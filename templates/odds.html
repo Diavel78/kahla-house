@@ -1,0 +1,1507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kahla House — Odds Board</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- Firebase Auth (compat mode) -->
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>
+        const FC = {
+            apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
+            authDomain: "kahla-house.firebaseapp.com",
+            projectId: "kahla-house",
+            storageBucket: "kahla-house.firebasestorage.app",
+            messagingSenderId: "1029771942929",
+            appId: "1:1029771942929:web:76358096dbb868e375a5b0"
+        };
+        firebase.initializeApp(FC);
+    </script>
+
+    <style>
+        :root {
+            --bg: #0b0e13;
+            --surface: #13171e;
+            --surface-2: #1a1f2b;
+            --border: #1e2530;
+            --text: #e2e8f0;
+            --text-secondary: #8890a8;
+            --text-muted: #555d78;
+            --blue: #4a7cff;
+            --green: #22c55e;
+            --orange: #f59e0b;
+            --red: #ef4444;
+            --purple: #a855f7;
+            --cyan: #06b6d4;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            position: relative;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(74,124,255,0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(74,124,255,0.03) 1px, transparent 1px);
+            background-size: 60px 60px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        body::after {
+            content: '';
+            position: fixed;
+            top: -200px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 800px;
+            height: 600px;
+            background: radial-gradient(ellipse, rgba(74,124,255,0.08) 0%, transparent 70%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* Top Bar */
+        .top-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 24px;
+            height: 56px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            position: relative;
+            z-index: 10;
+        }
+        .top-bar-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+        .top-bar-logo {
+            width: 36px;
+            height: 36px;
+            background: linear-gradient(135deg, var(--blue), var(--purple));
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 700;
+            font-size: 14px;
+            color: #fff;
+            letter-spacing: -0.5px;
+        }
+        .top-bar-title {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--text);
+            letter-spacing: -0.3px;
+        }
+        .nav-links {
+            display: flex;
+            gap: 4px;
+            margin-left: 12px;
+        }
+        .nav-link {
+            padding: 6px 14px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-decoration: none;
+            border-radius: 8px;
+            transition: all 0.15s;
+        }
+        .nav-link:hover {
+            color: var(--text);
+            background: var(--surface-2);
+        }
+        .nav-link.active {
+            color: #fff;
+            background: var(--blue);
+        }
+        .top-bar-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .status {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: var(--text-secondary);
+            min-height: 16px;
+            white-space: nowrap;
+        }
+        .status.loading { color: var(--orange); }
+        .status.error { color: var(--red); }
+        .logout-btn {
+            padding: 6px 14px;
+            background: var(--surface-2);
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            font-family: 'DM Sans', sans-serif;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .logout-btn:hover {
+            background: var(--border);
+            color: var(--text);
+        }
+
+        /* Sport bar */
+        .sport-bar {
+            display: flex;
+            gap: 0;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 0 24px;
+            overflow-x: auto;
+            position: relative;
+            z-index: 5;
+        }
+        .stab {
+            padding: 10px 18px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            white-space: nowrap;
+            transition: all 0.15s;
+            font-family: 'DM Sans', sans-serif;
+        }
+        .stab:hover { color: var(--text); }
+        .stab.active { color: #fff; border-bottom-color: var(--blue); }
+
+        /* Toolbar */
+        .toolbar {
+            display: flex;
+            gap: 10px;
+            padding: 14px 24px;
+            align-items: center;
+            flex-wrap: wrap;
+            max-width: 1440px;
+            margin: 0 auto;
+            position: relative;
+            z-index: 5;
+        }
+        .search-box {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 8px 14px;
+            color: var(--text);
+            font-size: 13px;
+            font-family: 'DM Sans', sans-serif;
+            width: 240px;
+            outline: none;
+            transition: border-color 0.15s;
+        }
+        .search-box:focus { border-color: var(--blue); }
+        .search-box::placeholder { color: var(--text-muted); }
+        .info {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-left: auto;
+            white-space: nowrap;
+        }
+
+        /* Books button + dropdown */
+        .books-btn-wrap { position: relative; }
+        .books-btn {
+            padding: 8px 16px;
+            background: var(--surface);
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            font-size: 12px;
+            font-weight: 600;
+            font-family: 'DM Sans', sans-serif;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.15s;
+        }
+        .books-btn:hover { background: var(--surface-2); color: var(--text); }
+        .books-btn .cnt {
+            background: var(--blue);
+            color: #fff;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            padding: 1px 7px;
+            border-radius: 10px;
+        }
+        .books-panel {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            margin-top: 8px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            width: 280px;
+            max-height: 440px;
+            overflow-y: auto;
+            z-index: 100;
+            box-shadow: 0 12px 40px rgba(0,0,0,.5);
+        }
+        .books-panel.open { display: block; }
+        .books-panel-header {
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .books-panel-header span { font-size: 13px; font-weight: 700; color: var(--text); }
+        .books-panel-header button {
+            font-size: 11px;
+            color: var(--blue);
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-family: 'DM Sans', sans-serif;
+            font-weight: 600;
+        }
+        .book-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 14px;
+            border-bottom: 1px solid rgba(30,37,48,0.5);
+            cursor: grab;
+            user-select: none;
+            transition: background 0.1s;
+        }
+        .book-item:hover { background: var(--surface-2); }
+        .book-item:last-child { border-bottom: none; }
+        .book-item.dragging { opacity: .4; background: var(--bg); }
+        .book-item input[type=checkbox] { accent-color: var(--blue); width: 16px; height: 16px; cursor: pointer; }
+        .book-item .book-label { flex: 1; font-size: 13px; color: var(--text); }
+        .book-item .book-abbr {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            color: var(--text-muted);
+            margin-left: 4px;
+        }
+        .book-item .move-btn {
+            color: var(--text-muted);
+            font-size: 16px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 0 3px;
+            line-height: 1;
+        }
+        .book-item .move-btn:hover { color: var(--blue); }
+        .active-books-summary { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+        .abs-chip {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            background: var(--surface-2);
+            padding: 3px 8px;
+            border-radius: 6px;
+        }
+
+        /* Board */
+        .board {
+            max-width: 1440px;
+            margin: 0 auto;
+            padding: 8px 24px 60px;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Game card */
+        .game {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            margin-bottom: 12px;
+            overflow: hidden;
+            transition: transform 0.2s, box-shadow 0.2s;
+            opacity: 0;
+            animation: fadeUp 0.4s ease forwards;
+        }
+        .game:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
+        .game:nth-child(1) { animation-delay: 0.02s; }
+        .game:nth-child(2) { animation-delay: 0.04s; }
+        .game:nth-child(3) { animation-delay: 0.06s; }
+        .game:nth-child(4) { animation-delay: 0.08s; }
+        .game:nth-child(5) { animation-delay: 0.10s; }
+        .game:nth-child(6) { animation-delay: 0.12s; }
+        .game:nth-child(7) { animation-delay: 0.14s; }
+        .game:nth-child(8) { animation-delay: 0.16s; }
+        .game:nth-child(9) { animation-delay: 0.18s; }
+        .game:nth-child(10) { animation-delay: 0.20s; }
+
+        @keyframes fadeUp {
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .game-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+        /* Best + Books layout */
+        .best-and-books { display: flex; align-items: stretch; }
+        .best-col { flex: 0 0 auto; min-width: 280px; border-right: 2px solid rgba(74,124,255,0.2); }
+        .best-col .gtable th { background: var(--bg); }
+        .best-col .gtable th:first-child { padding-left: 14px; }
+        .best-td { position: relative; padding: 6px 8px !important; text-align: center; vertical-align: middle; }
+        .best-book {
+            display: block;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 9px;
+            font-weight: 600;
+            color: var(--blue);
+            margin-top: 1px;
+        }
+        .books-col { flex: 1; min-width: 0; overflow: hidden; }
+
+        .ghdr {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 16px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            border-bottom: 1px solid rgba(30,37,48,0.6);
+        }
+        .ghdr .gt {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+            color: var(--blue);
+            font-size: 11px;
+        }
+        .ghdr.live { border-left: 3px solid var(--green); }
+
+        .live-badge {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 9px;
+            font-weight: 700;
+            color: var(--green);
+            background: rgba(34,197,94,0.12);
+            padding: 3px 8px;
+            border-radius: 6px;
+            margin-right: 8px;
+            animation: live-pulse 1.5s infinite;
+        }
+        @keyframes live-pulse { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
+
+        .score-display { font-size: 17px; font-weight: 700; color: var(--text); margin: 0 8px; letter-spacing: 1px; }
+        .score-display .score-away { color: var(--text); }
+        .score-display .score-sep { color: var(--text-muted); margin: 0 4px; }
+        .score-display .score-home { color: var(--text); }
+        .game-status {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            color: var(--text-secondary);
+            margin-left: 6px;
+        }
+        .stale-tag {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 9px;
+            color: var(--orange);
+            background: rgba(245,158,11,0.12);
+            padding: 3px 8px;
+            border-radius: 6px;
+            margin-left: 6px;
+        }
+        .my-bet-tag {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 9px;
+            font-weight: 700;
+            padding: 3px 10px;
+            border-radius: 6px;
+            background: rgba(168,85,247,0.12);
+            color: var(--purple);
+            border: 1px solid rgba(168,85,247,0.25);
+            margin-left: 8px;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .my-bet-tag .check { font-size: 12px; }
+        .my-bet-tag.winning { background: rgba(34,197,94,0.12); color: var(--green); border-color: rgba(34,197,94,0.25); }
+        .my-bet-tag.losing { background: rgba(245,158,11,0.12); color: var(--orange); border-color: rgba(245,158,11,0.25); }
+        .my-bet-tag.dead { background: rgba(239,68,68,0.12); color: var(--red); border-color: rgba(239,68,68,0.25); }
+        .game.has-bet { border-color: rgba(168,85,247,0.35); }
+        .game.has-bet.bet-winning { border-color: rgba(34,197,94,0.35); }
+        .game.has-bet.bet-losing { border-color: rgba(245,158,11,0.35); }
+        .game.has-bet.bet-dead { border-color: rgba(239,68,68,0.35); }
+        .game.has-bet .ghdr { border-bottom-color: rgba(168,85,247,0.25); }
+
+        .gtable { width: 100%; border-collapse: collapse; }
+        .gtable th {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 9px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: .5px;
+            color: var(--text-muted);
+            padding: 5px 6px;
+            background: var(--bg);
+            border-bottom: 1px solid rgba(30,37,48,0.6);
+            text-align: center;
+        }
+        .gtable th:first-child { text-align: left; padding-left: 14px; width: 30%; }
+        .gtable th.mkt-group { border-left: 1px solid var(--border); }
+        .gtable td {
+            padding: 0;
+            border-bottom: 1px solid rgba(30,37,48,0.6);
+            text-align: center;
+            vertical-align: middle;
+        }
+        .gtable tr:last-child td { border-bottom: none; }
+        .gtable td:first-child {
+            text-align: left;
+            padding: 8px 14px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text);
+        }
+        .gtable td.mkt-group { border-left: 1px solid var(--border); }
+
+        .oc {
+            font-family: 'JetBrains Mono', monospace;
+            padding: 6px 4px;
+            font-size: 13px;
+            font-weight: 700;
+            min-width: 58px;
+            display: inline-block;
+        }
+        .oc .pt {
+            display: block;
+            font-size: 10px;
+            font-weight: 400;
+            color: var(--text-secondary);
+            margin-bottom: 1px;
+        }
+        .oc.fav { color: var(--orange); }
+        .oc.dog { color: var(--blue); }
+        .oc.even { color: var(--text); }
+        .oc.na { color: var(--text-muted); font-weight: 400; font-size: 11px; }
+
+        /* Deep link */
+        .dlink { font-size: 10px; color: var(--text-muted); text-decoration: none; margin-left: 4px; }
+        .dlink:hover { color: var(--blue); }
+
+        /* Splits */
+        .splits {
+            padding: 7px 16px;
+            background: var(--bg);
+            border-top: 1px solid rgba(245,158,11,0.15);
+        }
+        .splits-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: .5px;
+            color: var(--orange);
+        }
+        .splits-rows { padding: 2px 16px 8px; background: var(--bg); }
+        .split-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 11px; }
+        .sr-mkt {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-secondary);
+            font-weight: 600;
+            min-width: 28px;
+        }
+        .sr-team {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-secondary);
+            min-width: 28px;
+            font-size: 10px;
+        }
+        .sr-bar { height: 5px; width: 60px; border-radius: 3px; overflow: hidden; background: var(--surface-2); }
+        .sr-fill { background: var(--orange); height: 100%; }
+        .sr-handle {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 700;
+            color: var(--orange);
+            min-width: 32px;
+            text-align: right;
+        }
+        .sr-sep { color: var(--text-muted); }
+        .sr-bets {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 700;
+            color: var(--blue);
+            min-width: 32px;
+            text-align: right;
+        }
+        .sr-tag {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 9px;
+            font-weight: 700;
+            padding: 2px 8px;
+            border-radius: 6px;
+            margin-left: 4px;
+            background: rgba(245,158,11,0.12);
+            color: var(--orange);
+            border: 1px solid rgba(245,158,11,0.25);
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+        .sr-src {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 9px;
+            color: var(--text-muted);
+            margin-left: 4px;
+        }
+
+        /* Movement row */
+        .mv-row {
+            display: flex;
+            gap: 16px;
+            padding: 5px 16px;
+            background: var(--bg);
+            flex-wrap: wrap;
+            align-items: baseline;
+        }
+        .mv-item {
+            font-family: 'JetBrains Mono', monospace;
+            display: inline-flex;
+            align-items: baseline;
+            gap: 4px;
+            font-size: 12px;
+        }
+        .mv-label {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-secondary);
+            font-weight: 600;
+            font-size: 11px;
+        }
+        .mv-team {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-secondary);
+            font-size: 11px;
+        }
+        .rlm-tag {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            font-weight: 700;
+            padding: 3px 10px;
+            border-radius: 6px;
+            background: rgba(239,68,68,0.12);
+            color: var(--red);
+            border: 1px solid rgba(239,68,68,0.25);
+            margin-left: 8px;
+            animation: rlm-pulse 2s infinite;
+        }
+        @keyframes rlm-pulse { 0%,100% { opacity: 1; } 50% { opacity: .6; } }
+
+        .empty-state { text-align: center; padding: 60px 24px; color: var(--text-muted); font-size: 14px; }
+        .spinner {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid var(--border);
+            border-top-color: var(--blue);
+            border-radius: 50%;
+            animation: spin .7s linear infinite;
+            vertical-align: middle;
+            margin-right: 6px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Auth loading screen */
+        .auth-loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            color: var(--text-muted);
+            font-size: 14px;
+        }
+
+        @media (max-width: 768px) {
+            .top-bar { padding: 0 12px; height: 50px; }
+            .top-bar-title { display: none; }
+            .nav-links { margin-left: 8px; }
+            .nav-link { font-size: 12px; padding: 5px 10px; }
+            .toolbar { padding: 10px 12px; }
+            .search-box { width: 160px; }
+            .board { padding: 6px 12px 40px; }
+            .gtable th, .oc { font-size: 11px; }
+            .gtable td:first-child { font-size: 12px; padding: 6px 10px; }
+            .oc { min-width: 48px; padding: 4px 2px; }
+            .best-and-books { flex-direction: column; }
+            .best-col { min-width: 100%; border-right: none; border-bottom: 2px solid rgba(74,124,255,0.2); }
+            .books-col { width: 100%; }
+            .sport-bar { padding: 0 12px; }
+            .stab { padding: 8px 12px; font-size: 12px; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Auth loading state -->
+    <div class="auth-loading" id="auth-gate">
+        <span class="spinner"></span> Authenticating...
+    </div>
+
+    <!-- Main app (hidden until auth) -->
+    <div id="app" style="display:none">
+        <div class="top-bar">
+            <div class="top-bar-left">
+                <div class="top-bar-logo">KH</div>
+                <div class="top-bar-title">The Kahla House</div>
+                <div class="nav-links">
+                    <a href="/" class="nav-link">Home</a>
+                    <a href="/odds" class="nav-link active">Odds</a>
+                    <a href="/dashboard" class="nav-link">Dashboard</a>
+                </div>
+            </div>
+            <div class="top-bar-right">
+                <span class="status" id="status">Loading...</span>
+                <button class="logout-btn" onclick="doLogout()">Logout</button>
+            </div>
+        </div>
+
+        <div class="sport-bar" id="sport-bar"></div>
+
+        <div class="toolbar">
+            <input class="search-box" id="search" type="text" placeholder="Search team or matchup..." oninput="renderBoard()">
+            <div class="books-btn-wrap">
+                <button class="books-btn" onclick="toggleBooksPanel()">
+                    Books <span class="cnt" id="books-cnt">0</span> &#9662;
+                </button>
+                <div class="books-panel" id="books-panel">
+                    <div class="books-panel-header">
+                        <span>Sportsbooks</span>
+                        <button onclick="selectAllBooks()">All</button>
+                        <button onclick="selectNoBooks()">None</button>
+                    </div>
+                    <div id="books-list"></div>
+                </div>
+            </div>
+            <div class="active-books-summary" id="books-summary"></div>
+            <span class="info" id="info"></span>
+        </div>
+
+        <div class="board" id="board">
+            <div class="empty-state"><span class="spinner"></span> Loading odds...</div>
+        </div>
+    </div>
+
+    <script>
+    // ─── Firebase Auth Guard ───
+    async function authFetch(url, options = {}) {
+        const user = firebase.auth().currentUser;
+        if (!user) { window.location.href = '/'; return null; }
+        const token = await user.getIdToken();
+        const headers = { ...(options.headers || {}), 'Authorization': 'Bearer ' + token };
+        return fetch(url, { ...options, headers });
+    }
+
+    function doLogout() {
+        firebase.auth().signOut().then(() => { window.location.href = '/'; });
+    }
+
+    firebase.auth().onAuthStateChanged(user => {
+        if (!user) {
+            window.location.href = '/';
+            return;
+        }
+        document.getElementById('auth-gate').style.display = 'none';
+        document.getElementById('app').style.display = '';
+        initApp();
+    });
+
+    // ─── App Logic ───
+    function initApp() {
+
+    const $ = id => document.getElementById(id);
+    const SPORTS = ['mlb','nba','nhl','nfl','ncaab','mma','soccer','tennis'];
+    const SL = {mlb:'MLB',nba:'NBA',nhl:'NHL',nfl:'NFL',ncaab:'NCAAB',ncaaf:'NCAAF',mma:'MMA',soccer:'Soccer',tennis:'Tennis'};
+    const BL = {pinnacle:'PIN',fanduel:'FD',draftkings:'DK',betmgm:'MGM',caesars:'CZR',bet365:'365',polymarket:'POLY',kalshi:'KAL',novig:'NOV','1xbet':'1X',betonline:'BOL',circa:'CIR',south_point:'SP',westgate:'WG',wynn:'WYN',stations:'STN',hardrock:'HR'};
+    const BL_FULL = {pinnacle:'Pinnacle',fanduel:'FanDuel',draftkings:'DraftKings',betmgm:'BetMGM',caesars:'Caesars',bet365:'Bet365',polymarket:'Polymarket',kalshi:'Kalshi',novig:'Novig','1xbet':'1xBet',betonline:'BetOnline',circa:'Circa',south_point:'South Point',westgate:'Westgate',wynn:'Wynn',stations:'Stations',hardrock:'Hard Rock'};
+
+    let activeSport = localStorage.getItem('odds_sport') || 'mlb';
+    let oddsData = {events:[], books:[]};
+    let currentOpeners = {};
+    const DEFAULT_BOOKS = ['fanduel','draftkings','betmgm','pinnacle','caesars'];
+    let enabledBooks = new Set(JSON.parse(localStorage.getItem('odds_books') || 'null') || DEFAULT_BOOKS);
+
+    const LEAGUE_FILTER = {
+        mlb: ['MLB'],
+        nba: ['NBA'],
+        nhl: ['NHL'],
+        nfl: ['NFL'],
+    };
+
+    function esc(s){if(!s)return '';const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+    function fmt(p){if(p==null)return '--';return p>0?'+'+p:''+p}
+    function cls(p){if(p==null)return 'na';if(p<-130)return 'fav';if(p>130)return 'dog';return 'even'}
+
+    // --- Opening line tracker (API-backed) ---
+    const TODAY = new Date().toISOString().slice(0,10);
+
+    async function loadOpeners(sport) {
+        try {
+            const resp = await authFetch(`/api/openers?sport=${sport}&date=${TODAY}`);
+            if (!resp) return {};
+            const data = await resp.json();
+            if (data.ok) return data.events || {};
+            return {};
+        } catch { return {}; }
+    }
+
+    async function saveOpenersAPI(sport, openers) {
+        try {
+            await authFetch('/api/openers', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sport, date: TODAY, events: openers })
+            });
+        } catch(e) { console.warn('saveOpeners:', e); }
+    }
+
+    async function captureOpeners(events, sport) {
+        const openers = currentOpeners;
+        let changed = false;
+        for (const ev of events) {
+            const eid = ev.numeric_id || ev.id;
+            if (!eid || openers[eid]) continue;
+            const pin = (ev.books || {}).circa || (ev.books || {}).pinnacle || (ev.books || {}).wynn || (ev.books || {}).westgate;
+            const srcBook = (ev.books||{}).circa ? 'CIR' : (ev.books||{}).pinnacle ? 'PIN' : (ev.books||{}).wynn ? 'WYN' : 'WG';
+            if (!pin) continue;
+            const o = { ml: {}, spread: {}, total: {}, src: srcBook };
+            for (const [team, price] of Object.entries(pin.moneyline || {})) {
+                if (price != null) o.ml[team] = price;
+            }
+            for (const [team, data] of Object.entries(pin.spread || {})) {
+                if (data?.price != null) o.spread[team] = { price: data.price, point: data.point };
+            }
+            for (const [side, data] of Object.entries(pin.total || {})) {
+                if (data?.price != null) o.total[side] = { price: data.price, point: data.point };
+            }
+            if (Object.keys(o.ml).length || Object.keys(o.spread).length) {
+                openers[eid] = o;
+                changed = true;
+            }
+        }
+        if (changed) {
+            currentOpeners = openers;
+            saveOpenersAPI(sport, openers);
+        }
+        return openers;
+    }
+
+    function computeMovement(ev, openers) {
+        const eid = ev.numeric_id || ev.id;
+        const opener = openers[eid];
+        if (!opener) return null;
+        const pin = (ev.books || {}).circa || (ev.books || {}).pinnacle || (ev.books || {}).wynn || (ev.books || {}).westgate;
+        if (!pin) return null;
+        const src = opener.src || ((ev.books||{}).circa ? 'CIR' : (ev.books||{}).pinnacle ? 'PIN' : 'WG');
+
+        const mv = { ml: {}, spread: {}, total: {}, src };
+        for (const [team, curPrice] of Object.entries(pin.moneyline || {})) {
+            const openPrice = opener.ml?.[team];
+            if (openPrice != null && curPrice != null) {
+                mv.ml[team] = { open: openPrice, current: curPrice, diff: curPrice - openPrice };
+            }
+        }
+        for (const [team, cur] of Object.entries(pin.spread || {})) {
+            const op = opener.spread?.[team];
+            if (op && cur?.price != null) {
+                mv.spread[team] = {
+                    open_price: op.price, open_point: op.point,
+                    current_price: cur.price, current_point: cur.point,
+                    point_diff: (cur.point||0) - (op.point||0),
+                    price_diff: cur.price - op.price,
+                };
+            }
+        }
+        for (const [side, cur] of Object.entries(pin.total || {})) {
+            const op = opener.total?.[side];
+            if (op && cur?.price != null) {
+                mv.total[side] = {
+                    open_price: op.price, open_point: op.point,
+                    current_price: cur.price, current_point: cur.point,
+                    point_diff: (cur.point||0) - (op.point||0),
+                    price_diff: cur.price - op.price,
+                };
+            }
+        }
+        return mv;
+    }
+
+    function detectRLM(mv, splits, away, home) {
+        if (!mv?.ml || !splits?.circa?.moneyline) return null;
+        const awayDiff = mv.ml[away]?.diff || 0;
+        const homeDiff = mv.ml[home]?.diff || 0;
+        const circa = splits.circa.moneyline;
+        const awayHandle = circa.away_handle_pct;
+        const homeHandle = circa.home_handle_pct;
+        if (Math.abs(awayDiff) < 3 || awayHandle == null || homeHandle == null) return null;
+
+        const awayGotExpensive = awayDiff < 0;
+        const homeGotExpensive = homeDiff < 0;
+        const moneyOnAway = awayHandle > 60;
+        const moneyOnHome = homeHandle > 60;
+
+        if (awayGotExpensive && moneyOnAway) return away;
+        if (homeGotExpensive && moneyOnHome) return home;
+        return null;
+    }
+
+    // On first load of the day, prefetch ALL sports to capture openers
+    async function prefetchOpeners() {
+        const prefetchKey = `prefetched:${TODAY}`;
+        if (localStorage.getItem(prefetchKey)) return;
+
+        const sports = SPORTS.filter(s => s !== activeSport);
+        for (const sp of sports) {
+            try {
+                const resp = await authFetch(`/api/odds?sport=${sp}`);
+                if (!resp) continue;
+                const data = await resp.json();
+                if (data.ok && data.events?.length) {
+                    // Temporarily use a separate openers object for prefetch
+                    const prefetchOpeners = {};
+                    let changed = false;
+                    for (const ev of data.events) {
+                        const eid = ev.numeric_id || ev.id;
+                        if (!eid) continue;
+                        const pin = (ev.books || {}).circa || (ev.books || {}).pinnacle || (ev.books || {}).wynn || (ev.books || {}).westgate;
+                        const srcBook = (ev.books||{}).circa ? 'CIR' : (ev.books||{}).pinnacle ? 'PIN' : (ev.books||{}).wynn ? 'WYN' : 'WG';
+                        if (!pin) continue;
+                        const o = { ml: {}, spread: {}, total: {}, src: srcBook };
+                        for (const [team, price] of Object.entries(pin.moneyline || {})) {
+                            if (price != null) o.ml[team] = price;
+                        }
+                        for (const [team, d] of Object.entries(pin.spread || {})) {
+                            if (d?.price != null) o.spread[team] = { price: d.price, point: d.point };
+                        }
+                        for (const [side, d] of Object.entries(pin.total || {})) {
+                            if (d?.price != null) o.total[side] = { price: d.price, point: d.point };
+                        }
+                        if (Object.keys(o.ml).length || Object.keys(o.spread).length) {
+                            prefetchOpeners[eid] = o;
+                            changed = true;
+                        }
+                    }
+                    if (changed) {
+                        saveOpenersAPI(sp, prefetchOpeners);
+                    }
+                }
+            } catch(e) { console.warn(`prefetch ${sp}:`, e); }
+        }
+        localStorage.setItem(prefetchKey, '1');
+    }
+
+    function localTime(s){
+        if(!s)return '';
+        try{const d=new Date(s);if(isNaN(d))return '';return d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}catch{return ''}
+    }
+    function localDate(s){
+        if(!s)return '';
+        try{const d=new Date(s);if(isNaN(d))return '';return d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}catch{return ''}
+    }
+
+    function renderSportBar(){
+        let h='';
+        for(const s of SPORTS) h+=`<div class="stab ${s===activeSport?'active':''}" onclick="setSport('${s}')">${SL[s]||s.toUpperCase()}</div>`;
+        $('sport-bar').innerHTML=h;
+    }
+
+    // Book order: user-defined order, persisted
+    let bookOrder = JSON.parse(localStorage.getItem('odds_book_order') || 'null') || [];
+
+    function saveBookPrefs(){
+        localStorage.setItem('odds_books', JSON.stringify([...enabledBooks]));
+        localStorage.setItem('odds_book_order', JSON.stringify(bookOrder));
+    }
+
+    function getOrderedBooks(){
+        const available = oddsData.books||[];
+        const ordered = [];
+        for(const b of bookOrder) { if(available.includes(b)) ordered.push(b); }
+        for(const b of available) { if(!ordered.includes(b)) ordered.push(b); }
+        bookOrder = ordered;
+        return ordered;
+    }
+
+    function getBooks(){
+        return getOrderedBooks().filter(b=>enabledBooks.has(b));
+    }
+
+    function renderBookPills(){
+        const ordered = getOrderedBooks();
+        const enabled = getBooks();
+        $('books-cnt').textContent = enabled.length;
+
+        let sh='';
+        for(const b of enabled) sh+=`<span class="abs-chip">${esc(BL[b]||b)}</span>`;
+        $('books-summary').innerHTML=sh;
+
+        let h='';
+        for(let i=0;i<ordered.length;i++){
+            const b = ordered[i];
+            const on = enabledBooks.has(b);
+            const full = BL_FULL[b]||b;
+            const abbr = BL[b]||b;
+            h+=`<div class="book-item" data-book="${b}">`;
+            h+=`<button class="move-btn" onclick="moveBook('${b}',-1)" ${i===0?'disabled':''}>&#9650;</button>`;
+            h+=`<button class="move-btn" onclick="moveBook('${b}',1)" ${i===ordered.length-1?'disabled':''}>&#9660;</button>`;
+            h+=`<input type="checkbox" ${on?'checked':''} onchange="toggleBook('${b}')">`;
+            h+=`<span class="book-label">${esc(full)}<span class="book-abbr">${esc(abbr)}</span></span>`;
+            h+=`</div>`;
+        }
+        $('books-list').innerHTML=h;
+    }
+
+    // Expose to global scope for onclick handlers
+    window.toggleBook = function(b){
+        if(enabledBooks.has(b)) enabledBooks.delete(b); else enabledBooks.add(b);
+        saveBookPrefs();
+        renderBookPills();
+        renderBoard();
+    };
+
+    window.selectAllBooks = function(){
+        enabledBooks = new Set(getOrderedBooks());
+        saveBookPrefs(); renderBookPills(); renderBoard();
+    };
+    window.selectNoBooks = function(){
+        enabledBooks = new Set();
+        saveBookPrefs(); renderBookPills(); renderBoard();
+    };
+
+    window.moveBook = function(b, dir){
+        const i = bookOrder.indexOf(b);
+        if(i<0) return;
+        const ni = i+dir;
+        if(ni<0||ni>=bookOrder.length) return;
+        bookOrder.splice(i,1);
+        bookOrder.splice(ni,0,b);
+        saveBookPrefs(); renderBookPills(); renderBoard();
+    };
+
+    let booksPanelOpen = false;
+    window.toggleBooksPanel = function(){
+        booksPanelOpen = !booksPanelOpen;
+        $('books-panel').classList.toggle('open', booksPanelOpen);
+    };
+    document.addEventListener('click', e=>{
+        if(booksPanelOpen && !e.target.closest('.books-btn-wrap')){
+            booksPanelOpen=false;
+            $('books-panel').classList.remove('open');
+        }
+    });
+
+    function renderSplitsRow(circa, dk, label, mktKey, awayName, homeName) {
+        const src = circa?.[mktKey];
+        if (!src) return '';
+        const srcLabel = 'Circa';
+
+        let awayH, awayT;
+        if (mktKey === 'total') {
+            awayH = src.over_handle_pct;
+            awayT = src.over_bets_pct;
+        } else {
+            awayH = src.away_handle_pct;
+            awayT = src.away_bets_pct;
+        }
+        if (awayH == null && awayT == null) return '';
+
+        const homeH = awayH != null ? (100 - awayH) : null;
+        const homeT = awayT != null ? (100 - awayT) : null;
+        const awayDiv = (awayH != null && awayT != null) ? Math.abs(awayH - awayT) : 0;
+        const homeDiv = (homeH != null && homeT != null) ? Math.abs(homeH - homeT) : 0;
+        const isSharp = Math.max(awayDiv, homeDiv) >= 15;
+        const sharpSide = (awayH != null && awayT != null && awayH > awayT) ? awayName
+            : (homeH != null && homeT != null && homeH > homeT) ? homeName : '';
+
+        let h = `<div class="split-row">`;
+        h += `<span class="sr-mkt">${label}</span>`;
+        h += `<span class="sr-team">${esc(awayName.substring(0,3).toUpperCase())}</span>`;
+        h += `<div class="sr-bar"><div class="sr-fill" style="width:${awayH||0}%"></div></div>`;
+        h += `<span class="sr-handle">${awayH != null ? awayH + '%' : '--'}</span>`;
+        h += `<span class="sr-sep">/</span>`;
+        h += `<span class="sr-bets">${awayT != null ? awayT + '%' : '--'}</span>`;
+        if (isSharp && sharpSide) {
+            h += `<span class="sr-tag">SHARP ${esc(sharpSide.substring(0,3).toUpperCase())}</span>`;
+        }
+        h += `<span class="sr-src">${srcLabel}</span>`;
+        h += `</div>`;
+        return h;
+    }
+
+    function renderMovement(mv, label, mktKey, awayName, homeName) {
+        const data = mv[mktKey] || {};
+        const awayData = data[awayName];
+        if (!awayData) return '';
+
+        let h = `<span class="mv-item"><span class="mv-label">${label}</span>`;
+
+        if (mktKey === 'ml') {
+            const diff = awayData.diff;
+            const arrow = diff > 0 ? '&#9650;' : diff < 0 ? '&#9660;' : '';
+            const color = diff > 0 ? 'var(--green)' : diff < 0 ? 'var(--red)' : 'var(--text-secondary)';
+            h += `<span class="mv-team">${esc(awayName.substring(0,3).toUpperCase())}</span> `;
+            h += `<span style="color:var(--text-secondary)">${fmt(awayData.open)}</span> `;
+            h += `<span style="color:${color}">${arrow}</span> `;
+            h += `<span style="font-weight:700;color:${color}">${fmt(awayData.current)}</span>`;
+            if (diff !== 0) h += ` <span style="font-size:10px;color:${color}">(${diff > 0 ? '+' : ''}${diff})</span>`;
+        } else if (mktKey === 'spread') {
+            const ptDiff = awayData.point_diff;
+            const pxDiff = awayData.price_diff;
+            const changed = ptDiff !== 0 || pxDiff !== 0;
+            const color = changed ? 'var(--orange)' : 'var(--text-secondary)';
+            const pt = awayData.current_point;
+            const ptStr = pt > 0 ? '+' + pt : '' + pt;
+            h += `<span class="mv-team">${esc(awayName.substring(0,3).toUpperCase())}</span> `;
+            h += `<span style="color:${color};font-weight:${changed?700:400}">${ptStr} ${fmt(awayData.current_price)}</span>`;
+            if (ptDiff !== 0) h += ` <span style="font-size:10px;color:${color}">(${ptDiff > 0 ? '+' : ''}${ptDiff})</span>`;
+        } else if (mktKey === 'total') {
+            const ptDiff = awayData.point_diff;
+            const changed = ptDiff !== 0 || awayData.price_diff !== 0;
+            const color = changed ? 'var(--orange)' : 'var(--text-secondary)';
+            h += `<span style="color:${color};font-weight:${changed?700:400}">O ${awayData.current_point} ${fmt(awayData.current_price)}</span>`;
+            if (ptDiff !== 0) h += ` <span style="font-size:10px;color:${color}">(${ptDiff > 0 ? '+' : ''}${ptDiff})</span>`;
+        }
+
+        h += `</span>`;
+        return h;
+    }
+
+    function findBestOdds(ev, books, away, home) {
+        const result = {
+            ml_away: null, ml_home: null,
+            spr_away: null, spr_home: null,
+            tot_over: null, tot_under: null,
+        };
+
+        for (const bk of books) {
+            const bd = (ev.books || {})[bk];
+            if (!bd) continue;
+            const label = BL[bk] || bk;
+
+            const mla = bd.moneyline?.[away];
+            if (mla != null && (result.ml_away == null || mla > result.ml_away.price))
+                result.ml_away = { price: mla, book: label };
+
+            const mlh = bd.moneyline?.[home];
+            if (mlh != null && (result.ml_home == null || mlh > result.ml_home.price))
+                result.ml_home = { price: mlh, book: label };
+
+            const spa = bd.spread?.[away];
+            if (spa?.price != null) {
+                if (result.spr_away == null ||
+                    spa.point > result.spr_away.point ||
+                    (spa.point === result.spr_away.point && spa.price > result.spr_away.price))
+                    result.spr_away = { price: spa.price, point: spa.point, book: label };
+            }
+
+            const sph = bd.spread?.[home];
+            if (sph?.price != null) {
+                if (result.spr_home == null ||
+                    sph.point > result.spr_home.point ||
+                    (sph.point === result.spr_home.point && sph.price > result.spr_home.price))
+                    result.spr_home = { price: sph.price, point: sph.point, book: label };
+            }
+
+            const tov = bd.total?.['Over'];
+            if (tov?.price != null) {
+                if (result.tot_over == null ||
+                    (tov.point === result.tot_over.point && tov.price > result.tot_over.price) ||
+                    (tov.point < result.tot_over.point))
+                    result.tot_over = { price: tov.price, point: tov.point, book: label };
+            }
+
+            const tun = bd.total?.['Under'];
+            if (tun?.price != null) {
+                if (result.tot_under == null ||
+                    (tun.point === result.tot_under.point && tun.price > result.tot_under.price) ||
+                    (tun.point > result.tot_under.point))
+                    result.tot_under = { price: tun.price, point: tun.point, book: label };
+            }
+        }
+        return result;
+    }
+
+    function bestCell(b) {
+        if (!b) return `<td class="best-td"><span class="oc na">--</span></td>`;
+        return `<td class="best-td"><span class="oc ${cls(b.price)}">${fmt(b.price)}</span><span class="best-book">${esc(b.book)}</span></td>`;
+    }
+
+    function bestCellPt(b, prefix) {
+        if (!b) return `<td class="best-td"><span class="oc na">--</span></td>`;
+        const ptStr = prefix
+            ? `${prefix} ${b.point}`
+            : (b.point > 0 ? '+' + b.point : '' + b.point);
+        return `<td class="best-td"><span class="oc ${cls(b.price)}"><span class="pt">${ptStr}</span>${fmt(b.price)}</span><span class="best-book">${esc(b.book)}</span></td>`;
+    }
+
+    function hasAnyOdds(ev, books) {
+        for (const bk of books) {
+            const bd = (ev.books || {})[bk];
+            if (!bd) continue;
+            if (Object.keys(bd.moneyline || {}).length) return true;
+            if (Object.keys(bd.spread || {}).length) return true;
+            if (Object.keys(bd.total || {}).length) return true;
+        }
+        return false;
+    }
+
+    function renderBoard(){
+        const board=$('board');
+        const query=($('search').value||'').toLowerCase().trim();
+        let events=(oddsData.events||[]);
+        const books=getBooks();
+
+        const leagueFilter = LEAGUE_FILTER[activeSport];
+        if (leagueFilter) {
+            events = events.filter(e => {
+                const lg = (e.league || '').toUpperCase();
+                if (!lg) return false;
+                return leagueFilter.some(f => lg.includes(f));
+            });
+        }
+
+        if (query) events = events.filter(e => (e.home_team + ' ' + e.away_team).toLowerCase().includes(query));
+
+        const withOdds = events.filter(e => hasAnyOdds(e, books));
+        if (withOdds.length) {
+            events = withOdds;
+        } else if (events.length && books.length) {
+            const allBooks = oddsData.books || [];
+            events = events.filter(e => hasAnyOdds(e, allBooks));
+        }
+
+        if(!events.length){
+            const msg=oddsData.meta_message?esc(oddsData.meta_message):'No games found';
+            board.innerHTML=`<div class="empty-state">${query?'No matches for "'+esc(query)+'"':msg}</div>`;
+            $('info').textContent='';
+            return;
+        }
+        $('info').textContent=events.length+' games';
+
+        let h='';
+        for(const ev of events){
+            const home=ev.home_team||'';
+            const away=ev.away_team||'';
+            const time=localTime(ev.commence_time);
+            const date=localDate(ev.commence_time);
+            const league=ev.league?esc(ev.league)+' \u00b7 ':'';
+            const best = findBestOdds(ev, books, away, home);
+
+            const sc = ev.score;
+            const isLive = sc && sc.live;
+            const liveClass = isLive ? ' live' : '';
+            const myBet = findMyBet(ev);
+            const betStatus = myBet ? getBetStatus(myBet, ev) : '';
+            const betClass = myBet ? ' has-bet' + (betStatus ? ' bet-' + betStatus : '') : '';
+
+            h+=`<div class="game${betClass}"><div class="ghdr${liveClass}">`;
+            if (isLive) {
+                h+=`<span><span class="live-badge">LIVE</span>${league}${esc(away)}`;
+                h+=` <span class="score-display"><span class="score-away">${sc.away_score ?? '-'}</span>`;
+                h+=`<span class="score-sep">-</span>`;
+                h+=`<span class="score-home">${sc.home_score ?? '-'}</span></span> `;
+                h+=`${esc(home)}`;
+                const gameState = sc.display_status || sc.period || sc.clock || '';
+                if (gameState) h+=`<span class="game-status">${esc(gameState)}</span>`;
+                h+=`<span class="stale-tag">pre-game odds</span>`;
+                if (myBet) h+=renderBetTag(myBet, ev);
+                h+=`</span>`;
+            } else {
+                h+=`<span>${league}${esc(away)} @ ${esc(home)}`;
+                if (myBet) h+=renderBetTag(myBet, ev);
+                h+=`</span>`;
+            }
+            h+=`<span class="gt">${esc(date)} ${esc(time)}</span></div>`;
+
+            // === BEST ODDS (left, always visible) ===
+            h+=`<div class="best-and-books">`;
+            h+=`<div class="best-col">`;
+            h+=`<table class="gtable"><thead><tr><th>Team</th><th>ML</th><th>Spread</th><th>Total</th></tr></thead><tbody>`;
+
+            h+=`<tr><td>${esc(away)}</td>`;
+            h+=bestCell(best.ml_away);
+            h+=bestCellPt(best.spr_away);
+            h+=bestCellPt(best.tot_over, 'O');
+            h+=`</tr>`;
+
+            h+=`<tr><td>${esc(home)}</td>`;
+            h+=bestCell(best.ml_home);
+            h+=bestCellPt(best.spr_home);
+            h+=bestCellPt(best.tot_under, 'U');
+            h+=`</tr></tbody></table>`;
+
+            const mv = computeMovement(ev, currentOpeners) || {};
+            const splits = ev.splits || {};
+            const circa = splits.circa;
+            const dk = splits.dk || splits.draftkings;
+            const rlmSide = detectRLM(mv, splits, away, home);
+            const hasMv = Object.keys(mv.ml||{}).length || Object.keys(mv.spread||{}).length;
+
+            if (hasMv || circa || dk || rlmSide) {
+                if (hasMv) {
+                    h += `<div class="mv-row">`;
+                    h += `<span class="splits-label">${mv.src || 'CIR'}</span>`;
+                    h += renderMovement(mv, 'ML', 'ml', away, home);
+                    h += renderMovement(mv, 'SPR', 'spread', away, home);
+                    h += renderMovement(mv, 'TOT', 'total', 'Over', 'Under');
+                    if (rlmSide) {
+                        h += `<span class="rlm-tag">RLM ${esc(rlmSide.substring(0,3).toUpperCase())}</span>`;
+                    }
+                    h += `</div>`;
+                }
+
+                if (circa || dk) {
+                    h += `<div class="splits"><span class="splits-label">Splits</span></div>`;
+                    h += `<div class="splits-rows">`;
+                    h += renderSplitsRow(circa, dk, 'ML', 'moneyline', away, home);
+                    h += renderSplitsRow(circa, dk, 'SPR', 'spread', away, home);
+                    h += renderSplitsRow(circa, dk, 'TOT', 'total', 'Over', 'Under');
+                    h += `</div>`;
+                }
+            }
+
+            h+=`</div>`;
+
+            // === ALL BOOKS (scrollable right) ===
+            h+=`<div class="books-col"><div class="game-scroll"><table class="gtable"><thead><tr>`;
+            for(const bk of books){
+                const link=(ev.books||{})[bk]?.event_link;
+                const label=esc(BL[bk]||bk);
+                const linkHtml=link?` <a class="dlink" href="${esc(link)}" target="_blank">&#8599;</a>`:'';
+                h+=`<th class="mkt-group" colspan="3">${label}${linkHtml}</th>`;
+            }
+            h+=`</tr><tr>`;
+            for(const bk of books){
+                h+=`<th class="mkt-group">ML</th><th>SPR</th><th>TOT</th>`;
+            }
+            h+=`</tr></thead><tbody>`;
+
+            // Away row
+            h+=`<tr>`;
+            for(const bk of books){
+                const bd=(ev.books||{})[bk]||{};
+                const ml=bd.moneyline?.[away];
+                h+=`<td class="mkt-group"><span class="oc ${ml!=null?cls(ml):'na'}">${fmt(ml)}</span></td>`;
+                const sp=bd.spread?.[away];
+                if(sp){h+=`<td><span class="oc ${cls(sp.price)}"><span class="pt">${sp.point>0?'+'+sp.point:sp.point}</span>${fmt(sp.price)}</span></td>`}
+                else{h+=`<td><span class="oc na">--</span></td>`}
+                const tot=bd.total?.['Over'];
+                if(tot){h+=`<td><span class="oc ${cls(tot.price)}"><span class="pt">O ${tot.point}</span>${fmt(tot.price)}</span></td>`}
+                else{h+=`<td><span class="oc na">--</span></td>`}
+            }
+            h+=`</tr>`;
+
+            // Home row
+            h+=`<tr>`;
+            for(const bk of books){
+                const bd=(ev.books||{})[bk]||{};
+                const ml=bd.moneyline?.[home];
+                h+=`<td class="mkt-group"><span class="oc ${ml!=null?cls(ml):'na'}">${fmt(ml)}</span></td>`;
+                const sp=bd.spread?.[home];
+                if(sp){h+=`<td><span class="oc ${cls(sp.price)}"><span class="pt">${sp.point>0?'+'+sp.point:sp.point}</span>${fmt(sp.price)}</span></td>`}
+                else{h+=`<td><span class="oc na">--</span></td>`}
+                const tot=bd.total?.['Under'];
+                if(tot){h+=`<td><span class="oc ${cls(tot.price)}"><span class="pt">U ${tot.point}</span>${fmt(tot.price)}</span></td>`}
+                else{h+=`<td><span class="oc na">--</span></td>`}
+            }
+            h+=`</tr></tbody></table></div></div>`;
+
+            h+=`</div></div>`;
+        }
+        board.innerHTML=h;
+    }
+
+    let firstLoad = true;
+    async function loadOdds(showLoading){
+        const status=$('status');
+        if(showLoading || firstLoad){
+            status.textContent='Loading...';
+            status.className='status loading';
+        }
+        try{
+            const resp=await authFetch(`/api/odds?sport=${activeSport}`);
+            if (!resp) return;
+            const data=await resp.json();
+            if(!data.ok){
+                status.textContent=data.error||'Error';
+                status.className='status error';
+                if(firstLoad) $('board').innerHTML=`<div class="empty-state">${esc(data.error||'API error')}</div>`;
+                return;
+            }
+            oddsData=data;
+            firstLoad=false;
+            const avail = new Set(data.books||[]);
+            const overlap = [...enabledBooks].filter(b=>avail.has(b));
+            if(!overlap.length && avail.size){
+                enabledBooks = new Set(avail);
+                saveBookPrefs();
+            }
+            // Capture opening lines for today
+            currentOpeners = await captureOpeners(data.events||[], activeSport);
+            const n=(data.events||[]).length;
+            const t=new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit'});
+            status.textContent=`${n} games \u00b7 ${t}`;
+            status.className='status';
+            renderBookPills();
+            renderBoard();
+        }catch(err){
+            if(firstLoad){
+                status.textContent='Fetch error';
+                status.className='status error';
+            }
+            console.error(err);
+        }
+    }
+
+    function getBetStatus(bet, ev) {
+        const sc = ev.score;
+        if (!sc || !sc.live) return '';
+
+        const awayScore = sc.away_score ?? 0;
+        const homeScore = sc.home_score ?? 0;
+        const total = awayScore + homeScore;
+        const pick = (bet.pick || '').toLowerCase();
+        const away = (ev.away_team || '').toLowerCase();
+        const home = (ev.home_team || '').toLowerCase();
+        const teamName = (bet.team_name || '').toLowerCase();
+
+        const overMatch = pick.match(/^over\s+([\d.]+)/i);
+        if (overMatch) {
+            const line = parseFloat(overMatch[1]);
+            if (total > line) return 'winning';
+            return 'losing';
+        }
+        const underMatch = pick.match(/^under\s+([\d.]+)/i);
+        if (underMatch) {
+            const line = parseFloat(underMatch[1]);
+            if (total > line) return 'dead';
+            if (total === line) return 'losing';
+            return 'winning';
+        }
+
+        const spreadMatch = pick.match(/(.+?)\s+([+-][\d.]+)$/);
+        if (spreadMatch) {
+            const spreadTeam = spreadMatch[1].toLowerCase();
+            const line = parseFloat(spreadMatch[2]);
+            let teamScore, oppScore;
+            if (away.includes(spreadTeam) || spreadTeam.includes(away.split(' ').pop())) {
+                teamScore = awayScore; oppScore = homeScore;
+            } else {
+                teamScore = homeScore; oppScore = awayScore;
+            }
+            const margin = teamScore - oppScore + line;
+            if (margin > 0) return 'winning';
+            if (margin === 0) return 'losing';
+            return 'dead';
+        }
+
+        if (teamName) {
+            let teamScore, oppScore;
+            if (away.includes(teamName) || teamName.includes(away.split(' ').pop())) {
+                teamScore = awayScore; oppScore = homeScore;
+            } else if (home.includes(teamName) || teamName.includes(home.split(' ').pop())) {
+                teamScore = homeScore; oppScore = awayScore;
+            } else {
+                return '';
+            }
+            if (teamScore > oppScore) return 'winning';
+            if (teamScore === oppScore) return 'losing';
+            return 'losing';
+        }
+
+        return '';
+    }
+
+    function renderBetTag(bet, ev) {
+        const pick = bet.pick || bet.team_name || '?';
+        const odds = bet.entry_american != null
+            ? ` (${bet.entry_american > 0 ? '+' : ''}${bet.entry_american})`
+            : '';
+        const status = ev ? getBetStatus(bet, ev) : '';
+        const statusClass = status ? ' ' + status : '';
+        return `<span class="my-bet-tag${statusClass}"><span class="check">&#10003;</span>POLY: ${esc(pick)}${odds}</span>`;
+    }
+
+    let myBets = [];
+
+    async function loadMyBets() {
+        try {
+            const resp = await authFetch('/api/my-bets');
+            if (!resp) return;
+            const data = await resp.json();
+            if (data.ok) myBets = data.bets || [];
+        } catch(e) { console.warn('my-bets:', e); }
+    }
+
+    function findMyBet(ev) {
+        const away = (ev.away_team || '').toLowerCase();
+        const home = (ev.home_team || '').toLowerCase();
+        for (const bet of myBets) {
+            const tn = (bet.team_name || '').toLowerCase();
+            const mn = (bet.market_name || '').toLowerCase();
+            if (tn && (away.includes(tn) || home.includes(tn) || tn.includes(away.split(' ').pop()) || tn.includes(home.split(' ').pop()))) {
+                return bet;
+            }
+            if (mn && (mn.includes(away.split(' ').pop()) || mn.includes(home.split(' ').pop()))) {
+                const awayLast = away.split(' ').pop();
+                const homeLast = home.split(' ').pop();
+                if (mn.includes(awayLast) && mn.includes(homeLast)) return bet;
+            }
+        }
+        return null;
+    }
+
+    window.setSport = function(s){
+        activeSport=s;
+        firstLoad=true;
+        localStorage.setItem('odds_sport',s);
+        renderSportBar();
+        // Load openers from API for new sport
+        loadOpeners(s).then(op => {
+            currentOpeners = op;
+            loadOdds(true);
+        });
+    };
+
+    // Initial load: fetch openers from API first, then load odds
+    renderSportBar();
+    loadMyBets();
+    loadOpeners(activeSport).then(op => {
+        currentOpeners = op;
+        loadOdds().then(() => prefetchOpeners());
+    });
+    setInterval(loadOdds, 5000);
+    setInterval(loadMyBets, 60000);
+
+    } // end initApp
+    </script>
+</body>
+</html>

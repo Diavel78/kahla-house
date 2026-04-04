@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Kahla House</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,600;0,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<style>
+:root {
+    --bg: #0b0e13;
+    --surface: #13171e;
+    --surface-2: #1a1f2b;
+    --border: #1e2530;
+    --text: #e2e8f0;
+    --text-secondary: #8890a8;
+    --text-muted: #555d78;
+    --blue: #4a7cff;
+    --blue-hover: #5e8dff;
+    --blue-dim: rgba(74,124,255,0.1);
+    --green: #22c55e;
+    --green-dim: rgba(34,197,94,0.12);
+    --orange: #f59e0b;
+    --orange-dim: rgba(245,158,11,0.12);
+    --red: #ef4444;
+    --red-dim: rgba(239,68,68,0.1);
+    --purple: #a855f7;
+    --purple-dim: rgba(168,85,247,0.1);
+    --cyan: #06b6d4;
+    --cyan-dim: rgba(6,182,212,0.12);
+    --r: 8px;
+    --rl: 12px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+}
+body::before {
+    content: '';
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background-image:
+        linear-gradient(rgba(74,124,255,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(74,124,255,0.03) 1px, transparent 1px);
+    background-size: 60px 60px;
+    pointer-events: none; z-index: 0;
+}
+body::after {
+    content: '';
+    position: fixed; top: -200px; left: 50%; transform: translateX(-50%);
+    width: 800px; height: 500px;
+    background: radial-gradient(ellipse, rgba(74,124,255,0.08) 0%, transparent 70%);
+    pointer-events: none; z-index: 0;
+}
+.screen { display: none; }
+.screen.active { display: flex; }
+
+/* AUTH */
+.auth-screen { align-items: center; justify-content: center; min-height: 100vh; padding: 20px; position: relative; z-index: 1; }
+.auth-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--rl); padding: 40px; width: 100%; max-width: 420px; box-shadow: 0 20px 60px rgba(0,0,0,.4); }
+.auth-logo { display: flex; align-items: center; gap: 12px; margin-bottom: 32px; }
+.logo-box { width: 44px; height: 44px; background: var(--blue); border-radius: var(--r); display: flex; align-items: center; justify-content: center; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 14px; color: #fff; flex-shrink: 0; letter-spacing: 0.5px; }
+.auth-logo h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
+.auth-logo p { font-size: 13px; color: var(--text-secondary); }
+.auth-tabs { display: flex; margin-bottom: 24px; background: var(--bg); border-radius: var(--r); padding: 3px; }
+.auth-tab { flex: 1; padding: 10px; text-align: center; font-size: 14px; font-weight: 600; color: var(--text-muted); cursor: pointer; border-radius: 6px; transition: .15s; }
+.auth-tab.active { background: var(--blue); color: #fff; }
+.auth-msg { padding: 10px 14px; border-radius: var(--r); font-size: 13px; margin-bottom: 16px; display: none; }
+.auth-msg.error { background: var(--red-dim); border: 1px solid rgba(239,68,68,.3); color: #f87171; }
+.form-group { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
+.form-group label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--text-secondary); }
+.form-group input { padding: 10px 14px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--r); color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 14px; transition: border-color .15s; }
+.form-group input:focus { outline: none; border-color: var(--blue); }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 10px 18px; border-radius: var(--r); font-family: 'DM Sans', sans-serif; font-size: 14px; font-weight: 600; border: none; cursor: pointer; transition: .15s; white-space: nowrap; }
+.btn-primary { background: var(--blue); color: #fff; width: 100%; }
+.btn-primary:hover { background: var(--blue-hover); }
+.btn-secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+.btn-secondary:hover { border-color: var(--text-muted); }
+.btn-sm { padding: 7px 13px; font-size: 13px; }
+
+/* PENDING */
+.pending-screen { text-align: center; padding: 60px 20px; }
+.pending-screen h2 { font-size: 24px; margin-bottom: 12px; }
+.pending-screen p { color: var(--text-secondary); font-size: 15px; line-height: 1.6; max-width: 400px; margin: 0 auto 24px; }
+
+/* DASHBOARD */
+.app-wrapper { flex-direction: column; align-items: center; min-height: 100vh; padding: 0 24px 40px; position: relative; z-index: 1; }
+.top-bar { width: 100%; max-width: 960px; display: flex; align-items: center; justify-content: space-between; padding: 20px 0; }
+.top-bar-left { display: flex; align-items: center; gap: 12px; }
+.top-bar-logo { width: 36px; height: 36px; background: var(--blue); border-radius: var(--r); display: flex; align-items: center; justify-content: center; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 11px; color: #fff; letter-spacing: 0.3px; }
+.top-bar-title { font-size: 15px; font-weight: 600; color: var(--text); }
+.top-bar-right { display: flex; align-items: center; gap: 12px; }
+.user-chip { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 20px; font-size: 13px; }
+.user-chip .avatar { width: 24px; height: 24px; background: var(--blue); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: #fff; }
+.user-chip .name { color: var(--text); font-weight: 500; }
+.user-chip .role { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--blue); text-transform: capitalize; }
+.logout-btn { background: none; border: 1px solid var(--border); color: var(--text-muted); padding: 6px 14px; border-radius: 6px; font-family: 'DM Sans', sans-serif; font-size: 13px; cursor: pointer; transition: .2s; }
+.logout-btn:hover { color: var(--text); border-color: var(--text-muted); }
+.dashboard-content { width: 100%; max-width: 960px; }
+.header { text-align: center; margin-bottom: 48px; }
+.header-mark { font-family: 'JetBrains Mono', monospace; font-size: 0.72em; letter-spacing: 0.25em; text-transform: uppercase; color: var(--blue); margin-bottom: 14px; opacity: 0; animation: fadeUp 0.6s ease forwards; }
+.header h1 { font-size: 2.2em; font-weight: 700; letter-spacing: -0.03em; line-height: 1.15; margin-bottom: 10px; opacity: 0; animation: fadeUp 0.6s ease 0.1s forwards; }
+.header p { color: var(--text-muted); font-size: 1em; opacity: 0; animation: fadeUp 0.6s ease 0.2s forwards; }
+
+/* APP CARDS */
+.apps-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 40px; }
+.app-card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 32px 24px; text-decoration: none; color: var(--text); transition: all 0.3s ease; position: relative; overflow: hidden; opacity: 0; animation: fadeUp 0.6s ease forwards; }
+.app-card:nth-child(1) { animation-delay: 0.3s; }
+.app-card:nth-child(2) { animation-delay: 0.4s; }
+.app-card:nth-child(3) { animation-delay: 0.5s; }
+.app-card:nth-child(4) { animation-delay: 0.6s; }
+.app-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; opacity: 0; transition: opacity 0.3s ease; }
+.app-card:hover { border-color: transparent; transform: translateY(-4px); }
+.app-card:hover::before { opacity: 1; }
+.app-card.bet-system::before { background: linear-gradient(90deg, var(--green), var(--blue)); }
+.app-card.bet-system:hover { border-color: rgba(34,197,94,0.3); box-shadow: 0 8px 40px rgba(34,197,94,0.08), 0 0 0 1px rgba(34,197,94,0.15); }
+.app-card.bet-system .app-tag { background: var(--green-dim); color: var(--green); }
+.bet-system:hover .arrow { color: var(--green); }
+.app-icon { font-size: 2em; margin-bottom: 18px; display: block; }
+.app-card h2 { font-size: 1.1em; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.01em; }
+.app-card p { color: var(--text-muted); font-size: 0.84em; line-height: 1.55; margin-bottom: 18px; }
+.app-tag { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 0.65em; padding: 4px 10px; border-radius: 6px; letter-spacing: 0.03em; }
+.arrow { position: absolute; bottom: 24px; right: 24px; color: var(--text-muted); font-size: 1.2em; transition: all 0.3s ease; opacity: 0.4; }
+.app-card:hover .arrow { opacity: 1; transform: translateX(4px); }
+.app-sub-links { display: flex; gap: 8px; margin-top: 12px; }
+.app-sub-link { font-size: 12px; font-weight: 600; color: var(--blue); text-decoration: none; padding: 4px 10px; background: var(--blue-dim); border-radius: 6px; transition: .15s; }
+.app-sub-link:hover { background: rgba(74,124,255,0.2); }
+
+/* ADMIN PANEL */
+.admin-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--rl); overflow: hidden; opacity: 0; animation: fadeUp 0.6s ease 0.6s forwards; }
+.admin-table-wrap { overflow-x: auto; }
+.admin-hdr { padding: 18px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.admin-hdr h2 { font-size: 16px; font-weight: 700; }
+.admin-hdr .badge { background: var(--red-dim); color: var(--red); font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 12px; }
+.admin-table { width: 100%; border-collapse: collapse; }
+.admin-table thead th { padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .6px; color: var(--text-muted); background: var(--bg); border-bottom: 1px solid var(--border); white-space: nowrap; }
+.admin-table tbody td { padding: 12px 16px; font-size: 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.admin-table tbody tr:last-child td { border-bottom: none; }
+.admin-table tbody tr { transition: background .1s; }
+.admin-table tbody tr:hover { background: rgba(74,124,255,0.03); }
+.role-badge { display: inline-flex; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; text-transform: capitalize; }
+.role-badge.admin { background: var(--red-dim); color: #f87171; }
+.role-badge.user { background: var(--blue-dim); color: #5e8dff; }
+.role-badge.viewer { background: var(--green-dim); color: #4ade80; }
+.role-badge.pending { background: var(--orange-dim); color: #fbbf24; }
+.toggle-btn { width: 36px; height: 20px; border-radius: 10px; border: none; cursor: pointer; position: relative; transition: .2s; flex-shrink: 0; }
+.toggle-btn.on { background: var(--green); }
+.toggle-btn.off { background: var(--border); }
+.toggle-btn::after { content: ''; position: absolute; top: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: .2s; }
+.toggle-btn.on::after { left: 18px; }
+.toggle-btn.off::after { left: 2px; }
+.app-toggles { display: flex; gap: 12px; align-items: center; }
+.app-toggle-item { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-muted); }
+select.role-select { padding: 5px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--r); color: var(--text); font-size: 12px; font-family: 'DM Sans', sans-serif; cursor: pointer; }
+select.role-select option { background: var(--surface); }
+.footer { text-align: center; margin-top: 48px; color: var(--text-muted); font-size: 0.75em; opacity: 0; animation: fadeUp 0.6s ease 0.7s forwards; }
+
+/* TOAST */
+.toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 300; display: flex; flex-direction: column; gap: 8px; }
+.toast { padding: 12px 20px; border-radius: var(--r); font-size: 14px; font-weight: 500; background: var(--surface); border: 1px solid var(--border); box-shadow: 0 4px 16px rgba(0,0,0,.3); color: var(--text); animation: toastIn .3s ease, toastOut .3s ease 2.7s; }
+.toast.success { border-left: 3px solid var(--green); }
+.toast.error { border-left: 3px solid var(--red); }
+.toast.info { border-left: 3px solid var(--blue); }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes toastIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+@keyframes toastOut { to { opacity: 0; transform: translateX(30px); } }
+
+@media (max-width: 768px) {
+    .apps-grid { grid-template-columns: 1fr; }
+    .header h1 { font-size: 1.6em; }
+    .top-bar { flex-direction: column; gap: 12px; align-items: stretch; }
+    .top-bar-right { justify-content: flex-end; }
+    .admin-table { font-size: 13px; }
+    .admin-table thead th, .admin-table tbody td { padding: 10px 12px; }
+    .app-toggles { flex-wrap: wrap; gap: 8px; }
+}
+@media (max-width: 560px) { .user-chip .role { display: none; } }
+</style>
+</head>
+<body>
+
+<!-- AUTH SCREEN -->
+<div class="auth-screen screen" id="authScreen">
+<div class="auth-card">
+    <div class="auth-logo"><div class="logo-box">KH</div><div><h1>The Kahla House</h1><p>Family Platform</p></div></div>
+    <div class="auth-tabs"><div class="auth-tab active" onclick="showAuthTab('login')">Sign In</div><div class="auth-tab" onclick="showAuthTab('signup')">Sign Up</div></div>
+    <div class="auth-msg error" id="authErr"></div>
+    <div id="loginForm">
+        <div class="form-group"><label>Email</label><input type="email" id="lEmail" placeholder="you@example.com"></div>
+        <div class="form-group"><label>Password</label><input type="password" id="lPass" placeholder="********" onkeydown="if(event.key==='Enter')doLogin()"></div>
+        <button class="btn btn-primary" onclick="doLogin()">Sign In</button>
+    </div>
+    <div id="signupForm" style="display:none">
+        <div class="form-group"><label>Full Name</label><input type="text" id="sName" placeholder="John Smith"></div>
+        <div class="form-group"><label>Email</label><input type="email" id="sEmail" placeholder="you@example.com"></div>
+        <div class="form-group"><label>Password</label><input type="password" id="sPass" placeholder="Min 6 characters" onkeydown="if(event.key==='Enter')doSignup()"></div>
+        <button class="btn btn-primary" onclick="doSignup()">Create Account</button>
+    </div>
+</div>
+</div>
+
+<!-- PENDING SCREEN -->
+<div class="auth-screen screen" id="pendingScreen">
+<div class="auth-card"><div class="pending-screen">
+    <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="var(--orange)" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+    <h2>Awaiting Approval</h2>
+    <p>Your account has been created. An administrator needs to approve your access before you can use the platform.</p>
+    <button class="btn btn-secondary" onclick="doLogout()">Sign Out</button>
+</div></div>
+</div>
+
+<!-- DASHBOARD -->
+<div class="app-wrapper screen" id="appScreen">
+    <div class="top-bar">
+        <div class="top-bar-left"><div class="top-bar-logo">KH</div><div class="top-bar-title">The Kahla House</div></div>
+        <div class="top-bar-right">
+            <div class="user-chip"><div class="avatar" id="uAvatar">?</div><span class="name" id="uName">&mdash;</span><span class="role" id="uRole">&mdash;</span></div>
+            <button class="logout-btn" onclick="doLogout()">Logout</button>
+        </div>
+    </div>
+    <div class="dashboard-content">
+        <div class="header"><div class="header-mark">The Kahla House</div><h1>Welcome Home</h1><p>Your apps and tools, all in one place</p></div>
+        <div class="apps-grid" id="appsGrid"></div>
+        <div class="admin-panel" id="adminPanel" style="display:none">
+            <div class="admin-hdr"><h2>User Management</h2><span class="badge" id="pendingBadge" style="display:none">0 pending</span></div>
+            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>App Access</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
+        </div>
+        <div class="footer">The Kahla House &middot; thekahlahouse.com</div>
+    </div>
+</div>
+
+<div class="toast-container" id="toastC"></div>
+
+<script>
+/* ===== FIREBASE CONFIG ===== */
+/* PLACEHOLDER — replace with your Firebase project config */
+const FC = {
+    apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
+    authDomain: "kahla-house.firebaseapp.com",
+    projectId: "kahla-house",
+    storageBucket: "kahla-house.firebasestorage.app",
+    messagingSenderId: "1029771942929",
+    appId: "1:1029771942929:web:76358096dbb868e375a5b0"
+};
+firebase.initializeApp(FC);
+const auth = firebase.auth(), db = firebase.firestore();
+let CU = null, CUD = null, unsubs = [], isSigningUp = false;
+
+/* ===== HELPERS ===== */
+function E(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function ini(n) { return (n || '?').split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2); }
+function showS(id) { document.querySelectorAll('.screen').forEach(s => s.classList.remove('active')); document.getElementById(id)?.classList.add('active'); }
+function toast(m, t) { const c = document.getElementById('toastC'), el = document.createElement('div'); el.className = 'toast ' + (t || 'info'); el.textContent = m; c.appendChild(el); setTimeout(() => el.remove(), 3000); }
+
+/* ===== AUTH UI ===== */
+function showAuthTab(t) {
+    document.querySelectorAll('.auth-tab').forEach((x, i) => x.classList.toggle('active', t === 'login' ? i === 0 : i === 1));
+    document.getElementById('loginForm').style.display = t === 'login' ? 'block' : 'none';
+    document.getElementById('signupForm').style.display = t === 'signup' ? 'block' : 'none';
+    document.getElementById('authErr').style.display = 'none';
+}
+function showErr(msg) { const el = document.getElementById('authErr'); el.textContent = msg; el.style.display = 'block'; }
+
+async function doLogin() {
+    const e = document.getElementById('lEmail').value.trim(), p = document.getElementById('lPass').value;
+    try { document.getElementById('authErr').style.display = 'none'; await auth.signInWithEmailAndPassword(e, p); } catch (er) { showErr(er.message); }
+}
+
+async function doSignup() {
+    const n = document.getElementById('sName').value.trim(), e = document.getElementById('sEmail').value.trim(), p = document.getElementById('sPass').value;
+    if (!n) { showErr('Please enter your name.'); return; }
+    try {
+        document.getElementById('authErr').style.display = 'none';
+        isSigningUp = true;
+        const cr = await auth.createUserWithEmailAndPassword(e, p);
+        await cr.user.updateProfile({ displayName: n });
+        const userData = {
+            email: e,
+            displayName: n,
+            role: 'pending',
+            approved: false,
+            appAccess: { betSystem: false },
+            createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        };
+        await db.collection('users').doc(cr.user.uid).set(userData);
+        CU = cr.user; CUD = { ...userData, createdAt: new Date() };
+        isSigningUp = false;
+        showS('pendingScreen');
+    } catch (er) { isSigningUp = false; showErr(er.message); }
+}
+
+function doLogout() { unsubs.forEach(f => f()); unsubs = []; auth.signOut(); }
+
+/* ===== AUTH STATE ===== */
+auth.onAuthStateChanged(async u => {
+    if (!u) { CU = null; CUD = null; showS('authScreen'); return; }
+    if (isSigningUp) { return; }
+    CU = u;
+    const ref = db.collection('users').doc(u.uid), doc = await ref.get();
+    if (!doc.exists) {
+        await ref.set({
+            email: u.email,
+            displayName: u.displayName || u.email,
+            role: 'pending',
+            approved: false,
+            appAccess: { betSystem: false },
+            createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        CUD = { email: u.email, displayName: u.displayName || u.email, role: 'pending', approved: false, appAccess: { betSystem: false } };
+    } else {
+        CUD = doc.data();
+    }
+    // Auto-promote first user to admin
+    if (CUD.role === 'pending') {
+        try {
+            const snap = await db.collection('users').limit(2).get();
+            if (snap.size === 1) {
+                await ref.update({ role: 'admin', approved: true, appAccess: { betSystem: true } });
+                CUD.role = 'admin'; CUD.approved = true; CUD.appAccess = { betSystem: true };
+            }
+        } catch (e) { /* non-admin cannot query users collection */ }
+    }
+    // Ensure appAccess exists
+    if (!CUD.appAccess) {
+        const aa = { betSystem: CUD.role === 'admin' };
+        await ref.update({ appAccess: aa }); CUD.appAccess = aa;
+    }
+    if (!CUD.approved || CUD.role === 'pending') { showS('pendingScreen'); }
+    else { showS('appScreen'); initDashboard(); }
+});
+
+/* ===== DASHBOARD ===== */
+function initDashboard() {
+    unsubs.forEach(f => f()); unsubs = [];
+    document.getElementById('uName').textContent = CUD.displayName || CU.email;
+    document.getElementById('uRole').textContent = CUD.role;
+    document.getElementById('uAvatar').textContent = ini(CUD.displayName);
+    renderAppCards();
+    if (CUD.role === 'admin') { document.getElementById('adminPanel').style.display = ''; loadAdminPanel(); }
+    else { document.getElementById('adminPanel').style.display = 'none'; }
+}
+
+function renderAppCards() {
+    const aa = CUD.appAccess || {};
+    let h = '';
+    if (aa.betSystem) {
+        h += `<div class="app-card bet-system" style="cursor:default">
+            <span class="app-icon">&#127922;</span>
+            <h2>Bet System</h2>
+            <p>Multi-sportsbook odds comparison, Circa splits, sharp indicators, line movement, and Polymarket position tracking with P&amp;L.</p>
+            <span class="app-tag">Sports Betting</span>
+            <div class="app-sub-links">
+                <a href="/odds" class="app-sub-link">Odds Board</a>
+                <a href="/dashboard" class="app-sub-link">Dashboard</a>
+            </div>
+            <span class="arrow">&rarr;</span>
+        </div>`;
+    }
+    /* Future apps go here:
+    if (aa.christmasList) { ... }
+    if (aa.budget) { ... }
+    */
+    if (!h) {
+        h = '<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text-muted)"><h3 style="color:var(--text-secondary);margin-bottom:8px">No Apps Assigned</h3><p>An administrator needs to grant you access.</p></div>';
+    }
+    document.getElementById('appsGrid').innerHTML = h;
+}
+
+/* ===== ADMIN PANEL ===== */
+function loadAdminPanel() {
+    const un = db.collection('users').onSnapshot(snap => {
+        const users = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        const pending = users.filter(u => !u.approved || u.role === 'pending');
+        const badge = document.getElementById('pendingBadge');
+        if (pending.length > 0) { badge.textContent = pending.length + ' pending'; badge.style.display = ''; }
+        else { badge.style.display = 'none'; }
+
+        document.getElementById('adminTB').innerHTML = users.map(u => {
+            const aa = u.appAccess || {};
+            const isMe = u.id === CU.uid;
+            const st = u.approved
+                ? '<span style="color:var(--green);font-size:13px">Approved</span>'
+                : '<span style="color:var(--orange);font-size:13px">Pending</span>';
+
+            return `<tr>
+                <td style="font-weight:600">${E(u.displayName)}</td>
+                <td style="color:var(--text-secondary);font-size:13px">${E(u.email)}</td>
+                <td>${st}</td>
+                <td><select class="role-select" onchange="setRole('${u.id}',this.value)" ${isMe ? 'disabled' : ''}>
+                    <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option>
+                    <option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option>
+                    <option value="viewer" ${u.role === 'viewer' ? 'selected' : ''}>Viewer</option>
+                    <option value="pending" ${u.role === 'pending' ? 'selected' : ''}>Pending</option>
+                </select></td>
+                <td><div class="app-toggles">
+                    <div class="app-toggle-item"><button class="toggle-btn ${aa.betSystem ? 'on' : 'off'}" onclick="toggleApp('${u.id}','betSystem',${!aa.betSystem})"></button>Bet System</div>
+                </div></td>
+                <td>${!isMe && !u.approved
+                    ? `<button class="btn btn-sm" style="background:var(--green);color:#fff;font-size:12px;margin-right:6px" onclick="approveUser('${u.id}')">Approve</button><button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:12px" onclick="rejectUser('${u.id}','${E(u.displayName)}')">Reject</button>`
+                    : isMe ? '<span style="color:var(--text-muted);font-size:12px">You</span>'
+                    : `<button class="btn btn-sm" style="background:var(--red-dim);color:var(--red);font-size:12px;border:1px solid rgba(239,68,68,.3)" onclick="rejectUser('${u.id}','${E(u.displayName)}')">Remove</button>`
+                }</td>
+            </tr>`;
+        }).join('');
+    });
+    unsubs.push(un);
+}
+
+async function setRole(uid, role) {
+    await db.collection('users').doc(uid).update({ role, approved: role !== 'pending' });
+    toast('Role updated to ' + role, 'success');
+}
+
+async function toggleApp(uid, app, val) {
+    await db.collection('users').doc(uid).update({ ['appAccess.' + app]: val });
+    toast(app + (val ? ' enabled' : ' disabled'), 'info');
+}
+
+async function approveUser(uid) {
+    await db.collection('users').doc(uid).update({
+        approved: true,
+        role: 'user',
+        appAccess: { betSystem: true }
+    });
+    toast('User approved', 'success');
+}
+
+async function rejectUser(uid, name) {
+    if (!confirm('Remove user "' + name + '"? This will delete their account data.')) { return; }
+    await db.collection('users').doc(uid).delete();
+    toast('User removed', 'success');
+}
+
+/* ===== FIREBASE TOKEN HELPER (used by sub-pages) ===== */
+// Sub-pages (odds.html, dashboard.html) can call this to get a fresh token
+window.getFirebaseToken = async function() {
+    if (!CU) return null;
+    return await CU.getIdToken();
+};
+
+showS('authScreen');
+</script>
+</body>
+</html>
