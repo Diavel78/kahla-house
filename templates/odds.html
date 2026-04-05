@@ -357,6 +357,10 @@
             opacity: 0;
             animation: fadeUp 0.4s ease forwards;
         }
+        .no-animate .game {
+            opacity: 1;
+            animation: none;
+        }
         .game:hover {
             border-color: var(--border-light);
             box-shadow: 0 4px 24px rgba(0,0,0,0.25);
@@ -1469,6 +1473,12 @@
             const gamesChanged = gameKey !== window._lastGameKey;
             window._lastGameKey = gameKey;
             oddsData=data;
+            if (firstLoad) {
+                // Allow fade-in animation on first load, then disable for subsequent renders
+                setTimeout(() => {
+                    document.querySelectorAll('.board-wrap').forEach(el => el.classList.add('no-animate'));
+                }, 600);
+            }
             firstLoad=false;
             const avail = new Set(data.books||[]);
             const overlap = [...enabledBooks].filter(b=>avail.has(b));
