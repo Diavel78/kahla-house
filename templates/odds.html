@@ -862,7 +862,7 @@
                 changed = true;
             }
         }
-        // Backfill: if an existing opener is missing any market, fill it from the current data
+        // Backfill: if an existing opener is missing any market, fill from the best available book
         for (const ev of events) {
             const eid = ev.numeric_id || ev.id;
             if (!eid || !openers[eid]) continue;
@@ -871,29 +871,20 @@
             const hasSpr = Object.keys(o.spread || {}).length;
             const hasTot = Object.keys(o.total || {}).length;
             if (hasML && hasSpr && hasTot) continue;
-            const srcKey = o.src === 'CIR' ? 'circa' : o.src === 'PIN' ? 'pinnacle' : o.src === 'WYN' ? 'wynn' : 'westgate';
-            const pin = (ev.books || {})[srcKey] || (ev.books || {}).pinnacle || (ev.books || {}).circa;
-            if (!pin) continue;
-            if (!hasML && pin.moneyline) {
-                if (!o.ml) o.ml = {};
-                for (const [team, price] of Object.entries(pin.moneyline)) {
-                    if (price != null) o.ml[team] = price;
-                }
-                if (Object.keys(o.ml).length) changed = true;
+            const bks = ev.books || {};
+            const chain = [bks[o.src === 'CIR' ? 'circa' : o.src === 'PIN' ? 'pinnacle' : o.src === 'WYN' ? 'wynn' : 'westgate'], bks.pinnacle, bks.circa, bks.wynn, bks.westgate].filter(Boolean);
+            function findWith(mkt) { return chain.find(b => Object.keys(b[mkt] || {}).length); }
+            if (!hasML) {
+                const b = findWith('moneyline');
+                if (b) { if (!o.ml) o.ml = {}; for (const [t, p] of Object.entries(b.moneyline)) { if (p != null) o.ml[t] = p; } if (Object.keys(o.ml).length) changed = true; }
             }
-            if (!hasSpr && pin.spread) {
-                if (!o.spread) o.spread = {};
-                for (const [team, data] of Object.entries(pin.spread)) {
-                    if (data?.price != null) o.spread[team] = { price: data.price, point: data.point };
-                }
-                if (Object.keys(o.spread).length) changed = true;
+            if (!hasSpr) {
+                const b = findWith('spread');
+                if (b) { if (!o.spread) o.spread = {}; for (const [t, d] of Object.entries(b.spread)) { if (d?.price != null) o.spread[t] = { price: d.price, point: d.point }; } if (Object.keys(o.spread).length) changed = true; }
             }
-            if (!hasTot && pin.total) {
-                if (!o.total) o.total = {};
-                for (const [side, data] of Object.entries(pin.total)) {
-                    if (data?.price != null) o.total[side] = { price: data.price, point: data.point };
-                }
-                if (Object.keys(o.total).length) changed = true;
+            if (!hasTot) {
+                const b = findWith('total');
+                if (b) { if (!o.total) o.total = {}; for (const [t, d] of Object.entries(b.total)) { if (d?.price != null) o.total[t] = { price: d.price, point: d.point }; } if (Object.keys(o.total).length) changed = true; }
             }
         }
         if (changed) {
@@ -912,20 +903,21 @@
         const src = opener.src || ((ev.books||{}).pinnacle ? 'PIN' : (ev.books||{}).circa ? 'CIR' : 'WG');
 
         // Just-in-time backfill: if opener is missing a market, grab it now
-        // so movement can display even if the Firestore save didn't persist
-        const srcKey = opener.src === 'CIR' ? 'circa' : opener.src === 'PIN' ? 'pinnacle' : opener.src === 'WYN' ? 'wynn' : 'westgate';
-        const srcBook = (ev.books || {})[srcKey] || pin;
-        if (!Object.keys(opener.ml || {}).length && srcBook?.moneyline) {
-            if (!opener.ml) opener.ml = {};
-            for (const [t, p] of Object.entries(srcBook.moneyline)) { if (p != null) opener.ml[t] = p; }
+        // Try the opener's source book first, fall back through the priority chain
+        const bks = ev.books || {};
+        const bookChain = [bks[opener.src === 'CIR' ? 'circa' : opener.src === 'PIN' ? 'pinnacle' : opener.src === 'WYN' ? 'wynn' : 'westgate'], bks.pinnacle, bks.circa, bks.wynn, bks.westgate].filter(Boolean);
+        function findBookWith(market) { return bookChain.find(b => Object.keys(b[market] || {}).length); }
+        if (!Object.keys(opener.ml || {}).length) {
+            const b = findBookWith('moneyline');
+            if (b) { if (!opener.ml) opener.ml = {}; for (const [t, p] of Object.entries(b.moneyline)) { if (p != null) opener.ml[t] = p; } }
         }
-        if (!Object.keys(opener.spread || {}).length && srcBook?.spread) {
-            if (!opener.spread) opener.spread = {};
-            for (const [t, d] of Object.entries(srcBook.spread)) { if (d?.price != null) opener.spread[t] = { price: d.price, point: d.point }; }
+        if (!Object.keys(opener.spread || {}).length) {
+            const b = findBookWith('spread');
+            if (b) { if (!opener.spread) opener.spread = {}; for (const [t, d] of Object.entries(b.spread)) { if (d?.price != null) opener.spread[t] = { price: d.price, point: d.point }; } }
         }
-        if (!Object.keys(opener.total || {}).length && srcBook?.total) {
-            if (!opener.total) opener.total = {};
-            for (const [t, d] of Object.entries(srcBook.total)) { if (d?.price != null) opener.total[t] = { price: d.price, point: d.point }; }
+        if (!Object.keys(opener.total || {}).length) {
+            const b = findBookWith('total');
+            if (b) { if (!opener.total) opener.total = {}; for (const [t, d] of Object.entries(b.total)) { if (d?.price != null) opener.total[t] = { price: d.price, point: d.point }; } }
         }
 
         const mv = { ml: {}, spread: {}, total: {}, src };
