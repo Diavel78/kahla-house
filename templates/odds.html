@@ -843,16 +843,12 @@
         for (const ev of events) {
             const eid = ev.numeric_id || ev.id;
             if (!eid || openers[eid]) continue;
-            const pin = (ev.books || {}).pinnacle || (ev.books || {}).circa || (ev.books || {}).wynn || (ev.books || {}).westgate;
-            const srcBook = (ev.books||{}).pinnacle ? 'PIN' : (ev.books||{}).circa ? 'CIR' : (ev.books||{}).wynn ? 'WYN' : 'WG';
-            if (!pin) continue;
+            const pin = (ev.books || {}).pinnacle || (ev.books || {}).circa;
+            const srcBook = (ev.books||{}).pinnacle ? 'PIN' : (ev.books||{}).circa ? 'CIR' : null;
+            if (!pin || !srcBook) continue;
             const o = { ml: {}, spread: {}, total: {}, src: srcBook };
-            // ML openers only from Pinnacle or Circa
-            const mlBook = (ev.books || {}).pinnacle || (ev.books || {}).circa;
-            if (mlBook) {
-                for (const [team, price] of Object.entries(mlBook.moneyline || {})) {
-                    if (price != null) o.ml[team] = price;
-                }
+            for (const [team, price] of Object.entries(pin.moneyline || {})) {
+                if (price != null) o.ml[team] = price;
             }
             for (const [team, data] of Object.entries(pin.spread || {})) {
                 if (data?.price != null) o.spread[team] = { price: data.price, point: data.point };
@@ -875,13 +871,11 @@
             const hasTot = Object.keys(o.total || {}).length;
             if (hasML && hasSpr && hasTot) continue;
             const bks = ev.books || {};
-            const chain = [bks[o.src === 'CIR' ? 'circa' : o.src === 'PIN' ? 'pinnacle' : o.src === 'WYN' ? 'wynn' : 'westgate'], bks.pinnacle, bks.circa, bks.wynn, bks.westgate].filter(Boolean);
+            const chain = [bks.pinnacle, bks.circa].filter(Boolean);
             const findWith = (mkt) => chain.find(b => Object.keys(b[mkt] || {}).length);
             if (!hasML) {
-                // ML only from Pinnacle or Circa
-                const mlChain = [bks.pinnacle, bks.circa].filter(Boolean);
-                const mlB = mlChain.find(b => Object.keys(b.moneyline || {}).length);
-                if (mlB) { if (!o.ml) o.ml = {}; for (const [t, p] of Object.entries(mlB.moneyline)) { if (p != null) o.ml[t] = p; } if (Object.keys(o.ml).length) changed = true; }
+                const b = findWith('moneyline');
+                if (b) { if (!o.ml) o.ml = {}; for (const [t, p] of Object.entries(b.moneyline)) { if (p != null) o.ml[t] = p; } if (Object.keys(o.ml).length) changed = true; }
             }
             if (!hasSpr) {
                 const b = findWith('spread');
@@ -903,26 +897,26 @@
         const eid = ev.numeric_id || ev.id;
         const opener = openers[eid];
         if (!opener) return null;
-        const pin = (ev.books || {}).pinnacle || (ev.books || {}).circa || (ev.books || {}).wynn || (ev.books || {}).westgate;
+        const pin = (ev.books || {}).pinnacle || (ev.books || {}).circa;
         if (!pin) return null;
-        const src = opener.src || ((ev.books||{}).pinnacle ? 'PIN' : (ev.books||{}).circa ? 'CIR' : 'WG');
+        const src = opener.src || ((ev.books||{}).pinnacle ? 'PIN' : 'CIR');
 
         // Just-in-time backfill: if opener is missing a market, grab it now
         // Try the opener's source book first, fall back through the priority chain
+        // JIT backfill — Pinnacle and Circa only
         const bks = ev.books || {};
-        const bookChain = [bks[opener.src === 'CIR' ? 'circa' : opener.src === 'PIN' ? 'pinnacle' : opener.src === 'WYN' ? 'wynn' : 'westgate'], bks.pinnacle, bks.circa, bks.wynn, bks.westgate].filter(Boolean);
-        const findBookWith = (market) => bookChain.find(b => Object.keys(b[market] || {}).length);
+        const sharpChain = [bks.pinnacle, bks.circa].filter(Boolean);
+        const findSharp = (market) => sharpChain.find(b => Object.keys(b[market] || {}).length);
         if (!Object.keys(opener.ml || {}).length) {
-            // ML only from Pinnacle or Circa
-            const mlB = [bks.pinnacle, bks.circa].filter(Boolean).find(b => Object.keys(b.moneyline || {}).length);
-            if (mlB) { if (!opener.ml) opener.ml = {}; for (const [t, p] of Object.entries(mlB.moneyline)) { if (p != null) opener.ml[t] = p; } }
+            const b = findSharp('moneyline');
+            if (b) { if (!opener.ml) opener.ml = {}; for (const [t, p] of Object.entries(b.moneyline)) { if (p != null) opener.ml[t] = p; } }
         }
         if (!Object.keys(opener.spread || {}).length) {
-            const b = findBookWith('spread');
+            const b = findSharp('spread');
             if (b) { if (!opener.spread) opener.spread = {}; for (const [t, d] of Object.entries(b.spread)) { if (d?.price != null) opener.spread[t] = { price: d.price, point: d.point }; } }
         }
         if (!Object.keys(opener.total || {}).length) {
-            const b = findBookWith('total');
+            const b = findSharp('total');
             if (b) { if (!opener.total) opener.total = {}; for (const [t, d] of Object.entries(b.total)) { if (d?.price != null) opener.total[t] = { price: d.price, point: d.point }; } }
         }
 
@@ -1001,8 +995,9 @@
                     for (const ev of data.events) {
                         const eid = ev.numeric_id || ev.id;
                         if (!eid) continue;
-                        const pin = (ev.books || {}).pinnacle || (ev.books || {}).circa || (ev.books || {}).wynn || (ev.books || {}).westgate;
-                        const srcBook = (ev.books||{}).pinnacle ? 'PIN' : (ev.books||{}).circa ? 'CIR' : (ev.books||{}).wynn ? 'WYN' : 'WG';
+                        const pin = (ev.books || {}).pinnacle || (ev.books || {}).circa;
+                        const srcBook = (ev.books||{}).pinnacle ? 'PIN' : (ev.books||{}).circa ? 'CIR' : null;
+                        if (!srcBook) continue;
                         if (!pin) continue;
                         const o = { ml: {}, spread: {}, total: {}, src: srcBook };
                         for (const [team, price] of Object.entries(pin.moneyline || {})) {
