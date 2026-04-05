@@ -854,6 +854,17 @@
                 changed = true;
             }
         }
+        // Backfill: if an existing opener is missing ML, fill it from the current data
+        for (const ev of events) {
+            const eid = ev.numeric_id || ev.id;
+            if (!eid || !openers[eid] || Object.keys(openers[eid].ml || {}).length) continue;
+            const pin = (ev.books || {})[openers[eid].src === 'CIR' ? 'circa' : openers[eid].src === 'PIN' ? 'pinnacle' : openers[eid].src === 'WYN' ? 'wynn' : 'westgate'];
+            if (!pin?.moneyline) continue;
+            for (const [team, price] of Object.entries(pin.moneyline)) {
+                if (price != null) openers[eid].ml[team] = price;
+            }
+            if (Object.keys(openers[eid].ml).length) changed = true;
+        }
         if (changed) {
             currentOpeners = openers;
             saveOpenersAPI(sport, openers);
