@@ -799,32 +799,55 @@ def _merge_splits(events, splits_map, splits_by_teams=None):
 @app.route("/api/openers", methods=["GET"])
 @firebase_auth_required
 def api_openers_get():
-    """Retrieve opening lines for a sport/date from Firestore."""
+    """Retrieve opening lines for a sport from Firestore (permanent per game ID)."""
     sport = request.args.get("sport", "mlb")
-    date = request.args.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
 
     try:
         db = get_db()
-        doc_id = f"{date}:{sport}"
+        doc_id = f"openers:{sport}"
         doc = db.collection("openers").document(doc_id).get()
         if doc.exists:
             data = doc.to_dict()
-            return jsonify({"ok": True, "events": data.get("events", {}), "date": date, "sport": sport})
-        return jsonify({"ok": True, "events": {}, "date": date, "sport": sport})
+            return jsonify({"ok": True, "events": data.get("events", {}), "sport": sport})
+        # Migrate: try loading from old date-based docs
+        old_events = _migrate_old_openers(db, sport)
+        if old_events:
+            return jsonify({"ok": True, "events": old_events, "sport": sport})
+        return jsonify({"ok": True, "events": {}, "sport": sport})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+def _migrate_old_openers(db, sport):
+    """One-time migration: merge all old date-based opener docs into the new permanent doc."""
+    try:
+        merged = {}
+        old_docs = db.collection("openers").where("sport", "==", sport).stream()
+        for doc in old_docs:
+            doc_id = doc.id
+            if doc_id.startswith("openers:"):
+                continue  # skip new-style docs
+            data = doc.to_dict()
+            for eid, opener_data in data.get("events", {}).items():
+                if eid not in merged:
+                    merged[eid] = opener_data
+        if merged:
+            new_ref = db.collection("openers").document(f"openers:{sport}")
+            new_ref.set({"sport": sport, "events": merged, "createdAt": firestore.SERVER_TIMESTAMP})
+        return merged
+    except Exception:
+        return {}
 
 
 @app.route("/api/openers", methods=["POST"])
 @firebase_auth_required
 def api_openers_save():
-    """Store opening lines for a sport/date to Firestore.
-    Body: { "sport": "mlb", "date": "2026-04-04", "events": { ... } }
-    Merges with existing data (doesn't overwrite events already captured).
+    """Store opening lines for a sport to Firestore (permanent per game ID).
+    Body: { "sport": "mlb", "events": { ... } }
+    Merges with existing data — never overrides already captured openers.
     """
     body = request.get_json(force=True)
     sport = body.get("sport", "mlb")
-    date = body.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
     new_events = body.get("events", {})
 
     if not new_events:
@@ -832,13 +855,12 @@ def api_openers_save():
 
     try:
         db = get_db()
-        doc_id = f"{date}:{sport}"
+        doc_id = f"openers:{sport}"
         doc_ref = db.collection("openers").document(doc_id)
         doc = doc_ref.get()
 
         if doc.exists:
             existing = doc.to_dict().get("events", {})
-            # Merge: add new events, and backfill missing markets in existing ones
             added = 0
             for eid, opener_data in new_events.items():
                 if eid not in existing:
@@ -858,15 +880,11 @@ def api_openers_save():
             doc_ref.update({"events": existing})
         else:
             doc_ref.set({
-                "date": date,
                 "sport": sport,
                 "events": new_events,
                 "createdAt": firestore.SERVER_TIMESTAMP,
             })
             added = len(new_events)
-
-        # Cleanup: delete openers older than 7 days
-        _cleanup_old_openers(db)
 
         return jsonify({"ok": True, "saved": added})
     except Exception as e:
@@ -874,17 +892,18 @@ def api_openers_save():
 
 
 def _cleanup_old_openers(db):
-    """Delete opener docs older than 7 days."""
+    """Legacy cleanup — no longer called but kept for reference."""
     try:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
-        # Query docs where date < cutoff
         docs = db.collection("openers").where("date", "<", cutoff).stream()
         batch = db.batch()
         count = 0
         for doc in docs:
+            if doc.id.startswith("openers:"):
+                continue  # never delete new-style permanent docs
             batch.delete(doc.reference)
             count += 1
-            if count >= 50:  # Firestore batch limit is 500, but keep it small
+            if count >= 50:
                 break
         if count > 0:
             batch.commit()

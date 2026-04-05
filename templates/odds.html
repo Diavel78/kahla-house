@@ -816,11 +816,10 @@
     function cls(p){if(p==null)return 'na';if(p<-130)return 'fav';if(p>130)return 'dog';return 'even'}
 
     // --- Opening line tracker (API-backed) ---
-    const TODAY = new Date().toISOString().slice(0,10);
 
     async function loadOpeners(sport) {
         try {
-            const resp = await authFetch(`/api/openers?sport=${sport}&date=${TODAY}`);
+            const resp = await authFetch(`/api/openers?sport=${sport}`);
             if (!resp) return {};
             const data = await resp.json();
             if (data.ok) return data.events || {};
@@ -833,7 +832,7 @@
             await authFetch('/api/openers', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sport, date: TODAY, events: openers })
+                body: JSON.stringify({ sport, events: openers })
             });
         } catch(e) { console.warn('saveOpeners:', e); }
     }
@@ -848,8 +847,12 @@
             const srcBook = (ev.books||{}).pinnacle ? 'PIN' : (ev.books||{}).circa ? 'CIR' : (ev.books||{}).wynn ? 'WYN' : 'WG';
             if (!pin) continue;
             const o = { ml: {}, spread: {}, total: {}, src: srcBook };
-            for (const [team, price] of Object.entries(pin.moneyline || {})) {
-                if (price != null) o.ml[team] = price;
+            // ML openers only from Pinnacle or Circa
+            const mlBook = (ev.books || {}).pinnacle || (ev.books || {}).circa;
+            if (mlBook) {
+                for (const [team, price] of Object.entries(mlBook.moneyline || {})) {
+                    if (price != null) o.ml[team] = price;
+                }
             }
             for (const [team, data] of Object.entries(pin.spread || {})) {
                 if (data?.price != null) o.spread[team] = { price: data.price, point: data.point };
@@ -875,8 +878,10 @@
             const chain = [bks[o.src === 'CIR' ? 'circa' : o.src === 'PIN' ? 'pinnacle' : o.src === 'WYN' ? 'wynn' : 'westgate'], bks.pinnacle, bks.circa, bks.wynn, bks.westgate].filter(Boolean);
             const findWith = (mkt) => chain.find(b => Object.keys(b[mkt] || {}).length);
             if (!hasML) {
-                const b = findWith('moneyline');
-                if (b) { if (!o.ml) o.ml = {}; for (const [t, p] of Object.entries(b.moneyline)) { if (p != null) o.ml[t] = p; } if (Object.keys(o.ml).length) changed = true; }
+                // ML only from Pinnacle or Circa
+                const mlChain = [bks.pinnacle, bks.circa].filter(Boolean);
+                const mlB = mlChain.find(b => Object.keys(b.moneyline || {}).length);
+                if (mlB) { if (!o.ml) o.ml = {}; for (const [t, p] of Object.entries(mlB.moneyline)) { if (p != null) o.ml[t] = p; } if (Object.keys(o.ml).length) changed = true; }
             }
             if (!hasSpr) {
                 const b = findWith('spread');
@@ -908,8 +913,9 @@
         const bookChain = [bks[opener.src === 'CIR' ? 'circa' : opener.src === 'PIN' ? 'pinnacle' : opener.src === 'WYN' ? 'wynn' : 'westgate'], bks.pinnacle, bks.circa, bks.wynn, bks.westgate].filter(Boolean);
         const findBookWith = (market) => bookChain.find(b => Object.keys(b[market] || {}).length);
         if (!Object.keys(opener.ml || {}).length) {
-            const b = findBookWith('moneyline');
-            if (b) { if (!opener.ml) opener.ml = {}; for (const [t, p] of Object.entries(b.moneyline)) { if (p != null) opener.ml[t] = p; } }
+            // ML only from Pinnacle or Circa
+            const mlB = [bks.pinnacle, bks.circa].filter(Boolean).find(b => Object.keys(b.moneyline || {}).length);
+            if (mlB) { if (!opener.ml) opener.ml = {}; for (const [t, p] of Object.entries(mlB.moneyline)) { if (p != null) opener.ml[t] = p; } }
         }
         if (!Object.keys(opener.spread || {}).length) {
             const b = findBookWith('spread');
@@ -979,7 +985,7 @@
 
     // On first load of the day, prefetch ALL sports to capture openers
     async function prefetchOpeners() {
-        const prefetchKey = `prefetched:${TODAY}`;
+        const prefetchKey = `prefetched:${new Date().toISOString().slice(0,10)}`;
         if (localStorage.getItem(prefetchKey)) return;
 
         const sports = SPORTS.filter(s => s !== activeSport);
