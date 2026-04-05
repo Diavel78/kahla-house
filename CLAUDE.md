@@ -16,6 +16,10 @@
 - **DK** = DraftKings
 - **FD** = FanDuel
 
+## Deployment
+- Always push to production (main) for Kahla House. Merge feature branches into main and push.
+- Vercel deploys automatically from `main`.
+
 ## Tech Stack
 - Backend: Flask (Python) on Vercel
 - Frontend: Vanilla JS, Firebase Auth, Firestore
