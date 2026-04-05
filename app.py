@@ -836,12 +836,23 @@ def api_openers_save():
 
         if doc.exists:
             existing = doc.to_dict().get("events", {})
-            # Only add events not already captured
+            # Merge: add new events, and backfill missing markets in existing ones
             added = 0
             for eid, opener_data in new_events.items():
                 if eid not in existing:
                     existing[eid] = opener_data
                     added += 1
+                else:
+                    # Backfill missing markets (ml, spread, total) without overriding
+                    updated = False
+                    for mkt in ("ml", "spread", "total"):
+                        existing_mkt = existing[eid].get(mkt, {})
+                        new_mkt = opener_data.get(mkt, {})
+                        if not existing_mkt and new_mkt:
+                            existing[eid][mkt] = new_mkt
+                            updated = True
+                    if updated:
+                        added += 1
             doc_ref.update({"events": existing})
         else:
             doc_ref.set({
