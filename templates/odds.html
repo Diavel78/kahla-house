@@ -48,6 +48,10 @@
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
+        html {
+            overflow-x: hidden;
+        }
+
         body {
             font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: var(--bg);
@@ -711,7 +715,7 @@
     </div>
 
     <!-- Main app (hidden until auth) -->
-    <div id="app" style="display:none">
+    <div id="app" style="display:none;max-width:100vw;overflow-x:hidden">
         <div class="top-bar">
             <div class="top-bar-left">
                 <div class="top-bar-logo">KH</div>
