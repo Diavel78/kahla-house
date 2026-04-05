@@ -326,6 +326,7 @@
         }
 
         /* Board */
+        .board-wrap { position: relative; }
         .board {
             max-width: 1440px;
             margin: 0 auto;
@@ -705,8 +706,11 @@
             <span class="info" id="info"></span>
         </div>
 
-        <div class="board" id="board">
-            <div class="empty-state"><span class="spinner"></span> Loading odds...</div>
+        <div class="board-wrap">
+            <div class="board" id="board">
+                <div class="empty-state"><span class="spinner"></span> Loading odds...</div>
+            </div>
+            <div class="board" id="board-back" style="position:absolute;visibility:hidden;pointer-events:none"></div>
         </div>
     </div>
 
@@ -1336,15 +1340,23 @@
 
             h+=`</div></div>`;
         }
-        // Seamless update: swap content without visible flash
-        // Use a hidden container, build the DOM off-screen, then swap
-        const tmp = document.createElement('div');
-        tmp.innerHTML = h;
-        // Preserve scroll position
-        const scrollX = board.parentElement?.scrollLeft || 0;
+        // Double-buffer: render into hidden back-board, then swap instantly
+        const back = $('board-back');
+        back.innerHTML = h;
         const scrollY = window.scrollY;
-        board.replaceChildren(...tmp.childNodes);
-        window.scrollTo(0, scrollY);
+        // Swap: make back visible, hide front, then swap IDs
+        requestAnimationFrame(() => {
+            board.style.visibility = 'hidden';
+            board.style.position = 'absolute';
+            board.style.pointerEvents = 'none';
+            back.style.visibility = '';
+            back.style.position = '';
+            back.style.pointerEvents = '';
+            // Swap IDs so next render targets the now-hidden one
+            board.id = 'board-back';
+            back.id = 'board';
+            window.scrollTo(0, scrollY);
+        });
     }
 
     let firstLoad = true;
