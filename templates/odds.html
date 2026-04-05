@@ -929,8 +929,11 @@
         }
 
         const mv = { ml: {}, spread: {}, total: {}, src };
-        for (const [team, curPrice] of Object.entries(pin.moneyline || {})) {
-            const openPrice = opener.ml?.[team];
+        const pinML = pin.moneyline || {};
+        const openerML = opener.ml || {};
+        console.log('[MV DEBUG]', ev.away_team, 'vs', ev.home_team, '| pin keys:', Object.keys(pinML), '| opener.ml keys:', Object.keys(openerML), '| opener.src:', opener.src, '| srcBook has ML:', !!srcBook?.moneyline);
+        for (const [team, curPrice] of Object.entries(pinML)) {
+            const openPrice = openerML[team];
             if (openPrice != null && curPrice != null) {
                 mv.ml[team] = { open: openPrice, current: curPrice, diff: curPrice - openPrice };
             }
