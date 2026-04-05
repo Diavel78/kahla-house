@@ -135,6 +135,11 @@ def dashboard():
     return render_template("dashboard.html")
 
 
+@app.route("/budget")
+def budget():
+    return render_template("budget.html")
+
+
 # ---------------------------------------------------------------------------
 # Polymarket SDK client
 # ---------------------------------------------------------------------------

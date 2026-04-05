@@ -32,6 +32,12 @@ service cloud.firestore {
       allow write: if isApproved();
     }
 
-    // Future collections (christmas lists, budgets, etc.) go here
+    // Budget collection — approved users can read/write
+    match /budgets/{docId} {
+      allow read: if isApproved();
+      allow write: if isApproved();
+    }
+
+    // Future collections (christmas lists, etc.) go here
   }
 }

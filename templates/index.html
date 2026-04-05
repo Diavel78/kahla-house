@@ -121,6 +121,10 @@ body::after {
 .app-card.bet-system:hover { border-color: rgba(34,197,94,0.3); box-shadow: 0 8px 40px rgba(34,197,94,0.08), 0 0 0 1px rgba(34,197,94,0.15); }
 .app-card.bet-system .app-tag { background: var(--green-dim); color: var(--green); }
 .bet-system:hover .arrow { color: var(--green); }
+.app-card.budget-app::before { background: linear-gradient(90deg, var(--blue), var(--cyan)); }
+.app-card.budget-app:hover { border-color: rgba(74,124,255,0.3); box-shadow: 0 8px 40px rgba(74,124,255,0.08), 0 0 0 1px rgba(74,124,255,0.15); }
+.app-card.budget-app .app-tag { background: var(--blue-dim); color: var(--blue); }
+.budget-app:hover .arrow { color: var(--blue); }
 .app-icon { font-size: 2em; margin-bottom: 18px; display: block; }
 .app-card h2 { font-size: 1.1em; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.01em; }
 .app-card p { color: var(--text-muted); font-size: 0.84em; line-height: 1.55; margin-bottom: 18px; }
@@ -285,7 +289,7 @@ async function doSignup() {
             displayName: n,
             role: 'pending',
             approved: false,
-            appAccess: { betSystem: false },
+            appAccess: { betSystem: false, budget: false },
             createdAt: firebase.firestore.FieldValue.serverTimestamp()
         };
         await db.collection('users').doc(cr.user.uid).set(userData);
@@ -309,10 +313,10 @@ auth.onAuthStateChanged(async u => {
             displayName: u.displayName || u.email,
             role: 'pending',
             approved: false,
-            appAccess: { betSystem: false },
+            appAccess: { betSystem: false, budget: false },
             createdAt: firebase.firestore.FieldValue.serverTimestamp()
         });
-        CUD = { email: u.email, displayName: u.displayName || u.email, role: 'pending', approved: false, appAccess: { betSystem: false } };
+        CUD = { email: u.email, displayName: u.displayName || u.email, role: 'pending', approved: false, appAccess: { betSystem: false, budget: false } };
     } else {
         CUD = doc.data();
     }
@@ -321,14 +325,14 @@ auth.onAuthStateChanged(async u => {
         try {
             const snap = await db.collection('users').limit(2).get();
             if (snap.size === 1) {
-                await ref.update({ role: 'admin', approved: true, appAccess: { betSystem: true } });
-                CUD.role = 'admin'; CUD.approved = true; CUD.appAccess = { betSystem: true };
+                await ref.update({ role: 'admin', approved: true, appAccess: { betSystem: true, budget: true } });
+                CUD.role = 'admin'; CUD.approved = true; CUD.appAccess = { betSystem: true, budget: true };
             }
         } catch (e) { /* non-admin cannot query users collection */ }
     }
     // Ensure appAccess exists
     if (!CUD.appAccess) {
-        const aa = { betSystem: CUD.role === 'admin' };
+        const aa = { betSystem: CUD.role === 'admin', budget: CUD.role === 'admin' };
         await ref.update({ appAccess: aa }); CUD.appAccess = aa;
     }
     if (!CUD.approved || CUD.role === 'pending') { showS('pendingScreen'); }
@@ -362,10 +366,18 @@ function renderAppCards() {
             <span class="arrow">&rarr;</span>
         </div>`;
     }
-    /* Future apps go here:
-    if (aa.christmasList) { ... }
-    if (aa.budget) { ... }
-    */
+    if (aa.budget) {
+        h += `<div class="app-card budget-app" style="cursor:default">
+            <span class="app-icon">&#128176;</span>
+            <h2>Budget</h2>
+            <p>Track monthly bills, paychecks, savings, and one-off expenses. See what's left over each month at a glance.</p>
+            <span class="app-tag">Finance</span>
+            <div class="app-sub-links">
+                <a href="/budget" class="app-sub-link">Open Budget</a>
+            </div>
+            <span class="arrow">&rarr;</span>
+        </div>`;
+    }
     if (!h) {
         h = '<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text-muted)"><h3 style="color:var(--text-secondary);margin-bottom:8px">No Apps Assigned</h3><p>An administrator needs to grant you access.</p></div>';
     }
@@ -400,6 +412,7 @@ function loadAdminPanel() {
                 </select></td>
                 <td><div class="app-toggles">
                     <div class="app-toggle-item"><button class="toggle-btn ${aa.betSystem ? 'on' : 'off'}" onclick="toggleApp('${u.id}','betSystem',${!aa.betSystem})"></button>Bet System</div>
+                    <div class="app-toggle-item"><button class="toggle-btn ${aa.budget ? 'on' : 'off'}" onclick="toggleApp('${u.id}','budget',${!aa.budget})"></button>Budget</div>
                 </div></td>
                 <td>${!isMe && !u.approved
                     ? `<button class="btn btn-sm" style="background:var(--green);color:#fff;font-size:12px;margin-right:6px" onclick="approveUser('${u.id}')">Approve</button><button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:12px" onclick="rejectUser('${u.id}','${E(u.displayName)}')">Reject</button>`
@@ -426,7 +439,7 @@ async function approveUser(uid) {
     await db.collection('users').doc(uid).update({
         approved: true,
         role: 'user',
-        appAccess: { betSystem: true }
+        appAccess: { betSystem: true, budget: true }
     });
     toast('User approved', 'success');
 }
