@@ -20,7 +20,7 @@ from firebase_admin import auth as fb_auth, credentials, firestore
 from dotenv import load_dotenv
 from flask import (
     Flask, render_template, request, redirect, url_for,
-    jsonify, g,
+    jsonify, g, make_response,
 )
 
 load_dotenv()
@@ -127,7 +127,9 @@ def landing():
 
 @app.route("/odds")
 def odds_page():
-    return render_template("odds.html")
+    resp = make_response(render_template("odds.html"))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
 
 
 @app.route("/dashboard")
