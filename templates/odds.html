@@ -862,16 +862,39 @@
                 changed = true;
             }
         }
-        // Backfill: if an existing opener is missing ML, fill it from the current data
+        // Backfill: if an existing opener is missing any market, fill it from the current data
         for (const ev of events) {
             const eid = ev.numeric_id || ev.id;
-            if (!eid || !openers[eid] || Object.keys(openers[eid].ml || {}).length) continue;
-            const pin = (ev.books || {})[openers[eid].src === 'CIR' ? 'circa' : openers[eid].src === 'PIN' ? 'pinnacle' : openers[eid].src === 'WYN' ? 'wynn' : 'westgate'];
-            if (!pin?.moneyline) continue;
-            for (const [team, price] of Object.entries(pin.moneyline)) {
-                if (price != null) openers[eid].ml[team] = price;
+            if (!eid || !openers[eid]) continue;
+            const o = openers[eid];
+            const hasML = Object.keys(o.ml || {}).length;
+            const hasSpr = Object.keys(o.spread || {}).length;
+            const hasTot = Object.keys(o.total || {}).length;
+            if (hasML && hasSpr && hasTot) continue;
+            const srcKey = o.src === 'CIR' ? 'circa' : o.src === 'PIN' ? 'pinnacle' : o.src === 'WYN' ? 'wynn' : 'westgate';
+            const pin = (ev.books || {})[srcKey] || (ev.books || {}).pinnacle || (ev.books || {}).circa;
+            if (!pin) continue;
+            if (!hasML && pin.moneyline) {
+                if (!o.ml) o.ml = {};
+                for (const [team, price] of Object.entries(pin.moneyline)) {
+                    if (price != null) o.ml[team] = price;
+                }
+                if (Object.keys(o.ml).length) changed = true;
             }
-            if (Object.keys(openers[eid].ml).length) changed = true;
+            if (!hasSpr && pin.spread) {
+                if (!o.spread) o.spread = {};
+                for (const [team, data] of Object.entries(pin.spread)) {
+                    if (data?.price != null) o.spread[team] = { price: data.price, point: data.point };
+                }
+                if (Object.keys(o.spread).length) changed = true;
+            }
+            if (!hasTot && pin.total) {
+                if (!o.total) o.total = {};
+                for (const [side, data] of Object.entries(pin.total)) {
+                    if (data?.price != null) o.total[side] = { price: data.price, point: data.point };
+                }
+                if (Object.keys(o.total).length) changed = true;
+            }
         }
         if (changed) {
             currentOpeners = openers;
