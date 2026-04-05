@@ -28,7 +28,9 @@
             --bg: #0b0e13;
             --surface: #13171e;
             --surface-2: #1a1f2b;
+            --surface-3: #1f2533;
             --border: #1e2530;
+            --border-light: #2a3140;
             --text: #e2e8f0;
             --text-secondary: #8890a8;
             --text-muted: #555d78;
@@ -37,6 +39,11 @@
             --orange: #f59e0b;
             --red: #ef4444;
             --purple: #a855f7;
+            --blue-dim: rgba(74,124,255,0.08);
+            --green-dim: rgba(34,197,94,0.10);
+            --orange-dim: rgba(245,158,11,0.10);
+            --red-dim: rgba(239,68,68,0.10);
+            --purple-dim: rgba(168,85,247,0.10);
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -216,9 +223,9 @@
 
         /* --- Layout --- */
         .container {
-            max-width: 1200px;
+            max-width: 1400px;
             margin: 0 auto;
-            padding: 24px;
+            padding: 28px 24px;
             position: relative;
             z-index: 1;
         }
@@ -226,23 +233,31 @@
         /* --- Summary cards --- */
         .cards {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
             gap: 14px;
-            margin-bottom: 28px;
+            margin-bottom: 32px;
         }
         .card {
             background: var(--surface);
             border: 1px solid var(--border);
             border-radius: 12px;
-            padding: 20px;
+            padding: 24px;
             transition: transform 0.2s, border-color 0.2s;
             opacity: 0;
             animation: fadeUp 0.5s ease forwards;
+            border-left: 3px solid var(--blue);
+            position: relative;
         }
+        .card.card-pnl { border-left-color: var(--green); }
+        .card.card-pnl.neg { border-left-color: var(--red); }
+        .card.card-purple { border-left-color: var(--purple); }
         .card:hover {
             transform: translateY(-2px);
             border-color: rgba(74,124,255,0.25);
         }
+        .card:hover.card-pnl { border-left-color: var(--green); }
+        .card:hover.card-pnl.neg { border-left-color: var(--red); }
+        .card:hover.card-purple { border-left-color: var(--purple); }
         .card:nth-child(1) { animation-delay: 0.05s; }
         .card:nth-child(2) { animation-delay: 0.10s; }
         .card:nth-child(3) { animation-delay: 0.15s; }
@@ -255,17 +270,37 @@
             text-transform: uppercase;
             letter-spacing: 0.8px;
             color: var(--text-muted);
-            margin-bottom: 8px;
+            margin-bottom: 10px;
             font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .card .label .card-icon {
+            font-size: 14px;
+            line-height: 1;
         }
         .card .value {
-            font-size: 22px;
+            font-size: 26px;
             font-weight: 700;
             color: var(--text);
             font-family: 'JetBrains Mono', monospace;
         }
         .card .value.positive { color: var(--green); }
         .card .value.negative { color: var(--red); }
+        .winrate-bar {
+            margin-top: 10px;
+            height: 4px;
+            background: var(--surface-2);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        .winrate-bar-fill {
+            height: 100%;
+            background: var(--purple);
+            border-radius: 2px;
+            transition: width 0.6s ease;
+        }
 
         @keyframes fadeUp {
             from { opacity: 0; transform: translateY(12px); }
@@ -280,8 +315,8 @@
             border-bottom: 1px solid var(--border);
         }
         .tab {
-            padding: 10px 20px;
-            font-size: 14px;
+            padding: 12px 24px;
+            font-size: 15px;
             font-weight: 600;
             color: var(--text-secondary);
             cursor: pointer;
@@ -295,14 +330,18 @@
             border-bottom-color: var(--blue);
         }
         .tab-count {
-            font-size: 11px;
-            background: var(--surface-2);
+            font-size: 12px;
+            background: var(--surface-3);
             color: var(--text-secondary);
-            padding: 1px 7px;
+            padding: 2px 9px;
             border-radius: 10px;
-            margin-left: 6px;
+            margin-left: 8px;
             font-family: 'JetBrains Mono', monospace;
             font-weight: 600;
+        }
+        .tab.active .tab-count {
+            background: var(--blue-dim);
+            color: var(--blue);
         }
         .tab-panel { display: none; }
         .tab-panel.active { display: block; }
@@ -311,8 +350,8 @@
         .section {
             background: var(--surface);
             border: 1px solid var(--border);
-            border-radius: 12px;
-            margin-bottom: 24px;
+            border-radius: 16px;
+            margin-bottom: 32px;
             overflow: hidden;
         }
         .section-header {
@@ -328,27 +367,38 @@
         }
         th {
             text-align: left;
-            padding: 10px 16px;
-            font-size: 11px;
+            padding: 12px 20px;
+            font-size: 12px;
             text-transform: uppercase;
             letter-spacing: 0.8px;
             color: var(--text-muted);
             border-bottom: 1px solid var(--border);
-            background: rgba(0,0,0,0.15);
+            background: var(--surface-2);
             font-weight: 700;
         }
         th.right, td.right { text-align: right; }
         td {
-            padding: 12px 16px;
+            padding: 14px 20px;
             font-size: 14px;
             border-bottom: 1px solid rgba(30,37,48,0.5);
             color: var(--text);
         }
+        td.market-name {
+            font-size: 15px;
+            font-weight: 600;
+        }
         tr:last-child td { border-bottom: none; }
-        tr:hover td { background: var(--surface-2); }
+        tr:hover td { background: var(--blue-dim); }
+        tr:nth-child(even) td { background: rgba(255,255,255,0.01); }
+        tr:nth-child(even):hover td { background: var(--blue-dim); }
         td.mono {
             font-family: 'JetBrains Mono', monospace;
             font-size: 13px;
+        }
+        td.pnl-cell {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14px;
+            font-weight: 700;
         }
         .positive { color: var(--green); }
         .negative { color: var(--red); }
@@ -370,6 +420,35 @@
             font-weight: 700;
             font-family: 'JetBrains Mono', monospace;
         }
+
+        /* Result badges */
+        .badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+            letter-spacing: 0.3px;
+            line-height: 1.4;
+        }
+        .badge-win {
+            background: var(--green-dim);
+            color: var(--green);
+        }
+        .badge-loss {
+            background: var(--red-dim);
+            color: var(--red);
+        }
+        .badge-sold {
+            background: var(--blue-dim);
+            color: var(--blue);
+        }
+        .badge-push {
+            background: rgba(85,93,120,0.15);
+            color: var(--text-muted);
+        }
+
         .empty-state {
             padding: 48px;
             text-align: center;
@@ -520,13 +599,13 @@
             .nav-links { margin-left: 8px; }
             .nav-link { padding: 5px 10px; font-size: 12px; }
             .cards { grid-template-columns: repeat(2, 1fr); gap: 8px; }
-            .card { padding: 14px; border-radius: 10px; }
+            .card { padding: 16px; border-radius: 10px; }
             .card .label { font-size: 10px; }
-            .card .value { font-size: 17px; }
+            .card .value { font-size: 19px; }
             .section { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 10px; }
             table { min-width: 520px; }
-            td, th { padding: 8px 10px; font-size: 12px; white-space: nowrap; }
-            .tab { padding: 8px 14px; font-size: 13px; }
+            td, th { padding: 10px 14px; font-size: 12px; white-space: nowrap; }
+            .tab { padding: 10px 16px; font-size: 13px; }
             .top-bar-right { gap: 8px; }
             .status { font-size: 10px; }
         }
@@ -560,32 +639,33 @@
             <!-- Summary cards -->
             <div class="cards" id="cards">
                 <div class="card">
-                    <div class="label">Balance</div>
+                    <div class="label"><span class="card-icon">&#x1F4B0;</span> Balance</div>
                     <div class="value" id="card-balance">--</div>
                 </div>
                 <div class="card">
-                    <div class="label">Open Positions</div>
+                    <div class="label"><span class="card-icon">&#x1F4CA;</span> Open Positions</div>
                     <div class="value" id="card-positions">--</div>
                 </div>
                 <div class="card">
-                    <div class="label">Portfolio Value</div>
+                    <div class="label"><span class="card-icon">&#x1F4BC;</span> Portfolio Value</div>
                     <div class="value" id="card-value">--</div>
                 </div>
-                <div class="card">
-                    <div class="label">Today's P&amp;L</div>
+                <div class="card card-pnl" id="card-today-wrap">
+                    <div class="label"><span class="card-icon">&#x2600;&#xFE0F;</span> Today's P&amp;L</div>
                     <div class="value" id="card-today-pnl">--</div>
                 </div>
-                <div class="card">
-                    <div class="label">Yesterday's P&amp;L</div>
+                <div class="card card-pnl" id="card-yesterday-wrap">
+                    <div class="label"><span class="card-icon">&#x1F556;</span> Yesterday's P&amp;L</div>
                     <div class="value" id="card-yesterday-pnl">--</div>
                 </div>
-                <div class="card">
-                    <div class="label">Total P&amp;L</div>
+                <div class="card card-pnl" id="card-pnl-wrap">
+                    <div class="label"><span class="card-icon">&#x1F4C8;</span> Total P&amp;L</div>
                     <div class="value" id="card-pnl">--</div>
                 </div>
-                <div class="card">
-                    <div class="label">Win Rate</div>
+                <div class="card card-purple">
+                    <div class="label"><span class="card-icon">&#x1F3AF;</span> Win Rate</div>
                     <div class="value" id="card-winrate">--</div>
+                    <div class="winrate-bar"><div class="winrate-bar-fill" id="winrate-fill" style="width:0%"></div></div>
                 </div>
             </div>
 
@@ -596,9 +676,6 @@
                 </div>
                 <div class="tab" data-tab="closed" onclick="switchTab('closed')">
                     Closed Positions <span class="tab-count" id="closed-count">0</span>
-                </div>
-                <div class="tab" data-tab="activity" onclick="switchTab('activity')">
-                    All Activity <span class="tab-count" id="activity-count">0</span>
                 </div>
             </div>
 
@@ -615,15 +692,6 @@
             <div class="tab-panel" id="panel-closed">
                 <div class="section">
                     <div id="closed-body">
-                        <div class="empty-state"><span class="spinner"></span> Loading...</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- All Activity tab -->
-            <div class="tab-panel" id="panel-activity">
-                <div class="section">
-                    <div id="activity-body">
                         <div class="empty-state"><span class="spinner"></span> Loading...</div>
                     </div>
                 </div>
@@ -741,18 +809,27 @@
         const todayEl = $('card-today-pnl');
         todayEl.innerHTML = pnlAmt(s.today_pnl);
         todayEl.className = 'value ' + pnlClass(s.today_pnl);
+        // Dynamic P&L card border colors
+        const todayWrap = $('card-today-wrap');
+        todayWrap.classList.toggle('neg', s.today_pnl !== null && s.today_pnl < 0);
 
         const yesterdayEl = $('card-yesterday-pnl');
         yesterdayEl.innerHTML = pnlAmt(s.yesterday_pnl);
         yesterdayEl.className = 'value ' + pnlClass(s.yesterday_pnl);
+        const yesterdayWrap = $('card-yesterday-wrap');
+        yesterdayWrap.classList.toggle('neg', s.yesterday_pnl !== null && s.yesterday_pnl < 0);
 
         const pnlEl = $('card-pnl');
         pnlEl.innerHTML = pnlAmt(s.total_pnl);
         pnlEl.className = 'value ' + pnlClass(s.total_pnl);
+        const pnlWrap = $('card-pnl-wrap');
+        pnlWrap.classList.toggle('neg', s.total_pnl !== null && s.total_pnl < 0);
 
-        $('card-winrate').textContent = s.win_rate !== null
-            ? s.win_rate.toFixed(1) + '%'
+        const wr = s.win_rate;
+        $('card-winrate').textContent = wr !== null
+            ? wr.toFixed(1) + '%'
             : (s.resolved_total === 0 ? 'N/A' : '--');
+        $('winrate-fill').style.width = (wr !== null ? Math.min(wr, 100) : 0) + '%';
     }
 
     function renderPositions(positions) {
@@ -770,11 +847,11 @@
 
         for (const p of positions) {
             html += `<tr>
-                <td>${esc(p.market_name.replace(/\s+\d{4}-\d{2}-\d{2}$/, ''))}${p.outcome ? ' &mdash; ' + esc(p.outcome) : ''}</td>
+                <td class="market-name">${esc(p.market_name.replace(/\s+\d{4}-\d{2}-\d{2}$/, ''))}${p.outcome ? ' &mdash; ' + esc(p.outcome) : ''}</td>
                 <td class="right mono">${p.quantity.toFixed(0)}</td>
                 <td class="right mono">${p.entry_price !== null ? amt(p.entry_price, '$') : '--'}</td>
                 <td class="right mono">${p.current_price !== null ? amt(p.current_price, '$') : '--'}</td>
-                <td class="right mono ${pnlClass(p.pnl)}">${pnlAmt(p.pnl)}</td>
+                <td class="right pnl-cell ${pnlClass(p.pnl)}">${pnlAmt(p.pnl)}</td>
                 <td class="right mono ${pnlClass(p.pnl_pct)}">${p.pnl_pct !== null ? ((p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct.toFixed(1) + '%') : '--'}</td>
             </tr>`;
         }
@@ -797,55 +874,21 @@
         for (const c of closed) {
             let result = '';
             if (c.type === 'Trade') {
-                result = '<span style="color:var(--blue);font-weight:700">Sold</span>';
+                result = '<span class="badge badge-sold">Sold</span>';
             } else if (c.pnl !== null && c.pnl > 0) {
-                result = '<span style="color:var(--green);font-weight:700">W</span>';
+                result = '<span class="badge badge-win">W</span>';
             } else if (c.pnl !== null && c.pnl < 0) {
-                result = '<span style="color:var(--red);font-weight:700">L</span>';
+                result = '<span class="badge badge-loss">L</span>';
             } else {
-                result = '<span style="color:var(--text-muted)">Push</span>';
+                result = '<span class="badge badge-push">Push</span>';
             }
             html += `<tr>
                 <td class="mono">${localTime(c.timestamp)}</td>
-                <td>${esc(c.market)}</td>
+                <td class="market-name">${esc(c.market)}</td>
                 <td>${result}</td>
                 <td class="right mono">${c.quantity !== null ? c.quantity.toFixed(0) : '--'}</td>
                 <td class="right mono">${c.price !== null ? amt(c.price, '$') : '--'}</td>
-                <td class="right mono ${pnlClass(c.pnl)}">${pnlAmt(c.pnl)}</td>
-            </tr>`;
-        }
-        html += '</tbody></table>';
-        el.innerHTML = html;
-    }
-
-    function renderActivity(activities) {
-        const el = $('activity-body');
-        $('activity-count').textContent = activities.length;
-        if (!activities.length) {
-            el.innerHTML = '<div class="empty-state">No activity yet</div>';
-            return;
-        }
-        let html = '<table><thead><tr>' +
-            '<th>Date</th><th>Type</th><th>Market</th>' +
-            '<th class="right">Qty</th><th class="right">Price</th>' +
-            '<th class="right">P&L</th></tr></thead><tbody>';
-
-        for (const a of activities) {
-            const typeBadge = a.type === 'Trade'
-                ? (a.side === 'BUY'
-                    ? '<span style="color:var(--green);font-weight:700">Buy</span>'
-                    : '<span style="color:var(--red);font-weight:700">Sell</span>')
-                : a.type === 'Position Resolution'
-                    ? '<span style="color:var(--purple);font-weight:700">Settled</span>'
-                    : '<span style="color:var(--text-muted)">' + esc(a.type) + '</span>';
-
-            html += `<tr>
-                <td class="mono">${localTime(a.timestamp)}</td>
-                <td>${typeBadge}</td>
-                <td>${esc(a.market || '')}</td>
-                <td class="right mono">${a.quantity != null ? a.quantity.toFixed(0) : '--'}</td>
-                <td class="right mono">${a.price != null ? amt(a.price, '$') : '--'}</td>
-                <td class="right mono ${pnlClass(a.pnl)}">${a.pnl != null ? pnlAmt(a.pnl) : '--'}</td>
+                <td class="right pnl-cell ${pnlClass(c.pnl)}">${pnlAmt(c.pnl)}</td>
             </tr>`;
         }
         html += '</tbody></table>';
@@ -959,7 +1002,6 @@
             renderCards(data);
             renderPositions(data.positions);
             renderClosed(data.closed_positions || []);
-            renderActivity(data.activity || []);
 
             const ts = new Date(data.timestamp);
             if (data.errors && data.errors.length) {
