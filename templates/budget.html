@@ -483,6 +483,19 @@
         .cat-badge.oneoff { background: var(--orange-dim); color: var(--orange); }
 
         /* --- Recurring indicator --- */
+        .payday-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--green);
+            background: var(--green-dim);
+            padding: 3px 10px;
+            border-radius: 6px;
+        }
+
         .recurring-badge {
             display: inline-flex;
             align-items: center;
@@ -733,6 +746,16 @@
                 </select>
             </div>
         </div>
+        <div class="form-row" id="payDayRow" style="display:none">
+            <div class="form-group">
+                <label>Pay Day (day of month)</label>
+                <input type="number" id="fPayDay1" placeholder="e.g. 1" min="1" max="31">
+            </div>
+            <div class="form-group">
+                <label>2nd Pay Day (optional)</label>
+                <input type="number" id="fPayDay2" placeholder="e.g. 15" min="1" max="31">
+            </div>
+        </div>
         <div class="form-group">
             <label>Notes (optional)</label>
             <input type="text" id="fNotes" placeholder="Any extra details...">
@@ -917,9 +940,17 @@ function renderTable(items, type) {
             ? `<span class="recurring-badge">&#x21bb; ${item.recurring}</span>`
             : '';
 
+        // Pay day display for income
+        let payDayHtml = '';
+        if (item.category === 'income' && item.payDay1) {
+            const d1 = ordinal(item.payDay1);
+            const d2 = item.payDay2 ? ' & ' + ordinal(item.payDay2) : '';
+            payDayHtml = `<span class="payday-badge">&#128181; ${d1}${d2}</span>`;
+        }
+
         html += `<tr>
             <td style="font-weight:600">${E(item.name)}${item.notes ? `<br><span style="font-size:12px;color:var(--text-muted)">${E(item.notes)}</span>` : ''}</td>
-            <td class="mono">${dateStr}</td>
+            <td class="mono">${dateStr} ${payDayHtml}</td>
             <td><span class="cat-badge ${catMap[item.category]}">${catLabel[item.category]}</span> ${recur}</td>
             <td class="mono right" style="font-weight:600">${fmt(item.amount)}</td>
             <td class="right"><div class="row-actions">
@@ -931,6 +962,12 @@ function renderTable(items, type) {
 
     html += '</tbody></table>';
     return html;
+}
+
+function ordinal(n) {
+    const s = ['th','st','nd','rd'];
+    const v = n % 100;
+    return n + (s[(v - 20) % 10] || s[v] || s[0]);
 }
 
 function formatDate(dateStr) {
@@ -961,7 +998,11 @@ function openModal(type, item) {
     $('fDate').value = item ? (item.date || '') : defaultDate();
     $('fCategory').value = item ? item.category : type;
     $('fRecurring').value = item ? (item.recurring || 'no') : (type === 'extra' ? 'no' : 'monthly');
+    $('fPayDay1').value = item ? (item.payDay1 || '') : '';
+    $('fPayDay2').value = item ? (item.payDay2 || '') : '';
     $('fNotes').value = item ? (item.notes || '') : '';
+
+    togglePayDayRow(item ? item.category : type);
 
     const titles = { bill: 'Bill', income: 'Income', savings: 'Savings Transfer', extra: 'One-Off Item' };
     $('modalTitle').textContent = (item ? 'Edit ' : 'Add ') + (titles[type] || 'Item');
@@ -969,6 +1010,15 @@ function openModal(type, item) {
     $('modalOverlay').classList.add('active');
     setTimeout(() => $('fName').focus(), 100);
 }
+
+function togglePayDayRow(cat) {
+    $('payDayRow').style.display = cat === 'income' ? '' : 'none';
+}
+
+// Listen for category changes
+document.getElementById('fCategory').addEventListener('change', function() {
+    togglePayDayRow(this.value);
+});
 
 function closeModal() {
     $('modalOverlay').classList.remove('active');
@@ -1011,6 +1061,9 @@ async function saveItem() {
         });
     }
 
+    const payDay1 = parseInt($('fPayDay1').value) || 0;
+    const payDay2 = parseInt($('fPayDay2').value) || 0;
+
     const itemData = {
         id: editId || generateId(),
         name,
@@ -1019,6 +1072,8 @@ async function saveItem() {
         category,
         recurring,
         notes,
+        payDay1: category === 'income' ? payDay1 : 0,
+        payDay2: category === 'income' ? payDay2 : 0,
         updatedAt: new Date().toISOString(),
         updatedBy: currentUid
     };
