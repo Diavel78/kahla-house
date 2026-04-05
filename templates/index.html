@@ -330,10 +330,14 @@ auth.onAuthStateChanged(async u => {
             }
         } catch (e) { /* non-admin cannot query users collection */ }
     }
-    // Ensure appAccess exists
+    // Ensure appAccess exists and has all app keys
     if (!CUD.appAccess) {
         const aa = { betSystem: CUD.role === 'admin', budget: CUD.role === 'admin' };
         await ref.update({ appAccess: aa }); CUD.appAccess = aa;
+    } else if (CUD.appAccess.budget === undefined) {
+        const val = CUD.role === 'admin';
+        await ref.update({ 'appAccess.budget': val });
+        CUD.appAccess.budget = val;
     }
     if (!CUD.approved || CUD.role === 'pending') { showS('pendingScreen'); }
     else { showS('appScreen'); initDashboard(); }
