@@ -1439,6 +1439,7 @@
 
             // === FOOTER: Movement + Splits ===
             const mv = computeMovement(ev, currentOpeners) || {};
+            const opener = currentOpeners[ev.numeric_id || ev.id];
             const splits = ev.splits || {};
             const circa = splits.circa;
             const dk = splits.dk || splits.draftkings;
@@ -1447,6 +1448,16 @@
 
             if (hasMv || circa || dk || rlmSide) {
                 h += `<div class="game-footer">`;
+                // TEMP DEBUG — remove after fixing
+                if (opener) {
+                    const pin = (ev.books||{}).pinnacle || (ev.books||{}).circa;
+                    const pinMLKeys = Object.keys(pin?.moneyline || {});
+                    const opMLKeys = Object.keys(opener.ml || {});
+                    const mvMLKeys = Object.keys(mv.ml || {});
+                    h += `<div style="padding:8px 16px;font-size:10px;font-family:monospace;color:#f59e0b;background:rgba(245,158,11,0.1)">`;
+                    h += `DEBUG: opener.src=${opener.src} | opener.ml={${opMLKeys.join(',')}} | pin.ml={${pinMLKeys.join(',')}} | mv.ml={${mvMLKeys.join(',')}}`;
+                    h += `</div>`;
+                }
                 if (hasMv) {
                     h += `<div class="movement-bar">`;
                     h += `<span class="mv-src">${mv.src || 'CIR'}</span>`;
