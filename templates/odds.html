@@ -836,8 +836,8 @@
         for (const ev of events) {
             const eid = ev.numeric_id || ev.id;
             if (!eid || openers[eid]) continue;
-            const pin = (ev.books || {}).circa || (ev.books || {}).pinnacle || (ev.books || {}).wynn || (ev.books || {}).westgate;
-            const srcBook = (ev.books||{}).circa ? 'CIR' : (ev.books||{}).pinnacle ? 'PIN' : (ev.books||{}).wynn ? 'WYN' : 'WG';
+            const pin = (ev.books || {}).pinnacle || (ev.books || {}).circa || (ev.books || {}).wynn || (ev.books || {}).westgate;
+            const srcBook = (ev.books||{}).pinnacle ? 'PIN' : (ev.books||{}).circa ? 'CIR' : (ev.books||{}).wynn ? 'WYN' : 'WG';
             if (!pin) continue;
             const o = { ml: {}, spread: {}, total: {}, src: srcBook };
             for (const [team, price] of Object.entries(pin.moneyline || {})) {
@@ -876,9 +876,9 @@
         const eid = ev.numeric_id || ev.id;
         const opener = openers[eid];
         if (!opener) return null;
-        const pin = (ev.books || {}).circa || (ev.books || {}).pinnacle || (ev.books || {}).wynn || (ev.books || {}).westgate;
+        const pin = (ev.books || {}).pinnacle || (ev.books || {}).circa || (ev.books || {}).wynn || (ev.books || {}).westgate;
         if (!pin) return null;
-        const src = opener.src || ((ev.books||{}).circa ? 'CIR' : (ev.books||{}).pinnacle ? 'PIN' : 'WG');
+        const src = opener.src || ((ev.books||{}).pinnacle ? 'PIN' : (ev.books||{}).circa ? 'CIR' : 'WG');
 
         const mv = { ml: {}, spread: {}, total: {}, src };
         for (const [team, curPrice] of Object.entries(pin.moneyline || {})) {
@@ -955,8 +955,8 @@
                     for (const ev of data.events) {
                         const eid = ev.numeric_id || ev.id;
                         if (!eid) continue;
-                        const pin = (ev.books || {}).circa || (ev.books || {}).pinnacle || (ev.books || {}).wynn || (ev.books || {}).westgate;
-                        const srcBook = (ev.books||{}).circa ? 'CIR' : (ev.books||{}).pinnacle ? 'PIN' : (ev.books||{}).wynn ? 'WYN' : 'WG';
+                        const pin = (ev.books || {}).pinnacle || (ev.books || {}).circa || (ev.books || {}).wynn || (ev.books || {}).westgate;
+                        const srcBook = (ev.books||{}).pinnacle ? 'PIN' : (ev.books||{}).circa ? 'CIR' : (ev.books||{}).wynn ? 'WYN' : 'WG';
                         if (!pin) continue;
                         const o = { ml: {}, spread: {}, total: {}, src: srcBook };
                         for (const [team, price] of Object.entries(pin.moneyline || {})) {
