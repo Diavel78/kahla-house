@@ -1356,6 +1356,15 @@
                 if(firstLoad) $('board').innerHTML=`<div class="empty-state">${esc(data.error||'API error')}</div>`;
                 return;
             }
+            // Skip re-render if data hasn't changed
+            const dataHash = JSON.stringify(data.events?.map(e => e.id + JSON.stringify(e.books || {})));
+            if (!firstLoad && dataHash === window._lastOddsHash) {
+                const t=new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit'});
+                status.textContent=`${(data.events||[]).length} games \u00b7 ${t}`;
+                status.className='status';
+                return;
+            }
+            window._lastOddsHash = dataHash;
             oddsData=data;
             firstLoad=false;
             const avail = new Set(data.books||[]);
@@ -1498,7 +1507,7 @@
         currentOpeners = op;
         loadOdds().then(() => prefetchOpeners());
     });
-    setInterval(loadOdds, 5000);
+    setInterval(loadOdds, 15000);  // 15s refresh — less flashing, still fresh
     setInterval(loadMyBets, 60000);
 
     } // end initApp
