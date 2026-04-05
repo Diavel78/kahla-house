@@ -53,6 +53,7 @@
             background: var(--bg);
             color: var(--text);
             min-height: 100vh;
+            overflow-x: hidden;
             position: relative;
         }
 
@@ -679,10 +680,14 @@
         }
 
         @media (max-width: 768px) {
-            .top-bar { padding: 0 12px; height: 50px; }
+            .top-bar { padding: 0 12px; height: auto; min-height: 50px; flex-wrap: wrap; gap: 4px; padding-top: 8px; padding-bottom: 8px; }
             .top-bar-title { display: none; }
+            .top-bar-left { flex: 1; min-width: 0; }
+            .top-bar-right { flex-shrink: 0; }
             .nav-links { margin-left: 8px; }
             .nav-link { font-size: 12px; padding: 5px 10px; }
+            .status { font-size: 10px; }
+            .logout-btn { padding: 5px 10px; font-size: 11px; }
             .toolbar { padding: 10px 12px; }
             .search-box { width: 160px; }
             .board { padding: 0 12px 40px; }
@@ -692,6 +697,10 @@
             .odds-val-book { font-size: 12px; }
             .sport-bar { padding: 0 12px; }
             .stab { padding: 8px 12px; font-size: 12px; }
+            /* Movement bar: wrap so ML/SPR/TOT all show */
+            .mv-items { flex-wrap: wrap; }
+            .mv-item { flex: none; padding: 8px 12px; font-size: 12px; }
+            .mv-src { padding: 8px 12px; font-size: 11px; }
         }
     </style>
 </head>
