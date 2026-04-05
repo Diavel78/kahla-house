@@ -1137,7 +1137,7 @@ def api_odds_raw():
 
 
 @app.route("/api/odds/debug-markets")
-@admin_required
+@firebase_auth_required
 def api_odds_debug_markets():
     """Show all market keys per book for a sport — helps diagnose missing moneyline."""
     if not OWLS_INSIGHT_API_KEY:

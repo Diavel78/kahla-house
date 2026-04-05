@@ -1661,6 +1661,26 @@
     setInterval(loadOdds, 15000);  // 15s refresh — less flashing, still fresh
     setInterval(loadMyBets, 60000);
 
+    // Debug: check ML market keys — call from console or add ?debug=markets to URL
+    window.debugMarkets = async function() {
+        const resp = await authFetch(`/api/odds/debug-markets?sport=${activeSport}`);
+        const data = await resp.json();
+        const el = document.createElement('div');
+        el.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.95);z-index:9999;padding:20px;overflow:auto;font-family:monospace;font-size:12px;color:#e2e8f0';
+        let html = `<div style="max-width:600px;margin:0 auto"><h2 style="color:#f59e0b;margin-bottom:16px">Market Keys: ${activeSport.toUpperCase()}</h2>`;
+        for (const [book, info] of Object.entries(data.books || {})) {
+            const hasML = info.games_with_ml > 0;
+            html += `<div style="margin-bottom:12px;padding:10px;border:1px solid ${hasML ? '#22c55e' : '#ef4444'};border-radius:8px">`;
+            html += `<strong>${book}</strong>: ${info.games} games, <span style="color:${hasML ? '#22c55e' : '#ef4444'}">${info.games_with_ml} with ML</span><br>`;
+            html += `Keys: ${info.market_keys.join(', ')}`;
+            html += `</div>`;
+        }
+        html += `<button onclick="this.parentElement.parentElement.remove()" style="margin-top:16px;padding:10px 20px;background:#4a7cff;color:white;border:none;border-radius:8px;font-size:14px">Close</button></div>`;
+        el.innerHTML = html;
+        document.body.appendChild(el);
+    };
+    if (location.search.includes('debug=markets')) setTimeout(window.debugMarkets, 3000);
+
     } // end initApp
     </script>
 </body>
