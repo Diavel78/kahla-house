@@ -611,7 +611,7 @@ def _normalize_owls_odds(sport, raw_data):
                 for mkt in bk.get("markets", []):
                     mkt_key = mkt.get("key", "")
                     outcomes = mkt.get("outcomes", [])
-                    if mkt_key == "h2h":
+                    if mkt_key in ("h2h", "moneyline"):
                         for o in outcomes:
                             book_odds["moneyline"][o["name"]] = o.get("price")
                     elif mkt_key == "spreads":
@@ -1132,6 +1132,41 @@ def api_odds_raw():
     try:
         raw = _owls_get(f"/{sport}/odds", {"books": books})
         return jsonify(raw)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/odds/debug-markets")
+@admin_required
+def api_odds_debug_markets():
+    """Show all market keys per book for a sport — helps diagnose missing moneyline."""
+    if not OWLS_INSIGHT_API_KEY:
+        return jsonify({"error": "no key"}), 500
+    sport = request.args.get("sport", "mlb")
+    try:
+        raw = _owls_get(f"/{sport}/odds")
+        books_data = raw.get("data", {})
+        result = {}
+        for book_key, book_events in books_data.items():
+            if not isinstance(book_events, list):
+                continue
+            market_keys = set()
+            game_count = 0
+            ml_count = 0
+            for ev in book_events:
+                game_count += 1
+                for bk in ev.get("bookmakers", []):
+                    for mkt in bk.get("markets", []):
+                        mk = mkt.get("key", "")
+                        market_keys.add(mk)
+                        if mk in ("h2h", "moneyline"):
+                            ml_count += 1
+            result[book_key] = {
+                "games": game_count,
+                "market_keys": sorted(market_keys),
+                "games_with_ml": ml_count,
+            }
+        return jsonify({"ok": True, "sport": sport, "books": result})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
