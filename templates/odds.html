@@ -873,7 +873,7 @@
             if (hasML && hasSpr && hasTot) continue;
             const bks = ev.books || {};
             const chain = [bks[o.src === 'CIR' ? 'circa' : o.src === 'PIN' ? 'pinnacle' : o.src === 'WYN' ? 'wynn' : 'westgate'], bks.pinnacle, bks.circa, bks.wynn, bks.westgate].filter(Boolean);
-            function findWith(mkt) { return chain.find(b => Object.keys(b[mkt] || {}).length); }
+            const findWith = (mkt) => chain.find(b => Object.keys(b[mkt] || {}).length);
             if (!hasML) {
                 const b = findWith('moneyline');
                 if (b) { if (!o.ml) o.ml = {}; for (const [t, p] of Object.entries(b.moneyline)) { if (p != null) o.ml[t] = p; } if (Object.keys(o.ml).length) changed = true; }
@@ -906,7 +906,7 @@
         // Try the opener's source book first, fall back through the priority chain
         const bks = ev.books || {};
         const bookChain = [bks[opener.src === 'CIR' ? 'circa' : opener.src === 'PIN' ? 'pinnacle' : opener.src === 'WYN' ? 'wynn' : 'westgate'], bks.pinnacle, bks.circa, bks.wynn, bks.westgate].filter(Boolean);
-        function findBookWith(market) { return bookChain.find(b => Object.keys(b[market] || {}).length); }
+        const findBookWith = (market) => bookChain.find(b => Object.keys(b[market] || {}).length);
         if (!Object.keys(opener.ml || {}).length) {
             const b = findBookWith('moneyline');
             if (b) { if (!opener.ml) opener.ml = {}; for (const [t, p] of Object.entries(b.moneyline)) { if (p != null) opener.ml[t] = p; } }
@@ -921,11 +921,8 @@
         }
 
         const mv = { ml: {}, spread: {}, total: {}, src };
-        const pinML = pin.moneyline || {};
-        const openerML = opener.ml || {};
-        console.log('[MV DEBUG]', ev.away_team, 'vs', ev.home_team, '| pin keys:', Object.keys(pinML), '| opener.ml keys:', Object.keys(openerML), '| opener.src:', opener.src, '| srcBook has ML:', !!srcBook?.moneyline);
-        for (const [team, curPrice] of Object.entries(pinML)) {
-            const openPrice = openerML[team];
+        for (const [team, curPrice] of Object.entries(pin.moneyline || {})) {
+            const openPrice = opener.ml?.[team];
             if (openPrice != null && curPrice != null) {
                 mv.ml[team] = { open: openPrice, current: curPrice, diff: curPrice - openPrice };
             }
@@ -1431,7 +1428,6 @@
 
             // === FOOTER: Movement + Splits ===
             const mv = computeMovement(ev, currentOpeners) || {};
-            const opener = currentOpeners[ev.numeric_id || ev.id];
             const splits = ev.splits || {};
             const circa = splits.circa;
             const dk = splits.dk || splits.draftkings;
@@ -1440,16 +1436,6 @@
 
             if (hasMv || circa || dk || rlmSide) {
                 h += `<div class="game-footer">`;
-                // TEMP DEBUG — remove after fixing
-                if (opener) {
-                    const pin = (ev.books||{}).pinnacle || (ev.books||{}).circa;
-                    const pinMLKeys = Object.keys(pin?.moneyline || {});
-                    const opMLKeys = Object.keys(opener.ml || {});
-                    const mvMLKeys = Object.keys(mv.ml || {});
-                    h += `<div style="padding:8px 16px;font-size:10px;font-family:monospace;color:#f59e0b;background:rgba(245,158,11,0.1)">`;
-                    h += `DEBUG: opener.src=${opener.src} | opener.ml={${opMLKeys.join(',')}} | pin.ml={${pinMLKeys.join(',')}} | mv.ml={${mvMLKeys.join(',')}}`;
-                    h += `</div>`;
-                }
                 if (hasMv) {
                     h += `<div class="movement-bar">`;
                     h += `<span class="mv-src">${mv.src || 'CIR'}</span>`;
