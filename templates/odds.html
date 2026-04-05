@@ -1336,7 +1336,15 @@
 
             h+=`</div></div>`;
         }
-        board.innerHTML=h;
+        // Seamless update: swap content without visible flash
+        // Use a hidden container, build the DOM off-screen, then swap
+        const tmp = document.createElement('div');
+        tmp.innerHTML = h;
+        // Preserve scroll position
+        const scrollX = board.parentElement?.scrollLeft || 0;
+        const scrollY = window.scrollY;
+        board.replaceChildren(...tmp.childNodes);
+        window.scrollTo(0, scrollY);
     }
 
     let firstLoad = true;
