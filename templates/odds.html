@@ -911,6 +911,23 @@
         if (!pin) return null;
         const src = opener.src || ((ev.books||{}).pinnacle ? 'PIN' : (ev.books||{}).circa ? 'CIR' : 'WG');
 
+        // Just-in-time backfill: if opener is missing a market, grab it now
+        // so movement can display even if the Firestore save didn't persist
+        const srcKey = opener.src === 'CIR' ? 'circa' : opener.src === 'PIN' ? 'pinnacle' : opener.src === 'WYN' ? 'wynn' : 'westgate';
+        const srcBook = (ev.books || {})[srcKey] || pin;
+        if (!Object.keys(opener.ml || {}).length && srcBook?.moneyline) {
+            if (!opener.ml) opener.ml = {};
+            for (const [t, p] of Object.entries(srcBook.moneyline)) { if (p != null) opener.ml[t] = p; }
+        }
+        if (!Object.keys(opener.spread || {}).length && srcBook?.spread) {
+            if (!opener.spread) opener.spread = {};
+            for (const [t, d] of Object.entries(srcBook.spread)) { if (d?.price != null) opener.spread[t] = { price: d.price, point: d.point }; }
+        }
+        if (!Object.keys(opener.total || {}).length && srcBook?.total) {
+            if (!opener.total) opener.total = {};
+            for (const [t, d] of Object.entries(srcBook.total)) { if (d?.price != null) opener.total[t] = { price: d.price, point: d.point }; }
+        }
+
         const mv = { ml: {}, spread: {}, total: {}, src };
         for (const [team, curPrice] of Object.entries(pin.moneyline || {})) {
             const openPrice = opener.ml?.[team];
