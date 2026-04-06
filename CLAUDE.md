@@ -5,10 +5,11 @@
 ### Splits vs Movement (Historical Line Data) — THESE ARE DIFFERENT THINGS
 - **Splits**: Handle % and bets % data (Circa, DraftKings). Shows sharp money detection. Located in the game footer below the movement bar. SPLITS ARE FINE — do not touch unless explicitly asked.
 - **Movement / Historical Line Data**: The movement bar (e.g. `PIN | ML CHI -126 ▼ -131 (-5) | SPR LOS -1.5 +132 | TOT O 7.5 -102`). Records the FIRST line seen (opener), then tracks if it moved up/down with point and price diffs. Can trigger RLM (Reverse Line Movement) flags. This is stored via the openers API in Firestore. Code: `computeMovement()`, `detectRLM()`, `renderMovement()` in odds.html. Backend: `/api/openers` in app.py. Do NOT confuse this with splits. Ever.
-  - **Book priority**: Pinnacle first (sharpest book), then Circa, then Wynn, then Westgate.
+  - **Book priority**: Pinnacle first (sharpest book), then Circa. These are the ONLY two sharp books. Do NOT use any other books (Wynn, Westgate, DK, etc.) for openers, backfill, or RLM detection.
   - **Opener lock-in**: Once an opener is captured for a game ID, it's locked in PERMANENTLY — never overridden, never reset daily. Openers persist in Firestore by sport (not by date).
   - **ML openers**: Only from Pinnacle or Circa. Do NOT record ML from other books.
   - **Backfill**: If an opener was captured missing any market (ML, spread, or total), it gets backfilled from the source book on subsequent loads. ML backfill only from Pinnacle or Circa. This applies to ALL sports.
+  - **RLM detection**: Uses Circa splits ONLY. Never use DraftKings splits for RLM. No splits is better than DK splits — DK data is unreliable.
 
 ### Key terminology
 - **ML** = Moneyline (a bet type), not Machine Learning
