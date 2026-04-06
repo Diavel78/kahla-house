@@ -958,7 +958,7 @@
         // adjusting for them, not the public money.
         // Normal: money on Michigan -> Michigan gets more expensive (books adjust)
         // RLM: money on Michigan -> Michigan gets CHEAPER (reverse = sharps on other side)
-        const splitsML = splits?.circa?.moneyline || splits?.dk?.moneyline || splits?.draftkings?.moneyline;
+        const splitsML = splits?.circa?.moneyline;
         if (!mv?.ml || !splitsML) return null;
         const awayDiff = mv.ml[away]?.diff || 0;
         const homeDiff = mv.ml[home]?.diff || 0;
