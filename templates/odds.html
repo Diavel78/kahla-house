@@ -958,19 +958,19 @@
         // adjusting for them, not the public money.
         // Normal: money on Michigan -> Michigan gets more expensive (books adjust)
         // RLM: money on Michigan -> Michigan gets CHEAPER (reverse = sharps on other side)
-        if (!mv?.ml || !splits?.circa?.moneyline) return null;
+        const splitsML = splits?.circa?.moneyline || splits?.dk?.moneyline || splits?.draftkings?.moneyline;
+        if (!mv?.ml || !splitsML) return null;
         const awayDiff = mv.ml[away]?.diff || 0;
         const homeDiff = mv.ml[home]?.diff || 0;
-        const circa = splits.circa.moneyline;
-        const awayHandle = circa.away_handle_pct;
-        const homeHandle = circa.home_handle_pct;
+        const awayHandle = splitsML.away_handle_pct;
+        const homeHandle = splitsML.home_handle_pct;
         if (Math.abs(awayDiff) < 3 || awayHandle == null || homeHandle == null) return null;
 
         // Positive diff = price went up = cheaper/more appealing for bettor
         const awayGotCheaper = awayDiff > 0;
         const homeGotCheaper = homeDiff > 0;
-        const moneyOnAway = awayHandle > 60;
-        const moneyOnHome = homeHandle > 60;
+        const moneyOnAway = awayHandle > 50;
+        const moneyOnHome = homeHandle > 50;
 
         if (awayGotCheaper && moneyOnAway) return away;
         if (homeGotCheaper && moneyOnHome) return home;
