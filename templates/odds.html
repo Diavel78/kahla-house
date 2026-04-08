@@ -1333,9 +1333,13 @@
             const sc = ev.score;
             const isLive = sc && sc.live;
             const liveClass = isLive ? ' live' : '';
-            const myBet = findMyBet(ev);
-            const betStatus = myBet ? getBetStatus(myBet, ev) : '';
-            const betClass = myBet ? ' has-bet' + (betStatus ? ' bet-' + betStatus : '') : '';
+            const myBetsArr = findMyBets(ev);
+            const hasBets = myBetsArr.length > 0;
+            const worstStatus = hasBets ? myBetsArr.map(b => getBetStatus(b, ev)).reduce((a, b) => {
+                const rank = { dead: 3, losing: 2, winning: 1, '': 0 };
+                return (rank[b] || 0) > (rank[a] || 0) ? b : a;
+            }, '') : '';
+            const betClass = hasBets ? ' has-bet' + (worstStatus ? ' bet-' + worstStatus : '') : '';
 
             h+=`<div class="game${betClass}">`;
 
@@ -1348,14 +1352,14 @@
                 const gameState = sc.display_status || sc.period || sc.clock || '';
                 if (gameState) h+=`<span class="game-status">${esc(gameState)}</span>`;
                 h+=`<span class="stale-tag">pre-game odds</span>`;
-                if (myBet) h+=renderBetTag(myBet, ev);
+                for (const bet of myBetsArr) h+=renderBetTag(bet, ev);
                 h+=`</div>`;
                 h+=`<div class="ghdr-meta"><span class="ghdr-league">${esc(leagueStr)}</span></div>`;
             } else {
                 h+=`<div>`;
                 h+=`<span class="ghdr-league">${esc(leagueStr)}</span>`;
                 h+=`<span class="ghdr-teams">${esc(away)} <span class="at">@</span> ${esc(home)}</span>`;
-                if (myBet) h+=renderBetTag(myBet, ev);
+                for (const bet of myBetsArr) h+=renderBetTag(bet, ev);
                 h+=`</div>`;
                 h+=`<div class="ghdr-meta">${esc(date)} &middot; ${esc(time)}</div>`;
             }
@@ -1616,22 +1620,24 @@
         } catch(e) { console.warn('my-bets:', e); }
     }
 
-    function findMyBet(ev) {
+    function findMyBets(ev) {
         const away = (ev.away_team || '').toLowerCase();
         const home = (ev.home_team || '').toLowerCase();
+        const matches = [];
         for (const bet of myBets) {
             const tn = (bet.team_name || '').toLowerCase();
             const mn = (bet.market_name || '').toLowerCase();
             if (tn && (away.includes(tn) || home.includes(tn) || tn.includes(away.split(' ').pop()) || tn.includes(home.split(' ').pop()))) {
-                return bet;
+                matches.push(bet);
+                continue;
             }
             if (mn && (mn.includes(away.split(' ').pop()) || mn.includes(home.split(' ').pop()))) {
                 const awayLast = away.split(' ').pop();
                 const homeLast = home.split(' ').pop();
-                if (mn.includes(awayLast) && mn.includes(homeLast)) return bet;
+                if (mn.includes(awayLast) && mn.includes(homeLast)) matches.push(bet);
             }
         }
-        return null;
+        return matches;
     }
 
     window.setSport = function(s){
