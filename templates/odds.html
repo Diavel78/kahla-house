@@ -1296,7 +1296,7 @@
         return false;
     }
 
-    function renderBoard(){
+    window.renderBoard = function renderBoard(){
         const board=$('board');
         const query=($('search').value||'').toLowerCase().trim();
         let events=(oddsData.events||[]);
