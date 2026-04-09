@@ -86,5 +86,10 @@
 - **Auth**: Firebase Auth with client-side SDK. Backend validates tokens via `firebase_auth_required` decorator.
 
 ## External APIs
-- **OWLS Insight API**: Odds, splits, scores. Base URL configured via `OWLS_INSIGHT_API_KEY` env var.
+- **OWLS Insight API**: Odds, splits, scores. See `OWLS_API.md` for full endpoint reference.
+  - Base URL: `https://api.owlsinsight.com`
+  - Auth: `Authorization: Bearer {OWLS_INSIGHT_API_KEY}`
+  - Market keys: `h2h` or `moneyline` = ML, `spreads` = point spreads, `totals` = over/under
+  - Splits sources: Circa Sports, DraftKings
+  - Some books (Circa, South Point, Stations, Westgate) don't send `h2h` for MLB
 - **Polymarket**: Bet positions fetched via OWLS API integration.
