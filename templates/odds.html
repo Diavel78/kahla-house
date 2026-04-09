@@ -1187,19 +1187,27 @@
             const ptDiff = awayData.point_diff;
             const pxDiff = awayData.price_diff;
             const changed = ptDiff !== 0 || pxDiff !== 0;
-            const color = changed ? 'var(--orange)' : 'var(--text-secondary)';
             const pt = awayData.current_point;
             const ptStr = pt > 0 ? '+' + pt : '' + pt;
+            const openPt = awayData.open_point;
+            const openPtStr = openPt > 0 ? '+' + openPt : '' + openPt;
+            // Color based on direction: line moving in bettor's favor (more points) = green
+            const color = ptDiff > 0 ? 'var(--green)' : ptDiff < 0 ? 'var(--red)' : pxDiff !== 0 ? 'var(--orange)' : 'var(--text-secondary)';
+            const arrow = ptDiff > 0 ? '&#9650;' : ptDiff < 0 ? '&#9660;' : pxDiff !== 0 ? (pxDiff > 0 ? '&#9650;' : '&#9660;') : '';
             h += `<span class="mv-team">${esc(truncTeam(awayName))}</span>`;
-            h += `<span class="mv-current" style="color:${color}">${ptStr}</span>`;
-            h += `<span class="mv-current" style="color:${color}">${fmt(awayData.current_price)}</span>`;
+            h += `<span class="mv-open">${openPtStr} ${fmt(awayData.open_price)}</span>`;
+            h += `<span class="mv-arrow" style="color:${color}">${arrow}</span>`;
+            h += `<span class="mv-current" style="color:${color}">${ptStr} ${fmt(awayData.current_price)}</span>`;
             if (ptDiff !== 0) h += `<span class="mv-diff" style="color:${color}">(${ptDiff > 0 ? '+' : ''}${ptDiff})</span>`;
         } else if (mktKey === 'total') {
             const ptDiff = awayData.point_diff;
-            const changed = ptDiff !== 0 || awayData.price_diff !== 0;
-            const color = changed ? 'var(--orange)' : 'var(--text-secondary)';
-            h += `<span class="mv-current" style="color:${color}">O ${awayData.current_point}</span>`;
-            h += `<span class="mv-current" style="color:${color}">${fmt(awayData.current_price)}</span>`;
+            const pxDiff = awayData.price_diff;
+            const changed = ptDiff !== 0 || pxDiff !== 0;
+            const color = ptDiff > 0 ? 'var(--red)' : ptDiff < 0 ? 'var(--green)' : pxDiff !== 0 ? 'var(--orange)' : 'var(--text-secondary)';
+            const arrow = ptDiff > 0 ? '&#9650;' : ptDiff < 0 ? '&#9660;' : pxDiff !== 0 ? (pxDiff > 0 ? '&#9650;' : '&#9660;') : '';
+            h += `<span class="mv-open">O ${awayData.open_point} ${fmt(awayData.open_price)}</span>`;
+            h += `<span class="mv-arrow" style="color:${color}">${arrow}</span>`;
+            h += `<span class="mv-current" style="color:${color}">O ${awayData.current_point} ${fmt(awayData.current_price)}</span>`;
             if (ptDiff !== 0) h += `<span class="mv-diff" style="color:${color}">(${ptDiff > 0 ? '+' : ''}${ptDiff})</span>`;
         }
 
