@@ -924,6 +924,7 @@ def api_odds():
     sport = request.args.get("sport", "mlb")
     books = request.args.get("books", "")
 
+    import time
     errors = []
     events = []
     from_cache = False
@@ -943,11 +944,16 @@ def api_odds():
     splits_ts = None
     try:
         raw_splits, _ = _fetch_splits(sport)
-        # Use our own fetch timestamp since OWLS doesn't provide one
-        cache_key = f"splits:{sport}"
-        cached = _owls_cache.get(cache_key)
-        if cached:
-            splits_ts = datetime.fromtimestamp(cached["ts"], tz=timezone.utc).isoformat()
+        # Track when splits data actually changed (not just fetched)
+        splits_change_key = f"splits_changed:{sport}"
+        import json, hashlib
+        splits_hash = hashlib.md5(json.dumps(raw_splits.get("data", []), sort_keys=True).encode()).hexdigest()
+        prev = _owls_cache.get(splits_change_key)
+        if not prev or prev.get("hash") != splits_hash:
+            _owls_cache[splits_change_key] = {"hash": splits_hash, "ts": time.time()}
+        splits_changed = _owls_cache.get(splits_change_key)
+        if splits_changed:
+            splits_ts = datetime.fromtimestamp(splits_changed["ts"], tz=timezone.utc).isoformat()
         splits_map, splits_by_teams = _normalize_splits(raw_splits)
         events = _merge_splits(events, splits_map, splits_by_teams)
     except Exception as e:
