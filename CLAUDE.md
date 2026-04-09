@@ -10,6 +10,10 @@
   - **ML openers**: Only from Pinnacle or Circa. Do NOT record ML from other books.
   - **Backfill**: If an opener was captured missing any market (ML, spread, or total), it gets backfilled from the source book on subsequent loads. ML backfill only from Pinnacle or Circa. This applies to ALL sports.
   - **RLM detection**: Uses Circa splits ONLY. Never use DraftKings splits for RLM. No splits is better than DK splits — DK data is unreliable.
+  - **Movement display**: All three markets (ML, SPR, TOT) show opener → arrow → current with colored diffs. Green/red arrows for direction.
+  - **Multiple bets per game**: A game can have multiple Polymarket bets. All show as separate tags in the header.
+  - **API quirk**: Some books (Circa, South Point, Stations, Westgate) don't send ML (h2h) for MLB via OWLS API. Backfill handles this by falling through to Pinnacle. The market key can be `h2h` or `moneyline` — both are accepted.
+  - **Debug**: Add `?debug=markets` to the odds URL to see which books send which market keys.
 
 ### Key terminology
 - **ML** = Moneyline (a bet type), not Machine Learning
