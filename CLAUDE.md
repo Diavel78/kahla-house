@@ -35,3 +35,56 @@
 - Styling: Embedded CSS in HTML templates (no external CSS framework)
 - Templates: `templates/odds.html`, `templates/dashboard.html`, `templates/budget.html`, `templates/index.html`
 - Main backend: `app.py`
+
+## Architecture — Key Files
+
+### `app.py` — Backend
+- **Page routes**: `/`, `/odds`, `/dashboard`, `/budget` — serve HTML templates
+- **API routes**:
+  - `GET /api/odds?sport=mlb` — fetches odds + splits + scores, merges, returns to frontend
+  - `GET/POST /api/openers?sport=mlb` — load/save opening lines in Firestore (permanent per game ID, keyed by `openers:{sport}`)
+  - `GET /api/my-bets` — fetches Polymarket positions
+  - `GET /api/odds/debug-markets?sport=mlb` — shows market keys per book (requires auth)
+  - `GET /api/odds/raw`, `/api/splits/raw`, `/api/scores/raw` — raw API responses (admin only)
+- **Data flow**: OWLS Insight API → normalize → merge splits → merge scores → JSON response
+- **Caching**: In-memory cache with 10s TTL for odds/splits, 30s for scores
+- **Splits timestamp**: Tracks when splits data actually CHANGED (via hash comparison), not just when fetched
+
+### `templates/odds.html` — Frontend (all-in-one)
+- **CSS**: Lines 26–705, embedded `<style>` block. Mobile breakpoint at 768px, splits grid at 900px.
+- **Key JS functions**:
+  - `loadOdds()` — fetches from `/api/odds`, calls `captureOpeners()`, then `renderBoard()`
+  - `captureOpeners()` — captures first-seen lines from PIN/CIR, backfills missing markets
+  - `computeMovement()` — compares opener to current, includes JIT backfill safety net
+  - `renderMovement()` — renders opener → arrow → current for ML/SPR/TOT
+  - `detectRLM()` — detects reverse line movement using Circa splits only
+  - `renderBoard()` — main render, double-buffered to prevent flash. Exposed to `window` for search.
+  - `findMyBets()` — returns ALL matching Polymarket bets for a game (supports multiple)
+  - `renderBetTag()` — renders individual bet tag with status coloring
+  - `renderSplitsRow()` — renders handle%/bets% with sharp detection
+- **Double-buffer rendering**: Two board divs swap IDs to prevent flash. `no-animate` class disables fadeUp animation after first load.
+- **Refresh**: 15s interval for odds, 60s for bets. Only re-renders if game list changed.
+- **Prefetch**: On first load, prefetches all sports to capture openers early.
+
+### `templates/dashboard.html` — Polymarket P&L Dashboard
+- Tracks trading positions, closed P&L, balances
+- Separate from odds board
+
+### `templates/budget.html` — Budget Tracker
+- Personal finance tracking tool
+
+## Mobile Layout
+- `overflow-x: hidden` on html, body, and `#app` wrapper (iOS Safari fix)
+- Top bar wraps on mobile, status/logout shrink
+- Movement bar items wrap with `flex-wrap` so ML/SPR/TOT all show
+- Odds table scrolls horizontally inside `overflow-x: auto` container
+- Splits grid goes single-column below 900px
+- Game card fadeUp animation only on first load (no flash on re-renders)
+
+## Firestore Structure
+- **Collection `openers`**: One document per sport (e.g. `openers:mlb`), contains `events` map of game IDs to opener data. Permanent — never reset daily.
+- **Auth**: Firebase Auth with client-side SDK. Backend validates tokens via `firebase_auth_required` decorator.
+
+## External APIs
+- **OWLS Insight API**: Odds, splits, scores. Base URL configured via `OWLS_INSIGHT_API_KEY` env var.
+- **Polymarket**: Bet positions fetched via OWLS API integration.
