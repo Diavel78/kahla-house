@@ -622,6 +622,10 @@
             color: var(--orange); letter-spacing: 0.5px; margin-bottom: 10px;
             display: flex; align-items: center; gap: 8px;
         }
+        .splits-ts {
+            font-size: 9px; font-weight: 600; color: var(--text-muted);
+            text-transform: none; letter-spacing: 0;
+        }
         .splits-header::after {
             content: ''; flex: 1; height: 1px;
             background: rgba(245,158,11,0.15);
@@ -1463,8 +1467,10 @@
                 }
 
                 if (circa || dk) {
+                    const splitsTs = oddsData.splits_timestamp;
+                    const splitsTsStr = splitsTs ? new Date(splitsTs).toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit'}) : '';
                     h += `<div class="splits-bar">`;
-                    h += `<div class="splits-header">Splits</div>`;
+                    h += `<div class="splits-header">Splits${splitsTsStr ? `<span class="splits-ts">${esc(splitsTsStr)}</span>` : ''}</div>`;
                     h += `<div class="splits-grid">`;
                     h += renderSplitsRow(circa, dk, 'ML', 'moneyline', away, home);
                     h += renderSplitsRow(circa, dk, 'SPR', 'spread', away, home);

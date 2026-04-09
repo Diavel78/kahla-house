@@ -940,8 +940,10 @@ def api_odds():
     except Exception as e:
         errors.append(f"{sport}: {e}")
 
+    splits_ts = None
     try:
         raw_splits, _ = _fetch_splits(sport)
+        splits_ts = raw_splits.get("meta", {}).get("timestamp") or raw_splits.get("timestamp") or raw_splits.get("updated_at")
         splits_map, splits_by_teams = _normalize_splits(raw_splits)
         events = _merge_splits(events, splits_map, splits_by_teams)
     except Exception as e:
@@ -968,6 +970,7 @@ def api_odds():
         "books": sorted(active_books, key=lambda b: (0 if b == "circa" else 1 if b == "pinnacle" else 2, b)),
         "leagues": sorted(leagues),
         "meta_message": meta_message,
+        "splits_timestamp": splits_ts,
         "errors": errors,
     })
 
