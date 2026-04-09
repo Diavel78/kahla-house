@@ -943,7 +943,11 @@ def api_odds():
     splits_ts = None
     try:
         raw_splits, _ = _fetch_splits(sport)
-        splits_ts = raw_splits.get("meta", {}).get("timestamp") or raw_splits.get("timestamp") or raw_splits.get("updated_at")
+        # Use our own fetch timestamp since OWLS doesn't provide one
+        cache_key = f"splits:{sport}"
+        cached = _owls_cache.get(cache_key)
+        if cached:
+            splits_ts = datetime.fromtimestamp(cached["ts"], tz=timezone.utc).isoformat()
         splits_map, splits_by_teams = _normalize_splits(raw_splits)
         events = _merge_splits(events, splits_map, splits_by_teams)
     except Exception as e:
