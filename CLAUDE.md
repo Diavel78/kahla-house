@@ -1,95 +1,228 @@
-# Project: The Kahla House
+# The Kahla House — Bet System
 
-## Domain Knowledge — Odds Board
+Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask backend on Vercel, Firebase Auth + Firestore, vanilla JS frontend. This is the ONLY active codebase for the bet system. The "Poly-Tracker" repo is deprecated and not used.
 
-### Splits vs Movement (Historical Line Data) — THESE ARE DIFFERENT THINGS
+**CRITICAL: This project lives at `/Users/robkahla/Documents/Kahla House/kahla-house/`. The domain is thekahlahouse.com. The Vercel project is `kahla-house`. Always push to `main` — Vercel deploys automatically.**
+
+## Pages & Routes
+
+| Route | Template | Purpose |
+|---|---|---|
+| `/` | `index.html` | Landing page (login/signup, admin panel, app cards) |
+| `/odds` | `odds.html` | Odds Board — multi-book odds comparison, splits, movement, RLM, live scores |
+| `/props` | `props.html` | Player Props — game-grouped best-line comparison across books |
+| `/dashboard` | `dashboard.html` | Polymarket P&L Dashboard — positions, closed trades, bet slip |
+| `/budget` | `budget.html` | Budget Tracker (personal finance) |
+
+### API Routes
+
+| Route | Auth | Purpose |
+|---|---|---|
+| `GET /api/odds?sport=mlb` | Firebase | Odds + splits + scores merged JSON |
+| `GET /api/props?sport=mlb` | Firebase | Player props grouped by game/player |
+| `GET/POST /api/openers?sport=mlb` | Firebase | Opening lines (Firestore, permanent per game ID) |
+| `GET /api/my-bets` | Firebase | Active Polymarket positions for odds board matching |
+| `GET/POST /api/preferences` | Firebase | User settings (books, sport, order) in Firestore |
+| `GET /api/data` | Firebase | Dashboard P&L data (positions, balances, trades) |
+| `GET /api/odds/raw` | Admin | Debug: raw Owls Insight odds response |
+| `GET /api/splits/raw` | Admin | Debug: raw splits response |
+| `GET /api/props/raw` | Admin | Debug: raw props response |
+| `GET /api/scores/raw` | Admin | Debug: raw live scores response |
+| `GET /api/realtime/raw` | Admin | Debug: raw Pinnacle sharp odds |
+| `GET /api/raw` | Admin | Debug: raw Polymarket SDK responses |
+| `GET /api/debug-trades` | Admin | Debug: grouped trade details |
+
+## Tech Stack
+
+- **Backend**: Flask (Python), single file `app.py`, Vercel serverless
+- **Frontend**: Vanilla JS, embedded CSS in each HTML template (no framework)
+- **Auth**: Firebase Auth (client SDK) + `firebase_auth_required` decorator (server validates tokens)
+- **Database**: Firestore (user prefs, openers, user management)
+- **APIs**: Owls Insight (odds, splits, scores, props), Polymarket US SDK (positions, P&L)
+- **Fonts**: DM Sans + JetBrains Mono
+- **Deployment**: Vercel via `vercel.json`, env vars in Vercel dashboard, auto-deploys from `main`
+
+## Key Files
+
+- `app.py` — All backend logic (~1500 lines)
+- `templates/odds.html` — Odds board (~1640 lines)
+- `templates/props.html` — Player props board (~550 lines)
+- `templates/dashboard.html` — P&L dashboard (~1030 lines)
+- `templates/index.html` — Landing page with auth + admin (~450 lines)
+- `templates/budget.html` — Budget tracker
+- `vercel.json` — Vercel deployment config
+- `requirements.txt` — Python deps (flask, polymarket-us, requests, python-dotenv, firebase-admin)
+- `.env` — Local env vars (DO NOT COMMIT — contains API keys)
+
+## Environment Variables (in Vercel)
+
+| Variable | Purpose |
+|---|---|
+| `OWLS_INSIGHT_API_KEY` | Owls Insight API key (MVP+ plan) |
+| `POLYMARKET_KEY_ID` | Polymarket US API key ID |
+| `POLYMARKET_SECRET_KEY` | Polymarket US API secret |
+| `FIREBASE_SERVICE_ACCOUNT` | Firebase Admin SDK service account JSON |
+| `FLASK_SECRET_KEY` | Flask session secret |
+
+---
+
+## Odds Board (`/odds`)
+
+### Features
+- **Best Odds Column** (left, always visible): Best ML, Spread, Total across all enabled books
+- **Multi-Book Columns** (scrollable right): Individual book odds side by side
+- **Sport Tabs**: MLB, NBA, NHL, NFL, NCAAB, MMA, Soccer, Tennis
+- **Search**: Filter by team name (client-side, instant)
+- **Book Selector**: Dropdown with checkboxes + up/down arrows to reorder. Saved to Firestore
+- **Live Scores**: Green LIVE badge with score between team names
+- **Circa Splits**: Handle % vs Ticket % per market. SHARP tags when divergence >= 15%
+- **Line Movement**: Opener vs current with arrows and diffs
+- **Reverse Line Movement (RLM)**: Pulsing red flag when line moves against sharp money
+- **Polymarket Bet Indicators**: Multiple bets per game supported, with live status coloring
+- **Auto-refresh**: 15 seconds (odds), 60 seconds (bets)
+- **Opener Prefetch**: First visit prefetches ALL sports to capture opening lines
+- **Double-buffer rendering**: Two board divs swap to prevent flash on re-render
+
+### Key JS Functions (odds.html)
+- `loadOdds()` — fetches `/api/odds`, calls `captureOpeners()`, then `renderBoard()`
+- `captureOpeners()` — captures first-seen lines from PIN/CIR, backfills missing markets
+- `computeMovement()` — compares opener to current, includes JIT backfill
+- `renderMovement()` — renders opener → arrow → current for ML/SPR/TOT
+- `detectRLM()` — reverse line movement using Circa splits ONLY
+- `renderBoard()` — main render, double-buffered. Exposed to `window` for search
+- `findMyBets()` — returns ALL matching Polymarket bets for a game (multiple per game)
+- `renderBetTag()` — renders individual bet tag with status coloring
+- `renderSplitsRow()` — renders handle%/bets% with sharp detection
+
+---
+
+## Player Props (`/props`)
+
+### Features
+- **Game-grouped layout**: Props organized by matchup, each game collapsible
+- **Best Line Comparison**: Best over/under price across all enabled books with book attribution
+- **Expandable Detail**: Click any prop row to see all books' lines with deep links
+- **Sport Tabs**: Same as Odds Board
+- **Search**: Filter by player name or team name (client-side)
+- **Book Selector**: Shared with Odds Board (same Firestore preferences)
+- **Auto-refresh**: 120 seconds (prop lines move slowly — saves API budget)
+
+### Caching
+- Props: 120 second TTL server-side (vs 10s for odds)
+- Uses same `_owls_cache` dict
+
+### Props Normalization (`app.py`)
+- `_fetch_props(sport)` — fetches `/{sport}/props` from Owls Insight
+- `_normalize_props()` — handles two API response formats (keyed-by-book or flat list)
+- Groups by event → player → prop market
+- `_prop_market_label()` — maps API keys to human labels (Strikeouts, Points, Rebounds, etc.)
+
+---
+
+## Dashboard (`/dashboard`)
+
+### Features
+- **Stats cards**: Balance, Open Positions, Portfolio Value, Today's P&L, Yesterday's P&L, Total P&L, Win Rate
+- **Open Positions table**: Market, Pick, Qty, Entry, Current, P&L, Return %
+- **Closed Positions tab**: Resolved bets + sold trades with Result (W/L/Sold) and P&L
+- **Bet Slip modal**: Shareable sportsbook-ticket format
+- **Auto-refresh**: 60 seconds
+
+### P&L Computation — CRITICAL NOTES
+- **Do NOT trust SDK's `realizedPnl`** — it uses complement pricing. Only use non-null as a sell indicator
+- Self-tracking average cost: accumulate buy costs per slug, compute `(sell_price - avg_buy_cost) * qty`
+- Both "Position Resolution" AND closed trades count toward realized P&L, win rate, daily P&L
+- Activity cutoff: filters out activity before `2026-03-01`
+
+---
+
+## Domain Knowledge — Splits vs Movement
+
+### THESE ARE DIFFERENT THINGS
 - **Splits**: Handle % and bets % data (Circa, DraftKings). Shows sharp money detection. Located in the game footer below the movement bar. SPLITS ARE FINE — do not touch unless explicitly asked.
-- **Movement / Historical Line Data**: The movement bar (e.g. `PIN | ML CHI -126 ▼ -131 (-5) | SPR LOS -1.5 +132 | TOT O 7.5 -102`). Records the FIRST line seen (opener), then tracks if it moved up/down with point and price diffs. Can trigger RLM (Reverse Line Movement) flags. This is stored via the openers API in Firestore. Code: `computeMovement()`, `detectRLM()`, `renderMovement()` in odds.html. Backend: `/api/openers` in app.py. Do NOT confuse this with splits. Ever.
-  - **Book priority**: Pinnacle first (sharpest book), then Circa. These are the ONLY two sharp books. Do NOT use any other books (Wynn, Westgate, DK, etc.) for openers, backfill, or RLM detection.
-  - **Opener lock-in**: Once an opener is captured for a game ID, it's locked in PERMANENTLY — never overridden, never reset daily. Openers persist in Firestore by sport (not by date).
-  - **ML openers**: Only from Pinnacle or Circa. Do NOT record ML from other books.
-  - **Backfill**: If an opener was captured missing any market (ML, spread, or total), it gets backfilled from the source book on subsequent loads. ML backfill only from Pinnacle or Circa. This applies to ALL sports.
-  - **RLM detection**: Uses Circa splits ONLY. Never use DraftKings splits for RLM. No splits is better than DK splits — DK data is unreliable.
-  - **Movement display**: All three markets (ML, SPR, TOT) show opener → arrow → current with colored diffs. Green/red arrows for direction.
-  - **Multiple bets per game**: A game can have multiple Polymarket bets. All show as separate tags in the header.
-  - **API quirk**: Some books (Circa, South Point, Stations, Westgate) don't send ML (h2h) for MLB via OWLS API. Backfill handles this by falling through to Pinnacle. The market key can be `h2h` or `moneyline` — both are accepted.
-  - **Debug**: Add `?debug=markets` to the odds URL to see which books send which market keys.
+- **Movement / Historical Line Data**: The movement bar. Records the FIRST line seen (opener), then tracks if it moved up/down. Stored via `/api/openers` in Firestore. Do NOT confuse with splits. Ever.
 
-### Key terminology
-- **ML** = Moneyline (a bet type), not Machine Learning
+### Movement Rules
+- **Book priority**: Pinnacle first, then Circa. ONLY two sharp books. Do NOT use Wynn, Westgate, DK, etc. for openers, backfill, or RLM
+- **Opener lock-in**: Once captured for a game ID, PERMANENTLY locked. Never overridden, never reset daily
+- **ML openers**: Only from Pinnacle or Circa
+- **Backfill**: Missing markets get backfilled from source book on subsequent loads
+- **RLM detection**: Circa splits ONLY. Never DraftKings. No splits > DK splits
+- **Multiple bets per game**: A game can have multiple Polymarket bets. All show as separate tags
+- **API quirk**: Some books don't send ML (h2h) for MLB. Market key can be `h2h` or `moneyline`
+- **Debug**: Add `?debug=markets` to odds URL to see market keys per book
+
+### Key Terminology
+- **ML** = Moneyline (NOT Machine Learning)
 - **SPR** = Spread
 - **TOT** = Total (Over/Under)
 - **RLM** = Reverse Line Movement
-- **CIR** = Circa (sportsbook)
-- **PIN** = Pinnacle
-- **DK** = DraftKings
-- **FD** = FanDuel
+- **CIR** = Circa, **PIN** = Pinnacle, **DK** = DraftKings, **FD** = FanDuel
 
-## Deployment
-- Always push to production (main) for Kahla House. Merge feature branches into main and push.
-- Vercel deploys automatically from `main`.
+---
 
-## Tech Stack
-- Backend: Flask (Python) on Vercel
-- Frontend: Vanilla JS, Firebase Auth, Firestore
-- Styling: Embedded CSS in HTML templates (no external CSS framework)
-- Templates: `templates/odds.html`, `templates/dashboard.html`, `templates/budget.html`, `templates/index.html`
-- Main backend: `app.py`
+## Owls Insight API
 
-## Architecture — Key Files
+**Base URL**: `https://api.owlsinsight.com/api/v1`
+**Auth**: `Authorization: Bearer {OWLS_INSIGHT_API_KEY}`
+**Plan**: MVP+ — 300K req/month, 400/min, real-time sharp odds, full props
 
-### `app.py` — Backend
-- **Page routes**: `/`, `/odds`, `/dashboard`, `/budget` — serve HTML templates
-- **API routes**:
-  - `GET /api/odds?sport=mlb` — fetches odds + splits + scores, merges, returns to frontend
-  - `GET/POST /api/openers?sport=mlb` — load/save opening lines in Firestore (permanent per game ID, keyed by `openers:{sport}`)
-  - `GET /api/my-bets` — fetches Polymarket positions
-  - `GET /api/odds/debug-markets?sport=mlb` — shows market keys per book (requires auth)
-  - `GET /api/odds/raw`, `/api/splits/raw`, `/api/scores/raw` — raw API responses (admin only)
-- **Data flow**: OWLS Insight API → normalize → merge splits → merge scores → JSON response
-- **Caching**: In-memory cache with 10s TTL for odds/splits, 30s for scores
-- **Splits timestamp**: Tracks when splits data actually CHANGED (via hash comparison), not just when fetched
+### Endpoints Used
 
-### `templates/odds.html` — Frontend (all-in-one)
-- **CSS**: Lines 26–705, embedded `<style>` block. Mobile breakpoint at 768px, splits grid at 900px.
-- **Key JS functions**:
-  - `loadOdds()` — fetches from `/api/odds`, calls `captureOpeners()`, then `renderBoard()`
-  - `captureOpeners()` — captures first-seen lines from PIN/CIR, backfills missing markets
-  - `computeMovement()` — compares opener to current, includes JIT backfill safety net
-  - `renderMovement()` — renders opener → arrow → current for ML/SPR/TOT
-  - `detectRLM()` — detects reverse line movement using Circa splits only
-  - `renderBoard()` — main render, double-buffered to prevent flash. Exposed to `window` for search.
-  - `findMyBets()` — returns ALL matching Polymarket bets for a game (supports multiple)
-  - `renderBetTag()` — renders individual bet tag with status coloring
-  - `renderSplitsRow()` — renders handle%/bets% with sharp detection
-- **Double-buffer rendering**: Two board divs swap IDs to prevent flash. `no-animate` class disables fadeUp animation after first load.
-- **Refresh**: 15s interval for odds, 60s for bets. Only re-renders if game list changed.
-- **Prefetch**: On first load, prefetches all sports to capture openers early.
+| Endpoint | Purpose |
+|---|---|
+| `GET /{sport}/odds` | All odds (spreads, moneylines, totals) from all books |
+| `GET /{sport}/props` | Player props from all books |
+| `GET /{sport}/splits` | Circa + DK betting splits |
+| `GET /{sport}/scores/live` | Live scores |
+| `GET /{sport}/realtime` | Real-time Pinnacle sharp odds |
 
-### `templates/dashboard.html` — Polymarket P&L Dashboard
-- Tracks trading positions, closed P&L, balances
-- Separate from odds board
+### Sports Keys
+`mlb`, `nba`, `nhl`, `nfl`, `ncaab`, `ncaaf`, `mma`, `soccer`, `tennis`
 
-### `templates/budget.html` — Budget Tracker
-- Personal finance tracking tool
+### Sportsbook Keys
+`pinnacle`, `fanduel`, `draftkings`, `betmgm`, `caesars`, `bet365`, `circa`, `south_point`, `westgate`, `wynn`, `stations`, `hardrock`, `betonline`, `1xbet`, `polymarket`, `kalshi`, `novig`
 
-## Mobile Layout
-- `overflow-x: hidden` on html, body, and `#app` wrapper (iOS Safari fix)
-- Top bar wraps on mobile, status/logout shrink
-- Movement bar items wrap with `flex-wrap` so ML/SPR/TOT all show
-- Odds table scrolls horizontally inside `overflow-x: auto` container
-- Splits grid goes single-column below 900px
-- Game card fadeUp animation only on first load (no flash on re-renders)
+### Caching (server-side, in-memory)
+- Odds: 10s TTL
+- Splits: 10s TTL
+- Props: 120s TTL (2 minutes)
+- Scores: 30s TTL
+- My-bets: 60s TTL
+- **Vercel cold starts reset all caches**
+
+---
 
 ## Firestore Structure
-- **Collection `openers`**: One document per sport (e.g. `openers:mlb`), contains `events` map of game IDs to opener data. Permanent — never reset daily.
-- **Auth**: Firebase Auth with client-side SDK. Backend validates tokens via `firebase_auth_required` decorator.
 
-## External APIs
-- **OWLS Insight API**: Odds, splits, scores. See `OWLS_API.md` for full endpoint reference.
-  - Base URL: `https://api.owlsinsight.com`
-  - Auth: `Authorization: Bearer {OWLS_INSIGHT_API_KEY}`
-  - Market keys: `h2h` or `moneyline` = ML, `spreads` = point spreads, `totals` = over/under
-  - Splits sources: Circa Sports, DraftKings
-  - Some books (Circa, South Point, Stations, Westgate) don't send `h2h` for MLB
-- **Polymarket**: Bet positions fetched via OWLS API integration.
+- **`users/{uid}`** — User profile (email, role, appAccess, preferences)
+- **`openers/{sport}`** — Opening lines per sport. `events` map of game IDs to opener data. Permanent — never reset daily
+- **Preferences fields**: `odds_books`, `odds_book_order`, `odds_sport`, `props_sport`
+
+## Firebase Auth
+- Client-side SDK in every template (compat mode)
+- `onAuthStateChanged` → show auth gate, then init app
+- `authFetch()` — wrapper that adds Bearer token to every API call
+- Backend: `@firebase_auth_required` decorator validates tokens, sets `g.uid`
+- `@admin_required` — checks user role is "admin"
+- First signup auto-promotes to admin
+
+## Mobile Layout
+- `overflow-x: hidden` on html, body, `#app` (iOS Safari fix)
+- Top bar wraps, movement bar items wrap with `flex-wrap`
+- Odds table scrolls horizontally
+- Splits grid single-column below 900px
+- Game card fadeUp animation only on first load
+
+## Deployment
+- **Always push to `main`**. Vercel auto-deploys to thekahlahouse.com
+- GitHub repo: `Diavel78/kahla-house`
+- Vercel project: `kahla-house` (team: `diavel78s-projects`)
+- Domain: `thekahlahouse.com` + `www.thekahlahouse.com`
+
+## Known Issues
+1. **Pinnacle feed drops randomly** — Circa is the reliable fallback for openers
+2. **Some books don't send ML for MLB** — Backfill handles this
+3. **Vercel cold starts** — In-memory cache resets. Openers safe in Firestore
+4. **SDK `realizedPnl` unreliable** — Only use non-null as sell indicator, not the value
+5. **Splits duplicates** — API returns today + tomorrow entries. Must prefer Circa-containing entries
