@@ -461,7 +461,25 @@ def parse_activities(client, activities):
             t_after = detail.get("afterPosition") or {}
             bq = abs(_safe_float(t_before.get("netPosition")) or 0)
             aq = abs(_safe_float(t_after.get("netPosition")) or 0)
+            before_net = _safe_float(t_before.get("netPosition")) or 0
             is_close = sdk_rpnl is not None or bq > aq
+
+            # SDK price is unreliable on sells — sometimes returns complement.
+            # Compute actual per-share proceeds from cost basis change.
+            if is_close and quantity and quantity > 0:
+                before_cost = _safe_float(t_before.get("cost"))
+                after_cost = _safe_float(t_after.get("cost")) or 0
+                if before_cost is not None:
+                    # Cost basis dropped = how much of your original investment was "returned"
+                    # But we need the PROCEEDS, not the cost basis change.
+                    # Proceeds = what you received for selling.
+                    # For a YES sell: proceeds = sell_price_per_share * qty
+                    # For a NO sell:  proceeds = sell_price_per_share * qty
+                    # The SDK price may be the complement. Detect by checking
+                    # if position is NO (netPosition < 0) and flip if needed.
+                    if before_net < 0 and price is not None:
+                        # NO position: SDK reports YES price, we need NO price
+                        price = 1.0 - price
 
             if market_slug:
                 if market_slug not in slug_to_title:
@@ -1542,6 +1560,8 @@ def api_debug_trades():
         detail = act.get("trade", {})
         slug = detail.get("marketSlug", "unknown")
         rpnl = detail.get("realizedPnl")
+        t_before = detail.get("beforePosition") or {}
+        t_after = detail.get("afterPosition") or {}
         entry = {
             "timestamp": detail.get("updateTime") or detail.get("timestamp"),
             "price": detail.get("price"),
@@ -1549,6 +1569,10 @@ def api_debug_trades():
             "cost": detail.get("cost"),
             "realizedPnl": rpnl,
             "is_sell": rpnl is not None,
+            "before_netPosition": t_before.get("netPosition"),
+            "before_cost": t_before.get("cost"),
+            "after_netPosition": t_after.get("netPosition"),
+            "after_cost": t_after.get("cost"),
         }
         if rpnl is not None:
             entry["costBasis"] = detail.get("costBasis")
