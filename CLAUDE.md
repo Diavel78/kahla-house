@@ -46,7 +46,7 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 
 - `app.py` — All backend logic (~1500 lines)
 - `templates/odds.html` — Odds board (~1640 lines)
-- `templates/props.html` — Player props board (~550 lines)
+- `templates/props.html` — Player props board (~560 lines)
 - `templates/dashboard.html` — P&L dashboard (~1030 lines)
 - `templates/index.html` — Landing page with auth + admin (~450 lines)
 - `templates/budget.html` — Budget tracker
@@ -99,23 +99,65 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 ## Player Props (`/props`)
 
 ### Features
-- **Game-grouped layout**: Props organized by matchup, each game collapsible
+- **Game-grouped layout**: Props organized by matchup, each game collapsible (click header to expand/collapse)
 - **Best Line Comparison**: Best over/under price across all enabled books with book attribution
-- **Expandable Detail**: Click any prop row to see all books' lines with deep links
-- **Sport Tabs**: Same as Odds Board
-- **Search**: Filter by player name or team name (client-side)
-- **Book Selector**: Shared with Odds Board (same Firestore preferences)
+- **Expandable Detail**: Click any prop row to see all books' lines with deep links to sportsbook pages
+- **Sport Tabs**: Same as Odds Board (MLB, NBA, NHL, NFL, NCAAB, MMA, Soccer, Tennis)
+- **Search**: Filter by player name or team name (client-side, instant). Auto-expands matching games. Clear button (X) in search box
+- **Book Selector**: Shared with Odds Board (same Firestore preferences — `odds_books`, `odds_book_order`)
+- **Sport preference**: Saved separately as `props_sport` in Firestore
 - **Auto-refresh**: 120 seconds (prop lines move slowly — saves API budget)
 
 ### Caching
 - Props: 120 second TTL server-side (vs 10s for odds)
 - Uses same `_owls_cache` dict
 
+### Owls Insight Props API Response Format
+The `/props` endpoint returns a **different format** than `/odds`:
+```json
+{
+  "data": [
+    {
+      "gameId": "mlb:Colorado Rockies@San Diego Padres-20260410",
+      "sport": "mlb",
+      "homeTeam": "San Diego Padres",
+      "awayTeam": "Colorado Rockies",
+      "commenceTime": "2026-04-10T01:41:00.000Z",
+      "isLive": false,
+      "books": [
+        {
+          "key": "fanduel",
+          "title": "FanDuel",
+          "props": [
+            {
+              "playerName": "Fernando Tatis Jr.",
+              "category": "runs",
+              "line": 0.5,
+              "overPrice": 210,
+              "underPrice": null,
+              "event_link": "https://sportsbook.fanduel.com/..."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+**Key differences from odds endpoint**: Uses `gameId`/`homeTeam`/`awayTeam`/`commenceTime` (camelCase, not snake_case). Props are flat under `books[].props[]` with `playerName`, `category`, `line`, `overPrice`, `underPrice` — NOT the nested `bookmakers[].markets[].outcomes[]` structure.
+
 ### Props Normalization (`app.py`)
-- `_fetch_props(sport)` — fetches `/{sport}/props` from Owls Insight
-- `_normalize_props()` — handles two API response formats (keyed-by-book or flat list)
-- Groups by event → player → prop market
-- `_prop_market_label()` — maps API keys to human labels (Strikeouts, Points, Rebounds, etc.)
+- `_fetch_props(sport)` — fetches `/{sport}/props` with 120s cache
+- `_normalize_props()` — parses the flat `data[]` list into game → player → prop structure
+- `_prop_market_label(category)` — maps category strings (`runs`, `strikeouts`, `hits`, `points`, `rebounds`, etc.) to human labels. Categories are simple strings, NOT prefixed with `player_`
+
+### Key JS Functions (props.html)
+- `renderBoard()` — main render, exposed to `window` for search input binding
+- `findBestLine(prop, side, books)` — finds highest price across enabled books for over/under
+- `toggleGame(eid)` — expand/collapse game card
+- `toggleDetail(rowId)` — expand/collapse individual prop row to show all books
+- `loadProps()` — fetches `/api/props`, re-renders board
+- `loadAndStart()` — loads Firestore prefs, then starts app
 
 ---
 
