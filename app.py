@@ -1104,6 +1104,68 @@ def _cleanup_old_openers(db):
 
 
 # ---------------------------------------------------------------------------
+# Splits Openers API (Firestore — same pattern as line openers)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/splits-openers", methods=["GET"])
+@firebase_auth_required
+def api_splits_openers_get():
+    """Load first-seen splits (handle %) for a sport from Firestore."""
+    sport = request.args.get("sport", "mlb")
+    try:
+        db = get_db()
+        doc_ref = db.collection("openers").document(f"splits:{sport}")
+        doc = doc_ref.get()
+        if doc.exists:
+            events = doc.to_dict().get("events", {})
+            return jsonify({"ok": True, "events": events})
+        return jsonify({"ok": True, "events": {}})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/splits-openers", methods=["POST"])
+@firebase_auth_required
+def api_splits_openers_save():
+    """Store first-seen splits per game to Firestore (permanent, never override).
+    Body: { "sport": "mlb", "events": { "event_id": { "ml": {...}, "spread": {...}, "total": {...} } } }
+    """
+    body = request.get_json(force=True)
+    sport = body.get("sport", "mlb")
+    new_events = body.get("events", {})
+
+    if not new_events:
+        return jsonify({"ok": True, "saved": 0})
+
+    try:
+        db = get_db()
+        doc_id = f"splits:{sport}"
+        doc_ref = db.collection("openers").document(doc_id)
+        doc = doc_ref.get()
+
+        if doc.exists:
+            existing = doc.to_dict().get("events", {})
+            added = 0
+            for eid, splits_data in new_events.items():
+                if eid not in existing:
+                    existing[eid] = splits_data
+                    added += 1
+                # Never override existing splits openers
+            doc_ref.update({"events": existing})
+        else:
+            doc_ref.set({
+                "sport": sport,
+                "events": new_events,
+                "createdAt": firestore.SERVER_TIMESTAMP,
+            })
+            added = len(new_events)
+
+        return jsonify({"ok": True, "saved": added})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
 # API routes — User Preferences
 # ---------------------------------------------------------------------------
 
@@ -1177,15 +1239,10 @@ def api_odds():
     except Exception as e:
         errors.append(f"{sport}: {e}")
 
-    splits_ts = None
     try:
         raw_splits, _ = _fetch_splits(sport)
         splits_map, splits_by_teams = _normalize_splits(raw_splits)
         events = _merge_splits(events, splits_map, splits_by_teams)
-        # Only show a timestamp if there's actual splits data attached to events
-        has_splits = any(ev.get("splits") for ev in events)
-        if not has_splits:
-            splits_ts = None
     except Exception as e:
         errors.append(f"splits: {e}")
 
@@ -1210,7 +1267,6 @@ def api_odds():
         "books": sorted(active_books, key=lambda b: (0 if b == "circa" else 1 if b == "pinnacle" else 2, b)),
         "leagues": sorted(leagues),
         "meta_message": meta_message,
-        "splits_timestamp": splits_ts,
         "errors": errors,
     })
 
