@@ -132,6 +132,11 @@ def odds_page():
     return resp
 
 
+@app.route("/props")
+def props_page():
+    return render_template("props.html")
+
+
 @app.route("/dashboard")
 def dashboard():
     return render_template("dashboard.html")
@@ -792,6 +797,255 @@ def _merge_splits(events, splits_map, splits_by_teams=None):
     return events
 
 
+PROPS_CACHE_TTL = 120  # 2 minutes — prop lines move slowly
+
+
+def _fetch_props(sport):
+    """Fetch player props for a sport (2-minute cache)."""
+    import time
+    cache_key = f"props:{sport}"
+    now = time.time()
+    cached = _owls_cache.get(cache_key)
+    if cached and (now - cached["ts"]) < PROPS_CACHE_TTL:
+        return cached["data"], True
+    try:
+        raw = _owls_get(f"/{sport}/props")
+        _owls_cache[cache_key] = {"data": raw, "ts": now}
+        return raw, False
+    except Exception as e:
+        print(f"PROPS ERROR: {e}")
+        return {}, False
+
+
+def _normalize_props(raw_props):
+    """Parse props into game-grouped player prop structure."""
+    raw_data = raw_props.get("data", {})
+    if isinstance(raw_data, dict):
+        return _normalize_props_by_book(raw_data)
+    if isinstance(raw_data, list):
+        return _normalize_props_flat(raw_data)
+    return []
+
+
+def _normalize_props_by_book(data_by_book):
+    """Normalize props when data is keyed by sportsbook."""
+    games = {}
+
+    for book_key, events in data_by_book.items():
+        if not isinstance(events, list):
+            continue
+        for ev in events:
+            eid = ev.get("eventId") or ev.get("event_id") or ev.get("id", "")
+            if not eid:
+                continue
+            eid = str(eid)
+
+            if eid not in games:
+                games[eid] = {
+                    "event_id": eid,
+                    "away_team": ev.get("away_team", ""),
+                    "home_team": ev.get("home_team", ""),
+                    "commence_time": ev.get("commence_time", ""),
+                    "league": ev.get("league", ""),
+                    "players": {},
+                }
+
+            game = games[eid]
+            for bm in ev.get("bookmakers", []):
+                bk = bm.get("key", book_key)
+                link = bm.get("event_link", "")
+                for mkt in bm.get("markets", []):
+                    mkt_key = mkt.get("key", "")
+                    if not mkt_key:
+                        continue
+                    description = mkt.get("description", "")
+                    outcomes = mkt.get("outcomes", [])
+                    if not outcomes:
+                        continue
+
+                    player_name = description
+                    if not player_name:
+                        for oc in outcomes:
+                            desc = oc.get("description", "")
+                            if desc:
+                                player_name = desc
+                                break
+                    if not player_name:
+                        continue
+
+                    point = None
+                    over_price = None
+                    under_price = None
+                    for oc in outcomes:
+                        name = oc.get("name", "").lower()
+                        if name == "over":
+                            over_price = oc.get("price")
+                            if point is None:
+                                point = oc.get("point")
+                        elif name == "under":
+                            under_price = oc.get("price")
+                            if point is None:
+                                point = oc.get("point")
+
+                    if over_price is None and under_price is None:
+                        continue
+
+                    if player_name not in game["players"]:
+                        game["players"][player_name] = {"props": {}}
+
+                    prop_label = _prop_market_label(mkt_key)
+                    prop_key = f"{mkt_key}:{point}" if point is not None else mkt_key
+
+                    if prop_key not in game["players"][player_name]["props"]:
+                        game["players"][player_name]["props"][prop_key] = {
+                            "market_key": mkt_key,
+                            "label": prop_label,
+                            "point": point,
+                            "books": {},
+                        }
+
+                    game["players"][player_name]["props"][prop_key]["books"][bk] = {
+                        "over": over_price,
+                        "under": under_price,
+                        "point": point,
+                        "link": link,
+                    }
+
+    return sorted(games.values(), key=lambda g: g.get("commence_time", ""))
+
+
+def _normalize_props_flat(data_list):
+    """Normalize props when data is a flat list of events."""
+    games = []
+    for ev in data_list:
+        eid = ev.get("eventId") or ev.get("event_id") or ev.get("id", "")
+        game = {
+            "event_id": str(eid) if eid else "",
+            "away_team": ev.get("away_team", ""),
+            "home_team": ev.get("home_team", ""),
+            "commence_time": ev.get("commence_time", ""),
+            "league": ev.get("league", ""),
+            "players": {},
+        }
+        for bm in ev.get("bookmakers", []):
+            bk = bm.get("key", "")
+            link = bm.get("event_link", "")
+            for mkt in bm.get("markets", []):
+                mkt_key = mkt.get("key", "")
+                description = mkt.get("description", "")
+                outcomes = mkt.get("outcomes", [])
+                if not outcomes or not mkt_key:
+                    continue
+
+                player_name = description
+                if not player_name:
+                    for oc in outcomes:
+                        desc = oc.get("description", "")
+                        if desc:
+                            player_name = desc
+                            break
+                if not player_name:
+                    continue
+
+                point = None
+                over_price = None
+                under_price = None
+                for oc in outcomes:
+                    name = oc.get("name", "").lower()
+                    if name == "over":
+                        over_price = oc.get("price")
+                        if point is None:
+                            point = oc.get("point")
+                    elif name == "under":
+                        under_price = oc.get("price")
+                        if point is None:
+                            point = oc.get("point")
+
+                if over_price is None and under_price is None:
+                    continue
+
+                if player_name not in game["players"]:
+                    game["players"][player_name] = {"props": {}}
+
+                prop_label = _prop_market_label(mkt_key)
+                prop_key = f"{mkt_key}:{point}" if point is not None else mkt_key
+
+                if prop_key not in game["players"][player_name]["props"]:
+                    game["players"][player_name]["props"][prop_key] = {
+                        "market_key": mkt_key,
+                        "label": prop_label,
+                        "point": point,
+                        "books": {},
+                    }
+
+                game["players"][player_name]["props"][prop_key]["books"][bk] = {
+                    "over": over_price,
+                    "under": under_price,
+                    "point": point,
+                    "link": link,
+                }
+
+        if game["players"]:
+            games.append(game)
+
+    return sorted(games, key=lambda g: g.get("commence_time", ""))
+
+
+def _prop_market_label(key):
+    """Convert API market key to human-readable label."""
+    labels = {
+        "player_strikeouts": "Strikeouts",
+        "player_hits": "Hits",
+        "player_home_runs": "Home Runs",
+        "player_rbis": "RBIs",
+        "player_runs": "Runs",
+        "player_stolen_bases": "Stolen Bases",
+        "player_total_bases": "Total Bases",
+        "player_hits_allowed": "Hits Allowed",
+        "player_walks": "Walks",
+        "player_earned_runs": "Earned Runs",
+        "player_pitching_outs": "Pitching Outs",
+        "player_points": "Points",
+        "player_rebounds": "Rebounds",
+        "player_assists": "Assists",
+        "player_threes": "3-Pointers",
+        "player_pts_rebs_asts": "Pts+Reb+Ast",
+        "player_pts_rebs": "Pts+Reb",
+        "player_pts_asts": "Pts+Ast",
+        "player_rebs_asts": "Reb+Ast",
+        "player_blocks": "Blocks",
+        "player_steals": "Steals",
+        "player_turnovers": "Turnovers",
+        "player_goals": "Goals",
+        "player_shots_on_goal": "Shots on Goal",
+        "player_power_play_points": "PP Points",
+        "player_blocked_shots": "Blocked Shots",
+        "player_saves": "Saves",
+        "player_passing_yards": "Pass Yards",
+        "player_rushing_yards": "Rush Yards",
+        "player_receiving_yards": "Rec Yards",
+        "player_touchdowns": "Touchdowns",
+        "player_pass_tds": "Pass TDs",
+        "player_interceptions": "Interceptions",
+        "player_completions": "Completions",
+        "player_receptions": "Receptions",
+        "player_rush_attempts": "Rush Attempts",
+        "player_tackles_assists": "Tackles+Ast",
+        "player_aces": "Aces",
+        "player_double_faults": "Double Faults",
+        "player_games_won": "Games Won",
+        "player_sets_won": "Sets Won",
+        "player_significant_strikes": "Sig. Strikes",
+        "player_takedowns": "Takedowns",
+    }
+    if key in labels:
+        return labels[key]
+    base = key.replace("_alternate", "").replace("_over_under", "")
+    if base in labels:
+        return labels[base]
+    return key.replace("player_", "").replace("_", " ").title()
+
+
 # ---------------------------------------------------------------------------
 # Openers API (Firestore — replaces localStorage)
 # ---------------------------------------------------------------------------
@@ -909,6 +1163,50 @@ def _cleanup_old_openers(db):
             batch.commit()
     except Exception as e:
         print(f"Opener cleanup error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# API routes — User Preferences
+# ---------------------------------------------------------------------------
+
+@app.route("/api/preferences", methods=["GET"])
+@firebase_auth_required
+def api_preferences_get():
+    """Return user preferences from Firestore user doc."""
+    prefs = g.user_data.get("preferences", {})
+    return jsonify({"ok": True, "preferences": prefs})
+
+
+@app.route("/api/preferences", methods=["POST"])
+@firebase_auth_required
+def api_preferences_save():
+    """Save user preferences to Firestore user doc.
+    Body: { "preferences": { "odds_books": [...], "odds_book_order": [...], "odds_sport": "mlb" } }
+    Merges with existing preferences.
+    """
+    try:
+        body = request.get_json(force=True)
+        new_prefs = body.get("preferences", {})
+        if not isinstance(new_prefs, dict):
+            return jsonify({"ok": False, "error": "preferences must be an object"}), 400
+
+        # Whitelist allowed preference keys
+        ALLOWED_KEYS = {"odds_books", "odds_book_order", "odds_sport"}
+        filtered = {k: v for k, v in new_prefs.items() if k in ALLOWED_KEYS}
+
+        if not filtered:
+            return jsonify({"ok": False, "error": "No valid preference keys"}), 400
+
+        db = get_db()
+        doc_ref = db.collection("users").document(g.uid)
+        # Merge into existing preferences
+        existing_prefs = g.user_data.get("preferences", {})
+        existing_prefs.update(filtered)
+        doc_ref.update({"preferences": existing_prefs})
+
+        return jsonify({"ok": True, "saved": list(filtered.keys())})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -1192,6 +1490,47 @@ def api_splits_raw():
     sport = request.args.get("sport", "mlb")
     try:
         raw = _owls_get(f"/{sport}/splits")
+        return jsonify(raw)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/props")
+@firebase_auth_required
+def api_props():
+    """Fetch player props from Owls Insight, normalized by game and player."""
+    if not OWLS_INSIGHT_API_KEY:
+        return jsonify({"ok": False, "error": "OWLS_INSIGHT_API_KEY not configured"}), 500
+
+    sport = request.args.get("sport", "mlb")
+    errors = []
+    games = []
+    from_cache = False
+
+    try:
+        raw, from_cache = _fetch_props(sport)
+        games = _normalize_props(raw)
+    except Exception as e:
+        errors.append(f"props: {e}")
+
+    return jsonify({
+        "ok": True,
+        "cached": from_cache,
+        "sport": sport,
+        "games": games,
+        "errors": errors,
+    })
+
+
+@app.route("/api/props/raw")
+@admin_required
+def api_props_raw():
+    """Debug: raw props response from Owls Insight."""
+    if not OWLS_INSIGHT_API_KEY:
+        return jsonify({"error": "no key"}), 500
+    sport = request.args.get("sport", "mlb")
+    try:
+        raw = _owls_get(f"/{sport}/props")
         return jsonify(raw)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
