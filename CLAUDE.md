@@ -251,7 +251,8 @@ The `/props` endpoint returns a **different format** than `/odds`:
 
 ## Mobile Layout
 - `overflow-x: hidden` on html, body, `#app` (iOS Safari fix)
-- Top bar wraps, movement bar items wrap with `flex-wrap`
+- Top bar: nav links (Home, Odds, Props, Dashboard) on first row, status + logout on second row (prevents overlap with 4 nav items)
+- Movement bar items wrap with `flex-wrap` so ML/SPR/TOT all show
 - Odds table scrolls horizontally
 - Splits grid single-column below 900px
 - Game card fadeUp animation only on first load
