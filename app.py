@@ -1541,7 +1541,7 @@ def api_raw():
 
 
 @app.route("/api/debug-trades")
-@admin_required
+@firebase_auth_required
 def api_debug_trades():
     try:
         client = get_client()
