@@ -171,10 +171,21 @@ The `/props` endpoint returns a **different format** than `/odds`:
 - **Auto-refresh**: 60 seconds
 
 ### P&L Computation — CRITICAL NOTES
-- **Do NOT trust SDK's `realizedPnl`** — it uses complement pricing. Only use non-null as a sell indicator
-- Self-tracking average cost: accumulate buy costs per slug, compute `(sell_price - avg_buy_cost) * qty`
+- **Do NOT trust SDK's `price` field** — it returns the COMPLEMENT (YES price when trading NO, vice versa). Always use `cost / qty` for actual per-share price paid or received
+- **Do NOT trust SDK's `realizedPnl` value** — it uses complement pricing. Only use non-null as a sell indicator
+- **Sell detection**: `realizedPnl is not None` (primary) or `beforePosition.netPosition > afterPosition.netPosition` (fallback)
+- **Trade P&L formula**: `(sell_cost/sell_qty - avg_buy_cost_per_share) * sell_qty`
+- Self-tracking average cost: accumulate buy `cost` values per slug (NOT `price`), compute avg cost per share
 - Both "Position Resolution" AND closed trades count toward realized P&L, win rate, daily P&L
 - Activity cutoff: filters out activity before `2026-03-01`
+- **SDK fields on trades**:
+  - `price` — COMPLEMENT, do not use for P&L (e.g., reports 0.76 when you paid 0.25/share)
+  - `cost` — actual dollars spent (buy) or received (sell). Use `cost.value / qty` for real per-share price
+  - `qty` — number of shares
+  - `realizedPnl` — unreliable value, but non-null = sell indicator
+  - `costBasis` — original cost basis (on sells)
+  - `originalPrice` — original entry price (on sells)
+  - `beforePosition` / `afterPosition` — position state before/after trade (netPosition, cost fields may be null)
 
 ---
 
@@ -267,5 +278,6 @@ The `/props` endpoint returns a **different format** than `/odds`:
 1. **Pinnacle feed drops randomly** — Circa is the reliable fallback for openers
 2. **Some books don't send ML for MLB** — Backfill handles this
 3. **Vercel cold starts** — In-memory cache resets. Openers safe in Firestore
-4. **SDK `realizedPnl` unreliable** — Only use non-null as sell indicator, not the value
+4. **SDK `price` field is the COMPLEMENT** — Always use `cost/qty` for real per-share price. The `price` field returns the opposite side's price (YES when trading NO). This caused sell P&L to show as losses. Fixed by computing `cost.value / qty` instead
+5. **SDK `realizedPnl` unreliable** — Only use non-null as sell indicator, not the value
 5. **Splits duplicates** — API returns today + tomorrow entries. Must prefer Circa-containing entries
