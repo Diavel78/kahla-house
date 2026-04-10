@@ -743,7 +743,7 @@
     }
 
     // --- Render board ---
-    function renderBoard(){
+    window.renderBoard = function(){
         const games = propsData.games || [];
         const books = getBooks();
         const query = ($('search').value||'').toLowerCase().trim();
