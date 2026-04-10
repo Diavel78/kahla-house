@@ -1540,6 +1540,27 @@ def api_raw():
     return jsonify(raw)
 
 
+@app.route("/debug")
+def debug_page():
+    """Simple page that makes an authenticated debug-trades call."""
+    slug = request.args.get("slug", "")
+    return f'''<!DOCTYPE html><html><head>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>firebase.initializeApp({{apiKey:"AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",authDomain:"kahla-house.firebaseapp.com",projectId:"kahla-house"}});</script>
+    </head><body style="background:#0b0e13;color:#e2e8f0;font-family:monospace;padding:20px">
+    <pre id="out">Loading...</pre>
+    <script>
+    firebase.auth().onAuthStateChanged(async u => {{
+        if (!u) {{ document.getElementById("out").textContent = "Not logged in. Go to / first."; return; }}
+        const t = await u.getIdToken();
+        const r = await fetch("/api/debug-trades?slug={slug}", {{headers:{{"Authorization":"Bearer "+t}}}});
+        const d = await r.json();
+        document.getElementById("out").textContent = JSON.stringify(d, null, 2);
+    }});
+    </script></body></html>'''
+
+
 @app.route("/api/debug-trades")
 @firebase_auth_required
 def api_debug_trades():
