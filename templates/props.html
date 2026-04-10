@@ -779,7 +779,7 @@
 
             gameCount++;
             const eid = game.event_id || `${away}-${home}`;
-            const isOpen = expandedGames.has(eid);
+            const isOpen = query ? true : expandedGames.has(eid);
 
             html += `<div class="game">`;
             html += `<div class="game-header" onclick="toggleGame('${esc(eid)}')">`;
