@@ -452,34 +452,25 @@ def parse_activities(client, activities):
         is_close = False
 
         if act_type == "ACTIVITY_TYPE_TRADE":
-            price = _safe_float(detail.get("price"))
+            sdk_price = _safe_float(detail.get("price"))
             quantity = _safe_float(detail.get("qty"))
             sdk_rpnl = _safe_float(detail.get("realizedPnl"))
+            trade_cost = _safe_float(detail.get("cost"))
             pnl = None
+
+            # SDK `price` field is the COMPLEMENT (YES price when trading NO,
+            # or vice versa). The `cost` field / qty gives the actual per-share
+            # price paid or received. Always use cost/qty.
+            if trade_cost is not None and quantity and quantity > 0:
+                price = trade_cost / quantity
+            else:
+                price = sdk_price
 
             t_before = detail.get("beforePosition") or {}
             t_after = detail.get("afterPosition") or {}
             bq = abs(_safe_float(t_before.get("netPosition")) or 0)
             aq = abs(_safe_float(t_after.get("netPosition")) or 0)
-            before_net = _safe_float(t_before.get("netPosition")) or 0
             is_close = sdk_rpnl is not None or bq > aq
-
-            # SDK price is unreliable on sells — sometimes returns complement.
-            # Compute actual per-share proceeds from cost basis change.
-            if is_close and quantity and quantity > 0:
-                before_cost = _safe_float(t_before.get("cost"))
-                after_cost = _safe_float(t_after.get("cost")) or 0
-                if before_cost is not None:
-                    # Cost basis dropped = how much of your original investment was "returned"
-                    # But we need the PROCEEDS, not the cost basis change.
-                    # Proceeds = what you received for selling.
-                    # For a YES sell: proceeds = sell_price_per_share * qty
-                    # For a NO sell:  proceeds = sell_price_per_share * qty
-                    # The SDK price may be the complement. Detect by checking
-                    # if position is NO (netPosition < 0) and flip if needed.
-                    if before_net < 0 and price is not None:
-                        # NO position: SDK reports YES price, we need NO price
-                        price = 1.0 - price
 
             if market_slug:
                 if market_slug not in slug_to_title:
