@@ -594,8 +594,10 @@
         /* --- Responsive --- */
         @media (max-width: 768px) {
             .container { padding: 12px; }
-            .top-bar { padding: 0 12px; height: 50px; }
+            .top-bar { padding: 8px 12px; height: auto; flex-wrap: wrap; gap: 6px; }
             .top-bar-title { display: none; }
+            .top-bar-left { width: 100%; }
+            .top-bar-right { width: 100%; justify-content: flex-end; }
             .nav-links { margin-left: 6px; gap: 2px; }
             .nav-link { padding: 4px 8px; font-size: 11px; }
             .cards { grid-template-columns: repeat(2, 1fr); gap: 8px; }
