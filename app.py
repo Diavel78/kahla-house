@@ -1180,15 +1180,24 @@ def api_odds():
     splits_ts = None
     try:
         raw_splits, _ = _fetch_splits(sport)
-        # Track when splits data actually changed (not just fetched)
+        # Track when splits data actually CHANGED (not just fetched).
+        # On cold start (no prev), store hash but NO timestamp — we don't
+        # know when splits last changed, so don't show a time.
+        # Only set timestamp when hash changes from a known previous value.
+        # Also skip if splits data is empty (no splits available yet).
         splits_change_key = f"splits_changed:{sport}"
         import json, hashlib
-        splits_hash = hashlib.md5(json.dumps(raw_splits.get("data", []), sort_keys=True).encode()).hexdigest()
+        splits_data = raw_splits.get("data", [])
+        splits_hash = hashlib.md5(json.dumps(splits_data, sort_keys=True).encode()).hexdigest()
         prev = _owls_cache.get(splits_change_key)
-        if not prev or prev.get("hash") != splits_hash:
+        if prev and prev.get("hash") != splits_hash and splits_data:
+            # Hash changed from a known value — splits actually updated
             _owls_cache[splits_change_key] = {"hash": splits_hash, "ts": time.time()}
+        elif not prev:
+            # First load (cold start) — store hash only, no timestamp
+            _owls_cache[splits_change_key] = {"hash": splits_hash, "ts": None}
         splits_changed = _owls_cache.get(splits_change_key)
-        if splits_changed:
+        if splits_changed and splits_changed.get("ts"):
             splits_ts = datetime.fromtimestamp(splits_changed["ts"], tz=timezone.utc).isoformat()
         splits_map, splits_by_teams = _normalize_splits(raw_splits)
         events = _merge_splits(events, splits_map, splits_by_teams)
