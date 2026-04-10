@@ -818,148 +818,69 @@ def _fetch_props(sport):
 
 
 def _normalize_props(raw_props):
-    """Parse props into game-grouped player prop structure."""
-    raw_data = raw_props.get("data", {})
-    if isinstance(raw_data, dict):
-        return _normalize_props_by_book(raw_data)
-    if isinstance(raw_data, list):
-        return _normalize_props_flat(raw_data)
-    return []
+    """Parse Owls Insight props response into game-grouped player prop structure.
 
-
-def _normalize_props_by_book(data_by_book):
-    """Normalize props when data is keyed by sportsbook."""
-    games = {}
-
-    for book_key, events in data_by_book.items():
-        if not isinstance(events, list):
-            continue
-        for ev in events:
-            eid = ev.get("eventId") or ev.get("event_id") or ev.get("id", "")
-            if not eid:
-                continue
-            eid = str(eid)
-
-            if eid not in games:
-                games[eid] = {
-                    "event_id": eid,
-                    "away_team": ev.get("away_team", ""),
-                    "home_team": ev.get("home_team", ""),
-                    "commence_time": ev.get("commence_time", ""),
-                    "league": ev.get("league", ""),
-                    "players": {},
+    Actual API format:
+    {
+      "data": [
+        {
+          "gameId": "mlb:Team A@Team B-20260410",
+          "sport": "mlb",
+          "homeTeam": "Team B",
+          "awayTeam": "Team A",
+          "commenceTime": "2026-04-10T01:41:00.000Z",
+          "isLive": false,
+          "books": [
+            {
+              "key": "fanduel",
+              "title": "FanDuel",
+              "props": [
+                {
+                  "playerName": "Fernando Tatis Jr.",
+                  "category": "runs",
+                  "line": 0.5,
+                  "overPrice": 210,
+                  "underPrice": null,
+                  "event_link": "https://..."
                 }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+    """
+    raw_data = raw_props.get("data", [])
+    if not isinstance(raw_data, list):
+        return []
 
-            game = games[eid]
-            for bm in ev.get("bookmakers", []):
-                bk = bm.get("key", book_key)
-                link = bm.get("event_link", "")
-                for mkt in bm.get("markets", []):
-                    mkt_key = mkt.get("key", "")
-                    if not mkt_key:
-                        continue
-                    description = mkt.get("description", "")
-                    outcomes = mkt.get("outcomes", [])
-                    if not outcomes:
-                        continue
-
-                    player_name = description
-                    if not player_name:
-                        for oc in outcomes:
-                            desc = oc.get("description", "")
-                            if desc:
-                                player_name = desc
-                                break
-                    if not player_name:
-                        continue
-
-                    point = None
-                    over_price = None
-                    under_price = None
-                    for oc in outcomes:
-                        name = oc.get("name", "").lower()
-                        if name == "over":
-                            over_price = oc.get("price")
-                            if point is None:
-                                point = oc.get("point")
-                        elif name == "under":
-                            under_price = oc.get("price")
-                            if point is None:
-                                point = oc.get("point")
-
-                    if over_price is None and under_price is None:
-                        continue
-
-                    if player_name not in game["players"]:
-                        game["players"][player_name] = {"props": {}}
-
-                    prop_label = _prop_market_label(mkt_key)
-                    prop_key = f"{mkt_key}:{point}" if point is not None else mkt_key
-
-                    if prop_key not in game["players"][player_name]["props"]:
-                        game["players"][player_name]["props"][prop_key] = {
-                            "market_key": mkt_key,
-                            "label": prop_label,
-                            "point": point,
-                            "books": {},
-                        }
-
-                    game["players"][player_name]["props"][prop_key]["books"][bk] = {
-                        "over": over_price,
-                        "under": under_price,
-                        "point": point,
-                        "link": link,
-                    }
-
-    return sorted(games.values(), key=lambda g: g.get("commence_time", ""))
-
-
-def _normalize_props_flat(data_list):
-    """Normalize props when data is a flat list of events."""
     games = []
-    for ev in data_list:
-        eid = ev.get("eventId") or ev.get("event_id") or ev.get("id", "")
+    for ev in raw_data:
+        eid = ev.get("gameId", "")
         game = {
-            "event_id": str(eid) if eid else "",
-            "away_team": ev.get("away_team", ""),
-            "home_team": ev.get("home_team", ""),
-            "commence_time": ev.get("commence_time", ""),
-            "league": ev.get("league", ""),
+            "event_id": str(eid),
+            "away_team": ev.get("awayTeam", ""),
+            "home_team": ev.get("homeTeam", ""),
+            "commence_time": ev.get("commenceTime", ""),
+            "is_live": ev.get("isLive", False),
             "players": {},
         }
-        for bm in ev.get("bookmakers", []):
-            bk = bm.get("key", "")
-            link = bm.get("event_link", "")
-            for mkt in bm.get("markets", []):
-                mkt_key = mkt.get("key", "")
-                description = mkt.get("description", "")
-                outcomes = mkt.get("outcomes", [])
-                if not outcomes or not mkt_key:
-                    continue
 
-                player_name = description
-                if not player_name:
-                    for oc in outcomes:
-                        desc = oc.get("description", "")
-                        if desc:
-                            player_name = desc
-                            break
+        for book in ev.get("books", []):
+            bk = book.get("key", "")
+            if not bk:
+                continue
+
+            for prop in book.get("props", []):
+                player_name = prop.get("playerName", "")
                 if not player_name:
                     continue
 
-                point = None
-                over_price = None
-                under_price = None
-                for oc in outcomes:
-                    name = oc.get("name", "").lower()
-                    if name == "over":
-                        over_price = oc.get("price")
-                        if point is None:
-                            point = oc.get("point")
-                    elif name == "under":
-                        under_price = oc.get("price")
-                        if point is None:
-                            point = oc.get("point")
+                category = prop.get("category", "")
+                line = prop.get("line")
+                over_price = prop.get("overPrice")
+                under_price = prop.get("underPrice")
+                link = prop.get("event_link", "")
 
                 if over_price is None and under_price is None:
                     continue
@@ -967,21 +888,21 @@ def _normalize_props_flat(data_list):
                 if player_name not in game["players"]:
                     game["players"][player_name] = {"props": {}}
 
-                prop_label = _prop_market_label(mkt_key)
-                prop_key = f"{mkt_key}:{point}" if point is not None else mkt_key
+                prop_label = _prop_market_label(category)
+                prop_key = f"{category}:{line}" if line is not None else category
 
                 if prop_key not in game["players"][player_name]["props"]:
                     game["players"][player_name]["props"][prop_key] = {
-                        "market_key": mkt_key,
+                        "market_key": category,
                         "label": prop_label,
-                        "point": point,
+                        "point": line,
                         "books": {},
                     }
 
                 game["players"][player_name]["props"][prop_key]["books"][bk] = {
                     "over": over_price,
                     "under": under_price,
-                    "point": point,
+                    "point": line,
                     "link": link,
                 }
 
@@ -991,59 +912,67 @@ def _normalize_props_flat(data_list):
     return sorted(games, key=lambda g: g.get("commence_time", ""))
 
 
-def _prop_market_label(key):
-    """Convert API market key to human-readable label."""
+def _prop_market_label(category):
+    """Convert API category to human-readable label."""
     labels = {
-        "player_strikeouts": "Strikeouts",
-        "player_hits": "Hits",
-        "player_home_runs": "Home Runs",
-        "player_rbis": "RBIs",
-        "player_runs": "Runs",
-        "player_stolen_bases": "Stolen Bases",
-        "player_total_bases": "Total Bases",
-        "player_hits_allowed": "Hits Allowed",
-        "player_walks": "Walks",
-        "player_earned_runs": "Earned Runs",
-        "player_pitching_outs": "Pitching Outs",
-        "player_points": "Points",
-        "player_rebounds": "Rebounds",
-        "player_assists": "Assists",
-        "player_threes": "3-Pointers",
-        "player_pts_rebs_asts": "Pts+Reb+Ast",
-        "player_pts_rebs": "Pts+Reb",
-        "player_pts_asts": "Pts+Ast",
-        "player_rebs_asts": "Reb+Ast",
-        "player_blocks": "Blocks",
-        "player_steals": "Steals",
-        "player_turnovers": "Turnovers",
-        "player_goals": "Goals",
-        "player_shots_on_goal": "Shots on Goal",
-        "player_power_play_points": "PP Points",
-        "player_blocked_shots": "Blocked Shots",
-        "player_saves": "Saves",
-        "player_passing_yards": "Pass Yards",
-        "player_rushing_yards": "Rush Yards",
-        "player_receiving_yards": "Rec Yards",
-        "player_touchdowns": "Touchdowns",
-        "player_pass_tds": "Pass TDs",
-        "player_interceptions": "Interceptions",
-        "player_completions": "Completions",
-        "player_receptions": "Receptions",
-        "player_rush_attempts": "Rush Attempts",
-        "player_tackles_assists": "Tackles+Ast",
-        "player_aces": "Aces",
-        "player_double_faults": "Double Faults",
-        "player_games_won": "Games Won",
-        "player_sets_won": "Sets Won",
-        "player_significant_strikes": "Sig. Strikes",
-        "player_takedowns": "Takedowns",
+        # MLB
+        "strikeouts": "Strikeouts",
+        "hits": "Hits",
+        "home_runs": "Home Runs",
+        "rbis": "RBIs",
+        "runs": "Runs",
+        "stolen_bases": "Stolen Bases",
+        "total_bases": "Total Bases",
+        "hits_allowed": "Hits Allowed",
+        "walks": "Walks",
+        "earned_runs": "Earned Runs",
+        "pitching_outs": "Pitching Outs",
+        "pitcher_strikeouts": "Strikeouts",
+        # NBA
+        "points": "Points",
+        "rebounds": "Rebounds",
+        "assists": "Assists",
+        "threes": "3-Pointers",
+        "pts_rebs_asts": "Pts+Reb+Ast",
+        "pts_rebs": "Pts+Reb",
+        "pts_asts": "Pts+Ast",
+        "rebs_asts": "Reb+Ast",
+        "blocks": "Blocks",
+        "steals": "Steals",
+        "turnovers": "Turnovers",
+        # NHL
+        "goals": "Goals",
+        "shots_on_goal": "Shots on Goal",
+        "power_play_points": "PP Points",
+        "blocked_shots": "Blocked Shots",
+        "saves": "Saves",
+        # NFL
+        "passing_yards": "Pass Yards",
+        "rushing_yards": "Rush Yards",
+        "receiving_yards": "Rec Yards",
+        "touchdowns": "Touchdowns",
+        "pass_tds": "Pass TDs",
+        "interceptions": "Interceptions",
+        "completions": "Completions",
+        "receptions": "Receptions",
+        "rush_attempts": "Rush Attempts",
+        "tackles_assists": "Tackles+Ast",
+        # Tennis
+        "aces": "Aces",
+        "double_faults": "Double Faults",
+        "games_won": "Games Won",
+        "sets_won": "Sets Won",
+        # MMA
+        "significant_strikes": "Sig. Strikes",
+        "takedowns": "Takedowns",
     }
-    if key in labels:
-        return labels[key]
-    base = key.replace("_alternate", "").replace("_over_under", "")
-    if base in labels:
-        return labels[base]
-    return key.replace("player_", "").replace("_", " ").title()
+    if category in labels:
+        return labels[category]
+    # Also check with player_ prefix stripped (in case API changes)
+    stripped = category.replace("player_", "")
+    if stripped in labels:
+        return labels[stripped]
+    return category.replace("_", " ").title()
 
 
 # ---------------------------------------------------------------------------
