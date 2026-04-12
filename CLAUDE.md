@@ -30,7 +30,9 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 | `GET /api/scores/raw` | Admin | Debug: raw live scores response |
 | `GET /api/realtime/raw` | Admin | Debug: raw Pinnacle sharp odds |
 | `GET /api/raw` | Admin | Debug: raw Polymarket SDK responses |
-| `GET /api/debug-trades` | Admin | Debug: grouped trade details |
+| `GET/POST /api/splits-openers?sport=mlb` | Firebase | First-seen splits (Firestore, permanent per game ID) |
+| `GET /api/debug-trades` | Firebase | Debug: grouped trade details with before/after position data |
+| `/debug?slug=X` | Firebase (page) | Debug page that calls debug-trades with auth |
 
 ## Tech Stack
 
@@ -75,7 +77,7 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 - **Search**: Filter by team name (client-side, instant)
 - **Book Selector**: Dropdown with checkboxes + up/down arrows to reorder. Saved to Firestore
 - **Live Scores**: Green LIVE badge with score between team names
-- **Circa Splits**: Handle % vs Ticket % per market. SHARP tags when divergence >= 15%
+- **Circa Splits**: Handle % vs Ticket % per market. SHARP tags when divergence >= 15%. Shows movement from first-seen values (e.g. `44% (-3)`) — stored in Firestore like openers
 - **Line Movement**: Opener vs current with arrows and diffs
 - **Reverse Line Movement (RLM)**: Pulsing red flag when line moves against sharp money
 - **Polymarket Bet Indicators**: Multiple bets per game supported, with live status coloring
@@ -92,7 +94,9 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 - `renderBoard()` — main render, double-buffered. Exposed to `window` for search
 - `findMyBets()` — returns ALL matching Polymarket bets for a game (multiple per game)
 - `renderBetTag()` — renders individual bet tag with status coloring
-- `renderSplitsRow()` — renders handle%/bets% with sharp detection
+- `renderSplitsRow()` — renders handle%/bets% with sharp detection and movement diffs from splits openers
+- `captureSplitsOpeners()` — captures first-seen Circa splits per game to Firestore (like `captureOpeners()`)
+- `loadSplitsOpeners()` / `saveSplitsOpenersAPI()` — Firestore load/save for splits openers
 
 ---
 
@@ -192,7 +196,7 @@ The `/props` endpoint returns a **different format** than `/odds`:
 ## Domain Knowledge — Splits vs Movement
 
 ### THESE ARE DIFFERENT THINGS
-- **Splits**: Handle % and bets % data (Circa, DraftKings). Shows sharp money detection. Located in the game footer below the movement bar. SPLITS ARE FINE — do not touch unless explicitly asked.
+- **Splits**: Handle % and bets % data (Circa only — DK is worthless). Shows sharp money detection. Located in the game footer below the movement bar. First-seen splits stored in Firestore (`splits:{sport}`) — shows diffs when handle % changes (e.g. `1% (+1)` in green, `44% (-3)` in red). Same persistence pattern as line openers — survives cold starts.
 - **Movement / Historical Line Data**: The movement bar. Records the FIRST line seen (opener), then tracks if it moved up/down. Stored via `/api/openers` in Firestore. Do NOT confuse with splits. Ever.
 
 ### Movement Rules
@@ -249,7 +253,8 @@ The `/props` endpoint returns a **different format** than `/odds`:
 ## Firestore Structure
 
 - **`users/{uid}`** — User profile (email, role, appAccess, preferences)
-- **`openers/{sport}`** — Opening lines per sport. `events` map of game IDs to opener data. Permanent — never reset daily
+- **`openers/openers:{sport}`** — Opening lines per sport. `events` map of game IDs to opener data. Permanent — never reset daily
+- **`openers/splits:{sport}`** — First-seen Circa splits per sport. `events` map of game IDs to handle/bets percentages. Permanent — never override
 - **Preferences fields**: `odds_books`, `odds_book_order`, `odds_sport`, `props_sport`
 
 ## Firebase Auth
@@ -274,10 +279,12 @@ The `/props` endpoint returns a **different format** than `/odds`:
 - Vercel project: `kahla-house` (team: `diavel78s-projects`)
 - Domain: `thekahlahouse.com` + `www.thekahlahouse.com`
 
-## Known Issues
+## Known Issues & Gotchas
 1. **Pinnacle feed drops randomly** — Circa is the reliable fallback for openers
 2. **Some books don't send ML for MLB** — Backfill handles this
-3. **Vercel cold starts** — In-memory cache resets. Openers safe in Firestore
-4. **SDK `price` field is the COMPLEMENT** — Always use `cost/qty` for real per-share price. The `price` field returns the opposite side's price (YES when trading NO). This caused sell P&L to show as losses. Fixed by computing `cost.value / qty` instead
+3. **Vercel cold starts** — In-memory cache resets. Openers + splits openers safe in Firestore
+4. **SDK `price` field is the COMPLEMENT** — NEVER use for P&L. Always use `cost.value / qty` for real per-share price. The `price` field returns the opposite side's price (YES when trading NO). This was the root cause of sell P&L showing as losses — now fixed
 5. **SDK `realizedPnl` unreliable** — Only use non-null as sell indicator, not the value
-5. **Splits duplicates** — API returns today + tomorrow entries. Must prefer Circa-containing entries
+6. **Splits duplicates** — API returns today + tomorrow entries. Must prefer Circa-containing entries
+7. **MMA odds sparse** — Only BetOnline returns MMA data through Owls Insight. No FanDuel/DraftKings/Pinnacle/Circa MMA coverage. User must enable BetOnline (BOL) in Books to see MMA fights
+8. **SDK trade fields are nested objects** — `price`, `cost`, `realizedPnl`, `costBasis` are all `{currency, value}` dicts, not plain numbers. `_safe_float()` handles this by extracting `.value`
