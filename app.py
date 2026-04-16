@@ -1591,20 +1591,39 @@ def api_debug_deposits():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+    # Collect all activity types to see what exists
+    type_counts = {}
     balance_changes = []
     for act in activities:
-        if act.get("type") != "ACTIVITY_TYPE_ACCOUNT_BALANCE_CHANGE":
-            continue
-        detail = act.get("accountBalanceChange", {})
-        balance_changes.append({
-            "timestamp": detail.get("updateTime") or detail.get("timestamp", ""),
-            "amount": detail.get("amount"),
-            "reason": detail.get("reason", ""),
-            "raw_keys": list(detail.keys()),
-        })
+        act_type = act.get("type", "unknown")
+        type_counts[act_type] = type_counts.get(act_type, 0) + 1
 
-    balance_changes.sort(key=lambda x: x["timestamp"], reverse=True)
-    return jsonify({"ok": True, "count": len(balance_changes), "deposits": balance_changes})
+        # Try multiple possible keys for balance changes
+        if "balance" in act_type.lower() or "account" in act_type.lower() or "deposit" in act_type.lower() or "transfer" in act_type.lower():
+            balance_changes.append({
+                "type": act_type,
+                "keys": list(act.keys()),
+                "raw": {k: v for k, v in act.items() if k != "type"},
+            })
+
+        # Also check for accountBalanceChange key regardless of type
+        if act.get("accountBalanceChange"):
+            detail = act["accountBalanceChange"]
+            balance_changes.append({
+                "type": act_type,
+                "timestamp": detail.get("updateTime") or detail.get("timestamp", ""),
+                "amount": detail.get("amount"),
+                "reason": detail.get("reason", ""),
+                "raw_keys": list(detail.keys()),
+            })
+
+    balance_changes.sort(key=lambda x: str(x.get("timestamp", "")), reverse=True)
+    return jsonify({
+        "ok": True,
+        "total_activities": len(activities),
+        "activity_types": type_counts,
+        "balance_changes": balance_changes,
+    })
 
 
 @app.route("/debug-deposits")
