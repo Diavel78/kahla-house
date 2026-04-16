@@ -1642,17 +1642,7 @@ def debug_deposits_page():
         const t = await u.getIdToken();
         const r = await fetch("/api/debug-deposits", {headers:{"Authorization":"Bearer "+t}});
         const d = await r.json();
-        if (d.deposits) {
-            let html = "";
-            for (const dep of d.deposits) {
-                const amt = parseFloat(dep.amount || 0).toFixed(2);
-                const color = parseFloat(dep.amount) > 0 ? "#22c55e" : "#ef4444";
-                html += `<span style="color:${color}">$${amt}</span>  ${dep.reason || "NO REASON"}  ${dep.timestamp}\\n`;
-            }
-            document.getElementById("out").innerHTML = html || "No balance changes found";
-        } else {
-            document.getElementById("out").textContent = JSON.stringify(d, null, 2);
-        }
+        document.getElementById("out").textContent = JSON.stringify(d, null, 2);
     });
     </script></body></html>'''
 
