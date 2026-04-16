@@ -1254,6 +1254,32 @@ def api_raw():
     return jsonify(raw)
 
 
+@app.route("/api/debug-deposits")
+@firebase_auth_required
+def api_debug_deposits():
+    """Show all balance changes with their reasons — helps identify maker rewards vs deposits."""
+    try:
+        client = get_client()
+        activities = fetch_activities(client)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    balance_changes = []
+    for act in activities:
+        if act.get("type") != "ACTIVITY_TYPE_ACCOUNT_BALANCE_CHANGE":
+            continue
+        detail = act.get("accountBalanceChange", {})
+        balance_changes.append({
+            "timestamp": detail.get("updateTime") or detail.get("timestamp", ""),
+            "amount": detail.get("amount"),
+            "reason": detail.get("reason", ""),
+            "raw_keys": list(detail.keys()),
+        })
+
+    balance_changes.sort(key=lambda x: x["timestamp"], reverse=True)
+    return jsonify({"ok": True, "count": len(balance_changes), "deposits": balance_changes})
+
+
 @app.route("/api/debug-trades")
 @admin_required
 def api_debug_trades():
