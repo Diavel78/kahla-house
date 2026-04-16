@@ -350,6 +350,7 @@ def compute_summary(enriched, parsed_activities, tz_offset_minutes=0):
     resolved_total = 0
     today_pnl = 0.0
     yesterday_pnl = 0.0
+    maker_rewards = 0.0
 
     client_tz = timezone(timedelta(minutes=-tz_offset_minutes))
     now_local = datetime.now(client_tz)
@@ -360,6 +361,10 @@ def compute_summary(enriched, parsed_activities, tz_offset_minutes=0):
         has_pnl = act["pnl"] is not None
         is_resolution = act["type"] == "Position Resolution"
         is_trade_close = act["type"] == "Trade" and act.get("_is_close") and has_pnl
+        is_maker = act["type"] == "Transfer" and has_pnl
+
+        if is_maker:
+            maker_rewards += act["pnl"]
 
         if (is_resolution or is_trade_close) and has_pnl:
             realized_pnl += act["pnl"]
@@ -367,7 +372,7 @@ def compute_summary(enriched, parsed_activities, tz_offset_minutes=0):
             if act["pnl"] > 0:
                 resolved_wins += 1
 
-        if (is_resolution or is_trade_close) and has_pnl:
+        if (is_resolution or is_trade_close or is_maker) and has_pnl:
             ts = act.get("timestamp", "")
             act_local = ""
             if ts:
@@ -385,7 +390,7 @@ def compute_summary(enriched, parsed_activities, tz_offset_minutes=0):
             elif act_local == yesterday_str:
                 yesterday_pnl += act["pnl"]
 
-    total_pnl = open_pnl + realized_pnl
+    total_pnl = open_pnl + realized_pnl + maker_rewards
     win_rate = (resolved_wins / resolved_total * 100) if resolved_total > 0 else None
 
     return {
@@ -395,6 +400,7 @@ def compute_summary(enriched, parsed_activities, tz_offset_minutes=0):
         "total_pnl": total_pnl,
         "open_pnl": open_pnl,
         "realized_pnl": realized_pnl,
+        "maker_rewards": maker_rewards,
         "today_pnl": today_pnl,
         "yesterday_pnl": yesterday_pnl,
         "resolved_total": resolved_total,
@@ -432,6 +438,9 @@ def parse_activities(client, activities):
         "ACTIVITY_TYPE_POSITION_RESOLUTION": "positionResolution",
         "ACTIVITY_TYPE_TRADE": "trade",
         "ACTIVITY_TYPE_ACCOUNT_BALANCE_CHANGE": "accountBalanceChange",
+        "ACTIVITY_TYPE_TRANSFER": "transfer",
+        "ACTIVITY_TYPE_ACCOUNT_DEPOSIT": "deposit",
+        "ACTIVITY_TYPE_ACCOUNT_WITHDRAWAL": "withdrawal",
     }
 
     slug_to_title = {}
@@ -440,6 +449,12 @@ def parse_activities(client, activities):
         act_type = act.get("type", "unknown")
         detail_key = TYPE_KEY_MAP.get(act_type, "")
         detail = act.get(detail_key, {}) if detail_key else {}
+        # Fallback: if mapped key not found, try to find the detail dict in the activity
+        if not detail:
+            for k, v in act.items():
+                if k != "type" and isinstance(v, dict) and ("amount" in v or "updateTime" in v):
+                    detail = v
+                    break
 
         timestamp = detail.get("updateTime") or detail.get("timestamp") or ""
         market_slug = detail.get("marketSlug", "")
@@ -509,6 +524,24 @@ def parse_activities(client, activities):
             reason = detail.get("reason", "")
             market = reason.replace("_", " ").title() if reason else "Balance Change"
             pnl = amount
+
+        elif act_type == "ACTIVITY_TYPE_TRANSFER":
+            # Maker rewards — count as P&L income
+            amount = _safe_float(detail.get("amount"))
+            market = "Maker Reward"
+            pnl = amount
+            is_close = False
+
+        elif act_type == "ACTIVITY_TYPE_ACCOUNT_DEPOSIT":
+            # User deposits — NOT P&L, just funding
+            amount = _safe_float(detail.get("amount"))
+            market = "Deposit"
+            pnl = None  # Don't count deposits as P&L
+
+        elif act_type == "ACTIVITY_TYPE_ACCOUNT_WITHDRAWAL":
+            amount = _safe_float(detail.get("amount"))
+            market = "Withdrawal"
+            pnl = None  # Don't count withdrawals as P&L
 
         if timestamp and "T" in str(timestamp):
             timestamp = str(timestamp).replace("T", " ")[:19]
@@ -1398,7 +1431,8 @@ def api_data():
     open_positions = [p for p in enriched if not p.get("expired")]
     closed_positions = [a for a in parsed_acts
                         if a["type"] == "Position Resolution"
-                        or (a["type"] == "Trade" and a.get("_is_close") and a.get("pnl") is not None)]
+                        or (a["type"] == "Trade" and a.get("_is_close") and a.get("pnl") is not None)
+                        or (a["type"] == "Transfer" and a.get("pnl") is not None)]
 
     tz_offset = request.args.get("tz", 0, type=int)
     summary = compute_summary(enriched, parsed_acts, tz_offset_minutes=tz_offset)

@@ -661,6 +661,10 @@
                     <div class="label"><span class="card-icon">&#x1F556;</span> Yesterday's P&amp;L</div>
                     <div class="value" id="card-yesterday-pnl">--</div>
                 </div>
+                <div class="card card-pnl" id="card-maker-wrap">
+                    <div class="label"><span class="card-icon">&#x1F4B0;</span> Maker Rewards</div>
+                    <div class="value" id="card-maker">--</div>
+                </div>
                 <div class="card card-pnl" id="card-pnl-wrap">
                     <div class="label"><span class="card-icon">&#x1F4C8;</span> Total P&amp;L</div>
                     <div class="value" id="card-pnl">--</div>
@@ -822,6 +826,12 @@
         const yesterdayWrap = $('card-yesterday-wrap');
         yesterdayWrap.classList.toggle('neg', s.yesterday_pnl !== null && s.yesterday_pnl < 0);
 
+        const makerEl = $('card-maker');
+        makerEl.innerHTML = pnlAmt(s.maker_rewards || 0);
+        makerEl.className = 'value ' + pnlClass(s.maker_rewards || 0);
+        const makerWrap = $('card-maker-wrap');
+        makerWrap.classList.toggle('neg', false); // rewards are always positive
+
         const pnlEl = $('card-pnl');
         pnlEl.innerHTML = pnlAmt(s.total_pnl);
         pnlEl.className = 'value ' + pnlClass(s.total_pnl);
@@ -876,7 +886,9 @@
 
         for (const c of closed) {
             let result = '';
-            if (c.type === 'Trade') {
+            if (c.type === 'Transfer') {
+                result = '<span class="badge badge-win">Maker</span>';
+            } else if (c.type === 'Trade') {
                 result = '<span class="badge badge-sold">Sold</span>';
             } else if (c.pnl !== null && c.pnl > 0) {
                 result = '<span class="badge badge-win">W</span>';
