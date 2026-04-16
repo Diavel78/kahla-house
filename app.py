@@ -1607,6 +1607,37 @@ def api_debug_deposits():
     return jsonify({"ok": True, "count": len(balance_changes), "deposits": balance_changes})
 
 
+@app.route("/debug-deposits")
+def debug_deposits_page():
+    """Page that shows all balance changes with auth."""
+    return '''<!DOCTYPE html><html><head>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>firebase.initializeApp({apiKey:"AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",authDomain:"kahla-house.firebaseapp.com",projectId:"kahla-house"});</script>
+    </head><body style="background:#0b0e13;color:#e2e8f0;font-family:monospace;padding:20px">
+    <h2 style="color:#f59e0b;margin-bottom:16px">Balance Changes (Deposits / Maker Rewards)</h2>
+    <pre id="out">Loading...</pre>
+    <script>
+    firebase.auth().onAuthStateChanged(async u => {
+        if (!u) { document.getElementById("out").textContent = "Not logged in. Go to / first."; return; }
+        const t = await u.getIdToken();
+        const r = await fetch("/api/debug-deposits", {headers:{"Authorization":"Bearer "+t}});
+        const d = await r.json();
+        if (d.deposits) {
+            let html = "";
+            for (const dep of d.deposits) {
+                const amt = parseFloat(dep.amount || 0).toFixed(2);
+                const color = parseFloat(dep.amount) > 0 ? "#22c55e" : "#ef4444";
+                html += `<span style="color:${color}">$${amt}</span>  ${dep.reason || "NO REASON"}  ${dep.timestamp}\\n`;
+            }
+            document.getElementById("out").innerHTML = html || "No balance changes found";
+        } else {
+            document.getElementById("out").textContent = JSON.stringify(d, null, 2);
+        }
+    });
+    </script></body></html>'''
+
+
 @app.route("/debug")
 def debug_page():
     """Simple page that makes an authenticated debug-trades call."""
