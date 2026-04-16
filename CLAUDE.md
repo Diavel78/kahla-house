@@ -32,7 +32,11 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 | `GET /api/raw` | Admin | Debug: raw Polymarket SDK responses |
 | `GET/POST /api/splits-openers?sport=mlb` | Firebase | First-seen splits (Firestore, permanent per game ID) |
 | `GET /api/debug-trades` | Firebase | Debug: grouped trade details with before/after position data |
+| `GET /api/debug-deposits` | Firebase | Debug: all balance changes with types and reasons |
+| `GET /api/odds/debug-markets` | Firebase | Debug: market keys per book for a sport |
 | `/debug?slug=X` | Firebase (page) | Debug page that calls debug-trades with auth |
+| `/debug-deposits` | Firebase (page) | Debug page showing all balance changes |
+| `/odds?debug=markets` | Firebase (page) | Overlay showing market keys per book |
 
 ## Tech Stack
 
@@ -168,9 +172,10 @@ The `/props` endpoint returns a **different format** than `/odds`:
 ## Dashboard (`/dashboard`)
 
 ### Features
-- **Stats cards**: Balance, Open Positions, Portfolio Value, Today's P&L, Yesterday's P&L, Total P&L, Win Rate
+- **Stats cards**: Balance, Open Positions, Portfolio Value, Today's P&L, Yesterday's P&L, Maker Rewards, Total P&L, Win Rate
 - **Open Positions table**: Market, Pick, Qty, Entry, Current, P&L, Return %
-- **Closed Positions tab**: Resolved bets + sold trades with Result (W/L/Sold) and P&L
+- **Closed Positions tab**: Resolved bets + sold trades + maker rewards with Result (W/L/Sold/Maker) and P&L
+- **Maker Rewards**: `ACTIVITY_TYPE_TRANSFER` = maker rewards (income, counted in P&L). `ACTIVITY_TYPE_ACCOUNT_DEPOSIT` = user deposits (NOT P&L). `ACTIVITY_TYPE_ACCOUNT_WITHDRAWAL` = withdrawals (NOT P&L). Maker rewards show as a separate stat card and appear in closed positions with "Maker" badge.
 - **Bet Slip modal**: Shareable sportsbook-ticket format
 - **Auto-refresh**: 60 seconds
 
