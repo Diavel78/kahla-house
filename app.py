@@ -132,6 +132,11 @@ def odds_page():
     return resp
 
 
+@app.route("/props")
+def props_page():
+    return render_template("props.html")
+
+
 @app.route("/dashboard")
 def dashboard():
     return render_template("dashboard.html")
@@ -447,10 +452,19 @@ def parse_activities(client, activities):
         is_close = False
 
         if act_type == "ACTIVITY_TYPE_TRADE":
-            price = _safe_float(detail.get("price"))
+            sdk_price = _safe_float(detail.get("price"))
             quantity = _safe_float(detail.get("qty"))
             sdk_rpnl = _safe_float(detail.get("realizedPnl"))
+            trade_cost = _safe_float(detail.get("cost"))
             pnl = None
+
+            # SDK `price` field is the COMPLEMENT (YES price when trading NO,
+            # or vice versa). The `cost` field / qty gives the actual per-share
+            # price paid or received. Always use cost/qty.
+            if trade_cost is not None and quantity and quantity > 0:
+                price = trade_cost / quantity
+            else:
+                price = sdk_price
 
             t_before = detail.get("beforePosition") or {}
             t_after = detail.get("afterPosition") or {}
@@ -792,6 +806,184 @@ def _merge_splits(events, splits_map, splits_by_teams=None):
     return events
 
 
+PROPS_CACHE_TTL = 120  # 2 minutes — prop lines move slowly
+
+
+def _fetch_props(sport):
+    """Fetch player props for a sport (2-minute cache)."""
+    import time
+    cache_key = f"props:{sport}"
+    now = time.time()
+    cached = _owls_cache.get(cache_key)
+    if cached and (now - cached["ts"]) < PROPS_CACHE_TTL:
+        return cached["data"], True
+    try:
+        raw = _owls_get(f"/{sport}/props")
+        _owls_cache[cache_key] = {"data": raw, "ts": now}
+        return raw, False
+    except Exception as e:
+        print(f"PROPS ERROR: {e}")
+        return {}, False
+
+
+def _normalize_props(raw_props):
+    """Parse Owls Insight props response into game-grouped player prop structure.
+
+    Actual API format:
+    {
+      "data": [
+        {
+          "gameId": "mlb:Team A@Team B-20260410",
+          "sport": "mlb",
+          "homeTeam": "Team B",
+          "awayTeam": "Team A",
+          "commenceTime": "2026-04-10T01:41:00.000Z",
+          "isLive": false,
+          "books": [
+            {
+              "key": "fanduel",
+              "title": "FanDuel",
+              "props": [
+                {
+                  "playerName": "Fernando Tatis Jr.",
+                  "category": "runs",
+                  "line": 0.5,
+                  "overPrice": 210,
+                  "underPrice": null,
+                  "event_link": "https://..."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+    """
+    raw_data = raw_props.get("data", [])
+    if not isinstance(raw_data, list):
+        return []
+
+    games = []
+    for ev in raw_data:
+        eid = ev.get("gameId", "")
+        game = {
+            "event_id": str(eid),
+            "away_team": ev.get("awayTeam", ""),
+            "home_team": ev.get("homeTeam", ""),
+            "commence_time": ev.get("commenceTime", ""),
+            "is_live": ev.get("isLive", False),
+            "players": {},
+        }
+
+        for book in ev.get("books", []):
+            bk = book.get("key", "")
+            if not bk:
+                continue
+
+            for prop in book.get("props", []):
+                player_name = prop.get("playerName", "")
+                if not player_name:
+                    continue
+
+                category = prop.get("category", "")
+                line = prop.get("line")
+                over_price = prop.get("overPrice")
+                under_price = prop.get("underPrice")
+                link = prop.get("event_link", "")
+
+                if over_price is None and under_price is None:
+                    continue
+
+                if player_name not in game["players"]:
+                    game["players"][player_name] = {"props": {}}
+
+                prop_label = _prop_market_label(category)
+                prop_key = f"{category}:{line}" if line is not None else category
+
+                if prop_key not in game["players"][player_name]["props"]:
+                    game["players"][player_name]["props"][prop_key] = {
+                        "market_key": category,
+                        "label": prop_label,
+                        "point": line,
+                        "books": {},
+                    }
+
+                game["players"][player_name]["props"][prop_key]["books"][bk] = {
+                    "over": over_price,
+                    "under": under_price,
+                    "point": line,
+                    "link": link,
+                }
+
+        if game["players"]:
+            games.append(game)
+
+    return sorted(games, key=lambda g: g.get("commence_time", ""))
+
+
+def _prop_market_label(category):
+    """Convert API category to human-readable label."""
+    labels = {
+        # MLB
+        "strikeouts": "Strikeouts",
+        "hits": "Hits",
+        "home_runs": "Home Runs",
+        "rbis": "RBIs",
+        "runs": "Runs",
+        "stolen_bases": "Stolen Bases",
+        "total_bases": "Total Bases",
+        "hits_allowed": "Hits Allowed",
+        "walks": "Walks",
+        "earned_runs": "Earned Runs",
+        "pitching_outs": "Pitching Outs",
+        "pitcher_strikeouts": "Strikeouts",
+        # NBA
+        "points": "Points",
+        "rebounds": "Rebounds",
+        "assists": "Assists",
+        "threes": "3-Pointers",
+        "pts_rebs_asts": "Pts+Reb+Ast",
+        "pts_rebs": "Pts+Reb",
+        "pts_asts": "Pts+Ast",
+        "rebs_asts": "Reb+Ast",
+        "blocks": "Blocks",
+        "steals": "Steals",
+        "turnovers": "Turnovers",
+        # NHL
+        "goals": "Goals",
+        "shots_on_goal": "Shots on Goal",
+        "power_play_points": "PP Points",
+        "blocked_shots": "Blocked Shots",
+        "saves": "Saves",
+        # NFL
+        "passing_yards": "Pass Yards",
+        "rushing_yards": "Rush Yards",
+        "receiving_yards": "Rec Yards",
+        "touchdowns": "Touchdowns",
+        "pass_tds": "Pass TDs",
+        "interceptions": "Interceptions",
+        "completions": "Completions",
+        "receptions": "Receptions",
+        "rush_attempts": "Rush Attempts",
+        "tackles_assists": "Tackles+Ast",
+        # Tennis
+        "aces": "Aces",
+        "double_faults": "Double Faults",
+        "games_won": "Games Won",
+        "sets_won": "Sets Won",
+        # MMA
+        "significant_strikes": "Sig. Strikes",
+        "takedowns": "Takedowns",
+    }
+    if category in labels:
+        return labels[category]
+    # Also check with player_ prefix stripped (in case API changes)
+    stripped = category.replace("player_", "")
+    if stripped in labels:
+        return labels[stripped]
+    return category.replace("_", " ").title()
+
+
 # ---------------------------------------------------------------------------
 # Openers API (Firestore — replaces localStorage)
 # ---------------------------------------------------------------------------
@@ -912,6 +1104,112 @@ def _cleanup_old_openers(db):
 
 
 # ---------------------------------------------------------------------------
+# Splits Openers API (Firestore — same pattern as line openers)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/splits-openers", methods=["GET"])
+@firebase_auth_required
+def api_splits_openers_get():
+    """Load first-seen splits (handle %) for a sport from Firestore."""
+    sport = request.args.get("sport", "mlb")
+    try:
+        db = get_db()
+        doc_ref = db.collection("openers").document(f"splits:{sport}")
+        doc = doc_ref.get()
+        if doc.exists:
+            events = doc.to_dict().get("events", {})
+            return jsonify({"ok": True, "events": events})
+        return jsonify({"ok": True, "events": {}})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/splits-openers", methods=["POST"])
+@firebase_auth_required
+def api_splits_openers_save():
+    """Store first-seen splits per game to Firestore (permanent, never override).
+    Body: { "sport": "mlb", "events": { "event_id": { "ml": {...}, "spread": {...}, "total": {...} } } }
+    """
+    body = request.get_json(force=True)
+    sport = body.get("sport", "mlb")
+    new_events = body.get("events", {})
+
+    if not new_events:
+        return jsonify({"ok": True, "saved": 0})
+
+    try:
+        db = get_db()
+        doc_id = f"splits:{sport}"
+        doc_ref = db.collection("openers").document(doc_id)
+        doc = doc_ref.get()
+
+        if doc.exists:
+            existing = doc.to_dict().get("events", {})
+            added = 0
+            for eid, splits_data in new_events.items():
+                if eid not in existing:
+                    existing[eid] = splits_data
+                    added += 1
+                # Never override existing splits openers
+            doc_ref.update({"events": existing})
+        else:
+            doc_ref.set({
+                "sport": sport,
+                "events": new_events,
+                "createdAt": firestore.SERVER_TIMESTAMP,
+            })
+            added = len(new_events)
+
+        return jsonify({"ok": True, "saved": added})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# API routes — User Preferences
+# ---------------------------------------------------------------------------
+
+@app.route("/api/preferences", methods=["GET"])
+@firebase_auth_required
+def api_preferences_get():
+    """Return user preferences from Firestore user doc."""
+    prefs = g.user_data.get("preferences", {})
+    return jsonify({"ok": True, "preferences": prefs})
+
+
+@app.route("/api/preferences", methods=["POST"])
+@firebase_auth_required
+def api_preferences_save():
+    """Save user preferences to Firestore user doc.
+    Body: { "preferences": { "odds_books": [...], "odds_book_order": [...], "odds_sport": "mlb" } }
+    Merges with existing preferences.
+    """
+    try:
+        body = request.get_json(force=True)
+        new_prefs = body.get("preferences", {})
+        if not isinstance(new_prefs, dict):
+            return jsonify({"ok": False, "error": "preferences must be an object"}), 400
+
+        # Whitelist allowed preference keys
+        ALLOWED_KEYS = {"odds_books", "odds_book_order", "odds_sport"}
+        filtered = {k: v for k, v in new_prefs.items() if k in ALLOWED_KEYS}
+
+        if not filtered:
+            return jsonify({"ok": False, "error": "No valid preference keys"}), 400
+
+        db = get_db()
+        doc_ref = db.collection("users").document(g.uid)
+        # Merge into existing preferences
+        existing_prefs = g.user_data.get("preferences", {})
+        existing_prefs.update(filtered)
+        doc_ref.update({"preferences": existing_prefs})
+
+        return jsonify({"ok": True, "saved": list(filtered.keys())})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
 # API routes — Odds
 # ---------------------------------------------------------------------------
 
@@ -941,19 +1239,8 @@ def api_odds():
     except Exception as e:
         errors.append(f"{sport}: {e}")
 
-    splits_ts = None
     try:
         raw_splits, _ = _fetch_splits(sport)
-        # Track when splits data actually changed (not just fetched)
-        splits_change_key = f"splits_changed:{sport}"
-        import json, hashlib
-        splits_hash = hashlib.md5(json.dumps(raw_splits.get("data", []), sort_keys=True).encode()).hexdigest()
-        prev = _owls_cache.get(splits_change_key)
-        if not prev or prev.get("hash") != splits_hash:
-            _owls_cache[splits_change_key] = {"hash": splits_hash, "ts": time.time()}
-        splits_changed = _owls_cache.get(splits_change_key)
-        if splits_changed:
-            splits_ts = datetime.fromtimestamp(splits_changed["ts"], tz=timezone.utc).isoformat()
         splits_map, splits_by_teams = _normalize_splits(raw_splits)
         events = _merge_splits(events, splits_map, splits_by_teams)
     except Exception as e:
@@ -980,7 +1267,6 @@ def api_odds():
         "books": sorted(active_books, key=lambda b: (0 if b == "circa" else 1 if b == "pinnacle" else 2, b)),
         "leagues": sorted(leagues),
         "meta_message": meta_message,
-        "splits_timestamp": splits_ts,
         "errors": errors,
     })
 
@@ -1197,6 +1483,47 @@ def api_splits_raw():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/props")
+@firebase_auth_required
+def api_props():
+    """Fetch player props from Owls Insight, normalized by game and player."""
+    if not OWLS_INSIGHT_API_KEY:
+        return jsonify({"ok": False, "error": "OWLS_INSIGHT_API_KEY not configured"}), 500
+
+    sport = request.args.get("sport", "mlb")
+    errors = []
+    games = []
+    from_cache = False
+
+    try:
+        raw, from_cache = _fetch_props(sport)
+        games = _normalize_props(raw)
+    except Exception as e:
+        errors.append(f"props: {e}")
+
+    return jsonify({
+        "ok": True,
+        "cached": from_cache,
+        "sport": sport,
+        "games": games,
+        "errors": errors,
+    })
+
+
+@app.route("/api/props/raw")
+@admin_required
+def api_props_raw():
+    """Debug: raw props response from Owls Insight."""
+    if not OWLS_INSIGHT_API_KEY:
+        return jsonify({"error": "no key"}), 500
+    sport = request.args.get("sport", "mlb")
+    try:
+        raw = _owls_get(f"/{sport}/props")
+        return jsonify(raw)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/scores/raw")
 @admin_required
 def api_scores_raw():
@@ -1280,8 +1607,29 @@ def api_debug_deposits():
     return jsonify({"ok": True, "count": len(balance_changes), "deposits": balance_changes})
 
 
+@app.route("/debug")
+def debug_page():
+    """Simple page that makes an authenticated debug-trades call."""
+    slug = request.args.get("slug", "")
+    return f'''<!DOCTYPE html><html><head>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>firebase.initializeApp({{apiKey:"AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",authDomain:"kahla-house.firebaseapp.com",projectId:"kahla-house"}});</script>
+    </head><body style="background:#0b0e13;color:#e2e8f0;font-family:monospace;padding:20px">
+    <pre id="out">Loading...</pre>
+    <script>
+    firebase.auth().onAuthStateChanged(async u => {{
+        if (!u) {{ document.getElementById("out").textContent = "Not logged in. Go to / first."; return; }}
+        const t = await u.getIdToken();
+        const r = await fetch("/api/debug-trades?slug={slug}", {{headers:{{"Authorization":"Bearer "+t}}}});
+        const d = await r.json();
+        document.getElementById("out").textContent = JSON.stringify(d, null, 2);
+    }});
+    </script></body></html>'''
+
+
 @app.route("/api/debug-trades")
-@admin_required
+@firebase_auth_required
 def api_debug_trades():
     try:
         client = get_client()
@@ -1300,6 +1648,8 @@ def api_debug_trades():
         detail = act.get("trade", {})
         slug = detail.get("marketSlug", "unknown")
         rpnl = detail.get("realizedPnl")
+        t_before = detail.get("beforePosition") or {}
+        t_after = detail.get("afterPosition") or {}
         entry = {
             "timestamp": detail.get("updateTime") or detail.get("timestamp"),
             "price": detail.get("price"),
@@ -1307,6 +1657,10 @@ def api_debug_trades():
             "cost": detail.get("cost"),
             "realizedPnl": rpnl,
             "is_sell": rpnl is not None,
+            "before_netPosition": t_before.get("netPosition"),
+            "before_cost": t_before.get("cost"),
+            "after_netPosition": t_after.get("netPosition"),
+            "after_cost": t_after.get("cost"),
         }
         if rpnl is not None:
             entry["costBasis"] = detail.get("costBasis")

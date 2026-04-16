@@ -451,7 +451,7 @@
         .game.has-bet .ghdr { border-bottom-color: rgba(168,85,247,0.25); }
 
         /* Unified odds table */
-        .odds-table { width: 100%; border-collapse: collapse; min-width: 700px; }
+        .odds-table { width: 100%; border-collapse: collapse; min-width: 700px; table-layout: fixed; }
         .odds-table th {
             font-family: 'JetBrains Mono', monospace;
             font-weight: 700;
@@ -692,12 +692,12 @@
         }
 
         @media (max-width: 768px) {
-            .top-bar { padding: 0 12px; height: auto; min-height: 50px; flex-wrap: wrap; gap: 4px; padding-top: 8px; padding-bottom: 8px; }
+            .top-bar { padding: 8px 12px; height: auto; flex-wrap: wrap; gap: 6px; }
             .top-bar-title { display: none; }
-            .top-bar-left { flex: 1; min-width: 0; }
-            .top-bar-right { flex-shrink: 0; }
-            .nav-links { margin-left: 8px; }
-            .nav-link { font-size: 12px; padding: 5px 10px; }
+            .top-bar-left { width: 100%; }
+            .top-bar-right { width: 100%; justify-content: flex-end; }
+            .nav-links { margin-left: 6px; gap: 2px; }
+            .nav-link { font-size: 11px; padding: 4px 8px; }
             .status { font-size: 10px; }
             .logout-btn { padding: 5px 10px; font-size: 11px; }
             .toolbar { padding: 10px 12px; }
@@ -731,6 +731,7 @@
                 <div class="nav-links">
                     <a href="/" class="nav-link">Home</a>
                     <a href="/odds" class="nav-link active">Odds</a>
+                    <a href="/props" class="nav-link">Props</a>
                     <a href="/dashboard" class="nav-link">Dashboard</a>
                 </div>
             </div>
@@ -802,11 +803,11 @@
     const BL = {pinnacle:'PIN',fanduel:'FD',draftkings:'DK',betmgm:'MGM',caesars:'CZR',bet365:'365',polymarket:'POLY',kalshi:'KAL',novig:'NOV','1xbet':'1X',betonline:'BOL',circa:'CIR',south_point:'SP',westgate:'WG',wynn:'WYN',stations:'STN',hardrock:'HR'};
     const BL_FULL = {pinnacle:'Pinnacle',fanduel:'FanDuel',draftkings:'DraftKings',betmgm:'BetMGM',caesars:'Caesars',bet365:'Bet365',polymarket:'Polymarket',kalshi:'Kalshi',novig:'Novig','1xbet':'1xBet',betonline:'BetOnline',circa:'Circa',south_point:'South Point',westgate:'Westgate',wynn:'Wynn',stations:'Stations',hardrock:'Hard Rock'};
 
-    let activeSport = localStorage.getItem('odds_sport') || 'mlb';
+    let activeSport = 'mlb';  // will be overridden by Firestore prefs
     let oddsData = {events:[], books:[]};
     let currentOpeners = {};
     const DEFAULT_BOOKS = ['fanduel','draftkings','betmgm','pinnacle','caesars'];
-    let enabledBooks = new Set(JSON.parse(localStorage.getItem('odds_books') || 'null') || DEFAULT_BOOKS);
+    let enabledBooks = new Set(DEFAULT_BOOKS);  // will be overridden by Firestore prefs
 
     const LEAGUE_FILTER = {
         mlb: ['MLB'],
@@ -895,6 +896,62 @@
             saveOpenersAPI(sport, openers);
         }
         return openers;
+    }
+
+    // --- Splits openers (Firestore-backed, same pattern as line openers) ---
+    let currentSplitsOpeners = {};
+
+    async function loadSplitsOpeners(sport) {
+        try {
+            const resp = await authFetch(`/api/splits-openers?sport=${sport}`);
+            if (!resp) return {};
+            const data = await resp.json();
+            if (data.ok) return data.events || {};
+            return {};
+        } catch { return {}; }
+    }
+
+    async function saveSplitsOpenersAPI(sport, openers) {
+        try {
+            await authFetch('/api/splits-openers', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sport, events: openers })
+            });
+        } catch(e) { console.warn('saveSplitsOpeners:', e); }
+    }
+
+    function captureSplitsOpeners(events, sport) {
+        const openers = currentSplitsOpeners;
+        let changed = false;
+        for (const ev of events) {
+            const eid = ev.numeric_id || ev.id;
+            if (!eid || openers[eid]) continue;
+            const circa = (ev.splits || {}).circa;
+            if (!circa) continue;
+
+            const entry = {};
+            const ml = circa.moneyline;
+            if (ml && ml.away_handle_pct != null) {
+                entry.ml = { away_handle: ml.away_handle_pct, away_bets: ml.away_bets_pct };
+            }
+            const spr = circa.spread;
+            if (spr && spr.away_handle_pct != null) {
+                entry.spread = { away_handle: spr.away_handle_pct, away_bets: spr.away_bets_pct };
+            }
+            const tot = circa.total;
+            if (tot && tot.over_handle_pct != null) {
+                entry.total = { over_handle: tot.over_handle_pct, over_bets: tot.over_bets_pct };
+            }
+            if (Object.keys(entry).length > 0) {
+                openers[eid] = entry;
+                changed = true;
+            }
+        }
+        if (changed) {
+            currentSplitsOpeners = openers;
+            saveSplitsOpenersAPI(sport, openers);
+        }
     }
 
     function computeMovement(ev, openers) {
@@ -1043,18 +1100,37 @@
     }
 
     // Book order: user-defined order, persisted
-    let bookOrder = JSON.parse(localStorage.getItem('odds_book_order') || 'null') || [];
+    let bookOrder = [];
 
+    // Debounced save to Firestore
+    let _prefsSaveTimer = null;
     function saveBookPrefs(){
-        localStorage.setItem('odds_books', JSON.stringify([...enabledBooks]));
-        localStorage.setItem('odds_book_order', JSON.stringify(bookOrder));
+        clearTimeout(_prefsSaveTimer);
+        _prefsSaveTimer = setTimeout(() => {
+            authFetch('/api/preferences', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({preferences: {
+                    odds_books: [...enabledBooks],
+                    odds_book_order: bookOrder,
+                }})
+            }).catch(e => console.error('Failed to save book prefs:', e));
+        }, 500);
     }
 
+    // All known book keys (superset — user order + API-returned + enabled)
+    const ALL_KNOWN_BOOKS = ['pinnacle','caesars','draftkings','fanduel','betmgm','novig','polymarket','circa','hardrock','south_point','stations','westgate','wynn','bet365','kalshi','1xbet','betonline'];
+
     function getOrderedBooks(){
-        const available = oddsData.books||[];
+        // Build master list: user-ordered books first, then any remaining known books
         const ordered = [];
-        for(const b of bookOrder) { if(available.includes(b)) ordered.push(b); }
-        for(const b of available) { if(!ordered.includes(b)) ordered.push(b); }
+        const seen = new Set();
+        // Respect user's custom order
+        for(const b of bookOrder) { if(!seen.has(b)) { ordered.push(b); seen.add(b); } }
+        // Add any known books not yet in the order
+        for(const b of ALL_KNOWN_BOOKS) { if(!seen.has(b)) { ordered.push(b); seen.add(b); } }
+        // Add any API-returned books we somehow don't know about
+        for(const b of (oddsData.books||[])) { if(!seen.has(b)) { ordered.push(b); seen.add(b); } }
         bookOrder = ordered;
         return ordered;
     }
@@ -1135,7 +1211,16 @@
         return up.substring(0,3);
     }
 
-    function renderSplitsRow(circa, dk, label, mktKey, awayName, homeName) {
+    function fmtSplitDiff(current, opener) {
+        if (opener == null || current == null) return '';
+        const diff = current - opener;
+        if (diff === 0) return '';
+        const color = diff > 0 ? 'var(--green)' : 'var(--red)';
+        const sign = diff > 0 ? '+' : '';
+        return `<span style="font-size:10px;font-weight:600;color:${color};margin-left:2px">(${sign}${diff})</span>`;
+    }
+
+    function renderSplitsRow(circa, dk, label, mktKey, awayName, homeName, splitsOpener) {
         const src = circa?.[mktKey];
         if (!src) return '';
 
@@ -1149,6 +1234,20 @@
         }
         if (awayH == null && awayT == null) return '';
 
+        // Get opener values for this market
+        const openerMktMap = { 'moneyline': 'ml', 'spread': 'spread', 'total': 'total' };
+        const opMkt = splitsOpener?.[openerMktMap[mktKey]];
+        let opH = null, opT = null;
+        if (opMkt) {
+            if (mktKey === 'total') {
+                opH = opMkt.over_handle;
+                opT = opMkt.over_bets;
+            } else {
+                opH = opMkt.away_handle;
+                opT = opMkt.away_bets;
+            }
+        }
+
         const homeH = awayH != null ? (100 - awayH) : null;
         const homeT = awayT != null ? (100 - awayT) : null;
         const awayDiv = (awayH != null && awayT != null) ? Math.abs(awayH - awayT) : 0;
@@ -1161,9 +1260,9 @@
         h += `<span class="sr-mkt">${label}</span>`;
         h += `<span class="sr-team">${esc(truncTeam(awayName))}</span>`;
         h += `<div class="sr-bar-wrap"><div class="sr-bar-fill" style="width:${awayH||0}%"></div></div>`;
-        h += `<span class="sr-handle">${awayH != null ? awayH + '%' : '--'}</span>`;
+        h += `<span class="sr-handle">${awayH != null ? awayH + '%' : '--'}${fmtSplitDiff(awayH, opH)}</span>`;
         h += `<span class="sr-sep">/</span>`;
-        h += `<span class="sr-bets">${awayT != null ? awayT + '%' : '--'}</span>`;
+        h += `<span class="sr-bets">${awayT != null ? awayT + '%' : '--'}${fmtSplitDiff(awayT, opT)}</span>`;
         if (isSharp && sharpSide) {
             h += `<span class="sr-tag">SHARP ${esc(truncTeam(sharpSide))}</span>`;
         }
@@ -1378,7 +1477,12 @@
             h+=`</div>`;
 
             // === UNIFIED ODDS TABLE ===
-            h+=`<div style="overflow-x:auto"><table class="odds-table"><thead>`;
+            h+=`<div style="overflow-x:auto"><table class="odds-table">`;
+            // Colgroup for fixed column widths
+            h+=`<colgroup><col style="width:160px">`;  // team name
+            h+=`<col style="width:70px"><col style="width:70px"><col style="width:70px">`;  // best ML/SPR/TOT
+            for(let _b=0;_b<books.length;_b++) h+=`<col style="width:62px"><col style="width:62px"><col style="width:62px">`;
+            h+=`</colgroup><thead>`;
 
             // First header row: Best Line label + best ML/SPR/TOT + book names
             h+=`<tr>`;
@@ -1467,14 +1571,14 @@
                 }
 
                 if (circa || dk) {
-                    const splitsTs = oddsData.splits_timestamp;
-                    const splitsTsStr = splitsTs ? new Date(splitsTs).toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit'}) : '';
+                    const eid = ev.numeric_id || ev.id;
+                    const splitsOp = currentSplitsOpeners[eid] || null;
                     h += `<div class="splits-bar">`;
-                    h += `<div class="splits-header">Splits${splitsTsStr ? `<span class="splits-ts">${esc(splitsTsStr)}</span>` : ''}</div>`;
+                    h += `<div class="splits-header">Splits</div>`;
                     h += `<div class="splits-grid">`;
-                    h += renderSplitsRow(circa, dk, 'ML', 'moneyline', away, home);
-                    h += renderSplitsRow(circa, dk, 'SPR', 'spread', away, home);
-                    h += renderSplitsRow(circa, dk, 'TOT', 'total', 'Over', 'Under');
+                    h += renderSplitsRow(circa, dk, 'ML', 'moneyline', away, home, splitsOp);
+                    h += renderSplitsRow(circa, dk, 'SPR', 'spread', away, home, splitsOp);
+                    h += renderSplitsRow(circa, dk, 'TOT', 'total', 'Over', 'Under', splitsOp);
                     h += `</div></div>`;
                 }
                 h += `</div>`;
@@ -1531,14 +1635,11 @@
                 }, 600);
             }
             firstLoad=false;
-            const avail = new Set(data.books||[]);
-            const overlap = [...enabledBooks].filter(b=>avail.has(b));
-            if(!overlap.length && avail.size){
-                enabledBooks = new Set(avail);
-                saveBookPrefs();
-            }
+            // Don't overwrite user's book selection when switching sports.
+            // Just track what books are available for rendering — enabledBooks stays as user chose.
             // Capture opening lines for today
             currentOpeners = await captureOpeners(data.events||[], activeSport);
+            captureSplitsOpeners(data.events||[], activeSport);
             const n=(data.events||[]).length;
             const t=new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit'});
             status.textContent=`${n} games \u00b7 ${t}`;
@@ -1657,24 +1758,51 @@
     window.setSport = function(s){
         activeSport=s;
         firstLoad=true;
-        localStorage.setItem('odds_sport',s);
+        authFetch('/api/preferences', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({preferences: {odds_sport: s}})
+        }).catch(e => console.error('Failed to save sport pref:', e));
         renderSportBar();
-        // Load openers from API for new sport
-        loadOpeners(s).then(op => {
+        // Load openers + splits openers from API for new sport
+        Promise.all([loadOpeners(s), loadSplitsOpeners(s)]).then(([op, splitsOp]) => {
             currentOpeners = op;
+            currentSplitsOpeners = splitsOp;
             loadOdds(true);
         });
     };
 
-    // Initial load: fetch openers from API first, then load odds
-    renderSportBar();
-    loadMyBets();
-    loadOpeners(activeSport).then(op => {
+    // Load user preferences from Firestore, then start the app
+    async function loadAndStart() {
+        try {
+            const resp = await authFetch('/api/preferences');
+            if (resp) {
+                const data = await resp.json();
+                if (data.ok && data.preferences) {
+                    const p = data.preferences;
+                    if (p.odds_sport) activeSport = p.odds_sport;
+                    if (Array.isArray(p.odds_books) && p.odds_books.length) enabledBooks = new Set(p.odds_books);
+                    if (Array.isArray(p.odds_book_order)) bookOrder = p.odds_book_order;
+                }
+            }
+        } catch(e) {
+            console.error('Failed to load preferences:', e);
+        }
+
+        renderSportBar();
+        loadMyBets();
+        const [op, splitsOp] = await Promise.all([
+            loadOpeners(activeSport),
+            loadSplitsOpeners(activeSport),
+        ]);
         currentOpeners = op;
-        loadOdds().then(() => prefetchOpeners());
-    });
-    setInterval(loadOdds, 15000);  // 15s refresh — less flashing, still fresh
-    setInterval(loadMyBets, 60000);
+        currentSplitsOpeners = splitsOp;
+        await loadOdds();
+        prefetchOpeners();
+        setInterval(loadOdds, 15000);
+        setInterval(loadMyBets, 60000);
+    }
+    loadAndStart();
 
     // Debug: check ML market keys — call from console or add ?debug=markets to URL
     window.debugMarkets = async function() {
