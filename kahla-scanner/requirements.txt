@@ -1,0 +1,10 @@
+httpx>=0.27
+playwright>=1.45
+apscheduler>=3.10
+supabase>=2.7
+python-dotenv>=1.0
+python-telegram-bot>=21.0
+polymarket-us>=0.1.0
+pydantic>=2.7
+tenacity>=8.2
+rapidfuzz>=3.9
