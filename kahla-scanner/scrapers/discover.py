@@ -144,21 +144,20 @@ def fetch_espn_window(sport: str, days_ahead: int = 3) -> list[ESPNGame]:
 # ---------------------------------------------------------------------------
 
 def fetch_gamma_events(
-    sport: str, days_ahead: int = 3, limit: int = 2000
+    sport: str, days_ahead: int = 3, limit: int = 1500
 ) -> list[dict[str, Any]]:
-    """Fetch per-GAME events from gamma.
+    """Fetch per-GAME markets from gamma.
 
-    Gamma's /events?tag_slug=<sport> is polluted with season-long futures
-    (MVP, Champion, CBA). Those resolve months out; individual game markets
-    resolve within hours. So we hit /markets with the tag + endDate <=
-    now + days_ahead, then group the results by eventSlug into synthetic
-    event dicts.
+    Polymarket's sport tag_slugs (mlb/nba/nhl) are season-only — they hold
+    MVP, Champion, CBA, etc. Per-game markets aren't tagged with them.
+
+    Approach: query /markets with NO tag_slug, just `end_date_max` to
+    isolate short-horizon markets. Anything resolving in the next 48h is
+    almost certainly a game (politics/crypto markets have longer horizons).
+    Tag-agnostic results then pass through ESPN cross-reference — if a
+    market's question doesn't match an ESPN game in our window, it's not
+    a sport market we care about and gets silently dropped.
     """
-    tag = GAMMA_TAG.get(sport)
-    if not tag:
-        log.warning("no gamma tag for %s", sport)
-        return []
-
     now = datetime.now(timezone.utc)
     end_max = now + timedelta(days=days_ahead + 1)
     end_max_iso = end_max.isoformat()
@@ -169,7 +168,6 @@ def fetch_gamma_events(
     with _http() as h:
         while offset < limit:
             params = {
-                "tag_slug":      tag,
                 "active":        "true",
                 "closed":        "false",
                 "archived":      "false",
@@ -177,7 +175,6 @@ def fetch_gamma_events(
                 "ascending":     "true",
                 "limit":         page_size,
                 "offset":        offset,
-                # Server-side end-date filter; harmless if gamma ignores it.
                 "end_date_max":  end_max_iso,
                 "endDateMax":    end_max_iso,
             }
@@ -197,7 +194,7 @@ def fetch_gamma_events(
                 break
             offset += page_size
 
-    log.info("gamma %s: fetched %d raw markets", sport, len(markets))
+    log.info("gamma %s: fetched %d raw markets (no tag filter)", sport, len(markets))
 
     # Client-side filter by endDate (server filter may be ignored depending
     # on gamma version). Keep markets ending between now-6h and now+days_ahead.
