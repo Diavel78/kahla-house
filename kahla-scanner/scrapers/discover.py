@@ -196,25 +196,47 @@ def fetch_gamma_events(
 
     log.info("gamma %s: fetched %d raw markets (no tag filter)", sport, len(markets))
 
-    # Client-side filter by endDate (server filter may be ignored depending
-    # on gamma version). Keep markets ending between now-6h and now+days_ahead.
+    # ALWAYS log the first raw market's keys + values so we can see what
+    # gamma actually returns, even when everything gets filtered out.
+    if markets:
+        first = markets[0]
+        # Show all non-trivial fields, trimmed for readability.
+        preview: dict[str, Any] = {}
+        for k, v in first.items():
+            if v is None or v == "" or v == [] or v == {}:
+                continue
+            if isinstance(v, str) and len(v) > 120:
+                preview[k] = v[:120] + "..."
+            elif isinstance(v, list) and len(v) > 4:
+                preview[k] = f"[len={len(v)}] " + str(v[:3])
+            else:
+                preview[k] = v
+        log.info("gamma %s: first raw market keys -> %s", sport, preview)
+
+    # Client-side filter. Try multiple candidate date fields — gamma's
+    # `endDate` might be a long resolution window while `gameStartTime`
+    # or `startDate` is the actual game time.
     games: list[dict[str, Any]] = []
     for m in markets:
-        ed = _parse_ts(m.get("endDate") or m.get("end_date"))
-        if not ed:
+        candidates = [
+            m.get("gameStartTime"),
+            m.get("startDate"),
+            m.get("start_date"),
+            m.get("endDate"),
+            m.get("end_date"),
+        ]
+        found: datetime | None = None
+        for c in candidates:
+            dt = _parse_ts(c)
+            if dt and now - timedelta(hours=6) < dt < end_max:
+                found = dt
+                break
+        if not found:
             continue
-        if ed < now - timedelta(hours=6):
-            continue
-        if ed > end_max:
-            continue
+        # Stash the chosen start into the market so downstream code sees it.
+        m.setdefault("_chosen_start", found.isoformat())
         games.append(m)
     log.info("gamma %s: %d markets in date window", sport, len(games))
-
-    if games:
-        sample_keys = {k: v for k, v in games[0].items()
-                       if k in ("id", "slug", "question", "startDate", "endDate",
-                                "eventSlug", "groupItemTitle", "outcomes")}
-        log.info("gamma %s: sample market -> %s", sport, sample_keys)
 
     # Group by eventSlug into synthetic events the rest of discover_sport
     # already knows how to consume (each event has a 'markets' list and a
