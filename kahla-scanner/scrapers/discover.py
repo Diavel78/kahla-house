@@ -461,29 +461,42 @@ def _abbrev(team: str) -> str | None:
 
 
 def _candidate_slugs(sport: str, ev: ESPNGame) -> list[str]:
-    """Plausible Polymarket slug patterns for a given ESPN game."""
+    """Plausible Polymarket slug patterns for a given ESPN game.
+
+    Pattern evidence from a real gamma market returned 2026-04-17:
+        'rus-soc-kss-2026-04-21-spread-away-2pt5'
+    ⇒ format is <league>-<abbrev>-<abbrev>-<yyyy-mm-dd>-<market_type>
+      and 'kss' was the abbrev for 'Krylia Sovetov Samara' (one team only
+      shown in that slug because it's a spread market for the away side).
+
+    For moneyline (binary) markets on games, the observed pattern is more
+    likely <league>-<away>-<home>-<yyyy-mm-dd>-ml or similar.
+    """
     date = ev.start.strftime("%Y-%m-%d")
-    date_compact = ev.start.strftime("%B-%-d").lower()  # e.g. april-17
     home_ab = _abbrev(ev.home)
     away_ab = _abbrev(ev.away)
     home_norm = _norm(ev.home).replace(" ", "-")
     away_norm = _norm(ev.away).replace(" ", "-")
-    slug_sport = sport.lower()
+    league = sport.lower()
 
     candidates: list[str] = []
     if home_ab and away_ab:
+        # Patterns matching the observed gamma format
         candidates += [
-            f"{slug_sport}-{away_ab}-{home_ab}-{date}",
-            f"{slug_sport}-{home_ab}-{away_ab}-{date}",
-            f"{away_ab}-vs-{home_ab}-{date}",
-            f"{home_ab}-vs-{away_ab}-{date}",
+            f"{league}-{away_ab}-{home_ab}-{date}-ml",
+            f"{league}-{away_ab}-{home_ab}-{date}-moneyline",
+            f"{league}-{away_ab}-{home_ab}-{date}-winner",
+            f"{league}-{away_ab}-{home_ab}-{date}",
+            f"{league}-{home_ab}-{away_ab}-{date}-ml",
+            f"{league}-{home_ab}-{away_ab}-{date}",
         ]
+    # Full-name variants (older slug style)
     candidates += [
         f"will-the-{home_norm}-beat-the-{away_norm}",
         f"will-the-{away_norm}-beat-the-{home_norm}",
         f"{away_norm}-vs-{home_norm}-{date}",
         f"{home_norm}-vs-{away_norm}-{date}",
-        f"{slug_sport}-{away_norm}-at-{home_norm}-{date_compact}",
+        f"{league}-{away_norm}-at-{home_norm}-{date}",
     ]
     # Dedupe preserving order
     seen: set[str] = set()
