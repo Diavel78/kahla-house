@@ -190,24 +190,17 @@ def fetch_gamma_events(
 
     log.info("gamma %s: fetched %d raw events", sport, len(events))
 
-    # Client-side filter: event start within [now-2h, now+days_ahead]
-    filtered: list[dict[str, Any]] = []
-    for ev in events:
-        start = _parse_ts(ev.get("startDate") or ev.get("start_date"))
-        if not start:
-            # Fall back to first child market's start
-            markets = ev.get("markets") or []
-            if markets:
-                start = _parse_ts(markets[0].get("startDate") or markets[0].get("start_date"))
-        if not start:
-            continue
-        if start < now - timedelta(hours=2):
-            continue
-        if start > window_end:
-            continue
-        filtered.append(ev)
-    log.info("gamma %s: %d events after date filter", sport, len(filtered))
-    return filtered
+    # Don't date-filter gamma events here — their startDate field is sometimes
+    # the parent-container creation date rather than the game start, and
+    # we'd throw away every single game. ESPN cross-ref in the caller filters
+    # these down to only the games actually happening in our window.
+    # Log one sample event so we can see the shape in the workflow output.
+    if events:
+        sample = {k: v for k, v in events[0].items()
+                  if k in ("id", "title", "slug", "startDate", "endDate",
+                           "category", "seriesSlug")}
+        log.info("gamma %s: sample event keys -> %s", sport, sample)
+    return events
 
 
 # ---------------------------------------------------------------------------

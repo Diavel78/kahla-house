@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-import httpx
+from curl_cffi import requests as cffi_requests  # chrome-impersonated TLS
 
 from config import config
 from signals import matcher
@@ -77,19 +77,17 @@ def _classify_market_type(mtype: str | None, mname: str | None) -> str | None:
 # HTTP
 # ---------------------------------------------------------------------------
 
-def _http() -> httpx.Client:
-    return httpx.Client(
-        headers={
-            "User-Agent": config.fd_user_agent,
-            "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": f"https://sportsbook.fanduel.com/",
-            "Origin":  f"https://sportsbook.fanduel.com",
-            "X-Px-Context": "",
-        },
-        timeout=15.0,
-        follow_redirects=True,
-    )
+def _session() -> cffi_requests.Session:
+    """curl_cffi session w/ Chrome-impersonated TLS — FD also JA3-blocks httpx."""
+    s = cffi_requests.Session(impersonate="chrome124")
+    s.headers.update({
+        "User-Agent":      config.fd_user_agent,
+        "Accept":          "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer":         "https://sportsbook.fanduel.com/",
+        "Origin":          "https://sportsbook.fanduel.com",
+    })
+    return s
 
 
 def fetch_sport(sport: str) -> dict[str, Any] | None:
@@ -103,9 +101,10 @@ def fetch_sport(sport: str) -> dict[str, Any] | None:
         "pageType": "SPORT",
         "_ak":      "FhMFpcPWXMeyZxOx",
     }
-    with _http() as http:
+    s = _session()
+    try:
         try:
-            r = http.get(BASE, params=params)
+            r = s.get(BASE, params=params, timeout=30)
             if r.status_code != 200:
                 log.warning("FD %s -> %s %s", sport, r.status_code, r.text[:200])
                 return None
@@ -113,6 +112,8 @@ def fetch_sport(sport: str) -> dict[str, Any] | None:
         except Exception as e:
             log.warning("FD %s exception: %s", sport, e)
             return None
+    finally:
+        s.close()
 
 
 # ---------------------------------------------------------------------------

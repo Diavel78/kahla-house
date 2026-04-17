@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable
 
-import httpx
+from curl_cffi import requests as cffi_requests  # chrome-impersonated TLS
 
 from config import config
 from signals import matcher
@@ -69,17 +69,22 @@ TOTAL_LABELS   = {"total", "total points", "totals", "over/under", "total runs",
 # HTTP
 # ---------------------------------------------------------------------------
 
-def _http() -> httpx.Client:
-    return httpx.Client(
-        headers={
-            "User-Agent": config.dk_user_agent,
-            "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://sportsbook.draftkings.com/",
-        },
-        timeout=15.0,
-        follow_redirects=True,
-    )
+def _session() -> cffi_requests.Session:
+    """curl_cffi session with Chrome-impersonated TLS fingerprint.
+
+    Plain httpx gets 403'd by DK's WAF because its JA3 fingerprint is
+    obviously non-browser. curl_cffi performs a real Chrome handshake so
+    our traffic looks indistinguishable from the sportsbook frontend.
+    """
+    s = cffi_requests.Session(impersonate="chrome124")
+    s.headers.update({
+        "User-Agent":      config.dk_user_agent,
+        "Accept":          "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer":         "https://sportsbook.draftkings.com/",
+        "Origin":          "https://sportsbook.draftkings.com",
+    })
+    return s
 
 
 def fetch_group(sport: str) -> tuple[str, dict[str, Any]] | None:
@@ -88,18 +93,21 @@ def fetch_group(sport: str) -> tuple[str, dict[str, Any]] | None:
     if not gid:
         log.warning("no DK event group for sport %s", sport)
         return None
-    with _http() as http:
+    s = _session()
+    try:
         for shape, url in [
             ("sportscontent", URL_SPORTSCONTENT.format(gid=gid)),
             ("legacy",        URL_LEGACY.format(gid=gid)),
         ]:
             try:
-                r = http.get(url)
+                r = s.get(url, timeout=30)
                 if r.status_code == 200:
                     return shape, r.json()
                 log.warning("DK %s %s -> %s", sport, shape, r.status_code)
             except Exception as e:
                 log.warning("DK %s %s exception: %s", sport, shape, e)
+    finally:
+        s.close()
     return None
 
 
