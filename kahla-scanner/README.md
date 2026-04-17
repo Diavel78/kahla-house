@@ -19,7 +19,7 @@ Scaffold only. Milestones:
 | M2 | DK scraper + event matcher (NFL) | **Done** — robust parser (sportscontent + legacy shapes) |
 | M3 | Divergence engine + signals table | **Done (logic)** |
 | M4 | Telegram alerter (multi-user fan-out) | **Done**; gated behind M0 results |
-| M6 | FD scraper | TODO |
+| M6 | FD scraper | **Done** — content-managed-page parser |
 | M7 | Dashboard on thekahlahouse.com | TODO — separate route in `kahla-house` repo |
 | M8 | Expand sports beyond NFL | TODO |
 | M9 | Per-market detail page | TODO |
