@@ -33,6 +33,7 @@ import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache as _lru_cache
 from typing import Any
 
 import httpx
@@ -569,16 +570,216 @@ def discover_by_slug_probe(sport: str, espn_games: list[ESPNGame]) -> int:
     return seeded
 
 
+# ---------------------------------------------------------------------------
+# SDK path — authenticated Polymarket US (primary)
+# ---------------------------------------------------------------------------
+
+@_lru_cache(maxsize=1)
+def _sdk_client():
+    from config import config
+    if not config.poly_api_key_id or not config.poly_api_secret:
+        raise RuntimeError("Polymarket credentials missing")
+    from polymarket_us import PolymarketUS
+    return PolymarketUS(key_id=config.poly_api_key_id, secret_key=config.poly_api_secret)
+
+
+def _sdk_fetch_sports_markets() -> list[dict[str, Any]]:
+    """Paginate client.markets.list() across all active sports markets."""
+    client = _sdk_client()
+    all_markets: list[dict[str, Any]] = []
+    offset = 0
+    limit = 500
+    for _ in range(40):   # safety cap: 20k markets max
+        params = {
+            "active": True, "closed": False, "archived": False,
+            "categories": ["sports"],
+            "limit": limit, "offset": offset,
+        }
+        try:
+            resp = client.markets.list(params)   # type: ignore[arg-type]
+        except Exception as e:
+            log.warning("markets.list offset=%d failed: %s", offset, e)
+            break
+        data = resp.model_dump() if hasattr(resp, "model_dump") else resp
+        batch = (data or {}).get("markets") or []
+        if not batch:
+            break
+        all_markets.extend(batch)
+        if len(batch) < limit:
+            break
+        offset += limit
+    return all_markets
+
+
+def _sdk_market_league(market: dict[str, Any]) -> str | None:
+    """Extract lowercase league key (nfl/nba/mlb/nhl/cbb/...) from an SDK market."""
+    for side in (market.get("marketSides") or []):
+        team = side.get("team") or {}
+        lg = team.get("league")
+        if lg:
+            return str(lg).lower()
+    slug = market.get("slug") or ""
+    parts = slug.split("-")
+    # Slug format observed: aec-<league>-<away>-<home>-<date>
+    if len(parts) >= 2 and parts[0] == "aec":
+        return parts[1].lower()
+    return None
+
+
+def _sdk_market_teams(market: dict[str, Any]) -> tuple[str | None, str | None, str | None, str | None]:
+    """Return (away_name, home_name, away_abbr, home_abbr) from the SDK market.
+
+    Slug format `aec-<league>-<AWAY>-<HOME>-<date>` is authoritative for abbrevs;
+    marketSides[].team supplies the display names.
+    """
+    sides = market.get("marketSides") or []
+    names_by_abbr: dict[str, str] = {}
+    for s in sides:
+        team = s.get("team") or {}
+        abbr = (team.get("abbreviation") or "").lower()
+        name = team.get("name") or s.get("description")
+        if abbr and name:
+            names_by_abbr[abbr] = str(name)
+
+    slug = market.get("slug") or ""
+    parts = slug.split("-")
+    if len(parts) >= 5 and parts[0] == "aec":
+        away_abbr, home_abbr = parts[2].lower(), parts[3].lower()
+        return (
+            names_by_abbr.get(away_abbr),
+            names_by_abbr.get(home_abbr),
+            away_abbr, home_abbr,
+        )
+    # Fallback: first two sides, order unknown.
+    all_names = [v for _, v in names_by_abbr.items()]
+    if len(all_names) == 2:
+        return all_names[0], all_names[1], None, None
+    return None, None, None, None
+
+
+def _sdk_market_home_side(market: dict[str, Any], home_abbr: str | None) -> str:
+    """Is marketSides[0].team the home team? If yes, BBO bid/ask reflects home
+    side directly (home_side='yes'); else invert (home_side='no').
+    """
+    sides = market.get("marketSides") or []
+    if not sides or not home_abbr:
+        return "yes"
+    first = (sides[0].get("team") or {}).get("abbreviation", "").lower()
+    return "yes" if first == home_abbr.lower() else "no"
+
+
+def discover_via_sdk(
+    sport: str, espn_games: list[ESPNGame], days_ahead: int
+) -> tuple[int, int]:
+    """Discover moneyline markets for `sport` via the Polymarket US SDK.
+
+    Returns (seeded_count, total_filtered_markets). Caller owns count merging.
+    """
+    sport_key = sport.lower()
+
+    raw = _sdk_fetch_sports_markets()
+    log.info("sdk: fetched %d active sports markets", len(raw))
+
+    now = datetime.now(timezone.utc)
+    window_end = now + timedelta(days=days_ahead, hours=12)
+
+    filtered: list[dict[str, Any]] = []
+    for m in raw:
+        if (m.get("sportsMarketType") or "").lower() != "moneyline":
+            continue
+        lg = _sdk_market_league(m)
+        if lg != sport_key:
+            continue
+        start = _parse_ts(m.get("gameStartTime") or m.get("startDate"))
+        if not start:
+            continue
+        # Keep slightly-past games (for in-flight matching), cap future.
+        if start > window_end or start < now - timedelta(hours=6):
+            continue
+        filtered.append(m)
+    log.info("sdk %s: %d moneyline markets in window", sport, len(filtered))
+
+    existing = {m["poly_market_id"] for m in db.list_active_markets(sport)
+                if m.get("poly_market_id")}
+    seeded = 0
+
+    for m in filtered:
+        slug = m.get("slug")
+        if not slug or slug in existing:
+            continue
+
+        away_name, home_name, away_abbr, home_abbr = _sdk_market_teams(m)
+        start = _parse_ts(m.get("gameStartTime") or m.get("startDate"))
+        if not start:
+            continue
+
+        # Cross-reference ESPN for canonical event_name when possible;
+        # fall back to Poly's own team names (less canonical but fine).
+        event_name = None
+        if espn_games and away_name and home_name:
+            espn = _match_espn_game(f"{away_name} vs {home_name}", start, espn_games)
+            if espn:
+                event_name = f"{espn.away} @ {espn.home}"
+        if not event_name:
+            if away_name and home_name:
+                event_name = f"{away_name} @ {home_name}"
+            else:
+                event_name = m.get("question") or slug
+
+        home_side = _sdk_market_home_side(m, home_abbr)
+
+        try:
+            row = db.upsert_market(Market(
+                sport=sport, event_name=event_name,
+                event_start=start, poly_market_id=slug,
+            ))
+            db.client().table("markets").update({
+                "notes": {
+                    "poly_home_side":  home_side,
+                    "auto_seeded":     True,
+                    "discovered_via":  "sdk",
+                    "poly_market_id_int": m.get("id"),
+                    "sports_market_type": m.get("sportsMarketType"),
+                    "away_abbr": away_abbr, "home_abbr": home_abbr,
+                    "original_question": m.get("question"),
+                }
+            }).eq("id", row["id"]).execute()
+            seeded += 1
+            existing.add(slug)
+            log.info("sdk-seeded %s (%s) home_side=%s", slug, event_name, home_side)
+        except Exception as e:
+            log.warning("sdk upsert_market(%s) failed: %s", slug, e)
+
+    return seeded, len(filtered)
+
+
 def discover_sport(sport: str, days_ahead: int = 3) -> dict[str, int]:
     """Discover + seed markets for one sport. Returns counts."""
     counts = {
         "gamma_events": 0, "matched": 0, "seeded": 0,
         "skipped_existing": 0, "skipped_no_ml": 0, "skipped_no_match": 0,
-        "slug_probe_seeded": 0,
+        "slug_probe_seeded": 0, "sdk_markets": 0, "sdk_seeded": 0,
         "failed": 0,
     }
     espn_games = fetch_espn_window(sport, days_ahead=days_ahead)
     log.info("ESPN %s upcoming games: %d", sport, len(espn_games))
+
+    # Primary path: authenticated Polymarket US SDK (client.markets.list).
+    # Gamma + slug-probe are kept as fallbacks because gamma serves global
+    # Poly (LoL, intl soccer) — useful only if the SDK misses something.
+    try:
+        sdk_seeded, sdk_total = discover_via_sdk(sport, espn_games, days_ahead)
+        counts["sdk_markets"] = sdk_total
+        counts["sdk_seeded"] = sdk_seeded
+        counts["seeded"] += sdk_seeded
+    except Exception as e:
+        log.exception("discover_via_sdk(%s) failed: %s", sport, e)
+
+    # If the SDK gave us anything, skip gamma/slug-probe entirely — gamma would
+    # just re-flood unmatched_markets with LoL/intl-soccer events.
+    if counts["sdk_seeded"] > 0:
+        log.info("discover %s: %s", sport, counts)
+        return counts
 
     gamma_events = fetch_gamma_events(sport, days_ahead=days_ahead)
     counts["gamma_events"] = len(gamma_events)
