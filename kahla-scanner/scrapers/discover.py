@@ -150,25 +150,27 @@ def fetch_gamma_events(
     if not tag:
         log.warning("no gamma tag for %s", sport)
         return []
-    start_cutoff = datetime.now(timezone.utc).isoformat()
-    end_cutoff = (datetime.now(timezone.utc) + timedelta(days=days_ahead + 1)).isoformat()
+
+    now = datetime.now(timezone.utc)
+    window_end = now + timedelta(days=days_ahead + 1)
 
     events: list[dict[str, Any]] = []
     offset = 0
     page_size = 100
     with _http() as h:
         while offset < limit:
+            # Don't send start/end date filters — gamma interprets these
+            # against market-creation time on some endpoints, which kills
+            # our results. Filter client-side instead.
             params = {
-                "tag_slug":       tag,
-                "active":         "true",
-                "closed":         "false",
-                "archived":       "false",
-                "order":          "startDate",
-                "ascending":      "true",
-                "limit":          page_size,
-                "offset":         offset,
-                "start_date_min": start_cutoff,
-                "end_date_max":   end_cutoff,
+                "tag_slug":  tag,
+                "active":    "true",
+                "closed":    "false",
+                "archived":  "false",
+                "order":     "startDate",
+                "ascending": "true",
+                "limit":     page_size,
+                "offset":    offset,
             }
             try:
                 r = h.get(f"{GAMMA_BASE}/events", params=params)
@@ -185,7 +187,27 @@ def fetch_gamma_events(
             if len(page) < page_size:
                 break
             offset += page_size
-    return events
+
+    log.info("gamma %s: fetched %d raw events", sport, len(events))
+
+    # Client-side filter: event start within [now-2h, now+days_ahead]
+    filtered: list[dict[str, Any]] = []
+    for ev in events:
+        start = _parse_ts(ev.get("startDate") or ev.get("start_date"))
+        if not start:
+            # Fall back to first child market's start
+            markets = ev.get("markets") or []
+            if markets:
+                start = _parse_ts(markets[0].get("startDate") or markets[0].get("start_date"))
+        if not start:
+            continue
+        if start < now - timedelta(hours=2):
+            continue
+        if start > window_end:
+            continue
+        filtered.append(ev)
+    log.info("gamma %s: %d events after date filter", sport, len(filtered))
+    return filtered
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +363,7 @@ def discover_sport(sport: str, days_ahead: int = 3) -> dict[str, int]:
     existing = {m["poly_market_id"] for m in db.list_active_markets(sport)}
     existing |= {m["poly_market_id"] for m in db.list_active_markets() if m.get("poly_market_id")}
 
+    sample_skipped: list[str] = []
     for ev in gamma_events:
         title = ev.get("title") or ev.get("slug") or ""
         start = _parse_ts(ev.get("startDate") or ev.get("start_date"))
@@ -354,15 +377,22 @@ def discover_sport(sport: str, days_ahead: int = 3) -> dict[str, int]:
         ml = _extract_ml_market(ev)
         if not ml:
             counts["skipped_no_ml"] += 1
+            if len(sample_skipped) < 3:
+                sample_skipped.append(f"no-ml: {title[:80]}")
             continue
         slug = ml.get("slug")
-        if not slug or slug in existing:
+        if not slug:
+            counts["skipped_no_ml"] += 1
+            continue
+        if slug in existing:
             counts["skipped_existing"] += 1
             continue
 
         espn_game = _match_espn_game(title, start, espn_games)
         if not espn_game:
             counts["skipped_no_match"] += 1
+            if len(sample_skipped) < 3:
+                sample_skipped.append(f"no-espn: {title[:80]}")
             db.log_unmatched(
                 "gamma", slug, sport=sport,
                 event_name=title, event_start=start,
@@ -401,6 +431,8 @@ def discover_sport(sport: str, days_ahead: int = 3) -> dict[str, int]:
             log.warning("upsert_market(%s) failed: %s", slug, e)
 
     log.info("discover %s: %s", sport, counts)
+    if sample_skipped:
+        log.info("discover %s sample skipped: %s", sport, sample_skipped)
     return counts
 
 

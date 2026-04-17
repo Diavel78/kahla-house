@@ -109,7 +109,16 @@ def resolve_sport(sport: str, days_back: int = 2) -> int:
     """Resolve completed events for `sport` over the last `days_back` days.
 
     Returns number of outcomes upserted.
+
+    Skips sports with no tracked markets in the DB — no point logging every
+    finished game to unmatched_markets before anything's been seeded.
     """
+    # Early-out: skip entirely if we have no markets tracking this sport.
+    tracked = db.list_active_markets(sport)
+    if not tracked:
+        log.debug("resolve %s: 0 tracked markets, skipping", sport)
+        return 0
+
     n = 0
     today = datetime.now(timezone.utc)
     for offset in range(days_back + 1):
@@ -147,7 +156,34 @@ def resolve_sport(sport: str, days_back: int = 2) -> int:
     return n
 
 
+def _cleanup_stale_espn_unmatched() -> int:
+    """Delete ESPN-sourced unmatched rows older than 6h.
+
+    These are usually bootstrap noise — ESPN games logged before any markets
+    were seeded. Going forward we skip logging when no markets exist for the
+    sport, so anything older than a few hours is stale.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    try:
+        res = (
+            db.client()
+            .table("unmatched_markets")
+            .delete()
+            .eq("source", "espn")
+            .lt("seen_at", cutoff)
+            .execute()
+        )
+        n = len(res.data or [])
+        if n:
+            log.info("cleaned %d stale espn unmatched rows", n)
+        return n
+    except Exception as e:
+        log.debug("unmatched cleanup skipped: %s", e)
+        return 0
+
+
 def resolve_all() -> dict[str, int]:
+    _cleanup_stale_espn_unmatched()
     out: dict[str, int] = {}
     for sport in config.sports_enabled:
         if sport not in ESPN_SPORT:
