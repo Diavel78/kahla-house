@@ -1,18 +1,42 @@
-"""Polymarket US poller.
+"""Polymarket US poller (M1).
 
-STATUS: scaffold. Milestone M1 is to port the existing Poly tracker code here.
+Operates on manually-seeded markets. Each market row in the `markets` table
+carries a `poly_market_id` (a Polymarket slug) plus metadata the scanner
+needs. The poller iterates every tracked market at POLY_POLL_INTERVAL and:
 
-Responsibilities:
-  - Load active sports markets from Polymarket US API
-  - Upsert into markets table (one row per Poly market)
-  - Fetch recent trades for each market, append to poly_ticks
-  - Fetch order book, expose depth(price) via a closure that divergence.py imports
-  - Track last_seen_trade_id per market (in-memory for now)
+  1. Fetches BBO via polymarket-us SDK
+  2. Computes mid = (bestBid + bestAsk) / 2
+  3. Maps to the HOME side probability using the row's stored home_side
+     (configured at seed time — either 'yes' or 'no')
+  4. Appends a tick to poly_ticks(outcome='HOME', price=home_prob)
+  5. Updates in-memory book depth cache for divergence.poly_book_depth
+
+Why BBO mid (not real trades)? The polymarket-us SDK exposes BBO cleanly
+(we already use it in app.py for the dashboard). Trade polling would be
+nicer but requires SDK method names we haven't verified. BBO mid captured
+every POLY_POLL_INTERVAL seconds gives us the same time-series shape the
+Brier scorer needs.
+
+CLI — seed a market for tracking:
+
+  python -m scrapers.polymarket seed \\
+      --slug chiefs-beat-bills-super-bowl \\
+      --sport NFL \\
+      --event "Bills @ Chiefs" \\
+      --start "2026-01-19T23:30:00Z" \\
+      --home-side yes    # YES token = home team winning
+
+  python -m scrapers.polymarket list          # show tracked markets
+  python -m scrapers.polymarket poll          # run one poll cycle
 """
 from __future__ import annotations
 
+import argparse
+import json
 import logging
+import sys
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any
 
 from config import config
@@ -22,67 +46,276 @@ from storage.models import Market, PolyTick
 
 log = logging.getLogger(__name__)
 
-# In-memory state, survives for the life of the process only.
-_last_trade_id: dict[str, str] = {}
+# In-memory, process-local state.
 _book_depth_cache: dict[str, dict[float, float]] = {}
 
 
+# ---------------------------------------------------------------------------
+# SDK client
+# ---------------------------------------------------------------------------
+
+@lru_cache(maxsize=1)
+def _client():
+    if not config.poly_api_key_id or not config.poly_api_secret:
+        raise RuntimeError(
+            "Polymarket credentials missing "
+            "(set POLY_API_KEY_ID/POLY_API_SECRET or POLYMARKET_KEY_ID/POLYMARKET_SECRET_KEY)"
+        )
+    from polymarket_us import PolymarketUS
+    return PolymarketUS(
+        key_id=config.poly_api_key_id,
+        secret_key=config.poly_api_secret,
+    )
+
+
+# ---------------------------------------------------------------------------
+# BBO -> HOME probability
+# ---------------------------------------------------------------------------
+
+def _safe_float(v) -> float | None:
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, dict):
+        v = v.get("value")
+        if v is None:
+            return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_bbo(slug: str) -> dict[str, Any] | None:
+    """Fetch BBO for a market slug. Returns {bid, ask, bid_size, ask_size, mid} or None."""
+    try:
+        resp = _client().markets.bbo(slug)
+    except Exception as e:
+        log.warning("bbo(%s) failed: %s", slug, e)
+        return None
+    if not resp:
+        return None
+    bid = _safe_float(resp.get("bestBidPrice") or resp.get("bid"))
+    ask = _safe_float(resp.get("bestAskPrice") or resp.get("ask"))
+    bid_size = _safe_float(
+        resp.get("bestBidSize") or resp.get("bidSize") or resp.get("bidSizeUsd")
+    )
+    ask_size = _safe_float(
+        resp.get("bestAskSize") or resp.get("askSize") or resp.get("askSizeUsd")
+    )
+    if bid is None or ask is None:
+        return None
+    return {
+        "bid": bid,
+        "ask": ask,
+        "bid_size": bid_size,
+        "ask_size": ask_size,
+        "mid": (bid + ask) / 2,
+        "raw": resp,
+    }
+
+
+def _home_prob(mid: float, home_side: str) -> float:
+    """Map BBO mid to HOME-win probability based on which Poly side represents home.
+
+    If the YES token is the HOME team, HOME prob = mid.
+    If the NO token is the HOME team (i.e., YES=AWAY), HOME prob = 1 - mid.
+    """
+    return mid if (home_side or "yes").lower() == "yes" else (1.0 - mid)
+
+
+# ---------------------------------------------------------------------------
+# Book depth for divergence engine
+# ---------------------------------------------------------------------------
+
+def _update_depth(market_id: str, home_prob: float, ask_size_usd: float | None) -> None:
+    """Seed a single-level depth entry at the current mid. Very coarse — a
+    full order book walk would be better once we know the SDK shape."""
+    if ask_size_usd is None:
+        return
+    # Round to a cent so lookups are tolerant.
+    key = round(home_prob, 2)
+    _book_depth_cache[market_id] = {key: float(ask_size_usd)}
+
+
 def _book_depth(market_id: str, price: float) -> float:
-    """Look up USD depth at or near a target price. Returns 0 if unknown."""
     per_market = _book_depth_cache.get(market_id) or {}
     if not per_market:
         return 0.0
-    # nearest price within 2 cents gets the depth
     best = min(per_market.keys(), key=lambda p: abs(p - price))
     if abs(best - price) > 0.02:
         return 0.0
     return per_market[best]
 
 
-# Register with divergence engine
 divergence.poly_book_depth = _book_depth
 
 
-def poll_once() -> None:
-    """TODO(M1): replace with real Polymarket US client calls.
+# ---------------------------------------------------------------------------
+# Poll
+# ---------------------------------------------------------------------------
 
-    Pseudocode sketch — keep so the real port has a target shape:
-      client = PolymarketUSClient(
-          key_id=config.poly_api_key_id,
-          secret=config.poly_api_secret,
-          passphrase=config.poly_api_passphrase,
-      )
-      for sport in config.sports_enabled:
-          for m in client.list_markets(sport=sport, status='active'):
-              market = Market(
-                  sport=sport,
-                  event_name=m['title'],
-                  event_start=parse(m['start_time']),
-                  poly_market_id=m['id'],
-              )
-              row = db.upsert_market(market)
-              market_id = row['id']
+def _tracked_markets() -> list[dict[str, Any]]:
+    """Return active markets with a poly_market_id set (i.e., seeded for tracking)."""
+    rows = db.list_active_markets()
+    return [r for r in rows if r.get("poly_market_id")]
 
-              trades = client.get_trades(m['id'],
-                                         since_id=_last_trade_id.get(m['id']))
-              ticks = [PolyTick(market_id=market_id,
-                                outcome=t['outcome'],
-                                price=t['price'],
-                                size=t['size_usd'],
-                                side=t.get('side'),
-                                tick_ts=parse(t['ts']))
-                        for t in trades]
-              db.insert_poly_ticks(ticks)
-              if trades:
-                  _last_trade_id[m['id']] = trades[-1]['id']
 
-              book = client.get_book(m['id'])
-              _book_depth_cache[market_id] = _flatten_book(book)
+def poll_once() -> int:
+    """Poll every tracked market once. Returns number of ticks inserted."""
+    markets = _tracked_markets()
+    if not markets:
+        log.info("no tracked Polymarket markets — seed some with `scrapers.polymarket seed`")
+        return 0
+
+    inserted = 0
+    for m in markets:
+        slug = m["poly_market_id"]
+        market_id = m["id"]
+        notes = m.get("notes") if isinstance(m.get("notes"), dict) else {}
+        home_side = (notes or {}).get("poly_home_side", "yes")
+
+        bbo = fetch_bbo(slug)
+        if not bbo:
+            continue
+
+        home_prob = _home_prob(bbo["mid"], home_side)
+        if not (0 < home_prob < 1):
+            log.warning("skip %s: computed HOME prob out of range (%.4f)", slug, home_prob)
+            continue
+
+        tick = PolyTick(
+            market_id=market_id,
+            outcome="HOME",
+            price=round(home_prob, 4),
+            # Tick 'size' here is the visible ask size (proxy for one-side depth).
+            # It's not a real fill, but preserves the SDK-observed liquidity figure.
+            size=round(bbo.get("ask_size") or 0.0, 2),
+            side="bbo_mid",
+            tick_ts=datetime.now(timezone.utc),
+        )
+        try:
+            db.insert_poly_ticks([tick])
+            inserted += 1
+        except Exception as e:
+            log.warning("insert_poly_ticks(%s) failed: %s", slug, e)
+            continue
+
+        _update_depth(market_id, home_prob, bbo.get("ask_size"))
+
+    log.info("poly poll: %d ticks across %d markets", inserted, len(markets))
+    return inserted
+
+
+# ---------------------------------------------------------------------------
+# Seed CLI — manually register a market for tracking
+# ---------------------------------------------------------------------------
+
+def seed_market(
+    slug: str,
+    sport: str,
+    event_name: str,
+    event_start: datetime,
+    home_side: str = "yes",
+) -> str:
+    """Insert or update a markets row tagged with a Polymarket slug.
+
+    home_side: 'yes' if the YES token represents the HOME team winning,
+               'no' if the NO token does. Stored under notes.poly_home_side.
+
+    Returns the markets.id (uuid).
     """
-    log.warning("polymarket.poll_once not yet implemented (M1)")
+    if home_side.lower() not in {"yes", "no"}:
+        raise ValueError("home_side must be 'yes' or 'no'")
+
+    # Verify the market exists on Poly before we write anything.
+    try:
+        meta = _client().markets.retrieve_by_slug(slug)
+    except Exception as e:
+        raise RuntimeError(f"could not retrieve Poly market {slug!r}: {e}")
+
+    title = (meta.get("title") or meta.get("question") or slug) if meta else slug
+    log.info("seeding %s (poly title: %s)", slug, title)
+
+    m = Market(
+        sport=sport,
+        event_name=event_name,
+        event_start=event_start,
+        poly_market_id=slug,
+    )
+    row = db.upsert_market(m)
+    market_id = row["id"]
+
+    # Stash home_side mapping. Supabase ignores unknown columns on insert, so
+    # we store it in a per-market config table... actually, simplest: reuse
+    # unmatched_markets.payload? No — add a dedicated "notes" column.
+    # For M1 we write this into `markets.notes` via a direct UPDATE; if the
+    # schema hasn't been migrated to add a notes column, fall back to using
+    # team_aliases (hack) — nope, that's gross. Use a tiny kv on payload.
+    # Simplest correct fix: attach notes via update with a jsonb column.
+    try:
+        db.client().table("markets").update(
+            {"notes": {"poly_home_side": home_side.lower()}}
+        ).eq("id", market_id).execute()
+    except Exception:
+        # markets.notes column may not exist on older DBs. Best-effort.
+        log.warning("could not persist poly_home_side — add a `notes jsonb` column to markets")
+    return market_id
 
 
-def _flatten_book(book: Any) -> dict[float, float]:
-    """Convert a Polymarket order book into {price -> cumulative USD depth}."""
-    # Placeholder — actual shape depends on Polymarket US SDK response.
-    return {}
+def list_tracked(limit: int = 50) -> list[dict[str, Any]]:
+    return _tracked_markets()[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+def _parse_ts(s: str) -> datetime:
+    s = s.replace("Z", "+00:00")
+    return datetime.fromisoformat(s)
+
+
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
+    p = argparse.ArgumentParser(prog="polymarket")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    seed = sub.add_parser("seed", help="Register a Polymarket market for tracking")
+    seed.add_argument("--slug", required=True, help="Polymarket market slug")
+    seed.add_argument("--sport", required=True, help="NFL, NBA, MLB, ...")
+    seed.add_argument("--event", required=True, help="'Away @ Home' event name")
+    seed.add_argument("--start", required=True, help="ISO8601 event start (UTC)")
+    seed.add_argument(
+        "--home-side", choices=["yes", "no"], default="yes",
+        help="Which Poly token represents HOME team winning (default: yes)",
+    )
+
+    sub.add_parser("list", help="Show tracked markets")
+    sub.add_parser("poll", help="Run one poll cycle")
+
+    args = p.parse_args(argv)
+
+    if args.cmd == "seed":
+        mid = seed_market(
+            slug=args.slug,
+            sport=args.sport.upper(),
+            event_name=args.event,
+            event_start=_parse_ts(args.start),
+            home_side=args.home_side,
+        )
+        log.info("seeded market_id=%s", mid)
+    elif args.cmd == "list":
+        rows = list_tracked()
+        print(json.dumps(rows, indent=2, default=str))
+    elif args.cmd == "poll":
+        n = poll_once()
+        log.info("poll complete: %d ticks", n)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -43,8 +43,14 @@ class Config:
     )
 
     # Polymarket
-    poly_api_key_id: str | None = field(default_factory=lambda: _env("POLY_API_KEY_ID"))
-    poly_api_secret: str | None = field(default_factory=lambda: _env("POLY_API_SECRET"))
+    # Accept both the scanner-native names AND the existing kahla-house names
+    # (POLYMARKET_KEY_ID / POLYMARKET_SECRET_KEY) so the same Vercel env vars work.
+    poly_api_key_id: str | None = field(
+        default_factory=lambda: _env("POLY_API_KEY_ID") or _env("POLYMARKET_KEY_ID")
+    )
+    poly_api_secret: str | None = field(
+        default_factory=lambda: _env("POLY_API_SECRET") or _env("POLYMARKET_SECRET_KEY")
+    )
     poly_api_passphrase: str | None = field(default_factory=lambda: _env("POLY_API_PASSPHRASE"))
 
     # Telegram

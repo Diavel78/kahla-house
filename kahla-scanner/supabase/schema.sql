@@ -9,13 +9,17 @@ create table if not exists markets (
   sport text not null,                    -- 'NFL','CBB','MLB','UFC', etc.
   event_name text not null,               -- 'Chiefs vs Bills 2026-01-19'
   event_start timestamptz not null,
-  poly_market_id text unique,             -- Polymarket market id
+  poly_market_id text unique,             -- Polymarket market id/slug
   dk_event_id text,
   fd_event_id text,
   kalshi_ticker text,
   status text default 'active',           -- 'active','settled','void'
+  notes jsonb default '{}'::jsonb,        -- per-market scanner config (e.g. poly_home_side)
   created_at timestamptz default now()
 );
+
+-- Backfill column for existing DBs (no-op when fresh).
+alter table markets add column if not exists notes jsonb default '{}'::jsonb;
 
 create index if not exists markets_event_start_idx on markets(event_start);
 create index if not exists markets_sport_idx on markets(sport);
