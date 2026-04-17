@@ -161,22 +161,30 @@ def fetch_gamma_events(
     now = datetime.now(timezone.utc)
     end_max = now + timedelta(days=days_ahead + 1)
     end_max_iso = end_max.isoformat()
+    end_min_iso = (now - timedelta(hours=12)).isoformat()
 
     markets: list[dict[str, Any]] = []
     offset = 0
     page_size = 100
     with _http() as h:
         while offset < limit:
+            # Sort DESCENDING by endDate — gamma has thousands of stale
+            # endDate markets (zombie placeholders from old political
+            # questions) that come first when ascending. Descending
+            # surfaces real current markets. Also narrow by end_date_min
+            # to drop anything whose nominal end is already behind us.
             params = {
                 "active":        "true",
                 "closed":        "false",
                 "archived":      "false",
                 "order":         "endDate",
-                "ascending":     "true",
+                "ascending":     "false",
                 "limit":         page_size,
                 "offset":        offset,
                 "end_date_max":  end_max_iso,
                 "endDateMax":    end_max_iso,
+                "end_date_min":  end_min_iso,
+                "endDateMin":    end_min_iso,
             }
             try:
                 r = h.get(f"{GAMMA_BASE}/markets", params=params)
@@ -414,11 +422,146 @@ def _parse_ts(s: str | None) -> datetime | None:
         return None
 
 
+_TEAM_ABBREV = {
+    # minimal MLB abbreviations commonly used on Polymarket slugs
+    "new york yankees": "nyy", "boston red sox": "bos", "los angeles dodgers": "lad",
+    "san francisco giants": "sf",  "san diego padres": "sd",  "chicago cubs": "chc",
+    "chicago white sox": "chw",    "cleveland guardians": "cle", "detroit tigers": "det",
+    "houston astros": "hou",       "kansas city royals": "kc",   "los angeles angels": "laa",
+    "milwaukee brewers": "mil",    "minnesota twins": "min",     "oakland athletics": "oak",
+    "athletics": "oak",            "seattle mariners": "sea",    "tampa bay rays": "tb",
+    "texas rangers": "tex",        "toronto blue jays": "tor",   "atlanta braves": "atl",
+    "miami marlins": "mia",        "new york mets": "nym",       "philadelphia phillies": "phi",
+    "washington nationals": "wsh", "arizona diamondbacks": "ari","colorado rockies": "col",
+    "cincinnati reds": "cin",      "pittsburgh pirates": "pit",  "st. louis cardinals": "stl",
+    "baltimore orioles": "bal",
+    # NBA
+    "atlanta hawks":"atl","boston celtics":"bos","brooklyn nets":"bkn","charlotte hornets":"cha",
+    "chicago bulls":"chi","cleveland cavaliers":"cle","dallas mavericks":"dal","denver nuggets":"den",
+    "detroit pistons":"det","golden state warriors":"gsw","houston rockets":"hou","indiana pacers":"ind",
+    "la clippers":"lac","los angeles clippers":"lac","los angeles lakers":"lal","memphis grizzlies":"mem",
+    "miami heat":"mia","milwaukee bucks":"mil","minnesota timberwolves":"min","new orleans pelicans":"nop",
+    "new york knicks":"nyk","oklahoma city thunder":"okc","orlando magic":"orl","philadelphia 76ers":"phi",
+    "phoenix suns":"phx","portland trail blazers":"por","sacramento kings":"sac","san antonio spurs":"sas",
+    "toronto raptors":"tor","utah jazz":"uta","washington wizards":"was",
+    # NHL
+    "anaheim ducks":"ana","boston bruins":"bos","buffalo sabres":"buf","calgary flames":"cgy",
+    "carolina hurricanes":"car","chicago blackhawks":"chi","colorado avalanche":"col","columbus blue jackets":"cbj",
+    "dallas stars":"dal","detroit red wings":"det","edmonton oilers":"edm","florida panthers":"fla",
+    "los angeles kings":"lak","minnesota wild":"min","montreal canadiens":"mtl","nashville predators":"nsh",
+    "new jersey devils":"nj","new york islanders":"nyi","new york rangers":"nyr","ottawa senators":"ott",
+    "philadelphia flyers":"phi","pittsburgh penguins":"pit","san jose sharks":"sj","seattle kraken":"sea",
+    "st. louis blues":"stl","tampa bay lightning":"tb","toronto maple leafs":"tor","vancouver canucks":"van",
+    "vegas golden knights":"vgk","washington capitals":"wsh","winnipeg jets":"wpg","utah hockey club":"uta",
+}
+
+
+def _abbrev(team: str) -> str | None:
+    return _TEAM_ABBREV.get(team.lower().strip())
+
+
+def _candidate_slugs(sport: str, ev: ESPNGame) -> list[str]:
+    """Plausible Polymarket slug patterns for a given ESPN game."""
+    date = ev.start.strftime("%Y-%m-%d")
+    date_compact = ev.start.strftime("%B-%-d").lower()  # e.g. april-17
+    home_ab = _abbrev(ev.home)
+    away_ab = _abbrev(ev.away)
+    home_norm = _norm(ev.home).replace(" ", "-")
+    away_norm = _norm(ev.away).replace(" ", "-")
+    slug_sport = sport.lower()
+
+    candidates: list[str] = []
+    if home_ab and away_ab:
+        candidates += [
+            f"{slug_sport}-{away_ab}-{home_ab}-{date}",
+            f"{slug_sport}-{home_ab}-{away_ab}-{date}",
+            f"{away_ab}-vs-{home_ab}-{date}",
+            f"{home_ab}-vs-{away_ab}-{date}",
+        ]
+    candidates += [
+        f"will-the-{home_norm}-beat-the-{away_norm}",
+        f"will-the-{away_norm}-beat-the-{home_norm}",
+        f"{away_norm}-vs-{home_norm}-{date}",
+        f"{home_norm}-vs-{away_norm}-{date}",
+        f"{slug_sport}-{away_norm}-at-{home_norm}-{date_compact}",
+    ]
+    # Dedupe preserving order
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def _poly_slug_exists(slug: str) -> dict[str, Any] | None:
+    """Hit gamma /markets/slug/<slug> directly. Cheap: single HTTP call per guess.
+    Returns the market dict on 200, None on 404 or error.
+    """
+    url = f"{GAMMA_BASE}/markets/slug/{slug}"
+    try:
+        with _http() as h:
+            r = h.get(url, timeout=10.0)
+            if r.status_code == 200:
+                data = r.json() or {}
+                if data and not data.get("closed"):
+                    return data
+    except Exception:
+        pass
+    return None
+
+
+def discover_by_slug_probe(sport: str, espn_games: list[ESPNGame]) -> int:
+    """Fallback: for each ESPN game, probe a handful of likely Polymarket
+    slug patterns. Seed anything that returns 200. Returns count seeded.
+    """
+    seeded = 0
+    existing = {m["poly_market_id"] for m in db.list_active_markets(sport)
+                if m.get("poly_market_id")}
+    for ev in espn_games:
+        found = None
+        for slug in _candidate_slugs(sport, ev):
+            if slug in existing:
+                break
+            found = _poly_slug_exists(slug)
+            if found:
+                break
+        if not found:
+            continue
+        slug = found.get("slug") or slug
+        if slug in existing:
+            continue
+        home_side = _infer_home_side(found, ev)
+        try:
+            m = Market(
+                sport=sport,
+                event_name=f"{ev.away} @ {ev.home}",
+                event_start=ev.start,
+                poly_market_id=slug,
+            )
+            row = db.upsert_market(m)
+            db.client().table("markets").update(
+                {"notes": {"poly_home_side": home_side,
+                           "auto_seeded": True,
+                           "discovered_via": "slug-probe",
+                           "ml_question": found.get("question")}}
+            ).eq("id", row["id"]).execute()
+            seeded += 1
+            existing.add(slug)
+            log.info("slug-probe seeded %s (%s @ %s) home_side=%s",
+                     slug, ev.away, ev.home, home_side)
+        except Exception as e:
+            log.warning("slug-probe upsert(%s) failed: %s", slug, e)
+    return seeded
+
+
 def discover_sport(sport: str, days_ahead: int = 3) -> dict[str, int]:
     """Discover + seed markets for one sport. Returns counts."""
     counts = {
         "gamma_events": 0, "matched": 0, "seeded": 0,
         "skipped_existing": 0, "skipped_no_ml": 0, "skipped_no_match": 0,
+        "slug_probe_seeded": 0,
         "failed": 0,
     }
     espn_games = fetch_espn_window(sport, days_ahead=days_ahead)
@@ -505,6 +648,14 @@ def discover_sport(sport: str, days_ahead: int = 3) -> dict[str, int]:
         except Exception as e:
             counts["failed"] += 1
             log.warning("upsert_market(%s) failed: %s", slug, e)
+
+    # Fallback: if gamma discovery seeded nothing, probe Polymarket slugs
+    # directly from ESPN team names. Hits /markets/slug/<slug> with a few
+    # candidate patterns per game.
+    if counts["seeded"] == 0 and espn_games:
+        log.info("gamma seeded 0 for %s — falling back to slug probe", sport)
+        probed = discover_by_slug_probe(sport, espn_games)
+        counts["slug_probe_seeded"] = probed
 
     log.info("discover %s: %s", sport, counts)
     if sample_skipped:
