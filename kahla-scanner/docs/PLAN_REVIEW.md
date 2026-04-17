@@ -1,239 +1,202 @@
-# Kahla Scanner — Plan Review
+# Kahla Scanner — Plan Review (revised)
 
-Review of the build spec, written after scaffolding the repo. Grouped by
-severity: what could sink the project, what will hurt within the first month,
-and what's nice-to-fix.
-
----
-
-## 1. Edge definition — the core theory has a flaw
-
-The spec treats **DK/FD devig'd mid** as "public fair value" and **Polymarket
-mid** as the "sharp" number. That framing works if Polymarket is actually the
-sharpest of the three. **It often isn't.**
-
-- Polymarket US post-July-2025 has thin books on many non-headline games.
-  On a $200-depth MLB moneyline, a single $50 ticket moves the mid 2–3%. That
-  alone can synthesize a "3% edge" where none exists.
-- DK and FD are correlated — they copy each other and Pinnacle within seconds.
-  Averaging them doesn't give you two independent estimates; it gives you one
-  estimate with a lower variance label.
-- On flagship markets (NFL primetime, NBA finals), the true sharp price is
-  Pinnacle / Circa / CRIS. Polymarket trails those by 30–90 seconds.
-
-**Fix before M4 fires any real alert:**
-
-1. Add a **no-vig Pinnacle reference** even if it's just pulled from an
-   aggregator. Three-way consensus (DK, FD, PIN) beats two-way every time.
-2. Require `min_liquidity_usd` to be depth **at the signal price within 2
-   cents**, not total market volume. The spec hints at this but the schema
-   doesn't enforce it. My scaffold computes it this way.
-3. **Skip signals where Poly mid has moved more than 3% in the last 60
-   seconds** — that's a stale book about to tighten, not an edge.
-4. Track **time-weighted average** of public prob over the last 5–10 minutes,
-   not just the single latest snapshot. One flash ML quote on DK during a
-   goal/TD drives false positives.
-
-Without these, the first week will produce loud, wrong alerts and you'll
-learn to ignore the bot. That's the real failure mode.
+Review of the build spec after a conversation that corrected several of my
+initial priors. Earlier draft over-weighted "Polymarket is thin / noisy"
+concerns; live order books (MLB moneylines, Challenger-tier tennis, etc.)
+show $13K–$90K at top of book even on niche markets. Those concerns are
+withdrawn. What remains is below.
 
 ---
 
-## 2. Event matching is the biggest hidden timesink
+## 1. The real open question — is Poly actually sharper?
+
+Strong structural prior that it is:
+- DK/FD aggressively limit winning players. Pros get flagged and cut off
+  within weeks of profitability.
+- The migration to prediction markets (Poly, Kalshi) is well-documented. The
+  sharpest US action increasingly lives there.
+- Post-July-2025 Poly has deep books even on obscure markets — depth is
+  not a concern.
+
+But "sharps bet there" ≠ "mid-price predicts outcomes better than DK/FD
+devig'd consensus". Those are different claims. The whole scanner rests on
+the second one. **Measure it before trusting it.** See M0 below.
+
+---
+
+## 2. M0 — the calibration gate (added to the plan)
+
+Before any alert fires, run in log-only mode for 2–3 weeks. Scrapers ingest
+Poly ticks + DK/FD snapshots; no signals, no Telegram. Then:
+
+For every settled market, pull each source's HOME-side implied probability
+at T-24h, T-6h, T-1h, T-0 before event start. Compute Brier score:
+`mean((prob_home − actual_home)²)` per source per checkpoint. Lowest wins.
+
+Three outcomes:
+- **Poly Brier < DK/FD Brier** by a meaningful margin at T-1h or T-0 →
+  thesis confirmed. Tune edge threshold from the residual distribution,
+  flip `SCANNER_MODE=live`.
+- **Tie** → Poly and DK/FD are parallel sharp markets. Divergence signal is
+  noise around zero. Pivot the thesis: cross-venue arb, per-book lag,
+  news-latency windows.
+- **Poly loses** → unlikely, but signal means fade Poly / take DK/FD. Only
+  plausible on specific market types where Poly has a structural
+  mispricing (politics-adjacent novelty, low-info props).
+
+Implementation in repo: `analytics/brier.py`, `analytics/outcomes.py`,
+`SCANNER_MODE=log_only` default. README has the workflow.
+
+---
+
+## 3. Event matching is still the biggest execution risk
 
 The spec gives it half a section. In practice it's ~30% of the work.
 
-What the spec has right:
-- Team aliases table.
-- ±30 min event_start tolerance.
-- Unmatched fallback to manual review.
+Under-scoped areas:
+- **Prop / sub-market matching.** Event-level linkage works for moneylines.
+  Spreads need a market-type mapping layer.
+- **Multi-leg / combined markets on Poly.** "Chiefs win by 7+" doesn't map
+  to any single DK offer. The matcher should detect and skip these, not
+  force a link.
+- **Timezone normalization at ingest.** Poly occasionally returns local time
+  with no tzinfo. Normalize to UTC at insert and warn if `tzinfo is None`.
+- **Series vs single-game.** UFC cards, CBB tournaments. A Poly market may
+  be "Jones beats Miocic at UFC 309" while DK's event is the whole card.
 
-What it's missing:
-- **Prop / sub-market matching.** Polymarket's "Will the Chiefs win?" is one
-  market; DK has an ML, a spread, and a total for the same game. The scaffold
-  links at the *event* level, which is right for ML, but if you expand to
-  spreads you'll need a market-type mapping layer.
-- **Multi-leg / combined markets on Poly.** Markets like "Chiefs win by 7+"
-  don't map to any single DK offer. The matcher should skip these, not try
-  to force a link.
-- **Timezones.** Poly sometimes returns `start_time` as UTC, sometimes as
-  the event's local time with no offset. Normalize to UTC at ingest and log
-  a warning if `tzinfo` is None.
-- **Series vs individual games.** UFC fight cards, CBB tournaments. A Poly
-  market may be "Jones beats Miocic at UFC 309" while DK's event is "UFC 309
-  Main Card". Plan for this before turning on MMA.
-
-**Concrete recommendation:** build a `/admin/matches` page in the dashboard
-from day 1 (not M9). You'll be reviewing unmatched markets weekly during
-season rollover.
+**Recommendation:** build the `/admin/matches` review UI in week 1, not M9.
+You'll use it constantly during season rollover.
 
 ---
 
-## 3. Scraping DK/FD is more fragile than the spec implies
+## 4. Scraping fragility
 
-"Monthly maintenance" in Section 11 is optimistic.
+"Monthly maintenance" in spec Section 11 is optimistic.
 
-- DK rotates event-group IDs roughly every pro season (NFL gets a new group
-  each August, CBB each November). Hard-coded IDs in `SPORT_EVENT_GROUPS`
-  will silently break. Add a **scraper-health heartbeat**: if no new
-  snapshots for sport X in N minutes, notify ops.
-- DK and FD both fingerprint on TLS / JA3 and sometimes 403 behind plain
-  `httpx`. You'll hit this on FD first. Plan to drop in `curl_cffi` or
-  Playwright for one or both. The scaffold uses plain `httpx`; budget a half
-  day for this.
-- "Rotate User-Agent" is cargo-culting — it doesn't help against modern
-  WAFs and may increase suspicion if the UA doesn't match other fingerprints.
-  Better to pick one modern desktop UA and stick to it.
+- DK rotates event-group IDs each season (NFL each August, CBB each
+  November). Hard-coded IDs silently break. Add a `scraper_health` table +
+  5-minute heartbeat that alerts ops after 3 consecutive failures.
+- DK and FD fingerprint on TLS/JA3. Plain `httpx` will 403 on FD sooner or
+  later. Budget a half day to drop in `curl_cffi` or Playwright.
+- "Rotate User-Agent" is cargo-culting. Pick one modern desktop UA and
+  keep the rest of the fingerprint consistent.
 
-**Concrete additions to the schema:**
+**Schema addition:**
 
 ```sql
 create table scraper_health (
-  source text primary key,           -- 'dk','fd','poly'
+  source text primary key,              -- 'dk','fd','poly'
   last_success timestamptz,
   consecutive_failures int default 0,
   last_error text
 );
 ```
 
-and a 5-minute heartbeat job that alerts ops at `consecutive_failures >= 3`.
+Not in the scaffold yet; add when M1/M2 land.
 
 ---
 
-## 4. Schema issues to fix before first write
+## 5. Schema fixes worth doing early
 
-Reviewing the spec's SQL against what the code needs:
-
-1. **`book_snapshots.implied_prob` comment is misleading.** Spec says "no-vig
-   not assumed" but doesn't say what IS stored. I kept it as raw implied
-   prob (with vig) in the scaffold; devig happens in `signals/divergence.py`.
-   The schema comment needs to match.
-2. **Missing `sport` on `signals`.** Telegram fan-out filters by sport but
-   has to join `markets` to get it. Denormalizing sport onto `signals` (and
-   `book_snapshots`, and `poly_ticks`) makes the hot-path queries cheaper
-   and lets the dashboard filter without joins.
-3. **`poly_ticks.outcome` is free text.** The divergence engine looks up
-   `outcome='HOME'`, but a real Poly scraper stores team names or "YES"/"NO".
-   Either (a) normalize to `'HOME'`/`'AWAY'` at insert time (brittle), or (b)
-   add an `outcome_side` column with an enum and keep `outcome` as the raw
-   label. I'd pick (b).
-4. **Retention.** Ticks are append-only and will balloon. Supabase free tier
-   caps you at 500 MB. Add a nightly job that deletes `poly_ticks` older
-   than 90 days (or move to S3 / a cold table).
-5. **`status` columns are free text.** Consider Postgres enums or a CHECK
-   constraint to prevent typos (`'settled'` vs `'resolved'`).
+1. **Denormalize `sport` onto `signals`** (and optionally `book_snapshots`,
+   `poly_ticks`). Fan-out + dashboard filter by sport constantly; saves a
+   join on every query.
+2. **Add `input_snapshot jsonb` to `signals`.** Capture the exact DK/FD/Poly
+   values used to compute edge at signal time. Makes post-mortem debugging
+   10× faster when alerts are wrong.
+3. **Fix `book_snapshots.implied_prob` docstring.** Spec says "no-vig not
+   assumed" without specifying what IS stored. Scaffold stores raw (with
+   vig); devig happens in the signal engine. Schema comment should match.
+4. **Retention job.** Ticks are append-only. Supabase free tier caps at 500
+   MB. Add a nightly job deleting `poly_ticks` + `book_snapshots` older
+   than 90 days, or move to cold storage.
+5. **`poly_ticks.outcome` is free text.** Divergence engine expects 'HOME'
+   but a real scraper stores team names or 'YES'/'NO'. Add an
+   `outcome_side` enum column and keep `outcome` as the raw label.
+6. Consider Postgres enums or CHECK constraints on `status` columns to
+   prevent typo drift (`settled` vs `resolved`).
 
 ---
 
-## 5. Operational gaps
+## 6. Operational gaps
 
-- **No kill switch.** If the divergence engine starts flooding, there's no
-  way to silence the bot without SSHing to the VPS. Add a `scanner_state`
-  table with a single row `{paused: bool}` and a `/pause` bot command that
-  Rob can hit from his phone.
-- **No replay mode.** When alerts are wrong, you'll want to reconstruct the
-  exact state at signal time. The append-only ticks help, but add a
-  `signals.input_snapshot jsonb` column that captures the DK/FD/Poly values
-  used to compute edge. Makes debugging 10× faster.
-- **`alerts_log.delivery_status` is insert-once.** If Telegram returns 429
-  rate-limit and the retry succeeds, the row still says `'failed'`. Either
-  allow updates or add a `retries` counter.
-- **APScheduler blocking in-process is fine for 1 sport, risky at 6.** Once
-  you enable NFL + CBB + MLB concurrently, the DK scrape for one sport
-  blocks the others for 1–2 seconds each. Move scrapers to
-  `ThreadPoolExecutor` inside the job (same process, just parallel HTTP).
-  Scaffold leaves this as a single sequential loop.
-- **No structured logging.** `logging.basicConfig` is fine for journalctl
-  but you'll want `json`-format logs once you deploy, so you can grep by
-  `sport`, `market_id`, `signal_id`. Low-effort to add; do it before M4.
+- **No kill switch.** Add a `scanner_state` table + `/pause` Telegram
+  command so Rob can silence the bot from his phone without SSHing.
+- **`alerts_log.delivery_status` is insert-once.** 429 retries that succeed
+  still show as `failed`. Either allow updates or add a retries counter.
+- **APScheduler blocking is fine for 1 sport, risky at 6.** Once
+  multi-sport is enabled, one scraper's slow tick blocks the others. Move
+  scrapers into a `ThreadPoolExecutor` in the job body. Scaffold leaves
+  this sequential.
+- **Structured logging.** `logging.basicConfig` is fine for journalctl but
+  JSON logs let you filter by `sport` / `market_id` / `signal_id` once the
+  volume grows. Low-effort add; do it before M4.
 
 ---
 
-## 6. Stack choices — mostly good, one swap
+## 7. Stack — agree mostly
 
-Agree with:
-- Python 3.11 (matches existing kahla-house codebase).
-- Supabase (free tier + Realtime = dashboard for free).
-- Telegram over SMS (richer formatting, free, push-reliable).
-- `systemd` on a VPS (simpler than Docker for one service).
-
-I'd swap:
-- **APScheduler in-process → separate asyncio event loop per scraper** once
-  you hit multi-sport. APScheduler's blocking scheduler makes concurrent I/O
-  awkward. For v1 it's fine; flag it at the scaffold level so future-you
-  knows. I kept APScheduler for the scaffold.
-
-Don't swap (common temptations to resist):
-- **Don't reach for Kafka / Redis / Celery.** For this data volume,
-  Postgres + APScheduler + one VPS is correct. Only add queuing if you
-  outgrow one VPS.
-- **Don't use SQLAlchemy.** The schema is small and stable; raw
-  `supabase-py` table builder is less typing than defining ORM models.
+Agree with: Python 3.11, Supabase, Telegram, systemd on a cheap VPS,
+APScheduler in-process for now. Don't reach for Kafka/Redis/Celery at this
+scale — Postgres + one VPS is correct. Don't add SQLAlchemy — schema is
+small and stable; raw `supabase-py` is less code than ORM models.
 
 ---
 
-## 7. Dashboard integration — one thing to be careful about
+## 8. Dashboard auth — reuse, don't reinvent
 
-The spec says "Supabase JS client reads live from signals". To keep
-`subscribers.telegram_chat_id` private, the schema I wrote enables RLS on
-all tables and grants `anon` SELECT only on non-PII tables. The anon key is
-safe to ship to the browser under that policy. **Double-check the anon
-policies in the Supabase dashboard after running the SQL** — RLS failures
-are silent and will leak data.
+`/markets` on thekahlahouse.com should reuse the existing
+`@firebase_auth_required` + role check in `app.py`. Don't introduce a second
+auth layer.
 
-Also: `/markets` should be gated behind the existing kahla-house auth. The
-approval-gated user system already exists in `app.py` — reuse
-`@firebase_auth_required` + a role check. Don't invent a second auth.
+The scaffold's `schema.sql` enables RLS and grants `anon` SELECT only on
+non-PII tables (markets, book_snapshots, poly_ticks, signals, outcomes).
+`subscribers` and `alerts_log` stay service-key-only. Verify anon policies
+in the Supabase dashboard after running the SQL — RLS mistakes are silent.
 
 ---
 
-## 8. Milestone sequencing — one swap suggested
+## 9. Milestone sequencing — revised
 
-The spec orders M4 (Telegram single-user) before M5 (multi-user). I'd
-collapse these. The multi-user logic is 30 extra lines and saves you from
-rewriting the fan-out once you add the second subscriber. The scaffold
-treats them as one milestone (both done at code level).
+Add **M0** (log-only + Brier calibration) as the gate before M4 fires.
+Collapse M4 + M5 (multi-user fan-out is 30 extra lines, not worth a
+separate milestone). Actual order:
 
-Also: **add an M0 — backtest harness on historical Poly data.** Before
-M1, replay 30 days of Poly ticks + book snapshots from wherever you can
-source them (even just your own Poly account history) and tune
-`MIN_EDGE_PCT_GLOBAL` against outcomes. Right now 2.5% is a guess; if
-empirics say 4% is the real threshold, you save yourself weeks of noisy
-alerts.
-
----
-
-## 9. Small things
-
-- `.env.example` is in the spec but `FD_USER_AGENT` is listed and then
-  never really used because FD blocks plain `httpx`. Mark it TODO or use
-  Playwright.
-- The `scan_all` divergence loop queries every active market every 30s.
-  At NFL-only scale this is ~16 markets, trivially cheap. At 6-sport scale
-  it's thousands — add an index-driven filter (`where updated_at > ...`)
-  once that hurts.
-- The build spec's `compute_divergence` pseudocode uses
-  `abs(edge) * 100 < MIN_EDGE_PCT_GLOBAL` — correct, but the real signal
-  has **direction**. Fade-side matters. The scaffold's implementation
-  picks fade_side based on `edge > 0` before the abs, which the spec
-  elides.
+```
+M0 (2–3 weeks, parallel with M1/M2/M6 build)
+M1 Polymarket poller + Supabase writes
+M2 DK scraper + matcher (NFL first)
+M6 FD scraper
+M3 Divergence engine  (already built)
+M0 decision gate — does Poly Brier < DK/FD Brier?
+  → yes: M4/M5 flip live
+  → no:  re-scope thesis before building more
+M7 Dashboard /markets route
+M8 Expand sports
+M9 Per-market detail page
+M10 Kalshi
+```
 
 ---
 
-## 10. Summary — what I'd change before M1 starts
+## 10. What changed from the first draft
 
-1. Add Pinnacle (or aggregator-sourced Pinnacle) as a third reference.
-   Two-way devig of two correlated US books is the weakest part of the
-   theory.
-2. Schema: add `sport` to `signals`, add `scraper_health`, add
-   `input_snapshot` to `signals`, add retention job. Consider enum types.
-3. Build scraper-health heartbeats + ops alerts before building more
-   scrapers. You want to know *fast* when DK changes an endpoint.
-4. Combine M4 + M5. Skip to multi-user immediately.
-5. Add M0: backtest harness on 30 days of historical data to tune
-   thresholds before alerting anyone.
-6. Plan admin/matches review UI for week 1, not M9.
+Withdrawn (based on live order-book evidence):
+- "$50 ticket moves Poly mid 2–3%" — wrong, depth is solid.
+- "Thin niche markets distort edge" — wrong, niche markets still have $10K+
+  at top of book.
+- "Require depth-within-2¢ filter" — not load-bearing; keep `min_liquidity`
+  as a cheap sanity check but it's not protecting against anything.
+- "Skip when Poly mid moved >3% in 60s" — stale-book heuristic that isn't
+  the real failure mode.
 
-The overall architecture (VPS + Supabase + Telegram + APScheduler) is
-**right for this scope**. Most risk is in the two hardest problems the
-spec under-weights: **event matching** and **the theory of edge itself**.
+Still valid:
+- DK/FD are correlated — averaging them is one sharpness estimate, not two.
+  A Pinnacle reference (via aggregator) would help if acquirable.
+- Event matching is the biggest under-scoped problem.
+- Scraper health + kill switch are ops basics missing from the spec.
+- Schema denormalization / input_snapshot / retention should ship early.
+
+New:
+- **M0 backtest gate** is the whole game. Everything else is
+  execution.

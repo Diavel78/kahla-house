@@ -240,6 +240,90 @@ def log_alert(
         return False
 
 
+# ---------- market_outcomes ----------
+
+def upsert_outcome(
+    market_id: str, winning_side: str, source: str = "manual"
+) -> None:
+    client().table("market_outcomes").upsert(
+        {"market_id": market_id, "winning_side": winning_side, "source": source},
+        on_conflict="market_id",
+    ).execute()
+
+
+def list_settled_markets(
+    sport: str | None = None, since: datetime | None = None
+) -> list[dict[str, Any]]:
+    """Return markets joined with their outcome rows."""
+    q = (
+        client()
+        .table("market_outcomes")
+        .select("winning_side,resolved_at,markets(*)")
+    )
+    if since:
+        q = q.gte("resolved_at", since.isoformat())
+    rows = q.execute().data or []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        m = r.get("markets") or {}
+        if not m:
+            continue
+        if sport and m.get("sport") != sport:
+            continue
+        out.append({**m, "winning_side": r["winning_side"]})
+    return out
+
+
+def book_snapshot_nearest(
+    market_id: str, book: str, target_ts: datetime, tolerance_minutes: int = 30
+) -> list[dict[str, Any]]:
+    """Most recent snapshot per (market_type, side) at or before target_ts,
+    within tolerance. Used by the Brier scorer to pull checkpoint prices.
+    """
+    lower = (target_ts - timedelta(minutes=tolerance_minutes)).isoformat()
+    upper = target_ts.isoformat()
+    res = (
+        client()
+        .table("book_snapshots")
+        .select("*")
+        .eq("market_id", market_id)
+        .eq("book", book)
+        .gte("captured_at", lower)
+        .lte("captured_at", upper)
+        .order("captured_at", desc=True)
+        .limit(200)
+        .execute()
+    )
+    rows = res.data or []
+    newest: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in rows:
+        key = (r["market_type"], r["side"])
+        if key not in newest:
+            newest[key] = r
+    return list(newest.values())
+
+
+def poly_tick_nearest(
+    market_id: str, outcome: str, target_ts: datetime, tolerance_minutes: int = 30
+) -> dict[str, Any] | None:
+    """Most recent Poly tick for outcome at or before target_ts, within tolerance."""
+    lower = (target_ts - timedelta(minutes=tolerance_minutes)).isoformat()
+    upper = target_ts.isoformat()
+    res = (
+        client()
+        .table("poly_ticks")
+        .select("*")
+        .eq("market_id", market_id)
+        .eq("outcome", outcome)
+        .gte("tick_ts", lower)
+        .lte("tick_ts", upper)
+        .order("tick_ts", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return (res.data or [None])[0]
+
+
 # ---------- team_aliases ----------
 
 def list_team_aliases(sport: str) -> dict[str, str]:

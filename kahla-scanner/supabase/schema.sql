@@ -108,6 +108,19 @@ create table if not exists team_aliases (
 
 create index if not exists team_aliases_sport_idx on team_aliases(sport);
 
+-- Settled market outcomes. Populated by a resolver job (Poly resolution
+-- webhooks, scores API, or manual entry). Used by analytics/brier.py to
+-- score how well each source predicted the actual outcome.
+create table if not exists market_outcomes (
+  market_id uuid primary key references markets(id) on delete cascade,
+  winning_side text not null,             -- 'home','away','void'
+  resolved_at timestamptz default now(),
+  source text                             -- 'polymarket','manual','scores_api'
+);
+
+create index if not exists market_outcomes_resolved_idx
+  on market_outcomes(resolved_at desc);
+
 -- Unmatched markets (for manual review / alias tuning)
 create table if not exists unmatched_markets (
   id bigserial primary key,
@@ -136,6 +149,7 @@ alter table subscribers enable row level security;
 alter table alerts_log enable row level security;
 alter table team_aliases enable row level security;
 alter table unmatched_markets enable row level security;
+alter table market_outcomes enable row level security;
 
 -- Dashboard (anon) can read markets, snapshots, ticks, signals
 drop policy if exists markets_read_anon on markets;
@@ -149,6 +163,9 @@ create policy poly_ticks_read_anon on poly_ticks for select to anon using (true)
 
 drop policy if exists signals_read_anon on signals;
 create policy signals_read_anon on signals for select to anon using (true);
+
+drop policy if exists outcomes_read_anon on market_outcomes;
+create policy outcomes_read_anon on market_outcomes for select to anon using (true);
 
 -- subscribers + alerts_log are service-only (contain PII / Telegram IDs)
 -- No anon policies added on purpose.

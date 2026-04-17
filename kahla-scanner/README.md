@@ -14,16 +14,20 @@ Scaffold only. Milestones:
 
 | # | Milestone | Status |
 |---|---|---|
+| **M0** | **Log-only calibration + Brier score** | **Done (tooling)**; run for 2–3 weeks before M4 |
 | M1 | Polymarket poller + Supabase writes | TODO — port existing tracker |
 | M2 | DK scraper + event matcher (NFL) | TODO — needs live endpoint probe |
 | M3 | Divergence engine + signals table | **Done (logic)** |
-| M4 | Telegram alerter (single user) | **Done (send path)** |
-| M5 | Multi-user subscriber system | **Done (fan-out + filters)**; `/start` bot command TODO |
+| M4 | Telegram alerter (multi-user fan-out) | **Done**; gated behind M0 results |
 | M6 | FD scraper | TODO |
 | M7 | Dashboard on thekahlahouse.com | TODO — separate route in `kahla-house` repo |
 | M8 | Expand sports beyond NFL | TODO |
 | M9 | Per-market detail page | TODO |
 | M10 | Kalshi integration | TODO |
+
+> **Gate:** `SCANNER_MODE=log_only` is the default. Signal scan + Telegram
+> fan-out stay off until M0 shows Poly actually predicts outcomes better
+> than DK/FD devig'd consensus.
 
 ---
 
@@ -111,6 +115,84 @@ sudo cp systemd/kahla-scanner.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now kahla-scanner
 journalctl -u kahla-scanner -f
+```
+
+---
+
+## M0 workflow — does the edge thesis hold?
+
+The whole scanner rests on one premise: **Polymarket prices predict outcomes
+better than DK/FD devig'd consensus** (at some time horizon before the event).
+Structural prior is strong — sharps get limited on DK/FD, so pros migrate to
+prediction markets — but we measure it instead of assuming.
+
+### Step 1 — run log-only mode
+
+Default `.env`:
+
+```
+SCANNER_MODE=log_only
+```
+
+The scheduler ingests everything (Poly ticks, DK/FD snapshots, market
+linkage) but does NOT compute signals or send alerts. Let it run 2–3 weeks
+across whatever sports are enabled. ~200 settled games per sport is the
+rough minimum for Brier statistics to be meaningful.
+
+### Step 2 — load outcomes
+
+Populate `market_outcomes` for each settled game. Two ways:
+
+**Manual / CSV** (fine for M0):
+
+```bash
+# outcomes.csv:
+# market_id,winning_side
+# 8f2a...,home
+# 9b1c...,away
+python -m analytics.outcomes from-csv outcomes.csv
+```
+
+**Automated**: wire a scores API or Polymarket resolution feed to
+`db.upsert_outcome(market_id, winning_side, source=...)`. Out of scope for M0.
+
+### Step 3 — score
+
+```bash
+python -m analytics.brier --sport NFL --days 30
+```
+
+Output looks like:
+
+```
+Brier scores — 214 settled markets
+
+POLY  T-24h: 0.2180 (n=203)  T-6h: 0.2091 (n=210)  T-1h: 0.2045 (n=213)  T-0h: 0.2031 (n=214)
+  DK  T-24h: 0.2245 (n=198)  T-6h: 0.2162 (n=207)  T-1h: 0.2088 (n=212)  T-0h: 0.2049 (n=214)
+  FD  T-24h: 0.2251 (n=195)  T-6h: 0.2168 (n=205)  T-1h: 0.2094 (n=211)  T-0h: 0.2053 (n=213)
+
+Best source per checkpoint:
+  T-24h: POLY (Brier 0.2180, n=203)
+  T-6h:  POLY (Brier 0.2091, n=210)
+  T-1h:  POLY (Brier 0.2045, n=213)
+  T-0h:  POLY (Brier 0.2031, n=214)
+```
+
+### Step 4 — decide
+
+- **Poly wins every checkpoint by a meaningful margin (>0.005)**: thesis
+  confirmed. Flip `SCANNER_MODE=live`. Tune `MIN_EDGE_PCT_GLOBAL` so only
+  the top ~10% of divergences (by Brier residual) would have fired.
+- **Poly ties DK/FD**: they're parallel sharp markets. Divergence scanner is
+  hunting noise. Pivot to a different thesis (cross-venue arb,
+  DK-specific book lag, news-latency).
+- **Poly loses**: edge is the other direction — fade Poly, take DK/FD. Rare
+  but possible on low-volume markets with inelastic order books.
+
+Dump per-market CSV to inspect which games dominate the score:
+
+```bash
+python -m analytics.brier --sport NFL --days 30 --csv nfl_brier.csv
 ```
 
 ---

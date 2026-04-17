@@ -39,6 +39,9 @@ def job_scrape_books() -> None:
 
 
 def job_scan_signals() -> None:
+    if not config.alerts_enabled:
+        log.debug("SCANNER_MODE=%s — skipping signal scan", config.scanner_mode)
+        return
     try:
         emitted = divergence.scan_all()
     except Exception as e:

@@ -91,8 +91,20 @@ class Config:
         default_factory=lambda: _env_list("SPORTS_ENABLED", ["NFL"])
     )
 
+    # Scanner mode:
+    #   'log_only' — scrapers run, snapshots land in Supabase, NO signals scanned,
+    #                NO alerts fired. Use this for M0 (Brier-score calibration).
+    #   'live'     — full pipeline: divergence scanning + Telegram fan-out.
+    scanner_mode: str = field(
+        default_factory=lambda: (_env("SCANNER_MODE", "log_only") or "log_only").lower()
+    )
+
     # Logging
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO"))
+
+    @property
+    def alerts_enabled(self) -> bool:
+        return self.scanner_mode == "live"
 
 
 config = Config()
