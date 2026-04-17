@@ -144,36 +144,45 @@ def fetch_espn_window(sport: str, days_ahead: int = 3) -> list[ESPNGame]:
 # ---------------------------------------------------------------------------
 
 def fetch_gamma_events(
-    sport: str, days_ahead: int = 3, limit: int = 500
+    sport: str, days_ahead: int = 3, limit: int = 2000
 ) -> list[dict[str, Any]]:
+    """Fetch per-GAME events from gamma.
+
+    Gamma's /events?tag_slug=<sport> is polluted with season-long futures
+    (MVP, Champion, CBA). Those resolve months out; individual game markets
+    resolve within hours. So we hit /markets with the tag + endDate <=
+    now + days_ahead, then group the results by eventSlug into synthetic
+    event dicts.
+    """
     tag = GAMMA_TAG.get(sport)
     if not tag:
         log.warning("no gamma tag for %s", sport)
         return []
 
     now = datetime.now(timezone.utc)
-    window_end = now + timedelta(days=days_ahead + 1)
+    end_max = now + timedelta(days=days_ahead + 1)
+    end_max_iso = end_max.isoformat()
 
-    events: list[dict[str, Any]] = []
+    markets: list[dict[str, Any]] = []
     offset = 0
     page_size = 100
     with _http() as h:
         while offset < limit:
-            # Don't send start/end date filters — gamma interprets these
-            # against market-creation time on some endpoints, which kills
-            # our results. Filter client-side instead.
             params = {
-                "tag_slug":  tag,
-                "active":    "true",
-                "closed":    "false",
-                "archived":  "false",
-                "order":     "startDate",
-                "ascending": "true",
-                "limit":     page_size,
-                "offset":    offset,
+                "tag_slug":      tag,
+                "active":        "true",
+                "closed":        "false",
+                "archived":      "false",
+                "order":         "endDate",
+                "ascending":     "true",
+                "limit":         page_size,
+                "offset":        offset,
+                # Server-side end-date filter; harmless if gamma ignores it.
+                "end_date_max":  end_max_iso,
+                "endDateMax":    end_max_iso,
             }
             try:
-                r = h.get(f"{GAMMA_BASE}/events", params=params)
+                r = h.get(f"{GAMMA_BASE}/markets", params=params)
                 if r.status_code != 200:
                     log.warning("gamma %s: %s %s", sport, r.status_code, r.text[:200])
                     break
@@ -183,24 +192,74 @@ def fetch_gamma_events(
                 break
             if not page:
                 break
-            events.extend(page)
+            markets.extend(page)
             if len(page) < page_size:
                 break
             offset += page_size
 
-    log.info("gamma %s: fetched %d raw events", sport, len(events))
+    log.info("gamma %s: fetched %d raw markets", sport, len(markets))
 
-    # Don't date-filter gamma events here — their startDate field is sometimes
-    # the parent-container creation date rather than the game start, and
-    # we'd throw away every single game. ESPN cross-ref in the caller filters
-    # these down to only the games actually happening in our window.
-    # Log one sample event so we can see the shape in the workflow output.
-    if events:
-        sample = {k: v for k, v in events[0].items()
-                  if k in ("id", "title", "slug", "startDate", "endDate",
-                           "category", "seriesSlug")}
-        log.info("gamma %s: sample event keys -> %s", sport, sample)
-    return events
+    # Client-side filter by endDate (server filter may be ignored depending
+    # on gamma version). Keep markets ending between now-6h and now+days_ahead.
+    games: list[dict[str, Any]] = []
+    for m in markets:
+        ed = _parse_ts(m.get("endDate") or m.get("end_date"))
+        if not ed:
+            continue
+        if ed < now - timedelta(hours=6):
+            continue
+        if ed > end_max:
+            continue
+        games.append(m)
+    log.info("gamma %s: %d markets in date window", sport, len(games))
+
+    if games:
+        sample_keys = {k: v for k, v in games[0].items()
+                       if k in ("id", "slug", "question", "startDate", "endDate",
+                                "eventSlug", "groupItemTitle", "outcomes")}
+        log.info("gamma %s: sample market -> %s", sport, sample_keys)
+
+    # Group by eventSlug into synthetic events the rest of discover_sport
+    # already knows how to consume (each event has a 'markets' list and a
+    # 'title'/'startDate' drawn from the ML market).
+    by_event: dict[str, dict[str, Any]] = {}
+    for m in games:
+        event_key = m.get("eventSlug") or m.get("event_slug") or m.get("slug")
+        if not event_key:
+            continue
+        bucket = by_event.setdefault(event_key, {
+            "id":        m.get("eventId") or m.get("event_id") or event_key,
+            "slug":      event_key,
+            "title":     "",
+            "startDate": None,
+            "markets":   [],
+        })
+        bucket["markets"].append(m)
+
+    # Pick a 'primary' market per event to set event-level title/startDate.
+    synthetic: list[dict[str, Any]] = []
+    for event_key, ev in by_event.items():
+        ml = _extract_ml_market(ev)
+        if ml:
+            ev["title"] = (
+                ml.get("groupItemTitle")
+                or ml.get("question")
+                or event_key.replace("-", " ")
+            )
+            ev["startDate"] = (
+                ml.get("startDate") or ml.get("start_date")
+                or ml.get("gameStartTime")
+            )
+        else:
+            # Fall back to the first market in the group
+            first = ev["markets"][0]
+            ev["title"] = first.get("groupItemTitle") or first.get("question") or event_key
+            ev["startDate"] = first.get("startDate") or first.get("gameStartTime")
+        synthetic.append(ev)
+
+    log.info("gamma %s: %d synthetic events (grouped by eventSlug)",
+             sport, len(synthetic))
+    return synthetic
 
 
 # ---------------------------------------------------------------------------
@@ -386,12 +445,17 @@ def discover_sport(sport: str, days_ahead: int = 3) -> dict[str, int]:
             counts["skipped_no_match"] += 1
             if len(sample_skipped) < 3:
                 sample_skipped.append(f"no-espn: {title[:80]}")
-            db.log_unmatched(
-                "gamma", slug, sport=sport,
-                event_name=title, event_start=start,
-                payload={"gamma_event_id": ev.get("id"),
-                         "ml_question": ml.get("question")},
-            )
+            # Only log to unmatched_markets if the title LOOKS like a game
+            # (contains 'vs', '@', or 'at' joining two alpha tokens). Futures
+            # markets like 'NBA MVP' or 'World Series Champion' shouldn't
+            # become noise in the review queue.
+            if re.search(r"\b(vs\.?|@|at)\b", title, re.IGNORECASE):
+                db.log_unmatched(
+                    "gamma", slug, sport=sport,
+                    event_name=title, event_start=start,
+                    payload={"gamma_event_id": ev.get("id"),
+                             "ml_question": ml.get("question")},
+                )
             continue
 
         counts["matched"] += 1
