@@ -16,7 +16,7 @@ Scaffold only. Milestones:
 |---|---|---|
 | **M0** | **Log-only calibration + Brier score** | **Done (tooling)**; run for 2–3 weeks before M4 |
 | M1 | Polymarket poller + Supabase writes | **Done** — BBO-mid poller + seed CLI |
-| M2 | DK scraper + event matcher (NFL) | TODO — needs live endpoint probe |
+| M2 | DK scraper + event matcher (NFL) | **Done** — robust parser (sportscontent + legacy shapes) |
 | M3 | Divergence engine + signals table | **Done (logic)** |
 | M4 | Telegram alerter (multi-user fan-out) | **Done**; gated behind M0 results |
 | M6 | FD scraper | TODO |
