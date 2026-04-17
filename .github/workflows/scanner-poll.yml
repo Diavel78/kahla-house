@@ -1,0 +1,87 @@
+name: Scanner — Poll
+
+# Runs the Kahla Scanner ingest jobs on a schedule.
+# Replaces the VPS for M0 calibration: polls Polymarket + DK + FD, resolves
+# finished games via ESPN, writes everything to Supabase.
+#
+# Required secrets (Settings -> Secrets and variables -> Actions):
+#   SUPABASE_URL
+#   SUPABASE_SERVICE_KEY
+#   POLYMARKET_KEY_ID
+#   POLYMARKET_SECRET_KEY
+#
+# Optional:
+#   SPORTS_ENABLED   (default: NFL,NBA,MLB,NHL,CBB)
+#   SCANNER_MODE     (default: log_only — keep this until M0 Brier results)
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"    # every 30 min
+  workflow_dispatch:          # manual trigger from Actions UI
+
+concurrency:
+  group: scanner-poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: kahla-scanner
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Poll Polymarket
+        continue-on-error: true
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          POLYMARKET_KEY_ID:    ${{ secrets.POLYMARKET_KEY_ID }}
+          POLYMARKET_SECRET_KEY: ${{ secrets.POLYMARKET_SECRET_KEY }}
+          SPORTS_ENABLED:       ${{ vars.SPORTS_ENABLED || 'NFL,NBA,MLB,NHL,CBB' }}
+          SCANNER_MODE:         ${{ vars.SCANNER_MODE || 'log_only' }}
+        run: python -m scrapers.polymarket poll
+
+      - name: Scrape DraftKings (per sport)
+        continue-on-error: true
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SPORTS_ENABLED:       ${{ vars.SPORTS_ENABLED || 'NFL,NBA,MLB,NHL,CBB' }}
+        run: |
+          IFS=',' read -ra SPORTS <<< "${SPORTS_ENABLED}"
+          for s in "${SPORTS[@]}"; do
+            python -m scrapers.draftkings scrape "${s}" || true
+          done
+
+      - name: Scrape FanDuel (per sport)
+        continue-on-error: true
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SPORTS_ENABLED:       ${{ vars.SPORTS_ENABLED || 'NFL,NBA,MLB,NHL,CBB' }}
+        run: |
+          IFS=',' read -ra SPORTS <<< "${SPORTS_ENABLED}"
+          for s in "${SPORTS[@]}"; do
+            python -m scrapers.fanduel scrape "${s}" || true
+          done
+
+      - name: Resolve finished games (ESPN)
+        continue-on-error: true
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SPORTS_ENABLED:       ${{ vars.SPORTS_ENABLED || 'NFL,NBA,MLB,NHL,CBB' }}
+        run: python -m analytics.resolve

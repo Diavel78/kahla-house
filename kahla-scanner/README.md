@@ -50,6 +50,50 @@ kahla-scanner/
 
 ---
 
+## Mobile-only quickstart (no Mac, no VPS)
+
+GitHub Actions runs the scanner on a cron so you can drive the whole thing
+from your phone.
+
+### 1 — Add 4 GitHub secrets (one-time)
+
+`github.com/Diavel78/kahla-house/settings/secrets/actions` → New repository secret:
+
+| Name | Value |
+|---|---|
+| `SUPABASE_URL` | `https://xzzjpbervfoyaodduynb.supabase.co` |
+| `SUPABASE_SERVICE_KEY` | your Supabase service_role key |
+| `POLYMARKET_KEY_ID` | same as in Vercel |
+| `POLYMARKET_SECRET_KEY` | same as in Vercel |
+
+### 2 — Seed a market
+
+Actions tab → **Scanner — Seed Market** → **Run workflow** button. Fill in
+the form (slug, sport, event, start time, which Poly token = home team) →
+Run workflow. Takes ~20s, adds a row to the `markets` table.
+
+### 3 — Wait for the cron
+
+The **Scanner — Poll** workflow fires every 30 min automatically. Or hit
+Run workflow on that one to trigger immediately. It polls Poly BBO mids,
+scrapes DK + FD, and runs the ESPN resolver.
+
+### 4 — Watch `/scanner`
+
+thekahlahouse.com/scanner starts filling in. "Last seen — Poly: 2m ago"
+once the first workflow finishes.
+
+Caveats:
+- GitHub Actions private-repo free tier = 2,000 minutes/month. The 30-min
+  cron uses ~1,500 min/month which fits. If you hit the limit, either
+  stretch cron to hourly or enable metered billing (~$20/mo for unlimited).
+- Cron resolution is "best effort" — runs may be delayed 5–15 min under
+  GitHub load. Fine for M0 Brier calibration; not great for live alerts.
+- For live alerting (`SCANNER_MODE=live`) once M0 results confirm the
+  thesis, move to a VPS for reliable sub-minute cadence.
+
+---
+
 ## Local dev
 
 ```bash
