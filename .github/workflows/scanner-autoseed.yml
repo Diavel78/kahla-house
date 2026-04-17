@@ -1,0 +1,50 @@
+name: Scanner — Auto-seed from Positions
+
+# One-click: register every Polymarket market you currently hold a
+# position in as a tracked scanner market. Uses the SAME credentials the
+# Kahla House dashboard uses (POLYMARKET_KEY_ID / POLYMARKET_SECRET_KEY).
+#
+# Run manually from the Actions UI whenever you make new bets.
+
+on:
+  workflow_dispatch:
+    inputs:
+      include_expired:
+        description: "Also include expired positions?"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+jobs:
+  autoseed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: kahla-scanner
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Auto-seed positions
+        env:
+          SUPABASE_URL:          ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY:  ${{ secrets.SUPABASE_SERVICE_KEY }}
+          POLYMARKET_KEY_ID:     ${{ secrets.POLYMARKET_KEY_ID }}
+          POLYMARKET_SECRET_KEY: ${{ secrets.POLYMARKET_SECRET_KEY }}
+        run: |
+          if [ "${{ inputs.include_expired }}" = "true" ]; then
+            python -m scrapers.polymarket autoseed --include-expired
+          else
+            python -m scrapers.polymarket autoseed
+          fi

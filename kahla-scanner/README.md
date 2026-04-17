@@ -66,11 +66,17 @@ from your phone.
 | `POLYMARKET_KEY_ID` | same as in Vercel |
 | `POLYMARKET_SECRET_KEY` | same as in Vercel |
 
-### 2 — Seed a market
+### 2 — Seed markets
 
-Actions tab → **Scanner — Seed Market** → **Run workflow** button. Fill in
-the form (slug, sport, event, start time, which Poly token = home team) →
-Run workflow. Takes ~20s, adds a row to the `markets` table.
+**Easiest — auto-seed from your Poly positions.**
+Actions tab → **Scanner — Auto-seed from Positions** → **Run workflow**.
+Pulls every market you currently hold a Polymarket position in and registers
+them for tracking (same credentials the Kahla House dashboard already uses).
+Run it again whenever you make new bets.
+
+**Or seed one at a time** → **Scanner — Seed Market** → Run workflow. Fill
+in slug, sport, event, start, home_side. Useful for tracking games you
+haven't bet on.
 
 ### 3 — Wait for the cron
 

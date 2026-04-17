@@ -269,6 +269,156 @@ def list_tracked(limit: int = 50) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Auto-seed from portfolio positions
+# ---------------------------------------------------------------------------
+
+def _fetch_positions() -> list[tuple[str, dict[str, Any]]]:
+    """Same call the dashboard uses — returns (slug, position_dict) pairs."""
+    try:
+        resp = _client().portfolio.positions()
+    except Exception as e:
+        log.error("positions() failed: %s", e)
+        return []
+    positions_map = (resp or {}).get("positions", {}) or {}
+    return list(positions_map.items())
+
+
+def _market_start_time(market: dict[str, Any]) -> datetime | None:
+    """Try several field names Poly uses for event start."""
+    for key in (
+        "startTime", "startDate", "eventStartTime", "openTime", "commenceTime",
+        "gameStartTime", "startsAt",
+    ):
+        v = market.get(key)
+        if not v:
+            continue
+        try:
+            return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        except Exception:
+            continue
+    # Fallback: end/resolution time (less accurate but preserves ordering)
+    for key in ("endDate", "endTime", "resolutionTime", "closeTime"):
+        v = market.get(key)
+        if not v:
+            continue
+        try:
+            return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        except Exception:
+            continue
+    return None
+
+
+def _infer_sport(market: dict[str, Any], position: dict[str, Any]) -> str:
+    """Best-effort sport guess from market metadata. Returns 'UNKNOWN' if unclear."""
+    haystacks: list[str] = []
+    for source in (market, position.get("marketMetadata") or {}):
+        for key in ("category", "sport", "subcategory", "tags", "title", "question"):
+            v = source.get(key)
+            if isinstance(v, str):
+                haystacks.append(v.lower())
+            elif isinstance(v, list):
+                haystacks.extend(str(x).lower() for x in v)
+    hay = " ".join(haystacks)
+    matches = [
+        ("NFL",   ["nfl", "super bowl"]),
+        ("NBA",   ["nba", "lakers", "celtics", "warriors"]),
+        ("MLB",   ["mlb", "yankees", "dodgers", "red sox", "world series"]),
+        ("NHL",   ["nhl", "stanley cup"]),
+        ("CBB",   ["ncaa basketball", "march madness", "college basketball", "final four"]),
+        ("NCAAF", ["college football", "ncaa football", "cfp"]),
+        ("UFC",   ["ufc", "mma"]),
+        ("SOCCER",["soccer", "epl", "la liga", "premier league", "champions league", "fifa"]),
+        ("TENNIS",["tennis", "atp", "wta"]),
+    ]
+    for sport, needles in matches:
+        if any(n in hay for n in needles):
+            return sport
+    return "UNKNOWN"
+
+
+def _split_event_name_auto(title: str) -> tuple[str, str]:
+    """Split a market title into (home, away) best-effort. Returns ('','') on failure."""
+    for sep in (" @ ", " at ", " vs. ", " vs ", " v. ", " v "):
+        if sep in title:
+            a, b = title.split(sep, 1)
+            a, b = a.strip(), b.strip()
+            if sep in (" @ ", " at "):
+                return b, a   # "Away @ Home"
+            return a, b
+    return "", ""
+
+
+def autoseed(skip_expired: bool = True) -> dict[str, int]:
+    """Register every Poly position as a tracked scanner market.
+
+    For each non-expired position:
+      - Look up market metadata via retrieve_by_slug
+      - Infer sport, parse event name, extract start time
+      - upsert into the markets table with poly_market_id=slug
+      - Skip if already seeded
+
+    Returns counts: {'seeded', 'skipped_existing', 'skipped_no_start', 'failed'}.
+    """
+    out = {"seeded": 0, "skipped_existing": 0, "skipped_no_start": 0, "failed": 0}
+    positions = _fetch_positions()
+    if not positions:
+        log.warning("no positions returned — are Poly credentials set?")
+        return out
+
+    existing = {m["poly_market_id"] for m in _tracked_markets()}
+
+    for slug, pos in positions:
+        if skip_expired and pos.get("expired"):
+            continue
+        if slug in existing:
+            out["skipped_existing"] += 1
+            continue
+
+        meta = pos.get("marketMetadata") or {}
+        # Prefer slug from metadata if present (sometimes positions are keyed by id)
+        real_slug = meta.get("slug") or slug
+
+        try:
+            market = _client().markets.retrieve_by_slug(real_slug) or {}
+        except Exception as e:
+            log.warning("retrieve_by_slug(%s) failed: %s", real_slug, e)
+            market = {}
+
+        title = (market.get("title") or meta.get("title")
+                 or market.get("question") or meta.get("question") or real_slug)
+        start = _market_start_time(market)
+        if not start:
+            log.warning("no start time for %s — skipping (fix manually later)", real_slug)
+            out["skipped_no_start"] += 1
+            continue
+
+        sport = _infer_sport(market, pos)
+        home, away = _split_event_name_auto(title)
+        event_name = f"{away} @ {home}" if home and away else title
+
+        try:
+            m = Market(
+                sport=sport,
+                event_name=event_name,
+                event_start=start,
+                poly_market_id=real_slug,
+            )
+            row = db.upsert_market(m)
+            db.client().table("markets").update(
+                {"notes": {"poly_home_side": "yes", "auto_seeded": True,
+                           "original_title": title}}
+            ).eq("id", row["id"]).execute()
+            out["seeded"] += 1
+            log.info("seeded %s (%s) sport=%s", real_slug, event_name, sport)
+        except Exception as e:
+            log.warning("upsert_market(%s) failed: %s", real_slug, e)
+            out["failed"] += 1
+
+    log.info("autoseed: %s", out)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
 
@@ -296,6 +446,14 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("list", help="Show tracked markets")
     sub.add_parser("poll", help="Run one poll cycle")
+    auto = sub.add_parser(
+        "autoseed",
+        help="Register every Poly position you hold as a tracked market",
+    )
+    auto.add_argument(
+        "--include-expired", action="store_true",
+        help="Include expired positions (default: skip)",
+    )
 
     args = p.parse_args(argv)
 
@@ -314,6 +472,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "poll":
         n = poll_once()
         log.info("poll complete: %d ticks", n)
+    elif args.cmd == "autoseed":
+        stats = autoseed(skip_expired=not args.include_expired)
+        log.info("autoseed complete: %s", stats)
     return 0
 
 
