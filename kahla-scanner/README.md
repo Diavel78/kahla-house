@@ -51,6 +51,37 @@ kahla-scanner/
 
 ---
 
+## Local quickstart (Mac) — preferred
+
+This is the fastest way to iterate: one command, output straight in your
+terminal, no waiting on GitHub Actions cron.
+
+```bash
+cd kahla-scanner
+./scripts/setup.sh          # venv + deps + .env template (one time)
+vi .env                     # fill in Supabase + Polymarket creds
+./scripts/poll.sh           # run the full poll pipeline once
+```
+
+`scripts/poll.sh` is the local equivalent of `.github/workflows/scanner-poll.yml`.
+It runs the same six steps in sequence (discover → autoseed → poll → DK → FD →
+ESPN resolve), prints a header and elapsed time per step, and continues on
+failure so one broken step doesn't block the rest.
+
+Useful flags:
+
+```bash
+./scripts/poll.sh --sports MLB,NBA --days 5   # override discover window
+./scripts/poll.sh --skip dk,fd                # skip specific steps
+./scripts/poll.sh -h                           # help
+```
+
+For a long-running scheduler (equivalent of the VPS / systemd setup), use
+`python main.py` instead — that's the APScheduler entrypoint and runs until
+Ctrl-C.
+
+---
+
 ## Mobile-only quickstart (no Mac, no VPS)
 
 GitHub Actions runs the scanner on a cron so you can drive the whole thing
@@ -110,19 +141,20 @@ Caveats:
 
 ---
 
-## Local dev
+## Local dev — long-running scheduler
+
+For continuous polling (not just one-shot), run the APScheduler entrypoint.
+Assumes `scripts/setup.sh` has already created the venv and `.env`.
 
 ```bash
 cd kahla-scanner
-python3.11 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# fill in .env, then:
 python main.py
 ```
 
-The scheduler runs indefinitely. Ctrl-C to stop.
+The scheduler runs indefinitely. Ctrl-C to stop. For a single pass
+(e.g. debugging), prefer `./scripts/poll.sh` — see "Local quickstart (Mac)"
+above.
 
 ---
 

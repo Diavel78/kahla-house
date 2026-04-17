@@ -4,8 +4,8 @@
 > thekahlahouse.com/scanner, backend plumbing verified, no data flowing
 > yet because Polymarket market discovery hasn't succeeded.
 >
-> **Start next session by:** triggering the scanner-poll workflow and
-> reading the autoseed + discover step output. See §3 below.
+> **Start next session by:** running `kahla-scanner/scripts/poll.sh` locally
+> and reading the autoseed + discover step output. See §3 below.
 
 ---
 
@@ -72,27 +72,34 @@ path until discover works.
 
 ## 3. Where to start next session
 
-### Step 1 — check the last commit's poll run
+### Step 1 — run the poll locally and read the output
 
-I pushed commit `ad8c37a` at the end of last session. It adds:
+Commit `ad8c37a` (last session) adds:
 - `autoseed` step to the scheduled poll (pulls Rob's existing Poly
   positions as a known-working data source)
 - Updated slug-probe patterns based on a real slug format we saw:
   `rus-soc-kss-2026-04-21-spread-away-2pt5` → implies
   `<league>-<away>-<home>-<date>-ml` for moneyline.
 
-Was NOT tested before session ended. Start with:
+Local run (Mac) — first time:
 
-1. Open `github.com/Diavel78/kahla-house/actions/workflows/scanner-poll.yml`
-2. Run workflow → Run workflow
-3. When done (~2min), tap the run → `poll` job → look at:
-   - **"Auto-seed from positions"** — did it seed anything from Rob's
-     current positions? If yes, we have data flowing and `/scanner`
-     will finally show non-zero.
-   - **"Discover new markets"** — did slug-probe hit anything? Look
-     for `slug-probe seeded ...` lines. If still 0, next pivot needed.
-4. Refresh `thekahlahouse.com/scanner` — if activity > 0, M0 pipeline
-   is fully live.
+```bash
+cd kahla-scanner
+./scripts/setup.sh          # venv + deps + .env template
+vi .env                     # fill in SUPABASE_* and POLYMARKET_*
+./scripts/poll.sh
+```
+
+Subsequent runs: just `./scripts/poll.sh`. It runs the same six steps the
+GitHub Actions workflow does, in order. Read the output for:
+
+- **"Auto-seed from Poly positions"** — did it seed anything? If yes,
+  data is flowing and `/scanner` will finally show non-zero.
+- **"Discover new markets"** — did slug-probe hit anything? Look for
+  `slug-probe seeded ...` lines. If still 0, next pivot needed.
+
+Then refresh `thekahlahouse.com/scanner` — if activity > 0, M0 pipeline
+is fully live.
 
 ### Step 2 — if autoseed + slug-probe both returned 0
 
