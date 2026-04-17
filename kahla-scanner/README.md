@@ -4,7 +4,8 @@ Prediction-market edge scanner. Compares public sportsbook lines (DK, FD) agains
 Polymarket sharp prices; alerts via Telegram when an edge clears configurable
 thresholds; surfaces live signals on thekahlahouse.com.
 
-See the full build spec in the parent `kahla-house` repo / CLAUDE's task prompt.
+> **Resuming work?** Read `HANDOFF.md` first — it captures the exact state
+> at the end of the last session, what's broken, and the concrete next step.
 
 ---
 

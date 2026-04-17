@@ -15,6 +15,12 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 | `/budget` | `budget.html` | Budget Tracker (personal finance) |
 | `/scanner` | `scanner.html` | Kahla Scanner review — activity, Brier scores, signals, matched/unmatched markets (admin-only, reads Supabase) |
 
+> **Kahla Scanner is its own subproject** at `kahla-scanner/` — separate Python app
+> deployed via GitHub Actions cron (not Vercel). Flask just renders the `/scanner`
+> review page on thekahlahouse.com from Supabase data. Scanner runs independently
+> and writes to the same Supabase. See `kahla-scanner/HANDOFF.md` for current state
+> and where to resume.
+
 ### API Routes
 
 | Route | Auth | Purpose |
