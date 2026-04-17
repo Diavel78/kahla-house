@@ -13,6 +13,7 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 | `/props` | `props.html` | Player Props — game-grouped best-line comparison across books |
 | `/dashboard` | `dashboard.html` | Polymarket P&L Dashboard — positions, closed trades, bet slip |
 | `/budget` | `budget.html` | Budget Tracker (personal finance) |
+| `/scanner` | `scanner.html` | Kahla Scanner review — activity, Brier scores, signals, matched/unmatched markets (admin-only, reads Supabase) |
 
 ### API Routes
 
@@ -31,6 +32,11 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 | `GET /api/realtime/raw` | Admin | Debug: raw Pinnacle sharp odds |
 | `GET /api/raw` | Admin | Debug: raw Polymarket SDK responses |
 | `GET/POST /api/splits-openers?sport=mlb` | Firebase | First-seen splits (Firestore, permanent per game ID) |
+| `GET /api/scanner/activity` | Admin | Scanner counts + last-seen per source |
+| `GET /api/scanner/brier` | Admin | Brier scores poly/dk/fd at T-24h/T-6h/T-1h/T-0 |
+| `GET /api/scanner/signals` | Admin | Recent divergence signals |
+| `GET /api/scanner/matches` | Admin | Recently matched markets (cross-venue linkage) |
+| `GET /api/scanner/unmatched` | Admin | Unmatched venue events needing manual review |
 | `GET /api/debug-trades` | Firebase | Debug: grouped trade details with before/after position data |
 | `GET /api/debug-deposits` | Firebase | Debug: all balance changes with types and reasons |
 | `GET /api/odds/debug-markets` | Firebase | Debug: market keys per book for a sport |
@@ -69,6 +75,8 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 | `POLYMARKET_SECRET_KEY` | Polymarket US API secret |
 | `FIREBASE_SERVICE_ACCOUNT` | Firebase Admin SDK service account JSON |
 | `FLASK_SECRET_KEY` | Flask session secret |
+| `SUPABASE_URL` | Kahla Scanner Postgres URL — needed for `/scanner` page to render data |
+| `SUPABASE_SERVICE_KEY` | Scanner service key — needed for `/scanner` API endpoints |
 
 ---
 

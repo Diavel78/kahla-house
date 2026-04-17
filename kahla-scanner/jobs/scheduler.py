@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from alerts import telegram
+from analytics import resolve as outcomes_resolve
 from config import config
 from scrapers import draftkings, fanduel, polymarket
 from signals import divergence
@@ -36,6 +37,10 @@ def job_scrape_books() -> None:
     for sport in config.sports_enabled:
         _safe(f"dk_scrape:{sport}", draftkings.scrape, sport)
         _safe(f"fd_scrape:{sport}", fanduel.scrape, sport)
+
+
+def job_resolve_outcomes() -> None:
+    _safe("resolve_outcomes", outcomes_resolve.resolve_all)
 
 
 def job_scan_signals() -> None:
@@ -95,5 +100,13 @@ def build_scheduler() -> BlockingScheduler:
         seconds=config.signal_scan_interval,
         id="scan_signals",
         next_run_time=datetime.now(timezone.utc) + timedelta(seconds=10),
+    )
+    # Resolve finished games to market_outcomes once an hour.
+    sched.add_job(
+        job_resolve_outcomes,
+        "interval",
+        minutes=60,
+        id="resolve_outcomes",
+        next_run_time=datetime.now(timezone.utc) + timedelta(minutes=5),
     )
     return sched

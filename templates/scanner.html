@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kahla House — Scanner</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>
+        const FC = {
+            apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
+            authDomain: "kahla-house.firebaseapp.com",
+            projectId: "kahla-house",
+            storageBucket: "kahla-house.firebasestorage.app",
+            messagingSenderId: "1029771942929",
+            appId: "1:1029771942929:web:76358096dbb868e375a5b0"
+        };
+        firebase.initializeApp(FC);
+    </script>
+
+    <style>
+        :root {
+            --bg: #0b0e13; --surface: #13171e; --surface-2: #1a1f2b; --surface-3: #1f2533;
+            --border: #1e2530; --border-light: #2a3140;
+            --text: #e2e8f0; --text-secondary: #8890a8; --text-muted: #555d78;
+            --blue: #4a7cff; --green: #22c55e; --orange: #f59e0b; --red: #ef4444; --purple: #a855f7;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body, #app { overflow-x: hidden; }
+        body {
+            font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg); color: var(--text); min-height: 100vh;
+        }
+        .top-bar {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 10px 20px; border-bottom: 1px solid var(--border);
+            background: var(--surface); position: sticky; top: 0; z-index: 10;
+        }
+        .top-bar-left { display: flex; align-items: center; gap: 14px; }
+        .top-bar-logo { width: 30px; height: 30px; background: var(--blue); border-radius: 6px; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:13px; }
+        .top-bar-title { font-weight: 600; font-size: 15px; }
+        .nav-links { display: flex; gap: 4px; margin-left: 8px; }
+        .nav-link { color: var(--text-secondary); text-decoration: none; padding: 5px 10px; border-radius: 5px; font-size: 13px; }
+        .nav-link:hover { color: var(--text); background: var(--surface-2); }
+        .nav-link.active { color: var(--text); background: var(--surface-2); }
+        .top-bar-right { display: flex; align-items: center; gap: 10px; }
+        .status { font-size: 12px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; }
+        .logout-btn { background: transparent; color: var(--text-secondary); border: 1px solid var(--border); padding: 5px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; }
+        .logout-btn:hover { color: var(--text); border-color: var(--border-light); }
+
+        main { padding: 20px; max-width: 1200px; margin: 0 auto; }
+        h2 { font-size: 14px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.08em; margin: 24px 0 10px; font-weight: 600; }
+        h2:first-child { margin-top: 0; }
+
+        .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+        .banner { background: var(--surface-2); border: 1px solid var(--border); color: var(--text-secondary); padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 20px; }
+        .banner.warn { border-color: var(--orange); color: var(--orange); background: rgba(245,158,11,0.08); }
+        .banner.err { border-color: var(--red); color: var(--red); background: rgba(239,68,68,0.08); }
+
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+        .stat { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; }
+        .stat-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+        .stat-value { font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: 600; color: var(--text); }
+        .stat-sub { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+
+        .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+        .toolbar select, .toolbar input { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); padding: 6px 10px; border-radius: 5px; font-size: 12px; font-family: inherit; }
+        .toolbar input { width: 80px; }
+        .toolbar label { font-size: 12px; color: var(--text-secondary); }
+        .btn { background: var(--surface-3); color: var(--text); border: 1px solid var(--border-light); padding: 6px 12px; border-radius: 5px; cursor: pointer; font-size: 12px; }
+        .btn:hover { background: var(--surface-2); }
+
+        table { width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+        th { text-align: left; padding: 8px 10px; color: var(--text-muted); font-weight: 600; border-bottom: 1px solid var(--border); }
+        td { padding: 8px 10px; border-bottom: 1px solid var(--border); color: var(--text); }
+        tr:last-child td { border-bottom: none; }
+        .brier-winner { color: var(--green); font-weight: 600; }
+        .src-tag { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-family: 'JetBrains Mono', monospace; background: var(--surface-3); color: var(--text-secondary); }
+        .src-tag.poly { background: rgba(168,85,247,0.15); color: var(--purple); }
+        .src-tag.dk   { background: rgba(34,197,94,0.15);  color: var(--green); }
+        .src-tag.fd   { background: rgba(74,124,255,0.15); color: var(--blue); }
+
+        .muted { color: var(--text-muted); }
+        .empty { padding: 20px; text-align: center; color: var(--text-muted); font-size: 13px; }
+
+        @media (max-width: 700px) {
+            main { padding: 12px; }
+            .top-bar { padding: 8px 12px; flex-wrap: wrap; gap: 6px; }
+            .top-bar-title { display: none; }
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="top-bar">
+            <div class="top-bar-left">
+                <div class="top-bar-logo">KH</div>
+                <div class="top-bar-title">The Kahla House</div>
+                <div class="nav-links">
+                    <a href="/" class="nav-link">Home</a>
+                    <a href="/odds" class="nav-link">Odds</a>
+                    <a href="/props" class="nav-link">Props</a>
+                    <a href="/dashboard" class="nav-link">Dashboard</a>
+                    <a href="/scanner" class="nav-link active">Scanner</a>
+                </div>
+            </div>
+            <div class="top-bar-right">
+                <span class="status" id="status">Loading...</span>
+                <button class="logout-btn" onclick="doLogout()">Logout</button>
+            </div>
+        </div>
+
+        <main>
+            <div id="gate-banner" class="banner" style="display:none"></div>
+
+            <div id="content" style="display:none">
+                <h2>Activity</h2>
+                <div class="panel">
+                    <div class="stats" id="stats"></div>
+                    <div class="muted" style="margin-top:12px;font-size:12px" id="freshness"></div>
+                </div>
+
+                <h2>Brier Score — is Polymarket sharper than DK/FD?</h2>
+                <div class="toolbar">
+                    <label for="sport">Sport</label>
+                    <select id="sport">
+                        <option value="">All</option>
+                        <option value="NFL">NFL</option>
+                        <option value="CBB">CBB</option>
+                        <option value="NBA">NBA</option>
+                        <option value="MLB">MLB</option>
+                        <option value="NHL">NHL</option>
+                    </select>
+                    <label for="days">Days</label>
+                    <input type="number" id="days" value="30" min="1" max="180">
+                    <button class="btn" onclick="loadBrier()">Refresh</button>
+                    <span class="muted" id="brier-meta"></span>
+                </div>
+                <div class="panel" id="brier-panel">
+                    <div class="empty">Loading…</div>
+                </div>
+
+                <h2>Recent Signals</h2>
+                <div class="panel" id="signals-panel">
+                    <div class="empty">Loading…</div>
+                </div>
+
+                <h2>Recent Matched Markets</h2>
+                <div class="panel" id="matches-panel">
+                    <div class="empty">Loading…</div>
+                </div>
+
+                <h2>Unmatched (needs manual review)</h2>
+                <div class="panel" id="unmatched-panel">
+                    <div class="empty">Loading…</div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+    async function authFetch(url, options = {}) {
+        const user = firebase.auth().currentUser;
+        if (!user) throw new Error('Not authenticated');
+        const token = await user.getIdToken();
+        const headers = Object.assign({}, options.headers || {}, {
+            'Authorization': `Bearer ${token}`,
+        });
+        return fetch(url, Object.assign({}, options, { headers }));
+    }
+
+    function doLogout() { firebase.auth().signOut().then(() => location.href = '/'); }
+
+    function showBanner(msg, cls = '') {
+        const b = document.getElementById('gate-banner');
+        b.textContent = msg;
+        b.className = 'banner ' + cls;
+        b.style.display = 'block';
+    }
+
+    function fmtTs(ts) {
+        if (!ts) return '—';
+        const d = new Date(ts);
+        const now = new Date();
+        const diff = (now - d) / 1000;
+        if (diff < 60) return Math.floor(diff) + 's ago';
+        if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+        if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+        return d.toLocaleString();
+    }
+    function fmtPct(p) { if (p === null || p === undefined) return '—'; return (p * 100).toFixed(1) + '%'; }
+
+    async function loadActivity() {
+        const res = await authFetch('/api/scanner/activity');
+        const j = await res.json();
+        if (!j.ok) {
+            document.getElementById('stats').innerHTML = '';
+            if (res.status === 503) showBanner('Scanner DB not configured yet (SUPABASE_URL missing in Vercel). Page wired up, data will appear once the scanner is live.', 'warn');
+            else showBanner('Error loading activity: ' + j.error, 'err');
+            return;
+        }
+        const d = j.data;
+        const stats = [
+            ['Active Markets', d.markets_active, `of ${d.markets_total} total`],
+            ['Book Snapshots (7d)', d.book_snapshots_recent.toLocaleString(), ''],
+            ['Poly Ticks (7d)', d.poly_ticks_recent.toLocaleString(), ''],
+            ['Signals (7d)', d.signals_recent.toLocaleString(), ''],
+            ['Settled Outcomes', d.outcomes_total.toLocaleString(), ''],
+            ['Unmatched', d.unmatched_open.toLocaleString(), 'needs review'],
+        ];
+        document.getElementById('stats').innerHTML = stats.map(s => `
+            <div class="stat">
+                <div class="stat-label">${s[0]}</div>
+                <div class="stat-value">${s[1]}</div>
+                ${s[2] ? `<div class="stat-sub">${s[2]}</div>` : ''}
+            </div>
+        `).join('');
+        const ls = d.last_seen || {};
+        document.getElementById('freshness').innerHTML =
+            `Last seen — DK: <strong>${fmtTs(ls.DK)}</strong> · FD: <strong>${fmtTs(ls.FD)}</strong> · Poly: <strong>${fmtTs(ls.poly)}</strong>`;
+    }
+
+    async function loadBrier() {
+        const sport = document.getElementById('sport').value;
+        const days = document.getElementById('days').value;
+        const params = new URLSearchParams();
+        if (sport) params.set('sport', sport);
+        params.set('days', days);
+        const panel = document.getElementById('brier-panel');
+        panel.innerHTML = '<div class="empty">Loading…</div>';
+        const res = await authFetch('/api/scanner/brier?' + params);
+        const j = await res.json();
+        if (!j.ok) { panel.innerHTML = `<div class="empty">${j.error}</div>`; return; }
+        const d = j.data;
+        document.getElementById('brier-meta').textContent = `${d.n_settled} settled market${d.n_settled === 1 ? '' : 's'}`;
+        if (d.n_settled === 0) {
+            panel.innerHTML = '<div class="empty">No settled markets yet. Ingest market_outcomes to compute Brier.</div>';
+            return;
+        }
+        const winners = d.winner_per_checkpoint || {};
+        let html = '<table><thead><tr><th>Source</th>';
+        for (const h of d.checkpoints) html += `<th>T-${h}h</th>`;
+        html += '</tr></thead><tbody>';
+        for (const src of ['poly', 'dk', 'fd']) {
+            html += `<tr><td><span class="src-tag ${src}">${src.toUpperCase()}</span></td>`;
+            for (const h of d.checkpoints) {
+                const cell = d.scores[src][String(h)];
+                const win = winners[String(h)];
+                const isWinner = win && win.source === src;
+                if (cell.brier === null) {
+                    html += '<td class="muted">—</td>';
+                } else {
+                    html += `<td class="${isWinner ? 'brier-winner' : ''}">${cell.brier.toFixed(4)} <span class="muted">(n=${cell.n})</span></td>`;
+                }
+            }
+            html += '</tr>';
+        }
+        html += '</tbody></table>';
+        html += '<div style="margin-top:12px;font-size:12px;color:var(--text-secondary)">Lower Brier score = better predictor. Green = best source at that horizon.</div>';
+        panel.innerHTML = html;
+    }
+
+    async function loadSignals() {
+        const res = await authFetch('/api/scanner/signals?limit=20');
+        const j = await res.json();
+        const panel = document.getElementById('signals-panel');
+        if (!j.ok) { panel.innerHTML = `<div class="empty">${j.error}</div>`; return; }
+        if (!j.data.length) { panel.innerHTML = '<div class="empty">No signals yet.</div>'; return; }
+        let html = '<table><thead><tr><th>When</th><th>Sport</th><th>Event</th><th>Fade</th><th>Edge</th><th>Public</th><th>Sharp</th><th>Liquidity</th></tr></thead><tbody>';
+        for (const s of j.data) {
+            html += `<tr>
+                <td>${fmtTs(s.triggered_at)}</td>
+                <td>${s.sport || ''}</td>
+                <td>${s.event_name || ''}</td>
+                <td>${(s.fade_side || '').toUpperCase()}</td>
+                <td>+${Number(s.edge_pct).toFixed(1)}%</td>
+                <td>${fmtPct(s.public_prob)}</td>
+                <td>${fmtPct(s.sharp_prob)}</td>
+                <td>${s.liquidity_usd ? '$' + Number(s.liquidity_usd).toLocaleString() : '—'}</td>
+            </tr>`;
+        }
+        html += '</tbody></table>';
+        panel.innerHTML = html;
+    }
+
+    async function loadMatches() {
+        const res = await authFetch('/api/scanner/matches?limit=40');
+        const j = await res.json();
+        const panel = document.getElementById('matches-panel');
+        if (!j.ok) { panel.innerHTML = `<div class="empty">${j.error}</div>`; return; }
+        if (!j.data.length) { panel.innerHTML = '<div class="empty">No matched markets yet.</div>'; return; }
+        let html = '<table><thead><tr><th>Sport</th><th>Event</th><th>Starts</th><th>Poly</th><th>DK</th><th>FD</th></tr></thead><tbody>';
+        for (const m of j.data) {
+            html += `<tr>
+                <td>${m.sport || ''}</td>
+                <td>${m.event_name || ''}</td>
+                <td>${m.event_start ? new Date(m.event_start).toLocaleString() : ''}</td>
+                <td>${m.poly_market_id ? '✓' : '—'}</td>
+                <td>${m.dk_event_id ? '✓' : '—'}</td>
+                <td>${m.fd_event_id ? '✓' : '—'}</td>
+            </tr>`;
+        }
+        html += '</tbody></table>';
+        panel.innerHTML = html;
+    }
+
+    async function loadUnmatched() {
+        const res = await authFetch('/api/scanner/unmatched?limit=40');
+        const j = await res.json();
+        const panel = document.getElementById('unmatched-panel');
+        if (!j.ok) { panel.innerHTML = `<div class="empty">${j.error}</div>`; return; }
+        if (!j.data.length) { panel.innerHTML = '<div class="empty">Nothing unmatched. Nice.</div>'; return; }
+        let html = '<table><thead><tr><th>Seen</th><th>Source</th><th>Sport</th><th>Event</th><th>Starts</th></tr></thead><tbody>';
+        for (const u of j.data) {
+            html += `<tr>
+                <td>${fmtTs(u.seen_at)}</td>
+                <td><span class="src-tag ${u.source}">${(u.source || '').toUpperCase()}</span></td>
+                <td>${u.sport || ''}</td>
+                <td>${u.event_name || ''}</td>
+                <td>${u.event_start ? new Date(u.event_start).toLocaleString() : ''}</td>
+            </tr>`;
+        }
+        html += '</tbody></table>';
+        panel.innerHTML = html;
+    }
+
+    async function loadAll() {
+        document.getElementById('content').style.display = 'block';
+        document.getElementById('status').textContent = 'Loading…';
+        await Promise.all([loadActivity(), loadBrier(), loadSignals(), loadMatches(), loadUnmatched()]);
+        document.getElementById('status').textContent = 'Ready';
+    }
+
+    firebase.auth().onAuthStateChanged(async (user) => {
+        if (!user) { location.href = '/'; return; }
+        try {
+            const res = await authFetch('/api/scanner/activity');
+            if (res.status === 403) {
+                showBanner('Admin access required.', 'err');
+                document.getElementById('status').textContent = 'No access';
+                return;
+            }
+        } catch (e) { /* fall through; loadAll will surface errors */ }
+        loadAll();
+    });
+    </script>
+</body>
+</html>
