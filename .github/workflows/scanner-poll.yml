@@ -43,6 +43,13 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
+      - name: Discover new markets (MLB/NBA/NHL)
+        continue-on-error: true
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scrapers.discover --sports MLB,NBA,NHL --days 3
+
       - name: Poll Polymarket
         continue-on-error: true
         env:

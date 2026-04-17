@@ -68,15 +68,24 @@ from your phone.
 
 ### 2 — Seed markets
 
-**Easiest — auto-seed from your Poly positions.**
-Actions tab → **Scanner — Auto-seed from Positions** → **Run workflow**.
-Pulls every market you currently hold a Polymarket position in and registers
-them for tracking (same credentials the Kahla House dashboard already uses).
-Run it again whenever you make new bets.
+**Default (already automatic):** the scheduled poll workflow runs
+`scrapers.discover` every 30 min, which pulls every active MLB/NBA/NHL
+moneyline market from Polymarket's public gamma API, cross-references
+against ESPN for canonical home/away, and seeds any new markets. You
+shouldn't have to touch anything — after the first poll runs, the markets
+table fills in automatically.
 
-**Or seed one at a time** → **Scanner — Seed Market** → Run workflow. Fill
-in slug, sport, event, start, home_side. Useful for tracking games you
-haven't bet on.
+**Manual one-off — different sport window:** Actions → **Scanner —
+Discover Markets** → Run workflow. Inputs let you override the sports
+list (e.g. `NFL` in-season) or days-ahead window.
+
+**Auto-seed your own positions:** Actions → **Scanner — Auto-seed from
+Positions** → Run workflow. Registers every Poly market you currently
+hold a position in (useful for tracking obscure props that gamma discover
+missed).
+
+**One at a time:** Actions → **Scanner — Seed Market** → Run workflow.
+Manual slug/sport/event form — useful for edge cases.
 
 ### 3 — Wait for the cron
 
