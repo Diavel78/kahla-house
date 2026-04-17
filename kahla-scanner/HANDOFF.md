@@ -38,70 +38,111 @@
 
 ## 2. What's broken / unknown
 
-### Primary blocker: Polymarket market discovery returns 0 games
+### Primary blocker: gamma-api ≠ Polymarket US — confirmed
 
-Last poll run showed:
+First local `./scripts/poll.sh` run (2026-04-17) confirmed HANDOFF's hypothesis:
+
 ```
 MLB: gamma_events: 1500, matched: 0, seeded: 0,
-     skipped_no_ml: 768, skipped_no_match: 732,
-     slug_probe_seeded: 0
-NBA: identical numbers
-NHL: identical numbers
+     skipped_no_ml: 761, skipped_no_match: 738, slug_probe_seeded: 0
+NBA / NHL: identical shape
 ```
 
-Root cause hypothesis: **`gamma-api.polymarket.com` serves Polymarket
-global (international soccer, politics, crypto), not Polymarket US
-sportsbook.** The first gamma market we logged was a Russian Premier
-League soccer spread, not a US sport. None of the 1500 fetched markets
-matched any of the 55 MLB games ESPN returned.
+First raw gamma market logged was **League of Legends (LCK Challengers)** —
+gamma-api.polymarket.com serves Polymarket global (esports, international
+soccer, politics), not Polymarket US sportsbook. Slug-probe *did* hit 6 NHL
+slugs on gamma (e.g. `nhl-ott-car-2026-04-18`) and got them into `markets`,
+but the subsequent BBO poll against `gateway.polymarket.us/v1/markets/{slug}/bbo`
+returned 404 for every one of those slugs. Two different ecosystems; same-named
+slugs don't carry across.
 
-### FD scraper: 404 on all sports
+### Supabase schema drift: `markets.notes` column missing
 
-FanDuel returns `404 {"error":true}` for every sport. curl_cffi
-impersonation got past the TLS layer (no longer a 403), but the
-endpoint path or _ak key is wrong. Haven't debugged yet.
+`schema.sql` has had `notes jsonb` since M1, but the live Supabase project
+wasn't re-migrated. Slug-probe inserts succeeded (201 Created), then the
+follow-up `PATCH ... notes = {...}` returned 400:
+`Could not find the 'notes' column of 'markets' in the schema cache`.
+**Fix**: paste this into Supabase SQL editor (idempotent):
 
-### DK: confirmed working but untestable
+```sql
+alter table markets add column if not exists notes jsonb default '{}'::jsonb;
+```
 
-DK returns 200s and parses events (we saw "CHA Hornets @ ORL Magic"
-logged as unmatched). But with 0 markets seeded, every DK event
-falls through to unmatched_markets. Can't verify the snapshot-insert
-path until discover works.
+Or re-run the whole `kahla-scanner/supabase/schema.sql` — it's safe to re-run.
+
+### Autoseed: 0 positions returned
+
+`GET https://api.polymarket.us/v1/portfolio/positions` returned 200 OK but
+empty. Either (a) portfolio genuinely has no open positions right now, or
+(b) creds point to a different account than the dashboard uses. Check
+`thekahlahouse.com/dashboard` — if it shows positions, creds mismatch; if
+also empty, just no data. Low-priority given discovery needs pivoting anyway.
+
+### FD scraper: 404 on all sports (unchanged)
+
+Same as before. Deferred.
+
+### DK: scraper works end-to-end — no matches (expected)
+
+DK NBA/MLB/NHL all return real event lists (e.g. `CHA Hornets @ ORL Magic`,
+`LA Dodgers @ COL Rockies`). All log as `unmatched dk event` because the
+`markets` table has no rows to match against. Will start matching once
+discover seeds real Poly US markets.
 
 ---
 
 ## 3. Where to start next session
 
-### Step 1 — run the poll locally and read the output
+### Step 1 — fix Supabase `markets.notes` column
 
-Commit `ad8c37a` (last session) adds:
-- `autoseed` step to the scheduled poll (pulls Rob's existing Poly
-  positions as a known-working data source)
-- Updated slug-probe patterns based on a real slug format we saw:
-  `rus-soc-kss-2026-04-21-spread-away-2pt5` → implies
-  `<league>-<away>-<home>-<date>-ml` for moneyline.
+One SQL statement in the Supabase SQL editor, then move on:
 
-Local run (Mac) — first time:
+```sql
+alter table markets add column if not exists notes jsonb default '{}'::jsonb;
+```
+
+### Step 2 — probe the Polymarket US SDK to find a real discovery method
+
+`scripts/probe_sdk.py` is a safe, read-only introspection script. Run once:
 
 ```bash
 cd kahla-scanner
-./scripts/setup.sh          # venv + deps + .env template
-vi .env                     # fill in SUPABASE_* and POLYMARKET_*
+source venv/bin/activate
+python scripts/probe_sdk.py
+```
+
+It prints every namespace/method on the `PolymarketUS` client, tries a
+dozen likely discovery call names (`markets.list`, `events.list`,
+`sports.markets(...)`, `catalog.markets`, etc.), and summarizes each
+response shape. Whatever returns something useful is the new discovery path.
+
+### Step 3 — implement `discover_via_sdk(sport)` using whatever probe found
+
+Replace (or front-end) `scrapers/discover.py`'s gamma-api path with a new
+`discover_via_sdk(sport)` that calls the SDK method(s) the probe identified.
+Once implemented, the existing ESPN cross-reference and upsert path should
+work as-is.
+
+Alternative if the SDK has no list method: scrape `polymarket.com/sports/<league>`
+HTML. More brittle, but last resort.
+
+### Step 4 — re-run the poll
+
+```bash
 ./scripts/poll.sh
 ```
 
-Subsequent runs: just `./scripts/poll.sh`. It runs the same six steps the
-GitHub Actions workflow does, in order. Read the output for:
+Look for:
 
-- **"Auto-seed from Poly positions"** — did it seed anything? If yes,
-  data is flowing and `/scanner` will finally show non-zero.
-- **"Discover new markets"** — did slug-probe hit anything? Look for
-  `slug-probe seeded ...` lines. If still 0, next pivot needed.
+- `Discover new markets` — non-zero `seeded` count.
+- `Poll Polymarket BBO` — ticks inserted (not all 404s).
+- `DK scrape: <sport>` — `matched > 0` (was 0 before because markets table
+  was empty; once seeded, DK should start matching).
 
 Then refresh `thekahlahouse.com/scanner` — if activity > 0, M0 pipeline
-is fully live.
+is live.
 
-### Step 2 — if autoseed + slug-probe both returned 0
+### Aside — if Step 2 reveals there's no SDK list method either
 
 Pivot strategy (not yet implemented): use the authenticated Polymarket
 US SDK (`polymarket_us.PolymarketUS`) to list active sports markets

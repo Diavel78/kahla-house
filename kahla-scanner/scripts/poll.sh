@@ -50,12 +50,15 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
-# config.py reads .env via python-dotenv, but the shell loop below also needs
-# SPORTS_ENABLED for DK/FD iteration.
-set -a
-# shellcheck disable=SC1091
-source .env
-set +a
+# config.py reads .env via python-dotenv; don't shell-source (unquoted values
+# like DK_USER_AGENT contain parens/semicolons that trip bash). Only SPORTS_ENABLED
+# is needed by the loops below — extract it with grep so quoting doesn't matter.
+if [ -z "${SPORTS_ENABLED:-}" ]; then
+    SPORTS_ENABLED=$(grep -E '^\s*SPORTS_ENABLED\s*=' .env \
+        | tail -n 1 \
+        | sed -E 's/^\s*SPORTS_ENABLED\s*=\s*//; s/^["'\'']//; s/["'\'']\s*$//' \
+        || true)
+fi
 : "${SPORTS_ENABLED:=NFL,NBA,MLB,NHL,CBB}"
 
 skip() { [[ ",${SKIP}," == *",$1,"* ]]; }
