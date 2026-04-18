@@ -699,13 +699,13 @@ def discover_via_sdk(
         filtered.append(m)
     log.info("sdk %s: %d moneyline markets in window", sport, len(filtered))
 
-    existing = {m["poly_market_id"] for m in db.list_active_markets(sport)
+    existing = {m["poly_market_id"]: m for m in db.list_active_markets(sport)
                 if m.get("poly_market_id")}
     seeded = 0
 
     for m in filtered:
         slug = m.get("slug")
-        if not slug or slug in existing:
+        if not slug:
             continue
 
         away_name, home_name, away_abbr, home_abbr = _sdk_market_teams(m)
@@ -727,6 +727,29 @@ def discover_via_sdk(
                 event_name = m.get("question") or slug
 
         home_side = _sdk_market_home_side(m, home_abbr)
+        notes_payload = {
+            "poly_home_side":  home_side,
+            "auto_seeded":     True,
+            "discovered_via":  "sdk",
+            "poly_market_id_int": m.get("id"),
+            "sports_market_type": m.get("sportsMarketType"),
+            "away_abbr": away_abbr, "home_abbr": home_abbr,
+            "original_question": m.get("question"),
+        }
+
+        # Existing row that's missing notes (e.g. seeded before the notes
+        # column existed in Supabase) — just refresh notes, don't count as new.
+        if slug in existing:
+            existing_notes = existing[slug].get("notes") or {}
+            if not (existing_notes or {}).get("poly_home_side"):
+                try:
+                    db.client().table("markets").update(
+                        {"notes": notes_payload}
+                    ).eq("id", existing[slug]["id"]).execute()
+                    log.info("sdk-refreshed notes for %s home_side=%s", slug, home_side)
+                except Exception as e:
+                    log.warning("sdk refresh notes(%s) failed: %s", slug, e)
+            continue
 
         try:
             row = db.upsert_market(Market(
@@ -734,18 +757,10 @@ def discover_via_sdk(
                 event_start=start, poly_market_id=slug,
             ))
             db.client().table("markets").update({
-                "notes": {
-                    "poly_home_side":  home_side,
-                    "auto_seeded":     True,
-                    "discovered_via":  "sdk",
-                    "poly_market_id_int": m.get("id"),
-                    "sports_market_type": m.get("sportsMarketType"),
-                    "away_abbr": away_abbr, "home_abbr": home_abbr,
-                    "original_question": m.get("question"),
-                }
+                "notes": notes_payload
             }).eq("id", row["id"]).execute()
             seeded += 1
-            existing.add(slug)
+            existing[slug] = row
             log.info("sdk-seeded %s (%s) home_side=%s", slug, event_name, home_side)
         except Exception as e:
             log.warning("sdk upsert_market(%s) failed: %s", slug, e)

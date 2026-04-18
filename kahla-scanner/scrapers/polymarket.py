@@ -87,8 +87,12 @@ def _safe_float(v) -> float | None:
         return None
 
 
+_LOGGED_BBO_KEYS = False
+
+
 def fetch_bbo(slug: str) -> dict[str, Any] | None:
     """Fetch BBO for a market slug. Returns {bid, ask, bid_size, ask_size, mid} or None."""
+    global _LOGGED_BBO_KEYS
     try:
         resp = _client().markets.bbo(slug)
     except Exception as e:
@@ -96,15 +100,56 @@ def fetch_bbo(slug: str) -> dict[str, Any] | None:
         return None
     if not resp:
         return None
-    bid = _safe_float(resp.get("bestBidPrice") or resp.get("bid"))
-    ask = _safe_float(resp.get("bestAskPrice") or resp.get("ask"))
-    bid_size = _safe_float(
-        resp.get("bestBidSize") or resp.get("bidSize") or resp.get("bidSizeUsd")
-    )
-    ask_size = _safe_float(
-        resp.get("bestAskSize") or resp.get("askSize") or resp.get("askSizeUsd")
-    )
+
+    # Normalize pydantic model -> dict; Polymarket US returns typed objects.
+    if hasattr(resp, "model_dump"):
+        resp_dict = resp.model_dump()
+    elif isinstance(resp, dict):
+        resp_dict = resp
+    else:
+        log.warning("bbo(%s) unexpected type: %s", slug, type(resp).__name__)
+        return None
+
+    if not _LOGGED_BBO_KEYS:
+        log.info("bbo(%s) sample keys=%s sample=%s",
+                 slug, sorted(resp_dict.keys()),
+                 {k: resp_dict[k] for k in list(resp_dict.keys())[:6]})
+        _LOGGED_BBO_KEYS = True
+
+    def _g(*keys):
+        for k in keys:
+            v = resp_dict.get(k)
+            if v is not None:
+                return v
+        return None
+
+    bid = _safe_float(_g("bestBidPrice", "bestBid", "best_bid", "bid", "bidPrice"))
+    ask = _safe_float(_g("bestAskPrice", "bestAsk", "best_ask", "ask", "askPrice"))
+
+    # Some APIs return best quotes as nested objects: {bids: [{price, size}, ...]}
+    if bid is None:
+        bids = resp_dict.get("bids") or []
+        if bids and isinstance(bids, list):
+            bid = _safe_float((bids[0] or {}).get("price"))
+    if ask is None:
+        asks = resp_dict.get("asks") or []
+        if asks and isinstance(asks, list):
+            ask = _safe_float((asks[0] or {}).get("price"))
+
+    bid_size = _safe_float(_g("bestBidSize", "bidSize", "bidSizeUsd", "bid_size"))
+    ask_size = _safe_float(_g("bestAskSize", "askSize", "askSizeUsd", "ask_size"))
+    if bid_size is None:
+        bids = resp_dict.get("bids") or []
+        if bids and isinstance(bids, list):
+            bid_size = _safe_float((bids[0] or {}).get("size"))
+    if ask_size is None:
+        asks = resp_dict.get("asks") or []
+        if asks and isinstance(asks, list):
+            ask_size = _safe_float((asks[0] or {}).get("size"))
+
     if bid is None or ask is None:
+        log.warning("bbo(%s): could not extract bid/ask from keys=%s",
+                    slug, sorted(resp_dict.keys()))
         return None
     return {
         "bid": bid,
@@ -112,7 +157,7 @@ def fetch_bbo(slug: str) -> dict[str, Any] | None:
         "bid_size": bid_size,
         "ask_size": ask_size,
         "mid": (bid + ask) / 2,
-        "raw": resp,
+        "raw": resp_dict,
     }
 
 
