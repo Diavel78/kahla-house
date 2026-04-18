@@ -126,13 +126,40 @@ def _parse_ts(s: str | None) -> datetime | None:
         return None
 
 
+def _canonical_key(sport: str, home: str, away: str, start: datetime,
+                   book_key: str) -> tuple[str, str, str, str]:
+    """Stable per-game key across books.
+
+    Owls returns each game once per book, but the eventId and commence_time
+    are NOT consistent across books:
+      - Most books (PIN/DK/FD/etc) use actual game start as commence_time.
+      - Polymarket uses the MARKET RESOLUTION time, which is 24h AFTER the
+        game. Example: today's KC@NYY 1:35pm ET shows up in Owls as POLY
+        with commence_time=2026-04-19T17:35Z (tomorrow) because the slug
+        is `polymarket-mlb-kc-nyy-2026-04-19` (resolution date = game+1).
+
+    We normalize POLY by subtracting 24h so POLY + PIN + DK / etc.
+    collapse into a single game record.
+    """
+    s = start
+    if book_key == "polymarket":
+        s = start - timedelta(days=1)
+    day = s.strftime("%Y-%m-%d")
+    return (sport, home.strip().lower(), away.strip().lower(), day)
+
+
 def parse_games(sport: str, raw: dict[str, Any]) -> list[OwlsGame]:
-    """Collapse the per-book response into one game per (sport, teams, time)."""
+    """Collapse the per-book response into one game per (sport, teams, day).
+
+    Groups events across all 13 book top-level keys by a canonical key derived
+    from (sport, teams, game-date). Polymarket commence_times are shifted -24h
+    before keying to account for Owls' POLY resolution-date convention.
+    """
     data = raw.get("data") or {}
     if not isinstance(data, dict):
         return []
 
-    games: dict[str, OwlsGame] = {}
+    games: dict[tuple[str, str, str, str], OwlsGame] = {}
     for top_key, events in data.items():
         if not isinstance(events, list):
             continue
@@ -143,17 +170,32 @@ def parse_games(sport: str, raw: dict[str, Any]) -> list[OwlsGame]:
             start = _parse_ts(ev.get("commence_time"))
             if not (eid and home and away and start):
                 continue
-            game = games.get(eid)
+
+            # Skip obvious aggregate-market entries ("Home Runs (15 Games)" etc)
+            if "(" in home or "(" in away:
+                continue
+
+            top_book = (top_key or "").lower()
+            key = _canonical_key(sport, home, away, start, top_book)
+            canonical_start = start - timedelta(days=1) if top_book == "polymarket" else start
+
+            game = games.get(key)
             if game is None:
                 game = OwlsGame(
                     sport=sport,
                     event_id=eid,
                     home=home,
                     away=away,
-                    commence_time=start,
+                    commence_time=canonical_start,  # always the non-POLY start
                     book_markets={},
                 )
-                games[eid] = game
+                games[key] = game
+            else:
+                # If a non-POLY book arrives after a POLY-first insert, upgrade
+                # the canonical start to the non-POLY value (it's the real game time).
+                if top_book != "polymarket":
+                    game.commence_time = canonical_start
+
             for b in ev.get("bookmakers") or []:
                 book_key = (b.get("key") or "").lower()
                 code = BOOK_CODES.get(book_key)

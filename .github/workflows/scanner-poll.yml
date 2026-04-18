@@ -64,3 +64,17 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           SPORTS_ENABLED:       ${{ vars.SPORTS_ENABLED || 'NFL,NBA,MLB,NHL,CBB' }}
         run: python -m analytics.resolve
+
+      - name: Scan for sharp-consensus signals
+        continue-on-error: true
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SPORTS_ENABLED:       ${{ vars.SPORTS_ENABLED || 'NFL,NBA,MLB,NHL,CBB' }}
+          # Phase 1: signals write to Supabase `signals` table. No Telegram yet.
+          # Thresholds (env-overridable):
+          #   SHARP_CONSENSUS_AGREE_MAX_PCT  default 1.5  (POLY~PIN agreement)
+          #   SHARP_CONSENSUS_EDGE_MIN_PCT   default 3.0  (sharp vs public)
+          #   SHARP_CONSENSUS_LOOKAHEAD_HOURS default 2.0
+          #   SHARP_CONSENSUS_DEDUP_MIN      default 30   (min gap between fires)
+        run: python -m signals.divergence
