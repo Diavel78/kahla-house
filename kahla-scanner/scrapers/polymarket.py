@@ -87,7 +87,7 @@ def _safe_float(v) -> float | None:
         return None
 
 
-_LOGGED_BBO_KEYS = False
+_LOGGED_BBO_KEYS = 0   # log first N responses to see variety (live vs settled)
 
 
 def fetch_bbo(slug: str) -> dict[str, Any] | None:
@@ -110,11 +110,15 @@ def fetch_bbo(slug: str) -> dict[str, Any] | None:
         log.warning("bbo(%s) unexpected type: %s", slug, type(resp).__name__)
         return None
 
-    if not _LOGGED_BBO_KEYS:
+    # Polymarket US wraps the payload one level deep in 'marketData'.
+    if isinstance(resp_dict.get("marketData"), dict):
+        resp_dict = resp_dict["marketData"]
+
+    if _LOGGED_BBO_KEYS < 3:
         log.info("bbo(%s) sample keys=%s sample=%s",
                  slug, sorted(resp_dict.keys()),
-                 {k: resp_dict[k] for k in list(resp_dict.keys())[:6]})
-        _LOGGED_BBO_KEYS = True
+                 {k: resp_dict[k] for k in list(resp_dict.keys())[:10]})
+        _LOGGED_BBO_KEYS += 1
 
     def _g(*keys):
         for k in keys:
@@ -126,7 +130,6 @@ def fetch_bbo(slug: str) -> dict[str, Any] | None:
     bid = _safe_float(_g("bestBidPrice", "bestBid", "best_bid", "bid", "bidPrice"))
     ask = _safe_float(_g("bestAskPrice", "bestAsk", "best_ask", "ask", "askPrice"))
 
-    # Some APIs return best quotes as nested objects: {bids: [{price, size}, ...]}
     if bid is None:
         bids = resp_dict.get("bids") or []
         if bids and isinstance(bids, list):
@@ -136,21 +139,22 @@ def fetch_bbo(slug: str) -> dict[str, Any] | None:
         if asks and isinstance(asks, list):
             ask = _safe_float((asks[0] or {}).get("price"))
 
-    bid_size = _safe_float(_g("bestBidSize", "bidSize", "bidSizeUsd", "bid_size"))
-    ask_size = _safe_float(_g("bestAskSize", "askSize", "askSizeUsd", "ask_size"))
-    if bid_size is None:
-        bids = resp_dict.get("bids") or []
-        if bids and isinstance(bids, list):
-            bid_size = _safe_float((bids[0] or {}).get("size"))
-    if ask_size is None:
-        asks = resp_dict.get("asks") or []
-        if asks and isinstance(asks, list):
-            ask_size = _safe_float((asks[0] or {}).get("size"))
+    # Fallback for markets with no live quotes (pre-open, post-close, thin
+    # books): use last traded or current price as a synthetic mid. For M0
+    # Brier calibration this is the canonical "market belief" regardless of
+    # whether a taker is currently willing to cross.
+    fallback_mid = _safe_float(_g("lastTradePx", "lastPriceSample", "currentPx"))
+    if (bid is None or ask is None) and fallback_mid is not None and 0 < fallback_mid < 1:
+        bid = ask = fallback_mid
 
     if bid is None or ask is None:
         log.warning("bbo(%s): could not extract bid/ask from keys=%s",
                     slug, sorted(resp_dict.keys()))
         return None
+
+    bid_size = _safe_float(_g("bestBidSize", "bidSize", "bidSizeUsd", "bid_size", "bidDepth"))
+    ask_size = _safe_float(_g("bestAskSize", "askSize", "askSizeUsd", "ask_size", "askDepth"))
+
     return {
         "bid": bid,
         "ask": ask,
