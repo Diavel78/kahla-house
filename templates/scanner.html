@@ -366,6 +366,27 @@
         document.getElementById('status').textContent = 'Ready';
     }
 
+    // Staggered auto-refresh:
+    //   fast tier (Activity + Signals) every 60s — cheap, most time-sensitive
+    //   slow tier (Brier + Matches + Unmatched) every 5min — matches ingest cadence
+    // Paused when tab is hidden; does an immediate fast-tier refresh when
+    // you return to the tab so you don't stare at stale data.
+    function setupAutoRefresh() {
+        const fast = () => {
+            if (document.visibilityState !== 'visible') return;
+            loadActivity(); loadSignals();
+        };
+        const slow = () => {
+            if (document.visibilityState !== 'visible') return;
+            loadBrier(); loadMatches(); loadUnmatched();
+        };
+        setInterval(fast,  60 * 1000);
+        setInterval(slow, 300 * 1000);
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') fast();
+        });
+    }
+
     firebase.auth().onAuthStateChanged(async (user) => {
         if (!user) { location.href = '/'; return; }
         try {
@@ -376,7 +397,8 @@
                 return;
             }
         } catch (e) { /* fall through; loadAll will surface errors */ }
-        loadAll();
+        await loadAll();
+        setupAutoRefresh();
     });
     </script>
 </body>
