@@ -53,6 +53,11 @@ def _devig_two_way(p_a: float, p_b: float) -> float:
 
 CHECKPOINTS_HOURS: list[float] = [24, 6, 1, 0]
 
+# Books we score, in display order. Must match book codes written by
+# kahla-scanner/scrapers/owls.py. Order is "sharp-ish public → big retail
+# → smaller books" so the table reads from left-most-likely-sharpest.
+BRIER_BOOKS: list[str] = ["POLY", "PIN", "CIR", "DK", "FD", "MGM", "CAE", "HR", "NVG"]
+
 
 # ---------------------------------------------------------------------------
 # Queries
@@ -83,23 +88,24 @@ def activity(days: int = 7) -> dict[str, Any]:
         .execute()
     )
 
-    # Latest captured_at per source (book_snapshots + poly_ticks)
-    latest_dk = (
-        c.table("book_snapshots").select("captured_at").eq("book", "DK")
-        .order("captured_at", desc=True).limit(1).execute()
-    )
-    latest_fd = (
-        c.table("book_snapshots").select("captured_at").eq("book", "FD")
-        .order("captured_at", desc=True).limit(1).execute()
-    )
-    latest_poly = (
-        c.table("poly_ticks").select("captured_at")
-        .order("captured_at", desc=True).limit(1).execute()
-    )
-
+    # Latest captured_at per book in book_snapshots (POLY + public books all
+    # land here now via scrapers/owls.py). Legacy poly_ticks timestamp is
+    # tracked too for visibility into the old VPS pipeline during migration.
     def _first(res):
         data = res.data or []
         return (data[0] or {}).get("captured_at") if data else None
+
+    last_seen: dict[str, str | None] = {}
+    for book in BRIER_BOOKS:
+        res = (
+            c.table("book_snapshots").select("captured_at").eq("book", book)
+            .order("captured_at", desc=True).limit(1).execute()
+        )
+        last_seen[book] = _first(res)
+    last_seen["poly_ticks"] = _first(
+        c.table("poly_ticks").select("captured_at")
+        .order("captured_at", desc=True).limit(1).execute()
+    )
 
     return {
         "window_days": days,
@@ -110,11 +116,7 @@ def activity(days: int = 7) -> dict[str, Any]:
         "signals_recent": signals_recent.count or 0,
         "outcomes_total": outcomes_total.count or 0,
         "unmatched_open": unmatched_open.count or 0,
-        "last_seen": {
-            "DK": _first(latest_dk),
-            "FD": _first(latest_fd),
-            "poly": _first(latest_poly),
-        },
+        "last_seen": last_seen,
     }
 
 
@@ -166,67 +168,63 @@ def unmatched(limit: int = 40) -> list[dict[str, Any]]:
 # Brier scoring
 # ---------------------------------------------------------------------------
 
-def _book_home_prob(snaps: list[dict[str, Any]]) -> float | None:
-    home = away = None
-    for s in snaps:
-        if s.get("market_type") != "moneyline":
-            continue
-        p = s.get("implied_prob")
-        if p is None:
-            continue
-        if s.get("side") == "home":
-            home = float(p)
-        elif s.get("side") == "away":
-            away = float(p)
-    if home is None or away is None or (home + away) <= 0:
-        return None
-    return _devig_two_way(home, away)
+def _book_home_probs_nearest(
+    c, market_id: str, target: datetime, tol_min: int = 30
+) -> dict[str, float]:
+    """For a given market + checkpoint time, return {book: devig'd home prob}
+    for every book that has a moneyline snapshot in the ±tol_min window.
 
-
-def _snap_nearest(c, market_id: str, book: str, target: datetime, tol_min: int = 30):
+    Single query per (market, checkpoint). Python-side groups by book and
+    picks the newest (home, away) pair to devig.
+    """
     lower = (target - timedelta(minutes=tol_min)).isoformat()
     upper = target.isoformat()
     res = (
         c.table("book_snapshots")
-        .select("market_type,side,implied_prob,captured_at")
+        .select("book,market_type,side,implied_prob,captured_at")
         .eq("market_id", market_id)
-        .eq("book", book)
+        .eq("market_type", "moneyline")
         .gte("captured_at", lower)
         .lte("captured_at", upper)
         .order("captured_at", desc=True)
-        .limit(50)
+        .limit(500)
         .execute()
     )
     rows = res.data or []
+
+    # Keep the newest (home, away) snapshot per book.
     newest: dict[tuple[str, str], dict[str, Any]] = {}
     for r in rows:
-        k = (r["market_type"], r["side"])
-        newest.setdefault(k, r)
-    return list(newest.values())
+        side = r.get("side")
+        if side not in ("home", "away"):
+            continue
+        k = (r["book"], side)
+        newest.setdefault(k, r)  # first wins (rows are desc)
 
+    # Devig each book that has both sides.
+    book_sides: dict[str, dict[str, float]] = {}
+    for (book, side), r in newest.items():
+        p = r.get("implied_prob")
+        if p is None:
+            continue
+        book_sides.setdefault(book, {})[side] = float(p)
 
-def _poly_nearest(c, market_id: str, target: datetime, tol_min: int = 30):
-    lower = (target - timedelta(minutes=tol_min)).isoformat()
-    upper = target.isoformat()
-    res = (
-        c.table("poly_ticks")
-        .select("price,tick_ts")
-        .eq("market_id", market_id)
-        .eq("outcome", "HOME")
-        .gte("tick_ts", lower)
-        .lte("tick_ts", upper)
-        .order("tick_ts", desc=True)
-        .limit(1)
-        .execute()
-    )
-    return (res.data or [None])[0]
+    out: dict[str, float] = {}
+    for book, sides in book_sides.items():
+        h = sides.get("home")
+        a = sides.get("away")
+        if h is None or a is None or (h + a) <= 0:
+            continue
+        out[book] = _devig_two_way(h, a)
+    return out
 
 
 def brier(sport: str | None = None, days: int = 30) -> dict[str, Any]:
-    """Compute Brier scores for poly/dk/fd at each checkpoint.
+    """Compute Brier scores for every supported book at each checkpoint.
 
-    Returns a dict with per-source, per-checkpoint mean squared error and
-    game counts, plus the winning source per checkpoint.
+    Returns a dict keyed by book code (POLY, PIN, DK, FD, CIR, MGM, CAE, HR,
+    NVG) with per-checkpoint mean squared error and game counts, plus the
+    lowest-Brier book per checkpoint ("winner" = sharpest predictor).
     """
     c = _client()
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
@@ -256,9 +254,9 @@ def brier(sport: str | None = None, days: int = 30) -> dict[str, Any]:
             "winning_side": r["winning_side"],
         })
 
-    agg = {
-        src: {h: {"n": 0, "sse": 0.0} for h in CHECKPOINTS_HOURS}
-        for src in ("poly", "dk", "fd")
+    agg: dict[str, dict[float, dict[str, float]]] = {
+        book: {h: {"n": 0, "sse": 0.0} for h in CHECKPOINTS_HOURS}
+        for book in BRIER_BOOKS
     }
 
     for m in settled:
@@ -266,43 +264,39 @@ def brier(sport: str | None = None, days: int = 30) -> dict[str, Any]:
         start = datetime.fromisoformat(m["event_start"].replace("Z", "+00:00"))
         for h in CHECKPOINTS_HOURS:
             target = start - timedelta(hours=h)
-            tick = _poly_nearest(c, m["id"], target)
-            if tick:
-                p = float(tick["price"])
-                agg["poly"][h]["n"] += 1
-                agg["poly"][h]["sse"] += (p - actual) ** 2
-            for book in ("DK", "FD"):
-                snaps = _snap_nearest(c, m["id"], book, target)
-                p = _book_home_prob(snaps)
-                if p is None:
+            probs = _book_home_probs_nearest(c, m["id"], target)
+            for book, p in probs.items():
+                if book not in agg:
                     continue
-                key = "dk" if book == "DK" else "fd"
-                agg[key][h]["n"] += 1
-                agg[key][h]["sse"] += (p - actual) ** 2
+                agg[book][h]["n"] += 1
+                agg[book][h]["sse"] += (p - actual) ** 2
 
     summary: dict[str, Any] = {
         "sport": sport,
         "days": days,
         "n_settled": len(settled),
         "checkpoints": CHECKPOINTS_HOURS,
+        "books": list(BRIER_BOOKS),
         "scores": {},
         "winner_per_checkpoint": {},
     }
-    for src in ("poly", "dk", "fd"):
-        summary["scores"][src] = {}
+    for book in BRIER_BOOKS:
+        summary["scores"][book] = {}
         for h in CHECKPOINTS_HOURS:
-            n = agg[src][h]["n"]
-            b = (agg[src][h]["sse"] / n) if n else None
-            summary["scores"][src][str(int(h))] = {
+            n = int(agg[book][h]["n"])
+            b = (agg[book][h]["sse"] / n) if n else None
+            summary["scores"][book][str(int(h))] = {
                 "n": n,
                 "brier": round(b, 5) if b is not None else None,
             }
     for h in CHECKPOINTS_HOURS:
         candidates = []
-        for src in ("poly", "dk", "fd"):
-            s = summary["scores"][src][str(int(h))]
-            if s["brier"] is not None and s["n"] > 0:
-                candidates.append((src, s["brier"], s["n"]))
+        for book in BRIER_BOOKS:
+            s = summary["scores"][book][str(int(h))]
+            # Require at least 5 games for a "winner" claim — a book with n=1
+            # that happened to be right once would otherwise win spuriously.
+            if s["brier"] is not None and s["n"] >= 5:
+                candidates.append((book, s["brier"], s["n"]))
         if candidates:
             best = min(candidates, key=lambda x: x[1])
             summary["winner_per_checkpoint"][str(int(h))] = {

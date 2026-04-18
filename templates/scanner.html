@@ -81,8 +81,15 @@
         .brier-winner { color: var(--green); font-weight: 600; }
         .src-tag { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-family: 'JetBrains Mono', monospace; background: var(--surface-3); color: var(--text-secondary); }
         .src-tag.poly { background: rgba(168,85,247,0.15); color: var(--purple); }
+        .src-tag.pin  { background: rgba(239,68,68,0.15);  color: #f87171; }
+        .src-tag.cir  { background: rgba(249,115,22,0.15); color: #fb923c; }
         .src-tag.dk   { background: rgba(34,197,94,0.15);  color: var(--green); }
         .src-tag.fd   { background: rgba(74,124,255,0.15); color: var(--blue); }
+        .src-tag.mgm  { background: rgba(217,180,74,0.15); color: #eab308; }
+        .src-tag.cae  { background: rgba(202,138,4,0.15);  color: #facc15; }
+        .src-tag.hr   { background: rgba(20,184,166,0.15); color: #2dd4bf; }
+        .src-tag.nvg  { background: rgba(244,114,182,0.15); color: #f472b6; }
+        .src-tag.dk, .src-tag.fd, .src-tag.poly { /* existing look retained */ }
 
         .muted { color: var(--text-muted); }
         .empty { padding: 20px; text-align: center; color: var(--text-muted); font-size: 13px; }
@@ -124,7 +131,7 @@
                     <div class="muted" style="margin-top:12px;font-size:12px" id="freshness"></div>
                 </div>
 
-                <h2>Brier Score — is Polymarket sharper than DK/FD?</h2>
+                <h2>Brier Score — which book is sharpest at each horizon?</h2>
                 <div class="toolbar">
                     <label for="sport">Sport</label>
                     <select id="sport">
@@ -220,8 +227,14 @@
             </div>
         `).join('');
         const ls = d.last_seen || {};
-        document.getElementById('freshness').innerHTML =
-            `Last seen — DK: <strong>${fmtTs(ls.DK)}</strong> · FD: <strong>${fmtTs(ls.FD)}</strong> · Poly: <strong>${fmtTs(ls.poly)}</strong>`;
+        // Render freshness for every book we have a timestamp for; stable order.
+        const BOOK_ORDER = ['POLY', 'PIN', 'CIR', 'DK', 'FD', 'MGM', 'CAE', 'HR', 'NVG'];
+        const parts = [];
+        for (const b of BOOK_ORDER) {
+            if (ls[b]) parts.push(`${b}: <strong>${fmtTs(ls[b])}</strong>`);
+        }
+        if (ls.poly_ticks) parts.push(`<span class="muted">poly_ticks(legacy): ${fmtTs(ls.poly_ticks)}</span>`);
+        document.getElementById('freshness').innerHTML = 'Last seen — ' + parts.join(' · ');
     }
 
     async function loadBrier() {
@@ -242,13 +255,18 @@
             return;
         }
         const winners = d.winner_per_checkpoint || {};
-        let html = '<table><thead><tr><th>Source</th>';
+        const books = d.books || Object.keys(d.scores || {});
+        let html = '<table><thead><tr><th>Book</th>';
         for (const h of d.checkpoints) html += `<th>T-${h}h</th>`;
         html += '</tr></thead><tbody>';
-        for (const src of ['poly', 'dk', 'fd']) {
-            html += `<tr><td><span class="src-tag ${src}">${src.toUpperCase()}</span></td>`;
+        for (const src of books) {
+            const row = d.scores[src] || {};
+            // Skip a book entirely if it has zero data at every checkpoint
+            const hasAny = d.checkpoints.some(h => row[String(h)] && row[String(h)].n > 0);
+            if (!hasAny) continue;
+            html += `<tr><td><span class="src-tag ${src.toLowerCase()}">${src}</span></td>`;
             for (const h of d.checkpoints) {
-                const cell = d.scores[src][String(h)];
+                const cell = row[String(h)] || {n: 0, brier: null};
                 const win = winners[String(h)];
                 const isWinner = win && win.source === src;
                 if (cell.brier === null) {
@@ -260,7 +278,7 @@
             html += '</tr>';
         }
         html += '</tbody></table>';
-        html += '<div style="margin-top:12px;font-size:12px;color:var(--text-secondary)">Lower Brier score = better predictor. Green = best source at that horizon.</div>';
+        html += '<div style="margin-top:12px;font-size:12px;color:var(--text-secondary)">Lower Brier score = better predictor. Green = sharpest book at that horizon (min n=5 to qualify).</div>';
         panel.innerHTML = html;
     }
 
