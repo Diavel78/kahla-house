@@ -790,9 +790,10 @@ def discover_sport(sport: str, days_ahead: int = 3) -> dict[str, int]:
     except Exception as e:
         log.exception("discover_via_sdk(%s) failed: %s", sport, e)
 
-    # If the SDK gave us anything, skip gamma/slug-probe entirely — gamma would
-    # just re-flood unmatched_markets with LoL/intl-soccer events.
-    if counts["sdk_seeded"] > 0:
+    # If the SDK returned any matching markets (seeded or already-existing),
+    # skip gamma/slug-probe — gamma serves LoL/intl-soccer and would just
+    # re-flood unmatched_markets every poll.
+    if counts["sdk_markets"] > 0:
         log.info("discover %s: %s", sport, counts)
         return counts
 
