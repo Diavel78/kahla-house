@@ -1,22 +1,27 @@
 name: Scanner — Poll
 
-# Runs the Kahla Scanner ingest jobs on a schedule.
-# Replaces the VPS for M0 calibration: polls Polymarket + DK + FD, resolves
-# finished games via ESPN, writes everything to Supabase.
+# Kahla Scanner ingest via Owls Insight.
 #
-# Required secrets (Settings -> Secrets and variables -> Actions):
+# One Owls API call per sport returns odds from ~13 books (POLY, PIN, DK, FD,
+# CIR, MGM, CAE, HR, NVG), eliminating the need for direct sportsbook scrapes.
+# Persists book_snapshots to Supabase. ESPN resolves finished games into
+# market_outcomes hourly (piggybacked on the same workflow).
+#
+# Budget: 8 sports × 288 runs/day (every 5min) = ~2.3K requests/day. Owls
+# MVP+ plan allows 300K/month — we use ~70K/month, well inside the limit.
+#
+# Required secrets:
+#   OWLS_INSIGHT_API_KEY
 #   SUPABASE_URL
 #   SUPABASE_SERVICE_KEY
-#   POLYMARKET_KEY_ID
-#   POLYMARKET_SECRET_KEY
 #
 # Optional:
 #   SPORTS_ENABLED   (default: NFL,NBA,MLB,NHL,CBB)
-#   SCANNER_MODE     (default: log_only — keep this until M0 Brier results)
+#   SCANNER_MODE     (default: log_only — keep until M0 Brier results)
 
 on:
   schedule:
-    - cron: "*/30 * * * *"    # every 30 min
+    - cron: "*/5 * * * *"    # every 5 minutes
   workflow_dispatch:          # manual trigger from Actions UI
 
 concurrency:
@@ -26,7 +31,7 @@ concurrency:
 jobs:
   poll:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     defaults:
       run:
         working-directory: kahla-scanner
@@ -43,58 +48,14 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Discover new markets (MLB/NBA/NHL)
-        continue-on-error: true
+      - name: Ingest Owls odds (all sports)
         env:
+          OWLS_INSIGHT_API_KEY: ${{ secrets.OWLS_INSIGHT_API_KEY }}
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          POLYMARKET_KEY_ID:    ${{ secrets.POLYMARKET_KEY_ID }}
-          POLYMARKET_SECRET_KEY: ${{ secrets.POLYMARKET_SECRET_KEY }}
-        run: python -m scrapers.discover --sports MLB,NBA,NHL --days 3
-
-      - name: Auto-seed from positions
-        continue-on-error: true
-        env:
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          POLYMARKET_KEY_ID:    ${{ secrets.POLYMARKET_KEY_ID }}
-          POLYMARKET_SECRET_KEY: ${{ secrets.POLYMARKET_SECRET_KEY }}
-        run: python -m scrapers.polymarket autoseed
-
-      - name: Poll Polymarket
-        continue-on-error: true
-        env:
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          POLYMARKET_KEY_ID:    ${{ secrets.POLYMARKET_KEY_ID }}
-          POLYMARKET_SECRET_KEY: ${{ secrets.POLYMARKET_SECRET_KEY }}
           SPORTS_ENABLED:       ${{ vars.SPORTS_ENABLED || 'NFL,NBA,MLB,NHL,CBB' }}
           SCANNER_MODE:         ${{ vars.SCANNER_MODE || 'log_only' }}
-        run: python -m scrapers.polymarket poll
-
-      - name: Scrape DraftKings (per sport)
-        continue-on-error: true
-        env:
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          SPORTS_ENABLED:       ${{ vars.SPORTS_ENABLED || 'NFL,NBA,MLB,NHL,CBB' }}
-        run: |
-          IFS=',' read -ra SPORTS <<< "${SPORTS_ENABLED}"
-          for s in "${SPORTS[@]}"; do
-            python -m scrapers.draftkings scrape "${s}" || true
-          done
-
-      - name: Scrape FanDuel (per sport)
-        continue-on-error: true
-        env:
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          SPORTS_ENABLED:       ${{ vars.SPORTS_ENABLED || 'NFL,NBA,MLB,NHL,CBB' }}
-        run: |
-          IFS=',' read -ra SPORTS <<< "${SPORTS_ENABLED}"
-          for s in "${SPORTS[@]}"; do
-            python -m scrapers.fanduel scrape "${s}" || true
-          done
+        run: python -m scrapers.owls
 
       - name: Resolve finished games (ESPN)
         continue-on-error: true
