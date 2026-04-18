@@ -132,6 +132,7 @@
                 </div>
 
                 <h2>Brier Score — which book is sharpest at each horizon?</h2>
+                <div class="panel muted" id="tracking-banner" style="font-size:13px;margin-bottom:12px;display:none;"></div>
                 <div class="toolbar">
                     <label for="sport">Sport</label>
                     <select id="sport">
@@ -235,6 +236,21 @@
         }
         if (ls.poly_ticks) parts.push(`<span class="muted">poly_ticks(legacy): ${fmtTs(ls.poly_ticks)}</span>`);
         document.getElementById('freshness').innerHTML = 'Last seen — ' + parts.join(' · ');
+
+        // Tracking banner (above Brier): games whose pre-game snapshots are
+        // being captured right now and will populate Brier rows after they settle.
+        const tr = d.tracking || { total: 0, by_sport: {} };
+        const banner = document.getElementById('tracking-banner');
+        if (tr.total > 0) {
+            const breakdown = Object.entries(tr.by_sport).sort((a,b) => b[1]-a[1])
+                .map(([s, n]) => `<strong>${n}</strong> ${s}`).join(' · ');
+            banner.innerHTML = `📡 Currently tracking <strong>${tr.total}</strong> ` +
+                `game${tr.total===1?'':'s'} (${breakdown}) — Brier rows will populate ` +
+                `as these games settle.`;
+            banner.style.display = 'block';
+        } else {
+            banner.style.display = 'none';
+        }
     }
 
     async function loadBrier() {

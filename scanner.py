@@ -71,6 +71,36 @@ def activity(days: int = 7) -> dict[str, Any]:
     markets = c.table("markets").select("id,sport,status", count="exact").execute()
     active_markets = c.table("markets").select("id", count="exact").eq("status", "active").execute()
 
+    # "Tracking" = upcoming or just-started games whose outcome hasn't landed
+    # yet. These are the games that will populate Brier rows once they settle.
+    now_dt = datetime.now(timezone.utc)
+    window_past = (now_dt - timedelta(hours=6)).isoformat()
+    window_future = (now_dt + timedelta(hours=48)).isoformat()
+    in_window = (
+        c.table("markets").select("id,event_start,sport")
+        .gte("event_start", window_past).lte("event_start", window_future)
+        .eq("status", "active").limit(2000).execute()
+    )
+    window_rows = in_window.data or []
+    window_ids = [r["id"] for r in window_rows]
+    tracking_settled_ids: set[str] = set()
+    if window_ids:
+        # Query in chunks to avoid URL length limits
+        CHUNK = 150
+        for i in range(0, len(window_ids), CHUNK):
+            chunk = window_ids[i:i + CHUNK]
+            res = (
+                c.table("market_outcomes").select("market_id")
+                .in_("market_id", chunk).execute()
+            )
+            for r in (res.data or []):
+                tracking_settled_ids.add(r["market_id"])
+    tracking_rows = [r for r in window_rows if r["id"] not in tracking_settled_ids]
+    tracking_by_sport: dict[str, int] = {}
+    for r in tracking_rows:
+        s = r.get("sport") or "?"
+        tracking_by_sport[s] = tracking_by_sport.get(s, 0) + 1
+
     book_snaps_recent = (
         c.table("book_snapshots").select("id", count="exact").gte("captured_at", since).execute()
     )
@@ -117,6 +147,10 @@ def activity(days: int = 7) -> dict[str, Any]:
         "outcomes_total": outcomes_total.count or 0,
         "unmatched_open": unmatched_open.count or 0,
         "last_seen": last_seen,
+        "tracking": {
+            "total": len(tracking_rows),
+            "by_sport": tracking_by_sport,
+        },
     }
 
 
