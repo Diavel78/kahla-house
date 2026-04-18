@@ -14,7 +14,10 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from alerts import telegram
 from analytics import resolve as outcomes_resolve
 from config import config
-from scrapers import draftkings, fanduel, polymarket
+# fanduel dropped 2026-04-18: FD migrated all data behind an authenticated
+# GraphQL/REST layer (pir.{region}.sportsbook.fanduel.com/graphql returns 401
+# without a session token). See HANDOFF.md §3 for re-enable notes.
+from scrapers import draftkings, polymarket
 from signals import divergence
 from storage import supabase_client as db
 
@@ -36,7 +39,6 @@ def job_poll_polymarket() -> None:
 def job_scrape_books() -> None:
     for sport in config.sports_enabled:
         _safe(f"dk_scrape:{sport}", draftkings.scrape, sport)
-        _safe(f"fd_scrape:{sport}", fanduel.scrape, sport)
 
 
 def job_resolve_outcomes() -> None:

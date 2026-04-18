@@ -2,11 +2,14 @@
 
 > **Last session ended:** pipeline is live on a DigitalOcean droplet.
 > Polymarket ticks flowing continuously, ESPN resolver capturing outcomes,
-> team aliases loaded. DK matching untested end-to-end; FD endpoint still
-> 404s and is the next thing to fix.
+> team aliases loaded, DK matching confirmed working (34 markets already
+> linked via `dk_event_id`). FD dropped from the scheduler — see §3.
 >
-> **Start next session by:** running the triage queries in §4 to confirm
-> recent `poly_ticks`/`book_snapshots` counts, then pivot to FanDuel.
+> **Start next session by:** running the triage queries in §4. If DK
+> `book_snapshots` is non-zero, start analyzing Poly→DK divergence in the
+> `signals` table. If still zero, debug DK insert path (match works; log
+> lines show `"DK {sport}: N events, M matched, X snapshots"` — investigate
+> if matched > 0 but snapshots = 0).
 
 ---
 
@@ -72,17 +75,31 @@ GitHub Actions UI to save minutes. Not urgent either way.
 
 ## 3. What's broken / open
 
-### Primary next task: FanDuel scraper 404
+### FanDuel — dropped from the scheduler (2026-04-18)
 
-`scrapers/fanduel.py` hits
-`https://sbapi.az.sportsbook.fanduel.com/api/content-managed-page` with
-`_ak=FhMFpcPWXMeyZxOx`. All sports return 404. Endpoint or auth token has
-moved. Options in priority order:
+**Removed from `jobs/scheduler.py`.** `scrapers/fanduel.py` left in place
+for a future rewrite. Investigation summary:
 
-1. Open FanDuel in a browser, watch Network tab, grab the real URL the
-   current frontend is hitting. Likely same shape, different path or token.
-2. Try other state subdomains (`nj`, `ny`, `pa`, `mi`, `va`, `co`, `tn`).
-3. If the frontend has pivoted to GraphQL, swap the scraper to target that.
+- Old endpoint (`sbapi.{state}.sportsbook.fanduel.com/api/content-managed-page`
+  with `_ak=FhMFpcPWXMeyZxOx`) returns `{"error":true}` across 15 state
+  subdomains. Static token and path both gone.
+- FD migrated to a unified host `api.sportsbook.fanduel.com` (paths
+  `/sbapi`, `/chapi`, `/config`) and a **GraphQL endpoint at
+  `pir.{region}.sportsbook.fanduel.com/graphql`** — but the GraphQL
+  endpoint returns **401 `UnauthorizedException: Valid authorization
+  header not provided`**. Requires a real user session.
+- Bundle grep for a fresh `_ak` token returned zero matches. FD removed
+  the static-token auth mechanism entirely.
+
+**Rationale for dropping:** FD odds track DK within ~5-10 bps — redundant
+second lagging book. The real M0 calibration question (sharp Poly vs
+lagging public) is fully answered by DK vs Poly. Adding FD would not
+materially improve signal.
+
+**Re-enable path (later):** either (a) add Pinnacle as a sharp-public
+scrape (new kind of signal, not a redundant one), or (b) run headless
+Chrome + Playwright for FD login + XHR capture if a user-session-backed
+FD feed becomes worth the infrastructure cost. Neither is M0-blocking.
 
 ### Secondary: stale slug noise in `poly_ticks` cycles
 
@@ -106,14 +123,23 @@ but no Polymarket market was seeded for them. Discover runs every 30 min
 so should fill in, but worth spot-checking whether the SDK actually
 returns those matchups.
 
-### Secondary: DK `book_snapshots` count still 0
+### Monitor: DK `book_snapshots` count
 
-Team aliases were loaded at `2026-04-18T15:30Z`, just before the scanner
-came up. DK scrape should now match and insert `book_snapshots` — but
-Supabase showed 0 at the time of this HANDOFF. Verify with the triage
-query in §4. If still 0 after an hour, the matcher may need additional
-aliases or the name-normalization step may have a bug for specific scrape
-shapes.
+As of 2026-04-18 16:15 UTC, `book_snapshots` = 0. But matching itself is
+working — **34 markets have `dk_event_id` populated**, and the last
+`unmatched_markets` row for DK was from 04:58 UTC (~11h before this
+HANDOFF, pre-alias-load). Expected reason for 0 snapshots: the scanner
+only came up at 15:43 UTC, and `scrape_books` runs every 3 min — it may
+just be that a scrape cycle hadn't completed a successful full flow yet
+by the time the query ran. Verify after an hour:
+
+```sql
+select book, count(*), max(captured_at) from book_snapshots group by book;
+```
+
+If still 0 after a few hours, check the VPS logs
+(`journalctl -u kahla-scanner -g 'DK ' -f`) for insert failures after
+`"DK {sport}: N events, M matched"` lines.
 
 ---
 
@@ -148,7 +174,7 @@ select source, count(*), max(resolved_at) from market_outcomes group by source;
 | `kahla-scanner/scrapers/polymarket.py` | SDK-based BBO poll + autoseed + seed CLI |
 | `kahla-scanner/scrapers/discover.py` | SDK discover (primary), gamma (fallback), slug-probe |
 | `kahla-scanner/scrapers/draftkings.py` | curl_cffi chrome-impersonated scraper |
-| `kahla-scanner/scrapers/fanduel.py` | **Broken (404) — next task** |
+| `kahla-scanner/scrapers/fanduel.py` | Disabled in scheduler 2026-04-18 (FD gated GraphQL, 401). File kept for future rewrite. |
 | `kahla-scanner/signals/matcher.py` | Cross-venue name → canonical linkage |
 | `kahla-scanner/analytics/resolve.py` | ESPN → market_outcomes |
 | `kahla-scanner/analytics/brier.py` | Brier scorer (CLI + API) |
