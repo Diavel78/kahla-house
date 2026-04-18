@@ -1,167 +1,169 @@
 # Kahla Scanner — Session Handoff
 
-> **Last session ended:** pipeline is live on a DigitalOcean droplet.
-> Polymarket ticks flowing continuously, ESPN resolver capturing outcomes,
-> team aliases loaded, DK matching confirmed working (34 markets already
-> linked via `dk_event_id`). FD dropped from the scheduler — see §3.
+> **Last session ended:** pipeline pivoted to Owls Insight as the single
+> ingest source. GH Actions cron runs `python -m scrapers.owls` every 5
+> minutes, pulls odds for 9 books (POLY, PIN, DK, FD, CIR, MGM, CAE, HR,
+> NVG) in one API call per sport, and writes to Supabase `book_snapshots`.
+> Verified: 1,392 snapshots landed in one manual run covering NBA + MLB +
+> NHL. The VPS is still running but is now redundant — cancel it any
+> time before day 60 of the DigitalOcean free trial to pay $0.
 >
-> **Start next session by:** running the triage queries in §4. If DK
-> `book_snapshots` is non-zero, start analyzing Poly→DK divergence in the
-> `signals` table. If still zero, debug DK insert path (match works; log
-> lines show `"DK {sport}: N events, M matched, X snapshots"` — investigate
-> if matched > 0 but snapshots = 0).
+> **Start next session by:** running the triage queries in §4 to confirm
+> cron cadence is holding and book_snapshots are still accumulating.
+> Then start looking at actual Poly→public divergence signals in the
+> data once ~24h has passed.
 
 ---
 
 ## 1. Live infrastructure (as of 2026-04-18)
 
-- **VPS** — DigitalOcean droplet `24.199.119.210` (Ubuntu 24.04, $4/mo).
-  Hostname `kahla-scanner`. 2GB swap enabled (512MB RAM wasn't enough for
-  `curl_cffi` compile).
-- **systemd unit** — `kahla-scanner.service`, auto-starts on boot, runs
-  `/opt/kahla-scanner/kahla-scanner/venv/bin/python main.py` as user
-  `scanner`. APScheduler inside `main.py` runs:
-  - Polymarket BBO poll every 45s
-  - DK/FD scrape every 3 min
-  - ESPN resolver every hour
-  - Autoseed every 15 min
-  - Discover (SDK-based) every 30 min
-- **Supabase** — project `xzzjpbervfoyaodduynb.supabase.co`. Schema loaded,
-  `markets.notes` column exists, RLS on. `team_aliases` table seeded with
-  434 rows (MLB 99 / NBA 104 / NHL 117 / NFL 114).
-- **thekahlahouse.com/scanner** — admin-gated review page on Vercel,
-  reads Supabase live. Activity + Brier + signals all populate from
-  the scanner's writes.
+**Single ingest pipeline: GitHub Actions cron + Owls Insight API.**
 
-### Operating the droplet
+- **GitHub Actions workflow:** [`.github/workflows/scanner-poll.yml`](../.github/workflows/scanner-poll.yml)
+  - Cron: `*/5 * * * *` (every 5 minutes)
+  - Step 1: `python -m scrapers.owls` — hits `/{sport}/odds` for each sport,
+    persists book_snapshots for 9 books per game.
+  - Step 2: `python -m analytics.resolve` — ESPN scoreboard → market_outcomes.
+  - Budget: ~2.3K req/day = 70K/month. Owls MVP+ plan is 300K/month.
+- **Supabase** — `xzzjpbervfoyaodduynb.supabase.co`. Schema loaded,
+  `team_aliases` has 434 rows (MLB 99 / NBA 104 / NHL 117 / NFL 114).
+- **Flask app on Vercel** — thekahlahouse.com/scanner reads from Supabase
+  and renders activity / Brier / signals / matched / unmatched.
+
+### Books captured per cron
+
+| Code | Book |
+|---|---|
+| POLY | Polymarket |
+| PIN | Pinnacle (sharp public) |
+| DK | DraftKings |
+| FD | FanDuel |
+| CIR | Circa |
+| MGM | BetMGM |
+| CAE | Caesars |
+| HR | Hardrock |
+| NVG | Novig |
+
+Skipped: wynn, westgate, south_point, stations (low-signal Vegas books;
+add back if ever useful).
+
+### Operating the workflow
 
 ```bash
-# SSH in
-ssh root@24.199.119.210
+# Trigger manually
+gh workflow run scanner-poll.yml --ref main
 
-# Live logs
-journalctl -u kahla-scanner -f
+# Check recent runs
+gh run list --workflow=scanner-poll.yml --limit 5
 
-# Restart / stop / status
-systemctl restart kahla-scanner
-systemctl stop kahla-scanner
-systemctl status kahla-scanner
-
-# Update scanner to latest main
-sudo -u scanner bash -c "cd /opt/kahla-scanner && git pull"
-systemctl restart kahla-scanner
+# View a run's logs
+gh run view <run-id> --log
 ```
 
-### GitHub Actions cron — now redundant
+### Required GH Actions secrets (already set)
 
-`scanner-poll.yml` still fires every 30 min, but the VPS covers the same
-ground at 45s resolution. Leave it enabled as a backup, or disable in the
-GitHub Actions UI to save minutes. Not urgent either way.
+- `OWLS_INSIGHT_API_KEY` (added 2026-04-18)
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_KEY`
 
 ---
 
 ## 2. What's working
 
-- **Polymarket poll** — `poly poll: 67 ticks across 147 markets` per cycle.
-  Writes `poly_ticks` rows continuously. Verified via Supabase REST.
-- **SDK-based discover** — `scrapers/discover.py` uses the authenticated
-  Polymarket US SDK as the primary path (gamma-api fallback is vestigial).
-- **ESPN resolver** — captures `market_outcomes` for MLB/NBA/NHL/NFL. 17+
-  outcomes already recorded.
-- **Brier scoring** — CLI and `/api/scanner/brier` endpoint both work.
-  Needs ~24h of tick accumulation before T-24h numbers mean anything.
-- **Team aliases** — 434 rows loaded. Matcher can now resolve abbreviations
-  (e.g. `LA Dodgers` → `los angeles dodgers`).
+- **Owls ingest** — confirmed in production: NBA 392 / MLB 590 / NHL 410
+  snapshots per run. ~1,400 rows per 5-min cycle.
+- **Brier scoring** — CLI and `/api/scanner/brier` endpoint. Should start
+  producing meaningful T-24h / T-6h / T-1h / T-0 numbers after ~24h of
+  accumulation.
+- **ESPN resolver** — populates `market_outcomes` for MLB/NBA/NHL/NFL.
+- **Team aliases** — 434 rows, matcher resolves abbreviations correctly.
 
 ## 3. What's broken / open
 
-### FanDuel — dropped from the scheduler (2026-04-18)
+### DigitalOcean droplet — redundant, decide whether to keep
 
-**Removed from `jobs/scheduler.py`.** `scrapers/fanduel.py` left in place
-for a future rewrite. Investigation summary:
+The droplet at `24.199.119.210` is still running the APScheduler-based
+pipeline from before the Owls pivot. It writes `poly_ticks` directly via
+the Polymarket SDK at 45s cadence. That's **higher resolution** than
+Owls' 5-min cadence for Polymarket specifically.
 
-- Old endpoint (`sbapi.{state}.sportsbook.fanduel.com/api/content-managed-page`
-  with `_ak=FhMFpcPWXMeyZxOx`) returns `{"error":true}` across 15 state
-  subdomains. Static token and path both gone.
-- FD migrated to a unified host `api.sportsbook.fanduel.com` (paths
-  `/sbapi`, `/chapi`, `/config`) and a **GraphQL endpoint at
-  `pir.{region}.sportsbook.fanduel.com/graphql`** — but the GraphQL
-  endpoint returns **401 `UnauthorizedException: Valid authorization
-  header not provided`**. Requires a real user session.
-- Bundle grep for a fresh `_ak` token returned zero matches. FD removed
-  the static-token auth mechanism entirely.
+**Keep it if** you want the finer-grained Poly tick data for modeling
+short-term movement. Cost: $4/mo after day 60 of the free trial (around
+2026-06-17).
 
-**Rationale for dropping:** FD odds track DK within ~5-10 bps — redundant
-second lagging book. The real M0 calibration question (sharp Poly vs
-lagging public) is fully answered by DK vs Poly. Adding FD would not
-materially improve signal.
+**Cancel it if** the Owls 5-min Poly snapshots are sufficient. That's
+likely enough for the T-24h / T-6h / T-1h / T-0 Brier horizons the
+project cares about.
 
-**Re-enable path (later):** either (a) add Pinnacle as a sharp-public
-scrape (new kind of signal, not a redundant one), or (b) run headless
-Chrome + Playwright for FD login + XHR capture if a user-session-backed
-FD feed becomes worth the infrastructure cost. Neither is M0-blocking.
+To cancel: DigitalOcean dashboard → Droplets → `kahla-scanner` →
+Destroy. The systemd unit, code, and all data are on GitHub and
+Supabase; destroying the droplet loses nothing irreplaceable.
 
-### Secondary: stale slug noise in `poly_ticks` cycles
+Related: `kahla-scanner/scripts/install_vps.sh` is still useful if we
+ever want to respin a droplet (e.g. if a future scraper needs residential
+IP workarounds). Keep the file.
 
-Every poll emits ~80 `bbo(<slug>) failed: market not found` warnings.
-Caused by slugs in the `markets` table that no longer exist on the
-Polymarket US API (left over from slug-probe fallbacks and day-of
-markets that never listed). Cleanup path:
+### FanDuel direct scraper — fully retired
 
-- In `fetch_bbo`, track consecutive 404s per slug; after N in a row, mark
-  the market `status='inactive'` and stop polling it.
-- Or run a one-off probe + bulk update: `select id, poly_market_id from
-  markets where status='active'`, check each against SDK, mark dead ones.
+`scrapers/fanduel.py` left in place for reference only; removed from the
+scheduler in commit `49e6968`. Owls now provides FD odds as one of the
+aggregated books, so there's no need to hit FD directly.
 
-Low priority — pipeline works, it's just log volume.
+### Direct scrapers in general — retiring
 
-### Secondary: discover gap for today's games
+`scrapers/polymarket.py`, `scrapers/draftkings.py`, `scrapers/fanduel.py`
+are all superseded by `scrapers/owls.py`. The old VPS service still uses
+them via `jobs/scheduler.py` + `main.py`. If we decommission the VPS,
+we can also delete these files. For now, leave them — they're harmless.
 
-~15 `unmatched espn event` lines per ESPN resolve cycle
-(`Washington Nationals @ Pittsburgh Pirates`, etc.) — ESPN sees live games
-but no Polymarket market was seeded for them. Discover runs every 30 min
-so should fill in, but worth spot-checking whether the SDK actually
-returns those matchups.
+### Stale `poly_ticks` warnings (low priority)
 
-### Monitor: DK `book_snapshots` count
-
-As of 2026-04-18 16:15 UTC, `book_snapshots` = 0. But matching itself is
-working — **34 markets have `dk_event_id` populated**, and the last
-`unmatched_markets` row for DK was from 04:58 UTC (~11h before this
-HANDOFF, pre-alias-load). Expected reason for 0 snapshots: the scanner
-only came up at 15:43 UTC, and `scrape_books` runs every 3 min — it may
-just be that a scrape cycle hadn't completed a successful full flow yet
-by the time the query ran. Verify after an hour:
-
-```sql
-select book, count(*), max(captured_at) from book_snapshots group by book;
-```
-
-If still 0 after a few hours, check the VPS logs
-(`journalctl -u kahla-scanner -g 'DK ' -f`) for insert failures after
-`"DK {sport}: N events, M matched"` lines.
+The VPS still logs `bbo(slug) failed: market not found` warnings for
+stale slugs. These can be quieted by a one-time `UPDATE markets SET
+status='inactive'` on slugs the SDK no longer returns. Irrelevant once
+the VPS is retired.
 
 ---
 
 ## 4. Quick triage queries (Supabase)
 
 ```sql
--- Is the VPS writing ticks?
-select max(captured_at) from poly_ticks;
--- should be within the last minute
+-- Ingest cadence check: should be < 6 minutes ago
+select max(captured_at) from book_snapshots;
 
--- DK/FD snapshots landing?
-select book, count(*), max(captured_at) from book_snapshots group by book;
+-- Per-book coverage
+select book, count(*), max(captured_at) from book_snapshots group by book order by count(*) desc;
 
--- How many markets are in discover-churn?
+-- Per-sport coverage in last hour
+select m.sport, count(*)
+from book_snapshots s
+join markets m on m.id = s.market_id
+where s.captured_at > now() - interval '1 hour'
+group by m.sport
+order by count(*) desc;
+
+-- Markets total
 select status, count(*) from markets group by status;
 
--- Unmatched backlog?
-select source, count(*) from unmatched_markets where resolved=false group by source;
-
--- Outcomes resolving?
+-- Outcomes resolving
 select source, count(*), max(resolved_at) from market_outcomes group by source;
+
+-- Open signals (once divergence scanning is on)
+select count(*) from signals where status='open';
 ```
+
+### Early analysis starter (Brier across horizons)
+
+Once ~24h of data has accumulated:
+
+```bash
+cd kahla-scanner
+python -m analytics.brier --sport MLB --days 7
+# Or hit /api/scanner/brier from the Flask app
+```
+
+The `/scanner` page on thekahlahouse.com reads the same data and renders
+Brier scores per (book, horizon) so you can eyeball Poly vs DK vs PIN.
 
 ---
 
@@ -169,29 +171,47 @@ select source, count(*), max(resolved_at) from market_outcomes group by source;
 
 | File | Purpose |
 |---|---|
-| `kahla-scanner/main.py` | Entry point — APScheduler loop |
-| `kahla-scanner/jobs/scheduler.py` | Job registration + cadences |
-| `kahla-scanner/scrapers/polymarket.py` | SDK-based BBO poll + autoseed + seed CLI |
-| `kahla-scanner/scrapers/discover.py` | SDK discover (primary), gamma (fallback), slug-probe |
-| `kahla-scanner/scrapers/draftkings.py` | curl_cffi chrome-impersonated scraper |
-| `kahla-scanner/scrapers/fanduel.py` | Disabled in scheduler 2026-04-18 (FD gated GraphQL, 401). File kept for future rewrite. |
-| `kahla-scanner/signals/matcher.py` | Cross-venue name → canonical linkage |
+| `kahla-scanner/scrapers/owls.py` | **Primary ingest** — Owls → book_snapshots |
+| `.github/workflows/scanner-poll.yml` | Cron workflow, every 5 min |
 | `kahla-scanner/analytics/resolve.py` | ESPN → market_outcomes |
 | `kahla-scanner/analytics/brier.py` | Brier scorer (CLI + API) |
-| `kahla-scanner/systemd/kahla-scanner.service` | VPS systemd unit |
-| `kahla-scanner/scripts/install_vps.sh` | One-shot VPS installer (swap, perms, tty-reads fixed) |
-| `kahla-scanner/scripts/poll.sh` | Local one-shot poll runner |
+| `kahla-scanner/signals/matcher.py` | Cross-venue name → canonical linkage |
+| `kahla-scanner/storage/supabase_client.py` | Supabase helpers |
 | `kahla-scanner/supabase/schema.sql` | DB schema (idempotent) |
 | `kahla-scanner/supabase/team_aliases.sql` | 434 alias rows (idempotent) |
 | `scanner.py` (root) | Flask-side reader for `/scanner` page |
 | `templates/scanner.html` | `/scanner` UI |
+| `kahla-scanner/scrapers/polymarket.py` | **Legacy** — used only by the (retiring) VPS systemd path |
+| `kahla-scanner/scrapers/draftkings.py` | Legacy — 403s from datacenter IPs, use Owls instead |
+| `kahla-scanner/scrapers/fanduel.py` | Legacy — FD gated its API; use Owls instead |
+| `kahla-scanner/jobs/scheduler.py` | VPS APScheduler (retiring) |
+| `kahla-scanner/main.py` | VPS entrypoint (retiring) |
+| `kahla-scanner/systemd/kahla-scanner.service` | VPS systemd unit (retiring) |
+| `kahla-scanner/scripts/install_vps.sh` | Keep — useful for any future VPS need |
 
-## 6. Env vars required on the VPS
+## 6. Env vars required
 
-Written to `/opt/kahla-scanner/kahla-scanner/.env` by the installer:
+### GitHub Actions secrets (for the cron workflow)
 
+- `OWLS_INSIGHT_API_KEY`
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_KEY`
-- `POLYMARKET_KEY_ID`
-- `POLYMARKET_SECRET_KEY`
-- `SPORTS_ENABLED` (default: `NFL,NBA,MLB,NHL,CBB`)
+
+### Local `.env` (for ad-hoc CLI runs)
+
+- Repo root `.env`: `OWLS_INSIGHT_API_KEY`, `POLYMARKET_KEY_ID`, `POLYMARKET_SECRET_KEY`
+- `kahla-scanner/.env`: `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`
+
+## 7. Open questions / next session
+
+1. **Retire the VPS?** Decide after a few days of Owls data. If Brier
+   scores are converging with just 5-min data, kill the droplet before
+   day 60.
+2. **Wire divergence signal emission.** Currently `book_snapshots` lands
+   but nothing computes cross-book divergence and inserts rows into
+   `signals`. Once we have 24-48h of data, turn on `job_scan_signals`
+   (or a standalone script equivalent).
+3. **Alerts.** Telegram fan-out exists but won't fire until `signals`
+   starts populating. Subscribers table ready.
+4. **Props later.** Owls exposes `/{sport}/props`. Not in M0 but the
+   same pattern works when we're ready.
