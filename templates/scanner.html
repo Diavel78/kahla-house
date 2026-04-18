@@ -215,7 +215,6 @@
         const stats = [
             ['Active Markets', d.markets_active, `of ${d.markets_total} total`],
             ['Book Snapshots (7d)', d.book_snapshots_recent.toLocaleString(), ''],
-            ['Poly Ticks (7d)', d.poly_ticks_recent.toLocaleString(), ''],
             ['Signals (7d)', d.signals_recent.toLocaleString(), ''],
             ['Settled Outcomes', d.outcomes_total.toLocaleString(), ''],
             ['Unmatched', d.unmatched_open.toLocaleString(), 'needs review'],
@@ -234,7 +233,6 @@
         for (const b of BOOK_ORDER) {
             if (ls[b]) parts.push(`${b}: <strong>${fmtTs(ls[b])}</strong>`);
         }
-        if (ls.poly_ticks) parts.push(`<span class="muted">poly_ticks(legacy): ${fmtTs(ls.poly_ticks)}</span>`);
         document.getElementById('freshness').innerHTML = 'Last seen — ' + parts.join(' · ');
 
         // Tracking banner (above Brier): games whose pre-game snapshots are

@@ -104,9 +104,6 @@ def activity(days: int = 7) -> dict[str, Any]:
     book_snaps_recent = (
         c.table("book_snapshots").select("id", count="exact").gte("captured_at", since).execute()
     )
-    poly_ticks_recent = (
-        c.table("poly_ticks").select("id", count="exact").gte("captured_at", since).execute()
-    )
     signals_recent = (
         c.table("signals").select("id", count="exact").gte("triggered_at", since).execute()
     )
@@ -118,9 +115,8 @@ def activity(days: int = 7) -> dict[str, Any]:
         .execute()
     )
 
-    # Latest captured_at per book in book_snapshots (POLY + public books all
-    # land here now via scrapers/owls.py). Legacy poly_ticks timestamp is
-    # tracked too for visibility into the old VPS pipeline during migration.
+    # Latest captured_at per book. All books (including POLY) now land in
+    # book_snapshots via scrapers/owls.py.
     def _first(res):
         data = res.data or []
         return (data[0] or {}).get("captured_at") if data else None
@@ -132,17 +128,12 @@ def activity(days: int = 7) -> dict[str, Any]:
             .order("captured_at", desc=True).limit(1).execute()
         )
         last_seen[book] = _first(res)
-    last_seen["poly_ticks"] = _first(
-        c.table("poly_ticks").select("captured_at")
-        .order("captured_at", desc=True).limit(1).execute()
-    )
 
     return {
         "window_days": days,
         "markets_total": markets.count or 0,
         "markets_active": active_markets.count or 0,
         "book_snapshots_recent": book_snaps_recent.count or 0,
-        "poly_ticks_recent": poly_ticks_recent.count or 0,
         "signals_recent": signals_recent.count or 0,
         "outcomes_total": outcomes_total.count or 0,
         "unmatched_open": unmatched_open.count or 0,
