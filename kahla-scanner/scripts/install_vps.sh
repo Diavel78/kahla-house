@@ -36,18 +36,29 @@ BRANCH="${KAHLA_BRANCH:-main}"
 INSTALL_DIR="/opt/kahla-scanner"
 SCANNER_USER="scanner"
 
-echo "== 1/6  installing apt deps =="
+echo "== 1/7  installing apt deps =="
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   git python3.12 python3.12-venv python3-pip build-essential \
   libssl-dev libffi-dev curl
 
-echo "== 2/6  creating scanner user =="
+echo "== 2/7  ensuring 2GB swap (pip build OOMs on 512MB droplets otherwise) =="
+if ! swapon --show | grep -q '^/swapfile'; then
+  if [ ! -f /swapfile ]; then
+    fallocate -l 2G /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile
+  fi
+  swapon /swapfile
+fi
+grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+echo "== 3/7  creating scanner user =="
 if ! id -u "$SCANNER_USER" >/dev/null 2>&1; then
   useradd -m -s /bin/bash "$SCANNER_USER"
 fi
 
-echo "== 3/6  cloning repo to $INSTALL_DIR =="
+echo "== 4/7  cloning repo to $INSTALL_DIR =="
 mkdir -p /opt
 if [ -d "$INSTALL_DIR/.git" ]; then
   (cd "$INSTALL_DIR" && sudo -u "$SCANNER_USER" git fetch --all \
@@ -55,13 +66,15 @@ if [ -d "$INSTALL_DIR/.git" ]; then
                     && sudo -u "$SCANNER_USER" git pull)
 else
   rm -rf "$INSTALL_DIR"
-  sudo -u "$SCANNER_USER" git clone --branch "$BRANCH" "$REPO" "$INSTALL_DIR"
+  # Clone as root (scanner user can't write to /opt), then hand ownership over.
+  git clone --branch "$BRANCH" "$REPO" "$INSTALL_DIR"
+  chown -R "$SCANNER_USER:$SCANNER_USER" "$INSTALL_DIR"
 fi
 
 # The Flask app lives at repo root, the scanner is the subdir we care about.
 SCANNER_DIR="$INSTALL_DIR/kahla-scanner"
 
-echo "== 4/6  creating venv + installing requirements =="
+echo "== 5/7  creating venv + installing requirements =="
 cd "$SCANNER_DIR"
 if [ ! -d venv ]; then
   sudo -u "$SCANNER_USER" python3.12 -m venv venv
@@ -69,17 +82,18 @@ fi
 sudo -u "$SCANNER_USER" ./venv/bin/pip install --quiet --upgrade pip
 sudo -u "$SCANNER_USER" ./venv/bin/pip install --quiet -r requirements.txt
 
-echo "== 5/6  configuring .env =="
+echo "== 6/7  configuring .env =="
 ENV_FILE="$SCANNER_DIR/.env"
 if [ ! -f "$ENV_FILE" ]; then
   cp .env.example "$ENV_FILE"
 
   echo
   echo ">>> Enter the 4 required credentials (get them from Vercel -> kahla-house -> Settings -> Environment Variables):"
-  read -p "  SUPABASE_URL:           " SUPABASE_URL
-  read -p "  SUPABASE_SERVICE_KEY:   " SUPABASE_SERVICE_KEY
-  read -p "  POLYMARKET_KEY_ID:      " POLY_KEY_ID
-  read -p "  POLYMARKET_SECRET_KEY:  " POLY_SECRET
+  # Read from /dev/tty so `curl ... | bash` still works (otherwise reads eat script lines).
+  read -p "  SUPABASE_URL:           " SUPABASE_URL        </dev/tty
+  read -p "  SUPABASE_SERVICE_KEY:   " SUPABASE_SERVICE_KEY </dev/tty
+  read -p "  POLYMARKET_KEY_ID:      " POLY_KEY_ID         </dev/tty
+  read -p "  POLYMARKET_SECRET_KEY:  " POLY_SECRET         </dev/tty
 
   # Set SPORTS_ENABLED to a reasonable default + ensure all 4 creds are set.
   python3 - "$ENV_FILE" <<PYEOF
@@ -115,7 +129,7 @@ else
   echo "  (.env already exists — leaving alone)"
 fi
 
-echo "== 6/6  installing + starting systemd unit =="
+echo "== 7/7  installing + starting systemd unit =="
 # Rewrite WorkingDirectory in the unit to match where we actually cloned.
 UNIT_SRC="$SCANNER_DIR/systemd/kahla-scanner.service"
 UNIT_DST="/etc/systemd/system/kahla-scanner.service"
