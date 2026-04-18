@@ -261,9 +261,6 @@
         html += '</tr></thead><tbody>';
         for (const src of books) {
             const row = d.scores[src] || {};
-            // Skip a book entirely if it has zero data at every checkpoint
-            const hasAny = d.checkpoints.some(h => row[String(h)] && row[String(h)].n > 0);
-            if (!hasAny) continue;
             html += `<tr><td><span class="src-tag ${src.toLowerCase()}">${src}</span></td>`;
             for (const h of d.checkpoints) {
                 const cell = row[String(h)] || {n: 0, brier: null};
