@@ -293,9 +293,62 @@ def build_snapshots(game: OwlsGame, market_id: str) -> list[BookSnapshot]:
 # Top-level ingest
 # ---------------------------------------------------------------------------
 
+def _latest_snapshot_map(
+    market_ids: list[str], within_minutes: int = 30
+) -> dict[tuple[str, str, str, str], tuple[int, float | None]]:
+    """Fetch recent snapshots for these markets and build a lookup of the most
+    recent (price_american, line) per (market_id, book, market_type, side).
+
+    Used to suppress no-op inserts when the price hasn't moved since the last
+    cron cycle — cuts ~60-75% of writes in a typical 5-min interval.
+    """
+    if not market_ids:
+        return {}
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=within_minutes)).isoformat()
+    # Supabase PostgREST allows `in.(v1,v2,...)` filtering. Chunk to avoid URL
+    # length issues with large market lists.
+    latest: dict[tuple[str, str, str, str], tuple[int, float | None, str]] = {}
+    CHUNK = 100
+    for i in range(0, len(market_ids), CHUNK):
+        chunk = market_ids[i:i + CHUNK]
+        res = (
+            db.client()
+            .table("book_snapshots")
+            .select("market_id,book,market_type,side,price_american,line,captured_at")
+            .in_("market_id", chunk)
+            .gte("captured_at", cutoff)
+            .order("captured_at", desc=True)
+            .limit(10000)
+            .execute()
+        )
+        for r in res.data or []:
+            key = (r["market_id"], r["book"], r["market_type"], r["side"])
+            if key in latest and latest[key][2] >= r["captured_at"]:
+                continue
+            latest[key] = (r["price_american"], r["line"], r["captured_at"])
+    return {k: (v[0], v[1]) for k, v in latest.items()}
+
+
+def _dedup_unchanged(
+    snaps: list[BookSnapshot], latest: dict[tuple[str, str, str, str], tuple[int, float | None]]
+) -> list[BookSnapshot]:
+    """Return only snapshots whose price or line changed vs. the latest known."""
+    out: list[BookSnapshot] = []
+    for s in snaps:
+        key = (s.market_id, s.book, s.market_type, s.side)
+        prev = latest.get(key)
+        if prev is None:
+            out.append(s)
+            continue
+        prev_price, prev_line = prev
+        if s.price_american != prev_price or s.line != prev_line:
+            out.append(s)
+    return out
+
+
 def ingest_sport(sport: str) -> dict[str, int]:
     """Fetch + parse + persist one sport. Returns counts dict."""
-    counts = {"games": 0, "matched": 0, "created": 0, "snapshots": 0}
+    counts = {"games": 0, "matched": 0, "created": 0, "candidate": 0, "snapshots": 0, "deduped": 0}
     raw = fetch_odds(sport)
     if not raw:
         return counts
@@ -309,27 +362,36 @@ def ingest_sport(sport: str) -> dict[str, int]:
     existing_count = len(db.list_active_markets(sport))
 
     all_snaps: list[BookSnapshot] = []
+    market_ids: list[str] = []
     for g in games:
         mid = _find_or_create_market(g, aliases)
         if not mid:
             continue
-        snaps = build_snapshots(g, mid)
-        all_snaps.extend(snaps)
+        market_ids.append(mid)
+        all_snaps.extend(build_snapshots(g, mid))
 
     # Post-ingest: count how many created this run
     counts["created"] = max(0, len(db.list_active_markets(sport)) - existing_count)
     counts["matched"] = counts["games"] - counts["created"]
+    counts["candidate"] = len(all_snaps)
 
-    if all_snaps:
+    # Only persist snapshots whose price/line differs from the last recorded
+    # value for the same (market, book, market_type, side).
+    latest = _latest_snapshot_map(market_ids)
+    to_write = _dedup_unchanged(all_snaps, latest)
+    counts["deduped"] = len(all_snaps) - len(to_write)
+
+    if to_write:
         try:
-            db.insert_book_snapshots(all_snaps)
-            counts["snapshots"] = len(all_snaps)
+            db.insert_book_snapshots(to_write)
+            counts["snapshots"] = len(to_write)
         except Exception as e:
             log.exception("insert_book_snapshots(%s) failed: %s", sport, e)
 
     log.info(
-        "Owls %s: %d games, %d matched, %d created, %d snapshots",
-        sport, counts["games"], counts["matched"], counts["created"], counts["snapshots"],
+        "Owls %s: %d games, %d matched, %d created, %d candidate, %d dedup'd, %d written",
+        sport, counts["games"], counts["matched"], counts["created"],
+        counts["candidate"], counts["deduped"], counts["snapshots"],
     )
     return counts
 
