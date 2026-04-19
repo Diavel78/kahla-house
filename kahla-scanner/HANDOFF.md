@@ -1,362 +1,483 @@
 # Kahla Scanner — Session Handoff
 
-> **Current state (2026-04-18 evening):** Scanner is live and self-running.
-> GitHub Actions cron runs `python -m scrapers.owls` every 5 minutes,
-> pulls odds for 9 books in a single API call per sport, and persists to
-> Supabase. The N-book Brier pipeline is in place and reads from
-> `book_snapshots` for every book including Polymarket. Scanner page at
-> [thekahlahouse.com/scanner](https://thekahlahouse.com/scanner) renders
-> Activity + "Currently Tracking" + 9-book Brier table + Signals +
-> Matched/Unmatched.
+> **Current state (end of 2026-04-18):** Scanner is fully live and autonomous.
+> External cron-job.org fires `workflow_dispatch` every 5 minutes →
+> GitHub Actions runs `scrapers/owls.py` → 9 books land in Supabase →
+> signal detector scans for POLY+PIN sharp consensus vs public lag.
+> Scanner page at [thekahlahouse.com/scanner](https://thekahlahouse.com/scanner)
+> auto-refreshes (60s Activity+Signals, 5min Brier+tables). VPS is destroyed.
+> $0 ongoing cost.
 >
-> **Start next session by:** running the triage queries in §5 to confirm
-> cron cadence + book_snapshot growth + first settled-game Brier numbers
-> from tonight's slate. Then look at actual Poly→public divergence on the
-> dashboard.
+> **Next session should start by:** glancing at the scanner page. If
+> book timestamps are all ≤5 min and Brier rows for POLY are filling in
+> (was artifact-low due to the 24h-offset bug we just fixed, expected to
+> normalize as new games settle), pipeline is healthy. Look at the
+> signals table — any fires? If yes, review quality. If no after 24-48h,
+> loosen threshold. Then pick from §8 open backlog.
 
 ---
 
 ## 1. Architecture at a glance
 
 ```
-Owls Insight API  ─(/{sport}/odds every 5min)─►  GitHub Actions cron
-                                                       │
-                                                       ▼
-                                          scrapers/owls.py
-                                          • parse 13 books per game
-                                          • match/create markets row
-                                          • dedup: skip no-op inserts
-                                                       │
-                                                       ▼
-                                               Supabase Postgres
-                                               • markets (upserts)
-                                               • book_snapshots (append)
-                                               • market_outcomes (ESPN)
-                                                       │
-                                                       ▼
-                                            Vercel Flask app
-                                            • /scanner page (admin)
-                                            • /api/scanner/* endpoints
-                                            • reads Supabase, renders UI
+cron-job.org  ─(POST dispatch every 5min)─►  GitHub Actions workflow
+                                                     │
+                                              scanner-poll.yml runs:
+                                              1. scrapers/owls.py
+                                              2. analytics/resolve.py
+                                              3. signals/divergence.py
+                                                     │
+                                                     ▼
+                                              Supabase Postgres
+                                              • markets, book_snapshots
+                                              • market_outcomes, signals
+                                              • team_aliases, unmatched
+                                                     │
+                                                     ▼
+                                              Vercel Flask app
+                                              • /scanner page (admin)
+                                              • auto-refresh every 60s/5min
 ```
 
-**No VPS dependency in the active path.** The DigitalOcean droplet at
-`24.199.119.210` is still running but writes to `poly_ticks` separately
-(legacy); nothing on the dashboard depends on it. Safe to cancel any
-time before day-60 of the DO free trial.
+**Zero always-on infrastructure we own.** Everything runs on free tiers.
 
 ---
 
-## 2. Live infrastructure (as of 2026-04-18)
+## 2. Live infrastructure
 
-### GitHub Actions workflow — primary ingest
+### Triggering (2-layer for reliability)
 
-- File: [`.github/workflows/scanner-poll.yml`](../.github/workflows/scanner-poll.yml)
-- Cron: `*/5 * * * *` (every 5 min)
-- Two steps:
-  1. `python -m scrapers.owls` — hits `/{sport}/odds` for each sport,
-     dedupes, persists `book_snapshots`.
-  2. `python -m analytics.resolve` — ESPN scoreboard → `market_outcomes`.
-- Runtime: ~50 seconds per run.
-- Secrets set: `OWLS_INSIGHT_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`.
+| Layer | Who fires it | Cadence | Purpose |
+|---|---|---|---|
+| **Primary** | cron-job.org | every 5 min | Reliable fine-grained cadence |
+| **Fallback** | GitHub Actions native `schedule:` | every 30 min (drifts to 30-45) | Runs if cron-job.org is down |
 
-**Budget check:** 5 sports × 288 runs/day = **1,440 Owls API calls/day ≈
-44K/month**. Owls MVP+ plan = 300K/month. ~15% utilization.
+The fallback lives in [.github/workflows/scanner-poll.yml](../.github/workflows/scanner-poll.yml)'s `schedule:` block. The primary lives in cron-job.org account (logged-in user's dashboard). Both trigger the same workflow. `concurrency.group: scanner-poll` prevents overlapping runs; dedup prevents duplicate writes either way.
 
-### Books tracked (9 total, in display order)
+**cron-job.org config:**
+- URL: `https://api.github.com/repos/Diavel78/kahla-house/actions/workflows/scanner-poll.yml/dispatches`
+- Method: POST, body `{"ref":"main"}`
+- Headers: `Authorization: Bearer <github_pat>`, `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`, `Content-Type: application/json`
+- GitHub PAT: fine-grained, repo = Diavel78/kahla-house, permission = Actions (Read and write). **Token expires in ~1 year — rotate around 2027-04-18.**
+
+### GitHub Actions workflow
+
+[.github/workflows/scanner-poll.yml](../.github/workflows/scanner-poll.yml) runs 3 steps:
+
+1. **Ingest odds (`python -m scrapers.owls`)** — hits Owls `/{sport}/odds` for each sport in `SPORTS_ENABLED`, collapses 13 books into unified games (with POLY 24h-offset normalization), dedupes against recent snapshots, persists `book_snapshots`.
+2. **Resolve outcomes (`python -m analytics.resolve`)** — ESPN scoreboard → `market_outcomes` rows for settled MLB/NBA/NHL/NFL games.
+3. **Signal scan (`python -m signals.divergence`)** — detects POLY+PIN consensus vs DK/FD/MGM public lag, writes to `signals` table. No Telegram yet.
+
+Runtime: typically 45-60 seconds per fire. 5 sports × 288 fires/day = ~1,440 Owls API calls/day (well under the 300K/month Owls budget).
+
+### Books tracked (9, in display order)
 
 | Code | Book | Role |
 |---|---|---|
-| POLY | Polymarket | Prediction market (thesis: sharpest) |
-| PIN | Pinnacle | Sharp public (sharp baseline) |
+| POLY | Polymarket | Prediction market — sharp thesis |
+| PIN | Pinnacle | Sharp public |
 | CIR | Circa | Sharp Vegas |
-| DK | DraftKings | Big retail |
-| FD | FanDuel | Big retail |
+| DK | DraftKings | Public/retail |
+| FD | FanDuel | Public/retail |
 | MGM | BetMGM | Retail |
 | CAE | Caesars | Retail |
 | HR | Hardrock | Retail |
-| NVG | Novig | Novel/exchange |
+| NVG | Novig | Novel exchange |
 
-Books returned by Owls but **deliberately skipped**: wynn, westgate,
-south_point, stations (low-signal Vegas). Add back via `BOOK_CODES` in
-`scrapers/owls.py` if ever useful.
+Skipped (returned by Owls but low-signal): wynn, westgate, south_point, stations. Add back via `BOOK_CODES` in [scrapers/owls.py](scrapers/owls.py).
 
 ### Supabase — `xzzjpbervfoyaodduynb.supabase.co`
 
-- `markets` — event records, upserted by matcher. 220+ active.
-- `book_snapshots` — append-only odds snapshots. Primary Brier source.
-- `market_outcomes` — ESPN-resolved outcomes. 17+ rows and growing.
-- `team_aliases` — 434 rows (MLB 99 / NBA 104 / NHL 117 / NFL 114).
-  Applied to live DB earlier today via Supabase SQL editor.
-- `unmatched_markets` — 340 open; pre-Owls accumulation, mostly harmless.
-- `poly_ticks` — legacy, written only by the (retiring) VPS.
+Free tier (500MB storage). Tables:
 
-### Operating
+- `markets` — event records (sport, teams, start, poly_market_id).
+- `book_snapshots` — odds snapshots. **Every Brier + signal query reads this.** Dedup-throttled to ~10MB/day (free tier runway ~50 days; set up retention before hitting limits).
+- `market_outcomes` — ESPN-resolved (home/away/void).
+- `signals` — sharp_consensus + future signal types. Empty until thresholds are hit.
+- `team_aliases` — 434 rows, maps book shorthand to canonical team names.
+- `unmatched_markets` — games the matcher couldn't link; mostly pre-Owls-era backlog.
+- `subscribers` — Telegram chat_ids + per-user filters. Empty; used in Phase 2.
+- `alerts_log` — Telegram send dedup. Empty; used in Phase 2.
+- `poly_ticks` — **legacy**, last VPS-era rows from 2026-04-18 afternoon. ~2MB archive. Not read by any current code. Safe to `DROP TABLE` at any time.
+
+### Vercel Flask app
+
+Serves `thekahlahouse.com`. Scanner-specific routes:
+
+- `GET /scanner` — admin-gated page, renders from `templates/scanner.html`
+- `GET /api/scanner/activity` — counts + last_seen per book + tracking breakdown
+- `GET /api/scanner/brier` — per-book Brier at T-24h/T-6h/T-1h/T-0
+- `GET /api/scanner/signals` — recent signals
+- `GET /api/scanner/matches` — recently linked markets
+- `GET /api/scanner/unmatched` — needs-review backlog
+
+Auto-refresh behavior:
+- Activity + Signals: every 60 seconds
+- Brier + Matches + Unmatched: every 5 minutes
+- Paused when tab is in background; immediate catch-up refresh on tab visibility restore
+
+### External services + tokens
+
+| Service | Purpose | Credentials | Rotation |
+|---|---|---|---|
+| **Supabase** | Postgres + REST API | `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` | only if suspected leak |
+| **Owls Insight** | Aggregated odds feed for 13 books | `OWLS_INSIGHT_API_KEY` | managed by user's MVP+ subscription ($50/mo, already paid) |
+| **GitHub PAT** | cron-job.org → workflow dispatch | Stored in cron-job.org job headers only | **~2027-04-18** (1 year from creation) |
+| **cron-job.org** | Reliable 5-min trigger | Email/password account | — |
+| **Firebase Auth** | Admin gate on /scanner | `FIREBASE_SERVICE_ACCOUNT` | only if suspected leak |
+
+---
+
+## 3. What's working
+
+- **Ingest at 5-min cadence** — cron-job.org verified firing; GH workflow success rate 100% during testing.
+- **All 9 books writing to `book_snapshots`**. Dedup ~85-90% reduction in no-op writes.
+- **POLY + PIN consensus merge** — after fixing the 24h offset bug in `parse_games`, POLY and PIN for the same real-world game now land on the same `markets` row.
+- **Brier scoring** covers all 9 books at 4 horizons; min-n=5 to qualify as "winner" prevents lucky-single-game artifacts.
+- **Signal detector (Phase 1)** live: `sharp_consensus` type. Requires POLY+PIN agreement within 1.5pp, edge ≥3pp vs public avg, game within next 2h, 30-min dedup. Thresholds env-overridable.
+- **ESPN resolver** — `market_outcomes` actively populating.
+- **Auto-refreshing scanner page** + "Currently tracking" banner showing in-flight games.
+
+---
+
+## 4. Brier methodology (non-obvious stuff)
+
+### What we compute per game × book × checkpoint
+
+1. Fetch latest `book_snapshots` moneyline (home + away) within ±30 min of checkpoint time.
+2. `devig_two_way(home_prob, away_prob)` — removes book margin, returns clean home-win probability.
+3. Squared error vs. outcome: `(predicted − actual)²` where `actual = 1.0` if home won, else `0.0`. Skip voids.
+4. Mean over games = book's Brier at that checkpoint. Lower is sharper.
+
+### Why table can look empty even with live ingest
+
+Brier only scores **settled** markets (game has ended + `market_outcomes` row exists). Games in progress are tracked (pre-game snapshots captured) but don't appear in the table until ESPN resolver writes their outcome.
+
+The "Currently tracking" banner shows the in-flight count by sport — those games will populate Brier rows over the next few hours as they settle.
+
+### Why winner requires n ≥ 5
+
+One lucky game can produce Brier ≈ 0.03. Without a minimum, it'd beat a book with 50 games at Brier 0.17. Requires at least 5 scored games before a book can "win" a checkpoint.
+
+### Known artifact: POLY under-represented initially
+
+Before 2026-04-18 ~18:00 UTC, POLY snapshots landed on different market rows than PIN/DK/FD for the same game (Owls uses Polymarket's resolution date = game date + 1 as commence_time, and our parse was keying by eventId). Fixed in commit `cf422de`. Games that settled before the fix show POLY n=0 at most horizons. New games settling post-fix will have normal POLY coverage — expect parity with other books by end of 2026-04-20.
+
+### Configuration
+
+- `CHECKPOINTS_HOURS = [24, 6, 1, 0]` in both `scanner.py` and `analytics/brier.py`
+- Tolerance window: ±30 min around each checkpoint
+- Books scored: `BRIER_BOOKS` in `scanner.py`, `BOOKS` in `analytics/brier.py`. **Keep in sync.**
+
+---
+
+## 5. Signal methodology (Phase 1)
+
+### sharp_consensus signal
+
+Emits when ALL of these are true:
+
+| Condition | Default | Env var |
+|---|---|---|
+| `event_start` within next 2 hours | 2.0 hr | `SHARP_CONSENSUS_LOOKAHEAD_HOURS` |
+| POLY + PIN both have fresh ML snapshots (within 10 min) | 10 min | `SHARP_CONSENSUS_FRESHNESS_MIN` |
+| `\|POLY - PIN\|` ≤ 1.5pp | 1.5 pp | `SHARP_CONSENSUS_AGREE_MAX_PCT` |
+| ≥2 of {DK, FD, MGM} have fresh ML snapshots | 2 books | `MIN_PUBLIC_BOOKS` (code) |
+| `\|sharp_avg - public_avg\|` ≥ 3pp | 3.0 pp | `SHARP_CONSENSUS_EDGE_MIN_PCT` |
+| No prior signal for this market in last 30 min | 30 min | `SHARP_CONSENSUS_DEDUP_MIN` |
+
+All env vars set via GitHub Actions **Variables** (Settings → Secrets and variables → Actions → Variables tab) — edit there, no code change needed.
+
+### Signal row shape
+
+- `signal_type = "sharp_consensus"`
+- `fade_side` = which side to bet (home if sharp > public, away otherwise)
+- `public_prob` = public avg on fade side
+- `sharp_prob` = sharp avg on fade side
+- `edge_pct` = abs percentage-point gap
+- `notes` = full drilldown (per-book probs, POLY-PIN agreement pp, minutes to event)
+
+### CLI
 
 ```bash
-# Trigger a run manually
-gh workflow run scanner-poll.yml --ref main
-
-# Check recent runs
-gh run list --workflow=scanner-poll.yml --limit 5
-
-# View the latest run's logs
-gh run view $(gh run list --workflow=scanner-poll.yml --limit 1 --json databaseId --jq '.[0].databaseId') --log
+cd kahla-scanner
+python -m signals.divergence               # real insert
+python -m signals.divergence --dry-run     # log would-fire, don't insert
 ```
 
 ---
 
-## 3. What's working (end-to-end)
-
-- **Owls ingest** — confirmed in production: NBA 392 + MLB 590 + NHL 410
-  snapshots per run in initial testing. Dedup cuts steady-state writes
-  by ~85-90% (run 2 after run 1 wrote 0 rows).
-- **Dedup logic** — `_dedup_unchanged()` in `scrapers/owls.py` suppresses
-  inserts where `(price_american, line)` equals the last recorded value
-  per `(market_id, book, market_type, side)` within a 30-min lookback.
-  Drops storage from ~80MB/day to ~10MB/day.
-- **Market matching** — SDK-based discover retired; `_find_or_create_market`
-  uses existing team aliases + ±30 min window to reuse existing `markets`
-  rows when possible, falls back to creating a fresh row.
-- **ESPN resolver** — `analytics/resolve.py` writes `market_outcomes` for
-  MLB/NBA/NHL/NFL hourly (via the same cron, piggybacked).
-- **Brier pipeline (N-book)** — `scanner.py::brier()` (Flask side) and
-  `kahla-scanner/analytics/brier.py` (CLI) both score all 9 books at
-  T-24h / T-6h / T-1h / T-0 from `book_snapshots`. Winner at each
-  checkpoint requires `n ≥ 5` (prevents lucky-one-game spurious winners).
-- **Scanner page** ([thekahlahouse.com/scanner](https://thekahlahouse.com/scanner)):
-  - Activity card: totals, last-seen per book (all 9 + legacy poly_ticks)
-  - "Currently tracking" banner: count of in-flight games by sport
-  - Brier table: 9 rows × 4 horizons, green = lowest Brier at that horizon
-  - Recent signals, matches, unmatched — all live
-- **Team aliases** — 434 rows seeded; matcher resolves abbreviations
-  correctly (`NY Mets` → `new york mets`).
-
----
-
-## 4. Brier methodology (non-obvious stuff to remember)
-
-### What we compute
-
-For each settled market, for each of 9 books, at each of 4 checkpoints:
-
-1. **Fetch the latest book_snapshot moneyline** (home + away) in a
-   ±30 min window around the checkpoint time.
-2. **Devig** using `devig_two_way(home_prob, away_prob)` to remove the
-   book's margin, yielding a clean home-win probability.
-3. **Squared error** vs. outcome: `(predicted − actual)²`, where
-   `actual = 1.0` if home won, `0.0` if away won, skip voids.
-4. **Mean over games** = that book's Brier at that checkpoint. Lower is
-   sharper.
-
-### Why it can look empty when data is flowing
-
-Brier runs only on **settled** markets (games with an outcome). A game in
-progress has pre-game snapshots being captured but doesn't appear in the
-table until ESPN resolves it. The "Currently tracking" banner shows games
-in the pipeline.
-
-The 17 settled markets that existed at Owls cutover had zero pre-game
-snapshots (they finished before Owls turned on), so they'll show `—`
-in every cell forever. Games settling from 2026-04-18 evening onward
-will populate real Brier numbers.
-
-### Why winner requires `n ≥ 5`
-
-Without the minimum, a book with a single game where it got the outcome
-right would "win" at Brier ≈ 0.03, overshadowing books with 50 games and
-Brier 0.18. That's meaningless. Once a book has 5+ games it's at least
-a statistically-comparable baseline.
-
-### Configuration
-
-- Checkpoints: `[24, 6, 1, 0]` hours before `event_start`
-- Tolerance window around each checkpoint: ±30 min
-- Books scored: `BRIER_BOOKS` in `scanner.py`, `BOOKS` in
-  `kahla-scanner/analytics/brier.py`. Keep these lists in sync.
-
----
-
-## 5. Triage queries (Supabase SQL editor)
+## 6. Triage queries (Supabase SQL editor)
 
 ```sql
 -- Ingest cadence: max captured_at should be < 6 min ago
 select max(captured_at) from book_snapshots;
 
--- Per-book freshness + volume
+-- Per-book 7-day volume
 select book, count(*) as rows_7d, max(captured_at) as last_seen
 from book_snapshots
 where captured_at > now() - interval '7 days'
-group by book
-order by rows_7d desc;
-
--- Per-sport coverage last hour
-select m.sport, count(*)
-from book_snapshots s
-join markets m on m.id = s.market_id
-where s.captured_at > now() - interval '1 hour'
-group by m.sport
-order by count(*) desc;
-
--- Total storage footprint
-select pg_size_pretty(pg_total_relation_size('book_snapshots'));
-
--- Markets state
-select status, count(*) from markets group by status;
+group by book order by rows_7d desc;
 
 -- Games currently tracking (in flight, no outcome yet)
 select m.sport, count(*)
 from markets m
 left join market_outcomes o on o.market_id = m.id
 where m.event_start between now() - interval '6 hours' and now() + interval '48 hours'
-  and m.status = 'active'
-  and o.market_id is null
-group by m.sport;
+  and m.status = 'active' and o.market_id is null
+group by m.sport order by count(*) desc;
 
--- Outcome flow
-select source, count(*), max(resolved_at)
-from market_outcomes
-group by source;
+-- Signals fired today
+select signal_type, count(*), min(triggered_at), max(triggered_at)
+from signals where triggered_at > now() - interval '24 hours'
+group by signal_type;
+
+-- Storage footprint
+select pg_size_pretty(pg_total_relation_size('book_snapshots')) as book_snaps,
+       pg_size_pretty(pg_total_relation_size('markets')) as markets,
+       pg_size_pretty(pg_database_size(current_database())) as total;
 ```
 
-### Starting Brier analysis once settled games accumulate
+### Starting Brier analysis
+
+Once ~24h of post-Owls data has accumulated:
 
 ```bash
 cd kahla-scanner
 python -m analytics.brier --sport MLB --days 3
-python -m analytics.brier --days 7            # all sports
-python -m analytics.brier --days 30 --csv /tmp/brier.csv   # dump per-game
+python -m analytics.brier --days 7
+python -m analytics.brier --days 30 --csv /tmp/brier.csv
 ```
 
-Or just refresh [thekahlahouse.com/scanner](https://thekahlahouse.com/scanner)
-and let the Flask endpoint render the table.
+The `/scanner` page renders the same info.
 
 ---
 
-## 6. Open decisions + next session backlog
+## 7. Common operations
 
-### 1. Decision pending: keep or cancel the VPS
+### Tune a signal threshold without deploying code
 
-DigitalOcean droplet `24.199.119.210` is still running the old APScheduler
-pipeline writing `poly_ticks` at 45s cadence. Nothing on the dashboard
-reads `poly_ticks` anymore. Keeping it costs $4/mo after day 60 of the
-DO free trial (~2026-06-17).
+GitHub → Settings → Secrets and variables → Actions → **Variables** tab → set e.g. `SHARP_CONSENSUS_EDGE_MIN_PCT=2.5`. Takes effect on the next cron fire (within 5 min).
 
-- **Cancel it** if you trust 5-min Owls snapshots for Poly (fine for
-  T-24h/T-6h/T-1h/T-0 horizons).
-- **Keep it** if you specifically want high-resolution Poly tick data for
-  short-term movement modeling later.
+### Pause the entire scanner
 
-My lean: cancel. The scanner works without it.
+- Turn off cron-job.org job (toggle to disabled — takes effect immediately).
+- GitHub schedule fallback still fires every 30 min unless you also comment out the `schedule:` block in scanner-poll.yml.
 
-### 2. Storage retention (not urgent)
+### Resume after pause
 
-- Current rate: ~10MB/day with dedup.
-- Free-tier runway: ~50 days.
-- Plan when we get there: either (a) drop a `delete from book_snapshots
-  where captured_at < now() - interval '30 days'` daily SQL cron, or
-  (b) upgrade Supabase to Pro ($25/mo, 8GB).
-- Do NOT enable retention until confident Brier pipeline is correct —
-  leave raw data intact for the first 2 weeks of validation.
+- Flip cron-job.org back on. Data resumes flowing on next fire.
 
-### 3. Signal emission is off
+### Trigger a one-off run manually
 
-`signals` table is still empty. `jobs/scheduler.py::job_scan_signals`
-exists but runs on the VPS only. Once we have 3-5 days of book_snapshot
-coverage, turn on a divergence scan job (probably as a new GH Actions
-workflow, not the VPS) that:
+```bash
+gh workflow run scanner-poll.yml --ref main
+gh run list --workflow=scanner-poll.yml --limit 2
+```
 
-- For each market where POLY and DK/FD/PIN disagree by N percentage
-  points, insert a row into `signals`.
-- Optionally fan out to Telegram via `alerts/telegram.py`.
+### Rotate the GitHub PAT
 
-Config lives in `config.py::scanner_mode`. Currently `log_only`. Flip to
-`alert_enabled` once we trust the Brier calibration.
+1. Generate new fine-grained PAT at https://github.com/settings/personal-access-tokens/new (repo = Diavel78/kahla-house, Actions: Read and write).
+2. In cron-job.org → Edit job → Headers → update `Authorization` value to `Bearer <new_token>`.
+3. Revoke old PAT.
 
-### 4. Render: settled-markets list with per-book Brier per game
+### Rename a book or add a new one
 
-The current Brier table is an aggregate. When we have ~50 settled markets
-it'd be useful to show the per-game breakdown so we can spot-check
-calibration: "this game, POLY said 60% home, DK said 58%, home lost —
-both books wrong by about the same amount." That's the CSV dump the CLI
-already produces. A page-side table would be natural to add.
+1. Add the book to `BOOK_CODES` in [scrapers/owls.py](scrapers/owls.py).
+2. Add the book code to `BRIER_BOOKS` in [scanner.py](../scanner.py) and `BOOKS` in [analytics/brier.py](analytics/brier.py).
+3. Add a CSS color class in [templates/scanner.html](../templates/scanner.html) (`.src-tag.xxx`).
+4. Commit, push. No Supabase changes needed.
 
-### 5. Props (later)
+### Retire old data (when nearing Supabase free tier)
 
-Owls exposes `/{sport}/props`. Same pattern as odds. Not in M0 scope.
+Not yet wired. When needed:
+
+```sql
+delete from book_snapshots where captured_at < now() - interval '30 days';
+```
+
+Run once, or schedule as a weekly Supabase edge function. Don't enable until Brier pipeline has been validated for at least 2 weeks.
+
+### Destroy the VPS (already done 2026-04-18)
+
+Was at `24.199.119.210`. Destroyed via DO dashboard. Credit card charge: $0 (within $200/60-day trial). Artifacts remaining: `poly_ticks` table in Supabase (~2MB legacy archive).
 
 ---
 
-## 7. Session log — what changed today (2026-04-18)
+## 8. Open decisions + next session backlog
 
-Chronological, newest last:
+### 1. Phase 2 — Telegram alerts (unblocks once signals accumulate)
 
-| Commit | Topic |
-|---|---|
-| `1152eff` | install_vps.sh fixes (swap, perms, tty reads) + HANDOFF refresh |
-| `49e6968` | Drop FanDuel direct scraper from scheduler (FD gated behind authed GraphQL) |
-| `df35bcb` | Pivot ingest to Owls Insight — 5-min cron, 13 books per call |
-| `3f9413e` | HANDOFF reflects Owls architecture + VPS-retire decision |
-| `67a2d52` | owls.py dedup — skip no-op inserts, 85-90% write reduction |
-| `f239a64` | Brier grades all 9 books (POLY/PIN/CIR/DK/FD/MGM/CAE/HR/NVG) |
-| `4771a0e` | scanner.html always renders all 9 rows (don't hide empty) |
-| `9a86331` | "Currently tracking" banner above Brier table |
-| _this commit_ | HANDOFF comprehensive rewrite |
+Once the `signals` table has fired a few entries and you've reviewed them:
 
-Also applied today (not in git):
-- `team_aliases.sql` seeded into Supabase (434 rows).
-- `OWLS_INSIGHT_API_KEY` added to GitHub Actions secrets.
-- DigitalOcean droplet spun up + installer run (then rendered redundant
-  by the Owls pivot — VPS still running, retire when ready).
-- Permissions allowlist added to `.claude/settings.json` (gitignored).
+1. Create a Telegram bot (`@BotFather` → `/newbot`, save token).
+2. DM the bot once, find your chat_id via `https://api.telegram.org/bot<TOKEN>/getUpdates`.
+3. Insert subscriber row:
+   ```sql
+   insert into subscribers (telegram_chat_id, display_name, sports, min_edge_pct)
+   values (<your_chat_id>, 'me', array['MLB','NBA','NHL','NFL','CBB'], 3.0);
+   ```
+4. Add `TELEGRAM_BOT_TOKEN` to GH Actions secrets.
+5. Wire `alerts/telegram.py::fan_out()` into the signal-scan step (or as a 4th step). Loop over open signals, fan out, log to `alerts_log` for dedup.
+
+Estimate: ~1 hour.
+
+### 2. Signal type expansion (Phase 3)
+
+- **Velocity / movement**: POLY moved >2pp in last 30 min, public hasn't followed. Useful for today's last-hour-before-game moves where POLY may be the only sharp source available (PIN lines open same-day).
+- **RLM (reverse line movement)**: Line moved against Circa handle %. Needs `/{sport}/splits` ingest into a new `splits_snapshots` table.
+- **Poly-only signal variant**: For games where PIN hasn't opened yet (tomorrow's slate before morning), emit a weaker `poly_vs_public` signal using POLY alone. Would catch pre-game-day divergence the strict `sharp_consensus` misses.
+
+### 3. Storage retention
+
+Decide in ~40 days when free tier is ~50% full. Options: 30-day retention cron, or upgrade to Supabase Pro ($25/mo, 8GB).
+
+### 4. Per-game Brier breakdown view
+
+Current Brier table is aggregate. A per-game drill-down ("for this specific MLB game, POLY said 60%, DK said 58%, home lost — here's each book's miss") would help validate calibration. Data already exists in the CSV dump — just needs a new Flask endpoint + modal.
+
+### 5. Settle / outcome audit
+
+`market_outcomes.source` tracks where outcome came from (currently only "espn"). Worth building a "check for disagreement" job that queries Polymarket's resolution API and flags any outcome where Poly resolved differently than ESPN — these are either voids, weird conditions, or data errors.
+
+### 6. Props (later)
+
+Owls exposes `/{sport}/props`. Same ingest pattern as odds. Not in M0 scope; revisit once moneyline Brier + signals are proven.
+
+### 7. Cleanup / tech debt
+
+- `poly_ticks` table can be `DROP`ped at any time (~2MB, zero code reads it).
+- `kahla-scanner/scrapers/polymarket.py`, `draftkings.py`, `fanduel.py` are legacy VPS-era direct scrapers, fully superseded by `scrapers/owls.py`. Delete whenever.
+- `kahla-scanner/main.py`, `kahla-scanner/jobs/scheduler.py`, `systemd/kahla-scanner.service` — VPS entry points, no longer reachable. Delete whenever.
+- `kahla-scanner/scripts/install_vps.sh` + `install_launchd.sh` — keep; useful reference if we ever need a VPS or local scheduler again.
 
 ---
 
-## 8. Key files reference
+## 9. Key files reference
+
+### Active path (ingest → persist → query)
 
 | File | Purpose |
 |---|---|
-| `kahla-scanner/scrapers/owls.py` | **Primary ingest** — Owls → book_snapshots |
-| `.github/workflows/scanner-poll.yml` | 5-min cron workflow |
-| `kahla-scanner/analytics/brier.py` | Brier CLI (9 books) |
-| `kahla-scanner/analytics/resolve.py` | ESPN → market_outcomes |
-| `kahla-scanner/signals/matcher.py` | Cross-venue name linkage |
-| `kahla-scanner/signals/normalize.py` | Odds conversion helpers |
-| `kahla-scanner/storage/supabase_client.py` | DB helpers |
-| `kahla-scanner/storage/models.py` | Row dataclasses |
-| `kahla-scanner/supabase/schema.sql` | DB schema (idempotent) |
-| `kahla-scanner/supabase/team_aliases.sql` | 434 alias rows (idempotent) |
-| `scanner.py` (root) | Flask-side read layer for `/scanner` page |
-| `templates/scanner.html` | `/scanner` UI |
-| `app.py` (root) | Flask app (routes `/api/scanner/*`) |
-| **Legacy (retiring with VPS):** | |
-| `kahla-scanner/main.py` | VPS entrypoint |
-| `kahla-scanner/jobs/scheduler.py` | APScheduler wiring |
-| `kahla-scanner/scrapers/polymarket.py` | SDK-based Poly poller |
-| `kahla-scanner/scrapers/draftkings.py` | Direct DK scraper (403s from VPS) |
-| `kahla-scanner/scrapers/fanduel.py` | Direct FD scraper (authed API now) |
-| `kahla-scanner/systemd/kahla-scanner.service` | VPS systemd unit |
-| `kahla-scanner/scripts/install_vps.sh` | VPS installer (keep for future use) |
+| [kahla-scanner/scrapers/owls.py](scrapers/owls.py) | **Primary ingest** — Owls → book_snapshots. Handles POLY 24h offset. |
+| [kahla-scanner/signals/divergence.py](signals/divergence.py) | Signal detector: sharp_consensus |
+| [kahla-scanner/analytics/resolve.py](analytics/resolve.py) | ESPN → market_outcomes |
+| [kahla-scanner/analytics/brier.py](analytics/brier.py) | Brier scorer (CLI), N books |
+| [kahla-scanner/signals/matcher.py](signals/matcher.py) | Cross-venue name linkage |
+| [kahla-scanner/signals/normalize.py](signals/normalize.py) | Odds conversion (american↔prob, devig) |
+| [kahla-scanner/storage/supabase_client.py](storage/supabase_client.py) | DB helpers |
+| [kahla-scanner/storage/models.py](storage/models.py) | Row dataclasses |
+| [kahla-scanner/supabase/schema.sql](supabase/schema.sql) | DB schema (idempotent) |
+| [kahla-scanner/supabase/team_aliases.sql](supabase/team_aliases.sql) | 434 alias rows (idempotent) |
+| [.github/workflows/scanner-poll.yml](../.github/workflows/scanner-poll.yml) | Cron workflow, 3 steps |
+| [scanner.py](../scanner.py) | Flask-side read layer for /scanner page |
+| [templates/scanner.html](../templates/scanner.html) | /scanner UI + auto-refresh JS |
+| [app.py](../app.py) | Flask app mounting /api/scanner/* |
+
+### Legacy / retiring (safe to delete)
+
+| File | Why retained |
+|---|---|
+| [kahla-scanner/main.py](main.py) | VPS entry point — VPS destroyed, not reachable |
+| [kahla-scanner/jobs/scheduler.py](jobs/scheduler.py) | APScheduler for VPS |
+| [kahla-scanner/scrapers/polymarket.py](scrapers/polymarket.py) | Direct Poly SDK scraper (replaced by Owls) |
+| [kahla-scanner/scrapers/draftkings.py](scrapers/draftkings.py) | Direct DK scraper (403s from datacenter IPs) |
+| [kahla-scanner/scrapers/fanduel.py](scrapers/fanduel.py) | Direct FD scraper (FD gated their API) |
+| [kahla-scanner/systemd/kahla-scanner.service](systemd/kahla-scanner.service) | VPS systemd unit |
+| [kahla-scanner/scripts/install_vps.sh](scripts/install_vps.sh) | Useful if we ever want a VPS again |
+| [kahla-scanner/scripts/install_launchd.sh](scripts/install_launchd.sh) | Useful if we ever want Mac scheduling |
 
 ---
 
-## 9. Env vars & secrets
+## 10. Env vars / secrets map
 
-### GitHub Actions secrets (cron workflow)
+### GitHub Actions secrets (for cron workflow)
 
 - `OWLS_INSIGHT_API_KEY`
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_KEY`
 
-### Vercel env vars (Flask app)
+### GitHub Actions variables (tunable without code push)
 
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_KEY`
-- `OWLS_INSIGHT_API_KEY` (used by `/api/odds` etc, not scanner)
-- `POLYMARKET_KEY_ID`, `POLYMARKET_SECRET_KEY` (dashboard page)
+- `SPORTS_ENABLED` (default: `NFL,NBA,MLB,NHL,CBB`)
+- `SCANNER_MODE` (default: `log_only`)
+- any `SHARP_CONSENSUS_*` threshold
+
+### Vercel env vars (Flask)
+
+- `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`
+- `OWLS_INSIGHT_API_KEY` (used by /odds page + scanner page)
+- `POLYMARKET_KEY_ID`, `POLYMARKET_SECRET_KEY` (for /dashboard P&L)
 - `FIREBASE_SERVICE_ACCOUNT`, `FLASK_SECRET_KEY`
 
 ### Local `.env` files
 
 - Repo root `.env`: `OWLS_INSIGHT_API_KEY`, `POLYMARKET_*`
 - `kahla-scanner/.env`: `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`
+
+### External services (not in env vars)
+
+- **cron-job.org account** — owns the 5-min trigger. Credentials = user's email/password.
+- **GitHub PAT** — stored only in cron-job.org job headers. Rotate ~2027-04-18.
+
+---
+
+## 11. Session log (commit-by-commit, 2026-04-18)
+
+Chronological, newest last:
+
+| Commit | Topic |
+|---|---|
+| `1152eff` | `install_vps.sh` bug fixes (swap, perms, tty reads) |
+| `49e6968` | Drop FanDuel direct scraper from scheduler |
+| `df35bcb` | **Owls Insight pivot** — 5-min cron, 13 books per call |
+| `3f9413e` | HANDOFF reflecting Owls architecture |
+| `67a2d52` | `owls.py` dedup logic (85-90% write reduction) |
+| `f239a64` | **N-book Brier refactor** (all 9 books, min-n=5 winner) |
+| `4771a0e` | Don't hide empty Brier rows |
+| `9a86331` | "Currently tracking" banner |
+| `c6cdc8a` | HANDOFF comprehensive rewrite |
+| `cf422de` | **POLY 24h-offset fix** + Phase 1 signal detector |
+| `d041a3a` | Staggered auto-refresh (60s/5min) |
+| `a2915cb` | Drop `poly_ticks` from UI (legacy, archive-only) |
+| `7b8d09f` | Slow GH schedule to `*/30` (cron-job.org is primary) |
+| _this commit_ | HANDOFF end-of-session rewrite |
+
+Also applied today (not in git):
+- `team_aliases.sql` seeded into Supabase (434 rows).
+- `OWLS_INSIGHT_API_KEY` added to GH Actions secrets.
+- DO droplet spun up, configured, then destroyed (net cost $0 within 60-day credit).
+- `.claude/settings.json` allowlist populated (gitignored).
+- **cron-job.org account created** and scanner-poll dispatch job configured.
+- **GitHub fine-grained PAT** created, stored only in cron-job.org.
+
+---
+
+## 12. Change log template (for future sessions)
+
+When you modify the architecture, append a brief entry here so the running doc stays honest:
+
+```
+### YYYY-MM-DD — topic
+- What changed
+- Why
+- Key commit(s)
+- Any operational steps taken outside git (DB migrations, secrets added, etc.)
+```
+
+### 2026-04-18 — initial Owls-based pipeline stood up
+- Migrated from VPS direct scrapers → Owls aggregator (9 books)
+- Destroyed VPS, moved to GH Actions + external cron-job.org trigger
+- Brier refactored to N books, Phase 1 signal detector live
+- See commits in §11
+
+---
+
+## Quick-reference checklist for next session
+
+- [ ] Refresh thekahlahouse.com/scanner — are all 9 book timestamps ≤5 min?
+- [ ] `gh run list --workflow=scanner-poll.yml --limit 5` — at least 4 of last 5 should be `workflow_dispatch` (cron-job.org)
+- [ ] Supabase: `select book, max(captured_at) from book_snapshots group by book` — all within the last 5-10 min?
+- [ ] Supabase: `select count(*) from signals where triggered_at > now() - interval '24 hours'` — anything? Review if yes.
+- [ ] If signals have fired and look reasonable → consider Phase 2 (Telegram).
+- [ ] If signals are empty after 48h of live games → loosen `SHARP_CONSENSUS_EDGE_MIN_PCT` to 2.0 via GH Actions variables.
