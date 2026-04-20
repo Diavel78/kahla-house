@@ -38,6 +38,7 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 | `GET /api/realtime/raw` | Admin | Debug: raw Pinnacle sharp odds |
 | `GET /api/raw` | Admin | Debug: raw Polymarket SDK responses |
 | `GET/POST /api/splits-openers?sport=mlb` | Firebase | First-seen splits (Firestore, permanent per game ID) |
+| `GET/POST /api/splits-last-changed?sport=mlb` | Firebase | Per-game ts of last actual Circa handle/bets % change. Server-authoritative diff |
 | `GET /api/scanner/activity` | Admin | Scanner counts + last-seen per source |
 | `GET /api/scanner/brier` | Admin | Brier scores poly/dk/fd at T-24h/T-6h/T-1h/T-0 |
 | `GET /api/scanner/signals` | Admin | Recent divergence signals |
@@ -96,6 +97,7 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 - **Book Selector**: Dropdown with checkboxes + up/down arrows to reorder. Saved to Firestore
 - **Live Scores**: Green LIVE badge with score between team names
 - **Circa Splits**: Handle % vs Ticket % per market. SHARP tags when divergence >= 15%. Shows movement from first-seen values (e.g. `44% (-3)`) — stored in Firestore like openers
+- **Splits Last-Changed Timestamp**: Splits header shows `updated Xm ago` per game. Server-authoritative — only bumps `ts` when Circa handle/bets % values actually differ from stored (Circa feed updates ~15-30 min, so this reveals real movement vs stale polls). Stored in Firestore doc `openers/splits_changed:{sport}`
 - **Line Movement**: Opener vs current with arrows and diffs
 - **Reverse Line Movement (RLM)**: Pulsing red flag when line moves against sharp money
 - **Polymarket Bet Indicators**: Multiple bets per game supported, with live status coloring
@@ -115,6 +117,10 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 - `renderSplitsRow()` — renders handle%/bets% with sharp detection and movement diffs from splits openers
 - `captureSplitsOpeners()` — captures first-seen Circa splits per game to Firestore (like `captureOpeners()`)
 - `loadSplitsOpeners()` / `saveSplitsOpenersAPI()` — Firestore load/save for splits openers
+- `buildSplitsSnapshot()` — builds per-game `{ml, spread, total}` snapshot of current Circa handle/bets % for diff POST
+- `syncSplitsLastChanged()` — POSTs snapshot to `/api/splits-last-changed`; server decides which games actually changed and returns fresh `ts` map. Triggers `renderBoard()` on change
+- `loadSplitsLastChanged()` — GETs per-game last-changed map on sport switch / app boot
+- `fmtTsAgo(ts)` — formats unix-ms timestamp as `just now` / `Xs/m/h/d ago`
 
 ---
 
@@ -274,6 +280,7 @@ The `/props` endpoint returns a **different format** than `/odds`:
 - **`users/{uid}`** — User profile (email, role, appAccess, preferences)
 - **`openers/openers:{sport}`** — Opening lines per sport. `events` map of game IDs to opener data. Permanent — never reset daily
 - **`openers/splits:{sport}`** — First-seen Circa splits per sport. `events` map of game IDs to handle/bets percentages. Permanent — never override
+- **`openers/splits_changed:{sport}`** — Last-changed Circa splits per game. `events` map: `{eid: {ml, spread, total, ts}}`. `ts` (unix ms) bumps only when values actually differ from stored. Server-authoritative diff in `/api/splits-last-changed` POST
 - **Preferences fields**: `odds_books`, `odds_book_order`, `odds_sport`, `props_sport`
 
 ## Firebase Auth

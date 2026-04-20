@@ -1274,6 +1274,75 @@ def api_splits_openers_save():
 
 
 # ---------------------------------------------------------------------------
+# Splits Last-Changed API (Firestore) — tracks when Circa handle/bets %
+# actually moved per game. Server is authoritative: client POSTs current
+# observed values, server bumps `ts` only when values differ from stored.
+# ---------------------------------------------------------------------------
+
+@app.route("/api/splits-last-changed", methods=["GET"])
+@firebase_auth_required
+def api_splits_last_changed_get():
+    sport = request.args.get("sport", "mlb")
+    try:
+        db = get_db()
+        doc_ref = db.collection("openers").document(f"splits_changed:{sport}")
+        doc = doc_ref.get()
+        if doc.exists:
+            events = doc.to_dict().get("events", {})
+            return jsonify({"ok": True, "events": events})
+        return jsonify({"ok": True, "events": {}})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/splits-last-changed", methods=["POST"])
+@firebase_auth_required
+def api_splits_last_changed_save():
+    """Client POSTs currently observed Circa splits per game (no timestamps).
+    Server compares to stored values and bumps `ts` (ms) only on actual change.
+    Body: { "sport": "mlb", "events": { eid: { "ml": {...}, "spread": {...}, "total": {...} } } }
+    """
+    import time
+    body = request.get_json(force=True)
+    sport = body.get("sport", "mlb")
+    incoming = body.get("events", {}) or {}
+
+    try:
+        db = get_db()
+        doc_ref = db.collection("openers").document(f"splits_changed:{sport}")
+        doc = doc_ref.get()
+        existing = doc.to_dict().get("events", {}) if doc.exists else {}
+        now_ms = int(time.time() * 1000)
+        changed = 0
+
+        for eid, new_vals in incoming.items():
+            if not isinstance(new_vals, dict) or not new_vals:
+                continue
+            prior = existing.get(eid) or {}
+            prior_vals = {k: prior.get(k) for k in ("ml", "spread", "total")}
+            if prior_vals == {k: new_vals.get(k) for k in ("ml", "spread", "total")}:
+                continue
+            entry = {k: new_vals.get(k) for k in ("ml", "spread", "total") if new_vals.get(k) is not None}
+            entry["ts"] = now_ms
+            existing[eid] = entry
+            changed += 1
+
+        if changed:
+            if doc.exists:
+                doc_ref.update({"events": existing})
+            else:
+                doc_ref.set({
+                    "sport": sport,
+                    "events": existing,
+                    "createdAt": firestore.SERVER_TIMESTAMP,
+                })
+
+        return jsonify({"ok": True, "changed": changed, "events": existing})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
 # API routes — User Preferences
 # ---------------------------------------------------------------------------
 

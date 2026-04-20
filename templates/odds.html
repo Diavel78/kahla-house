@@ -955,6 +955,78 @@
         }
     }
 
+    // --- Splits last-changed (Firestore-backed, server-authoritative diff) ---
+    // Maps eid -> { ml, spread, total, ts }. `ts` is unix ms of last time
+    // Circa handle/bets % actually moved for this game.
+    let currentSplitsLastChanged = {};
+
+    async function loadSplitsLastChanged(sport) {
+        try {
+            const resp = await authFetch(`/api/splits-last-changed?sport=${sport}`);
+            if (!resp) return {};
+            const data = await resp.json();
+            if (data.ok) return data.events || {};
+            return {};
+        } catch { return {}; }
+    }
+
+    function buildSplitsSnapshot(events) {
+        const snap = {};
+        for (const ev of events) {
+            const eid = ev.numeric_id || ev.id;
+            if (!eid) continue;
+            const circa = (ev.splits || {}).circa;
+            if (!circa) continue;
+            const entry = {};
+            const ml = circa.moneyline;
+            if (ml && ml.away_handle_pct != null) {
+                entry.ml = { away_handle: ml.away_handle_pct, away_bets: ml.away_bets_pct };
+            }
+            const spr = circa.spread;
+            if (spr && spr.away_handle_pct != null) {
+                entry.spread = { away_handle: spr.away_handle_pct, away_bets: spr.away_bets_pct };
+            }
+            const tot = circa.total;
+            if (tot && tot.over_handle_pct != null) {
+                entry.total = { over_handle: tot.over_handle_pct, over_bets: tot.over_bets_pct };
+            }
+            if (Object.keys(entry).length > 0) snap[eid] = entry;
+        }
+        return snap;
+    }
+
+    async function syncSplitsLastChanged(events, sport) {
+        const snap = buildSplitsSnapshot(events);
+        if (!Object.keys(snap).length) return false;
+        try {
+            const resp = await authFetch('/api/splits-last-changed', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sport, events: snap })
+            });
+            if (!resp) return false;
+            const data = await resp.json();
+            if (!data.ok) return false;
+            const prev = currentSplitsLastChanged;
+            currentSplitsLastChanged = data.events || {};
+            // Return true if any game's ts changed — caller may re-render
+            for (const eid in currentSplitsLastChanged) {
+                if ((prev[eid]?.ts || 0) !== (currentSplitsLastChanged[eid]?.ts || 0)) return true;
+            }
+            return false;
+        } catch(e) { console.warn('syncSplitsLastChanged:', e); return false; }
+    }
+
+    function fmtTsAgo(ts) {
+        if (!ts) return '';
+        const s = Math.floor((Date.now() - ts) / 1000);
+        if (s < 10) return 'just now';
+        if (s < 60) return s + 's ago';
+        if (s < 3600) return Math.floor(s/60) + 'm ago';
+        if (s < 86400) return Math.floor(s/3600) + 'h ago';
+        return Math.floor(s/86400) + 'd ago';
+    }
+
     function computeMovement(ev, openers) {
         const eid = ev.numeric_id || ev.id;
         const opener = openers[eid];
@@ -1574,8 +1646,9 @@
                 if (circa || dk) {
                     const eid = ev.numeric_id || ev.id;
                     const splitsOp = currentSplitsOpeners[eid] || null;
+                    const lcTs = currentSplitsLastChanged[eid]?.ts;
                     h += `<div class="splits-bar">`;
-                    h += `<div class="splits-header">Splits</div>`;
+                    h += `<div class="splits-header">Splits${lcTs ? `<span class="splits-ts">updated ${fmtTsAgo(lcTs)}</span>` : ''}</div>`;
                     h += `<div class="splits-grid">`;
                     h += renderSplitsRow(circa, dk, 'ML', 'moneyline', away, home, splitsOp);
                     h += renderSplitsRow(circa, dk, 'SPR', 'spread', away, home, splitsOp);
@@ -1647,6 +1720,10 @@
             status.className='status';
             renderBookPills();
             if (gamesChanged) renderBoard();
+            // Sync splits last-changed timestamps; re-render if any game's ts bumped
+            syncSplitsLastChanged(data.events||[], activeSport).then(tsChanged => {
+                if (tsChanged && !gamesChanged) renderBoard();
+            });
         }catch(err){
             if(firstLoad){
                 status.textContent='Fetch error';
@@ -1765,10 +1842,11 @@
             body: JSON.stringify({preferences: {odds_sport: s}})
         }).catch(e => console.error('Failed to save sport pref:', e));
         renderSportBar();
-        // Load openers + splits openers from API for new sport
-        Promise.all([loadOpeners(s), loadSplitsOpeners(s)]).then(([op, splitsOp]) => {
+        // Load openers + splits openers + splits last-changed from API for new sport
+        Promise.all([loadOpeners(s), loadSplitsOpeners(s), loadSplitsLastChanged(s)]).then(([op, splitsOp, splitsLc]) => {
             currentOpeners = op;
             currentSplitsOpeners = splitsOp;
+            currentSplitsLastChanged = splitsLc;
             loadOdds(true);
         });
     };
@@ -1792,12 +1870,14 @@
 
         renderSportBar();
         loadMyBets();
-        const [op, splitsOp] = await Promise.all([
+        const [op, splitsOp, splitsLc] = await Promise.all([
             loadOpeners(activeSport),
             loadSplitsOpeners(activeSport),
+            loadSplitsLastChanged(activeSport),
         ]);
         currentOpeners = op;
         currentSplitsOpeners = splitsOp;
+        currentSplitsLastChanged = splitsLc;
         await loadOdds();
         prefetchOpeners();
         setInterval(loadOdds, 15000);
