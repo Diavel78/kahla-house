@@ -194,15 +194,22 @@ def unmatched(limit: int = 40) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def _book_home_probs_nearest(
-    c, market_id: str, target: datetime, tol_min: int = 30
+    c, market_id: str, target: datetime, lookback_days: int = 14
 ) -> dict[str, float]:
     """For a given market + checkpoint time, return {book: devig'd home prob}
-    for every book that has a moneyline snapshot in the ±tol_min window.
+    for every book that has ANY moneyline snapshot at or before `target`.
 
-    Single query per (market, checkpoint). Python-side groups by book and
-    picks the newest (home, away) pair to devig.
+    Returns the NEWEST snapshot ≤ target per (book, side). A book's posted
+    line is live until they change it — so an unchanged line from hours ago
+    IS that book's line at the checkpoint. Using a narrow ±30-min window
+    penalized sharp books (PIN, CIR) that rarely re-price vs retail books
+    (MGM, CAE) that re-price constantly and so always had a fresh snapshot
+    inside the window. That selection bias was flipping the Brier leaderboard.
+
+    `lookback_days` is a wide ceiling (14d is generous for any US sport's
+    line-post window); beyond that we consider the snapshot stale/irrelevant.
     """
-    lower = (target - timedelta(minutes=tol_min)).isoformat()
+    lower = (target - timedelta(days=lookback_days)).isoformat()
     upper = target.isoformat()
     res = (
         c.table("book_snapshots")
@@ -212,7 +219,7 @@ def _book_home_probs_nearest(
         .gte("captured_at", lower)
         .lte("captured_at", upper)
         .order("captured_at", desc=True)
-        .limit(500)
+        .limit(2000)
         .execute()
     )
     rows = res.data or []
@@ -315,17 +322,23 @@ def brier(sport: str | None = None, days: int = 30) -> dict[str, Any]:
                 "brier": round(b, 5) if b is not None else None,
             }
     for h in CHECKPOINTS_HOURS:
+        # Compute max n at this checkpoint across all books — winner must
+        # be scored on at least 50% of that slate AND have n >= 5 absolute.
+        # This prevents a book with n=6 on a cherry-picked sample from
+        # beating a book with n=200 on the full slate.
+        ns = [int(summary["scores"][book][str(int(h))]["n"]) for book in BRIER_BOOKS]
+        max_n = max(ns) if ns else 0
+        min_required = max(5, int(max_n * 0.5))
         candidates = []
         for book in BRIER_BOOKS:
             s = summary["scores"][book][str(int(h))]
-            # Require at least 5 games for a "winner" claim — a book with n=1
-            # that happened to be right once would otherwise win spuriously.
-            if s["brier"] is not None and s["n"] >= 5:
+            if s["brier"] is not None and s["n"] >= min_required:
                 candidates.append((book, s["brier"], s["n"]))
         if candidates:
             best = min(candidates, key=lambda x: x[1])
             summary["winner_per_checkpoint"][str(int(h))] = {
                 "source": best[0], "brier": best[1], "n": best[2],
+                "min_n_required": min_required, "max_n_in_slate": max_n,
             }
         else:
             summary["winner_per_checkpoint"][str(int(h))] = None

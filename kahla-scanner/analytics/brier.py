@@ -58,11 +58,15 @@ def _checkpoint_ts(event_start: datetime, hours_before: float) -> datetime:
 
 
 def _book_home_probs_nearest(
-    market_id: str, target: datetime, tol_min: int = 30
+    market_id: str, target: datetime, lookback_days: int = 14
 ) -> dict[str, float]:
-    """Return {book_code: devig'd home prob} for every book with a moneyline
-    snapshot in the ±tol_min window around `target`. One DB query."""
-    lower = (target - timedelta(minutes=tol_min)).isoformat()
+    """Return {book_code: devig'd home prob} using the NEWEST moneyline
+    snapshot at or before `target` per book. A book's posted line is live
+    until they change it, so an unchanged sharp-book line from hours ago
+    IS their line at the checkpoint. A narrow ±30-min window biased the
+    comparison toward retail books (MGM/CAE) that re-price constantly
+    vs sharp books (PIN/CIR) that rarely do."""
+    lower = (target - timedelta(days=lookback_days)).isoformat()
     upper = target.isoformat()
     res = (
         db.client()
@@ -73,7 +77,7 @@ def _book_home_probs_nearest(
         .gte("captured_at", lower)
         .lte("captured_at", upper)
         .order("captured_at", desc=True)
-        .limit(500)
+        .limit(2000)
         .execute()
     )
     rows = res.data or []
@@ -184,19 +188,25 @@ def print_summary(rows: list[RowResult]) -> None:
             continue
         print(_fmt_row(book, s[book]))
     print()
-    print(f"Best book per checkpoint (min n={MIN_N_WINNER}):")
+    # Winner must be scored on >= 50% of the max-n book's slate AND n >= 5
+    # absolute. Prevents a small-sample book from beating a full-slate book.
+    print("Best book per checkpoint (n >= max(5, 50% of max book's n)):")
     for h in CHECKPOINTS_HOURS:
+        ns = [int(s[book][h]["n"]) for book in BOOKS]
+        max_n = max(ns) if ns else 0
+        min_required = max(MIN_N_WINNER, int(max_n * 0.5))
         candidates = [
             (book, s[book][h]["brier"], int(s[book][h]["n"]))
             for book in BOOKS
-            if s[book][h]["n"] >= MIN_N_WINNER
+            if s[book][h]["n"] >= min_required
         ]
         if not candidates:
-            print(f"  T-{int(h)}h: (insufficient data)")
+            print(f"  T-{int(h)}h: (insufficient data; need n >= {min_required})")
             continue
         best = min(candidates, key=lambda x: x[1])
         print(
-            f"  T-{int(h)}h: {best[0]} (Brier {best[1]:.4f}, n={best[2]})"
+            f"  T-{int(h)}h: {best[0]} (Brier {best[1]:.4f}, n={best[2]}; "
+            f"min_required={min_required}, max_n={max_n})"
         )
     print()
 
