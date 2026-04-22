@@ -1044,7 +1044,8 @@
                     const won = c.pnl !== null && c.pnl > 0;
                     const lost = c.pnl !== null && c.pnl < 0;
                     const resultCls = won ? 'win' : (lost ? 'loss' : 'push');
-                    const resultLabel = won ? 'W' : (lost ? 'L' : 'PUSH');
+                    const baseLabel = won ? 'W' : (lost ? 'L' : 'PUSH');
+                    const resultLabel = c.type === 'Trade' ? `Sold - ${baseLabel}` : baseLabel;
                     const label = (c.market || '').replace(/\s+\d{4}-\d{2}-\d{2}$/, '');
 
                     html += `<div class="betslip-item">
