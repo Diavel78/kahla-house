@@ -1015,7 +1015,9 @@
         dateEl.textContent = now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 
         const settledToday = _lastClosed.filter(c =>
-            c.type === 'Position Resolution' && isToday(c.timestamp)
+            (c.type === 'Position Resolution' || c.type === 'Trade')
+            && c.pnl !== null
+            && isToday(c.timestamp)
         );
 
         if (!_lastPositions.length && !settledToday.length) {
