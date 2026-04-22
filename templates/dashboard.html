@@ -561,6 +561,41 @@
         }
         .betslip-odds.fav { color: var(--orange); }
         .betslip-odds.dog { color: var(--blue); }
+        .betslip-result {
+            font-size: 13px;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+            letter-spacing: 0.5px;
+            white-space: nowrap;
+            padding: 6px 12px;
+            border-radius: 8px;
+            min-width: 44px;
+            text-align: center;
+        }
+        .betslip-result.win {
+            color: var(--green);
+            background: var(--green-dim);
+            border: 1px solid rgba(34,197,94,0.35);
+        }
+        .betslip-result.loss {
+            color: var(--red);
+            background: var(--red-dim);
+            border: 1px solid rgba(239,68,68,0.35);
+        }
+        .betslip-result.push {
+            color: var(--text-muted);
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+        }
+        .betslip-section-label {
+            padding: 10px 24px 6px;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 1.2px;
+            color: var(--text-muted);
+            font-family: 'JetBrains Mono', monospace;
+            text-transform: uppercase;
+        }
         .betslip-footer {
             padding: 14px 24px 18px;
             border-top: 1px solid var(--border);
@@ -933,6 +968,19 @@
 
     // --- Bet Slip ---
     let _lastPositions = [];
+    let _lastClosed = [];
+
+    function isToday(utcStr) {
+        if (!utcStr) return false;
+        try {
+            const dt = new Date(utcStr.replace(' ', 'T') + 'Z');
+            if (isNaN(dt)) return false;
+            const now = new Date();
+            return dt.getFullYear() === now.getFullYear()
+                && dt.getMonth() === now.getMonth()
+                && dt.getDate() === now.getDate();
+        } catch (e) { return false; }
+    }
 
     function probToAmericanOdds(prob) {
         if (prob === null || prob === undefined || prob <= 0 || prob >= 1) return null;
@@ -966,20 +1014,42 @@
         const now = new Date();
         dateEl.textContent = now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 
-        if (!_lastPositions.length) {
-            body.innerHTML = '<div class="betslip-empty">No open positions</div>';
+        const settledToday = _lastClosed.filter(c =>
+            c.type === 'Position Resolution' && isToday(c.timestamp)
+        );
+
+        if (!_lastPositions.length && !settledToday.length) {
+            body.innerHTML = '<div class="betslip-empty">No bets today</div>';
         } else {
             let html = '';
-            for (const p of _lastPositions) {
-                const odds = probToAmericanOdds(p.entry_price);
-                const oddsStr = fmtOdds(odds);
-                const oddsClass = odds !== null ? (odds < 0 ? 'fav' : 'dog') : '';
-                const label = buildBetSlipLabel(p);
+            if (_lastPositions.length) {
+                html += '<div class="betslip-section-label">Pending</div>';
+                for (const p of _lastPositions) {
+                    const odds = probToAmericanOdds(p.entry_price);
+                    const oddsStr = fmtOdds(odds);
+                    const oddsClass = odds !== null ? (odds < 0 ? 'fav' : 'dog') : '';
+                    const label = buildBetSlipLabel(p);
 
-                html += `<div class="betslip-item">
-                    <div class="betslip-market">${esc(label)}</div>
-                    <div class="betslip-odds ${oddsClass}">${oddsStr}</div>
-                </div>`;
+                    html += `<div class="betslip-item">
+                        <div class="betslip-market">${esc(label)}</div>
+                        <div class="betslip-odds ${oddsClass}">${oddsStr}</div>
+                    </div>`;
+                }
+            }
+            if (settledToday.length) {
+                html += '<div class="betslip-section-label">Settled Today</div>';
+                for (const c of settledToday) {
+                    const won = c.pnl !== null && c.pnl > 0;
+                    const lost = c.pnl !== null && c.pnl < 0;
+                    const resultCls = won ? 'win' : (lost ? 'loss' : 'push');
+                    const resultLabel = won ? 'W' : (lost ? 'L' : 'PUSH');
+                    const label = (c.market || '').replace(/\s+\d{4}-\d{2}-\d{2}$/, '');
+
+                    html += `<div class="betslip-item">
+                        <div class="betslip-market">${esc(label)}</div>
+                        <div class="betslip-result ${resultCls}">${resultLabel}</div>
+                    </div>`;
+                }
             }
             body.innerHTML = html;
         }
@@ -1015,6 +1085,7 @@
             if (!data.ok) throw new Error(data.error || 'API error');
 
             _lastPositions = data.positions || [];
+            _lastClosed = data.closed_positions || [];
             renderCards(data);
             renderPositions(data.positions);
             renderClosed(data.closed_positions || []);
