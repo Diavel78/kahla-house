@@ -880,6 +880,61 @@
 
     // --- Opening line tracker (API-backed) ---
 
+    /* Scanner-backed first-seen openers (Phase 4).
+       The 5-min Owls cron writes book_snapshots to Supabase. The earliest
+       PIN/CIR snapshot per (market_type, side) is the genuine opener —
+       better than the legacy Firestore "first time the user opened the
+       page" capture. We merge these over Firestore openers in `currentOpeners`
+       on each sport switch + after each odds load. */
+    let scannerOpeners = [];  // array of {home, away, commence, opener}
+
+    async function loadScannerOpeners(sport) {
+        try {
+            const resp = await authFetch(`/api/openers/scanner?sport=${sport}`);
+            if (!resp) return [];
+            const data = await resp.json();
+            return (data.ok && Array.isArray(data.events)) ? data.events : [];
+        } catch { return []; }
+    }
+
+    function _matchScannerEvent(scannerEvts, ev) {
+        const eAway = (ev.away_team || '').toLowerCase();
+        const eHome = (ev.home_team || '').toLowerCase();
+        const eStart = ev.commence_time ? new Date(ev.commence_time).getTime() : 0;
+        for (const s of scannerEvts) {
+            const sAway = (s.away || '').toLowerCase();
+            const sHome = (s.home || '').toLowerCase();
+            const sStart = s.commence ? new Date(s.commence).getTime() : 0;
+            if (eStart && sStart && Math.abs(eStart - sStart) > 30 * 60 * 1000) continue;
+            if (!eAway || !eHome || !sAway || !sHome) continue;
+            // Exact (post-lowercase) or substring containment in either direction.
+            // Owls and the scanner both pull from the same source so exact match
+            // is the common case; substring covers minor team-name suffix drift.
+            if (eAway === sAway && eHome === sHome) return s;
+            if ((eAway.includes(sAway) || sAway.includes(eAway)) &&
+                (eHome.includes(sHome) || sHome.includes(eHome))) return s;
+        }
+        return null;
+    }
+
+    /* Mutates `currentOpeners` in place. Scanner data wins; Firestore fills gaps. */
+    function mergeScannerOpenersInto(events) {
+        if (!scannerOpeners.length) return;
+        for (const ev of (events || [])) {
+            const eid = ev.numeric_id || ev.id;
+            if (!eid) continue;
+            const s = _matchScannerEvent(scannerOpeners, ev);
+            if (!s) continue;
+            const fb = currentOpeners[eid] || { ml: {}, spread: {}, total: {} };
+            currentOpeners[eid] = {
+                ml:     { ...(fb.ml     || {}), ...(s.opener.ml     || {}) },
+                spread: { ...(fb.spread || {}), ...(s.opener.spread || {}) },
+                total:  { ...(fb.total  || {}), ...(s.opener.total  || {}) },
+                src:    s.opener.src || fb.src,
+            };
+        }
+    }
+
     async function loadOpeners(sport) {
         try {
             const resp = await authFetch(`/api/openers?sport=${sport}`);
@@ -1168,51 +1223,12 @@
         return null;
     }
 
-    // On first load of the day, prefetch ALL sports to capture openers
-    async function prefetchOpeners() {
-        const prefetchKey = `prefetched:${new Date().toISOString().slice(0,10)}`;
-        if (localStorage.getItem(prefetchKey)) return;
-
-        const sports = SPORTS.filter(s => s !== activeSport);
-        for (const sp of sports) {
-            try {
-                const resp = await authFetch(`/api/odds?sport=${sp}`);
-                if (!resp) continue;
-                const data = await resp.json();
-                if (data.ok && data.events?.length) {
-                    // Temporarily use a separate openers object for prefetch
-                    const prefetchOpeners = {};
-                    let changed = false;
-                    for (const ev of data.events) {
-                        const eid = ev.numeric_id || ev.id;
-                        if (!eid) continue;
-                        const pin = (ev.books || {}).pinnacle || (ev.books || {}).circa;
-                        const srcBook = (ev.books||{}).pinnacle ? 'PIN' : (ev.books||{}).circa ? 'CIR' : null;
-                        if (!srcBook) continue;
-                        if (!pin) continue;
-                        const o = { ml: {}, spread: {}, total: {}, src: srcBook };
-                        for (const [team, price] of Object.entries(pin.moneyline || {})) {
-                            if (price != null) o.ml[team] = price;
-                        }
-                        for (const [team, d] of Object.entries(pin.spread || {})) {
-                            if (d?.price != null) o.spread[team] = { price: d.price, point: d.point };
-                        }
-                        for (const [side, d] of Object.entries(pin.total || {})) {
-                            if (d?.price != null) o.total[side] = { price: d.price, point: d.point };
-                        }
-                        if (Object.keys(o.ml).length || Object.keys(o.spread).length) {
-                            prefetchOpeners[eid] = o;
-                            changed = true;
-                        }
-                    }
-                    if (changed) {
-                        saveOpenersAPI(sp, prefetchOpeners);
-                    }
-                }
-            } catch(e) { console.warn(`prefetch ${sp}:`, e); }
-        }
-        localStorage.setItem(prefetchKey, '1');
-    }
+    /* Note: a `prefetchOpeners()` function used to live here. It hit
+       /api/odds for every other sport on first page load of the day to
+       seed Firestore with current odds as "openers." That's now redundant
+       — `/api/openers/scanner` returns the actual earliest-captured PIN/CIR
+       lines from the 5-min Owls cron, which is a better signal than
+       "what the line was the first time someone refreshed the page." */
 
     function localTime(s){
         if(!s)return '';
@@ -1767,8 +1783,12 @@
             firstLoad=false;
             // Don't overwrite user's book selection when switching sports.
             // Just track what books are available for rendering — enabledBooks stays as user chose.
-            // Capture opening lines for today
+            // Capture opening lines for today (Firestore-backed legacy capture).
             currentOpeners = await captureOpeners(data.events||[], activeSport);
+            // Then merge scanner-backed openers on top — these are the genuine
+            // earliest-seen lines from the 5-min Owls cron, and override the
+            // legacy "first time the user opened the page" Firestore values.
+            mergeScannerOpenersInto(data.events || []);
             captureSplitsOpeners(data.events||[], activeSport);
             const n=(data.events||[]).length;
             const t=new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit'});
@@ -1798,11 +1818,17 @@
             body: JSON.stringify({preferences: {odds_sport: s}})
         }).catch(e => console.error('Failed to save sport pref:', e));
         renderSportBar();
-        // Load openers + splits openers + splits last-changed from API for new sport
-        Promise.all([loadOpeners(s), loadSplitsOpeners(s), loadSplitsLastChanged(s)]).then(([op, splitsOp, splitsLc]) => {
+        // Load openers (Firestore + scanner) + splits openers + splits last-changed for new sport
+        Promise.all([
+            loadOpeners(s),
+            loadSplitsOpeners(s),
+            loadSplitsLastChanged(s),
+            loadScannerOpeners(s),
+        ]).then(([op, splitsOp, splitsLc, scnOps]) => {
             currentOpeners = op;
             currentSplitsOpeners = splitsOp;
             currentSplitsLastChanged = splitsLc;
+            scannerOpeners = scnOps;
             loadOdds(true);
         });
     };
@@ -1825,16 +1851,17 @@
         }
 
         renderSportBar();
-        const [op, splitsOp, splitsLc] = await Promise.all([
+        const [op, splitsOp, splitsLc, scnOps] = await Promise.all([
             loadOpeners(activeSport),
             loadSplitsOpeners(activeSport),
             loadSplitsLastChanged(activeSport),
+            loadScannerOpeners(activeSport),
         ]);
         currentOpeners = op;
         currentSplitsOpeners = splitsOp;
         currentSplitsLastChanged = splitsLc;
+        scannerOpeners = scnOps;
         await loadOdds();
-        prefetchOpeners();
         setInterval(loadOdds, 15000);
     }
     loadAndStart();

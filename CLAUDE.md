@@ -60,7 +60,8 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `GET /api/odds?sport=mlb` | Firebase | Odds + splits + scores merged JSON |
 | `GET /api/odds/history` | Firebase | Line-movement history for one event from Supabase `book_snapshots`. Params: `sport`, `home`, `away`, `commence` (ISO), `market` (ml/spread/total), `since` (15m/30m/1h/6h/12h/24h/all). Returns step-function-ready data per book per side. Books: PIN/CIR/DK/FD/MGM/CAE/HR/NVG (POLY excluded). Powers the chart modal. |
 | `GET /api/props?sport=mlb` | Firebase | Player props grouped by game/player |
-| `GET/POST /api/openers?sport=mlb` | Firebase | Opening lines (Firestore, permanent per game ID) |
+| `GET/POST /api/openers?sport=mlb` | Firebase | Legacy Firestore openers (kept as fallback for games predating the scanner cron). Permanent per game ID. |
+| `GET /api/openers/scanner?sport=mlb` | Firebase | **Primary opener source.** Earliest PIN/CIR snapshot per (market_type, side) from Supabase `book_snapshots`. Returned as `[{home, away, commence, opener: {ml, spread, total, src}}]` — client matches against current Owls events by team + commence_time within ±30 min and merges over Firestore openers. |
 | `GET/POST /api/preferences` | Firebase | User settings (books, sport, order) in Firestore |
 | `GET/POST /api/splits-openers?sport=mlb` | Firebase | First-seen splits (Firestore, permanent per game ID) |
 | `GET/POST /api/splits-last-changed?sport=mlb` | Firebase | Per-game ts of last actual Circa handle/bets % change. Server-authoritative diff |
@@ -131,12 +132,13 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - **Line-Movement Chart**: Each game header has a small graph icon. Click → modal with a step-function chart (Chart.js) of historical odds from Supabase `book_snapshots`. Defaults to PIN/CIR/DK on the ML market over the last 24h; toggle other books (FD/MGM/CAE/HR/NVG) and switch market (ML/Spread/Total) or range (15m/30m/1H/6H/12H/24H/All). POLY excluded — its prices are 0-1 probability, not American odds. Data only exists for games the 5-min Owls ingest cron has captured.
 - **Auto-refresh**: 15 seconds (odds)
 - _Note: Polymarket "my bets" indicators were removed from the Odds Board so it can be shared with friends (viewer role). The Dashboard still shows P&L for active positions._
-- **Opener Prefetch**: First visit prefetches ALL sports to capture opening lines
+- **Genuine first-seen openers**: `/api/openers/scanner` returns the actual earliest PIN/CIR snapshot per market from Supabase. The client merges this on top of legacy Firestore openers — scanner data wins, Firestore fills any gaps for games predating the cron. The old "prefetch all sports on first page load to seed openers" hack has been removed.
 - **Double-buffer rendering**: Two board divs swap to prevent flash on re-render
 
 ### Key JS Functions (odds.html)
-- `loadOdds()` — fetches `/api/odds`, calls `captureOpeners()`, then `renderBoard()`
-- `captureOpeners()` — captures first-seen lines from PIN/CIR, backfills missing markets
+- `loadOdds()` — fetches `/api/odds`, calls `captureOpeners()`, then `mergeScannerOpenersInto()`, then `renderBoard()`
+- `captureOpeners()` — legacy Firestore opener capture from current PIN/CIR data
+- `loadScannerOpeners()` / `mergeScannerOpenersInto()` — pulls scanner-backed openers via `/api/openers/scanner` and merges them over `currentOpeners`. Scanner values win
 - `computeMovement()` — compares opener to current, includes JIT backfill
 - `renderMovement()` — renders opener → arrow → current for ML/SPR/TOT
 - `detectRLM()` — reverse line movement using Circa splits ONLY

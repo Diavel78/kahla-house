@@ -1040,10 +1040,161 @@ def _prop_market_label(category):
 # Openers API (Firestore — replaces localStorage)
 # ---------------------------------------------------------------------------
 
+@app.route("/api/openers/scanner")
+@firebase_auth_required
+def api_openers_scanner():
+    """Scanner-backed first-seen lines for upcoming games in this sport.
+
+    Reads `book_snapshots` for active markets and returns the earliest
+    PIN/CIR snapshot per (market_type, side). The Odds Board client merges
+    this into its in-memory openers map, with these values taking priority
+    over the legacy Firestore openers.
+
+    Why this exists: the legacy Firestore openers were captured client-side
+    on first page load, so the "opener" was really "first time a user
+    opened the page." This endpoint replaces that with the genuine
+    earliest-seen line from the 5-min Owls ingest cron.
+
+    Response: { ok, sport, events: [{home, away, commence, opener: {ml, spread, total, src}}] }
+    """
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": True, "sport": request.args.get("sport"), "events": []})
+
+    sport_owls = (request.args.get("sport") or "").lower().strip()
+    sport_code = _SCANNER_SPORT_FROM_OWLS.get(sport_owls)
+    if not sport_code:
+        return jsonify({"ok": True, "sport": sport_owls, "events": []})
+
+    # Trailing 6h window so games still in progress still appear, but we
+    # don't drag in last week's settled markets.
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    try:
+        markets = (
+            sb.table("markets")
+            .select("id,event_name,event_start")
+            .eq("sport", sport_code)
+            .eq("status", "active")
+            .gte("event_start", cutoff)
+            .limit(500)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"markets query failed: {e}"}), 500
+
+    if not markets:
+        return jsonify({"ok": True, "sport": sport_owls, "events": []})
+
+    market_ids = [m["id"] for m in markets]
+
+    # Pull PIN/CIR snapshots ascending — first row per (market, book, mkt, side)
+    # is the opener for that combo. 50K row cap is plenty for one sport's
+    # active slate (typical: a few hundred markets × 8 sides × 2 books).
+    try:
+        snaps = (
+            sb.table("book_snapshots")
+            .select("market_id,book,market_type,side,price_american,line,captured_at")
+            .in_("market_id", market_ids)
+            .in_("book", ["PIN", "CIR"])
+            .order("captured_at", desc=False)
+            .limit(50000)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"snapshots query failed: {e}"}), 500
+
+    firsts: dict[tuple, dict] = {}
+    for r in snaps:
+        key = (r["market_id"], r["book"], r["market_type"], r["side"])
+        if key not in firsts:
+            firsts[key] = r
+
+    out = []
+    for m in markets:
+        mid = m["id"]
+        ename = m.get("event_name", "") or ""
+
+        # event_name format: "Away @ Home"
+        away_name, home_name = None, None
+        for sep in [" @ ", " vs ", " v. ", " vs. "]:
+            if sep in ename:
+                parts = ename.split(sep, 1)
+                if len(parts) == 2:
+                    away_name, home_name = parts[0].strip(), parts[1].strip()
+                    break
+        if not (away_name and home_name):
+            continue
+
+        side_to_team = {"home": home_name, "away": away_name}
+        opener: dict = {"ml": {}, "spread": {}, "total": {}, "src": None}
+        used_pin = used_cir = False
+
+        for mkt_type, mkt_key in [("moneyline", "ml"), ("spread", "spread"), ("total", "total")]:
+            for side in ["home", "away", "over", "under"]:
+                pin_row = firsts.get((mid, "PIN", mkt_type, side))
+                cir_row = firsts.get((mid, "CIR", mkt_type, side))
+                # Pick whichever was captured first (the actual opener)
+                if pin_row and cir_row:
+                    src_row = pin_row if pin_row["captured_at"] <= cir_row["captured_at"] else cir_row
+                else:
+                    src_row = pin_row or cir_row
+                if not src_row:
+                    continue
+                if src_row["book"] == "PIN":
+                    used_pin = True
+                else:
+                    used_cir = True
+
+                price = src_row["price_american"]
+                line = src_row.get("line")
+
+                if mkt_type == "moneyline":
+                    team = side_to_team.get(side)
+                    if team is not None:
+                        opener["ml"][team] = price
+                elif mkt_type == "spread":
+                    team = side_to_team.get(side)
+                    if team is not None and line is not None:
+                        opener["spread"][team] = {"price": price, "point": line}
+                elif mkt_type == "total":
+                    label = "Over" if side == "over" else ("Under" if side == "under" else None)
+                    if label and line is not None:
+                        opener["total"][label] = {"price": price, "point": line}
+
+        if not (opener["ml"] or opener["spread"] or opener["total"]):
+            continue
+
+        if used_pin and used_cir:
+            opener["src"] = "PIN+CIR"
+        elif used_pin:
+            opener["src"] = "PIN"
+        elif used_cir:
+            opener["src"] = "CIR"
+
+        out.append({
+            "home": home_name,
+            "away": away_name,
+            "commence": m["event_start"],
+            "opener": opener,
+        })
+
+    return jsonify({"ok": True, "sport": sport_owls, "events": out, "count": len(out)})
+
+
 @app.route("/api/openers", methods=["GET"])
 @firebase_auth_required
 def api_openers_get():
-    """Retrieve opening lines for a sport from Firestore (permanent per game ID)."""
+    """Retrieve opening lines for a sport from Firestore (permanent per game ID).
+
+    Note: scanner-backed openers via /api/openers/scanner are now the
+    primary source. This endpoint remains for backward compat — the
+    Odds Board client merges scanner data over Firestore data, so
+    Firestore is now a fallback for games predating the scanner cron.
+    """
     sport = request.args.get("sport", "mlb")
 
     try:
