@@ -1193,10 +1193,19 @@ def api_preferences_save():
 @firebase_auth_required
 def api_odds():
     """Return events with latest snapshots from Supabase. Cron-only — no
-    live odds-vendor API call here. Cron writes to book_snapshots every 15
-    min via kahla-scanner/scrapers/odds_api.py."""
+    live odds-vendor API call here. Cron writes to book_snapshots every 30
+    min via kahla-scanner/scrapers/odds_api.py.
+
+    Live games (event_start in the past) get an `is_live: true` flag plus
+    `score` data merged from ESPN's free public scoreboard JSON.
+    """
     sport = request.args.get("sport", "mlb")
     events, books, leagues = _fetch_odds_from_snapshots(sport)
+    try:
+        events = _merge_espn_scores(sport, events)
+    except Exception:
+        # ESPN failures must never break the board.
+        pass
     return jsonify({
         "ok":            True,
         "cached":        False,
@@ -1207,6 +1216,124 @@ def api_odds():
         "meta_message":  "",
         "errors":        [],
     })
+
+
+# ---------------------------------------------------------------------------
+# ESPN free scoreboard for live game scores (no auth, no rate limit issues)
+# ---------------------------------------------------------------------------
+
+import requests as _http  # used by ESPN scoreboard fetch
+
+# Owls path  ->  ESPN scoreboard URL slug pair (sport, league)
+_ESPN_PATH = {
+    "mlb":   ("baseball",       "mlb"),
+    "nba":   ("basketball",     "nba"),
+    "nhl":   ("hockey",         "nhl"),
+    "nfl":   ("football",       "nfl"),
+    "ncaab": ("basketball",     "mens-college-basketball"),
+    "ncaaf": ("football",       "college-football"),
+    # ESPN doesn't have one consolidated MMA scoreboard endpoint — skip for now.
+}
+
+_ESPN_CACHE: dict[str, tuple[float, list]] = {}
+_ESPN_TTL = 30  # seconds
+
+
+def _fetch_espn_scoreboard(sport: str) -> list:
+    """Hit ESPN's free scoreboard API. Returns the events array, [] on error
+    or unsupported sport. 30s in-memory cache. No API key required."""
+    pair = _ESPN_PATH.get(sport)
+    if not pair:
+        return []
+    import time
+    now = time.time()
+    cached = _ESPN_CACHE.get(sport)
+    if cached and (now - cached[0]) < _ESPN_TTL:
+        return cached[1]
+    sport_grp, league = pair
+    url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_grp}/{league}/scoreboard"
+    try:
+        r = _http.get(url, timeout=8)
+        if r.status_code != 200:
+            return []
+        events = (r.json() or {}).get("events", []) or []
+        _ESPN_CACHE[sport] = (now, events)
+        return events
+    except Exception:
+        return []
+
+
+def _merge_espn_scores(sport: str, events: list) -> list:
+    """Attach a `score` field to each event whose teams + start time match
+    an ESPN scoreboard entry. Score shape:
+      { state, display_status, period, clock, away_score, home_score, live }
+    Match strategy: lowercase team-name substring + commence_time within
+    ±90 min. Skips silently if ESPN doesn't cover the sport."""
+    espn_events = _fetch_espn_scoreboard(sport)
+    if not espn_events:
+        return events
+
+    def _norm(s: str) -> str:
+        return (s or "").lower().strip()
+
+    # Pre-build a lookup of ESPN games keyed by team-pair fragments
+    espn_lookup = []
+    for g in espn_events:
+        comp = (g.get("competitions") or [{}])[0]
+        competitors = comp.get("competitors") or []
+        if len(competitors) != 2:
+            continue
+        # ESPN flags "homeAway"; tolerate both shapes
+        home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0])
+        away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1])
+        home_team = (home.get("team") or {}).get("displayName") or ""
+        away_team = (away.get("team") or {}).get("displayName") or ""
+        status = (comp.get("status") or {})
+        type_ = status.get("type") or {}
+        state = type_.get("state", "")
+        is_live = state in ("in", "live")
+        comp_dt_str = comp.get("date") or g.get("date") or ""
+        try:
+            comp_dt = _parse_iso(comp_dt_str) if comp_dt_str else None
+        except Exception:
+            comp_dt = None
+        espn_lookup.append({
+            "home": _norm(home_team),
+            "away": _norm(away_team),
+            "commence": comp_dt,
+            "score": {
+                "state": state,
+                "display_status": type_.get("shortDetail") or type_.get("description") or "",
+                "period": str(status.get("period", "")),
+                "clock": status.get("displayClock", ""),
+                "away_score": away.get("score"),
+                "home_score": home.get("score"),
+                "live": is_live,
+            },
+        })
+
+    for ev in events:
+        eh = _norm(ev.get("home_team", ""))
+        ea = _norm(ev.get("away_team", ""))
+        ec_str = ev.get("commence_time", "")
+        ec = _parse_iso(ec_str) if ec_str else None
+
+        for el in espn_lookup:
+            if not el["home"] or not el["away"]:
+                continue
+            # Substring match in either direction so "Mariners" matches
+            # "Seattle Mariners" both ways
+            if not ((eh in el["home"] or el["home"] in eh) and
+                    (ea in el["away"] or el["away"] in ea)):
+                continue
+            # Commence time within 90 min if both available
+            if ec and el["commence"]:
+                if abs((ec - el["commence"]).total_seconds()) > 90 * 60:
+                    continue
+            ev["score"] = el["score"]
+            break
+
+    return events
 
 
 @app.route("/api/my-bets")

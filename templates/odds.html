@@ -1321,14 +1321,17 @@
             const best = findBestOdds(ev, books, away, home);
 
             const isLive = !!ev.is_live;
+            const sc = ev.score;
+            const showScore = !!(sc && (sc.live || sc.state === 'post')) && sc.away_score != null && sc.home_score != null;
 
             h+=`<div class="game">`;
 
             // === GAME HEADER ===
-            // Live games show a LIVE badge and a "closing line" tag because
-            // we freeze the displayed odds at event_start (mid-game retail
-            // twitches were causing whiplash). The chart still has full
-            // history if you want to see the live movement.
+            // Live games show a LIVE badge + ESPN score (if scoring data was
+            // available for this sport) + "closing line" tag because we
+            // freeze the displayed odds at event_start. Mid-game retail
+            // twitches were causing whiplash. The chart modal still has
+            // full history if you want to see post-start movement.
             const chartBtn = `<button class="chart-btn js-chart-btn" title="Line movement"
                 data-sport="${esc(activeSport)}"
                 data-home="${esc(home)}"
@@ -1341,7 +1344,13 @@
             h+=`<div>`;
             h+=`<span class="ghdr-league">${esc(leagueStr)}</span>`;
             if (isLive) h+=`<span class="live-badge">LIVE</span>`;
-            h+=`<span class="ghdr-teams">${esc(away)} <span class="at">@</span> ${esc(home)}</span>`;
+            if (showScore) {
+                h+=`<span class="ghdr-teams">${esc(away)} <span class="score-inline">${sc.away_score} <span class="score-sep">-</span> ${sc.home_score}</span> ${esc(home)}</span>`;
+                const stateLabel = sc.display_status || sc.period || sc.clock || '';
+                if (stateLabel) h+=`<span class="game-status">${esc(stateLabel)}</span>`;
+            } else {
+                h+=`<span class="ghdr-teams">${esc(away)} <span class="at">@</span> ${esc(home)}</span>`;
+            }
             if (isLive) h+=`<span class="stale-tag">closing line</span>`;
             h+=`</div>`;
             h+=`<div class="ghdr-meta">${esc(date)} &middot; ${esc(time)} ${chartBtn}</div>`;
