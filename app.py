@@ -647,14 +647,16 @@ _SHORT_TO_DISPLAY_KEY = {
     "MGM":    "betmgm",
     "CAE":    "caesars",
     "HR":     "hardrock",
-    "BET365": "bet365",
-    "BR":     "betrivers",
     "BOL":    "betonline",
-    "LV":     "lowvig",
-    "CIR":    "circa",
-    "POLY":   "polymarket",
-    "NVG":    "novig",
 }
+
+# Allowlist for the Odds Board. The Odds API EU region returns dozens of
+# European books we don't care about (unibet_se, winamax_fr, tipico_de,
+# bovada, betsson, betclic_fr, marathonbet, fanatics, etc.) and Supabase
+# still holds Owls-era short codes (POLY, NOV, KAL, STN, WG, WYN, SP, CZR).
+# We hide everything not in this set both server-side (response filter) and
+# in the scraper (no junk written going forward).
+_ALLOWED_BOOKS = {"PIN", "DK", "FD", "MGM", "CAE", "HR", "BOL"}
 
 
 def _split_event_name(name: str) -> tuple[str, str] | tuple[None, None]:
@@ -787,6 +789,8 @@ def _fetch_odds_from_snapshots(sport_path: str):
 
         books_block: dict[str, dict] = {}
         for short_book, mkt_data in (by_market.get(m["id"]) or {}).items():
+            if short_book not in _ALLOWED_BOOKS:
+                continue
             display_key = _SHORT_TO_DISPLAY_KEY.get(short_book, short_book.lower())
             ml: dict = {}
             spread: dict = {}

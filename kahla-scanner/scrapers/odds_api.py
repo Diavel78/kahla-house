@@ -52,7 +52,6 @@ SPORT_KEYS = {
 }
 
 # Odds API bookmaker key (lowercase)  ->  short code stored in book_snapshots.book.
-# Anything not in this map is stored uppercased verbatim — no data lost.
 BOOK_CODES = {
     "pinnacle":     "PIN",
     "draftkings":   "DK",
@@ -61,14 +60,14 @@ BOOK_CODES = {
     "caesars":      "CAE",
     "hardrockbet":  "HR",
     "hardrock":     "HR",
-    "circasports":  "CIR",
-    "circa":        "CIR",
-    "bet365":       "BET365",
-    "betrivers":    "BR",
     "betonlineag":  "BOL",
     "betonline":    "BOL",
-    "lowvig":       "LV",
 }
+
+# Allowlist — only these books get written to book_snapshots. The Odds API
+# EU region returns dozens of European books we don't care about. Anything
+# whose mapped short code isn't in this set is silently dropped at ingest.
+ALLOWED_BOOKS = {"PIN", "DK", "FD", "MGM", "CAE", "HR", "BOL"}
 
 # How close (minutes) two event_start values must be to consider the same game.
 MATCH_WINDOW = timedelta(minutes=30)
@@ -178,6 +177,9 @@ def build_snapshots(g: OddsApiGame, market_id: str) -> list[BookSnapshot]:
     for bk in g.bookmakers:
         bk_key = (bk.get("key") or "").lower()
         if not bk_key:
+            continue
+        # Allowlist: skip Euro books and anything not on our shortlist.
+        if _book_code(bk_key) not in ALLOWED_BOOKS:
             continue
         book = _book_code(bk_key)
         for mkt in bk.get("markets", []) or []:
