@@ -2,18 +2,46 @@
 
 Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask backend on Vercel, Firebase Auth + Firestore, vanilla JS frontend. This is the ONLY active codebase for the bet system. The "Poly-Tracker" repo is deprecated and not used.
 
-**CRITICAL: This project lives at `/Users/robkahla/Documents/Kahla House/kahla-house/`. The domain is thekahlahouse.com. The Vercel project is `kahla-house`. Always push to `main` — Vercel deploys automatically.**
+**CRITICAL: This project lives at `/Users/robkahla/Documents/Kahla House/kahla-house/`. The domain is thekahlahouse.com. The Vercel project is `kahla-house`.**
+
+> **PUSH RULE**: Every commit goes to `main`. Vercel auto-deploys from `main`. If you're working on a feature branch, finish the work, then merge to `main` and push `main` — without being asked. Don't leave changes sitting on a branch waiting for permission.
+>
+> **DOC RULE**: Whenever code or behavior changes, update this CLAUDE.md in the same commit. The project is too sprawling to navigate without an accurate map.
+
+## Access Control (read this first)
+
+Three roles in Firestore `users/{uid}.role`:
+- **`admin`** — full access (Odds, Props, Dashboard, Scanner, debug). Rob.
+- **`viewer`** — Odds + Props only. Friends use this tier.
+- **`pending`** — default for new signups. No access until an admin approves.
+
+Approval flow:
+- Sign-up creates a `pending` user doc with `approved: false`. The pending screen tells them to wait.
+- Admins see pending users in the User Management panel on `/` with **Approve as Viewer** / **Approve as Admin** / **Reject** buttons.
+- The **first** signup on an empty users collection auto-promotes to admin so the platform can bootstrap.
+- Admin role dropdown can move users between `admin` / `viewer` / `pending` at any time.
+
+Per-page gating (client-side via `/api/me` probe + server-side via decorators):
+| Page / API | Roles allowed | Server gate |
+|---|---|---|
+| `/odds`, `/props` (pages) | admin, viewer | client probes `/api/me` and bounces unauthorized |
+| `/api/odds`, `/api/props`, `/api/openers`, `/api/preferences`, `/api/splits-*` | any approved | `@firebase_auth_required` (rejects pending) |
+| `/dashboard` (page) | admin | client probes `/api/me` and bounces non-admins |
+| `/api/data`, `/api/my-bets`, `/api/debug-trades`, `/api/debug-deposits` | admin | `@admin_required` |
+| `/scanner` (page), `/api/scanner/*` | admin | client probe + `@admin_required` |
+| All `/api/*/raw`, `/api/raw`, `/api/odds/debug-markets` | admin | `@admin_required` |
+
+`@firebase_auth_required` itself rejects any user where `approved != true` (returns 403), so even API endpoints that don't need admin still keep `pending` users out.
 
 ## Pages & Routes
 
-| Route | Template | Purpose |
-|---|---|---|
-| `/` | `index.html` | Landing page (login/signup, admin panel, app cards) |
-| `/odds` | `odds.html` | Odds Board — multi-book odds comparison, splits, movement, RLM, live scores |
-| `/props` | `props.html` | Player Props — game-grouped best-line comparison across books |
-| `/dashboard` | `dashboard.html` | Polymarket P&L Dashboard — positions, closed trades, bet slip |
-| `/budget` | `budget.html` | Budget Tracker (personal finance) |
-| `/scanner` | `scanner.html` | Kahla Scanner review — activity, Brier scores, signals, matched/unmatched markets (admin-only, reads Supabase) |
+| Route | Template | Access | Purpose |
+|---|---|---|---|
+| `/` | `index.html` | public | Landing page (login/signup, pending screen, admin panel, app cards by role) |
+| `/odds` | `odds.html` | admin + viewer | Odds Board — multi-book odds comparison, splits, movement, RLM, live scores |
+| `/props` | `props.html` | admin + viewer | Player Props — game-grouped best-line comparison across books |
+| `/dashboard` | `dashboard.html` | admin only | Polymarket P&L Dashboard — positions, closed trades, bet slip |
+| `/scanner` | `scanner.html` | admin only | Kahla Scanner review — activity, Brier scores, signals, matched/unmatched markets (reads Supabase) |
 
 > **Kahla Scanner is its own subproject** at `kahla-scanner/` — separate Python app
 > deployed via GitHub Actions cron (not Vercel). Flask just renders the `/scanner`
@@ -23,32 +51,35 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 
 ### API Routes
 
+`Firebase` = `@firebase_auth_required` (any approved user). `Admin` = `@admin_required` (must also be role=admin).
+
 | Route | Auth | Purpose |
 |---|---|---|
+| `GET /api/me` | Firebase | Lightweight role probe — returns `{uid, role, approved, displayName, email}`. Used by every sub-page to gate UI before loading data. |
 | `GET /api/odds?sport=mlb` | Firebase | Odds + splits + scores merged JSON |
 | `GET /api/props?sport=mlb` | Firebase | Player props grouped by game/player |
 | `GET/POST /api/openers?sport=mlb` | Firebase | Opening lines (Firestore, permanent per game ID) |
-| `GET /api/my-bets` | Firebase | Active Polymarket positions for odds board matching |
 | `GET/POST /api/preferences` | Firebase | User settings (books, sport, order) in Firestore |
-| `GET /api/data` | Firebase | Dashboard P&L data (positions, balances, trades) |
+| `GET/POST /api/splits-openers?sport=mlb` | Firebase | First-seen splits (Firestore, permanent per game ID) |
+| `GET/POST /api/splits-last-changed?sport=mlb` | Firebase | Per-game ts of last actual Circa handle/bets % change. Server-authoritative diff |
+| `GET /api/my-bets` | **Admin** | Active Polymarket positions (Dashboard only — no longer used by Odds Board) |
+| `GET /api/data` | **Admin** | Dashboard P&L data (positions, balances, trades) |
+| `GET /api/scanner/activity` | Admin | Scanner counts + last-seen per source |
+| `GET /api/scanner/brier` | Admin | Brier scores poly/dk/fd at T-24h/T-6h/T-1h/T-0 |
+| `GET /api/scanner/signals` | Admin | Recent divergence signals |
+| `GET /api/scanner/matches` | Admin | Recently matched markets (cross-venue linkage) |
+| `GET /api/scanner/unmatched` | Admin | Unmatched venue events needing manual review |
 | `GET /api/odds/raw` | Admin | Debug: raw Owls Insight odds response |
 | `GET /api/splits/raw` | Admin | Debug: raw splits response |
 | `GET /api/props/raw` | Admin | Debug: raw props response |
 | `GET /api/scores/raw` | Admin | Debug: raw live scores response |
 | `GET /api/realtime/raw` | Admin | Debug: raw Pinnacle sharp odds |
 | `GET /api/raw` | Admin | Debug: raw Polymarket SDK responses |
-| `GET/POST /api/splits-openers?sport=mlb` | Firebase | First-seen splits (Firestore, permanent per game ID) |
-| `GET/POST /api/splits-last-changed?sport=mlb` | Firebase | Per-game ts of last actual Circa handle/bets % change. Server-authoritative diff |
-| `GET /api/scanner/activity` | Admin | Scanner counts + last-seen per source |
-| `GET /api/scanner/brier` | Admin | Brier scores poly/dk/fd at T-24h/T-6h/T-1h/T-0 |
-| `GET /api/scanner/signals` | Admin | Recent divergence signals |
-| `GET /api/scanner/matches` | Admin | Recently matched markets (cross-venue linkage) |
-| `GET /api/scanner/unmatched` | Admin | Unmatched venue events needing manual review |
-| `GET /api/debug-trades` | Firebase | Debug: grouped trade details with before/after position data |
-| `GET /api/debug-deposits` | Firebase | Debug: all balance changes with types and reasons |
+| `GET /api/debug-trades` | **Admin** | Debug: grouped trade details with before/after position data |
+| `GET /api/debug-deposits` | **Admin** | Debug: all balance changes with types and reasons |
 | `GET /api/odds/debug-markets` | Firebase | Debug: market keys per book for a sport |
-| `/debug?slug=X` | Firebase (page) | Debug page that calls debug-trades with auth |
-| `/debug-deposits` | Firebase (page) | Debug page showing all balance changes |
+| `/debug?slug=X` | Firebase (page) | Debug page that calls debug-trades with auth (server-side admin gate on the API call) |
+| `/debug-deposits` | Firebase (page) | Debug page showing all balance changes (server-side admin gate on the API call) |
 | `/odds?debug=markets` | Firebase (page) | Overlay showing market keys per book |
 
 ## Tech Stack
@@ -63,12 +94,13 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 
 ## Key Files
 
-- `app.py` — All backend logic (~1500 lines)
-- `templates/odds.html` — Odds board (~1640 lines)
-- `templates/props.html` — Player props board (~560 lines)
-- `templates/dashboard.html` — P&L dashboard (~1030 lines)
-- `templates/index.html` — Landing page with auth + admin (~450 lines)
-- `templates/budget.html` — Budget tracker
+- `app.py` — All backend logic (~1900 lines)
+- `templates/odds.html` — Odds board (~1770 lines)
+- `templates/props.html` — Player props board (~940 lines)
+- `templates/dashboard.html` — P&L dashboard (~1130 lines)
+- `templates/index.html` — Landing page with auth + admin + role-based app cards (~440 lines)
+- `templates/scanner.html` — Kahla Scanner review surface (~400 lines)
+- `firestore.rules` — Firestore security rules (admin/approved helpers)
 - `vercel.json` — Vercel deployment config
 - `requirements.txt` — Python deps (flask, polymarket-us, requests, python-dotenv, firebase-admin)
 - `.env` — Local env vars (DO NOT COMMIT — contains API keys)
@@ -100,8 +132,8 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 - **Splits Last-Changed Timestamp**: Splits header shows `updated Xm ago` per game. Server-authoritative — only bumps `ts` when Circa handle/bets % values actually differ from stored (Circa feed updates ~15-30 min, so this reveals real movement vs stale polls). Stored in Firestore doc `openers/splits_changed:{sport}`
 - **Line Movement**: Opener vs current with arrows and diffs
 - **Reverse Line Movement (RLM)**: Pulsing red flag when line moves against sharp money
-- **Polymarket Bet Indicators**: Multiple bets per game supported, with live status coloring
-- **Auto-refresh**: 15 seconds (odds), 60 seconds (bets)
+- **Auto-refresh**: 15 seconds (odds)
+- _Note: Polymarket "my bets" indicators were removed from the Odds Board so it can be shared with friends (viewer role). The Dashboard still shows P&L for active positions._
 - **Opener Prefetch**: First visit prefetches ALL sports to capture opening lines
 - **Double-buffer rendering**: Two board divs swap to prevent flash on re-render
 
@@ -112,8 +144,6 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 - `renderMovement()` — renders opener → arrow → current for ML/SPR/TOT
 - `detectRLM()` — reverse line movement using Circa splits ONLY
 - `renderBoard()` — main render, double-buffered. Exposed to `window` for search
-- `findMyBets()` — returns ALL matching Polymarket bets for a game (multiple per game)
-- `renderBetTag()` — renders individual bet tag with status coloring
 - `renderSplitsRow()` — renders handle%/bets% with sharp detection and movement diffs from splits openers
 - `captureSplitsOpeners()` — captures first-seen Circa splits per game to Firestore (like `captureOpeners()`)
 - `loadSplitsOpeners()` / `saveSplitsOpenersAPI()` — Firestore load/save for splits openers
@@ -230,7 +260,6 @@ The `/props` endpoint returns a **different format** than `/odds`:
 - **ML openers**: Only from Pinnacle or Circa
 - **Backfill**: Missing markets get backfilled from source book on subsequent loads
 - **RLM detection**: Circa splits ONLY. Never DraftKings. No splits > DK splits
-- **Multiple bets per game**: A game can have multiple Polymarket bets. All show as separate tags
 - **API quirk**: Some books don't send ML (h2h) for MLB. Market key can be `h2h` or `moneyline`
 - **Debug**: Add `?debug=markets` to odds URL to see market keys per book
 
@@ -277,30 +306,34 @@ The `/props` endpoint returns a **different format** than `/odds`:
 
 ## Firestore Structure
 
-- **`users/{uid}`** — User profile (email, role, appAccess, preferences)
+- **`users/{uid}`** — User profile: `email`, `displayName`, `role` (`admin` / `viewer` / `pending`), `approved` (bool), `preferences`, `createdAt`. There is NO `appAccess` field anymore — access is determined entirely by `role`.
 - **`openers/openers:{sport}`** — Opening lines per sport. `events` map of game IDs to opener data. Permanent — never reset daily
 - **`openers/splits:{sport}`** — First-seen Circa splits per sport. `events` map of game IDs to handle/bets percentages. Permanent — never override
 - **`openers/splits_changed:{sport}`** — Last-changed Circa splits per game. `events` map: `{eid: {ml, spread, total, ts}}`. `ts` (unix ms) bumps only when values actually differ from stored. Server-authoritative diff in `/api/splits-last-changed` POST
 - **Preferences fields**: `odds_books`, `odds_book_order`, `odds_sport`, `props_sport`
 
+`firestore.rules` exposes two helpers: `isApproved()` (any approved role) and `isAdmin()` (admin + approved). The `openers` collection is gated by `isApproved()`. The `users` collection allows self-create (signup), self-read, and admin read/update/delete.
+
 ## Firebase Auth
 - Client-side SDK in every template (compat mode)
-- `onAuthStateChanged` → show auth gate, then init app
+- `onAuthStateChanged` → probe `/api/me` → bounce unauthorized → init app
 - `authFetch()` — wrapper that adds Bearer token to every API call
-- Backend: `@firebase_auth_required` decorator validates tokens, sets `g.uid`
-- `@admin_required` — checks user role is "admin"
-- First signup auto-promotes to admin
+- Backend: `@firebase_auth_required` validates tokens, sets `g.uid` and `g.user_data`, rejects users where `approved != true`
+- `@admin_required` — additionally checks `g.user_data.role == 'admin'`
+- First signup on an empty users collection auto-promotes to admin (bootstrap)
+- All other signups stay `pending` until an admin clicks **Approve as Viewer** or **Approve as Admin** in the User Management panel on `/`
 
 ## Mobile Layout
 - `overflow-x: hidden` on html, body, `#app` (iOS Safari fix)
-- Top bar: nav links (Home, Odds, Props, Dashboard) on first row, status + logout on second row (prevents overlap with 4 nav items)
+- Top bar: nav links (Home, Odds, Props, Dashboard) on first row, status + logout on second row (prevents overlap with 4 nav items). Dashboard/Scanner links only render for admins.
 - Movement bar items wrap with `flex-wrap` so ML/SPR/TOT all show
 - Odds table scrolls horizontally
 - Splits grid single-column below 900px
 - Game card fadeUp animation only on first load
 
 ## Deployment
-- **Always push to `main`**. Vercel auto-deploys to thekahlahouse.com
+- **Every commit goes to `main`**. Vercel auto-deploys to thekahlahouse.com on push to `main`. Don't leave changes on a feature branch.
+- If you're handed a feature branch (e.g. `claude/...`), finish the work, merge into `main`, push `main`. Don't wait to be told.
 - GitHub repo: `Diavel78/kahla-house`
 - Vercel project: `kahla-house` (team: `diavel78s-projects`)
 - Domain: `thekahlahouse.com` + `www.thekahlahouse.com`
