@@ -1562,14 +1562,15 @@
 
         if (query) events = events.filter(e => (e.home_team + ' ' + e.away_team).toLowerCase().includes(query));
 
-        // Show every game that has odds at ANY book in the API response.
-        // The user's enabled-books preference filters which COLUMNS render,
-        // not which games appear — otherwise sharp books (PIN/CIR) holding
-        // off on evening lines would silently hide later games even though
-        // retail books have already priced them. Empty-state only triggers
-        // when no books anywhere have priced.
-        const allBooks = oddsData.books || [];
-        events = events.filter(e => hasAnyOdds(e, allBooks));
+        // Show every game the API returned. Don't filter on book coverage —
+        // sharp books often delay posting evening lines, and a game with no
+        // odds at all should still appear (with empty cells) so the user
+        // knows it exists. Log the raw count so we can tell when Owls
+        // itself is short-changing us vs a client filter problem.
+        const rawCount = (oddsData.events || []).length;
+        if (rawCount !== events.length) {
+            console.log('[odds] sport=' + activeSport + ' raw=' + rawCount + ' afterLeagueFilter=' + events.length);
+        }
 
         if(!events.length){
             const msg=oddsData.meta_message?esc(oddsData.meta_message):'No games found';
@@ -1577,7 +1578,7 @@
             $('info').textContent='';
             return;
         }
-        $('info').textContent=events.length+' games';
+        $('info').textContent = events.length + ' games' + (rawCount !== events.length ? ' (' + (rawCount - events.length) + ' filtered)' : '');
 
         let h='';
         for(const ev of events){
