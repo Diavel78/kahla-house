@@ -60,5 +60,7 @@ jobs:
           OWLS_INSIGHT_API_KEY: ${{ secrets.OWLS_INSIGHT_API_KEY }}
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          SPORTS_ENABLED:       ${{ vars.SPORTS_ENABLED || 'NFL,NBA,MLB,NHL,CBB,NCAAF,UFC' }}
+          # Hardcoded so it doesn't depend on a repo Variable. Edit here to
+          # add/remove sports. Soccer + Tennis intentionally excluded.
+          SPORTS_ENABLED: NFL,NBA,MLB,NHL,CBB,NCAAF,UFC
         run: python -m scrapers.owls

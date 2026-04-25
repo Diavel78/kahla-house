@@ -68,6 +68,29 @@ def get_db():
 
 
 # ---------------------------------------------------------------------------
+# Supabase (read-only) for line-movement charts
+# ---------------------------------------------------------------------------
+_supabase_client = None
+
+
+def get_supabase():
+    """Return a Supabase client using the service key. Lazy-init."""
+    global _supabase_client
+    if _supabase_client is not None:
+        return _supabase_client
+    url = os.getenv("SUPABASE_URL", "").strip()
+    key = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
+    if not url or not key:
+        return None
+    try:
+        from supabase import create_client
+        _supabase_client = create_client(url, key)
+        return _supabase_client
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Auth decorators
 # ---------------------------------------------------------------------------
 
