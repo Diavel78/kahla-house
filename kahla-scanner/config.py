@@ -1,7 +1,8 @@
 """Typed config loaded from environment.
 
-Trimmed to only what `scrapers/owls.py` needs after the divergence/Brier
-pipeline retirement: Supabase creds, sports list, log level.
+Trimmed to only what `scrapers/odds_api.py` and `scripts/cleanup_snapshots.py`
+need after the divergence/Brier pipeline retirement: Supabase creds,
+sports list, log level.
 """
 from __future__ import annotations
 

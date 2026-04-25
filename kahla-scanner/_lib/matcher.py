@@ -1,9 +1,9 @@
-"""Team-name matching utilities used by `scrapers/owls.py`.
+"""Team-name matching utilities used by `scrapers/odds_api.py`.
 
 After the divergence/Brier pipeline retirement, only the pure helpers
 (team-name canonicalization + fuzzy matching) are needed here. The
-cross-venue linking logic has been removed because owls.py reads all
-books from a single Owls Insight payload — no per-source matching.
+cross-venue linking logic has been removed because the scraper reads
+all books from a single API payload — no per-source matching.
 """
 from __future__ import annotations
 

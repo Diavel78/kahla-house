@@ -1,6 +1,7 @@
 """Supabase client wrapper. Uses the service key — bypasses RLS.
 
-Trimmed to only the helpers used by `scrapers/owls.py`:
+Trimmed to only the helpers used by `scrapers/odds_api.py` and
+`scripts/cleanup_snapshots.py`:
   - client()
   - upsert_market / list_active_markets
   - insert_book_snapshots
@@ -28,17 +29,11 @@ def client() -> Client:
 # ---------- markets ----------
 
 def upsert_market(m: Market) -> dict[str, Any]:
-    """Upsert by poly_market_id when present, else insert."""
-    row = m.to_row()
-    if m.poly_market_id:
-        res = (
-            client()
-            .table("markets")
-            .upsert(row, on_conflict="poly_market_id")
-            .execute()
-        )
-    else:
-        res = client().table("markets").insert(row).execute()
+    """Insert a new market row. Renamed from upsert because the Polymarket
+    cross-venue conflict path is gone — every call now just inserts.
+    Caller is responsible for not creating duplicates (see
+    scrapers/odds_api.py:_find_or_create_market for the dedup logic)."""
+    res = client().table("markets").insert(m.to_row()).execute()
     return (res.data or [{}])[0]
 
 

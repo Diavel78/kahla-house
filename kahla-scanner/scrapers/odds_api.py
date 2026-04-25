@@ -31,8 +31,8 @@ from typing import Any
 import httpx
 
 from config import config
-from signals import matcher
-from signals.normalize import american_to_prob
+from _lib import matcher
+from _lib.normalize import american_to_prob
 from storage import supabase_client as db
 from storage.models import BookSnapshot, Market
 

@@ -603,12 +603,14 @@ def parse_activities(client, activities):
 
 
 # ---------------------------------------------------------------------------
-# Owls Insight API helpers
+# In-memory caches
 # ---------------------------------------------------------------------------
 
-# Generic in-memory cache (also used by the Polymarket dashboard helpers).
-# Name retained for backwards compat with api_my_bets / api_data.
-_owls_cache = {}
+# Generic dict cache used by the Polymarket dashboard helpers
+# (api_my_bets / api_data) to avoid hammering the polymarket-us SDK on
+# every request. Keys are domain-specific strings, values are
+# `{"data": ..., "ts": time.time()}`. Vercel cold starts wipe it.
+_cache: dict = {}
 
 
 # ---------------------------------------------------------------------------
@@ -616,15 +618,15 @@ _owls_cache = {}
 # ---------------------------------------------------------------------------
 #
 # As of the Owls retirement, the live page no longer hits any odds-vendor
-# API. The 5/15-min `kahla-scanner/scrapers/odds_api.py` cron writes deduped
+# API. The 30-min `kahla-scanner/scrapers/odds_api.py` cron writes deduped
 # rows to `book_snapshots`; the Odds Board reads the latest row per
 # (market, book, market_type, side) and reconstructs the same JSON shape
-# the frontend used to get from the Owls passthrough.
+# the frontend used to get from the legacy passthrough.
 #
-# Frontend impact: data freshness drops from "10s server cache" to "15-min
-# cron cadence". For sharp books (PIN, CIR) this is a non-event — they
-# post a line and sit on it for hours. For retail books that thrash, the
-# user sees their value as of the most recent cron run.
+# Frontend freshness: ~30 min cron cadence. For sharp books (PIN) that's
+# a non-event — they post a line and sit on it for hours. For retail
+# books that thrash, the user sees their value as of the most recent
+# cron run. Live games freeze at the closing line (event_start) anyway.
 
 # Owls path (lowercase)  ->  scanner sport code stored in markets.sport
 _SPORT_PATH_TO_CODE = {
@@ -886,7 +888,7 @@ def api_openers_scanner():
     Why this exists: the legacy Firestore openers were captured client-side
     on first page load, so the "opener" was really "first time a user
     opened the page." This endpoint replaces that with the genuine
-    earliest-seen line from the 5-min Owls ingest cron.
+    earliest-seen PIN line captured by the 30-min Odds API ingest cron.
 
     Response: { ok, sport, events: [{home, away, commence, opener: {ml, spread, total, src}}] }
     """
@@ -1342,7 +1344,7 @@ def api_my_bets():
     import time
     cache_key = "my_bets"
     now = time.time()
-    cached = _owls_cache.get(cache_key)
+    cached = _cache.get(cache_key)
     if cached and (now - cached["ts"]) < 60:
         return jsonify(cached["data"])
 
@@ -1404,7 +1406,7 @@ def api_my_bets():
         return jsonify({"ok": False, "bets": [], "error": str(e)})
 
     result = {"ok": True, "bets": bets}
-    _owls_cache[cache_key] = {"data": result, "ts": now}
+    _cache[cache_key] = {"data": result, "ts": now}
     return jsonify(result)
 
 

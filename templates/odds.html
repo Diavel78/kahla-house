@@ -865,7 +865,7 @@
     // --- Opening line tracker (API-backed) ---
 
     /* Scanner-backed first-seen openers (Phase 4).
-       The 5-min Owls cron writes book_snapshots to Supabase. The earliest
+       The 30-min Odds API cron writes book_snapshots to Supabase. The earliest
        PIN/CIR snapshot per (market_type, side) is the genuine opener —
        better than the legacy Firestore "first time the user opened the
        page" capture. We merge these over Firestore openers in `currentOpeners`
@@ -1000,7 +1000,7 @@
        /api/odds for every other sport on first page load of the day to
        seed Firestore with current odds as "openers." That's now redundant
        — `/api/openers/scanner` returns the actual earliest-captured PIN/CIR
-       lines from the 5-min Owls cron, which is a better signal than
+       lines from the 30-min Odds API cron, which is a better signal than
        "what the line was the first time someone refreshed the page." */
 
     function localTime(s){
@@ -1670,7 +1670,7 @@
             // Capture opening lines for today (Firestore-backed legacy capture).
             currentOpeners = await captureOpeners(data.events||[], activeSport);
             // Then merge scanner-backed openers on top — these are the genuine
-            // earliest-seen lines from the 5-min Owls cron, and override the
+            // earliest-seen lines from the 30-min Odds API cron, and override the
             // legacy "first time the user opened the page" Firestore values.
             mergeScannerOpenersInto(data.events || []);
             const n=(data.events||[]).length;

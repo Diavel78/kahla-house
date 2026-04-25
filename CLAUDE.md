@@ -103,7 +103,9 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - `templates/dashboard.html` — P&L dashboard (~1130 lines)
 - `templates/index.html` — Landing page with auth + admin + role-based app cards (~440 lines)
 - `kahla-scanner/scrapers/odds_api.py` — The Odds API ingester (cron entry point)
+- `kahla-scanner/scripts/cleanup_snapshots.py` — nightly book_snapshots > 15d delete
 - `kahla-scanner/storage/{models,supabase_client}.py` — slim Supabase wrapper
+- `kahla-scanner/_lib/{matcher,normalize}.py` — team-name fuzzy match + odds math
 - `firestore.rules` — Firestore security rules (admin/approved helpers)
 - `vercel.json` — Vercel deployment config
 - `requirements.txt` — Python deps (flask, polymarket-us, requests, python-dotenv, firebase-admin, supabase)
