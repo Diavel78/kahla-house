@@ -643,6 +643,64 @@ def _owls_get_cached(sport, books):
     return raw, False
 
 
+def _fetch_events_cached(sport):
+    """Hit /{sport}/events to get the day's full schedule. Owls's /odds
+    endpoint only returns events that have odds posted by *some* book —
+    so on a Saturday morning, late-day MLB games may not appear there
+    even though they're scheduled. /events returns the full slate so we
+    can merge it in and surface every scheduled matchup, even with empty
+    odds cells until prices post.
+    """
+    import time
+    cache_key = f"events:{sport}"
+    now = time.time()
+    cached = _owls_cache.get(cache_key)
+    # 60s TTL — schedules don't change often
+    if cached and (now - cached["ts"]) < 60:
+        return cached["data"]
+    try:
+        raw = _owls_get(f"/{sport}/events")
+    except Exception:
+        raw = None
+    _owls_cache[cache_key] = {"data": raw, "ts": now}
+    return raw
+
+
+def _merge_events_into_odds(sport, events, raw_events):
+    """For every event in `raw_events` not already in `events`, append a
+    bare-bones event with empty `books`. Skipped on parse errors.
+    """
+    if not raw_events:
+        return events
+    # Owls /events response shape varies — accept either {data: [...]} or [...]
+    items = raw_events.get("data") if isinstance(raw_events, dict) else raw_events
+    if not isinstance(items, list):
+        return events
+
+    existing_ids = {e.get("id") for e in events if e.get("id")}
+    existing_numeric = {e.get("numeric_id") for e in events if e.get("numeric_id")}
+    for ev in items:
+        if not isinstance(ev, dict):
+            continue
+        eid = ev.get("eventId") or ev.get("id") or ""
+        nid = str(ev.get("id", ""))
+        if not eid or eid in existing_ids or (nid and nid in existing_numeric):
+            continue
+        events.append({
+            "id": eid,
+            "numeric_id": nid,
+            "sport": sport,
+            "home_team": ev.get("home_team", ""),
+            "away_team": ev.get("away_team", ""),
+            "commence_time": ev.get("commence_time", ""),
+            "league": ev.get("league", ""),
+            "status": ev.get("status", ""),
+            "books": {},
+        })
+    events.sort(key=lambda e: e.get("commence_time", ""))
+    return events
+
+
 def _normalize_owls_odds(sport, raw_data):
     books_data = raw_data.get("data", {})
     if not isinstance(books_data, dict):
@@ -1529,6 +1587,16 @@ def api_odds():
         errors.append(f"{sport}: HTTP {e.response.status_code}")
     except Exception as e:
         errors.append(f"{sport}: {e}")
+
+    # Owls's /odds endpoint sometimes only includes events with priced books.
+    # Fall back to /{sport}/events to fill in any scheduled games whose odds
+    # haven't posted yet — the user can at least see the matchup, and the
+    # cells fill in once books price.
+    try:
+        raw_events = _fetch_events_cached(sport)
+        events = _merge_events_into_odds(sport, events, raw_events)
+    except Exception as e:
+        errors.append(f"events: {e}")
 
     try:
         raw_splits, _ = _fetch_splits(sport)
