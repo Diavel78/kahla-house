@@ -1990,9 +1990,26 @@ def api_odds_raw():
     if not OWLS_INSIGHT_API_KEY:
         return jsonify({"error": "no key"}), 500
     sport = request.args.get("sport", "mlb")
-    books = request.args.get("books", "pinnacle,fanduel")
+    # No book filter by default — show what every book in Owls returned for
+    # the sport. Pass ?books=pinnacle,fanduel explicitly to filter.
+    books = request.args.get("books", "")
     try:
-        raw = _owls_get(f"/{sport}/odds", {"books": books})
+        params = {"books": books} if books else {}
+        raw = _owls_get(f"/{sport}/odds", params)
+        return jsonify(raw)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/events/raw")
+@admin_required
+def api_events_raw():
+    """Raw passthrough of Owls /{sport}/events. Used by /debug-odds."""
+    if not OWLS_INSIGHT_API_KEY:
+        return jsonify({"error": "no key"}), 500
+    sport = request.args.get("sport", "mlb")
+    try:
+        raw = _owls_get(f"/{sport}/events")
         return jsonify(raw)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -2191,55 +2208,96 @@ def api_debug_deposits():
 
 @app.route("/debug-odds")
 def debug_odds_page():
-    """Auth'd diagnostic: counts events Owls returned for a sport.
+    """Auth'd diagnostic comparing Owls /odds vs /events for a sport.
     Usage: /debug-odds?sport=mlb. Admin token required."""
     sport = request.args.get("sport", "mlb")
     return ('''<!DOCTYPE html><html><head>
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
     <script>firebase.initializeApp({apiKey:"AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",authDomain:"kahla-house.firebaseapp.com",projectId:"kahla-house"});</script>
-    </head><body style="background:#0b0e13;color:#e2e8f0;font-family:monospace;padding:20px;font-size:14px">
-    <h2 style="color:#f59e0b;margin-bottom:16px">Owls /''' + sport + '''/odds — event count per book</h2>
-    <div id="summary" style="font-size:18px;margin-bottom:20px;color:#22c55e">Loading…</div>
+    </head><body style="background:#0b0e13;color:#e2e8f0;font-family:monospace;padding:20px;font-size:13px">
+    <h2 style="color:#f59e0b;margin-bottom:16px">Owls diagnostic — sport=''' + sport + '''</h2>
+    <div id="summary" style="font-size:16px;margin-bottom:16px;color:#22c55e">Loading…</div>
+    <h3 style="color:#a855f7;margin:20px 0 8px">Per-book event counts (from /odds)</h3>
+    <pre id="bookCounts" style="font-size:11px;color:#8890a8;margin-bottom:16px"></pre>
+    <h3 style="color:#a855f7;margin:20px 0 8px">All scheduled games (sorted by start time)</h3>
     <pre id="games" style="font-size:11px;color:#8890a8;max-height:60vh;overflow:auto"></pre>
     <script>
+    function eachEvent(data) {
+        // /odds returns {data:{book:[ev,...]}} ; /events returns {data:[ev,...]} or [ev,...]
+        const out = [];
+        if (!data) return out;
+        const d = data.data ?? data;
+        if (Array.isArray(d)) { for (const ev of d) out.push([null, ev]); return out; }
+        if (typeof d === 'object') {
+            for (const [book, evs] of Object.entries(d)) {
+                if (!Array.isArray(evs)) continue;
+                for (const ev of evs) out.push([book, ev]);
+            }
+        }
+        return out;
+    }
+    function eid(ev) { return ev.id || ev.eventId || null; }
     firebase.auth().onAuthStateChanged(async u => {
         if (!u) { document.getElementById("summary").textContent = "Not logged in. Go to / first."; return; }
         try {
             const t = await u.getIdToken();
-            const r = await fetch("/api/odds/raw?sport=''' + sport + '''", {headers:{"Authorization":"Bearer "+t}});
-            const d = await r.json();
-            if (!r.ok) { document.getElementById("summary").textContent = "HTTP " + r.status + ": " + (d.error || JSON.stringify(d)); return; }
-            const dataMap = (d && d.data) || {};
-            const counts = {};
-            const allEids = new Set();
-            const eidToTime = {};
-            for (const [book, evs] of Object.entries(dataMap)) {
-                if (!Array.isArray(evs)) continue;
-                counts[book] = evs.length;
-                for (const e of evs) {
-                    const eid = e.id || e.eventId;
-                    if (!eid) continue;
-                    allEids.add(eid);
-                    eidToTime[eid] = e.commence_time || "";
+            const headers = { Authorization: "Bearer " + t };
+            const [oddsResp, evResp] = await Promise.all([
+                fetch("/api/odds/raw?sport=''' + sport + '''", {headers}),
+                fetch("/api/events/raw?sport=''' + sport + '''", {headers}),
+            ]);
+            const oddsD = await oddsResp.json();
+            const evD   = await evResp.json();
+
+            // Per-book counts + all events from /odds
+            const oddsBookCounts = {};
+            const oddsEids = new Set();
+            const eidToInfo = {};
+            for (const [book, ev] of eachEvent(oddsD)) {
+                const id = eid(ev); if (!id) continue;
+                oddsEids.add(id);
+                if (book) oddsBookCounts[book] = (oddsBookCounts[book] || 0) + 1;
+                eidToInfo[id] = {
+                    time: ev.commence_time || "",
+                    teams: (ev.away_team||"?") + " @ " + (ev.home_team||"?"),
+                    src: "odds",
+                };
+            }
+            // /events
+            const eventsEids = new Set();
+            for (const [, ev] of eachEvent(evD)) {
+                const id = eid(ev); if (!id) continue;
+                eventsEids.add(id);
+                if (!eidToInfo[id]) {
+                    eidToInfo[id] = {
+                        time: ev.commence_time || "",
+                        teams: (ev.away_team||"?") + " @ " + (ev.home_team||"?"),
+                        src: "events-only",
+                    };
                 }
             }
-            const lines = ["TOTAL UNIQUE EVENTS: " + allEids.size, ""];
-            for (const [bk, n] of Object.entries(counts).sort((a,b)=>b[1]-a[1])) {
-                lines.push(bk.padEnd(14) + " " + n);
+            const allEids = new Set([...oddsEids, ...eventsEids]);
+
+            const summary = [
+                "/odds   unique events: " + oddsEids.size,
+                "/events unique events: " + eventsEids.size,
+                "merged unique events: " + allEids.size,
+                "in /events only       : " + [...eventsEids].filter(x => !oddsEids.has(x)).length,
+            ];
+            document.getElementById("summary").innerHTML = summary.join("<br>");
+
+            const bookLines = [];
+            for (const [bk, n] of Object.entries(oddsBookCounts).sort((a,b)=>b[1]-a[1])) {
+                bookLines.push(bk.padEnd(14) + " " + n);
             }
-            document.getElementById("summary").innerHTML = lines.join("<br>");
-            // List events by start time so we can see what range Owls is returning
-            const sortedEids = [...allEids].sort((a,b)=>(eidToTime[a]||"").localeCompare(eidToTime[b]||""));
-            const gameLines = sortedEids.map(eid => {
-                const t = eidToTime[eid] || "?";
-                let teams = "?";
-                for (const evs of Object.values(dataMap)) {
-                    if (!Array.isArray(evs)) continue;
-                    const ev = evs.find(x => (x.id||x.eventId) === eid);
-                    if (ev) { teams = (ev.away_team||"?") + " @ " + (ev.home_team||"?"); break; }
-                }
-                return t + "  " + teams;
+            document.getElementById("bookCounts").textContent = bookLines.join("\\n");
+
+            const sorted = [...allEids].sort((a,b)=>(eidToInfo[a].time||"").localeCompare(eidToInfo[b].time||""));
+            const gameLines = sorted.map(id => {
+                const info = eidToInfo[id];
+                const tag = info.src === "events-only" ? "  [events-only]" : "";
+                return info.time + "  " + info.teams + tag;
             });
             document.getElementById("games").textContent = gameLines.join("\\n");
         } catch (e) {
