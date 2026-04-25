@@ -1555,11 +1555,7 @@
         if (leagueFilter) {
             events = events.filter(e => {
                 const lg = (e.league || '').toUpperCase();
-                // No league tag → trust the sport path (/api/odds?sport=mlb
-                // is already MLB-only). Polymarket and some other books don't
-                // populate the league field, and rejecting them here was
-                // hiding most of the day's slate.
-                if (!lg) return true;
+                if (!lg) return false;
                 return leagueFilter.some(f => lg.includes(f));
             });
         }
