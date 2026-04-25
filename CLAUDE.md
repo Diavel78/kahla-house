@@ -58,6 +58,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 |---|---|---|
 | `GET /api/me` | Firebase | Lightweight role probe — returns `{uid, role, approved, displayName, email}`. Used by every sub-page to gate UI before loading data. |
 | `GET /api/odds?sport=mlb` | Firebase | Odds + splits + scores merged JSON |
+| `GET /api/odds/history` | Firebase | Line-movement history for one event from Supabase `book_snapshots`. Params: `sport`, `home`, `away`, `commence` (ISO), `market` (ml/spread/total), `since` (15m/30m/1h/6h/12h/24h/all). Returns step-function-ready data per book per side. Books: PIN/CIR/DK/FD/MGM/CAE/HR/NVG (POLY excluded). Powers the chart modal. |
 | `GET /api/props?sport=mlb` | Firebase | Player props grouped by game/player |
 | `GET/POST /api/openers?sport=mlb` | Firebase | Opening lines (Firestore, permanent per game ID) |
 | `GET/POST /api/preferences` | Firebase | User settings (books, sport, order) in Firestore |
@@ -127,6 +128,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - **Splits Last-Changed Timestamp**: Splits header shows `updated Xm ago` per game. Server-authoritative — only bumps `ts` when Circa handle/bets % values actually differ from stored (Circa feed updates ~15-30 min, so this reveals real movement vs stale polls). Stored in Firestore doc `openers/splits_changed:{sport}`
 - **Line Movement**: Opener vs current with arrows and diffs
 - **Reverse Line Movement (RLM)**: Pulsing red flag when line moves against sharp money
+- **Line-Movement Chart**: Each game header has a small graph icon. Click → modal with a step-function chart (Chart.js) of historical odds from Supabase `book_snapshots`. Defaults to PIN/CIR/DK on the ML market over the last 24h; toggle other books (FD/MGM/CAE/HR/NVG) and switch market (ML/Spread/Total) or range (15m/30m/1H/6H/12H/24H/All). POLY excluded — its prices are 0-1 probability, not American odds. Data only exists for games the 5-min Owls ingest cron has captured.
 - **Auto-refresh**: 15 seconds (odds)
 - _Note: Polymarket "my bets" indicators were removed from the Odds Board so it can be shared with friends (viewer role). The Dashboard still shows P&L for active positions._
 - **Opener Prefetch**: First visit prefetches ALL sports to capture opening lines

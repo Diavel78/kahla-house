@@ -11,6 +11,9 @@
     <!-- Firebase Auth (compat mode) -->
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <!-- Chart.js (line-movement chart modal) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
     <script>
         const FC = {
             apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
@@ -397,6 +400,75 @@
         .ghdr-meta {
             font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-secondary);
             display: flex; align-items: center; gap: 10px;
+        }
+        /* Line-movement chart icon (per-game header) */
+        .chart-btn {
+            background: transparent; border: 1px solid var(--border);
+            color: var(--text-secondary); cursor: pointer;
+            width: 28px; height: 28px; border-radius: 6px;
+            display: inline-flex; align-items: center; justify-content: center;
+            transition: .15s; flex-shrink: 0;
+        }
+        .chart-btn:hover { color: var(--blue); border-color: var(--blue); background: rgba(74,124,255,0.08); }
+        .chart-btn svg { width: 14px; height: 14px; }
+
+        /* Chart modal */
+        .chart-modal-bg {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.78);
+            display: none; align-items: center; justify-content: center;
+            z-index: 200; padding: 16px; backdrop-filter: blur(4px);
+        }
+        .chart-modal-bg.open { display: flex; }
+        .chart-modal {
+            background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+            width: 100%; max-width: 920px; max-height: 92vh; overflow: hidden;
+            display: flex; flex-direction: column;
+        }
+        .chart-hdr {
+            padding: 14px 18px; border-bottom: 1px solid var(--border);
+            display: flex; align-items: center; justify-content: space-between; gap: 12px;
+        }
+        .chart-hdr-title { font-size: 15px; font-weight: 700; color: var(--text); }
+        .chart-hdr-meta { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-secondary); }
+        .chart-close {
+            background: none; border: none; color: var(--text-muted); cursor: pointer;
+            font-size: 22px; line-height: 1; padding: 4px 10px; border-radius: 6px;
+        }
+        .chart-close:hover { color: var(--text); background: var(--surface-2); }
+        .chart-controls {
+            padding: 12px 18px; border-bottom: 1px solid var(--border);
+            display: flex; flex-direction: column; gap: 10px;
+        }
+        .chart-pill-row {
+            display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+        }
+        .chart-pill-row .label {
+            font-family: 'JetBrains Mono', monospace; font-size: 10px;
+            color: var(--text-muted); margin-right: 6px; letter-spacing: 0.05em;
+        }
+        .chart-pill {
+            background: var(--surface-2); border: 1px solid var(--border);
+            color: var(--text-secondary); padding: 5px 12px; border-radius: 6px;
+            font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 600;
+            cursor: pointer; transition: .15s; user-select: none;
+        }
+        .chart-pill:hover { color: var(--text); border-color: var(--text-muted); }
+        .chart-pill.active {
+            background: var(--blue-dim); border-color: var(--blue); color: var(--blue);
+        }
+        .chart-pill.book.active { /* book pills color-code per book in JS */ }
+        .chart-canvas-wrap {
+            position: relative; padding: 18px; flex: 1; min-height: 320px;
+        }
+        .chart-empty {
+            text-align: center; color: var(--text-muted); padding: 60px 20px;
+            font-size: 14px;
+        }
+        @media (max-width: 700px) {
+            .chart-hdr-title { font-size: 13px; }
+            .chart-controls { padding: 10px 12px; }
+            .chart-canvas-wrap { padding: 12px; min-height: 240px; }
+            .chart-pill { padding: 4px 9px; font-size: 10px; }
         }
         .ghdr-league {
             font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted);
@@ -1506,6 +1578,14 @@
             h+=`<div class="game">`;
 
             // === GAME HEADER ===
+            const chartBtn = `<button class="chart-btn js-chart-btn" title="Line movement"
+                data-sport="${esc(activeSport)}"
+                data-home="${esc(home)}"
+                data-away="${esc(away)}"
+                data-commence="${esc(ev.commence_time||'')}">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="14 7 21 7 21 14"/></svg>
+            </button>`;
+
             h+=`<div class="ghdr${liveClass}">`;
             if (isLive) {
                 h+=`<div>`;
@@ -1515,13 +1595,13 @@
                 if (gameState) h+=`<span class="game-status">${esc(gameState)}</span>`;
                 h+=`<span class="stale-tag">pre-game odds</span>`;
                 h+=`</div>`;
-                h+=`<div class="ghdr-meta"><span class="ghdr-league">${esc(leagueStr)}</span></div>`;
+                h+=`<div class="ghdr-meta"><span class="ghdr-league">${esc(leagueStr)}</span>${chartBtn}</div>`;
             } else {
                 h+=`<div>`;
                 h+=`<span class="ghdr-league">${esc(leagueStr)}</span>`;
                 h+=`<span class="ghdr-teams">${esc(away)} <span class="at">@</span> ${esc(home)}</span>`;
                 h+=`</div>`;
-                h+=`<div class="ghdr-meta">${esc(date)} &middot; ${esc(time)}</div>`;
+                h+=`<div class="ghdr-meta">${esc(date)} &middot; ${esc(time)} ${chartBtn}</div>`;
             }
             h+=`</div>`;
 
@@ -1780,6 +1860,310 @@
     if (location.search.includes('debug=markets')) setTimeout(window.debugMarkets, 3000);
 
     } // end initApp
+    </script>
+
+    <!-- ─── Line-movement chart modal ─── -->
+    <div class="chart-modal-bg" id="chartModalBg" onclick="if(event.target===this)closeChartModal()">
+        <div class="chart-modal">
+            <div class="chart-hdr">
+                <div>
+                    <div class="chart-hdr-title" id="chartHdrTitle">—</div>
+                    <div class="chart-hdr-meta" id="chartHdrMeta"></div>
+                </div>
+                <button class="chart-close" onclick="closeChartModal()" aria-label="Close">&times;</button>
+            </div>
+            <div class="chart-controls">
+                <div class="chart-pill-row" id="chartMarketRow">
+                    <span class="label">MARKET</span>
+                    <button class="chart-pill active" data-market="ml" onclick="setChartMarket('ml')">ML</button>
+                    <button class="chart-pill" data-market="spread" onclick="setChartMarket('spread')">Spread</button>
+                    <button class="chart-pill" data-market="total" onclick="setChartMarket('total')">Total</button>
+                </div>
+                <div class="chart-pill-row" id="chartSpanRow">
+                    <span class="label">RANGE</span>
+                    <button class="chart-pill" data-span="15m" onclick="setChartSpan('15m')">15m</button>
+                    <button class="chart-pill" data-span="30m" onclick="setChartSpan('30m')">30m</button>
+                    <button class="chart-pill" data-span="1h" onclick="setChartSpan('1h')">1H</button>
+                    <button class="chart-pill" data-span="6h" onclick="setChartSpan('6h')">6H</button>
+                    <button class="chart-pill" data-span="12h" onclick="setChartSpan('12h')">12H</button>
+                    <button class="chart-pill active" data-span="24h" onclick="setChartSpan('24h')">24H</button>
+                    <button class="chart-pill" data-span="all" onclick="setChartSpan('all')">All</button>
+                </div>
+                <div class="chart-pill-row" id="chartBooksRow">
+                    <span class="label">BOOKS</span>
+                </div>
+            </div>
+            <div class="chart-canvas-wrap">
+                <canvas id="chartCanvas"></canvas>
+                <div class="chart-empty" id="chartEmpty" style="display:none">
+                    No movement data captured for this game yet. The Owls ingest runs every 5 minutes — check back shortly.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    /* ─── Line-movement chart logic (separate scope from initApp) ─── */
+    (function(){
+        const CHART_BOOKS = [
+            { code: 'PIN', label: 'PIN', color: '#fbbf24', defaultOn: true  },
+            { code: 'CIR', label: 'CIR', color: '#e2e8f0', defaultOn: true  },
+            { code: 'DK',  label: 'DK',  color: '#22c55e', defaultOn: true  },
+            { code: 'FD',  label: 'FD',  color: '#06b6d4', defaultOn: false },
+            { code: 'MGM', label: 'MGM', color: '#a855f7', defaultOn: false },
+            { code: 'CAE', label: 'CAE', color: '#f97316', defaultOn: false },
+            { code: 'HR',  label: 'HR',  color: '#ec4899', defaultOn: false },
+            { code: 'NVG', label: 'NVG', color: '#84cc16', defaultOn: false },
+        ];
+
+        const state = {
+            sport: null, home: '', away: '', commence: '',
+            market: 'ml',
+            span: '24h',
+            enabled: new Set(CHART_BOOKS.filter(b=>b.defaultOn).map(b=>b.code)),
+            data: null,
+            chart: null,
+            inflight: 0,
+        };
+
+        function bookByCode(code) { return CHART_BOOKS.find(b => b.code === code); }
+
+        function buildBookPills() {
+            const row = document.getElementById('chartBooksRow');
+            // Remove all but the first child (the LABEL span)
+            while (row.children.length > 1) row.removeChild(row.lastChild);
+            for (const b of CHART_BOOKS) {
+                const btn = document.createElement('button');
+                btn.className = 'chart-pill book' + (state.enabled.has(b.code) ? ' active' : '');
+                btn.textContent = b.label;
+                btn.style.borderColor = state.enabled.has(b.code) ? b.color : '';
+                btn.style.color = state.enabled.has(b.code) ? b.color : '';
+                btn.style.background = state.enabled.has(b.code) ? (b.color + '22') : '';
+                btn.onclick = () => toggleBook(b.code);
+                row.appendChild(btn);
+            }
+        }
+
+        function setActivePill(rowId, attr, value) {
+            document.querySelectorAll('#' + rowId + ' .chart-pill').forEach(el => {
+                el.classList.toggle('active', el.dataset[attr] === value);
+            });
+        }
+
+        window.setChartMarket = function(m) {
+            state.market = m;
+            setActivePill('chartMarketRow', 'market', m);
+            fetchAndRender();
+        };
+        window.setChartSpan = function(s) {
+            state.span = s;
+            setActivePill('chartSpanRow', 'span', s);
+            fetchAndRender();
+        };
+        function toggleBook(code) {
+            if (state.enabled.has(code)) state.enabled.delete(code);
+            else state.enabled.add(code);
+            buildBookPills();
+            renderChart();  // no refetch — server returned all books, we filter client-side
+        }
+
+        async function authFetchSafe(url) {
+            const u = firebase.auth().currentUser;
+            if (!u) return null;
+            const tok = await u.getIdToken();
+            return fetch(url, { headers: { Authorization: 'Bearer ' + tok } });
+        }
+
+        async function fetchAndRender() {
+            const seq = ++state.inflight;
+            const params = new URLSearchParams({
+                sport: state.sport || '',
+                home: state.home,
+                away: state.away,
+                commence: state.commence,
+                market: state.market,
+                since: state.span,
+            });
+            try {
+                const resp = await authFetchSafe('/api/odds/history?' + params.toString());
+                if (!resp || !resp.ok) { state.data = null; renderChart(); return; }
+                const j = await resp.json();
+                if (seq !== state.inflight) return; // stale
+                state.data = j;
+            } catch (e) {
+                state.data = null;
+            }
+            renderChart();
+        }
+
+        function renderChart() {
+            const canvas = document.getElementById('chartCanvas');
+            const empty  = document.getElementById('chartEmpty');
+            const meta   = document.getElementById('chartHdrMeta');
+
+            if (state.chart) { state.chart.destroy(); state.chart = null; }
+
+            const data = state.data;
+            const haveAny = data && data.books && Object.keys(data.books).length > 0;
+            if (!haveAny) {
+                canvas.style.display = 'none';
+                empty.style.display  = '';
+                meta.textContent = '';
+                return;
+            }
+            canvas.style.display = '';
+            empty.style.display  = 'none';
+
+            // Sides per market
+            const sides = data.market === 'total' ? ['over', 'under'] : ['away', 'home'];
+            const sideLabel = { home: state.home, away: state.away, over: 'Over', under: 'Under' };
+
+            const datasets = [];
+            const nowIso = new Date().toISOString();
+            for (const b of CHART_BOOKS) {
+                if (!state.enabled.has(b.code)) continue;
+                const byBook = (data.books || {})[b.code];
+                if (!byBook) continue;
+                for (const side of sides) {
+                    const arr = byBook[side];
+                    if (!arr || !arr.length) continue;
+                    // Carry the last value forward to "now" so the step extends
+                    // to the right edge of the chart instead of stopping mid-graph.
+                    const points = arr.map(p => ({ x: p.ts, y: p.price, _line: p.line }));
+                    const last = points[points.length - 1];
+                    if (last) points.push({ x: nowIso, y: last.y, _line: last._line });
+                    datasets.push({
+                        label: b.label + ' ' + (sideLabel[side] || side),
+                        data: points,
+                        borderColor: b.color,
+                        backgroundColor: b.color + '33',
+                        borderDash: side === 'away' || side === 'over' ? [5, 5] : [],
+                        stepped: 'after',
+                        pointRadius: 0,
+                        pointHoverRadius: 4,
+                        borderWidth: 2,
+                        tension: 0,
+                    });
+                }
+            }
+
+            if (!datasets.length) {
+                canvas.style.display = 'none';
+                empty.style.display  = '';
+                empty.textContent = 'No data for the selected books / range. Try toggling more books or expanding the range.';
+                return;
+            }
+
+            // Header meta: market label + sample count
+            const totalPoints = datasets.reduce((n, d) => n + d.data.length - 1, 0);
+            const mktLabel = data.market === 'moneyline' ? 'Moneyline'
+                          : data.market === 'spread' ? 'Spread'
+                          : 'Total';
+            meta.textContent = `${mktLabel} · ${datasets.length} series · ${totalPoints} samples`;
+
+            const ctx = canvas.getContext('2d');
+            state.chart = new Chart(ctx, {
+                type: 'line',
+                data: { datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'nearest', intersect: false },
+                    parsing: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                color: '#cbd5e1', boxWidth: 12, boxHeight: 2,
+                                font: { family: 'JetBrains Mono, monospace', size: 11 },
+                            },
+                        },
+                        tooltip: {
+                            backgroundColor: '#13171e',
+                            borderColor: '#1e2530', borderWidth: 1,
+                            titleFont: { family: 'DM Sans, sans-serif', size: 12 },
+                            bodyFont: { family: 'JetBrains Mono, monospace', size: 11 },
+                            callbacks: {
+                                title: items => {
+                                    const d = new Date(items[0].parsed.x);
+                                    return d.toLocaleString('en-US', {
+                                        month: 'short', day: 'numeric',
+                                        hour: 'numeric', minute: '2-digit',
+                                    });
+                                },
+                                label: item => {
+                                    const ds = item.dataset;
+                                    const p  = item.raw;
+                                    const american = p.y > 0 ? '+' + p.y : '' + p.y;
+                                    const line = p._line != null ? ' @ ' + p._line : '';
+                                    return ds.label + ': ' + american + line;
+                                },
+                            },
+                        },
+                    },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: { tooltipFormat: 'MMM d, h:mm a' },
+                            grid: { color: 'rgba(255,255,255,0.04)' },
+                            ticks: { color: '#8890a8', font: { family: 'JetBrains Mono, monospace', size: 10 } },
+                        },
+                        y: {
+                            grid: { color: 'rgba(255,255,255,0.04)' },
+                            ticks: {
+                                color: '#8890a8',
+                                font: { family: 'JetBrains Mono, monospace', size: 10 },
+                                callback: v => v > 0 ? '+' + v : v,
+                            },
+                        },
+                    },
+                },
+            });
+        }
+
+        window.openChartModal = function(opts) {
+            state.sport    = opts.sport;
+            state.home     = opts.home;
+            state.away     = opts.away;
+            state.commence = opts.commence;
+            state.market   = 'ml';
+            state.span     = '24h';
+            state.enabled  = new Set(CHART_BOOKS.filter(b=>b.defaultOn).map(b=>b.code));
+            document.getElementById('chartHdrTitle').textContent = opts.away + ' @ ' + opts.home;
+            setActivePill('chartMarketRow', 'market', 'ml');
+            setActivePill('chartSpanRow', 'span', '24h');
+            buildBookPills();
+            document.getElementById('chartModalBg').classList.add('open');
+            fetchAndRender();
+        };
+
+        window.closeChartModal = function() {
+            document.getElementById('chartModalBg').classList.remove('open');
+            if (state.chart) { state.chart.destroy(); state.chart = null; }
+            state.data = null;
+        };
+
+        // Close on Esc
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape' && document.getElementById('chartModalBg').classList.contains('open')) {
+                window.closeChartModal();
+            }
+        });
+
+        // Delegated click handler for the per-game chart icons. The Odds Board
+        // re-renders the game list frequently — using delegation keeps a single
+        // listener regardless of how many times innerHTML gets swapped.
+        document.addEventListener('click', e => {
+            const btn = e.target.closest('.js-chart-btn');
+            if (!btn) return;
+            window.openChartModal({
+                sport:    btn.dataset.sport,
+                home:     btn.dataset.home,
+                away:     btn.dataset.away,
+                commence: btn.dataset.commence,
+            });
+        });
+    })();
     </script>
 </body>
 </html>

@@ -1559,6 +1559,173 @@ def api_data():
 
 
 # ---------------------------------------------------------------------------
+# Line-movement history (powers the per-game chart modal on /odds)
+# ---------------------------------------------------------------------------
+
+# Owls API sport path  ->  scanner sport code stored in markets.sport
+_SCANNER_SPORT_FROM_OWLS = {
+    "mlb": "MLB",
+    "nba": "NBA",
+    "nhl": "NHL",
+    "nfl": "NFL",
+    "ncaab": "CBB",
+    "ncaaf": "NCAAF",
+    "mma": "UFC",
+}
+
+# Books we surface on the chart. POLY excluded — its prices are 0-1
+# (probability) not American odds and would need de-vig conversion.
+_CHART_BOOKS = ["PIN", "CIR", "DK", "FD", "MGM", "CAE", "HR", "NVG"]
+
+# `since` query param  ->  timedelta. Used to bound the snapshot query.
+_HISTORY_SPANS = {
+    "15m":  timedelta(minutes=15),
+    "30m":  timedelta(minutes=30),
+    "1h":   timedelta(hours=1),
+    "6h":   timedelta(hours=6),
+    "12h":  timedelta(hours=12),
+    "24h":  timedelta(hours=24),
+    "all":  None,  # no lower bound
+}
+
+
+def _norm_team(name: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace. Mirrors the
+    same normalization used by the scanner ingest so team-name matching
+    against `markets.event_name` works without an alias table lookup."""
+    if not name:
+        return ""
+    s = re.sub(r"[^\w\s]", " ", name.lower())
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _parse_iso(ts: str) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        # Tolerate the trailing 'Z' that JS toISOString emits
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+@app.route("/api/odds/history")
+@firebase_auth_required
+def api_odds_history():
+    """Return book_snapshots history for one event's market.
+
+    Query params:
+      sport     — Owls path: mlb|nba|nhl|nfl|ncaab|ncaaf|mma
+      home, away — team names exactly as Odds Board has them
+      commence  — ISO timestamp of event start (Owls commence_time)
+      market    — ml|spread|total  (defaults to ml)
+      since     — 15m|30m|1h|6h|12h|24h|all  (defaults to 24h)
+
+    Response:
+      { ok, market_id, market, since_iso, books: {
+          BOOK_CODE: { side: [{ts, price, line}, ...], ... }, ...
+      } }
+
+    Books returned: PIN, CIR, DK, FD, MGM, CAE, HR, NVG. POLY skipped.
+    """
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+
+    sport_owls = (request.args.get("sport") or "").lower().strip()
+    sport_code = _SCANNER_SPORT_FROM_OWLS.get(sport_owls)
+    if not sport_code:
+        return jsonify({"ok": False, "error": f"unsupported sport: {sport_owls}"}), 400
+
+    home_raw = (request.args.get("home") or "").strip()
+    away_raw = (request.args.get("away") or "").strip()
+    commence = _parse_iso(request.args.get("commence", ""))
+    if not home_raw or not away_raw or not commence:
+        return jsonify({"ok": False, "error": "home, away, commence required"}), 400
+
+    market_in = (request.args.get("market") or "ml").lower()
+    market_type = {"ml": "moneyline", "spread": "spread", "total": "total"}.get(market_in)
+    if not market_type:
+        return jsonify({"ok": False, "error": f"bad market: {market_in}"}), 400
+
+    span_key = (request.args.get("since") or "24h").lower()
+    if span_key not in _HISTORY_SPANS:
+        return jsonify({"ok": False, "error": f"bad since: {span_key}"}), 400
+    span = _HISTORY_SPANS[span_key]
+
+    # ---- 1. Find the matching market row ----
+    home_n = _norm_team(home_raw)
+    away_n = _norm_team(away_raw)
+    window = timedelta(minutes=30)
+    try:
+        rows = (
+            sb.table("markets")
+            .select("id,event_name,event_start")
+            .eq("sport", sport_code)
+            .eq("status", "active")
+            .gte("event_start", (commence - window).isoformat())
+            .lte("event_start", (commence + window).isoformat())
+            .limit(50)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"markets query failed: {e}"}), 500
+
+    market_id = None
+    for r in rows:
+        ev = _norm_team(r.get("event_name", ""))
+        if home_n and away_n and home_n in ev and away_n in ev:
+            market_id = r["id"]
+            break
+
+    if not market_id:
+        return jsonify({
+            "ok": True, "market_id": None, "market": market_type,
+            "since_iso": None, "books": {},
+        })
+
+    # ---- 2. Pull snapshots for that market_id + market_type ----
+    since_iso = None
+    try:
+        q = (
+            sb.table("book_snapshots")
+            .select("book,side,price_american,line,captured_at")
+            .eq("market_id", market_id)
+            .eq("market_type", market_type)
+            .in_("book", _CHART_BOOKS)
+            .order("captured_at", desc=False)
+            .limit(5000)
+        )
+        if span is not None:
+            since_iso = (datetime.now(timezone.utc) - span).isoformat()
+            q = q.gte("captured_at", since_iso)
+        snaps = q.execute().data or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"snapshots query failed: {e}"}), 500
+
+    # ---- 3. Group into { book: { side: [{ts, price, line}, ...] } } ----
+    books: dict[str, dict[str, list[dict]]] = {}
+    for s in snaps:
+        bk = s["book"]
+        side = s["side"]
+        books.setdefault(bk, {}).setdefault(side, []).append({
+            "ts": s["captured_at"],
+            "price": s["price_american"],
+            "line": s.get("line"),
+        })
+
+    return jsonify({
+        "ok": True,
+        "market_id": market_id,
+        "market": market_type,
+        "since_iso": since_iso,
+        "books": books,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Debug routes (admin only)
 # ---------------------------------------------------------------------------
 
