@@ -1,36 +1,38 @@
-name: Scanner — Poll
+name: Odds Ingest — Poll
 
-# Kahla Scanner ingest via Owls Insight.
+# Kahla House odds ingest via Owls Insight.
 #
 # One Owls API call per sport returns odds from ~13 books (POLY, PIN, DK, FD,
-# CIR, MGM, CAE, HR, NVG), eliminating the need for direct sportsbook scrapes.
-# Persists book_snapshots to Supabase. ESPN resolves finished games into
-# market_outcomes hourly (piggybacked on the same workflow).
+# CIR, MGM, CAE, HR, NVG). Persists book_snapshots to Supabase, deduped:
+# only writes when a (market, book, market_type, side)'s price/line changes.
+# Powers the line-movement charts on the Odds Board.
 #
-# Budget: 8 sports × 288 runs/day (every 5min) = ~2.3K requests/day. Owls
-# MVP+ plan allows 300K/month — we use ~70K/month, well inside the limit.
+# This used to also run divergence/Brier analytics — those have been retired.
+# This workflow now only writes book_snapshots.
+#
+# Budget: 7 sports × 288 runs/day (every 5min) = ~2K requests/day. Owls
+# MVP+ plan allows 300K/month — we use ~60K/month, well inside the limit.
 #
 # Required secrets:
 #   OWLS_INSIGHT_API_KEY
 #   SUPABASE_URL
 #   SUPABASE_SERVICE_KEY
 #
-# Optional:
-#   SPORTS_ENABLED   (default: NFL,NBA,MLB,NHL,CBB)
-#   SCANNER_MODE     (default: log_only — keep until M0 Brier results)
+# Optional repo Variable:
+#   SPORTS_ENABLED   (default: NFL,NBA,MLB,NHL,CBB,NCAAF,UFC)
 
 on:
   schedule:
     # Primary trigger is an external cron-job.org job that fires
     # workflow_dispatch every 5 min (GitHub's native schedule reliably
-    # drifts to 30-40 min actual cadence, which isn't fine-grained enough
-    # for signal scanning). This schedule: line stays as a fallback —
-    # runs every 30 min so data still flows if cron-job.org is down.
+    # drifts to 30-40 min actual cadence). This schedule: line stays as
+    # a fallback — runs every 30 min so data still flows if cron-job.org
+    # is down.
     - cron: "*/30 * * * *"
   workflow_dispatch:          # manual trigger + cron-job.org primary
 
 concurrency:
-  group: scanner-poll
+  group: odds-ingest-poll
   cancel-in-progress: false
 
 jobs:
@@ -58,28 +60,5 @@ jobs:
           OWLS_INSIGHT_API_KEY: ${{ secrets.OWLS_INSIGHT_API_KEY }}
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          SPORTS_ENABLED:       ${{ vars.SPORTS_ENABLED || 'NFL,NBA,MLB,NHL,CBB' }}
-          SCANNER_MODE:         ${{ vars.SCANNER_MODE || 'log_only' }}
+          SPORTS_ENABLED:       ${{ vars.SPORTS_ENABLED || 'NFL,NBA,MLB,NHL,CBB,NCAAF,UFC' }}
         run: python -m scrapers.owls
-
-      - name: Resolve finished games (ESPN)
-        continue-on-error: true
-        env:
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          SPORTS_ENABLED:       ${{ vars.SPORTS_ENABLED || 'NFL,NBA,MLB,NHL,CBB' }}
-        run: python -m analytics.resolve
-
-      - name: Scan for sharp-consensus signals
-        continue-on-error: true
-        env:
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          SPORTS_ENABLED:       ${{ vars.SPORTS_ENABLED || 'NFL,NBA,MLB,NHL,CBB' }}
-          # Phase 1: signals write to Supabase `signals` table. No Telegram yet.
-          # Thresholds (env-overridable):
-          #   SHARP_CONSENSUS_AGREE_MAX_PCT  default 1.5  (POLY~PIN agreement)
-          #   SHARP_CONSENSUS_EDGE_MIN_PCT   default 3.0  (sharp vs public)
-          #   SHARP_CONSENSUS_LOOKAHEAD_HOURS default 2.0
-          #   SHARP_CONSENSUS_DEDUP_MIN      default 30   (min gap between fires)
-        run: python -m signals.divergence

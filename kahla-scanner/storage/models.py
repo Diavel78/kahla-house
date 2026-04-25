@@ -1,7 +1,14 @@
-"""Row dataclasses mirroring Supabase tables."""
+"""Row dataclasses mirroring Supabase tables.
+
+Trimmed to only the rows owls.py writes: Market and BookSnapshot.
+PolyTick / Signal / Subscriber dataclasses were removed when the
+divergence/Brier pipeline was retired — the underlying tables are no
+longer written to. The tables themselves still exist in Supabase for
+historical inspection but can be dropped manually if you want.
+"""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any
 
@@ -28,7 +35,7 @@ class Market:
 @dataclass
 class BookSnapshot:
     market_id: str
-    book: str                    # 'DK','FD'
+    book: str                    # 'PIN','CIR','DK','FD','MGM','CAE','HR','NVG','POLY'
     market_type: str             # 'moneyline','spread','total'
     side: str                    # 'home','away','over','under'
     price_american: int
@@ -38,52 +45,3 @@ class BookSnapshot:
     def to_row(self) -> dict[str, Any]:
         d = asdict(self)
         return {k: v for k, v in d.items() if v is not None}
-
-
-@dataclass
-class PolyTick:
-    market_id: str
-    outcome: str
-    price: float
-    size: float
-    tick_ts: datetime
-    side: str | None = None
-
-    def to_row(self) -> dict[str, Any]:
-        d = asdict(self)
-        d["tick_ts"] = self.tick_ts.isoformat()
-        return {k: v for k, v in d.items() if v is not None}
-
-
-@dataclass
-class Signal:
-    market_id: str
-    signal_type: str             # 'divergence','rlm','arb'
-    fade_side: str
-    public_prob: float
-    sharp_prob: float
-    edge_pct: float
-    liquidity_usd: float | None = None
-    notes: dict[str, Any] = field(default_factory=dict)
-    status: str = "open"
-
-    def to_row(self) -> dict[str, Any]:
-        d = asdict(self)
-        return {k: v for k, v in d.items() if v is not None or k == "notes"}
-
-
-@dataclass
-class Subscriber:
-    telegram_chat_id: int
-    handle: str | None = None
-    display_name: str | None = None
-    sports: list[str] = field(
-        default_factory=lambda: ["NFL", "CBB", "MLB", "NBA", "NHL", "UFC"]
-    )
-    min_edge_pct: float = 3.0
-    min_liquidity_usd: float = 500.0
-    quiet_hours_start: int | None = None
-    quiet_hours_end: int | None = None
-    timezone: str = "America/Phoenix"
-    active: bool = True
-    id: str | None = None

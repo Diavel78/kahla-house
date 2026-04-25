@@ -11,7 +11,7 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 ## Access Control (read this first)
 
 Three roles in Firestore `users/{uid}.role`:
-- **`admin`** — full access (Odds, Props, Dashboard, Scanner, debug). Rob.
+- **`admin`** — full access (Odds, Props, Dashboard, debug). Rob.
 - **`viewer`** — Odds + Props only. Friends use this tier.
 - **`pending`** — default for new signups. No access until an admin approves.
 
@@ -28,7 +28,6 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `/api/odds`, `/api/props`, `/api/openers`, `/api/preferences`, `/api/splits-*` | any approved | `@firebase_auth_required` (rejects pending) |
 | `/dashboard` (page) | admin | client probes `/api/me` and bounces non-admins |
 | `/api/data`, `/api/my-bets`, `/api/debug-trades`, `/api/debug-deposits` | admin | `@admin_required` |
-| `/scanner` (page), `/api/scanner/*` | admin | client probe + `@admin_required` |
 | All `/api/*/raw`, `/api/raw`, `/api/odds/debug-markets` | admin | `@admin_required` |
 
 `@firebase_auth_required` itself rejects any user where `approved != true` (returns 403), so even API endpoints that don't need admin still keep `pending` users out.
@@ -38,16 +37,18 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | Route | Template | Access | Purpose |
 |---|---|---|---|
 | `/` | `index.html` | public | Landing page (login/signup, pending screen, admin panel, app cards by role) |
-| `/odds` | `odds.html` | admin + viewer | Odds Board — multi-book odds comparison, splits, movement, RLM, live scores |
+| `/odds` | `odds.html` | admin + viewer | Odds Board — multi-book odds comparison, splits, movement, RLM, live scores, per-game line-movement chart |
 | `/props` | `props.html` | admin + viewer | Player Props — game-grouped best-line comparison across books |
 | `/dashboard` | `dashboard.html` | admin only | Polymarket P&L Dashboard — positions, closed trades, bet slip |
-| `/scanner` | `scanner.html` | admin only | Kahla Scanner review — activity, Brier scores, signals, matched/unmatched markets (reads Supabase) |
 
-> **Kahla Scanner is its own subproject** at `kahla-scanner/` — separate Python app
-> deployed via GitHub Actions cron (not Vercel). Flask just renders the `/scanner`
-> review page on thekahlahouse.com from Supabase data. Scanner runs independently
-> and writes to the same Supabase. See `kahla-scanner/HANDOFF.md` for current state
-> and where to resume.
+> **Odds-ingest cron (`kahla-scanner/`)**: a stripped-down Python subproject
+> at `kahla-scanner/` runs `python -m scrapers.owls` every 5 min via GitHub
+> Actions (`.github/workflows/scanner-poll.yml`), driven by an external
+> cron-job.org trigger with a 30-min GitHub-native fallback. It writes
+> deduplicated rows to Supabase `book_snapshots` for every (market, book,
+> market_type, side) — these power the line-movement chart on the Odds Board.
+> The legacy divergence/Brier/signals/Telegram pipeline has been retired;
+> only the Owls ingest remains.
 
 ### API Routes
 
@@ -64,11 +65,6 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `GET/POST /api/splits-last-changed?sport=mlb` | Firebase | Per-game ts of last actual Circa handle/bets % change. Server-authoritative diff |
 | `GET /api/my-bets` | **Admin** | Active Polymarket positions (Dashboard only — no longer used by Odds Board) |
 | `GET /api/data` | **Admin** | Dashboard P&L data (positions, balances, trades) |
-| `GET /api/scanner/activity` | Admin | Scanner counts + last-seen per source |
-| `GET /api/scanner/brier` | Admin | Brier scores poly/dk/fd at T-24h/T-6h/T-1h/T-0 |
-| `GET /api/scanner/signals` | Admin | Recent divergence signals |
-| `GET /api/scanner/matches` | Admin | Recently matched markets (cross-venue linkage) |
-| `GET /api/scanner/unmatched` | Admin | Unmatched venue events needing manual review |
 | `GET /api/odds/raw` | Admin | Debug: raw Owls Insight odds response |
 | `GET /api/splits/raw` | Admin | Debug: raw splits response |
 | `GET /api/props/raw` | Admin | Debug: raw props response |
@@ -99,7 +95,6 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - `templates/props.html` — Player props board (~940 lines)
 - `templates/dashboard.html` — P&L dashboard (~1130 lines)
 - `templates/index.html` — Landing page with auth + admin + role-based app cards (~440 lines)
-- `templates/scanner.html` — Kahla Scanner review surface (~400 lines)
 - `firestore.rules` — Firestore security rules (admin/approved helpers)
 - `vercel.json` — Vercel deployment config
 - `requirements.txt` — Python deps (flask, polymarket-us, requests, python-dotenv, firebase-admin)
@@ -114,8 +109,8 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `POLYMARKET_SECRET_KEY` | Polymarket US API secret |
 | `FIREBASE_SERVICE_ACCOUNT` | Firebase Admin SDK service account JSON |
 | `FLASK_SECRET_KEY` | Flask session secret |
-| `SUPABASE_URL` | Kahla Scanner Postgres URL — needed for `/scanner` page to render data |
-| `SUPABASE_SERVICE_KEY` | Scanner service key — needed for `/scanner` API endpoints |
+| `SUPABASE_URL` | Supabase Postgres URL — read by Flask for the line-movement chart |
+| `SUPABASE_SERVICE_KEY` | Supabase service key — same |
 
 ---
 
@@ -325,7 +320,7 @@ The `/props` endpoint returns a **different format** than `/odds`:
 
 ## Mobile Layout
 - `overflow-x: hidden` on html, body, `#app` (iOS Safari fix)
-- Top bar: nav links (Home, Odds, Props, Dashboard) on first row, status + logout on second row (prevents overlap with 4 nav items). Dashboard/Scanner links only render for admins.
+- Top bar: nav links (Home, Odds, Props, Dashboard) on first row, status + logout on second row. Dashboard link only renders for admins.
 - Movement bar items wrap with `flex-wrap` so ML/SPR/TOT all show
 - Odds table scrolls horizontally
 - Splits grid single-column below 900px
@@ -347,4 +342,4 @@ The `/props` endpoint returns a **different format** than `/odds`:
 6. **Splits duplicates** — API returns today + tomorrow entries. Must prefer Circa-containing entries
 7. **MMA odds sparse** — Only BetOnline returns MMA data through Owls Insight. No FanDuel/DraftKings/Pinnacle/Circa MMA coverage. User must enable BetOnline (BOL) in Books to see MMA fights
 8. **SDK trade fields are nested objects** — `price`, `cost`, `realizedPnl`, `costBasis` are all `{currency, value}` dicts, not plain numbers. `_safe_float()` handles this by extracting `.value`
-9. **Brier scoring selection bias (fixed 2026-04-21)** — `book_snapshots` are deduplicated: a new row is only written when a book's price actually changes ([scrapers/owls.py:_latest_snapshot_map](kahla-scanner/scrapers/owls.py)). Retail books (MGM, CAE) re-price constantly and get fresh snapshots every 5-min cron cycle; sharp books (PIN, CIR) post a line and sit — their last snapshot can be hours old. A narrow ±30-min Brier lookup window therefore skipped PIN/CIR at most checkpoints and only counted them on games where they DID move (typically harder-to-predict games), flattering MGM's score. Fixed by switching `_book_home_probs_nearest` in both `scanner.py` (web) and `kahla-scanner/analytics/brier.py` (CLI) to use "newest snapshot at or before target, 14-day lookback." Winner selection now also requires `n >= max(5, 50% of max book's n)` at that checkpoint to prevent small-sample false wins.
+9. **`book_snapshots` is deduplicated** — a new row is only written when a (market, book, market_type, side)'s price or line actually changes since the last stored value (`_latest_snapshot_map` + `_dedup_unchanged` in `kahla-scanner/scrapers/owls.py`). Retail books (MGM, CAE) re-price constantly and get fresh rows every 5-min cycle; sharp books (PIN, CIR) post a line and sit — their last row can be hours old. This is correct for step-function chart rendering: the chart carries the last value forward visually until the next sample.
