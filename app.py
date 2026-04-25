@@ -711,9 +711,12 @@ def _fetch_odds_from_snapshots(sport_path: str):
 
     market_ids = [m["id"] for m in markets]
 
-    # Fresh snapshots from the last hour — covers any book that priced
-    # during the most recent cron run.
-    fresh_cutoff = (now - timedelta(hours=1)).isoformat()
+    # Fresh snapshots from the last 90 min — covers two cron runs (30 min
+    # cadence + slack). Markets without ANY snapshot in this window are
+    # considered stale: either duplicate Owls-era rows the new cron didn't
+    # match, or games whose books stopped posting after they started. We
+    # filter those out below so the board only shows live, updated markets.
+    fresh_cutoff = (now - timedelta(minutes=90)).isoformat()
     try:
         snaps = (
             sb.table("book_snapshots")
@@ -728,6 +731,15 @@ def _fetch_odds_from_snapshots(sport_path: str):
         )
     except Exception:
         snaps = []
+
+    # Restrict markets to those with fresh snapshots. This drops:
+    #   - Owls-era duplicate markets that the new Odds API cron didn't match
+    #   - Games whose books stopped pricing hours ago (board would show stale)
+    fresh_market_ids = {s["market_id"] for s in snaps}
+    markets = [m for m in markets if m["id"] in fresh_market_ids]
+    market_ids = [m["id"] for m in markets]
+    if not markets:
+        return [], [], []
 
     # Anchor: latest pre-fresh-window row per (market, book, market_type, side)
     # not already represented. Sharp books (PIN, CIR) sit on lines for hours
@@ -802,6 +814,12 @@ def _fetch_odds_from_snapshots(sport_path: str):
                     "event_link": "",
                 }
                 active_books.add(display_key)
+
+        # Skip games where no book has any market data. Without this, every
+        # market in the time window renders even when the chart is empty,
+        # producing rows of "--" cells that look like a bug.
+        if not books_block:
+            continue
 
         events_out.append({
             "id":            m["id"],
