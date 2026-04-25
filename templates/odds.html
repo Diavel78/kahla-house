@@ -1562,13 +1562,14 @@
 
         if (query) events = events.filter(e => (e.home_team + ' ' + e.away_team).toLowerCase().includes(query));
 
-        const withOdds = events.filter(e => hasAnyOdds(e, books));
-        if (withOdds.length) {
-            events = withOdds;
-        } else if (events.length && books.length) {
-            const allBooks = oddsData.books || [];
-            events = events.filter(e => hasAnyOdds(e, allBooks));
-        }
+        // Show every game that has odds at ANY book in the API response.
+        // The user's enabled-books preference filters which COLUMNS render,
+        // not which games appear — otherwise sharp books (PIN/CIR) holding
+        // off on evening lines would silently hide later games even though
+        // retail books have already priced them. Empty-state only triggers
+        // when no books anywhere have priced.
+        const allBooks = oddsData.books || [];
+        events = events.filter(e => hasAnyOdds(e, allBooks));
 
         if(!events.length){
             const msg=oddsData.meta_message?esc(oddsData.meta_message):'No games found';
