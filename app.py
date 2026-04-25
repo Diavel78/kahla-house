@@ -1535,6 +1535,123 @@ def _parse_iso(ts: str) -> datetime | None:
         return None
 
 
+@app.route("/api/odds/history-batch")
+@firebase_auth_required
+def api_odds_history_batch():
+    """6-hour PIN ML history for every active game in a sport, batched.
+    Powers the inline sparkline rendered in each game card on the Odds Board.
+
+    Returns: { ok, sport, market: 'moneyline', side: 'home', since_iso,
+               events: { market_id: [{ts, price}, ...], ... } }
+
+    One Supabase round-trip total instead of N per-card requests. Uses the
+    same active-markets window as /api/odds (now-6h to now+2d) so the chart
+    only renders for games visible on the board.
+    """
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": True, "sport": request.args.get("sport"), "events": {}})
+
+    sport_owls = (request.args.get("sport") or "").lower().strip()
+    sport_code = _SPORT_PATH_TO_CODE.get(sport_owls)
+    if not sport_code:
+        return jsonify({"ok": True, "sport": sport_owls, "events": {}})
+
+    now = datetime.now(timezone.utc)
+    low = (now - timedelta(hours=6)).isoformat()
+    high = (now + timedelta(days=2)).isoformat()
+
+    try:
+        markets = (
+            sb.table("markets")
+            .select("id")
+            .eq("sport", sport_code)
+            .eq("status", "active")
+            .gte("event_start", low)
+            .lte("event_start", high)
+            .limit(500)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return jsonify({"ok": True, "sport": sport_owls, "events": {}})
+
+    if not markets:
+        return jsonify({"ok": True, "sport": sport_owls, "events": {}})
+
+    market_ids = [m["id"] for m in markets]
+    six_h = (now - timedelta(hours=6)).isoformat()
+
+    # 6h PIN ML home-team only — keeps the payload tiny per game.
+    try:
+        snaps = (
+            sb.table("book_snapshots")
+            .select("market_id,price_american,captured_at")
+            .in_("market_id", market_ids)
+            .eq("book", "PIN")
+            .eq("market_type", "moneyline")
+            .eq("side", "home")
+            .gte("captured_at", six_h)
+            .order("captured_at", desc=False)
+            .limit(20000)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        snaps = []
+
+    # Anchor: most-recent pre-window PIN ML home row per market not already in
+    # the fresh set. So a market that's been quiet for >6h still gets a flat
+    # baseline rendered.
+    present = {s["market_id"] for s in snaps}
+    missing = [mid for mid in market_ids if mid not in present]
+    if missing:
+        try:
+            anchor_rows = (
+                sb.table("book_snapshots")
+                .select("market_id,price_american,captured_at")
+                .in_("market_id", missing)
+                .eq("book", "PIN")
+                .eq("market_type", "moneyline")
+                .eq("side", "home")
+                .lt("captured_at", six_h)
+                .order("captured_at", desc=True)
+                .limit(2000)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            anchor_rows = []
+        seen: set[str] = set()
+        for r in anchor_rows:
+            mid = r["market_id"]
+            if mid in seen:
+                continue
+            seen.add(mid)
+            # Pin to window edge so the chart starts at the left
+            r["captured_at"] = six_h
+            snaps.append(r)
+
+    out: dict[str, list[dict]] = {}
+    for s in snaps:
+        out.setdefault(s["market_id"], []).append({
+            "ts": s["captured_at"],
+            "price": s["price_american"],
+        })
+
+    return jsonify({
+        "ok":         True,
+        "sport":      sport_owls,
+        "market":     "moneyline",
+        "side":       "home",
+        "since_iso":  six_h,
+        "events":     out,
+    })
+
+
 @app.route("/api/odds/history")
 @firebase_auth_required
 def api_odds_history():

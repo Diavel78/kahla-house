@@ -612,7 +612,47 @@
         }
         .th-book-name:hover .deep-link { opacity: 1; }
 
-        /* Game footer (movement + splits) */
+        /* Inline 6H PIN ML sparkline (where Circa splits used to live) */
+        .spark-wrap {
+            padding: 12px 18px 14px;
+            border-top: 1px solid var(--border);
+            background: rgba(11,14,19,0.3);
+        }
+        .spark-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            color: var(--text-muted);
+            letter-spacing: 0.04em;
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .spark-tag {
+            font-weight: 700;
+            color: #fbbf24;
+            background: rgba(251,191,36,0.12);
+            padding: 1px 6px;
+            border-radius: 4px;
+        }
+        .spark-range {
+            margin-left: auto;
+            color: var(--text-muted);
+        }
+        .spark-canvas-wrap {
+            position: relative;
+            height: 60px;
+        }
+        .spark-canvas-wrap canvas { width: 100% !important; height: 100% !important; }
+        .spark-empty {
+            position: absolute; inset: 0;
+            display: flex; align-items: center; justify-content: center;
+            color: var(--text-muted);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+        }
+
+        /* Game footer (movement) */
         .game-footer {
             background: rgba(11,14,19,0.4);
             border-top: 1px solid var(--border);
@@ -1444,12 +1484,13 @@
             }
             h+=`</tr></tbody></table></div>`;
 
-            // === FOOTER: Movement bar (splits + RLM removed when Owls retired) ===
+            // === FOOTER: Movement bar + inline 6h PIN ML home sparkline ===
             const mv = computeMovement(ev, currentOpeners) || {};
             const hasMv = Object.keys(mv.ml||{}).length || Object.keys(mv.spread||{}).length;
+            const sparkId = ev.id || ev.numeric_id;
 
+            h += `<div class="game-footer">`;
             if (hasMv) {
-                h += `<div class="game-footer">`;
                 h += `<div class="movement-bar">`;
                 h += `<span class="mv-src">${mv.src || 'PIN'}</span>`;
                 h += `<div class="mv-items">`;
@@ -1457,8 +1498,17 @@
                 h += renderMovement(mv, 'SPR', 'spread', away, home);
                 h += renderMovement(mv, 'TOT', 'total', 'Over', 'Under');
                 h += `</div></div>`;
+            }
+            // Sparkline placeholder — populated by drawSparklines() after the
+            // batch /api/odds/history-batch fetch resolves. Title bar shows
+            // what the user is looking at.
+            if (sparkId) {
+                h += `<div class="spark-wrap">`;
+                h += `<div class="spark-label"><span class="spark-tag">PIN</span> ${esc(home)} ML <span class="spark-range">6H</span></div>`;
+                h += `<div class="spark-canvas-wrap"><canvas class="js-spark" data-mid="${esc(sparkId)}"></canvas><div class="spark-empty js-spark-empty" data-mid="${esc(sparkId)}" style="display:none">no PIN history yet</div></div>`;
                 h += `</div>`;
             }
+            h += `</div>`;
 
             h+=`</div>`;
         }
@@ -1478,6 +1528,110 @@
             board.id = 'board-back';
             back.id = 'board';
             window.scrollTo(0, scrollY);
+            // Inline 6h PIN ML home sparklines for every game card.
+            // Fires after the swap so the canvases exist in the visible board.
+            drawSparklines();
+        });
+    }
+
+    /* ─── Inline 6H PIN ML sparklines per game card ─── */
+    let _sparkData = null;
+    const _sparkInstances = {};
+
+    // American → implied probability so the chart axis is continuous around
+    // the +100/-100 favorite/dog flip (American odds have a 200-cent
+    // discontinuity right there).
+    function _amerToProb(p) {
+        if (p == null || !Number.isFinite(p)) return null;
+        if (p > 0) return 100 / (p + 100);
+        if (p < 0) return -p / (-p + 100);
+        return 0.5;
+    }
+
+    async function fetchSparklineBatch() {
+        try {
+            const resp = await authFetch(`/api/odds/history-batch?sport=${activeSport}`);
+            if (!resp) return;
+            const data = await resp.json();
+            _sparkData = (data && data.ok) ? (data.events || {}) : {};
+        } catch (e) {
+            _sparkData = {};
+            console.warn('history-batch:', e);
+        }
+        drawSparklines();
+    }
+
+    function drawSparklines() {
+        if (typeof Chart === 'undefined') return;
+        if (!_sparkData) return;  // first load — fetchSparklineBatch will retrigger
+        const canvases = document.querySelectorAll('#board canvas.js-spark');
+        canvases.forEach(canvas => {
+            const mid = canvas.dataset.mid;
+            const series = _sparkData[mid] || [];
+            const emptyEl = document.querySelector(`#board .js-spark-empty[data-mid="${mid}"]`);
+            // Destroy prior instance for this canvas (board re-renders swap nodes)
+            const prior = _sparkInstances[mid];
+            if (prior) { try { prior.destroy(); } catch {} delete _sparkInstances[mid]; }
+            if (!series.length) {
+                canvas.style.display = 'none';
+                if (emptyEl) emptyEl.style.display = '';
+                return;
+            }
+            canvas.style.display = '';
+            if (emptyEl) emptyEl.style.display = 'none';
+
+            const points = series
+                .map(p => ({ x: new Date(p.ts).valueOf(), y: _amerToProb(p.price), _amer: p.price }))
+                .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+            if (!points.length) {
+                canvas.style.display = 'none';
+                if (emptyEl) emptyEl.style.display = '';
+                return;
+            }
+            const last = points[points.length - 1];
+            points.push({ x: Date.now(), y: last.y, _amer: last._amer });
+
+            _sparkInstances[mid] = new Chart(canvas.getContext('2d'), {
+                type: 'line',
+                data: { datasets: [{
+                    data: points,
+                    borderColor: '#fbbf24',
+                    backgroundColor: 'rgba(251,191,36,0.10)',
+                    fill: true,
+                    pointRadius: 0,
+                    pointHoverRadius: 3,
+                    borderWidth: 1.5,
+                    stepped: 'after',
+                    tension: 0,
+                }] },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            backgroundColor: '#13171e',
+                            borderColor: '#1e2530', borderWidth: 1,
+                            displayColors: false,
+                            callbacks: {
+                                title: items => new Date(items[0].parsed.x).toLocaleString('en-US', {
+                                    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+                                }),
+                                label: item => {
+                                    const v = item.raw._amer;
+                                    return v > 0 ? '+' + v : '' + v;
+                                },
+                            },
+                        },
+                    },
+                    scales: {
+                        x: { type: 'time', display: false, grid: { display: false } },
+                        y: { display: false, grid: { display: false } },
+                    },
+                    elements: { line: { borderJoinStyle: 'round' } },
+                },
+            });
         });
     }
 
@@ -1550,7 +1704,14 @@
         ]).then(([op, scnOps]) => {
             currentOpeners = op;
             scannerOpeners = scnOps;
+            // Sparkline data is per-sport; wipe before re-fetching for new sport.
+            _sparkData = null;
+            for (const k of Object.keys(_sparkInstances)) {
+                try { _sparkInstances[k].destroy(); } catch {}
+                delete _sparkInstances[k];
+            }
             loadOdds(true);
+            fetchSparklineBatch();
         });
     };
 
@@ -1579,6 +1740,7 @@
         currentOpeners = op;
         scannerOpeners = scnOps;
         await loadOdds();
+        fetchSparklineBatch();
         // Adaptive polling. Server hits we make on each tick:
         //   - Supabase READ (free, no API credits)
         //   - ESPN scoreboard (free, server-cached 30s)
@@ -1597,7 +1759,15 @@
         if (window._loadOddsTimer) clearTimeout(window._loadOddsTimer);
         const delay = _hasLiveOnBoard() ? 30000 : 90000;
         window._loadOddsTimer = setTimeout(async () => {
-            try { await loadOdds(); } finally { scheduleNextLoad(); }
+            try {
+                await loadOdds();
+                // Sparklines refresh too (cron writes new PIN snapshots every
+                // 30 min; a refresh between cron runs is a no-op for the chart
+                // but cheap — single batched Supabase read per sport).
+                fetchSparklineBatch();
+            } finally {
+                scheduleNextLoad();
+            }
         }, delay);
     }
     loadAndStart();
