@@ -2,14 +2,15 @@ name: Odds Ingest — Poll
 
 # Kahla House odds ingest via The Odds API (v4).
 #
-# One API call per sport hits /v4/sports/{sport_key}/odds with markets=h2h,
-# spreads,totals and regions=us. Persists book_snapshots to Supabase, deduped:
-# only writes when a (market, book, market_type, side)'s price/line changes.
-# Powers the line-movement charts and the Odds Board on thekahlahouse.com.
+# One API call per sport hits /v4/sports/{sport_key}/odds with
+#   markets=h2h,spreads,totals
+#   regions=us,eu          ← EU is required for Pinnacle (it's not in US region)
+# Persists book_snapshots to Supabase, deduped: only writes when a
+# (market, book, market_type, side)'s price/line changes.
 #
 # Cost math (The Odds API charges credits = markets × regions per call):
-#   3 markets × 1 region = 3 credits per call
-#   7 sports × 4 calls/hour × 24h × 30 days = 20,160 calls/month
+#   3 markets × 2 regions = 6 credits per call
+#   7 sports × 2 calls/hour × 24h × 30 days = 10,080 calls/month
 #   = 60,480 credits/month, fits in the $59 100K-credit tier
 #
 # Required GitHub repo secrets:
@@ -21,11 +22,11 @@ name: Odds Ingest — Poll
 
 on:
   schedule:
-    # Primary trigger is the external cron-job.org workflow_dispatch every
-    # 15 min. GitHub's native schedule is the fallback at the same interval
-    # (it drifts a bit but that's fine — both can fire and the dedup logic
-    # in scrapers/odds_api.py prevents redundant Supabase writes).
-    - cron: "*/15 * * * *"
+    # 30-min cadence, set this way because adding the EU region (required
+    # for Pinnacle) doubled the per-call credit cost. cron-job.org is the
+    # primary trigger via workflow_dispatch; this GitHub-native cron is
+    # the fallback.
+    - cron: "*/30 * * * *"
   workflow_dispatch:          # manual trigger + cron-job.org primary
 
 concurrency:

@@ -41,21 +41,26 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `/dashboard` | `dashboard.html` | admin only | Polymarket P&L Dashboard — positions, closed trades, bet slip |
 
 > **Odds-ingest cron (`kahla-scanner/`)**: minimal Python subproject at
-> `kahla-scanner/` runs `python -m scrapers.odds_api` every 15 min via GitHub
+> `kahla-scanner/` runs `python -m scrapers.odds_api` every 30 min via GitHub
 > Actions (`.github/workflows/scanner-poll.yml`), driven by an external
-> cron-job.org trigger with a 15-min GitHub-native fallback. It hits The
+> cron-job.org trigger with a 30-min GitHub-native fallback. It hits The
 > Odds API (https://the-odds-api.com) for `/v4/sports/{sport_key}/odds`
-> with markets=h2h,spreads,totals,regions=us, and writes deduped rows to
-> Supabase `book_snapshots` for every (market, book, market_type, side).
-> Powers BOTH the live Odds Board AND the line-movement chart modal —
-> Flask reads from Supabase, no live odds-vendor API calls from `/api/odds`.
+> with `markets=h2h,spreads,totals` and `regions=us,eu` (EU required for
+> Pinnacle), writes deduped rows to Supabase `book_snapshots` for every
+> (market, book, market_type, side). Powers BOTH the live Odds Board AND
+> the line-movement chart modal — Flask reads from Supabase, no live
+> odds-vendor API calls from `/api/odds`.
+>
+> Cost: 6 credits/call × 7 sports × 2 calls/hr × 24h × 30d = 60K credits/mo
+> on the $59/100K-credit tier.
 >
 > Owls Insight was the prior provider; retired April 2026 due to coverage
 > gaps. Brier/signals/Telegram pipeline was retired earlier in the same
 > spring cleanup. Player Props, live scores, and Circa betting splits
 > were removed at the same time as Owls — none of them came in The Odds
 > API equivalent and the user opted to drop the features rather than pay
-> a second provider.
+> a second provider. **Circa is not available in The Odds API at all** —
+> known data gap; Circa was a unique Owls feature.
 
 ### API Routes
 
@@ -205,11 +210,13 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 
 **Auth**: `?api_key=...` query param (NOT a Bearer header — common gotcha)
 **Plan**: $59/mo, 100K credits/mo, "All sports / All bookmakers / All markets"
-**Cost formula**: each call to `/odds` costs `markets × regions` credits. We send `markets=h2h,spreads,totals` (3) and `regions=us` (1) → **3 credits per call**. With 7 sports × 4 calls/hr × 24h × 30d = 60,480 credits/mo, comfortably inside the 100K budget.
+**Cost formula**: each call to `/odds` costs `markets × regions` credits. We send `markets=h2h,spreads,totals` (3) and `regions=us,eu` (2) → **6 credits per call**. With 7 sports × 2 calls/hr × 24h × 30d = 60,480 credits/mo, fits in the 100K budget.
+
+> **Region gotcha**: Pinnacle is in the `eu` region, NOT `us`. Without `eu` in the regions param we'd get zero PIN data — defeating the whole sharp-tracking purpose. The doubled credit cost is why the cron runs every 30 min instead of every 15.
 
 ### Endpoint Used
 
-`GET /v4/sports/{sport_key}/odds?regions=us&markets=h2h,spreads,totals&oddsFormat=american&dateFormat=iso&api_key=KEY`
+`GET /v4/sports/{sport_key}/odds?regions=us,eu&markets=h2h,spreads,totals&oddsFormat=american&dateFormat=iso&api_key=KEY`
 
 Response: a top-level JSON array of events, each with a `bookmakers` list, each with a `markets` list (`h2h`/`spreads`/`totals`), each with an `outcomes` list. See `kahla-scanner/scrapers/odds_api.py` for the parse logic.
 

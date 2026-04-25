@@ -1,15 +1,18 @@
 """The Odds API → Supabase ingest.
 
 Replaces the retired Owls Insight scraper. Hits /v4/sports/{sport}/odds
-for each enabled sport, normalizes to BookSnapshot rows, and writes
+for each enabled sport with regions=us,eu (EU is required for Pinnacle),
+markets=h2h,spreads,totals, normalizes to BookSnapshot rows, and writes
 deduped (only-on-change) rows to the same `book_snapshots` table the
 charts read from.
 
 API ref: https://the-odds-api.com/liveapi/guides/v4/
 
 Books written (short codes used in book_snapshots.book):
-  PIN, DK, FD, MGM, CAE, HR, BET365, BR, BOL, CIR (if returned)
-  Any unmapped book code is stored as-is (uppercase) so we never lose data.
+  US region: DK, FD, MGM, CAE, HR, BET365, BR, BOL, LV
+  EU region: PIN, plus any other EU book Odds API returns (passed through
+             uppercased by short-code mapping)
+  Note: Circa is NOT in The Odds API at all — that's a known data gap.
 
 CLI:
   python -m scrapers.odds_api                  # all SPORTS_ENABLED sports
@@ -91,7 +94,12 @@ def fetch_odds(sport_code: str) -> list[dict[str, Any]] | None:
     url = f"{ODDS_API_BASE}/sports/{sport_key}/odds"
     params = {
         "api_key":     _api_key(),   # Odds API uses snake_case here, not "apiKey"
-        "regions":     "us",
+        # `us,eu` because Pinnacle is in the EU region, not US — without it
+        # we'd lose PIN entirely (the sharpest book and the whole point of
+        # the line-movement chart). Cost = markets × regions = 3 × 2 = 6
+        # credits per call. Cron cadence is set to 30 min in the workflow
+        # to fit the $59/100K-credit tier (60K credits/mo).
+        "regions":     "us,eu",
         "markets":     "h2h,spreads,totals",
         "oddsFormat":  "american",
         "dateFormat":  "iso",
