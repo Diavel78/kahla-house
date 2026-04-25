@@ -1906,6 +1906,10 @@
                     <button class="chart-pill" data-market="spread" onclick="setChartMarket('spread')">Spread</button>
                     <button class="chart-pill" data-market="total" onclick="setChartMarket('total')">Total</button>
                 </div>
+                <div class="chart-pill-row" id="chartSideRow">
+                    <span class="label">SIDE</span>
+                    <!-- pills built dynamically per market + teams -->
+                </div>
                 <div class="chart-pill-row" id="chartSpanRow">
                     <span class="label">RANGE</span>
                     <button class="chart-pill" data-span="15m" onclick="setChartSpan('15m')">15m</button>
@@ -1946,12 +1950,37 @@
         const state = {
             sport: null, home: '', away: '', commence: '',
             market: 'ml',
+            side: 'home',  // 'home'|'away' for ml/spread, 'over'|'under' for total
             span: '24h',
             enabled: new Set(CHART_BOOKS.filter(b=>b.defaultOn).map(b=>b.code)),
             data: null,
             chart: null,
             inflight: 0,
         };
+
+        function sidesForMarket(market) {
+            return market === 'total' ? ['over', 'under'] : ['away', 'home'];
+        }
+        function defaultSide(market) {
+            return market === 'total' ? 'over' : 'home';
+        }
+        function sideLabel(market, side) {
+            if (market === 'total') return side === 'over' ? 'Over' : 'Under';
+            return side === 'home' ? state.home : state.away;
+        }
+
+        function buildSidePills() {
+            const row = document.getElementById('chartSideRow');
+            while (row.children.length > 1) row.removeChild(row.lastChild);
+            for (const side of sidesForMarket(state.market)) {
+                const btn = document.createElement('button');
+                btn.className = 'chart-pill' + (state.side === side ? ' active' : '');
+                btn.textContent = sideLabel(state.market, side);
+                btn.dataset.side = side;
+                btn.onclick = () => { state.side = side; buildSidePills(); renderChart(); };
+                row.appendChild(btn);
+            }
+        }
 
         function bookByCode(code) { return CHART_BOOKS.find(b => b.code === code); }
 
@@ -1979,7 +2008,13 @@
 
         window.setChartMarket = function(m) {
             state.market = m;
+            // Switching market may invalidate the current side (e.g. from
+            // 'home' to a Total chart) — reset to the market's default side.
+            if (!sidesForMarket(m).includes(state.side)) {
+                state.side = defaultSide(m);
+            }
             setActivePill('chartMarketRow', 'market', m);
+            buildSidePills();
             fetchAndRender();
         };
         window.setChartSpan = function(s) {
@@ -2041,40 +2076,37 @@
             canvas.style.display = '';
             empty.style.display  = 'none';
 
-            // Sides per market
-            const sides = data.market === 'total' ? ['over', 'under'] : ['away', 'home'];
-            const sideLabel = { home: state.home, away: state.away, over: 'Over', under: 'Under' };
+            // Only plot the currently selected side. Showing both sides at
+            // once forces the Y-axis to span both ML legs (e.g. -150 to +130),
+            // which squashes any actual movement into a flat line.
+            const side = state.side;
 
             const datasets = [];
-            const nowIso = new Date().toISOString();
             for (const b of CHART_BOOKS) {
                 if (!state.enabled.has(b.code)) continue;
                 const byBook = (data.books || {})[b.code];
                 if (!byBook) continue;
-                for (const side of sides) {
-                    const arr = byBook[side];
-                    if (!arr || !arr.length) continue;
-                    // Convert ISO strings to Unix ms so Chart.js's time scale
-                    // doesn't have to guess timezone parsing.
-                    // Carry the last value forward to "now" so the step extends
-                    // to the right edge of the chart instead of stopping mid-graph.
-                    const points = arr
-                        .map(p => ({ x: new Date(p.ts).valueOf(), y: p.price, _line: p.line }))
-                        .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
-                    const last = points[points.length - 1];
-                    if (last) points.push({ x: Date.now(), y: last.y, _line: last._line });
-                    datasets.push({
-                        label: b.label + ' ' + (sideLabel[side] || side),
-                        data: points,
-                        borderColor: b.color,
-                        backgroundColor: b.color + '33',
-                        borderDash: side === 'away' || side === 'over' ? [5, 5] : [],
-                        pointRadius: 0,
-                        pointHoverRadius: 4,
-                        borderWidth: 2,
-                        tension: 0.35,
-                    });
-                }
+                const arr = byBook[side];
+                if (!arr || !arr.length) continue;
+                // Convert ISO strings to Unix ms so Chart.js's time scale
+                // doesn't have to guess timezone parsing.
+                // Carry the last value forward to "now" so the line extends
+                // to the right edge of the chart instead of stopping mid-graph.
+                const points = arr
+                    .map(p => ({ x: new Date(p.ts).valueOf(), y: p.price, _line: p.line }))
+                    .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+                const last = points[points.length - 1];
+                if (last) points.push({ x: Date.now(), y: last.y, _line: last._line });
+                datasets.push({
+                    label: b.label,  // side is already shown in the SIDE pill row
+                    data: points,
+                    borderColor: b.color,
+                    backgroundColor: b.color + '33',
+                    pointRadius: 0,
+                    pointHoverRadius: 4,
+                    borderWidth: 2,
+                    tension: 0.35,
+                });
             }
 
             if (!datasets.length) {
@@ -2084,12 +2116,12 @@
                 return;
             }
 
-            // Header meta: market label + sample count
+            // Header meta: market + side label + sample count
             const totalPoints = datasets.reduce((n, d) => n + d.data.length - 1, 0);
             const mktLabel = data.market === 'moneyline' ? 'Moneyline'
                           : data.market === 'spread' ? 'Spread'
                           : 'Total';
-            meta.textContent = `${mktLabel} · ${datasets.length} series · ${totalPoints} samples`;
+            meta.textContent = `${mktLabel} · ${sideLabel(state.market, side)} · ${totalPoints} samples`;
 
             const ctx = canvas.getContext('2d');
             state.chart = new Chart(ctx, {
@@ -2158,11 +2190,13 @@
             state.away     = opts.away;
             state.commence = opts.commence;
             state.market   = 'ml';
+            state.side     = defaultSide('ml');
             state.span     = '24h';
             state.enabled  = new Set(CHART_BOOKS.filter(b=>b.defaultOn).map(b=>b.code));
             document.getElementById('chartHdrTitle').textContent = opts.away + ' @ ' + opts.home;
             setActivePill('chartMarketRow', 'market', 'ml');
             setActivePill('chartSpanRow', 'span', '24h');
+            buildSidePills();
             buildBookPills();
             document.getElementById('chartModalBg').classList.add('open');
             fetchAndRender();
