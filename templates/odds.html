@@ -1940,7 +1940,7 @@
             { code: 'MGM', label: 'MGM', color: '#a855f7', defaultOn: false },
             { code: 'CAE', label: 'CAE', color: '#f97316', defaultOn: false },
             { code: 'HR',  label: 'HR',  color: '#ec4899', defaultOn: false },
-            { code: 'NVG', label: 'NVG', color: '#84cc16', defaultOn: false },
+            // NVG (Novig) intentionally excluded — not legal in Rob's state.
         ];
 
         const state = {
@@ -2054,11 +2054,15 @@
                 for (const side of sides) {
                     const arr = byBook[side];
                     if (!arr || !arr.length) continue;
+                    // Convert ISO strings to Unix ms so Chart.js's time scale
+                    // doesn't have to guess timezone parsing.
                     // Carry the last value forward to "now" so the step extends
                     // to the right edge of the chart instead of stopping mid-graph.
-                    const points = arr.map(p => ({ x: p.ts, y: p.price, _line: p.line }));
+                    const points = arr
+                        .map(p => ({ x: new Date(p.ts).valueOf(), y: p.price, _line: p.line }))
+                        .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
                     const last = points[points.length - 1];
-                    if (last) points.push({ x: nowIso, y: last.y, _line: last._line });
+                    if (last) points.push({ x: Date.now(), y: last.y, _line: last._line });
                     datasets.push({
                         label: b.label + ' ' + (sideLabel[side] || side),
                         data: points,
@@ -2096,7 +2100,8 @@
                     responsive: true,
                     maintainAspectRatio: false,
                     interaction: { mode: 'nearest', intersect: false },
-                    parsing: false,
+                    // Chart.js needs default parsing enabled so the time
+                    // scale can handle our ISO-string x values.
                     plugins: {
                         legend: {
                             position: 'bottom',

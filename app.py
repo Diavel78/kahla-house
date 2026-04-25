@@ -1725,8 +1725,9 @@ _SCANNER_SPORT_FROM_OWLS = {
 }
 
 # Books we surface on the chart. POLY excluded — its prices are 0-1
-# (probability) not American odds and would need de-vig conversion.
-_CHART_BOOKS = ["PIN", "CIR", "DK", "FD", "MGM", "CAE", "HR", "NVG"]
+# (probability) not American odds. NVG (Novig) excluded too — not legal
+# in Rob's state, no point graphing it.
+_CHART_BOOKS = ["PIN", "CIR", "DK", "FD", "MGM", "CAE", "HR"]
 
 # `since` query param  ->  timedelta. Used to bound the snapshot query.
 _HISTORY_SPANS = {
@@ -1777,7 +1778,7 @@ def api_odds_history():
           BOOK_CODE: { side: [{ts, price, line}, ...], ... }, ...
       } }
 
-    Books returned: PIN, CIR, DK, FD, MGM, CAE, HR, NVG. POLY skipped.
+    Books returned: PIN, CIR, DK, FD, MGM, CAE, HR. POLY + NVG excluded.
     """
     sb = get_supabase()
     if sb is None:
