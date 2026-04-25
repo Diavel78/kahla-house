@@ -995,21 +995,83 @@
     const ALL_KNOWN_BOOKS = ['pinnacle','draftkings','fanduel','betmgm','caesars','hardrock','betonline'];
 
     function getOrderedBooks(){
-        // Build master list: user-ordered books first, then any remaining known books
+        // The book selector only ever shows books in ALL_KNOWN_BOOKS — that
+        // matches the server-side _ALLOWED_BOOKS allowlist. Stale Firestore
+        // preferences from the Owls era (POLY/NOV/KAL/STN/etc) are silently
+        // dropped. Random Odds API EU books that leak into responses are
+        // also dropped from the selector.
+        const allowed = new Set(ALL_KNOWN_BOOKS);
         const ordered = [];
         const seen = new Set();
-        // Respect user's custom order
-        for(const b of bookOrder) { if(!seen.has(b)) { ordered.push(b); seen.add(b); } }
-        // Add any known books not yet in the order
+        // Respect user's custom order, but only for books that are still allowed
+        for(const b of bookOrder) { if(allowed.has(b) && !seen.has(b)) { ordered.push(b); seen.add(b); } }
+        // Append any known books not yet in the order
         for(const b of ALL_KNOWN_BOOKS) { if(!seen.has(b)) { ordered.push(b); seen.add(b); } }
-        // Add any API-returned books we somehow don't know about
-        for(const b of (oddsData.books||[])) { if(!seen.has(b)) { ordered.push(b); seen.add(b); } }
         bookOrder = ordered;
         return ordered;
     }
 
     function getBooks(){
         return getOrderedBooks().filter(b=>enabledBooks.has(b));
+    }
+
+    /* Compare current PIN line vs the captured opener for each market.
+       PIN-only post-Owls. Returns null if no PIN data or no opener stored.
+       Includes a JIT backfill: if the saved opener is missing a market
+       (e.g. game tracked since before that market opened), we accept the
+       current PIN line as the opener for that one market. */
+    function computeMovement(ev, openers) {
+        const eid = ev.numeric_id || ev.id;
+        const opener = openers[eid];
+        if (!opener) return null;
+        const pin = (ev.books || {}).pinnacle;
+        if (!pin) return null;
+        const src = opener.src || 'PIN';
+
+        // JIT backfill of missing markets
+        if (!Object.keys(opener.ml || {}).length && Object.keys(pin.moneyline || {}).length) {
+            opener.ml = opener.ml || {};
+            for (const [t, p] of Object.entries(pin.moneyline)) if (p != null) opener.ml[t] = p;
+        }
+        if (!Object.keys(opener.spread || {}).length && Object.keys(pin.spread || {}).length) {
+            opener.spread = opener.spread || {};
+            for (const [t, d] of Object.entries(pin.spread)) if (d?.price != null) opener.spread[t] = { price: d.price, point: d.point };
+        }
+        if (!Object.keys(opener.total || {}).length && Object.keys(pin.total || {}).length) {
+            opener.total = opener.total || {};
+            for (const [s, d] of Object.entries(pin.total)) if (d?.price != null) opener.total[s] = { price: d.price, point: d.point };
+        }
+
+        const mv = { ml: {}, spread: {}, total: {}, src };
+        for (const [team, curPrice] of Object.entries(pin.moneyline || {})) {
+            const openPrice = opener.ml?.[team];
+            if (openPrice != null && curPrice != null) {
+                mv.ml[team] = { open: openPrice, current: curPrice, diff: curPrice - openPrice };
+            }
+        }
+        for (const [team, cur] of Object.entries(pin.spread || {})) {
+            const op = opener.spread?.[team];
+            if (op && cur?.price != null) {
+                mv.spread[team] = {
+                    open_price: op.price, open_point: op.point,
+                    current_price: cur.price, current_point: cur.point,
+                    point_diff: (cur.point || 0) - (op.point || 0),
+                    price_diff: cur.price - op.price,
+                };
+            }
+        }
+        for (const [side, cur] of Object.entries(pin.total || {})) {
+            const op = opener.total?.[side];
+            if (op && cur?.price != null) {
+                mv.total[side] = {
+                    open_price: op.price, open_point: op.point,
+                    current_price: cur.price, current_point: cur.point,
+                    point_diff: (cur.point || 0) - (op.point || 0),
+                    price_diff: cur.price - op.price,
+                };
+            }
+        }
+        return mv;
     }
 
     function renderBookPills(){
