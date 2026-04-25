@@ -1604,6 +1604,121 @@ def api_debug_deposits():
     })
 
 
+@app.route("/api/debug-snap")
+@admin_required
+def api_debug_snap():
+    """Diagnostic: counts markets and book_snapshots in Supabase, plus a
+    sample of recent rows. Used to debug why the Odds Board shows empty."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+
+    sport_path = (request.args.get("sport") or "mlb").lower()
+    sport_code = _SPORT_PATH_TO_CODE.get(sport_path, sport_path.upper())
+
+    now = datetime.now(timezone.utc)
+    low = (now - timedelta(hours=6)).isoformat()
+    high = (now + timedelta(days=2)).isoformat()
+
+    out: dict = {
+        "ok": True,
+        "now_iso": now.isoformat(),
+        "sport_path": sport_path,
+        "sport_code": sport_code,
+        "window_low": low,
+        "window_high": high,
+    }
+
+    # Total markets for this sport (no time filter)
+    try:
+        all_mkts = (
+            sb.table("markets")
+            .select("id,event_name,event_start,status")
+            .eq("sport", sport_code)
+            .order("event_start", desc=True)
+            .limit(20)
+            .execute()
+            .data
+            or []
+        )
+        out["recent_markets_any_status_count"] = len(all_mkts)
+        out["recent_markets_sample"] = all_mkts[:10]
+    except Exception as e:
+        out["markets_error"] = str(e)
+
+    # Markets matching the same query Flask /api/odds uses
+    try:
+        windowed = (
+            sb.table("markets")
+            .select("id,event_name,event_start")
+            .eq("sport", sport_code)
+            .eq("status", "active")
+            .gte("event_start", low)
+            .lte("event_start", high)
+            .order("event_start", desc=False)
+            .limit(500)
+            .execute()
+            .data
+            or []
+        )
+        out["windowed_markets_count"] = len(windowed)
+        out["windowed_markets_sample"] = windowed[:10]
+    except Exception as e:
+        out["windowed_markets_error"] = str(e)
+
+    # Recent snapshots count
+    try:
+        recent_snap = (
+            sb.table("book_snapshots")
+            .select("market_id,book,market_type,side,price_american,captured_at")
+            .order("captured_at", desc=True)
+            .limit(10)
+            .execute()
+            .data
+            or []
+        )
+        out["recent_snapshots_sample"] = recent_snap
+    except Exception as e:
+        out["snapshots_error"] = str(e)
+
+    # What does /api/odds actually return?
+    try:
+        evs, books, leagues = _fetch_odds_from_snapshots(sport_path)
+        out["api_odds_events_count"] = len(evs)
+        out["api_odds_books"] = books
+        out["api_odds_first_event"] = evs[0] if evs else None
+    except Exception as e:
+        out["api_odds_error"] = str(e)
+
+    return jsonify(out)
+
+
+@app.route("/debug-snap")
+def debug_snap_page():
+    """Auth'd browser-friendly wrapper for /api/debug-snap."""
+    sport = request.args.get("sport", "mlb")
+    return ('''<!DOCTYPE html><html><head>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>firebase.initializeApp({apiKey:"AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",authDomain:"kahla-house.firebaseapp.com",projectId:"kahla-house"});</script>
+    </head><body style="background:#0b0e13;color:#e2e8f0;font-family:monospace;padding:16px;font-size:11px">
+    <h2 style="color:#f59e0b">Supabase diagnostic — sport=''' + sport + '''</h2>
+    <pre id="out" style="white-space:pre-wrap;word-break:break-word">Loading...</pre>
+    <script>
+    firebase.auth().onAuthStateChanged(async u => {
+        if (!u) { document.getElementById("out").textContent = "Not logged in. Go to / first."; return; }
+        try {
+            const t = await u.getIdToken();
+            const r = await fetch("/api/debug-snap?sport=''' + sport + '''", {headers:{"Authorization":"Bearer "+t}});
+            const d = await r.json();
+            document.getElementById("out").textContent = JSON.stringify(d, null, 2);
+        } catch (e) {
+            document.getElementById("out").textContent = "ERROR: " + e.message;
+        }
+    });
+    </script></body></html>''')
+
+
 @app.route("/debug-deposits")
 def debug_deposits_page():
     """Page that shows all balance changes with auth."""
