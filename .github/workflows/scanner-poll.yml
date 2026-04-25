@@ -1,34 +1,31 @@
 name: Odds Ingest — Poll
 
-# Kahla House odds ingest via Owls Insight.
+# Kahla House odds ingest via The Odds API (v4).
 #
-# One Owls API call per sport returns odds from ~13 books (POLY, PIN, DK, FD,
-# CIR, MGM, CAE, HR, NVG). Persists book_snapshots to Supabase, deduped:
+# One API call per sport hits /v4/sports/{sport_key}/odds with markets=h2h,
+# spreads,totals and regions=us. Persists book_snapshots to Supabase, deduped:
 # only writes when a (market, book, market_type, side)'s price/line changes.
-# Powers the line-movement charts on the Odds Board.
+# Powers the line-movement charts and the Odds Board on thekahlahouse.com.
 #
-# This used to also run divergence/Brier analytics — those have been retired.
-# This workflow now only writes book_snapshots.
+# Cost math (The Odds API charges credits = markets × regions per call):
+#   3 markets × 1 region = 3 credits per call
+#   7 sports × 4 calls/hour × 24h × 30 days = 20,160 calls/month
+#   = 60,480 credits/month, fits in the $59 100K-credit tier
 #
-# Budget: 7 sports × 288 runs/day (every 5min) = ~2K requests/day. Owls
-# MVP+ plan allows 300K/month — we use ~60K/month, well inside the limit.
-#
-# Required secrets:
-#   OWLS_INSIGHT_API_KEY
+# Required GitHub repo secrets:
+#   ODDS_API_KEY         — from the-odds-api.com (paid tier)
 #   SUPABASE_URL
 #   SUPABASE_SERVICE_KEY
 #
-# Optional repo Variable:
-#   SPORTS_ENABLED   (default: NFL,NBA,MLB,NHL,CBB,NCAAF,UFC)
+# To add/remove sports: edit SPORTS_ENABLED below.
 
 on:
   schedule:
-    # Primary trigger is an external cron-job.org job that fires
-    # workflow_dispatch every 5 min (GitHub's native schedule reliably
-    # drifts to 30-40 min actual cadence). This schedule: line stays as
-    # a fallback — runs every 30 min so data still flows if cron-job.org
-    # is down.
-    - cron: "*/30 * * * *"
+    # Primary trigger is the external cron-job.org workflow_dispatch every
+    # 15 min. GitHub's native schedule is the fallback at the same interval
+    # (it drifts a bit but that's fine — both can fire and the dedup logic
+    # in scrapers/odds_api.py prevents redundant Supabase writes).
+    - cron: "*/15 * * * *"
   workflow_dispatch:          # manual trigger + cron-job.org primary
 
 concurrency:
@@ -55,12 +52,10 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Ingest Owls odds (all sports)
+      - name: Ingest odds (all sports)
         env:
-          OWLS_INSIGHT_API_KEY: ${{ secrets.OWLS_INSIGHT_API_KEY }}
+          ODDS_API_KEY:         ${{ secrets.ODDS_API_KEY }}
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          # Hardcoded so it doesn't depend on a repo Variable. Edit here to
-          # add/remove sports. Soccer + Tennis intentionally excluded.
-          SPORTS_ENABLED: NFL,NBA,MLB,NHL,CBB,NCAAF,UFC
-        run: python -m scrapers.owls
+          SPORTS_ENABLED:       NFL,NBA,MLB,NHL,CBB,NCAAF,UFC
+        run: python -m scrapers.odds_api
