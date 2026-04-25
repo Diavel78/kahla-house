@@ -1984,6 +1984,27 @@
 
         function bookByCode(code) { return CHART_BOOKS.find(b => b.code === code); }
 
+        // American odds <-> implied probability (with vig). Used to plot on
+        // a continuous probability Y axis instead of the discontinuous
+        // American-odds scale (where +100 and -100 are the same 50% point
+        // separated by a 200-cent visual cliff).
+        function americanToProb(price) {
+            if (price == null || !Number.isFinite(price)) return null;
+            if (price > 0) return 100 / (price + 100);
+            if (price < 0) return -price / (-price + 100);
+            return 0.5;
+        }
+        function probToAmerican(p) {
+            if (!Number.isFinite(p) || p <= 0 || p >= 1) return null;
+            return p >= 0.5
+                ? Math.round(-p / (1 - p) * 100)
+                : Math.round((1 - p) / p * 100);
+        }
+        function fmtAmerican(v) {
+            if (v == null || !Number.isFinite(v)) return '--';
+            return v > 0 ? '+' + v : '' + v;
+        }
+
         function buildBookPills() {
             const row = document.getElementById('chartBooksRow');
             // Remove all but the first child (the LABEL span)
@@ -2090,13 +2111,23 @@
                 if (!arr || !arr.length) continue;
                 // Convert ISO strings to Unix ms so Chart.js's time scale
                 // doesn't have to guess timezone parsing.
-                // Carry the last value forward to "now" so the line extends
-                // to the right edge of the chart instead of stopping mid-graph.
+                // Y is implied probability, NOT raw American odds. American
+                // has a 200-cent discontinuity at ±100 (both = 50%) so plotting
+                // it linearly draws huge fake cliffs every favorite/dog flip.
+                // Probability is continuous — the tick callback labels each
+                // tick back in American so the user still reads odds, not %.
+                // The original American price is kept in `_american` for the
+                // tooltip.
                 const points = arr
-                    .map(p => ({ x: new Date(p.ts).valueOf(), y: p.price, _line: p.line }))
+                    .map(p => ({
+                        x: new Date(p.ts).valueOf(),
+                        y: americanToProb(p.price),
+                        _american: p.price,
+                        _line: p.line,
+                    }))
                     .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
                 const last = points[points.length - 1];
-                if (last) points.push({ x: Date.now(), y: last.y, _line: last._line });
+                if (last) points.push({ x: Date.now(), y: last.y, _american: last._american, _line: last._line });
                 datasets.push({
                     label: b.label,  // side is already shown in the SIDE pill row
                     data: points,
@@ -2105,7 +2136,11 @@
                     pointRadius: 0,
                     pointHoverRadius: 4,
                     borderWidth: 2,
-                    tension: 0.35,
+                    // Step interpolation — books post a line and sit, then
+                    // jump. A tensioned curve would lie about gradual drift
+                    // that never happened.
+                    stepped: 'after',
+                    tension: 0,
                 });
             }
 
@@ -2157,7 +2192,7 @@
                                 label: item => {
                                     const ds = item.dataset;
                                     const p  = item.raw;
-                                    const american = p.y > 0 ? '+' + p.y : '' + p.y;
+                                    const american = fmtAmerican(p._american);
                                     const line = p._line != null ? ' @ ' + p._line : '';
                                     return ds.label + ': ' + american + line;
                                 },
@@ -2172,11 +2207,18 @@
                             ticks: { color: '#8890a8', font: { family: 'JetBrains Mono, monospace', size: 10 } },
                         },
                         y: {
+                            // Y values are implied probability (0-1). Tick
+                            // labels re-derive American odds so the user sees
+                            // familiar +/- numbers and never a "0" tick.
                             grid: { color: 'rgba(255,255,255,0.04)' },
                             ticks: {
                                 color: '#8890a8',
                                 font: { family: 'JetBrains Mono, monospace', size: 10 },
-                                callback: v => v > 0 ? '+' + v : v,
+                                callback: v => fmtAmerican(probToAmerican(v)),
+                                // Avoid Chart.js trying to find a "0" tick or
+                                // generating evenly-spaced probability ticks
+                                // that map to weird American values.
+                                maxTicksLimit: 6,
                             },
                         },
                     },
