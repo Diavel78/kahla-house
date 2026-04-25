@@ -779,7 +779,6 @@
                 <div class="nav-links">
                     <a href="/" class="nav-link">Home</a>
                     <a href="/odds" class="nav-link active">Odds</a>
-                    <a href="/props" class="nav-link">Props</a>
                     <a href="/dashboard" class="nav-link admin-only" style="display:none">Dashboard</a>
                 </div>
             </div>
@@ -1589,13 +1588,12 @@
             const leagueStr=ev.league||'';
             const best = findBestOdds(ev, books, away, home);
 
-            const sc = ev.score;
-            const isLive = sc && sc.live;
-            const liveClass = isLive ? ' live' : '';
-
             h+=`<div class="game">`;
 
             // === GAME HEADER ===
+            // Live scores were removed when Owls was retired. The Odds API
+            // doesn't provide live scores in the same payload; if you want
+            // them back, wire up the free ESPN scoreboard JSON.
             const chartBtn = `<button class="chart-btn js-chart-btn" title="Line movement"
                 data-sport="${esc(activeSport)}"
                 data-home="${esc(home)}"
@@ -1604,23 +1602,12 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="14 7 21 7 21 14"/></svg>
             </button>`;
 
-            h+=`<div class="ghdr${liveClass}">`;
-            if (isLive) {
-                h+=`<div>`;
-                h+=`<span class="live-badge">LIVE</span>`;
-                h+=`<span class="ghdr-teams">${esc(away)} <span class="score-inline">${sc.away_score ?? '-'} <span class="score-sep">-</span> ${sc.home_score ?? '-'}</span> ${esc(home)}</span>`;
-                const gameState = sc.display_status || sc.period || sc.clock || '';
-                if (gameState) h+=`<span class="game-status">${esc(gameState)}</span>`;
-                h+=`<span class="stale-tag">pre-game odds</span>`;
-                h+=`</div>`;
-                h+=`<div class="ghdr-meta"><span class="ghdr-league">${esc(leagueStr)}</span>${chartBtn}</div>`;
-            } else {
-                h+=`<div>`;
-                h+=`<span class="ghdr-league">${esc(leagueStr)}</span>`;
-                h+=`<span class="ghdr-teams">${esc(away)} <span class="at">@</span> ${esc(home)}</span>`;
-                h+=`</div>`;
-                h+=`<div class="ghdr-meta">${esc(date)} &middot; ${esc(time)} ${chartBtn}</div>`;
-            }
+            h+=`<div class="ghdr">`;
+            h+=`<div>`;
+            h+=`<span class="ghdr-league">${esc(leagueStr)}</span>`;
+            h+=`<span class="ghdr-teams">${esc(away)} <span class="at">@</span> ${esc(home)}</span>`;
+            h+=`</div>`;
+            h+=`<div class="ghdr-meta">${esc(date)} &middot; ${esc(time)} ${chartBtn}</div>`;
             h+=`</div>`;
 
             // === UNIFIED ODDS TABLE ===
@@ -1694,41 +1681,19 @@
             }
             h+=`</tr></tbody></table></div>`;
 
-            // === FOOTER: Movement + Splits ===
+            // === FOOTER: Movement bar (splits + RLM removed when Owls retired) ===
             const mv = computeMovement(ev, currentOpeners) || {};
-            const splits = ev.splits || {};
-            const circa = splits.circa;
-            const dk = splits.dk || splits.draftkings;
-            const rlmSide = detectRLM(mv, splits, away, home);
             const hasMv = Object.keys(mv.ml||{}).length || Object.keys(mv.spread||{}).length;
 
-            if (hasMv || circa || dk || rlmSide) {
+            if (hasMv) {
                 h += `<div class="game-footer">`;
-                if (hasMv) {
-                    h += `<div class="movement-bar">`;
-                    h += `<span class="mv-src">${mv.src || 'CIR'}</span>`;
-                    h += `<div class="mv-items">`;
-                    h += renderMovement(mv, 'ML', 'ml', away, home);
-                    h += renderMovement(mv, 'SPR', 'spread', away, home);
-                    h += renderMovement(mv, 'TOT', 'total', 'Over', 'Under');
-                    if (rlmSide) {
-                        h += `<span class="mv-item"><span class="rlm-tag">RLM ${esc(truncTeam(rlmSide))}</span></span>`;
-                    }
-                    h += `</div></div>`;
-                }
-
-                if (circa || dk) {
-                    const eid = ev.numeric_id || ev.id;
-                    const splitsOp = currentSplitsOpeners[eid] || null;
-                    const lcTs = currentSplitsLastChanged[eid]?.ts;
-                    h += `<div class="splits-bar">`;
-                    h += `<div class="splits-header">Splits${lcTs ? `<span class="splits-ts">updated ${fmtTsAgo(lcTs)}</span>` : ''}</div>`;
-                    h += `<div class="splits-grid">`;
-                    h += renderSplitsRow(circa, dk, 'ML', 'moneyline', away, home, splitsOp);
-                    h += renderSplitsRow(circa, dk, 'SPR', 'spread', away, home, splitsOp);
-                    h += renderSplitsRow(circa, dk, 'TOT', 'total', 'Over', 'Under', splitsOp);
-                    h += `</div></div>`;
-                }
+                h += `<div class="movement-bar">`;
+                h += `<span class="mv-src">${mv.src || 'PIN'}</span>`;
+                h += `<div class="mv-items">`;
+                h += renderMovement(mv, 'ML', 'ml', away, home);
+                h += renderMovement(mv, 'SPR', 'spread', away, home);
+                h += renderMovement(mv, 'TOT', 'total', 'Over', 'Under');
+                h += `</div></div>`;
                 h += `</div>`;
             }
 
@@ -1791,17 +1756,12 @@
             // earliest-seen lines from the 5-min Owls cron, and override the
             // legacy "first time the user opened the page" Firestore values.
             mergeScannerOpenersInto(data.events || []);
-            captureSplitsOpeners(data.events||[], activeSport);
             const n=(data.events||[]).length;
             const t=new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit'});
             status.textContent=`${n} games \u00b7 ${t}`;
             status.className='status';
             renderBookPills();
             if (gamesChanged) renderBoard();
-            // Sync splits last-changed timestamps; re-render if any game's ts bumped
-            syncSplitsLastChanged(data.events||[], activeSport).then(tsChanged => {
-                if (tsChanged && !gamesChanged) renderBoard();
-            });
         }catch(err){
             if(firstLoad){
                 status.textContent='Fetch error';
@@ -1820,16 +1780,12 @@
             body: JSON.stringify({preferences: {odds_sport: s}})
         }).catch(e => console.error('Failed to save sport pref:', e));
         renderSportBar();
-        // Load openers (Firestore + scanner) + splits openers + splits last-changed for new sport
+        // Splits/SHARP-RLM removed when Owls was retired. Just openers + scanner-backed openers.
         Promise.all([
             loadOpeners(s),
-            loadSplitsOpeners(s),
-            loadSplitsLastChanged(s),
             loadScannerOpeners(s),
-        ]).then(([op, splitsOp, splitsLc, scnOps]) => {
+        ]).then(([op, scnOps]) => {
             currentOpeners = op;
-            currentSplitsOpeners = splitsOp;
-            currentSplitsLastChanged = splitsLc;
             scannerOpeners = scnOps;
             loadOdds(true);
         });
@@ -1853,18 +1809,19 @@
         }
 
         renderSportBar();
-        const [op, splitsOp, splitsLc, scnOps] = await Promise.all([
+        const [op, scnOps] = await Promise.all([
             loadOpeners(activeSport),
-            loadSplitsOpeners(activeSport),
-            loadSplitsLastChanged(activeSport),
             loadScannerOpeners(activeSport),
         ]);
         currentOpeners = op;
-        currentSplitsOpeners = splitsOp;
-        currentSplitsLastChanged = splitsLc;
         scannerOpeners = scnOps;
         await loadOdds();
-        setInterval(loadOdds, 15000);
+        // No more user-side polling — odds are written by the 15-min cron and
+        // the page reads from Supabase on each load. Pull-to-refresh to update.
+        // Keep a slow refresh (90s) for users who leave the tab open during
+        // a session — cheap since /api/odds reads cached Supabase data, no
+        // external API hits.
+        setInterval(loadOdds, 90000);
     }
     loadAndStart();
 

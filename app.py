@@ -13,7 +13,6 @@ import secrets
 import functools
 from datetime import datetime, timezone, timedelta
 
-import requests as http_requests
 import firebase_admin
 from firebase_admin import auth as fb_auth, credentials, firestore
 
@@ -30,7 +29,6 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 POLYMARKET_KEY_ID = os.getenv("POLYMARKET_KEY_ID", "")
 POLYMARKET_SECRET_KEY = os.getenv("POLYMARKET_SECRET_KEY", "")
-OWLS_INSIGHT_API_KEY = os.getenv("OWLS_INSIGHT_API_KEY", "")
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32))
@@ -153,11 +151,6 @@ def odds_page():
     resp = make_response(render_template("odds.html"))
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
-
-
-@app.route("/props")
-def props_page():
-    return render_template("props.html")
 
 
 @app.route("/dashboard")
@@ -613,485 +606,221 @@ def parse_activities(client, activities):
 # Owls Insight API helpers
 # ---------------------------------------------------------------------------
 
-OWLS_BASE = "https://api.owlsinsight.com/api/v1"
-OWLS_SPORTS = ["mlb", "nba", "nhl", "nfl", "ncaab", "ncaaf", "mma", "soccer", "tennis"]
-OWLS_CACHE_TTL = 10  # seconds
-
+# Generic in-memory cache (also used by the Polymarket dashboard helpers).
+# Name retained for backwards compat with api_my_bets / api_data.
 _owls_cache = {}
 
 
-def _owls_get(path, params=None):
-    headers = {"Authorization": f"Bearer {OWLS_INSIGHT_API_KEY}"}
-    resp = http_requests.get(f"{OWLS_BASE}{path}", headers=headers,
-                             params=params, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
+# ---------------------------------------------------------------------------
+# Odds Board — read latest snapshots from Supabase (cron-only architecture).
+# ---------------------------------------------------------------------------
+#
+# As of the Owls retirement, the live page no longer hits any odds-vendor
+# API. The 5/15-min `kahla-scanner/scrapers/odds_api.py` cron writes deduped
+# rows to `book_snapshots`; the Odds Board reads the latest row per
+# (market, book, market_type, side) and reconstructs the same JSON shape
+# the frontend used to get from the Owls passthrough.
+#
+# Frontend impact: data freshness drops from "10s server cache" to "15-min
+# cron cadence". For sharp books (PIN, CIR) this is a non-event — they
+# post a line and sit on it for hours. For retail books that thrash, the
+# user sees their value as of the most recent cron run.
+
+# Owls path (lowercase)  ->  scanner sport code stored in markets.sport
+_SPORT_PATH_TO_CODE = {
+    "mlb":   "MLB",
+    "nba":   "NBA",
+    "nhl":   "NHL",
+    "nfl":   "NFL",
+    "ncaab": "CBB",
+    "ncaaf": "NCAAF",
+    "mma":   "UFC",
+}
+
+# book_snapshots.book (uppercase short code)  ->  display key the Odds Board
+# template uses to look up book metadata in its `BL` map. Anything not in
+# this map falls back to lowercased verbatim — no data lost.
+_SHORT_TO_DISPLAY_KEY = {
+    "PIN":    "pinnacle",
+    "DK":     "draftkings",
+    "FD":     "fanduel",
+    "MGM":    "betmgm",
+    "CAE":    "caesars",
+    "HR":     "hardrock",
+    "BET365": "bet365",
+    "BR":     "betrivers",
+    "BOL":    "betonline",
+    "LV":     "lowvig",
+    "CIR":    "circa",
+    "POLY":   "polymarket",
+    "NVG":    "novig",
+}
 
 
-def _owls_get_cached(sport, books):
-    import time
-    cache_key = f"{sport}:{books}"
-    now = time.time()
-    cached = _owls_cache.get(cache_key)
-    if cached and (now - cached["ts"]) < OWLS_CACHE_TTL:
-        return cached["data"], True
-    params = {}
-    if books:
-        params["books"] = books
-    raw = _owls_get(f"/{sport}/odds", params)
-    _owls_cache[cache_key] = {"data": raw, "ts": now}
-    return raw, False
+def _split_event_name(name: str) -> tuple[str, str] | tuple[None, None]:
+    """`event_name` convention is 'Away @ Home'. Returns (away, home) or (None, None)."""
+    if not name:
+        return None, None
+    for sep in (" @ ", " vs ", " v. ", " vs. "):
+        if sep in name:
+            parts = name.split(sep, 1)
+            if len(parts) == 2:
+                return parts[0].strip(), parts[1].strip()
+    return None, None
 
 
-def _fetch_events_cached(sport):
-    """Hit /{sport}/events to get the day's full schedule. Owls's /odds
-    endpoint only returns events that have odds posted by *some* book —
-    so on a Saturday morning, late-day MLB games may not appear there
-    even though they're scheduled. /events returns the full slate so we
-    can merge it in and surface every scheduled matchup, even with empty
-    odds cells until prices post.
+def _fetch_odds_from_snapshots(sport_path: str):
+    """Build Odds Board events list from the latest book_snapshots in Supabase.
+
+    Returns (events, active_books, leagues). Empty lists if Supabase isn't
+    configured or the sport isn't mapped.
     """
-    import time
-    cache_key = f"events:{sport}"
-    now = time.time()
-    cached = _owls_cache.get(cache_key)
-    # 60s TTL — schedules don't change often
-    if cached and (now - cached["ts"]) < 60:
-        return cached["data"]
+    sb = get_supabase()
+    if sb is None:
+        return [], [], []
+
+    sport_code = _SPORT_PATH_TO_CODE.get(sport_path)
+    if not sport_code:
+        return [], [], []
+
+    now = datetime.now(timezone.utc)
+    # Show games from 6h ago (in-progress / just-started) through the next
+    # 2 days. Beyond that is future schedule clutter.
+    low = (now - timedelta(hours=6)).isoformat()
+    high = (now + timedelta(days=2)).isoformat()
+
     try:
-        raw = _owls_get(f"/{sport}/events")
+        markets = (
+            sb.table("markets")
+            .select("id,event_name,event_start")
+            .eq("sport", sport_code)
+            .eq("status", "active")
+            .gte("event_start", low)
+            .lte("event_start", high)
+            .order("event_start", desc=False)
+            .limit(500)
+            .execute()
+            .data
+            or []
+        )
     except Exception:
-        raw = None
-    _owls_cache[cache_key] = {"data": raw, "ts": now}
-    return raw
+        return [], [], []
 
+    if not markets:
+        return [], [], []
 
-def _merge_events_into_odds(sport, events, raw_events):
-    """For every event in `raw_events` not already in `events`, append a
-    bare-bones event with empty `books`. Skipped on parse errors.
-    """
-    if not raw_events:
-        return events
-    # Owls /events response shape varies — accept either {data: [...]} or [...]
-    items = raw_events.get("data") if isinstance(raw_events, dict) else raw_events
-    if not isinstance(items, list):
-        return events
+    market_ids = [m["id"] for m in markets]
 
-    existing_ids = {e.get("id") for e in events if e.get("id")}
-    existing_numeric = {e.get("numeric_id") for e in events if e.get("numeric_id")}
-    for ev in items:
-        if not isinstance(ev, dict):
-            continue
-        eid = ev.get("eventId") or ev.get("id") or ""
-        nid = str(ev.get("id", ""))
-        if not eid or eid in existing_ids or (nid and nid in existing_numeric):
-            continue
-        events.append({
-            "id": eid,
-            "numeric_id": nid,
-            "sport": sport,
-            "home_team": ev.get("home_team", ""),
-            "away_team": ev.get("away_team", ""),
-            "commence_time": ev.get("commence_time", ""),
-            "league": ev.get("league", ""),
-            "status": ev.get("status", ""),
-            "books": {},
-        })
-    events.sort(key=lambda e: e.get("commence_time", ""))
-    return events
-
-
-def _normalize_owls_odds(sport, raw_data):
-    books_data = raw_data.get("data", {})
-    if not isinstance(books_data, dict):
-        return []
-
-    events_map = {}
-    for book_key, book_events in books_data.items():
-        if not isinstance(book_events, list):
-            continue
-        for ev in book_events:
-            eid = ev.get("eventId") or ev.get("id", "")
-            if not eid:
-                continue
-            if eid not in events_map:
-                events_map[eid] = {
-                    "id": eid,
-                    "numeric_id": str(ev.get("id", "")),
-                    "sport": sport,
-                    "home_team": ev.get("home_team", ""),
-                    "away_team": ev.get("away_team", ""),
-                    "commence_time": ev.get("commence_time", ""),
-                    "league": ev.get("league", ""),
-                    "status": ev.get("status", ""),
-                    "books": {},
-                }
-            for bk in ev.get("bookmakers", []):
-                bk_key = bk.get("key", book_key)
-                book_odds = {
-                    "moneyline": {}, "spread": {}, "total": {},
-                    "event_link": bk.get("event_link", ""),
-                }
-                for mkt in bk.get("markets", []):
-                    mkt_key = mkt.get("key", "")
-                    outcomes = mkt.get("outcomes", [])
-                    if mkt_key in ("h2h", "moneyline"):
-                        for o in outcomes:
-                            book_odds["moneyline"][o["name"]] = o.get("price")
-                    elif mkt_key == "spreads":
-                        for o in outcomes:
-                            book_odds["spread"][o["name"]] = {
-                                "price": o.get("price"),
-                                "point": o.get("point"),
-                            }
-                    elif mkt_key == "totals":
-                        for o in outcomes:
-                            book_odds["total"][o["name"]] = {
-                                "price": o.get("price"),
-                                "point": o.get("point"),
-                            }
-                events_map[eid]["books"][bk_key] = book_odds
-
-    return sorted(events_map.values(), key=lambda e: e.get("commence_time", ""))
-
-
-def _fetch_scores(sport):
-    import time
-    cache_key = f"scores:{sport}"
-    now = time.time()
-    cached = _owls_cache.get(cache_key)
-    if cached and (now - cached["ts"]) < 30:
-        return cached["data"], True
+    # Fresh snapshots from the last hour — covers any book that priced
+    # during the most recent cron run.
+    fresh_cutoff = (now - timedelta(hours=1)).isoformat()
     try:
-        raw = _owls_get(f"/{sport}/scores/live")
-        _owls_cache[cache_key] = {"data": raw, "ts": now}
-        return raw, False
+        snaps = (
+            sb.table("book_snapshots")
+            .select("market_id,book,market_type,side,price_american,line,captured_at")
+            .in_("market_id", market_ids)
+            .gte("captured_at", fresh_cutoff)
+            .order("captured_at", desc=True)
+            .limit(50000)
+            .execute()
+            .data
+            or []
+        )
     except Exception:
-        try:
-            raw = _owls_get("/scores/live")
-            _owls_cache[cache_key] = {"data": raw, "ts": now}
-            return raw, False
-        except Exception:
-            return {}, False
+        snaps = []
 
+    # Anchor: latest pre-fresh-window row per (market, book, market_type, side)
+    # not already represented. Sharp books (PIN, CIR) sit on lines for hours
+    # and would otherwise drop off the board entirely.
+    present = {(s["market_id"], s["book"], s["market_type"], s["side"]) for s in snaps}
+    try:
+        anchor_rows = (
+            sb.table("book_snapshots")
+            .select("market_id,book,market_type,side,price_american,line,captured_at")
+            .in_("market_id", market_ids)
+            .lt("captured_at", fresh_cutoff)
+            .order("captured_at", desc=True)
+            .limit(20000)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        anchor_rows = []
 
-def _merge_scores(events, raw_scores, sport):
-    sport_scores = raw_scores.get("events", [])
-    if not sport_scores:
-        raw_data = raw_scores.get("data", {})
-        if isinstance(raw_data, list):
-            sport_scores = raw_data
-        elif isinstance(raw_data, dict):
-            sport_scores = raw_data.get("sports", {}).get(sport, [])
-    if not sport_scores:
-        return events
+    seen: set[tuple] = set()
+    for r in anchor_rows:
+        key = (r["market_id"], r["book"], r["market_type"], r["side"])
+        if key in present or key in seen:
+            continue
+        seen.add(key)
+        snaps.append(r)
 
-    scores_lookup = []
-    for game in sport_scores:
-        away_info = game.get("away", {})
-        home_info = game.get("home", {})
-        away_team = away_info.get("team", {})
-        home_team = home_info.get("team", {})
-        away_name = away_team.get("displayName", "")
-        home_name = home_team.get("displayName", "")
+    # Bucket: market_id -> book -> (market_type, side) -> latest snapshot
+    by_market: dict[str, dict[str, dict[tuple[str, str], dict]]] = {}
+    for s in snaps:
+        bucket = by_market.setdefault(s["market_id"], {}).setdefault(s["book"], {})
+        key = (s["market_type"], s["side"])
+        cur = bucket.get(key)
+        if cur is None or s["captured_at"] > cur["captured_at"]:
+            bucket[key] = s
 
-        status_obj = game.get("status", {})
-        state = ""
-        if isinstance(status_obj, dict):
-            state = status_obj.get("state") or status_obj.get("type", {}).get("description", "")
-        elif isinstance(status_obj, str):
-            state = status_obj
+    # Build response events
+    events_out = []
+    active_books: set[str] = set()
+    for m in markets:
+        away, home = _split_event_name(m.get("event_name", "") or "")
+        if not (away and home):
+            continue
 
-        display_status = game.get("displayStatus") or ""
-        period = game.get("period") or game.get("inning") or ""
-        clock = game.get("displayClock") or game.get("clock") or ""
+        books_block: dict[str, dict] = {}
+        for short_book, mkt_data in (by_market.get(m["id"]) or {}).items():
+            display_key = _SHORT_TO_DISPLAY_KEY.get(short_book, short_book.lower())
+            ml: dict = {}
+            spread: dict = {}
+            total: dict = {}
+            for (mtype, side), s in mkt_data.items():
+                price = s["price_american"]
+                line = s.get("line")
+                if mtype == "moneyline":
+                    team = home if side == "home" else away if side == "away" else None
+                    if team:
+                        ml[team] = price
+                elif mtype == "spread":
+                    team = home if side == "home" else away if side == "away" else None
+                    if team and line is not None:
+                        spread[team] = {"price": price, "point": line}
+                elif mtype == "total":
+                    label = "Over" if side == "over" else "Under" if side == "under" else None
+                    if label and line is not None:
+                        total[label] = {"price": price, "point": line}
+            if ml or spread or total:
+                books_block[display_key] = {
+                    "moneyline": ml,
+                    "spread":    spread,
+                    "total":     total,
+                    "event_link": "",
+                }
+                active_books.add(display_key)
 
-        scores_lookup.append({
-            "teams": frozenset([away_name.lower(), home_name.lower()]),
-            "away_name": away_name,
-            "home_name": home_name,
-            "away_score": away_info.get("score"),
-            "home_score": home_info.get("score"),
-            "state": state,
-            "display_status": str(display_status),
-            "period": str(period),
-            "clock": str(clock),
+        events_out.append({
+            "id":            m["id"],
+            "numeric_id":    m["id"],
+            "sport":         sport_path,
+            "home_team":     home,
+            "away_team":     away,
+            "commence_time": m["event_start"],
+            "league":        sport_path.upper(),
+            "status":        "",
+            "books":         books_block,
         })
 
-    for ev in events:
-        ev_teams = frozenset([ev.get("away_team", "").lower(), ev.get("home_team", "").lower()])
-        for sc in scores_lookup:
-            if ev_teams == sc["teams"]:
-                ev_away = ev.get("away_team", "").lower()
-                base = {
-                    "state": sc["state"],
-                    "display_status": sc["display_status"],
-                    "period": sc["period"],
-                    "clock": sc["clock"],
-                    "live": sc["state"] in ("in", "live", "In Progress"),
-                }
-                if sc["away_name"].lower() == ev_away:
-                    ev["score"] = {**base,
-                        "away_score": sc["away_score"],
-                        "home_score": sc["home_score"],
-                    }
-                else:
-                    ev["score"] = {**base,
-                        "away_score": sc["home_score"],
-                        "home_score": sc["away_score"],
-                    }
-                break
+    leagues = sorted({e["league"] for e in events_out if e.get("league")})
+    sorted_books = sorted(active_books, key=lambda b: (
+        0 if b == "circa" else 1 if b == "pinnacle" else 2, b
+    ))
+    return events_out, sorted_books, leagues
 
-    return events
-
-
-def _fetch_splits(sport):
-    import time
-    cache_key = f"splits:{sport}"
-    now = time.time()
-    cached = _owls_cache.get(cache_key)
-    if cached and (now - cached["ts"]) < OWLS_CACHE_TTL:
-        return cached["data"], True
-    try:
-        raw = _owls_get(f"/{sport}/splits")
-        _owls_cache[cache_key] = {"data": raw, "ts": now}
-        return raw, False
-    except Exception as e:
-        print(f"SPLITS ERROR: {e}")
-        return {}, False
-
-
-def _normalize_splits(raw_splits):
-    splits_map = {}
-    splits_by_teams = {}
-    raw_data = raw_splits.get("data", [])
-    if not isinstance(raw_data, list):
-        return {}, {}
-
-    for ev in raw_data:
-        eid = ev.get("event_id") or ev.get("eventId") or ev.get("id", "")
-        eid = str(eid) if eid else ""
-
-        ev_splits = {}
-        for sp in ev.get("splits", []):
-            book = sp.get("book", "")
-            if not book:
-                continue
-            ev_splits[book] = {
-                "title": sp.get("title", book),
-                "moneyline": sp.get("moneyline", {}),
-                "spread": sp.get("spread", {}),
-                "total": sp.get("total", {}),
-            }
-
-        if ev_splits:
-            has_circa = "circa" in ev_splits
-            if eid:
-                if has_circa or eid not in splits_map:
-                    splits_map[eid] = ev_splits
-            away = ev.get("away_team", "").lower()
-            home = ev.get("home_team", "").lower()
-            if away and home:
-                teams_key = frozenset([away, home])
-                if has_circa or teams_key not in splits_by_teams:
-                    splits_by_teams[teams_key] = ev_splits
-
-    return splits_map, splits_by_teams
-
-
-def _merge_splits(events, splits_map, splits_by_teams=None):
-    if splits_by_teams is None:
-        splits_by_teams = {}
-    for ev in events:
-        nid = str(ev.get("numeric_id", ""))
-        eid = str(ev.get("id", ""))
-        found = splits_map.get(nid) or splits_map.get(eid)
-        if not found:
-            away = ev.get("away_team", "").lower().strip()
-            home = ev.get("home_team", "").lower().strip()
-            if away and home:
-                teams_key = frozenset([away, home])
-                found = splits_by_teams.get(teams_key)
-        ev["splits"] = found if found else {}
-    return events
-
-
-PROPS_CACHE_TTL = 120  # 2 minutes — prop lines move slowly
-
-
-def _fetch_props(sport):
-    """Fetch player props for a sport (2-minute cache)."""
-    import time
-    cache_key = f"props:{sport}"
-    now = time.time()
-    cached = _owls_cache.get(cache_key)
-    if cached and (now - cached["ts"]) < PROPS_CACHE_TTL:
-        return cached["data"], True
-    try:
-        raw = _owls_get(f"/{sport}/props")
-        _owls_cache[cache_key] = {"data": raw, "ts": now}
-        return raw, False
-    except Exception as e:
-        print(f"PROPS ERROR: {e}")
-        return {}, False
-
-
-def _normalize_props(raw_props):
-    """Parse Owls Insight props response into game-grouped player prop structure.
-
-    Actual API format:
-    {
-      "data": [
-        {
-          "gameId": "mlb:Team A@Team B-20260410",
-          "sport": "mlb",
-          "homeTeam": "Team B",
-          "awayTeam": "Team A",
-          "commenceTime": "2026-04-10T01:41:00.000Z",
-          "isLive": false,
-          "books": [
-            {
-              "key": "fanduel",
-              "title": "FanDuel",
-              "props": [
-                {
-                  "playerName": "Fernando Tatis Jr.",
-                  "category": "runs",
-                  "line": 0.5,
-                  "overPrice": 210,
-                  "underPrice": null,
-                  "event_link": "https://..."
-                }
-              ]
-            }
-          ]
-        }
-      ]
-    }
-    """
-    raw_data = raw_props.get("data", [])
-    if not isinstance(raw_data, list):
-        return []
-
-    games = []
-    for ev in raw_data:
-        eid = ev.get("gameId", "")
-        game = {
-            "event_id": str(eid),
-            "away_team": ev.get("awayTeam", ""),
-            "home_team": ev.get("homeTeam", ""),
-            "commence_time": ev.get("commenceTime", ""),
-            "is_live": ev.get("isLive", False),
-            "players": {},
-        }
-
-        for book in ev.get("books", []):
-            bk = book.get("key", "")
-            if not bk:
-                continue
-
-            for prop in book.get("props", []):
-                player_name = prop.get("playerName", "")
-                if not player_name:
-                    continue
-
-                category = prop.get("category", "")
-                line = prop.get("line")
-                over_price = prop.get("overPrice")
-                under_price = prop.get("underPrice")
-                link = prop.get("event_link", "")
-
-                if over_price is None and under_price is None:
-                    continue
-
-                if player_name not in game["players"]:
-                    game["players"][player_name] = {"props": {}}
-
-                prop_label = _prop_market_label(category)
-                prop_key = f"{category}:{line}" if line is not None else category
-
-                if prop_key not in game["players"][player_name]["props"]:
-                    game["players"][player_name]["props"][prop_key] = {
-                        "market_key": category,
-                        "label": prop_label,
-                        "point": line,
-                        "books": {},
-                    }
-
-                game["players"][player_name]["props"][prop_key]["books"][bk] = {
-                    "over": over_price,
-                    "under": under_price,
-                    "point": line,
-                    "link": link,
-                }
-
-        if game["players"]:
-            games.append(game)
-
-    return sorted(games, key=lambda g: g.get("commence_time", ""))
-
-
-def _prop_market_label(category):
-    """Convert API category to human-readable label."""
-    labels = {
-        # MLB
-        "strikeouts": "Strikeouts",
-        "hits": "Hits",
-        "home_runs": "Home Runs",
-        "rbis": "RBIs",
-        "runs": "Runs",
-        "stolen_bases": "Stolen Bases",
-        "total_bases": "Total Bases",
-        "hits_allowed": "Hits Allowed",
-        "walks": "Walks",
-        "earned_runs": "Earned Runs",
-        "pitching_outs": "Pitching Outs",
-        "pitcher_strikeouts": "Strikeouts",
-        # NBA
-        "points": "Points",
-        "rebounds": "Rebounds",
-        "assists": "Assists",
-        "threes": "3-Pointers",
-        "pts_rebs_asts": "Pts+Reb+Ast",
-        "pts_rebs": "Pts+Reb",
-        "pts_asts": "Pts+Ast",
-        "rebs_asts": "Reb+Ast",
-        "blocks": "Blocks",
-        "steals": "Steals",
-        "turnovers": "Turnovers",
-        # NHL
-        "goals": "Goals",
-        "shots_on_goal": "Shots on Goal",
-        "power_play_points": "PP Points",
-        "blocked_shots": "Blocked Shots",
-        "saves": "Saves",
-        # NFL
-        "passing_yards": "Pass Yards",
-        "rushing_yards": "Rush Yards",
-        "receiving_yards": "Rec Yards",
-        "touchdowns": "Touchdowns",
-        "pass_tds": "Pass TDs",
-        "interceptions": "Interceptions",
-        "completions": "Completions",
-        "receptions": "Receptions",
-        "rush_attempts": "Rush Attempts",
-        "tackles_assists": "Tackles+Ast",
-        # Tennis
-        "aces": "Aces",
-        "double_faults": "Double Faults",
-        "games_won": "Games Won",
-        "sets_won": "Sets Won",
-        # MMA
-        "significant_strikes": "Sig. Strikes",
-        "takedowns": "Takedowns",
-    }
-    if category in labels:
-        return labels[category]
-    # Also check with player_ prefix stripped (in case API changes)
-    stripped = category.replace("player_", "")
-    if stripped in labels:
-        return labels[stripped]
-    return category.replace("_", " ").title()
 
 
 # ---------------------------------------------------------------------------
@@ -1364,136 +1093,6 @@ def _cleanup_old_openers(db):
         print(f"Opener cleanup error: {e}")
 
 
-# ---------------------------------------------------------------------------
-# Splits Openers API (Firestore — same pattern as line openers)
-# ---------------------------------------------------------------------------
-
-@app.route("/api/splits-openers", methods=["GET"])
-@firebase_auth_required
-def api_splits_openers_get():
-    """Load first-seen splits (handle %) for a sport from Firestore."""
-    sport = request.args.get("sport", "mlb")
-    try:
-        db = get_db()
-        doc_ref = db.collection("openers").document(f"splits:{sport}")
-        doc = doc_ref.get()
-        if doc.exists:
-            events = doc.to_dict().get("events", {})
-            return jsonify({"ok": True, "events": events})
-        return jsonify({"ok": True, "events": {}})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/splits-openers", methods=["POST"])
-@firebase_auth_required
-def api_splits_openers_save():
-    """Store first-seen splits per game to Firestore (permanent, never override).
-    Body: { "sport": "mlb", "events": { "event_id": { "ml": {...}, "spread": {...}, "total": {...} } } }
-    """
-    body = request.get_json(force=True)
-    sport = body.get("sport", "mlb")
-    new_events = body.get("events", {})
-
-    if not new_events:
-        return jsonify({"ok": True, "saved": 0})
-
-    try:
-        db = get_db()
-        doc_id = f"splits:{sport}"
-        doc_ref = db.collection("openers").document(doc_id)
-        doc = doc_ref.get()
-
-        if doc.exists:
-            existing = doc.to_dict().get("events", {})
-            added = 0
-            for eid, splits_data in new_events.items():
-                if eid not in existing:
-                    existing[eid] = splits_data
-                    added += 1
-                # Never override existing splits openers
-            doc_ref.update({"events": existing})
-        else:
-            doc_ref.set({
-                "sport": sport,
-                "events": new_events,
-                "createdAt": firestore.SERVER_TIMESTAMP,
-            })
-            added = len(new_events)
-
-        return jsonify({"ok": True, "saved": added})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-# ---------------------------------------------------------------------------
-# Splits Last-Changed API (Firestore) — tracks when Circa handle/bets %
-# actually moved per game. Server is authoritative: client POSTs current
-# observed values, server bumps `ts` only when values differ from stored.
-# ---------------------------------------------------------------------------
-
-@app.route("/api/splits-last-changed", methods=["GET"])
-@firebase_auth_required
-def api_splits_last_changed_get():
-    sport = request.args.get("sport", "mlb")
-    try:
-        db = get_db()
-        doc_ref = db.collection("openers").document(f"splits_changed:{sport}")
-        doc = doc_ref.get()
-        if doc.exists:
-            events = doc.to_dict().get("events", {})
-            return jsonify({"ok": True, "events": events})
-        return jsonify({"ok": True, "events": {}})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/splits-last-changed", methods=["POST"])
-@firebase_auth_required
-def api_splits_last_changed_save():
-    """Client POSTs currently observed Circa splits per game (no timestamps).
-    Server compares to stored values and bumps `ts` (ms) only on actual change.
-    Body: { "sport": "mlb", "events": { eid: { "ml": {...}, "spread": {...}, "total": {...} } } }
-    """
-    import time
-    body = request.get_json(force=True)
-    sport = body.get("sport", "mlb")
-    incoming = body.get("events", {}) or {}
-
-    try:
-        db = get_db()
-        doc_ref = db.collection("openers").document(f"splits_changed:{sport}")
-        doc = doc_ref.get()
-        existing = doc.to_dict().get("events", {}) if doc.exists else {}
-        now_ms = int(time.time() * 1000)
-        changed = 0
-
-        for eid, new_vals in incoming.items():
-            if not isinstance(new_vals, dict) or not new_vals:
-                continue
-            prior = existing.get(eid) or {}
-            prior_vals = {k: prior.get(k) for k in ("ml", "spread", "total")}
-            if prior_vals == {k: new_vals.get(k) for k in ("ml", "spread", "total")}:
-                continue
-            entry = {k: new_vals.get(k) for k in ("ml", "spread", "total") if new_vals.get(k) is not None}
-            entry["ts"] = now_ms
-            existing[eid] = entry
-            changed += 1
-
-        if changed:
-            if doc.exists:
-                doc_ref.update({"events": existing})
-            else:
-                doc_ref.set({
-                    "sport": sport,
-                    "events": existing,
-                    "createdAt": firestore.SERVER_TIMESTAMP,
-                })
-
-        return jsonify({"ok": True, "changed": changed, "events": existing})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
 
 # ---------------------------------------------------------------------------
 # API routes — Current user (lightweight role probe for client-side gating)
@@ -1565,68 +1164,20 @@ def api_preferences_save():
 @app.route("/api/odds")
 @firebase_auth_required
 def api_odds():
-    if not OWLS_INSIGHT_API_KEY:
-        return jsonify({"ok": False, "error": "OWLS_INSIGHT_API_KEY not configured"}), 500
-
+    """Return events with latest snapshots from Supabase. Cron-only — no
+    live odds-vendor API call here. Cron writes to book_snapshots every 15
+    min via kahla-scanner/scrapers/odds_api.py."""
     sport = request.args.get("sport", "mlb")
-    books = request.args.get("books", "")
-
-    import time
-    errors = []
-    events = []
-    from_cache = False
-    meta_message = ""
-
-    try:
-        raw, from_cache = _owls_get_cached(sport, books)
-        events = _normalize_owls_odds(sport, raw)
-        meta = raw.get("meta", {})
-        if meta.get("message"):
-            meta_message = meta["message"]
-    except http_requests.HTTPError as e:
-        errors.append(f"{sport}: HTTP {e.response.status_code}")
-    except Exception as e:
-        errors.append(f"{sport}: {e}")
-
-    # Owls's /odds endpoint sometimes only includes events with priced books.
-    # Fall back to /{sport}/events to fill in any scheduled games whose odds
-    # haven't posted yet — the user can at least see the matchup, and the
-    # cells fill in once books price.
-    try:
-        raw_events = _fetch_events_cached(sport)
-        events = _merge_events_into_odds(sport, events, raw_events)
-    except Exception as e:
-        errors.append(f"events: {e}")
-
-    try:
-        raw_splits, _ = _fetch_splits(sport)
-        splits_map, splits_by_teams = _normalize_splits(raw_splits)
-        events = _merge_splits(events, splits_map, splits_by_teams)
-    except Exception as e:
-        errors.append(f"splits: {e}")
-
-    try:
-        raw_scores, _ = _fetch_scores(sport)
-        events = _merge_scores(events, raw_scores, sport)
-    except Exception as e:
-        errors.append(f"scores: {e}")
-
-    active_books = set()
-    leagues = set()
-    for ev in events:
-        active_books.update(ev.get("books", {}).keys())
-        if ev.get("league"):
-            leagues.add(ev["league"])
-
+    events, books, leagues = _fetch_odds_from_snapshots(sport)
     return jsonify({
-        "ok": True,
-        "cached": from_cache,
-        "sport": sport,
-        "events": events,
-        "books": sorted(active_books, key=lambda b: (0 if b == "circa" else 1 if b == "pinnacle" else 2, b)),
-        "leagues": sorted(leagues),
-        "meta_message": meta_message,
-        "errors": errors,
+        "ok":            True,
+        "cached":        False,
+        "sport":         sport,
+        "events":        events,
+        "books":         books,
+        "leagues":       leagues,
+        "meta_message":  "",
+        "errors":        [],
     })
 
 
@@ -1984,159 +1535,6 @@ def api_odds_history():
 # Debug routes (admin only)
 # ---------------------------------------------------------------------------
 
-@app.route("/api/odds/raw")
-@admin_required
-def api_odds_raw():
-    if not OWLS_INSIGHT_API_KEY:
-        return jsonify({"error": "no key"}), 500
-    sport = request.args.get("sport", "mlb")
-    # No book filter by default — show what every book in Owls returned for
-    # the sport. Pass ?books=pinnacle,fanduel explicitly to filter.
-    books = request.args.get("books", "")
-    try:
-        params = {"books": books} if books else {}
-        raw = _owls_get(f"/{sport}/odds", params)
-        return jsonify(raw)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/events/raw")
-@admin_required
-def api_events_raw():
-    """Raw passthrough of Owls /{sport}/events. Used by /debug-odds."""
-    if not OWLS_INSIGHT_API_KEY:
-        return jsonify({"error": "no key"}), 500
-    sport = request.args.get("sport", "mlb")
-    try:
-        raw = _owls_get(f"/{sport}/events")
-        return jsonify(raw)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/odds/debug-markets")
-@firebase_auth_required
-def api_odds_debug_markets():
-    """Show all market keys per book for a sport — helps diagnose missing moneyline."""
-    if not OWLS_INSIGHT_API_KEY:
-        return jsonify({"error": "no key"}), 500
-    sport = request.args.get("sport", "mlb")
-    try:
-        raw = _owls_get(f"/{sport}/odds")
-        books_data = raw.get("data", {})
-        result = {}
-        for book_key, book_events in books_data.items():
-            if not isinstance(book_events, list):
-                continue
-            market_keys = set()
-            game_count = 0
-            ml_count = 0
-            for ev in book_events:
-                game_count += 1
-                for bk in ev.get("bookmakers", []):
-                    for mkt in bk.get("markets", []):
-                        mk = mkt.get("key", "")
-                        market_keys.add(mk)
-                        if mk in ("h2h", "moneyline"):
-                            ml_count += 1
-            result[book_key] = {
-                "games": game_count,
-                "market_keys": sorted(market_keys),
-                "games_with_ml": ml_count,
-            }
-        return jsonify({"ok": True, "sport": sport, "books": result})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/splits/raw")
-@admin_required
-def api_splits_raw():
-    if not OWLS_INSIGHT_API_KEY:
-        return jsonify({"error": "no key"}), 500
-    sport = request.args.get("sport", "mlb")
-    try:
-        raw = _owls_get(f"/{sport}/splits")
-        return jsonify(raw)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/props")
-@firebase_auth_required
-def api_props():
-    """Fetch player props from Owls Insight, normalized by game and player."""
-    if not OWLS_INSIGHT_API_KEY:
-        return jsonify({"ok": False, "error": "OWLS_INSIGHT_API_KEY not configured"}), 500
-
-    sport = request.args.get("sport", "mlb")
-    errors = []
-    games = []
-    from_cache = False
-
-    try:
-        raw, from_cache = _fetch_props(sport)
-        games = _normalize_props(raw)
-    except Exception as e:
-        errors.append(f"props: {e}")
-
-    return jsonify({
-        "ok": True,
-        "cached": from_cache,
-        "sport": sport,
-        "games": games,
-        "errors": errors,
-    })
-
-
-@app.route("/api/props/raw")
-@admin_required
-def api_props_raw():
-    """Debug: raw props response from Owls Insight."""
-    if not OWLS_INSIGHT_API_KEY:
-        return jsonify({"error": "no key"}), 500
-    sport = request.args.get("sport", "mlb")
-    try:
-        raw = _owls_get(f"/{sport}/props")
-        return jsonify(raw)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/scores/raw")
-@admin_required
-def api_scores_raw():
-    if not OWLS_INSIGHT_API_KEY:
-        return jsonify({"error": "no key"}), 500
-    sport = request.args.get("sport", "")
-    try:
-        if sport:
-            try:
-                raw = _owls_get(f"/{sport}/scores/live")
-                return jsonify(raw)
-            except Exception:
-                raw = _owls_get(f"/scores/live", {"sport": sport})
-        else:
-            raw = _owls_get(f"/scores/live")
-        return jsonify(raw)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/realtime/raw")
-@admin_required
-def api_realtime_raw():
-    if not OWLS_INSIGHT_API_KEY:
-        return jsonify({"error": "no key"}), 500
-    sport = request.args.get("sport", "mlb")
-    feed = request.args.get("feed", "realtime")
-    try:
-        raw = _owls_get(f"/{sport}/{feed}")
-        return jsonify(raw)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 
 @app.route("/api/raw")
 @admin_required
@@ -2204,107 +1602,6 @@ def api_debug_deposits():
         "activity_types": type_counts,
         "balance_changes": balance_changes,
     })
-
-
-@app.route("/debug-odds")
-def debug_odds_page():
-    """Auth'd diagnostic comparing Owls /odds vs /events for a sport.
-    Usage: /debug-odds?sport=mlb. Admin token required."""
-    sport = request.args.get("sport", "mlb")
-    return ('''<!DOCTYPE html><html><head>
-    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
-    <script>firebase.initializeApp({apiKey:"AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",authDomain:"kahla-house.firebaseapp.com",projectId:"kahla-house"});</script>
-    </head><body style="background:#0b0e13;color:#e2e8f0;font-family:monospace;padding:20px;font-size:13px">
-    <h2 style="color:#f59e0b;margin-bottom:16px">Owls diagnostic — sport=''' + sport + '''</h2>
-    <div id="summary" style="font-size:16px;margin-bottom:16px;color:#22c55e">Loading…</div>
-    <h3 style="color:#a855f7;margin:20px 0 8px">Per-book event counts (from /odds)</h3>
-    <pre id="bookCounts" style="font-size:11px;color:#8890a8;margin-bottom:16px"></pre>
-    <h3 style="color:#a855f7;margin:20px 0 8px">All scheduled games (sorted by start time)</h3>
-    <pre id="games" style="font-size:11px;color:#8890a8;max-height:60vh;overflow:auto"></pre>
-    <script>
-    function eachEvent(data) {
-        // /odds returns {data:{book:[ev,...]}} ; /events returns {data:[ev,...]} or [ev,...]
-        const out = [];
-        if (!data) return out;
-        const d = data.data ?? data;
-        if (Array.isArray(d)) { for (const ev of d) out.push([null, ev]); return out; }
-        if (typeof d === 'object') {
-            for (const [book, evs] of Object.entries(d)) {
-                if (!Array.isArray(evs)) continue;
-                for (const ev of evs) out.push([book, ev]);
-            }
-        }
-        return out;
-    }
-    function eid(ev) { return ev.id || ev.eventId || null; }
-    firebase.auth().onAuthStateChanged(async u => {
-        if (!u) { document.getElementById("summary").textContent = "Not logged in. Go to / first."; return; }
-        try {
-            const t = await u.getIdToken();
-            const headers = { Authorization: "Bearer " + t };
-            const [oddsResp, evResp] = await Promise.all([
-                fetch("/api/odds/raw?sport=''' + sport + '''", {headers}),
-                fetch("/api/events/raw?sport=''' + sport + '''", {headers}),
-            ]);
-            const oddsD = await oddsResp.json();
-            const evD   = await evResp.json();
-
-            // Per-book counts + all events from /odds
-            const oddsBookCounts = {};
-            const oddsEids = new Set();
-            const eidToInfo = {};
-            for (const [book, ev] of eachEvent(oddsD)) {
-                const id = eid(ev); if (!id) continue;
-                oddsEids.add(id);
-                if (book) oddsBookCounts[book] = (oddsBookCounts[book] || 0) + 1;
-                eidToInfo[id] = {
-                    time: ev.commence_time || "",
-                    teams: (ev.away_team||"?") + " @ " + (ev.home_team||"?"),
-                    src: "odds",
-                };
-            }
-            // /events
-            const eventsEids = new Set();
-            for (const [, ev] of eachEvent(evD)) {
-                const id = eid(ev); if (!id) continue;
-                eventsEids.add(id);
-                if (!eidToInfo[id]) {
-                    eidToInfo[id] = {
-                        time: ev.commence_time || "",
-                        teams: (ev.away_team||"?") + " @ " + (ev.home_team||"?"),
-                        src: "events-only",
-                    };
-                }
-            }
-            const allEids = new Set([...oddsEids, ...eventsEids]);
-
-            const summary = [
-                "/odds   unique events: " + oddsEids.size,
-                "/events unique events: " + eventsEids.size,
-                "merged unique events: " + allEids.size,
-                "in /events only       : " + [...eventsEids].filter(x => !oddsEids.has(x)).length,
-            ];
-            document.getElementById("summary").innerHTML = summary.join("<br>");
-
-            const bookLines = [];
-            for (const [bk, n] of Object.entries(oddsBookCounts).sort((a,b)=>b[1]-a[1])) {
-                bookLines.push(bk.padEnd(14) + " " + n);
-            }
-            document.getElementById("bookCounts").textContent = bookLines.join("\\n");
-
-            const sorted = [...allEids].sort((a,b)=>(eidToInfo[a].time||"").localeCompare(eidToInfo[b].time||""));
-            const gameLines = sorted.map(id => {
-                const info = eidToInfo[id];
-                const tag = info.src === "events-only" ? "  [events-only]" : "";
-                return info.time + "  " + info.teams + tag;
-            });
-            document.getElementById("games").textContent = gameLines.join("\\n");
-        } catch (e) {
-            document.getElementById("summary").textContent = "ERROR: " + e.message;
-        }
-    });
-    </script></body></html>''')
 
 
 @app.route("/debug-deposits")
