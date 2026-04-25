@@ -481,6 +481,12 @@
             border-radius: 6px; margin-right: 8px; animation: live-pulse 1.5s infinite;
         }
         @keyframes live-pulse { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
+        /* FINAL badge — same shape as LIVE but grey + no pulse */
+        .live-badge.final-badge {
+            color: var(--text-secondary);
+            background: var(--surface-2);
+            animation: none;
+        }
         .score-inline { font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 700; color: var(--text); margin: 0 6px; letter-spacing: 1px; }
         .score-sep { color: var(--text-muted); margin: 0 3px; }
         .game-status {
@@ -1320,18 +1326,26 @@
             const leagueStr=ev.league||'';
             const best = findBestOdds(ev, books, away, home);
 
-            const isLive = !!ev.is_live;
             const sc = ev.score;
-            const showScore = !!(sc && (sc.live || sc.state === 'post')) && sc.away_score != null && sc.home_score != null;
+            // ESPN state takes priority when available (post = final, in = live).
+            // Fall back to is_live (set server-side from commence_time<=now) when
+            // ESPN doesn't cover the sport (MMA) or the game isn't matched.
+            const espnFinal = sc && sc.state === 'post';
+            const espnLive  = sc && sc.state === 'in';
+            const isLive    = espnLive || (ev.is_live && !espnFinal);
+            const isFinal   = espnFinal;
+            const showScore = (isLive || isFinal) && sc && sc.away_score != null && sc.home_score != null;
 
             h+=`<div class="game">`;
 
             // === GAME HEADER ===
-            // Live games show a LIVE badge + ESPN score (if scoring data was
-            // available for this sport) + "closing line" tag because we
-            // freeze the displayed odds at event_start. Mid-game retail
-            // twitches were causing whiplash. The chart modal still has
-            // full history if you want to see post-start movement.
+            // Pre-game:    Away @ Home   <date · time>
+            // Live:        [LIVE] Away N - N Home <state>   closing line
+            // Final:       [FINAL] Away N - N Home          closing line
+            //
+            // We freeze the on-board odds at event_start because mid-game
+            // retail twitches were causing whiplash. Chart modal has the
+            // full post-start history if you want to see live movement.
             const chartBtn = `<button class="chart-btn js-chart-btn" title="Line movement"
                 data-sport="${esc(activeSport)}"
                 data-home="${esc(home)}"
@@ -1343,15 +1357,18 @@
             h+=`<div class="ghdr${isLive ? ' live' : ''}">`;
             h+=`<div>`;
             h+=`<span class="ghdr-league">${esc(leagueStr)}</span>`;
-            if (isLive) h+=`<span class="live-badge">LIVE</span>`;
+            if (isLive)  h+=`<span class="live-badge">LIVE</span>`;
+            if (isFinal) h+=`<span class="live-badge final-badge">FINAL</span>`;
             if (showScore) {
                 h+=`<span class="ghdr-teams">${esc(away)} <span class="score-inline">${sc.away_score} <span class="score-sep">-</span> ${sc.home_score}</span> ${esc(home)}</span>`;
-                const stateLabel = sc.display_status || sc.period || sc.clock || '';
-                if (stateLabel) h+=`<span class="game-status">${esc(stateLabel)}</span>`;
+                if (isLive) {
+                    const stateLabel = sc.display_status || sc.period || sc.clock || '';
+                    if (stateLabel) h+=`<span class="game-status">${esc(stateLabel)}</span>`;
+                }
             } else {
                 h+=`<span class="ghdr-teams">${esc(away)} <span class="at">@</span> ${esc(home)}</span>`;
             }
-            if (isLive) h+=`<span class="stale-tag">closing line</span>`;
+            if (isLive || isFinal) h+=`<span class="stale-tag">closing line</span>`;
             h+=`</div>`;
             h+=`<div class="ghdr-meta">${esc(date)} &middot; ${esc(time)} ${chartBtn}</div>`;
             h+=`</div>`;

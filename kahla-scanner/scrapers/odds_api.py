@@ -239,21 +239,27 @@ def build_snapshots(g: OddsApiGame, market_id: str) -> list[BookSnapshot]:
 # Find-or-create market (matches owls.py pattern so existing markets are reused)
 # ---------------------------------------------------------------------------
 
-def _find_or_create_market(g: OddsApiGame, aliases: dict[str, str]) -> str | None:
+def _find_or_create_market(
+    g: OddsApiGame,
+    aliases: dict[str, str],
+    existing: list[dict[str, Any]],
+) -> str | None:
     """Return market_id for this game. Reuses an existing markets row if the
-    teams + commence_time match within MATCH_WINDOW; otherwise inserts a new row.
-
-    The matcher logic mirrors owls.py — same `markets` table, so games already
-    seeded by the old Owls scraper will be reused (no duplicates in Supabase).
+    teams + commence_time match within MATCH_WINDOW; otherwise inserts a new
+    row. `existing` is hoisted out of the caller — pass the same active-markets
+    list to every call within an ingest_sport run to avoid N+1 Supabase reads.
     """
     venue_key = matcher._teams_key(g.home, g.away, aliases)
-    existing = db.list_active_markets(g.sport)
     for row in existing:
-        row_start = matcher._parse_ts(row["event_start"]) if hasattr(matcher, "_parse_ts") \
-                    else _parse_iso(row["event_start"]) or g.commence_time
+        row_start = _parse_iso(row.get("event_start", ""))
+        if row_start is None:
+            # Bad/missing timestamp — skip (was previously falling back to
+            # g.commence_time, which made the window check pass for ANY row
+            # with an unparseable date and matched the wrong game).
+            continue
         if abs(row_start - g.commence_time) > MATCH_WINDOW:
             continue
-        row_away, row_home = matcher._split_event_name(row["event_name"])
+        row_away, row_home = matcher._split_event_name(row.get("event_name", ""))
         if row_home and row_away:
             if matcher._teams_key(row_home, row_away, aliases) == venue_key:
                 return row["id"]
@@ -268,7 +274,18 @@ def _find_or_create_market(g: OddsApiGame, aliases: dict[str, str]) -> str | Non
     )
     try:
         row = db.upsert_market(m)
-        return row.get("id")
+        new_id = row.get("id")
+        # Keep our local list current so subsequent matches in the same run
+        # see the row we just created.
+        if new_id:
+            existing.append({
+                "id":          new_id,
+                "event_name":  m.event_name,
+                "event_start": m.event_start.isoformat(),
+                "sport":       m.sport,
+                "status":      "active",
+            })
+        return new_id
     except Exception as e:
         log.warning("upsert_market failed for %s @ %s: %s", g.away, g.home, e)
         return None
@@ -340,18 +357,22 @@ def ingest_sport(sport_code: str) -> dict[str, int]:
         return counts
 
     aliases = db.list_team_aliases(sport_code)
-    existing_count = len(db.list_active_markets(sport_code))
+    # Hoist the active-markets list out of the per-game loop. Was N+1: 30
+    # MLB games made 30 identical Supabase queries to fetch active markets.
+    # Now: one fetch, mutated in place when a new market is inserted.
+    existing_markets = db.list_active_markets(sport_code)
+    existing_count = len(existing_markets)
 
     all_snaps: list[BookSnapshot] = []
     market_ids: list[str] = []
     for g in games:
-        mid = _find_or_create_market(g, aliases)
+        mid = _find_or_create_market(g, aliases, existing_markets)
         if not mid:
             continue
         market_ids.append(mid)
         all_snaps.extend(build_snapshots(g, mid))
 
-    counts["created"] = max(0, len(db.list_active_markets(sport_code)) - existing_count)
+    counts["created"] = max(0, len(existing_markets) - existing_count)
     counts["matched"] = counts["games"] - counts["created"]
     counts["candidate"] = len(all_snaps)
 
