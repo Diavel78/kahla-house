@@ -1875,8 +1875,8 @@
                     <button class="chart-pill" data-span="30m" onclick="setChartSpan('30m')">30m</button>
                     <button class="chart-pill" data-span="1h" onclick="setChartSpan('1h')">1H</button>
                     <button class="chart-pill" data-span="6h" onclick="setChartSpan('6h')">6H</button>
-                    <button class="chart-pill" data-span="12h" onclick="setChartSpan('12h')">12H</button>
-                    <button class="chart-pill active" data-span="24h" onclick="setChartSpan('24h')">24H</button>
+                    <button class="chart-pill active" data-span="12h" onclick="setChartSpan('12h')">12H</button>
+                    <button class="chart-pill" data-span="24h" onclick="setChartSpan('24h')">24H</button>
                     <button class="chart-pill" data-span="all" onclick="setChartSpan('all')">All</button>
                 </div>
                 <div class="chart-pill-row" id="chartBooksRow">
@@ -1886,7 +1886,7 @@
             <div class="chart-canvas-wrap">
                 <canvas id="chartCanvas"></canvas>
                 <div class="chart-empty" id="chartEmpty" style="display:none">
-                    No movement data captured for this game yet. The Owls ingest runs every 5 minutes — check back shortly.
+                    No movement data captured for this game yet. The Odds API ingest runs every 30 minutes — check back shortly.
                 </div>
             </div>
         </div>
@@ -1895,22 +1895,23 @@
     <script>
     /* ─── Line-movement chart logic (separate scope from initApp) ─── */
     (function(){
+        // Default-on is just PIN (the sharp anchor). The rest are toggles.
+        // Circa removed entirely — not in The Odds API since the Owls swap.
         const CHART_BOOKS = [
             { code: 'PIN', label: 'PIN', color: '#fbbf24', defaultOn: true  },
-            { code: 'CIR', label: 'CIR', color: '#e2e8f0', defaultOn: true  },
-            { code: 'DK',  label: 'DK',  color: '#22c55e', defaultOn: true  },
+            { code: 'DK',  label: 'DK',  color: '#22c55e', defaultOn: false },
             { code: 'FD',  label: 'FD',  color: '#06b6d4', defaultOn: false },
             { code: 'MGM', label: 'MGM', color: '#a855f7', defaultOn: false },
             { code: 'CAE', label: 'CAE', color: '#f97316', defaultOn: false },
             { code: 'HR',  label: 'HR',  color: '#ec4899', defaultOn: false },
-            // NVG (Novig) intentionally excluded — not legal in Rob's state.
+            { code: 'BOL', label: 'BOL', color: '#84cc16', defaultOn: false },
         ];
 
         const state = {
             sport: null, home: '', away: '', commence: '',
             market: 'ml',
             side: 'home',  // 'home'|'away' for ml/spread, 'over'|'under' for total
-            span: '24h',
+            span: '12h',
             enabled: new Set(CHART_BOOKS.filter(b=>b.defaultOn).map(b=>b.code)),
             data: null,
             chart: null,
@@ -2192,11 +2193,11 @@
             state.commence = opts.commence;
             state.market   = 'ml';
             state.side     = defaultSide('ml');
-            state.span     = '24h';
+            state.span     = '12h';
             state.enabled  = new Set(CHART_BOOKS.filter(b=>b.defaultOn).map(b=>b.code));
             document.getElementById('chartHdrTitle').textContent = opts.away + ' @ ' + opts.home;
             setActivePill('chartMarketRow', 'market', 'ml');
-            setActivePill('chartSpanRow', 'span', '24h');
+            setActivePill('chartSpanRow', 'span', '12h');
             buildSidePills();
             buildBookPills();
             document.getElementById('chartModalBg').classList.add('open');

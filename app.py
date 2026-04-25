@@ -898,15 +898,16 @@ def api_openers_scanner():
 
     market_ids = [m["id"] for m in markets]
 
-    # Pull PIN/CIR snapshots ascending — first row per (market, book, mkt, side)
-    # is the opener for that combo. 50K row cap is plenty for one sport's
-    # active slate (typical: a few hundred markets × 8 sides × 2 books).
+    # Pull PIN snapshots ascending — first row per (market, market_type, side)
+    # is the genuine opener for that combo. Pinnacle is the only sharp source
+    # post-Owls; Circa was the historical fallback but isn't returned by The
+    # Odds API at any region, so we just trust PIN.
     try:
         snaps = (
             sb.table("book_snapshots")
-            .select("market_id,book,market_type,side,price_american,line,captured_at")
+            .select("market_id,market_type,side,price_american,line,captured_at")
             .in_("market_id", market_ids)
-            .in_("book", ["PIN", "CIR"])
+            .eq("book", "PIN")
             .order("captured_at", desc=False)
             .limit(50000)
             .execute()
@@ -918,7 +919,7 @@ def api_openers_scanner():
 
     firsts: dict[tuple, dict] = {}
     for r in snaps:
-        key = (r["market_id"], r["book"], r["market_type"], r["side"])
+        key = (r["market_id"], r["market_type"], r["side"])
         if key not in firsts:
             firsts[key] = r
 
@@ -939,25 +940,13 @@ def api_openers_scanner():
             continue
 
         side_to_team = {"home": home_name, "away": away_name}
-        opener: dict = {"ml": {}, "spread": {}, "total": {}, "src": None}
-        used_pin = used_cir = False
+        opener: dict = {"ml": {}, "spread": {}, "total": {}, "src": "PIN"}
 
-        for mkt_type, mkt_key in [("moneyline", "ml"), ("spread", "spread"), ("total", "total")]:
+        for mkt_type, _mkt_key in [("moneyline", "ml"), ("spread", "spread"), ("total", "total")]:
             for side in ["home", "away", "over", "under"]:
-                pin_row = firsts.get((mid, "PIN", mkt_type, side))
-                cir_row = firsts.get((mid, "CIR", mkt_type, side))
-                # Pick whichever was captured first (the actual opener)
-                if pin_row and cir_row:
-                    src_row = pin_row if pin_row["captured_at"] <= cir_row["captured_at"] else cir_row
-                else:
-                    src_row = pin_row or cir_row
+                src_row = firsts.get((mid, mkt_type, side))
                 if not src_row:
                     continue
-                if src_row["book"] == "PIN":
-                    used_pin = True
-                else:
-                    used_cir = True
-
                 price = src_row["price_american"]
                 line = src_row.get("line")
 
@@ -976,13 +965,6 @@ def api_openers_scanner():
 
         if not (opener["ml"] or opener["spread"] or opener["total"]):
             continue
-
-        if used_pin and used_cir:
-            opener["src"] = "PIN+CIR"
-        elif used_pin:
-            opener["src"] = "PIN"
-        elif used_cir:
-            opener["src"] = "CIR"
 
         out.append({
             "home": home_name,
@@ -1365,10 +1347,10 @@ _SCANNER_SPORT_FROM_OWLS = {
     "mma": "UFC",
 }
 
-# Books we surface on the chart. POLY excluded — its prices are 0-1
-# (probability) not American odds. NVG (Novig) excluded too — not legal
-# in Rob's state, no point graphing it.
-_CHART_BOOKS = ["PIN", "CIR", "DK", "FD", "MGM", "CAE", "HR"]
+# Books we surface on the chart. Aligned with the Odds Board allowlist
+# (_ALLOWED_BOOKS). Circa is not in The Odds API at any region; Polymarket
+# uses 0-1 probability not American odds; Novig isn't legal in Rob's state.
+_CHART_BOOKS = ["PIN", "DK", "FD", "MGM", "CAE", "HR", "BOL"]
 
 # `since` query param  ->  timedelta. Used to bound the snapshot query.
 _HISTORY_SPANS = {
@@ -1419,7 +1401,7 @@ def api_odds_history():
           BOOK_CODE: { side: [{ts, price, line}, ...], ... }, ...
       } }
 
-    Books returned: PIN, CIR, DK, FD, MGM, CAE, HR. POLY + NVG excluded.
+    Books returned: PIN, DK, FD, MGM, CAE, HR, BOL.
     """
     sb = get_supabase()
     if sb is None:

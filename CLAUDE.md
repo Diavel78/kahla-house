@@ -70,9 +70,9 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 |---|---|---|
 | `GET /api/me` | Firebase | Lightweight role probe — returns `{uid, role, approved, displayName, email}`. Used by every sub-page to gate UI before loading data. |
 | `GET /api/odds?sport=mlb` | Firebase | Odds Board JSON — built from latest `book_snapshots` per (market, book, market_type, side) in Supabase. Cron-only; no live Odds API call here. Includes anchor sweep so books that haven't priced inside the freshness window still show their last value. |
-| `GET /api/odds/history` | Firebase | Line-movement history for one event from Supabase `book_snapshots`. Params: `sport`, `home`, `away`, `commence` (ISO), `market` (ml/spread/total), `since` (15m/30m/1h/6h/12h/24h/all). Returns step-function-ready data per book per side. Books: PIN/CIR/DK/FD/MGM/CAE/HR. Powers the chart modal. |
+| `GET /api/odds/history` | Firebase | Line-movement history for one event from Supabase `book_snapshots`. Params: `sport`, `home`, `away`, `commence` (ISO), `market` (ml/spread/total), `since` (15m/30m/1h/6h/12h/24h/all). Returns step-function-ready data per book per side. Books: PIN/DK/FD/MGM/CAE/HR/BOL. Chart modal defaults to PIN only at 12H. |
 | `GET/POST /api/openers?sport=mlb` | Firebase | Legacy Firestore openers (fallback for games predating the cron). Permanent per game ID. |
-| `GET /api/openers/scanner?sport=mlb` | Firebase | **Primary opener source.** Earliest PIN/CIR snapshot per (market_type, side) from Supabase `book_snapshots`. Client matches against current events by team + commence_time within ±30 min and merges over Firestore openers. |
+| `GET /api/openers/scanner?sport=mlb` | Firebase | **Primary opener source.** Earliest PIN snapshot per (market_type, side) from Supabase `book_snapshots`. Client matches against current events by team + commence_time within ±30 min and merges over Firestore openers. (Circa was the historical fallback but isn't in The Odds API — PIN-only now.) |
 | `GET/POST /api/preferences` | Firebase | User settings (books, sport, order) in Firestore |
 | `GET /api/my-bets` | **Admin** | Active Polymarket positions (Dashboard only) |
 | `GET /api/data` | **Admin** | Dashboard P&L data (positions, balances, trades) |
