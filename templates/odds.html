@@ -650,70 +650,6 @@
         .mv-arrow { font-size: 16px; }
         .mv-current { font-weight: 700; font-size: 15px; }
         .mv-diff { font-size: 11px; }
-        .rlm-tag {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 10px; font-weight: 700;
-            padding: 4px 12px; border-radius: 6px;
-            background: var(--red-dim); color: var(--red);
-            border: 1px solid rgba(239,68,68,0.25);
-            animation: rlm-pulse 2s infinite;
-        }
-        @keyframes rlm-pulse { 0%,100% { opacity: 1; } 50% { opacity: .6; } }
-
-        /* Splits */
-        .splits-bar {
-            padding: 14px 20px 16px;
-        }
-        .splits-header {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 11px; font-weight: 700; text-transform: uppercase;
-            color: var(--orange); letter-spacing: 0.5px; margin-bottom: 10px;
-            display: flex; align-items: center; gap: 8px;
-        }
-        .splits-ts {
-            font-size: 9px; font-weight: 600; color: var(--text-muted);
-            text-transform: none; letter-spacing: 0;
-        }
-        .splits-header::after {
-            content: ''; flex: 1; height: 1px;
-            background: rgba(245,158,11,0.15);
-        }
-        .splits-grid {
-            display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 24px;
-        }
-        .split-card {
-            display: flex; align-items: center; gap: 10px;
-            font-family: 'JetBrains Mono', monospace; font-size: 13px;
-            padding: 8px 12px;
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-        }
-        .sr-mkt {
-            color: var(--text-muted); font-weight: 700; min-width: 32px;
-            font-size: 11px; text-transform: uppercase;
-        }
-        .sr-team {
-            color: var(--text-secondary); min-width: 36px; font-size: 12px; font-weight: 600;
-        }
-        .sr-bar-wrap {
-            flex: 1; min-width: 60px; max-width: 120px;
-            height: 8px; border-radius: 4px;
-            background: var(--surface-2); overflow: hidden;
-        }
-        .sr-bar-fill { height: 100%; background: var(--orange); border-radius: 4px; transition: width 0.3s; }
-        .sr-handle { font-weight: 700; color: var(--orange); min-width: 40px; text-align: right; font-size: 15px; }
-        .sr-sep { color: var(--text-muted); font-size: 11px; }
-        .sr-bets { font-weight: 700; color: var(--blue); min-width: 40px; text-align: right; font-size: 15px; }
-        .sr-tag {
-            font-size: 11px; font-weight: 700;
-            padding: 4px 12px; border-radius: 6px;
-            background: var(--orange-dim); color: var(--orange);
-            border: 1px solid rgba(245,158,11,0.25);
-            white-space: nowrap; margin-left: auto;
-        }
-        .sr-src { font-size: 10px; color: var(--text-muted); margin-left: 6px; }
-        @media (max-width: 900px) { .splits-grid { grid-template-columns: 1fr; } }
 
         .empty-state { text-align: center; padding: 60px 24px; color: var(--text-muted); font-size: 14px; }
         .spinner {
@@ -855,10 +791,13 @@
     function initApp() {
 
     const $ = id => document.getElementById(id);
-    const SPORTS = ['mlb','nba','nhl','nfl','ncaab','mma','soccer','tennis'];
-    const SL = {mlb:'MLB',nba:'NBA',nhl:'NHL',nfl:'NFL',ncaab:'NCAAB',ncaaf:'NCAAF',mma:'MMA',soccer:'Soccer',tennis:'Tennis'};
-    const BL = {pinnacle:'PIN',fanduel:'FD',draftkings:'DK',betmgm:'MGM',caesars:'CZR',bet365:'365',polymarket:'POLY',kalshi:'KAL',novig:'NOV','1xbet':'1X',betonline:'BOL',circa:'CIR',south_point:'SP',westgate:'WG',wynn:'WYN',stations:'STN',hardrock:'HR'};
-    const BL_FULL = {pinnacle:'Pinnacle',fanduel:'FanDuel',draftkings:'DraftKings',betmgm:'BetMGM',caesars:'Caesars',bet365:'Bet365',polymarket:'Polymarket',kalshi:'Kalshi',novig:'Novig','1xbet':'1xBet',betonline:'BetOnline',circa:'Circa',south_point:'South Point',westgate:'Westgate',wynn:'Wynn',stations:'Stations',hardrock:'Hard Rock'};
+    // Sports the cron ingests (matches kahla-scanner SPORTS_ENABLED). NCAAF
+    // and UFC included; Soccer and Tennis intentionally excluded — empty data.
+    const SPORTS = ['mlb','nba','nhl','nfl','ncaab','ncaaf','mma'];
+    const SL = {mlb:'MLB',nba:'NBA',nhl:'NHL',nfl:'NFL',ncaab:'NCAAB',ncaaf:'NCAAF',mma:'MMA'};
+    // Books the Odds API allowlist surfaces (matches _ALLOWED_BOOKS in app.py).
+    const BL = {pinnacle:'PIN',draftkings:'DK',fanduel:'FD',betmgm:'MGM',caesars:'CZR',hardrock:'HR',betonline:'BOL'};
+    const BL_FULL = {pinnacle:'Pinnacle',draftkings:'DraftKings',fanduel:'FanDuel',betmgm:'BetMGM',caesars:'Caesars',hardrock:'Hard Rock',betonline:'BetOnline'};
 
     let activeSport = 'mlb';  // will be overridden by Firestore prefs
     let oddsData = {events:[], books:[]};
@@ -1010,217 +949,6 @@
         return openers;
     }
 
-    // --- Splits openers (Firestore-backed, same pattern as line openers) ---
-    let currentSplitsOpeners = {};
-
-    async function loadSplitsOpeners(sport) {
-        try {
-            const resp = await authFetch(`/api/splits-openers?sport=${sport}`);
-            if (!resp) return {};
-            const data = await resp.json();
-            if (data.ok) return data.events || {};
-            return {};
-        } catch { return {}; }
-    }
-
-    async function saveSplitsOpenersAPI(sport, openers) {
-        try {
-            await authFetch('/api/splits-openers', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sport, events: openers })
-            });
-        } catch(e) { console.warn('saveSplitsOpeners:', e); }
-    }
-
-    function captureSplitsOpeners(events, sport) {
-        const openers = currentSplitsOpeners;
-        let changed = false;
-        for (const ev of events) {
-            const eid = ev.numeric_id || ev.id;
-            if (!eid || openers[eid]) continue;
-            const circa = (ev.splits || {}).circa;
-            if (!circa) continue;
-
-            const entry = {};
-            const ml = circa.moneyline;
-            if (ml && ml.away_handle_pct != null) {
-                entry.ml = { away_handle: ml.away_handle_pct, away_bets: ml.away_bets_pct };
-            }
-            const spr = circa.spread;
-            if (spr && spr.away_handle_pct != null) {
-                entry.spread = { away_handle: spr.away_handle_pct, away_bets: spr.away_bets_pct };
-            }
-            const tot = circa.total;
-            if (tot && tot.over_handle_pct != null) {
-                entry.total = { over_handle: tot.over_handle_pct, over_bets: tot.over_bets_pct };
-            }
-            if (Object.keys(entry).length > 0) {
-                openers[eid] = entry;
-                changed = true;
-            }
-        }
-        if (changed) {
-            currentSplitsOpeners = openers;
-            saveSplitsOpenersAPI(sport, openers);
-        }
-    }
-
-    // --- Splits last-changed (Firestore-backed, server-authoritative diff) ---
-    // Maps eid -> { ml, spread, total, ts }. `ts` is unix ms of last time
-    // Circa handle/bets % actually moved for this game.
-    let currentSplitsLastChanged = {};
-
-    async function loadSplitsLastChanged(sport) {
-        try {
-            const resp = await authFetch(`/api/splits-last-changed?sport=${sport}`);
-            if (!resp) return {};
-            const data = await resp.json();
-            if (data.ok) return data.events || {};
-            return {};
-        } catch { return {}; }
-    }
-
-    function buildSplitsSnapshot(events) {
-        const snap = {};
-        for (const ev of events) {
-            const eid = ev.numeric_id || ev.id;
-            if (!eid) continue;
-            const circa = (ev.splits || {}).circa;
-            if (!circa) continue;
-            const entry = {};
-            const ml = circa.moneyline;
-            if (ml && ml.away_handle_pct != null) {
-                entry.ml = { away_handle: ml.away_handle_pct, away_bets: ml.away_bets_pct };
-            }
-            const spr = circa.spread;
-            if (spr && spr.away_handle_pct != null) {
-                entry.spread = { away_handle: spr.away_handle_pct, away_bets: spr.away_bets_pct };
-            }
-            const tot = circa.total;
-            if (tot && tot.over_handle_pct != null) {
-                entry.total = { over_handle: tot.over_handle_pct, over_bets: tot.over_bets_pct };
-            }
-            if (Object.keys(entry).length > 0) snap[eid] = entry;
-        }
-        return snap;
-    }
-
-    async function syncSplitsLastChanged(events, sport) {
-        const snap = buildSplitsSnapshot(events);
-        if (!Object.keys(snap).length) return false;
-        try {
-            const resp = await authFetch('/api/splits-last-changed', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sport, events: snap })
-            });
-            if (!resp) return false;
-            const data = await resp.json();
-            if (!data.ok) return false;
-            const prev = currentSplitsLastChanged;
-            currentSplitsLastChanged = data.events || {};
-            // Return true if any game's ts changed — caller may re-render
-            for (const eid in currentSplitsLastChanged) {
-                if ((prev[eid]?.ts || 0) !== (currentSplitsLastChanged[eid]?.ts || 0)) return true;
-            }
-            return false;
-        } catch(e) { console.warn('syncSplitsLastChanged:', e); return false; }
-    }
-
-    function fmtTsAgo(ts) {
-        if (!ts) return '';
-        const s = Math.floor((Date.now() - ts) / 1000);
-        if (s < 10) return 'just now';
-        if (s < 60) return s + 's ago';
-        if (s < 3600) return Math.floor(s/60) + 'm ago';
-        if (s < 86400) return Math.floor(s/3600) + 'h ago';
-        return Math.floor(s/86400) + 'd ago';
-    }
-
-    function computeMovement(ev, openers) {
-        const eid = ev.numeric_id || ev.id;
-        const opener = openers[eid];
-        if (!opener) return null;
-        const pin = (ev.books || {}).pinnacle || (ev.books || {}).circa;
-        if (!pin) return null;
-        const src = opener.src || ((ev.books||{}).pinnacle ? 'PIN' : 'CIR');
-
-        // Just-in-time backfill: if opener is missing a market, grab it now
-        // Try the opener's source book first, fall back through the priority chain
-        // JIT backfill — Pinnacle and Circa only
-        const bks = ev.books || {};
-        const sharpChain = [bks.pinnacle, bks.circa].filter(Boolean);
-        const findSharp = (market) => sharpChain.find(b => Object.keys(b[market] || {}).length);
-        if (!Object.keys(opener.ml || {}).length) {
-            const b = findSharp('moneyline');
-            if (b) { if (!opener.ml) opener.ml = {}; for (const [t, p] of Object.entries(b.moneyline)) { if (p != null) opener.ml[t] = p; } }
-        }
-        if (!Object.keys(opener.spread || {}).length) {
-            const b = findSharp('spread');
-            if (b) { if (!opener.spread) opener.spread = {}; for (const [t, d] of Object.entries(b.spread)) { if (d?.price != null) opener.spread[t] = { price: d.price, point: d.point }; } }
-        }
-        if (!Object.keys(opener.total || {}).length) {
-            const b = findSharp('total');
-            if (b) { if (!opener.total) opener.total = {}; for (const [t, d] of Object.entries(b.total)) { if (d?.price != null) opener.total[t] = { price: d.price, point: d.point }; } }
-        }
-
-        const mv = { ml: {}, spread: {}, total: {}, src };
-        for (const [team, curPrice] of Object.entries(pin.moneyline || {})) {
-            const openPrice = opener.ml?.[team];
-            if (openPrice != null && curPrice != null) {
-                mv.ml[team] = { open: openPrice, current: curPrice, diff: curPrice - openPrice };
-            }
-        }
-        for (const [team, cur] of Object.entries(pin.spread || {})) {
-            const op = opener.spread?.[team];
-            if (op && cur?.price != null) {
-                mv.spread[team] = {
-                    open_price: op.price, open_point: op.point,
-                    current_price: cur.price, current_point: cur.point,
-                    point_diff: (cur.point||0) - (op.point||0),
-                    price_diff: cur.price - op.price,
-                };
-            }
-        }
-        for (const [side, cur] of Object.entries(pin.total || {})) {
-            const op = opener.total?.[side];
-            if (op && cur?.price != null) {
-                mv.total[side] = {
-                    open_price: op.price, open_point: op.point,
-                    current_price: cur.price, current_point: cur.point,
-                    point_diff: (cur.point||0) - (op.point||0),
-                    price_diff: cur.price - op.price,
-                };
-            }
-        }
-        return mv;
-    }
-
-    function detectRLM(mv, splits, away, home) {
-        // RLM = line moves to make the popular side MORE appealing (cheaper),
-        // not less. That means sharps are on the OTHER side and books are
-        // adjusting for them, not the public money.
-        // Normal: money on Michigan -> Michigan gets more expensive (books adjust)
-        // RLM: money on Michigan -> Michigan gets CHEAPER (reverse = sharps on other side)
-        const splitsML = splits?.circa?.moneyline;
-        if (!mv?.ml || !splitsML) return null;
-        const awayDiff = mv.ml[away]?.diff || 0;
-        const homeDiff = mv.ml[home]?.diff || 0;
-        const awayHandle = splitsML.away_handle_pct;
-        const homeHandle = splitsML.home_handle_pct;
-        if (Math.abs(awayDiff) < 3 || awayHandle == null || homeHandle == null) return null;
-
-        // Positive diff = price went up = cheaper/more appealing for bettor
-        const awayGotCheaper = awayDiff > 0;
-        const homeGotCheaper = homeDiff > 0;
-        const moneyOnAway = awayHandle > 50;
-        const moneyOnHome = homeHandle > 50;
-
-        if (awayGotCheaper && moneyOnAway) return away;
-        if (homeGotCheaper && moneyOnHome) return home;
-        return null;
-    }
 
     /* Note: a `prefetchOpeners()` function used to live here. It hit
        /api/odds for every other sport on first page load of the day to
@@ -1264,7 +992,7 @@
     }
 
     // All known book keys (superset — user order + API-returned + enabled)
-    const ALL_KNOWN_BOOKS = ['pinnacle','caesars','draftkings','fanduel','betmgm','novig','polymarket','circa','hardrock','south_point','stations','westgate','wynn','bet365','kalshi','1xbet','betonline'];
+    const ALL_KNOWN_BOOKS = ['pinnacle','draftkings','fanduel','betmgm','caesars','hardrock','betonline'];
 
     function getOrderedBooks(){
         // Build master list: user-ordered books first, then any remaining known books
@@ -1356,64 +1084,6 @@
         return up.substring(0,3);
     }
 
-    function fmtSplitDiff(current, opener) {
-        if (opener == null || current == null) return '';
-        const diff = current - opener;
-        if (diff === 0) return '';
-        const color = diff > 0 ? 'var(--green)' : 'var(--red)';
-        const sign = diff > 0 ? '+' : '';
-        return `<span style="font-size:10px;font-weight:600;color:${color};margin-left:2px">(${sign}${diff})</span>`;
-    }
-
-    function renderSplitsRow(circa, dk, label, mktKey, awayName, homeName, splitsOpener) {
-        const src = circa?.[mktKey];
-        if (!src) return '';
-
-        let awayH, awayT;
-        if (mktKey === 'total') {
-            awayH = src.over_handle_pct;
-            awayT = src.over_bets_pct;
-        } else {
-            awayH = src.away_handle_pct;
-            awayT = src.away_bets_pct;
-        }
-        if (awayH == null && awayT == null) return '';
-
-        // Get opener values for this market
-        const openerMktMap = { 'moneyline': 'ml', 'spread': 'spread', 'total': 'total' };
-        const opMkt = splitsOpener?.[openerMktMap[mktKey]];
-        let opH = null, opT = null;
-        if (opMkt) {
-            if (mktKey === 'total') {
-                opH = opMkt.over_handle;
-                opT = opMkt.over_bets;
-            } else {
-                opH = opMkt.away_handle;
-                opT = opMkt.away_bets;
-            }
-        }
-
-        const homeH = awayH != null ? (100 - awayH) : null;
-        const homeT = awayT != null ? (100 - awayT) : null;
-        const awayDiv = (awayH != null && awayT != null) ? Math.abs(awayH - awayT) : 0;
-        const homeDiv = (homeH != null && homeT != null) ? Math.abs(homeH - homeT) : 0;
-        const isSharp = Math.max(awayDiv, homeDiv) >= 15;
-        const sharpSide = (awayH != null && awayT != null && awayH > awayT) ? awayName
-            : (homeH != null && homeT != null && homeH > homeT) ? homeName : '';
-
-        let h = `<div class="split-card">`;
-        h += `<span class="sr-mkt">${label}</span>`;
-        h += `<span class="sr-team">${esc(truncTeam(awayName))}</span>`;
-        h += `<div class="sr-bar-wrap"><div class="sr-bar-fill" style="width:${awayH||0}%"></div></div>`;
-        h += `<span class="sr-handle">${awayH != null ? awayH + '%' : '--'}${fmtSplitDiff(awayH, opH)}</span>`;
-        h += `<span class="sr-sep">/</span>`;
-        h += `<span class="sr-bets">${awayT != null ? awayT + '%' : '--'}${fmtSplitDiff(awayT, opT)}</span>`;
-        if (isSharp && sharpSide) {
-            h += `<span class="sr-tag">SHARP ${esc(truncTeam(sharpSide))}</span>`;
-        }
-        h += `</div>`;
-        return h;
-    }
 
     function renderMovement(mv, label, mktKey, awayName, homeName) {
         const data = mv[mktKey] || {};
@@ -1588,12 +1258,15 @@
             const leagueStr=ev.league||'';
             const best = findBestOdds(ev, books, away, home);
 
+            const isLive = !!ev.is_live;
+
             h+=`<div class="game">`;
 
             // === GAME HEADER ===
-            // Live scores were removed when Owls was retired. The Odds API
-            // doesn't provide live scores in the same payload; if you want
-            // them back, wire up the free ESPN scoreboard JSON.
+            // Live games show a LIVE badge and a "closing line" tag because
+            // we freeze the displayed odds at event_start (mid-game retail
+            // twitches were causing whiplash). The chart still has full
+            // history if you want to see the live movement.
             const chartBtn = `<button class="chart-btn js-chart-btn" title="Line movement"
                 data-sport="${esc(activeSport)}"
                 data-home="${esc(home)}"
@@ -1602,10 +1275,12 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="14 7 21 7 21 14"/></svg>
             </button>`;
 
-            h+=`<div class="ghdr">`;
+            h+=`<div class="ghdr${isLive ? ' live' : ''}">`;
             h+=`<div>`;
             h+=`<span class="ghdr-league">${esc(leagueStr)}</span>`;
+            if (isLive) h+=`<span class="live-badge">LIVE</span>`;
             h+=`<span class="ghdr-teams">${esc(away)} <span class="at">@</span> ${esc(home)}</span>`;
+            if (isLive) h+=`<span class="stale-tag">closing line</span>`;
             h+=`</div>`;
             h+=`<div class="ghdr-meta">${esc(date)} &middot; ${esc(time)} ${chartBtn}</div>`;
             h+=`</div>`;

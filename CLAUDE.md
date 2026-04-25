@@ -134,7 +134,8 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - **Line Movement Bar**: Opener vs current with arrows and diffs (per game footer)
 - **Line-Movement Chart**: Each game header has a small graph icon. Click → modal with a step-function chart (Chart.js) of historical odds from Supabase `book_snapshots`. Defaults to PIN/CIR/DK on the ML market over the last 24h; toggle other books (FD/MGM/CAE/HR) and switch market (ML/Spread/Total) or range (15m/30m/1H/6H/12H/24H/All).
 - **Genuine first-seen openers**: `/api/openers/scanner` returns the actual earliest PIN/CIR snapshot per market from Supabase. The client merges this on top of legacy Firestore openers — scanner data wins, Firestore fills any gaps for games predating the cron.
-- **Auto-refresh**: 90 seconds (the page reads from cached Supabase data; the cron writes every 15 min, so polling faster is just rerendering the same numbers)
+- **Live-game freeze**: once an event's `commence_time` passes, the board displays the closing line (last pre-start snapshot per book) and stops showing post-start retail twitches. Live games render a green `LIVE` badge in the header and a `closing line` tag next to the teams. The chart modal still shows full pre-and-post-start history if you want to see live movement.
+- **Auto-refresh**: 90 seconds (the page reads from cached Supabase data; the cron writes every 30 min, so polling faster is just rerendering the same numbers)
 - **Double-buffer rendering**: Two board divs swap to prevent flash on re-render
 
 ### Removed (when Owls retired in spring 2026)

@@ -743,6 +743,21 @@ def _fetch_odds_from_snapshots(sport_path: str):
     if not markets:
         return [], [], []
 
+    # Live-game freeze. Once a game's event_start passes we want the BOARD
+    # to display the closing line (last pre-start snapshot per book) and stop
+    # showing every cron-cadence retail twitch — those updates are useless
+    # mid-game and were causing user whiplash. We don't drop the post-start
+    # rows from book_snapshots (the chart still uses them), we just filter
+    # them out of the live-board read here.
+    now_iso = now.isoformat()
+    event_start_by_mid: dict[str, str] = {m["id"]: m.get("event_start", "") for m in markets}
+
+    def _post_start(mid: str, captured_at: str) -> bool:
+        es = event_start_by_mid.get(mid, "")
+        return bool(es) and es <= now_iso and captured_at > es
+
+    snaps = [s for s in snaps if not _post_start(s["market_id"], s["captured_at"])]
+
     # Anchor: latest pre-fresh-window row per (market, book, market_type, side)
     # not already represented. Sharp books (PIN, CIR) sit on lines for hours
     # and would otherwise drop off the board entirely.
@@ -764,6 +779,11 @@ def _fetch_odds_from_snapshots(sport_path: str):
 
     seen: set[tuple] = set()
     for r in anchor_rows:
+        # Same live-game freeze applies to the anchor: drop post-start rows
+        # so a game that started 2h ago shows its closing line, not whatever
+        # the books churned out mid-game.
+        if _post_start(r["market_id"], r["captured_at"]):
+            continue
         key = (r["market_id"], r["book"], r["market_type"], r["side"])
         if key in present or key in seen:
             continue
@@ -825,6 +845,9 @@ def _fetch_odds_from_snapshots(sport_path: str):
         if not books_block:
             continue
 
+        es = event_start_by_mid.get(m["id"], "")
+        is_live = bool(es) and es <= now_iso
+
         events_out.append({
             "id":            m["id"],
             "numeric_id":    m["id"],
@@ -833,7 +856,8 @@ def _fetch_odds_from_snapshots(sport_path: str):
             "away_team":     away,
             "commence_time": m["event_start"],
             "league":        sport_path.upper(),
-            "status":        "",
+            "status":        "live" if is_live else "",
+            "is_live":       is_live,
             "books":         books_block,
         })
 
