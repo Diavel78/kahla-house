@@ -1839,6 +1839,14 @@ def api_odds_history():
         })
 
     # ---- 2. Pull snapshots for that market_id + market_type ----
+    # Two queries:
+    #   (A) all rows within the requested time window
+    #   (B) the latest row at-or-before the cutoff per (book, side) — these are
+    #       "anchor" samples so a book that hasn't priced inside the window
+    #       (typical for sharp books PIN/CIR which post a line and sit) still
+    #       gets a flat line drawn across the entire range. Anchor rows have
+    #       their captured_at rewritten to the cutoff before merging so the
+    #       line visually starts at the left edge with the carried-forward Y.
     since_iso = None
     try:
         q = (
@@ -1854,6 +1862,33 @@ def api_odds_history():
             since_iso = (datetime.now(timezone.utc) - span).isoformat()
             q = q.gte("captured_at", since_iso)
         snaps = q.execute().data or []
+
+        if since_iso is not None:
+            anchor_rows = (
+                sb.table("book_snapshots")
+                .select("book,side,price_american,line,captured_at")
+                .eq("market_id", market_id)
+                .eq("market_type", market_type)
+                .in_("book", _CHART_BOOKS)
+                .lt("captured_at", since_iso)
+                .order("captured_at", desc=True)
+                .limit(2000)
+                .execute()
+                .data
+                or []
+            )
+            # First (most recent) row per (book, side) wins.
+            present = {(s["book"], s["side"]) for s in snaps}
+            seen: set[tuple[str, str]] = set()
+            for r in anchor_rows:
+                key = (r["book"], r["side"])
+                if key in seen or key in present:
+                    continue
+                seen.add(key)
+                # Pin the anchor at the window's left edge so the line draws
+                # across the full range starting from this carry-forward value.
+                r["captured_at"] = since_iso
+                snaps.insert(0, r)
     except Exception as e:
         return jsonify({"ok": False, "error": f"snapshots query failed: {e}"}), 500
 
