@@ -1,0 +1,44 @@
+name: book_snapshots — nightly cleanup
+
+# Deletes book_snapshots rows older than 15 days. Chart history beyond
+# ~2 weeks isn't useful (games are over) and the table just bloats
+# Supabase storage. The brier/divergence scanner that needed deep
+# history is gone.
+#
+# Runs at 09:00 UTC daily (~1am Pacific). Set SUPABASE_URL and
+# SUPABASE_SERVICE_KEY in repo Settings → Secrets → Actions.
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: snapshot-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: kahla-scanner
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Delete book_snapshots > 15 days old
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.cleanup_snapshots --days 15

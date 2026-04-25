@@ -1579,12 +1579,26 @@
         currentOpeners = op;
         scannerOpeners = scnOps;
         await loadOdds();
-        // No more user-side polling — odds are written by the 15-min cron and
-        // the page reads from Supabase on each load. Pull-to-refresh to update.
-        // Keep a slow refresh (90s) for users who leave the tab open during
-        // a session — cheap since /api/odds reads cached Supabase data, no
-        // external API hits.
-        setInterval(loadOdds, 90000);
+        // Adaptive polling. Server hits we make on each tick:
+        //   - Supabase READ (free, no API credits)
+        //   - ESPN scoreboard (free, server-cached 30s)
+        //   - The Odds API: NEVER from this poll. Cron is the only writer.
+        // So we can poll fast during live games (score keeps ticking) without
+        // burning the $59/100K credit budget on the actual odds feed.
+        scheduleNextLoad();
+    }
+
+    function _hasLiveOnBoard() {
+        return ((oddsData && oddsData.events) || []).some(
+            e => e.is_live || (e.score && (e.score.live || e.score.state === 'in'))
+        );
+    }
+    function scheduleNextLoad() {
+        if (window._loadOddsTimer) clearTimeout(window._loadOddsTimer);
+        const delay = _hasLiveOnBoard() ? 30000 : 90000;
+        window._loadOddsTimer = setTimeout(async () => {
+            try { await loadOdds(); } finally { scheduleNextLoad(); }
+        }, delay);
     }
     loadAndStart();
 
