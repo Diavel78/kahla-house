@@ -139,12 +139,8 @@ def props_page():
 
 @app.route("/dashboard")
 def dashboard():
+    """Polymarket P&L dashboard — admin only (client-side gated)."""
     return render_template("dashboard.html")
-
-
-@app.route("/budget")
-def budget():
-    return render_template("budget.html")
 
 
 @app.route("/scanner")
@@ -1343,6 +1339,25 @@ def api_splits_last_changed_save():
 
 
 # ---------------------------------------------------------------------------
+# API routes — Current user (lightweight role probe for client-side gating)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/me")
+@firebase_auth_required
+def api_me():
+    """Return the current user's role + approval state.
+    Used by sub-pages to gate UI before loading data."""
+    return jsonify({
+        "ok": True,
+        "uid": g.uid,
+        "role": g.user_data.get("role"),
+        "approved": bool(g.user_data.get("approved")),
+        "displayName": g.user_data.get("displayName"),
+        "email": g.user_data.get("email"),
+    })
+
+
+# ---------------------------------------------------------------------------
 # API routes — User Preferences
 # ---------------------------------------------------------------------------
 
@@ -1449,7 +1464,7 @@ def api_odds():
 
 
 @app.route("/api/my-bets")
-@firebase_auth_required
+@admin_required
 def api_my_bets():
     import time
     cache_key = "my_bets"
@@ -1525,7 +1540,7 @@ def api_my_bets():
 # ---------------------------------------------------------------------------
 
 @app.route("/api/data")
-@firebase_auth_required
+@admin_required
 def api_data():
     errors = []
     now = datetime.now(timezone.utc)
@@ -1760,7 +1775,7 @@ def api_raw():
 
 
 @app.route("/api/debug-deposits")
-@firebase_auth_required
+@admin_required
 def api_debug_deposits():
     """Show all balance changes with their reasons — helps identify maker rewards vs deposits."""
     try:
@@ -1847,7 +1862,7 @@ def debug_page():
 
 
 @app.route("/api/debug-trades")
-@firebase_auth_required
+@admin_required
 def api_debug_trades():
     try:
         client = get_client()

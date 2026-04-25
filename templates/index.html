@@ -117,14 +117,19 @@ body::after {
 .app-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; opacity: 0; transition: opacity 0.3s ease; }
 .app-card:hover { border-color: transparent; transform: translateY(-4px); }
 .app-card:hover::before { opacity: 1; }
-.app-card.bet-system::before { background: linear-gradient(90deg, var(--green), var(--blue)); }
-.app-card.bet-system:hover { border-color: rgba(34,197,94,0.3); box-shadow: 0 8px 40px rgba(34,197,94,0.08), 0 0 0 1px rgba(34,197,94,0.15); }
-.app-card.bet-system .app-tag { background: var(--green-dim); color: var(--green); }
-.bet-system:hover .arrow { color: var(--green); }
-.app-card.budget-app::before { background: linear-gradient(90deg, var(--blue), var(--cyan)); }
-.app-card.budget-app:hover { border-color: rgba(74,124,255,0.3); box-shadow: 0 8px 40px rgba(74,124,255,0.08), 0 0 0 1px rgba(74,124,255,0.15); }
-.app-card.budget-app .app-tag { background: var(--blue-dim); color: var(--blue); }
-.budget-app:hover .arrow { color: var(--blue); }
+.app-card.odds-app::before { background: linear-gradient(90deg, var(--green), var(--blue)); }
+.app-card.odds-app:hover { border-color: rgba(34,197,94,0.3); box-shadow: 0 8px 40px rgba(34,197,94,0.08), 0 0 0 1px rgba(34,197,94,0.15); }
+.app-card.odds-app .app-tag { background: var(--green-dim); color: var(--green); }
+.odds-app:hover .arrow { color: var(--green); }
+.app-card.dashboard-app::before { background: linear-gradient(90deg, var(--blue), var(--cyan)); }
+.app-card.dashboard-app:hover { border-color: rgba(74,124,255,0.3); box-shadow: 0 8px 40px rgba(74,124,255,0.08), 0 0 0 1px rgba(74,124,255,0.15); }
+.app-card.dashboard-app .app-tag { background: var(--blue-dim); color: var(--blue); }
+.dashboard-app:hover .arrow { color: var(--blue); }
+.app-card.scanner-app::before { background: linear-gradient(90deg, var(--purple), var(--cyan)); }
+.app-card.scanner-app:hover { border-color: rgba(168,85,247,0.3); box-shadow: 0 8px 40px rgba(168,85,247,0.08), 0 0 0 1px rgba(168,85,247,0.15); }
+.app-card.scanner-app .app-tag { background: var(--purple-dim); color: var(--purple); }
+.scanner-app:hover .arrow { color: var(--purple); }
+.admin-badge { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 9px; padding: 3px 8px; border-radius: 5px; background: var(--red-dim); color: #f87171; margin-left: 8px; letter-spacing: 0.05em; vertical-align: middle; }
 .app-icon { font-size: 2em; margin-bottom: 18px; display: block; }
 .app-card h2 { font-size: 1.1em; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.01em; }
 .app-card p { color: var(--text-muted); font-size: 0.84em; line-height: 1.55; margin-bottom: 18px; }
@@ -149,17 +154,8 @@ body::after {
 .admin-table tbody tr:hover { background: rgba(74,124,255,0.03); }
 .role-badge { display: inline-flex; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; text-transform: capitalize; }
 .role-badge.admin { background: var(--red-dim); color: #f87171; }
-.role-badge.user { background: var(--blue-dim); color: #5e8dff; }
 .role-badge.viewer { background: var(--green-dim); color: #4ade80; }
 .role-badge.pending { background: var(--orange-dim); color: #fbbf24; }
-.toggle-btn { width: 36px; height: 20px; border-radius: 10px; border: none; cursor: pointer; position: relative; transition: .2s; flex-shrink: 0; }
-.toggle-btn.on { background: var(--green); }
-.toggle-btn.off { background: var(--border); }
-.toggle-btn::after { content: ''; position: absolute; top: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: .2s; }
-.toggle-btn.on::after { left: 18px; }
-.toggle-btn.off::after { left: 2px; }
-.app-toggles { display: flex; gap: 12px; align-items: center; }
-.app-toggle-item { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-muted); }
 select.role-select { padding: 5px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--r); color: var(--text); font-size: 12px; font-family: 'DM Sans', sans-serif; cursor: pointer; }
 select.role-select option { background: var(--surface); }
 .footer { text-align: center; margin-top: 48px; color: var(--text-muted); font-size: 0.75em; opacity: 0; animation: fadeUp 0.6s ease 0.7s forwards; }
@@ -182,7 +178,6 @@ select.role-select option { background: var(--surface); }
     .top-bar-right { justify-content: flex-end; }
     .admin-table { font-size: 13px; }
     .admin-table thead th, .admin-table tbody td { padding: 10px 12px; }
-    .app-toggles { flex-wrap: wrap; gap: 8px; }
 }
 @media (max-width: 560px) { .user-chip .role { display: none; } }
 </style>
@@ -233,7 +228,7 @@ select.role-select option { background: var(--surface); }
         <div class="apps-grid" id="appsGrid"></div>
         <div class="admin-panel" id="adminPanel" style="display:none">
             <div class="admin-hdr"><h2>User Management</h2><span class="badge" id="pendingBadge" style="display:none">0 pending</span></div>
-            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>App Access</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
+            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
         </div>
         <div class="footer">The Kahla House &middot; thekahlahouse.com</div>
     </div>
@@ -289,7 +284,6 @@ async function doSignup() {
             displayName: n,
             role: 'pending',
             approved: false,
-            appAccess: { betSystem: false, budget: false },
             createdAt: firebase.firestore.FieldValue.serverTimestamp()
         };
         await db.collection('users').doc(cr.user.uid).set(userData);
@@ -313,10 +307,9 @@ auth.onAuthStateChanged(async u => {
             displayName: u.displayName || u.email,
             role: 'pending',
             approved: false,
-            appAccess: { betSystem: false, budget: false },
             createdAt: firebase.firestore.FieldValue.serverTimestamp()
         });
-        CUD = { email: u.email, displayName: u.displayName || u.email, role: 'pending', approved: false, appAccess: { betSystem: false, budget: false } };
+        CUD = { email: u.email, displayName: u.displayName || u.email, role: 'pending', approved: false };
     } else {
         CUD = doc.data();
     }
@@ -325,19 +318,10 @@ auth.onAuthStateChanged(async u => {
         try {
             const snap = await db.collection('users').limit(2).get();
             if (snap.size === 1) {
-                await ref.update({ role: 'admin', approved: true, appAccess: { betSystem: true, budget: true } });
-                CUD.role = 'admin'; CUD.approved = true; CUD.appAccess = { betSystem: true, budget: true };
+                await ref.update({ role: 'admin', approved: true });
+                CUD.role = 'admin'; CUD.approved = true;
             }
         } catch (e) { /* non-admin cannot query users collection */ }
-    }
-    // Ensure appAccess exists and has all app keys
-    if (!CUD.appAccess) {
-        const aa = { betSystem: CUD.role === 'admin', budget: CUD.role === 'admin' };
-        await ref.update({ appAccess: aa }); CUD.appAccess = aa;
-    } else if (CUD.appAccess.budget === undefined) {
-        const val = CUD.role === 'admin';
-        await ref.update({ 'appAccess.budget': val });
-        CUD.appAccess.budget = val;
     }
     if (!CUD.approved || CUD.role === 'pending') { showS('pendingScreen'); }
     else { showS('appScreen'); initDashboard(); }
@@ -355,30 +339,41 @@ function initDashboard() {
 }
 
 function renderAppCards() {
-    const aa = CUD.appAccess || {};
+    const role = CUD.role;
+    const isAdmin = role === 'admin';
+    const isViewer = role === 'viewer' || isAdmin;
     let h = '';
-    if (aa.betSystem) {
-        h += `<div class="app-card bet-system" style="cursor:default">
+    if (isViewer) {
+        h += `<div class="app-card odds-app" style="cursor:default">
             <span class="app-icon">&#127922;</span>
-            <h2>Bet System</h2>
-            <p>Multi-sportsbook odds comparison, Circa splits, sharp indicators, line movement, and Polymarket position tracking with P&amp;L.</p>
+            <h2>Odds Board</h2>
+            <p>Multi-sportsbook odds comparison, Circa splits, sharp indicators, line movement, and player props across all books.</p>
             <span class="app-tag">Sports Betting</span>
             <div class="app-sub-links">
                 <a href="/odds" class="app-sub-link">Odds Board</a>
-                <a href="/dashboard" class="app-sub-link">Dashboard</a>
-                <a href="/scanner" class="app-sub-link">Scanner</a>
+                <a href="/props" class="app-sub-link">Player Props</a>
             </div>
             <span class="arrow">&rarr;</span>
         </div>`;
     }
-    if (aa.budget) {
-        h += `<div class="app-card budget-app" style="cursor:default">
-            <span class="app-icon">&#128176;</span>
-            <h2>Budget</h2>
-            <p>Track monthly bills, paychecks, savings, and one-off expenses. See what's left over each month at a glance.</p>
-            <span class="app-tag">Finance</span>
+    if (isAdmin) {
+        h += `<div class="app-card dashboard-app" style="cursor:default">
+            <span class="app-icon">&#128202;</span>
+            <h2>Dashboard<span class="admin-badge">ADMIN</span></h2>
+            <p>Polymarket position tracking with P&amp;L, open and closed trades, maker rewards, and shareable bet slips.</p>
+            <span class="app-tag">P&amp;L Tracking</span>
             <div class="app-sub-links">
-                <a href="/budget" class="app-sub-link">Open Budget</a>
+                <a href="/dashboard" class="app-sub-link">Open Dashboard</a>
+            </div>
+            <span class="arrow">&rarr;</span>
+        </div>`;
+        h += `<div class="app-card scanner-app" style="cursor:default">
+            <span class="app-icon">&#128270;</span>
+            <h2>Scanner<span class="admin-badge">ADMIN</span></h2>
+            <p>Kahla Scanner review surface — activity, Brier scores, divergence signals, matched and unmatched markets.</p>
+            <span class="app-tag">Research</span>
+            <div class="app-sub-links">
+                <a href="/scanner" class="app-sub-link">Open Scanner</a>
             </div>
             <span class="arrow">&rarr;</span>
         </div>`;
@@ -399,7 +394,6 @@ function loadAdminPanel() {
         else { badge.style.display = 'none'; }
 
         document.getElementById('adminTB').innerHTML = users.map(u => {
-            const aa = u.appAccess || {};
             const isMe = u.id === CU.uid;
             const st = u.approved
                 ? '<span style="color:var(--green);font-size:13px">Approved</span>'
@@ -411,16 +405,11 @@ function loadAdminPanel() {
                 <td>${st}</td>
                 <td><select class="role-select" onchange="setRole('${u.id}',this.value)" ${isMe ? 'disabled' : ''}>
                     <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option>
-                    <option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option>
                     <option value="viewer" ${u.role === 'viewer' ? 'selected' : ''}>Viewer</option>
                     <option value="pending" ${u.role === 'pending' ? 'selected' : ''}>Pending</option>
                 </select></td>
-                <td><div class="app-toggles">
-                    <div class="app-toggle-item"><button class="toggle-btn ${aa.betSystem ? 'on' : 'off'}" onclick="toggleApp('${u.id}','betSystem',${!aa.betSystem})"></button>Bet System</div>
-                    <div class="app-toggle-item"><button class="toggle-btn ${aa.budget ? 'on' : 'off'}" onclick="toggleApp('${u.id}','budget',${!aa.budget})"></button>Budget</div>
-                </div></td>
                 <td>${!isMe && !u.approved
-                    ? `<button class="btn btn-sm" style="background:var(--green);color:#fff;font-size:12px;margin-right:6px" onclick="approveUser('${u.id}')">Approve</button><button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:12px" onclick="rejectUser('${u.id}','${E(u.displayName)}')">Reject</button>`
+                    ? `<button class="btn btn-sm" style="background:var(--green);color:#fff;font-size:12px;margin-right:6px" onclick="approveUser('${u.id}','viewer')">Approve as Viewer</button><button class="btn btn-sm" style="background:var(--red-dim);color:#f87171;font-size:12px;margin-right:6px;border:1px solid rgba(239,68,68,.3)" onclick="approveUser('${u.id}','admin')">Approve as Admin</button><button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:12px" onclick="rejectUser('${u.id}','${E(u.displayName)}')">Reject</button>`
                     : isMe ? '<span style="color:var(--text-muted);font-size:12px">You</span>'
                     : `<button class="btn btn-sm" style="background:var(--red-dim);color:var(--red);font-size:12px;border:1px solid rgba(239,68,68,.3)" onclick="rejectUser('${u.id}','${E(u.displayName)}')">Remove</button>`
                 }</td>
@@ -435,18 +424,12 @@ async function setRole(uid, role) {
     toast('Role updated to ' + role, 'success');
 }
 
-async function toggleApp(uid, app, val) {
-    await db.collection('users').doc(uid).update({ ['appAccess.' + app]: val });
-    toast(app + (val ? ' enabled' : ' disabled'), 'info');
-}
-
-async function approveUser(uid) {
+async function approveUser(uid, role) {
     await db.collection('users').doc(uid).update({
         approved: true,
-        role: 'user',
-        appAccess: { betSystem: true, budget: true }
+        role: role || 'viewer'
     });
-    toast('User approved', 'success');
+    toast('User approved as ' + (role || 'viewer'), 'success');
 }
 
 async function rejectUser(uid, name) {

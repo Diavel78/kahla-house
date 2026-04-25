@@ -426,30 +426,6 @@
             border-radius: 6px;
             margin-left: 8px;
         }
-        .my-bet-tag {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 10px;
-            font-weight: 700;
-            padding: 4px 10px;
-            border-radius: 6px;
-            background: rgba(168,85,247,0.12);
-            color: var(--purple);
-            border: 1px solid rgba(168,85,247,0.25);
-            margin-left: 10px;
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-        }
-        .my-bet-tag .check { font-size: 12px; }
-        .my-bet-tag.winning { background: rgba(34,197,94,0.12); color: var(--green); border-color: rgba(34,197,94,0.25); }
-        .my-bet-tag.losing { background: rgba(245,158,11,0.12); color: var(--orange); border-color: rgba(245,158,11,0.25); }
-        .my-bet-tag.dead { background: rgba(239,68,68,0.12); color: var(--red); border-color: rgba(239,68,68,0.25); }
-        .game.has-bet { border-color: rgba(168,85,247,0.35); }
-        .game.has-bet.bet-winning { border-color: rgba(34,197,94,0.35); }
-        .game.has-bet.bet-losing { border-color: rgba(245,158,11,0.35); }
-        .game.has-bet.bet-dead { border-color: rgba(239,68,68,0.35); }
-        .game.has-bet .ghdr { border-bottom-color: rgba(168,85,247,0.25); }
-
         /* Unified odds table */
         .odds-table { width: 100%; border-collapse: collapse; min-width: 700px; table-layout: fixed; }
         .odds-table th {
@@ -785,11 +761,18 @@
         firebase.auth().signOut().then(() => { window.location.href = '/'; });
     }
 
-    firebase.auth().onAuthStateChanged(user => {
+    firebase.auth().onAuthStateChanged(async user => {
         if (!user) {
             window.location.href = '/';
             return;
         }
+        try {
+            const token = await user.getIdToken();
+            const r = await fetch('/api/me', { headers: { 'Authorization': 'Bearer ' + token } });
+            if (!r.ok) { window.location.href = '/'; return; }
+            const me = await r.json();
+            if (!me.approved || (me.role !== 'admin' && me.role !== 'viewer')) { window.location.href = '/'; return; }
+        } catch (e) { window.location.href = '/'; return; }
         document.getElementById('auth-gate').style.display = 'none';
         document.getElementById('app').style.display = '';
         initApp();
@@ -1517,15 +1500,8 @@
             const sc = ev.score;
             const isLive = sc && sc.live;
             const liveClass = isLive ? ' live' : '';
-            const myBetsArr = findMyBets(ev);
-            const hasBets = myBetsArr.length > 0;
-            const worstStatus = hasBets ? myBetsArr.map(b => getBetStatus(b, ev)).reduce((a, b) => {
-                const rank = { dead: 3, losing: 2, winning: 1, '': 0 };
-                return (rank[b] || 0) > (rank[a] || 0) ? b : a;
-            }, '') : '';
-            const betClass = hasBets ? ' has-bet' + (worstStatus ? ' bet-' + worstStatus : '') : '';
 
-            h+=`<div class="game${betClass}">`;
+            h+=`<div class="game">`;
 
             // === GAME HEADER ===
             h+=`<div class="ghdr${liveClass}">`;
@@ -1536,14 +1512,12 @@
                 const gameState = sc.display_status || sc.period || sc.clock || '';
                 if (gameState) h+=`<span class="game-status">${esc(gameState)}</span>`;
                 h+=`<span class="stale-tag">pre-game odds</span>`;
-                for (const bet of myBetsArr) h+=renderBetTag(bet, ev);
                 h+=`</div>`;
                 h+=`<div class="ghdr-meta"><span class="ghdr-league">${esc(leagueStr)}</span></div>`;
             } else {
                 h+=`<div>`;
                 h+=`<span class="ghdr-league">${esc(leagueStr)}</span>`;
                 h+=`<span class="ghdr-teams">${esc(away)} <span class="at">@</span> ${esc(home)}</span>`;
-                for (const bet of myBetsArr) h+=renderBetTag(bet, ev);
                 h+=`</div>`;
                 h+=`<div class="ghdr-meta">${esc(date)} &middot; ${esc(time)}</div>`;
             }
@@ -1733,106 +1707,6 @@
         }
     }
 
-    function getBetStatus(bet, ev) {
-        const sc = ev.score;
-        if (!sc || !sc.live) return '';
-
-        const awayScore = sc.away_score ?? 0;
-        const homeScore = sc.home_score ?? 0;
-        const total = awayScore + homeScore;
-        const pick = (bet.pick || '').toLowerCase();
-        const away = (ev.away_team || '').toLowerCase();
-        const home = (ev.home_team || '').toLowerCase();
-        const teamName = (bet.team_name || '').toLowerCase();
-
-        const overMatch = pick.match(/^over\s+([\d.]+)/i);
-        if (overMatch) {
-            const line = parseFloat(overMatch[1]);
-            if (total > line) return 'winning';
-            return 'losing';
-        }
-        const underMatch = pick.match(/^under\s+([\d.]+)/i);
-        if (underMatch) {
-            const line = parseFloat(underMatch[1]);
-            if (total > line) return 'dead';
-            if (total === line) return 'losing';
-            return 'winning';
-        }
-
-        const spreadMatch = pick.match(/(.+?)\s+([+-][\d.]+)$/);
-        if (spreadMatch) {
-            const spreadTeam = spreadMatch[1].toLowerCase();
-            const line = parseFloat(spreadMatch[2]);
-            let teamScore, oppScore;
-            if (away.includes(spreadTeam) || spreadTeam.includes(away.split(' ').pop())) {
-                teamScore = awayScore; oppScore = homeScore;
-            } else {
-                teamScore = homeScore; oppScore = awayScore;
-            }
-            const margin = teamScore - oppScore + line;
-            if (margin > 0) return 'winning';
-            if (margin === 0) return 'losing';
-            return 'dead';
-        }
-
-        if (teamName) {
-            let teamScore, oppScore;
-            if (away.includes(teamName) || teamName.includes(away.split(' ').pop())) {
-                teamScore = awayScore; oppScore = homeScore;
-            } else if (home.includes(teamName) || teamName.includes(home.split(' ').pop())) {
-                teamScore = homeScore; oppScore = awayScore;
-            } else {
-                return '';
-            }
-            if (teamScore > oppScore) return 'winning';
-            if (teamScore === oppScore) return 'losing';
-            return 'losing';
-        }
-
-        return '';
-    }
-
-    function renderBetTag(bet, ev) {
-        const pick = bet.pick || bet.team_name || '?';
-        const odds = bet.entry_american != null
-            ? ` (${bet.entry_american > 0 ? '+' : ''}${bet.entry_american})`
-            : '';
-        const status = ev ? getBetStatus(bet, ev) : '';
-        const statusClass = status ? ' ' + status : '';
-        return `<span class="my-bet-tag${statusClass}"><span class="check">&#10003;</span>POLY: ${esc(pick)}${odds}</span>`;
-    }
-
-    let myBets = [];
-
-    async function loadMyBets() {
-        try {
-            const resp = await authFetch('/api/my-bets');
-            if (!resp) return;
-            const data = await resp.json();
-            if (data.ok) myBets = data.bets || [];
-        } catch(e) { console.warn('my-bets:', e); }
-    }
-
-    function findMyBets(ev) {
-        const away = (ev.away_team || '').toLowerCase();
-        const home = (ev.home_team || '').toLowerCase();
-        const matches = [];
-        for (const bet of myBets) {
-            const tn = (bet.team_name || '').toLowerCase();
-            const mn = (bet.market_name || '').toLowerCase();
-            if (tn && (away.includes(tn) || home.includes(tn) || tn.includes(away.split(' ').pop()) || tn.includes(home.split(' ').pop()))) {
-                matches.push(bet);
-                continue;
-            }
-            if (mn && (mn.includes(away.split(' ').pop()) || mn.includes(home.split(' ').pop()))) {
-                const awayLast = away.split(' ').pop();
-                const homeLast = home.split(' ').pop();
-                if (mn.includes(awayLast) && mn.includes(homeLast)) matches.push(bet);
-            }
-        }
-        return matches;
-    }
-
     window.setSport = function(s){
         activeSport=s;
         firstLoad=true;
@@ -1869,7 +1743,6 @@
         }
 
         renderSportBar();
-        loadMyBets();
         const [op, splitsOp, splitsLc] = await Promise.all([
             loadOpeners(activeSport),
             loadSplitsOpeners(activeSport),
@@ -1881,7 +1754,6 @@
         await loadOdds();
         prefetchOpeners();
         setInterval(loadOdds, 15000);
-        setInterval(loadMyBets, 60000);
     }
     loadAndStart();
 

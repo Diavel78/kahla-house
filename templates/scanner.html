@@ -388,13 +388,9 @@
     firebase.auth().onAuthStateChanged(async (user) => {
         if (!user) { location.href = '/'; return; }
         try {
-            const res = await authFetch('/api/scanner/activity');
-            if (res.status === 403) {
-                showBanner('Admin access required.', 'err');
-                document.getElementById('status').textContent = 'No access';
-                return;
-            }
-        } catch (e) { /* fall through; loadAll will surface errors */ }
+            const me = await authFetch('/api/me').then(r => r.ok ? r.json() : null);
+            if (!me || !me.approved || me.role !== 'admin') { location.href = '/'; return; }
+        } catch (e) { location.href = '/'; return; }
         await loadAll();
         setupAutoRefresh();
     });
