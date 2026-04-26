@@ -1323,6 +1323,17 @@
        surface the per-market score next to the movement values.
        Phase 3 will pipe ≥7 scores to a Telegram alert.
     ────────────────────────────────────────────────────────────── */
+    /* American odds → "cents from even money" so we can subtract
+       across the +/-100 boundary. -110 = 10 (10 cents into favorite
+       territory). +110 = -10 (10 cents into dog). Lets us compute
+       a clean cent-distance even for lines that cross even money.   */
+    function _amerToCents(p) {
+        if (p == null || !Number.isFinite(p)) return null;
+        if (p < 0) return -p - 100;
+        if (p > 0) return -(p - 100);
+        return 0;
+    }
+
     function _moveSubScore(mv, mktKey) {
         const data = mv && mv[mktKey];
         if (!data) return null;
@@ -1330,32 +1341,27 @@
         if (!team) return null;
         const d = data[team];
         if (mktKey === 'ml') {
-            if (d.open == null || d.current == null) return null;
-            const op = _amerToProb(d.open);
-            const cp = _amerToProb(d.current);
-            if (op == null || cp == null) return null;
-            // Pinnacle moves on enormous volume — when PIN moves a
-            // moneyline at all, that IS sharp money. A 10-cent ML
-            // move (e.g. -133 → -123) is ~2 prob-pts and should
-            // register as MAX. Smaller scale than spread/total
-            // because ML moves on PIN are inherently rarer.
-            //   ~3c American (≈0.5 prob-pt)  → 3
-            //   ~5c American (≈1.0 prob-pt)  → 5
-            //   ~10c American (≈2.0 prob-pt) → 10  ← caps out
-            return Math.min(10, Math.round(Math.abs(cp - op) * 500));
+            // 1 cent of American odds movement = 1 score-point. Caps
+            // at 10 cents = 10. The bettor's mental model: 'PIN moved
+            // 5 cents → 5. 10 cents → 10.' Crossing the +/-100
+            // boundary handled by _amerToCents.
+            const oC = _amerToCents(d.open);
+            const cC = _amerToCents(d.current);
+            if (oC == null || cC == null) return null;
+            return Math.min(10, Math.round(Math.abs(cC - oC)));
         }
-        // Spread: 1pt move is sharp-action territory. 0.5pt = 3,
-        // 1pt = 6, 1.5pt = 9, 2pt+ = 10. Plus small price-twitch credit.
+        // Spread: 0.1 pt = 1 score. 0.5pt move = 5, 1pt = 10.
+        // Plus tiny price-twitch credit (1 cent on the juice = 0.1).
         if (mktKey === 'spread') {
             const pt = Math.abs(d.point_diff || 0);
             const px = Math.abs(d.price_diff || 0);
-            return Math.min(10, Math.round(pt * 6 + Math.min(2, px / 10)));
+            return Math.min(10, Math.round(pt * 10 + Math.min(2, px / 10)));
         }
-        // Total: 0.5 move = 6, 1+ = 10. Same price-twitch credit.
+        // Total: same scale as spread. 0.5 = 5, 1 = 10.
         if (mktKey === 'total') {
             const pt = Math.abs(d.point_diff || 0);
             const px = Math.abs(d.price_diff || 0);
-            return Math.min(10, Math.round(pt * 12 + Math.min(2, px / 10)));
+            return Math.min(10, Math.round(pt * 10 + Math.min(2, px / 10)));
         }
         return null;
     }
