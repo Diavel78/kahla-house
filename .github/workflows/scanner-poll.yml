@@ -17,6 +17,10 @@ name: Odds Ingest — Poll
 #   ODDS_API_KEY         — from the-odds-api.com (paid tier)
 #   SUPABASE_URL
 #   SUPABASE_SERVICE_KEY
+#   TELEGRAM_BOT_TOKEN   — optional; from @BotFather. Sharp/steam alerts
+#   TELEGRAM_CHAT_ID     — optional; user id from /getUpdates.
+#                          Both required to send alerts; if either is
+#                          missing the alert step exits as a no-op.
 #
 # To add/remove sports: edit SPORTS_ENABLED below.
 
@@ -65,3 +69,16 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           SPORTS_ENABLED:       NFL,NBA,MLB,NHL,CBB,NCAAF,UFC
         run: python -m scrapers.odds_api
+
+      # Sharp/steam Telegram alerts. Runs after ingest so it sees fresh
+      # snapshots. No-ops silently when TELEGRAM_BOT_TOKEN/CHAT_ID aren't
+      # set, and `continue-on-error` means a flaky alert run never blocks
+      # the next ingest cycle.
+      - name: Sharp + steam alerts (Telegram)
+        continue-on-error: true
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -m scripts.sharp_alerts

@@ -125,6 +125,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - `templates/index.html` — Landing page with auth + admin + role-based app cards (~440 lines)
 - `kahla-scanner/scrapers/odds_api.py` — The Odds API ingester (cron entry point)
 - `kahla-scanner/scripts/cleanup_snapshots.py` — nightly book_snapshots > 15d delete
+- `kahla-scanner/scripts/sharp_alerts.py` — Telegram steam + Sharp 7+ alerts (runs after each scanner-poll ingest)
 - `kahla-scanner/storage/{models,supabase_client}.py` — slim Supabase wrapper
 - `kahla-scanner/_lib/{matcher,normalize}.py` — team-name fuzzy match + odds math
 - `firestore.rules` — Firestore security rules (admin/approved helpers)
@@ -143,6 +144,8 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `FLASK_SECRET_KEY` | Vercel env | Flask session secret |
 | `SUPABASE_URL` | GitHub Actions secret + Vercel env | Supabase Postgres URL |
 | `SUPABASE_SERVICE_KEY` | GitHub Actions secret + Vercel env | Supabase service key |
+| `TELEGRAM_BOT_TOKEN` | GitHub Actions secret | Bot token from @BotFather. Used by `scripts/sharp_alerts.py`. Optional — alert step is a no-op when missing. |
+| `TELEGRAM_CHAT_ID` | GitHub Actions secret | Your Telegram user id (from `getUpdates`). Optional. |
 
 ---
 
@@ -302,9 +305,33 @@ The chip prints `[SIDE] SHARP N`. Side label is the team's truncTeam() abbr for 
 - **7-9** — `tier-strong` (green)
 - **10**  — `tier-elite` (gold gradient)
 
+### Telegram alerts (Phase 3 — live)
+
+`kahla-scanner/scripts/sharp_alerts.py` runs immediately after each ingest cycle (appended step in `.github/workflows/scanner-poll.yml` — same 30-min cadence, no second cron registration). Sends two kinds of messages to Telegram:
+
+- **🚨 STEAM** — for each (market_type, side), counts how many books moved the same direction comparing the latest snapshot vs ≥30-min-ago snapshot. Fires when ≥`STEAM_BOOK_COUNT` (5) books align. Indicates institutional-flow synchronization.
+- **⚡ SHARP N** — fires when any (market, market_type) crosses Sharp Score ≥`SHARP_THRESHOLD` (7). Score formula mirrors the on-card chip in `templates/odds.html` exactly so the Telegram alert matches what the user sees: `_amer_to_cents()` + `_move_score_ml()` + `_move_score_spr_tot()` are Python ports of the JS helpers.
+
+Dedupe via the `sharp_alerts` Supabase table — duplicate (market_id, market_type, alert_type, side) within `DEDUPE_HOURS` (6) is suppressed. Required schema:
+
+```sql
+CREATE TABLE IF NOT EXISTS sharp_alerts (
+  id          BIGSERIAL PRIMARY KEY,
+  market_id   UUID NOT NULL,
+  market_type TEXT NOT NULL,
+  alert_type  TEXT NOT NULL,           -- 'steam' or 'sharp7'
+  side        TEXT,                     -- home/away/over/under
+  sent_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  payload     JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_sharp_alerts_dedup
+  ON sharp_alerts (market_id, market_type, alert_type, side, sent_at DESC);
+```
+
+Setup: BotFather → `/newbot` → token; message bot anything; visit `https://api.telegram.org/bot<TOKEN>/getUpdates` → grab `chat.id`. Add as GitHub secrets `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`. Alert step skips silently when either is missing, so the workflow doesn't break if you tear down the bot.
+
 ### Future hooks (not yet built)
 
-- **Phase 3 — Telegram alerts**: when any market's score crosses ≥7 in a given cron cycle, push a Telegram message via a GitHub Actions cron + bot. Sender uses the same Supabase reads, no new credit burn.
 - **Phase 4 — Sharp Bot tab (admin only)**: daily picker takes top 5 +EV bets (combining sharp score with devigged fair line from `_lib/normalize.py` AND the per-signal sub-scores), logs them as paper bets in a new `paper_bets` Supabase table, resolves on game completion via ESPN scores, runs a per-signal hit-rate tracker so weights can self-tune over a rolling 30-day window.
 
 ## Action Network — Public Betting Splits
