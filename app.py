@@ -7,7 +7,6 @@ Firestore for data storage. First app: Bet System (odds board + P&L dashboard).
 
 import os
 import re
-import sys
 import json
 import secrets
 import functools
@@ -18,7 +17,7 @@ from firebase_admin import auth as fb_auth, credentials, firestore
 
 from dotenv import load_dotenv
 from flask import (
-    Flask, render_template, request, redirect, url_for,
+    Flask, render_template, request,
     jsonify, g, make_response,
 )
 
@@ -643,22 +642,33 @@ _SPORT_PATH_TO_CODE = {
 # template uses to look up book metadata in its `BL` map. Anything not in
 # this map falls back to lowercased verbatim — no data lost.
 _SHORT_TO_DISPLAY_KEY = {
+    # Sharp + big-4 US retail
     "PIN":    "pinnacle",
     "DK":     "draftkings",
     "FD":     "fanduel",
     "MGM":    "betmgm",
     "CAE":    "caesars",
+    # Other US-licensed / Rob-accessible books
     "HR":     "hardrock",
+    "BET365": "bet365",
+    "BR":     "betrivers",
     "BOL":    "betonline",
+    "LV":     "lowvig",
+    "BVD":    "bovada",
+    "ESPN":   "espnbet",
+    "FAN":    "fanatics",
+    "MB":     "mybookie",
 }
 
-# Allowlist for the Odds Board. The Odds API EU region returns dozens of
-# European books we don't care about (unibet_se, winamax_fr, tipico_de,
-# bovada, betsson, betclic_fr, marathonbet, fanatics, etc.) and Supabase
-# still holds Owls-era short codes (POLY, NOV, KAL, STN, WG, WYN, SP, CZR).
-# We hide everything not in this set both server-side (response filter) and
-# in the scraper (no junk written going forward).
-_ALLOWED_BOOKS = {"PIN", "DK", "FD", "MGM", "CAE", "HR", "BOL"}
+# Allowlist for the Odds Board. Mirrors `ALLOWED_BOOKS` in
+# kahla-scanner/scrapers/odds_api.py — must stay in sync. Books outside
+# this set (EU regional junk, Owls-era short codes left in Supabase from
+# old scrapes) are filtered out of the response.
+_ALLOWED_BOOKS = {
+    "PIN", "DK", "FD", "MGM", "CAE",
+    "HR", "BET365", "BR", "BOL",
+    "LV", "BVD", "ESPN", "FAN", "MB",
+}
 
 
 def _split_event_name(name: str) -> tuple[str, str] | tuple[None, None]:
@@ -906,7 +916,7 @@ def api_openers_scanner():
         return jsonify({"ok": True, "sport": request.args.get("sport"), "events": []})
 
     sport_owls = (request.args.get("sport") or "").lower().strip()
-    sport_code = _SCANNER_SPORT_FROM_OWLS.get(sport_owls)
+    sport_code = _SPORT_PATH_TO_CODE.get(sport_owls)
     if not sport_code:
         return jsonify({"ok": True, "sport": sport_owls, "events": []})
 
@@ -1499,17 +1509,6 @@ def api_data():
 # Line-movement history (powers the per-game chart modal on /odds)
 # ---------------------------------------------------------------------------
 
-# Owls API sport path  ->  scanner sport code stored in markets.sport
-_SCANNER_SPORT_FROM_OWLS = {
-    "mlb": "MLB",
-    "nba": "NBA",
-    "nhl": "NHL",
-    "nfl": "NFL",
-    "ncaab": "CBB",
-    "ncaaf": "NCAAF",
-    "mma": "UFC",
-}
-
 # Books we surface on the chart. Aligned with the Odds Board allowlist
 # (_ALLOWED_BOOKS). Circa is not in The Odds API at any region; Polymarket
 # uses 0-1 probability not American odds; Novig isn't legal in Rob's state.
@@ -1724,7 +1723,7 @@ def api_odds_history():
         return jsonify({"ok": False, "error": "Supabase not configured"}), 503
 
     sport_owls = (request.args.get("sport") or "").lower().strip()
-    sport_code = _SCANNER_SPORT_FROM_OWLS.get(sport_owls)
+    sport_code = _SPORT_PATH_TO_CODE.get(sport_owls)
     if not sport_code:
         return jsonify({"ok": False, "error": f"unsupported sport: {sport_owls}"}), 400
 

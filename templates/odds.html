@@ -863,8 +863,16 @@
     const SPORTS = ['mlb','nba','nhl','nfl','ncaab','ncaaf','mma'];
     const SL = {mlb:'MLB',nba:'NBA',nhl:'NHL',nfl:'NFL',ncaab:'NCAAB',ncaaf:'NCAAF',mma:'MMA'};
     // Books the Odds API allowlist surfaces (matches _ALLOWED_BOOKS in app.py).
-    const BL = {pinnacle:'PIN',draftkings:'DK',fanduel:'FD',betmgm:'MGM',caesars:'CZR',hardrock:'HR',betonline:'BOL'};
-    const BL_FULL = {pinnacle:'Pinnacle',draftkings:'DraftKings',fanduel:'FanDuel',betmgm:'BetMGM',caesars:'Caesars',hardrock:'Hard Rock',betonline:'BetOnline'};
+    const BL = {
+        pinnacle:'PIN', draftkings:'DK', fanduel:'FD', betmgm:'MGM', caesars:'CZR',
+        hardrock:'HR', bet365:'365', betrivers:'BR', betonline:'BOL',
+        lowvig:'LV', bovada:'BVD', espnbet:'ESPN', fanatics:'FAN', mybookie:'MB',
+    };
+    const BL_FULL = {
+        pinnacle:'Pinnacle', draftkings:'DraftKings', fanduel:'FanDuel', betmgm:'BetMGM', caesars:'Caesars',
+        hardrock:'Hard Rock', bet365:'Bet365', betrivers:'BetRivers', betonline:'BetOnline',
+        lowvig:'LowVig', bovada:'Bovada', espnbet:'ESPN BET', fanatics:'Fanatics', mybookie:'MyBookie',
+    };
 
     let activeSport = 'mlb';  // will be overridden by Firestore prefs
     let oddsData = {events:[], books:[]};
@@ -1059,7 +1067,11 @@
     }
 
     // All known book keys (superset — user order + API-returned + enabled)
-    const ALL_KNOWN_BOOKS = ['pinnacle','draftkings','fanduel','betmgm','caesars','hardrock','betonline'];
+    const ALL_KNOWN_BOOKS = [
+        'pinnacle','draftkings','fanduel','betmgm','caesars',
+        'hardrock','bet365','betrivers','betonline',
+        'lowvig','bovada','espnbet','fanatics','mybookie',
+    ];
 
     function getOrderedBooks(){
         // The book selector only ever shows books in ALL_KNOWN_BOOKS — that
@@ -1896,26 +1908,9 @@
         }, delay);
     }
     loadAndStart();
-
-    // Debug: check ML market keys — call from console or add ?debug=markets to URL
-    window.debugMarkets = async function() {
-        const resp = await authFetch(`/api/odds/debug-markets?sport=${activeSport}`);
-        const data = await resp.json();
-        const el = document.createElement('div');
-        el.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.95);z-index:9999;padding:20px;overflow:auto;font-family:monospace;font-size:12px;color:#e2e8f0';
-        let html = `<div style="max-width:600px;margin:0 auto"><h2 style="color:#f59e0b;margin-bottom:16px">Market Keys: ${activeSport.toUpperCase()}</h2>`;
-        for (const [book, info] of Object.entries(data.books || {})) {
-            const hasML = info.games_with_ml > 0;
-            html += `<div style="margin-bottom:12px;padding:10px;border:1px solid ${hasML ? '#22c55e' : '#ef4444'};border-radius:8px">`;
-            html += `<strong>${book}</strong>: ${info.games} games, <span style="color:${hasML ? '#22c55e' : '#ef4444'}">${info.games_with_ml} with ML</span><br>`;
-            html += `Keys: ${info.market_keys.join(', ')}`;
-            html += `</div>`;
-        }
-        html += `<button onclick="this.parentElement.parentElement.remove()" style="margin-top:16px;padding:10px 20px;background:#4a7cff;color:white;border:none;border-radius:8px;font-size:14px">Close</button></div>`;
-        el.innerHTML = html;
-        document.body.appendChild(el);
-    };
-    if (location.search.includes('debug=markets')) setTimeout(window.debugMarkets, 3000);
+    // (window.debugMarkets / ?debug=markets overlay was tied to the
+    // /api/odds/debug-markets endpoint that we deleted with the Owls
+    // scrubbing — removed.)
 
     } // end initApp
     </script>

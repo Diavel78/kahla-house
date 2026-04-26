@@ -31,7 +31,12 @@ on:
 
 concurrency:
   group: odds-ingest-poll
-  cancel-in-progress: false
+  # If cron-job.org ever retries or someone manually triggers while a run
+  # is queued, cancel the older one. Each run is idempotent (dedup logic
+  # in scrapers/odds_api.py) so a half-finished run getting killed loses
+  # nothing — the next run picks up what was missed. This guarantees we
+  # never run two ingests back-to-back and double the credit burn.
+  cancel-in-progress: true
 
 jobs:
   poll:

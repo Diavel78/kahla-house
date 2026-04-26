@@ -53,21 +53,36 @@ SPORT_KEYS = {
 
 # Odds API bookmaker key (lowercase)  ->  short code stored in book_snapshots.book.
 BOOK_CODES = {
-    "pinnacle":     "PIN",
-    "draftkings":   "DK",
-    "fanduel":      "FD",
-    "betmgm":       "MGM",
-    "caesars":      "CAE",
-    "hardrockbet":  "HR",
-    "hardrock":     "HR",
-    "betonlineag":  "BOL",
-    "betonline":    "BOL",
+    # Sharp + the big-4 US retail
+    "pinnacle":      "PIN",
+    "draftkings":    "DK",
+    "fanduel":       "FD",
+    "betmgm":        "MGM",
+    "caesars":       "CAE",
+    # Other US-licensed / available-to-Rob books
+    "hardrockbet":   "HR",
+    "hardrock":      "HR",
+    "bet365":        "BET365",
+    "betrivers":     "BR",
+    "betonlineag":   "BOL",
+    "betonline":     "BOL",
+    "lowvig":        "LV",
+    "bovada":        "BVD",
+    "espnbet":       "ESPN",
+    "fanatics":      "FAN",
+    "mybookieag":    "MB",
 }
 
-# Allowlist — only these books get written to book_snapshots. The Odds API
-# EU region returns dozens of European books we don't care about. Anything
-# whose mapped short code isn't in this set is silently dropped at ingest.
-ALLOWED_BOOKS = {"PIN", "DK", "FD", "MGM", "CAE", "HR", "BOL"}
+# Allowlist — only these short codes get written to book_snapshots. The Odds
+# API EU region returns dozens of European books (winamax_fr, tipico_de,
+# unibet_se, etc.) we don't care about; this set is the explicit US-style
+# slate Rob can actually use. Anything whose mapped short code isn't here
+# is silently dropped at ingest.
+ALLOWED_BOOKS = {
+    "PIN", "DK", "FD", "MGM", "CAE",
+    "HR", "BET365", "BR", "BOL",
+    "LV", "BVD", "ESPN", "FAN", "MB",
+}
 
 # How close (minutes) two event_start values must be to consider the same game.
 MATCH_WINDOW = timedelta(minutes=30)
