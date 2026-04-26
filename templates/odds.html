@@ -1579,7 +1579,11 @@
     }
     function _fmtPoint(v) {
         if (v == null || !Number.isFinite(v)) return '';
-        return v > 0 ? '+' + v : '' + v;
+        // Round to 1 decimal place to avoid Chart.js auto-generated ticks
+        // showing things like "+1.5000000000000002" (binary float artifact
+        // when the chart range is tiny).
+        const r = Math.round(v * 10) / 10;
+        return r > 0 ? '+' + r : '' + r;
     }
     // "last odds update Nm ago" formatter. Takes ISO string from the server
     // (most recent captured_at across visible snaps). Returns "just now",
