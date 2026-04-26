@@ -673,6 +673,51 @@
             font-size: 10px;
         }
 
+        /* Public splits row (Action Network ML data) */
+        .splits-row {
+            padding: 8px 18px 12px;
+            border-top: 1px solid var(--border);
+            background: rgba(11,14,19,0.3);
+            display: none;  /* hidden until drawSplitsRow() populates */
+            flex-direction: column;
+            gap: 4px;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .splits-row.has-data { display: flex; }
+        .splits-header {
+            display: flex; align-items: center; gap: 8px;
+            font-size: 10px; color: var(--text-muted); letter-spacing: 0.04em;
+        }
+        .splits-tag {
+            font-weight: 700; color: var(--blue);
+            background: var(--blue-dim); padding: 1px 6px; border-radius: 4px;
+        }
+        .splits-bar {
+            display: flex; gap: 0; height: 18px; border-radius: 4px;
+            overflow: hidden; background: var(--surface-2); position: relative;
+        }
+        .splits-half {
+            display: flex; align-items: center; justify-content: center;
+            font-size: 10px; font-weight: 700; color: #fff;
+            transition: width .2s;
+        }
+        .splits-half.away.bets { background: rgba(74,124,255,0.55); }
+        .splits-half.home.bets { background: rgba(74,124,255,0.85); }
+        .splits-half.away.money { background: rgba(245,158,11,0.55); }
+        .splits-half.home.money { background: rgba(245,158,11,0.85); }
+        .splits-bar.money .splits-half { font-size: 10px; }
+        .splits-bar-label {
+            font-size: 10px; color: var(--text-muted); width: 38px; flex-shrink: 0;
+            display: flex; align-items: center;
+        }
+        .splits-line { display: flex; align-items: center; gap: 8px; }
+        .splits-sharp {
+            margin-left: auto;
+            font-size: 10px; font-weight: 700;
+            color: var(--orange); background: var(--orange-dim);
+            padding: 2px 6px; border-radius: 4px;
+        }
+
         /* Game footer (movement) */
         .game-footer {
             background: rgba(11,14,19,0.4);
@@ -1542,6 +1587,10 @@
                 h += renderSparkRow(sparkId, 'total',  'TOT', 'Over');
                 h += `</div>`;
             }
+            // Public splits row (Action Network — % bets vs % money for the
+            // moneyline). Populated by drawSplitsRow() after the batched
+            // /api/splits fetch resolves.
+            h += `<div class="splits-row js-splits" data-away="${esc(away)}" data-home="${esc(home)}"></div>`;
             h += `</div>`;
 
             h+=`</div>`;
@@ -1565,6 +1614,95 @@
             // Inline 6h PIN ML home sparklines for every game card.
             // Fires after the swap so the canvases exist in the visible board.
             drawSparklines();
+            drawSplitsRows();
+        });
+    }
+
+    /* ─── Public splits (Action Network) per game card ─── */
+    let _splitsData = null;  // { events: [{away_team, home_team, ml: {...}, sharp_diff}] }
+
+    async function fetchSplitsBatch() {
+        try {
+            const resp = await authFetch(`/api/splits?sport=${activeSport}`);
+            if (!resp) return;
+            const data = await resp.json();
+            _splitsData = (data && data.ok) ? data : null;
+        } catch (e) {
+            _splitsData = null;
+            console.warn('splits:', e);
+        }
+        drawSplitsRows();
+    }
+
+    function _matchSplitsEvent(splitsEvents, ourAway, ourHome) {
+        if (!Array.isArray(splitsEvents)) return null;
+        const a = (ourAway || '').toLowerCase();
+        const h = (ourHome || '').toLowerCase();
+        for (const ev of splitsEvents) {
+            const sa = (ev.away_team || '').toLowerCase();
+            const sh = (ev.home_team || '').toLowerCase();
+            if (!sa || !sh) continue;
+            // Action Network uses short names ("Pirates"); we have full
+            // names ("Pittsburgh Pirates"). Substring containment in
+            // either direction handles both ways.
+            if ((a.includes(sa) || sa.includes(a)) &&
+                (h.includes(sh) || sh.includes(h))) return ev;
+        }
+        return null;
+    }
+
+    function drawSplitsRows() {
+        if (!_splitsData) return;
+        const events = _splitsData.events || [];
+        document.querySelectorAll('#board .js-splits').forEach(el => {
+            const ours = _matchSplitsEvent(events, el.dataset.away, el.dataset.home);
+            if (!ours || !ours.ml) {
+                el.innerHTML = '';
+                el.classList.remove('has-data');
+                return;
+            }
+            const ml = ours.ml;
+            const ab = ml.away_bets,  hb = ml.home_bets;
+            const am = ml.away_money, hm = ml.home_money;
+            const haveBets  = (ab != null && hb != null);
+            const haveMoney = (am != null && hm != null);
+            if (!haveBets && !haveMoney) {
+                el.innerHTML = '';
+                el.classList.remove('has-data');
+                return;
+            }
+
+            const sharpHtml = (ours.sharp_diff != null && Math.abs(ours.sharp_diff) >= 10)
+                ? `<span class="splits-sharp">SHARP ${ours.sharp_diff > 0 ? '+' : ''}${ours.sharp_diff}%</span>`
+                : '';
+
+            let inner = `
+                <div class="splits-header">
+                    <span class="splits-tag">PUBLIC</span> ML splits · away vs home
+                    ${sharpHtml}
+                </div>`;
+            if (haveBets) {
+                inner += `
+                <div class="splits-line">
+                    <span class="splits-bar-label">% bets</span>
+                    <div class="splits-bar" style="flex:1">
+                        <div class="splits-half away bets" style="width:${ab}%">${ab}%</div>
+                        <div class="splits-half home bets" style="width:${hb}%">${hb}%</div>
+                    </div>
+                </div>`;
+            }
+            if (haveMoney) {
+                inner += `
+                <div class="splits-line">
+                    <span class="splits-bar-label">% money</span>
+                    <div class="splits-bar money" style="flex:1">
+                        <div class="splits-half away money" style="width:${am}%">${am}%</div>
+                        <div class="splits-half home money" style="width:${hm}%">${hm}%</div>
+                    </div>
+                </div>`;
+            }
+            el.innerHTML = inner;
+            el.classList.add('has-data');
         });
     }
 
@@ -1841,14 +1979,16 @@
         ]).then(([op, scnOps]) => {
             currentOpeners = op;
             scannerOpeners = scnOps;
-            // Sparkline data is per-sport; wipe before re-fetching for new sport.
+            // Sparkline + splits data is per-sport; wipe before re-fetching.
             _sparkData = null;
+            _splitsData = null;
             for (const k of Object.keys(_sparkInstances)) {
                 try { _sparkInstances[k].destroy(); } catch {}
                 delete _sparkInstances[k];
             }
             loadOdds(true);
             fetchSparklineBatch();
+            fetchSplitsBatch();
         });
     };
 
@@ -1878,6 +2018,7 @@
         scannerOpeners = scnOps;
         await loadOdds();
         fetchSparklineBatch();
+        fetchSplitsBatch();
         // Adaptive polling. Server hits we make on each tick:
         //   - Supabase READ (free, no API credits)
         //   - ESPN scoreboard (free, server-cached 30s)
@@ -1902,6 +2043,7 @@
                 // 30 min; a refresh between cron runs is a no-op for the chart
                 // but cheap — single batched Supabase read per sport).
                 fetchSparklineBatch();
+                fetchSplitsBatch();
             } finally {
                 scheduleNextLoad();
             }

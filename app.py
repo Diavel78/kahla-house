@@ -1511,81 +1511,102 @@ def _fetch_action_splits(sport: str) -> dict:
 
 
 def _parse_action_splits_html(html: str) -> dict:
-    """Best-effort parse. We expect Action Network's public-betting page to
-    contain the splits table in a recognizable structure — typically rows
-    keyed by matchup with `% bets` and `% money` cells per market. Schema
-    isn't documented; we use heuristics + log everything we DON'T find.
+    """Parse Action Network's /{sport}/public-betting HTML table.
 
-    Strategy:
-      1. Try BeautifulSoup .find_all('table'); pick the largest table.
-      2. Look for percentage strings (\d+%) within rows.
-      3. Pair team names + percentages into our shape.
+    Row layout we discovered:
+        cell 0: status + teams, e.g.
+                "TOP 10TH : 0-0, 2 Out Pirates PIT 907 Brewers MIL 908"
+                "Final Mariners SEA 925 Cardinals STL 926"
+                "PPD Rockies COL 903 Mets NYM 904"
+        cell 1: open odds         (American, away then home)
+        cell 2: current odds      (American, away then home)
+        cell 3: % of bets         "Right Arrow 35 % Right Arrow 65 %"
+        cell 4: % of money        "Right Arrow 27 % Right Arrow 73 %"
+        cell 5: money-vs-bets diff (e.g. "+8 %") — public-fade signal
+        cell 6: total ticket count
 
-    Returns {"ok": True, "events": [...]} on success or
-            {"ok": False, "error": "...", "events": [], "table_count": N}
-    so the diagnostic page can show what went wrong.
+    Currently the page shows MONEYLINE splits only by default. Spread and
+    Total live on different URLs (?period=spread / ?period=total) — left
+    as a future iteration.
     """
     from bs4 import BeautifulSoup
     import re as _re
 
     soup = BeautifulSoup(html, "lxml")
     tables = soup.find_all("table")
-
-    debug: dict = {
-        "ok": False,
-        "events": [],
-        "table_count": len(tables),
-        "first_table_rows": 0,
-        "first_table_sample": "",
-    }
-
     if not tables:
-        # Action Network might be rendering with JS only. Capture a few
-        # markers to confirm.
-        markers: list[str] = []
-        for token in ("public-betting", "% Bets", "% Money", "publicBetting"):
-            if token.lower() in html.lower():
-                markers.append(token)
-        debug["error"] = "no <table> elements in HTML"
-        debug["html_markers_seen"] = markers
-        return debug
+        return {"ok": False, "error": "no <table> elements in HTML",
+                "events": [], "table_count": 0}
 
-    # Pick the largest table by row count
-    def _row_count(t):
-        return len(t.find_all("tr"))
-    table = max(tables, key=_row_count)
+    table = max(tables, key=lambda t: len(t.find_all("tr")))
     rows = table.find_all("tr")
-    debug["first_table_rows"] = len(rows)
-    if rows:
-        debug["first_table_sample"] = rows[0].get_text(" | ", strip=True)[:300]
 
+    # Pattern: <away_name>  <ABBR>  <NUM>  <home_name>  <ABBR>  <NUM>
+    # Team name allows spaces (e.g. "Red Sox", "White Sox", "Blue Jays").
+    # Allowing 2-4 char abbr to catch ATH, NYM, CWS, etc.
+    team_re = _re.compile(
+        r"([A-Za-z][A-Za-z .'-]*?)\s+([A-Z]{2,4})\s+(\d{3})\s+"
+        r"([A-Za-z][A-Za-z .'-]*?)\s+([A-Z]{2,4})\s+(\d{3})"
+    )
     pct_re = _re.compile(r"(\d{1,3})\s*%")
-    events = []
-    for tr in rows[1:]:  # skip header
+    diff_re = _re.compile(r"([+-]\d+)\s*%")
+
+    events: list[dict] = []
+    parse_warnings = 0
+    for tr in rows[1:]:
         cells = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
-        if not cells:
+        if len(cells) < 5:
             continue
-        # Cell 0 typically has team names. Action Network uses uppercase
-        # abbreviations + full names jammed together.
-        cell0 = cells[0]
-        # Pull all percentage values across the row
-        pcts = pct_re.findall(" | ".join(cells))
-        if not pcts:
+        m = team_re.search(cells[0])
+        if not m:
+            parse_warnings += 1
             continue
+        away_name, away_abbr, away_id, home_name, home_abbr, home_id = m.groups()
+        status = cells[0][:m.start()].strip()
+        # Defensive — empty status sometimes means upcoming game
+        if not status:
+            status = "scheduled"
+
+        bets_pcts  = [int(p) for p in pct_re.findall(cells[3] if len(cells) > 3 else "")]
+        money_pcts = [int(p) for p in pct_re.findall(cells[4] if len(cells) > 4 else "")]
+
+        ml: dict = {}
+        if len(bets_pcts) >= 2:
+            ml["away_bets"] = bets_pcts[0]
+            ml["home_bets"] = bets_pcts[1]
+        if len(money_pcts) >= 2:
+            ml["away_money"] = money_pcts[0]
+            ml["home_money"] = money_pcts[1]
+
+        # Sharp signal: % money diverging from % bets by N points.
+        # Action Network publishes a "+8 %" style diff in cell 5 — we
+        # carry it through too in case the UI wants to surface it directly.
+        sharp_diff = None
+        if len(cells) > 5:
+            md = diff_re.search(cells[5])
+            if md:
+                try:
+                    sharp_diff = int(md.group(1))
+                except ValueError:
+                    pass
+
         events.append({
-            "raw_first_cell": cell0[:120],
-            "all_cells_count": len(cells),
-            "pct_values": [int(p) for p in pcts],
-            "row_text": " | ".join(cells)[:400],
+            "status":     status,
+            "away_team":  away_name.strip(),
+            "away_abbr":  away_abbr,
+            "home_team":  home_name.strip(),
+            "home_abbr":  home_abbr,
+            "ml":         ml,
+            "sharp_diff": sharp_diff,
         })
 
-    if not events:
-        debug["error"] = "table found but no percentage rows parsed"
-        return debug
-
-    debug["ok"] = True
-    debug["events"] = events
-    return debug
+    return {
+        "ok":              bool(events),
+        "events":          events,
+        "table_count":     len(tables),
+        "parse_warnings":  parse_warnings,
+        "rows_seen":       len(rows),
+    }
 
 
 @app.route("/api/splits")
