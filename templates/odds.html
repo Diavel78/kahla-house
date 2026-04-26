@@ -763,6 +763,38 @@
         .mv-current { font-weight: 700; font-size: 15px; }
         .mv-diff { font-size: 11px; }
 
+        /* Per-market sharp-score chip (1-10 strength). Splits each
+           movement row in half: existing values left, score right. */
+        .mv-item-content { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+        .mv-item.with-score {
+            justify-content: space-between;
+            font-size: 13px;       /* shrunk from 14px so values + chip fit */
+            padding: 8px 14px;     /* shrunk from 10px 20px */
+        }
+        .mv-item.with-score .mv-current { font-size: 14px; }
+        .mv-item.with-score .mv-open    { font-size: 12px; }
+        .mv-score-chip {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px; font-weight: 800;
+            padding: 4px 9px; border-radius: 6px;
+            white-space: nowrap;
+            display: inline-flex; align-items: center; gap: 4px;
+            letter-spacing: 0.04em;
+            margin-left: 8px; flex-shrink: 0;
+        }
+        .mv-score-chip .mv-score-tag {
+            font-size: 9px; font-weight: 700;
+            opacity: 0.7; letter-spacing: 0.06em;
+        }
+        .mv-score-chip.tier-low    { background: rgba(148,163,184,0.10); color: var(--text-muted); }
+        .mv-score-chip.tier-mid    { background: rgba(245,158,11,0.15); color: var(--orange); }
+        .mv-score-chip.tier-strong { background: rgba(16,185,129,0.18); color: var(--green); }
+        .mv-score-chip.tier-elite  {
+            background: linear-gradient(135deg, rgba(245,158,11,0.30), rgba(234,179,8,0.30));
+            color: #fde68a;
+            box-shadow: 0 0 0 1px rgba(245,158,11,0.4) inset;
+        }
+
         .empty-state { text-align: center; padding: 60px 24px; color: var(--text-muted); font-size: 14px; }
         .spinner {
             display: inline-block;
@@ -1271,52 +1303,168 @@
     }
 
 
-    function renderMovement(mv, label, mktKey, awayName, homeName) {
+    /* ─── Sharp Score (1-10) per market ───────────────────────────
+       Composite of three signals, each scaled 0-10:
+         - PIN movement magnitude (since opener)
+         - Public splits divergence (% money − % bets, ML only)
+         - PIN vs retail consensus (median of DK/FD/MGM/CAE)
+       Weighted average. Components missing data are skipped and the
+       remaining weights renormalize.
+
+       Scoring intent: 10 = aggressive sharp signal. Game cards
+       surface the per-market score next to the movement values.
+       Phase 3 will pipe ≥7 scores to a Telegram alert.
+    ────────────────────────────────────────────────────────────── */
+    function _moveSubScore(mv, mktKey) {
+        const data = mv && mv[mktKey];
+        if (!data) return null;
+        const team = Object.keys(data)[0];
+        if (!team) return null;
+        const d = data[team];
+        if (mktKey === 'ml') {
+            if (d.open == null || d.current == null) return null;
+            const op = _amerToProb(d.open);
+            const cp = _amerToProb(d.current);
+            if (op == null || cp == null) return null;
+            // 1 prob-point of change = 1 score-point. ≥10pts = max 10.
+            return Math.min(10, Math.round(Math.abs(cp - op) * 100));
+        }
+        // Spread: 1pt move = 5, 2pt+ = 10. Plus price-only twitches up to 3.
+        if (mktKey === 'spread') {
+            const pt = Math.abs(d.point_diff || 0);
+            const px = Math.abs(d.price_diff || 0);
+            return Math.min(10, Math.round(pt * 5 + Math.min(3, px / 10)));
+        }
+        // Total: 0.5pt = 5, 1+ = 10.
+        if (mktKey === 'total') {
+            const pt = Math.abs(d.point_diff || 0);
+            const px = Math.abs(d.price_diff || 0);
+            return Math.min(10, Math.round(pt * 10 + Math.min(2, px / 10)));
+        }
+        return null;
+    }
+
+    function _splitsSubScore(splitsEv) {
+        if (!splitsEv || !splitsEv.ml) return null;
+        const m = splitsEv.ml;
+        if (m.away_money == null || m.away_bets == null) return null;
+        const diff = Math.abs((m.away_money || 0) - (m.away_bets || 0));
+        // |money - bets| of 20 pts = max sharp signal. <2 = noise.
+        if (diff < 2) return 0;
+        return Math.min(10, Math.round(diff / 2));
+    }
+
+    function _retailMedianProb(ev, mktKey, key) {
+        // key = home_team for ml/spread, 'Over' for total
+        const retailKeys = ['draftkings', 'fanduel', 'betmgm', 'caesars'];
+        const probs = [];
+        for (const bk of retailKeys) {
+            const bd = (ev.books || {})[bk];
+            if (!bd) continue;
+            let price = null;
+            if (mktKey === 'ml')     price = bd.moneyline?.[key];
+            if (mktKey === 'spread') price = bd.spread?.[key]?.price;
+            if (mktKey === 'total')  price = bd.total?.[key]?.price;
+            const p = _amerToProb(price);
+            if (p != null) probs.push(p);
+        }
+        if (probs.length < 2) return null;
+        probs.sort((a, b) => a - b);
+        return probs[Math.floor(probs.length / 2)];
+    }
+
+    function _divergenceSubScore(ev, mktKey, awayName, homeName) {
+        const pin = (ev.books || {}).pinnacle;
+        if (!pin) return null;
+        let pinPrice = null, key = null;
+        if (mktKey === 'ml')      { key = homeName; pinPrice = pin.moneyline?.[key]; }
+        else if (mktKey === 'spread') { key = homeName; pinPrice = pin.spread?.[key]?.price; }
+        else if (mktKey === 'total')  { key = 'Over';  pinPrice = pin.total?.[key]?.price; }
+        const pinProb = _amerToProb(pinPrice);
+        if (pinProb == null) return null;
+        const median = _retailMedianProb(ev, mktKey, key);
+        if (median == null) return null;
+        // 5 prob-points = max divergence (retail seriously off-PIN).
+        return Math.min(10, Math.round(Math.abs(pinProb - median) * 200));
+    }
+
+    function computeSharpScore(ev, mv, splitsEv, mktKey, awayName, homeName) {
+        if (!mv || !mv[mktKey] || !Object.keys(mv[mktKey]).length) return null;
+        const moveS   = _moveSubScore(mv, mktKey);
+        const splitsS = (mktKey === 'ml') ? _splitsSubScore(splitsEv) : null;
+        const divS    = _divergenceSubScore(ev, mktKey, awayName, homeName);
+
+        const components = [];
+        const weights = [];
+        // Movement is the heaviest signal — a sharp money move shows
+        // up here regardless of whether splits/retail agree.
+        if (moveS   != null) { components.push(moveS);   weights.push(50); }
+        if (splitsS != null) { components.push(splitsS); weights.push(25); }
+        // For SPR/TOT with no splits, give divergence the splits weight
+        // so the score still scales 0-10 not 0-7.
+        if (divS    != null) { components.push(divS);    weights.push(mktKey === 'ml' ? 25 : 50); }
+
+        if (!components.length) return null;
+        const totalW = weights.reduce((a, b) => a + b, 0);
+        const wSum   = components.reduce((s, c, i) => s + c * weights[i], 0);
+        return Math.round(wSum / totalW);
+    }
+
+    function _scoreTier(score) {
+        if (score >= 10) return 'elite';
+        if (score >= 7)  return 'strong';
+        if (score >= 4)  return 'mid';
+        return 'low';
+    }
+
+    function renderMovement(mv, label, mktKey, awayName, homeName, sharpScore) {
         const data = mv[mktKey] || {};
         const awayData = data[awayName];
         if (!awayData) return '';
 
-        let h = `<span class="mv-item"><span class="mv-label">${label}</span>`;
+        let inner = `<span class="mv-label">${label}</span>`;
 
         if (mktKey === 'ml') {
             const diff = awayData.diff;
             const arrow = diff > 0 ? '&#9650;' : diff < 0 ? '&#9660;' : '';
             const color = diff > 0 ? 'var(--green)' : diff < 0 ? 'var(--red)' : 'var(--text-secondary)';
-            h += `<span class="mv-team">${esc(truncTeam(awayName))}</span>`;
-            h += `<span class="mv-open">${fmt(awayData.open)}</span>`;
-            h += `<span class="mv-arrow" style="color:${color}">${arrow}</span>`;
-            h += `<span class="mv-current" style="color:${color}">${fmt(awayData.current)}</span>`;
-            if (diff !== 0) h += `<span class="mv-diff" style="color:${color}">(${diff > 0 ? '+' : ''}${diff})</span>`;
+            inner += `<span class="mv-team">${esc(truncTeam(awayName))}</span>`;
+            inner += `<span class="mv-open">${fmt(awayData.open)}</span>`;
+            inner += `<span class="mv-arrow" style="color:${color}">${arrow}</span>`;
+            inner += `<span class="mv-current" style="color:${color}">${fmt(awayData.current)}</span>`;
+            if (diff !== 0) inner += `<span class="mv-diff" style="color:${color}">(${diff > 0 ? '+' : ''}${diff})</span>`;
         } else if (mktKey === 'spread') {
             const ptDiff = awayData.point_diff;
             const pxDiff = awayData.price_diff;
-            const changed = ptDiff !== 0 || pxDiff !== 0;
             const pt = awayData.current_point;
             const ptStr = pt > 0 ? '+' + pt : '' + pt;
             const openPt = awayData.open_point;
             const openPtStr = openPt > 0 ? '+' + openPt : '' + openPt;
-            // Color based on direction: line moving in bettor's favor (more points) = green
             const color = ptDiff > 0 ? 'var(--green)' : ptDiff < 0 ? 'var(--red)' : pxDiff !== 0 ? 'var(--orange)' : 'var(--text-secondary)';
             const arrow = ptDiff > 0 ? '&#9650;' : ptDiff < 0 ? '&#9660;' : pxDiff !== 0 ? (pxDiff > 0 ? '&#9650;' : '&#9660;') : '';
-            h += `<span class="mv-team">${esc(truncTeam(awayName))}</span>`;
-            h += `<span class="mv-open">${openPtStr} ${fmt(awayData.open_price)}</span>`;
-            h += `<span class="mv-arrow" style="color:${color}">${arrow}</span>`;
-            h += `<span class="mv-current" style="color:${color}">${ptStr} ${fmt(awayData.current_price)}</span>`;
-            if (ptDiff !== 0) h += `<span class="mv-diff" style="color:${color}">(${ptDiff > 0 ? '+' : ''}${ptDiff})</span>`;
+            inner += `<span class="mv-team">${esc(truncTeam(awayName))}</span>`;
+            inner += `<span class="mv-open">${openPtStr} ${fmt(awayData.open_price)}</span>`;
+            inner += `<span class="mv-arrow" style="color:${color}">${arrow}</span>`;
+            inner += `<span class="mv-current" style="color:${color}">${ptStr} ${fmt(awayData.current_price)}</span>`;
+            if (ptDiff !== 0) inner += `<span class="mv-diff" style="color:${color}">(${ptDiff > 0 ? '+' : ''}${ptDiff})</span>`;
         } else if (mktKey === 'total') {
             const ptDiff = awayData.point_diff;
             const pxDiff = awayData.price_diff;
-            const changed = ptDiff !== 0 || pxDiff !== 0;
             const color = ptDiff > 0 ? 'var(--red)' : ptDiff < 0 ? 'var(--green)' : pxDiff !== 0 ? 'var(--orange)' : 'var(--text-secondary)';
             const arrow = ptDiff > 0 ? '&#9650;' : ptDiff < 0 ? '&#9660;' : pxDiff !== 0 ? (pxDiff > 0 ? '&#9650;' : '&#9660;') : '';
-            h += `<span class="mv-open">O ${awayData.open_point} ${fmt(awayData.open_price)}</span>`;
-            h += `<span class="mv-arrow" style="color:${color}">${arrow}</span>`;
-            h += `<span class="mv-current" style="color:${color}">O ${awayData.current_point} ${fmt(awayData.current_price)}</span>`;
-            if (ptDiff !== 0) h += `<span class="mv-diff" style="color:${color}">(${ptDiff > 0 ? '+' : ''}${ptDiff})</span>`;
+            inner += `<span class="mv-open">O ${awayData.open_point} ${fmt(awayData.open_price)}</span>`;
+            inner += `<span class="mv-arrow" style="color:${color}">${arrow}</span>`;
+            inner += `<span class="mv-current" style="color:${color}">O ${awayData.current_point} ${fmt(awayData.current_price)}</span>`;
+            if (ptDiff !== 0) inner += `<span class="mv-diff" style="color:${color}">(${ptDiff > 0 ? '+' : ''}${ptDiff})</span>`;
         }
 
-        h += `</span>`;
-        return h;
+        let chip = '';
+        const hasScore = (sharpScore != null && Number.isFinite(sharpScore));
+        if (hasScore) {
+            chip = `<span class="mv-score-chip tier-${_scoreTier(sharpScore)}" title="Sharp signal strength (1-10)"><span class="mv-score-tag">SHARP</span>${sharpScore}</span>`;
+        }
+        const itemClass = hasScore ? 'mv-item with-score' : 'mv-item';
+        return `<span class="${itemClass}"><span class="mv-item-content">${inner}</span>${chip}</span>`;
     }
 
     function findBestOdds(ev, books, away, home) {
@@ -1567,14 +1715,23 @@
             const hasMv = Object.keys(mv.ml||{}).length || Object.keys(mv.spread||{}).length;
             const sparkId = ev.id || ev.numeric_id;
 
+            // Sharp score per market — composite of PIN movement +
+            // public splits divergence (ML only) + PIN/retail divergence.
+            // Splits event matched the same way drawSplitsRows() does.
+            const splitsEv = (_splitsData && Array.isArray(_splitsData.events))
+                ? _matchSplitsEvent(_splitsData.events, away, home) : null;
+            const mlScore  = computeSharpScore(ev, mv, splitsEv, 'ml',     away, home);
+            const sprScore = computeSharpScore(ev, mv, splitsEv, 'spread', away, home);
+            const totScore = computeSharpScore(ev, mv, splitsEv, 'total',  away, home);
+
             h += `<div class="game-footer">`;
             if (hasMv) {
                 h += `<div class="movement-bar">`;
                 h += `<span class="mv-src">${mv.src || 'PIN'}</span>`;
                 h += `<div class="mv-items">`;
-                h += renderMovement(mv, 'ML', 'ml', away, home);
-                h += renderMovement(mv, 'SPR', 'spread', away, home);
-                h += renderMovement(mv, 'TOT', 'total', 'Over', 'Under');
+                h += renderMovement(mv, 'ML',  'ml',     away, home, mlScore);
+                h += renderMovement(mv, 'SPR', 'spread', away, home, sprScore);
+                h += renderMovement(mv, 'TOT', 'total', 'Over', 'Under', totScore);
                 h += `</div></div>`;
             }
             // Three PIN sparklines per game (ML home / Spread home / Total

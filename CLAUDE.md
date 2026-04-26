@@ -155,7 +155,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - **Book Selector**: Dropdown with checkboxes + up/down arrows to reorder. Saved to Firestore. Hard-filtered through `ALL_KNOWN_BOOKS` allowlist so stale Owls-era preferences don't pollute the dropdown.
 - **Live-game freeze**: once `commence_time` passes, the board displays the closing line (last pre-start snapshot per book) and stops showing post-start retail twitches. Server-side filter — see `_fetch_odds_from_snapshots` in `app.py`.
 - **Live game header**: green pulsing `LIVE` badge for in-progress games (ESPN `state: "in"`), grey `FINAL` badge once ESPN reports `state: "post"`. Score inline (Away N – N Home), period/clock from ESPN. `closing line` tag next to teams whenever the line is frozen.
-- **Line Movement Bar**: Opener vs current with arrows + diffs (per game footer). Driven by PIN-only openers from `/api/openers/scanner`.
+- **Line Movement Bar**: Opener vs current with arrows + diffs (per game footer). Driven by PIN-only openers from `/api/openers/scanner`. Each row (ML / SPR / TOT) is split: existing values left, **Sharp Score chip** on the right (1-10 scale, color-tiered: low/mid/strong/elite). Score = weighted composite of (a) PIN movement magnitude since opener, (b) Action Network money/bets divergence (ML only), (c) PIN-vs-retail-median implied-prob divergence. JS-side compute in `computeSharpScore()` — see "Sharp Score" section below.
 - **Inline 6H Sparklines** (in the spot where Circa splits used to live): three small Chart.js sparklines stacked per game card — PIN ML home, PIN Spread home, PIN Total Over. Each plots ODDS (price) — line value (e.g. `-1.5`, `8.5`) shown in the row label and tooltip. Y-axis labels in American odds (right side, small). Live-game freeze applied — sparkline stops at event_start. Uses `/api/odds/history-batch`.
 - **Public Splits Row** (under the sparklines): horizontal `% bets` / `% money` bar — away% on the left, home% on the right, color-coded blue (bets) / orange (money). Source: Action Network's public-betting JSON API. Optional `SHARP +N%` tag in the header when |money% − bets%| ≥ 10 (sharp-money fingerprint). Hidden by default (`display:none`) — only shows when a match is found and at least one of bets/money has data. Drawn by `drawSplitsRows()` which matches each game card to a splits event by team-name substring containment in either direction.
 - **Click-through Chart Modal**: graph icon next to each game header opens a full-screen modal with toggleable books / markets / ranges. PIN-only by default at 12H. Chart modal does NOT freeze on live — full pre+post-start history visible there if you want to see mid-game movement.
@@ -270,6 +270,49 @@ Allowed short codes (14): `PIN, DK, FD, MGM, CAE, HR, BET365, BR, BOL, LV, BVD, 
 
 ### Rate-Limit Headers
 - `x-requests-used` / `x-requests-remaining` — logged on every cron run so credit burn is visible in workflow logs.
+
+## Sharp Score (per-market 1-10)
+
+Per-market signal-strength rating shown on each game card's movement bar. Scale of 1-10 where 10 = aggressive sharp signal. Computed JS-side in `computeSharpScore(ev, mv, splitsEv, mktKey, away, home)` in `templates/odds.html`.
+
+### Components (each scaled 0-10)
+
+1. **PIN movement magnitude** — opener vs current.
+   - ML: implied-probability change in points (1 prob-pt = 1 score-pt, capped 10).
+   - Spread: `|point_diff| × 5` + small price-only twitch credit (capped 10).
+   - Total: `|point_diff| × 10` + small price-only twitch credit (capped 10).
+
+2. **Splits divergence** (ML only) — `|money% − bets%|`.
+   - `<2pt` = noise, `=20pt+` = max. Linear in between.
+   - Action Network's spread/total split URLs not yet ingested, so SPR/TOT skip this signal and the remaining weights renormalize.
+
+3. **PIN vs retail consensus** — `|pin_implied_prob − median(DK/FD/MGM/CAE)|`.
+   - 0 prob-pts = 0 score, 5 prob-pts = max 10.
+   - Catches retail mispricings (books that haven't adjusted yet).
+
+### Weighting
+
+Movement is the heaviest component because a sharp money move shows up there regardless of whether splits/retail agree.
+
+| Market | Movement | Splits | PIN-vs-retail |
+|---|---|---|---|
+| ML  | 50 | 25 | 25 |
+| SPR | 50 | — | 50 |
+| TOT | 50 | — | 50 |
+
+Components missing data are skipped and remaining weights renormalize, so the score always scales 0-10 not 0-7.
+
+### UI tiers (CSS color-coded chips)
+
+- **0-3** — `tier-low` (gray, muted)
+- **4-6** — `tier-mid` (orange)
+- **7-9** — `tier-strong` (green)
+- **10**  — `tier-elite` (gold gradient)
+
+### Future hooks (not yet built)
+
+- **Phase 3 — Telegram alerts**: when any market's score crosses ≥7 in a given cron cycle, push a Telegram message via a GitHub Actions cron + bot. Sender uses the same Supabase reads, no new credit burn.
+- **Phase 4 — Sharp Bot tab (admin only)**: daily picker takes top 5 +EV bets (combining sharp score with devigged fair line from `_lib/normalize.py`), logs them as paper bets in a new `paper_bets` Supabase table, resolves on game completion via ESPN scores, runs a per-signal hit-rate tracker so weights can self-tune over a rolling 30-day window.
 
 ## Action Network — Public Betting Splits
 
