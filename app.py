@@ -1575,27 +1575,22 @@ def _parse_action_splits_next_data(html: str) -> dict:
         debug["error"] = f"json: {e}"
         return {"events": [], "debug": debug}
 
-    # Heuristic walk: look for dicts with both "home_team"/"away_team"
-    # (or "homeTeam"/"awayTeam") AND any *bet* / *money* percentage
-    # keys. Action Network has used both snake_case and camelCase in
-    # different builds, hence the dual checks.
+    # Game candidate = any dict with home_team_id + away_team_id +
+    # start_time. That's structural ("what is a game"), independent of
+    # whether splits have been attached yet — so we catch today's
+    # scheduled games and yesterday's finals alike.
     candidates: list[dict] = []
     sample_keys: set[str] = set()
 
     def walk(node, depth=0):
-        if depth > 12 or len(candidates) > 200:
+        if depth > 14 or len(candidates) > 500:
             return
         if isinstance(node, dict):
             keys = set(node.keys())
             for k in keys:
-                if len(sample_keys) < 50:
+                if len(sample_keys) < 200:
                     sample_keys.add(k)
-            has_teams = (("home_team" in keys and "away_team" in keys) or
-                         ("homeTeam" in keys and "awayTeam" in keys) or
-                         ("teams" in keys))
-            has_pct = any("percent" in k.lower() or "bet" in k.lower() or "money" in k.lower()
-                          for k in keys)
-            if has_teams and has_pct:
+            if "home_team_id" in keys and "away_team_id" in keys and "start_time" in keys:
                 candidates.append(node)
             for v in node.values():
                 walk(v, depth + 1)
@@ -1605,91 +1600,125 @@ def _parse_action_splits_next_data(html: str) -> dict:
 
     walk(data)
     debug["candidate_count"] = len(candidates)
-    debug["sample_top_keys"] = sorted(sample_keys)[:50]
+    debug["sample_top_keys"] = sorted(sample_keys)[:200]
 
     events: list[dict] = []
+    splits_found_in: list[str] = []  # remembers paths where we saw split %s
     for c in candidates:
-        ev = _next_data_event(c)
+        ev = _next_data_event(c, splits_found_in)
         if ev:
             events.append(ev)
     debug["events_extracted"] = len(events)
+    debug["splits_paths_seen"] = splits_found_in[:5]
 
-    # If we found game-shaped candidates but couldn't extract any ml
-    # splits, dump the first candidate's structure (field names + value
-    # types) so we can see what shape Action Network is using and tune
-    # _next_data_event accordingly. Sanitize values to types only —
-    # don't leak the raw data into the API response.
+    # If we have games but no splits, dump deep structure of the first
+    # game so we can see exactly where the split percentages live.
     if candidates and not events:
         first = candidates[0]
         shape = {}
-        for k, v in list(first.items())[:80]:
-            if isinstance(v, dict):
-                shape[k] = {"_type": "dict", "_keys": sorted(v.keys())[:30]}
-            elif isinstance(v, list):
-                shape[k] = {"_type": "list", "_len": len(v),
-                             "_first_keys": sorted(v[0].keys())[:30] if v and isinstance(v[0], dict) else None}
-            elif isinstance(v, (int, float)):
-                shape[k] = f"num:{v}"
-            elif isinstance(v, str):
-                shape[k] = f"str:{v[:60]}"
-            else:
-                shape[k] = type(v).__name__
+        for k, v in list(first.items())[:120]:
+            shape[k] = _shape_value(v, depth_left=2)
         debug["candidate_shape"] = shape
 
     return {"events": events, "debug": debug}
 
 
-def _next_data_event(node: dict) -> dict | None:
+def _shape_value(v, depth_left=2):
+    """Recursive type/key dumper for debug output. Doesn't leak raw values
+    deeply — just enough to reveal field structure."""
+    if isinstance(v, dict):
+        if depth_left <= 0:
+            return {"_type": "dict", "_keys": sorted(v.keys())[:30]}
+        return {"_type": "dict",
+                "_fields": {k: _shape_value(v2, depth_left - 1) for k, v2 in list(v.items())[:30]}}
+    if isinstance(v, list):
+        if not v:
+            return {"_type": "list", "_len": 0}
+        if depth_left <= 0 or not isinstance(v[0], (dict, list)):
+            return {"_type": "list", "_len": len(v),
+                    "_first_type": type(v[0]).__name__,
+                    "_first_keys": sorted(v[0].keys())[:30] if isinstance(v[0], dict) else None}
+        return {"_type": "list", "_len": len(v),
+                "_first": _shape_value(v[0], depth_left - 1)}
+    if isinstance(v, (int, float)):
+        return f"num:{v}"
+    if isinstance(v, str):
+        return f"str:{v[:60]}"
+    if v is None:
+        return "null"
+    return type(v).__name__
+
+
+def _next_data_event(node: dict, splits_paths: list[str] | None = None) -> dict | None:
     """Map a __NEXT_DATA__ game object → our splits event shape.
-    Returns None if essential fields can't be extracted."""
+    Walks the game's subtree to find split percentages — they don't
+    live on the game object directly; they're nested somewhere inside
+    `markets`, a per-book wrapper, or a top-level "consensus" subtree
+    we can't see from the game alone.
+    Returns None when team names can't be extracted."""
     def _name(v):
         if isinstance(v, str): return v
         if isinstance(v, dict):
             return v.get("display_name") or v.get("full_name") or v.get("name") or v.get("abbr")
         return None
 
-    away = _name(node.get("away_team") or node.get("awayTeam"))
-    home = _name(node.get("home_team") or node.get("homeTeam"))
-    if not (away and home) and isinstance(node.get("teams"), list) and len(node["teams"]) == 2:
-        # `teams` ordering: usually [away, home]
-        away = away or _name(node["teams"][0])
-        home = home or _name(node["teams"][1])
+    away = home = None
+    teams = node.get("teams")
+    if isinstance(teams, list) and len(teams) == 2:
+        # Action Network's `teams` array is sometimes [away, home],
+        # sometimes [home, away]. Use away_team_id / home_team_id to
+        # disambiguate when present.
+        away_id = node.get("away_team_id")
+        home_id = node.get("home_team_id")
+        for t in teams:
+            tid = t.get("id") if isinstance(t, dict) else None
+            if tid == away_id: away = _name(t)
+            if tid == home_id: home = _name(t)
+        if not (away and home):
+            away = _name(teams[0])
+            home = _name(teams[1])
+    away = away or _name(node.get("away_team") or node.get("awayTeam"))
+    home = home or _name(node.get("home_team") or node.get("homeTeam"))
     if not (away and home):
         return None
 
-    # Pull any percent-shaped fields. Field names observed historically:
-    # "moneyline_bets_percent", "ml_bets_pct", "public_betting", etc.
+    # Walk the game's subtree looking for split percentages. Match keys
+    # like bet_percent / bets_pct / ticket_percent / public_bet_percent /
+    # money_percent / handle_percent. Confine to this game's subtree
+    # so we don't cross-pollute between games.
     ml: dict = {}
-    for k, v in node.items():
-        if not isinstance(v, (int, float)):
-            continue
-        kl = k.lower()
-        if "ml" in kl or "moneyline" in kl:
-            if "away" in kl and "bet" in kl: ml["away_bets"] = int(v)
-            if "home" in kl and "bet" in kl: ml["home_bets"] = int(v)
-            if "away" in kl and "money" in kl: ml["away_money"] = int(v)
-            if "home" in kl and "money" in kl: ml["home_money"] = int(v)
-    # Some Action Network shapes nest splits under a key.
-    for nest_key in ("splits", "public_betting", "betting_percentages"):
-        nested = node.get(nest_key)
-        if isinstance(nested, dict):
-            for k, v in nested.items():
-                if not isinstance(v, (int, float)):
-                    continue
+    def harvest(n, path="", depth=0):
+        if depth > 8 or (ml.get("away_bets") is not None and ml.get("home_bets") is not None
+                         and ml.get("away_money") is not None and ml.get("home_money") is not None):
+            return
+        if isinstance(n, dict):
+            for k, v in n.items():
                 kl = k.lower()
-                if "away" in kl and "bet" in kl: ml.setdefault("away_bets", int(v))
-                if "home" in kl and "bet" in kl: ml.setdefault("home_bets", int(v))
-                if "away" in kl and "money" in kl: ml.setdefault("away_money", int(v))
-                if "home" in kl and "money" in kl: ml.setdefault("home_money", int(v))
+                if isinstance(v, (int, float)):
+                    is_bets  = ("bet" in kl or "ticket" in kl) and "percent" in kl
+                    is_money = ("money" in kl or "handle" in kl) and "percent" in kl
+                    is_away  = "away" in kl
+                    is_home  = "home" in kl
+                    if is_bets and is_away: ml.setdefault("away_bets", int(round(v)));  splits_paths and splits_paths.append(f"{path}.{k}")
+                    if is_bets and is_home: ml.setdefault("home_bets", int(round(v)));  splits_paths and splits_paths.append(f"{path}.{k}")
+                    if is_money and is_away: ml.setdefault("away_money", int(round(v))); splits_paths and splits_paths.append(f"{path}.{k}")
+                    if is_money and is_home: ml.setdefault("home_money", int(round(v))); splits_paths and splits_paths.append(f"{path}.{k}")
+                else:
+                    harvest(v, f"{path}.{k}", depth + 1)
+        elif isinstance(n, list):
+            for i, item in enumerate(n):
+                harvest(item, f"{path}[{i}]", depth + 1)
+    harvest(node)
 
     if not ml:
         return None
+    raw_status = (node.get("status_display") or node.get("status") or "").strip()
     return {
         "away_team": away,
         "home_team": home,
         "ml":        ml,
         "sharp_diff": None,
-        "status":    "scheduled",
+        "status":    raw_status or "scheduled",
     }
 
 
