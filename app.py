@@ -1430,6 +1430,137 @@ def api_my_bets():
     return jsonify(result)
 
 
+# Open / unfilled limit orders. Distinct from positions (which are
+# already-filled bets awaiting outcome) — these are working orders
+# sitting in Polymarket's CLOB book that haven't matched yet. Powers
+# the "Open Orders" section of the dashboard betslip so Rob can share
+# his planned bets with friends before they fill.
+_OPEN_ORDER_STATES = {
+    "ORDER_STATE_NEW",
+    "ORDER_STATE_PENDING_NEW",
+    "ORDER_STATE_PENDING_REPLACE",
+    "ORDER_STATE_PARTIALLY_FILLED",
+}
+
+# Map SDK intent → human-readable side label for the betslip
+_INTENT_LABEL = {
+    "ORDER_INTENT_BUY_LONG":   "BUY YES",
+    "ORDER_INTENT_BUY_SHORT":  "BUY NO",
+    "ORDER_INTENT_SELL_LONG":  "SELL YES",
+    "ORDER_INTENT_SELL_SHORT": "SELL NO",
+}
+
+
+@app.route("/api/my-orders")
+@admin_required
+def api_my_orders():
+    """Open/unfilled limit orders on Polymarket. Filtered to working
+    states (NEW / PENDING_NEW / PENDING_REPLACE / PARTIALLY_FILLED).
+    Filled, canceled, expired, and rejected orders are excluded.
+
+    Response shape:
+      { ok, orders: [{
+            id, market_name, outcome, team_name, pick,
+            slug, event_slug, intent, side_label,
+            type, tif, price, quantity, cum_quantity,
+            leaves_quantity, fill_pct, created_at
+        }] }
+
+    The shape mirrors /api/my-bets's `pick` / `market_name` /
+    `team_name` triplet so the frontend's buildBetSlipLabel() works
+    without changes."""
+    import time
+    cache_key = "my_orders"
+    now = time.time()
+    cached = _cache.get(cache_key)
+    if cached and (now - cached["ts"]) < 30:
+        return jsonify(cached["data"])
+
+    out_orders: list[dict] = []
+    try:
+        client = get_client()
+        resp = client.orders.list()
+        # SDK returns either a dict-like with .orders or a typed object
+        raw = resp.get("orders") if isinstance(resp, dict) else getattr(resp, "orders", []) or []
+        for o in raw:
+            # Each SDK order may be dict or model — normalize accessor.
+            def _g(key, default=None):
+                if isinstance(o, dict): return o.get(key, default)
+                return getattr(o, key, default)
+
+            state = _g("state") or ""
+            if state not in _OPEN_ORDER_STATES:
+                continue
+
+            md = _g("marketMetadata") or {}
+            if not isinstance(md, dict):
+                # If it's a model, dict it for safe lookup
+                md = {k: getattr(md, k, None) for k in
+                      ("slug", "title", "outcome", "eventSlug", "team")}
+
+            slug = md.get("slug") or ""
+            title = md.get("title") or ""
+            outcome = md.get("outcome") or ""
+            event_slug = md.get("eventSlug") or ""
+            team = md.get("team") or {}
+            team_name = team.get("name", "") if isinstance(team, dict) else ""
+
+            # Match the same pick-derivation logic as api_my_bets so a
+            # "Heat -3.5" market shows team-prefixed in the slip.
+            pick = outcome
+            if team_name and outcome and re.search(r"[0-9]", outcome):
+                pick = f"{team_name} {outcome}"
+            elif outcome.lower() in ("over", "under"):
+                try:
+                    md_raw = fetch_market(client, slug)
+                    md_full = md_raw.get("market", md_raw) if isinstance(md_raw, dict) else {}
+                    question = md_full.get("question", "")
+                    total_match = re.search(r"(\d+\.?\d*)", question)
+                    if total_match:
+                        pick = f"{outcome} {total_match.group(1)}"
+                except Exception:
+                    pass
+            elif team_name:
+                pick = team_name
+
+            qty       = _g("quantity") or 0
+            cum_qty   = _g("cumQuantity") or 0
+            leaves    = _g("leavesQuantity") or 0
+            fill_pct  = (cum_qty / qty * 100) if qty else 0
+            price     = _safe_float(_g("price"))
+            intent    = _g("intent") or ""
+            side_label = _INTENT_LABEL.get(intent, intent.replace("ORDER_INTENT_", "").replace("_", " "))
+
+            out_orders.append({
+                "id":               _g("id") or "",
+                "market_name":      title,
+                "outcome":          outcome,
+                "team_name":        team_name,
+                "pick":             pick,
+                "slug":             slug,
+                "event_slug":       event_slug,
+                "intent":           intent,
+                "side_label":       side_label,
+                "type":             _g("type") or "",
+                "tif":              _g("tif") or "",
+                "state":            state,
+                "price":            price,
+                "quantity":         qty,
+                "cum_quantity":     cum_qty,
+                "leaves_quantity":  leaves,
+                "fill_pct":         round(fill_pct, 1),
+                "created_at":       _g("createTime") or _g("insertTime") or "",
+            })
+    except Exception as e:
+        return jsonify({"ok": False, "orders": [], "error": str(e)})
+
+    # Newest first (most recently placed at top of betslip).
+    out_orders.sort(key=lambda o: o.get("created_at") or "", reverse=True)
+    result = {"ok": True, "orders": out_orders}
+    _cache[cache_key] = {"data": result, "ts": now}
+    return jsonify(result)
+
+
 # ---------------------------------------------------------------------------
 # Public betting splits (% bets / % money) — scraped from Action Network's
 # free public-betting page.

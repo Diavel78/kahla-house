@@ -89,6 +89,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `GET /api/splits?sport=mlb` | Firebase | Public ML betting splits (% bets, % money) per game. Three-layer fetch: (1) Action Network's JSON API at `api.actionnetwork.com/web/v2/scoreboard/{league}` is the primary source (today's scheduled games + live %s), (2) `<script id="__NEXT_DATA__">` JSON in the SSR HTML page as backup, (3) HTML table parser as last resort (legacy, only catches yesterday's finals). Cached 30 min server-side per (sport, date). Successful parses cache; failures don't, so the next hit retries fresh. |
 | `GET/POST /api/preferences` | Firebase | User settings (books, sport, order) in Firestore |
 | `GET /api/my-bets` | **Admin** | Active Polymarket positions (Dashboard only) |
+| `GET /api/my-orders` | **Admin** | Open / unfilled Polymarket limit orders (CLOB working orders). Filtered to NEW / PENDING_NEW / PENDING_REPLACE / PARTIALLY_FILLED states — filled, canceled, expired, rejected excluded. Powers the **Open Orders** section of the dashboard betslip so planned bets can be shared with friends before they fill. 30s server cache. |
 | `GET /api/data` | **Admin** | Dashboard P&L data (positions, balances, trades) |
 | `GET /api/raw` | Admin | Debug: raw Polymarket SDK responses |
 | `GET /api/debug-trades` | **Admin** | Debug: grouped trade details with before/after position data |
@@ -191,8 +192,8 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - **Open Positions table**: Market, Pick, Qty, Entry, Current, P&L, Return %
 - **Closed Positions tab**: Resolved bets + sold trades + maker rewards with Result (W/L/Sold/Maker) and P&L
 - **Maker Rewards**: `ACTIVITY_TYPE_TRANSFER` = maker rewards (income, counted in P&L). `ACTIVITY_TYPE_ACCOUNT_DEPOSIT` = user deposits (NOT P&L). `ACTIVITY_TYPE_ACCOUNT_WITHDRAWAL` = withdrawals (NOT P&L). Maker rewards show as a separate stat card and appear in closed positions with "Maker" badge.
-- **Bet Slip modal**: Shareable sportsbook-ticket format
-- **Auto-refresh**: 60 seconds
+- **Bet Slip modal**: Shareable sportsbook-ticket format. Three sections in display order: **Open Orders** (unfilled limit orders from `/api/my-orders` — forward-looking "here's what I'm trying to get into"; shows fill progress like `1/100` for partials), **Pending** (held positions awaiting outcome — from `/api/data`), **Settled Today** (resolved-today bets with W/L/Sold/Maker badges). Orders intentionally don't show in the Open Positions or Closed Positions tabs — they're only on the betslip because they represent intent, not active risk.
+- **Auto-refresh**: 60 seconds (loads `/api/data` and `/api/my-orders` in parallel)
 
 ### P&L Computation — CRITICAL NOTES
 - **Do NOT trust SDK's `price` field** — it returns the COMPLEMENT (YES price when trading NO, vice versa). Always use `cost / qty` for actual per-share price paid or received

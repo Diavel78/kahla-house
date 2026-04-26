@@ -978,6 +978,7 @@
     // --- Bet Slip ---
     let _lastPositions = [];
     let _lastClosed = [];
+    let _lastOrders = [];  // open/unfilled limit orders from /api/my-orders
 
     function isToday(utcStr) {
         if (!utcStr) return false;
@@ -1029,10 +1030,31 @@
             && isToday(c.timestamp)
         );
 
-        if (!_lastPositions.length && !settledToday.length) {
+        if (!_lastOrders.length && !_lastPositions.length && !settledToday.length) {
             body.innerHTML = '<div class="betslip-empty">No bets today</div>';
         } else {
             let html = '';
+            // Open Orders — limit orders sitting in the CLOB book that
+            // haven't filled yet. Shown above held positions because
+            // these are forward-looking ("here's what I'm trying to
+            // get into") versus positions ("here's what I'm holding").
+            if (_lastOrders.length) {
+                html += '<div class="betslip-section-label">Open Orders</div>';
+                for (const o of _lastOrders) {
+                    const odds = probToAmericanOdds(o.price);
+                    const oddsStr = fmtOdds(odds);
+                    const oddsClass = odds !== null ? (odds < 0 ? 'fav' : 'dog') : '';
+                    const label = buildBetSlipLabel(o);
+                    // Show fill progress only when partial; "1/100 filled" style.
+                    const fillNote = (o.fill_pct > 0 && o.fill_pct < 100)
+                        ? ` <span style="color:var(--text-muted);font-size:11px">(${o.cum_quantity}/${o.quantity})</span>`
+                        : '';
+                    html += `<div class="betslip-item">
+                        <div class="betslip-market">${esc(label)}${fillNote}</div>
+                        <div class="betslip-odds ${oddsClass}">${oddsStr}</div>
+                    </div>`;
+                }
+            }
             if (_lastPositions.length) {
                 html += '<div class="betslip-section-label">Pending</div>';
                 for (const p of _lastPositions) {
@@ -1091,13 +1113,31 @@
 
         try {
             const tz = new Date().getTimezoneOffset();
-            const resp = await authFetch('/api/data?tz=' + tz);
+            // Fetch positions/P&L and open orders in parallel \u2014 they hit
+            // different SDK methods, so no point serializing.
+            const [resp, ordersResp] = await Promise.all([
+                authFetch('/api/data?tz=' + tz),
+                authFetch('/api/my-orders'),
+            ]);
             if (!resp) return;
             const data = await resp.json();
             if (!data.ok) throw new Error(data.error || 'API error');
 
             _lastPositions = data.positions || [];
             _lastClosed = data.closed_positions || [];
+
+            // Orders are best-effort \u2014 if the SDK call fails, log and
+            // keep going. The dashboard's positions tabs work without
+            // them; only the betslip's "Open Orders" section disappears.
+            if (ordersResp) {
+                try {
+                    const ordersData = await ordersResp.json();
+                    _lastOrders = (ordersData && ordersData.ok) ? (ordersData.orders || []) : [];
+                } catch { _lastOrders = []; }
+            } else {
+                _lastOrders = [];
+            }
+
             renderCards(data);
             renderPositions(data.positions);
             renderClosed(data.closed_positions || []);
