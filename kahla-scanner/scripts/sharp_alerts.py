@@ -388,8 +388,11 @@ def _sharp_for_ml(market_id, openers, pin_current):
 
 
 def _sharp_for_spread(market_id, openers, pin_current):
-    """SPR sharp = side whose price decreased (becoming less attractive
-    because money is hammering it). Falls back to negative point_diff."""
+    """SPR sharp = whichever side the LINE moved against the bettor on.
+    Line movement is the primary signal; a price change that comes WITH
+    a line shift is secondary re-juicing, not the sharp tell.
+    e.g. BOS -7 → -8.5: a_pt = -1.5 (more favored), h_pt = +1.5 →
+    sharp on AWAY (BOS). +13c price drift on BOS is just rebalance."""
     h_op = openers.get((market_id, "spread", "home"))
     h_cu = pin_current.get((market_id, "spread", "home"))
     a_op = openers.get((market_id, "spread", "away"))
@@ -397,17 +400,20 @@ def _sharp_for_spread(market_id, openers, pin_current):
     if not (h_op and h_cu and a_op and a_cu):
         return None
 
-    h_px = h_cu["price_american"] - h_op["price_american"]
-    a_px = a_cu["price_american"] - a_op["price_american"]
+    h_pt = (h_cu.get("line") or 0) - (h_op.get("line") or 0)
+    a_pt = (a_cu.get("line") or 0) - (a_op.get("line") or 0)
 
     side = None
-    if abs(h_px - a_px) >= 1:
-        side = "home" if h_px < a_px else "away"
+    # PRIMARY: line shift ≥0.5pt is the dominant signal.
+    if abs(h_pt - a_pt) >= 0.5:
+        side = "home" if h_pt < a_pt else "away"
     else:
-        h_pt = (h_cu.get("line") or 0) - (h_op.get("line") or 0)
-        a_pt = (a_cu.get("line") or 0) - (a_op.get("line") or 0)
-        if h_pt < 0 and h_pt < a_pt: side = "home"
-        elif a_pt < 0 and a_pt < h_pt: side = "away"
+        # FALLBACK: pure price move (line didn't shift). Side whose
+        # juice got worse = money there.
+        h_px = h_cu["price_american"] - h_op["price_american"]
+        a_px = a_cu["price_american"] - a_op["price_american"]
+        if abs(h_px - a_px) >= 1:
+            side = "home" if h_px < a_px else "away"
     if not side:
         return None
 

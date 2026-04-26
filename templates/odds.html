@@ -1467,18 +1467,24 @@
 
         if (mktKey === 'spread') {
             const a = data[awayName], h = data[homeName];
-            // Primary: price-side movement. Decreasing price on a side
-            // = books making it less attractive = money on this side.
+            // PRIMARY: line movement. When the line itself shifts ≥0.5pt,
+            // that's the dominant sharp signal — books gave one side a
+            // worse number to cover (= money is on that side). Price
+            // changes that come WITH a line move are secondary
+            // re-juicing, not the signal.
+            const aPt = a ? (a.point_diff || 0) : 0;
+            const hPt = h ? (h.point_diff || 0) : 0;
+            if (Math.abs(aPt - hPt) >= 0.5) {
+                // Negative point_diff = side became MORE favored =
+                // money on that side. e.g. BOS -7 → -8.5: aPt = -1.5
+                // (more favored), hPt = +1.5 → sharp on AWAY (BOS).
+                return aPt < hPt ? awayName : homeName;
+            }
+            // FALLBACK: pure-price move (line stayed put). Side whose
+            // price decreased = less attractive juice = money there.
             const aPx = a ? (a.price_diff || 0) : 0;
             const hPx = h ? (h.price_diff || 0) : 0;
             if (Math.abs(aPx - hPx) >= 1) return aPx < hPx ? awayName : homeName;
-            // Secondary: line-point shift. Negative point_diff for a
-            // side means line moved toward MORE favored on that side
-            // = money there. (For -1.5 → -2.0: point_diff = -0.5.)
-            const aPt = a ? (a.point_diff || 0) : 0;
-            const hPt = h ? (h.point_diff || 0) : 0;
-            if (aPt < 0 && aPt < hPt) return awayName;
-            if (hPt < 0 && hPt < aPt) return homeName;
             return null;
         }
 
