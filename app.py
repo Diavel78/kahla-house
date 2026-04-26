@@ -1547,10 +1547,12 @@ def _parse_action_splits_html(html: str) -> dict:
 
     # Pattern: <away_name>  <ABBR>  <NUM>  <home_name>  <ABBR>  <NUM>
     # Team name allows spaces (e.g. "Red Sox", "White Sox", "Blue Jays").
-    # Allowing 2-4 char abbr to catch ATH, NYM, CWS, etc.
+    # Allowing 2-4 char abbr to catch ATH, NYM, CWS, etc. ID width is
+    # \d{1,4} because NHL uses 1-2 digit game IDs (CAR 7) where MLB
+    # uses 3-digit IDs (SEA 925).
     team_re = _re.compile(
-        r"([A-Za-z][A-Za-z .'-]*?)\s+([A-Z]{2,4})\s+(\d{3})\s+"
-        r"([A-Za-z][A-Za-z .'-]*?)\s+([A-Z]{2,4})\s+(\d{3})"
+        r"([A-Za-z][A-Za-z .'-]*?)\s+([A-Z]{2,4})\s+(\d{1,4})\s+"
+        r"([A-Za-z][A-Za-z .'-]*?)\s+([A-Z]{2,4})\s+(\d{1,4})"
     )
     # Status prefix that Action Network puts before the away team in cell 0.
     # Without stripping this, team_re greedily eats the status word as part
@@ -1558,12 +1560,20 @@ def _parse_action_splits_html(html: str) -> dict:
     # as away_team="Final Mariners"), breaking team-match in the UI.
     status_prefix_re = _re.compile(
         r"^("
-        r"Final(?:\s*-?\s*\d+)?"
+        # Final / Final - 10 (extra-inning MLB) / Final - OT / Final/SO (NHL)
+        r"Final(?:\s*[-/]\s*(?:\d+|2OT|3OT|OT|SO|F))?"
         r"|Postponed|PPD"
         r"|Cancell?ed|Delayed|Suspended"
+        # MLB live: TOP/BOT/MID/END Nth (optional ": 0-0, 2 Out")
         r"|(?:TOP|BOT|MID|END)\s+\d+(?:ST|ND|RD|TH)(?:\s*:[^A-Za-z]*?Out)?"
+        # NHL live: "1ST 18:42", "OT 4:23", "INT", "SHOOTOUT"
+        r"|\d+(?:ST|ND|RD|TH)(?:\s+PER)?(?:\s+\d{1,2}:\d{2})?"
+        r"|OT(?:\s+\d{1,2}:\d{2})?"
+        r"|INT|INTERMISSION|SHOOTOUT|SO"
+        # NBA/NFL: "1ST QTR", "HALF/HALFTIME"
         r"|\d+(?:ST|ND|RD|TH)\s+QTR"
         r"|HALF|HALFTIME"
+        # Pre-game time stamps
         r"|\d{1,2}:\d{2}\s*(?:AM|PM)(?:\s+ET)?"
         r")\s+",
         _re.IGNORECASE,
