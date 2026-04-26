@@ -1506,7 +1506,11 @@ def _fetch_action_splits(sport: str) -> dict:
 
     parsed = _parse_action_splits_html(html)
     parsed["html_len"] = len(html)
-    _cache[cache_key] = {"data": parsed, "ts": now}
+    # Only cache successful parses. A 0-event response usually means our
+    # status-prefix regex needs another pattern (NHL "Final/OT" etc.) —
+    # don't pin a broken result for 30 min while iterating.
+    if parsed.get("ok"):
+        _cache[cache_key] = {"data": parsed, "ts": now}
     return parsed
 
 
@@ -1569,6 +1573,7 @@ def _parse_action_splits_html(html: str) -> dict:
 
     events: list[dict] = []
     parse_warnings = 0
+    failed_samples: list[str] = []
     for tr in rows[1:]:
         cells = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
         if len(cells) < 5:
@@ -1586,6 +1591,10 @@ def _parse_action_splits_html(html: str) -> dict:
         m = team_re.search(cell0_after_status)
         if not m:
             parse_warnings += 1
+            # Capture up to 5 failing cells so we can spot which status
+            # patterns (NHL "Final/OT", "1ST 18:42", etc.) we're missing.
+            if len(failed_samples) < 5:
+                failed_samples.append(cell0[:200])
             continue
         away_name, away_abbr, away_id, home_name, home_abbr, home_id = m.groups()
         # Anything between status prefix and the team match is unexpected
@@ -1635,6 +1644,7 @@ def _parse_action_splits_html(html: str) -> dict:
         "table_count":     len(tables),
         "parse_warnings":  parse_warnings,
         "rows_seen":       len(rows),
+        "failed_samples":  failed_samples,
     }
 
 
