@@ -1658,15 +1658,17 @@
             canvas.style.display = '';
             if (emptyEl) emptyEl.style.display = 'none';
 
-            // Y-value choice:
-            //   ML:     plot implied probability (continuous), label Y ticks
-            //           in American so the discontinuity at +/-100 isn't a cliff
-            //   Spread/Total: plot the LINE (point spread / over-under value)
-            //                 since the price stays ~-110 and the line is what moves
-            const isML = mkt === 'ml';
+            // All three sparklines plot the PRICE (odds), not the line.
+            // Sportsbooks rarely move the spread / total point itself —
+            // they move the juice on it (-110 → -115 → -105 etc). That's
+            // the meaningful movement to graph. The line value (-1.5, 8.5,
+            // etc.) is shown as label context.
+            // Plotted as implied probability internally so the Y axis is
+            // continuous around the +100/-100 favorite/dog flip; tick
+            // callback re-labels in American odds.
             const points = series.map(p => ({
                 x:     new Date(p.ts).valueOf(),
-                y:     isML ? _amerToProb(p.price) : (p.line == null ? null : Number(p.line)),
+                y:     _amerToProb(p.price),
                 _amer: p.price,
                 _line: p.line,
             })).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
@@ -1682,13 +1684,17 @@
             const last = points[points.length - 1];
             points.push({ x: Date.now(), y: last.y, _amer: last._amer, _line: last._line });
 
-            // Current-value label next to the row title
+            // Current-value label next to the row title.
+            //   ML:     "+135"
+            //   SPR:    "-1.5  -110"
+            //   TOT:    "+8.5  -110"
+            const isML = mkt === 'ml';
             if (currentEl) {
                 if (isML) {
                     currentEl.textContent = _fmtAmer(last._amer);
                 } else {
                     const lineStr = _fmtPoint(last._line);
-                    currentEl.textContent = `${lineStr} ${_fmtAmer(last._amer)}`;
+                    currentEl.textContent = `${lineStr}  ${_fmtAmer(last._amer)}`;
                 }
             }
 
@@ -1722,7 +1728,7 @@
                                 label: item => {
                                     const p = item.raw;
                                     if (isML) return _fmtAmer(p._amer);
-                                    return `${_fmtPoint(p._line)} ${_fmtAmer(p._amer)}`;
+                                    return `${_fmtPoint(p._line)}  ${_fmtAmer(p._amer)}`;
                                 },
                             },
                         },
@@ -1737,9 +1743,9 @@
                                 color: '#8890a8',
                                 font: { family: 'JetBrains Mono, monospace', size: 9 },
                                 maxTicksLimit: 4,
-                                callback: v => isML
-                                    ? _fmtAmer(_probToAmer(v))
-                                    : _fmtPoint(v),
+                                // All three charts plot probability internally;
+                                // re-label the ticks back in American odds.
+                                callback: v => _fmtAmer(_probToAmer(v)),
                             },
                         },
                     },
