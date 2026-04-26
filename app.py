@@ -1566,7 +1566,7 @@ def api_odds_history_batch():
     try:
         markets = (
             sb.table("markets")
-            .select("id")
+            .select("id,event_start")
             .eq("sport", sport_code)
             .eq("status", "active")
             .gte("event_start", low)
@@ -1584,6 +1584,17 @@ def api_odds_history_batch():
 
     market_ids = [m["id"] for m in markets]
     six_h = (now - timedelta(hours=6)).isoformat()
+    now_iso = now.isoformat()
+    # Live-game freeze (matches the board cells). Once a game starts, stop
+    # plotting new points on its sparkline — the cron writes a couple of
+    # post-start snapshots before the book takes the line down, but those
+    # samples are noise on a chart of a 30-min cron cadence. Same logic
+    # _fetch_odds_from_snapshots uses for the table cells.
+    event_start_by_mid: dict[str, str] = {m["id"]: m.get("event_start", "") for m in markets}
+
+    def _post_start(mid: str, captured_at: str) -> bool:
+        es = event_start_by_mid.get(mid, "")
+        return bool(es) and es <= now_iso and captured_at > es
 
     # 6h PIN ML home-team only — keeps the payload tiny per game.
     try:
@@ -1603,6 +1614,9 @@ def api_odds_history_batch():
         )
     except Exception:
         snaps = []
+
+    # Drop post-start rows for live games (sparkline freezes at closing line).
+    snaps = [s for s in snaps if not _post_start(s["market_id"], s["captured_at"])]
 
     # Anchor: most-recent pre-window PIN ML home row per market not already in
     # the fresh set. So a market that's been quiet for >6h still gets a flat
@@ -1629,6 +1643,10 @@ def api_odds_history_batch():
             anchor_rows = []
         seen: set[str] = set()
         for r in anchor_rows:
+            # Same freeze applies to anchors — for a game that started >6h ago,
+            # the only PIN row we'll find is mid-game; we don't want to show it.
+            if _post_start(r["market_id"], r["captured_at"]):
+                continue
             mid = r["market_id"]
             if mid in seen:
                 continue
