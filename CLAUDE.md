@@ -148,7 +148,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 ## Odds Board (`/odds`)
 
 ### Features
-- **Best Odds Column** (left, always visible): Best ML, Spread, Total across all enabled books
+- **Best Odds Column** (left, always visible): Best ML, Spread, Total across all enabled books, with devigged **fair line** as a subscript under each price (e.g. `-120 BR / fair -125`). Fair = no-vig American odds derived from the best-of-each-side pair: `_devigPair(awayPrice, homePrice)` normalizes the two implied probs to sum to 1.0. Polymarket-friendly — limit-order at the fair price. SPR/TOT only show fair when the best home/away points match (devigging across different lines is meaningless).
 - **Multi-Book Columns** (scrollable right): Individual book odds side by side
 - **Sport Tabs**: MLB, NBA, NHL, NFL, NCAAB, NCAAF, MMA. Soccer / Tennis intentionally not listed (cron doesn't ingest them).
 - **Search**: Filter by team name (client-side, instant)

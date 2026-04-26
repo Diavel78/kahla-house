@@ -606,6 +606,15 @@
             font-size: 9px; font-weight: 600;
             color: var(--blue); display: block; margin-top: 1px;
         }
+        /* Devigged fair-line subscript under best-line cells.
+           Polymarket-friendly: this is the price to limit-order. */
+        .odds-fair {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px; font-weight: 600;
+            color: var(--text-muted); display: block;
+            margin-top: 3px; letter-spacing: 0.04em;
+            opacity: 0.85;
+        }
         .deep-link {
             font-size: 10px; color: var(--text-muted); text-decoration: none; margin-left: 4px;
             opacity: 0; transition: opacity 0.15s;
@@ -1629,19 +1638,62 @@
         return result;
     }
 
-    function bestCell(b, isLast) {
-        const tdClass = isLast ? 'best-cell-last' : 'best-cell';
-        if (!b) return `<td class="${tdClass}"><span class="odds-val na">--</span></td>`;
-        return `<td class="${tdClass}"><span class="odds-val ${cls(b.price)}">${fmt(b.price)}</span><span class="odds-book-attr">${esc(b.book)}</span></td>`;
+    /* Devig the best pair on each market into a fair (no-vig) American
+       price per side. Output is the price the user should put on
+       Polymarket as a limit order — Polymarket has minimal vig, so
+       fair line = target Polymarket price.
+
+       Math: take implied probs of best-away + best-home, normalize so
+       they sum to 1.0 (this strips out the combined vig from the two
+       books' best prices), convert each back to American odds.
+
+       For SPR/TOT we only devig when the best prices are at MATCHING
+       points (spread: away_pt + home_pt = 0; total: equal points).
+       Devigging at non-matching points sums probabilities of different
+       markets and gives a meaningless fair number.                    */
+    function _devigPair(awayPrice, homePrice) {
+        const ap = _amerToProb(awayPrice);
+        const hp = _amerToProb(homePrice);
+        if (ap == null || hp == null) return null;
+        const sum = ap + hp;
+        if (sum <= 0) return null;
+        return {
+            away_amer: _probToAmer(ap / sum),
+            home_amer: _probToAmer(hp / sum),
+        };
     }
 
-    function bestCellPt(b, prefix, isLast) {
+    function _computeFairLines(best) {
+        const ml = (best.ml_away && best.ml_home)
+            ? _devigPair(best.ml_away.price, best.ml_home.price) : null;
+        const sprPointsMatch = best.spr_away && best.spr_home
+            && (best.spr_away.point + best.spr_home.point === 0);
+        const spr = sprPointsMatch
+            ? _devigPair(best.spr_away.price, best.spr_home.price) : null;
+        const totPointsMatch = best.tot_over && best.tot_under
+            && (best.tot_over.point === best.tot_under.point);
+        const tot = totPointsMatch
+            ? _devigPair(best.tot_over.price, best.tot_under.price) : null;
+        return { ml, spr, tot };
+    }
+
+    function bestCell(b, isLast, fairAmer) {
+        const tdClass = isLast ? 'best-cell-last' : 'best-cell';
+        if (!b) return `<td class="${tdClass}"><span class="odds-val na">--</span></td>`;
+        const fairHtml = (fairAmer != null && Number.isFinite(fairAmer))
+            ? `<span class="odds-fair">fair ${fmt(fairAmer)}</span>` : '';
+        return `<td class="${tdClass}"><span class="odds-val ${cls(b.price)}">${fmt(b.price)}</span><span class="odds-book-attr">${esc(b.book)}</span>${fairHtml}</td>`;
+    }
+
+    function bestCellPt(b, prefix, isLast, fairAmer) {
         const tdClass = isLast ? 'best-cell-last' : 'best-cell';
         if (!b) return `<td class="${tdClass}"><span class="odds-val na">--</span></td>`;
         const ptStr = prefix
             ? `${prefix} ${b.point}`
             : (b.point > 0 ? '+' + b.point : '' + b.point);
-        return `<td class="${tdClass}"><span class="odds-point">${ptStr}</span><span class="odds-val ${cls(b.price)}">${fmt(b.price)}</span><span class="odds-book-attr">${esc(b.book)}</span></td>`;
+        const fairHtml = (fairAmer != null && Number.isFinite(fairAmer))
+            ? `<span class="odds-fair">fair ${fmt(fairAmer)}</span>` : '';
+        return `<td class="${tdClass}"><span class="odds-point">${ptStr}</span><span class="odds-val ${cls(b.price)}">${fmt(b.price)}</span><span class="odds-book-attr">${esc(b.book)}</span>${fairHtml}</td>`;
     }
 
     function hasAnyOdds(ev, books) {
@@ -1698,6 +1750,11 @@
             const date=localDate(ev.commence_time);
             const leagueStr=ev.league||'';
             const best = findBestOdds(ev, books, away, home);
+            // Devigged fair line per market — shown as a subscript under
+            // each best-line cell. User's workflow: fair price = the
+            // limit-order target on Polymarket (Polymarket has minimal
+            // vig, so fair line directly maps to a Polymarket cents bid).
+            const fair = _computeFairLines(best);
 
             const sc = ev.score;
             // ESPN state takes priority when available (post = final, in = live).
@@ -1782,9 +1839,9 @@
             // Away row
             h+=`<tr>`;
             h+=`<td class="team-name">${esc(away)}</td>`;
-            h+=bestCell(best.ml_away);
-            h+=bestCellPt(best.spr_away);
-            h+=bestCellPt(best.tot_over, 'O', true);
+            h+=bestCell(best.ml_away, false, fair.ml?.away_amer);
+            h+=bestCellPt(best.spr_away, null, false, fair.spr?.away_amer);
+            h+=bestCellPt(best.tot_over, 'O', true, fair.tot?.away_amer);
             for(const bk of books){
                 const bd=(ev.books||{})[bk]||{};
                 const ml=bd.moneyline?.[away];
@@ -1801,9 +1858,9 @@
             // Home row
             h+=`<tr>`;
             h+=`<td class="team-name">${esc(home)}</td>`;
-            h+=bestCell(best.ml_home);
-            h+=bestCellPt(best.spr_home);
-            h+=bestCellPt(best.tot_under, 'U', true);
+            h+=bestCell(best.ml_home, false, fair.ml?.home_amer);
+            h+=bestCellPt(best.spr_home, null, false, fair.spr?.home_amer);
+            h+=bestCellPt(best.tot_under, 'U', true, fair.tot?.home_amer);
             for(const bk of books){
                 const bd=(ev.books||{})[bk]||{};
                 const ml=bd.moneyline?.[home];
