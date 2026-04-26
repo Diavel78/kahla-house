@@ -1520,19 +1520,19 @@ def _fetch_action_splits(sport: str) -> dict:
     parsed["url"] = url
     parsed["date_et"] = today_et
 
-    # Fallback: Action Network is a Next.js app — when the SSR table only
-    # contains yesterday's finals (no scheduled rows), the full game list
-    # is still embedded as JSON in <script id="__NEXT_DATA__">. Walk it
-    # for splits if the table parse came up short.
-    if not parsed.get("ok") or len(parsed.get("events", [])) < 1:
-        nxt = _parse_action_splits_next_data(html)
-        if nxt.get("events"):
-            parsed["events"]      = nxt["events"]
-            parsed["ok"]          = True
-            parsed["source"]      = "next_data"
-            parsed["next_debug"]  = nxt.get("debug", {})
-        else:
-            parsed["next_debug"]  = nxt.get("debug", {})
+    # ALWAYS try __NEXT_DATA__ as the primary source. Action Network's
+    # SSR table is unreliable — for NHL it only returns yesterday's
+    # finals even with ?date=today (their server caches the SSR a long
+    # time, the date param doesn't bust it). The Next.js JSON blob is
+    # complete by definition (it's what hydrates the client UI you see
+    # in the browser).
+    parsed["source"] = "table"
+    nxt = _parse_action_splits_next_data(html)
+    if nxt.get("events"):
+        parsed["events"]     = nxt["events"]
+        parsed["ok"]         = True
+        parsed["source"]     = "next_data"
+    parsed["next_debug"]     = nxt.get("debug", {})
 
     # Only cache successful parses. A 0-event response usually means our
     # status-prefix regex needs another pattern (NHL "Final/OT" etc.) —
@@ -1613,6 +1613,29 @@ def _parse_action_splits_next_data(html: str) -> dict:
         if ev:
             events.append(ev)
     debug["events_extracted"] = len(events)
+
+    # If we found game-shaped candidates but couldn't extract any ml
+    # splits, dump the first candidate's structure (field names + value
+    # types) so we can see what shape Action Network is using and tune
+    # _next_data_event accordingly. Sanitize values to types only —
+    # don't leak the raw data into the API response.
+    if candidates and not events:
+        first = candidates[0]
+        shape = {}
+        for k, v in list(first.items())[:80]:
+            if isinstance(v, dict):
+                shape[k] = {"_type": "dict", "_keys": sorted(v.keys())[:30]}
+            elif isinstance(v, list):
+                shape[k] = {"_type": "list", "_len": len(v),
+                             "_first_keys": sorted(v[0].keys())[:30] if v and isinstance(v[0], dict) else None}
+            elif isinstance(v, (int, float)):
+                shape[k] = f"num:{v}"
+            elif isinstance(v, str):
+                shape[k] = f"str:{v[:60]}"
+            else:
+                shape[k] = type(v).__name__
+        debug["candidate_shape"] = shape
+
     return {"events": events, "debug": debug}
 
 
