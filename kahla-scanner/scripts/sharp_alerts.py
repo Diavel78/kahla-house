@@ -46,10 +46,13 @@ STEAM_LOOKBACK_MIN  = 70     # how far back the "previous" snapshot can be
 STEAM_RECENT_MIN    = 35     # what counts as "current"
 DEDUPE_HOURS        = 6      # don't re-fire same alert inside this window
 # Active games window: only consider markets whose game starts within this.
-# Games already underway are still scored — closing-line freeze handles
-# stale post-start data on the user-facing board, but for alerts we want
-# the latest pre-start picture.
+# Alerts ONLY fire on pre-game contests — once a game is live the line is
+# no longer pre-game (post-start retail twitches aren't sharp money) and
+# the user can't really act on the alert anyway.
 ACTIVE_WINDOW_HOURS = 24
+LIVE_BUFFER_MIN     = 5    # tolerate ~5 min clock skew so a game just
+                            # past `event_start` by <5 min still alerts
+                            # (probably still showing pre-game closing data)
 
 # Sport code → display label for the alert message
 _SPORT_LABEL = {
@@ -154,8 +157,10 @@ def _telegram_send(token, chat_id, text):
 
 # ──────────────────────── Supabase queries ──────────────────────
 def _fetch_active_markets(sb):
+    """Pre-game markets only. Once a game is live the alert is moot —
+    sharp money has already moved the line and you can't act on it."""
     now = datetime.now(timezone.utc)
-    low  = (now - timedelta(hours=2)).isoformat()
+    low  = (now - timedelta(minutes=LIVE_BUFFER_MIN)).isoformat()
     high = (now + timedelta(hours=ACTIVE_WINDOW_HOURS)).isoformat()
     try:
         rows = (sb.table("markets")
@@ -293,10 +298,24 @@ def _direction(cur, ear, market_type):
     return 1 if composite > 0.5 else -1 if composite < -0.5 else 0
 
 
+_OPPOSITE_SIDE = {"home": "away", "away": "home", "over": "under", "under": "over"}
+
+
+def _steam_sharp_side(raw_side, direction):
+    """Steam direction interpretation:
+       direction = -1 (price decreased on raw_side) → books making that side less
+         attractive because money is on it → sharp = raw_side.
+       direction = +1 (price increased on raw_side) → books making that side more
+         attractive to attract money → sharp = OPPOSITE side."""
+    if direction < 0: return raw_side
+    return _OPPOSITE_SIDE.get(raw_side, raw_side)
+
+
 def _detect_steam(snaps_recent, snaps_earlier, market_id):
     """Per (market_type, side), find groups of ≥STEAM_BOOK_COUNT books
-    moving the same direction. Returns list of dicts."""
-    # Latest snapshot per (book, market_type, side) in each window
+    moving the same direction. Dedupes home/away (or over/under) entries
+    that point at the same sharp_side, keeping the strongest signal.
+    Returns list of dicts with `sharp_side` already translated."""
     cur = {}
     for s in snaps_recent:
         if s["market_id"] != market_id: continue
@@ -308,32 +327,138 @@ def _detect_steam(snaps_recent, snaps_earlier, market_id):
         key = (s["book"], s["market_type"], s["side"])
         if key not in ear: ear[key] = s
 
-    # Group by (market_type, side, direction) → set of books
     grouped = {}
     for key, c in cur.items():
         e = ear.get(key)
         if not e: continue
-        mt, side = key[1], key[2]
+        mt, raw_side = key[1], key[2]
         d = _direction(c, e, mt)
         if d == 0: continue
-        gk = (mt, side, d)
+        gk = (mt, raw_side, d)
         grouped.setdefault(gk, []).append((c["book"], e, c))
 
-    out = []
-    for (mt, side, d), books in grouped.items():
-        if len(books) >= STEAM_BOOK_COUNT:
-            out.append({
-                "market_type": mt,
-                "side":        side,
-                "direction":   d,
-                "books":       [b[0] for b in books],
-                "samples":     [(b[0], b[1].get("price_american"), b[2].get("price_american")) for b in books[:5]],
-            })
-    return out
+    # Build per-(market_type, sharp_side) best candidate. ML/SPR fires
+    # twice (home -1 AND away +1 both point at sharp=home); we keep the
+    # one with more books.
+    best_per_sharp = {}
+    for (mt, raw_side, d), books in grouped.items():
+        if len(books) < STEAM_BOOK_COUNT:
+            continue
+        sharp_side = _steam_sharp_side(raw_side, d)
+        bk_key = (mt, sharp_side)
+        cand = {
+            "market_type": mt,
+            "raw_side":    raw_side,
+            "sharp_side":  sharp_side,
+            "direction":   d,
+            "books":       [b[0] for b in books],
+            "samples":     [(b[0], b[1].get("price_american"), b[2].get("price_american")) for b in books[:5]],
+        }
+        if bk_key not in best_per_sharp or len(books) > len(best_per_sharp[bk_key]["books"]):
+            best_per_sharp[bk_key] = cand
+    return list(best_per_sharp.values())
+
+
+def _sharp_for_ml(market_id, openers, pin_current):
+    """ML sharp = team whose American odds got more negative since opener
+    (line tightening = books balancing against money on that side).
+    Mirrors templates/odds.html `_sharpSide` so alerts match the chip.
+    Returns (side, score, opener, current) or None."""
+    h_op = openers.get((market_id, "moneyline", "home"))
+    h_cu = pin_current.get((market_id, "moneyline", "home"))
+    a_op = openers.get((market_id, "moneyline", "away"))
+    a_cu = pin_current.get((market_id, "moneyline", "away"))
+
+    h_diff = (h_cu["price_american"] - h_op["price_american"]) if (h_op and h_cu) else None
+    a_diff = (a_cu["price_american"] - a_op["price_american"]) if (a_op and a_cu) else None
+    if h_diff is None and a_diff is None:
+        return None
+    h = h_diff if h_diff is not None else float("inf")
+    a = a_diff if a_diff is not None else float("inf")
+    if h == a:
+        return None
+    if a < h:
+        side, op, cu = "away", a_op, a_cu
+    else:
+        side, op, cu = "home", h_op, h_cu
+    score = _move_score_ml(op["price_american"], cu["price_american"])
+    if score is None:
+        return None
+    return side, score, op, cu
+
+
+def _sharp_for_spread(market_id, openers, pin_current):
+    """SPR sharp = side whose price decreased (becoming less attractive
+    because money is hammering it). Falls back to negative point_diff."""
+    h_op = openers.get((market_id, "spread", "home"))
+    h_cu = pin_current.get((market_id, "spread", "home"))
+    a_op = openers.get((market_id, "spread", "away"))
+    a_cu = pin_current.get((market_id, "spread", "away"))
+    if not (h_op and h_cu and a_op and a_cu):
+        return None
+
+    h_px = h_cu["price_american"] - h_op["price_american"]
+    a_px = a_cu["price_american"] - a_op["price_american"]
+
+    side = None
+    if abs(h_px - a_px) >= 1:
+        side = "home" if h_px < a_px else "away"
+    else:
+        h_pt = (h_cu.get("line") or 0) - (h_op.get("line") or 0)
+        a_pt = (a_cu.get("line") or 0) - (a_op.get("line") or 0)
+        if h_pt < 0 and h_pt < a_pt: side = "home"
+        elif a_pt < 0 and a_pt < h_pt: side = "away"
+    if not side:
+        return None
+
+    op, cu = (h_op, h_cu) if side == "home" else (a_op, a_cu)
+    score = _move_score_spr_tot(op.get("line"), cu.get("line"),
+                                 op["price_american"], cu["price_american"])
+    if score is None:
+        return None
+    return side, score, op, cu
+
+
+def _sharp_for_total(market_id, openers, pin_current):
+    """TOT sharp = LOWERED total or rising Over price → UNDER.
+    Raised total or falling Over price → OVER."""
+    o_op = openers.get((market_id, "total", "over"))
+    o_cu = pin_current.get((market_id, "total", "over"))
+    if not (o_op and o_cu):
+        return None
+    pt_diff = (o_cu.get("line") or 0) - (o_op.get("line") or 0)
+    px_diff = o_cu["price_american"] - o_op["price_american"]
+
+    if pt_diff < 0:
+        side = "under"
+    elif pt_diff > 0:
+        side = "over"
+    elif px_diff > 0:
+        side = "under"   # Over got cheaper → books making it attractive → money on Under
+    elif px_diff < 0:
+        side = "over"
+    else:
+        return None
+
+    score = _move_score_spr_tot(o_op.get("line"), o_cu.get("line"),
+                                 o_op["price_american"], o_cu["price_american"])
+    if score is None:
+        return None
+
+    # Show the SHARP side's prices in the message so the user reads
+    # numbers from the side our chip is naming. Fall back to over data
+    # if the under snapshot is missing.
+    if side == "under":
+        u_op = openers.get((market_id, "total", "under"))
+        u_cu = pin_current.get((market_id, "total", "under"))
+        if u_op and u_cu:
+            return side, score, u_op, u_cu
+    return side, score, o_op, o_cu
 
 
 def _compute_sharp_score(opener, current, market_type):
-    """Returns int 0-10 or None."""
+    """Returns int 0-10 or None. Used for direct opener-vs-current
+    scoring when we already know the side."""
     if not opener or not current: return None
     if market_type == "moneyline":
         return _move_score_ml(opener.get("price_american"), current.get("price_american"))
@@ -358,17 +483,18 @@ def _fmt_local(iso_str):
 
 def _msg_steam(market, alert, away, home):
     sport = _SPORT_LABEL.get(market.get("sport"), market.get("sport") or "")
-    direction_word = "favorite" if alert["direction"] < 0 else "underdog"
+    sharp_side = alert["sharp_side"]
     if alert["market_type"] == "total":
-        direction_word = "OVER" if alert["direction"] > 0 else "UNDER"
+        side_label = sharp_side.upper()
+    else:
+        side_label = (home if sharp_side == "home" else away).upper()
     sample_lines = []
     for bk, ep, cp in alert["samples"]:
         sample_lines.append(f"  {bk}: {_fmt_amer(ep)} → {_fmt_amer(cp)}")
     return (
         f"🚨 *STEAM* — {sport}\n"
         f"*{away} @ {home}* · {_fmt_local(market.get('event_start'))}\n"
-        f"`{_short_market(alert['market_type'])}` · *{(home if alert['side']=='home' else away if alert['side']=='away' else alert['side']).upper()}* · "
-        f"{len(alert['books'])} books → *{direction_word}*\n"
+        f"`{_short_market(alert['market_type'])}` · *{side_label}* · {len(alert['books'])} books\n"
         + "\n".join(sample_lines)
     )
 
@@ -446,39 +572,45 @@ def main(argv=None):
         # ── Steam detection
         steams = _detect_steam(snaps_recent, snaps_earlier, mid)
         for alert in steams:
-            if _already_alerted(sb, mid, alert["market_type"], "steam", alert["side"]):
+            sharp_side = alert["sharp_side"]
+            if _already_alerted(sb, mid, alert["market_type"], "steam", sharp_side):
                 continue
             msg = _msg_steam(market, alert, away, home)
             if _telegram_send(token, chat_id, msg):
                 sent_steam += 1
-                _record_alert(sb, mid, alert["market_type"], "steam", alert["side"], {
+                _record_alert(sb, mid, alert["market_type"], "steam", sharp_side, {
                     "books": alert["books"], "direction": alert["direction"],
+                    "raw_side": alert["raw_side"],
                 })
 
-        # ── Sharp 7+ detection (per market_type, on the side that fired)
-        for mt in ("moneyline", "spread", "total"):
-            sides = ("over", "under") if mt == "total" else ("home", "away")
-            best_side, best_score, best_opener, best_cur = None, -1, None, None
-            for sd in sides:
-                op = openers.get((mid, mt, sd))
-                cu = pin_current.get((mid, mt, sd))
-                sc = _compute_sharp_score(op, cu, mt)
-                if sc is not None and sc > best_score:
-                    best_side, best_score, best_opener, best_cur = sd, sc, op, cu
-            if best_score >= SHARP_THRESHOLD:
-                if _already_alerted(sb, mid, mt, "sharp7", best_side):
-                    continue
-                msg = _msg_sharp7(market, mt, best_side, best_score,
-                                  best_opener, best_cur, away, home)
-                if _telegram_send(token, chat_id, msg):
-                    sent_sharp += 1
-                    _record_alert(sb, mid, mt, "sharp7", best_side, {
-                        "score": best_score,
-                        "opener_price": best_opener.get("price_american"),
-                        "current_price": best_cur.get("price_american"),
-                        "opener_line": best_opener.get("line"),
-                        "current_line": best_cur.get("line"),
-                    })
+        # ── Sharp 7+ detection. Side is determined by movement
+        # DIRECTION (mirrors templates/odds.html `_sharpSide`), not by
+        # max-score — both sides have ~equal absolute movement so a
+        # max-score tie always picked the wrong side previously.
+        for mt, helper in (
+            ("moneyline", _sharp_for_ml),
+            ("spread",    _sharp_for_spread),
+            ("total",     _sharp_for_total),
+        ):
+            r = helper(mid, openers, pin_current)
+            if r is None:
+                continue
+            side, score, opener_snap, current_snap = r
+            if score < SHARP_THRESHOLD:
+                continue
+            if _already_alerted(sb, mid, mt, "sharp7", side):
+                continue
+            msg = _msg_sharp7(market, mt, side, score,
+                              opener_snap, current_snap, away, home)
+            if _telegram_send(token, chat_id, msg):
+                sent_sharp += 1
+                _record_alert(sb, mid, mt, "sharp7", side, {
+                    "score":         score,
+                    "opener_price":  opener_snap.get("price_american"),
+                    "current_price": current_snap.get("price_american"),
+                    "opener_line":   opener_snap.get("line"),
+                    "current_line":  current_snap.get("line"),
+                })
 
     log.info("alerts sent: steam=%d sharp7=%d", sent_steam, sent_sharp)
     return 0
