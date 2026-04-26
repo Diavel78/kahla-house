@@ -1540,15 +1540,25 @@ def _parse_iso(ts: str) -> datetime | None:
 @app.route("/api/odds/history-batch")
 @firebase_auth_required
 def api_odds_history_batch():
-    """6-hour PIN ML history for every active game in a sport, batched.
-    Powers the inline sparkline rendered in each game card on the Odds Board.
+    """6-hour PIN history for every active game in a sport, batched.
+    Powers the inline sparklines rendered in each game card on the Odds Board.
 
-    Returns: { ok, sport, market: 'moneyline', side: 'home', since_iso,
-               events: { market_id: [{ts, price}, ...], ... } }
+    Returns three series per market — ML home, Spread home, Total over —
+    in one response so the page can paint all three sparklines at once
+    without N+1 fetches.
 
-    One Supabase round-trip total instead of N per-card requests. Uses the
-    same active-markets window as /api/odds (now-6h to now+2d) so the chart
-    only renders for games visible on the board.
+    Response: { ok, sport, since_iso, events: {
+        "<market_id>": {
+            "ml":     { "side": "home", "series": [{ts, price}, ...] },
+            "spread": { "side": "home", "series": [{ts, price, line}, ...] },
+            "total":  { "side": "over", "series": [{ts, price, line}, ...] }
+        }, ...
+    } }
+
+    Live-game freeze applied: post-event_start snapshots are dropped so
+    the sparkline matches the frozen board cell. Anchor sweep: markets
+    with no PIN data inside the 6h window get a flat baseline pinned to
+    the window's left edge from the most recent pre-window row.
     """
     sb = get_supabase()
     if sb is None:
@@ -1585,88 +1595,96 @@ def api_odds_history_batch():
     market_ids = [m["id"] for m in markets]
     six_h = (now - timedelta(hours=6)).isoformat()
     now_iso = now.isoformat()
-    # Live-game freeze (matches the board cells). Once a game starts, stop
-    # plotting new points on its sparkline — the cron writes a couple of
-    # post-start snapshots before the book takes the line down, but those
-    # samples are noise on a chart of a 30-min cron cadence. Same logic
-    # _fetch_odds_from_snapshots uses for the table cells.
     event_start_by_mid: dict[str, str] = {m["id"]: m.get("event_start", "") for m in markets}
 
     def _post_start(mid: str, captured_at: str) -> bool:
         es = event_start_by_mid.get(mid, "")
         return bool(es) and es <= now_iso and captured_at > es
 
-    # 6h PIN ML home-team only — keeps the payload tiny per game.
+    # The three series we render per game: ML home, Spread home, Total over.
+    SERIES = (("moneyline", "home"), ("spread", "home"), ("total", "over"))
+    SERIES_KEYS = {"moneyline": "ml", "spread": "spread", "total": "total"}
+    wanted_combos = set(SERIES)
+
+    # One Supabase fetch covers all 3 markets × all sides — we filter the
+    # sides we want in Python. Smaller payload than 3 separate queries.
     try:
         snaps = (
             sb.table("book_snapshots")
-            .select("market_id,price_american,captured_at")
+            .select("market_id,market_type,side,price_american,line,captured_at")
             .in_("market_id", market_ids)
             .eq("book", "PIN")
-            .eq("market_type", "moneyline")
-            .eq("side", "home")
+            .in_("market_type", ["moneyline", "spread", "total"])
             .gte("captured_at", six_h)
             .order("captured_at", desc=False)
-            .limit(20000)
+            .limit(50000)
             .execute()
             .data
             or []
         )
     except Exception:
         snaps = []
+    snaps = [s for s in snaps
+             if (s["market_type"], s["side"]) in wanted_combos
+             and not _post_start(s["market_id"], s["captured_at"])]
 
-    # Drop post-start rows for live games (sparkline freezes at closing line).
-    snaps = [s for s in snaps if not _post_start(s["market_id"], s["captured_at"])]
-
-    # Anchor: most-recent pre-window PIN ML home row per market not already in
-    # the fresh set. So a market that's been quiet for >6h still gets a flat
-    # baseline rendered.
-    present = {s["market_id"] for s in snaps}
-    missing = [mid for mid in market_ids if mid not in present]
-    if missing:
+    # Anchor sweep — for any (market, market_type, side) combo missing from
+    # the fresh window, pull the most recent pre-window row and pin it to
+    # the window's left edge so the chart starts with a flat baseline.
+    present = {(s["market_id"], s["market_type"], s["side"]) for s in snaps}
+    need_anchor = any(
+        (mid, mt, side) not in present
+        for mid in market_ids for mt, side in SERIES
+    )
+    if need_anchor:
         try:
             anchor_rows = (
                 sb.table("book_snapshots")
-                .select("market_id,price_american,captured_at")
-                .in_("market_id", missing)
+                .select("market_id,market_type,side,price_american,line,captured_at")
+                .in_("market_id", market_ids)
                 .eq("book", "PIN")
-                .eq("market_type", "moneyline")
-                .eq("side", "home")
+                .in_("market_type", ["moneyline", "spread", "total"])
                 .lt("captured_at", six_h)
                 .order("captured_at", desc=True)
-                .limit(2000)
+                .limit(50000)
                 .execute()
                 .data
                 or []
             )
         except Exception:
             anchor_rows = []
-        seen: set[str] = set()
         for r in anchor_rows:
-            # Same freeze applies to anchors — for a game that started >6h ago,
-            # the only PIN row we'll find is mid-game; we don't want to show it.
+            combo = (r["market_type"], r["side"])
+            if combo not in wanted_combos:
+                continue
+            key = (r["market_id"], r["market_type"], r["side"])
+            if key in present:
+                continue
             if _post_start(r["market_id"], r["captured_at"]):
                 continue
-            mid = r["market_id"]
-            if mid in seen:
-                continue
-            seen.add(mid)
-            # Pin to window edge so the chart starts at the left
+            present.add(key)
             r["captured_at"] = six_h
             snaps.append(r)
 
-    out: dict[str, list[dict]] = {}
+    out: dict[str, dict[str, dict]] = {}
     for s in snaps:
-        out.setdefault(s["market_id"], []).append({
-            "ts": s["captured_at"],
+        mid = s["market_id"]
+        key = SERIES_KEYS[s["market_type"]]
+        slot = out.setdefault(mid, {}).setdefault(key, {"side": s["side"], "series": []})
+        slot["series"].append({
+            "ts":    s["captured_at"],
             "price": s["price_american"],
+            "line":  s.get("line"),
         })
+
+    # Sort each series by timestamp (anchor rows were appended out of order)
+    for game in out.values():
+        for slot in game.values():
+            slot["series"].sort(key=lambda p: p["ts"])
 
     return jsonify({
         "ok":         True,
         "sport":      sport_owls,
-        "market":     "moneyline",
-        "side":       "home",
         "since_iso":  six_h,
         "events":     out,
     })

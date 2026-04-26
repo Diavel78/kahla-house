@@ -612,18 +612,28 @@
         }
         .th-book-name:hover .deep-link { opacity: 1; }
 
-        /* Inline 6H PIN ML sparkline (where Circa splits used to live) */
+        /* Inline 6H PIN sparklines (ML / Spread / Total) — where Circa
+           splits used to live. Three small charts stacked vertically with
+           visible Y-axis labels in American odds (ML) or point values
+           (spread/total). */
         .spark-wrap {
-            padding: 12px 18px 14px;
+            padding: 10px 18px 14px;
             border-top: 1px solid var(--border);
             background: rgba(11,14,19,0.3);
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .spark-row {
+            display: flex;
+            flex-direction: column;
         }
         .spark-label {
             font-family: 'JetBrains Mono', monospace;
             font-size: 10px;
             color: var(--text-muted);
             letter-spacing: 0.04em;
-            margin-bottom: 6px;
+            margin-bottom: 4px;
             display: flex;
             align-items: center;
             gap: 8px;
@@ -635,13 +645,24 @@
             padding: 1px 6px;
             border-radius: 4px;
         }
-        .spark-range {
+        .spark-mkt {
+            font-weight: 700;
+            color: var(--text-secondary);
+            font-size: 10px;
+        }
+        .spark-current {
+            font-weight: 700;
+            color: var(--text);
             margin-left: auto;
+            font-size: 11px;
+        }
+        .spark-range {
             color: var(--text-muted);
+            font-size: 10px;
         }
         .spark-canvas-wrap {
             position: relative;
-            height: 60px;
+            height: 50px;
         }
         .spark-canvas-wrap canvas { width: 100% !important; height: 100% !important; }
         .spark-empty {
@@ -649,7 +670,7 @@
             display: flex; align-items: center; justify-content: center;
             color: var(--text-muted);
             font-family: 'JetBrains Mono', monospace;
-            font-size: 11px;
+            font-size: 10px;
         }
 
         /* Game footer (movement) */
@@ -1499,13 +1520,14 @@
                 h += renderMovement(mv, 'TOT', 'total', 'Over', 'Under');
                 h += `</div></div>`;
             }
-            // Sparkline placeholder — populated by drawSparklines() after the
-            // batch /api/odds/history-batch fetch resolves. Title bar shows
-            // what the user is looking at.
+            // Three PIN sparklines per game (ML home / Spread home / Total
+            // over). drawSparklines() runs after each render and populates
+            // the canvases with data from fetchSparklineBatch().
             if (sparkId) {
                 h += `<div class="spark-wrap">`;
-                h += `<div class="spark-label"><span class="spark-tag">PIN</span> ${esc(home)} ML <span class="spark-range">6H</span></div>`;
-                h += `<div class="spark-canvas-wrap"><canvas class="js-spark" data-mid="${esc(sparkId)}"></canvas><div class="spark-empty js-spark-empty" data-mid="${esc(sparkId)}" style="display:none">no PIN history yet</div></div>`;
+                h += renderSparkRow(sparkId, 'ml',     'ML',  esc(home));
+                h += renderSparkRow(sparkId, 'spread', 'SPR', esc(home));
+                h += renderSparkRow(sparkId, 'total',  'TOT', 'Over');
                 h += `</div>`;
             }
             h += `</div>`;
@@ -1534,18 +1556,49 @@
         });
     }
 
-    /* ─── Inline 6H PIN ML sparklines per game card ─── */
+    /* ─── Inline 6H PIN sparklines per game card (ML / SPR / TOT) ─── */
     let _sparkData = null;
-    const _sparkInstances = {};
+    const _sparkInstances = {};  // keyed by `${market_id}::${mkt}` (ml/spread/total)
 
-    // American → implied probability so the chart axis is continuous around
-    // the +100/-100 favorite/dog flip (American odds have a 200-cent
-    // discontinuity right there).
+    // American → implied probability so the ML chart axis is continuous
+    // around the +100/-100 favorite/dog flip.
     function _amerToProb(p) {
         if (p == null || !Number.isFinite(p)) return null;
         if (p > 0) return 100 / (p + 100);
         if (p < 0) return -p / (-p + 100);
         return 0.5;
+    }
+    function _probToAmer(p) {
+        if (!Number.isFinite(p) || p <= 0 || p >= 1) return null;
+        return p >= 0.5 ? Math.round(-p / (1 - p) * 100)
+                        : Math.round((1 - p) / p * 100);
+    }
+    function _fmtAmer(v) {
+        if (v == null || !Number.isFinite(v)) return '--';
+        return v > 0 ? '+' + v : '' + v;
+    }
+    function _fmtPoint(v) {
+        if (v == null || !Number.isFinite(v)) return '';
+        return v > 0 ? '+' + v : '' + v;
+    }
+
+    // HTML for one sparkline row inside a game card. Data attributes let
+    // drawSparklines() find the canvas + its market type after each render.
+    function renderSparkRow(sparkId, mkt, mktLabel, sideLabel) {
+        const id = esc(sparkId);
+        return `<div class="spark-row">
+            <div class="spark-label">
+                <span class="spark-tag">PIN</span>
+                <span class="spark-mkt">${esc(mktLabel)}</span>
+                ${esc(sideLabel)}
+                <span class="spark-current js-spark-current" data-mid="${id}" data-mkt="${esc(mkt)}"></span>
+                <span class="spark-range">6H</span>
+            </div>
+            <div class="spark-canvas-wrap">
+                <canvas class="js-spark" data-mid="${id}" data-mkt="${esc(mkt)}"></canvas>
+                <div class="spark-empty js-spark-empty" data-mid="${id}" data-mkt="${esc(mkt)}" style="display:none">no PIN history yet</div>
+            </div>
+        </div>`;
     }
 
     async function fetchSparklineBatch() {
@@ -1563,35 +1616,66 @@
 
     function drawSparklines() {
         if (typeof Chart === 'undefined') return;
-        if (!_sparkData) return;  // first load — fetchSparklineBatch will retrigger
-        const canvases = document.querySelectorAll('#board canvas.js-spark');
-        canvases.forEach(canvas => {
+        if (!_sparkData) return;
+        document.querySelectorAll('#board canvas.js-spark').forEach(canvas => {
             const mid = canvas.dataset.mid;
-            const series = _sparkData[mid] || [];
-            const emptyEl = document.querySelector(`#board .js-spark-empty[data-mid="${mid}"]`);
-            // Destroy prior instance for this canvas (board re-renders swap nodes)
-            const prior = _sparkInstances[mid];
-            if (prior) { try { prior.destroy(); } catch {} delete _sparkInstances[mid]; }
+            const mkt = canvas.dataset.mkt;  // 'ml' | 'spread' | 'total'
+            const slot = (_sparkData[mid] || {})[mkt];
+            const emptyEl = document.querySelector(
+                `#board .js-spark-empty[data-mid="${mid}"][data-mkt="${mkt}"]`);
+            const currentEl = document.querySelector(
+                `#board .js-spark-current[data-mid="${mid}"][data-mkt="${mkt}"]`);
+
+            // Destroy any prior chart instance for this canvas
+            const key = `${mid}::${mkt}`;
+            const prior = _sparkInstances[key];
+            if (prior) { try { prior.destroy(); } catch {} delete _sparkInstances[key]; }
+
+            const series = (slot && slot.series) || [];
             if (!series.length) {
                 canvas.style.display = 'none';
                 if (emptyEl) emptyEl.style.display = '';
+                if (currentEl) currentEl.textContent = '';
                 return;
             }
             canvas.style.display = '';
             if (emptyEl) emptyEl.style.display = 'none';
 
-            const points = series
-                .map(p => ({ x: new Date(p.ts).valueOf(), y: _amerToProb(p.price), _amer: p.price }))
-                .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+            // Y-value choice:
+            //   ML:     plot implied probability (continuous), label Y ticks
+            //           in American so the discontinuity at +/-100 isn't a cliff
+            //   Spread/Total: plot the LINE (point spread / over-under value)
+            //                 since the price stays ~-110 and the line is what moves
+            const isML = mkt === 'ml';
+            const points = series.map(p => ({
+                x:     new Date(p.ts).valueOf(),
+                y:     isML ? _amerToProb(p.price) : (p.line == null ? null : Number(p.line)),
+                _amer: p.price,
+                _line: p.line,
+            })).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
             if (!points.length) {
                 canvas.style.display = 'none';
                 if (emptyEl) emptyEl.style.display = '';
+                if (currentEl) currentEl.textContent = '';
                 return;
             }
+            // Carry forward to "now" so the line reaches the right edge.
+            // For frozen (live/final) games the server already capped data at
+            // event_start; this just stretches the flat tail to "now".
             const last = points[points.length - 1];
-            points.push({ x: Date.now(), y: last.y, _amer: last._amer });
+            points.push({ x: Date.now(), y: last.y, _amer: last._amer, _line: last._line });
 
-            _sparkInstances[mid] = new Chart(canvas.getContext('2d'), {
+            // Current-value label next to the row title
+            if (currentEl) {
+                if (isML) {
+                    currentEl.textContent = _fmtAmer(last._amer);
+                } else {
+                    const lineStr = _fmtPoint(last._line);
+                    currentEl.textContent = `${lineStr} ${_fmtAmer(last._amer)}`;
+                }
+            }
+
+            _sparkInstances[key] = new Chart(canvas.getContext('2d'), {
                 type: 'line',
                 data: { datasets: [{
                     data: points,
@@ -1619,15 +1703,28 @@
                                     month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
                                 }),
                                 label: item => {
-                                    const v = item.raw._amer;
-                                    return v > 0 ? '+' + v : '' + v;
+                                    const p = item.raw;
+                                    if (isML) return _fmtAmer(p._amer);
+                                    return `${_fmtPoint(p._line)} ${_fmtAmer(p._amer)}`;
                                 },
                             },
                         },
                     },
                     scales: {
                         x: { type: 'time', display: false, grid: { display: false } },
-                        y: { display: false, grid: { display: false } },
+                        y: {
+                            display: true,
+                            position: 'right',
+                            grid: { color: 'rgba(255,255,255,0.04)' },
+                            ticks: {
+                                color: '#8890a8',
+                                font: { family: 'JetBrains Mono, monospace', size: 9 },
+                                maxTicksLimit: 4,
+                                callback: v => isML
+                                    ? _fmtAmer(_probToAmer(v))
+                                    : _fmtPoint(v),
+                            },
+                        },
                     },
                     elements: { line: { borderJoinStyle: 'round' } },
                 },
