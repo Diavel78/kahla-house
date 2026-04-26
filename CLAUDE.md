@@ -278,9 +278,9 @@ Per-market signal-strength rating shown on each game card's movement bar. Scale 
 ### Components (each scaled 0-10)
 
 1. **PIN movement magnitude** — opener vs current.
-   - ML: implied-probability change in points (1 prob-pt = 1 score-pt, capped 10).
-   - Spread: `|point_diff| × 5` + small price-only twitch credit (capped 10).
-   - Total: `|point_diff| × 10` + small price-only twitch credit (capped 10).
+   - ML: implied-probability change × 500 (capped 10). Calibrated so a 10-cent American odds move (≈2 prob-pts, e.g. -133 → -123) caps out — Pinnacle moves on huge volume, so any ML move IS sharp money.
+   - Spread: `|point_diff| × 6` + small price-only twitch credit (capped 10). 1pt move = 6, 1.5pt = 9, 2pt+ = max.
+   - Total: `|point_diff| × 12` + small price-only twitch credit (capped 10). 0.5pt move = 6, 1pt+ = max.
 
 2. **Splits divergence** (ML only) — `|money% − bets%|`.
    - `<2pt` = noise, `=20pt+` = max. Linear in between.
