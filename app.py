@@ -1431,6 +1431,205 @@ def api_my_bets():
 
 
 # ---------------------------------------------------------------------------
+# Public betting splits (% bets / % money) — scraped from Action Network's
+# free public-betting page.
+# ---------------------------------------------------------------------------
+#
+# Action Network publishes splits per sport at /{sport}/public-betting.
+# Page is server-rendered HTML with the splits table inline (some
+# JavaScript hydration but the table data is in the markup). Free, no
+# auth, ToS gray area but the same data scrapers have used for years.
+#
+# We cache 30 min server-side because:
+#   - splits move slowly (every few hours)
+#   - Action Network rate-limits aggressive scrapers
+#   - re-fetching per /api/odds poll would hammer them
+#
+# If parsing breaks (HTML changes), the scraper logs detail and the
+# /api/splits endpoint returns ok:false so the UI degrades gracefully —
+# board still works, splits just disappear.
+
+_ACTION_SPORTS = {"mlb", "nba", "nhl", "nfl", "ncaab", "ncaaf"}
+_SPLITS_CACHE_TTL = 30 * 60  # 30 min
+_SPLITS_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def _fetch_action_splits(sport: str) -> dict:
+    """Scrape Action Network's public-betting page for `sport`. Returns
+    {"ok": bool, "events": [{home, away, ml, spread, total}], "error": str?, "html_len": int?}.
+
+    Each event entry shape:
+      {
+        "home": "Atlanta Braves",
+        "away": "Philadelphia Phillies",
+        "spread": {"away_bets": 65, "away_money": 70, "home_bets": 35, "home_money": 30},
+        "ml":     {"away_bets": ..., "home_bets": ..., ...},
+        "total":  {"over_bets": ..., "over_money": ..., "under_bets": ..., "under_money": ...},
+      }
+    Missing markets just absent from the dict. Best-effort parse.
+    """
+    import time
+    import requests as _http
+    cache_key = f"splits:{sport}"
+    now = time.time()
+    cached = _cache.get(cache_key)
+    if cached and (now - cached["ts"]) < _SPLITS_CACHE_TTL:
+        return cached["data"]
+
+    if sport not in _ACTION_SPORTS:
+        out = {"ok": False, "error": f"unsupported sport: {sport}", "events": []}
+        _cache[cache_key] = {"data": out, "ts": now}
+        return out
+
+    url = f"https://www.actionnetwork.com/{sport}/public-betting"
+    try:
+        r = _http.get(url, headers={"User-Agent": _SPLITS_UA, "Accept": "text/html"}, timeout=12)
+        if r.status_code != 200:
+            out = {"ok": False, "error": f"HTTP {r.status_code}", "events": [], "html_len": len(r.text or "")}
+            _cache[cache_key] = {"data": out, "ts": now}
+            return out
+        html = r.text or ""
+    except Exception as e:
+        out = {"ok": False, "error": f"fetch: {e}", "events": []}
+        _cache[cache_key] = {"data": out, "ts": now}
+        return out
+
+    try:
+        from bs4 import BeautifulSoup
+    except Exception as e:
+        out = {"ok": False, "error": f"bs4 unavailable: {e}", "events": [], "html_len": len(html)}
+        _cache[cache_key] = {"data": out, "ts": now}
+        return out
+
+    parsed = _parse_action_splits_html(html)
+    parsed["html_len"] = len(html)
+    _cache[cache_key] = {"data": parsed, "ts": now}
+    return parsed
+
+
+def _parse_action_splits_html(html: str) -> dict:
+    """Best-effort parse. We expect Action Network's public-betting page to
+    contain the splits table in a recognizable structure — typically rows
+    keyed by matchup with `% bets` and `% money` cells per market. Schema
+    isn't documented; we use heuristics + log everything we DON'T find.
+
+    Strategy:
+      1. Try BeautifulSoup .find_all('table'); pick the largest table.
+      2. Look for percentage strings (\d+%) within rows.
+      3. Pair team names + percentages into our shape.
+
+    Returns {"ok": True, "events": [...]} on success or
+            {"ok": False, "error": "...", "events": [], "table_count": N}
+    so the diagnostic page can show what went wrong.
+    """
+    from bs4 import BeautifulSoup
+    import re as _re
+
+    soup = BeautifulSoup(html, "lxml")
+    tables = soup.find_all("table")
+
+    debug: dict = {
+        "ok": False,
+        "events": [],
+        "table_count": len(tables),
+        "first_table_rows": 0,
+        "first_table_sample": "",
+    }
+
+    if not tables:
+        # Action Network might be rendering with JS only. Capture a few
+        # markers to confirm.
+        markers: list[str] = []
+        for token in ("public-betting", "% Bets", "% Money", "publicBetting"):
+            if token.lower() in html.lower():
+                markers.append(token)
+        debug["error"] = "no <table> elements in HTML"
+        debug["html_markers_seen"] = markers
+        return debug
+
+    # Pick the largest table by row count
+    def _row_count(t):
+        return len(t.find_all("tr"))
+    table = max(tables, key=_row_count)
+    rows = table.find_all("tr")
+    debug["first_table_rows"] = len(rows)
+    if rows:
+        debug["first_table_sample"] = rows[0].get_text(" | ", strip=True)[:300]
+
+    pct_re = _re.compile(r"(\d{1,3})\s*%")
+    events = []
+    for tr in rows[1:]:  # skip header
+        cells = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
+        if not cells:
+            continue
+        # Cell 0 typically has team names. Action Network uses uppercase
+        # abbreviations + full names jammed together.
+        cell0 = cells[0]
+        # Pull all percentage values across the row
+        pcts = pct_re.findall(" | ".join(cells))
+        if not pcts:
+            continue
+        events.append({
+            "raw_first_cell": cell0[:120],
+            "all_cells_count": len(cells),
+            "pct_values": [int(p) for p in pcts],
+            "row_text": " | ".join(cells)[:400],
+        })
+
+    if not events:
+        debug["error"] = "table found but no percentage rows parsed"
+        return debug
+
+    debug["ok"] = True
+    debug["events"] = events
+    return debug
+
+
+@app.route("/api/splits")
+@firebase_auth_required
+def api_splits():
+    """Public betting splits (% of bets, % of money) per game.
+    Source: Action Network public-betting HTML, scraped + cached 30 min.
+    Sport: mlb / nba / nhl / nfl / ncaab / ncaaf. MMA / soccer / tennis
+    not supported by Action Network's free public splits coverage.
+    """
+    sport = (request.args.get("sport") or "mlb").lower().strip()
+    data = _fetch_action_splits(sport)
+    return jsonify(data)
+
+
+@app.route("/debug-splits")
+def debug_splits_page():
+    """Auth'd browser-friendly view of /api/splits. Lets us iterate on the
+    parser without hitting Action Network from a curl that gets 403'd —
+    Vercel's runtime CAN reach them; this page surfaces what we get back."""
+    sport = request.args.get("sport", "mlb")
+    return ('''<!DOCTYPE html><html><head>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>firebase.initializeApp({apiKey:"AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",authDomain:"kahla-house.firebaseapp.com",projectId:"kahla-house"});</script>
+    </head><body style="background:#0b0e13;color:#e2e8f0;font-family:monospace;padding:16px;font-size:11px">
+    <h2 style="color:#f59e0b">Splits diagnostic — sport=''' + sport + '''</h2>
+    <pre id="out" style="white-space:pre-wrap;word-break:break-word">Loading...</pre>
+    <script>
+    firebase.auth().onAuthStateChanged(async u => {
+        if (!u) { document.getElementById("out").textContent = "Not logged in. Go to / first."; return; }
+        try {
+            const t = await u.getIdToken();
+            const r = await fetch("/api/splits?sport=''' + sport + '''", {headers:{Authorization:"Bearer "+t}});
+            const d = await r.json();
+            document.getElementById("out").textContent = JSON.stringify(d, null, 2);
+        } catch (e) {
+            document.getElementById("out").textContent = "ERROR: " + e.message;
+        }
+    });
+    </script></body></html>''')
+
+
+# ---------------------------------------------------------------------------
 # API routes — Dashboard
 # ---------------------------------------------------------------------------
 
