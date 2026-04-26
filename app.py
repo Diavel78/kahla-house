@@ -1484,7 +1484,18 @@ def _fetch_action_splits(sport: str) -> dict:
         _cache[cache_key] = {"data": out, "ts": now}
         return out
 
-    url = f"https://www.actionnetwork.com/{sport}/public-betting"
+    # Action Network's SSR for the bare URL frequently returns YESTERDAY's
+    # finals (their server defaults to the previous day until late-evening
+    # ET). Pass today's date in US Eastern explicitly so we always grab
+    # today's slate. Also lets us cache per-date.
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        today_et = datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
+    except Exception:
+        today_et = datetime.utcnow().strftime("%Y%m%d")
+
+    url = f"https://www.actionnetwork.com/{sport}/public-betting?date={today_et}"
     try:
         r = _http.get(url, headers={"User-Agent": _SPLITS_UA, "Accept": "text/html"}, timeout=12)
         if r.status_code != 200:
@@ -1506,12 +1517,157 @@ def _fetch_action_splits(sport: str) -> dict:
 
     parsed = _parse_action_splits_html(html)
     parsed["html_len"] = len(html)
+    parsed["url"] = url
+    parsed["date_et"] = today_et
+
+    # Fallback: Action Network is a Next.js app — when the SSR table only
+    # contains yesterday's finals (no scheduled rows), the full game list
+    # is still embedded as JSON in <script id="__NEXT_DATA__">. Walk it
+    # for splits if the table parse came up short.
+    if not parsed.get("ok") or len(parsed.get("events", [])) < 1:
+        nxt = _parse_action_splits_next_data(html)
+        if nxt.get("events"):
+            parsed["events"]      = nxt["events"]
+            parsed["ok"]          = True
+            parsed["source"]      = "next_data"
+            parsed["next_debug"]  = nxt.get("debug", {})
+        else:
+            parsed["next_debug"]  = nxt.get("debug", {})
+
     # Only cache successful parses. A 0-event response usually means our
     # status-prefix regex needs another pattern (NHL "Final/OT" etc.) —
     # don't pin a broken result for 30 min while iterating.
     if parsed.get("ok"):
         _cache[cache_key] = {"data": parsed, "ts": now}
     return parsed
+
+
+def _parse_action_splits_next_data(html: str) -> dict:
+    """Pull splits out of Action Network's __NEXT_DATA__ JSON blob.
+
+    Action Network is a Next.js app — the entire page-data tree is
+    embedded as JSON inside <script id="__NEXT_DATA__"> so the client
+    can hydrate. That blob is by definition complete (all games on the
+    page) where the SSR'd HTML table is sometimes truncated to only
+    completed games.
+
+    We don't know the exact shape — it's been refactored at least once
+    and isn't documented — so this walks the tree heuristically looking
+    for any object that has team identifiers AND public-percentage
+    fields, then maps them to our event shape. Failures return debug
+    info so we can iterate.
+    """
+    import json as _json
+    import re as _re
+    debug: dict = {"found_blob": False, "json_len": 0, "candidate_count": 0}
+    m = _re.search(
+        r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+        html, _re.DOTALL,
+    )
+    if not m:
+        return {"events": [], "debug": debug}
+    debug["found_blob"] = True
+    raw = m.group(1)
+    debug["json_len"] = len(raw)
+    try:
+        data = _json.loads(raw)
+    except Exception as e:
+        debug["error"] = f"json: {e}"
+        return {"events": [], "debug": debug}
+
+    # Heuristic walk: look for dicts with both "home_team"/"away_team"
+    # (or "homeTeam"/"awayTeam") AND any *bet* / *money* percentage
+    # keys. Action Network has used both snake_case and camelCase in
+    # different builds, hence the dual checks.
+    candidates: list[dict] = []
+    sample_keys: set[str] = set()
+
+    def walk(node, depth=0):
+        if depth > 12 or len(candidates) > 200:
+            return
+        if isinstance(node, dict):
+            keys = set(node.keys())
+            for k in keys:
+                if len(sample_keys) < 50:
+                    sample_keys.add(k)
+            has_teams = (("home_team" in keys and "away_team" in keys) or
+                         ("homeTeam" in keys and "awayTeam" in keys) or
+                         ("teams" in keys))
+            has_pct = any("percent" in k.lower() or "bet" in k.lower() or "money" in k.lower()
+                          for k in keys)
+            if has_teams and has_pct:
+                candidates.append(node)
+            for v in node.values():
+                walk(v, depth + 1)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v, depth + 1)
+
+    walk(data)
+    debug["candidate_count"] = len(candidates)
+    debug["sample_top_keys"] = sorted(sample_keys)[:50]
+
+    events: list[dict] = []
+    for c in candidates:
+        ev = _next_data_event(c)
+        if ev:
+            events.append(ev)
+    debug["events_extracted"] = len(events)
+    return {"events": events, "debug": debug}
+
+
+def _next_data_event(node: dict) -> dict | None:
+    """Map a __NEXT_DATA__ game object → our splits event shape.
+    Returns None if essential fields can't be extracted."""
+    def _name(v):
+        if isinstance(v, str): return v
+        if isinstance(v, dict):
+            return v.get("display_name") or v.get("full_name") or v.get("name") or v.get("abbr")
+        return None
+
+    away = _name(node.get("away_team") or node.get("awayTeam"))
+    home = _name(node.get("home_team") or node.get("homeTeam"))
+    if not (away and home) and isinstance(node.get("teams"), list) and len(node["teams"]) == 2:
+        # `teams` ordering: usually [away, home]
+        away = away or _name(node["teams"][0])
+        home = home or _name(node["teams"][1])
+    if not (away and home):
+        return None
+
+    # Pull any percent-shaped fields. Field names observed historically:
+    # "moneyline_bets_percent", "ml_bets_pct", "public_betting", etc.
+    ml: dict = {}
+    for k, v in node.items():
+        if not isinstance(v, (int, float)):
+            continue
+        kl = k.lower()
+        if "ml" in kl or "moneyline" in kl:
+            if "away" in kl and "bet" in kl: ml["away_bets"] = int(v)
+            if "home" in kl and "bet" in kl: ml["home_bets"] = int(v)
+            if "away" in kl and "money" in kl: ml["away_money"] = int(v)
+            if "home" in kl and "money" in kl: ml["home_money"] = int(v)
+    # Some Action Network shapes nest splits under a key.
+    for nest_key in ("splits", "public_betting", "betting_percentages"):
+        nested = node.get(nest_key)
+        if isinstance(nested, dict):
+            for k, v in nested.items():
+                if not isinstance(v, (int, float)):
+                    continue
+                kl = k.lower()
+                if "away" in kl and "bet" in kl: ml.setdefault("away_bets", int(v))
+                if "home" in kl and "bet" in kl: ml.setdefault("home_bets", int(v))
+                if "away" in kl and "money" in kl: ml.setdefault("away_money", int(v))
+                if "home" in kl and "money" in kl: ml.setdefault("home_money", int(v))
+
+    if not ml:
+        return None
+    return {
+        "away_team": away,
+        "home_team": home,
+        "ml":        ml,
+        "sharp_diff": None,
+        "status":    "scheduled",
+    }
 
 
 def _parse_action_splits_html(html: str) -> dict:
