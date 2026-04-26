@@ -1548,6 +1548,22 @@ def _parse_action_splits_html(html: str) -> dict:
         r"([A-Za-z][A-Za-z .'-]*?)\s+([A-Z]{2,4})\s+(\d{3})\s+"
         r"([A-Za-z][A-Za-z .'-]*?)\s+([A-Z]{2,4})\s+(\d{3})"
     )
+    # Status prefix that Action Network puts before the away team in cell 0.
+    # Without stripping this, team_re greedily eats the status word as part
+    # of the away team name (e.g. "Final Mariners SEA 925 ..." was parsed
+    # as away_team="Final Mariners"), breaking team-match in the UI.
+    status_prefix_re = _re.compile(
+        r"^("
+        r"Final(?:\s*-?\s*\d+)?"
+        r"|Postponed|PPD"
+        r"|Cancell?ed|Delayed|Suspended"
+        r"|(?:TOP|BOT|MID|END)\s+\d+(?:ST|ND|RD|TH)(?:\s*:[^A-Za-z]*?Out)?"
+        r"|\d+(?:ST|ND|RD|TH)\s+QTR"
+        r"|HALF|HALFTIME"
+        r"|\d{1,2}:\d{2}\s*(?:AM|PM)(?:\s+ET)?"
+        r")\s+",
+        _re.IGNORECASE,
+    )
     pct_re = _re.compile(r"(\d{1,3})\s*%")
     diff_re = _re.compile(r"([+-]\d+)\s*%")
 
@@ -1557,13 +1573,26 @@ def _parse_action_splits_html(html: str) -> dict:
         cells = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
         if len(cells) < 5:
             continue
-        m = team_re.search(cells[0])
+
+        cell0 = cells[0]
+        sm = status_prefix_re.match(cell0)
+        if sm:
+            status = sm.group(1).strip()
+            cell0_after_status = cell0[sm.end():]
+        else:
+            status = ""
+            cell0_after_status = cell0
+
+        m = team_re.search(cell0_after_status)
         if not m:
             parse_warnings += 1
             continue
         away_name, away_abbr, away_id, home_name, home_abbr, home_id = m.groups()
-        status = cells[0][:m.start()].strip()
-        # Defensive — empty status sometimes means upcoming game
+        # Anything between status prefix and the team match is unexpected
+        # (shouldn't happen, but if it does prefer it over "scheduled").
+        leftover = cell0_after_status[:m.start()].strip()
+        if leftover and not status:
+            status = leftover
         if not status:
             status = "scheduled"
 
