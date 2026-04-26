@@ -25,9 +25,9 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | Page / API | Roles allowed | Server gate |
 |---|---|---|
 | `/odds` (page) | admin, viewer | client probes `/api/me` and bounces unauthorized |
-| `/api/odds`, `/api/openers*`, `/api/preferences` | any approved | `@firebase_auth_required` (rejects pending) |
+| `/api/odds`, `/api/odds/history`, `/api/odds/history-batch`, `/api/openers*`, `/api/preferences` | any approved | `@firebase_auth_required` (rejects pending) |
 | `/dashboard` (page) | admin | client probes `/api/me` and bounces non-admins |
-| `/api/data`, `/api/my-bets`, `/api/debug-trades`, `/api/debug-deposits` | admin | `@admin_required` |
+| `/api/data`, `/api/my-bets`, `/api/debug-trades`, `/api/debug-deposits`, `/api/debug-snap` | admin | `@admin_required` |
 | `/api/raw` (Polymarket SDK debug) | admin | `@admin_required` |
 
 `@firebase_auth_required` itself rejects any user where `approved != true` (returns 403), so even API endpoints that don't need admin still keep `pending` users out.
@@ -41,26 +41,38 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `/dashboard` | `dashboard.html` | admin only | Polymarket P&L Dashboard — positions, closed trades, bet slip |
 
 > **Odds-ingest cron (`kahla-scanner/`)**: minimal Python subproject at
-> `kahla-scanner/` runs `python -m scrapers.odds_api` every 30 min via GitHub
-> Actions (`.github/workflows/scanner-poll.yml`), driven by an external
-> cron-job.org trigger with a 30-min GitHub-native fallback. It hits The
-> Odds API (https://the-odds-api.com) for `/v4/sports/{sport_key}/odds`
-> with `markets=h2h,spreads,totals` and `regions=us,eu` (EU required for
-> Pinnacle), writes deduped rows to Supabase `book_snapshots` for every
-> (market, book, market_type, side). Powers BOTH the live Odds Board AND
-> the line-movement chart modal — Flask reads from Supabase, no live
-> odds-vendor API calls from `/api/odds`.
+> `kahla-scanner/` runs `python -m scrapers.odds_api` every 30 min via
+> GitHub Actions (`.github/workflows/scanner-poll.yml`). Triggered ONLY
+> by an external cron-job.org workflow_dispatch — the GitHub-native
+> schedule was killed because both firing every 30 min was queueing
+> back-to-back via the concurrency group, doubling credit burn.
+> `cancel-in-progress: true` so any retry/manual-overlap kills the
+> in-flight run; each run is idempotent (dedup) so partial runs lose
+> nothing.
 >
-> Cost: 6 credits/call × 7 sports × 2 calls/hr × 24h × 30d = 60K credits/mo
-> on the $59/100K-credit tier.
+> The cron hits The Odds API (https://the-odds-api.com) for
+> `/v4/sports/{sport_key}/odds` with `markets=h2h,spreads,totals` and
+> `regions=us,eu` (EU required for Pinnacle — NOT in the US region).
+> Writes deduped rows to Supabase `book_snapshots` for every (market,
+> book, market_type, side). Powers the Odds Board, the line-movement
+> chart modal, AND the inline 3-row sparkline per game card — all reads,
+> no live odds-vendor API calls from Flask.
 >
-> Owls Insight was the prior provider; retired April 2026 due to coverage
-> gaps. Brier/signals/Telegram pipeline was retired earlier in the same
-> spring cleanup. Player Props, live scores, and Circa betting splits
-> were removed at the same time as Owls — none of them came in The Odds
-> API equivalent and the user opted to drop the features rather than pay
-> a second provider. **Circa is not available in The Odds API at all** —
-> known data gap; Circa was a unique Owls feature.
+> Cost: 6 credits/call × 7 sports × 2 calls/hr × 24h × 30d = ~60K
+> credits/mo on the $59/100K-credit tier.
+>
+> A second workflow `.github/workflows/snapshot-cleanup.yml` runs nightly
+> at 09:00 UTC and deletes `book_snapshots` rows older than 15 days —
+> chart range maxes out at "All" but games are over after a few hours,
+> so retention beyond ~2 weeks just bloats Supabase.
+>
+> Owls Insight was the prior provider; retired April 2026 due to
+> coverage gaps (only 7 of 15 MLB games returned on a typical Saturday).
+> Brier/signals/Telegram pipeline was retired earlier in the same spring
+> cleanup. Player Props page, Owls live scores, and Circa betting splits
+> were removed when Owls was cancelled — props weren't being used,
+> live scores got reimplemented via free ESPN scoreboard JSON, and
+> **Circa is not in The Odds API at any region** (known data gap).
 
 ### API Routes
 
@@ -69,18 +81,21 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | Route | Auth | Purpose |
 |---|---|---|
 | `GET /api/me` | Firebase | Lightweight role probe — returns `{uid, role, approved, displayName, email}`. Used by every sub-page to gate UI before loading data. |
-| `GET /api/odds?sport=mlb` | Firebase | Odds Board JSON — built from latest `book_snapshots` per (market, book, market_type, side) in Supabase. Cron-only; no live Odds API call here. Includes anchor sweep so books that haven't priced inside the freshness window still show their last value. |
-| `GET /api/odds/history` | Firebase | Line-movement history for one event from Supabase `book_snapshots`. Params: `sport`, `home`, `away`, `commence` (ISO), `market` (ml/spread/total), `since` (15m/30m/1h/6h/12h/24h/all). Returns step-function-ready data per book per side. Books: PIN/DK/FD/MGM/CAE/HR/BOL. Chart modal defaults to PIN only at 12H. |
+| `GET /api/odds?sport=mlb` | Firebase | Odds Board JSON — built from latest `book_snapshots` per (market, book, market_type, side) in Supabase. Cron-only; no live Odds API call here. Includes anchor sweep so books that haven't priced inside the freshness window still show their last value. Merges ESPN scoreboard data per event for live scores. Returns `last_data_iso` so the page can show "last odds update Nm ago" instead of a wall clock. |
+| `GET /api/odds/history` | Firebase | Line-movement history for one event from Supabase `book_snapshots`. Params: `sport`, `home`, `away`, `commence` (ISO), `market` (ml/spread/total), `since` (15m/30m/1h/6h/12h/24h/all). Returns step-function-ready data per book per side. Books: 14-book allowlist (see _ALLOWED_BOOKS). Chart modal defaults to PIN only at 12H. NO live-game freeze on this endpoint — full history including post-start movement. |
+| `GET /api/odds/history-batch?sport=mlb` | Firebase | 6-hour PIN history for ALL active games in the sport, batched in one response. Three series per game: ML home, Spread home, Total over. Powers the inline sparklines in each game card footer. Live-game freeze applied — same as the board cells. |
 | `GET/POST /api/openers?sport=mlb` | Firebase | Legacy Firestore openers (fallback for games predating the cron). Permanent per game ID. |
-| `GET /api/openers/scanner?sport=mlb` | Firebase | **Primary opener source.** Earliest PIN snapshot per (market_type, side) from Supabase `book_snapshots`. Client matches against current events by team + commence_time within ±30 min and merges over Firestore openers. (Circa was the historical fallback but isn't in The Odds API — PIN-only now.) |
+| `GET /api/openers/scanner?sport=mlb` | Firebase | **Primary opener source.** Earliest PIN snapshot per (market_type, side) from Supabase `book_snapshots`. Client matches against current events by team + commence_time within ±30 min and merges over Firestore openers. (PIN-only post-Owls; Circa not in The Odds API.) |
 | `GET/POST /api/preferences` | Firebase | User settings (books, sport, order) in Firestore |
 | `GET /api/my-bets` | **Admin** | Active Polymarket positions (Dashboard only) |
 | `GET /api/data` | **Admin** | Dashboard P&L data (positions, balances, trades) |
 | `GET /api/raw` | Admin | Debug: raw Polymarket SDK responses |
 | `GET /api/debug-trades` | **Admin** | Debug: grouped trade details with before/after position data |
 | `GET /api/debug-deposits` | **Admin** | Debug: all balance changes with types and reasons |
+| `GET /api/debug-snap` | **Admin** | Debug: Supabase row counts + sample markets/snapshots + what `_fetch_odds_from_snapshots` returns. JSON. |
 | `/debug?slug=X` | Firebase (page) | Debug page that calls debug-trades with auth |
 | `/debug-deposits` | Firebase (page) | Debug page showing all balance changes |
+| `/debug-snap?sport=mlb` | Firebase (page) | Browser-friendly wrapper for `/api/debug-snap` |
 
 ## Tech Stack
 
@@ -91,7 +106,8 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
   - **Firestore** — user prefs, openers (legacy), user management
   - **Supabase** (Postgres) — `markets` + `book_snapshots`. Sole source of truth for the Odds Board AND the line-movement chart. Written by the kahla-scanner cron, read by Flask.
 - **External APIs**:
-  - **The Odds API** (`https://api.the-odds-api.com/v4`) — every 15 min via cron
+  - **The Odds API** (`https://api.the-odds-api.com/v4`) — every 30 min via cron-job.org → GitHub Actions; only the cron talks to it
+  - **ESPN free public scoreboard** (`https://site.api.espn.com/apis/site/v2/sports/...`) — 30s server cache; called from Flask `/api/odds` to merge live scores onto live games. No auth, no rate-limit issues at our volume.
   - **Polymarket US SDK** — Dashboard positions/P&L
 - **Fonts**: DM Sans + JetBrains Mono
 - **Deployment**: Vercel via `vercel.json`, env vars in Vercel dashboard, auto-deploys from `main`
@@ -130,35 +146,36 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 ### Features
 - **Best Odds Column** (left, always visible): Best ML, Spread, Total across all enabled books
 - **Multi-Book Columns** (scrollable right): Individual book odds side by side
-- **Sport Tabs**: MLB, NBA, NHL, NFL, NCAAB, NCAAF, MMA. Soccer + Tennis tabs are still in the UI but the cron doesn't ingest them — those tabs will read empty.
+- **Sport Tabs**: MLB, NBA, NHL, NFL, NCAAB, NCAAF, MMA. Soccer / Tennis intentionally not listed (cron doesn't ingest them).
 - **Search**: Filter by team name (client-side, instant)
-- **Book Selector**: Dropdown with checkboxes + up/down arrows to reorder. Saved to Firestore.
-- **Line Movement Bar**: Opener vs current with arrows and diffs (per game footer)
-- **Line-Movement Chart**: Each game header has a small graph icon. Click → modal with a step-function chart (Chart.js) of historical odds from Supabase `book_snapshots`. Defaults to PIN/CIR/DK on the ML market over the last 24h; toggle other books (FD/MGM/CAE/HR) and switch market (ML/Spread/Total) or range (15m/30m/1H/6H/12H/24H/All).
-- **Genuine first-seen openers**: `/api/openers/scanner` returns the actual earliest PIN/CIR snapshot per market from Supabase. The client merges this on top of legacy Firestore openers — scanner data wins, Firestore fills any gaps for games predating the cron.
-- **Live-game freeze**: once an event's `commence_time` passes, the board displays the closing line (last pre-start snapshot per book) and stops showing post-start retail twitches. Live games render a green `LIVE` badge in the header and a `closing line` tag next to the teams. The chart modal still shows full pre-and-post-start history if you want to see live movement.
-- **Auto-refresh**: 90 seconds (the page reads from cached Supabase data; the cron writes every 30 min, so polling faster is just rerendering the same numbers)
-- **Double-buffer rendering**: Two board divs swap to prevent flash on re-render
+- **Book Selector**: Dropdown with checkboxes + up/down arrows to reorder. Saved to Firestore. Hard-filtered through `ALL_KNOWN_BOOKS` allowlist so stale Owls-era preferences don't pollute the dropdown.
+- **Live-game freeze**: once `commence_time` passes, the board displays the closing line (last pre-start snapshot per book) and stops showing post-start retail twitches. Server-side filter — see `_fetch_odds_from_snapshots` in `app.py`.
+- **Live game header**: green pulsing `LIVE` badge for in-progress games (ESPN `state: "in"`), grey `FINAL` badge once ESPN reports `state: "post"`. Score inline (Away N – N Home), period/clock from ESPN. `closing line` tag next to teams whenever the line is frozen.
+- **Line Movement Bar**: Opener vs current with arrows + diffs (per game footer). Driven by PIN-only openers from `/api/openers/scanner`.
+- **Inline 6H Sparklines** (in the spot where Circa splits used to live): three small Chart.js sparklines stacked per game card — PIN ML home, PIN Spread home, PIN Total Over. Each plots ODDS (price) — line value (e.g. `-1.5`, `8.5`) shown in the row label and tooltip. Y-axis labels in American odds (right side, small). Live-game freeze applied — sparkline stops at event_start. Uses `/api/odds/history-batch`.
+- **Click-through Chart Modal**: graph icon next to each game header opens a full-screen modal with toggleable books / markets / ranges. PIN-only by default at 12H. Chart modal does NOT freeze on live — full pre+post-start history visible there if you want to see mid-game movement.
+- **Status text**: "X games · last odds update Nm ago" (NOT a wall clock — relative to most-recent cron snapshot in the response, so the user knows actual data freshness).
+- **Adaptive polling**: 30s when any visible event is live (for ESPN score updates), 90s otherwise. Both poll only Supabase + ESPN — never The Odds API directly.
+- **Double-buffer rendering**: Two board divs swap to prevent flash on re-render.
 
 ### Removed (when Owls retired in spring 2026)
-- **Live scores** — The Odds API `/scores` is a separate per-credit endpoint. If wanted back, hook free ESPN scoreboard JSON instead.
-- **Circa betting splits + SHARP/RLM detection** — Circa splits aren't in The Odds API. Sports Insights at $35/mo was an option but Rob opted to drop the feature.
-- **Player Props page** — `/props` route, `templates/props.html`, all `/api/props*` endpoints, all props JS. Props in The Odds API are per-event (more credits per call) and Rob isn't using props enough to justify the budget.
-- **User-side `setInterval(loadOdds, 15000)`** — replaced with 90s refresh since cron is the source of truth.
+- **Owls live scores** — replaced with free ESPN scoreboard JSON merged in `_merge_espn_scores`.
+- **Circa betting splits + SHARP/RLM detection** — Circa isn't in The Odds API at any region. Public-splits feature is on the roadmap (likely scrape DK or pay Sports Insights ~$35/mo).
+- **Player Props page** — `/props` route, `templates/props.html`, all `/api/props*` endpoints, props JS. Not being used; props in The Odds API are per-event (more credits per call).
+- **Splits-related JS in odds.html** (`renderSplitsRow`, `captureSplitsOpeners`, `loadSplitsOpeners`, `saveSplitsOpenersAPI`, `buildSplitsSnapshot`, `syncSplitsLastChanged`, `loadSplitsLastChanged`, `fmtTsAgo`, `detectRLM`) — fully deleted.
+- **All Owls Flask endpoints**: `/api/odds/raw`, `/api/events/raw`, `/api/odds/debug-markets`, `/api/splits/raw`, `/api/props/raw`, `/api/scores/raw`, `/api/realtime/raw`, `/api/splits-openers`, `/api/splits-last-changed`, `/api/props`, `/scanner`, `/debug-odds`. Gone.
 
 ### Key JS Functions (odds.html)
 - `loadOdds()` — fetches `/api/odds`, calls `captureOpeners()`, then `mergeScannerOpenersInto()`, then `renderBoard()`
-- `captureOpeners()` — legacy Firestore opener capture from current PIN/CIR data (now mostly dormant — scanner-backed openers usually have everything)
+- `captureOpeners()` — legacy Firestore opener capture from current PIN data (mostly dormant now)
 - `loadScannerOpeners()` / `mergeScannerOpenersInto()` — pulls scanner-backed openers via `/api/openers/scanner` and merges them over `currentOpeners`. Scanner values win.
-- `computeMovement()` — compares opener to current, includes JIT backfill
+- `computeMovement()` — PIN-only; compares opener to current, includes JIT backfill
 - `renderMovement()` — renders opener → arrow → current for ML/SPR/TOT
 - `renderBoard()` — main render, double-buffered. Exposed to `window` for search.
-- Chart modal: see the IIFE block at the bottom of `odds.html`. Uses Chart.js v4 + date-fns adapter via CDN.
-
-> **Note**: dead splits-related JS functions (`renderSplitsRow`, `captureSplitsOpeners`,
-> `loadSplitsOpeners`, `saveSplitsOpenersAPI`, `buildSplitsSnapshot`,
-> `syncSplitsLastChanged`, `loadSplitsLastChanged`, `fmtTsAgo`, `detectRLM`)
-> are still defined in odds.html but never called. Safe to delete in a future cleanup pass.
+- `renderSparkRow()` / `fetchSparklineBatch()` / `drawSparklines()` — inline 6h sparklines (3 per card)
+- `_amerToProb()` / `_probToAmer()` / `_fmtAmer()` / `_fmtPoint()` / `_fmtDataAge()` — small numeric formatters
+- `scheduleNextLoad()` — adaptive setTimeout chain replacing setInterval
+- Chart modal: see the IIFE block at the bottom of `odds.html`. Chart.js v4 + date-fns adapter via CDN.
 
 ---
 
@@ -193,29 +210,29 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 
 ## Domain Knowledge — Movement
 
-- **Movement / Historical Line Data**: The per-game footer movement bar. Records the FIRST line seen (opener) and renders it next to the current line with an arrow + diff. Two opener sources (merged on the client):
-  - **Primary**: scanner-backed openers from `/api/openers/scanner` — earliest PIN/CIR snapshot per (market, side) in Supabase `book_snapshots`. This IS the genuine first-seen line.
-  - **Fallback**: legacy Firestore openers in the `openers/openers:{sport}` doc — captured client-side for games predating the cron's history.
+- **Movement / Historical Line Data**: The per-game footer movement bar + the inline sparklines + the click-through chart. All driven by Supabase `book_snapshots`.
+  - **Primary opener source**: scanner-backed openers from `/api/openers/scanner` — earliest PIN snapshot per (market, side). PIN-only post-Owls.
+  - **Fallback**: legacy Firestore openers in `openers/openers:{sport}` for games predating the cron's history.
 
 ### Movement Rules
-- **Book priority**: Pinnacle first, then Circa. ONLY two sharp books for openers
-- **Opener lock-in**: Once captured for a game ID, PERMANENTLY locked. Never overridden, never reset daily
+- **Sharp source**: Pinnacle only. Circa was the historical fallback when PIN dropped lines, but Circa isn't in The Odds API at any region.
+- **Opener lock-in**: Once captured for a game ID, PERMANENTLY locked. Never overridden, never reset daily.
 
 ### Key Terminology
 - **ML** = Moneyline (NOT Machine Learning)
 - **SPR** = Spread
 - **TOT** = Total (Over/Under)
-- **PIN** = Pinnacle, **CIR** = Circa, **DK** = DraftKings, **FD** = FanDuel, **MGM** = BetMGM, **CAE** = Caesars, **HR** = HardRock
+- **PIN** = Pinnacle (sharp), **DK** = DraftKings, **FD** = FanDuel, **MGM** = BetMGM, **CAE** = Caesars, **HR** = HardRock, **BR** = BetRivers, **BOL** = BetOnline, **LV** = LowVig, **BVD** = Bovada, **ESPN** = ESPN BET, **FAN** = Fanatics, **MB** = MyBookie, **BET365** = Bet365 (US)
 
 ---
 
 ## The Odds API (`https://api.the-odds-api.com/v4`)
 
-**Auth**: `?api_key=...` query param (NOT a Bearer header — common gotcha)
+**Auth**: `?api_key=...` query param (NOT a Bearer header — common gotcha when copying patterns from Owls/etc.)
 **Plan**: $59/mo, 100K credits/mo, "All sports / All bookmakers / All markets"
 **Cost formula**: each call to `/odds` costs `markets × regions` credits. We send `markets=h2h,spreads,totals` (3) and `regions=us,eu` (2) → **6 credits per call**. With 7 sports × 2 calls/hr × 24h × 30d = 60,480 credits/mo, fits in the 100K budget.
 
-> **Region gotcha**: Pinnacle is in the `eu` region, NOT `us`. Without `eu` in the regions param we'd get zero PIN data — defeating the whole sharp-tracking purpose. The doubled credit cost is why the cron runs every 30 min instead of every 15.
+> **Region gotcha**: Pinnacle is in the `eu` region, NOT `us`. Without `eu` in the regions param we'd get zero PIN data — defeating the whole sharp-tracking purpose. Adding the second region doubled the per-call credit cost, which is why the cron is at 30 min cadence (not 15).
 
 ### Endpoint Used
 
@@ -234,11 +251,39 @@ Response: a top-level JSON array of events, each with a `bookmakers` list, each 
 | NCAAF | `americanfootball_ncaaf` |
 | UFC   | `mma_mixed_martial_arts` |
 
-### Bookmaker Key Mapping
-Odds API returns lowercase keys; we normalize to short codes for Supabase. Mapping in `kahla-scanner/scrapers/odds_api.py:BOOK_CODES`. Unmapped keys pass through uppercased (no data loss).
+### Books Allowlist
+The cron + Flask both filter to a 14-book allowlist. Anything else returned by The Odds API (Euro books from EU region — `winamax_fr`, `tipico_de`, `betsson`, `unibet_se`, `marathonbet`, etc.) is silently dropped at ingest. Allowlist must stay in sync between three places:
+
+| File | Symbol |
+|---|---|
+| `kahla-scanner/scrapers/odds_api.py` | `BOOK_CODES` (Odds API key → short code) + `ALLOWED_BOOKS` (set of allowed short codes) |
+| `app.py` | `_SHORT_TO_DISPLAY_KEY` (short code → frontend display key) + `_ALLOWED_BOOKS` (same set) |
+| `templates/odds.html` | `BL` + `BL_FULL` + `ALL_KNOWN_BOOKS` |
+
+Allowed short codes (14): `PIN, DK, FD, MGM, CAE, HR, BET365, BR, BOL, LV, BVD, ESPN, FAN, MB`.
 
 ### Rate-Limit Headers
 - `x-requests-used` / `x-requests-remaining` — logged on every cron run so credit burn is visible in workflow logs.
+
+## ESPN Scoreboard
+
+Used for live game scores on the Odds Board. Free, public, no auth.
+
+`GET https://site.api.espn.com/apis/site/v2/sports/{sport_group}/{league}/scoreboard`
+
+Sport group / league mapping in `app.py:_ESPN_PATH`:
+| Sport (Flask path) | sport_group | league |
+|---|---|---|
+| mlb   | baseball       | mlb |
+| nba   | basketball     | nba |
+| nhl   | hockey         | nhl |
+| nfl   | football       | nfl |
+| ncaab | basketball     | mens-college-basketball |
+| ncaaf | football       | college-football |
+
+MMA intentionally not mapped — ESPN doesn't have a single consolidated MMA scoreboard endpoint.
+
+Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API event to an ESPN game by lowercase team-name substring + commence_time within ±90 min, then attaches a `score` object to the event. Failures are silenced — board renders without scores rather than 500s.
 
 ---
 
@@ -275,12 +320,16 @@ Odds API returns lowercase keys; we normalize to short codes for Supabase. Mappi
 - Domain: `thekahlahouse.com` + `www.thekahlahouse.com`
 
 ## Known Issues & Gotchas
-1. **The Odds API auth is `?api_key=` query param** — NOT a Bearer header. Easy to copy from one provider's pattern and break.
-2. **The Odds API credit cost = `markets × regions`** per `/odds` call. We use `h2h,spreads,totals` × `us` = 3 credits. Don't add markets/regions casually — costs scale linearly.
-3. **Vercel cold starts** — `_owls_cache` (the in-memory dict, kept around as a generic Polymarket dashboard cache) resets. Odds/openers safe in Supabase + Firestore.
-4. **SDK `price` field is the COMPLEMENT** — NEVER use for P&L. Always use `cost.value / qty` for real per-share price. The `price` field returns the opposite side's price (YES when trading NO).
-5. **SDK `realizedPnl` unreliable** — Only use non-null as sell indicator, not the value.
-6. **SDK trade fields are nested objects** — `price`, `cost`, `realizedPnl`, `costBasis` are all `{currency, value}` dicts, not plain numbers. `_safe_float()` handles this by extracting `.value`.
-7. **`book_snapshots` is deduplicated** — a new row is only written when a (market, book, market_type, side)'s price or line actually changes since the last stored value (`_latest_snapshot_map` + `_dedup_unchanged` in `kahla-scanner/scrapers/odds_api.py`). Retail books (MGM, CAE) re-price often; sharp books (PIN, CIR) post a line and sit — their last row can be hours old. The Flask `/api/odds` and `/api/odds/history` both use anchor queries (latest pre-window row per book) so stale-but-current sharp lines still render.
-8. **Cron timing** — GitHub-native cron drifts (5-15 min variance). Primary trigger is cron-job.org calling `workflow_dispatch` every 15 min. GitHub fallback is `*/15 * * * *`.
-9. **Soccer + Tennis** — UI tabs exist on the Odds Board but the cron doesn't ingest them (not in `SPORTS_ENABLED`). Those tabs will read empty until added to the workflow.
+1. **The Odds API auth is `?api_key=` query param** — NOT a Bearer header. Easy to copy from one provider's pattern (Owls used Bearer) and break.
+2. **The Odds API credit cost = `markets × regions`** per `/odds` call. We use `h2h,spreads,totals` × `us,eu` = 6 credits. Don't add markets/regions casually — costs scale linearly. Adding `us2` (ESPN BET, Fanatics) would bump to 9 credits/call.
+3. **Pinnacle is in the EU region**, NOT US. If you ever drop `eu` from the regions param, PIN data stops flowing — and PIN is the entire sharp angle for openers/movement.
+4. **Cron is cron-job.org ONLY** — the GitHub-native `*/30 * * * *` schedule on `scanner-poll.yml` was killed because it double-fired with cron-job.org and burned 2x credits via the concurrency queue. If cron-job.org dies, the "last odds update Nm ago" indicator on `/odds` will surface it within minutes; manually trigger from the Actions tab as recovery.
+5. **`cancel-in-progress: true`** on the scanner-poll concurrency group — any retry/manual-overlap kills the in-flight run instead of queueing. Each run is idempotent (dedup logic) so partial runs lose nothing.
+6. **`_cache` (Polymarket dashboard cache)** resets on Vercel cold start. Used by `api_my_bets` and `api_data` only. Odds/openers/snapshots safe in Supabase + Firestore.
+7. **SDK `price` field is the COMPLEMENT** — NEVER use for P&L. Always use `cost.value / qty` for real per-share price. The `price` field returns the opposite side's price (YES when trading NO).
+8. **SDK `realizedPnl` unreliable** — Only use non-null as sell indicator, not the value.
+9. **SDK trade fields are nested objects** — `price`, `cost`, `realizedPnl`, `costBasis` are all `{currency, value}` dicts, not plain numbers. `_safe_float()` handles this by extracting `.value`.
+10. **`book_snapshots` is deduplicated** — a new row is only written when a (market, book, market_type, side)'s price or line actually changes since the last stored value (`_latest_snapshot_map` + `_dedup_unchanged` in `kahla-scanner/scrapers/odds_api.py`). Retail books (MGM, CAE) re-price often; sharp books (PIN) post a line and sit — their last row can be hours old. The Flask `/api/odds`, `/api/odds/history`, AND `/api/odds/history-batch` all use anchor queries (latest pre-window row per book) so stale-but-current sharp lines still render.
+11. **Live-game freeze applies to** the board cells, the inline sparklines, AND `/api/openers/scanner` — same `_post_start` filter pattern. The click-through chart modal (`/api/odds/history`) deliberately does NOT freeze, so users can see post-start movement there.
+12. **Markets table never marks rows `closed`** — the Flask query filters by `event_start` window so stale markets don't render, but the table grows unboundedly. Low-priority cleanup; would need a small extension to the snapshot-cleanup workflow.
+13. **`book_snapshots` retention is 15 days** — `.github/workflows/snapshot-cleanup.yml` deletes older rows nightly. Chart "All" range is bounded by this.
