@@ -867,7 +867,16 @@ def _fetch_odds_from_snapshots(sport_path: str):
     sorted_books = sorted(active_books, key=lambda b: (
         0 if b == "circa" else 1 if b == "pinnacle" else 2, b
     ))
-    return events_out, sorted_books, leagues
+    # Most-recent captured_at across all snaps that fed events_out — i.e.
+    # when the cron last wrote fresh data we surfaced. Used by the page to
+    # display an honest "Updated Nm ago" instead of the wall clock, which
+    # was making the user think live polling = live data updates.
+    last_data_iso: str | None = None
+    for s in snaps:
+        ca = s.get("captured_at")
+        if ca and (last_data_iso is None or ca > last_data_iso):
+            last_data_iso = ca
+    return events_out, sorted_books, leagues, last_data_iso
 
 
 
@@ -1202,21 +1211,22 @@ def api_odds():
     `score` data merged from ESPN's free public scoreboard JSON.
     """
     sport = request.args.get("sport", "mlb")
-    events, books, leagues = _fetch_odds_from_snapshots(sport)
+    events, books, leagues, last_data_iso = _fetch_odds_from_snapshots(sport)
     try:
         events = _merge_espn_scores(sport, events)
     except Exception:
         # ESPN failures must never break the board.
         pass
     return jsonify({
-        "ok":            True,
-        "cached":        False,
-        "sport":         sport,
-        "events":        events,
-        "books":         books,
-        "leagues":       leagues,
-        "meta_message":  "",
-        "errors":        [],
+        "ok":             True,
+        "cached":         False,
+        "sport":          sport,
+        "events":         events,
+        "books":          books,
+        "leagues":        leagues,
+        "last_data_iso":  last_data_iso,
+        "meta_message":   "",
+        "errors":         [],
     })
 
 
@@ -1993,9 +2003,10 @@ def api_debug_snap():
 
     # What does /api/odds actually return?
     try:
-        evs, books, leagues = _fetch_odds_from_snapshots(sport_path)
+        evs, books, leagues, last_iso = _fetch_odds_from_snapshots(sport_path)
         out["api_odds_events_count"] = len(evs)
         out["api_odds_books"] = books
+        out["api_odds_last_data_iso"] = last_iso
         out["api_odds_first_event"] = evs[0] if evs else None
     except Exception as e:
         out["api_odds_error"] = str(e)

@@ -1581,6 +1581,19 @@
         if (v == null || !Number.isFinite(v)) return '';
         return v > 0 ? '+' + v : '' + v;
     }
+    // "last odds update Nm ago" formatter. Takes ISO string from the server
+    // (most recent captured_at across visible snaps). Returns "just now",
+    // "Xm ago", "Xh ago", or "—" when no data.
+    function _fmtDataAge(iso) {
+        if (!iso) return 'never';
+        const t = new Date(iso).valueOf();
+        if (!Number.isFinite(t)) return 'never';
+        const diffSec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+        if (diffSec < 60)   return 'just now';
+        if (diffSec < 3600) return Math.floor(diffSec / 60) + 'm ago';
+        if (diffSec < 86400) return Math.floor(diffSec / 3600) + 'h ago';
+        return Math.floor(diffSec / 86400) + 'd ago';
+    }
 
     // HTML for one sparkline row inside a game card. Data attributes let
     // drawSparklines() find the canvas + its market type after each render.
@@ -1770,9 +1783,14 @@
             // earliest-seen lines from the 30-min Odds API cron, and override the
             // legacy "first time the user opened the page" Firestore values.
             mergeScannerOpenersInto(data.events || []);
-            const n=(data.events||[]).length;
-            const t=new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit'});
-            status.textContent=`${n} games \u00b7 ${t}`;
+            const n = (data.events || []).length;
+            // "last odds update Nm ago" \u2014 based on the most recent cron-written
+            // snapshot, NOT the current wall clock. We poll every 30s during
+            // live games for ESPN scores, but the actual odds only change
+            // when the cron writes (every 30 min). Earlier the wall clock made
+            // the page look like everything was updating live; this is honest.
+            const ageStr = _fmtDataAge(data.last_data_iso);
+            status.textContent = `${n} games \u00b7 last odds update ${ageStr}`;
             status.className='status';
             renderBookPills();
             if (gamesChanged) renderBoard();
