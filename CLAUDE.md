@@ -273,34 +273,25 @@ Allowed short codes (14): `PIN, DK, FD, MGM, CAE, HR, BET365, BR, BOL, LV, BVD, 
 
 ## Sharp Score (per-market 1-10)
 
-Per-market signal-strength rating shown on each game card's movement bar. Scale of 1-10 where 10 = aggressive sharp signal. Computed JS-side in `computeSharpScore(ev, mv, splitsEv, mktKey, away, home)` in `templates/odds.html`.
+Per-market signal-strength rating shown on each game card's movement bar. Scale of 1-10 where 10 = aggressive sharp signal.
 
-### Components (each scaled 0-10)
+**Score IS the PIN movement, full stop.** Cents-of-line-or-juice movement maps 1:1 to score, capped at 10. Splits divergence and PIN-vs-retail divergence are NOT folded into the score — they're already visible on the card (splits row, per-book odds table) and folding them in just dilutes the headline number when public action happens to be balanced.
 
-1. **PIN movement magnitude** — opener vs current. Direct 1:1 cents-to-score mapping (the betting world describes moves in cents, so 5-cent move = 5, 10-cent = 10 max).
-   - ML: `|cent_distance|` capped 10. `_amerToCents()` handles the +/-100 boundary (e.g. -110 → +110 = 20-cent move, not 0).
-   - Spread / Total: `|point_diff| × 10 + |price_diff_cents|`, capped 10. 1pt of line move = 10 cents-equivalent. So a 9-cent juice drop with NO line move (books tightening price because money is hammering one side) = SHARP 9, same as an equivalent ML cent move. 0.5pt + small price = 5–8.
+Computed JS-side in `computeSharpScore(ev, mv, splitsEv, mktKey, away, home)` in `templates/odds.html`. Movement breakdown:
 
-2. **Splits divergence** (ML only) — `|money% − bets%|`.
-   - `<2pt` = noise, `=20pt+` = max. Linear in between.
-   - Action Network's spread/total split URLs not yet ingested, so SPR/TOT skip this signal and the remaining weights renormalize.
+- **ML**: `|cent_distance|` capped 10. `_amerToCents()` handles the +/-100 boundary (e.g. -110 → +110 = 20-cent move, not 0).
+- **Spread / Total**: `|point_diff| × 10 + |price_diff_cents|`, capped 10. 1pt of line move = 10 cents-equivalent. So a 9-cent juice drop with NO line move = SHARP 9, same as a 9-cent ML move. 0.5pt + small price = 5–8.
 
-3. **PIN vs retail consensus** — `|pin_implied_prob − median(DK/FD/MGM/CAE)|`.
-   - **Same-line only** — for SPR/TOT we filter retail books to those at the same point as PIN. Comparing PIN's Over-at-6 to DK's Over-at-5.5 is meaningless (different markets), so those books skip.
-   - Sensitivity: 1c diff = 0 (noise), 3c = 4, 5c = 8, 6c+ = 10. Books disagree by 1-2c routinely — not a sharp signal, just vig variation.
-   - Catches retail mispricings (books that haven't adjusted fast enough on a line PIN already moved).
+The `_splitsSubScore` and `_divergenceSubScore` helpers are kept in the file (Phase 4 Sharp Bot will use them for paper-bet selection logic, where weighted blending across signals makes sense). They just don't feed the on-card display number.
 
-### Weighting
+### Side detection (which way is sharp money?)
 
-Movement is the heaviest component because a sharp money move shows up there regardless of whether splits/retail agree.
+`_sharpSide()` reads PIN movement direction:
+- **ML** — team whose American odds got more negative (line tightening = money flowing in).
+- **SPR** — side whose price decreased (less attractive juice = money there). Falls back to negative point_diff.
+- **TOT** — total dropped or Over price went UP = sharp on UNDER. Total raised or Over price went DOWN = sharp on OVER.
 
-| Market | Movement | Splits | PIN-vs-retail |
-|---|---|---|---|
-| ML  | 50 | 25 | 25 |
-| SPR | 50 | — | 50 |
-| TOT | 50 | — | 50 |
-
-Components missing data are skipped and remaining weights renormalize, so the score always scales 0-10 not 0-7.
+The chip prints `[SIDE] SHARP N`. Side label is the team's truncTeam() abbr for ML/SPR, "OVER"/"UNDER" for TOT.
 
 ### UI tiers (CSS color-coded chips)
 
@@ -312,7 +303,7 @@ Components missing data are skipped and remaining weights renormalize, so the sc
 ### Future hooks (not yet built)
 
 - **Phase 3 — Telegram alerts**: when any market's score crosses ≥7 in a given cron cycle, push a Telegram message via a GitHub Actions cron + bot. Sender uses the same Supabase reads, no new credit burn.
-- **Phase 4 — Sharp Bot tab (admin only)**: daily picker takes top 5 +EV bets (combining sharp score with devigged fair line from `_lib/normalize.py`), logs them as paper bets in a new `paper_bets` Supabase table, resolves on game completion via ESPN scores, runs a per-signal hit-rate tracker so weights can self-tune over a rolling 30-day window.
+- **Phase 4 — Sharp Bot tab (admin only)**: daily picker takes top 5 +EV bets (combining sharp score with devigged fair line from `_lib/normalize.py` AND the per-signal sub-scores), logs them as paper bets in a new `paper_bets` Supabase table, resolves on game completion via ESPN scores, runs a per-signal hit-rate tracker so weights can self-tune over a rolling 30-day window.
 
 ## Action Network — Public Betting Splits
 

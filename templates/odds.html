@@ -1492,20 +1492,15 @@
 
     function computeSharpScore(ev, mv, splitsEv, mktKey, awayName, homeName) {
         if (!mv || !mv[mktKey] || !Object.keys(mv[mktKey]).length) return null;
-        const moveS   = _moveSubScore(mv, mktKey);
-        const splitsS = (mktKey === 'ml') ? _splitsSubScore(splitsEv) : null;
-        const divS    = _divergenceSubScore(ev, mktKey, awayName, homeName);
-
-        const components = [];
-        const weights = [];
-        if (moveS   != null) { components.push(moveS);   weights.push(50); }
-        if (splitsS != null) { components.push(splitsS); weights.push(25); }
-        if (divS    != null) { components.push(divS);    weights.push(mktKey === 'ml' ? 25 : 50); }
-        if (!components.length) return null;
-        const totalW = weights.reduce((a, b) => a + b, 0);
-        const wSum   = components.reduce((s, c, i) => s + c * weights[i], 0);
-        const score = Math.round(wSum / totalW);
-        const side  = _sharpSide(mv, mktKey, awayName, homeName);
+        // Score IS the movement, full stop. 10 cents = 10, 7 cents = 7,
+        // 5 cents = 5. Splits divergence + PIN/retail divergence used to
+        // weight-blend in here, but a 10-cent PIN move shouldn't get
+        // averaged DOWN to 7 because public splits aren't extreme. The
+        // splits row + per-book table already surface those signals
+        // separately on the card; no need to dilute the headline number.
+        const score = _moveSubScore(mv, mktKey);
+        if (score == null) return null;
+        const side = _sharpSide(mv, mktKey, awayName, homeName);
         return { score, side };
     }
 
