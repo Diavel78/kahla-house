@@ -84,8 +84,9 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `GET /api/odds?sport=mlb` | Firebase | Odds Board JSON — built from latest `book_snapshots` per (market, book, market_type, side) in Supabase. Cron-only; no live Odds API call here. Includes anchor sweep so books that haven't priced inside the freshness window still show their last value. Merges ESPN scoreboard data per event for live scores. Returns `last_data_iso` so the page can show "last odds update Nm ago" instead of a wall clock. |
 | `GET /api/odds/history` | Firebase | Line-movement history for one event from Supabase `book_snapshots`. Params: `sport`, `home`, `away`, `commence` (ISO), `market` (ml/spread/total), `since` (15m/30m/1h/6h/12h/24h/all). Returns step-function-ready data per book per side. Books: 14-book allowlist (see _ALLOWED_BOOKS). Chart modal defaults to PIN only at 12H. NO live-game freeze on this endpoint — full history including post-start movement. |
 | `GET /api/odds/history-batch?sport=mlb` | Firebase | 6-hour PIN history for ALL active games in the sport, batched in one response. Three series per game: ML home, Spread home, Total over. Powers the inline sparklines in each game card footer. Live-game freeze applied — same as the board cells. |
-| `GET/POST /api/openers?sport=mlb` | Firebase | Legacy Firestore openers (fallback for games predating the cron). Permanent per game ID. |
+| `GET /api/openers?sport=mlb` (also POST) | Firebase | Legacy Firestore openers (fallback for games predating the cron). Permanent per game ID. |
 | `GET /api/openers/scanner?sport=mlb` | Firebase | **Primary opener source.** Earliest PIN snapshot per (market_type, side) from Supabase `book_snapshots`. Client matches against current events by team + commence_time within ±30 min and merges over Firestore openers. (PIN-only post-Owls; Circa not in The Odds API.) |
+| `GET /api/splits?sport=mlb` | Firebase | Public ML betting splits (% bets, % money) per game. Three-layer fetch: (1) Action Network's JSON API at `api.actionnetwork.com/web/v2/scoreboard/{league}` is the primary source (today's scheduled games + live %s), (2) `<script id="__NEXT_DATA__">` JSON in the SSR HTML page as backup, (3) HTML table parser as last resort (legacy, only catches yesterday's finals). Cached 30 min server-side per (sport, date). Successful parses cache; failures don't, so the next hit retries fresh. |
 | `GET/POST /api/preferences` | Firebase | User settings (books, sport, order) in Firestore |
 | `GET /api/my-bets` | **Admin** | Active Polymarket positions (Dashboard only) |
 | `GET /api/data` | **Admin** | Dashboard P&L data (positions, balances, trades) |
@@ -96,6 +97,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `/debug?slug=X` | Firebase (page) | Debug page that calls debug-trades with auth |
 | `/debug-deposits` | Firebase (page) | Debug page showing all balance changes |
 | `/debug-snap?sport=mlb` | Firebase (page) | Browser-friendly wrapper for `/api/debug-snap` |
+| `/debug-splits?sport=mlb` | Firebase (page) | Browser-friendly view of `/api/splits` for the splits scraper. Shows raw events, source (`json_api` / `next_data` / `table`), `failed_samples` for unmatched rows, `next_debug` (sample top keys + first candidate field shape), and `api_debug` (URL, status, game count, splits paths seen). Built specifically to iterate on Action Network's shape changes without hitting their site directly from curl. |
 
 ## Tech Stack
 
@@ -108,14 +110,15 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - **External APIs**:
   - **The Odds API** (`https://api.the-odds-api.com/v4`) — every 30 min via cron-job.org → GitHub Actions; only the cron talks to it
   - **ESPN free public scoreboard** (`https://site.api.espn.com/apis/site/v2/sports/...`) — 30s server cache; called from Flask `/api/odds` to merge live scores onto live games. No auth, no rate-limit issues at our volume.
+  - **Action Network** (`https://api.actionnetwork.com/web/v2/scoreboard/{league}` + `https://www.actionnetwork.com/{sport}/public-betting`) — public betting splits (% bets / % money). 30-min server cache per (sport, date). No auth on the JSON API (browser UA + Referer header is enough). Falls back to scraping the SSR HTML's `__NEXT_DATA__` JSON or the rendered HTML table if the API misbehaves. Used by `/api/splits`.
   - **Polymarket US SDK** — Dashboard positions/P&L
 - **Fonts**: DM Sans + JetBrains Mono
 - **Deployment**: Vercel via `vercel.json`, env vars in Vercel dashboard, auto-deploys from `main`
 
 ## Key Files
 
-- `app.py` — All backend logic (~1700 lines)
-- `templates/odds.html` — Odds board (~2230 lines)
+- `app.py` — All backend logic (~2100 lines, includes splits scraper + JSON API client)
+- `templates/odds.html` — Odds board (~2230 lines, includes splits row + sparklines)
 - `templates/dashboard.html` — P&L dashboard (~1130 lines)
 - `templates/index.html` — Landing page with auth + admin + role-based app cards (~440 lines)
 - `kahla-scanner/scrapers/odds_api.py` — The Odds API ingester (cron entry point)
@@ -124,7 +127,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - `kahla-scanner/_lib/{matcher,normalize}.py` — team-name fuzzy match + odds math
 - `firestore.rules` — Firestore security rules (admin/approved helpers)
 - `vercel.json` — Vercel deployment config
-- `requirements.txt` — Python deps (flask, polymarket-us, requests, python-dotenv, firebase-admin, supabase)
+- `requirements.txt` — Python deps (flask, polymarket-us, requests, python-dotenv, firebase-admin, supabase, **beautifulsoup4**, **lxml**)
 - `.env` — Local env vars (DO NOT COMMIT — contains API keys)
 
 ## Environment Variables
@@ -153,14 +156,15 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - **Live game header**: green pulsing `LIVE` badge for in-progress games (ESPN `state: "in"`), grey `FINAL` badge once ESPN reports `state: "post"`. Score inline (Away N – N Home), period/clock from ESPN. `closing line` tag next to teams whenever the line is frozen.
 - **Line Movement Bar**: Opener vs current with arrows + diffs (per game footer). Driven by PIN-only openers from `/api/openers/scanner`.
 - **Inline 6H Sparklines** (in the spot where Circa splits used to live): three small Chart.js sparklines stacked per game card — PIN ML home, PIN Spread home, PIN Total Over. Each plots ODDS (price) — line value (e.g. `-1.5`, `8.5`) shown in the row label and tooltip. Y-axis labels in American odds (right side, small). Live-game freeze applied — sparkline stops at event_start. Uses `/api/odds/history-batch`.
+- **Public Splits Row** (under the sparklines): horizontal `% bets` / `% money` bar — away% on the left, home% on the right, color-coded blue (bets) / orange (money). Source: Action Network's public-betting JSON API. Optional `SHARP +N%` tag in the header when |money% − bets%| ≥ 10 (sharp-money fingerprint). Hidden by default (`display:none`) — only shows when a match is found and at least one of bets/money has data. Drawn by `drawSplitsRows()` which matches each game card to a splits event by team-name substring containment in either direction.
 - **Click-through Chart Modal**: graph icon next to each game header opens a full-screen modal with toggleable books / markets / ranges. PIN-only by default at 12H. Chart modal does NOT freeze on live — full pre+post-start history visible there if you want to see mid-game movement.
 - **Status text**: "X games · last odds update Nm ago" (NOT a wall clock — relative to most-recent cron snapshot in the response, so the user knows actual data freshness).
-- **Adaptive polling**: 30s when any visible event is live (for ESPN score updates), 90s otherwise. Both poll only Supabase + ESPN — never The Odds API directly.
+- **Adaptive polling**: 30s when any visible event is live (for ESPN score updates), 90s otherwise. Both poll only Supabase + ESPN — never The Odds API directly. Splits also re-fetched on each poll (cheap; cached 30 min server-side).
 - **Double-buffer rendering**: Two board divs swap to prevent flash on re-render.
 
 ### Removed (when Owls retired in spring 2026)
 - **Owls live scores** — replaced with free ESPN scoreboard JSON merged in `_merge_espn_scores`.
-- **Circa betting splits + SHARP/RLM detection** — Circa isn't in The Odds API at any region. Public-splits feature is on the roadmap (likely scrape DK or pay Sports Insights ~$35/mo).
+- **Circa betting splits + SHARP/RLM detection** — Circa isn't in The Odds API at any region. Replaced spring 2026 by Action Network public betting splits (free scrape via their JSON API, see `/api/splits` and the "Public Splits" section below).
 - **Player Props page** — `/props` route, `templates/props.html`, all `/api/props*` endpoints, props JS. Not being used; props in The Odds API are per-event (more credits per call).
 - **Splits-related JS in odds.html** (`renderSplitsRow`, `captureSplitsOpeners`, `loadSplitsOpeners`, `saveSplitsOpenersAPI`, `buildSplitsSnapshot`, `syncSplitsLastChanged`, `loadSplitsLastChanged`, `fmtTsAgo`, `detectRLM`) — fully deleted.
 - **All Owls Flask endpoints**: `/api/odds/raw`, `/api/events/raw`, `/api/odds/debug-markets`, `/api/splits/raw`, `/api/props/raw`, `/api/scores/raw`, `/api/realtime/raw`, `/api/splits-openers`, `/api/splits-last-changed`, `/api/props`, `/scanner`, `/debug-odds`. Gone.
@@ -171,8 +175,9 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - `loadScannerOpeners()` / `mergeScannerOpenersInto()` — pulls scanner-backed openers via `/api/openers/scanner` and merges them over `currentOpeners`. Scanner values win.
 - `computeMovement()` — PIN-only; compares opener to current, includes JIT backfill
 - `renderMovement()` — renders opener → arrow → current for ML/SPR/TOT
-- `renderBoard()` — main render, double-buffered. Exposed to `window` for search.
+- `renderBoard()` — main render, double-buffered. Exposed to `window` for search. Inserts `<div class="splits-row js-splits">` placeholder under the spark-wrap; populated post-render by `drawSplitsRows()`.
 - `renderSparkRow()` / `fetchSparklineBatch()` / `drawSparklines()` — inline 6h sparklines (3 per card)
+- `fetchSplitsBatch()` / `_matchSplitsEvent()` / `drawSplitsRows()` — public ML splits row. `fetchSplitsBatch` hits `/api/splits` per-sport, `_matchSplitsEvent` resolves Action Network's short names ("Mariners") to our full names ("Seattle Mariners") via two-way substring containment, `drawSplitsRows` populates the bars (% bets always, % money + SHARP tag when present).
 - `_amerToProb()` / `_probToAmer()` / `_fmtAmer()` / `_fmtPoint()` / `_fmtDataAge()` — small numeric formatters
 - `scheduleNextLoad()` — adaptive setTimeout chain replacing setInterval
 - Chart modal: see the IIFE block at the bottom of `odds.html`. Chart.js v4 + date-fns adapter via CDN.
@@ -265,6 +270,58 @@ Allowed short codes (14): `PIN, DK, FD, MGM, CAE, HR, BET365, BR, BOL, LV, BVD, 
 ### Rate-Limit Headers
 - `x-requests-used` / `x-requests-remaining` — logged on every cron run so credit burn is visible in workflow logs.
 
+## Action Network — Public Betting Splits
+
+Free public-betting source replacing Circa splits (which we lost when Owls was retired and Circa turned out to not exist in The Odds API at any region). Powers the % bets / % money bar under each game card on `/odds` and the optional `SHARP +N%` tag when money diverges from bets.
+
+### Data sources (in fallback order)
+
+`_fetch_action_splits(sport)` in `app.py` tries three paths and uses the first that returns events:
+
+1. **JSON API (primary)** — `_fetch_action_api()`:
+   ```
+   GET https://api.actionnetwork.com/web/v2/scoreboard/{league}?period=game&date=YYYYMMDD
+   ```
+   Headers: `User-Agent` (browser-like), `Origin: https://www.actionnetwork.com`, `Referer: https://www.actionnetwork.com/`. No auth — Cloudflare/WAF passes the request through with a real-looking UA + referer.
+
+   This is the same endpoint Action Network's own browser UI calls via XHR after page hydration, so it's the most complete and current data path. Returns today's scheduled games + live games + completed games for the date, all with their public betting %s. Sport keys map via `_ACTION_API_LEAGUE` (mlb/nba/nhl/nfl/ncaab/ncaaf — same path codes as our internal sport keys).
+
+2. **`__NEXT_DATA__` JSON in the SSR HTML page** — `_parse_action_splits_next_data()`:
+   `<script id="__NEXT_DATA__" type="application/json">…</script>` — Next.js apps embed their full hydration tree here. Walk it heuristically looking for game-shaped objects (`home_team_id` + `away_team_id` + `start_time`), then per-game subtree-walk for `*_percent` keys matching bet/ticket/money/handle × away/home.
+   - **Caveat learned the hard way**: Action Network's `__NEXT_DATA__` for the public-betting page does NOT carry split percentages on the game object — only odds, scores, and per-book market prices. Today's scheduled games are also frequently missing from `__NEXT_DATA__` (rendered client-side from the JSON API). So this path basically only works as a backup for cached completed-game data; the JSON API is the real answer.
+
+3. **HTML table parser (legacy fallback)** — `_parse_action_splits_html()`:
+   BeautifulSoup over `<table>` rows with cell layout: `[status+teams, open odds, current odds, % bets, % money, money-vs-bets diff, ticket count]`. Status prefix (`Final`, `Final - OT`, `PPD`, `1ST 18:42`, `7:05 PM`, etc.) gets stripped before the team-name regex via `status_prefix_re`. Team regex allows 1-4 digit game IDs (NHL uses 1-2 digit: `CAR 7`, MLB uses 3: `SEA 925`).
+   - Only useful for yesterday's finals — Action Network's SSR table doesn't include today's scheduled games regardless of `?date=` URL param.
+
+### URL we hit
+- API: `https://api.actionnetwork.com/web/v2/scoreboard/{league}?period=game&date=YYYYMMDD` (today in US/Eastern, via `zoneinfo.ZoneInfo("America/New_York")`)
+- HTML page (only for `__NEXT_DATA__` + table fallback): `https://www.actionnetwork.com/{sport}/public-betting?date=YYYYMMDD`
+
+### Caching
+- Server-side `_cache` dict (same one used for ESPN cache). Key: `splits:{sport}`. TTL: **30 min**.
+- **Successful parses cache, failures don't** — so if the JSON API rejects us or our walker misses everything, the next user hit retries fresh instead of being pinned to a broken response for half an hour.
+
+### Diagnostics — `/debug-splits?sport=X`
+Browser-friendly view of `/api/splits` that shows:
+- `source`: which path won (`json_api` / `next_data` / `table`)
+- `events`: parsed event list with `away_team`, `home_team`, `ml: {away_bets, home_bets, away_money, home_money}`, `sharp_diff`, `status`
+- `failed_samples`: up to 5 raw cell strings the table parser couldn't match (helps spot new status patterns)
+- `next_debug`: `__NEXT_DATA__` walker diagnostics — `candidate_count`, `sample_top_keys`, `splits_paths_seen`, and `candidate_shape` (deep field-name dump of the first game when extraction fails — types/keys, no raw values)
+- `api_debug`: JSON API diagnostics — `url`, `status`, `top_keys`, `game_count`, `events_extracted`, `splits_paths_seen`, `game_shape` (when 0 events extracted from games)
+
+The `*_shape` dumps are how we iterate on Action Network's frequently-changing JSON shapes without fetching the URL ourselves from a sandbox that blocks external network. Whenever the splits row stops rendering for a sport, hit `/debug-splits?sport=X` first.
+
+### Frontend wiring (`odds.html`)
+- `fetchSplitsBatch()` calls `/api/splits?sport={activeSport}`, stashes into `_splitsData`, then runs `drawSplitsRows()`.
+- `_matchSplitsEvent(splitsEvents, ourAway, ourHome)` matches by team-name **substring containment in either direction** — Action Network uses short names ("Mariners"), we have full names ("Seattle Mariners"), so `seattle_mariners.includes(mariners) || mariners.includes(seattle_mariners)` resolves both. Lowercased before comparing.
+- `drawSplitsRows()` runs after each `renderBoard()` swap (inside the same `requestAnimationFrame` as `drawSparklines()`). For each `.js-splits` placeholder div, finds the matching event and either populates with `% bets` / `% money` bars + `.has-data` class (which un-hides via CSS) or leaves it empty.
+- Polling: re-fetched on every `scheduleNextLoad()` tick (30s/90s). Cheap because of the server-side 30-min cache — most ticks are no-ops.
+
+### Sport coverage
+- Supported: MLB, NBA, NHL, NFL, NCAAB, NCAAF (= `_ACTION_SPORTS`)
+- NOT supported: MMA, soccer, tennis (Action Network doesn't have public-betting pages for these). Splits row just stays hidden for those sports.
+
 ## ESPN Scoreboard
 
 Used for live game scores on the Odds Board. Free, public, no auth.
@@ -333,3 +390,8 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 11. **Live-game freeze applies to** the board cells, the inline sparklines, AND `/api/openers/scanner` — same `_post_start` filter pattern. The click-through chart modal (`/api/odds/history`) deliberately does NOT freeze, so users can see post-start movement there.
 12. **Markets table never marks rows `closed`** — the Flask query filters by `event_start` window so stale markets don't render, but the table grows unboundedly. Low-priority cleanup; would need a small extension to the snapshot-cleanup workflow.
 13. **`book_snapshots` retention is 15 days** — `.github/workflows/snapshot-cleanup.yml` deletes older rows nightly. Chart "All" range is bounded by this.
+14. **Splits scraper is undocumented territory** — Action Network's JSON shape changes between builds (snake_case ↔ camelCase, fields move, things rename). Whenever the splits row stops rendering, hit `/debug-splits?sport=X` and inspect `next_debug.candidate_shape` / `api_debug.game_shape` — they dump field names to make tuning the extractor a one-round-trip iteration. Don't try to debug via curl — the Vercel runtime CAN reach Action Network from US east edge nodes, but local curls + browsers from random IPs often get 403'd by Cloudflare.
+15. **Action Network team names are short** ("Mariners", "Red Sox") where ours from The Odds API are full ("Seattle Mariners", "Boston Red Sox"). The frontend matches with **two-way substring containment** in `_matchSplitsEvent()` (`a.includes(b) || b.includes(a)`). Don't switch to exact match — it'll silently break splits across all sports.
+16. **Splits status prefix regex** in `_parse_action_splits_html()` is the brittle part of the legacy table parser. New live-game status strings from Action Network's UI ("END 2ND PER", "INT 1", a different separator like "Final/2OT") will land in `failed_samples` if not covered. Add new patterns to `status_prefix_re`. Smoke-test with the inline test in commit `3ef01aa`'s message before pushing.
+17. **NHL game IDs are 1-2 digits** (`CAR 7`, `OTT 8`) where MLB uses 3-digit (`SEA 925`). `team_re` in the legacy table parser uses `\d{1,4}` to handle both. Do NOT tighten this back to `\d{3}`; NHL will silently break.
+18. **Action Network `?date=YYYYMMDD` URL param doesn't actually bust their SSR cache** — bare URL and dated URL return identical SSR HTML for several hours into the day. We pass it anyway (cheap, helps cache key separation), but the JSON API is the only path that respects the date param.
