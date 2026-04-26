@@ -1520,12 +1520,7 @@ def _fetch_action_splits(sport: str) -> dict:
     parsed["url"] = url
     parsed["date_et"] = today_et
 
-    # ALWAYS try __NEXT_DATA__ as the primary source. Action Network's
-    # SSR table is unreliable — for NHL it only returns yesterday's
-    # finals even with ?date=today (their server caches the SSR a long
-    # time, the date param doesn't bust it). The Next.js JSON blob is
-    # complete by definition (it's what hydrates the client UI you see
-    # in the browser).
+    # ALWAYS try __NEXT_DATA__ as a backup data source.
     parsed["source"] = "table"
     nxt = _parse_action_splits_next_data(html)
     if nxt.get("events"):
@@ -1534,12 +1529,117 @@ def _fetch_action_splits(sport: str) -> dict:
         parsed["source"]     = "next_data"
     parsed["next_debug"]     = nxt.get("debug", {})
 
+    # Best source: Action Network's JSON API directly. The SSR HTML
+    # only contains yesterday's completed games, and __NEXT_DATA__
+    # doesn't carry split percentages — both are populated/refreshed
+    # via XHR to api.actionnetwork.com after the page loads. So we
+    # call that API ourselves. If it returns events we use those.
+    api = _fetch_action_api(sport, today_et)
+    if api.get("events"):
+        parsed["events"]     = api["events"]
+        parsed["ok"]         = True
+        parsed["source"]     = "json_api"
+    parsed["api_debug"]      = api.get("debug", {})
+
     # Only cache successful parses. A 0-event response usually means our
     # status-prefix regex needs another pattern (NHL "Final/OT" etc.) —
     # don't pin a broken result for 30 min while iterating.
     if parsed.get("ok"):
         _cache[cache_key] = {"data": parsed, "ts": now}
     return parsed
+
+
+# Action Network's API uses a different sport-key convention than
+# their URL paths. Map our path codes to API league IDs / slugs.
+_ACTION_API_LEAGUE = {
+    "mlb":   "mlb",
+    "nba":   "nba",
+    "nhl":   "nhl",
+    "nfl":   "nfl",
+    "ncaab": "ncaab",
+    "ncaaf": "ncaaf",
+}
+
+
+def _fetch_action_api(sport: str, date_et: str) -> dict:
+    """Hit Action Network's public JSON API for the day's scoreboard.
+
+    This is what the actionnetwork.com browser UI calls via XHR after
+    page hydration to get today's games + public betting %s. The SSR
+    HTML page is incidental — the real data path is this API.
+
+    Endpoint observed in their web UI:
+      GET https://api.actionnetwork.com/web/v2/scoreboard/{league}
+          ?period=game&date=YYYYMMDD&bookIds=15,30,68,69,71,75,79,123,69,972
+          &date_format=YYYY-MM-DD
+
+    No auth on the public scoreboard. User-Agent + a Referer header
+    keeps Cloudflare/WAF from challenging the request.
+    """
+    import requests as _http
+    debug: dict = {"ok": False}
+    league = _ACTION_API_LEAGUE.get(sport)
+    if not league:
+        debug["error"] = f"unsupported league: {sport}"
+        return {"events": [], "debug": debug}
+
+    url = (f"https://api.actionnetwork.com/web/v2/scoreboard/{league}"
+           f"?period=game&date={date_et}")
+    debug["url"] = url
+    try:
+        r = _http.get(url, headers={
+            "User-Agent": _SPLITS_UA,
+            "Accept":     "application/json, text/plain, */*",
+            "Origin":     "https://www.actionnetwork.com",
+            "Referer":    "https://www.actionnetwork.com/",
+        }, timeout=12)
+        debug["status"] = r.status_code
+        if r.status_code != 200:
+            debug["error"] = f"HTTP {r.status_code}"
+            debug["body_snippet"] = (r.text or "")[:300]
+            return {"events": [], "debug": debug}
+        data = r.json()
+    except Exception as e:
+        debug["error"] = f"{type(e).__name__}: {e}"
+        return {"events": [], "debug": debug}
+
+    if not isinstance(data, dict):
+        debug["error"] = f"unexpected JSON type: {type(data).__name__}"
+        return {"events": [], "debug": debug}
+
+    debug["top_keys"] = sorted(data.keys())[:30]
+
+    # Most likely shape: {"games": [...]}. Fall back to scanning common
+    # alt names so we don't break if Action Network renames the field.
+    games = (data.get("games")
+             or data.get("scoreboard")
+             or data.get("events")
+             or [])
+    if not isinstance(games, list):
+        debug["error"] = f"games field not a list: {type(games).__name__}"
+        return {"events": [], "debug": debug}
+    debug["game_count"] = len(games)
+
+    splits_paths: list[str] = []
+    events: list[dict] = []
+    for g in games:
+        ev = _next_data_event(g, splits_paths)
+        if ev:
+            events.append(ev)
+    debug["events_extracted"] = len(events)
+    debug["splits_paths_seen"] = splits_paths[:5]
+
+    # If we got games but no splits, dump the first game's structure
+    # so we can see where the API puts public betting %s (almost
+    # certainly different field names than __NEXT_DATA__).
+    if games and not events:
+        g0 = games[0]
+        if isinstance(g0, dict):
+            debug["game_shape"] = {k: _shape_value(v, depth_left=2)
+                                    for k, v in list(g0.items())[:120]}
+
+    debug["ok"] = True
+    return {"events": events, "debug": debug}
 
 
 def _parse_action_splits_next_data(html: str) -> dict:
