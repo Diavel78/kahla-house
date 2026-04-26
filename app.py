@@ -1527,7 +1527,14 @@ def api_my_orders():
             cum_qty   = _g("cumQuantity") or 0
             leaves    = _g("leavesQuantity") or 0
             fill_pct  = (cum_qty / qty * 100) if qty else 0
-            price     = _safe_float(_g("price"))
+            raw_price = _safe_float(_g("price"))
+            # SDK price field is the COMPLEMENT — same gotcha as the
+            # trades feed (see CLAUDE.md #7). For an order to BUY
+            # "Twins -1.5" at $0.40 (= +150 American), the SDK reports
+            # price=0.60. Flip to recover the user's real per-share
+            # price. We don't have cost/qty here like positions do
+            # because the order hasn't filled yet.
+            price = (1 - raw_price) if (raw_price is not None and 0 <= raw_price <= 1) else raw_price
             intent    = _g("intent") or ""
             side_label = _INTENT_LABEL.get(intent, intent.replace("ORDER_INTENT_", "").replace("_", " "))
 
