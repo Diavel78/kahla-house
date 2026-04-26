@@ -11,6 +11,10 @@
     <!-- Firebase Auth (compat mode) -->
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <!-- html2canvas: rasterizes the betslip modal so it can be saved /
+         shared as a single PNG (the slip can grow longer than the
+         viewport when many open orders + positions stack up). ~50KB. -->
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
     <script>
         const FC = {
             apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
@@ -523,6 +527,29 @@
             transition: all 0.15s;
         }
         .betslip-close:hover { background: var(--surface-2); color: var(--text); }
+        .betslip-actions { display: flex; align-items: center; gap: 8px; }
+        .betslip-share {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            color: var(--text);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            padding: 6px 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .betslip-share:hover { background: var(--blue-dim); border-color: var(--blue); }
+        .betslip-share:disabled { opacity: 0.5; cursor: wait; }
+        /* When capturing the slip to image, expand it past the viewport
+           cap so html2canvas grabs the FULL list (otherwise you get a
+           cropped screenshot identical to the on-screen view). */
+        .betslip.capturing {
+            max-height: none !important;
+            overflow: visible !important;
+        }
         .betslip-body { padding: 8px 0; }
         .betslip-item {
             padding: 14px 24px;
@@ -747,7 +774,10 @@
                         <h2>BET SLIP</h2>
                         <div class="betslip-date" id="betslip-date"></div>
                     </div>
-                    <button class="betslip-close" onclick="closeBetSlip()">&times;</button>
+                    <div class="betslip-actions">
+                        <button class="betslip-share" id="betslip-share-btn" onclick="shareBetSlip()" title="Save / share as image">Share</button>
+                        <button class="betslip-close" onclick="closeBetSlip()">&times;</button>
+                    </div>
                 </div>
                 <div class="betslip-body" id="betslip-body">
                     <div class="betslip-empty">No open positions</div>
@@ -1101,6 +1131,93 @@
         if (e.target === $('betslip-overlay')) closeBetSlip();
     }
     window.closeBetSlipOutside = closeBetSlipOutside;
+
+    // Capture the betslip modal as a PNG so it can be sent to friends
+    // without scrolling-screenshot gymnastics. On mobile we hand the
+    // image to navigator.share() (pops up iMessage / share sheet); on
+    // desktop we trigger a download. Why this is needed: the slip can
+    // grow longer than viewport once Open Orders + Pending +
+    // Settled-Today stack up — a normal screenshot crops it.
+    async function shareBetSlip() {
+        const btn  = $('betslip-share-btn');
+        const slip = $('betslip');
+        if (!slip || !window.html2canvas) return;
+
+        btn.disabled = true;
+        const origLabel = btn.textContent;
+        btn.textContent = 'Saving…';
+
+        // Hide the action buttons during capture so they don't appear
+        // in the saved image. Also expand max-height past viewport so
+        // html2canvas grabs the full content, not the scrolled view.
+        const actions = slip.querySelector('.betslip-actions');
+        const prevActionsDisplay = actions ? actions.style.display : '';
+        if (actions) actions.style.display = 'none';
+        slip.classList.add('capturing');
+
+        try {
+            // Wait for fonts so the capture isn't a fallback-typeface frame
+            // (DM Sans / JetBrains Mono load via @font-face).
+            if (document.fonts && document.fonts.ready) {
+                try { await document.fonts.ready; } catch {}
+            }
+
+            const canvas = await html2canvas(slip, {
+                backgroundColor: getComputedStyle(slip).backgroundColor || '#0d1117',
+                scale: window.devicePixelRatio > 1 ? 2 : 2,  // 2x = sharp on retina + good IG quality
+                useCORS: true,
+                logging: false,
+                // Match slip's actual scrollHeight so the WHOLE list
+                // is in the image, not just what was visible.
+                windowHeight: slip.scrollHeight + 40,
+                height: slip.scrollHeight,
+            });
+
+            const filename = 'kahla-house-betslip-' +
+                new Date().toISOString().slice(0, 10) + '.png';
+
+            // Try Web Share API (mobile primarily). canShare with files
+            // is the right capability check — bare navigator.share exists
+            // on desktop Safari but can't take an image attachment.
+            const blob = await new Promise(res => canvas.toBlob(res, 'image/png', 0.95));
+            if (blob && navigator.canShare) {
+                const file = new File([blob], filename, { type: 'image/png' });
+                if (navigator.canShare({ files: [file] })) {
+                    try {
+                        await navigator.share({
+                            files: [file],
+                            title: 'Kahla House Bet Slip',
+                            text:  $('betslip-date')?.textContent || 'Bet slip',
+                        });
+                        return;  // success, skip download fallback
+                    } catch (err) {
+                        // User cancelled — silently fall through to download.
+                        if (err && err.name !== 'AbortError') console.warn('share:', err);
+                        if (err && err.name === 'AbortError') return;
+                    }
+                }
+            }
+
+            // Desktop fallback: trigger a PNG download.
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        } catch (err) {
+            console.error('shareBetSlip:', err);
+            alert('Could not generate image: ' + (err.message || err));
+        } finally {
+            slip.classList.remove('capturing');
+            if (actions) actions.style.display = prevActionsDisplay;
+            btn.disabled = false;
+            btn.textContent = origLabel;
+        }
+    }
+    window.shareBetSlip = shareBetSlip;
 
     document.addEventListener('keydown', function(e) {
         if (e.key === 'Escape') closeBetSlip();
