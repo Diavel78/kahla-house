@@ -1528,20 +1528,32 @@ def api_my_orders():
             leaves    = _g("leavesQuantity") or 0
             fill_pct  = (cum_qty / qty * 100) if qty else 0
             raw_price = _safe_float(_g("price"))
-            # SDK price field is the COMPLEMENT — same gotcha as the
-            # trades feed (see CLAUDE.md #7). For an order to BUY
-            # "Twins -1.5" at $0.40 (= +150 American), the SDK reports
-            # price=0.60. Flip to recover the user's real per-share
-            # price. We don't have cost/qty here like positions do
-            # because the order hasn't filled yet.
-            price = (1 - raw_price) if (raw_price is not None and 0 <= raw_price <= 1) else raw_price
             intent    = _g("intent") or ""
+            # Polymarket's CLOB stores prices canonically as the YES
+            # probability of the market. When the user's pick is the
+            # NO side (intent = *_SHORT), the SDK's price field is the
+            # YES price — so to display what they actually pay/receive
+            # for their picked outcome we need the complement.
+            # When their pick IS the YES side (intent = *_LONG) the
+            # SDK price is already the right number — DO NOT flip.
+            # Empirically verified against Polymarket app order list.
+            needs_flip = intent.endswith("_SHORT")
+            if raw_price is not None and 0 <= raw_price <= 1 and needs_flip:
+                price = 1 - raw_price
+            else:
+                price = raw_price
             side_label = _INTENT_LABEL.get(intent, intent.replace("ORDER_INTENT_", "").replace("_", " "))
 
             out_orders.append({
                 "id":               _g("id") or "",
                 "market_name":      title,
-                "outcome":          outcome,
+                # `outcome` is what the dashboard's buildBetSlipLabel()
+                # appends after the market title. Use `pick` (which has
+                # the team prefix logic for spread bets like
+                # "Tampa Bay Rays -1.5") instead of the raw outcome
+                # (which is just "-1.5" for spreads — no team).
+                "outcome":          pick or outcome,
+                "raw_outcome":      outcome,
                 "team_name":        team_name,
                 "pick":             pick,
                 "slug":             slug,
