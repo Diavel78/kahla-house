@@ -786,6 +786,14 @@
             font-size: 9px; font-weight: 700;
             opacity: 0.7; letter-spacing: 0.06em;
         }
+        .mv-score-chip .mv-score-side {
+            font-size: 11px; font-weight: 800;
+            letter-spacing: 0.04em;
+            padding-right: 6px;
+            border-right: 1px solid currentColor;
+            margin-right: 4px;
+            opacity: 0.95;
+        }
         .mv-score-chip.tier-low    { background: rgba(148,163,184,0.10); color: var(--text-muted); }
         .mv-score-chip.tier-mid    { background: rgba(245,158,11,0.15); color: var(--orange); }
         .mv-score-chip.tier-strong { background: rgba(16,185,129,0.18); color: var(--green); }
@@ -1388,6 +1396,67 @@
         return Math.min(10, Math.round(Math.abs(pinProb - median) * 200));
     }
 
+    /* Which side is the sharp money on? Reads PIN movement direction:
+
+       ML  — whichever team's price became MORE NEGATIVE (sharper
+             favorite, books moved to balance against money on this side).
+       SPR — whichever side's PRICE decreased (less attractive, money
+             flowing in). Falls back to point-line direction.
+       TOT — total dropped or Over price went UP (more attractive) =
+             money on UNDER. Total raised or Over price went DOWN =
+             money on OVER.
+
+       Returns one of: a team name, 'Over', 'Under', or null. */
+    function _sharpSide(mv, mktKey, awayName, homeName) {
+        const data = mv && mv[mktKey];
+        if (!data) return null;
+
+        if (mktKey === 'ml') {
+            const a = data[awayName], h = data[homeName];
+            if (!a && !h) return null;
+            // diff = current - open (American odds). More-negative diff
+            // means the team became a bigger favorite (or smaller dog) =
+            // money flowing in.
+            const aDiff = a ? a.diff : Infinity;
+            const hDiff = h ? h.diff : Infinity;
+            if (aDiff === hDiff) return null;
+            return aDiff < hDiff ? awayName : homeName;
+        }
+
+        if (mktKey === 'spread') {
+            const a = data[awayName], h = data[homeName];
+            // Primary: price-side movement. Decreasing price on a side
+            // = books making it less attractive = money on this side.
+            const aPx = a ? (a.price_diff || 0) : 0;
+            const hPx = h ? (h.price_diff || 0) : 0;
+            if (Math.abs(aPx - hPx) >= 1) return aPx < hPx ? awayName : homeName;
+            // Secondary: line-point shift. Negative point_diff for a
+            // side means line moved toward MORE favored on that side
+            // = money there. (For -1.5 → -2.0: point_diff = -0.5.)
+            const aPt = a ? (a.point_diff || 0) : 0;
+            const hPt = h ? (h.point_diff || 0) : 0;
+            if (aPt < 0 && aPt < hPt) return awayName;
+            if (hPt < 0 && hPt < aPt) return homeName;
+            return null;
+        }
+
+        if (mktKey === 'total') {
+            const o = data['Over'];
+            if (!o) return null;
+            // Total LOWERED = money on UNDER (books drop the total to
+            // attract over-action and balance the book).
+            if ((o.point_diff || 0) < 0) return 'Under';
+            if ((o.point_diff || 0) > 0) return 'Over';
+            // Same total but Over price got CHEAPER (less negative or
+            // more positive) = books making Over attractive = money on
+            // Under. Reverse for Over-getting-more-expensive.
+            if ((o.price_diff || 0) > 0) return 'Under';
+            if ((o.price_diff || 0) < 0) return 'Over';
+            return null;
+        }
+        return null;
+    }
+
     function computeSharpScore(ev, mv, splitsEv, mktKey, awayName, homeName) {
         if (!mv || !mv[mktKey] || !Object.keys(mv[mktKey]).length) return null;
         const moveS   = _moveSubScore(mv, mktKey);
@@ -1396,18 +1465,15 @@
 
         const components = [];
         const weights = [];
-        // Movement is the heaviest signal — a sharp money move shows
-        // up here regardless of whether splits/retail agree.
         if (moveS   != null) { components.push(moveS);   weights.push(50); }
         if (splitsS != null) { components.push(splitsS); weights.push(25); }
-        // For SPR/TOT with no splits, give divergence the splits weight
-        // so the score still scales 0-10 not 0-7.
         if (divS    != null) { components.push(divS);    weights.push(mktKey === 'ml' ? 25 : 50); }
-
         if (!components.length) return null;
         const totalW = weights.reduce((a, b) => a + b, 0);
         const wSum   = components.reduce((s, c, i) => s + c * weights[i], 0);
-        return Math.round(wSum / totalW);
+        const score = Math.round(wSum / totalW);
+        const side  = _sharpSide(mv, mktKey, awayName, homeName);
+        return { score, side };
     }
 
     function _scoreTier(score) {
@@ -1417,7 +1483,7 @@
         return 'low';
     }
 
-    function renderMovement(mv, label, mktKey, awayName, homeName, sharpScore) {
+    function renderMovement(mv, label, mktKey, awayName, homeName, sharpInfo) {
         const data = mv[mktKey] || {};
         const awayData = data[awayName];
         if (!awayData) return '';
@@ -1459,9 +1525,22 @@
         }
 
         let chip = '';
-        const hasScore = (sharpScore != null && Number.isFinite(sharpScore));
+        const score = sharpInfo && Number.isFinite(sharpInfo.score) ? sharpInfo.score : null;
+        const side  = sharpInfo && sharpInfo.side ? sharpInfo.side : null;
+        const hasScore = score != null;
         if (hasScore) {
-            chip = `<span class="mv-score-chip tier-${_scoreTier(sharpScore)}" title="Sharp signal strength (1-10)"><span class="mv-score-tag">SHARP</span>${sharpScore}</span>`;
+            // Compact side label for the chip:
+            //   ML/SPR → 3-letter team abbr (truncTeam)
+            //   TOT    → OVER / UNDER
+            let sideLabel = '';
+            if (side) {
+                if (side === 'Over' || side === 'Under') sideLabel = side.toUpperCase();
+                else sideLabel = truncTeam(side);
+            }
+            const sideHtml = sideLabel
+                ? `<span class="mv-score-side">${esc(sideLabel)}</span>`
+                : '';
+            chip = `<span class="mv-score-chip tier-${_scoreTier(score)}" title="Sharp signal strength (1-10) — side: ${esc(side || 'n/a')}">${sideHtml}<span class="mv-score-tag">SHARP</span>${score}</span>`;
         }
         const itemClass = hasScore ? 'mv-item with-score' : 'mv-item';
         return `<span class="${itemClass}"><span class="mv-item-content">${inner}</span>${chip}</span>`;
