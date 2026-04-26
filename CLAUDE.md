@@ -279,8 +279,7 @@ Per-market signal-strength rating shown on each game card's movement bar. Scale 
 
 1. **PIN movement magnitude** — opener vs current. Direct 1:1 cents-to-score mapping (the betting world describes moves in cents, so 5-cent move = 5, 10-cent = 10 max).
    - ML: `|cent_distance|` capped 10. `_amerToCents()` handles the +/-100 boundary (e.g. -110 → +110 = 20-cent move, not 0).
-   - Spread: `|point_diff| × 10` + small price-twitch credit, capped 10. 0.5pt move = 5, 1pt+ = max.
-   - Total: `|point_diff| × 10` + small price-twitch credit, capped 10. 0.5pt move = 5, 1pt+ = max.
+   - Spread / Total: `|point_diff| × 10 + |price_diff_cents|`, capped 10. 1pt of line move = 10 cents-equivalent. So a 9-cent juice drop with NO line move (books tightening price because money is hammering one side) = SHARP 9, same as an equivalent ML cent move. 0.5pt + small price = 5–8.
 
 2. **Splits divergence** (ML only) — `|money% − bets%|`.
    - `<2pt` = noise, `=20pt+` = max. Linear in between.

@@ -1350,18 +1350,16 @@
             if (oC == null || cC == null) return null;
             return Math.min(10, Math.round(Math.abs(cC - oC)));
         }
-        // Spread: 0.1 pt = 1 score. 0.5pt move = 5, 1pt = 10.
-        // Plus tiny price-twitch credit (1 cent on the juice = 0.1).
-        if (mktKey === 'spread') {
+        // Spread/Total: same cent-equivalent scale as ML.
+        // 1 point of line move ≈ 10-cent move (since 1pt is the max
+        // sharp signal). Combine line-cents + price-cents and cap.
+        // So a 9-cent juice drop with no line move = SHARP 9, same
+        // as a 9-cent ML move. Books tightening juice without moving
+        // the line still means money is on that side.
+        if (mktKey === 'spread' || mktKey === 'total') {
             const pt = Math.abs(d.point_diff || 0);
             const px = Math.abs(d.price_diff || 0);
-            return Math.min(10, Math.round(pt * 10 + Math.min(2, px / 10)));
-        }
-        // Total: same scale as spread. 0.5 = 5, 1 = 10.
-        if (mktKey === 'total') {
-            const pt = Math.abs(d.point_diff || 0);
-            const px = Math.abs(d.price_diff || 0);
-            return Math.min(10, Math.round(pt * 10 + Math.min(2, px / 10)));
+            return Math.min(10, Math.round(pt * 10 + px));
         }
         return null;
     }
