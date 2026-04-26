@@ -401,8 +401,8 @@ def _msg_sharp7(market, market_type, side, score, opener, current, away, home):
 def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    token   = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    token   = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = (os.environ.get("TELEGRAM_CHAT_ID")   or "").strip()
     if not token or not chat_id:
         log.warning("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — exiting (no-op).")
         return 0
