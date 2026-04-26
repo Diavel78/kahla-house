@@ -470,13 +470,13 @@ def _compute_sharp_score(opener, current, market_type):
 
 # ──────────────────────── Message format ────────────────────────────
 def _fmt_local(iso_str):
-    """ISO → 'h:mm AM/PM ET' for the alert. Uses Eastern since most users
-    track sports there; tradeoff over per-user TZ which we don't have."""
+    """ISO → 'h:mm AM/PM MT' for the alert message. America/Denver
+    auto-handles MST↔MDT based on date so we don't drift."""
     if not iso_str: return ""
     try:
         from zoneinfo import ZoneInfo
-        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00")).astimezone(ZoneInfo("America/New_York"))
-        return dt.strftime("%-I:%M %p ET")
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Denver"))
+        return dt.strftime("%-I:%M %p MT")
     except Exception:
         return iso_str[:16]
 
