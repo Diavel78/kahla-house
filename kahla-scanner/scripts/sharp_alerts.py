@@ -476,13 +476,15 @@ def _compute_sharp_score(opener, current, market_type):
 
 # ──────────────────────── Message format ────────────────────────────
 def _fmt_local(iso_str):
-    """ISO → 'h:mm AM/PM MT' for the alert message. America/Denver
-    auto-handles MST↔MDT based on date so we don't drift."""
+    """ISO → 'Sun Apr 26 · 5:00 PM MT' for the alert message. Includes
+    day+date so a Saturday-night alert about a Sunday game can't be
+    mistaken for an in-progress one. America/Denver auto-handles
+    MST↔MDT across DST."""
     if not iso_str: return ""
     try:
         from zoneinfo import ZoneInfo
         dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Denver"))
-        return dt.strftime("%-I:%M %p MT")
+        return dt.strftime("%a %b %-d · %-I:%M %p MT")
     except Exception:
         return iso_str[:16]
 
