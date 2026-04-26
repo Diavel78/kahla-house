@@ -735,6 +735,11 @@
                     <div class="value" id="card-winrate">--</div>
                     <div class="winrate-bar"><div class="winrate-bar-fill" id="winrate-fill" style="width:0%"></div></div>
                 </div>
+                <div class="card" id="card-clv-wrap" title="Closing Line Value: avg pp difference between your fills and PIN's no-vig closing line. Positive = sharp entries, negative = picked off. Open positions whose game has started.">
+                    <div class="label"><span class="card-icon">&#x1F4CA;</span> Avg CLV</div>
+                    <div class="value" id="card-clv">--</div>
+                    <div class="clv-meta" id="card-clv-meta" style="font-size:11px;color:var(--text-muted);margin-top:4px"></div>
+                </div>
             </div>
 
             <!-- Tabs -->
@@ -880,6 +885,24 @@
     }
     window.switchTab = switchTab;
 
+    function renderClvCard() {
+        const el  = $('card-clv');
+        const elM = $('card-clv-meta');
+        if (!el) return;
+        const v = _lastClvAvg;
+        if (v == null || !Number.isFinite(v)) {
+            el.textContent = '--';
+            el.className = 'value';
+            if (elM) elM.textContent = (Array.isArray(_lastClv) && _lastClv.length === 0)
+                ? 'no matched bets yet' : '';
+            return;
+        }
+        const cls = v > 0 ? 'pnl-pos' : (v < 0 ? 'pnl-neg' : '');
+        el.textContent = (v > 0 ? '+' : '') + v.toFixed(2) + '%';
+        el.className = 'value ' + cls;
+        if (elM) elM.textContent = `${(_lastClv || []).length} matched bets`;
+    }
+
     function renderCards(data) {
         const s = data.summary;
         const b = data.balances;
@@ -927,13 +950,29 @@
             el.innerHTML = '<div class="empty-state">No open positions</div>';
             return;
         }
+        // Build a slug→clv lookup so we can decorate each row inline.
+        // CLV only computes for positions whose game has started.
+        const clvBySlug = {};
+        if (Array.isArray(_lastClv)) {
+            for (const c of _lastClv) {
+                if (c.market_slug) clvBySlug[c.market_slug] = c.clv_pp;
+            }
+        }
+        const fmtClv = (v) => {
+            if (v == null || !Number.isFinite(v)) return '<span class="mono na">--</span>';
+            const cls = v > 0 ? 'pnl-pos' : (v < 0 ? 'pnl-neg' : '');
+            const s = (v > 0 ? '+' : '') + v.toFixed(1) + '%';
+            return `<span class="mono ${cls}">${s}</span>`;
+        };
         let html = '<table><thead><tr>' +
             '<th>Market / Pick</th>' +
             '<th class="right">Qty</th><th class="right">Entry</th>' +
             '<th class="right">Current</th><th class="right">P&L</th>' +
-            '<th class="right">Return %</th></tr></thead><tbody>';
+            '<th class="right">Return %</th>' +
+            '<th class="right" title="Closing Line Value: how your fill compared to PIN\'s no-vig closing line. + = sharp, - = picked off.">CLV</th></tr></thead><tbody>';
 
         for (const p of positions) {
+            const clv = clvBySlug[p.market_slug];
             html += `<tr>
                 <td class="market-name">${esc(p.market_name.replace(/\s+\d{4}-\d{2}-\d{2}$/, ''))}${p.outcome ? ' &mdash; ' + esc(p.outcome) : ''}</td>
                 <td class="right mono">${p.quantity.toFixed(0)}</td>
@@ -941,6 +980,7 @@
                 <td class="right mono">${p.current_price !== null ? amt(p.current_price, '$') : '--'}</td>
                 <td class="right pnl-cell ${pnlClass(p.pnl)}">${pnlAmt(p.pnl)}</td>
                 <td class="right mono ${pnlClass(p.pnl_pct)}">${p.pnl_pct !== null ? ((p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct.toFixed(1) + '%') : '--'}</td>
+                <td class="right">${fmtClv(clv)}</td>
             </tr>`;
         }
         html += '</tbody></table>';
@@ -1009,6 +1049,8 @@
     let _lastPositions = [];
     let _lastClosed = [];
     let _lastOrders = [];  // open/unfilled limit orders from /api/my-orders
+    let _lastClv = [];     // closing line value per position from /api/clv
+    let _lastClvAvg = null;
 
     function isToday(utcStr) {
         if (!utcStr) return false;
@@ -1230,11 +1272,13 @@
 
         try {
             const tz = new Date().getTimezoneOffset();
-            // Fetch positions/P&L and open orders in parallel \u2014 they hit
-            // different SDK methods, so no point serializing.
-            const [resp, ordersResp] = await Promise.all([
+            // Fetch positions/P&L, open orders, and CLV in parallel \u2014
+            // they all hit different sources (SDK + Supabase) so no
+            // point serializing.
+            const [resp, ordersResp, clvResp] = await Promise.all([
                 authFetch('/api/data?tz=' + tz),
                 authFetch('/api/my-orders'),
+                authFetch('/api/clv'),
             ]);
             if (!resp) return;
             const data = await resp.json();
@@ -1255,9 +1299,27 @@
                 _lastOrders = [];
             }
 
+            // CLV is also best-effort \u2014 Supabase reads can fail or a
+            // bet may be on a market we don't track. Failures fall
+            // through to '--' in the CLV column.
+            if (clvResp) {
+                try {
+                    const clvData = await clvResp.json();
+                    if (clvData && clvData.ok) {
+                        _lastClv    = clvData.clv || [];
+                        _lastClvAvg = clvData.avg_clv_pp;
+                    } else {
+                        _lastClv = []; _lastClvAvg = null;
+                    }
+                } catch { _lastClv = []; _lastClvAvg = null; }
+            } else {
+                _lastClv = []; _lastClvAvg = null;
+            }
+
             renderCards(data);
             renderPositions(data.positions);
             renderClosed(data.closed_positions || []);
+            renderClvCard();
 
             const ts = new Date(data.timestamp);
             if (data.errors && data.errors.length) {

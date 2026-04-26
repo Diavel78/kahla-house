@@ -1581,6 +1581,313 @@ def api_my_orders():
 
 
 # ---------------------------------------------------------------------------
+# CLV (Closing Line Value) — how each Polymarket bet compares to PIN's
+# closing line. Positive = you got a better price than the close (sharp).
+# Negative = you got picked off. Rolling 30-day average is the
+# professional metric for whether YOU are sharp regardless of W/L noise.
+# ---------------------------------------------------------------------------
+
+# Sport keys: Polymarket slug prefix → our scanner sport code.
+_PM_SLUG_TO_SPORT = {
+    "mlb":   "MLB",
+    "nba":   "NBA",
+    "nhl":   "NHL",
+    "nfl":   "NFL",
+    "ncaab": "CBB",
+    "ncaaf": "NCAAF",
+    "mma":   "UFC",
+}
+
+
+def _amer_to_prob_py(p):
+    """Python equivalent of the JS helper. American → implied prob."""
+    if p is None:
+        return None
+    try:
+        p = float(p)
+    except (TypeError, ValueError):
+        return None
+    if p > 0: return 100.0 / (p + 100.0)
+    if p < 0: return -p / (-p + 100.0)
+    return 0.5
+
+
+def _clv_extract_match_info(meta):
+    """Parse Polymarket marketMetadata into the fields we need to look
+    up the corresponding row in our markets table.
+
+    Returns {sport, bet_date, team_name, market_type, point} or None
+    if we can't extract enough to attempt a match (e.g. non-sports
+    markets, election markets).
+    """
+    title       = (meta.get("title") or "")
+    event_slug  = (meta.get("eventSlug") or "")
+    market_slug = (meta.get("slug") or "")
+    raw_outcome = (meta.get("outcome") or "")
+    team        = meta.get("team") if isinstance(meta.get("team"), dict) else {}
+    team_name   = (team.get("name") if isinstance(team, dict) else "") or ""
+
+    sport = None
+    for slug_str in (event_slug, market_slug):
+        for sk, code in _PM_SLUG_TO_SPORT.items():
+            if slug_str.startswith(sk + "-"):
+                sport = code
+                break
+        if sport:
+            break
+    if not sport:
+        return None
+
+    date_match = re.search(r"(\d{4}-\d{2}-\d{2})", event_slug or market_slug)
+    if not date_match:
+        return None
+    bet_date = date_match.group(1)
+
+    outcome_lower = raw_outcome.strip().lower()
+    point = None
+    if outcome_lower in ("over", "under"):
+        market_type = "total"
+        m = re.search(r"(\d+\.?\d*)", title)
+        if m:
+            point = float(m.group(1))
+    elif re.search(r"[+-]\d+\.?\d*", raw_outcome):
+        market_type = "spread"
+        m = re.search(r"([+-]?\d+\.?\d*)", raw_outcome)
+        if m:
+            point = float(m.group(1))
+    elif team_name or raw_outcome:
+        market_type = "moneyline"
+    else:
+        return None
+
+    return {
+        "sport":       sport,
+        "bet_date":    bet_date,
+        "team_name":   team_name or raw_outcome,
+        "market_type": market_type,
+        "point":       point,
+        "raw_outcome": raw_outcome,
+    }
+
+
+def _clv_find_market(extracted):
+    """Look up the matching markets row + figure out which side
+    (home/away) the user's pick is on.
+
+    Returns (market_id, away_event, home_event, user_side, event_start_iso)
+    or None.
+    """
+    sb = get_supabase()
+    if sb is None:
+        return None
+
+    sport     = extracted["sport"]
+    bet_date  = extracted["bet_date"]
+    team_name = extracted["team_name"]
+
+    try:
+        markets = (
+            sb.table("markets")
+            .select("id,event_name,event_start")
+            .eq("sport", sport)
+            .gte("event_start", f"{bet_date}T00:00:00+00:00")
+            .lte("event_start", f"{bet_date}T23:59:59+00:00")
+            .limit(50)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return None
+    if not markets:
+        return None
+
+    try:
+        from rapidfuzz import fuzz
+    except ImportError:
+        return None
+
+    tn = team_name.lower().strip()
+    if not tn:
+        return None
+
+    best = None
+    best_score = 0
+    for m in markets:
+        ev = m.get("event_name") or ""
+        if " @ " not in ev:
+            continue
+        away, home = ev.split(" @ ", 1)
+        s_a = fuzz.partial_ratio(tn, away.lower())
+        s_h = fuzz.partial_ratio(tn, home.lower())
+        max_s = max(s_a, s_h)
+        if max_s > best_score and max_s >= 75:
+            best_score = max_s
+            user_side = "away" if s_a >= s_h else "home"
+            best = (m["id"], away, home, user_side, m["event_start"])
+    return best
+
+
+def _clv_pin_close_pair(market_id, market_type, before_iso):
+    """PIN's last-pre-event-start prices on BOTH sides of a market.
+
+    Returns {side: implied_prob} (e.g. {'home': 0.55, 'away': 0.45})
+    when both sides have a snapshot, else None.
+    """
+    sb = get_supabase()
+    if sb is None:
+        return None
+
+    sides = ("over", "under") if market_type == "total" else ("home", "away")
+    out = {}
+    for side in sides:
+        try:
+            rows = (
+                sb.table("book_snapshots")
+                .select("price_american,line,captured_at")
+                .eq("market_id", market_id)
+                .eq("book", "PIN")
+                .eq("market_type", market_type)
+                .eq("side", side)
+                .lte("captured_at", before_iso)
+                .order("captured_at", desc=True)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            continue
+        if not rows:
+            continue
+        prob = _amer_to_prob_py(rows[0].get("price_american"))
+        if prob is not None:
+            out[side] = {"prob": prob, "price": rows[0].get("price_american")}
+    return out if len(out) == 2 else None
+
+
+@app.route("/api/clv")
+@admin_required
+def api_clv():
+    """Closing Line Value per open Polymarket position.
+
+    For each filled position whose game has started (so PIN has a
+    closing line), match to our markets table, fetch PIN's pre-start
+    snapshots on both sides, devig the pair, compare to your fill price.
+
+    CLV = (devigged_close_prob − entry_implied_prob) × 100
+    Positive = your entry was at a longer price than the close (sharp).
+    Negative = line moved against you.
+
+    v1 scope: open positions only. v2 will add closed/settled bets +
+    30-day rolling average per signal type (Sharp Bot needs that).
+    """
+    import time
+    cache_key = "clv"
+    now = time.time()
+    cached = _cache.get(cache_key)
+    if cached and (now - cached["ts"]) < 60:
+        return jsonify(cached["data"])
+
+    out = []
+    matched = 0
+    skipped_no_match = 0
+    skipped_future = 0
+    skipped_no_close = 0
+
+    try:
+        client = get_client()
+        positions = fetch_positions(client)
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        for slug, pos in positions:
+            if pos.get("expired"):
+                continue
+            net = _safe_float(pos.get("netPosition")) or 0
+            if abs(net) < 0.01:
+                continue
+            cost = _safe_float(pos.get("cost"))
+            if cost is None or abs(net) <= 0:
+                continue
+            entry_prob = cost / abs(net)
+            if not (0 < entry_prob < 1):
+                continue
+
+            meta = pos.get("marketMetadata") or {}
+            extracted = _clv_extract_match_info(meta)
+            if not extracted:
+                skipped_no_match += 1
+                continue
+            match = _clv_find_market(extracted)
+            if not match:
+                skipped_no_match += 1
+                continue
+            market_id, away_ev, home_ev, user_side, event_start_iso = match
+
+            # Skip games that haven't started — no closing line yet.
+            if event_start_iso > now_iso:
+                skipped_future += 1
+                continue
+
+            mt = extracted["market_type"]
+            if mt == "total":
+                outcome_lower = (meta.get("outcome") or "").lower()
+                user_book_side = "over" if "over" in outcome_lower else "under"
+            else:
+                user_book_side = user_side  # 'home' / 'away'
+
+            pair = _clv_pin_close_pair(market_id, mt, event_start_iso)
+            if not pair or user_book_side not in pair:
+                skipped_no_close += 1
+                continue
+
+            sum_p = pair["home" if mt != "total" else "over"]["prob"] + pair["away" if mt != "total" else "under"]["prob"]
+            if sum_p <= 0:
+                skipped_no_close += 1
+                continue
+            user_prob_devig = pair[user_book_side]["prob"] / sum_p
+            clv_pp = round((user_prob_devig - entry_prob) * 100, 2)
+            matched += 1
+
+            # SDK's `outcome` for spreads is just '-1.5'; prepend team
+            # name so the dashboard label looks like the betslip's.
+            display_outcome = (extracted["team_name"] + " " + extracted["raw_outcome"]).strip() if mt == "spread" else (meta.get("outcome") or extracted["team_name"])
+
+            out.append({
+                "market_name":   meta.get("title") or "",
+                "market_slug":   meta.get("slug") or slug,
+                "outcome":       display_outcome,
+                "team_name":     extracted["team_name"],
+                "market_type":   mt,
+                "side":          user_book_side,
+                "entry_prob":    round(entry_prob, 4),
+                "close_prob":    round(user_prob_devig, 4),
+                "close_amer":    pair[user_book_side].get("price"),
+                "clv_pp":        clv_pp,
+                "commence_time": event_start_iso,
+            })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "clv": []})
+
+    out.sort(key=lambda r: r.get("commence_time") or "", reverse=True)
+
+    # Rolling stat: average CLV across positions we could match.
+    avg_clv = round(sum(r["clv_pp"] for r in out) / len(out), 2) if out else None
+
+    result = {
+        "ok":              True,
+        "clv":             out,
+        "avg_clv_pp":      avg_clv,
+        "matched":         matched,
+        "skipped_no_match":  skipped_no_match,
+        "skipped_future":    skipped_future,
+        "skipped_no_close":  skipped_no_close,
+    }
+    _cache[cache_key] = {"data": result, "ts": now}
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
 # Public betting splits (% bets / % money) — scraped from Action Network's
 # free public-betting page.
 # ---------------------------------------------------------------------------
