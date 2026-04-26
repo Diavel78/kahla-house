@@ -20,14 +20,14 @@ name: Odds Ingest — Poll
 #
 # To add/remove sports: edit SPORTS_ENABLED below.
 
+# Trigger: cron-job.org pings workflow_dispatch every 30 min. We used to
+# also have a GitHub-native `*/30 * * * *` schedule as a backup, but with
+# both running every 30 min the workflow was queueing back-to-back via the
+# concurrency group — burning ~2x the Odds API credits for the same data.
+# cron-job.org has been reliable; the "last odds update Nm ago" status on
+# /odds will surface any cron failure within a refresh cycle.
 on:
-  schedule:
-    # 30-min cadence, set this way because adding the EU region (required
-    # for Pinnacle) doubled the per-call credit cost. cron-job.org is the
-    # primary trigger via workflow_dispatch; this GitHub-native cron is
-    # the fallback.
-    - cron: "*/30 * * * *"
-  workflow_dispatch:          # manual trigger + cron-job.org primary
+  workflow_dispatch:
 
 concurrency:
   group: odds-ingest-poll
