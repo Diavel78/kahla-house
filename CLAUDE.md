@@ -287,8 +287,9 @@ Per-market signal-strength rating shown on each game card's movement bar. Scale 
    - Action Network's spread/total split URLs not yet ingested, so SPR/TOT skip this signal and the remaining weights renormalize.
 
 3. **PIN vs retail consensus** — `|pin_implied_prob − median(DK/FD/MGM/CAE)|`.
-   - 0 prob-pts = 0 score, 5 prob-pts = max 10.
-   - Catches retail mispricings (books that haven't adjusted yet).
+   - **Same-line only** — for SPR/TOT we filter retail books to those at the same point as PIN. Comparing PIN's Over-at-6 to DK's Over-at-5.5 is meaningless (different markets), so those books skip.
+   - Sensitivity: 1c diff = 0 (noise), 3c = 4, 5c = 8, 6c+ = 10. Books disagree by 1-2c routinely — not a sharp signal, just vig variation.
+   - Catches retail mispricings (books that haven't adjusted fast enough on a line PIN already moved).
 
 ### Weighting
 

@@ -1362,17 +1362,26 @@
         return Math.min(10, Math.round(diff / 2));
     }
 
-    function _retailMedianProb(ev, mktKey, key) {
-        // key = home_team for ml/spread, 'Over' for total
+    function _retailMedianProb(ev, mktKey, key, pinPoint) {
+        // For SPR/TOT we MUST compare books at the same line. PIN's
+        // Over at total 6 vs DK's Over at total 5.5 isn't a divergence
+        // signal — it's just two different markets. Filter to books
+        // with matching pinPoint.
         const retailKeys = ['draftkings', 'fanduel', 'betmgm', 'caesars'];
         const probs = [];
         for (const bk of retailKeys) {
             const bd = (ev.books || {})[bk];
             if (!bd) continue;
             let price = null;
-            if (mktKey === 'ml')     price = bd.moneyline?.[key];
-            if (mktKey === 'spread') price = bd.spread?.[key]?.price;
-            if (mktKey === 'total')  price = bd.total?.[key]?.price;
+            if (mktKey === 'ml') {
+                price = bd.moneyline?.[key];
+            } else if (mktKey === 'spread') {
+                const sp = bd.spread?.[key];
+                if (sp && sp.point === pinPoint) price = sp.price;
+            } else if (mktKey === 'total') {
+                const t = bd.total?.[key];
+                if (t && t.point === pinPoint) price = t.price;
+            }
             const p = _amerToProb(price);
             if (p != null) probs.push(p);
         }
@@ -1384,16 +1393,28 @@
     function _divergenceSubScore(ev, mktKey, awayName, homeName) {
         const pin = (ev.books || {}).pinnacle;
         if (!pin) return null;
-        let pinPrice = null, key = null;
-        if (mktKey === 'ml')      { key = homeName; pinPrice = pin.moneyline?.[key]; }
-        else if (mktKey === 'spread') { key = homeName; pinPrice = pin.spread?.[key]?.price; }
-        else if (mktKey === 'total')  { key = 'Over';  pinPrice = pin.total?.[key]?.price; }
+        let pinPrice = null, key = null, pinPoint = null;
+        if (mktKey === 'ml') {
+            key = homeName; pinPrice = pin.moneyline?.[key];
+        } else if (mktKey === 'spread') {
+            key = homeName;
+            pinPrice = pin.spread?.[key]?.price;
+            pinPoint = pin.spread?.[key]?.point;
+        } else if (mktKey === 'total') {
+            key = 'Over';
+            pinPrice = pin.total?.[key]?.price;
+            pinPoint = pin.total?.[key]?.point;
+        }
         const pinProb = _amerToProb(pinPrice);
         if (pinProb == null) return null;
-        const median = _retailMedianProb(ev, mktKey, key);
+        const median = _retailMedianProb(ev, mktKey, key, pinPoint);
         if (median == null) return null;
-        // 5 prob-points = max divergence (retail seriously off-PIN).
-        return Math.min(10, Math.round(Math.abs(pinProb - median) * 200));
+        // Scale: 1c diff = 0 (noise), 3c = 4, 5c = 8, 6c+ = 10.
+        // Books routinely disagree by 1-2c on the same line — that's
+        // not a sharp signal, it's just normal vig variation. Need
+        // real disagreement (≥3c) before this contributes meaningfully.
+        const diffPct = Math.abs(pinProb - median) * 100;
+        return Math.max(0, Math.min(10, Math.round((diffPct - 1) * 2)));
     }
 
     /* Which side is the sharp money on? Reads PIN movement direction:
