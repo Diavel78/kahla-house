@@ -351,11 +351,13 @@ Setup: BotFather → `/newbot` → token; message bot anything; visit `https://a
 
 Three independent paper-bet bots writing to a single Supabase table (`paper_bets`). Each bot represents a distinct thesis about when sharp signals are actionable; logging them separately is the only way to know which strategy actually wins money.
 
-| Bot | Trigger / window | Cadence | Cap | Where |
-|---|---|---|---|---|
-| **steam** | A Telegram STEAM alert fires (5+ books moved same direction in last ~30 min) | Every 30 min, piggybacking on `scanner-poll.yml` | uncapped (steam is rare; ~0-3/day in practice) | Logged from `scripts/sharp_alerts.py` after a successful Telegram send + dedup pass. |
-| **early** | Cumulative PIN movement on games starting in 10–36h | 1×/day at 13:00 UTC (≈8am ET EDT / 9am ET EST) | top 5 per run | `.github/workflows/paper-bets-early.yml`, triggered by cron-job.org workflow_dispatch (no GitHub-native schedule, same pattern as `scanner-poll.yml`). |
-| **late** | Cumulative PIN movement on games starting in 15min–2h | every 30 min, appended step in `scanner-poll.yml` | top 5 per run | Idempotent — per-market dedup means re-runs only fill new candidates as games enter the <2h window. |
+All three bots ride the existing `scanner-poll.yml` 30-min cron — no extra workflows or cron-job.org entries. Per-bot dedup (`(market_id, bot)` × 7-day lookback) means a game gets picked the first time it qualifies in each bot's window and is skipped on later cycles.
+
+| Bot | Trigger / window | Cap | Where |
+|---|---|---|---|
+| **steam** | A Telegram STEAM alert fires (5+ books moved same direction in last ~30 min) | uncapped (steam is rare; ~0-3/day in practice) | Logged from `scripts/sharp_alerts.py` after a successful Telegram send + dedup pass. |
+| **early** | Cumulative PIN movement on games starting in 12–18h | top 5 per run | Appended step in `scanner-poll.yml`. |
+| **late** | Cumulative PIN movement on games starting in 0–2h | top 5 per run | Appended step in `scanner-poll.yml`. |
 
 ### Stage 1 — live (this commit)
 

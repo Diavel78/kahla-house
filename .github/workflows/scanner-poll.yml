@@ -83,11 +83,20 @@ jobs:
           TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python -m scripts.sharp_alerts
 
-      # Phase 4 — Late EV paper-bet picker. Picks top 5 from games
-      # starting in the next 15min–2h window. Idempotent (per-market
-      # dedup) so running every 30 min only fills new candidates as
-      # games enter the window. continue-on-error: a flaky pick run
-      # shouldn't block the next ingest cycle.
+      # Phase 4 — Early + Late EV paper-bet pickers. Both ride this
+      # same 30-min cron. Per-bot dedup means re-runs only fill new
+      # candidates as games walk into each bot's window:
+      #   early → games starting 12–18h out
+      #   late  → games starting 0–2h out
+      # continue-on-error so a flaky pick run never blocks the next
+      # ingest cycle.
+      - name: Paper bets — Early EV picker
+        continue-on-error: true
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.paper_bets_picker --bot early
+
       - name: Paper bets — Late EV picker
         continue-on-error: true
         env:

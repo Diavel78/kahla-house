@@ -1,12 +1,14 @@
 """Phase 4 Sharp Bot — Early + Late EV pickers.
 
-Two bots, one script:
-  --bot early   Runs 1×/day (8am ET via cron-job.org → paper-bets-early.yml).
-                Candidates: games where event_start is 10–36h from now.
-                Thesis: soft opener, sharps positioned, retail will push
-                line further by close.
-  --bot late    Runs every 30 min (appended step in scanner-poll.yml).
-                Candidates: games where event_start is 15min–2h from now.
+Two bots, one script. Both run every 30 min as appended steps in
+`scanner-poll.yml` — same cron that fires odds ingest + sharp alerts.
+Per-bot dedup (`(market_id, bot)`) prevents double-logging, so games
+get picked the first time they qualify in each bot's window.
+
+  --bot early   Candidates: event_start 12–18h from now.
+                Thesis: cumulative sharp signal has had overnight to
+                develop, but retail closing-line move hasn't kicked in.
+  --bot late    Candidates: event_start 0–2h from now.
                 Thesis: closing-line sharp money, near-CLV proxy.
 
 Per market we:
@@ -44,15 +46,17 @@ log = logging.getLogger(__name__)
 # ─────────────────────────── Bot windows ──────────────────────────
 # Hours-from-now bounds. Markets whose event_start falls inside the
 # bot's window become candidates; everything else is filtered out.
+# Both windows evaluated every 30 min on the existing scanner-poll
+# cron — per-bot dedup means re-runs only fill new candidates as games
+# walk into each window.
 WINDOWS = {
-    # 10h floor: sharp money has had the morning to react to opener
-    # but retail hasn't pushed the line yet. 36h ceiling: tomorrow's
-    # late-night games are still in scope when picker runs at 8am ET.
-    "early": (timedelta(hours=10),    timedelta(hours=36)),
-    # 15min floor: ignore games already at/inside live-buffer window.
-    # 2h ceiling: "late steam" is the last 1-2 hours pre-game where
-    # syndicate flow + lineup news drive the closing line.
-    "late":  (timedelta(minutes=15),  timedelta(hours=2)),
+    # 12-18h: cumulative sharp signal has had overnight to develop but
+    # retail closing-line move hasn't kicked in. Captures evening-game
+    # action that posted on the morning slate.
+    "early": (timedelta(hours=12), timedelta(hours=18)),
+    # 0-2h: closing-line sharp money / late-info (lineups, weather,
+    # syndicate flow). Closest to CLV. 0-floor = strictly future games.
+    "late":  (timedelta(minutes=0), timedelta(hours=2)),
 }
 
 
