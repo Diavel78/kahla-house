@@ -159,7 +159,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - **Book Selector**: Dropdown with checkboxes + up/down arrows to reorder. Saved to Firestore. Hard-filtered through `ALL_KNOWN_BOOKS` allowlist so stale Owls-era preferences don't pollute the dropdown.
 - **Live-game freeze**: once `commence_time` passes, the board displays the closing line (last pre-start snapshot per book) and stops showing post-start retail twitches. Server-side filter — see `_fetch_odds_from_snapshots` in `app.py`.
 - **Live game header**: green pulsing `LIVE` badge for in-progress games (ESPN `state: "in"`), grey `FINAL` badge once ESPN reports `state: "post"`. Score inline (Away N – N Home), period/clock from ESPN. `closing line` tag next to teams whenever the line is frozen.
-- **Line Movement Bar**: Opener vs current with arrows + diffs (per game footer). Driven by PIN-only openers from `/api/openers/scanner`. Each row (ML / SPR / TOT) is split: existing values left, **Sharp Score chip** on the right (1-10 scale, color-tiered: low/mid/strong/elite). Score = weighted composite of (a) PIN movement magnitude since opener, (b) Action Network money/bets divergence (ML only), (c) PIN-vs-retail-median implied-prob divergence. JS-side compute in `computeSharpScore()` — see "Sharp Score" section below.
+- **Line Movement Bar**: Opener vs current with arrows + diffs (per game footer). Driven by PIN-only openers from `/api/openers/scanner`. Each row (ML / SPR / TOT) is split: existing values left, **Sharp Score chip** on the right (`[SIDE] SHARP N`, 1-10 scale, color-tiered low/mid/strong/elite). Score = pure PIN movement magnitude since opener (`|cents|` for ML, `|point_diff|×10` OR `|price_cents|` for SPR/TOT — never additive). Side = the team/over/under whose bet got HARDER. See "Sharp Score" section below for full rule + edge cases.
 - **Inline 6H Sparklines** (in the spot where Circa splits used to live): three small Chart.js sparklines stacked per game card — PIN ML home, PIN Spread home, PIN Total Over. Each plots ODDS (price) — line value (e.g. `-1.5`, `8.5`) shown in the row label and tooltip. Y-axis labels in American odds (right side, small). Live-game freeze applied — sparkline stops at event_start. Uses `/api/odds/history-batch`.
 - **Public Splits Row** (under the sparklines): horizontal `% bets` / `% money` bar — away% on the left, home% on the right, color-coded blue (bets) / orange (money). Source: Action Network's public-betting JSON API. Optional `SHARP +N%` tag in the header when |money% − bets%| ≥ 10 (sharp-money fingerprint). Hidden by default (`display:none`) — only shows when a match is found and at least one of bets/money has data. Drawn by `drawSplitsRows()` which matches each game card to a splits event by team-name substring containment in either direction.
 - **Click-through Chart Modal**: graph icon next to each game header opens a full-screen modal with toggleable books / markets / ranges. PIN-only by default at 12H. Chart modal does NOT freeze on live — full pre+post-start history visible there if you want to see mid-game movement.
@@ -196,7 +196,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - **Open Positions table**: Market, Pick, Qty, Entry, Current, P&L, Return %
 - **Closed Positions tab**: Resolved bets + sold trades + maker rewards with Result (W/L/Sold/Maker) and P&L
 - **Maker Rewards**: `ACTIVITY_TYPE_TRANSFER` = maker rewards (income, counted in P&L). `ACTIVITY_TYPE_ACCOUNT_DEPOSIT` = user deposits (NOT P&L). `ACTIVITY_TYPE_ACCOUNT_WITHDRAWAL` = withdrawals (NOT P&L). Maker rewards show as a separate stat card and appear in closed positions with "Maker" badge.
-- **Bet Slip modal**: Shareable sportsbook-ticket format. Three sections in display order: **Open Orders** (unfilled limit orders from `/api/my-orders` — forward-looking "here's what I'm trying to get into"; shows fill progress like `1/100` for partials), **Pending** (held positions awaiting outcome — from `/api/data`), **Settled Today** (resolved-today bets with W/L/Sold/Maker badges). Orders intentionally don't show in the Open Positions or Closed Positions tabs — they're only on the betslip because they represent intent, not active risk. **Share button** (top-right of header) rasterizes the entire slip — including off-viewport content — to PNG via [html2canvas](https://html2canvas.hertzen.com/) (CDN); on mobile it hands the image to `navigator.share()` (pops the iMessage / share sheet), on desktop it downloads as `kahla-house-betslip-YYYY-MM-DD.png`. Capture forces `max-height: none` on `.betslip.capturing` so the image grabs the full content even if the on-screen modal is scrolled.
+- **Bet Slip modal**: Shareable sportsbook-ticket format. Three sections in display order: **Open Orders** (unfilled limit orders from `/api/my-orders` — forward-looking "here's what I'm trying to get into"; shows fill progress like `1/100` for partials), **Pending** (held positions awaiting outcome — from `/api/data`), **Settled Today** (resolved-today bets with W/L/Sold/Maker badges). Orders intentionally don't show in the Open Positions or Closed Positions tabs — they're only on the betslip because they represent intent, not active risk. **Share button** (top-right of header) rasterizes the entire slip — including off-viewport content — to PNG via [html2canvas](https://html2canvas.hertzen.com/) (CDN); on mobile it hands the image to `navigator.share()` (pops the iMessage / share sheet) with the auto-text "Another day of heartbreak and losses queued up!", on desktop it downloads as `kahla-house-betslip-YYYY-MM-DD.png`. Capture forces `max-height: none` on `.betslip.capturing` so the image grabs the full content even if the on-screen modal is scrolled.
 - **CLV column on Open Positions** + **Avg CLV stat card**: per-position Closing Line Value (vs PIN's devigged closing line). Bets whose game hasn't started yet show `--` (no closing line yet). Stat card averages all matched positions; rolls in/out as games start/finish. Bets we can't match (non-sport markets, slug parse failures) just don't appear in the rolled-up average — silent skip. See `/api/clv` route + `_clv_extract_match_info` / `_clv_find_market` / `_clv_pin_close_pair` helpers in `app.py`.
 - **Auto-refresh**: 60 seconds (loads `/api/data`, `/api/my-orders`, and `/api/clv` in parallel)
 
@@ -280,25 +280,32 @@ Allowed short codes (14): `PIN, DK, FD, MGM, CAE, HR, BET365, BR, BOL, LV, BVD, 
 
 Per-market signal-strength rating shown on each game card's movement bar. Scale of 1-10 where 10 = aggressive sharp signal.
 
-**Score IS the PIN movement, full stop.** Cents-of-line-or-juice movement maps 1:1 to score, capped at 10. Splits divergence and PIN-vs-retail divergence are NOT folded into the score — they're already visible on the card (splits row, per-book odds table) and folding them in just dilutes the headline number when public action happens to be balanced.
+**The unified rule across ML / SPR / TOT:** _sharp side = the side whose bet got HARDER to win._ Books move odds to balance action — whichever side they made worse is where money is flowing. Two distinct sharp signals: a **line move**, OR a **vig-only move** (line flat). Vig drift that comes WITH a line shift is rebalance, NOT a separate signal.
 
-Computed JS-side in `computeSharpScore(ev, mv, splitsEv, mktKey, away, home)` in `templates/odds.html`. Movement breakdown:
+Score is the PIN movement magnitude, full stop. Splits divergence and PIN-vs-retail divergence are NOT folded into the headline number — they're already visible on the card (splits row, per-book odds table) and blending them just dilutes the score when public action happens to be balanced.
 
-- **ML**: `|cent_distance|` capped 10. `_amerToCents()` handles the +/-100 boundary (e.g. -110 → +110 = 20-cent move, not 0).
-- **Spread / Total**: TWO distinct signals, NEVER additive.
-  - LINE moved → score = `|point_diff| × 10` capped 10. Any vig drift that came along with the line move is rebalance, IGNORED.
+Computed JS-side in `computeSharpScore()` (`templates/odds.html`) and Python-side in `_sharp_for_ml/_sharp_for_spread/_sharp_for_total` + `_move_score_ml/_move_score_spr_tot` (`kahla-scanner/scripts/sharp_alerts.py`). Both implementations follow the same rule so the on-card chip and the Telegram alert always agree.
+
+### Score (magnitude)
+
+- **ML**: `|cent_distance(opener, current)|` capped 10. `_amerToCents()` handles the ±100 boundary so a flip from −110 to +110 reads as a 20-cent move, not 0. 1 cent = 1 score, "1 is 1, 5 is 5, 10 is 10".
+- **SPR / TOT**: TWO distinct signals, **never additive**.
+  - LINE moved (≥0.5pt) → score = `|point_diff| × 10` capped 10. Any juice drift that came along is rebalance, IGNORED.
   - LINE flat → score = `|price_diff_cents|` capped 10. Pure juice move.
 
+### Side detection (which side is sharp?)
+
+| Market | Rule |
+|---|---|
+| ML | Team whose American odds got more negative (= more expensive to bet = harder = sharp). |
+| SPR | PRIMARY: side whose line moved against them (`point_diff < 0` → harder spread to cover). FALLBACK: line flat → side whose price decreased. |
+| TOT | Line raised → over needs more = sharp OVER. Line lowered → under has less room = sharp UNDER. Line flat → vig direction. |
+
+Chip prints `[SIDE] SHARP N`. Side label is the team's `truncTeam()` abbreviation for ML/SPR, "OVER"/"UNDER" for TOT.
+
+**Edge case — only one side observed:** if PIN snapshot exists for only one side of a market, we use the available side's direction directly: if it got more favored (negative diff) we fire with that side; if it got less favored we'd be naming the wrong team and don't have the right team's prices to print, so we **skip** the alert/chip rather than label the wrong side. (Old behaviour was an `Infinity` fallback that always picked the available side regardless of direction — that bug is gone.)
+
 The `_splitsSubScore` and `_divergenceSubScore` helpers are kept in the file (Phase 4 Sharp Bot will use them for paper-bet selection logic, where weighted blending across signals makes sense). They just don't feed the on-card display number.
-
-### Side detection (which way is sharp money?)
-
-`_sharpSide()` reads PIN movement direction:
-- **ML** — team whose American odds got more negative (line tightening = money flowing in).
-- **SPR** — side whose price decreased (less attractive juice = money there). Falls back to negative point_diff.
-- **TOT** — total dropped or Over price went UP = sharp on UNDER. Total raised or Over price went DOWN = sharp on OVER.
-
-The chip prints `[SIDE] SHARP N`. Side label is the team's truncTeam() abbr for ML/SPR, "OVER"/"UNDER" for TOT.
 
 ### UI tiers (CSS color-coded chips)
 
@@ -311,8 +318,12 @@ The chip prints `[SIDE] SHARP N`. Side label is the team's truncTeam() abbr for 
 
 `kahla-scanner/scripts/sharp_alerts.py` runs immediately after each ingest cycle (appended step in `.github/workflows/scanner-poll.yml` — same 30-min cadence, no second cron registration). Sends two kinds of messages to Telegram:
 
-- **🚨 STEAM** — for each (market_type, side), counts how many books moved the same direction comparing the latest snapshot vs ≥30-min-ago snapshot. Fires when ≥`STEAM_BOOK_COUNT` (5) books align. Indicates institutional-flow synchronization.
+- **🚨 STEAM** — for each book on each (market_type, raw_side), computes the implied sharp side from THAT book's move via `_move_sharp_side()` (line direction first for SPR/TOT, vig fallback). Groups books by `(market_type, sharp_side)`; fires when ≥`STEAM_BOOK_COUNT` (5) books point at the same sharp side. Single book counted once per market regardless of which raw side reported the move. Indicates institutional-flow synchronization.
 - **⚡ SHARP N** — fires when any (market, market_type) crosses Sharp Score ≥`SHARP_THRESHOLD` (7). Score formula mirrors the on-card chip in `templates/odds.html` exactly so the Telegram alert matches what the user sees: `_amer_to_cents()` + `_move_score_ml()` + `_move_score_spr_tot()` are Python ports of the JS helpers.
+
+Pre-game only: `ACTIVE_WINDOW` runs from `now − LIVE_BUFFER_MIN (5min)` to `now + ACTIVE_WINDOW_HOURS (24h)`. Alerts on already-live games would be useless — line is no longer pre-game and you can't act on it. Time formatting: `_fmt_local()` formats to America/Denver with day+date prefix (`Sun Apr 26 · 5:00 PM MT`) so a Saturday-night alert about Sunday's game can't be mistaken for in-progress one.
+
+STEAM message renders the SHARP side's prices (not the raw_side that triggered detection) so an alert that says "sharp HOUSTON ROCKETS" lists Houston prices, not Lakers prices. SPR/TOT samples include the line value (`+7.0 -112 → +6.5 -119`), ML is price-only.
 
 Dedupe via the `sharp_alerts` Supabase table — duplicate (market_id, market_type, alert_type, side) within `DEDUPE_HOURS` (6) is suppressed. Required schema:
 
@@ -461,3 +472,8 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 16. **Splits status prefix regex** in `_parse_action_splits_html()` is the brittle part of the legacy table parser. New live-game status strings from Action Network's UI ("END 2ND PER", "INT 1", a different separator like "Final/2OT") will land in `failed_samples` if not covered. Add new patterns to `status_prefix_re`. Smoke-test with the inline test in commit `3ef01aa`'s message before pushing.
 17. **NHL game IDs are 1-2 digits** (`CAR 7`, `OTT 8`) where MLB uses 3-digit (`SEA 925`). `team_re` in the legacy table parser uses `\d{1,4}` to handle both. Do NOT tighten this back to `\d{3}`; NHL will silently break.
 18. **Action Network `?date=YYYYMMDD` URL param doesn't actually bust their SSR cache** — bare URL and dated URL return identical SSR HTML for several hours into the day. We pass it anyway (cheap, helps cache key separation), but the JSON API is the only path that respects the date param.
+19. **Sharp-side rule across ALL markets: side whose bet got HARDER = sharp.** Books move odds to balance action; the side they made worse to bet is where money is flowing. ML = side whose American odds got more negative. SPR = side whose line moved against them (line is primary; vig drift after a line move is rebalance noise). TOT = total raised → harder for over → sharp OVER; total lowered → harder for under → sharp UNDER. Don't try to be clever with composite/symmetric formulas — the rule is asymmetric (raising a TOT makes both sides "move +1 direction" by old composite logic but only OVER is sharp), and clever formulas have repeatedly missed this.
+20. **Sharp Score is line OR vig, NEVER additive.** For SPR/TOT: if the line moved, score = `|point_diff| × 10` and vig drift is ignored (rebalance). If the line stayed flat, score = `|price_diff_cents|`. Adding them double-counts when books re-juice a new line.
+21. **One-sided PIN snapshots: skip rather than guess.** When only one side of a market has a PIN snapshot in `book_snapshots`, use that side's direction directly: if it got more favored (negative diff), sharp = that side and we fire. If it got less favored, the actually-sharp side is the OTHER one but we don't have its prices to render — bail. Old `Infinity`-fallback heuristic always picked the available side regardless of direction; that bug is gone in both `_sharpSide()` (JS chip) and `_sharp_for_ml/spread/total()` (Python alert).
+22. **GitHub secrets often have trailing whitespace from copy-paste.** A trailing newline in `TELEGRAM_BOT_TOKEN` blew up `urllib` with `InvalidURL: URL can't contain control characters`. `sharp_alerts.py` now `.strip()`s both Telegram env vars at read time. If you add new secret-driven scripts, do the same defensively.
+23. **Polymarket `intent` flips price meaning on orders.** For `BUY_LONG`/`SELL_LONG` (buying/selling YES), the SDK `price` field is what the user pays/receives directly. For `BUY_SHORT`/`SELL_SHORT` (NO side), the SDK reports the YES-canonical price; real per-share price = `1 − price`. `/api/my-orders` flips only on `*_SHORT` intents — verified empirically against the Polymarket app.
