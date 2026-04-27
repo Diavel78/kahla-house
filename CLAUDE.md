@@ -426,6 +426,34 @@ Nav link added to `/odds` (admin-only, hidden for viewers) and `/dashboard` (adm
 
 Rolling 30-day per-signal hit-rate fed back into `combined_score` weights. `_splitsSubScore` and `_divergenceSubScore` (currently dormant in `templates/odds.html`) come into play here — the picker can blend additional signals once we have outcome data to grade their contribution. Also: CLV closed/settled history rollup (Phase 4 per the CLV section above).
 
+### Active investigation — paused 2026-04-27 night
+
+First production day at `EDGE_PP_MIN = 1.0` produced **zero picks across all three bots**. Diagnostic queries confirmed:
+- `book_snapshots` flowing fine (200+ rows per 30-min cycle)
+- `sharp_alerts` firing (got SHARP 7 / 9 / 10 Telegram alerts on `Minnesota Timberwolves @ Denver Nuggets` Mon 8:40 PM MT)
+- `paper_bets` empty
+
+Manual edge math on the Wolves @ Nuggets game (Denver -503 ML, Denver -10.5 SPR -113, UNDER 222 -111) showed retail books tracking PIN within ~1pp on every side — heavy chalk + tight markets meant the 1.0pp gate rejected genuinely +EV picks at 0.3-0.9pp.
+
+Lowered to `EDGE_PP_MIN = 0.5` in commit `92df774`. **Resume tomorrow:**
+1. Re-run `select bot, count(*), max(picked_at) from paper_bets group by bot;` — if still 0 across the board, threshold isn't the issue. Likely culprits to chase next:
+   - Picker erroring out (check GitHub Actions log for the `Paper bets — Early/Late EV picker` step)
+   - SPR/TOT line gate too strict (entry book must match PIN's line *exactly* — common case where PIN is at -10.5 but DK is at -10 fails)
+   - `pin_devig_fair_prob` returning None on mismatched-line markets
+2. If picks ARE flowing, watch hit rate by edge tier as data accumulates. If 0.5-1.0pp picks lose money but 1.0+pp picks win, raise the gate back. If 0-0.5pp would have won, lower further.
+3. Diagnostic query template (paste into Supabase SQL editor):
+   ```sql
+   with latest as (
+     select distinct on (book, market_type, side)
+       book, market_type, side, price_american, line
+     from book_snapshots
+     where market_id in (select id from markets where event_name ilike '%KEYWORD%' and event_start > now())
+     order by book, market_type, side, captured_at desc
+   )
+   select market_type, side, book, price_american, line from latest order by market_type, side, book;
+   ```
+   Replace `%KEYWORD%` with a team name to inspect any game's PIN-vs-retail spread.
+
 ## Action Network — Public Betting Splits
 
 Free public-betting source replacing Circa splits (which we lost when Owls was retired and Circa turned out to not exist in The Odds API at any region). Powers the % bets / % money bar under each game card on `/odds` and the optional `SHARP +N%` tag when money diverges from bets.
