@@ -415,9 +415,15 @@ def _detect_steam(snaps_recent, snaps_earlier, market_id):
 
 
 def _sharp_for_ml(market_id, openers, pin_current):
-    """ML sharp = team whose American odds got more negative since opener
-    (line tightening = books balancing against money on that side).
-    Mirrors templates/odds.html `_sharpSide` so alerts match the chip.
+    """ML sharp = team whose American odds got MORE NEGATIVE since opener
+    (more favored = books balancing money on that side).
+
+    When one side's data is missing, we use the available side's
+    DIRECTION to determine sharp: if it got more favored (negative
+    diff), sharp = that side. If it got less favored (positive diff),
+    sharp = the OTHER side — but we don't have the other side's
+    snapshots to render in the message, so we skip the alert rather
+    than fire on the wrong-side prices.
     Returns (side, score, opener, current) or None."""
     h_op = openers.get((market_id, "moneyline", "home"))
     h_cu = pin_current.get((market_id, "moneyline", "home"))
@@ -426,16 +432,32 @@ def _sharp_for_ml(market_id, openers, pin_current):
 
     h_diff = (h_cu["price_american"] - h_op["price_american"]) if (h_op and h_cu) else None
     a_diff = (a_cu["price_american"] - a_op["price_american"]) if (a_op and a_cu) else None
-    if h_diff is None and a_diff is None:
-        return None
-    h = h_diff if h_diff is not None else float("inf")
-    a = a_diff if a_diff is not None else float("inf")
-    if h == a:
-        return None
-    if a < h:
-        side, op, cu = "away", a_op, a_cu
+
+    side = None
+    if h_diff is not None and a_diff is not None:
+        # Both sides observed — pick the one that got more negative.
+        if h_diff == a_diff:
+            return None
+        if h_diff < a_diff:
+            side, op, cu = "home", h_op, h_cu
+        else:
+            side, op, cu = "away", a_op, a_cu
+    elif h_diff is not None:
+        # Only home observed. If home got more favored (negative), sharp
+        # is home. Otherwise sharp is away — but we don't have away's
+        # numbers to show in the alert, so skip.
+        if h_diff < 0:
+            side, op, cu = "home", h_op, h_cu
+        else:
+            return None
+    elif a_diff is not None:
+        if a_diff < 0:
+            side, op, cu = "away", a_op, a_cu
+        else:
+            return None
     else:
-        side, op, cu = "home", h_op, h_cu
+        return None
+
     score = _move_score_ml(op["price_american"], cu["price_american"])
     if score is None:
         return None

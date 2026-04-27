@@ -1455,14 +1455,19 @@
 
         if (mktKey === 'ml') {
             const a = data[awayName], h = data[homeName];
-            if (!a && !h) return null;
-            // diff = current - open (American odds). More-negative diff
-            // means the team became a bigger favorite (or smaller dog) =
-            // money flowing in.
-            const aDiff = a ? a.diff : Infinity;
-            const hDiff = h ? h.diff : Infinity;
-            if (aDiff === hDiff) return null;
-            return aDiff < hDiff ? awayName : homeName;
+            const aDiff = a ? a.diff : null;
+            const hDiff = h ? h.diff : null;
+            // Both sides observed → side with more-negative diff is sharp.
+            if (aDiff != null && hDiff != null) {
+                if (aDiff === hDiff) return null;
+                return aDiff < hDiff ? awayName : homeName;
+            }
+            // Only one side observed. If THAT side got more favored,
+            // sharp is that side. If it got less favored, sharp is the
+            // OTHER side — bail rather than print the wrong team.
+            if (aDiff != null) return aDiff < 0 ? awayName : null;
+            if (hDiff != null) return hDiff < 0 ? homeName : null;
+            return null;
         }
 
         if (mktKey === 'spread') {
