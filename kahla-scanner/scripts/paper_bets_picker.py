@@ -5,9 +5,9 @@ Two bots, one script. Both run every 30 min as appended steps in
 Per-bot dedup (`(market_id, bot)`) prevents double-logging, so games
 get picked the first time they qualify in each bot's window.
 
-  --bot early   Candidates: event_start 12–18h from now.
-                Thesis: cumulative sharp signal has had overnight to
-                develop, but retail closing-line move hasn't kicked in.
+  --bot early   Candidates: event_start 10–36h from now.
+                Thesis: cumulative sharp signal has had time to develop,
+                but retail closing-line move hasn't kicked in.
   --bot late    Candidates: event_start 0–2h from now.
                 Thesis: closing-line sharp money, near-CLV proxy.
 
@@ -50,10 +50,11 @@ log = logging.getLogger(__name__)
 # cron — per-bot dedup means re-runs only fill new candidates as games
 # walk into each window.
 WINDOWS = {
-    # 12-18h: cumulative sharp signal has had overnight to develop but
-    # retail closing-line move hasn't kicked in. Captures evening-game
-    # action that posted on the morning slate.
-    "early": (timedelta(hours=12), timedelta(hours=18)),
+    # 10-36h: cumulative sharp signal has had time to develop but retail
+    # closing-line move hasn't kicked in. Wide window so a game gets
+    # multiple shots at qualifying as the day progresses; per-bot dedup
+    # locks the entry at the FIRST qualifying cycle.
+    "early": (timedelta(hours=10), timedelta(hours=36)),
     # 0-2h: closing-line sharp money / late-info (lineups, weather,
     # syndicate flow). Closest to CLV. 0-floor = strictly future games.
     "late":  (timedelta(minutes=0), timedelta(hours=2)),

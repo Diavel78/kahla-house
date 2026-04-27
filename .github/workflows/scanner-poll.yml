@@ -103,3 +103,15 @@ jobs:
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python -m scripts.paper_bets_picker --bot late
+
+      # Phase 4 Stage 2 — paper-bet resolver. Grades pending bets whose
+      # event_start is more than 4h ago via ESPN final scores. Idempotent
+      # (graded rows leave the pending filter), cheap (small queries +
+      # in-memory ESPN cache per run), continue-on-error so a flaky ESPN
+      # response doesn't break the pipeline.
+      - name: Paper bets — Resolver
+        continue-on-error: true
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.paper_bets_resolver

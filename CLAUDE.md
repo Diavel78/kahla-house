@@ -391,14 +391,20 @@ Schema (`kahla-scanner/supabase/paper_bets.sql`): one row per logged bet with `b
 
 `scripts/sharp_alerts.py` previously wrote `_record_alert(... payload={"books": ..., "direction": ..., "raw_side": ...})` after a successful steam send, but `_detect_steam` never put `direction` or `raw_side` keys into its alert dict — so any real steam fire would `KeyError` before `_record_alert` was called, leaving the dedup row unwritten and the next cycle re-firing the same alert. Now the payload is `{"books", "samples"}` (keys that actually exist in `_detect_steam` output).
 
-### Stage 2 — resolver (next)
+### Stage 2 — resolver (live)
 
-`scripts/paper_bets_resolver.py` will:
-- Pull pending rows whose `event_start` is more than ~4h ago (game finished + ESPN final posted).
-- Match each market to ESPN final via the same `_merge_espn_scores` logic Flask uses on `/api/odds`.
-- Grade ML by winner, SPR by score margin vs `entry_line`, TOT by total vs `entry_line`. Push when SPR margin equals the line exactly or TOT total equals the line exactly.
-- Set `status` (won/lost/push), `pnl_units` (flat 1u: `entry_price/100` win when positive, `100/|entry_price|` win when negative, `−1.0` loss, `0` push), `result_score`, `settled_at`.
-- Run as an appended step in `scanner-poll.yml` (cheap; just queries pending rows + already-cached ESPN data).
+`scripts/paper_bets_resolver.py`, appended step in `scanner-poll.yml` (every 30 min). For each `paper_bets` row with `status='pending'` and `event_start < now - 4h`:
+1. Look up ESPN scoreboard for the bet's sport on the bet's US/Eastern date (per-run in-memory cache so 5-15 bets on the same night = 1 ESPN call).
+2. Match by lowercase team-name substring (two-way) + commence_time within ±90 min — same logic as Flask's `_merge_espn_scores`.
+3. Skip if `state != 'post'` (game still in-progress / postponed — try again next cycle).
+4. Grade:
+   - **ML**: side wins iff their score > opponent's. Tie → push.
+   - **SPR**: `(side_score − opp_score) + entry_line` > 0 = won, < 0 = lost, == 0 = push.
+   - **TOT**: total vs `entry_line` (over wins on >, under on <, push on ==).
+5. `pnl_units` = flat 1u sizing: win @ +N → `+N/100`, win @ −N → `+100/N`, loss → `−1.0`, push/void → `0`.
+6. Update `status`, `pnl_units`, `result_score` (`{home, away, total}`), `settled_at`.
+
+UFC bets stay pending — ESPN has no consolidated MMA scoreboard endpoint. Manual resolution for now (low volume). Postponed games (`PPD` / `state` stuck at `pre`/`in` past expected end) also stay pending until ESPN's state flips to `post`.
 
 ### Stage 3 — admin UI (after Stage 2)
 
