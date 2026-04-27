@@ -385,7 +385,7 @@ Schema (`kahla-scanner/supabase/paper_bets.sql`): one row per logged bet with `b
 
 **Constants in `_lib/paper_bets.py`** (tune as we get hit-rate data):
 - `SHARP_SCORE_MIN = 4`
-- `EDGE_PP_MIN = 1.0`
+- `EDGE_PP_MIN = 0.5` (started at 1.0; lowered after first day produced zero picks because heavy-chalk markets had retail within 1pp of PIN devigged. 0.5pp still requires positive edge but catches realistic retail-lag cases.)
 - `SHARP_WEIGHT = 0.6`, `EDGE_WEIGHT = 0.4`
 - `MAX_PICKS_PER_RUN = 5`
 - `ENTRY_BOOKS = {DK, FD, MGM, CAE, HR, BET365, BR, BOL, LV, BVD, ESPN, FAN, MB}` — same 14-book allowlist as `_ALLOWED_BOOKS` minus PIN.

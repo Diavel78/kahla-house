@@ -23,8 +23,14 @@ log = logging.getLogger(__name__)
 
 # Pick filters. EV bets must clear BOTH thresholds. (Steam bets bypass
 # these — steam fires on the trigger event, not on cumulative state.)
+# Lowered EDGE_PP_MIN from 1.0 → 0.5 after first day's run produced zero
+# picks: heavy-chalk markets (Denver -503 etc.) had retail tracking PIN
+# within 1pp on every side. 0.5pp still requires a positive edge but
+# catches the realistic gap where retail is half a point softer than
+# PIN's devigged fair. We'll re-tighten if 30d hit-rate at this floor
+# under-performs.
 SHARP_SCORE_MIN = 4
-EDGE_PP_MIN     = 1.0
+EDGE_PP_MIN     = 0.5
 
 # Score weights — 60% sharp signal, 40% edge. Tunable once we have
 # resolved-bet data to grade each component's hit-rate.
