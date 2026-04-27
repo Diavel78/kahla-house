@@ -280,42 +280,79 @@ def _fmt_pt(v):
     return f"+{v}" if v > 0 else f"{v}"
 
 
-def _direction(cur, ear, market_type):
-    """Sign of movement: +1 / -1 / 0. Same composite as the JS scorer."""
-    cp = cur.get("price_american")
-    ep = ear.get("price_american")
-    cl = cur.get("line")
-    el = ear.get("line")
-    if cp is None or ep is None: return 0
-    if market_type == "moneyline":
-        # American odds going more negative = book pulling toward favorite.
-        # We want the direction of the line, which mirrors price direction.
-        d = cp - ep
-        return 1 if d > 0 else -1 if d < 0 else 0
-    line_diff = (cl or 0) - (el or 0)
-    price_diff = cp - ep
-    composite = line_diff * 10 + price_diff
-    return 1 if composite > 0.5 else -1 if composite < -0.5 else 0
-
+# THE RULE: sharp side = side whose bet got HARDER.
+#   ML  - team whose American odds got more negative (more expensive
+#         to bet that team to win)
+#   SPR - team whose spread number got worse (need to win by more, e.g.
+#         BOS -7 → -8.5 = harder for BOS bettors = sharp BOS)
+#   TOT - line raised → Over needs more points = harder = sharp OVER
+#         line lowered → Under has less room = harder = sharp UNDER
+# Books move the line/price to make the side getting hammered with
+# money LESS attractive (harder to win the bet). So whichever side got
+# harder is the side the sharp money is on.
 
 _OPPOSITE_SIDE = {"home": "away", "away": "home", "over": "under", "under": "over"}
 
 
-def _steam_sharp_side(raw_side, direction):
-    """Steam direction interpretation:
-       direction = -1 (price decreased on raw_side) → books making that side less
-         attractive because money is on it → sharp = raw_side.
-       direction = +1 (price increased on raw_side) → books making that side more
-         attractive to attract money → sharp = OPPOSITE side."""
-    if direction < 0: return raw_side
-    return _OPPOSITE_SIDE.get(raw_side, raw_side)
+def _move_sharp_side(market_type, raw_side, cur_snap, ear_snap):
+    """Compute the sharp side directly from a single book's move on a
+    given (market_type, raw_side). Replaces the older
+    direction±1-translation rule which was correct for ML/SPR but wrong
+    for TOT (raising a total = sharp OVER regardless of which side
+    the move was detected on)."""
+    cur_p = cur_snap.get("price_american")
+    ear_p = ear_snap.get("price_american")
+    cur_l = cur_snap.get("line")
+    ear_l = ear_snap.get("line")
+    if cur_p is None or ear_p is None:
+        return None
+
+    if market_type == "moneyline":
+        d = cur_p - ear_p
+        if d < 0: return raw_side               # got more favored = sharp on raw
+        if d > 0: return _OPPOSITE_SIDE.get(raw_side)
+        return None
+
+    if market_type == "spread":
+        # PRIMARY: line shift (>=0.5pt). Negative point_diff on raw_side
+        # = side became more favored = sharp on raw.
+        line_diff = (cur_l or 0) - (ear_l or 0)
+        if abs(line_diff) >= 0.5:
+            return raw_side if line_diff < 0 else _OPPOSITE_SIDE.get(raw_side)
+        # FALLBACK: pure price move.
+        d = cur_p - ear_p
+        if d < 0: return raw_side
+        if d > 0: return _OPPOSITE_SIDE.get(raw_side)
+        return None
+
+    if market_type == "total":
+        # Line direction IS the answer regardless of which side the move
+        # was detected on. Total raised = books expect more scoring =
+        # sharp OVER. Lowered = sharp UNDER.
+        line_diff = (cur_l or 0) - (ear_l or 0)
+        if line_diff > 0: return "over"
+        if line_diff < 0: return "under"
+        # Line flat — read juice direction on the raw side.
+        d = cur_p - ear_p
+        if raw_side == "over":
+            if d < 0: return "over"   # Over price more negative = sharp Over
+            if d > 0: return "under"
+        else:
+            if d < 0: return "under"
+            if d > 0: return "over"
+        return None
+
+    return None
 
 
 def _detect_steam(snaps_recent, snaps_earlier, market_id):
-    """Per (market_type, side), find groups of ≥STEAM_BOOK_COUNT books
-    moving the same direction. Dedupes home/away (or over/under) entries
-    that point at the same sharp_side, keeping the strongest signal.
-    Returns list of dicts with `sharp_side` already translated."""
+    """Per (market_type, sharp_side), find groups of >=STEAM_BOOK_COUNT
+    books moving in a way consistent with the same sharp side.
+
+    Each book contributes ONCE per (market_type, sharp_side) — even
+    though most markets have two sides (home/away or over/under), a
+    single book's move flows from both sides simultaneously. We
+    deduplicate so a single book doesn't get counted twice."""
     cur = {}
     for s in snaps_recent:
         if s["market_id"] != market_id: continue
@@ -327,58 +364,48 @@ def _detect_steam(snaps_recent, snaps_earlier, market_id):
         key = (s["book"], s["market_type"], s["side"])
         if key not in ear: ear[key] = s
 
-    grouped = {}
+    # (book, market_type) → sharp_side. If a book's home and away side
+    # both report a move, they should agree on sharp_side — last write
+    # wins on any disagreement (defensive; rare).
+    book_sharp = {}
     for key, c in cur.items():
         e = ear.get(key)
         if not e: continue
-        mt, raw_side = key[1], key[2]
-        d = _direction(c, e, mt)
-        if d == 0: continue
-        gk = (mt, raw_side, d)
-        grouped.setdefault(gk, []).append((c["book"], e, c))
+        bk, mt, raw_side = key
+        ss = _move_sharp_side(mt, raw_side, c, e)
+        if ss:
+            book_sharp[(bk, mt)] = ss
 
-    # Build per-(market_type, sharp_side) best candidate. ML/SPR fires
-    # twice (home -1 AND away +1 both point at sharp=home); we keep the
-    # one with more books. Samples shown in the message are looked up
-    # on the SHARP side (not raw_side) so the prices in the alert
-    # match the side the header names — otherwise an alert that says
-    # "sharp ROCKETS" lists Lakers prices going up, which is correct
-    # mechanically but confusing to read.
-    best_per_sharp = {}
-    for (mt, raw_side, d), books in grouped.items():
+    # Group books by (market_type, sharp_side)
+    grouped = {}
+    for (bk, mt), ss in book_sharp.items():
+        grouped.setdefault((mt, ss), []).append(bk)
+
+    out = []
+    for (mt, ss), books in grouped.items():
         if len(books) < STEAM_BOOK_COUNT:
             continue
-        sharp_side = _steam_sharp_side(raw_side, d)
-        # Re-key sample lookups onto the sharp side so the price strings
-        # we show describe the side the alert header names. Capture line
-        # too so the message can render '+7.0 -112 → +6.5 -119' for
-        # spread/total markets — price alone hides half the move.
+        # Show sharp-side prices/lines so the message reads consistently
+        # with the named side. Fall back to opposite side if missing.
         samples = []
-        for bk, _e_raw, _c_raw in books[:5]:
-            ss_e = ear.get((bk, mt, sharp_side))
-            ss_c = cur.get((bk, mt, sharp_side))
+        for bk in books[:5]:
+            ss_e = ear.get((bk, mt, ss))
+            ss_c = cur.get((bk, mt, ss))
+            if not (ss_e and ss_c):
+                opp = _OPPOSITE_SIDE.get(ss)
+                ss_e = ear.get((bk, mt, opp))
+                ss_c = cur.get((bk, mt, opp))
             if ss_e and ss_c:
                 samples.append((bk,
                                 ss_e.get("line"), ss_e.get("price_american"),
                                 ss_c.get("line"), ss_c.get("price_american")))
-        if not samples:
-            # Fall back to raw side (shouldn't happen for two-sided
-            # markets, but defensive).
-            samples = [(b[0],
-                        b[1].get("line"), b[1].get("price_american"),
-                        b[2].get("line"), b[2].get("price_american")) for b in books[:5]]
-        bk_key = (mt, sharp_side)
-        cand = {
+        out.append({
             "market_type": mt,
-            "raw_side":    raw_side,
-            "sharp_side":  sharp_side,
-            "direction":   d,
-            "books":       [b[0] for b in books],
+            "sharp_side":  ss,
+            "books":       books,
             "samples":     samples,
-        }
-        if bk_key not in best_per_sharp or len(books) > len(best_per_sharp[bk_key]["books"]):
-            best_per_sharp[bk_key] = cand
-    return list(best_per_sharp.values())
+        })
+    return out
 
 
 def _sharp_for_ml(market_id, openers, pin_current):
