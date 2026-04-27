@@ -87,11 +87,17 @@ def _move_score_ml(opener_amer, current_amer):
 
 
 def _move_score_spr_tot(opener_line, current_line, opener_price, current_price):
+    """Sharp magnitude for SPR/TOT.
+       LINE moved  → score is the line move; vig drift is rebalance, IGNORED.
+       LINE flat   → score is the vig move (pure juice signal).
+       Two distinct signals; never additive."""
     if opener_price is None or current_price is None:
         return None
     pt = abs((current_line or 0) - (opener_line or 0))
+    if pt > 0:
+        return min(10, round(pt * 10))
     px = abs(current_price - opener_price)
-    return min(10, round(pt * 10 + px))
+    return min(10, round(px))
 
 
 def _sharp_side_ml(home_diff_cents, away_diff_cents):

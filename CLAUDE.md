@@ -285,7 +285,9 @@ Per-market signal-strength rating shown on each game card's movement bar. Scale 
 Computed JS-side in `computeSharpScore(ev, mv, splitsEv, mktKey, away, home)` in `templates/odds.html`. Movement breakdown:
 
 - **ML**: `|cent_distance|` capped 10. `_amerToCents()` handles the +/-100 boundary (e.g. -110 → +110 = 20-cent move, not 0).
-- **Spread / Total**: `|point_diff| × 10 + |price_diff_cents|`, capped 10. 1pt of line move = 10 cents-equivalent. So a 9-cent juice drop with NO line move = SHARP 9, same as a 9-cent ML move. 0.5pt + small price = 5–8.
+- **Spread / Total**: TWO distinct signals, NEVER additive.
+  - LINE moved → score = `|point_diff| × 10` capped 10. Any vig drift that came along with the line move is rebalance, IGNORED.
+  - LINE flat → score = `|price_diff_cents|` capped 10. Pure juice move.
 
 The `_splitsSubScore` and `_divergenceSubScore` helpers are kept in the file (Phase 4 Sharp Bot will use them for paper-bet selection logic, where weighted blending across signals makes sense). They just don't feed the on-card display number.
 
