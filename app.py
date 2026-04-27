@@ -158,6 +158,12 @@ def dashboard():
     return render_template("dashboard.html")
 
 
+@app.route("/sharp-bot")
+def sharp_bot_page():
+    """Phase 4 paper-bet bot tracker — admin only (client-side gated)."""
+    return render_template("sharp_bot.html")
+
+
 # ---------------------------------------------------------------------------
 # Polymarket SDK client
 # ---------------------------------------------------------------------------
@@ -3167,6 +3173,79 @@ def api_debug_trades():
         "total_slugs": len(by_slug),
         "slugs_with_sells": len(sell_slugs),
         "trades_by_slug": sell_slugs,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Sharp Bot (paper bets) admin tracker
+# ---------------------------------------------------------------------------
+
+@app.route("/api/sharp-bot")
+@admin_required
+def api_sharp_bot():
+    """JSON for /sharp-bot. Returns:
+      pending  — every paper_bets row with status='pending' (no age cap)
+      settled  — rows graded in the last 30 days (won/lost/push)
+      stats    — per-bot rollup over `settled`: graded count, hit rate
+                 (excludes pushes from denominator), total units, ROI
+                 per bet (units/graded). Hit rate / ROI are null when
+                 there are no resolved bets yet."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+
+    now = datetime.now(timezone.utc)
+    cutoff_30d = (now - timedelta(days=30)).isoformat()
+
+    cols = ("id,picked_at,bot,sport,event_name,event_start,"
+            "market_type,side,entry_book,entry_price,entry_line,"
+            "fair_prob,edge_pp,sharp_score,"
+            "status,pnl_units,result_score,settled_at")
+    try:
+        pending = (sb.table("paper_bets").select(cols)
+                   .eq("status", "pending")
+                   .order("event_start", desc=False)
+                   .limit(500).execute().data) or []
+        settled = (sb.table("paper_bets").select(cols)
+                   .neq("status", "pending")
+                   .gte("settled_at", cutoff_30d)
+                   .order("settled_at", desc=True)
+                   .limit(500).execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
+
+    stats: dict = {}
+    for bot in ("steam", "early", "late"):
+        stats[bot] = {"graded": 0, "won": 0, "lost": 0, "push": 0,
+                      "units": 0.0, "hit_rate": None, "roi": None}
+    for r in settled:
+        bot = r.get("bot")
+        if bot not in stats:
+            continue
+        s = stats[bot]
+        s["graded"] += 1
+        st = r.get("status")
+        if st in ("won", "lost", "push"):
+            s[st] += 1
+        try:
+            s["units"] += float(r.get("pnl_units") or 0)
+        except (TypeError, ValueError):
+            pass
+    for s in stats.values():
+        decided = s["won"] + s["lost"]
+        if decided > 0:
+            s["hit_rate"] = round(s["won"] / decided, 4)
+        if s["graded"] > 0:
+            s["roi"] = round(s["units"] / s["graded"], 4)
+        s["units"] = round(s["units"], 3)
+
+    return jsonify({
+        "ok":           True,
+        "now_iso":      now.isoformat(),
+        "window_days":  30,
+        "pending":      pending,
+        "settled":      settled,
+        "stats":        stats,
     })
 
 

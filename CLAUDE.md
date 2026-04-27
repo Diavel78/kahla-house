@@ -27,7 +27,8 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `/odds` (page) | admin, viewer | client probes `/api/me` and bounces unauthorized |
 | `/api/odds`, `/api/odds/history`, `/api/odds/history-batch`, `/api/openers*`, `/api/preferences` | any approved | `@firebase_auth_required` (rejects pending) |
 | `/dashboard` (page) | admin | client probes `/api/me` and bounces non-admins |
-| `/api/data`, `/api/my-bets`, `/api/debug-trades`, `/api/debug-deposits`, `/api/debug-snap` | admin | `@admin_required` |
+| `/sharp-bot` (page) | admin | client probes `/api/me` and bounces non-admins |
+| `/api/data`, `/api/my-bets`, `/api/debug-trades`, `/api/debug-deposits`, `/api/debug-snap`, `/api/sharp-bot` | admin | `@admin_required` |
 | `/api/raw` (Polymarket SDK debug) | admin | `@admin_required` |
 
 `@firebase_auth_required` itself rejects any user where `approved != true` (returns 403), so even API endpoints that don't need admin still keep `pending` users out.
@@ -39,6 +40,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `/` | `index.html` | public | Landing page (login/signup, pending screen, admin panel, app cards by role) |
 | `/odds` | `odds.html` | admin + viewer | Odds Board — multi-book odds comparison, opener-vs-current movement, per-game line-movement chart modal |
 | `/dashboard` | `dashboard.html` | admin only | Polymarket P&L Dashboard — positions, closed trades, bet slip |
+| `/sharp-bot` | `sharp_bot.html` | admin only | Phase 4 paper-bet tracker — Steam / Early EV / Late EV columns, pending + settled-30d picks, per-bot hit rate / units / ROI |
 
 > **Odds-ingest cron (`kahla-scanner/`)**: minimal Python subproject at
 > `kahla-scanner/` runs `python -m scrapers.odds_api` every 30 min via
@@ -92,6 +94,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `GET /api/my-orders` | **Admin** | Open / unfilled Polymarket limit orders (CLOB working orders). Filtered to NEW / PENDING_NEW / PENDING_REPLACE / PARTIALLY_FILLED states — filled, canceled, expired, rejected excluded. Powers the **Open Orders** section of the dashboard betslip so planned bets can be shared with friends before they fill. 30s server cache. |
 | `GET /api/clv` | **Admin** | Closing Line Value per open Polymarket position whose underlying game has started (so PIN has a closing line). Matches each Polymarket bet to our `markets` table (sport prefix + commence date + fuzzy team name), pulls PIN's last pre-`event_start` snapshots on both sides, devigs the pair, computes `(close_devig_prob − entry_implied_prob) × 100`. Positive = sharp entry, negative = got picked off. Returns per-bet records + `avg_clv_pp` rolling average across matched bets. 60s server cache. v1 covers open positions only — closed/settled bet history + 30-day rolling per-signal hit-rate is Phase 4 (Sharp Bot). |
 | `GET /api/data` | **Admin** | Dashboard P&L data (positions, balances, trades) |
+| `GET /api/sharp-bot` | **Admin** | Phase 4 paper-bet tracker payload. Returns `pending` (every `paper_bets` row with `status='pending'`, no age cap), `settled` (last 30 days), and `stats` (per-bot rollup: graded count, hit rate excluding pushes, total units, ROI per bet). Single endpoint, no caching — paper_bets queries are tiny. |
 | `GET /api/raw` | Admin | Debug: raw Polymarket SDK responses |
 | `GET /api/debug-trades` | **Admin** | Debug: grouped trade details with before/after position data |
 | `GET /api/debug-deposits` | **Admin** | Debug: all balance changes with types and reasons |
@@ -406,9 +409,18 @@ Schema (`kahla-scanner/supabase/paper_bets.sql`): one row per logged bet with `b
 
 UFC bets stay pending — ESPN has no consolidated MMA scoreboard endpoint. Manual resolution for now (low volume). Postponed games (`PPD` / `state` stuck at `pre`/`in` past expected end) also stay pending until ESPN's state flips to `post`.
 
-### Stage 3 — admin UI (after Stage 2)
+### Stage 3 — admin UI (live)
 
-`/sharp-bot` admin-only page + `/api/sharp-bot/*` routes. Three columns (Steam / Early / Late), each showing today's picks, last 30 days' P&L, hit rate, ROI. Per-bot stat cards roll up across all sports.
+`/sharp-bot` (admin-only, client-side gated via `/api/me`) + `GET /api/sharp-bot` (admin-only, server-side `@admin_required`).
+
+The page renders three columns side-by-side (steam / early / late). Mobile stacks them. Per column:
+- **Stat strip**: Graded count, Hit Rate (excludes pushes from denominator), Total Units, ROI per bet (`units / graded`).
+- **Pending list**: every `paper_bets` row where `status='pending'`, sorted by `event_start` asc. Each row shows event/sport, market+side+entry, edge_pp + sharp_score chips, kickoff countdown.
+- **Settled · 30d list**: every row settled in the last 30d, sorted by `settled_at` desc. Same row layout plus W/L/Push badge, final score, settled-time-ago, pnl_units.
+
+Auto-refreshes every 60s. Manual Refresh button in the top bar. The endpoint returns `pending` (no age cap), `settled` (last 30d), and `stats` (per-bot rollup) in a single payload — page polls one URL.
+
+Nav link added to `/odds` (admin-only, hidden for viewers) and `/dashboard` (admin-only by virtue of the page itself). Sharp Bot card on `/` is rendered alongside the Dashboard card under the admin app section.
 
 ### Stage 4 — self-tuning (deferred until ~14d of resolved data)
 

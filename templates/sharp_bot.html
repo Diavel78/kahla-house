@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kahla House — Sharp Bot</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>
+        const FC = {
+            apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
+            authDomain: "kahla-house.firebaseapp.com",
+            projectId: "kahla-house",
+            storageBucket: "kahla-house.firebasestorage.app",
+            messagingSenderId: "1029771942929",
+            appId: "1:1029771942929:web:76358096dbb868e375a5b0"
+        };
+        firebase.initializeApp(FC);
+    </script>
+
+    <style>
+        :root {
+            --bg: #0b0e13;
+            --surface: #13171e;
+            --surface-2: #1a1f2b;
+            --surface-3: #1f2533;
+            --border: #1e2530;
+            --border-light: #2a3140;
+            --text: #e2e8f0;
+            --text-secondary: #8890a8;
+            --text-muted: #555d78;
+            --blue: #4a7cff;
+            --green: #22c55e;
+            --orange: #f59e0b;
+            --red: #ef4444;
+            --purple: #a855f7;
+            --gold: #facc15;
+            --blue-dim: rgba(74,124,255,0.08);
+            --green-dim: rgba(34,197,94,0.10);
+            --orange-dim: rgba(245,158,11,0.10);
+            --red-dim: rgba(239,68,68,0.10);
+            --purple-dim: rgba(168,85,247,0.10);
+            --gold-dim: rgba(250,204,21,0.10);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body, #app { overflow-x: hidden; }
+        body {
+            font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        /* --- Top Bar (matches dashboard.html) --- */
+        .top-bar {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0 24px; height: 56px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            position: sticky; top: 0; z-index: 10;
+        }
+        .top-bar-left { display: flex; align-items: center; gap: 16px; }
+        .top-bar-logo {
+            width: 36px; height: 36px;
+            background: linear-gradient(135deg, var(--blue), var(--purple));
+            border-radius: 10px;
+            display: flex; align-items: center; justify-content: center;
+            font-family: 'JetBrains Mono', monospace; font-weight: 700;
+            font-size: 14px; color: #fff; letter-spacing: -0.5px;
+        }
+        .top-bar-title { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
+        .nav-links { display: flex; gap: 8px; margin-left: 16px; }
+        .nav-link {
+            padding: 6px 12px; border-radius: 6px; font-size: 13px;
+            color: var(--text-secondary); text-decoration: none; transition: all 0.15s;
+        }
+        .nav-link:hover { background: var(--surface-2); color: var(--text); }
+        .nav-link.active { background: var(--surface-3); color: var(--text); }
+        .top-bar-right { display: flex; align-items: center; gap: 12px; }
+        .status { font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+        .logout-btn {
+            background: transparent; border: 1px solid var(--border-light);
+            color: var(--text-secondary); padding: 5px 12px; border-radius: 6px;
+            cursor: pointer; font-size: 12px; transition: all 0.15s;
+        }
+        .logout-btn:hover { color: var(--red); border-color: var(--red); }
+
+        /* --- Page wrapper --- */
+        #auth-gate { display: flex; align-items: center; justify-content: center;
+                     min-height: 100vh; color: var(--text-muted); font-size: 14px; }
+        #app { display: none; }
+        .page {
+            max-width: 1600px; margin: 0 auto; padding: 24px;
+        }
+        .page-header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 20px; flex-wrap: wrap; gap: 12px;
+        }
+        .page-header h1 {
+            font-size: 22px; font-weight: 700; letter-spacing: -0.02em;
+            display: flex; align-items: center; gap: 10px;
+        }
+        .page-header .meta {
+            font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* --- Bot grid --- */
+        .bots-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+        }
+        @media (max-width: 1100px) {
+            .bots-grid { grid-template-columns: 1fr; }
+        }
+
+        .bot-col {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        .bot-col[data-bot="steam"] { border-top: 3px solid var(--red); }
+        .bot-col[data-bot="early"] { border-top: 3px solid var(--blue); }
+        .bot-col[data-bot="late"]  { border-top: 3px solid var(--orange); }
+
+        .bot-head {
+            padding: 14px 16px; display: flex; align-items: center;
+            justify-content: space-between; gap: 8px;
+            border-bottom: 1px solid var(--border);
+        }
+        .bot-head h2 {
+            font-size: 14px; font-weight: 700; letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .bot-col[data-bot="steam"] .bot-head h2 { color: var(--red); }
+        .bot-col[data-bot="early"] .bot-head h2 { color: var(--blue); }
+        .bot-col[data-bot="late"]  .bot-head h2 { color: var(--orange); }
+        .bot-head .desc {
+            font-size: 11px; color: var(--text-muted);
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* --- Stat strip --- */
+        .stat-strip {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1px;
+            background: var(--border);
+            border-bottom: 1px solid var(--border);
+        }
+        .stat-cell {
+            background: var(--surface);
+            padding: 10px 12px;
+            text-align: center;
+        }
+        .stat-cell .label {
+            font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+            color: var(--text-muted); margin-bottom: 4px;
+        }
+        .stat-cell .value {
+            font-size: 16px; font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .stat-cell .value.pos { color: var(--green); }
+        .stat-cell .value.neg { color: var(--red); }
+        .stat-cell .value.muted { color: var(--text-muted); }
+
+        /* --- Sections --- */
+        .section {
+            padding: 12px 16px 4px;
+        }
+        .section-title {
+            font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+            color: var(--text-muted); margin-bottom: 8px;
+            display: flex; align-items: center; justify-content: space-between;
+        }
+        .section-title .count {
+            font-family: 'JetBrains Mono', monospace; color: var(--text-secondary);
+        }
+
+        .picks { list-style: none; padding-bottom: 8px; }
+        .empty {
+            font-size: 12px; color: var(--text-muted); text-align: center;
+            padding: 20px 8px; font-style: italic;
+        }
+
+        /* --- Pick row --- */
+        .pick {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px 12px;
+            margin-bottom: 6px;
+            font-size: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .pick .row1 {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 8px;
+        }
+        .pick .teams {
+            font-weight: 600; color: var(--text); font-size: 12px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            flex: 1;
+        }
+        .sport-badge {
+            font-family: 'JetBrains Mono', monospace; font-size: 9px;
+            padding: 2px 6px; border-radius: 4px;
+            background: var(--surface-3); color: var(--text-secondary);
+            letter-spacing: 0.04em; flex-shrink: 0;
+        }
+        .pick .row2 {
+            display: flex; align-items: center; gap: 8px;
+            font-family: 'JetBrains Mono', monospace; font-size: 11px;
+            color: var(--text-secondary); flex-wrap: wrap;
+        }
+        .pick .row2 .market { color: var(--text); font-weight: 600; }
+        .pick .row2 .entry  { color: var(--text); }
+        .pick .row3 {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 8px; font-size: 10px; color: var(--text-muted);
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .pick .signals { display: flex; gap: 6px; align-items: center; }
+        .pick .chip {
+            padding: 2px 6px; border-radius: 4px; font-size: 10px;
+            background: var(--surface-3); color: var(--text-secondary);
+            letter-spacing: 0.02em;
+        }
+        .pick .chip.edge { background: var(--green-dim); color: var(--green); }
+        .pick .chip.sharp { background: var(--purple-dim); color: var(--purple); }
+        .pick .chip.kickoff { background: var(--orange-dim); color: var(--orange); }
+        /* Result badges */
+        .pick.won  { border-color: rgba(34,197,94,0.35); background: linear-gradient(180deg, var(--green-dim), var(--surface-2) 60%); }
+        .pick.lost { border-color: rgba(239,68,68,0.35); background: linear-gradient(180deg, var(--red-dim), var(--surface-2) 60%); }
+        .pick.push { border-color: rgba(168,85,247,0.30); }
+        .pick .badge {
+            font-family: 'JetBrains Mono', monospace; font-size: 10px;
+            font-weight: 700; letter-spacing: 0.06em; padding: 2px 8px;
+            border-radius: 4px;
+        }
+        .pick .badge.won  { background: var(--green); color: #04240e; }
+        .pick .badge.lost { background: var(--red);   color: #260606; }
+        .pick .badge.push { background: var(--purple); color: #160426; }
+        .pick .pnl { font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+        .pick .pnl.pos { color: var(--green); }
+        .pick .pnl.neg { color: var(--red); }
+        .pick .pnl.zero { color: var(--text-muted); }
+
+        .refresh-btn {
+            background: transparent; border: 1px solid var(--border-light);
+            color: var(--text-secondary); padding: 5px 10px; border-radius: 6px;
+            cursor: pointer; font-size: 12px;
+        }
+        .refresh-btn:hover { color: var(--text); border-color: var(--blue); }
+
+        @media (max-width: 600px) {
+            .top-bar { flex-direction: column; height: auto; padding: 8px 12px; gap: 4px; }
+            .top-bar-left, .top-bar-right { width: 100%; justify-content: space-between; }
+            .page { padding: 12px; }
+            .stat-cell { padding: 8px 4px; }
+            .stat-cell .value { font-size: 13px; }
+        }
+    </style>
+</head>
+<body>
+    <div id="auth-gate">Authenticating…</div>
+
+    <div id="app">
+        <div class="top-bar">
+            <div class="top-bar-left">
+                <div class="top-bar-logo">KH</div>
+                <div class="top-bar-title">The Kahla House</div>
+                <div class="nav-links">
+                    <a href="/" class="nav-link">Home</a>
+                    <a href="/odds" class="nav-link">Odds</a>
+                    <a href="/dashboard" class="nav-link">Dashboard</a>
+                    <a href="/sharp-bot" class="nav-link active">Sharp Bot</a>
+                </div>
+            </div>
+            <div class="top-bar-right">
+                <span class="status" id="status">Loading…</span>
+                <button class="refresh-btn" onclick="loadData(true)">Refresh</button>
+                <button class="logout-btn" onclick="doLogout()">Logout</button>
+            </div>
+        </div>
+
+        <div class="page">
+            <div class="page-header">
+                <h1>Sharp Bot</h1>
+                <div class="meta" id="meta">—</div>
+            </div>
+
+            <div class="bots-grid">
+                <section class="bot-col" data-bot="steam">
+                    <div class="bot-head">
+                        <h2>🚨 Steam</h2>
+                        <div class="desc">5+ books moved together</div>
+                    </div>
+                    <div class="stat-strip" data-stats="steam"></div>
+                    <div class="section"><div class="section-title">Pending <span class="count" data-pending-count="steam">0</span></div><ul class="picks" data-pending="steam"></ul></div>
+                    <div class="section"><div class="section-title">Settled · 30d <span class="count" data-settled-count="steam">0</span></div><ul class="picks" data-settled="steam"></ul></div>
+                </section>
+
+                <section class="bot-col" data-bot="early">
+                    <div class="bot-head">
+                        <h2>⏰ Early EV</h2>
+                        <div class="desc">10–36h pre-game</div>
+                    </div>
+                    <div class="stat-strip" data-stats="early"></div>
+                    <div class="section"><div class="section-title">Pending <span class="count" data-pending-count="early">0</span></div><ul class="picks" data-pending="early"></ul></div>
+                    <div class="section"><div class="section-title">Settled · 30d <span class="count" data-settled-count="early">0</span></div><ul class="picks" data-settled="early"></ul></div>
+                </section>
+
+                <section class="bot-col" data-bot="late">
+                    <div class="bot-head">
+                        <h2>⚡ Late EV</h2>
+                        <div class="desc">0–2h pre-game</div>
+                    </div>
+                    <div class="stat-strip" data-stats="late"></div>
+                    <div class="section"><div class="section-title">Pending <span class="count" data-pending-count="late">0</span></div><ul class="picks" data-pending="late"></ul></div>
+                    <div class="section"><div class="section-title">Settled · 30d <span class="count" data-settled-count="late">0</span></div><ul class="picks" data-settled="late"></ul></div>
+                </section>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    // ─── Firebase auth (admin gate) ───
+    async function authFetch(url, options = {}) {
+        const user = firebase.auth().currentUser;
+        if (!user) { window.location.href = '/'; return null; }
+        const token = await user.getIdToken();
+        const headers = { ...(options.headers || {}), 'Authorization': 'Bearer ' + token };
+        return fetch(url, { ...options, headers });
+    }
+    function doLogout() { firebase.auth().signOut().then(() => { window.location.href = '/'; }); }
+
+    firebase.auth().onAuthStateChanged(async user => {
+        if (!user) { window.location.href = '/'; return; }
+        try {
+            const token = await user.getIdToken();
+            const r = await fetch('/api/me', { headers: { 'Authorization': 'Bearer ' + token } });
+            if (!r.ok) { window.location.href = '/'; return; }
+            const me = await r.json();
+            if (!me.approved || me.role !== 'admin') { window.location.href = '/'; return; }
+        } catch { window.location.href = '/'; return; }
+        document.getElementById('auth-gate').style.display = 'none';
+        document.getElementById('app').style.display = '';
+        loadData(true);
+        setInterval(() => loadData(false), 60_000);
+    });
+
+    // ─── Formatters ───
+    const _fmtAmer = p => (p == null ? '—' : (p > 0 ? `+${p}` : `${p}`));
+    const _fmtPt   = v => (v == null ? '' : (v > 0 ? `+${v}` : `${v}`));
+    const _fmtPct  = (x, dp=1) => (x == null ? '—' : `${(x*100).toFixed(dp)}%`);
+    const _fmtUnits = u => {
+        if (u == null) return '—';
+        const n = Number(u);
+        const sign = n > 0 ? '+' : '';
+        return `${sign}${n.toFixed(2)}u`;
+    };
+    function _fmtKickoff(iso) {
+        const d = new Date(iso);
+        const now = new Date();
+        const diffMin = Math.round((d - now) / 60_000);
+        if (diffMin < 0) return 'live/done';
+        if (diffMin < 60) return `${diffMin}m`;
+        if (diffMin < 60*24) return `${Math.round(diffMin/60)}h`;
+        return d.toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+    }
+    function _fmtSettled(iso) {
+        const d = new Date(iso);
+        const now = new Date();
+        const diffH = (now - d) / 3_600_000;
+        if (diffH < 24) return `${Math.round(diffH)}h ago`;
+        return d.toLocaleString([], {month:'short', day:'numeric'});
+    }
+    function _shortMarket(mt) { return ({moneyline:'ML', spread:'SPR', total:'TOT'})[mt] || mt; }
+
+    function _renderStats(s) {
+        const hr = s.hit_rate == null ? '—' : `${(s.hit_rate*100).toFixed(1)}%`;
+        const roi = s.roi == null ? '—' : `${(s.roi >= 0 ? '+' : '')}${(s.roi*100).toFixed(1)}%`;
+        const unitsCls = s.units > 0 ? 'pos' : (s.units < 0 ? 'neg' : 'muted');
+        const roiCls   = (s.roi == null) ? 'muted' : (s.roi > 0 ? 'pos' : (s.roi < 0 ? 'neg' : 'muted'));
+        return `
+            <div class="stat-cell"><div class="label">Graded</div><div class="value">${s.graded}</div></div>
+            <div class="stat-cell"><div class="label">Hit Rate</div><div class="value ${s.graded? '' : 'muted'}">${hr}</div></div>
+            <div class="stat-cell"><div class="label">Units</div><div class="value ${unitsCls}">${_fmtUnits(s.units)}</div></div>
+            <div class="stat-cell"><div class="label">ROI/bet</div><div class="value ${roiCls}">${roi}</div></div>
+        `;
+    }
+
+    function _renderPick(r, kind) {
+        const market = _shortMarket(r.market_type);
+        const sideLabel = (r.market_type === 'total')
+            ? (r.side || '').toUpperCase()
+            : (r.side === 'home' ? 'HOME' : 'AWAY');
+        const lineFrag = (r.entry_line == null) ? '' : ` ${_fmtPt(r.entry_line)}`;
+        const sigChips = [];
+        if (r.edge_pp != null) sigChips.push(`<span class="chip edge">+${Number(r.edge_pp).toFixed(1)}pp</span>`);
+        if (r.sharp_score != null) sigChips.push(`<span class="chip sharp">SHARP ${r.sharp_score}</span>`);
+
+        const cls = (kind === 'settled') ? (r.status || '') : '';
+
+        let resultHtml = '';
+        if (kind === 'settled') {
+            const badge = `<span class="badge ${r.status}">${(r.status || '').toUpperCase()}</span>`;
+            const pnlCls = r.pnl_units > 0 ? 'pos' : (r.pnl_units < 0 ? 'neg' : 'zero');
+            const score = r.result_score
+                ? `${r.result_score.away}-${r.result_score.home}`
+                : '';
+            resultHtml = `
+                <div class="row3">
+                    <span>${score} · settled ${_fmtSettled(r.settled_at)}</span>
+                    <span>${badge} <span class="pnl ${pnlCls}">${_fmtUnits(r.pnl_units)}</span></span>
+                </div>`;
+        } else {
+            sigChips.push(`<span class="chip kickoff">${_fmtKickoff(r.event_start)}</span>`);
+        }
+
+        return `
+            <li class="pick ${cls}">
+                <div class="row1">
+                    <span class="teams">${r.event_name}</span>
+                    <span class="sport-badge">${r.sport}</span>
+                </div>
+                <div class="row2">
+                    <span class="market">${market} · ${sideLabel}${lineFrag}</span>
+                    <span class="entry">@ ${r.entry_book} ${_fmtAmer(r.entry_price)}</span>
+                </div>
+                <div class="row3">
+                    <span class="signals">${sigChips.join('')}</span>
+                </div>
+                ${resultHtml}
+            </li>
+        `;
+    }
+
+    async function loadData(showLoading) {
+        const status = document.getElementById('status');
+        if (showLoading) status.textContent = 'Loading…';
+        try {
+            const resp = await authFetch('/api/sharp-bot');
+            if (!resp || !resp.ok) throw new Error('fetch failed');
+            const data = await resp.json();
+            if (!data.ok) throw new Error(data.error || 'unknown');
+
+            const groupBy = (rows, key) => {
+                const out = { steam: [], early: [], late: [] };
+                for (const r of rows || []) {
+                    if (out[r.bot]) out[r.bot].push(r);
+                }
+                return out;
+            };
+            const pending = groupBy(data.pending);
+            const settled = groupBy(data.settled);
+
+            for (const bot of ['steam', 'early', 'late']) {
+                document.querySelector(`[data-stats="${bot}"]`).innerHTML = _renderStats(data.stats[bot]);
+                const pendList = document.querySelector(`[data-pending="${bot}"]`);
+                const settList = document.querySelector(`[data-settled="${bot}"]`);
+                document.querySelector(`[data-pending-count="${bot}"]`).textContent = pending[bot].length;
+                document.querySelector(`[data-settled-count="${bot}"]`).textContent = settled[bot].length;
+                pendList.innerHTML = pending[bot].length
+                    ? pending[bot].map(r => _renderPick(r, 'pending')).join('')
+                    : `<li class="empty">No pending picks</li>`;
+                settList.innerHTML = settled[bot].length
+                    ? settled[bot].slice(0, 30).map(r => _renderPick(r, 'settled')).join('')
+                    : `<li class="empty">No settled picks yet</li>`;
+            }
+
+            const totUnits = ['steam','early','late'].reduce((a,b)=>a+(data.stats[b].units||0), 0);
+            const sign = totUnits > 0 ? '+' : '';
+            document.getElementById('meta').textContent = `${data.window_days}d · ${sign}${totUnits.toFixed(2)}u total · updated ${new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}`;
+            status.textContent = 'Live';
+        } catch (e) {
+            status.textContent = 'Error';
+            console.error('sharp-bot load failed', e);
+        }
+    }
+    </script>
+</body>
+</html>

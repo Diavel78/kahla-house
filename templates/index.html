@@ -125,6 +125,10 @@ body::after {
 .app-card.dashboard-app:hover { border-color: rgba(74,124,255,0.3); box-shadow: 0 8px 40px rgba(74,124,255,0.08), 0 0 0 1px rgba(74,124,255,0.15); }
 .app-card.dashboard-app .app-tag { background: var(--blue-dim); color: var(--blue); }
 .dashboard-app:hover .arrow { color: var(--blue); }
+.app-card.sharpbot-app::before { background: linear-gradient(90deg, var(--purple), var(--orange)); }
+.app-card.sharpbot-app:hover { border-color: rgba(168,85,247,0.3); box-shadow: 0 8px 40px rgba(168,85,247,0.08), 0 0 0 1px rgba(168,85,247,0.15); }
+.app-card.sharpbot-app .app-tag { background: var(--purple-dim); color: var(--purple); }
+.sharpbot-app:hover .arrow { color: var(--purple); }
 .admin-badge { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 9px; padding: 3px 8px; border-radius: 5px; background: var(--red-dim); color: #f87171; margin-left: 8px; letter-spacing: 0.05em; vertical-align: middle; }
 .app-icon { font-size: 2em; margin-bottom: 18px; display: block; }
 .app-card h2 { font-size: 1.1em; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.01em; }
@@ -359,6 +363,16 @@ function renderAppCards() {
             <span class="app-tag">P&amp;L Tracking</span>
             <div class="app-sub-links">
                 <a href="/dashboard" class="app-sub-link">Open Dashboard</a>
+            </div>
+            <span class="arrow">&rarr;</span>
+        </div>`;
+        h += `<div class="app-card sharpbot-app" style="cursor:default">
+            <span class="app-icon">&#129302;</span>
+            <h2>Sharp Bot<span class="admin-badge">ADMIN</span></h2>
+            <p>Three paper-bet bots — Steam, Early EV, Late EV — auto-tracked vs. ESPN finals. Hit rate, units, and ROI per strategy.</p>
+            <span class="app-tag">Paper Betting</span>
+            <div class="app-sub-links">
+                <a href="/sharp-bot" class="app-sub-link">Open Sharp Bot</a>
             </div>
             <span class="arrow">&rarr;</span>
         </div>`;
