@@ -350,17 +350,23 @@ def _detect_steam(snaps_recent, snaps_earlier, market_id):
             continue
         sharp_side = _steam_sharp_side(raw_side, d)
         # Re-key sample lookups onto the sharp side so the price strings
-        # we show describe the side the alert header names.
+        # we show describe the side the alert header names. Capture line
+        # too so the message can render '+7.0 -112 → +6.5 -119' for
+        # spread/total markets — price alone hides half the move.
         samples = []
         for bk, _e_raw, _c_raw in books[:5]:
             ss_e = ear.get((bk, mt, sharp_side))
             ss_c = cur.get((bk, mt, sharp_side))
             if ss_e and ss_c:
-                samples.append((bk, ss_e.get("price_american"), ss_c.get("price_american")))
+                samples.append((bk,
+                                ss_e.get("line"), ss_e.get("price_american"),
+                                ss_c.get("line"), ss_c.get("price_american")))
         if not samples:
             # Fall back to raw side (shouldn't happen for two-sided
             # markets, but defensive).
-            samples = [(b[0], b[1].get("price_american"), b[2].get("price_american")) for b in books[:5]]
+            samples = [(b[0],
+                        b[1].get("line"), b[1].get("price_american"),
+                        b[2].get("line"), b[2].get("price_american")) for b in books[:5]]
         bk_key = (mt, sharp_side)
         cand = {
             "market_type": mt,
@@ -508,17 +514,24 @@ def _fmt_local(iso_str):
 def _msg_steam(market, alert, away, home):
     sport = _SPORT_LABEL.get(market.get("sport"), market.get("sport") or "")
     sharp_side = alert["sharp_side"]
-    if alert["market_type"] == "total":
+    mt = alert["market_type"]
+    if mt == "total":
         side_label = sharp_side.upper()
     else:
         side_label = (home if sharp_side == "home" else away).upper()
     sample_lines = []
-    for bk, ep, cp in alert["samples"]:
-        sample_lines.append(f"  {bk}: {_fmt_amer(ep)} → {_fmt_amer(cp)}")
+    for bk, e_line, e_price, c_line, c_price in alert["samples"]:
+        if mt == "moneyline":
+            line = f"  {bk}: {_fmt_amer(e_price)} → {_fmt_amer(c_price)}"
+        else:
+            # Show line + price so spread/total moves read '+7 -112 → +6.5 -119'
+            line = (f"  {bk}: {_fmt_pt(e_line)} {_fmt_amer(e_price)}"
+                    f" → {_fmt_pt(c_line)} {_fmt_amer(c_price)}")
+        sample_lines.append(line)
     return (
         f"🚨 *STEAM* — {sport}\n"
         f"*{away} @ {home}* · {_fmt_local(market.get('event_start'))}\n"
-        f"`{_short_market(alert['market_type'])}` · *{side_label}* · {len(alert['books'])} books\n"
+        f"`{_short_market(mt)}` · *{side_label}* · {len(alert['books'])} books\n"
         + "\n".join(sample_lines)
     )
 
