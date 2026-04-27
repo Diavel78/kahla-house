@@ -125,7 +125,11 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - `templates/index.html` — Landing page with auth + admin + role-based app cards (~440 lines)
 - `kahla-scanner/scrapers/odds_api.py` — The Odds API ingester (cron entry point)
 - `kahla-scanner/scripts/cleanup_snapshots.py` — nightly book_snapshots > 15d delete
-- `kahla-scanner/scripts/sharp_alerts.py` — Telegram steam + Sharp 7+ alerts (runs after each scanner-poll ingest)
+- `kahla-scanner/scripts/sharp_alerts.py` — Telegram steam + Sharp 7+ alerts (runs after each scanner-poll ingest). Also logs paper bets for the **steam bot** (Phase 4) — every Telegram steam fire writes a row to `paper_bets`.
+- `kahla-scanner/scripts/paper_bets_picker.py` — Phase 4 Early/Late EV pickers. `--bot early` runs 1×/day via `paper-bets-early.yml`; `--bot late` runs every 30 min appended to `scanner-poll.yml`.
+- `kahla-scanner/_lib/sharp.py` — sharp-score math + sharp-side detection. Used by the paper-bet picker. (`sharp_alerts.py` still has local copies of these helpers — DRY violation kept on purpose to minimise blast radius on the live alert pipeline; both implementations are bytewise identical and any future fix lands in both.)
+- `kahla-scanner/_lib/paper_bets.py` — paper-bet shared helpers: PIN devig, best-entry finder, score formula, dedup check, insert helper, snapshot loaders.
+- `kahla-scanner/supabase/paper_bets.sql` — `paper_bets` table DDL. Run manually in Supabase SQL editor.
 - `kahla-scanner/storage/{models,supabase_client}.py` — slim Supabase wrapper
 - `kahla-scanner/_lib/{matcher,normalize}.py` — team-name fuzzy match + odds math
 - `firestore.rules` — Firestore security rules (admin/approved helpers)
@@ -343,9 +347,64 @@ CREATE INDEX IF NOT EXISTS idx_sharp_alerts_dedup
 
 Setup: BotFather → `/newbot` → token; message bot anything; visit `https://api.telegram.org/bot<TOKEN>/getUpdates` → grab `chat.id`. Add as GitHub secrets `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`. Alert step skips silently when either is missing, so the workflow doesn't break if you tear down the bot.
 
-### Future hooks (not yet built)
+## Phase 4 — Sharp Bot (paper bets)
 
-- **Phase 4 — Sharp Bot tab (admin only)**: daily picker takes top 5 +EV bets (combining sharp score with devigged fair line from `_lib/normalize.py` AND the per-signal sub-scores), logs them as paper bets in a new `paper_bets` Supabase table, resolves on game completion via ESPN scores, runs a per-signal hit-rate tracker so weights can self-tune over a rolling 30-day window.
+Three independent paper-bet bots writing to a single Supabase table (`paper_bets`). Each bot represents a distinct thesis about when sharp signals are actionable; logging them separately is the only way to know which strategy actually wins money.
+
+| Bot | Trigger / window | Cadence | Cap | Where |
+|---|---|---|---|---|
+| **steam** | A Telegram STEAM alert fires (5+ books moved same direction in last ~30 min) | Every 30 min, piggybacking on `scanner-poll.yml` | uncapped (steam is rare; ~0-3/day in practice) | Logged from `scripts/sharp_alerts.py` after a successful Telegram send + dedup pass. |
+| **early** | Cumulative PIN movement on games starting in 10–36h | 1×/day at 13:00 UTC (≈8am ET EDT / 9am ET EST) | top 5 per run | `.github/workflows/paper-bets-early.yml`, triggered by cron-job.org workflow_dispatch (no GitHub-native schedule, same pattern as `scanner-poll.yml`). |
+| **late** | Cumulative PIN movement on games starting in 15min–2h | every 30 min, appended step in `scanner-poll.yml` | top 5 per run | Idempotent — per-market dedup means re-runs only fill new candidates as games enter the <2h window. |
+
+### Stage 1 — live (this commit)
+
+Schema (`kahla-scanner/supabase/paper_bets.sql`): one row per logged bet with `bot ∈ {steam,early,late}`, locked entry book/price/line, signal context (`fair_prob`, `edge_pp`, `sharp_score`, `signal_blob`), and resolution fields (`status`, `pnl_units`, `result_score`, `settled_at`) populated later by Stage 2.
+
+**Picker selection logic for early/late** (`scripts/paper_bets_picker.py`):
+1. Fetch markets where `event_start` is inside the bot's window.
+2. Determine sharp side per market_type via `_lib/sharp.py` — same logic as the on-card chip + Telegram alerts.
+3. Filter to markets where `sharp_score ≥ 4`.
+4. Devig PIN's two-way market for that side → `fair_prob`. Skip if either PIN side is missing or (for SPR/TOT) the home/away or over/under lines don't match.
+5. Find the best non-PIN entry price for that side. **Line gate for SPR/TOT**: entry book must be quoting at PIN's current line, otherwise the devigged fair doesn't apply. ML has no line so any non-PIN book qualifies.
+6. `edge_pp = (fair_prob − implied_at_entry) × 100`. Filter `edge_pp ≥ 1.0pp`.
+7. `combined_score = 0.6 × sharp_score/10 + 0.4 × min(edge_pp/10, 1.0)`. Edge component capped at 10pp so a freak data error doesn't drown out genuine sharp signals.
+8. Sort candidates desc by `combined_score`, dedup by `market_id` (one bet per game per bot), skip any market already picked by this bot in the last 7 days, insert top 5.
+
+**Steam paper bet logic** (`_log_steam_paper_bet` in `sharp_alerts.py`):
+1. Triggered after a successful Telegram steam send (so dedup gating is the existing `sharp_alerts` table — same 6h window).
+2. Entry = best price on the sharp side among the steaming books that are in the entry-book allowlist (`pb.ENTRY_BOOKS` = 14-book allowlist minus PIN). Entry line for SPR/TOT comes from that book's snapshot, NOT PIN's.
+3. `fair_prob` / `edge_pp` are computed when PIN devig is possible, otherwise null. Steam can fire without clean PIN data — we still want hit-rate tracking even without pre-bet edge.
+4. `sharp_score` is null for steam (the trigger is the burst event, not cumulative movement magnitude).
+5. Per-`(market_id, bot=steam)` dedup via `pb.already_picked()` — 7-day lookback. Avoids double-logging if a steam re-fires after the 6h alert dedup window expires but the game hasn't started yet.
+
+**Constants in `_lib/paper_bets.py`** (tune as we get hit-rate data):
+- `SHARP_SCORE_MIN = 4`
+- `EDGE_PP_MIN = 1.0`
+- `SHARP_WEIGHT = 0.6`, `EDGE_WEIGHT = 0.4`
+- `MAX_PICKS_PER_RUN = 5`
+- `ENTRY_BOOKS = {DK, FD, MGM, CAE, HR, BET365, BR, BOL, LV, BVD, ESPN, FAN, MB}` — same 14-book allowlist as `_ALLOWED_BOOKS` minus PIN.
+
+### Latent bug fixed in this stage
+
+`scripts/sharp_alerts.py` previously wrote `_record_alert(... payload={"books": ..., "direction": ..., "raw_side": ...})` after a successful steam send, but `_detect_steam` never put `direction` or `raw_side` keys into its alert dict — so any real steam fire would `KeyError` before `_record_alert` was called, leaving the dedup row unwritten and the next cycle re-firing the same alert. Now the payload is `{"books", "samples"}` (keys that actually exist in `_detect_steam` output).
+
+### Stage 2 — resolver (next)
+
+`scripts/paper_bets_resolver.py` will:
+- Pull pending rows whose `event_start` is more than ~4h ago (game finished + ESPN final posted).
+- Match each market to ESPN final via the same `_merge_espn_scores` logic Flask uses on `/api/odds`.
+- Grade ML by winner, SPR by score margin vs `entry_line`, TOT by total vs `entry_line`. Push when SPR margin equals the line exactly or TOT total equals the line exactly.
+- Set `status` (won/lost/push), `pnl_units` (flat 1u: `entry_price/100` win when positive, `100/|entry_price|` win when negative, `−1.0` loss, `0` push), `result_score`, `settled_at`.
+- Run as an appended step in `scanner-poll.yml` (cheap; just queries pending rows + already-cached ESPN data).
+
+### Stage 3 — admin UI (after Stage 2)
+
+`/sharp-bot` admin-only page + `/api/sharp-bot/*` routes. Three columns (Steam / Early / Late), each showing today's picks, last 30 days' P&L, hit rate, ROI. Per-bot stat cards roll up across all sports.
+
+### Stage 4 — self-tuning (deferred until ~14d of resolved data)
+
+Rolling 30-day per-signal hit-rate fed back into `combined_score` weights. `_splitsSubScore` and `_divergenceSubScore` (currently dormant in `templates/odds.html`) come into play here — the picker can blend additional signals once we have outcome data to grade their contribution. Also: CLV closed/settled history rollup (Phase 4 per the CLV section above).
 
 ## Action Network — Public Betting Splits
 

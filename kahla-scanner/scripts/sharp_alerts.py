@@ -35,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.error import URLError, HTTPError
 from urllib.request import Request, urlopen
 
+from _lib import paper_bets as pb
 from storage import supabase_client as db
 
 log = logging.getLogger(__name__)
@@ -615,6 +616,70 @@ def _msg_sharp7(market, market_type, side, score, opener, current, away, home):
     )
 
 
+# ──────────────────────── Paper bet (Phase 4 steam bot) ────────────────────────
+def _log_steam_paper_bet(sb, market, alert, pin_current, snaps_recent):
+    """Steam fired → log a paper bet for the sharp side. Entry is the
+    BEST non-PIN price among the steaming books on the sharp side at
+    'recent' time (so the entry reflects what we'd actually have hit
+    when the alert went out, not a stale earlier snapshot).
+
+    fair_prob / edge_pp / sharp_score are filled when PIN devig + opener
+    data are available; left null otherwise (steam can fire on markets
+    where PIN devig isn't possible — we still want hit-rate tracking)."""
+    mid         = market["id"]
+    market_type = alert["market_type"]
+    sharp_side  = alert["sharp_side"]
+    steam_books = set(alert["books"]) & pb.ENTRY_BOOKS
+
+    # Find best non-PIN price among the steaming books on the sharp side
+    # in the 'recent' window (the snaps that drove detection).
+    best = None
+    for s in snaps_recent:
+        if s["market_id"] != mid: continue
+        if s["market_type"] != market_type: continue
+        if s["side"] != sharp_side: continue
+        if s["book"] not in steam_books: continue
+        price = s.get("price_american")
+        if price is None: continue
+        if best is None or price > best["price_american"]:
+            best = s
+    if best is None:
+        log.info("steam paper bet skipped (no entry book among steamers): %s %s/%s",
+                 market.get("event_name"), market_type, sharp_side)
+        return False
+
+    target_line = best.get("line") if market_type != "moneyline" else None
+
+    # PIN devig for fair_prob (optional — steam can fire without it).
+    fair_prob = pb.pin_devig_fair_prob(mid, market_type, sharp_side, pin_current)
+    edge_pp = None
+    if fair_prob is not None:
+        try:
+            from _lib.normalize import american_to_prob
+            implied = american_to_prob(int(best["price_american"]))
+            edge_pp = (fair_prob - implied) * 100.0
+        except (ValueError, TypeError):
+            edge_pp = None
+
+    return pb.insert_paper_bet(
+        sb,
+        bot="steam",
+        market=market,
+        market_type=market_type,
+        side=sharp_side,
+        entry_book=best["book"],
+        entry_price=int(best["price_american"]),
+        entry_line=target_line,
+        fair_prob=fair_prob,
+        edge_pp=edge_pp,
+        sharp_score=None,
+        signal_blob={
+            "books":   list(alert["books"]),
+            "samples": [list(s) for s in alert.get("samples", [])],
+        },
+    )
+
+
 # ──────────────────────── Main ────────────────────────────
 def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -671,9 +736,13 @@ def main(argv=None):
             if _telegram_send(token, chat_id, msg):
                 sent_steam += 1
                 _record_alert(sb, mid, alert["market_type"], "steam", sharp_side, {
-                    "books": alert["books"], "direction": alert["direction"],
-                    "raw_side": alert["raw_side"],
+                    "books":   alert["books"],
+                    "samples": alert.get("samples", []),
                 })
+                # Phase 4 — also log as a paper bet (steam bot). Skipped
+                # silently if no entry book among steamers or insert fails.
+                if not pb.already_picked(sb, "steam", mid):
+                    _log_steam_paper_bet(sb, market, alert, pin_current, snaps_recent)
 
         # ── Sharp 7+ detection. Side is determined by movement
         # DIRECTION (mirrors templates/odds.html `_sharpSide`), not by

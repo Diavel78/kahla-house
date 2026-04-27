@@ -73,7 +73,7 @@ jobs:
       # Sharp/steam Telegram alerts. Runs after ingest so it sees fresh
       # snapshots. No-ops silently when TELEGRAM_BOT_TOKEN/CHAT_ID aren't
       # set, and `continue-on-error` means a flaky alert run never blocks
-      # the next ingest cycle.
+      # the next ingest cycle. Also logs steam paper bets (Phase 4).
       - name: Sharp + steam alerts (Telegram)
         continue-on-error: true
         env:
@@ -82,3 +82,15 @@ jobs:
           TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python -m scripts.sharp_alerts
+
+      # Phase 4 — Late EV paper-bet picker. Picks top 5 from games
+      # starting in the next 15min–2h window. Idempotent (per-market
+      # dedup) so running every 30 min only fills new candidates as
+      # games enter the window. continue-on-error: a flaky pick run
+      # shouldn't block the next ingest cycle.
+      - name: Paper bets — Late EV picker
+        continue-on-error: true
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.paper_bets_picker --bot late
