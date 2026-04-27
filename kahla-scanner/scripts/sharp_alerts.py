@@ -339,12 +339,28 @@ def _detect_steam(snaps_recent, snaps_earlier, market_id):
 
     # Build per-(market_type, sharp_side) best candidate. ML/SPR fires
     # twice (home -1 AND away +1 both point at sharp=home); we keep the
-    # one with more books.
+    # one with more books. Samples shown in the message are looked up
+    # on the SHARP side (not raw_side) so the prices in the alert
+    # match the side the header names — otherwise an alert that says
+    # "sharp ROCKETS" lists Lakers prices going up, which is correct
+    # mechanically but confusing to read.
     best_per_sharp = {}
     for (mt, raw_side, d), books in grouped.items():
         if len(books) < STEAM_BOOK_COUNT:
             continue
         sharp_side = _steam_sharp_side(raw_side, d)
+        # Re-key sample lookups onto the sharp side so the price strings
+        # we show describe the side the alert header names.
+        samples = []
+        for bk, _e_raw, _c_raw in books[:5]:
+            ss_e = ear.get((bk, mt, sharp_side))
+            ss_c = cur.get((bk, mt, sharp_side))
+            if ss_e and ss_c:
+                samples.append((bk, ss_e.get("price_american"), ss_c.get("price_american")))
+        if not samples:
+            # Fall back to raw side (shouldn't happen for two-sided
+            # markets, but defensive).
+            samples = [(b[0], b[1].get("price_american"), b[2].get("price_american")) for b in books[:5]]
         bk_key = (mt, sharp_side)
         cand = {
             "market_type": mt,
@@ -352,7 +368,7 @@ def _detect_steam(snaps_recent, snaps_earlier, market_id):
             "sharp_side":  sharp_side,
             "direction":   d,
             "books":       [b[0] for b in books],
-            "samples":     [(b[0], b[1].get("price_american"), b[2].get("price_american")) for b in books[:5]],
+            "samples":     samples,
         }
         if bk_key not in best_per_sharp or len(books) > len(best_per_sharp[bk_key]["books"]):
             best_per_sharp[bk_key] = cand
