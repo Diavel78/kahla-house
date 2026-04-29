@@ -460,6 +460,23 @@ def parse_activities(client, activities):
         "ACTIVITY_TYPE_ACCOUNT_WITHDRAWAL": "withdrawal",
     }
 
+    def _pick_from_meta(meta: dict) -> str:
+        """Mirror enrich_positions: prefer team_name+spread, then team
+        name, then raw outcome (skip generic YES/NO since those don't
+        identify the bet). Used for closed-position betslip labels."""
+        if not isinstance(meta, dict):
+            return ""
+        team = meta.get("team") or {}
+        team_name = (team.get("name", "") if isinstance(team, dict) else "") or ""
+        raw_outcome = meta.get("outcome", "") or ""
+        if team_name and raw_outcome and re.search(r'[0-9]', raw_outcome):
+            return f"{team_name} {raw_outcome}"
+        if team_name:
+            return team_name
+        if raw_outcome.lower() not in ("yes", "no", ""):
+            return raw_outcome
+        return raw_outcome  # last resort: bare YES/NO if nothing else
+
     slug_to_title = {}
     parsed = []
     for act in activities:
@@ -482,6 +499,11 @@ def parse_activities(client, activities):
         quantity = None
         pnl = None
         is_close = False
+        # Pretty pick label + entry price for the betslip's Settled
+        # Today rows. Without these, settled rows would only show the
+        # game name + W/L badge — losing which side and at what price.
+        pick = ""
+        entry_price = None
 
         if act_type == "ACTIVITY_TYPE_TRADE":
             sdk_price = _safe_float(detail.get("price"))
@@ -504,6 +526,18 @@ def parse_activities(client, activities):
             aq = abs(_safe_float(t_after.get("netPosition")) or 0)
             is_close = sdk_rpnl is not None or bq > aq
 
+            # Pick + entry price from the BEFORE-trade position. Avoids
+            # the SDK's intent-based price-flip mess (originalPrice is
+            # YES-canonical; cost/qty on the before-position is the real
+            # per-share price they paid regardless of LONG/SHORT).
+            t_meta = (t_before.get("marketMetadata") or
+                      t_after.get("marketMetadata") or {})
+            pick = _pick_from_meta(t_meta)
+            b_cost = _safe_float(t_before.get("cost"))
+            b_qty  = abs(_safe_float(t_before.get("netPosition")) or 0)
+            if b_cost is not None and b_qty > 0:
+                entry_price = b_cost / b_qty
+
             if market_slug:
                 if market_slug not in slug_to_title:
                     slug_to_title[market_slug] = _resolve_market_title(client, market_slug)
@@ -516,6 +550,7 @@ def parse_activities(client, activities):
             market = meta.get("title", "")
             if market_slug and market:
                 slug_to_title[market_slug] = market
+            pick = _pick_from_meta(meta)
 
             side = detail.get("side", "")
             side = side.replace("POSITION_RESOLUTION_SIDE_", "")
@@ -524,6 +559,7 @@ def parse_activities(client, activities):
             cost = _safe_float(before.get("cost"))
             if cost is not None and quantity > 0:
                 price = cost / quantity
+                entry_price = price
 
             if cost is not None:
                 net = _safe_float(before.get("netPosition")) or 0
@@ -566,6 +602,12 @@ def parse_activities(client, activities):
         parsed.append({
             "timestamp": str(timestamp),
             "market": str(market) or market_slug,
+            # Aliases so the betslip's Settled Today rows can use the
+            # same buildBetSlipLabel(p) + entry-odds path as Pending /
+            # Open Orders (which expect market_name + outcome + entry_price).
+            "market_name": str(market) or market_slug,
+            "outcome": pick,
+            "entry_price": entry_price,
             "_market_slug": market_slug,
             "_is_close": is_close if act_type == "ACTIVITY_TYPE_TRADE" else False,
             "side": str(side),

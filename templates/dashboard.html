@@ -1150,11 +1150,27 @@
                     const resultCls = won ? 'win' : (lost ? 'loss' : 'push');
                     const baseLabel = won ? 'W' : (lost ? 'L' : 'PUSH');
                     const resultLabel = c.type === 'Trade' ? `Sold - ${baseLabel}` : baseLabel;
-                    const label = (c.market || '').replace(/\s+\d{4}-\d{2}-\d{2}$/, '');
+                    // Same pretty label as Pending (game — pick) so we
+                    // don't lose which side won/lost. Falls back to the
+                    // bare market name when no team-name pick was
+                    // resolvable from the SDK metadata.
+                    const label = buildBetSlipLabel(c);
+                    const odds = probToAmericanOdds(c.entry_price);
+                    const oddsStr = fmtOdds(odds);
+                    const oddsClass = odds !== null ? (odds < 0 ? 'fav' : 'dog') : '';
+                    // Show entry odds beside the result badge when we
+                    // have them (Position Resolution always; sells when
+                    // the SDK provided a beforePosition cost basis).
+                    const oddsCell = odds !== null
+                        ? `<div class="betslip-odds ${oddsClass}" style="margin-right:8px">${oddsStr}</div>`
+                        : '';
 
                     html += `<div class="betslip-item">
                         <div class="betslip-market">${esc(label)}</div>
-                        <div class="betslip-result ${resultCls}">${resultLabel}</div>
+                        <div style="display:flex;align-items:center;gap:0">
+                            ${oddsCell}
+                            <div class="betslip-result ${resultCls}">${resultLabel}</div>
+                        </div>
                     </div>`;
                 }
             }
