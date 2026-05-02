@@ -48,6 +48,15 @@ SHARP_THRESHOLD     = 8      # alert when sharp score crosses this. Bumped
                               # roughly halves volume; only strong moves
                               # (8-10 cents on ML, 0.8pt+ on SPR/TOT) ring.
 STEAM_BOOK_COUNT    = 5      # n books moving same direction = steam
+# Magnitude floor for what counts as a "move" toward the sharp side in
+# steam detection. Without this, ANY 1-cent vig drift counted as a book
+# moving with the sharp side, so a market where 5 books each re-juiced
+# by 1-2 cents would (falsely) trip a STEAM alert. Real steam = 5+ cent
+# directional moves on multiple books inside ~30 min. Anything below
+# these thresholds is noise.
+STEAM_MIN_MOVE_CENTS = 5     # min |price diff| (cents) to count for ML
+                              # and for SPR/TOT vig fallback
+STEAM_MIN_LINE_MOVE  = 0.5   # min |line diff| (points) for SPR/TOT line move
 STEAM_LOOKBACK_MIN  = 70     # how far back the "previous" snapshot can be
 STEAM_RECENT_MIN    = 35     # what counts as "current"
 DEDUPE_HOURS        = 24     # don't re-fire same alert inside this window
@@ -315,7 +324,11 @@ def _move_sharp_side(market_type, raw_side, cur_snap, ear_snap):
     given (market_type, raw_side). Replaces the older
     direction±1-translation rule which was correct for ML/SPR but wrong
     for TOT (raising a total = sharp OVER regardless of which side
-    the move was detected on)."""
+    the move was detected on).
+
+    Returns None when the move magnitude is below the noise floor
+    (STEAM_MIN_MOVE_CENTS / STEAM_MIN_LINE_MOVE). 1-3 cent vig drift
+    isn't a directional book move and shouldn't count toward steam."""
     cur_p = cur_snap.get("price_american")
     ear_p = ear_snap.get("price_american")
     cur_l = cur_snap.get("line")
@@ -325,18 +338,22 @@ def _move_sharp_side(market_type, raw_side, cur_snap, ear_snap):
 
     if market_type == "moneyline":
         d = cur_p - ear_p
+        if abs(d) < STEAM_MIN_MOVE_CENTS:
+            return None
         if d < 0: return raw_side               # got more favored = sharp on raw
         if d > 0: return _OPPOSITE_SIDE.get(raw_side)
         return None
 
     if market_type == "spread":
-        # PRIMARY: line shift (>=0.5pt). Negative point_diff on raw_side
-        # = side became more favored = sharp on raw.
+        # PRIMARY: line shift (>=STEAM_MIN_LINE_MOVE). Negative point_diff
+        # on raw_side = side became more favored = sharp on raw.
         line_diff = (cur_l or 0) - (ear_l or 0)
-        if abs(line_diff) >= 0.5:
+        if abs(line_diff) >= STEAM_MIN_LINE_MOVE:
             return raw_side if line_diff < 0 else _OPPOSITE_SIDE.get(raw_side)
         # FALLBACK: pure price move.
         d = cur_p - ear_p
+        if abs(d) < STEAM_MIN_MOVE_CENTS:
+            return None
         if d < 0: return raw_side
         if d > 0: return _OPPOSITE_SIDE.get(raw_side)
         return None
@@ -346,10 +363,12 @@ def _move_sharp_side(market_type, raw_side, cur_snap, ear_snap):
         # was detected on. Total raised = books expect more scoring =
         # sharp OVER. Lowered = sharp UNDER.
         line_diff = (cur_l or 0) - (ear_l or 0)
-        if line_diff > 0: return "over"
-        if line_diff < 0: return "under"
-        # Line flat — read juice direction on the raw side.
+        if abs(line_diff) >= STEAM_MIN_LINE_MOVE:
+            return "over" if line_diff > 0 else "under"
+        # Line flat (or sub-threshold) — read juice direction on the raw side.
         d = cur_p - ear_p
+        if abs(d) < STEAM_MIN_MOVE_CENTS:
+            return None
         if raw_side == "over":
             if d < 0: return "over"   # Over price more negative = sharp Over
             if d > 0: return "under"
