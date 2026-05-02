@@ -55,9 +55,15 @@ WINDOWS = {
     # multiple shots at qualifying as the day progresses; per-bot dedup
     # locks the entry at the FIRST qualifying cycle.
     "early": (timedelta(hours=10), timedelta(hours=36)),
-    # 0-2h: closing-line sharp money / late-info (lineups, weather,
-    # syndicate flow). Closest to CLV. 0-floor = strictly future games.
-    "late":  (timedelta(minutes=0), timedelta(hours=2)),
+    # 0-5h: closing-line sharp money / late-info (lineups, weather,
+    # syndicate flow). Widened from 0-2h so the bot has a fair shot —
+    # 2h was too narrow given the 30-min cron cadence (a game might
+    # only get 4 evaluation cycles in window). 5h gives ~10 cycles and
+    # captures the meaningful late-action stretch. Per-bot dedup is
+    # cross-bot independent, so the same game can be picked by early
+    # AND late — by design, since the picks may end up on opposite
+    # sides as the signal evolves through the day.
+    "late":  (timedelta(minutes=0), timedelta(hours=5)),
 }
 
 

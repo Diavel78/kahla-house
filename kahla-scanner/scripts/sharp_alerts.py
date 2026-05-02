@@ -57,6 +57,15 @@ STEAM_BOOK_COUNT    = 5      # n books moving same direction = steam
 STEAM_MIN_MOVE_CENTS = 5     # min |price diff| (cents) to count for ML
                               # and for SPR/TOT vig fallback
 STEAM_MIN_LINE_MOVE  = 0.5   # min |line diff| (points) for SPR/TOT line move
+# PIN-specific stricter floor. PIN is the sharp benchmark; we want
+# UNAMBIGUOUS movement before treating it as confirmation, not a
+# borderline 5-6c re-juice that's indistinguishable from noise. The
+# Cubs/D-backs alert that triggered this (PIN's over price moved 6c —
+# barely above the 5c floor — and rendered without a side label, looking
+# like PIN was diverging from retail) showed why a global 5c floor isn't
+# strict enough on PIN.
+STEAM_PIN_MIN_MOVE_CENTS = 8  # PIN must move 8c+ for vig confirmation
+STEAM_PIN_MIN_LINE_MOVE  = 0.5  # PIN line move floor (same as retail)
 STEAM_LOOKBACK_MIN  = 70     # how far back the "previous" snapshot can be
 STEAM_RECENT_MIN    = 35     # what counts as "current"
 DEDUPE_HOURS        = 24     # don't re-fire same alert inside this window
@@ -319,16 +328,18 @@ def _fmt_pt(v):
 _OPPOSITE_SIDE = {"home": "away", "away": "home", "over": "under", "under": "over"}
 
 
-def _move_sharp_side(market_type, raw_side, cur_snap, ear_snap):
+def _move_sharp_side(market_type, raw_side, cur_snap, ear_snap, book=None):
     """Compute the sharp side directly from a single book's move on a
     given (market_type, raw_side). Replaces the older
     direction±1-translation rule which was correct for ML/SPR but wrong
     for TOT (raising a total = sharp OVER regardless of which side
     the move was detected on).
 
-    Returns None when the move magnitude is below the noise floor
-    (STEAM_MIN_MOVE_CENTS / STEAM_MIN_LINE_MOVE). 1-3 cent vig drift
-    isn't a directional book move and shouldn't count toward steam."""
+    Returns None when the move magnitude is below the noise floor.
+    `book` lets us apply a stricter floor for PIN — PIN is the sharp
+    benchmark and a borderline 5-6c PIN re-juice is indistinguishable
+    from noise; we want unambiguous movement (8c+) before counting PIN
+    as a confirming book."""
     cur_p = cur_snap.get("price_american")
     ear_p = ear_snap.get("price_american")
     cur_l = cur_snap.get("line")
@@ -336,23 +347,27 @@ def _move_sharp_side(market_type, raw_side, cur_snap, ear_snap):
     if cur_p is None or ear_p is None:
         return None
 
+    is_pin = (book == "PIN")
+    min_cents = STEAM_PIN_MIN_MOVE_CENTS if is_pin else STEAM_MIN_MOVE_CENTS
+    min_line  = STEAM_PIN_MIN_LINE_MOVE  if is_pin else STEAM_MIN_LINE_MOVE
+
     if market_type == "moneyline":
         d = cur_p - ear_p
-        if abs(d) < STEAM_MIN_MOVE_CENTS:
+        if abs(d) < min_cents:
             return None
         if d < 0: return raw_side               # got more favored = sharp on raw
         if d > 0: return _OPPOSITE_SIDE.get(raw_side)
         return None
 
     if market_type == "spread":
-        # PRIMARY: line shift (>=STEAM_MIN_LINE_MOVE). Negative point_diff
-        # on raw_side = side became more favored = sharp on raw.
+        # PRIMARY: line shift. Negative point_diff on raw_side = side
+        # became more favored = sharp on raw.
         line_diff = (cur_l or 0) - (ear_l or 0)
-        if abs(line_diff) >= STEAM_MIN_LINE_MOVE:
+        if abs(line_diff) >= min_line:
             return raw_side if line_diff < 0 else _OPPOSITE_SIDE.get(raw_side)
         # FALLBACK: pure price move.
         d = cur_p - ear_p
-        if abs(d) < STEAM_MIN_MOVE_CENTS:
+        if abs(d) < min_cents:
             return None
         if d < 0: return raw_side
         if d > 0: return _OPPOSITE_SIDE.get(raw_side)
@@ -363,11 +378,11 @@ def _move_sharp_side(market_type, raw_side, cur_snap, ear_snap):
         # was detected on. Total raised = books expect more scoring =
         # sharp OVER. Lowered = sharp UNDER.
         line_diff = (cur_l or 0) - (ear_l or 0)
-        if abs(line_diff) >= STEAM_MIN_LINE_MOVE:
+        if abs(line_diff) >= min_line:
             return "over" if line_diff > 0 else "under"
         # Line flat (or sub-threshold) — read juice direction on the raw side.
         d = cur_p - ear_p
-        if abs(d) < STEAM_MIN_MOVE_CENTS:
+        if abs(d) < min_cents:
             return None
         if raw_side == "over":
             if d < 0: return "over"   # Over price more negative = sharp Over
@@ -407,7 +422,7 @@ def _detect_steam(snaps_recent, snaps_earlier, market_id):
         e = ear.get(key)
         if not e: continue
         bk, mt, raw_side = key
-        ss = _move_sharp_side(mt, raw_side, c, e)
+        ss = _move_sharp_side(mt, raw_side, c, e, book=bk)
         if ss:
             book_sharp[(bk, mt)] = ss
 
@@ -430,18 +445,25 @@ def _detect_steam(snaps_recent, snaps_earlier, market_id):
             continue
         if len(books) < STEAM_BOOK_COUNT:
             continue
-        # Show sharp-side prices/lines so the message reads consistently
-        # with the named side. Fall back to opposite side if missing.
+        # Show sharp-side prices/lines when available. If a book moved
+        # on the OPPOSITE side only (the dedup'd snapshots table only
+        # has the side that actually changed), fall back to opposite —
+        # but track which side is being shown so the message can label
+        # it. Without the label, the user reasonably reads e.g.
+        # 'PIN: +101 → +107' under a 'TOT UNDER' alert as PIN's UNDER
+        # price, which would be the opposite move's interpretation.
         samples = []
         for bk in books[:5]:
+            shown_side = ss
             ss_e = ear.get((bk, mt, ss))
             ss_c = cur.get((bk, mt, ss))
             if not (ss_e and ss_c):
                 opp = _OPPOSITE_SIDE.get(ss)
                 ss_e = ear.get((bk, mt, opp))
                 ss_c = cur.get((bk, mt, opp))
+                shown_side = opp
             if ss_e and ss_c:
-                samples.append((bk,
+                samples.append((bk, shown_side,
                                 ss_e.get("line"), ss_e.get("price_american"),
                                 ss_c.get("line"), ss_c.get("price_american")))
         out.append({
@@ -614,12 +636,22 @@ def _msg_steam(market, alert, away, home):
     else:
         side_label = (home if sharp_side == "home" else away).upper()
     sample_lines = []
-    for bk, e_line, e_price, c_line, c_price in alert["samples"]:
-        if mt == "moneyline":
-            line = f"  {bk}: {_fmt_amer(e_price)} → {_fmt_amer(c_price)}"
+    for sample in alert["samples"]:
+        # Backward-compat unpack: older tuples had no shown_side field.
+        if len(sample) == 6:
+            bk, shown_side, e_line, e_price, c_line, c_price = sample
         else:
-            # Show line + price so spread/total moves read '+7 -112 → +6.5 -119'
-            line = (f"  {bk}: {_fmt_pt(e_line)} {_fmt_amer(e_price)}"
+            bk, e_line, e_price, c_line, c_price = sample
+            shown_side = sharp_side
+        # Tag the row when we're showing the OPPOSITE side's prices
+        # (because the sharp-side snapshot didn't change in the alert
+        # window so no recent row exists). Without the tag the price
+        # numbers can be misread as the sharp side.
+        side_tag = "" if shown_side == sharp_side else f" [{shown_side}]"
+        if mt == "moneyline":
+            line = f"  {bk}{side_tag}: {_fmt_amer(e_price)} → {_fmt_amer(c_price)}"
+        else:
+            line = (f"  {bk}{side_tag}: {_fmt_pt(e_line)} {_fmt_amer(e_price)}"
                     f" → {_fmt_pt(c_line)} {_fmt_amer(c_price)}")
         sample_lines.append(line)
     return (
