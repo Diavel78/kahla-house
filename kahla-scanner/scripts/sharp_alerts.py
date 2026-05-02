@@ -418,6 +418,16 @@ def _detect_steam(snaps_recent, snaps_earlier, market_id):
 
     out = []
     for (mt, ss), books in grouped.items():
+        # PIN-confirmation gate: STEAM only fires if Pinnacle (the sharp
+        # benchmark) registered a move clearing the noise floor AND
+        # pointed at the same sharp side as the retail consensus. If
+        # PIN isn't moving, retail-only "consensus" is just retail
+        # re-juicing — the Toronto/Twins ML alert that triggered this
+        # rule had PIN moving 1c (below the 5c floor) while 4 retail
+        # books did 1-3c re-juices. Real steam needs the sharp book
+        # confirming the direction.
+        if "PIN" not in books:
+            continue
         if len(books) < STEAM_BOOK_COUNT:
             continue
         # Show sharp-side prices/lines so the message reads consistently
