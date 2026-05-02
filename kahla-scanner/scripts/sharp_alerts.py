@@ -41,11 +41,20 @@ from storage import supabase_client as db
 log = logging.getLogger(__name__)
 
 # ─────────────────────────── Config ────────────────────────────
-SHARP_THRESHOLD     = 7      # alert when sharp score crosses this
+SHARP_THRESHOLD     = 8      # alert when sharp score crosses this. Bumped
+                              # from 7 after first day produced too many
+                              # alerts — every Wolves/Nuggets-style heavy
+                              # mover tripped ML+SPR+TOT separately. 8
+                              # roughly halves volume; only strong moves
+                              # (8-10 cents on ML, 0.8pt+ on SPR/TOT) ring.
 STEAM_BOOK_COUNT    = 5      # n books moving same direction = steam
 STEAM_LOOKBACK_MIN  = 70     # how far back the "previous" snapshot can be
 STEAM_RECENT_MIN    = 35     # what counts as "current"
-DEDUPE_HOURS        = 6      # don't re-fire same alert inside this window
+DEDUPE_HOURS        = 24     # don't re-fire same alert inside this window
+                              # Was 6 — too short, sustained moves on the
+                              # same game would re-alert 4x/day. 24h means
+                              # one alert per (market_id, market_type,
+                              # side) per game day, full stop.
 # Active games window: only consider markets whose game starts within this.
 # Alerts ONLY fire on pre-game contests — once a game is live the line is
 # no longer pre-game (post-start retail twitches aren't sharp money) and

@@ -326,13 +326,13 @@ The `_splitsSubScore` and `_divergenceSubScore` helpers are kept in the file (Ph
 `kahla-scanner/scripts/sharp_alerts.py` runs immediately after each ingest cycle (appended step in `.github/workflows/scanner-poll.yml` — same 30-min cadence, no second cron registration). Sends two kinds of messages to Telegram:
 
 - **🚨 STEAM** — for each book on each (market_type, raw_side), computes the implied sharp side from THAT book's move via `_move_sharp_side()` (line direction first for SPR/TOT, vig fallback). Groups books by `(market_type, sharp_side)`; fires when ≥`STEAM_BOOK_COUNT` (5) books point at the same sharp side. Single book counted once per market regardless of which raw side reported the move. Indicates institutional-flow synchronization.
-- **⚡ SHARP N** — fires when any (market, market_type) crosses Sharp Score ≥`SHARP_THRESHOLD` (7). Score formula mirrors the on-card chip in `templates/odds.html` exactly so the Telegram alert matches what the user sees: `_amer_to_cents()` + `_move_score_ml()` + `_move_score_spr_tot()` are Python ports of the JS helpers.
+- **⚡ SHARP N** — fires when any (market, market_type) crosses Sharp Score ≥`SHARP_THRESHOLD` (8 — started at 7, raised after first day produced too many alerts since heavy movers tripped ML+SPR+TOT separately). Score formula mirrors the on-card chip in `templates/odds.html` exactly so the Telegram alert matches what the user sees: `_amer_to_cents()` + `_move_score_ml()` + `_move_score_spr_tot()` are Python ports of the JS helpers.
 
 Pre-game only: `ACTIVE_WINDOW` runs from `now − LIVE_BUFFER_MIN (5min)` to `now + ACTIVE_WINDOW_HOURS (24h)`. Alerts on already-live games would be useless — line is no longer pre-game and you can't act on it. Time formatting: `_fmt_local()` formats to America/Denver with day+date prefix (`Sun Apr 26 · 5:00 PM MT`) so a Saturday-night alert about Sunday's game can't be mistaken for in-progress one.
 
 STEAM message renders the SHARP side's prices (not the raw_side that triggered detection) so an alert that says "sharp HOUSTON ROCKETS" lists Houston prices, not Lakers prices. SPR/TOT samples include the line value (`+7.0 -112 → +6.5 -119`), ML is price-only.
 
-Dedupe via the `sharp_alerts` Supabase table — duplicate (market_id, market_type, alert_type, side) within `DEDUPE_HOURS` (6) is suppressed. Required schema:
+Dedupe via the `sharp_alerts` Supabase table — duplicate (market_id, market_type, alert_type, side) within `DEDUPE_HOURS` (24 — was 6, bumped to one-alert-per-game-per-day so sustained moves don't re-fire all afternoon) is suppressed. Required schema:
 
 ```sql
 CREATE TABLE IF NOT EXISTS sharp_alerts (
