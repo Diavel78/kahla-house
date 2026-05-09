@@ -232,13 +232,13 @@ Map confidence chip → units:
 
 | Confidence | Units | When to use |
 |-----|-----|-----|
-| `low`    | 1u | Forced lean. Sharp score < 4 (chalk-flat market), no splits divergence. Print it for tracking — don't talk yourself into it. |
-| `medium` | 1u | Sharp ≥ 4, single signal (sharp move alone, no splits or injury edge to confirm). Most picks land here. |
-| `high`   | 3u | Sharp ≥ 5 AND splits divergence ≥ 5pp on the same side, OR sharp ≥ 4 + a real qualitative edge (key injury, scratched ace, etc.). |
-| `max`    | 5u | Sharp ≥ 7 AND splits divergence ≥ 10pp on the same side, multiple confirming reads, no major risk on the other side. Rare alignments — steam + RLM + qualitative edge. |
+| `low`    | 1u  | Forced lean. Sharp score < 4 (chalk-flat market), no splits divergence. Print it for tracking — don't talk yourself into it. |
+| `medium` | 3u  | Sharp ≥ 4, single signal (sharp move alone, no splits or injury edge to confirm). Most picks land here. |
+| `high`   | 5u  | Sharp ≥ 5 AND splits divergence ≥ 5pp on the same side, OR sharp ≥ 4 + a real qualitative edge (key injury, scratched ace, etc.). |
+| `whale`  | 10u | Sharp ≥ 7 AND splits divergence ≥ 10pp on the same side, multiple confirming reads, no major risk on the other side. Rare alignments — steam + RLM + qualitative edge. |
 
-Push `max` rarely. If you're using `max` more than 1-2 picks per night,
-your bar is too low.
+Push `whale` rarely. If you're using `whale` more than 1-2 picks per
+week, your bar is too low — the 10u tier should feel scary to call.
 
 ### Never just "pass" — always give a forced lean
 

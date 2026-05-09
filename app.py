@@ -3359,7 +3359,7 @@ def api_handicapper():
                "units": 0.0, "hit_rate": None, "roi": None}
     by_conf: dict = {c: {"graded": 0, "won": 0, "lost": 0, "push": 0,
                          "units": 0.0, "hit_rate": None, "roi": None}
-                     for c in ("low", "medium", "high", "max")}
+                     for c in ("low", "medium", "high", "whale")}
     for r in settled:
         st = r.get("status")
         if st not in ("won", "lost", "push"):
@@ -3524,10 +3524,10 @@ def api_handicapper_pick():
         return jsonify({"ok": False, "error": "bad market_type"}), 400
     if body["side"] not in ("home", "away", "over", "under"):
         return jsonify({"ok": False, "error": "bad side"}), 400
-    if body["confidence"] not in ("low", "medium", "high", "max"):
+    if body["confidence"] not in ("low", "medium", "high", "whale"):
         return jsonify({"ok": False, "error": "bad confidence"}), 400
-    if body["units"] not in (1, 3, 5):
-        return jsonify({"ok": False, "error": "units must be 1/3/5"}), 400
+    if body["units"] not in (1, 3, 5, 10):
+        return jsonify({"ok": False, "error": "units must be 1/3/5/10"}), 400
 
     line_val = body.get("line")
     if body["market_type"] in ("spread", "total"):
@@ -3587,6 +3587,40 @@ def api_handicapper_pick():
         return jsonify({"ok": False, "error": f"insert: {e}"}), 500
     pick_id = (res.data or [{}])[0].get("id")
     return jsonify({"ok": True, "id": pick_id, "skipped": False}), 201
+
+
+@app.route("/api/handicapper/pick/<int:pick_id>", methods=["DELETE"])
+@bot_required
+def api_handicapper_pick_delete(pick_id: int):
+    """Delete a pick. Authorization:
+      • admin can delete any pick
+      • bot_access users can only delete picks they themselves logged
+        (asked_by == current uid)
+    Use case: accidentally logged pick / user changed their mind /
+    pick logged for the wrong side. Hard delete (no soft-delete column)
+    since these are personal-tracking rows, not audit data."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+
+    try:
+        row = (sb.table("bot_picks").select("id,asked_by")
+               .eq("id", pick_id).single().execute().data)
+    except Exception:
+        row = None
+    if not row:
+        return jsonify({"ok": False, "error": "pick not found"}), 404
+
+    is_admin = g.user_data.get("role") == "admin"
+    is_owner = row.get("asked_by") == g.uid
+    if not (is_admin or is_owner):
+        return jsonify({"ok": False, "error": "not your pick"}), 403
+
+    try:
+        sb.table("bot_picks").delete().eq("id", pick_id).execute()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"delete failed: {e}"}), 500
+    return jsonify({"ok": True, "id": pick_id})
 
 
 # ---------------------------------------------------------------------------

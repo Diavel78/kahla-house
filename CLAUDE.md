@@ -477,13 +477,13 @@ Different from Sharp Bot. Sharp Bot is fully automated (cron picks from rule-bas
 - MLB Stats API `statsapi.mlb.com` — probable pitchers + season stats
 - ESPN injuries — every supported sport
 
-**Sizing rubric** (1u / 3u / 5u via the `confidence` chip):
+**Sizing rubric** (1u / 3u / 5u / 10u via the `confidence` chip):
 | Conf | Units | When |
 |---|---|---|
-| low | 1u | Edge <1pp or signal conflicted (logged for tracking) |
-| medium | 1u | ~1-2pp edge, single confirming signal |
-| high | 3u | 2-4pp edge AND ≥2 confirming signals |
-| max | 5u | 4pp+ edge AND multiple confirming signals AND no strong counter-risk |
+| low | 1u | Forced lean — sharp_score < 4, chalk-flat market |
+| medium | 3u | Sharp ≥ 4, single signal |
+| high | 5u | Sharp ≥ 5 AND splits divergence ≥ 5pp aligned, OR sharp ≥ 4 + qualitative edge |
+| whale | 10u | Sharp ≥ 7 AND splits divergence ≥ 10pp aligned, multiple confirming reads. Rare. |
 
 **Schema** (`kahla-scanner/supabase/bot_picks.sql`): one row per pick. Columns include `units` (1/3/5), `confidence` (low/medium/high/max), `analysis_md` (full write-up rendered on the page), `reasons` (jsonb array of bullet reasons), plus the standard market/entry/resolution fields. Run manually in Supabase SQL editor.
 
