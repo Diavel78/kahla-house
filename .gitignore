@@ -15,13 +15,14 @@ firebase-service-account.json
 # IDE
 .vscode/
 .idea/
-# Ignore everything inside .claude/ EXCEPT skills/ — project-level
-# skills (e.g. the /handicap skill that drives the in-chat handicapper)
-# need to follow the repo so every Claude Code session (incl. mobile)
-# has them. Personal session state (settings.local.json, etc.) stays
-# ignored.
+# Ignore everything inside .claude/ EXCEPT what's listed below — project-
+# level config that needs to follow the repo so every Claude Code session
+# (incl. mobile) has them. Personal session state (settings.local.json)
+# stays ignored.
 .claude/*
 !.claude/skills/
+!.claude/hooks/
+!.claude/settings.json
 
 # OS
 .DS_Store
