@@ -147,9 +147,93 @@
         .empty { padding: 24px; text-align: center; font-size: 13px; color: var(--text-muted); background: var(--surface); border: 1px dashed var(--border); border-radius: 12px; }
         .gate-msg { padding: 60px 20px; text-align: center; color: var(--text-secondary); }
 
+        /* Ask form */
+        .ask-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-bottom: 22px; }
+        .ask-row { display: flex; gap: 8px; align-items: stretch; }
+        .ask-input { flex: 1; padding: 12px 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-family: inherit; font-size: 15px; }
+        .ask-input:focus { outline: none; border-color: var(--blue); }
+        .ask-submit { padding: 12px 20px; background: var(--blue); color: #fff; border: 0; border-radius: 10px; font-weight: 600; cursor: pointer; font-family: inherit; font-size: 14px; }
+        .ask-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+        .ask-sport { padding: 12px 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-family: inherit; font-size: 13px; }
+        .ask-hint { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
+
+        /* Dossier panel */
+        .dossier { display: none; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin-bottom: 26px; }
+        .dossier.show { display: block; }
+        .dossier-error { color: var(--red); font-size: 13px; padding: 16px; background: var(--red-dim); border: 1px solid rgba(239,68,68,0.3); border-radius: 10px; }
+        .dossier-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+        .dossier-head h2 { font-size: 18px; font-weight: 700; }
+        .dossier-head .sub { font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+
+        .suggestion-card { padding: 14px 16px; background: var(--blue-dim); border: 1px solid rgba(74,124,255,0.3); border-radius: 12px; margin-bottom: 18px; }
+        .suggestion-card .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--blue); font-weight: 700; margin-bottom: 6px; }
+        .suggestion-card .pick-line { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+        .suggestion-card .pick-line .pick-units { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; margin-left: 8px; vertical-align: middle; }
+        .suggestion-card .pick-line .pick-units.units-1 { background: rgba(255,255,255,0.06); color: var(--text-secondary); }
+        .suggestion-card .pick-line .pick-units.units-3 { background: var(--orange-dim); color: var(--orange); }
+        .suggestion-card .pick-line .pick-units.units-5 { background: var(--gold-dim); color: var(--gold); }
+        .suggestion-card .pick-meta { font-size: 12px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; }
+        .suggestion-card .actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+        .suggestion-card button { padding: 8px 14px; border-radius: 8px; font-size: 12px; cursor: pointer; font-family: inherit; border: 1px solid var(--border-light); background: var(--surface-2); color: var(--text); }
+        .suggestion-card button.primary { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
+        .suggestion-card button:hover { border-color: var(--blue); }
+        .suggestion-pass { padding: 12px 16px; background: var(--surface-2); border: 1px dashed var(--border); border-radius: 10px; font-size: 13px; color: var(--text-secondary); margin-bottom: 18px; }
+
+        .market-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 18px; }
+        .market-card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+        .market-card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 8px; }
+        .market-card .row { font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6; }
+        .market-card .row .label { color: var(--text-muted); }
+        .market-card .row .pin { color: var(--purple); }
+        .market-card .row .best { color: var(--green); font-weight: 600; }
+        .market-card .row .edge { color: var(--green); }
+        .market-card .row .edge.neg { color: var(--text-muted); }
+        .market-card .move { font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 6px 8px; background: var(--surface-2); border-radius: 6px; margin-top: 8px; }
+        .market-card .move .sharp { color: var(--blue); font-weight: 700; }
+
+        .splits-row { padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 18px; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+        .splits-row .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 6px; }
+        .splits-row .lane { display: flex; gap: 16px; flex-wrap: wrap; }
+        .splits-row .stat { color: var(--text-secondary); }
+        .splits-row .stat b { color: var(--text); font-weight: 600; }
+        .splits-row .sharp-tag { color: var(--blue); font-weight: 700; }
+
+        .teams-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+        .team-card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+        .team-card h4 { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+        .team-card .rec { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); margin-bottom: 8px; }
+        .team-card .last10 { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-secondary); margin-bottom: 8px; word-spacing: 4px; }
+        .team-card .last10 .W { color: var(--green); }
+        .team-card .last10 .L { color: var(--red); }
+        .team-card .inj-list { font-size: 12px; color: var(--text-secondary); }
+        .team-card .inj-list li { margin-left: 14px; line-height: 1.45; margin-bottom: 3px; }
+        .team-card .inj-list li b { color: var(--text); font-weight: 600; }
+
+        .pitchers { padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 18px; font-size: 12px; line-height: 1.55; }
+        .pitchers .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 6px; }
+        .pitchers .row { font-family: 'JetBrains Mono', monospace; }
+        .pitchers .row b { color: var(--text); font-weight: 600; }
+
+        /* Log-pick modal */
+        .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 100; padding: 16px; }
+        .modal-bg.show { display: flex; }
+        .modal { background: var(--surface); border: 1px solid var(--border-light); border-radius: 14px; padding: 22px; width: 100%; max-width: 480px; max-height: 90vh; overflow-y: auto; }
+        .modal h3 { font-size: 16px; margin-bottom: 14px; }
+        .modal .field { margin-bottom: 12px; }
+        .modal label { display: block; font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+        .modal input, .modal textarea, .modal select { width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-family: inherit; font-size: 13px; }
+        .modal textarea { min-height: 80px; resize: vertical; font-family: 'JetBrains Mono', monospace; }
+        .modal .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .modal .actions { display: flex; gap: 8px; margin-top: 16px; }
+        .modal button { padding: 10px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; font-family: inherit; border: 1px solid var(--border-light); background: var(--surface-2); color: var(--text); flex: 1; }
+        .modal button.primary { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
+
         @media (max-width: 720px) {
             .stat-strip { grid-template-columns: repeat(2, 1fr); }
             .conf-strip { grid-template-columns: repeat(2, 1fr); }
+            .market-grid { grid-template-columns: 1fr; }
+            .teams-grid { grid-template-columns: 1fr; }
+            .ask-row { flex-direction: column; }
         }
     </style>
 </head>
@@ -180,8 +264,30 @@
             <div class="page-header">
                 <h1>Pick Bot</h1>
                 <div class="meta" id="meta">—</div>
-                <p class="lede">In-chat handicapper. Ask about a game on Claude — get a full pre-game analysis and a 1/3/5u recommendation. Only ML, spread, or total. Picks auto-grade against ESPN finals every 30 min.</p>
+                <p class="lede">Ask about a game and get the full pre-game read: PIN sharp signal, retail edge per side, public splits, injuries, recent form, lineups. Bot suggests a 1/3/5u play if signals + edge clear the bar — otherwise it'll tell you to pass. ML, spread, total only.</p>
             </div>
+
+            <div class="ask-card">
+                <div class="ask-row">
+                    <input type="text" class="ask-input" id="askInput" placeholder="Toronto vs Angels"
+                           autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+                           onkeydown="if(event.key==='Enter') askGame()" />
+                    <select class="ask-sport" id="askSport">
+                        <option value="">Auto-detect sport</option>
+                        <option value="MLB">MLB</option>
+                        <option value="NBA">NBA</option>
+                        <option value="NHL">NHL</option>
+                        <option value="NFL">NFL</option>
+                        <option value="NCAAF">NCAAF</option>
+                        <option value="CBB">NCAAB</option>
+                        <option value="UFC">UFC</option>
+                    </select>
+                    <button class="ask-submit" id="askSubmit" onclick="askGame()">Build dossier</button>
+                </div>
+                <div class="ask-hint">Free-form: "Yankees vs Red Sox", "Lakers Nuggets tonight", "MIN @ DEN". Window: games starting within ±90 min/+48h.</div>
+            </div>
+
+            <div class="dossier" id="dossier"></div>
 
             <div class="stat-strip" id="overallStats"></div>
             <div class="conf-strip" id="confStrip"></div>
@@ -194,6 +300,50 @@
             <div class="section">
                 <div class="section-title">Settled · 30d <span class="count" id="settledCount">0</span></div>
                 <ul class="picks" id="settledList"></ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Log-pick modal -->
+    <div class="modal-bg" id="logModal">
+        <div class="modal">
+            <h3>Log this pick</h3>
+            <div class="field">
+                <label>Selection</label>
+                <input type="text" id="lmSelection" readonly />
+            </div>
+            <div class="row2">
+                <div class="field">
+                    <label>Units</label>
+                    <select id="lmUnits">
+                        <option value="1">1u</option>
+                        <option value="3">3u</option>
+                        <option value="5">5u</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label>Confidence</label>
+                    <select id="lmConfidence">
+                        <option value="low">low</option>
+                        <option value="medium">medium</option>
+                        <option value="high">high</option>
+                        <option value="max">max</option>
+                    </select>
+                </div>
+            </div>
+            <div class="field">
+                <label>Reasons (one per line, optional)</label>
+                <textarea id="lmReasons" placeholder="PIN moved -120 → -135 (sharp 5)
+Splits 31/69 money on home — sharp side
+DK retail still at -125, +2.4pp edge"></textarea>
+            </div>
+            <div class="field">
+                <label>Analysis (optional, markdown)</label>
+                <textarea id="lmAnalysis" placeholder="Full write-up …"></textarea>
+            </div>
+            <div class="actions">
+                <button onclick="closeLog()">Cancel</button>
+                <button class="primary" id="lmSubmit" onclick="submitLog()">Log Pick</button>
             </div>
         </div>
     </div>
@@ -337,6 +487,342 @@
                 ${analysis}
             </li>
         `;
+    }
+
+    // ─── Dossier (web-side ask) ───
+    let _lastDossier = null;
+    let _pendingPick = null;
+
+    async function askGame() {
+        const q = (document.getElementById('askInput').value || '').trim();
+        if (!q) return;
+        const sport = document.getElementById('askSport').value || '';
+        const dossierEl = document.getElementById('dossier');
+        const submitBtn = document.getElementById('askSubmit');
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Building…';
+        dossierEl.classList.add('show');
+        dossierEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">Pulling odds + injuries + splits…</div>';
+
+        try {
+            const params = new URLSearchParams({ q });
+            if (sport) params.set('sport', sport);
+            const resp = await authFetch('/api/handicapper/dossier?' + params.toString());
+            const data = await resp.json();
+            if (!data.ok) {
+                const tokens = (data.tokens || []).join(', ');
+                const alts = (data.alt_matches || []).map(m =>
+                    `<li>${_esc(m.event_name)} <span style="color:var(--text-muted);font-size:11px">(${m.sport}, ${new Date(m.event_start).toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'})})</span></li>`
+                ).join('');
+                dossierEl.innerHTML = `<div class="dossier-error">
+                    <strong>No match.</strong> Parsed tokens: <code>${_esc(tokens || '(none)')}</code><br>
+                    ${data.hint ? `<span style="color:var(--text-secondary)">${_esc(data.hint)}</span>` : ''}
+                    ${alts ? `<div style="margin-top:10px;font-size:13px;color:var(--text)">Did you mean:<ul style="margin-top:4px;margin-left:18px">${alts}</ul></div>` : ''}
+                </div>`;
+                return;
+            }
+            _lastDossier = data;
+            renderDossier(data);
+        } catch (e) {
+            dossierEl.innerHTML = `<div class="dossier-error">Request failed: ${_esc(String(e))}</div>`;
+        } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Build dossier';
+        }
+    }
+
+    function renderDossier(d) {
+        const el = document.getElementById('dossier');
+        const startsIn = d.starts_in_min;
+        const startsLabel = startsIn == null ? '' :
+            (startsIn < 0 ? `started ${-startsIn}m ago` :
+             startsIn < 60 ? `starts in ${startsIn}m` :
+             `starts in ${(startsIn/60).toFixed(1)}h`);
+        const dt = new Date(d.event_start_utc);
+
+        let html = `<div class="dossier-head">
+            <div>
+                <h2>${_esc(d.event_name)}</h2>
+                <div class="sub">${d.sport} · ${dt.toLocaleString([], {weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'})} · ${startsLabel}${d.venue ? ' · ' + _esc(d.venue) : ''}</div>
+            </div>
+        </div>`;
+
+        // Suggestion card
+        if (d.suggestion) {
+            const s = d.suggestion;
+            const market = _shortMarket(s.market_type);
+            const sideLabel = s.market_type === 'total'
+                ? s.side.toUpperCase()
+                : (s.side === 'home' ? d.home : d.away);
+            const lineFrag = (s.entry_line == null) ? '' : ` ${_fmtPt(s.entry_line)}`;
+            html += `<div class="suggestion-card">
+                <div class="lbl">Bot Suggests</div>
+                <div class="pick-line">
+                    ${market} · ${_esc(sideLabel)}${lineFrag} ${_fmtAmer(s.entry_price)} (${_esc(s.entry_book)})
+                    <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>
+                </div>
+                <div class="pick-meta">
+                    edge +${Number(s.edge_pp).toFixed(1)}pp · sharp ${s.sharp_score} · combined ${(s.combined_score*100).toFixed(0)}/100
+                </div>
+                <div class="actions">
+                    <button class="primary" onclick="openLog()">Log this pick</button>
+                    <button onclick="copyForClaude()">Copy for Claude</button>
+                </div>
+            </div>`;
+        } else {
+            html += `<div class="suggestion-pass">
+                <strong>Bot says: pass.</strong> No market clears the gates (sharp ≥ 4 AND edge ≥ 0.5pp). The data is below — you can still
+                <button onclick="openLog(true)" style="background:none;border:0;color:var(--blue);text-decoration:underline;cursor:pointer;font:inherit;padding:0">log a manual pick</button>
+                or <button onclick="copyForClaude()" style="background:none;border:0;color:var(--blue);text-decoration:underline;cursor:pointer;font:inherit;padding:0">copy for Claude</button>.
+            </div>`;
+        }
+
+        // Markets grid
+        html += '<div class="market-grid">';
+        for (const mt of ['moneyline', 'spread', 'total']) {
+            html += renderMarketCard(mt, d.odds[mt] || {}, d);
+        }
+        html += '</div>';
+
+        // Splits
+        if (d.splits) {
+            const sp = d.splits;
+            const sd = sp.sharp_diff;
+            const sharpTag = (sd != null && Math.abs(sd) >= 10)
+                ? `<span class="sharp-tag">SHARP ${sd > 0 ? d.home : d.away} +${Math.abs(sd).toFixed(0)}%</span>`
+                : '';
+            html += `<div class="splits-row">
+                <div class="lbl">Public ML splits — Action Network ${sharpTag}</div>
+                <div class="lane">
+                    <span class="stat">Bets: <b>${_esc(d.away)}</b> ${sp.away_bets ?? '—'}% · <b>${_esc(d.home)}</b> ${sp.home_bets ?? '—'}%</span>
+                    <span class="stat">Money: <b>${_esc(d.away)}</b> ${sp.away_money ?? '—'}% · <b>${_esc(d.home)}</b> ${sp.home_money ?? '—'}%</span>
+                </div>
+            </div>`;
+        }
+
+        // Pitchers (MLB only)
+        if (d.mlb && d.mlb.probable_pitchers) {
+            const pp = d.mlb.probable_pitchers;
+            const mkRow = (which, p) => {
+                if (!p || !p.name) return `<div class="row"><b>${which}:</b> not announced</div>`;
+                const stats = [
+                    p.era != null ? `ERA ${p.era}` : null,
+                    p.whip != null ? `WHIP ${p.whip}` : null,
+                    p.k_per_9 != null ? `K/9 ${p.k_per_9}` : null,
+                    p.ip ? `${p.ip} IP` : null,
+                ].filter(Boolean).join(' · ');
+                return `<div class="row"><b>${which}:</b> ${_esc(p.name)} (${_esc(p.throws || '?')}) · ${stats}</div>`;
+            };
+            html += `<div class="pitchers">
+                <div class="lbl">Probable Pitchers</div>
+                ${mkRow(d.away, pp.away)}
+                ${mkRow(d.home, pp.home)}
+            </div>`;
+        }
+
+        // Teams (record + last 10 + injuries)
+        if (d.espn) {
+            html += '<div class="teams-grid">';
+            for (const which of ['away', 'home']) {
+                const t = d.espn[which] || {};
+                const last10 = (t.recent || []).slice(0, 10).map(r =>
+                    `<span class="${r.result}">${r.result}</span>`).join(' ');
+                const inj = (t.injuries || []).slice(0, 6).map(i =>
+                    `<li><b>${_esc(i.name)}</b> (${_esc(i.pos || '?')}) — ${_esc(i.status || '?')}${i.detail ? ' · ' + _esc(i.detail) : ''}</li>`).join('');
+                html += `<div class="team-card">
+                    <h4>${which === 'away' ? '✈ ' : '🏟 '}${_esc(t.name || (which === 'away' ? d.away : d.home))}</h4>
+                    <div class="rec">${_esc(t.record || '—')} · ${(t.recent||[]).length} games loaded</div>
+                    ${last10 ? `<div class="last10">${last10}</div>` : ''}
+                    ${inj ? `<div class="lbl" style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin:6px 0 4px">Injury report (${(t.injuries||[]).length})</div><ul class="inj-list">${inj}</ul>` : '<div style="font-size:11px;color:var(--text-muted);font-style:italic">No injuries reported</div>'}
+                </div>`;
+            }
+            html += '</div>';
+        }
+
+        el.innerHTML = html;
+    }
+
+    function renderMarketCard(mt, blk, d) {
+        const sides = mt === 'total' ? ['over', 'under'] : ['away', 'home'];
+        const labelOf = s => mt === 'total' ? s.toUpperCase() : (s === 'home' ? d.home : d.away);
+        const pin = blk.pin_current || {};
+        const best = blk.best_entry || {};
+        const mv = blk.movement;
+        const title = ({moneyline:'Moneyline', spread:'Spread', total:'Total'})[mt] || mt;
+
+        let rows = '';
+        for (const s of sides) {
+            const pinSnap = pin[s];
+            const bestSnap = best[s];
+            const sideName = labelOf(s);
+            if (pinSnap) {
+                const ln = pinSnap.line;
+                const lineFrag = (ln != null) ? ` <span class="label">@${_fmtPt(ln)}</span>` : '';
+                const fair = pinSnap.fair_american;
+                const fairFrag = fair != null ? ` <span class="label">fair ${_fmtAmer(fair)}</span>` : '';
+                rows += `<div class="row"><span class="label">${_esc(sideName)} PIN:</span> <span class="pin">${_fmtAmer(pinSnap.price)}</span>${lineFrag}${fairFrag}</div>`;
+            }
+            if (bestSnap) {
+                const ln = bestSnap.line;
+                const lineFrag = (ln != null) ? ` <span class="label">@${_fmtPt(ln)}</span>` : '';
+                const ep = bestSnap.edge_pp;
+                const edgeCls = (ep != null && ep >= 0) ? 'edge' : 'edge neg';
+                const edgeFrag = (ep != null) ? ` <span class="${edgeCls}">${ep > 0 ? '+' : ''}${ep.toFixed(1)}pp</span>` : '';
+                rows += `<div class="row"><span class="label">${_esc(sideName)} best:</span> <span class="best">${_fmtAmer(bestSnap.price_american)}</span>${lineFrag} <span class="label">[${_esc(bestSnap.book)}]</span>${edgeFrag}</div>`;
+            }
+        }
+
+        let move = '';
+        if (mv) {
+            const oFrag = mv.opener_line != null ? ` (${_fmtPt(mv.opener_line)})` : '';
+            const cFrag = mv.current_line != null ? ` (${_fmtPt(mv.current_line)})` : '';
+            move = `<div class="move">PIN: <b>${_fmtAmer(mv.opener_price)}${oFrag}</b> → <b>${_fmtAmer(mv.current_price)}${cFrag}</b> <span class="sharp">SHARP ${(mv.sharp_side || '').toUpperCase()} = ${mv.sharp_score}</span></div>`;
+        }
+
+        return `<div class="market-card"><h3>${title}</h3>${rows || '<div style="font-size:11px;color:var(--text-muted)">No PIN data</div>'}${move}</div>`;
+    }
+
+    function copyForClaude() {
+        if (!_lastDossier) return;
+        // Strip the suggestion + alt_matches — Claude will derive its own.
+        const clean = { ...(_lastDossier) };
+        delete clean.suggestion;
+        delete clean.alt_matches;
+        const txt = `Game: ${clean.event_name}\nSport: ${clean.sport}\nQuery: ${clean.query}\n\nDossier JSON:\n\`\`\`json\n${JSON.stringify(clean, null, 2)}\n\`\`\`\n\nWrite the full handicapper analysis + a 1/3/5u recommendation per /handicap rules.`;
+        if (navigator.clipboard) {
+            navigator.clipboard.writeText(txt).then(() => {
+                alert('Copied. Paste into Claude Code for the full write-up.');
+            }, () => fallbackCopy(txt));
+        } else { fallbackCopy(txt); }
+    }
+    function fallbackCopy(t) {
+        const ta = document.createElement('textarea');
+        ta.value = t; document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); alert('Copied.'); } catch {}
+        document.body.removeChild(ta);
+    }
+
+    // ─── Log-pick modal ───
+    function openLog(manual) {
+        if (!_lastDossier) return;
+        const s = _lastDossier.suggestion;
+        if (manual && !s) {
+            // Manual: prompt user to choose ML/SPR/TOT + side. Simple version:
+            // pre-fill best ML edge if available; user can edit.
+            const ml = _lastDossier.odds.moneyline || {};
+            const fallback = ml.best_entry && (ml.best_entry.home || ml.best_entry.away);
+            if (!fallback) {
+                alert('No data to seed a manual pick. Try a different game.');
+                return;
+            }
+        }
+        _pendingPick = s ? {
+            market_id:  _lastDossier.market_id,
+            market_type: s.market_type,
+            side:        s.side,
+            book:        s.entry_book,
+            price:       s.entry_price,
+            line:        s.entry_line,
+            fair_prob:   s.fair_prob,
+            edge_pp:     s.edge_pp,
+            sharp_score: s.sharp_score,
+            label:       _suggestLabel(s, _lastDossier),
+            seed_units:  s.units,
+            seed_conf:   s.confidence,
+        } : _seedManual(_lastDossier);
+        if (!_pendingPick) return;
+
+        document.getElementById('lmSelection').value = _pendingPick.label;
+        document.getElementById('lmUnits').value      = String(_pendingPick.seed_units || 1);
+        document.getElementById('lmConfidence').value = _pendingPick.seed_conf || 'medium';
+        document.getElementById('lmReasons').value    = '';
+        document.getElementById('lmAnalysis').value   = '';
+        document.getElementById('logModal').classList.add('show');
+    }
+    function closeLog() {
+        document.getElementById('logModal').classList.remove('show');
+        _pendingPick = null;
+    }
+    function _suggestLabel(s, d) {
+        const market = _shortMarket(s.market_type);
+        const sideName = s.market_type === 'total'
+            ? s.side.toUpperCase()
+            : (s.side === 'home' ? d.home : d.away);
+        const lineFrag = (s.entry_line == null) ? '' : ` ${_fmtPt(s.entry_line)}`;
+        return `${market} · ${sideName}${lineFrag} ${_fmtAmer(s.entry_price)} (${s.entry_book})`;
+    }
+    function _seedManual(d) {
+        // No suggestion — pick the best-ML side as a starting point. User
+        // can edit-as-needed (they can also still Cancel).
+        const ml = d.odds.moneyline || {};
+        const home = (ml.best_entry || {}).home;
+        const away = (ml.best_entry || {}).away;
+        const choice = (home && (!away || home.price_american > away.price_american))
+            ? { side: 'home', best: home }
+            : (away ? { side: 'away', best: away } : null);
+        if (!choice) return null;
+        const sideName = choice.side === 'home' ? d.home : d.away;
+        return {
+            market_id: d.market_id,
+            market_type: 'moneyline',
+            side: choice.side,
+            book: choice.best.book,
+            price: choice.best.price_american,
+            line: null,
+            fair_prob: ((ml.pin_current || {})[choice.side] || {}).fair_prob,
+            edge_pp: choice.best.edge_pp,
+            sharp_score: (ml.movement || {}).sharp_score,
+            label: `ML · ${sideName} ${_fmtAmer(choice.best.price_american)} (${choice.best.book})`,
+            seed_units: 1,
+            seed_conf: 'medium',
+        };
+    }
+
+    async function submitLog() {
+        if (!_pendingPick) return;
+        const reasons = (document.getElementById('lmReasons').value || '')
+            .split('\n').map(r => r.trim()).filter(Boolean);
+        const analysis = document.getElementById('lmAnalysis').value || '';
+        const body = {
+            market_id:   _pendingPick.market_id,
+            market_type: _pendingPick.market_type,
+            side:        _pendingPick.side,
+            book:        _pendingPick.book,
+            price:       _pendingPick.price,
+            line:        _pendingPick.line,
+            units:       Number(document.getElementById('lmUnits').value),
+            confidence:  document.getElementById('lmConfidence').value,
+            fair_prob:   _pendingPick.fair_prob ?? null,
+            edge_pp:     _pendingPick.edge_pp ?? null,
+            sharp_score: _pendingPick.sharp_score ?? null,
+            analysis_md: analysis || null,
+            reasons:     reasons.length ? reasons : null,
+            query_text:  (_lastDossier && _lastDossier.query) || null,
+        };
+        const submitBtn = document.getElementById('lmSubmit');
+        submitBtn.disabled = true; submitBtn.textContent = 'Logging…';
+        try {
+            const r = await authFetch('/api/handicapper/pick', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const out = await r.json();
+            if (out.skipped) {
+                alert('Already logged within the last 7 days (id ' + out.existing_id + ').');
+            } else if (out.ok) {
+                alert('Logged pick #' + out.id);
+                loadData(true);
+            } else {
+                alert('Failed: ' + (out.error || 'unknown'));
+                return;
+            }
+            closeLog();
+        } catch (e) {
+            alert('Request failed: ' + e);
+        } finally {
+            submitBtn.disabled = false; submitBtn.textContent = 'Log Pick';
+        }
     }
 
     async function loadData(showLoading) {

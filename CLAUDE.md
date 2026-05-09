@@ -104,6 +104,8 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `GET /api/data` | **Admin** | Dashboard P&L data (positions, balances, trades) |
 | `GET /api/sharp-bot` | **Admin** | Phase 4 paper-bet tracker payload. Returns `pending` (every `paper_bets` row with `status='pending'`, no age cap), `settled` (last 30 days), and `stats` (per-bot rollup: graded count, hit rate excluding pushes, total units, ROI per bet). Single endpoint, no caching — paper_bets queries are tiny. |
 | `GET /api/handicapper` | **Bot** | Pick Bot tracker payload. Returns `pending` (every `bot_picks` row with `status='pending'`, no age cap), `settled` (last 30 days), `stats` (overall: graded / hit_rate / units / roi), and `stats_by_confidence` (same rollup keyed by low/medium/high/max). Includes the full `analysis_md` write-up + `reasons` bullet list per pick — the page expands them inline. |
+| `GET /api/handicapper/dossier?q=...&sport=...` | **Bot** | Live pre-game dossier for one game. Same shape + sources as `kahla-scanner/scripts/handicapper.py` but server-side. Pulls latest book_snapshots (PIN devig + best retail edge per side), Action Network splits, ESPN injuries + records + last-10, MLB probable pitchers + season stats. Includes a rule-based `suggestion` block (sharp ≥ 4 AND edge ≥ 0.5pp gates) with sizing → 1u/3u/5u + low/medium/high/max confidence. No caching — user-driven, low volume, want fresh data every call. ~2-5s latency from external API hops. Implemented in `handicapper_web.py` (Flask-portable, free deps only). |
+| `POST /api/handicapper/pick` | **Bot** | Log a pick to `bot_picks`. JSON body: market_id, market_type, side, book, price, line, units (1/3/5), confidence (low/medium/high/max), plus optional fair_prob, edge_pp, sharp_score, analysis_md, reasons (string array), query_text, signal_blob. Idempotent on (market_id, market_type, side) within 7 days unless `allow_duplicate=true`. Returns `{ok, id, skipped}` (with `existing_id` if duplicate). Same row shape as `kahla-scanner/scripts/handicapper_log_pick.py` produces from CLI. |
 | `GET /api/raw` | Admin | Debug: raw Polymarket SDK responses |
 | `GET /api/debug-trades` | **Admin** | Debug: grouped trade details with before/after position data |
 | `GET /api/debug-deposits` | **Admin** | Debug: all balance changes with types and reasons |
@@ -135,7 +137,8 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - `templates/odds.html` — Odds board (~2230 lines, includes splits row + sparklines)
 - `templates/dashboard.html` — P&L dashboard (~1130 lines)
 - `templates/sharp_bot.html` — Phase 4 paper-bet tracker (admin only)
-- `templates/handicapper.html` — Pick Bot page (admin + bot_access)
+- `templates/handicapper.html` — Pick Bot page: search bar + dossier renderer + log-pick modal + history (admin + bot_access)
+- `handicapper_web.py` — Flask-portable port of the dossier builder. Self-contained: math helpers + sharp-side/score + match resolution + free public data fetches (Supabase, ESPN, Action Network, MLB Stats API). Backs `/api/handicapper/dossier`. **Keep in sync with `kahla-scanner/scripts/handicapper.py`** — rules logic must agree.
 - `templates/index.html` — Landing page with auth + admin + role-based app cards
 - `.claude/skills/handicap.md` — **Pick Bot skill**: routing + analyst workflow + betting strategy doc. Auto-applies on betting-flavored questions about a specific game. Read this for the PIN-anchor / line-movement / splits-divergence / sizing rules.
 - `kahla-scanner/scripts/handicapper.py` — Pick Bot dossier builder (free public data + Supabase)
@@ -439,19 +442,33 @@ Auto-refreshes every 60s. Manual Refresh button in the top bar. The endpoint ret
 
 Nav link added to `/odds` (admin-only, hidden for viewers) and `/dashboard` (admin-only by virtue of the page itself). Sharp Bot card on `/` is rendered alongside the Dashboard card under the admin app section.
 
-### Pick Bot — Phase 5 (handicapper, in-chat)
+### Pick Bot — Phase 5 (handicapper, dual flow)
 
-Different from Sharp Bot. Sharp Bot is fully automated (cron picks from rule-based logic). Pick Bot is **interactive**: the user asks Claude in chat about a game ("Toronto vs Angels today, thoughts?"), and Claude does the analysis using free public data + Supabase odds, writes a full pre-game write-up, and logs a 1/3/5u recommendation to `bot_picks`. Resolver auto-grades against ESPN finals on the same 30-min cron.
+Different from Sharp Bot. Sharp Bot is fully automated (cron picks from rule-based logic). Pick Bot is **interactive**: the user types a game name and gets the full pre-game data + a rule-based pick suggestion + the option to either log it directly or pull a long-form narrative from Claude.
+
+**Two flows, same data**:
+- **Web (`/handicapper`)** — Type "Toronto vs Angels" in the search bar, get the live dossier rendered: PIN devig + best retail edge per market (ML/SPR/TOT), Action Network splits, ESPN injuries + records + last 10, MLB pitchers. The bot's mechanical suggestion (rule-based gates: sharp ≥ 4 AND edge ≥ 0.5pp) renders at the top with a "Log this pick" button. **Best for the data view + a quick mechanical pick.**
+- **In-chat Claude (mobile or desktop)** — Ask "Toronto vs Angels today, thoughts?" in any Claude Code session in this repo. The `/handicap` skill auto-loads, runs `kahla-scanner/scripts/handicapper.py` for the same dossier, and Claude writes the full narrative analysis applying the strategy rules (PIN anchor, line movement read, public splits divergence, fade-the-public, late-scratch caveats). **Best for the deep narrative read.** Hand-off bridge: the web page has a "Copy for Claude" button that copies the dossier JSON formatted for paste into Claude Code.
 
 **Markets**: ML, spread, total only. **No props.**
 
-**Routing**: When the user asks a betting-flavored question about a specific game, invoke the `/handicap` skill (`.claude/skills/handicap.md`). It documents the full workflow + strategy principles. Plain-English questions trigger the same flow without the explicit `/handicap` prefix.
+**Routing for in-chat flow**: When the user asks a betting-flavored question about a specific game, invoke the `/handicap` skill (`.claude/skills/handicap.md`).
 
-**Pipeline**:
+**Pipeline (in-chat flow)**:
 1. `kahla-scanner/scripts/handicapper.py "Toronto vs Angels"` — builds a JSON dossier (latest odds across all 14 books, PIN devig + sharp side/score, public splits, ESPN injuries, ESPN team records + last 10, MLB probable pitchers + season stats). Free public sources only — no paid APIs, no Claude API.
-2. Claude reads the dossier, applies the strategy rules in `.claude/skills/handicap.md` (PIN as anchor, line movement, splits divergence, public bias to fade, late-scratch caveats, sizing rubric), writes the full analyst write-up in chat, and proposes a side / market / line / book / price / units / confidence.
-3. `kahla-scanner/scripts/handicapper_log_pick.py --market-id <uuid> --market-type <ml|spread|total> --side <home|away|over|under> --book DK --price -125 --units 3 --confidence high --analysis-file /tmp/analysis.md --reason "..." --reason "..."` writes the row to `bot_picks`. Idempotent: same `(market_id, market_type, side)` within 7 days is silently skipped (use `--allow-duplicate` to override). If Claude doesn't recommend a pick (no edge / conflicted signals / late scratch), the script is just not called.
+2. Claude reads the dossier, applies the strategy rules in `.claude/skills/handicap.md`, writes the full analyst write-up in chat, and proposes a side / market / line / book / price / units / confidence.
+3. `kahla-scanner/scripts/handicapper_log_pick.py --market-id <uuid> --market-type <ml|spread|total> --side <home|away|over|under> --book DK --price -125 --units 3 --confidence high --analysis-file /tmp/analysis.md --reason "..." --reason "..."` writes the row to `bot_picks`. Idempotent: same `(market_id, market_type, side)` within 7 days is silently skipped (use `--allow-duplicate` to override). If Claude doesn't recommend a pick, the script is just not called.
 4. `kahla-scanner/scripts/bot_picks_resolver.py` — appended step in `scanner-poll.yml`. Same ESPN-matching pattern as `paper_bets_resolver.py`, but reads `units` per row for 1/3/5u sizing.
+
+**Pipeline (web flow)**:
+1. User types query → page POSTs to `GET /api/handicapper/dossier?q=...` → Flask runs `handicapper_web.build_dossier()` (same shape as the CLI version, ports the math + sharp helpers locally so the kahla-scanner subproject stays out of the Vercel deploy) → JSON returns to the page.
+2. Page renders odds grid, splits row, injury blocks, suggestion card.
+3. User clicks "Log this pick" → modal pre-fills with the suggestion → POSTs to `/api/handicapper/pick` → row inserted into `bot_picks`.
+4. Same resolver grades it.
+
+**Two dossier implementations, kept in sync**:
+- `kahla-scanner/scripts/handicapper.py` — CLI (uses httpx, kahla-scanner _lib helpers). Authoritative.
+- `handicapper_web.py` — Flask-portable port (uses requests, math helpers inlined). When the rules change, change BOTH. The kahla-scanner subproject doesn't ship to Vercel (`vercel.json` only deploys app.py), so Flask can't `import` from it.
 
 **Data sources** (free public, no auth or trivial UA-spoof):
 - Supabase `book_snapshots` — odds + PIN opener
