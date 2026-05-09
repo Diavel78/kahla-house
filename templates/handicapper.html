@@ -147,8 +147,35 @@
         .empty { padding: 24px; text-align: center; font-size: 13px; color: var(--text-muted); background: var(--surface); border: 1px dashed var(--border); border-radius: 12px; }
         .gate-msg { padding: 60px 20px; text-align: center; color: var(--text-secondary); }
 
+        /* Sport tabs */
+        .sport-tabs { display: flex; gap: 4px; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 4px; margin-bottom: 14px; scrollbar-width: none; }
+        .sport-tabs::-webkit-scrollbar { display: none; }
+        .sport-tab { padding: 8px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; color: var(--text-secondary); font-size: 13px; font-weight: 500; cursor: pointer; white-space: nowrap; transition: all 0.15s; font-family: inherit; }
+        .sport-tab:hover { color: var(--text); border-color: var(--border-light); }
+        .sport-tab.active { background: var(--blue-dim); border-color: var(--blue); color: var(--blue); font-weight: 600; }
+
+        /* Game list */
+        .games-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 22px; }
+        .games-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+        .games-head h3 { font-size: 13px; font-weight: 600; }
+        .games-head .count { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); padding: 2px 8px; background: var(--bg); border-radius: 10px; border: 1px solid var(--border); }
+        .games-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+        .game-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; transition: border-color 0.15s; }
+        .game-row:hover { border-color: var(--border-light); }
+        .game-row .matchup { font-size: 14px; font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+        .game-row .when { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); margin-right: 6px; white-space: nowrap; }
+        .game-row .pick-btn { padding: 6px 12px; background: var(--blue); color: #fff; border: 0; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; }
+        .game-row .pick-btn:hover { background: #5b8aff; }
+        .game-row .pick-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .games-empty { padding: 20px; text-align: center; font-size: 12px; color: var(--text-muted); }
+
         /* Ask form */
         .ask-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-bottom: 22px; }
+        .ask-card .ask-toggle { font-size: 11px; color: var(--text-muted); cursor: pointer; user-select: none; margin-bottom: 0; }
+        .ask-card .ask-toggle:hover { color: var(--text-secondary); }
+        .ask-card .ask-body { display: none; margin-top: 12px; }
+        .ask-card.expanded .ask-body { display: block; }
+        .ask-card.expanded .ask-toggle { margin-bottom: 0; }
         .ask-row { display: flex; gap: 8px; align-items: stretch; }
         .ask-input { flex: 1; padding: 12px 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-family: inherit; font-size: 15px; }
         .ask-input:focus { outline: none; border-color: var(--blue); }
@@ -271,24 +298,52 @@
                 <p class="lede">Ask about a game and get the full pre-game read: PIN sharp signal, retail edge per side, public splits, injuries, recent form, lineups. Bot suggests a 1/3/5u play if signals + edge clear the bar — otherwise it'll tell you to pass. ML, spread, total only.</p>
             </div>
 
-            <div class="ask-card">
-                <div class="ask-row">
-                    <input type="text" class="ask-input" id="askInput" placeholder="Toronto vs Angels"
-                           autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
-                           onkeydown="if(event.key==='Enter') askGame()" />
-                    <select class="ask-sport" id="askSport">
-                        <option value="">Auto-detect sport</option>
-                        <option value="MLB">MLB</option>
-                        <option value="NBA">NBA</option>
-                        <option value="NHL">NHL</option>
-                        <option value="NFL">NFL</option>
-                        <option value="NCAAF">NCAAF</option>
-                        <option value="CBB">NCAAB</option>
-                        <option value="UFC">UFC</option>
-                    </select>
-                    <button class="ask-submit" id="askSubmit" onclick="askGame()">Build dossier</button>
+            <!-- Sport tabs -->
+            <div class="sport-tabs" id="sportTabs">
+                <button class="sport-tab active" data-sport="MLB">MLB</button>
+                <button class="sport-tab" data-sport="NBA">NBA</button>
+                <button class="sport-tab" data-sport="NHL">NHL</button>
+                <button class="sport-tab" data-sport="NFL">NFL</button>
+                <button class="sport-tab" data-sport="NCAAF">NCAAF</button>
+                <button class="sport-tab" data-sport="CBB">NCAAB</button>
+                <button class="sport-tab" data-sport="UFC">UFC</button>
+            </div>
+
+            <!-- Game list (auto-populates per selected sport) -->
+            <div class="games-card">
+                <div class="games-head">
+                    <h3 id="gamesTitle">MLB — upcoming</h3>
+                    <span class="count" id="gamesCount">…</span>
                 </div>
-                <div class="ask-hint">Free-form: "Yankees vs Red Sox", "Lakers Nuggets tonight", "MIN @ DEN". Window: games starting within ±90 min/+48h.</div>
+                <ul class="games-list" id="gamesList">
+                    <li class="games-empty">Loading…</li>
+                </ul>
+            </div>
+
+            <!-- Search (collapsed by default — game list is primary) -->
+            <div class="ask-card" id="askCard">
+                <div class="ask-toggle" onclick="document.getElementById('askCard').classList.toggle('expanded')">
+                    Or search by name ▾
+                </div>
+                <div class="ask-body">
+                    <div class="ask-row">
+                        <input type="text" class="ask-input" id="askInput" placeholder="Toronto vs Angels"
+                               autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+                               onkeydown="if(event.key==='Enter') askGame()" />
+                        <select class="ask-sport" id="askSport">
+                            <option value="">Auto-detect sport</option>
+                            <option value="MLB">MLB</option>
+                            <option value="NBA">NBA</option>
+                            <option value="NHL">NHL</option>
+                            <option value="NFL">NFL</option>
+                            <option value="NCAAF">NCAAF</option>
+                            <option value="CBB">NCAAB</option>
+                            <option value="UFC">UFC</option>
+                        </select>
+                        <button class="ask-submit" id="askSubmit" onclick="askGame()">Build dossier</button>
+                    </div>
+                    <div class="ask-hint">Free-form: "Yankees vs Red Sox", "Lakers Nuggets tonight", "MIN @ DEN". Same window as the list above.</div>
+                </div>
             </div>
 
             <div class="dossier" id="dossier"></div>
@@ -381,6 +436,8 @@
         } catch { window.location.href = '/'; return; }
         document.getElementById('auth-gate').style.display = 'none';
         document.getElementById('app').style.display = '';
+        _initSportTabs();
+        loadGames();
         loadData(true);
         setInterval(() => loadData(false), 60_000);
     });
@@ -489,6 +546,76 @@
                 ${analysis}
             </li>
         `;
+    }
+
+    // ─── Sport tabs + game list ───
+    const SPORT_LS_KEY = 'pickbot_sport';
+    let _activeSport = localStorage.getItem(SPORT_LS_KEY) || 'MLB';
+
+    function _initSportTabs() {
+        const tabs = document.querySelectorAll('#sportTabs .sport-tab');
+        tabs.forEach(t => {
+            t.classList.toggle('active', t.dataset.sport === _activeSport);
+            t.addEventListener('click', () => {
+                _activeSport = t.dataset.sport;
+                localStorage.setItem(SPORT_LS_KEY, _activeSport);
+                tabs.forEach(x => x.classList.toggle('active', x === t));
+                loadGames();
+            });
+        });
+    }
+
+    async function loadGames() {
+        const list = document.getElementById('gamesList');
+        const count = document.getElementById('gamesCount');
+        const title = document.getElementById('gamesTitle');
+        const sportLabel = ({CBB:'NCAAB'})[_activeSport] || _activeSport;
+        title.textContent = `${sportLabel} — upcoming`;
+        count.textContent = '…';
+        list.innerHTML = '<li class="games-empty">Loading…</li>';
+        try {
+            const r = await authFetch('/api/handicapper/games?sport=' + encodeURIComponent(_activeSport));
+            const data = await r.json();
+            if (!data.ok) throw new Error(data.error || 'fetch failed');
+            const games = data.games || [];
+            count.textContent = games.length;
+            if (!games.length) {
+                list.innerHTML = '<li class="games-empty">No upcoming games for this sport.</li>';
+                return;
+            }
+            list.innerHTML = games.map(g => {
+                const matchup = g.away && g.home ? `${_esc(g.away)} @ ${_esc(g.home)}` : _esc(g.event_name);
+                return `<li class="game-row">
+                    <span class="when">${_fmtKickoff(g.event_start)}</span>
+                    <span class="matchup">${matchup}</span>
+                    <button class="pick-btn" onclick="pickGame('${g.market_id}')">Pick</button>
+                </li>`;
+            }).join('');
+        } catch (e) {
+            list.innerHTML = `<li class="games-empty" style="color:var(--red)">Failed to load: ${_esc(String(e))}</li>`;
+            count.textContent = '0';
+        }
+    }
+
+    async function pickGame(marketId) {
+        // Click-to-pick from the games list. Skips the freeform search
+        // and goes straight to the dossier endpoint with market_id.
+        const dossierEl = document.getElementById('dossier');
+        dossierEl.classList.add('show');
+        dossierEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">Pulling odds + injuries + splits…</div>';
+        dossierEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        try {
+            const resp = await authFetch('/api/handicapper/dossier?market_id=' + encodeURIComponent(marketId));
+            const data = await resp.json();
+            if (!data.ok) {
+                dossierEl.innerHTML = `<div class="dossier-error"><strong>Couldn't build dossier.</strong> ${_esc(data.error || 'unknown error')}</div>`;
+                return;
+            }
+            _lastDossier = data;
+            renderDossier(data);
+        } catch (e) {
+            dossierEl.innerHTML = `<div class="dossier-error">Request failed: ${_esc(String(e))}</div>`;
+        }
     }
 
     // ─── Dossier (web-side ask) ───

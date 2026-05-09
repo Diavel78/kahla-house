@@ -3404,14 +3404,13 @@ def api_handicapper():
 @app.route("/api/handicapper/dossier")
 @bot_required
 def api_handicapper_dossier():
-    """Build the live pre-game dossier for one game from a freeform
-    query. Same shape + sources as kahla-scanner/scripts/handicapper.py
-    but server-side so the website search bar can render results
-    instantly without the user touching Claude Code.
+    """Build the live pre-game dossier for one game.
 
-    Query params:
-      q     — required. e.g. "Toronto vs Angels"
-      sport — optional sport hint: MLB / NBA / NFL / NHL / NCAAF / CBB / UFC
+    Query params (one of `q` OR `market_id` required):
+      q          — freeform team query, e.g. "Toronto vs Angels"
+      market_id  — direct UUID lookup. Used by the click-to-pick game
+                   cards on /handicapper to skip the fuzzy match.
+      sport      — optional sport hint when using `q`.
 
     No caching — dossiers are 1:1 user-driven, low volume, and we want
     fresh data every time (line moved? injury just dropped?). Each call
@@ -3421,16 +3420,76 @@ def api_handicapper_dossier():
     sb = get_supabase()
     if sb is None:
         return jsonify({"ok": False, "error": "Supabase not configured"}), 503
-    q = (request.args.get("q") or "").strip()
-    if not q:
-        return jsonify({"ok": False, "error": "missing q param"}), 400
+    market_id = (request.args.get("market_id") or "").strip() or None
+    q = (request.args.get("q") or "").strip() or None
+    if not market_id and not q:
+        return jsonify({"ok": False, "error": "missing q or market_id param"}), 400
     sport = request.args.get("sport") or None
     try:
-        dossier = handicapper_web.build_dossier(sb, q, sport)
+        dossier = handicapper_web.build_dossier(
+            sb, q, sport, market_id=market_id)
     except Exception as e:
         return jsonify({"ok": False, "error": f"dossier build failed: {e}"}), 500
     code = 200 if dossier.get("ok") else 404
     return jsonify(dossier), code
+
+
+@app.route("/api/handicapper/games")
+@bot_required
+def api_handicapper_games():
+    """List active games for a sport — pre-game window only. Powers the
+    click-to-pick UI on /handicapper.
+
+    Window: events starting in the next 48h (and within the last 90 min,
+    so a late-asked-about live game still appears). Sorted by event_start.
+
+    Lightweight: only event_name + start time + ids. The dossier (with
+    odds, splits, injuries) is fetched on click via /api/handicapper/dossier."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+    sport = (request.args.get("sport") or "").upper().strip()
+    if not sport:
+        return jsonify({"ok": False, "error": "missing sport param"}), 400
+
+    now = datetime.now(timezone.utc)
+    after  = (now - timedelta(minutes=90)).isoformat()
+    before = (now + timedelta(hours=48)).isoformat()
+    try:
+        rows = (sb.table("markets")
+                .select("id,sport,event_name,event_start,status")
+                .eq("status", "active")
+                .eq("sport", sport)
+                .gte("event_start", after)
+                .lte("event_start", before)
+                .order("event_start")
+                .limit(200).execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
+
+    games = []
+    for m in rows:
+        en = m.get("event_name") or ""
+        away = home = ""
+        if " @ " in en:
+            parts = en.split(" @ ", 1)
+            away, home = parts[0].strip(), parts[1].strip()
+        games.append({
+            "market_id":   m["id"],
+            "event_name":  en,
+            "event_start": m["event_start"],
+            "sport":       m["sport"],
+            "away":        away,
+            "home":        home,
+        })
+
+    return jsonify({
+        "ok":      True,
+        "sport":   sport,
+        "now_iso": now.isoformat(),
+        "count":   len(games),
+        "games":   games,
+    })
 
 
 @app.route("/api/handicapper/pick", methods=["POST"])

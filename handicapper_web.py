@@ -806,18 +806,50 @@ def _suggest_pick(odds: dict) -> dict | None:
 
 # ──────────────────────────── Public entry point ────────────────────────────
 
-def build_dossier(sb, query: str, sport_hint: str | None) -> dict:
+def build_dossier(sb, query: str | None, sport_hint: str | None,
+                  market_id: str | None = None) -> dict:
     """Top-level call. Returns the dossier dict shaped for the analyst /
-    web page. Same shape as the kahla-scanner CLI version."""
-    market, alts = _find_market(sb, query, sport_hint)
-    if not market:
-        return {
-            "ok": False,
-            "error": "no market matched query",
-            "query": query,
-            "tokens": _parse_query(query),
-            "hint": "Check spelling, or try 'Yankees vs Red Sox' style.",
-        }
+    web page. Same shape as the kahla-scanner CLI version.
+
+    Two entry modes:
+      • market_id given — direct lookup, skips the freeform team-search.
+        Used by the click-to-pick game cards on /handicapper.
+      • query given — fuzzy team-name match against active markets.
+        Used by the search bar.
+    """
+    alts: list = []
+    market: dict | None = None
+    if market_id:
+        try:
+            market = (sb.table("markets")
+                      .select("id,sport,event_name,event_start,status")
+                      .eq("id", market_id)
+                      .single().execute().data)
+        except Exception:
+            market = None
+        if not market:
+            return {
+                "ok": False,
+                "error": f"market {market_id} not found",
+                "query": query or market_id,
+                "hint": "Game may have ended or been removed.",
+            }
+    else:
+        if not query:
+            return {
+                "ok": False,
+                "error": "query required",
+                "hint": "Pass either ?q=... or ?market_id=...",
+            }
+        market, alts = _find_market(sb, query, sport_hint)
+        if not market:
+            return {
+                "ok": False,
+                "error": "no market matched query",
+                "query": query,
+                "tokens": _parse_query(query),
+                "hint": "Check spelling, or try 'Yankees vs Red Sox' style.",
+            }
 
     sport = market["sport"]
     away, home = _split_event_name(market["event_name"])
@@ -870,7 +902,7 @@ def build_dossier(sb, query: str, sport_hint: str | None) -> dict:
 
     return {
         "ok":              True,
-        "query":           query,
+        "query":           query or market["event_name"],
         "market_id":       market["id"],
         "sport":           sport,
         "event_name":      market["event_name"],
