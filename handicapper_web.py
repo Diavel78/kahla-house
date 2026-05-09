@@ -328,41 +328,44 @@ def _odds_api_key() -> str | None:
 
 
 def _fetch_live_event(sport: str, event_start_iso: str,
-                      away: str, home: str) -> dict | None:
-    """Hit The Odds API and return the matching event payload, or None.
+                      away: str, home: str) -> tuple[dict | None, str | None]:
+    """Hit The Odds API and return (event_payload, error_msg).
+
+    Returns (event_dict, None) on success, (None, "reason string") on
+    any failure. Error string is surfaced to the dossier so the UI can
+    show why the live fetch fell back to cached.
 
     Cost: 6 credits per call (3 markets × 2 regions). Same call shape as
     the cron — gets all events for the sport, we filter to the one game.
-    Side benefit: latency only — we don't currently re-ingest these into
-    book_snapshots. The 30-min cron remains the source of truth for the
-    Odds Board / sparklines / openers; live fetch only freshens the data
-    that feeds the dossier on this click.
     """
     sport_key = SPORT_KEYS.get(sport)
-    api_key   = _odds_api_key()
-    if not (sport_key and api_key):
-        return None
+    if not sport_key:
+        return None, f"sport {sport} not in SPORT_KEYS"
+    api_key = _odds_api_key()
+    if not api_key:
+        return None, "ODDS_API_KEY not set in Vercel env"
     try:
         bet_dt = datetime.fromisoformat(event_start_iso.replace("Z", "+00:00"))
-    except Exception:
-        return None
+    except Exception as e:
+        return None, f"bad event_start: {e}"
     url = f"{ODDS_API_BASE}/sports/{sport_key}/odds"
     params = {
         "api_key":    api_key,
-        "regions":    "us,eu",  # EU required for PIN; same as cron
+        "regions":    "us,eu",
         "markets":    "h2h,spreads,totals",
         "oddsFormat": "american",
         "dateFormat": "iso",
     }
     try:
         r = requests.get(url, params=params, timeout=12)
-        if r.status_code != 200:
-            log.warning("live odds %s -> %s", sport, r.status_code)
-            return None
+    except Exception as e:
+        return None, f"http exception: {str(e)[:120]}"
+    if r.status_code != 200:
+        return None, f"http {r.status_code}: {r.text[:120]}"
+    try:
         events = r.json() or []
     except Exception as e:
-        log.warning("live odds %s exception: %s", sport, e)
-        return None
+        return None, f"bad json: {e}"
 
     away_n, home_n = (away or "").lower(), (home or "").lower()
     window = timedelta(minutes=LIVE_MATCH_WINDOW_MIN)
@@ -381,8 +384,8 @@ def _fetch_live_event(sport: str, event_start_iso: str,
             continue
         if abs((ev_dt - bet_dt).total_seconds()) > window.total_seconds():
             continue
-        return ev
-    return None
+        return ev, None
+    return None, f"no live event matched {away} @ {home} in {len(events)} returned"
 
 
 def _live_event_to_latest(ev: dict) -> dict:
@@ -1066,16 +1069,23 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
 
     # Live odds refresh — replace `latest` with a fresh Odds API call so
     # the dossier reflects current lines, not the last 30-min cron tick.
-    # Falls through silently if the API call fails / no match — we still
-    # have the cached snapshots to render.
+    # Failures are reported via `live_error` so the UI can explain why
+    # cached fell-back happened.
     live_used = False
+    live_error: str | None = None
     if live and away and home and event_start:
-        ev = _fetch_live_event(sport, event_start, away, home)
+        ev, err = _fetch_live_event(sport, event_start, away, home)
         if ev:
             live_latest = _live_event_to_latest(ev)
             if live_latest:
                 latest = live_latest
                 live_used = True
+            else:
+                live_error = "live response had no usable book lines"
+        else:
+            live_error = err
+    elif live:
+        live_error = "missing event metadata"
     odds = {
         "moneyline": _build_market_block("moneyline", ("away", "home"),
                                           latest, pin_op),
@@ -1139,5 +1149,6 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
             for m in alts[1:]
         ],
         "live_used":       live_used,
+        "live_error":      live_error,
         "generated_at":    datetime.now(timezone.utc).isoformat(),
     }
