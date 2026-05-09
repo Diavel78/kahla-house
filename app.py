@@ -3425,9 +3425,10 @@ def api_handicapper_dossier():
     if not market_id and not q:
         return jsonify({"ok": False, "error": "missing q or market_id param"}), 400
     sport = request.args.get("sport") or None
+    live  = (request.args.get("live") or "").lower() in ("1", "true", "yes")
     try:
         dossier = handicapper_web.build_dossier(
-            sb, q, sport, market_id=market_id)
+            sb, q, sport, market_id=market_id, live=live)
     except Exception as e:
         return jsonify({"ok": False, "error": f"dossier build failed: {e}"}), 500
     code = 200 if dossier.get("ok") else 404

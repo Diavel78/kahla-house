@@ -20,6 +20,7 @@ authoritative — it backs the live picker logic that's been running.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -34,6 +35,40 @@ ALLOWED_BOOKS = {
     "BR", "BOL", "LV", "BVD", "ESPN", "FAN", "MB",
 }
 ENTRY_BOOKS = ALLOWED_BOOKS - {"PIN"}
+
+# Odds API mappings — duplicated from kahla-scanner/scrapers/odds_api.py
+# so handicapper_web (the only Vercel-deployed module) can hit the live
+# endpoint when the user clicks "Pick". Keep in sync with the ingester
+# if a new book or sport is added.
+ODDS_API_BASE = "https://api.the-odds-api.com/v4"
+SPORT_KEYS = {
+    "MLB":   "baseball_mlb",
+    "NBA":   "basketball_nba",
+    "NHL":   "icehockey_nhl",
+    "NFL":   "americanfootball_nfl",
+    "CBB":   "basketball_ncaab",
+    "NCAAF": "americanfootball_ncaaf",
+    "UFC":   "mma_mixed_martial_arts",
+}
+BOOK_CODES = {
+    "pinnacle":      "PIN",
+    "draftkings":    "DK",
+    "fanduel":       "FD",
+    "betmgm":        "MGM",
+    "caesars":       "CAE",
+    "hardrockbet":   "HR",
+    "hardrock":      "HR",
+    "bet365":        "BET365",
+    "betrivers":     "BR",
+    "betonlineag":   "BOL",
+    "betonline":     "BOL",
+    "lowvig":        "LV",
+    "bovada":        "BVD",
+    "espnbet":       "ESPN",
+    "fanatics":      "FAN",
+    "mybookieag":    "MB",
+}
+LIVE_MATCH_WINDOW_MIN = 30
 
 _ESPN_PATH: dict[str, tuple[str, str]] = {
     "MLB":   ("baseball",   "mlb"),
@@ -283,6 +318,138 @@ def _pin_opener(sb, market_id: str) -> dict:
         key = (r["market_type"], r["side"])
         if key not in out:
             out[key] = r
+    return out
+
+
+# ──────────────────────── Live Odds API fetch ────────────────────────
+
+def _odds_api_key() -> str | None:
+    return (os.getenv("ODDS_API_KEY") or "").strip() or None
+
+
+def _fetch_live_event(sport: str, event_start_iso: str,
+                      away: str, home: str) -> dict | None:
+    """Hit The Odds API and return the matching event payload, or None.
+
+    Cost: 6 credits per call (3 markets × 2 regions). Same call shape as
+    the cron — gets all events for the sport, we filter to the one game.
+    Side benefit: latency only — we don't currently re-ingest these into
+    book_snapshots. The 30-min cron remains the source of truth for the
+    Odds Board / sparklines / openers; live fetch only freshens the data
+    that feeds the dossier on this click.
+    """
+    sport_key = SPORT_KEYS.get(sport)
+    api_key   = _odds_api_key()
+    if not (sport_key and api_key):
+        return None
+    try:
+        bet_dt = datetime.fromisoformat(event_start_iso.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    url = f"{ODDS_API_BASE}/sports/{sport_key}/odds"
+    params = {
+        "api_key":    api_key,
+        "regions":    "us,eu",  # EU required for PIN; same as cron
+        "markets":    "h2h,spreads,totals",
+        "oddsFormat": "american",
+        "dateFormat": "iso",
+    }
+    try:
+        r = requests.get(url, params=params, timeout=12)
+        if r.status_code != 200:
+            log.warning("live odds %s -> %s", sport, r.status_code)
+            return None
+        events = r.json() or []
+    except Exception as e:
+        log.warning("live odds %s exception: %s", sport, e)
+        return None
+
+    away_n, home_n = (away or "").lower(), (home or "").lower()
+    window = timedelta(minutes=LIVE_MATCH_WINDOW_MIN)
+    for ev in events:
+        ev_home = (ev.get("home_team") or "").lower()
+        ev_away = (ev.get("away_team") or "").lower()
+        if not ev_home or not ev_away:
+            continue
+        if not ((home_n in ev_home or ev_home in home_n) and
+                (away_n in ev_away or ev_away in away_n)):
+            continue
+        try:
+            ev_dt = datetime.fromisoformat(
+                (ev.get("commence_time") or "").replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if abs((ev_dt - bet_dt).total_seconds()) > window.total_seconds():
+            continue
+        return ev
+    return None
+
+
+def _live_event_to_latest(ev: dict) -> dict:
+    """Translate a single Odds API event payload into the same `latest`
+    shape `_latest_snapshots` builds: {(book, market_type, side): snapshot}.
+
+    Markets/sides we care about:
+      h2h     → moneyline / home, away (price only, no line)
+      spreads → spread / home, away (price + line)
+      totals  → total / over, under (price + line)
+    """
+    out: dict = {}
+    home_name = (ev.get("home_team") or "").lower()
+    away_name = (ev.get("away_team") or "").lower()
+    captured  = datetime.now(timezone.utc).isoformat()
+
+    for bk in ev.get("bookmakers") or []:
+        bk_key = (bk.get("key") or "").lower()
+        short = BOOK_CODES.get(bk_key)
+        if not short or short not in ALLOWED_BOOKS:
+            continue
+        for mk in bk.get("markets") or []:
+            mk_key = mk.get("key")
+            if mk_key == "h2h":
+                mt = "moneyline"
+            elif mk_key == "spreads":
+                mt = "spread"
+            elif mk_key == "totals":
+                mt = "total"
+            else:
+                continue
+            for oc in mk.get("outcomes") or []:
+                name  = (oc.get("name") or "").strip()
+                price = oc.get("price")
+                line  = oc.get("point")
+                if price is None:
+                    continue
+                if mt == "total":
+                    side = name.lower()  # "Over" / "Under"
+                    if side not in ("over", "under"):
+                        continue
+                else:
+                    nlc = name.lower()
+                    if nlc == home_name or home_name and home_name in nlc:
+                        side = "home"
+                    elif nlc == away_name or away_name and away_name in nlc:
+                        side = "away"
+                    else:
+                        continue
+                try:
+                    price = int(round(float(price)))
+                except (TypeError, ValueError):
+                    continue
+                line_val = None
+                if line is not None:
+                    try:
+                        line_val = float(line)
+                    except (TypeError, ValueError):
+                        line_val = None
+                out[(short, mt, side)] = {
+                    "book":           short,
+                    "market_type":    mt,
+                    "side":           side,
+                    "price_american": price,
+                    "line":           line_val,
+                    "captured_at":    captured,
+                }
     return out
 
 
@@ -832,7 +999,8 @@ def _suggest_pick(odds: dict, splits: dict | None = None) -> dict | None:
 # ──────────────────────────── Public entry point ────────────────────────────
 
 def build_dossier(sb, query: str | None, sport_hint: str | None,
-                  market_id: str | None = None) -> dict:
+                  market_id: str | None = None,
+                  live: bool = False) -> dict:
     """Top-level call. Returns the dossier dict shaped for the analyst /
     web page. Same shape as the kahla-scanner CLI version.
 
@@ -841,6 +1009,13 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         Used by the click-to-pick game cards on /handicapper.
       • query given — fuzzy team-name match against active markets.
         Used by the search bar.
+
+    `live=True` adds an on-demand Odds API call for the matched game and
+    replaces the Supabase-cached `latest` snapshots with live data. PIN
+    opener still comes from Supabase (live fetch only has the current
+    line, not history). Costs 6 Odds API credits per click. Used by the
+    "Pick" button on the game list so dossiers reflect the moment, not
+    the last 30-min cron tick.
     """
     alts: list = []
     market: dict | None = None
@@ -888,6 +1063,19 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
 
     latest = _latest_snapshots(sb, market["id"])
     pin_op = _pin_opener(sb, market["id"])
+
+    # Live odds refresh — replace `latest` with a fresh Odds API call so
+    # the dossier reflects current lines, not the last 30-min cron tick.
+    # Falls through silently if the API call fails / no match — we still
+    # have the cached snapshots to render.
+    live_used = False
+    if live and away and home and event_start:
+        ev = _fetch_live_event(sport, event_start, away, home)
+        if ev:
+            live_latest = _live_event_to_latest(ev)
+            if live_latest:
+                latest = live_latest
+                live_used = True
     odds = {
         "moneyline": _build_market_block("moneyline", ("away", "home"),
                                           latest, pin_op),
@@ -950,5 +1138,6 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
              "event_start": m["event_start"], "sport": m["sport"]}
             for m in alts[1:]
         ],
+        "live_used":       live_used,
         "generated_at":    datetime.now(timezone.utc).isoformat(),
     }
