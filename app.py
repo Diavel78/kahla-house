@@ -136,6 +136,19 @@ def admin_required(f):
     return wrapper
 
 
+def bot_required(f):
+    """Require Firebase auth + bot_access (admin always implicit).
+    Used for the Handicapper Bot page + API."""
+    @functools.wraps(f)
+    @firebase_auth_required
+    def wrapper(*args, **kwargs):
+        role = g.user_data.get("role")
+        if role != "admin" and not g.user_data.get("bot_access"):
+            return jsonify({"ok": False, "error": "Bot access required"}), 403
+        return f(*args, **kwargs)
+    return wrapper
+
+
 # ---------------------------------------------------------------------------
 # Page routes (serve templates — auth handled client-side by Firebase JS SDK)
 # ---------------------------------------------------------------------------
@@ -162,6 +175,12 @@ def dashboard():
 def sharp_bot_page():
     """Phase 4 paper-bet bot tracker — admin only (client-side gated)."""
     return render_template("sharp_bot.html")
+
+
+@app.route("/handicapper")
+def handicapper_page():
+    """Handicapper Bot — admin + bot_access gated (client-side via /api/me)."""
+    return render_template("handicapper.html")
 
 
 # ---------------------------------------------------------------------------
@@ -1199,14 +1218,20 @@ def _cleanup_old_openers(db):
 @firebase_auth_required
 def api_me():
     """Return the current user's role + approval state.
-    Used by sub-pages to gate UI before loading data."""
+    Used by sub-pages to gate UI before loading data.
+
+    `bot_access` is a per-user toggle that admins flip in User Management.
+    Admins always have it implicitly (the access-gating page treats
+    role=admin as bot_access=true)."""
+    role = g.user_data.get("role")
     return jsonify({
         "ok": True,
         "uid": g.uid,
-        "role": g.user_data.get("role"),
+        "role": role,
         "approved": bool(g.user_data.get("approved")),
         "displayName": g.user_data.get("displayName"),
         "email": g.user_data.get("email"),
+        "bot_access": bool(g.user_data.get("bot_access")) or role == "admin",
     })
 
 
@@ -3289,6 +3314,220 @@ def api_sharp_bot():
         "settled":      settled,
         "stats":        stats,
     })
+
+
+# ---------------------------------------------------------------------------
+# Handicapper Bot — picks tracker
+# ---------------------------------------------------------------------------
+
+@app.route("/api/handicapper")
+@bot_required
+def api_handicapper():
+    """JSON for /handicapper. Returns pending picks (no age cap), settled
+    picks from the last 30d, and rollup stats. Mirrors /api/sharp-bot's
+    shape, but reads from bot_picks (the in-chat handicapper's table).
+
+    Stats: hit_rate (excludes pushes), total units, ROI per pick (units /
+    graded). Per-confidence-tier rollup so we can see if 'max' picks
+    actually win at higher rates than 'medium'."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+
+    now = datetime.now(timezone.utc)
+    cutoff_30d = (now - timedelta(days=30)).isoformat()
+
+    cols = ("id,picked_at,asked_by,query_text,sport,event_name,event_start,"
+            "market_type,side,entry_book,entry_price,entry_line,"
+            "units,confidence,fair_prob,edge_pp,sharp_score,"
+            "analysis_md,reasons,"
+            "status,pnl_units,result_score,settled_at")
+    try:
+        pending = (sb.table("bot_picks").select(cols)
+                   .eq("status", "pending")
+                   .order("event_start", desc=False)
+                   .limit(500).execute().data) or []
+        settled = (sb.table("bot_picks").select(cols)
+                   .neq("status", "pending")
+                   .gte("settled_at", cutoff_30d)
+                   .order("settled_at", desc=True)
+                   .limit(500).execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
+
+    overall = {"graded": 0, "won": 0, "lost": 0, "push": 0,
+               "units": 0.0, "hit_rate": None, "roi": None}
+    by_conf: dict = {c: {"graded": 0, "won": 0, "lost": 0, "push": 0,
+                         "units": 0.0, "hit_rate": None, "roi": None}
+                     for c in ("low", "medium", "high", "max")}
+    for r in settled:
+        st = r.get("status")
+        if st not in ("won", "lost", "push"):
+            continue
+        try:
+            pnl = float(r.get("pnl_units") or 0)
+        except (TypeError, ValueError):
+            pnl = 0.0
+        overall["graded"] += 1
+        overall[st] += 1
+        overall["units"] += pnl
+        conf = r.get("confidence")
+        if conf in by_conf:
+            bucket = by_conf[conf]
+            bucket["graded"] += 1
+            bucket[st] += 1
+            bucket["units"] += pnl
+
+    def _finalize(s: dict) -> None:
+        decided = s["won"] + s["lost"]
+        if decided > 0:
+            s["hit_rate"] = round(s["won"] / decided, 4)
+        if s["graded"] > 0:
+            s["roi"] = round(s["units"] / s["graded"], 4)
+        s["units"] = round(s["units"], 3)
+
+    _finalize(overall)
+    for s in by_conf.values():
+        _finalize(s)
+
+    return jsonify({
+        "ok":           True,
+        "now_iso":      now.isoformat(),
+        "window_days":  30,
+        "pending":      pending,
+        "settled":      settled,
+        "stats":        overall,
+        "stats_by_confidence": by_conf,
+    })
+
+
+@app.route("/api/handicapper/dossier")
+@bot_required
+def api_handicapper_dossier():
+    """Build the live pre-game dossier for one game from a freeform
+    query. Same shape + sources as kahla-scanner/scripts/handicapper.py
+    but server-side so the website search bar can render results
+    instantly without the user touching Claude Code.
+
+    Query params:
+      q     — required. e.g. "Toronto vs Angels"
+      sport — optional sport hint: MLB / NBA / NFL / NHL / NCAAF / CBB / UFC
+
+    No caching — dossiers are 1:1 user-driven, low volume, and we want
+    fresh data every time (line moved? injury just dropped?). Each call
+    makes a handful of free public API hits (Supabase + ESPN + MLB Stats
+    + Action Network). Typical latency 2-5s."""
+    import handicapper_web
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify({"ok": False, "error": "missing q param"}), 400
+    sport = request.args.get("sport") or None
+    try:
+        dossier = handicapper_web.build_dossier(sb, q, sport)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"dossier build failed: {e}"}), 500
+    code = 200 if dossier.get("ok") else 404
+    return jsonify(dossier), code
+
+
+@app.route("/api/handicapper/pick", methods=["POST"])
+@bot_required
+def api_handicapper_pick():
+    """Log a pick to bot_picks. Body matches the bot_picks columns —
+    see kahla-scanner/scripts/handicapper_log_pick.py for the same
+    shape used by the CLI logger.
+
+    Request JSON:
+      market_id, market_type ('moneyline'|'spread'|'total'),
+      side ('home'|'away'|'over'|'under'), book, price (int),
+      line (number, null for ML), units (1|3|5),
+      confidence ('low'|'medium'|'high'|'max'),
+      fair_prob, edge_pp, sharp_score, analysis_md, reasons (list),
+      query_text, signal_blob (object).
+
+    Idempotent on (market_id, market_type, side) within 7 days unless
+    `allow_duplicate=true` is passed."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+
+    body = request.get_json(force=True, silent=True) or {}
+    required = ["market_id", "market_type", "side", "book", "price",
+                "units", "confidence"]
+    missing = [k for k in required if body.get(k) is None]
+    if missing:
+        return jsonify({"ok": False, "error": f"missing: {missing}"}), 400
+
+    if body["market_type"] not in ("moneyline", "spread", "total"):
+        return jsonify({"ok": False, "error": "bad market_type"}), 400
+    if body["side"] not in ("home", "away", "over", "under"):
+        return jsonify({"ok": False, "error": "bad side"}), 400
+    if body["confidence"] not in ("low", "medium", "high", "max"):
+        return jsonify({"ok": False, "error": "bad confidence"}), 400
+    if body["units"] not in (1, 3, 5):
+        return jsonify({"ok": False, "error": "units must be 1/3/5"}), 400
+
+    line_val = body.get("line")
+    if body["market_type"] in ("spread", "total"):
+        if line_val is None:
+            return jsonify({"ok": False, "error": "line required for spread/total"}), 400
+
+    try:
+        m = (sb.table("markets")
+             .select("id,sport,event_name,event_start,status")
+             .eq("id", body["market_id"])
+             .single().execute().data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"market lookup: {e}"}), 404
+    if not m:
+        return jsonify({"ok": False, "error": "market not found"}), 404
+
+    if not body.get("allow_duplicate"):
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=168)).isoformat()
+        try:
+            existing = (sb.table("bot_picks").select("id")
+                        .eq("market_id", body["market_id"])
+                        .eq("market_type", body["market_type"])
+                        .eq("side", body["side"])
+                        .gte("picked_at", cutoff)
+                        .limit(1).execute().data) or []
+        except Exception:
+            existing = []
+        if existing:
+            return jsonify({"ok": True, "skipped": True,
+                            "reason": "already logged within 7 days",
+                            "existing_id": existing[0]["id"]}), 200
+
+    row = {
+        "asked_by":    g.uid,
+        "query_text":  body.get("query_text"),
+        "market_id":   body["market_id"],
+        "sport":       m["sport"],
+        "event_name":  m["event_name"],
+        "event_start": m["event_start"],
+        "market_type": body["market_type"],
+        "side":        body["side"],
+        "entry_book":  body["book"],
+        "entry_price": int(body["price"]),
+        "entry_line":  float(line_val) if line_val is not None else None,
+        "units":       int(body["units"]),
+        "confidence":  body["confidence"],
+        "fair_prob":   body.get("fair_prob"),
+        "edge_pp":     body.get("edge_pp"),
+        "sharp_score": body.get("sharp_score"),
+        "analysis_md": body.get("analysis_md"),
+        "reasons":     body.get("reasons"),
+        "signal_blob": body.get("signal_blob"),
+    }
+    try:
+        res = sb.table("bot_picks").insert(row).execute()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"insert: {e}"}), 500
+    pick_id = (res.data or [{}])[0].get("id")
+    return jsonify({"ok": True, "id": pick_id, "skipped": False}), 201
 
 
 # ---------------------------------------------------------------------------

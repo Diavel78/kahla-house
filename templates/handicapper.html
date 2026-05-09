@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kahla House — Pick Bot</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>
+        const FC = {
+            apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
+            authDomain: "kahla-house.firebaseapp.com",
+            projectId: "kahla-house",
+            storageBucket: "kahla-house.firebasestorage.app",
+            messagingSenderId: "1029771942929",
+            appId: "1:1029771942929:web:76358096dbb868e375a5b0"
+        };
+        firebase.initializeApp(FC);
+    </script>
+
+    <style>
+        :root {
+            --bg: #0b0e13;
+            --surface: #13171e;
+            --surface-2: #1a1f2b;
+            --surface-3: #1f2533;
+            --border: #1e2530;
+            --border-light: #2a3140;
+            --text: #e2e8f0;
+            --text-secondary: #8890a8;
+            --text-muted: #555d78;
+            --blue: #4a7cff;
+            --green: #22c55e;
+            --orange: #f59e0b;
+            --red: #ef4444;
+            --purple: #a855f7;
+            --gold: #facc15;
+            --blue-dim: rgba(74,124,255,0.08);
+            --green-dim: rgba(34,197,94,0.10);
+            --orange-dim: rgba(245,158,11,0.10);
+            --red-dim: rgba(239,68,68,0.10);
+            --purple-dim: rgba(168,85,247,0.10);
+            --gold-dim: rgba(250,204,21,0.10);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body, #app { overflow-x: hidden; }
+        body {
+            font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        .top-bar { background: var(--surface); border-bottom: 1px solid var(--border); padding: 14px 22px; display: flex; flex-direction: column; gap: 10px; }
+        .top-bar-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+        .top-bar-left { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+        .top-bar-title { font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }
+        .nav-links { display: flex; gap: 14px; }
+        .nav-link { color: var(--text-secondary); text-decoration: none; font-size: 13px; padding: 4px 0; border-bottom: 2px solid transparent; transition: all 0.15s; }
+        .nav-link:hover { color: var(--text); }
+        .nav-link.active { color: var(--blue); border-color: var(--blue); }
+        .top-bar-right { display: flex; align-items: center; gap: 10px; }
+        .status { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-secondary); padding: 4px 10px; background: var(--bg); border-radius: 12px; border: 1px solid var(--border); }
+        .refresh-btn, .logout-btn { background: var(--surface-2); border: 1px solid var(--border); color: var(--text-secondary); padding: 6px 12px; border-radius: 8px; font-size: 12px; cursor: pointer; transition: all 0.15s; font-family: inherit; }
+        .refresh-btn:hover, .logout-btn:hover { color: var(--text); border-color: var(--border-light); }
+
+        .page { max-width: 1200px; margin: 0 auto; padding: 24px 16px 60px; }
+        .page-header { margin-bottom: 18px; }
+        .page-header h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; }
+        .page-header .meta { font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; margin-top: 4px; }
+        .page-header .lede { font-size: 13px; color: var(--text-secondary); margin-top: 8px; max-width: 720px; line-height: 1.5; }
+
+        .stat-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 22px; }
+        .stat-cell { text-align: center; }
+        .stat-cell .label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+        .stat-cell .value { font-size: 18px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+        .stat-cell .value.muted { color: var(--text-muted); }
+        .stat-cell .value.pos { color: var(--green); }
+        .stat-cell .value.neg { color: var(--red); }
+        .stat-cell .value.zero { color: var(--text-secondary); }
+
+        .conf-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 22px; }
+        .conf-card { padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+        .conf-card .head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+        .conf-card .head .name { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
+        .conf-card .head .name.low { color: var(--text-secondary); }
+        .conf-card .head .name.medium { color: var(--orange); }
+        .conf-card .head .name.high { color: var(--green); }
+        .conf-card .head .name.max { color: var(--gold); }
+        .conf-card .head .units-tag { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); }
+        .conf-card .body { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-secondary); }
+        .conf-card .body .pnl.pos { color: var(--green); }
+        .conf-card .body .pnl.neg { color: var(--red); }
+        .conf-card .body .pnl.zero { color: var(--text-muted); }
+
+        .section { margin-bottom: 26px; }
+        .section-title { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 14px; font-weight: 600; }
+        .section-title .count { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted); padding: 2px 8px; background: var(--surface); border-radius: 10px; border: 1px solid var(--border); }
+
+        .picks { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+        .pick { padding: 14px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; transition: border-color 0.15s; }
+        .pick:hover { border-color: var(--border-light); }
+        .pick.won { border-left: 3px solid var(--green); }
+        .pick.lost { border-left: 3px solid var(--red); }
+        .pick.push { border-left: 3px solid var(--text-muted); }
+        .pick .row1 { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+        .pick .teams { font-weight: 600; font-size: 14px; }
+        .pick .sport-badge { font-size: 10px; color: var(--text-muted); padding: 2px 7px; background: var(--bg); border-radius: 8px; border: 1px solid var(--border); font-family: 'JetBrains Mono', monospace; }
+        .pick .row2 { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+        .pick .market { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--text); }
+        .pick .market .side-tag { color: var(--blue); font-weight: 700; }
+        .pick .entry { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-secondary); }
+        .pick .row3 { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .pick .signals { display: flex; gap: 6px; flex-wrap: wrap; }
+        .pick .chip { font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 10px; font-family: 'JetBrains Mono', monospace; }
+        .pick .chip.edge { background: var(--green-dim); color: #4ade80; }
+        .pick .chip.sharp { background: var(--blue-dim); color: var(--blue); }
+        .pick .chip.kickoff { background: var(--bg); color: var(--text-secondary); border: 1px solid var(--border); }
+        .pick .chip.units-1 { background: rgba(255,255,255,0.04); color: var(--text-secondary); }
+        .pick .chip.units-3 { background: var(--orange-dim); color: var(--orange); }
+        .pick .chip.units-5 { background: var(--gold-dim); color: var(--gold); }
+        .pick .chip.conf-low    { background: rgba(255,255,255,0.04); color: var(--text-secondary); }
+        .pick .chip.conf-medium { background: var(--orange-dim); color: var(--orange); }
+        .pick .chip.conf-high   { background: var(--green-dim); color: var(--green); }
+        .pick .chip.conf-max    { background: var(--gold-dim); color: var(--gold); }
+        .pick .badge { font-size: 10px; padding: 2px 8px; border-radius: 8px; font-weight: 700; letter-spacing: 0.04em; font-family: 'JetBrains Mono', monospace; }
+        .pick .badge.won  { background: var(--green-dim); color: var(--green); }
+        .pick .badge.lost { background: var(--red-dim); color: var(--red); }
+        .pick .badge.push { background: rgba(136,144,168,0.10); color: var(--text-secondary); }
+        .pick .pnl { font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; }
+        .pick .pnl.pos { color: var(--green); }
+        .pick .pnl.neg { color: var(--red); }
+        .pick .pnl.zero { color: var(--text-muted); }
+
+        .pick .reasons { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
+        .pick .reasons li { margin-left: 16px; margin-bottom: 2px; }
+        .pick .expand-btn { background: none; border: 0; color: var(--text-muted); font-size: 11px; cursor: pointer; padding: 4px 0; margin-top: 6px; font-family: inherit; }
+        .pick .expand-btn:hover { color: var(--text-secondary); }
+        .pick .analysis { margin-top: 8px; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; line-height: 1.55; color: var(--text); white-space: pre-wrap; word-wrap: break-word; display: none; }
+        .pick.expanded .analysis { display: block; }
+
+        .empty { padding: 24px; text-align: center; font-size: 13px; color: var(--text-muted); background: var(--surface); border: 1px dashed var(--border); border-radius: 12px; }
+        .gate-msg { padding: 60px 20px; text-align: center; color: var(--text-secondary); }
+
+        /* Ask form */
+        .ask-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-bottom: 22px; }
+        .ask-row { display: flex; gap: 8px; align-items: stretch; }
+        .ask-input { flex: 1; padding: 12px 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-family: inherit; font-size: 15px; }
+        .ask-input:focus { outline: none; border-color: var(--blue); }
+        .ask-submit { padding: 12px 20px; background: var(--blue); color: #fff; border: 0; border-radius: 10px; font-weight: 600; cursor: pointer; font-family: inherit; font-size: 14px; }
+        .ask-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+        .ask-sport { padding: 12px 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-family: inherit; font-size: 13px; }
+        .ask-hint { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
+
+        /* Dossier panel */
+        .dossier { display: none; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin-bottom: 26px; }
+        .dossier.show { display: block; }
+        .dossier-error { color: var(--red); font-size: 13px; padding: 16px; background: var(--red-dim); border: 1px solid rgba(239,68,68,0.3); border-radius: 10px; }
+        .dossier-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+        .dossier-head h2 { font-size: 18px; font-weight: 700; }
+        .dossier-head .sub { font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+
+        .suggestion-card { padding: 14px 16px; background: var(--blue-dim); border: 1px solid rgba(74,124,255,0.3); border-radius: 12px; margin-bottom: 18px; }
+        .suggestion-card .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--blue); font-weight: 700; margin-bottom: 6px; }
+        .suggestion-card .pick-line { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+        .suggestion-card .pick-line .pick-units { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; margin-left: 8px; vertical-align: middle; }
+        .suggestion-card .pick-line .pick-units.units-1 { background: rgba(255,255,255,0.06); color: var(--text-secondary); }
+        .suggestion-card .pick-line .pick-units.units-3 { background: var(--orange-dim); color: var(--orange); }
+        .suggestion-card .pick-line .pick-units.units-5 { background: var(--gold-dim); color: var(--gold); }
+        .suggestion-card .pick-meta { font-size: 12px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; }
+        .suggestion-card .actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+        .suggestion-card button { padding: 8px 14px; border-radius: 8px; font-size: 12px; cursor: pointer; font-family: inherit; border: 1px solid var(--border-light); background: var(--surface-2); color: var(--text); }
+        .suggestion-card button.primary { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
+        .suggestion-card button:hover { border-color: var(--blue); }
+        .suggestion-pass { padding: 12px 16px; background: var(--surface-2); border: 1px dashed var(--border); border-radius: 10px; font-size: 13px; color: var(--text-secondary); margin-bottom: 18px; }
+
+        .market-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 18px; }
+        .market-card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+        .market-card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 8px; }
+        .market-card .row { font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6; }
+        .market-card .row .label { color: var(--text-muted); }
+        .market-card .row .pin { color: var(--purple); }
+        .market-card .row .best { color: var(--green); font-weight: 600; }
+        .market-card .row .edge { color: var(--green); }
+        .market-card .row .edge.neg { color: var(--text-muted); }
+        .market-card .move { font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 6px 8px; background: var(--surface-2); border-radius: 6px; margin-top: 8px; }
+        .market-card .move .sharp { color: var(--blue); font-weight: 700; }
+
+        .splits-row { padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 18px; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+        .splits-row .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 6px; }
+        .splits-row .lane { display: flex; gap: 16px; flex-wrap: wrap; }
+        .splits-row .stat { color: var(--text-secondary); }
+        .splits-row .stat b { color: var(--text); font-weight: 600; }
+        .splits-row .sharp-tag { color: var(--blue); font-weight: 700; }
+
+        .teams-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+        .team-card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+        .team-card h4 { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+        .team-card .rec { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); margin-bottom: 8px; }
+        .team-card .last10 { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-secondary); margin-bottom: 8px; word-spacing: 4px; }
+        .team-card .last10 .W { color: var(--green); }
+        .team-card .last10 .L { color: var(--red); }
+        .team-card .inj-list { font-size: 12px; color: var(--text-secondary); }
+        .team-card .inj-list li { margin-left: 14px; line-height: 1.45; margin-bottom: 3px; }
+        .team-card .inj-list li b { color: var(--text); font-weight: 600; }
+
+        .pitchers { padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 18px; font-size: 12px; line-height: 1.55; }
+        .pitchers .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 6px; }
+        .pitchers .row { font-family: 'JetBrains Mono', monospace; }
+        .pitchers .row b { color: var(--text); font-weight: 600; }
+
+        /* Log-pick modal */
+        .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 100; padding: 16px; }
+        .modal-bg.show { display: flex; }
+        .modal { background: var(--surface); border: 1px solid var(--border-light); border-radius: 14px; padding: 22px; width: 100%; max-width: 480px; max-height: 90vh; overflow-y: auto; }
+        .modal h3 { font-size: 16px; margin-bottom: 14px; }
+        .modal .field { margin-bottom: 12px; }
+        .modal label { display: block; font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+        .modal input, .modal textarea, .modal select { width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-family: inherit; font-size: 13px; }
+        .modal textarea { min-height: 80px; resize: vertical; font-family: 'JetBrains Mono', monospace; }
+        .modal .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .modal .actions { display: flex; gap: 8px; margin-top: 16px; }
+        .modal button { padding: 10px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; font-family: inherit; border: 1px solid var(--border-light); background: var(--surface-2); color: var(--text); flex: 1; }
+        .modal button.primary { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
+
+        @media (max-width: 720px) {
+            .stat-strip { grid-template-columns: repeat(2, 1fr); }
+            .conf-strip { grid-template-columns: repeat(2, 1fr); }
+            .market-grid { grid-template-columns: 1fr; }
+            .teams-grid { grid-template-columns: 1fr; }
+            .ask-row { flex-direction: column; }
+        }
+    </style>
+</head>
+<body>
+    <div id="auth-gate" class="gate-msg">Checking access…</div>
+    <div id="app" style="display:none">
+        <div class="top-bar">
+            <div class="top-bar-row top-bar-left">
+                <div class="top-bar-title">The Kahla House</div>
+                <div class="nav-links">
+                    <a href="/" class="nav-link">Home</a>
+                    <a href="/odds" class="nav-link">Odds</a>
+                    <a href="/dashboard" class="nav-link admin-only" style="display:none">Dashboard</a>
+                    <a href="/sharp-bot" class="nav-link admin-only" style="display:none">Sharp Bot</a>
+                    <a href="/handicapper" class="nav-link active">Pick Bot</a>
+                </div>
+            </div>
+            <div class="top-bar-row" style="justify-content:flex-end">
+                <div class="top-bar-right">
+                    <span class="status" id="status">Loading…</span>
+                    <button class="refresh-btn" onclick="loadData(true)">Refresh</button>
+                    <button class="logout-btn" onclick="doLogout()">Logout</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="page">
+            <div class="page-header">
+                <h1>Pick Bot</h1>
+                <div class="meta" id="meta">—</div>
+                <p class="lede">Ask about a game and get the full pre-game read: PIN sharp signal, retail edge per side, public splits, injuries, recent form, lineups. Bot suggests a 1/3/5u play if signals + edge clear the bar — otherwise it'll tell you to pass. ML, spread, total only.</p>
+            </div>
+
+            <div class="ask-card">
+                <div class="ask-row">
+                    <input type="text" class="ask-input" id="askInput" placeholder="Toronto vs Angels"
+                           autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+                           onkeydown="if(event.key==='Enter') askGame()" />
+                    <select class="ask-sport" id="askSport">
+                        <option value="">Auto-detect sport</option>
+                        <option value="MLB">MLB</option>
+                        <option value="NBA">NBA</option>
+                        <option value="NHL">NHL</option>
+                        <option value="NFL">NFL</option>
+                        <option value="NCAAF">NCAAF</option>
+                        <option value="CBB">NCAAB</option>
+                        <option value="UFC">UFC</option>
+                    </select>
+                    <button class="ask-submit" id="askSubmit" onclick="askGame()">Build dossier</button>
+                </div>
+                <div class="ask-hint">Free-form: "Yankees vs Red Sox", "Lakers Nuggets tonight", "MIN @ DEN". Window: games starting within ±90 min/+48h.</div>
+            </div>
+
+            <div class="dossier" id="dossier"></div>
+
+            <div class="stat-strip" id="overallStats"></div>
+            <div class="conf-strip" id="confStrip"></div>
+
+            <div class="section">
+                <div class="section-title">Pending <span class="count" id="pendingCount">0</span></div>
+                <ul class="picks" id="pendingList"></ul>
+            </div>
+
+            <div class="section">
+                <div class="section-title">Settled · 30d <span class="count" id="settledCount">0</span></div>
+                <ul class="picks" id="settledList"></ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Log-pick modal -->
+    <div class="modal-bg" id="logModal">
+        <div class="modal">
+            <h3>Log this pick</h3>
+            <div class="field">
+                <label>Selection</label>
+                <input type="text" id="lmSelection" readonly />
+            </div>
+            <div class="row2">
+                <div class="field">
+                    <label>Units</label>
+                    <select id="lmUnits">
+                        <option value="1">1u</option>
+                        <option value="3">3u</option>
+                        <option value="5">5u</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label>Confidence</label>
+                    <select id="lmConfidence">
+                        <option value="low">low</option>
+                        <option value="medium">medium</option>
+                        <option value="high">high</option>
+                        <option value="max">max</option>
+                    </select>
+                </div>
+            </div>
+            <div class="field">
+                <label>Reasons (one per line, optional)</label>
+                <textarea id="lmReasons" placeholder="PIN moved -120 → -135 (sharp 5)
+Splits 31/69 money on home — sharp side
+DK retail still at -125, +2.4pp edge"></textarea>
+            </div>
+            <div class="field">
+                <label>Analysis (optional, markdown)</label>
+                <textarea id="lmAnalysis" placeholder="Full write-up …"></textarea>
+            </div>
+            <div class="actions">
+                <button onclick="closeLog()">Cancel</button>
+                <button class="primary" id="lmSubmit" onclick="submitLog()">Log Pick</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    async function authFetch(url, options = {}) {
+        const user = firebase.auth().currentUser;
+        if (!user) { window.location.href = '/'; return null; }
+        const token = await user.getIdToken();
+        const headers = { ...(options.headers || {}), 'Authorization': 'Bearer ' + token };
+        return fetch(url, { ...options, headers });
+    }
+    function doLogout() { firebase.auth().signOut().then(() => { window.location.href = '/'; }); }
+
+    firebase.auth().onAuthStateChanged(async user => {
+        if (!user) { window.location.href = '/'; return; }
+        try {
+            const token = await user.getIdToken();
+            const r = await fetch('/api/me', { headers: { 'Authorization': 'Bearer ' + token } });
+            if (!r.ok) { window.location.href = '/'; return; }
+            const me = await r.json();
+            if (!me.approved) { window.location.href = '/'; return; }
+            // Bot access OR admin gets through. /api/handicapper enforces server-side too.
+            if (!me.bot_access && me.role !== 'admin') {
+                document.getElementById('auth-gate').innerHTML =
+                    '<h2>No Pick Bot access</h2><p>Ask an admin to grant you access from the User Management panel.</p>';
+                return;
+            }
+            // Show admin-only nav links if applicable.
+            if (me.role === 'admin') {
+                document.querySelectorAll('.admin-only').forEach(el => el.style.display = '');
+            }
+        } catch { window.location.href = '/'; return; }
+        document.getElementById('auth-gate').style.display = 'none';
+        document.getElementById('app').style.display = '';
+        loadData(true);
+        setInterval(() => loadData(false), 60_000);
+    });
+
+    const _fmtAmer = p => (p == null ? '—' : (p > 0 ? `+${p}` : `${p}`));
+    const _fmtPt   = v => (v == null ? '' : (v > 0 ? `+${v}` : `${v}`));
+    const _fmtUnits = u => {
+        if (u == null) return '—';
+        const n = Number(u);
+        const sign = n > 0 ? '+' : '';
+        return `${sign}${n.toFixed(2)}u`;
+    };
+    function _fmtKickoff(iso) {
+        const d = new Date(iso);
+        const now = new Date();
+        const diffMin = Math.round((d - now) / 60_000);
+        if (diffMin < 0) return 'live/done';
+        if (diffMin < 60) return `${diffMin}m`;
+        if (diffMin < 60*24) return `${Math.round(diffMin/60)}h`;
+        return d.toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+    }
+    function _fmtSettled(iso) {
+        const d = new Date(iso);
+        const diffH = (Date.now() - d) / 3_600_000;
+        if (diffH < 24) return `${Math.round(diffH)}h ago`;
+        return d.toLocaleString([], {month:'short', day:'numeric'});
+    }
+    function _shortMarket(mt) { return ({moneyline:'ML', spread:'SPR', total:'TOT'})[mt] || mt; }
+    function _esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+
+    function _renderStats(s) {
+        const hr = s.hit_rate == null ? '—' : `${(s.hit_rate*100).toFixed(1)}%`;
+        const roi = s.roi == null ? '—' : `${(s.roi >= 0 ? '+' : '')}${(s.roi*100).toFixed(1)}%`;
+        const unitsCls = s.units > 0 ? 'pos' : (s.units < 0 ? 'neg' : 'muted');
+        const roiCls   = (s.roi == null) ? 'muted' : (s.roi > 0 ? 'pos' : (s.roi < 0 ? 'neg' : 'muted'));
+        return `
+            <div class="stat-cell"><div class="label">Graded</div><div class="value">${s.graded}</div></div>
+            <div class="stat-cell"><div class="label">Hit Rate</div><div class="value ${s.graded? '' : 'muted'}">${hr}</div></div>
+            <div class="stat-cell"><div class="label">Units</div><div class="value ${unitsCls}">${_fmtUnits(s.units)}</div></div>
+            <div class="stat-cell"><div class="label">ROI/pick</div><div class="value ${roiCls}">${roi}</div></div>
+        `;
+    }
+
+    function _renderConfCard(name, s, units) {
+        const pnlCls = s.units > 0 ? 'pos' : (s.units < 0 ? 'neg' : 'zero');
+        const hr = s.hit_rate == null ? '—' : `${(s.hit_rate*100).toFixed(0)}%`;
+        return `<div class="conf-card">
+            <div class="head"><span class="name ${name}">${name.toUpperCase()}</span><span class="units-tag">${units}u</span></div>
+            <div class="body">${s.graded} graded · HR ${hr} · <span class="pnl ${pnlCls}">${_fmtUnits(s.units)}</span></div>
+        </div>`;
+    }
+
+    function _renderPick(r, kind) {
+        const market = _shortMarket(r.market_type);
+        const sideLabel = (r.market_type === 'total')
+            ? (r.side || '').toUpperCase()
+            : (r.side === 'home' ? 'HOME' : 'AWAY');
+        const lineFrag = (r.entry_line == null) ? '' : ` ${_fmtPt(r.entry_line)}`;
+        const sigChips = [];
+        sigChips.push(`<span class="chip units-${r.units}">${r.units}u</span>`);
+        if (r.confidence) sigChips.push(`<span class="chip conf-${r.confidence}">${r.confidence.toUpperCase()}</span>`);
+        if (r.edge_pp != null) sigChips.push(`<span class="chip edge">+${Number(r.edge_pp).toFixed(1)}pp</span>`);
+        if (r.sharp_score != null) sigChips.push(`<span class="chip sharp">SHARP ${r.sharp_score}</span>`);
+
+        const cls = (kind === 'settled') ? (r.status || '') : '';
+
+        let resultHtml = '';
+        if (kind === 'settled') {
+            const badge = `<span class="badge ${r.status}">${(r.status || '').toUpperCase()}</span>`;
+            const pnlCls = r.pnl_units > 0 ? 'pos' : (r.pnl_units < 0 ? 'neg' : 'zero');
+            const score = r.result_score
+                ? `${r.result_score.away}-${r.result_score.home}`
+                : '';
+            resultHtml = `
+                <div class="row3">
+                    <span style="font-size:11px;color:var(--text-muted)">${score} · settled ${_fmtSettled(r.settled_at)}</span>
+                    <span>${badge} <span class="pnl ${pnlCls}">${_fmtUnits(r.pnl_units)}</span></span>
+                </div>`;
+        } else {
+            sigChips.push(`<span class="chip kickoff">${_fmtKickoff(r.event_start)}</span>`);
+        }
+
+        const reasons = (r.reasons && r.reasons.length)
+            ? `<ul class="reasons">${r.reasons.map(b => `<li>${_esc(b)}</li>`).join('')}</ul>`
+            : '';
+        const analysis = r.analysis_md
+            ? `<button class="expand-btn" onclick="this.parentElement.classList.toggle('expanded')">Show full analysis ▾</button>
+               <div class="analysis">${_esc(r.analysis_md)}</div>`
+            : '';
+
+        return `
+            <li class="pick ${cls}">
+                <div class="row1">
+                    <span class="teams">${_esc(r.event_name)}</span>
+                    <span class="sport-badge">${_esc(r.sport)}</span>
+                </div>
+                <div class="row2">
+                    <span class="market"><span class="side-tag">${market} · ${sideLabel}${lineFrag}</span></span>
+                    <span class="entry">@ ${_esc(r.entry_book)} ${_fmtAmer(r.entry_price)}</span>
+                </div>
+                <div class="row3">
+                    <span class="signals">${sigChips.join('')}</span>
+                </div>
+                ${resultHtml}
+                ${reasons}
+                ${analysis}
+            </li>
+        `;
+    }
+
+    // ─── Dossier (web-side ask) ───
+    let _lastDossier = null;
+    let _pendingPick = null;
+
+    async function askGame() {
+        const q = (document.getElementById('askInput').value || '').trim();
+        if (!q) return;
+        const sport = document.getElementById('askSport').value || '';
+        const dossierEl = document.getElementById('dossier');
+        const submitBtn = document.getElementById('askSubmit');
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Building…';
+        dossierEl.classList.add('show');
+        dossierEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">Pulling odds + injuries + splits…</div>';
+
+        try {
+            const params = new URLSearchParams({ q });
+            if (sport) params.set('sport', sport);
+            const resp = await authFetch('/api/handicapper/dossier?' + params.toString());
+            const data = await resp.json();
+            if (!data.ok) {
+                const tokens = (data.tokens || []).join(', ');
+                const alts = (data.alt_matches || []).map(m =>
+                    `<li>${_esc(m.event_name)} <span style="color:var(--text-muted);font-size:11px">(${m.sport}, ${new Date(m.event_start).toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'})})</span></li>`
+                ).join('');
+                dossierEl.innerHTML = `<div class="dossier-error">
+                    <strong>No match.</strong> Parsed tokens: <code>${_esc(tokens || '(none)')}</code><br>
+                    ${data.hint ? `<span style="color:var(--text-secondary)">${_esc(data.hint)}</span>` : ''}
+                    ${alts ? `<div style="margin-top:10px;font-size:13px;color:var(--text)">Did you mean:<ul style="margin-top:4px;margin-left:18px">${alts}</ul></div>` : ''}
+                </div>`;
+                return;
+            }
+            _lastDossier = data;
+            renderDossier(data);
+        } catch (e) {
+            dossierEl.innerHTML = `<div class="dossier-error">Request failed: ${_esc(String(e))}</div>`;
+        } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Build dossier';
+        }
+    }
+
+    function renderDossier(d) {
+        const el = document.getElementById('dossier');
+        const startsIn = d.starts_in_min;
+        const startsLabel = startsIn == null ? '' :
+            (startsIn < 0 ? `started ${-startsIn}m ago` :
+             startsIn < 60 ? `starts in ${startsIn}m` :
+             `starts in ${(startsIn/60).toFixed(1)}h`);
+        const dt = new Date(d.event_start_utc);
+
+        let html = `<div class="dossier-head">
+            <div>
+                <h2>${_esc(d.event_name)}</h2>
+                <div class="sub">${d.sport} · ${dt.toLocaleString([], {weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'})} · ${startsLabel}${d.venue ? ' · ' + _esc(d.venue) : ''}</div>
+            </div>
+        </div>`;
+
+        // Suggestion card
+        if (d.suggestion) {
+            const s = d.suggestion;
+            const market = _shortMarket(s.market_type);
+            const sideLabel = s.market_type === 'total'
+                ? s.side.toUpperCase()
+                : (s.side === 'home' ? d.home : d.away);
+            const lineFrag = (s.entry_line == null) ? '' : ` ${_fmtPt(s.entry_line)}`;
+            html += `<div class="suggestion-card">
+                <div class="lbl">Bot Suggests</div>
+                <div class="pick-line">
+                    ${market} · ${_esc(sideLabel)}${lineFrag} ${_fmtAmer(s.entry_price)} (${_esc(s.entry_book)})
+                    <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>
+                </div>
+                <div class="pick-meta">
+                    edge +${Number(s.edge_pp).toFixed(1)}pp · sharp ${s.sharp_score} · combined ${(s.combined_score*100).toFixed(0)}/100
+                </div>
+                <div class="actions">
+                    <button class="primary" onclick="openLog()">Log this pick</button>
+                    <button onclick="copyForClaude()">Copy for Claude</button>
+                </div>
+            </div>`;
+        } else {
+            html += `<div class="suggestion-pass">
+                <strong>Bot says: pass.</strong> No market clears the gates (sharp ≥ 4 AND edge ≥ 0.5pp). The data is below — you can still
+                <button onclick="openLog(true)" style="background:none;border:0;color:var(--blue);text-decoration:underline;cursor:pointer;font:inherit;padding:0">log a manual pick</button>
+                or <button onclick="copyForClaude()" style="background:none;border:0;color:var(--blue);text-decoration:underline;cursor:pointer;font:inherit;padding:0">copy for Claude</button>.
+            </div>`;
+        }
+
+        // Markets grid
+        html += '<div class="market-grid">';
+        for (const mt of ['moneyline', 'spread', 'total']) {
+            html += renderMarketCard(mt, d.odds[mt] || {}, d);
+        }
+        html += '</div>';
+
+        // Splits
+        if (d.splits) {
+            const sp = d.splits;
+            const sd = sp.sharp_diff;
+            const sharpTag = (sd != null && Math.abs(sd) >= 10)
+                ? `<span class="sharp-tag">SHARP ${sd > 0 ? d.home : d.away} +${Math.abs(sd).toFixed(0)}%</span>`
+                : '';
+            html += `<div class="splits-row">
+                <div class="lbl">Public ML splits — Action Network ${sharpTag}</div>
+                <div class="lane">
+                    <span class="stat">Bets: <b>${_esc(d.away)}</b> ${sp.away_bets ?? '—'}% · <b>${_esc(d.home)}</b> ${sp.home_bets ?? '—'}%</span>
+                    <span class="stat">Money: <b>${_esc(d.away)}</b> ${sp.away_money ?? '—'}% · <b>${_esc(d.home)}</b> ${sp.home_money ?? '—'}%</span>
+                </div>
+            </div>`;
+        }
+
+        // Pitchers (MLB only)
+        if (d.mlb && d.mlb.probable_pitchers) {
+            const pp = d.mlb.probable_pitchers;
+            const mkRow = (which, p) => {
+                if (!p || !p.name) return `<div class="row"><b>${which}:</b> not announced</div>`;
+                const stats = [
+                    p.era != null ? `ERA ${p.era}` : null,
+                    p.whip != null ? `WHIP ${p.whip}` : null,
+                    p.k_per_9 != null ? `K/9 ${p.k_per_9}` : null,
+                    p.ip ? `${p.ip} IP` : null,
+                ].filter(Boolean).join(' · ');
+                return `<div class="row"><b>${which}:</b> ${_esc(p.name)} (${_esc(p.throws || '?')}) · ${stats}</div>`;
+            };
+            html += `<div class="pitchers">
+                <div class="lbl">Probable Pitchers</div>
+                ${mkRow(d.away, pp.away)}
+                ${mkRow(d.home, pp.home)}
+            </div>`;
+        }
+
+        // Teams (record + last 10 + injuries)
+        if (d.espn) {
+            html += '<div class="teams-grid">';
+            for (const which of ['away', 'home']) {
+                const t = d.espn[which] || {};
+                const last10 = (t.recent || []).slice(0, 10).map(r =>
+                    `<span class="${r.result}">${r.result}</span>`).join(' ');
+                const inj = (t.injuries || []).slice(0, 6).map(i =>
+                    `<li><b>${_esc(i.name)}</b> (${_esc(i.pos || '?')}) — ${_esc(i.status || '?')}${i.detail ? ' · ' + _esc(i.detail) : ''}</li>`).join('');
+                html += `<div class="team-card">
+                    <h4>${which === 'away' ? '✈ ' : '🏟 '}${_esc(t.name || (which === 'away' ? d.away : d.home))}</h4>
+                    <div class="rec">${_esc(t.record || '—')} · ${(t.recent||[]).length} games loaded</div>
+                    ${last10 ? `<div class="last10">${last10}</div>` : ''}
+                    ${inj ? `<div class="lbl" style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin:6px 0 4px">Injury report (${(t.injuries||[]).length})</div><ul class="inj-list">${inj}</ul>` : '<div style="font-size:11px;color:var(--text-muted);font-style:italic">No injuries reported</div>'}
+                </div>`;
+            }
+            html += '</div>';
+        }
+
+        el.innerHTML = html;
+    }
+
+    function renderMarketCard(mt, blk, d) {
+        const sides = mt === 'total' ? ['over', 'under'] : ['away', 'home'];
+        const labelOf = s => mt === 'total' ? s.toUpperCase() : (s === 'home' ? d.home : d.away);
+        const pin = blk.pin_current || {};
+        const best = blk.best_entry || {};
+        const mv = blk.movement;
+        const title = ({moneyline:'Moneyline', spread:'Spread', total:'Total'})[mt] || mt;
+
+        let rows = '';
+        for (const s of sides) {
+            const pinSnap = pin[s];
+            const bestSnap = best[s];
+            const sideName = labelOf(s);
+            if (pinSnap) {
+                const ln = pinSnap.line;
+                const lineFrag = (ln != null) ? ` <span class="label">@${_fmtPt(ln)}</span>` : '';
+                const fair = pinSnap.fair_american;
+                const fairFrag = fair != null ? ` <span class="label">fair ${_fmtAmer(fair)}</span>` : '';
+                rows += `<div class="row"><span class="label">${_esc(sideName)} PIN:</span> <span class="pin">${_fmtAmer(pinSnap.price)}</span>${lineFrag}${fairFrag}</div>`;
+            }
+            if (bestSnap) {
+                const ln = bestSnap.line;
+                const lineFrag = (ln != null) ? ` <span class="label">@${_fmtPt(ln)}</span>` : '';
+                const ep = bestSnap.edge_pp;
+                const edgeCls = (ep != null && ep >= 0) ? 'edge' : 'edge neg';
+                const edgeFrag = (ep != null) ? ` <span class="${edgeCls}">${ep > 0 ? '+' : ''}${ep.toFixed(1)}pp</span>` : '';
+                rows += `<div class="row"><span class="label">${_esc(sideName)} best:</span> <span class="best">${_fmtAmer(bestSnap.price_american)}</span>${lineFrag} <span class="label">[${_esc(bestSnap.book)}]</span>${edgeFrag}</div>`;
+            }
+        }
+
+        let move = '';
+        if (mv) {
+            const oFrag = mv.opener_line != null ? ` (${_fmtPt(mv.opener_line)})` : '';
+            const cFrag = mv.current_line != null ? ` (${_fmtPt(mv.current_line)})` : '';
+            move = `<div class="move">PIN: <b>${_fmtAmer(mv.opener_price)}${oFrag}</b> → <b>${_fmtAmer(mv.current_price)}${cFrag}</b> <span class="sharp">SHARP ${(mv.sharp_side || '').toUpperCase()} = ${mv.sharp_score}</span></div>`;
+        }
+
+        return `<div class="market-card"><h3>${title}</h3>${rows || '<div style="font-size:11px;color:var(--text-muted)">No PIN data</div>'}${move}</div>`;
+    }
+
+    function copyForClaude() {
+        if (!_lastDossier) return;
+        // Strip the suggestion + alt_matches — Claude will derive its own.
+        const clean = { ...(_lastDossier) };
+        delete clean.suggestion;
+        delete clean.alt_matches;
+        const txt = `Game: ${clean.event_name}\nSport: ${clean.sport}\nQuery: ${clean.query}\n\nDossier JSON:\n\`\`\`json\n${JSON.stringify(clean, null, 2)}\n\`\`\`\n\nWrite the full handicapper analysis + a 1/3/5u recommendation per /handicap rules.`;
+        if (navigator.clipboard) {
+            navigator.clipboard.writeText(txt).then(() => {
+                alert('Copied. Paste into Claude Code for the full write-up.');
+            }, () => fallbackCopy(txt));
+        } else { fallbackCopy(txt); }
+    }
+    function fallbackCopy(t) {
+        const ta = document.createElement('textarea');
+        ta.value = t; document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); alert('Copied.'); } catch {}
+        document.body.removeChild(ta);
+    }
+
+    // ─── Log-pick modal ───
+    function openLog(manual) {
+        if (!_lastDossier) return;
+        const s = _lastDossier.suggestion;
+        if (manual && !s) {
+            // Manual: prompt user to choose ML/SPR/TOT + side. Simple version:
+            // pre-fill best ML edge if available; user can edit.
+            const ml = _lastDossier.odds.moneyline || {};
+            const fallback = ml.best_entry && (ml.best_entry.home || ml.best_entry.away);
+            if (!fallback) {
+                alert('No data to seed a manual pick. Try a different game.');
+                return;
+            }
+        }
+        _pendingPick = s ? {
+            market_id:  _lastDossier.market_id,
+            market_type: s.market_type,
+            side:        s.side,
+            book:        s.entry_book,
+            price:       s.entry_price,
+            line:        s.entry_line,
+            fair_prob:   s.fair_prob,
+            edge_pp:     s.edge_pp,
+            sharp_score: s.sharp_score,
+            label:       _suggestLabel(s, _lastDossier),
+            seed_units:  s.units,
+            seed_conf:   s.confidence,
+        } : _seedManual(_lastDossier);
+        if (!_pendingPick) return;
+
+        document.getElementById('lmSelection').value = _pendingPick.label;
+        document.getElementById('lmUnits').value      = String(_pendingPick.seed_units || 1);
+        document.getElementById('lmConfidence').value = _pendingPick.seed_conf || 'medium';
+        document.getElementById('lmReasons').value    = '';
+        document.getElementById('lmAnalysis').value   = '';
+        document.getElementById('logModal').classList.add('show');
+    }
+    function closeLog() {
+        document.getElementById('logModal').classList.remove('show');
+        _pendingPick = null;
+    }
+    function _suggestLabel(s, d) {
+        const market = _shortMarket(s.market_type);
+        const sideName = s.market_type === 'total'
+            ? s.side.toUpperCase()
+            : (s.side === 'home' ? d.home : d.away);
+        const lineFrag = (s.entry_line == null) ? '' : ` ${_fmtPt(s.entry_line)}`;
+        return `${market} · ${sideName}${lineFrag} ${_fmtAmer(s.entry_price)} (${s.entry_book})`;
+    }
+    function _seedManual(d) {
+        // No suggestion — pick the best-ML side as a starting point. User
+        // can edit-as-needed (they can also still Cancel).
+        const ml = d.odds.moneyline || {};
+        const home = (ml.best_entry || {}).home;
+        const away = (ml.best_entry || {}).away;
+        const choice = (home && (!away || home.price_american > away.price_american))
+            ? { side: 'home', best: home }
+            : (away ? { side: 'away', best: away } : null);
+        if (!choice) return null;
+        const sideName = choice.side === 'home' ? d.home : d.away;
+        return {
+            market_id: d.market_id,
+            market_type: 'moneyline',
+            side: choice.side,
+            book: choice.best.book,
+            price: choice.best.price_american,
+            line: null,
+            fair_prob: ((ml.pin_current || {})[choice.side] || {}).fair_prob,
+            edge_pp: choice.best.edge_pp,
+            sharp_score: (ml.movement || {}).sharp_score,
+            label: `ML · ${sideName} ${_fmtAmer(choice.best.price_american)} (${choice.best.book})`,
+            seed_units: 1,
+            seed_conf: 'medium',
+        };
+    }
+
+    async function submitLog() {
+        if (!_pendingPick) return;
+        const reasons = (document.getElementById('lmReasons').value || '')
+            .split('\n').map(r => r.trim()).filter(Boolean);
+        const analysis = document.getElementById('lmAnalysis').value || '';
+        const body = {
+            market_id:   _pendingPick.market_id,
+            market_type: _pendingPick.market_type,
+            side:        _pendingPick.side,
+            book:        _pendingPick.book,
+            price:       _pendingPick.price,
+            line:        _pendingPick.line,
+            units:       Number(document.getElementById('lmUnits').value),
+            confidence:  document.getElementById('lmConfidence').value,
+            fair_prob:   _pendingPick.fair_prob ?? null,
+            edge_pp:     _pendingPick.edge_pp ?? null,
+            sharp_score: _pendingPick.sharp_score ?? null,
+            analysis_md: analysis || null,
+            reasons:     reasons.length ? reasons : null,
+            query_text:  (_lastDossier && _lastDossier.query) || null,
+        };
+        const submitBtn = document.getElementById('lmSubmit');
+        submitBtn.disabled = true; submitBtn.textContent = 'Logging…';
+        try {
+            const r = await authFetch('/api/handicapper/pick', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const out = await r.json();
+            if (out.skipped) {
+                alert('Already logged within the last 7 days (id ' + out.existing_id + ').');
+            } else if (out.ok) {
+                alert('Logged pick #' + out.id);
+                loadData(true);
+            } else {
+                alert('Failed: ' + (out.error || 'unknown'));
+                return;
+            }
+            closeLog();
+        } catch (e) {
+            alert('Request failed: ' + e);
+        } finally {
+            submitBtn.disabled = false; submitBtn.textContent = 'Log Pick';
+        }
+    }
+
+    async function loadData(showLoading) {
+        const status = document.getElementById('status');
+        if (showLoading) status.textContent = 'Loading…';
+        try {
+            const resp = await authFetch('/api/handicapper');
+            if (!resp || !resp.ok) throw new Error('fetch failed');
+            const data = await resp.json();
+            if (!data.ok) throw new Error(data.error || 'unknown');
+
+            document.getElementById('overallStats').innerHTML = _renderStats(data.stats);
+            const conf = data.stats_by_confidence || {};
+            const unitsForConf = {low:1, medium:1, high:3, max:5};
+            document.getElementById('confStrip').innerHTML =
+                ['low','medium','high','max']
+                    .map(name => _renderConfCard(name, conf[name] || {graded:0,won:0,lost:0,push:0,units:0,hit_rate:null,roi:null}, unitsForConf[name]))
+                    .join('');
+
+            const pending = data.pending || [];
+            const settled = data.settled || [];
+            document.getElementById('pendingCount').textContent = pending.length;
+            document.getElementById('settledCount').textContent = settled.length;
+            document.getElementById('pendingList').innerHTML = pending.length
+                ? pending.map(r => _renderPick(r, 'pending')).join('')
+                : `<li class="empty">No pending picks. Ask Claude about a game to log one.</li>`;
+            document.getElementById('settledList').innerHTML = settled.length
+                ? settled.slice(0, 50).map(r => _renderPick(r, 'settled')).join('')
+                : `<li class="empty">No settled picks yet.</li>`;
+
+            const sign = data.stats.units > 0 ? '+' : '';
+            document.getElementById('meta').textContent =
+                `${data.window_days}d · ${sign}${(data.stats.units||0).toFixed(2)}u total · `
+                + `updated ${new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}`;
+            status.textContent = 'Live';
+        } catch (e) {
+            status.textContent = 'Error';
+            console.error('handicapper load failed', e);
+        }
+    }
+    </script>
+</body>
+</html>

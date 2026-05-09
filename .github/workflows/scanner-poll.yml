@@ -115,3 +115,14 @@ jobs:
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python -m scripts.paper_bets_resolver
+
+      # Handicapper Bot — pick resolver. Grades pending bot_picks rows
+      # (from in-chat pick logging via scripts/handicapper_log_pick.py)
+      # against ESPN final scores. Same pattern as paper_bets_resolver,
+      # but reads `units` per row (1/3/5u sizing instead of flat 1u).
+      - name: Bot picks — Resolver
+        continue-on-error: true
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.bot_picks_resolver

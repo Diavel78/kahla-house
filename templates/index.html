@@ -158,6 +158,11 @@ body::after {
 .role-badge.pending { background: var(--orange-dim); color: #fbbf24; }
 select.role-select { padding: 5px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--r); color: var(--text); font-size: 12px; font-family: 'DM Sans', sans-serif; cursor: pointer; }
 select.role-select option { background: var(--surface); }
+.bot-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; border: 1px solid var(--border); background: var(--bg); color: var(--text-secondary); cursor: pointer; transition: all 0.15s; user-select: none; }
+.bot-pill:hover { border-color: var(--blue); }
+.bot-pill.on { background: rgba(59, 130, 246, 0.12); border-color: var(--blue); color: #60a5fa; }
+.bot-pill.implicit { opacity: 0.5; cursor: default; }
+.bot-pill.implicit:hover { border-color: var(--border); }
 .footer { text-align: center; margin-top: 48px; color: var(--text-muted); font-size: 0.75em; opacity: 0; animation: fadeUp 0.6s ease 0.7s forwards; }
 
 /* TOAST */
@@ -228,7 +233,7 @@ select.role-select option { background: var(--surface); }
         <div class="apps-grid" id="appsGrid"></div>
         <div class="admin-panel" id="adminPanel" style="display:none">
             <div class="admin-hdr"><h2>User Management</h2><span class="badge" id="pendingBadge" style="display:none">0 pending</span></div>
-            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
+            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>Pick Bot</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
         </div>
         <div class="footer">The Kahla House &middot; thekahlahouse.com</div>
     </div>
@@ -342,6 +347,7 @@ function renderAppCards() {
     const role = CUD.role;
     const isAdmin = role === 'admin';
     const isViewer = role === 'viewer' || isAdmin;
+    const hasBot = isAdmin || !!CUD.bot_access;
     let h = '';
     if (isViewer) {
         h += `<div class="app-card odds-app" style="cursor:default">
@@ -351,6 +357,18 @@ function renderAppCards() {
             <span class="app-tag">Sports Betting</span>
             <div class="app-sub-links">
                 <a href="/odds" class="app-sub-link">Odds Board</a>
+            </div>
+            <span class="arrow">&rarr;</span>
+        </div>`;
+    }
+    if (hasBot) {
+        h += `<div class="app-card pickbot-app" style="cursor:default">
+            <span class="app-icon">&#127919;</span>
+            <h2>Pick Bot${isAdmin ? '' : '<span class="admin-badge">BOT</span>'}</h2>
+            <p>In-chat handicapper. Ask about a game on Claude — get a full pre-game analysis (PIN sharp signals, line movement, public splits, injuries, lineups) and a 1/3/5u recommendation. ML, spread, or total only.</p>
+            <span class="app-tag">Handicapping</span>
+            <div class="app-sub-links">
+                <a href="/handicapper" class="app-sub-link">Open Pick Bot</a>
             </div>
             <span class="arrow">&rarr;</span>
         </div>`;
@@ -407,6 +425,7 @@ function loadAdminPanel() {
                     <option value="viewer" ${u.role === 'viewer' ? 'selected' : ''}>Viewer</option>
                     <option value="pending" ${u.role === 'pending' ? 'selected' : ''}>Pending</option>
                 </select></td>
+                <td>${botPill(u)}</td>
                 <td>${!isMe && !u.approved
                     ? `<button class="btn btn-sm" style="background:var(--green);color:#fff;font-size:12px;margin-right:6px" onclick="approveUser('${u.id}','viewer')">Approve as Viewer</button><button class="btn btn-sm" style="background:var(--red-dim);color:#f87171;font-size:12px;margin-right:6px;border:1px solid rgba(239,68,68,.3)" onclick="approveUser('${u.id}','admin')">Approve as Admin</button><button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:12px" onclick="rejectUser('${u.id}','${E(u.displayName)}')">Reject</button>`
                     : isMe ? '<span style="color:var(--text-muted);font-size:12px">You</span>'
@@ -418,9 +437,27 @@ function loadAdminPanel() {
     unsubs.push(un);
 }
 
+function botPill(u) {
+    // Admins always have implicit access — show as "ON" but uneditable.
+    if (u.role === 'admin') {
+        return `<span class="bot-pill on implicit" title="Admins always have Pick Bot access">ON</span>`;
+    }
+    // Pending users can't have access — pill stays grey.
+    if (u.role === 'pending' || !u.approved) {
+        return `<span class="bot-pill implicit" title="Approve user first">OFF</span>`;
+    }
+    const on = !!u.bot_access;
+    return `<span class="bot-pill ${on ? 'on' : ''}" onclick="toggleBotAccess('${u.id}',${on ? 'false' : 'true'})">${on ? 'ON' : 'OFF'}</span>`;
+}
+
 async function setRole(uid, role) {
     await db.collection('users').doc(uid).update({ role, approved: role !== 'pending' });
     toast('Role updated to ' + role, 'success');
+}
+
+async function toggleBotAccess(uid, on) {
+    await db.collection('users').doc(uid).update({ bot_access: on });
+    toast('Pick Bot access ' + (on ? 'granted' : 'revoked'), 'success');
 }
 
 async function approveUser(uid, role) {
