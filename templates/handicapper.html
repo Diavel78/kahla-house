@@ -236,6 +236,22 @@
         .splits-row .stat b { color: var(--text); font-weight: 600; }
         .splits-row .sharp-tag { color: var(--blue); font-weight: 700; }
 
+        /* Team comparison — display-only context block */
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; margin-bottom: 18px; }
+        .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+        .card-head h3 { font-size: 14px; font-weight: 600; }
+        .ref-tag { font-family: 'JetBrains Mono', monospace; font-size: 9px; padding: 2px 8px; background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border); border-radius: 8px; letter-spacing: 0.04em; font-weight: 600; }
+        .tc-header { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; margin-top: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+        .tc-header span:first-child { text-align: right; font-weight: 600; font-size: 13px; color: var(--text); }
+        .tc-header span:last-child  { text-align: left;  font-weight: 600; font-size: 13px; color: var(--text); }
+        .tc-body { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; }
+        .tc-row { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: center; padding: 6px 0; }
+        .tc-row .tc-val { font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 500; color: var(--text-secondary); }
+        .tc-row .tc-val:first-child { text-align: right; }
+        .tc-row .tc-val:last-child  { text-align: left; }
+        .tc-row .tc-val.tc-better { color: var(--green); font-weight: 700; }
+        .tc-row .tc-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; white-space: nowrap; }
+
         .teams-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
         .team-card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
         .team-card h4 { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
@@ -452,6 +468,15 @@
 
     const _fmtAmer = p => (p == null ? '—' : (p > 0 ? `+${p}` : `${p}`));
     const _fmtPt   = v => (v == null ? '' : (v > 0 ? `+${v}` : `${v}`));
+    function _fmtCompare(v, fmt) {
+        if (v == null) return '—';
+        if (fmt === 'raw' || typeof v !== 'number') return _esc(String(v));
+        if (fmt === '0dp') return v.toFixed(0);
+        if (fmt === '1dp') return v.toFixed(1);
+        if (fmt === '2dp') return v.toFixed(2);
+        if (fmt === '3dp') return v.toFixed(3).replace(/^0/, '');
+        return String(v);
+    }
     const _fmtUnits = u => {
         if (u == null) return '—';
         const n = Number(u);
@@ -795,6 +820,40 @@
                 <div class="lbl">Probable Pitchers</div>
                 ${mkRow(d.away, pp.away)}
                 ${mkRow(d.home, pp.home)}
+            </div>`;
+        }
+
+        // Team comparison — display-only context (NOT fed into the
+        // suggestion). Lets the user confirm/counter the market read
+        // with their own eyes.
+        if (d.team_compare && (d.team_compare.fields || []).length) {
+            const tc = d.team_compare;
+            const rows = tc.fields.map(f => {
+                const av = _fmtCompare(f.away, f.fmt);
+                const hv = _fmtCompare(f.home, f.fmt);
+                let aCls = '', hCls = '';
+                if (typeof f.away === 'number' && typeof f.home === 'number' && f.away !== f.home) {
+                    const aWins = (f.better === 'high') ? f.away > f.home : f.away < f.home;
+                    aCls = aWins ? 'tc-better' : '';
+                    hCls = aWins ? '' : 'tc-better';
+                }
+                return `<div class="tc-row">
+                    <span class="tc-val ${aCls}">${av}</span>
+                    <span class="tc-label">${_esc(f.label)}</span>
+                    <span class="tc-val ${hCls}">${hv}</span>
+                </div>`;
+            }).join('');
+            html += `<div class="card">
+                <div class="card-head">
+                    <h3>Team comparison</h3>
+                    <span class="ref-tag" title="Reference data — does not affect the bot suggestion">REFERENCE · NOT IN PICK</span>
+                </div>
+                <div class="tc-header">
+                    <span>${_esc(tc.away_label)}</span>
+                    <span></span>
+                    <span>${_esc(tc.home_label)}</span>
+                </div>
+                <div class="tc-body">${rows}</div>
             </div>`;
         }
 

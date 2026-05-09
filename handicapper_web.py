@@ -832,8 +832,199 @@ def _mlb_probables(event_iso: str, away: str, home: str) -> dict:
                 "venue": (g.get("venue") or {}).get("name"),
                 "away":  _mlb_pitcher_block(((g.get("teams") or {}).get("away") or {}).get("probablePitcher")),
                 "home":  _mlb_pitcher_block(((g.get("teams") or {}).get("home") or {}).get("probablePitcher")),
+                "away_team_id": away_t.get("id"),
+                "home_team_id": home_t.get("id"),
             }
     return {}
+
+
+# ────────────────────────── Team comparison ──────────────────────────
+#
+# Display-only context for the dossier. Powers a side-by-side "Team
+# comparison" block on /handicapper so the user can see season averages
+# / recent form / records. Never feeds into _suggest_pick — the market
+# (PIN move + splits) is still the signal of record. This is just
+# reference data so the user can confirm or counter the bot's read.
+
+def _mlb_team_compare(away_id, home_id, away_label: str, home_label: str) -> dict | None:
+    """Build the MLB team-compare block: RPG, ERA, OPS, BA, record.
+    Hits MLB Stats API team season stats for hitting + pitching. Two
+    calls per team = 4 calls total per dossier when the click is on
+    MLB. Free, no auth, no rate-limit issues at our volume."""
+    if not (away_id and home_id):
+        return None
+    season = datetime.now(timezone.utc).year
+
+    def _team(tid: int) -> dict:
+        out: dict = {}
+        # Hitting: runs, OPS, batting avg, games (for RPG calc).
+        url = f"https://statsapi.mlb.com/api/v1/teams/{tid}/stats"
+        h = _http_get(url, params={"stats": "season", "group": "hitting", "season": season})
+        if h:
+            sp = ((h.get("stats") or [{}])[0].get("splits") or [{}])
+            s  = (sp[0].get("stat") or {}) if sp else {}
+            try:
+                games = int(s.get("gamesPlayed") or 0)
+                runs  = int(s.get("runs") or 0)
+                out["rpg"] = round(runs / games, 2) if games else None
+            except Exception:
+                out["rpg"] = None
+            out["ops"] = _to_float(s.get("ops"))
+            out["ba"]  = _to_float(s.get("avg"))
+        # Pitching: ERA + record (W-L).
+        p = _http_get(url, params={"stats": "season", "group": "pitching", "season": season})
+        if p:
+            sp = ((p.get("stats") or [{}])[0].get("splits") or [{}])
+            s  = (sp[0].get("stat") or {}) if sp else {}
+            out["era"] = _to_float(s.get("era"))
+            wl = f"{s.get('wins', 0)}-{s.get('losses', 0)}"
+            if wl != "0-0":
+                out["record"] = wl
+        return out
+
+    a = _team(away_id)
+    h = _team(home_id)
+    if not (a or h):
+        return None
+    fields = []
+    for key, label, fmt, better in (
+        ("record", "Record",       "raw", "high"),
+        ("rpg",    "Runs / Game",  "2dp", "high"),
+        ("era",    "Team ERA",     "2dp", "low"),
+        ("ops",    "Team OPS",     "3dp", "high"),
+        ("ba",     "Batting Avg",  "3dp", "high"),
+    ):
+        av, hv = a.get(key), h.get(key)
+        if av is None and hv is None:
+            continue
+        fields.append({"key": key, "label": label,
+                       "away": av, "home": hv,
+                       "fmt": fmt, "better": better})
+    return {
+        "away_label": away_label,
+        "home_label": home_label,
+        "fields":     fields,
+    } if fields else None
+
+
+# ESPN team-statistics endpoint shape:
+#   GET site.web.api.espn.com/apis/site/v2/sports/{path}/teams/{id}/statistics
+#   → splits.categories[].stats[].{name, displayName, value, displayValue}
+# The stat names vary per sport — _ESPN_COMPARE_FIELDS maps each sport
+# to a curated 4-5 stat list with our preferred labels and "better
+# direction" so the renderer can highlight the team with the edge on
+# each row.
+_ESPN_COMPARE_FIELDS = {
+    "NBA": [
+        ("avgPoints",                 "Points / Game",   "1dp", "high"),
+        ("avgPointsAgainst",          "Points Allowed",  "1dp", "low"),
+        ("fieldGoalPct",              "FG %",            "1dp", "high"),
+        ("threePointFieldGoalPct",    "3P %",            "1dp", "high"),
+    ],
+    "NFL": [
+        ("totalPointsPerGame",        "Points / Game",   "1dp", "high"),
+        ("avgPointsAgainst",          "Points Allowed",  "1dp", "low"),
+        ("yardsPerGame",              "Yards / Game",    "0dp", "high"),
+        ("yardsAllowed",              "Yards Allowed",   "0dp", "low"),
+    ],
+    "NHL": [
+        ("avgGoals",                  "Goals / Game",    "2dp", "high"),
+        ("avgGoalsAgainst",           "Goals Allowed",   "2dp", "low"),
+        ("powerPlayPct",              "Power Play %",    "1dp", "high"),
+        ("penaltyKillPct",            "Penalty Kill %",  "1dp", "high"),
+    ],
+    "NCAAF": [
+        ("totalPointsPerGame",        "Points / Game",   "1dp", "high"),
+        ("avgPointsAgainst",          "Points Allowed",  "1dp", "low"),
+        ("yardsPerGame",              "Yards / Game",    "0dp", "high"),
+        ("yardsAllowed",              "Yards Allowed",   "0dp", "low"),
+    ],
+    "CBB": [
+        ("avgPoints",                 "Points / Game",   "1dp", "high"),
+        ("avgPointsAgainst",          "Points Allowed",  "1dp", "low"),
+        ("fieldGoalPct",              "FG %",            "1dp", "high"),
+        ("threePointFieldGoalPct",    "3P %",            "1dp", "high"),
+    ],
+}
+
+
+def _espn_team_stats(sport: str, team_id: str | None) -> dict[str, float]:
+    """Pull the flat {stat_name: value} map from ESPN's team statistics
+    endpoint for a single team. Returns empty dict on any failure
+    (offseason / endpoint change / etc.)."""
+    if not team_id:
+        return {}
+    path = _ESPN_PATH.get(sport)
+    if not path:
+        return {}
+    url = f"https://site.web.api.espn.com/apis/site/v2/sports/{path}/teams/{team_id}/statistics"
+    data = _http_get(url)
+    if not data:
+        return {}
+    out: dict[str, float] = {}
+    splits = (data.get("splits") or {})
+    for cat in splits.get("categories") or []:
+        for s in cat.get("stats") or []:
+            name = s.get("name")
+            v = s.get("value")
+            if name and v is not None:
+                try:
+                    out[name] = float(v)
+                except (TypeError, ValueError):
+                    pass
+    return out
+
+
+def _espn_team_record(team_block: dict | None) -> str | None:
+    """Pull "W-L" from the ESPN team block (already part of espn.{home,
+    away}). Some sports include OT-loss → "W-L-OTL" stays as-is."""
+    if not team_block:
+        return None
+    rec = team_block.get("record")
+    if isinstance(rec, str) and rec:
+        return rec
+    return None
+
+
+def _espn_team_compare(sport: str, away_id: str | None, home_id: str | None,
+                       away_label: str, home_label: str,
+                       away_record: str | None, home_record: str | None) -> dict | None:
+    """Build the team-compare block for non-MLB sports. Uses ESPN's team
+    statistics endpoint."""
+    field_map = _ESPN_COMPARE_FIELDS.get(sport)
+    if not (field_map and (away_id or home_id)):
+        return None
+    a = _espn_team_stats(sport, away_id)
+    h = _espn_team_stats(sport, home_id)
+
+    fields = []
+    if away_record or home_record:
+        fields.append({"key": "record", "label": "Record",
+                       "away": away_record, "home": home_record,
+                       "fmt": "raw", "better": "high"})
+
+    for stat_name, label, fmt, better in field_map:
+        av, hv = a.get(stat_name), h.get(stat_name)
+        if av is None and hv is None:
+            continue
+        fields.append({"key": stat_name, "label": label,
+                       "away": av, "home": hv,
+                       "fmt": fmt, "better": better})
+
+    return {
+        "away_label": away_label,
+        "home_label": home_label,
+        "fields":     fields,
+    } if fields else None
+
+
+def _to_float(v) -> float | None:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def _mlb_pitcher_block(p: dict | None) -> dict:
@@ -1118,8 +1309,24 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
             }
 
     mlb_extra = {}
+    team_compare = None
     if sport == "MLB" and event_start and away and home:
-        mlb_extra["probable_pitchers"] = _mlb_probables(event_start, away, home)
+        probables = _mlb_probables(event_start, away, home)
+        mlb_extra["probable_pitchers"] = probables
+        team_compare = _mlb_team_compare(
+            probables.get("away_team_id"),
+            probables.get("home_team_id"),
+            away, home,
+        )
+    elif sport in _ESPN_COMPARE_FIELDS and espn_block:
+        away_t = espn_block.get("away") or {}
+        home_t = espn_block.get("home") or {}
+        team_compare = _espn_team_compare(
+            sport,
+            away_t.get("id"), home_t.get("id"),
+            away or "", home or "",
+            _espn_team_record(away_t), _espn_team_record(home_t),
+        )
 
     suggestion = _suggest_pick(odds, splits)
 
@@ -1142,6 +1349,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
             "broadcasts": espn_block.get("broadcasts"),
         } if espn_block else None,
         "mlb":             mlb_extra or None,
+        "team_compare":    team_compare,
         "suggestion":      suggestion,
         "alt_matches":     [
             {"id": m["id"], "event_name": m["event_name"],
