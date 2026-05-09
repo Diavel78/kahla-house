@@ -35,9 +35,16 @@ fi
 # scanner subproject's deps: httpx, supabase, python-dotenv, rapidfuzz.
 pip install -q --user -r "$CLAUDE_PROJECT_DIR/kahla-scanner/requirements.txt"
 
-# Propagate Supabase credentials. Claude Code Web injects user-configured
+# Propagate runtime credentials. Claude Code Web injects user-configured
 # secrets as env vars; we just need to re-export them via $CLAUDE_ENV_FILE
 # so every subsequent shell (and the handicapper CLI) sees them.
+#
+# Required for in-chat handicapper flow:
+#   • SUPABASE_URL + SUPABASE_SERVICE_KEY — read book_snapshots, write
+#     bot_picks. Without these the dossier CLI can't run.
+#   • ODDS_API_KEY (optional) — enables live odds fetch in the in-chat
+#     CLI flow, mirroring the website's "Pick" button. Without it the
+#     CLI falls back to cached snapshots (still works, just less fresh).
 if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_SERVICE_KEY:-}" ]; then
   echo "export SUPABASE_URL=\"${SUPABASE_URL}\""           >> "$CLAUDE_ENV_FILE"
   echo "export SUPABASE_SERVICE_KEY=\"${SUPABASE_SERVICE_KEY}\"" >> "$CLAUDE_ENV_FILE"
@@ -46,6 +53,13 @@ else
   echo "[session-start] WARN: SUPABASE_URL / SUPABASE_SERVICE_KEY not set." >&2
   echo "[session-start] Add them as Claude Code secrets to enable the in-chat handicapper flow." >&2
   echo "[session-start] (Website at /handicapper still works — it reads env from Vercel.)" >&2
+fi
+
+if [ -n "${ODDS_API_KEY:-}" ]; then
+  echo "export ODDS_API_KEY=\"${ODDS_API_KEY}\"" >> "$CLAUDE_ENV_FILE"
+  echo "[session-start] ODDS_API_KEY plumbed through (in-chat live odds enabled)" >&2
+else
+  echo "[session-start] note: ODDS_API_KEY not set — in-chat handicapper will use cached odds only." >&2
 fi
 
 # Also write PYTHONPATH so `python -m scripts.handicapper` works from any
