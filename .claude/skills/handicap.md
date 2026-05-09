@@ -35,6 +35,16 @@ hand back the PIN devigged fair as the Polymarket entry target.
 
 **Markets covered: moneyline, spread, total. No props.**
 
+**Multi-pick per game allowed.** You can recommend a play on more than one
+market for the same game (e.g. SPR + TOT). Log each as a separate
+`bot_picks` row via successive `handicapper_log_pick.py` calls.
+
+**ML/SPR mutual exclusion — never both.** ML and spread on the same
+side are correlated (same directional bet, just leveraged). If you'd
+suggest one, do NOT also suggest the other. Pick the one with the
+better risk/reward read and let it stand alone. Total is independent
+and can pair with either.
+
 ## Workflow
 
 1. **Detect the question.** Triggers: any betting-flavored question about a

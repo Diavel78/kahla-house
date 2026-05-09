@@ -1215,22 +1215,30 @@ def _splits_signal_pp(splits: dict | None, sharp_side: str | None,
         return 0.0
 
 
-def _suggest_pick(odds: dict, splits: dict | None = None) -> dict | None:
-    """Polymarket-execution pick: name the sharp side, give the PIN
-    devigged price as the limit-order target. ALWAYS returns the best
-    available read — soft picks are labeled with `gates_cleared=False`
-    so the UI shows a "would pass, but if forced" header.
+def _suggest_picks(odds: dict, splits: dict | None = None) -> list[dict]:
+    """Polymarket-execution picks. Returns a list — there can be more
+    than one on a game. Behaviour:
 
-    Scoring:
+    1. The TOP candidate across all markets is always returned (forced
+       lean if needed, with `gates_cleared=False`).
+    2. Additional picks from OTHER markets are appended only when they
+       clear the sharp gate themselves (avoids 3 forced leans on a
+       chalk-flat game).
+    3. ML / SPR mutual exclusion — these are correlated (same
+       directional bet), so we never recommend both. If both qualify,
+       the higher combined_score wins, the other is dropped.
+
+    Net result: 1-2 picks per game. TOT is always allowed alongside
+    one of {ML, SPR}.
+
+    Scoring (unchanged):
       sharp_score (0-10) — PIN movement magnitude on this side.
-      splits_pp     — money% − bets% on this side (ML only; 0 for SPR/TOT).
+      splits_pp     — money% − bets% on this side (ML only).
       combined = 0.7·(sharp/10) + 0.3·(splits/30 capped 1.0)
 
-    Returns None ONLY when no PIN snapshot exists on either side of any
-    market (no fair line computable → no Polymarket target). UI shows
-    "no data" then.
+    Returns [] when no PIN snapshot exists on any side of any market.
 
-    Sizing tiers (sharp-driven, no edge_pp):
+    Sizing tiers:
       sharp ≥ 7 + splits ≥ 10pp aligned → 10u whale
       sharp ≥ 5 + splits ≥ 5pp  aligned → 5u high
       sharp ≥ 4                          → 3u medium
@@ -1271,25 +1279,52 @@ def _suggest_pick(odds: dict, splits: dict | None = None) -> dict | None:
             })
 
     if not candidates:
-        return None
+        return []
 
-    # Qualified candidates win; ties broken by combined_score.
-    candidates.sort(key=lambda c: (c["gates_cleared"], c["combined_score"]),
-                    reverse=True)
-    top = candidates[0]
+    # Best candidate per market_type (with sizing applied).
+    by_market: dict[str, dict] = {}
+    for c in candidates:
+        s = c["sharp_score"]
+        sp = c["splits_pp"]
+        if s >= 7 and sp >= SPLITS_MIN_PP:
+            c["units"], c["confidence"] = 10, "whale"
+        elif s >= 5 and sp >= 5:
+            c["units"], c["confidence"] = 5, "high"
+        elif s >= SHARP_SCORE_MIN:
+            c["units"], c["confidence"] = 3, "medium"
+        else:
+            c["units"], c["confidence"] = 1, "low"
+        cur = by_market.get(c["market_type"])
+        if (not cur) or ((c["gates_cleared"], c["combined_score"]) >
+                         (cur["gates_cleared"], cur["combined_score"])):
+            by_market[c["market_type"]] = c
 
-    s = top["sharp_score"]
-    sp = top["splits_pp"]
-    if s >= 7 and sp >= SPLITS_MIN_PP:
-        top["units"], top["confidence"] = 10, "whale"
-    elif s >= 5 and sp >= 5:
-        top["units"], top["confidence"] = 5, "high"
-    elif s >= SHARP_SCORE_MIN:
-        top["units"], top["confidence"] = 3, "medium"
-    else:
-        top["units"], top["confidence"] = 1, "low"
+    # Top pick across all markets — always shown, even as a forced lean.
+    all_top = max(by_market.values(),
+                  key=lambda c: (c["gates_cleared"], c["combined_score"]))
+    chosen: list[dict] = [all_top]
 
-    return top
+    # Add other markets that have cleared the gate themselves.
+    for mt in ("moneyline", "spread", "total"):
+        c = by_market.get(mt)
+        if not c or c is all_top:
+            continue
+        if c["gates_cleared"]:
+            chosen.append(c)
+
+    # ML / SPR exclusion — never both. If both made it in, drop the
+    # lower-scoring one.
+    has_ml  = any(c["market_type"] == "moneyline" for c in chosen)
+    has_spr = any(c["market_type"] == "spread"    for c in chosen)
+    if has_ml and has_spr:
+        ml  = next(c for c in chosen if c["market_type"] == "moneyline")
+        spr = next(c for c in chosen if c["market_type"] == "spread")
+        drop = spr if ml["combined_score"] >= spr["combined_score"] else ml
+        chosen = [c for c in chosen if c is not drop]
+
+    # Stable order: ML/SPR first, then TOT.
+    chosen.sort(key=lambda c: 0 if c["market_type"] != "total" else 1)
+    return chosen
 
 
 # ──────────────────────────── Public entry point ────────────────────────────
@@ -1430,7 +1465,11 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
             _espn_team_record(away_t), _espn_team_record(home_t),
         )
 
-    suggestion = _suggest_pick(odds, splits)
+    suggestions = _suggest_picks(odds, splits)
+    # Keep the singular `suggestion` field as an alias for the top pick
+    # so any caller still expecting it doesn't break. New code should
+    # use `suggestions` (list) so multi-pick games render correctly.
+    suggestion = suggestions[0] if suggestions else None
 
     return {
         "ok":              True,
@@ -1453,6 +1492,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         "mlb":             mlb_extra or None,
         "team_compare":    team_compare,
         "suggestion":      suggestion,
+        "suggestions":     suggestions,
         "alt_matches":     [
             {"id": m["id"], "event_name": m["event_name"],
              "event_start": m["event_start"], "sport": m["sport"]}
