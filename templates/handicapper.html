@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kahla House — Pick Bot</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>
+        const FC = {
+            apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
+            authDomain: "kahla-house.firebaseapp.com",
+            projectId: "kahla-house",
+            storageBucket: "kahla-house.firebasestorage.app",
+            messagingSenderId: "1029771942929",
+            appId: "1:1029771942929:web:76358096dbb868e375a5b0"
+        };
+        firebase.initializeApp(FC);
+    </script>
+
+    <style>
+        :root {
+            --bg: #0b0e13;
+            --surface: #13171e;
+            --surface-2: #1a1f2b;
+            --surface-3: #1f2533;
+            --border: #1e2530;
+            --border-light: #2a3140;
+            --text: #e2e8f0;
+            --text-secondary: #8890a8;
+            --text-muted: #555d78;
+            --blue: #4a7cff;
+            --green: #22c55e;
+            --orange: #f59e0b;
+            --red: #ef4444;
+            --purple: #a855f7;
+            --gold: #facc15;
+            --blue-dim: rgba(74,124,255,0.08);
+            --green-dim: rgba(34,197,94,0.10);
+            --orange-dim: rgba(245,158,11,0.10);
+            --red-dim: rgba(239,68,68,0.10);
+            --purple-dim: rgba(168,85,247,0.10);
+            --gold-dim: rgba(250,204,21,0.10);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body, #app { overflow-x: hidden; }
+        body {
+            font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        .top-bar { background: var(--surface); border-bottom: 1px solid var(--border); padding: 14px 22px; display: flex; flex-direction: column; gap: 10px; }
+        .top-bar-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+        .top-bar-left { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+        .top-bar-title { font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }
+        .nav-links { display: flex; gap: 14px; }
+        .nav-link { color: var(--text-secondary); text-decoration: none; font-size: 13px; padding: 4px 0; border-bottom: 2px solid transparent; transition: all 0.15s; }
+        .nav-link:hover { color: var(--text); }
+        .nav-link.active { color: var(--blue); border-color: var(--blue); }
+        .top-bar-right { display: flex; align-items: center; gap: 10px; }
+        .status { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-secondary); padding: 4px 10px; background: var(--bg); border-radius: 12px; border: 1px solid var(--border); }
+        .refresh-btn, .logout-btn { background: var(--surface-2); border: 1px solid var(--border); color: var(--text-secondary); padding: 6px 12px; border-radius: 8px; font-size: 12px; cursor: pointer; transition: all 0.15s; font-family: inherit; }
+        .refresh-btn:hover, .logout-btn:hover { color: var(--text); border-color: var(--border-light); }
+
+        .page { max-width: 1200px; margin: 0 auto; padding: 24px 16px 60px; }
+        .page-header { margin-bottom: 18px; }
+        .page-header h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; }
+        .page-header .meta { font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; margin-top: 4px; }
+        .page-header .lede { font-size: 13px; color: var(--text-secondary); margin-top: 8px; max-width: 720px; line-height: 1.5; }
+
+        .stat-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 22px; }
+        .stat-cell { text-align: center; }
+        .stat-cell .label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+        .stat-cell .value { font-size: 18px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+        .stat-cell .value.muted { color: var(--text-muted); }
+        .stat-cell .value.pos { color: var(--green); }
+        .stat-cell .value.neg { color: var(--red); }
+        .stat-cell .value.zero { color: var(--text-secondary); }
+
+        .conf-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 22px; }
+        .conf-card { padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+        .conf-card .head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+        .conf-card .head .name { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
+        .conf-card .head .name.low { color: var(--text-secondary); }
+        .conf-card .head .name.medium { color: var(--orange); }
+        .conf-card .head .name.high { color: var(--green); }
+        .conf-card .head .name.max { color: var(--gold); }
+        .conf-card .head .units-tag { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); }
+        .conf-card .body { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-secondary); }
+        .conf-card .body .pnl.pos { color: var(--green); }
+        .conf-card .body .pnl.neg { color: var(--red); }
+        .conf-card .body .pnl.zero { color: var(--text-muted); }
+
+        .section { margin-bottom: 26px; }
+        .section-title { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 14px; font-weight: 600; }
+        .section-title .count { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted); padding: 2px 8px; background: var(--surface); border-radius: 10px; border: 1px solid var(--border); }
+
+        .picks { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+        .pick { padding: 14px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; transition: border-color 0.15s; }
+        .pick:hover { border-color: var(--border-light); }
+        .pick.won { border-left: 3px solid var(--green); }
+        .pick.lost { border-left: 3px solid var(--red); }
+        .pick.push { border-left: 3px solid var(--text-muted); }
+        .pick .row1 { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+        .pick .teams { font-weight: 600; font-size: 14px; }
+        .pick .sport-badge { font-size: 10px; color: var(--text-muted); padding: 2px 7px; background: var(--bg); border-radius: 8px; border: 1px solid var(--border); font-family: 'JetBrains Mono', monospace; }
+        .pick .row2 { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+        .pick .market { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--text); }
+        .pick .market .side-tag { color: var(--blue); font-weight: 700; }
+        .pick .entry { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-secondary); }
+        .pick .row3 { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .pick .signals { display: flex; gap: 6px; flex-wrap: wrap; }
+        .pick .chip { font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 10px; font-family: 'JetBrains Mono', monospace; }
+        .pick .chip.edge { background: var(--green-dim); color: #4ade80; }
+        .pick .chip.sharp { background: var(--blue-dim); color: var(--blue); }
+        .pick .chip.kickoff { background: var(--bg); color: var(--text-secondary); border: 1px solid var(--border); }
+        .pick .chip.units-1 { background: rgba(255,255,255,0.04); color: var(--text-secondary); }
+        .pick .chip.units-3 { background: var(--orange-dim); color: var(--orange); }
+        .pick .chip.units-5 { background: var(--gold-dim); color: var(--gold); }
+        .pick .chip.conf-low    { background: rgba(255,255,255,0.04); color: var(--text-secondary); }
+        .pick .chip.conf-medium { background: var(--orange-dim); color: var(--orange); }
+        .pick .chip.conf-high   { background: var(--green-dim); color: var(--green); }
+        .pick .chip.conf-max    { background: var(--gold-dim); color: var(--gold); }
+        .pick .badge { font-size: 10px; padding: 2px 8px; border-radius: 8px; font-weight: 700; letter-spacing: 0.04em; font-family: 'JetBrains Mono', monospace; }
+        .pick .badge.won  { background: var(--green-dim); color: var(--green); }
+        .pick .badge.lost { background: var(--red-dim); color: var(--red); }
+        .pick .badge.push { background: rgba(136,144,168,0.10); color: var(--text-secondary); }
+        .pick .pnl { font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; }
+        .pick .pnl.pos { color: var(--green); }
+        .pick .pnl.neg { color: var(--red); }
+        .pick .pnl.zero { color: var(--text-muted); }
+
+        .pick .reasons { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
+        .pick .reasons li { margin-left: 16px; margin-bottom: 2px; }
+        .pick .expand-btn { background: none; border: 0; color: var(--text-muted); font-size: 11px; cursor: pointer; padding: 4px 0; margin-top: 6px; font-family: inherit; }
+        .pick .expand-btn:hover { color: var(--text-secondary); }
+        .pick .analysis { margin-top: 8px; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; line-height: 1.55; color: var(--text); white-space: pre-wrap; word-wrap: break-word; display: none; }
+        .pick.expanded .analysis { display: block; }
+
+        .empty { padding: 24px; text-align: center; font-size: 13px; color: var(--text-muted); background: var(--surface); border: 1px dashed var(--border); border-radius: 12px; }
+        .gate-msg { padding: 60px 20px; text-align: center; color: var(--text-secondary); }
+
+        @media (max-width: 720px) {
+            .stat-strip { grid-template-columns: repeat(2, 1fr); }
+            .conf-strip { grid-template-columns: repeat(2, 1fr); }
+        }
+    </style>
+</head>
+<body>
+    <div id="auth-gate" class="gate-msg">Checking access…</div>
+    <div id="app" style="display:none">
+        <div class="top-bar">
+            <div class="top-bar-row top-bar-left">
+                <div class="top-bar-title">The Kahla House</div>
+                <div class="nav-links">
+                    <a href="/" class="nav-link">Home</a>
+                    <a href="/odds" class="nav-link">Odds</a>
+                    <a href="/dashboard" class="nav-link admin-only" style="display:none">Dashboard</a>
+                    <a href="/sharp-bot" class="nav-link admin-only" style="display:none">Sharp Bot</a>
+                    <a href="/handicapper" class="nav-link active">Pick Bot</a>
+                </div>
+            </div>
+            <div class="top-bar-row" style="justify-content:flex-end">
+                <div class="top-bar-right">
+                    <span class="status" id="status">Loading…</span>
+                    <button class="refresh-btn" onclick="loadData(true)">Refresh</button>
+                    <button class="logout-btn" onclick="doLogout()">Logout</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="page">
+            <div class="page-header">
+                <h1>Pick Bot</h1>
+                <div class="meta" id="meta">—</div>
+                <p class="lede">In-chat handicapper. Ask about a game on Claude — get a full pre-game analysis and a 1/3/5u recommendation. Only ML, spread, or total. Picks auto-grade against ESPN finals every 30 min.</p>
+            </div>
+
+            <div class="stat-strip" id="overallStats"></div>
+            <div class="conf-strip" id="confStrip"></div>
+
+            <div class="section">
+                <div class="section-title">Pending <span class="count" id="pendingCount">0</span></div>
+                <ul class="picks" id="pendingList"></ul>
+            </div>
+
+            <div class="section">
+                <div class="section-title">Settled · 30d <span class="count" id="settledCount">0</span></div>
+                <ul class="picks" id="settledList"></ul>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    async function authFetch(url, options = {}) {
+        const user = firebase.auth().currentUser;
+        if (!user) { window.location.href = '/'; return null; }
+        const token = await user.getIdToken();
+        const headers = { ...(options.headers || {}), 'Authorization': 'Bearer ' + token };
+        return fetch(url, { ...options, headers });
+    }
+    function doLogout() { firebase.auth().signOut().then(() => { window.location.href = '/'; }); }
+
+    firebase.auth().onAuthStateChanged(async user => {
+        if (!user) { window.location.href = '/'; return; }
+        try {
+            const token = await user.getIdToken();
+            const r = await fetch('/api/me', { headers: { 'Authorization': 'Bearer ' + token } });
+            if (!r.ok) { window.location.href = '/'; return; }
+            const me = await r.json();
+            if (!me.approved) { window.location.href = '/'; return; }
+            // Bot access OR admin gets through. /api/handicapper enforces server-side too.
+            if (!me.bot_access && me.role !== 'admin') {
+                document.getElementById('auth-gate').innerHTML =
+                    '<h2>No Pick Bot access</h2><p>Ask an admin to grant you access from the User Management panel.</p>';
+                return;
+            }
+            // Show admin-only nav links if applicable.
+            if (me.role === 'admin') {
+                document.querySelectorAll('.admin-only').forEach(el => el.style.display = '');
+            }
+        } catch { window.location.href = '/'; return; }
+        document.getElementById('auth-gate').style.display = 'none';
+        document.getElementById('app').style.display = '';
+        loadData(true);
+        setInterval(() => loadData(false), 60_000);
+    });
+
+    const _fmtAmer = p => (p == null ? '—' : (p > 0 ? `+${p}` : `${p}`));
+    const _fmtPt   = v => (v == null ? '' : (v > 0 ? `+${v}` : `${v}`));
+    const _fmtUnits = u => {
+        if (u == null) return '—';
+        const n = Number(u);
+        const sign = n > 0 ? '+' : '';
+        return `${sign}${n.toFixed(2)}u`;
+    };
+    function _fmtKickoff(iso) {
+        const d = new Date(iso);
+        const now = new Date();
+        const diffMin = Math.round((d - now) / 60_000);
+        if (diffMin < 0) return 'live/done';
+        if (diffMin < 60) return `${diffMin}m`;
+        if (diffMin < 60*24) return `${Math.round(diffMin/60)}h`;
+        return d.toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+    }
+    function _fmtSettled(iso) {
+        const d = new Date(iso);
+        const diffH = (Date.now() - d) / 3_600_000;
+        if (diffH < 24) return `${Math.round(diffH)}h ago`;
+        return d.toLocaleString([], {month:'short', day:'numeric'});
+    }
+    function _shortMarket(mt) { return ({moneyline:'ML', spread:'SPR', total:'TOT'})[mt] || mt; }
+    function _esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+
+    function _renderStats(s) {
+        const hr = s.hit_rate == null ? '—' : `${(s.hit_rate*100).toFixed(1)}%`;
+        const roi = s.roi == null ? '—' : `${(s.roi >= 0 ? '+' : '')}${(s.roi*100).toFixed(1)}%`;
+        const unitsCls = s.units > 0 ? 'pos' : (s.units < 0 ? 'neg' : 'muted');
+        const roiCls   = (s.roi == null) ? 'muted' : (s.roi > 0 ? 'pos' : (s.roi < 0 ? 'neg' : 'muted'));
+        return `
+            <div class="stat-cell"><div class="label">Graded</div><div class="value">${s.graded}</div></div>
+            <div class="stat-cell"><div class="label">Hit Rate</div><div class="value ${s.graded? '' : 'muted'}">${hr}</div></div>
+            <div class="stat-cell"><div class="label">Units</div><div class="value ${unitsCls}">${_fmtUnits(s.units)}</div></div>
+            <div class="stat-cell"><div class="label">ROI/pick</div><div class="value ${roiCls}">${roi}</div></div>
+        `;
+    }
+
+    function _renderConfCard(name, s, units) {
+        const pnlCls = s.units > 0 ? 'pos' : (s.units < 0 ? 'neg' : 'zero');
+        const hr = s.hit_rate == null ? '—' : `${(s.hit_rate*100).toFixed(0)}%`;
+        return `<div class="conf-card">
+            <div class="head"><span class="name ${name}">${name.toUpperCase()}</span><span class="units-tag">${units}u</span></div>
+            <div class="body">${s.graded} graded · HR ${hr} · <span class="pnl ${pnlCls}">${_fmtUnits(s.units)}</span></div>
+        </div>`;
+    }
+
+    function _renderPick(r, kind) {
+        const market = _shortMarket(r.market_type);
+        const sideLabel = (r.market_type === 'total')
+            ? (r.side || '').toUpperCase()
+            : (r.side === 'home' ? 'HOME' : 'AWAY');
+        const lineFrag = (r.entry_line == null) ? '' : ` ${_fmtPt(r.entry_line)}`;
+        const sigChips = [];
+        sigChips.push(`<span class="chip units-${r.units}">${r.units}u</span>`);
+        if (r.confidence) sigChips.push(`<span class="chip conf-${r.confidence}">${r.confidence.toUpperCase()}</span>`);
+        if (r.edge_pp != null) sigChips.push(`<span class="chip edge">+${Number(r.edge_pp).toFixed(1)}pp</span>`);
+        if (r.sharp_score != null) sigChips.push(`<span class="chip sharp">SHARP ${r.sharp_score}</span>`);
+
+        const cls = (kind === 'settled') ? (r.status || '') : '';
+
+        let resultHtml = '';
+        if (kind === 'settled') {
+            const badge = `<span class="badge ${r.status}">${(r.status || '').toUpperCase()}</span>`;
+            const pnlCls = r.pnl_units > 0 ? 'pos' : (r.pnl_units < 0 ? 'neg' : 'zero');
+            const score = r.result_score
+                ? `${r.result_score.away}-${r.result_score.home}`
+                : '';
+            resultHtml = `
+                <div class="row3">
+                    <span style="font-size:11px;color:var(--text-muted)">${score} · settled ${_fmtSettled(r.settled_at)}</span>
+                    <span>${badge} <span class="pnl ${pnlCls}">${_fmtUnits(r.pnl_units)}</span></span>
+                </div>`;
+        } else {
+            sigChips.push(`<span class="chip kickoff">${_fmtKickoff(r.event_start)}</span>`);
+        }
+
+        const reasons = (r.reasons && r.reasons.length)
+            ? `<ul class="reasons">${r.reasons.map(b => `<li>${_esc(b)}</li>`).join('')}</ul>`
+            : '';
+        const analysis = r.analysis_md
+            ? `<button class="expand-btn" onclick="this.parentElement.classList.toggle('expanded')">Show full analysis ▾</button>
+               <div class="analysis">${_esc(r.analysis_md)}</div>`
+            : '';
+
+        return `
+            <li class="pick ${cls}">
+                <div class="row1">
+                    <span class="teams">${_esc(r.event_name)}</span>
+                    <span class="sport-badge">${_esc(r.sport)}</span>
+                </div>
+                <div class="row2">
+                    <span class="market"><span class="side-tag">${market} · ${sideLabel}${lineFrag}</span></span>
+                    <span class="entry">@ ${_esc(r.entry_book)} ${_fmtAmer(r.entry_price)}</span>
+                </div>
+                <div class="row3">
+                    <span class="signals">${sigChips.join('')}</span>
+                </div>
+                ${resultHtml}
+                ${reasons}
+                ${analysis}
+            </li>
+        `;
+    }
+
+    async function loadData(showLoading) {
+        const status = document.getElementById('status');
+        if (showLoading) status.textContent = 'Loading…';
+        try {
+            const resp = await authFetch('/api/handicapper');
+            if (!resp || !resp.ok) throw new Error('fetch failed');
+            const data = await resp.json();
+            if (!data.ok) throw new Error(data.error || 'unknown');
+
+            document.getElementById('overallStats').innerHTML = _renderStats(data.stats);
+            const conf = data.stats_by_confidence || {};
+            const unitsForConf = {low:1, medium:1, high:3, max:5};
+            document.getElementById('confStrip').innerHTML =
+                ['low','medium','high','max']
+                    .map(name => _renderConfCard(name, conf[name] || {graded:0,won:0,lost:0,push:0,units:0,hit_rate:null,roi:null}, unitsForConf[name]))
+                    .join('');
+
+            const pending = data.pending || [];
+            const settled = data.settled || [];
+            document.getElementById('pendingCount').textContent = pending.length;
+            document.getElementById('settledCount').textContent = settled.length;
+            document.getElementById('pendingList').innerHTML = pending.length
+                ? pending.map(r => _renderPick(r, 'pending')).join('')
+                : `<li class="empty">No pending picks. Ask Claude about a game to log one.</li>`;
+            document.getElementById('settledList').innerHTML = settled.length
+                ? settled.slice(0, 50).map(r => _renderPick(r, 'settled')).join('')
+                : `<li class="empty">No settled picks yet.</li>`;
+
+            const sign = data.stats.units > 0 ? '+' : '';
+            document.getElementById('meta').textContent =
+                `${data.window_days}d · ${sign}${(data.stats.units||0).toFixed(2)}u total · `
+                + `updated ${new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}`;
+            status.textContent = 'Live';
+        } catch (e) {
+            status.textContent = 'Error';
+            console.error('handicapper load failed', e);
+        }
+    }
+    </script>
+</body>
+</html>

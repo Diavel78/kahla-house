@@ -136,6 +136,19 @@ def admin_required(f):
     return wrapper
 
 
+def bot_required(f):
+    """Require Firebase auth + bot_access (admin always implicit).
+    Used for the Handicapper Bot page + API."""
+    @functools.wraps(f)
+    @firebase_auth_required
+    def wrapper(*args, **kwargs):
+        role = g.user_data.get("role")
+        if role != "admin" and not g.user_data.get("bot_access"):
+            return jsonify({"ok": False, "error": "Bot access required"}), 403
+        return f(*args, **kwargs)
+    return wrapper
+
+
 # ---------------------------------------------------------------------------
 # Page routes (serve templates — auth handled client-side by Firebase JS SDK)
 # ---------------------------------------------------------------------------
@@ -162,6 +175,12 @@ def dashboard():
 def sharp_bot_page():
     """Phase 4 paper-bet bot tracker — admin only (client-side gated)."""
     return render_template("sharp_bot.html")
+
+
+@app.route("/handicapper")
+def handicapper_page():
+    """Handicapper Bot — admin + bot_access gated (client-side via /api/me)."""
+    return render_template("handicapper.html")
 
 
 # ---------------------------------------------------------------------------
@@ -1199,14 +1218,20 @@ def _cleanup_old_openers(db):
 @firebase_auth_required
 def api_me():
     """Return the current user's role + approval state.
-    Used by sub-pages to gate UI before loading data."""
+    Used by sub-pages to gate UI before loading data.
+
+    `bot_access` is a per-user toggle that admins flip in User Management.
+    Admins always have it implicitly (the access-gating page treats
+    role=admin as bot_access=true)."""
+    role = g.user_data.get("role")
     return jsonify({
         "ok": True,
         "uid": g.uid,
-        "role": g.user_data.get("role"),
+        "role": role,
         "approved": bool(g.user_data.get("approved")),
         "displayName": g.user_data.get("displayName"),
         "email": g.user_data.get("email"),
+        "bot_access": bool(g.user_data.get("bot_access")) or role == "admin",
     })
 
 
@@ -3288,6 +3313,91 @@ def api_sharp_bot():
         "pending":      pending,
         "settled":      settled,
         "stats":        stats,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Handicapper Bot — picks tracker
+# ---------------------------------------------------------------------------
+
+@app.route("/api/handicapper")
+@bot_required
+def api_handicapper():
+    """JSON for /handicapper. Returns pending picks (no age cap), settled
+    picks from the last 30d, and rollup stats. Mirrors /api/sharp-bot's
+    shape, but reads from bot_picks (the in-chat handicapper's table).
+
+    Stats: hit_rate (excludes pushes), total units, ROI per pick (units /
+    graded). Per-confidence-tier rollup so we can see if 'max' picks
+    actually win at higher rates than 'medium'."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+
+    now = datetime.now(timezone.utc)
+    cutoff_30d = (now - timedelta(days=30)).isoformat()
+
+    cols = ("id,picked_at,asked_by,query_text,sport,event_name,event_start,"
+            "market_type,side,entry_book,entry_price,entry_line,"
+            "units,confidence,fair_prob,edge_pp,sharp_score,"
+            "analysis_md,reasons,"
+            "status,pnl_units,result_score,settled_at")
+    try:
+        pending = (sb.table("bot_picks").select(cols)
+                   .eq("status", "pending")
+                   .order("event_start", desc=False)
+                   .limit(500).execute().data) or []
+        settled = (sb.table("bot_picks").select(cols)
+                   .neq("status", "pending")
+                   .gte("settled_at", cutoff_30d)
+                   .order("settled_at", desc=True)
+                   .limit(500).execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
+
+    overall = {"graded": 0, "won": 0, "lost": 0, "push": 0,
+               "units": 0.0, "hit_rate": None, "roi": None}
+    by_conf: dict = {c: {"graded": 0, "won": 0, "lost": 0, "push": 0,
+                         "units": 0.0, "hit_rate": None, "roi": None}
+                     for c in ("low", "medium", "high", "max")}
+    for r in settled:
+        st = r.get("status")
+        if st not in ("won", "lost", "push"):
+            continue
+        try:
+            pnl = float(r.get("pnl_units") or 0)
+        except (TypeError, ValueError):
+            pnl = 0.0
+        overall["graded"] += 1
+        overall[st] += 1
+        overall["units"] += pnl
+        conf = r.get("confidence")
+        if conf in by_conf:
+            bucket = by_conf[conf]
+            bucket["graded"] += 1
+            bucket[st] += 1
+            bucket["units"] += pnl
+
+    def _finalize(s: dict) -> None:
+        decided = s["won"] + s["lost"]
+        if decided > 0:
+            s["hit_rate"] = round(s["won"] / decided, 4)
+        if s["graded"] > 0:
+            s["roi"] = round(s["units"] / s["graded"], 4)
+        s["units"] = round(s["units"], 3)
+
+    _finalize(overall)
+    for s in by_conf.values():
+        _finalize(s)
+
+    return jsonify({
+        "ok":           True,
+        "now_iso":      now.isoformat(),
+        "window_days":  30,
+        "pending":      pending,
+        "settled":      settled,
+        "stats":        overall,
+        "stats_by_confidence": by_conf,
     })
 
 

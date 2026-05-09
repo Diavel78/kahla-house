@@ -11,9 +11,14 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 ## Access Control (read this first)
 
 Three roles in Firestore `users/{uid}.role`:
-- **`admin`** — full access (Odds, Dashboard, debug). Rob.
-- **`viewer`** — Odds only. Friends use this tier.
+- **`admin`** — full access (Odds, Dashboard, Sharp Bot, Pick Bot, debug). Rob.
+- **`viewer`** — Odds only by default. Friends use this tier.
 - **`pending`** — default for new signups. No access until an admin approves.
+
+Plus a **per-user capability** in Firestore `users/{uid}.bot_access` (boolean):
+- Toggleable independently of `role` via the Pick Bot pill in User Management. Lets a viewer get Pick Bot access without making them admin.
+- Admins always have it implicitly (the gates treat `role=admin` as `bot_access=true`).
+- Admin pill toggle in User Management: ON / OFF (greyed out for pending/unapproved users).
 
 Approval flow:
 - Sign-up creates a `pending` user doc with `approved: false`. The pending screen tells them to wait.
@@ -28,10 +33,12 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `/api/odds`, `/api/odds/history`, `/api/odds/history-batch`, `/api/openers*`, `/api/preferences` | any approved | `@firebase_auth_required` (rejects pending) |
 | `/dashboard` (page) | admin | client probes `/api/me` and bounces non-admins |
 | `/sharp-bot` (page) | admin | client probes `/api/me` and bounces non-admins |
+| `/handicapper` (page) | admin OR `bot_access=true` | client probes `/api/me` for `bot_access` |
 | `/api/data`, `/api/my-bets`, `/api/debug-trades`, `/api/debug-deposits`, `/api/debug-snap`, `/api/sharp-bot` | admin | `@admin_required` |
+| `/api/handicapper` | admin OR `bot_access=true` | `@bot_required` |
 | `/api/raw` (Polymarket SDK debug) | admin | `@admin_required` |
 
-`@firebase_auth_required` itself rejects any user where `approved != true` (returns 403), so even API endpoints that don't need admin still keep `pending` users out.
+`@firebase_auth_required` itself rejects any user where `approved != true` (returns 403), so even API endpoints that don't need admin still keep `pending` users out. `@bot_required` adds an additional `role=='admin' OR bot_access==true` check on top of `@firebase_auth_required`.
 
 ## Pages & Routes
 
@@ -41,6 +48,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `/odds` | `odds.html` | admin + viewer | Odds Board — multi-book odds comparison, opener-vs-current movement, per-game line-movement chart modal |
 | `/dashboard` | `dashboard.html` | admin only | Polymarket P&L Dashboard — positions, closed trades, bet slip |
 | `/sharp-bot` | `sharp_bot.html` | admin only | Phase 4 paper-bet tracker — Steam / Early EV / Late EV columns, pending + settled-30d picks, per-bot hit rate / units / ROI |
+| `/handicapper` | `handicapper.html` | admin + `bot_access` | **Pick Bot** — in-chat handicapper picks tracker. Pending + settled-30d picks, overall hit-rate / ROI / units, plus a per-confidence-tier rollup (low/medium/high/max → 1u/1u/3u/5u). Picks are made by Claude in chat (not auto-generated like Sharp Bot) — every recommendation logs to `bot_picks` and auto-grades against ESPN finals. |
 
 > **Odds-ingest cron (`kahla-scanner/`)**: minimal Python subproject at
 > `kahla-scanner/` runs `python -m scrapers.odds_api` every 30 min via
@@ -95,6 +103,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `GET /api/clv` | **Admin** | Closing Line Value per open Polymarket position whose underlying game has started (so PIN has a closing line). Matches each Polymarket bet to our `markets` table (sport prefix + commence date + fuzzy team name), pulls PIN's last pre-`event_start` snapshots on both sides, devigs the pair, computes `(close_devig_prob − entry_implied_prob) × 100`. Positive = sharp entry, negative = got picked off. Returns per-bet records + `avg_clv_pp` rolling average across matched bets. 60s server cache. v1 covers open positions only — closed/settled bet history + 30-day rolling per-signal hit-rate is Phase 4 (Sharp Bot). |
 | `GET /api/data` | **Admin** | Dashboard P&L data (positions, balances, trades) |
 | `GET /api/sharp-bot` | **Admin** | Phase 4 paper-bet tracker payload. Returns `pending` (every `paper_bets` row with `status='pending'`, no age cap), `settled` (last 30 days), and `stats` (per-bot rollup: graded count, hit rate excluding pushes, total units, ROI per bet). Single endpoint, no caching — paper_bets queries are tiny. |
+| `GET /api/handicapper` | **Bot** | Pick Bot tracker payload. Returns `pending` (every `bot_picks` row with `status='pending'`, no age cap), `settled` (last 30 days), `stats` (overall: graded / hit_rate / units / roi), and `stats_by_confidence` (same rollup keyed by low/medium/high/max). Includes the full `analysis_md` write-up + `reasons` bullet list per pick — the page expands them inline. |
 | `GET /api/raw` | Admin | Debug: raw Polymarket SDK responses |
 | `GET /api/debug-trades` | **Admin** | Debug: grouped trade details with before/after position data |
 | `GET /api/debug-deposits` | **Admin** | Debug: all balance changes with types and reasons |
@@ -125,7 +134,15 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - `app.py` — All backend logic (~2100 lines, includes splits scraper + JSON API client)
 - `templates/odds.html` — Odds board (~2230 lines, includes splits row + sparklines)
 - `templates/dashboard.html` — P&L dashboard (~1130 lines)
-- `templates/index.html` — Landing page with auth + admin + role-based app cards (~440 lines)
+- `templates/sharp_bot.html` — Phase 4 paper-bet tracker (admin only)
+- `templates/handicapper.html` — Pick Bot page (admin + bot_access)
+- `templates/index.html` — Landing page with auth + admin + role-based app cards
+- `.claude/skills/handicap.md` — **Pick Bot skill**: routing + analyst workflow + betting strategy doc. Auto-applies on betting-flavored questions about a specific game. Read this for the PIN-anchor / line-movement / splits-divergence / sizing rules.
+- `kahla-scanner/scripts/handicapper.py` — Pick Bot dossier builder (free public data + Supabase)
+- `kahla-scanner/scripts/handicapper_log_pick.py` — Pick Bot pick logger (writes to `bot_picks`)
+- `kahla-scanner/scripts/bot_picks_resolver.py` — Pick Bot resolver (cron-graded vs ESPN)
+- `kahla-scanner/scripts/handicapper_backtest.py` — Pick Bot backtest replay (rule-based, signals-only)
+- `kahla-scanner/supabase/bot_picks.sql` — `bot_picks` table DDL (run manually in Supabase SQL editor)
 - `kahla-scanner/scrapers/odds_api.py` — The Odds API ingester (cron entry point)
 - `kahla-scanner/scripts/cleanup_snapshots.py` — nightly book_snapshots > 15d delete
 - `kahla-scanner/scripts/sharp_alerts.py` — Telegram steam + Sharp 7+ alerts (runs after each scanner-poll ingest). Also logs paper bets for the **steam bot** (Phase 4) — every Telegram steam fire writes a row to `paper_bets`.
@@ -421,6 +438,41 @@ The page renders three columns side-by-side (steam / early / late). Mobile stack
 Auto-refreshes every 60s. Manual Refresh button in the top bar. The endpoint returns `pending` (no age cap), `settled` (last 30d), and `stats` (per-bot rollup) in a single payload — page polls one URL.
 
 Nav link added to `/odds` (admin-only, hidden for viewers) and `/dashboard` (admin-only by virtue of the page itself). Sharp Bot card on `/` is rendered alongside the Dashboard card under the admin app section.
+
+### Pick Bot — Phase 5 (handicapper, in-chat)
+
+Different from Sharp Bot. Sharp Bot is fully automated (cron picks from rule-based logic). Pick Bot is **interactive**: the user asks Claude in chat about a game ("Toronto vs Angels today, thoughts?"), and Claude does the analysis using free public data + Supabase odds, writes a full pre-game write-up, and logs a 1/3/5u recommendation to `bot_picks`. Resolver auto-grades against ESPN finals on the same 30-min cron.
+
+**Markets**: ML, spread, total only. **No props.**
+
+**Routing**: When the user asks a betting-flavored question about a specific game, invoke the `/handicap` skill (`.claude/skills/handicap.md`). It documents the full workflow + strategy principles. Plain-English questions trigger the same flow without the explicit `/handicap` prefix.
+
+**Pipeline**:
+1. `kahla-scanner/scripts/handicapper.py "Toronto vs Angels"` — builds a JSON dossier (latest odds across all 14 books, PIN devig + sharp side/score, public splits, ESPN injuries, ESPN team records + last 10, MLB probable pitchers + season stats). Free public sources only — no paid APIs, no Claude API.
+2. Claude reads the dossier, applies the strategy rules in `.claude/skills/handicap.md` (PIN as anchor, line movement, splits divergence, public bias to fade, late-scratch caveats, sizing rubric), writes the full analyst write-up in chat, and proposes a side / market / line / book / price / units / confidence.
+3. `kahla-scanner/scripts/handicapper_log_pick.py --market-id <uuid> --market-type <ml|spread|total> --side <home|away|over|under> --book DK --price -125 --units 3 --confidence high --analysis-file /tmp/analysis.md --reason "..." --reason "..."` writes the row to `bot_picks`. Idempotent: same `(market_id, market_type, side)` within 7 days is silently skipped (use `--allow-duplicate` to override). If Claude doesn't recommend a pick (no edge / conflicted signals / late scratch), the script is just not called.
+4. `kahla-scanner/scripts/bot_picks_resolver.py` — appended step in `scanner-poll.yml`. Same ESPN-matching pattern as `paper_bets_resolver.py`, but reads `units` per row for 1/3/5u sizing.
+
+**Data sources** (free public, no auth or trivial UA-spoof):
+- Supabase `book_snapshots` — odds + PIN opener
+- ESPN scoreboard / team injuries / team schedule — `site.api.espn.com` + `site.web.api.espn.com`
+- Action Network `api.actionnetwork.com/web/v2/scoreboard/{league}` — public betting splits (same JSON used by `/api/splits`)
+- MLB Stats API `statsapi.mlb.com` — probable pitchers + season stats
+- ESPN injuries — every supported sport
+
+**Sizing rubric** (1u / 3u / 5u via the `confidence` chip):
+| Conf | Units | When |
+|---|---|---|
+| low | 1u | Edge <1pp or signal conflicted (logged for tracking) |
+| medium | 1u | ~1-2pp edge, single confirming signal |
+| high | 3u | 2-4pp edge AND ≥2 confirming signals |
+| max | 5u | 4pp+ edge AND multiple confirming signals AND no strong counter-risk |
+
+**Schema** (`kahla-scanner/supabase/bot_picks.sql`): one row per pick. Columns include `units` (1/3/5), `confidence` (low/medium/high/max), `analysis_md` (full write-up rendered on the page), `reasons` (jsonb array of bullet reasons), plus the standard market/entry/resolution fields. Run manually in Supabase SQL editor.
+
+**Backtest**: `kahla-scanner/scripts/handicapper_backtest.py --sport MLB --days 30 --cutoff-min 30 --edge-min 1.0 --sharp-min 4` — replays historical `book_snapshots` at a cutoff time, picks via rule-based logic (no Claude involvement), grades via ESPN. **Limitation**: ESPN injuries, splits, and lineups are not historical via free APIs — backtest is signal-only (PIN move + edge). Useful as a calibration check; a positive ROI from rule-based alone validates the live picks are at least starting from a non-negative baseline.
+
+**Strategy principles** (full doc in `.claude/skills/handicap.md`): PIN is the sharpest book — PIN devigged is the fair line, every other book is shaded for retail bias. Line movement signals: steam (5+ books move together w/ PIN confirming), reverse line movement (RLM) when line moves against the public-money side, early move (12-36h pre-game, sharp model edge) vs late move (final 2h, near-CLV). Public splits divergence: `% money` >> `% bets` on a side = sharp money. Public-bias fades: favorites, overs, home, big-name brands, recent winners. Late scratches in MLB / NBA / NHL / NFL — note + downsize / pass.
 
 ### Stage 4 — self-tuning (deferred until ~14d of resolved data)
 
