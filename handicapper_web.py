@@ -181,21 +181,48 @@ def _sharp_for_ml(home_op, home_cu, away_op, away_cu) -> tuple | None:
 
 
 def _sharp_for_spread(h_op, h_cu, a_op, a_cu) -> tuple | None:
-    if not (h_op and h_cu and a_op and a_cu):
+    h_avail = bool(h_op and h_cu)
+    a_avail = bool(a_op and a_cu)
+    if not (h_avail or a_avail):
         return None
-    h_pt = (h_cu.get("line") or 0) - (h_op.get("line") or 0)
-    a_pt = (a_cu.get("line") or 0) - (a_op.get("line") or 0)
-    side = None
-    if abs(h_pt - a_pt) >= 0.5:
-        side = "home" if h_pt < a_pt else "away"
+
+    if h_avail and a_avail:
+        h_pt = (h_cu.get("line") or 0) - (h_op.get("line") or 0)
+        a_pt = (a_cu.get("line") or 0) - (a_op.get("line") or 0)
+        side = None
+        if abs(h_pt - a_pt) >= 0.5:
+            side = "home" if h_pt < a_pt else "away"
+        else:
+            h_px = h_cu["price_american"] - h_op["price_american"]
+            a_px = a_cu["price_american"] - a_op["price_american"]
+            if abs(h_px - a_px) >= 1:
+                side = "home" if h_px < a_px else "away"
+        if not side:
+            return None
+        op, cu = (h_op, h_cu) if side == "home" else (a_op, a_cu)
     else:
-        h_px = h_cu["price_american"] - h_op["price_american"]
-        a_px = a_cu["price_american"] - a_op["price_american"]
-        if abs(h_px - a_px) >= 1:
-            side = "home" if h_px < a_px else "away"
-    if not side:
-        return None
-    op, cu = (h_op, h_cu) if side == "home" else (a_op, a_cu)
+        # One-sided fallback: derive movement from whichever side has a
+        # complete pair. Sharp side = the team whose spread got HARDER.
+        # ref line tightened (e.g. -1.5 → -2)   → ref harder
+        # ref line eased     (e.g. -1.5 → -1)   → ref easier (other harder)
+        # ref vig more negative                 → ref harder
+        # ref vig less negative                 → ref easier
+        ref_op, ref_cu = (h_op, h_cu) if h_avail else (a_op, a_cu)
+        ref_is_home = h_avail
+        pt_diff = (ref_cu.get("line") or 0) - (ref_op.get("line") or 0)
+        px_diff = ref_cu["price_american"] - ref_op["price_american"]
+        if abs(pt_diff) >= 0.5:
+            ref_harder = pt_diff < 0
+        elif abs(px_diff) >= 1:
+            ref_harder = px_diff < 0
+        else:
+            return None
+        if ref_is_home:
+            side = "home" if ref_harder else "away"
+        else:
+            side = "away" if ref_harder else "home"
+        op, cu = ref_op, ref_cu  # only ref-side snapshots available
+
     score = _move_score_spr_tot(op.get("line"), cu.get("line"),
                                  op["price_american"], cu["price_american"])
     if score is None:
@@ -204,27 +231,49 @@ def _sharp_for_spread(h_op, h_cu, a_op, a_cu) -> tuple | None:
 
 
 def _sharp_for_total(o_op, o_cu, u_op, u_cu) -> tuple | None:
-    if not (o_op and o_cu):
+    o_avail = bool(o_op and o_cu)
+    u_avail = bool(u_op and u_cu)
+    if not (o_avail or u_avail):
         return None
-    pt_diff = (o_cu.get("line") or 0) - (o_op.get("line") or 0)
-    px_diff = o_cu["price_american"] - o_op["price_american"]
-    if pt_diff < 0:
-        side = "under"
-    elif pt_diff > 0:
-        side = "over"
-    elif px_diff > 0:
-        side = "under"
+
+    # Reference snapshot: prefer over (most totals are over-quoted in
+    # our data), fall back to under. Line direction reads the same from
+    # either side; vig direction is INVERTED (under getting more
+    # expensive means UNDER is sharp, mirror of over).
+    if o_avail:
+        ref_op, ref_cu = o_op, o_cu
+        ref_is_over = True
+    else:
+        ref_op, ref_cu = u_op, u_cu
+        ref_is_over = False
+
+    pt_diff = (ref_cu.get("line") or 0) - (ref_op.get("line") or 0)
+    px_diff = ref_cu["price_american"] - ref_op["price_american"]
+
+    if pt_diff > 0:
+        side = "over"   # line raised → over needs more runs → sharp OVER
+    elif pt_diff < 0:
+        side = "under"  # line lowered → under has less room → sharp UNDER
     elif px_diff < 0:
-        side = "over"
+        # Reference side got more expensive (harder).
+        side = "over" if ref_is_over else "under"
+    elif px_diff > 0:
+        # Reference side got cheaper (easier) → other side is sharp.
+        side = "under" if ref_is_over else "over"
     else:
         return None
-    score = _move_score_spr_tot(o_op.get("line"), o_cu.get("line"),
-                                 o_op["price_american"], o_cu["price_american"])
+
+    score = _move_score_spr_tot(ref_op.get("line"), ref_cu.get("line"),
+                                 ref_op["price_american"], ref_cu["price_american"])
     if score is None:
         return None
-    if side == "under" and u_op and u_cu:
+
+    # Prefer sharp-side snapshots for the display pair when available.
+    if side == "over" and o_avail:
+        return side, score, o_op, o_cu
+    if side == "under" and u_avail:
         return side, score, u_op, u_cu
-    return side, score, o_op, o_cu
+    return side, score, ref_op, ref_cu
 
 
 # ──────────────────────────── Match resolution ────────────────────────────
