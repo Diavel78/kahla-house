@@ -31,10 +31,11 @@ create table if not exists bot_picks (
   entry_book    text not null,
   entry_price   integer not null,              -- American odds
   entry_line    numeric,                       -- spread/total point (null for ML)
-  -- Sizing + confidence. units ∈ {1,3,5}. confidence is the human-readable
-  -- chip so the page can color-code without re-deriving.
-  units         integer not null check (units in (1,3,5)),
-  confidence    text not null check (confidence in ('low','medium','high','max')),
+  -- Sizing + confidence. units ∈ {1,3,5,10}. confidence is the human-
+  -- readable chip so the page can color-code without re-deriving.
+  -- Mapping: low=1u, medium=3u, high=5u, whale=10u.
+  units         integer not null check (units in (1,3,5,10)),
+  confidence    text not null check (confidence in ('low','medium','high','whale')),
   -- Edge math. Nullable when PIN devig isn't possible (one-sided market,
   -- mismatched lines) — we still log the pick.
   fair_prob     numeric,

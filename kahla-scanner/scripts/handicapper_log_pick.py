@@ -75,9 +75,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--line", default="",
                    help="Spread/total point. Empty for moneyline.")
     p.add_argument("--units", type=int, required=True,
-                   choices=[1, 3, 5])
+                   choices=[1, 3, 5, 10])
     p.add_argument("--confidence", required=True,
-                   choices=["low", "medium", "high", "max"])
+                   choices=["low", "medium", "high", "whale"])
     p.add_argument("--fair-prob", type=float, default=None)
     p.add_argument("--edge-pp", type=float, default=None)
     p.add_argument("--sharp-score", type=int, default=None)

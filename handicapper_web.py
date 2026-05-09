@@ -768,9 +768,9 @@ def _suggest_pick(odds: dict, splits: dict | None = None) -> dict | None:
     "no data" then.
 
     Sizing tiers (sharp-driven, no edge_pp):
-      sharp ≥ 7 + splits ≥ 10pp aligned → 5u max
-      sharp ≥ 5 + splits ≥ 5pp  aligned → 3u high
-      sharp ≥ 4                          → 1u medium
+      sharp ≥ 7 + splits ≥ 10pp aligned → 10u whale
+      sharp ≥ 5 + splits ≥ 5pp  aligned → 5u high
+      sharp ≥ 4                          → 3u medium
       else                               → 1u low (forced lean)
     """
     candidates: list[dict] = []
@@ -818,11 +818,11 @@ def _suggest_pick(odds: dict, splits: dict | None = None) -> dict | None:
     s = top["sharp_score"]
     sp = top["splits_pp"]
     if s >= 7 and sp >= SPLITS_MIN_PP:
-        top["units"], top["confidence"] = 5, "max"
+        top["units"], top["confidence"] = 10, "whale"
     elif s >= 5 and sp >= 5:
-        top["units"], top["confidence"] = 3, "high"
+        top["units"], top["confidence"] = 5, "high"
     elif s >= SHARP_SCORE_MIN:
-        top["units"], top["confidence"] = 1, "medium"
+        top["units"], top["confidence"] = 3, "medium"
     else:
         top["units"], top["confidence"] = 1, "low"
 
