@@ -489,7 +489,11 @@
         const diffMin = Math.round((d - now) / 60_000);
         if (diffMin < 0) return 'live/done';
         if (diffMin < 60) return `${diffMin}m`;
-        if (diffMin < 60*24) return `${Math.round(diffMin/60)}h`;
+        if (diffMin < 60*24) {
+            const h = Math.floor(diffMin / 60);
+            const m = diffMin % 60;
+            return m === 0 ? `${h}h` : `${h}h ${m}m`;
+        }
         return d.toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
     }
     function _fmtSettled(iso) {
@@ -719,10 +723,13 @@
     function renderDossier(d) {
         const el = document.getElementById('dossier');
         const startsIn = d.starts_in_min;
-        const startsLabel = startsIn == null ? '' :
-            (startsIn < 0 ? `started ${-startsIn}m ago` :
-             startsIn < 60 ? `starts in ${startsIn}m` :
-             `starts in ${(startsIn/60).toFixed(1)}h`);
+        const startsLabel = startsIn == null ? '' : (() => {
+            if (startsIn < 0) return `started ${-startsIn}m ago`;
+            if (startsIn < 60) return `starts in ${startsIn}m`;
+            const h = Math.floor(startsIn / 60);
+            const m = startsIn % 60;
+            return m === 0 ? `starts in ${h}h` : `starts in ${h}h ${m}m`;
+        })();
         const dt = new Date(d.event_start_utc);
 
         const liveBadge = d.live_used
