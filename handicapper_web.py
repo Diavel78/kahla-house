@@ -717,36 +717,63 @@ def _mlb_pitcher_block(p: dict | None) -> dict:
 
 # ──────────────────────────── Mechanical pick ────────────────────────────
 
-# Same gates as kahla-scanner/_lib/paper_bets.py — keep in sync.
-SHARP_SCORE_MIN = 4
-EDGE_PP_MIN     = 0.5
-SHARP_WEIGHT    = 0.6
-EDGE_WEIGHT     = 0.4
+# Polymarket-execution scoring. The user bets on Polymarket (limit
+# orders at fair / sharp prices) — NOT at retail. So we don't filter on
+# "+EV at DK/FD" anymore. The signal is:
+#   1. Sharp move (PIN opener → current line/price magnitude + side)
+#   2. Public splits divergence (% money − % bets on the sharp side)
+# Combined score = how much the read agrees with itself. The
+# Polymarket entry target = PIN devigged American on the sharp side.
+SHARP_SCORE_MIN  = 4   # Sharp signal threshold.
+SPLITS_MIN_PP    = 10  # |money% − bets%| considered "material".
+SHARP_WEIGHT     = 0.7
+SPLITS_WEIGHT    = 0.3
 
 
-def _suggest_pick(odds: dict) -> dict | None:
-    """Rule-based pick from the dossier. ALWAYS returns the best
-    available candidate when there's enough data to score one — the user
-    asked for "give me an answer" rather than "pass". `gates_cleared`
-    flags whether the top candidate clears the sharp + edge bar
-    (sharp ≥ 4 AND edge ≥ 0.5pp); the UI shows a soft-pick label when
-    it's False.
+def _splits_signal_pp(splits: dict | None, sharp_side: str | None,
+                      market_type: str) -> float:
+    """Return the splits-divergence percentage points for the sharp side.
+    Positive = money concentrated on this side (sharp signal agrees).
+    Negative = public ticket count overweight on this side (square fade).
 
-    Returns None ONLY when literally no side has a computable edge — PIN
-    data missing on both sides for every market. The page renders a "no
-    data" message in that case rather than a fake suggestion.
-
-    Scoring: every (market, side) where best_entry has a non-null edge_pp
-    becomes a candidate. sharp_score = the PIN-movement score IF this
-    side is the sharp side; 0 otherwise (so a non-sharp side with strong
-    edge still gets considered). combined_score = same formula as the
-    qualifying picks. Top candidate wins. Soft picks (gates not cleared)
-    are pinned at 1u / low.
-
-    Claude's in-chat write-up may disagree — chat sees injuries, lineups,
-    late news the rules don't, and is authoritative.
+    Only computable for ML splits (Action Network doesn't expose money/
+    bets per spread or total bucket). Returns 0 for SPR/TOT — splits
+    contribute zero to those candidates' scores.
     """
-    candidates = []
+    if not splits or market_type != "moneyline" or sharp_side not in ("home", "away"):
+        return 0.0
+    money = splits.get(f"{sharp_side}_money")
+    bets  = splits.get(f"{sharp_side}_bets")
+    if money is None or bets is None:
+        return 0.0
+    try:
+        return float(money) - float(bets)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _suggest_pick(odds: dict, splits: dict | None = None) -> dict | None:
+    """Polymarket-execution pick: name the sharp side, give the PIN
+    devigged price as the limit-order target. ALWAYS returns the best
+    available read — soft picks are labeled with `gates_cleared=False`
+    so the UI shows a "would pass, but if forced" header.
+
+    Scoring:
+      sharp_score (0-10) — PIN movement magnitude on this side.
+      splits_pp     — money% − bets% on this side (ML only; 0 for SPR/TOT).
+      combined = 0.7·(sharp/10) + 0.3·(splits/30 capped 1.0)
+
+    Returns None ONLY when no PIN snapshot exists on either side of any
+    market (no fair line computable → no Polymarket target). UI shows
+    "no data" then.
+
+    Sizing tiers (sharp-driven, no edge_pp):
+      sharp ≥ 7 + splits ≥ 10pp aligned → 5u max
+      sharp ≥ 5 + splits ≥ 5pp  aligned → 3u high
+      sharp ≥ 4                          → 1u medium
+      else                               → 1u low (forced lean)
+    """
+    candidates: list[dict] = []
     for mt in ("moneyline", "spread", "total"):
         blk = odds.get(mt) or {}
         mv = blk.get("movement") or {}
@@ -754,25 +781,28 @@ def _suggest_pick(odds: dict) -> dict | None:
         sharp_score = mv.get("sharp_score") or 0
         sides = ("over", "under") if mt == "total" else ("away", "home")
         for side in sides:
-            best = (blk.get("best_entry") or {}).get(side)
-            if not best or best.get("edge_pp") is None:
+            pin = (blk.get("pin_current") or {}).get(side) or {}
+            fair_prob     = pin.get("fair_prob")
+            fair_american = pin.get("fair_american")
+            # Need at minimum a fair line to call this a Polymarket target.
+            if fair_prob is None or fair_american is None:
                 continue
-            edge_pp = best["edge_pp"]
-            # Sharp score only counts toward THIS side if PIN moved against it.
+
             score_for_side = sharp_score if side == sharp_side else 0
+            splits_pp = _splits_signal_pp(splits, sharp_side, mt) if score_for_side > 0 else 0.0
             cs = (SHARP_WEIGHT * (score_for_side / 10.0)
-                  + EDGE_WEIGHT * min(max(0.0, edge_pp) / 10.0, 1.0))
-            gates_cleared = (score_for_side >= SHARP_SCORE_MIN
-                             and edge_pp >= EDGE_PP_MIN)
+                  + SPLITS_WEIGHT * min(max(0.0, splits_pp) / 30.0, 1.0))
+            gates_cleared = score_for_side >= SHARP_SCORE_MIN
+
             candidates.append({
                 "market_type":    mt,
                 "side":           side,
                 "sharp_score":    score_for_side,
-                "edge_pp":        edge_pp,
-                "entry_book":     best["book"],
-                "entry_price":    best["price_american"],
-                "entry_line":     best.get("line"),
-                "fair_prob":      (blk.get("pin_current") or {}).get(side, {}).get("fair_prob"),
+                "splits_pp":      round(splits_pp, 1),
+                "fair_prob":      fair_prob,
+                "fair_american":  fair_american,
+                "pin_current":    pin.get("price"),
+                "pin_line":       pin.get("line"),
                 "combined_score": round(cs, 4),
                 "gates_cleared":  gates_cleared,
             })
@@ -780,25 +810,20 @@ def _suggest_pick(odds: dict) -> dict | None:
     if not candidates:
         return None
 
-    # Sort: qualified picks first (gates_cleared True), then by
-    # combined_score. Means a soft pick never beats a real one.
+    # Qualified candidates win; ties broken by combined_score.
     candidates.sort(key=lambda c: (c["gates_cleared"], c["combined_score"]),
                     reverse=True)
     top = candidates[0]
 
-    if top["gates_cleared"]:
-        # Tiered sizing — same as before.
-        cs = top["combined_score"]
-        if cs >= 0.75 and top["edge_pp"] >= 4.0:
-            top["units"], top["confidence"] = 5, "max"
-        elif cs >= 0.55 and top["edge_pp"] >= 2.0:
-            top["units"], top["confidence"] = 3, "high"
-        elif cs >= 0.40:
-            top["units"], top["confidence"] = 1, "medium"
-        else:
-            top["units"], top["confidence"] = 1, "low"
+    s = top["sharp_score"]
+    sp = top["splits_pp"]
+    if s >= 7 and sp >= SPLITS_MIN_PP:
+        top["units"], top["confidence"] = 5, "max"
+    elif s >= 5 and sp >= 5:
+        top["units"], top["confidence"] = 3, "high"
+    elif s >= SHARP_SCORE_MIN:
+        top["units"], top["confidence"] = 1, "medium"
     else:
-        # Soft pick: would-pass-but-if-forced. Pinned at 1u / low.
         top["units"], top["confidence"] = 1, "low"
 
     return top
@@ -898,7 +923,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     if sport == "MLB" and event_start and away and home:
         mlb_extra["probable_pitchers"] = _mlb_probables(event_start, away, home)
 
-    suggestion = _suggest_pick(odds)
+    suggestion = _suggest_pick(odds, splits)
 
     return {
         "ok":              True,

@@ -199,6 +199,8 @@
         .suggestion-card .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--blue); font-weight: 700; margin-bottom: 6px; }
         .suggestion-card .lbl.soft { color: var(--orange); }
         .suggestion-card .pick-line { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+        .suggestion-card .pick-line .target { color: var(--green); font-family: 'JetBrains Mono', monospace; font-size: 17px; }
+        .suggestion-card.soft .pick-line .target { color: var(--orange); }
         .suggestion-card .pick-line .pick-units { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; margin-left: 8px; vertical-align: middle; }
         .suggestion-card .pick-line .pick-units.units-1 { background: rgba(255,255,255,0.06); color: var(--text-secondary); }
         .suggestion-card .pick-line .pick-units.units-3 { background: var(--orange-dim); color: var(--orange); }
@@ -676,30 +678,36 @@
             </div>
         </div>`;
 
-        // Suggestion card — always render when we have data. `gates_cleared`
-        // distinguishes a real pick from a soft/forced lean (would-pass-
-        // but-if-forced). User explicitly asked: never just "pass" — give
-        // an answer.
+        // Suggestion card — Polymarket-style. PIN devigged American is the
+        // limit-order target. Sharp score + splits divergence are the
+        // signals; no retail-book "+EV" hunt. `gates_cleared` separates
+        // a real pick (sharp ≥ 4) from a forced lean.
         if (d.suggestion) {
             const s = d.suggestion;
             const market = _shortMarket(s.market_type);
             const sideLabel = s.market_type === 'total'
                 ? s.side.toUpperCase()
                 : (s.side === 'home' ? d.home : d.away);
-            const lineFrag = (s.entry_line == null) ? '' : ` ${_fmtPt(s.entry_line)}`;
+            const lineFrag = (s.pin_line == null) ? '' : ` ${_fmtPt(s.pin_line)}`;
             const cardCls = s.gates_cleared ? 'suggestion-card' : 'suggestion-card soft';
             const heading = s.gates_cleared
-                ? '<div class="lbl">Bot Suggests</div>'
+                ? '<div class="lbl">Bot Suggests — Polymarket Target</div>'
                 : '<div class="lbl soft">Lean — would pass, but if forced</div>';
-            const meta = `edge ${s.edge_pp >= 0 ? '+' : ''}${Number(s.edge_pp).toFixed(1)}pp · sharp ${s.sharp_score || 0} · combined ${(s.combined_score*100).toFixed(0)}/100`;
+            const splitsFrag = (s.splits_pp != null && Math.abs(s.splits_pp) >= 1)
+                ? ` · splits ${s.splits_pp > 0 ? '+' : ''}${s.splits_pp.toFixed(0)}pp`
+                : '';
+            const meta = `sharp ${s.sharp_score || 0}${splitsFrag} · combined ${(s.combined_score*100).toFixed(0)}/100`;
+            const pinNow = (s.pin_current != null) ? ` · PIN now ${_fmtAmer(s.pin_current)}` : '';
             html += `<div class="${cardCls}">
                 ${heading}
                 <div class="pick-line">
-                    ${market} · ${_esc(sideLabel)}${lineFrag} ${_fmtAmer(s.entry_price)} (${_esc(s.entry_book)})
+                    ${market} · ${_esc(sideLabel)}${lineFrag}
+                    <span class="target">@ ${_fmtAmer(s.fair_american)}</span>
                     <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>
                 </div>
+                <div class="pick-meta">Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow}</div>
                 <div class="pick-meta">${meta}</div>
-                ${s.gates_cleared ? '' : `<div class="soft-note">Sharp + edge gates not cleared (need sharp ≥ 4 AND edge ≥ 0.5pp). Skip in chalk-flat markets; this is the best read available.</div>`}
+                ${s.gates_cleared ? '' : `<div class="soft-note">Sharp gate not cleared (need sharp ≥ 4). Chalk-flat market; this is the best read available — treat as 1u lean only.</div>`}
                 <div class="actions">
                     <button class="primary" onclick="openLog()">Log this pick</button>
                     <button onclick="copyForClaude()">Copy for Claude</button>
@@ -707,9 +715,9 @@
             </div>`;
         } else {
             html += `<div class="suggestion-pass">
-                <strong>No data to score.</strong> PIN missing on every market for this game — can't compute fair lines. Try
+                <strong>No PIN data.</strong> Can't compute a devigged fair line for this game — no Polymarket target. Try
                 <button onclick="copyForClaude()" style="background:none;border:0;color:var(--blue);text-decoration:underline;cursor:pointer;font:inherit;padding:0">copying for Claude</button>
-                anyway, or check back closer to kickoff.
+                or check back closer to kickoff.
             </div>`;
         }
 
@@ -843,24 +851,25 @@
         if (!_lastDossier) return;
         const s = _lastDossier.suggestion;
         if (manual && !s) {
-            // Manual: prompt user to choose ML/SPR/TOT + side. Simple version:
-            // pre-fill best ML edge if available; user can edit.
             const ml = _lastDossier.odds.moneyline || {};
-            const fallback = ml.best_entry && (ml.best_entry.home || ml.best_entry.away);
+            const fallback = ml.pin_current && (ml.pin_current.home || ml.pin_current.away);
             if (!fallback) {
                 alert('No data to seed a manual pick. Try a different game.');
                 return;
             }
         }
+        // Polymarket execution: entry_book = "PMM", entry_price = PIN
+        // devigged fair (the limit-order target). edge_pp omitted — we
+        // don't compute retail edges anymore.
         _pendingPick = s ? {
-            market_id:  _lastDossier.market_id,
+            market_id:   _lastDossier.market_id,
             market_type: s.market_type,
             side:        s.side,
-            book:        s.entry_book,
-            price:       s.entry_price,
-            line:        s.entry_line,
+            book:        'PMM',
+            price:       s.fair_american,
+            line:        s.pin_line,
             fair_prob:   s.fair_prob,
-            edge_pp:     s.edge_pp,
+            edge_pp:     null,
             sharp_score: s.sharp_score,
             label:       _suggestLabel(s, _lastDossier),
             seed_units:  s.units,
@@ -884,8 +893,8 @@
         const sideName = s.market_type === 'total'
             ? s.side.toUpperCase()
             : (s.side === 'home' ? d.home : d.away);
-        const lineFrag = (s.entry_line == null) ? '' : ` ${_fmtPt(s.entry_line)}`;
-        return `${market} · ${sideName}${lineFrag} ${_fmtAmer(s.entry_price)} (${s.entry_book})`;
+        const lineFrag = (s.pin_line == null) ? '' : ` ${_fmtPt(s.pin_line)}`;
+        return `${market} · ${sideName}${lineFrag} @ ${_fmtAmer(s.fair_american)} (PMM target)`;
     }
     function _buildReasons(pick, d) {
         // Generate 1-3 bullet reasons grounded in THIS pick's actual
@@ -910,14 +919,11 @@
             lines.push(`PIN: ${_fmtAmer(mv.opener_price)}${oFrag} → ${_fmtAmer(mv.current_price)}${cFrag} — sharp ${sharpName} (${mv.sharp_score})`);
         }
 
-        // Edge at chosen book vs PIN devigged fair.
-        if (pick.edge_pp != null) {
-            const fair = (blk.pin_current || {})[pick.side] || {};
-            const fairFrag = fair.fair_american != null
-                ? ` vs PIN devigged ${_fmtAmer(fair.fair_american)}`
-                : '';
-            const sign = pick.edge_pp >= 0 ? '+' : '';
-            lines.push(`${pick.book} ${_fmtAmer(pick.price)}${pick.line != null ? ' @ ' + _fmtPt(pick.line) : ''} = ${sign}${pick.edge_pp.toFixed(1)}pp edge${fairFrag}`);
+        // Polymarket entry target — PIN devigged fair on this side.
+        const pinSide = (blk.pin_current || {})[pick.side] || {};
+        if (pinSide.fair_american != null) {
+            const lineFrag = pick.line != null ? ` @ ${_fmtPt(pick.line)}` : '';
+            lines.push(`Polymarket target: ${_fmtAmer(pinSide.fair_american)}${lineFrag} (PIN devig fair)`);
         }
 
         // Splits divergence — only if material (≥10% gap between money and bets on this side).
@@ -942,29 +948,29 @@
     }
 
     function _seedManual(d) {
-        // No suggestion — pick the best-ML side as a starting point. User
-        // can edit-as-needed (they can also still Cancel).
+        // Manual fallback: home-ML PIN devig fair as starting point.
+        // User can edit/cancel.
         const ml = d.odds.moneyline || {};
-        const home = (ml.best_entry || {}).home;
-        const away = (ml.best_entry || {}).away;
-        const choice = (home && (!away || home.price_american > away.price_american))
-            ? { side: 'home', best: home }
-            : (away ? { side: 'away', best: away } : null);
+        const homePin = (ml.pin_current || {}).home;
+        const awayPin = (ml.pin_current || {}).away;
+        const choice = (homePin && homePin.fair_american != null)
+            ? { side: 'home', pin: homePin }
+            : ((awayPin && awayPin.fair_american != null) ? { side: 'away', pin: awayPin } : null);
         if (!choice) return null;
         const sideName = choice.side === 'home' ? d.home : d.away;
         return {
-            market_id: d.market_id,
+            market_id:   d.market_id,
             market_type: 'moneyline',
-            side: choice.side,
-            book: choice.best.book,
-            price: choice.best.price_american,
-            line: null,
-            fair_prob: ((ml.pin_current || {})[choice.side] || {}).fair_prob,
-            edge_pp: choice.best.edge_pp,
+            side:        choice.side,
+            book:        'PMM',
+            price:       choice.pin.fair_american,
+            line:        null,
+            fair_prob:   choice.pin.fair_prob,
+            edge_pp:     null,
             sharp_score: (ml.movement || {}).sharp_score,
-            label: `ML · ${sideName} ${_fmtAmer(choice.best.price_american)} (${choice.best.book})`,
-            seed_units: 1,
-            seed_conf: 'medium',
+            label:       `ML · ${sideName} @ ${_fmtAmer(choice.pin.fair_american)} (PMM target)`,
+            seed_units:  1,
+            seed_conf:   'medium',
         };
     }
 
