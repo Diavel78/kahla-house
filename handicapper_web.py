@@ -417,14 +417,34 @@ def _fetch_live_event(sport: str, event_start_iso: str,
         return None, f"bad json: {e}"
 
     away_n, home_n = (away or "").lower(), (home or "").lower()
-    window = timedelta(minutes=LIVE_MATCH_WINDOW_MIN)
+    # UFC: cards span ~5-6h with each fight having its own commence_time
+    # in The Odds API (different from the single card-start time we have
+    # in markets.event_start). Use a wider window so we still match the
+    # individual fight no matter how late it starts on the card.
+    window_min = 360 if sport == "UFC" else LIVE_MATCH_WINDOW_MIN
+    window = timedelta(minutes=window_min)
+
+    def _name_match(ev_name: str, our_name: str) -> bool:
+        # Substring containment in either direction handles the common
+        # case (full name match). UFC fallback: any token of length ≥ 3
+        # in our name appears in the API name. Catches diacritics,
+        # nickname differences, partial spellings (B. Susurkaev vs
+        # Baysangur Susurkaev, etc.).
+        if not (ev_name and our_name):
+            return False
+        if our_name in ev_name or ev_name in our_name:
+            return True
+        if sport == "UFC":
+            tokens = [t for t in re.split(r"\s+", our_name) if len(t) >= 3]
+            return any(t in ev_name for t in tokens)
+        return False
+
     for ev in events:
         ev_home = (ev.get("home_team") or "").lower()
         ev_away = (ev.get("away_team") or "").lower()
         if not ev_home or not ev_away:
             continue
-        if not ((home_n in ev_home or ev_home in home_n) and
-                (away_n in ev_away or ev_away in away_n)):
+        if not (_name_match(ev_home, home_n) and _name_match(ev_away, away_n)):
             continue
         try:
             ev_dt = datetime.fromisoformat(

@@ -723,8 +723,13 @@
     function renderDossier(d) {
         const el = document.getElementById('dossier');
         const startsIn = d.starts_in_min;
+        const ufcCardCaveat = d.sport === 'UFC' ? ' (card scheduled — individual fight may start later)' : '';
         const startsLabel = startsIn == null ? '' : (() => {
-            if (startsIn < 0) return `started ${-startsIn}m ago`;
+            if (startsIn < 0) {
+                return d.sport === 'UFC'
+                    ? `card scheduled ${-startsIn}m ago${ufcCardCaveat}`
+                    : `started ${-startsIn}m ago`;
+            }
             if (startsIn < 60) return `starts in ${startsIn}m`;
             const h = Math.floor(startsIn / 60);
             const m = startsIn % 60;
