@@ -641,13 +641,20 @@ def _mlb_pitcher_block(p: dict | None) -> dict:
     block = {
         "name":   p.get("fullName"),
         "id":     pid,
+        # MLB Stats API's `probablePitcher` hydrate doesn't include
+        # pitchHand by default — we backfill it from the person endpoint
+        # below. Keep this as a first-pass fallback in case the schedule
+        # response ever DOES include it.
         "throws": ((p.get("pitchHand") or {}).get("code")),
     }
     if not pid:
         return block
+    # Single combined call: person details + season pitching stats.
+    # `hydrate=stats(...)` nests the stats into the person response, so
+    # we get throws + ERA/WHIP/etc in one round-trip.
     season = datetime.now(timezone.utc).year
-    url = f"https://statsapi.mlb.com/api/v1/people/{pid}/stats"
-    params = {"stats": "season", "season": season, "group": "pitching"}
+    url = f"https://statsapi.mlb.com/api/v1/people/{pid}"
+    params = {"hydrate": f"stats(group=[pitching],type=[season],season={season})"}
     try:
         r = httpx.get(url, params=params, timeout=HTTP_TIMEOUT)
         if r.status_code != 200:
@@ -655,21 +662,27 @@ def _mlb_pitcher_block(p: dict | None) -> dict:
         data = r.json() or {}
     except Exception:
         return block
-    splits = (data.get("stats") or [{}])[0].get("splits") or []
-    if not splits:
+    people = data.get("people") or []
+    if not people:
         return block
-    s = splits[0].get("stat") or {}
-    block.update({
-        "era":     s.get("era"),
-        "whip":    s.get("whip"),
-        "ip":      s.get("inningsPitched"),
-        "k":       s.get("strikeOuts"),
-        "bb":      s.get("baseOnBalls"),
-        "k_per_9": s.get("strikeoutsPer9Inn"),
-        "bb_per_9": s.get("walksPer9Inn"),
-        "hr_per_9": s.get("homeRunsPer9"),
-        "record":  f"{s.get('wins', 0)}-{s.get('losses', 0)}",
-    })
+    person = people[0]
+    if not block["throws"]:
+        block["throws"] = ((person.get("pitchHand") or {}).get("code"))
+    stats_blocks = person.get("stats") or []
+    splits = (stats_blocks[0].get("splits") if stats_blocks else []) or []
+    if splits:
+        s = splits[0].get("stat") or {}
+        block.update({
+            "era":     s.get("era"),
+            "whip":    s.get("whip"),
+            "ip":      s.get("inningsPitched"),
+            "k":       s.get("strikeOuts"),
+            "bb":      s.get("baseOnBalls"),
+            "k_per_9": s.get("strikeoutsPer9Inn"),
+            "bb_per_9": s.get("walksPer9Inn"),
+            "hr_per_9": s.get("homeRunsPer9"),
+            "record":  f"{s.get('wins', 0)}-{s.get('losses', 0)}",
+        })
     return block
 
 

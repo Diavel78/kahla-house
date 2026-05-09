@@ -193,19 +193,40 @@ Map confidence chip → units:
 Push `max` rarely. If you're using `max` more than 1-2 picks per night,
 your bar is too low.
 
-### When to PASS (no pick)
+### Never just "pass" — always give a forced lean
 
-It's better to log no pick than a bad pick:
-- PIN one-sided (only home or away has snapshots) and softer books don't
-  agree → no fair line, can't size edge
-- Signals conflict (sharp moved one way, splits the opposite, no
-  resolution) → market is uncertain, you should be too
-- Game already started or starts in <15 min and dossier is stale
-- Late scratch / injury news after dossier built
-- Edge < 0.5pp at ANY book → not worth the risk
+The user explicitly asked: never refuse to answer. Even when the read is
+weak, name the side you'd take **if forced to bet** and label it as
+such. Phrasing template:
 
-Tell the user "no pick" with a one-paragraph why. They want honesty more
-than they want a pick.
+> *"I'd pass on this one — [why]. But if you're going to play it, lean
+> [side / market / line / book / price] for 1u. Confidence: low.
+> Reasoning: [one or two sentences]."*
+
+When the gates ARE cleared (sharp ≥ 4 AND edge ≥ 0.5pp + a confirming
+signal), use the normal Bot Suggests language and the standard sizing
+rubric (1u/3u/5u).
+
+When the gates are NOT cleared, ALWAYS:
+1. Lead with "I'd pass" + the reason (chalk-flat market, signals
+   conflict, PIN data thin, late scratch, etc.)
+2. Then give the forced lean. Default 1u + low confidence. Pick the
+   side with the highest positive edge regardless of sharp signal
+   (sharp_score = 0 is fine for a forced lean).
+3. If literally no positive edge anywhere on any market, pick the side
+   with the LEAST negative edge — best of the bad. Tag it explicitly:
+   "no positive edge anywhere; least-bad option is X."
+
+Hard-pass conditions where you log no pick (call --units 0 isn't
+supported, so just don't run the log script):
+- Game already started OR starts in <15 min AND dossier is stale
+- Late scratch / injury news AFTER dossier built that materially
+  changes the read
+- Bot has explicitly recommended pass via the dossier `suggestion`
+  block being null (PIN data missing on every market)
+
+In those three cases, tell the user "no pick — [reason]" and skip the
+log step. Otherwise, always give an answer.
 
 ## Key files
 

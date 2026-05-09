@@ -673,31 +673,45 @@ def _mlb_pitcher_block(p: dict | None) -> dict:
     block = {
         "name":   p.get("fullName"),
         "id":     pid,
+        # MLB Stats API's `probablePitcher` hydrate doesn't include
+        # pitchHand by default — we backfill it from the person endpoint
+        # below. Keep this as a first-pass fallback in case the schedule
+        # response ever DOES include it.
         "throws": ((p.get("pitchHand") or {}).get("code")),
     }
     if not pid:
         return block
+    # Single combined call: person details + season pitching stats.
+    # `hydrate=stats(...)` nests the stats into the person response, so
+    # we get throws + ERA/WHIP/etc in one round-trip.
     season = datetime.now(timezone.utc).year
-    url = f"https://statsapi.mlb.com/api/v1/people/{pid}/stats"
-    params = {"stats": "season", "season": season, "group": "pitching"}
+    url = f"https://statsapi.mlb.com/api/v1/people/{pid}"
+    params = {"hydrate": f"stats(group=[pitching],type=[season],season={season})"}
     data = _http_get(url, params=params)
     if not data:
         return block
-    splits = (data.get("stats") or [{}])[0].get("splits") or []
-    if not splits:
+    people = data.get("people") or []
+    if not people:
         return block
-    s = splits[0].get("stat") or {}
-    block.update({
-        "era":      s.get("era"),
-        "whip":     s.get("whip"),
-        "ip":       s.get("inningsPitched"),
-        "k":        s.get("strikeOuts"),
-        "bb":       s.get("baseOnBalls"),
-        "k_per_9":  s.get("strikeoutsPer9Inn"),
-        "bb_per_9": s.get("walksPer9Inn"),
-        "hr_per_9": s.get("homeRunsPer9"),
-        "record":   f"{s.get('wins', 0)}-{s.get('losses', 0)}",
-    })
+    person = people[0]
+    # Pitch hand from the person response — what fixes the "(?)" display.
+    if not block["throws"]:
+        block["throws"] = ((person.get("pitchHand") or {}).get("code"))
+    stats_blocks = person.get("stats") or []
+    splits = (stats_blocks[0].get("splits") if stats_blocks else []) or []
+    if splits:
+        s = splits[0].get("stat") or {}
+        block.update({
+            "era":      s.get("era"),
+            "whip":     s.get("whip"),
+            "ip":       s.get("inningsPitched"),
+            "k":        s.get("strikeOuts"),
+            "bb":       s.get("baseOnBalls"),
+            "k_per_9":  s.get("strikeoutsPer9Inn"),
+            "bb_per_9": s.get("walksPer9Inn"),
+            "hr_per_9": s.get("homeRunsPer9"),
+            "record":   f"{s.get('wins', 0)}-{s.get('losses', 0)}",
+        })
     return block
 
 
@@ -711,57 +725,82 @@ EDGE_WEIGHT     = 0.4
 
 
 def _suggest_pick(odds: dict) -> dict | None:
-    """Rule-based pick suggestion from the dossier — same logic as the
-    Sharp Bot Late EV picker. Returns the highest-scoring candidate that
-    clears the sharp + edge gates, or None if no market qualifies.
+    """Rule-based pick from the dossier. ALWAYS returns the best
+    available candidate when there's enough data to score one — the user
+    asked for "give me an answer" rather than "pass". `gates_cleared`
+    flags whether the top candidate clears the sharp + edge bar
+    (sharp ≥ 4 AND edge ≥ 0.5pp); the UI shows a soft-pick label when
+    it's False.
 
-    This is the website's instant 'Bot suggests' line. Claude's
-    in-chat write-up may agree, disagree, or recommend pass — the
-    in-chat analysis is authoritative because it considers injuries,
-    lineups, weather, and late news the website doesn't pre-filter on.
+    Returns None ONLY when literally no side has a computable edge — PIN
+    data missing on both sides for every market. The page renders a "no
+    data" message in that case rather than a fake suggestion.
+
+    Scoring: every (market, side) where best_entry has a non-null edge_pp
+    becomes a candidate. sharp_score = the PIN-movement score IF this
+    side is the sharp side; 0 otherwise (so a non-sharp side with strong
+    edge still gets considered). combined_score = same formula as the
+    qualifying picks. Top candidate wins. Soft picks (gates not cleared)
+    are pinned at 1u / low.
+
+    Claude's in-chat write-up may disagree — chat sees injuries, lineups,
+    late news the rules don't, and is authoritative.
     """
     candidates = []
     for mt in ("moneyline", "spread", "total"):
         blk = odds.get(mt) or {}
-        mv = blk.get("movement")
-        if not mv:
-            continue
-        side = mv["sharp_side"]
-        score = mv["sharp_score"]
-        if score < SHARP_SCORE_MIN:
-            continue
-        best = (blk.get("best_entry") or {}).get(side)
-        if not best or best.get("edge_pp") is None:
-            continue
-        if best["edge_pp"] < EDGE_PP_MIN:
-            continue
-        cs = (SHARP_WEIGHT * (score / 10.0)
-              + EDGE_WEIGHT * min(max(0.0, best["edge_pp"]) / 10.0, 1.0))
-        candidates.append({
-            "market_type": mt,
-            "side":        side,
-            "sharp_score": score,
-            "edge_pp":     best["edge_pp"],
-            "entry_book":  best["book"],
-            "entry_price": best["price_american"],
-            "entry_line":  best.get("line"),
-            "fair_prob":   (blk.get("pin_current") or {}).get(side, {}).get("fair_prob"),
-            "combined_score": round(cs, 4),
-        })
+        mv = blk.get("movement") or {}
+        sharp_side  = mv.get("sharp_side")
+        sharp_score = mv.get("sharp_score") or 0
+        sides = ("over", "under") if mt == "total" else ("away", "home")
+        for side in sides:
+            best = (blk.get("best_entry") or {}).get(side)
+            if not best or best.get("edge_pp") is None:
+                continue
+            edge_pp = best["edge_pp"]
+            # Sharp score only counts toward THIS side if PIN moved against it.
+            score_for_side = sharp_score if side == sharp_side else 0
+            cs = (SHARP_WEIGHT * (score_for_side / 10.0)
+                  + EDGE_WEIGHT * min(max(0.0, edge_pp) / 10.0, 1.0))
+            gates_cleared = (score_for_side >= SHARP_SCORE_MIN
+                             and edge_pp >= EDGE_PP_MIN)
+            candidates.append({
+                "market_type":    mt,
+                "side":           side,
+                "sharp_score":    score_for_side,
+                "edge_pp":        edge_pp,
+                "entry_book":     best["book"],
+                "entry_price":    best["price_american"],
+                "entry_line":     best.get("line"),
+                "fair_prob":      (blk.get("pin_current") or {}).get(side, {}).get("fair_prob"),
+                "combined_score": round(cs, 4),
+                "gates_cleared":  gates_cleared,
+            })
+
     if not candidates:
         return None
-    candidates.sort(key=lambda c: c["combined_score"], reverse=True)
+
+    # Sort: qualified picks first (gates_cleared True), then by
+    # combined_score. Means a soft pick never beats a real one.
+    candidates.sort(key=lambda c: (c["gates_cleared"], c["combined_score"]),
+                    reverse=True)
     top = candidates[0]
-    # Sizing: combined_score → 1u/3u/5u + confidence chip.
-    cs = top["combined_score"]
-    if cs >= 0.75 and top["edge_pp"] >= 4.0:
-        top["units"], top["confidence"] = 5, "max"
-    elif cs >= 0.55 and top["edge_pp"] >= 2.0:
-        top["units"], top["confidence"] = 3, "high"
-    elif cs >= 0.40:
-        top["units"], top["confidence"] = 1, "medium"
+
+    if top["gates_cleared"]:
+        # Tiered sizing — same as before.
+        cs = top["combined_score"]
+        if cs >= 0.75 and top["edge_pp"] >= 4.0:
+            top["units"], top["confidence"] = 5, "max"
+        elif cs >= 0.55 and top["edge_pp"] >= 2.0:
+            top["units"], top["confidence"] = 3, "high"
+        elif cs >= 0.40:
+            top["units"], top["confidence"] = 1, "medium"
+        else:
+            top["units"], top["confidence"] = 1, "low"
     else:
+        # Soft pick: would-pass-but-if-forced. Pinned at 1u / low.
         top["units"], top["confidence"] = 1, "low"
+
     return top
 
 

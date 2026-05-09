@@ -166,7 +166,11 @@
         .dossier-head .sub { font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
 
         .suggestion-card { padding: 14px 16px; background: var(--blue-dim); border: 1px solid rgba(74,124,255,0.3); border-radius: 12px; margin-bottom: 18px; }
+        .suggestion-card.soft { background: var(--surface-2); border-color: var(--border-light); }
+        .suggestion-card.soft .pick-line { color: var(--text); }
+        .suggestion-card .soft-note { font-size: 11px; color: var(--text-muted); margin-top: 8px; line-height: 1.5; font-style: italic; }
         .suggestion-card .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--blue); font-weight: 700; margin-bottom: 6px; }
+        .suggestion-card .lbl.soft { color: var(--orange); }
         .suggestion-card .pick-line { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
         .suggestion-card .pick-line .pick-units { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; margin-left: 8px; vertical-align: middle; }
         .suggestion-card .pick-line .pick-units.units-1 { background: rgba(255,255,255,0.06); color: var(--text-secondary); }
@@ -547,7 +551,10 @@ DK retail still at -125, +2.4pp edge"></textarea>
             </div>
         </div>`;
 
-        // Suggestion card
+        // Suggestion card — always render when we have data. `gates_cleared`
+        // distinguishes a real pick from a soft/forced lean (would-pass-
+        // but-if-forced). User explicitly asked: never just "pass" — give
+        // an answer.
         if (d.suggestion) {
             const s = d.suggestion;
             const market = _shortMarket(s.market_type);
@@ -555,15 +562,19 @@ DK retail still at -125, +2.4pp edge"></textarea>
                 ? s.side.toUpperCase()
                 : (s.side === 'home' ? d.home : d.away);
             const lineFrag = (s.entry_line == null) ? '' : ` ${_fmtPt(s.entry_line)}`;
-            html += `<div class="suggestion-card">
-                <div class="lbl">Bot Suggests</div>
+            const cardCls = s.gates_cleared ? 'suggestion-card' : 'suggestion-card soft';
+            const heading = s.gates_cleared
+                ? '<div class="lbl">Bot Suggests</div>'
+                : '<div class="lbl soft">Lean — would pass, but if forced</div>';
+            const meta = `edge ${s.edge_pp >= 0 ? '+' : ''}${Number(s.edge_pp).toFixed(1)}pp · sharp ${s.sharp_score || 0} · combined ${(s.combined_score*100).toFixed(0)}/100`;
+            html += `<div class="${cardCls}">
+                ${heading}
                 <div class="pick-line">
                     ${market} · ${_esc(sideLabel)}${lineFrag} ${_fmtAmer(s.entry_price)} (${_esc(s.entry_book)})
                     <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>
                 </div>
-                <div class="pick-meta">
-                    edge +${Number(s.edge_pp).toFixed(1)}pp · sharp ${s.sharp_score} · combined ${(s.combined_score*100).toFixed(0)}/100
-                </div>
+                <div class="pick-meta">${meta}</div>
+                ${s.gates_cleared ? '' : `<div class="soft-note">Sharp + edge gates not cleared (need sharp ≥ 4 AND edge ≥ 0.5pp). Skip in chalk-flat markets; this is the best read available.</div>`}
                 <div class="actions">
                     <button class="primary" onclick="openLog()">Log this pick</button>
                     <button onclick="copyForClaude()">Copy for Claude</button>
@@ -571,9 +582,9 @@ DK retail still at -125, +2.4pp edge"></textarea>
             </div>`;
         } else {
             html += `<div class="suggestion-pass">
-                <strong>Bot says: pass.</strong> No market clears the gates (sharp ≥ 4 AND edge ≥ 0.5pp). The data is below — you can still
-                <button onclick="openLog(true)" style="background:none;border:0;color:var(--blue);text-decoration:underline;cursor:pointer;font:inherit;padding:0">log a manual pick</button>
-                or <button onclick="copyForClaude()" style="background:none;border:0;color:var(--blue);text-decoration:underline;cursor:pointer;font:inherit;padding:0">copy for Claude</button>.
+                <strong>No data to score.</strong> PIN missing on every market for this game — can't compute fair lines. Try
+                <button onclick="copyForClaude()" style="background:none;border:0;color:var(--blue);text-decoration:underline;cursor:pointer;font:inherit;padding:0">copying for Claude</button>
+                anyway, or check back closer to kickoff.
             </div>`;
         }
 
