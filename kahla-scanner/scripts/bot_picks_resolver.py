@@ -175,16 +175,25 @@ def _grade(bet: dict, home_score: int, away_score: int) -> str | None:
 
 
 def _pnl_units(status: str, entry_price: int, units: int) -> float:
-    """1/3/5u sizing. Win @ +150 with 3u = +4.50u, win @ -110 with 5u =
-    +4.545u, loss with 3u = -3.0u, push = 0u."""
+    """To-WIN sizing. The user bets to win N units, not to risk N units.
+    So a win is always exactly +units, regardless of price. A loss is
+    whatever it cost to chase that win at the entry line.
+
+    Examples:
+      Win  3u @ +123 → +3.00u  (you wanted 3u, you got 3u)
+      Win  1u @ -105 → +1.00u  (same)
+      Lost 3u @ +123 → -2.44u  (needed to risk 3·100/123 = 2.44u to win 3u)
+      Lost 1u @ -105 → -1.05u  (needed to risk 1·105/100 = 1.05u to win 1u)
+      Push / void    →  0u
+    """
     if status in ("push", "void"):
         return 0.0
-    if status == "lost":
-        return float(-units)
+    if status == "won":
+        return float(units)
     p = int(entry_price)
     if p > 0:
-        return units * (p / 100.0)
-    return units * (100.0 / abs(p))
+        return -units * (100.0 / p)
+    return -units * (abs(p) / 100.0)
 
 
 def _fetch_pending(sb) -> list[dict]:
