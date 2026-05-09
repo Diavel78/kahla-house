@@ -753,37 +753,47 @@
         // limit-order target. Sharp score + splits divergence are the
         // signals; no retail-book "+EV" hunt. `gates_cleared` separates
         // a real pick (sharp ≥ 4) from a forced lean.
-        if (d.suggestion) {
-            const s = d.suggestion;
-            const market = _shortMarket(s.market_type);
-            const sideLabel = s.market_type === 'total'
-                ? s.side.toUpperCase()
-                : (s.side === 'home' ? d.home : d.away);
-            const lineFrag = (s.pin_line == null) ? '' : ` ${_fmtPt(s.pin_line)}`;
-            const cardCls = s.gates_cleared ? 'suggestion-card' : 'suggestion-card soft';
-            const heading = s.gates_cleared
-                ? '<div class="lbl">Bot Suggests — Polymarket Target</div>'
-                : '<div class="lbl soft">Lean — would pass, but if forced</div>';
-            const splitsFrag = (s.splits_pp != null && Math.abs(s.splits_pp) >= 1)
-                ? ` · splits ${s.splits_pp > 0 ? '+' : ''}${s.splits_pp.toFixed(0)}pp`
-                : '';
-            const meta = `sharp ${s.sharp_score || 0}${splitsFrag} · combined ${(s.combined_score*100).toFixed(0)}/100`;
-            const pinNow = (s.pin_current != null) ? ` · PIN now ${_fmtAmer(s.pin_current)}` : '';
-            html += `<div class="${cardCls}">
-                ${heading}
-                <div class="pick-line">
-                    ${market} · ${_esc(sideLabel)}${lineFrag}
-                    <span class="target">@ ${_fmtAmer(s.fair_american)}</span>
-                    <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>
-                </div>
-                <div class="pick-meta">Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow}</div>
-                <div class="pick-meta">${meta}</div>
-                ${s.gates_cleared ? '' : `<div class="soft-note">Sharp gate not cleared (need sharp ≥ 4). Chalk-flat market; this is the best read available — treat as 1u lean only.</div>`}
-                <div class="actions">
-                    <button class="primary" onclick="openLog()">Log this pick</button>
-                    <button onclick="copyForClaude()">Copy for Claude</button>
-                </div>
-            </div>`;
+        // Suggestion cards — multi-pick supported. The bot may now
+        // recommend a play across two non-correlated markets (e.g.
+        // SPR + TOT). ML/SPR are mutually excluded server-side.
+        const suggestions = d.suggestions || (d.suggestion ? [d.suggestion] : []);
+        if (suggestions.length) {
+            const multi = suggestions.length > 1;
+            for (let i = 0; i < suggestions.length; i++) {
+                const s = suggestions[i];
+                const market = _shortMarket(s.market_type);
+                const sideLabel = s.market_type === 'total'
+                    ? s.side.toUpperCase()
+                    : (s.side === 'home' ? d.home : d.away);
+                const lineFrag = (s.pin_line == null) ? '' : ` ${_fmtPt(s.pin_line)}`;
+                const cardCls = s.gates_cleared ? 'suggestion-card' : 'suggestion-card soft';
+                const headingText = s.gates_cleared
+                    ? (multi
+                        ? `Bot Suggests — Pick ${i + 1} of ${suggestions.length}`
+                        : 'Bot Suggests — Polymarket Target')
+                    : 'Lean — would pass, but if forced';
+                const headingCls = s.gates_cleared ? 'lbl' : 'lbl soft';
+                const splitsFrag = (s.splits_pp != null && Math.abs(s.splits_pp) >= 1)
+                    ? ` · splits ${s.splits_pp > 0 ? '+' : ''}${s.splits_pp.toFixed(0)}pp`
+                    : '';
+                const meta = `sharp ${s.sharp_score || 0}${splitsFrag} · combined ${(s.combined_score*100).toFixed(0)}/100`;
+                const pinNow = (s.pin_current != null) ? ` · PIN now ${_fmtAmer(s.pin_current)}` : '';
+                html += `<div class="${cardCls}">
+                    <div class="${headingCls}">${_esc(headingText)}</div>
+                    <div class="pick-line">
+                        ${market} · ${_esc(sideLabel)}${lineFrag}
+                        <span class="target">@ ${_fmtAmer(s.fair_american)}</span>
+                        <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>
+                    </div>
+                    <div class="pick-meta">Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow}</div>
+                    <div class="pick-meta">${meta}</div>
+                    ${s.gates_cleared ? '' : `<div class="soft-note">Sharp gate not cleared (need sharp ≥ 4). Chalk-flat market; this is the best read available — treat as 1u lean only.</div>`}
+                    <div class="actions">
+                        <button class="primary" onclick="openLog(false, ${i})">Log this pick</button>
+                        <button onclick="copyForClaude()">Copy for Claude</button>
+                    </div>
+                </div>`;
+            }
         } else {
             html += `<div class="suggestion-pass">
                 <strong>No PIN data.</strong> Can't compute a devigged fair line for this game — no Polymarket target. Try
@@ -952,9 +962,15 @@
     }
 
     // ─── Log-pick modal ───
-    function openLog(manual) {
+    function openLog(manual, pickIdx) {
         if (!_lastDossier) return;
-        const s = _lastDossier.suggestion;
+        // Multi-pick aware: pickIdx selects which suggestion to seed.
+        // Defaults to the top pick (index 0). Falls back to legacy
+        // singular `suggestion` field if `suggestions` array is absent.
+        const list = _lastDossier.suggestions
+            || (_lastDossier.suggestion ? [_lastDossier.suggestion] : []);
+        const idx = (typeof pickIdx === 'number') ? pickIdx : 0;
+        const s = list[idx] || null;
         if (manual && !s) {
             const ml = _lastDossier.odds.moneyline || {};
             const fallback = ml.pin_current && (ml.pin_current.home || ml.pin_current.away);

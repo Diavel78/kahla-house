@@ -452,6 +452,8 @@ Different from Sharp Bot. Sharp Bot is fully automated (cron picks from rule-bas
 
 **Markets**: ML, spread, total only. **No props.**
 
+**Multi-pick per game.** The dossier's `suggestions` field is a list. The bot may recommend up to 2 picks per game: one of {ML, SPR} plus an optional TOT. ML and SPR are mutually excluded — they're correlated bets, so the higher-scoring of the two wins and the other is dropped server-side. The legacy `suggestion` field is kept as an alias for `suggestions[0]` (the top pick) for backward-compat.
+
 **Routing for in-chat flow**: When the user asks a betting-flavored question about a specific game, invoke the `/handicap` skill (`.claude/skills/handicap.md`).
 
 **Pipeline (in-chat flow)**:
