@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -69,6 +70,18 @@ BOOK_CODES = {
     "mybookieag":    "MB",
 }
 LIVE_MATCH_WINDOW_MIN = 30
+
+# Per-sport event-list cache for the live Odds API fetch. When a user
+# rapid-clicks several games in the same sport within seconds, we don't
+# need to re-hit the API for each click — the events list barely
+# changes minute-to-minute. Cache the full /odds response per sport for
+# 60s and reuse it on subsequent clicks. Each cache hit saves 6 credits.
+#
+# Module-level dict: survives across requests on the same warm Vercel
+# container. Cold starts reset it (fine — pays one extra API call once,
+# then the cache builds back up).
+_LIVE_EVENTS_CACHE: dict[str, tuple[float, list]] = {}
+_LIVE_CACHE_TTL_SEC = 60
 
 _ESPN_PATH: dict[str, tuple[str, str]] = {
     "MLB":   ("baseball",   "mlb"),
@@ -397,24 +410,34 @@ def _fetch_live_event(sport: str, event_start_iso: str,
         bet_dt = datetime.fromisoformat(event_start_iso.replace("Z", "+00:00"))
     except Exception as e:
         return None, f"bad event_start: {e}"
-    url = f"{ODDS_API_BASE}/sports/{sport_key}/odds"
-    params = {
-        "api_key":    api_key,
-        "regions":    "us,eu",
-        "markets":    "h2h,spreads,totals",
-        "oddsFormat": "american",
-        "dateFormat": "iso",
-    }
-    try:
-        r = requests.get(url, params=params, timeout=12)
-    except Exception as e:
-        return None, f"http exception: {str(e)[:120]}"
-    if r.status_code != 200:
-        return None, f"http {r.status_code}: {r.text[:120]}"
-    try:
-        events = r.json() or []
-    except Exception as e:
-        return None, f"bad json: {e}"
+    # Cache hit? Reuse the events list, skip the API call. Saves 6
+    # credits per click within the TTL window. The user's flow of
+    # rapid-clicking several games in the same sport benefits the most.
+    cached = _LIVE_EVENTS_CACHE.get(sport)
+    cache_age: float | None = None
+    if cached and (time.time() - cached[0]) < _LIVE_CACHE_TTL_SEC:
+        events = cached[1]
+        cache_age = time.time() - cached[0]
+    else:
+        url = f"{ODDS_API_BASE}/sports/{sport_key}/odds"
+        params = {
+            "api_key":    api_key,
+            "regions":    "us,eu",
+            "markets":    "h2h,spreads,totals",
+            "oddsFormat": "american",
+            "dateFormat": "iso",
+        }
+        try:
+            r = requests.get(url, params=params, timeout=12)
+        except Exception as e:
+            return None, f"http exception: {str(e)[:120]}"
+        if r.status_code != 200:
+            return None, f"http {r.status_code}: {r.text[:120]}"
+        try:
+            events = r.json() or []
+        except Exception as e:
+            return None, f"bad json: {e}"
+        _LIVE_EVENTS_CACHE[sport] = (time.time(), events)
 
     away_n, home_n = (away or "").lower(), (home or "").lower()
     # UFC: cards span ~5-6h with each fight having its own commence_time
@@ -454,7 +477,17 @@ def _fetch_live_event(sport: str, event_start_iso: str,
         if abs((ev_dt - bet_dt).total_seconds()) > window.total_seconds():
             continue
         return ev, None
-    return None, f"no live event matched {away} @ {home} in {len(events)} returned"
+    # No match — surface sample events from the response so we can
+    # diagnose without re-hitting the API. Most failures are name
+    # mismatches (Odds API returns slight variants) or commence_time
+    # drift past our window.
+    if not events:
+        return None, f"odds API returned 0 events for {sport}"
+    samples = ", ".join(
+        f"{(e.get('away_team') or '?')}@{(e.get('home_team') or '?')}"
+        for e in events[:3]
+    )
+    return None, f"no match in {len(events)} events. samples: {samples}"
 
 
 def _live_event_to_latest(ev: dict) -> dict:
