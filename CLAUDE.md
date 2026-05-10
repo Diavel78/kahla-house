@@ -469,7 +469,11 @@ Different from Sharp Bot. Sharp Bot is fully automated (cron picks from rule-bas
 
 **Markets**: ML, spread, total only. **No props.**
 
-**Multi-pick per game.** The dossier's `suggestions` field is a list. The bot may recommend up to 2 picks per game: one of {ML, SPR} plus an optional TOT. ML and SPR are mutually excluded — they're correlated bets on the same direction. Server-side exclusion picks the side with the **stronger sharp signal** (higher `sharp_score`); tie → prefer ML (cleaner bet, lower variance, more interpretable than the leveraged spread). Earlier versions picked the better-priced expression (bigger fair_american), but that's variance reasoning, not edge reasoning — at fair price both bets are zero-EV, so the higher-sharp version is the more reliable expression. The legacy `suggestion` field is kept as an alias for `suggestions[0]` for backward-compat.
+**Multi-pick per game.** The dossier's `suggestions` field is a list. The bot may recommend up to 2 picks per game: one of {ML, SPR} plus an optional TOT. ML and SPR are mutually excluded — they're correlated bets on the same direction. Exclusion order:
+1. **ML chalk filter** (`ML_CHALK_FAIR_CAP = -140`): when both ML and SPR exist for the same game and ML fair ≤ -140, drop ML — the leveraged SPR is the cleaner expression at chalky prices. ML alone (no SPR alternative) still stands so the user gets *some* pick on chalky-only games.
+2. **Sharp comparison**: otherwise, pick the side with the stronger `sharp_score`; tie → prefer ML (lower variance, cleaner bet than its leveraged spread).
+
+Earlier versions picked the better-priced expression (bigger fair_american) outright, but that's variance reasoning, not edge reasoning — at fair price both bets are zero-EV. The legacy `suggestion` field is kept as an alias for `suggestions[0]` for backward-compat.
 
 **Heavy-chalk SPR alone is filtered.** When SPR is the only ML/SPR candidate and `fair_american <= -150` (`SPR_CHALK_FAIR_CAP`), the SPR candidate is dropped before pick selection — a leveraged chalk bet with no better expression to switch to is just a lame bet. ML at heavy chalk is NOT filtered (no correlated alternative; the heavy ML IS the cleanest expression of that bet).
 

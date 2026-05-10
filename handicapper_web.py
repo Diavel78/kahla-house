@@ -1241,6 +1241,13 @@ SPLITS_WEIGHT    = 0.3
 # there has no better expression to switch to.
 SPR_CHALK_FAIR_CAP = -150
 
+# When BOTH an ML and a SPR candidate exist on the same side, drop
+# the ML if its fair is at or below this cap. The leveraged SPR is
+# the cleaner expression of a chalky directional bet at this price.
+# ML alone (no SPR alternative) still stands — see the ML/SPR
+# exclusion block in `_suggest_picks`.
+ML_CHALK_FAIR_CAP = -140
+
 
 def _splits_signal_pp(splits: dict | None, sharp_side: str | None,
                       market_type: str) -> float:
@@ -1373,25 +1380,29 @@ def _suggest_picks(odds: dict, splits: dict | None = None) -> list[dict]:
             chosen.append(c)
 
     # ML / SPR exclusion — never both. They're correlated bets on the
-    # same direction. Pick whichever has the **stronger sharp signal**;
-    # tie → prefer ML (cleaner bet, lower variance, more interpretable).
-    # The previous rule preferred the bigger payout (less-negative
-    # American), but that's variance reasoning, not edge reasoning —
-    # at fair price both bets are zero-EV, so the higher-sharp version
-    # is the more reliable expression. The chalk-SPR filter
-    # (`SPR_CHALK_FAIR_CAP`) still drops a heavily-juiced SPR before
-    # this step regardless.
+    # same direction.
+    #   1. If ML fair is chalky (≤ -140) AND a SPR alternative exists,
+    #      drop the chalky ML — the SPR is the cleaner expression.
+    #      Heavy chalk ML alone (no SPR) stays, since dropping it would
+    #      leave no ML/SPR pick at all on a game where the user might
+    #      still want one.
+    #   2. Otherwise, pick whichever has the stronger sharp signal;
+    #      tie → prefer ML (lower variance, cleaner bet than its
+    #      leveraged spread).
+    # The chalk-SPR filter (`SPR_CHALK_FAIR_CAP`) still drops a
+    # heavily-juiced SPR earlier; if both are chalky, ML survives.
     has_ml  = any(c["market_type"] == "moneyline" for c in chosen)
     has_spr = any(c["market_type"] == "spread"    for c in chosen)
     if has_ml and has_spr:
         ml  = next(c for c in chosen if c["market_type"] == "moneyline")
         spr = next(c for c in chosen if c["market_type"] == "spread")
-        ml_sharp  = ml.get("sharp_score")  or 0
-        spr_sharp = spr.get("sharp_score") or 0
-        if ml_sharp >= spr_sharp:
-            drop = spr
-        else:
+        ml_fair = ml.get("fair_american")
+        if ml_fair is not None and ml_fair <= ML_CHALK_FAIR_CAP:
             drop = ml
+        else:
+            ml_sharp  = ml.get("sharp_score")  or 0
+            spr_sharp = spr.get("sharp_score") or 0
+            drop = spr if ml_sharp >= spr_sharp else ml
         chosen = [c for c in chosen if c is not drop]
 
     # Stable order: ML/SPR first, then TOT.
