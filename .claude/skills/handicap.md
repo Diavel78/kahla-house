@@ -41,16 +41,26 @@ market for the same game (e.g. SPR + TOT). Log each as a separate
 
 **ML/SPR mutual exclusion — never both.** ML and spread on the same
 side are correlated (same directional bet, just leveraged). If you'd
-suggest one, do NOT also suggest the other. Pick the one with the
-better risk/reward read and let it stand alone. Total is independent
-and can pair with either.
+suggest one, do NOT also suggest the other. **Pick the better-priced
+expression**: less-negative American odds = bigger payout = the right
+version to take. Total is independent and can pair with either.
 
-**Heavy-chalk SPR is a no.** When the spread side you'd recommend is
-priced -150 or worse on Polymarket / PIN devig fair, do NOT recommend
-SPR — recommend the ML instead. Laying -167 to take +1.5 cushion
-gives you almost no real edge over the ML; you've doubled the price
-to win the same money. If the ML is the better expression, just
-suggest ML.
+Examples:
+* ML at +102, SPR at -167 → take ML. SPR is laying juice for a tiny
+  cushion you almost never need.
+* ML at -179, SPR at +120 → take **SPR -1.5**. The cushion is cheap;
+  same directional read at +120 vs -179 is a huge payout upgrade.
+* ML at -150, SPR at -130 → take SPR. Less chalky, similar risk.
+
+The leveraged version is always worse EV than the better-priced
+sibling. Pick the one with the higher (less negative) American odds.
+
+**Heavy-chalk SPR alone is still a no.** When the spread side is
+priced -150 or worse on Polymarket / PIN devig fair AND the ML
+candidate didn't qualify, do NOT recommend SPR. That's a leveraged
+chalk bet with no better expression available — pass on the SPR
+entirely. The chalk filter applies to SPR only; heavy-chalk ML can
+still be recommended (no SPR alternative to switch to in that case).
 
 ## Workflow
 
