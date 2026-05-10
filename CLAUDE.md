@@ -469,11 +469,11 @@ Different from Sharp Bot. Sharp Bot is fully automated (cron picks from rule-bas
 
 **Markets**: ML, spread, total only. **No props.**
 
-**Multi-pick per game.** The dossier's `suggestions` field is a list. The bot may recommend up to 2 picks per game: one of {ML, SPR} plus an optional TOT. ML and SPR are mutually excluded — they're correlated bets on the same direction. Exclusion order:
-1. **ML chalk filter** (`ML_CHALK_FAIR_CAP = -140`): when both ML and SPR exist for the same game and ML fair ≤ -140, drop ML — the leveraged SPR is the cleaner expression at chalky prices. ML alone (no SPR alternative) still stands so the user gets *some* pick on chalky-only games.
-2. **Sharp comparison**: otherwise, pick the side with the stronger `sharp_score`; tie → prefer ML (lower variance, cleaner bet than its leveraged spread).
+**Multi-pick per game.** The dossier's `suggestions` field is a list. The bot may recommend up to 2 picks per game: one of {ML, SPR} plus an optional TOT. ML and SPR are mutually excluded — they're correlated bets on the same direction, so the bot picks exactly one. The choice is a **symmetric chalk filter** on the ML fair price:
+- **ML fair ≤ -140 (chalky)** → drop ML, keep SPR. The leveraged spread is the cleaner expression of a chalky directional bet at +EV prices.
+- **ML fair > -140 (lighter)** → drop SPR, keep ML. SPR's variance isn't worth it when ML is reasonable; just bet the cleaner side.
 
-Earlier versions picked the better-priced expression (bigger fair_american) outright, but that's variance reasoning, not edge reasoning — at fair price both bets are zero-EV. The legacy `suggestion` field is kept as an alias for `suggestions[0]` for backward-compat.
+The decision runs on `by_market` BEFORE the gate-clearing step, so SPR can't sneak into the picks just because its `sharp_score` outranks an unsignaled ML on a near-pickem game. Sharp signal still gates whether a pick is "real" (≥4) vs a forced 1u lean — it just doesn't decide which of ML/SPR you bet. Earlier versions picked the better-priced expression (bigger fair_american) outright, then pivoted to higher-sharp_score — both are variance reasoning, not edge reasoning. The legacy `suggestion` field is kept as an alias for `suggestions[0]` for backward-compat.
 
 **Heavy-chalk SPR alone is filtered.** When SPR is the only ML/SPR candidate and `fair_american <= -150` (`SPR_CHALK_FAIR_CAP`), the SPR candidate is dropped before pick selection — a leveraged chalk bet with no better expression to switch to is just a lame bet. ML at heavy chalk is NOT filtered (no correlated alternative; the heavy ML IS the cleanest expression of that bet).
 
