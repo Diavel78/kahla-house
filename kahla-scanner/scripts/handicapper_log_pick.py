@@ -104,12 +104,17 @@ def auto_reasons(blob: dict, market_type: str, side: str,
                 lines.append("PIN hasn't budged — flat market, no line signal")
         else:
             line_changed = (oL is not None and cL is not None and abs(cL - oL) >= 0.01)
+            # Tag displayed prices with ref_side on TOT — ref_side may
+            # be the OPPOSITE of sharp_side when the vig moved on the
+            # side that got easier (= other side sharp by elimination).
+            ref_side = (mv.get("ref_side") or "") if isinstance(mv, dict) else ""
+            ref_tag = f" [{ref_side}]" if (ref_side and market_type == "total") else ""
             if line_changed:
                 label = "Spread" if market_type == "spread" else "Total"
                 lines.append(f"{label} moved {_fmt_pt(oL)} → {_fmt_pt(cL)}{sharp_frag}")
             elif oP is not None and cP is not None and oP != cP:
                 line_at = f" at {_fmt_pt(cL)}" if cL is not None else ""
-                lines.append(f"Vig moved {_fmt_amer(oP)} → {_fmt_amer(cP)}{line_at}{sharp_frag}")
+                lines.append(f"PIN{ref_tag}: {_fmt_amer(oP)} → {_fmt_amer(cP)}{line_at}{sharp_frag}")
             elif score == 0:
                 lines.append("PIN line and vig flat — no movement signal")
 
