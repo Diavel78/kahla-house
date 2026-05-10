@@ -3543,6 +3543,41 @@ def api_handicapper_games():
     })
 
 
+@app.route("/api/handicapper/sport-counts")
+@bot_required
+def api_handicapper_sport_counts():
+    """One-shot count of upcoming games per sport. Powers the
+    /handicapper page's dynamic sport-tab ordering — sports with the
+    most games go left, off-season sports drop to the right. Same
+    pre-game window as /api/handicapper/games (last 90 min through
+    next 48h).
+
+    Returns: {ok: True, counts: {MLB: 15, NBA: 0, ...}}
+    """
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+    now = datetime.now(timezone.utc)
+    after  = (now - timedelta(minutes=90)).isoformat()
+    before = (now + timedelta(hours=48)).isoformat()
+    try:
+        rows = (sb.table("markets")
+                .select("sport")
+                .eq("status", "active")
+                .gte("event_start", after)
+                .lte("event_start", before)
+                .limit(2000).execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
+    counts: dict[str, int] = {}
+    for r in rows:
+        s = (r.get("sport") or "").upper()
+        if not s:
+            continue
+        counts[s] = counts.get(s, 0) + 1
+    return jsonify({"ok": True, "counts": counts, "now_iso": now.isoformat()})
+
+
 @app.route("/api/handicapper/pick", methods=["POST"])
 @bot_required
 def api_handicapper_pick():
