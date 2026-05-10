@@ -228,70 +228,108 @@ def _update(sb, pick_id: int, status: str, pnl: float,
         return False
 
 
+def _write_heartbeat(sb, summary: dict) -> None:
+    """Write one row to resolver_runs so the page can surface 'last
+    grading run Nm ago' + the breakdown. Best-effort — if the heartbeat
+    write itself fails we just log and move on (don't crash the resolver
+    over its own diagnostic)."""
+    try:
+        sb.table("resolver_runs").insert({"kind": "bot_picks", **summary}).execute()
+    except Exception as e:
+        log.warning("heartbeat write failed: %s", e)
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
-    sb = db.client()
-    bets = _fetch_pending(sb)
-    if not bets:
-        log.info("no pending bot_picks to resolve")
+    started = datetime.now(timezone.utc)
+    summary: dict[str, Any] = {
+        "picks_seen": 0, "won": 0, "lost": 0, "push": 0,
+        "unmatched": 0, "not_final": 0, "unsupported": 0,
+        "took_ms": None, "error": None,
+    }
+    sb = None
+    try:
+        sb = db.client()
+        bets = _fetch_pending(sb)
+        summary["picks_seen"] = len(bets)
+        if not bets:
+            log.info("no pending bot_picks to resolve")
+            summary["took_ms"] = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+            _write_heartbeat(sb, summary)
+            return 0
+        log.info("pending bot_picks: %d", len(bets))
+
+        espn_cache: dict[tuple[str, str], list] = {}
+        won = lost = push = unmatched = not_final = unsupported = 0
+
+        for bet in bets:
+            sport = bet.get("sport") or ""
+            if sport not in _ESPN_PATH:
+                unsupported += 1
+                continue
+            date_key = _espn_date_key(bet.get("event_start") or "")
+            if not date_key:
+                unmatched += 1
+                continue
+            cache_key = (sport, date_key)
+            if cache_key not in espn_cache:
+                espn_cache[cache_key] = _fetch_espn(sport, date_key)
+            events = espn_cache[cache_key]
+
+            m = _match_espn(bet, events)
+            if not m:
+                unmatched += 1
+                continue
+            if m["state"] != "post":
+                not_final += 1
+                continue
+            if m["home_score"] is None or m["away_score"] is None:
+                unmatched += 1
+                continue
+
+            status = _grade(bet, m["home_score"], m["away_score"])
+            if status is None:
+                unmatched += 1
+                continue
+            units = bet.get("units") or 1
+            pnl = _pnl_units(status, bet["entry_price"], units)
+            result = {
+                "home":  m["home_score"],
+                "away":  m["away_score"],
+                "total": m["home_score"] + m["away_score"],
+            }
+            if not _update(sb, bet["id"], status, pnl, result):
+                continue
+
+            if status == "won":  won  += 1
+            elif status == "lost": lost += 1
+            else:                  push += 1
+            log.info("RESOLVED bot_pick %s %s/%s @ %du -> %s pnl=%+.3fu (%d-%d)",
+                     bet["event_name"], bet["market_type"], bet["side"],
+                     units, status.upper(), pnl,
+                     m["away_score"], m["home_score"])
+
+        summary.update(won=won, lost=lost, push=push, unmatched=unmatched,
+                       not_final=not_final, unsupported=unsupported)
+        log.info("bot_picks resolver done: won=%d lost=%d push=%d unmatched=%d "
+                 "not_final=%d unsupported=%d",
+                 won, lost, push, unmatched, not_final, unsupported)
+        summary["took_ms"] = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+        _write_heartbeat(sb, summary)
         return 0
-    log.info("pending bot_picks: %d", len(bets))
-
-    espn_cache: dict[tuple[str, str], list] = {}
-    won = lost = push = unmatched = not_final = unsupported = 0
-
-    for bet in bets:
-        sport = bet.get("sport") or ""
-        if sport not in _ESPN_PATH:
-            unsupported += 1
-            continue
-        date_key = _espn_date_key(bet.get("event_start") or "")
-        if not date_key:
-            unmatched += 1
-            continue
-        cache_key = (sport, date_key)
-        if cache_key not in espn_cache:
-            espn_cache[cache_key] = _fetch_espn(sport, date_key)
-        events = espn_cache[cache_key]
-
-        m = _match_espn(bet, events)
-        if not m:
-            unmatched += 1
-            continue
-        if m["state"] != "post":
-            not_final += 1
-            continue
-        if m["home_score"] is None or m["away_score"] is None:
-            unmatched += 1
-            continue
-
-        status = _grade(bet, m["home_score"], m["away_score"])
-        if status is None:
-            unmatched += 1
-            continue
-        units = bet.get("units") or 1
-        pnl = _pnl_units(status, bet["entry_price"], units)
-        result = {
-            "home":  m["home_score"],
-            "away":  m["away_score"],
-            "total": m["home_score"] + m["away_score"],
-        }
-        if not _update(sb, bet["id"], status, pnl, result):
-            continue
-
-        if status == "won":  won  += 1
-        elif status == "lost": lost += 1
-        else:                  push += 1
-        log.info("RESOLVED bot_pick %s %s/%s @ %du -> %s pnl=%+.3fu (%d-%d)",
-                 bet["event_name"], bet["market_type"], bet["side"],
-                 units, status.upper(), pnl,
-                 m["away_score"], m["home_score"])
-
-    log.info("bot_picks resolver done: won=%d lost=%d push=%d unmatched=%d "
-             "not_final=%d unsupported=%d",
-             won, lost, push, unmatched, not_final, unsupported)
-    return 0
+    except Exception as e:
+        # Capture full traceback in the heartbeat so we can debug from
+        # the page (and avoid relying on `continue-on-error: true`
+        # silently swallowing crashes).
+        import traceback
+        tb = traceback.format_exc()
+        summary["error"] = (f"{type(e).__name__}: {e}\n{tb}")[:4000]
+        summary["took_ms"] = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+        log.error("bot_picks resolver CRASHED: %s", summary["error"])
+        if sb is not None:
+            _write_heartbeat(sb, summary)
+        return 1
 
 
 if __name__ == "__main__":

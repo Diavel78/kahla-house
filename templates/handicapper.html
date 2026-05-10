@@ -1173,9 +1173,30 @@
                 : `<li class="empty">No settled picks yet.</li>`;
 
             const sign = data.stats.units > 0 ? '+' : '';
-            document.getElementById('meta').textContent =
+            // Resolver heartbeat — shows last grading run age so we can
+            // see if the cron's still alive. Red if stale (>90 min) or
+            // crashed (error field non-null).
+            const r = data.resolver;
+            let graded = '';
+            if (r && r.run_at) {
+                const ageMin = Math.round((Date.now() - new Date(r.run_at)) / 60_000);
+                const stale = ageMin > 90;
+                const errored = !!r.error;
+                const ageLabel = ageMin < 60 ? `${ageMin}m` : `${Math.floor(ageMin/60)}h ${ageMin%60}m`;
+                let txt;
+                if (errored)        txt = `grading CRASHED ${ageLabel} ago`;
+                else if (stale)     txt = `grading STALE — ${ageLabel} ago`;
+                else if (r.picks_seen === 0) txt = `grading ${ageLabel} ago · 0 pending`;
+                else txt = `graded ${ageLabel} ago · ${r.won||0}W/${r.lost||0}L`
+                         + (r.not_final ? ` · ${r.not_final} not-final` : '');
+                graded = ` · <span style="color:${(stale||errored)?'var(--red)':'var(--text-secondary)'};font-size:11px">${_esc(txt)}</span>`;
+            } else {
+                graded = ` · <span style="color:var(--red);font-size:11px">no resolver runs yet</span>`;
+            }
+            document.getElementById('meta').innerHTML =
                 `${data.window_days}d · ${sign}${(data.stats.units||0).toFixed(2)}u total · `
-                + `updated ${new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}`;
+                + `updated ${new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}`
+                + graded;
             status.textContent = 'Live';
         } catch (e) {
             status.textContent = 'Error';

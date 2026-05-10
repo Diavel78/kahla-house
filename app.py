@@ -3390,6 +3390,22 @@ def api_handicapper():
     for s in by_conf.values():
         _finalize(s)
 
+    # Resolver heartbeat — last bot_picks_resolver run from the
+    # resolver_runs table. Lets the page show "graded run Nm ago" so
+    # the user can see at a glance whether grading is alive.
+    resolver: dict | None = None
+    try:
+        rows = (sb.table("resolver_runs")
+                .select("run_at,picks_seen,won,lost,push,unmatched,"
+                        "not_final,took_ms,error")
+                .eq("kind", "bot_picks")
+                .order("run_at", desc=True)
+                .limit(1).execute().data) or []
+        if rows:
+            resolver = rows[0]
+    except Exception:
+        resolver = None
+
     return jsonify({
         "ok":           True,
         "now_iso":      now.isoformat(),
@@ -3398,6 +3414,7 @@ def api_handicapper():
         "settled":      settled,
         "stats":        overall,
         "stats_by_confidence": by_conf,
+        "resolver":     resolver,
     })
 
 
