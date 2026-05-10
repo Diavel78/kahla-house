@@ -447,27 +447,43 @@ def _fetch_live_event(sport: str, event_start_iso: str,
     window_min = 360 if sport == "UFC" else LIVE_MATCH_WINDOW_MIN
     window = timedelta(minutes=window_min)
 
+    def _norm(s: str) -> str:
+        # Lowercase + collapse non-alphanumeric to spaces. Catches the
+        # `Cortes-Acosta` vs `cortes acosta` style differences and
+        # handles diacritics that lowercase to ASCII variants.
+        return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+
     def _name_match(ev_name: str, our_name: str) -> bool:
-        # Substring containment in either direction handles the common
-        # case (full name match). UFC fallback: any token of length ≥ 3
-        # in our name appears in the API name. Catches diacritics,
-        # nickname differences, partial spellings (B. Susurkaev vs
-        # Baysangur Susurkaev, etc.).
-        if not (ev_name and our_name):
+        ev_n, our_nn = _norm(ev_name), _norm(our_name)
+        if not (ev_n and our_nn):
             return False
-        if our_name in ev_name or ev_name in our_name:
+        if our_nn in ev_n or ev_n in our_nn:
             return True
         if sport == "UFC":
-            tokens = [t for t in re.split(r"\s+", our_name) if len(t) >= 3]
-            return any(t in ev_name for t in tokens)
+            # Token fallback for UFC quirks (B. Susurkaev vs Baysangur
+            # Susurkaev, hyphenated last names, etc.). Any 3+ char token
+            # in our name appearing in the API name is enough.
+            tokens = [t for t in our_nn.split() if len(t) >= 3]
+            return any(t in ev_n for t in tokens)
         return False
+
+    def _pair_match(ev_home: str, ev_away: str) -> tuple[bool, bool]:
+        """Return (matched, swapped). swapped=True means the API's
+        home_team is OUR away team (UFC home/away is arbitrary)."""
+        if _name_match(ev_home, home_n) and _name_match(ev_away, away_n):
+            return True, False
+        if sport == "UFC":
+            if _name_match(ev_home, away_n) and _name_match(ev_away, home_n):
+                return True, True
+        return False, False
 
     for ev in events:
         ev_home = (ev.get("home_team") or "").lower()
         ev_away = (ev.get("away_team") or "").lower()
         if not ev_home or not ev_away:
             continue
-        if not (_name_match(ev_home, home_n) and _name_match(ev_away, away_n)):
+        matched, swapped = _pair_match(ev_home, ev_away)
+        if not matched:
             continue
         try:
             ev_dt = datetime.fromisoformat(
@@ -476,6 +492,15 @@ def _fetch_live_event(sport: str, event_start_iso: str,
             continue
         if abs((ev_dt - bet_dt).total_seconds()) > window.total_seconds():
             continue
+        if swapped:
+            # Flip home/away on a shallow copy so _live_event_to_latest
+            # routes outcomes by the right side. Outcome names match by
+            # team name (not the "home"/"away" label), so flipping the
+            # event-level fields is enough — the name mapping in
+            # _live_event_to_latest resolves correctly.
+            ev = {**ev,
+                  "home_team": ev.get("away_team"),
+                  "away_team": ev.get("home_team")}
         return ev, None
     # No match — surface sample events from the response so we can
     # diagnose without re-hitting the API. Most failures are name
