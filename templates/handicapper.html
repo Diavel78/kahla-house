@@ -178,6 +178,9 @@
         .game-row:hover { border-color: var(--border-light); }
         .game-row .matchup { font-size: 14px; font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
         .game-row .when { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); margin-right: 6px; white-space: nowrap; }
+        .game-row .when.tier-soon     { color: var(--gold); }
+        .game-row .when.tier-close    { color: var(--green); }
+        .game-row .when.tier-imminent { color: var(--red); font-weight: 700; }
         .game-row .pick-btn { padding: 6px 12px; background: var(--blue); color: #fff; border: 0; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; }
         .game-row .pick-btn:hover { background: #5b8aff; }
         .game-row .pick-btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -520,6 +523,19 @@
         }
         return d.toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
     }
+    function _kickoffTier(iso) {
+        // Color tier for the games-list timer:
+        //   < 15m  → red+bold (imminent)
+        //   15-60m → green    (close)
+        //   1-2h   → yellow   (soon)
+        //   ≥ 2h   → grey     (far, default — no class)
+        const diffMin = Math.round((new Date(iso) - new Date()) / 60_000);
+        if (diffMin < 0)   return '';
+        if (diffMin < 15)  return 'tier-imminent';
+        if (diffMin < 60)  return 'tier-close';
+        if (diffMin < 120) return 'tier-soon';
+        return '';
+    }
     function _fmtSettled(iso) {
         const d = new Date(iso);
         const diffH = (Date.now() - d) / 3_600_000;
@@ -716,7 +732,7 @@
             list.innerHTML = games.map(g => {
                 const matchup = g.away && g.home ? `${_esc(g.away)} @ ${_esc(g.home)}` : _esc(g.event_name);
                 return `<li class="game-row">
-                    <span class="when">${_fmtKickoff(g.event_start)}</span>
+                    <span class="when ${_kickoffTier(g.event_start)}">${_fmtKickoff(g.event_start)}</span>
                     <span class="matchup">${matchup}</span>
                     <button class="pick-btn" onclick="pickGame('${g.market_id}')">Pick</button>
                 </li>`;
