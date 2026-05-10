@@ -1330,14 +1330,23 @@ def _suggest_picks(odds: dict, splits: dict | None = None) -> list[dict]:
         if c["gates_cleared"]:
             chosen.append(c)
 
-    # ML / SPR exclusion — never both. If both made it in, drop the
-    # lower-scoring one.
+    # ML / SPR exclusion — never both. They're correlated bets on the
+    # same direction; pick the BETTER-PRICED expression and drop the
+    # other. Less-negative American = bigger payout = the right
+    # version of this bet to take. This handles both:
+    #   • Heavy-chalk SPR (e.g. Giants +1.5 @ -167 vs ML +102) → ML wins
+    #   • Heavy-chalk ML  (e.g. Dodgers -179 ML vs SPR -1.5 +120) → SPR wins
+    # Falls back to combined_score when prices are missing.
     has_ml  = any(c["market_type"] == "moneyline" for c in chosen)
     has_spr = any(c["market_type"] == "spread"    for c in chosen)
     if has_ml and has_spr:
         ml  = next(c for c in chosen if c["market_type"] == "moneyline")
         spr = next(c for c in chosen if c["market_type"] == "spread")
-        drop = spr if ml["combined_score"] >= spr["combined_score"] else ml
+        ml_fair, spr_fair = ml.get("fair_american"), spr.get("fair_american")
+        if ml_fair is None or spr_fair is None:
+            drop = spr if ml["combined_score"] >= spr["combined_score"] else ml
+        else:
+            drop = ml if spr_fair > ml_fair else spr
         chosen = [c for c in chosen if c is not drop]
 
     # Stable order: ML/SPR first, then TOT.
