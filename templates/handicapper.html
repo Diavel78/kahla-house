@@ -1011,6 +1011,15 @@
                     const topKeys = (name === 'action' && fd.top_keys && fd.top_keys.length)
                         ? `<div style="margin-top:4px;padding-left:8px;color:var(--text-muted);font-size:10px">response keys: ${_esc(fd.top_keys.join(', '))}${fd.status != null ? ` · status ${fd.status}` : ''}</div>`
                         : '';
+                    // Action: when games were returned but our walker found
+                    // no splits, dump every percent-shaped path from the
+                    // first game so we know Action's current schema.
+                    const pctPaths = (name === 'action' && fd.percent_paths_first_game && fd.percent_paths_first_game.length)
+                        ? `<div style="margin-top:4px;padding-left:8px;color:var(--green);font-size:10px;word-break:break-all">percent paths in 1st game: ${_esc(fd.percent_paths_first_game.join(' · '))}</div>`
+                        : '';
+                    const noPctPaths = (name === 'action' && fd.percent_paths_first_game && fd.percent_paths_first_game.length === 0 && fd.game_count > 0)
+                        ? `<div style="margin-top:4px;padding-left:8px;color:var(--red);font-size:10px">no percent-shaped keys ANYWHERE in 1st game — splits likely on a separate endpoint now</div>`
+                        : '';
                     // HTML scrapers: list URL attempts so we can see which
                     // candidate path returned 200 vs 404.
                     const urlsTried = (fd.urls_tried && fd.urls_tried.length)
@@ -1023,6 +1032,8 @@
                         ${samples ? `<div style="color:var(--text-muted);font-size:10px;margin-top:2px">sample: ${_esc(samples)}</div>` : ''}
                         ${noSplits}
                         ${topKeys}
+                        ${pctPaths}
+                        ${noPctPaths}
                         ${urlsTried}
                     </div>`;
                 }).join('');

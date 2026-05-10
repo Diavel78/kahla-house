@@ -849,14 +849,25 @@ def _fetch_action_for_sport(sport: str) -> dict:
             games_no_splits.append(f"{a_name} @ {h_name}")
             if not sample_top_keys and isinstance(g, dict):
                 sample_top_keys = sorted(list(g.keys()))[:25]
+    # If our walker found nothing in any game, dump all percent-shaped
+    # paths from the first game so we can see Action's current schema
+    # and update _walk_splits' regex/key-name matching.
+    percent_paths_first_game: list[str] = []
+    if not events and games:
+        try:
+            percent_paths_first_game = _collect_percent_keys(games[0])[:30]
+        except Exception:
+            pass
+
     out = {
         "events": events,
         "debug": {
             **debug,
-            "game_count":       len(games),
-            "events_extracted": len(events),
-            "games_no_splits":  games_no_splits[:8],
-            "sample_top_keys":  sample_top_keys,
+            "game_count":               len(games),
+            "events_extracted":         len(events),
+            "games_no_splits":          games_no_splits[:8],
+            "sample_top_keys":          sample_top_keys,
+            "percent_paths_first_game": percent_paths_first_game,
         },
     }
     # Only cache when we got events. Empty result is almost always a
@@ -1224,16 +1235,33 @@ def _fetch_splits(sport: str, away: str, home: str) -> dict:
 
 
 def _walk_splits(node: Any, depth: int = 0) -> dict | None:
-    if depth > 8 or not isinstance(node, (dict, list)):
+    """Recursively look for a node with percent-shaped keys for both
+    sides + both kinds (bets vs money). Flexible to key-naming
+    variations: snake_case / camelCase, singular / plural, percent /
+    pct, bet / bets / tickets, money / handle. When Action Network
+    reshuffles their schema, this regex-based matching adapts; the
+    old hardcoded-key version broke every time."""
+    if depth > 12 or not isinstance(node, (dict, list)):
         return None
     if isinstance(node, dict):
         keys = list(node.keys())
-        if any(re.search(r"(bet|ticket|money|handle).*percent", k, re.I)
-               for k in keys):
-            ab = _pct(node, ["away_bets_percent", "away_tickets_percent"])
-            hb = _pct(node, ["home_bets_percent", "home_tickets_percent"])
-            am = _pct(node, ["away_money_percent", "away_handle_percent"])
-            hm = _pct(node, ["home_money_percent", "home_handle_percent"])
+
+        def _match(side_re: str, kind_re: str) -> list[str]:
+            pat = rf"^{side_re}.*({kind_re}).*(percent|pct|share|pct_share)\b|^{side_re}.*pct\b"
+            return [k for k in keys
+                    if re.search(rf"^{side_re}.*({kind_re}).*(percent|pct)", k, re.I)]
+
+        away_bet_keys   = _match("away", "bet|ticket|wager")
+        home_bet_keys   = _match("home", "bet|ticket|wager")
+        away_money_keys = _match("away", "money|handle|dollar")
+        home_money_keys = _match("home", "money|handle|dollar")
+
+        if (away_bet_keys or home_bet_keys
+                or away_money_keys or home_money_keys):
+            ab = _pct(node, away_bet_keys)
+            hb = _pct(node, home_bet_keys)
+            am = _pct(node, away_money_keys)
+            hm = _pct(node, home_money_keys)
             if any(v is not None for v in (ab, hb, am, hm)):
                 sd = round(hm - hb, 1) if (hm is not None and hb is not None) else None
                 return {"away_bets": ab, "home_bets": hb,
@@ -1249,6 +1277,28 @@ def _walk_splits(node: Any, depth: int = 0) -> dict | None:
             if r:
                 return r
     return None
+
+
+def _collect_percent_keys(node: Any, depth: int = 0,
+                          seen: set | None = None,
+                          path: str = "") -> list[str]:
+    """Diagnostic helper: walk a node and collect every dotted-path
+    that has 'percent' or 'pct' in the leaf key. Used to surface what
+    Action's response actually contains when our walker found nothing."""
+    if seen is None:
+        seen = set()
+    if depth > 12 or len(seen) > 40:
+        return list(seen)
+    if isinstance(node, dict):
+        for k, v in node.items():
+            new_path = f"{path}.{k}" if path else k
+            if re.search(r"percent|pct", str(k), re.I):
+                seen.add(new_path)
+            _collect_percent_keys(v, depth + 1, seen, new_path)
+    elif isinstance(node, list):
+        for i, v in enumerate(node[:3]):  # only sample first 3 items
+            _collect_percent_keys(v, depth + 1, seen, f"{path}[{i}]")
+    return sorted(seen)
 
 
 def _pct(d: dict, keys: list[str]) -> float | None:
