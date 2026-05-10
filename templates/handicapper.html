@@ -198,11 +198,15 @@
         .ask-sport { padding: 12px 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-family: inherit; font-size: 13px; }
         .ask-hint { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
 
-        /* Dossier panel */
-        .dossier { display: none; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin-bottom: 26px; }
-        .dossier.show { display: block; }
+        /* Dossier panel — opens as a modal overlay so the games list
+           below stays scrolled where the user left it. */
+        .dossier-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: none; align-items: flex-start; justify-content: center; z-index: 90; padding: 24px 16px; overflow-y: auto; }
+        .dossier-overlay.show { display: flex; }
+        .dossier { position: relative; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 18px; width: 100%; max-width: 920px; margin: auto; }
+        .dossier-close { position: absolute; top: 10px; right: 10px; width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border-light); background: var(--surface-2); color: var(--text); font-size: 22px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; z-index: 1; }
+        .dossier-close:hover { background: var(--bg); border-color: var(--blue); }
         .dossier-error { color: var(--red); font-size: 13px; padding: 16px; background: var(--red-dim); border: 1px solid rgba(239,68,68,0.3); border-radius: 10px; }
-        .dossier-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+        .dossier-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; padding-bottom: 12px; padding-right: 40px; border-bottom: 1px solid var(--border); }
         .dossier-head h2 { font-size: 18px; font-weight: 700; }
         .dossier-head .sub { font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
 
@@ -387,7 +391,12 @@
                 </div>
             </div>
 
-            <div class="dossier" id="dossier"></div>
+            <div class="dossier-overlay" id="dossierOverlay" onclick="if(event.target===this)closeDossier()">
+                <div class="dossier">
+                    <button class="dossier-close" onclick="closeDossier()" aria-label="Close">×</button>
+                    <div id="dossier"></div>
+                </div>
+            </div>
 
             <div class="section">
                 <div class="section-title">Pending <span class="count" id="pendingCount">0</span></div>
@@ -721,11 +730,11 @@
     async function pickGame(marketId) {
         // Click-to-pick from the games list. Live=true → on-demand Odds
         // API call (6 credits) so the dossier shows the current line,
-        // not the last 30-min cron snapshot.
+        // not the last 30-min cron snapshot. Opens as a modal overlay
+        // so the games-list scroll position is preserved when closed.
         const dossierEl = document.getElementById('dossier');
-        dossierEl.classList.add('show');
+        openDossierModal();
         dossierEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">Pulling live odds + injuries + splits…</div>';
-        dossierEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
         try {
             const resp = await authFetch('/api/handicapper/dossier?live=true&market_id=' + encodeURIComponent(marketId));
             const data = await resp.json();
@@ -744,6 +753,26 @@
     let _lastDossier = null;
     let _pendingPick = null;
 
+    function openDossierModal() {
+        const overlay = document.getElementById('dossierOverlay');
+        overlay.classList.add('show');
+        // Lock background scroll so the games list doesn't jiggle while
+        // the dossier scrolls inside its modal.
+        document.body.style.overflow = 'hidden';
+        // Reset the modal's own scroll to the top each time it opens.
+        overlay.scrollTop = 0;
+    }
+    function closeDossier() {
+        document.getElementById('dossierOverlay').classList.remove('show');
+        document.body.style.overflow = '';
+    }
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            const overlay = document.getElementById('dossierOverlay');
+            if (overlay && overlay.classList.contains('show')) closeDossier();
+        }
+    });
+
     async function askGame() {
         const q = (document.getElementById('askInput').value || '').trim();
         if (!q) return;
@@ -752,7 +781,7 @@
         const submitBtn = document.getElementById('askSubmit');
         submitBtn.disabled = true;
         submitBtn.textContent = 'Building…';
-        dossierEl.classList.add('show');
+        openDossierModal();
         dossierEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">Pulling odds + injuries + splits…</div>';
 
         try {
