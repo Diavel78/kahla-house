@@ -142,9 +142,14 @@
         .pick .reasons li { margin-left: 16px; margin-bottom: 2px; }
         .pick .expand-btn { background: none; border: 0; color: var(--text-muted); font-size: 11px; cursor: pointer; padding: 4px 0; margin-top: 6px; font-family: inherit; }
         .pick .expand-btn:hover { color: var(--text-secondary); }
-        .pick .pick-actions { display: flex; gap: 8px; margin-top: 8px; }
-        .pick .delete-btn { background: none; border: 0; color: var(--text-muted); font-size: 11px; cursor: pointer; padding: 4px 0; font-family: inherit; }
+        .pick .pick-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
+        .pick .delete-btn { background: none; border: 0; color: var(--text-muted); font-size: 11px; cursor: pointer; padding: 4px 0; font-family: inherit; margin-left: auto; }
         .pick .delete-btn:hover { color: var(--red); }
+        .pick .settle-btn { background: var(--surface-2); border: 1px solid var(--border-light); color: var(--text-secondary); font-size: 11px; padding: 4px 10px; border-radius: 8px; cursor: pointer; font-family: inherit; font-weight: 600; }
+        .pick .settle-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .pick .settle-won:hover  { border-color: var(--green);  color: var(--green);  background: var(--green-dim); }
+        .pick .settle-lost:hover { border-color: var(--red);    color: var(--red);    background: rgba(239,68,68,0.10); }
+        .pick .settle-push:hover { border-color: var(--orange); color: var(--orange); background: var(--orange-dim); }
         .pick .analysis { margin-top: 8px; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; line-height: 1.55; color: var(--text); white-space: pre-wrap; word-wrap: break-word; display: none; }
         .pick.expanded .analysis { display: block; }
 
@@ -583,9 +588,44 @@
                 ${resultHtml}
                 ${reasons}
                 ${analysis}
-                <div class="pick-actions"><button class="delete-btn" onclick="deletePick(${r.id}, this)">Delete</button></div>
+                <div class="pick-actions">
+                    ${kind === 'pending' ? `
+                        <button class="settle-btn settle-won"  onclick="settlePick(${r.id}, 'won',  this)">✓ Won</button>
+                        <button class="settle-btn settle-lost" onclick="settlePick(${r.id}, 'lost', this)">✗ Lost</button>
+                        <button class="settle-btn settle-push" onclick="settlePick(${r.id}, 'push', this)">= Push</button>
+                    ` : ''}
+                    <button class="delete-btn" onclick="deletePick(${r.id}, this)">Delete</button>
+                </div>
             </li>
         `;
+    }
+
+    async function settlePick(pickId, status, btn) {
+        const labels = {won: 'WIN', lost: 'LOSS', push: 'PUSH'};
+        if (!confirm(`Mark this pick as ${labels[status]}? You can still delete it after.`)) return;
+        const row = btn.closest('li.pick');
+        const allBtns = row ? row.querySelectorAll('.settle-btn,.delete-btn') : [btn];
+        allBtns.forEach(b => b.disabled = true);
+        btn.textContent = '…';
+        try {
+            const r = await authFetch('/api/handicapper/pick/' + pickId + '/settle', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({status}),
+            });
+            const out = await r.json();
+            if (!out.ok) {
+                alert('Failed: ' + (out.error || 'unknown'));
+                allBtns.forEach(b => b.disabled = false);
+                btn.textContent = labels[status] === 'WIN' ? '✓ Won' : (labels[status] === 'LOSS' ? '✗ Lost' : '= Push');
+                return;
+            }
+            // Refresh — pick will move from pending to settled with new pnl.
+            loadData(false);
+        } catch (e) {
+            alert('Request failed: ' + e);
+            allBtns.forEach(b => b.disabled = false);
+        }
     }
 
     async function deletePick(pickId, btn) {

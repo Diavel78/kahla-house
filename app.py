@@ -3641,6 +3641,68 @@ def api_handicapper_pick_delete(pick_id: int):
     return jsonify({"ok": True, "id": pick_id})
 
 
+@app.route("/api/handicapper/pick/<int:pick_id>/settle", methods=["POST"])
+@bot_required
+def api_handicapper_pick_settle(pick_id: int):
+    """Manually settle a pending pick. Use case: UFC fights (no auto-grade
+    for SPR/TOT method-of-victory bets), or any pick where the resolver
+    can't reach ESPN reliably (rare). Body: {status: 'won'|'lost'|'push'}.
+    Computes pnl_units via the same to-WIN math the resolver uses.
+
+    Authorization: admin OR owner of the row (asked_by). Same gate as
+    the delete endpoint."""
+    body = request.get_json(silent=True) or {}
+    new_status = (body.get("status") or "").strip()
+    if new_status not in ("won", "lost", "push"):
+        return jsonify({"ok": False, "error": "status must be won/lost/push"}), 400
+
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+
+    try:
+        row = (sb.table("bot_picks")
+               .select("id,asked_by,status,entry_price,units")
+               .eq("id", pick_id).single().execute().data)
+    except Exception:
+        row = None
+    if not row:
+        return jsonify({"ok": False, "error": "pick not found"}), 404
+
+    is_admin = g.user_data.get("role") == "admin"
+    is_owner = row.get("asked_by") == g.uid
+    if not (is_admin or is_owner):
+        return jsonify({"ok": False, "error": "not your pick"}), 403
+
+    # PnL math mirrors kahla-scanner/scripts/bot_picks_resolver.py
+    # _pnl_units (to-WIN sizing). Keep in sync.
+    units = row.get("units") or 1
+    entry_price = int(row.get("entry_price") or 0)
+    if new_status == "push":
+        pnl = 0.0
+    elif new_status == "won":
+        pnl = float(units)
+    else:  # lost
+        if entry_price > 0:
+            pnl = -units * (100.0 / entry_price)
+        elif entry_price < 0:
+            pnl = -units * (abs(entry_price) / 100.0)
+        else:
+            pnl = -float(units)
+
+    try:
+        sb.table("bot_picks").update({
+            "status":     new_status,
+            "pnl_units":  pnl,
+            "settled_at": datetime.now(timezone.utc).isoformat(),
+            "result_score": {"manual": True},
+        }).eq("id", pick_id).execute()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"update failed: {e}"}), 500
+    return jsonify({"ok": True, "id": pick_id, "status": new_status,
+                    "pnl_units": round(pnl, 3)})
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

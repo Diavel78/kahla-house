@@ -47,6 +47,10 @@ _ESPN_PATH: dict[str, tuple[str, str]] = {
     "NFL":   ("football",   "nfl"),
     "CBB":   ("basketball", "mens-college-basketball"),
     "NCAAF": ("football",   "college-football"),
+    # UFC: ESPN's MMA scoreboard only supports ML grading (winner tag).
+    # Spread / total method-of-victory bets stay pending — user can
+    # settle them manually via the page button.
+    "UFC":   ("mma",        "ufc"),
 }
 
 
@@ -89,6 +93,78 @@ def _fetch_espn(sport: str, date_yyyymmdd: str) -> list[dict[str, Any]]:
     except Exception as e:
         log.warning("ESPN %s %s exception: %s", sport, date_yyyymmdd, e)
         return []
+
+
+import re
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def _ufc_match_espn(bet: dict, espn_events: list[dict]) -> dict | None:
+    """UFC-specific matcher. ESPN MMA scoreboard returns a flat list of
+    fights (one event per competition with two `athlete` competitors).
+    Match by fighter-name normalization in either orientation since
+    UFC home/away assignment is arbitrary. Returns the standard match
+    dict shape with `winner_home` / `winner_away` (bools) instead of
+    numeric scores — UFC ML grading reads the winner boolean."""
+    away, home = _split_event_name(bet.get("event_name") or "")
+    if not (away and home):
+        return None
+    away_n, home_n = _norm(away), _norm(home)
+    bet_start = _parse_iso(bet.get("event_start") or "")
+
+    for g in espn_events:
+        comp = (g.get("competitions") or [{}])[0]
+        cs = comp.get("competitors") or []
+        if len(cs) != 2:
+            continue
+        # ESPN MMA puts fighter info under `athlete`, not `team`. Try both.
+        def _name(c):
+            return _norm((c.get("athlete") or {}).get("displayName")
+                         or (c.get("team") or {}).get("displayName") or "")
+        n1, n2 = _name(cs[0]), _name(cs[1])
+        if not (n1 and n2):
+            continue
+        # Try both orientations — UFC home/away is meaningless.
+        std_match = ((home_n in n1 or n1 in home_n) and
+                     (away_n in n2 or n2 in away_n))
+        swap_match = ((home_n in n2 or n2 in home_n) and
+                      (away_n in n1 or n1 in away_n))
+        if not (std_match or swap_match):
+            # Last-name token fallback for diacritics / hyphens.
+            home_tokens = [t for t in home_n.split() if len(t) >= 3]
+            away_tokens = [t for t in away_n.split() if len(t) >= 3]
+            std_match = (any(t in n1 for t in home_tokens)
+                         and any(t in n2 for t in away_tokens))
+            swap_match = (any(t in n2 for t in home_tokens)
+                          and any(t in n1 for t in away_tokens))
+            if not (std_match or swap_match):
+                continue
+        # Map: which espn competitor corresponds to OUR home / away?
+        if std_match:
+            h_c, a_c = cs[0], cs[1]
+        else:
+            h_c, a_c = cs[1], cs[0]
+
+        # 24h window — UFC card timing in our markets table is the
+        # card-start, individual fight commence may differ by hours.
+        comp_dt_s = comp.get("date") or g.get("date") or ""
+        comp_dt = _parse_iso(comp_dt_s) if comp_dt_s else None
+        if bet_start and comp_dt:
+            if abs((bet_start - comp_dt).total_seconds()) > 24 * 3600:
+                continue
+
+        state = ((comp.get("status") or {}).get("type") or {}).get("state", "")
+
+        return {
+            "state":        state,
+            "home_score":   None,   # UFC has no numeric score
+            "away_score":   None,
+            "winner_home":  bool(h_c.get("winner")),
+            "winner_away":  bool(a_c.get("winner")),
+        }
+    return None
 
 
 def _match_espn(bet: dict, espn_events: list[dict]) -> dict | None:
@@ -282,38 +358,66 @@ def main(argv: list[str] | None = None) -> int:
                 espn_cache[cache_key] = _fetch_espn(sport, date_key)
             events = espn_cache[cache_key]
 
-            m = _match_espn(bet, events)
+            if sport == "UFC":
+                m = _ufc_match_espn(bet, events)
+            else:
+                m = _match_espn(bet, events)
             if not m:
                 unmatched += 1
                 continue
             if m["state"] != "post":
                 not_final += 1
                 continue
-            if m["home_score"] is None or m["away_score"] is None:
-                unmatched += 1
-                continue
 
-            status = _grade(bet, m["home_score"], m["away_score"])
-            if status is None:
-                unmatched += 1
-                continue
+            # UFC: only ML grading is supported (winner boolean from
+            # ESPN). SPR / TOT method-of-victory bets stay pending —
+            # user settles them manually via the page.
+            if sport == "UFC":
+                if bet.get("market_type") != "moneyline":
+                    unsupported += 1
+                    continue
+                if not (m["winner_home"] or m["winner_away"]):
+                    not_final += 1   # No winner reported yet (NC, draw, ongoing)
+                    continue
+                if m["winner_home"] and m["winner_away"]:
+                    status = "push"   # draw
+                else:
+                    won_side = "home" if m["winner_home"] else "away"
+                    status = "won" if bet["side"] == won_side else "lost"
+                result = {
+                    "home":  None, "away": None, "total": None,
+                    "winner_home": m["winner_home"],
+                    "winner_away": m["winner_away"],
+                }
+            else:
+                if m["home_score"] is None or m["away_score"] is None:
+                    unmatched += 1
+                    continue
+                status = _grade(bet, m["home_score"], m["away_score"])
+                if status is None:
+                    unmatched += 1
+                    continue
+                result = {
+                    "home":  m["home_score"],
+                    "away":  m["away_score"],
+                    "total": m["home_score"] + m["away_score"],
+                }
             units = bet.get("units") or 1
             pnl = _pnl_units(status, bet["entry_price"], units)
-            result = {
-                "home":  m["home_score"],
-                "away":  m["away_score"],
-                "total": m["home_score"] + m["away_score"],
-            }
             if not _update(sb, bet["id"], status, pnl, result):
                 continue
 
             if status == "won":  won  += 1
             elif status == "lost": lost += 1
             else:                  push += 1
-            log.info("RESOLVED bot_pick %s %s/%s @ %du -> %s pnl=%+.3fu (%d-%d)",
+            score_frag = (
+                f"({m['away_score']}-{m['home_score']})"
+                if m.get("home_score") is not None else
+                f"(winner: {'home' if m.get('winner_home') else 'away'})"
+            )
+            log.info("RESOLVED bot_pick %s %s/%s @ %du -> %s pnl=%+.3fu %s",
                      bet["event_name"], bet["market_type"], bet["side"],
-                     units, status.upper(), pnl,
-                     m["away_score"], m["home_score"])
+                     units, status.upper(), pnl, score_frag)
 
         summary.update(won=won, lost=lost, push=push, unmatched=unmatched,
                        not_final=not_final, unsupported=unsupported)
