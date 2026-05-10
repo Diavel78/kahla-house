@@ -835,10 +835,6 @@
                         : 'Bot Suggests — Polymarket Target')
                     : 'Lean — would pass, but if forced';
                 const headingCls = s.gates_cleared ? 'lbl' : 'lbl soft';
-                const splitsFrag = (s.splits_pp != null && Math.abs(s.splits_pp) >= 1)
-                    ? ` · splits ${s.splits_pp > 0 ? '+' : ''}${s.splits_pp.toFixed(0)}pp`
-                    : '';
-                const meta = `sharp ${s.sharp_score || 0}${splitsFrag} · combined ${(s.combined_score*100).toFixed(0)}/100`;
                 const pinNow = (s.pin_current != null) ? ` · PIN now ${_fmtAmer(s.pin_current)}` : '';
                 const why = _buildReasons(s, d);
                 const whyHtml = why.length
@@ -852,7 +848,6 @@
                         <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>
                     </div>
                     <div class="pick-meta">Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow}</div>
-                    <div class="pick-meta">${meta}</div>
                     ${whyHtml}
                     ${s.gates_cleared ? '' : `<div class="soft-note">Sharp gate not cleared (need sharp ≥ 4). Chalk-flat market; this is the best read available — treat as 1u lean only.</div>`}
                     <div class="actions">
