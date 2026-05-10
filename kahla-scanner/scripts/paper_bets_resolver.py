@@ -32,8 +32,10 @@ log = logging.getLogger(__name__)
 
 
 # Pending bets must be at least this old before we attempt to resolve.
-# 4h is enough for any major sport to finish + ESPN to post the final.
-RESOLVE_LAG_HOURS = 4
+# 0 = check from the moment the game starts. The real "is it over"
+# gate is ESPN state='post', not a clock cushion. In-progress games
+# get bucketed as `not_final` and retried next cron tick.
+RESOLVE_LAG_HOURS = 0
 
 # Scanner sport code (uppercase) → (sport_group, league) on ESPN's
 # scoreboard endpoint. Mirrors Flask's _ESPN_PATH but for scanner codes.
