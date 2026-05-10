@@ -113,27 +113,38 @@ def auto_reasons(blob: dict, market_type: str, side: str,
             elif score == 0:
                 lines.append("PIN line and vig flat — no movement signal")
 
-    # Public splits — ML only
+    # Public splits — ML only. Money% (Action) is the sharp fingerprint;
+    # bets% (Covers / VegasInsider) is the square fingerprint. When only
+    # bets% is available, fall back to heavy/light public-side wording.
     if splits and market_type == "moneyline":
         m_key = "home_money" if side == "home" else "away_money"
         b_key = "home_bets"  if side == "home" else "away_bets"
         m = splits.get(m_key)
         b = splits.get(b_key)
+        sources = splits.get("sources") or []
+        src_lbl = f" [{len(sources)} sources]" if len(sources) > 1 else ""
         if m is not None and b is not None:
             try:
                 diff = round(float(m) - float(b))
             except (TypeError, ValueError):
                 diff = 0
             if diff >= 10:
-                lines.append(f"Public {m}% money / {b}% bets on {side_name} — sharp money divergence (+{diff}pp)")
+                lines.append(f"Public {m}% money / {b}% bets on {side_name} — sharp money divergence (+{diff}pp){src_lbl}")
             elif diff <= -10:
-                lines.append(f"Public {m}% money / {b}% bets on {side_name} — square money, fade signal ({abs(diff)}pp)")
+                lines.append(f"Public {m}% money / {b}% bets on {side_name} — square money, fade signal ({abs(diff)}pp){src_lbl}")
             elif (m or 0) >= 65:
-                lines.append(f"Public heavy on {side_name} ({m}% money / {b}% bets)")
+                lines.append(f"Public heavy on {side_name} ({m}% money / {b}% bets){src_lbl}")
             elif (m or 0) <= 35:
-                lines.append(f"Public light on {side_name} ({m}% money / {b}% bets) — contrarian side")
+                lines.append(f"Public light on {side_name} ({m}% money / {b}% bets) — contrarian side{src_lbl}")
             else:
-                lines.append(f"Public split flat ({b}% bets / {m}% money on {side_name}) — no public signal")
+                lines.append(f"Public split flat ({b}% bets / {m}% money on {side_name}){src_lbl}")
+        elif b is not None:
+            if b >= 65:
+                lines.append(f"Public heavy on {side_name} ({b}% bets){src_lbl} — money% unavailable")
+            elif b <= 35:
+                lines.append(f"Public light on {side_name} ({b}% bets){src_lbl} — contrarian side")
+            else:
+                lines.append(f"Public split roughly even ({b}% bets on {side_name}){src_lbl}")
 
     # Polymarket fair line (only when it differs from PIN's current price)
     pin_side = (blk.get("pin_current") or {}).get(side) or {}

@@ -730,10 +730,50 @@ def _http_get(url: str, **kwargs) -> dict | None:
         return None
 
 
-def _fetch_splits(sport: str, away: str, home: str) -> dict | None:
+# ─── Multi-source splits ───
+# Three public splits sources, blended when ≥2 agree, fall through when
+# only 1 has data. Action Network = the only source with money% (sharp
+# fingerprint). Covers + VegasInsider give bets% (square fingerprint),
+# useful for filling Action's coverage gaps and as redundancy.
+#
+# Module-level sport-level cache (30 min TTL) so multiple dossier hits
+# in the same sport reuse one fetch per source.
+_SPLITS_CACHE: dict[str, dict] = {}
+_SPLITS_TTL = 30 * 60  # 30 min
+
+
+def _cache_get(key: str) -> dict | None:
+    hit = _SPLITS_CACHE.get(key)
+    if hit and (time.time() - hit["ts"]) < _SPLITS_TTL:
+        return hit["data"]
+    return None
+
+
+def _cache_set(key: str, data: dict) -> None:
+    _SPLITS_CACHE[key] = {"ts": time.time(), "data": data}
+
+
+def _team_match(home: str, away: str, ev_home: str, ev_away: str) -> bool:
+    """Two-way substring match. Action uses 'Mariners', we have 'Seattle
+    Mariners'; both directions need to work."""
+    if not (home and away and ev_home and ev_away):
+        return False
+    h, a = home.lower(), away.lower()
+    eh, ea = ev_home.lower(), ev_away.lower()
+    return ((h in eh or eh in h) and (a in ea or ea in a))
+
+
+def _fetch_action_for_sport(sport: str) -> dict:
+    """Per-sport Action Network fetch via their JSON API. Returns
+    {events: [{home, away, ml: {away_bets, home_bets, away_money, home_money}}], debug}."""
     league = _ACTION_LEAGUE.get(sport)
     if not league:
-        return None
+        return {"events": [], "debug": {"error": f"unsupported sport: {sport}"}}
+    cache_key = f"action:{sport}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
     url = f"https://api.actionnetwork.com/web/v2/scoreboard/{league}"
     headers = {
@@ -742,25 +782,321 @@ def _fetch_splits(sport: str, away: str, home: str) -> dict | None:
         "Referer": "https://www.actionnetwork.com/",
     }
     data = _http_get(url, params={"period": "game", "date": today}, headers=headers)
+    debug = {"url": url, "date": today}
     if not data:
-        return None
+        out = {"events": [], "debug": {**debug, "error": "fetch failed"}}
+        _cache_set(cache_key, out)
+        return out
     games = data.get("games") or []
-    away_n, home_n = away.lower(), home.lower()
-
-    def _name(t: dict | None) -> str:
-        if not t:
-            return ""
-        return (t.get("full_name") or t.get("display_name")
-                or t.get("short_name") or "").lower()
-
+    events = []
     for g in games:
-        gh, ga = _name(g.get("home_team")), _name(g.get("away_team"))
-        if not gh or not ga:
+        ht = (g.get("home_team") or {})
+        at = (g.get("away_team") or {})
+        h_name = ht.get("full_name") or ht.get("display_name") or ht.get("short_name")
+        a_name = at.get("full_name") or at.get("display_name") or at.get("short_name")
+        if not (h_name and a_name):
             continue
-        if not ((home_n in gh or gh in home_n) and (away_n in ga or ga in away_n)):
+        ml = _walk_splits(g)
+        if ml:
+            events.append({
+                "home_team": h_name,
+                "away_team": a_name,
+                "ml": ml,
+            })
+    out = {"events": events, "debug": {**debug, "game_count": len(games), "events_extracted": len(events)}}
+    _cache_set(cache_key, out)
+    return out
+
+
+_COVERS_LEAGUE = {
+    "MLB":   "MLB",
+    "NBA":   "NBA",
+    "NHL":   "NHL",
+    "NFL":   "NFL",
+    "CBB":   "NCAAB",
+    "NCAAF": "NCAAF",
+}
+
+
+def _fetch_covers_for_sport(sport: str) -> dict:
+    """Per-sport Covers consensus fetch. Best-effort HTML scrape — Covers
+    publishes consensus PICK% (≈ bets%) per game on their consensus page.
+    No money% (only Action Network has that).
+
+    Day-1 selectors are educated guesses. Diagnostic info in `debug` so
+    /debug-splits surfaces what HTML we got and the parser can be tuned
+    iteratively without flailing."""
+    league = _COVERS_LEAGUE.get(sport)
+    if not league:
+        return {"events": [], "debug": {"error": f"unsupported sport: {sport}"}}
+    cache_key = f"covers:{sport}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    url = f"https://www.covers.com/sport/{league.lower()}/picks-consensus"
+    debug = {"url": url}
+    try:
+        r = requests.get(url, headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml",
+        }, timeout=HTTP_TIMEOUT)
+        debug["status"] = r.status_code
+        debug["html_len"] = len(r.text or "")
+        if r.status_code != 200:
+            out = {"events": [], "debug": {**debug, "error": f"HTTP {r.status_code}"}}
+            _cache_set(cache_key, out)
+            return out
+        html = r.text or ""
+    except Exception as e:
+        out = {"events": [], "debug": {**debug, "error": f"fetch: {e}"}}
+        _cache_set(cache_key, out)
+        return out
+
+    events = _parse_covers_consensus(html, debug)
+    out = {"events": events, "debug": {**debug, "events_extracted": len(events)}}
+    _cache_set(cache_key, out)
+    return out
+
+
+def _parse_covers_consensus(html: str, debug: dict) -> list[dict]:
+    """Extract consensus bets% per game. Covers' consensus page renders
+    a per-game card with team names and a picks % bar. Without a stable
+    public schema, we look for percentage text adjacent to team names.
+
+    Returns [{home_team, away_team, ml: {away_bets, home_bets}}]. Money%
+    not available from Covers."""
+    try:
+        from bs4 import BeautifulSoup
+    except Exception as e:
+        debug["bs4_error"] = str(e)
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    events: list[dict] = []
+    sample_blocks: list[str] = []
+
+    # Strategy: find every game-row container, then within each row
+    # extract team names + the two consensus % cells. Class names on
+    # Covers change periodically; try multiple selectors.
+    candidates = (
+        soup.select("[class*='cmg_consensus_pick_table_container']")
+        or soup.select("[class*='consensus-pick']")
+        or soup.select("[class*='matchup']")
+        or soup.select("table tr")
+    )
+    debug["candidate_count"] = len(candidates)
+
+    pct_re = re.compile(r"(\d{1,3})\s*%")
+    for c in candidates[:200]:  # cap to avoid pathological pages
+        text = c.get_text(" ", strip=True)
+        if not text:
             continue
-        return _walk_splits(g)
-    return None
+        pcts = pct_re.findall(text)
+        if len(pcts) < 2:
+            continue
+        # Pull the two team names — usually the first two distinct
+        # capitalised tokens longer than 2 chars.
+        names = re.findall(r"\b([A-Z][A-Za-z\.&]{2,}(?:\s+[A-Z][A-Za-z\.&]+){0,3})\b", text)
+        names = [n for n in names if n.lower() not in {"vs", "consensus", "picks", "spread", "total", "over", "under", "money", "line"}]
+        if len(names) < 2:
+            continue
+        # Heuristic: away team listed first on Covers ("Away @ Home")
+        away_name, home_name = names[0], names[1]
+        try:
+            away_bets = float(pcts[0])
+            home_bets = float(pcts[1])
+        except ValueError:
+            continue
+        # Only accept if pcts roughly sum to 100 (otherwise we
+        # mis-grabbed something that wasn't a splits row).
+        if not (85 <= (away_bets + home_bets) <= 115):
+            continue
+        events.append({
+            "home_team": home_name,
+            "away_team": away_name,
+            "ml": {"away_bets": away_bets, "home_bets": home_bets,
+                   "away_money": None, "home_money": None},
+        })
+        if len(sample_blocks) < 3:
+            sample_blocks.append(text[:200])
+
+    debug["sample_blocks"] = sample_blocks
+    return events
+
+
+_VI_LEAGUE = {
+    "MLB":   "mlb",
+    "NBA":   "nba",
+    "NHL":   "nhl",
+    "NFL":   "nfl",
+    "CBB":   "college-basketball",
+    "NCAAF": "college-football",
+}
+
+
+def _fetch_vegasinsider_for_sport(sport: str) -> dict:
+    """Per-sport VegasInsider consensus fetch. Same shape as Covers —
+    bets% only, no money%. Best-effort scrape with diagnostics."""
+    league = _VI_LEAGUE.get(sport)
+    if not league:
+        return {"events": [], "debug": {"error": f"unsupported sport: {sport}"}}
+    cache_key = f"vi:{sport}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    url = f"https://www.vegasinsider.com/{league}/matchups/"
+    debug = {"url": url}
+    try:
+        r = requests.get(url, headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml",
+        }, timeout=HTTP_TIMEOUT)
+        debug["status"] = r.status_code
+        debug["html_len"] = len(r.text or "")
+        if r.status_code != 200:
+            out = {"events": [], "debug": {**debug, "error": f"HTTP {r.status_code}"}}
+            _cache_set(cache_key, out)
+            return out
+        html = r.text or ""
+    except Exception as e:
+        out = {"events": [], "debug": {**debug, "error": f"fetch: {e}"}}
+        _cache_set(cache_key, out)
+        return out
+
+    events = _parse_vi_consensus(html, debug)
+    out = {"events": events, "debug": {**debug, "events_extracted": len(events)}}
+    _cache_set(cache_key, out)
+    return out
+
+
+def _parse_vi_consensus(html: str, debug: dict) -> list[dict]:
+    """Extract consensus bets% per game from VegasInsider's matchups
+    page. Same caveats as Covers — selectors are educated guesses,
+    diagnostics surface what we found for iteration."""
+    try:
+        from bs4 import BeautifulSoup
+    except Exception as e:
+        debug["bs4_error"] = str(e)
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    events: list[dict] = []
+    sample_blocks: list[str] = []
+
+    candidates = (
+        soup.select("[class*='consensus']")
+        or soup.select("[class*='matchup']")
+        or soup.select("table tr")
+    )
+    debug["candidate_count"] = len(candidates)
+    pct_re = re.compile(r"(\d{1,3})\s*%")
+    for c in candidates[:200]:
+        text = c.get_text(" ", strip=True)
+        if not text:
+            continue
+        pcts = pct_re.findall(text)
+        if len(pcts) < 2:
+            continue
+        names = re.findall(r"\b([A-Z][A-Za-z\.&]{2,}(?:\s+[A-Z][A-Za-z\.&]+){0,3})\b", text)
+        names = [n for n in names if n.lower() not in {"vs", "at", "consensus", "picks", "spread", "total", "over", "under", "money", "line", "ml"}]
+        if len(names) < 2:
+            continue
+        away_name, home_name = names[0], names[1]
+        try:
+            away_bets = float(pcts[0])
+            home_bets = float(pcts[1])
+        except ValueError:
+            continue
+        if not (85 <= (away_bets + home_bets) <= 115):
+            continue
+        events.append({
+            "home_team": home_name,
+            "away_team": away_name,
+            "ml": {"away_bets": away_bets, "home_bets": home_bets,
+                   "away_money": None, "home_money": None},
+        })
+        if len(sample_blocks) < 3:
+            sample_blocks.append(text[:200])
+
+    debug["sample_blocks"] = sample_blocks
+    return events
+
+
+def _blend_ml(per_source: dict[str, dict | None]) -> dict:
+    """Average available bets% across sources. Money% is single-source
+    (Action Network only). Returns a splits dict in the same shape the
+    frontend expects, plus `sources` list of contributing source names
+    so the page can label what blended in."""
+    away_bets_vals: list[float] = []
+    home_bets_vals: list[float] = []
+    away_money = home_money = None
+    sources: list[str] = []
+
+    for name, data in per_source.items():
+        if not data:
+            continue
+        ab, hb = data.get("away_bets"), data.get("home_bets")
+        am, hm = data.get("away_money"), data.get("home_money")
+        contributed = False
+        if ab is not None:
+            away_bets_vals.append(float(ab)); contributed = True
+        if hb is not None:
+            home_bets_vals.append(float(hb)); contributed = True
+        if name == "action":
+            if am is not None:
+                away_money = float(am); contributed = True
+            if hm is not None:
+                home_money = float(hm); contributed = True
+        if contributed:
+            sources.append(name)
+
+    def _avg(vals: list[float]) -> float | None:
+        if not vals:
+            return None
+        return round(sum(vals) / len(vals), 1)
+
+    away_bets = _avg(away_bets_vals)
+    home_bets = _avg(home_bets_vals)
+    sharp_diff = None
+    # sharp_diff = money% on home minus bets% on home (positive = sharp HOME).
+    # Only computable when Action's money% is present alongside any bets%.
+    if home_money is not None and home_bets is not None:
+        sharp_diff = round(home_money - home_bets, 1)
+
+    return {
+        "away_bets":  away_bets,
+        "home_bets":  home_bets,
+        "away_money": away_money,
+        "home_money": home_money,
+        "sharp_diff": sharp_diff,
+        "sources":    sources,
+    }
+
+
+def _fetch_splits(sport: str, away: str, home: str) -> dict | None:
+    """Multi-source blended splits for one (away, home) pair. Hits
+    Action Network (money% + bets%), Covers (bets%), VegasInsider
+    (bets%) at the sport level (cached 30 min per source), then
+    matches each by two-way team-name containment and blends via
+    `_blend_ml`. Returns None if no source matched."""
+    action_data = _fetch_action_for_sport(sport)
+    covers_data = _fetch_covers_for_sport(sport)
+    vi_data     = _fetch_vegasinsider_for_sport(sport)
+
+    def _find(events: list[dict]) -> dict | None:
+        for ev in events:
+            if _team_match(home, away, ev.get("home_team", ""), ev.get("away_team", "")):
+                return ev.get("ml")
+        return None
+
+    per_source: dict[str, dict | None] = {
+        "action":       _find(action_data.get("events") or []),
+        "covers":       _find(covers_data.get("events") or []),
+        "vegasinsider": _find(vi_data.get("events") or []),
+    }
+    if not any(v for v in per_source.values()):
+        return None
+    return _blend_ml(per_source)
 
 
 def _walk_splits(node: Any, depth: int = 0) -> dict | None:

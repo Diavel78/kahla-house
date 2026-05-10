@@ -884,11 +884,17 @@
             const sharpTag = (sd != null && Math.abs(sd) >= 10)
                 ? `<span class="sharp-tag">SHARP ${sd > 0 ? d.home : d.away} +${Math.abs(sd).toFixed(0)}%</span>`
                 : '';
+            const srcLabel = (sp.sources && sp.sources.length)
+                ? `blended (${sp.sources.join(' + ')})`
+                : 'unavailable';
+            const moneyRow = (sp.away_money != null || sp.home_money != null)
+                ? `<span class="stat">Money: <b>${_esc(d.away)}</b> ${sp.away_money ?? '—'}% · <b>${_esc(d.home)}</b> ${sp.home_money ?? '—'}%</span>`
+                : `<span class="stat" style="color:var(--text-muted)">Money %: only Action Network reports it · not in this blend</span>`;
             html += `<div class="splits-row">
-                <div class="lbl">Public ML splits — Action Network ${sharpTag}</div>
+                <div class="lbl">Public ML splits — ${_esc(srcLabel)} ${sharpTag}</div>
                 <div class="lane">
                     <span class="stat">Bets: <b>${_esc(d.away)}</b> ${sp.away_bets ?? '—'}% · <b>${_esc(d.home)}</b> ${sp.home_bets ?? '—'}%</span>
-                    <span class="stat">Money: <b>${_esc(d.away)}</b> ${sp.away_money ?? '—'}% · <b>${_esc(d.home)}</b> ${sp.home_money ?? '—'}%</span>
+                    ${moneyRow}
                 </div>
             </div>`;
         }
@@ -1133,23 +1139,38 @@
         }
 
         // 2) Public splits — ML only (splits don't carry to SPR/TOT).
+        // Money% (Action Network) is the sharp fingerprint; bets%
+        // (Covers / VegasInsider) is the square fingerprint. When both
+        // present, the divergence is the signal. When only bets% is
+        // available, fall back to a heavy/light public-side callout.
         const sp = d.splits;
         if (sp && pick.market_type === 'moneyline') {
             const mKey = pick.side === 'home' ? 'home_money' : 'away_money';
             const bKey = pick.side === 'home' ? 'home_bets'  : 'away_bets';
             const m = sp[mKey], b = sp[bKey];
+            const srcLbl = (sp.sources && sp.sources.length > 1)
+                ? ` [${sp.sources.length} sources]` : '';
             if (m != null && b != null) {
                 const diff = Math.round(m - b);
                 if (diff >= 10) {
-                    lines.push(`Public ${m}% money / ${b}% bets on ${sideName} — sharp money divergence (+${diff}pp)`);
+                    lines.push(`Public ${m}% money / ${b}% bets on ${sideName} — sharp money divergence (+${diff}pp)${srcLbl}`);
                 } else if (diff <= -10) {
-                    lines.push(`Public ${m}% money / ${b}% bets on ${sideName} — square money, fade signal (${Math.abs(diff)}pp)`);
+                    lines.push(`Public ${m}% money / ${b}% bets on ${sideName} — square money, fade signal (${Math.abs(diff)}pp)${srcLbl}`);
                 } else if (m >= 65) {
-                    lines.push(`Public heavy on ${sideName} (${m}% money / ${b}% bets) — fading the public if you're on the other side`);
+                    lines.push(`Public heavy on ${sideName} (${m}% money / ${b}% bets)${srcLbl}`);
                 } else if (m <= 35) {
-                    lines.push(`Public light on ${sideName} (${m}% money / ${b}% bets) — contrarian side`);
+                    lines.push(`Public light on ${sideName} (${m}% money / ${b}% bets) — contrarian side${srcLbl}`);
                 } else {
-                    lines.push(`Public split flat (${b}% bets / ${m}% money on ${sideName}) — no public signal`);
+                    lines.push(`Public split flat (${b}% bets / ${m}% money on ${sideName})${srcLbl}`);
+                }
+            } else if (b != null) {
+                // Bets% only — no money% means no sharp/square divergence read.
+                if (b >= 65) {
+                    lines.push(`Public heavy on ${sideName} (${b}% bets)${srcLbl} — money% unavailable`);
+                } else if (b <= 35) {
+                    lines.push(`Public light on ${sideName} (${b}% bets)${srcLbl} — contrarian side`);
+                } else {
+                    lines.push(`Public split roughly even (${b}% bets on ${sideName})${srcLbl}`);
                 }
             }
         }
