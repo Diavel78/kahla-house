@@ -789,6 +789,8 @@ def _fetch_action_for_sport(sport: str) -> dict:
         return out
     games = data.get("games") or []
     events = []
+    games_no_splits = []  # diagnostic: games returned but splits structure wasn't attached
+    sample_top_keys: list[str] = []  # diagnostic: keys on a no-splits game so we can see what changed
     for g in games:
         ht = (g.get("home_team") or {})
         at = (g.get("away_team") or {})
@@ -803,7 +805,20 @@ def _fetch_action_for_sport(sport: str) -> dict:
                 "away_team": a_name,
                 "ml": ml,
             })
-    out = {"events": events, "debug": {**debug, "game_count": len(games), "events_extracted": len(events)}}
+        else:
+            games_no_splits.append(f"{a_name} @ {h_name}")
+            if not sample_top_keys and isinstance(g, dict):
+                sample_top_keys = sorted(list(g.keys()))[:25]
+    out = {
+        "events": events,
+        "debug": {
+            **debug,
+            "game_count":       len(games),
+            "events_extracted": len(events),
+            "games_no_splits":  games_no_splits[:8],
+            "sample_top_keys":  sample_top_keys,
+        },
+    }
     _cache_set(cache_key, out)
     return out
 
@@ -1073,15 +1088,34 @@ def _blend_ml(per_source: dict[str, dict | None]) -> dict:
     }
 
 
-def _fetch_splits(sport: str, away: str, home: str) -> dict | None:
+def _fetch_splits(sport: str, away: str, home: str) -> dict:
     """Multi-source blended splits for one (away, home) pair. Hits
     Action Network (money% + bets%), Covers (bets%), VegasInsider
     (bets%) at the sport level (cached 30 min per source), then
     matches each by two-way team-name containment and blends via
-    `_blend_ml`. Returns None if no source matched."""
+    `_blend_ml`.
+
+    ALWAYS returns a dict so the frontend can display the empty state
+    + per-source diagnostics. Check `sources` (list of matched sources)
+    to know if any data is present. `per_source` carries match status
+    + sample team names + extraction debug for each source — surfaced
+    on the page so we can see WHICH source failed and why instead of
+    silently rendering nothing."""
     action_data = _fetch_action_for_sport(sport)
     covers_data = _fetch_covers_for_sport(sport)
     vi_data     = _fetch_vegasinsider_for_sport(sport)
+
+    def _summary(src_data: dict, ml: dict | None) -> dict:
+        evs = src_data.get("events") or []
+        sample = []
+        for ev in evs[:5]:
+            sample.append(f"{ev.get('away_team', '?')} @ {ev.get('home_team', '?')}")
+        return {
+            "matched":         ml is not None,
+            "events_returned": len(evs),
+            "sample_games":    sample,
+            "fetch_debug":     src_data.get("debug") or {},
+        }
 
     def _find(events: list[dict]) -> dict | None:
         for ev in events:
@@ -1089,14 +1123,34 @@ def _fetch_splits(sport: str, away: str, home: str) -> dict | None:
                 return ev.get("ml")
         return None
 
+    a_ml = _find(action_data.get("events") or [])
+    c_ml = _find(covers_data.get("events") or [])
+    v_ml = _find(vi_data.get("events") or [])
     per_source: dict[str, dict | None] = {
-        "action":       _find(action_data.get("events") or []),
-        "covers":       _find(covers_data.get("events") or []),
-        "vegasinsider": _find(vi_data.get("events") or []),
+        "action":       a_ml,
+        "covers":       c_ml,
+        "vegasinsider": v_ml,
     }
+    diagnostics = {
+        "action":       _summary(action_data, a_ml),
+        "covers":       _summary(covers_data, c_ml),
+        "vegasinsider": _summary(vi_data, v_ml),
+    }
+    sources_tried = ["action", "covers", "vegasinsider"]
+
     if not any(v for v in per_source.values()):
-        return None
-    return _blend_ml(per_source)
+        return {
+            "away_bets":    None, "home_bets":    None,
+            "away_money":   None, "home_money":   None,
+            "sharp_diff":   None,
+            "sources":      [],
+            "sources_tried": sources_tried,
+            "per_source":   diagnostics,
+        }
+    blended = _blend_ml(per_source)
+    blended["sources_tried"] = sources_tried
+    blended["per_source"]    = diagnostics
+    return blended
 
 
 def _walk_splits(node: Any, depth: int = 0) -> dict | None:
