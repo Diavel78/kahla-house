@@ -1006,10 +1006,24 @@
                     const noSplits = (fd.games_no_splits && fd.games_no_splits.length)
                         ? `<div style="margin-top:4px;padding-left:8px;color:var(--orange);font-size:10px">games returned w/o splits: ${_esc(fd.games_no_splits.slice(0,3).join(' · '))}</div>`
                         : '';
+                    // Action: surface top-level response keys when 0 games
+                    // (tells us if the API moved games into a different envelope).
+                    const topKeys = (name === 'action' && fd.top_keys && fd.top_keys.length)
+                        ? `<div style="margin-top:4px;padding-left:8px;color:var(--text-muted);font-size:10px">response keys: ${_esc(fd.top_keys.join(', '))}${fd.status != null ? ` · status ${fd.status}` : ''}</div>`
+                        : '';
+                    // HTML scrapers: list URL attempts so we can see which
+                    // candidate path returned 200 vs 404.
+                    const urlsTried = (fd.urls_tried && fd.urls_tried.length)
+                        ? `<div style="margin-top:4px;padding-left:8px;color:var(--text-muted);font-size:10px">URLs tried: ${
+                            fd.urls_tried.map(u => `${u.url.split('/').slice(-2).join('/')}→${u.status ?? 'err'}`).join(' · ')
+                        }</div>`
+                        : '';
                     return `<div style="padding:6px 8px;background:var(--surface);border-radius:6px;margin-bottom:4px">
                         <div><b style="color:var(--text)">${name}</b>: ${status} · ${evs} games extracted${fetchErr}</div>
                         ${samples ? `<div style="color:var(--text-muted);font-size:10px;margin-top:2px">sample: ${_esc(samples)}</div>` : ''}
                         ${noSplits}
+                        ${topKeys}
+                        ${urlsTried}
                     </div>`;
                 }).join('');
                 html += `<div class="splits-row" style="border-color:rgba(245,158,11,0.3)">

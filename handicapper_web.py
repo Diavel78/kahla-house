@@ -781,10 +781,50 @@ def _fetch_action_for_sport(sport: str) -> dict:
         "Origin":  "https://www.actionnetwork.com",
         "Referer": "https://www.actionnetwork.com/",
     }
-    data = _http_get(url, params={"period": "game", "date": today}, headers=headers)
     debug = {"url": url, "date": today}
+    # Direct fetch (not via _http_get) so we can capture status + response
+    # shape on every call — needed for diagnostics when the API returns
+    # 200 but with an unexpected envelope (which is what's happening now
+    # for matchups that should have splits).
+    try:
+        r = requests.get(url, params={"period": "game", "date": today},
+                         headers=headers, timeout=HTTP_TIMEOUT)
+        debug["status"] = r.status_code
+        if r.status_code != 200:
+            debug["body_sample"] = (r.text or "")[:200]
+            out = {"events": [], "debug": {**debug, "error": f"HTTP {r.status_code}"}}
+            _cache_set(cache_key, out)
+            return out
+        try:
+            data = r.json()
+        except Exception as e:
+            debug["body_sample"] = (r.text or "")[:200]
+            out = {"events": [], "debug": {**debug, "error": f"json parse: {e}"}}
+            _cache_set(cache_key, out)
+            return out
+    except Exception as e:
+        out = {"events": [], "debug": {**debug, "error": f"fetch: {e}"}}
+        _cache_set(cache_key, out)
+        return out
+    # Surface top-level keys so we can see if Action moved games to a
+    # different envelope (e.g. wrapped inside `data` / `results`).
+    if isinstance(data, dict):
+        debug["top_keys"] = sorted(list(data.keys()))[:20]
+    # Try several known game-list locations — Action has reshuffled
+    # this envelope before. First match wins.
+    if isinstance(data, dict):
+        candidate = (
+            data.get("games")
+            or (data.get("data") or {}).get("games")
+            or (data.get("results") or {}).get("games")
+            or data.get("scoreboard", {}).get("games")
+            or []
+        )
+        # Wrap the data dict back in a games-key shape for the rest of
+        # the parsing so the existing code below works unchanged.
+        data = {"games": candidate, **{k: v for k, v in data.items() if k != "games"}}
     if not data:
-        out = {"events": [], "debug": {**debug, "error": "fetch failed"}}
+        out = {"events": [], "debug": {**debug, "error": "empty response"}}
         _cache_set(cache_key, out)
         return out
     games = data.get("games") or []
@@ -819,7 +859,10 @@ def _fetch_action_for_sport(sport: str) -> dict:
             "sample_top_keys":  sample_top_keys,
         },
     }
-    _cache_set(cache_key, out)
+    # Only cache when we got events. Empty result is almost always a
+    # bug we need to iterate on, not a 30-min-stable state.
+    if events:
+        _cache_set(cache_key, out)
     return out
 
 
@@ -849,28 +892,44 @@ def _fetch_covers_for_sport(sport: str) -> dict:
     if cached is not None:
         return cached
 
-    url = f"https://www.covers.com/sport/{league.lower()}/picks-consensus"
-    debug = {"url": url}
-    try:
-        r = requests.get(url, headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml",
-        }, timeout=HTTP_TIMEOUT)
-        debug["status"] = r.status_code
-        debug["html_len"] = len(r.text or "")
-        if r.status_code != 200:
-            out = {"events": [], "debug": {**debug, "error": f"HTTP {r.status_code}"}}
-            _cache_set(cache_key, out)
-            return out
-        html = r.text or ""
-    except Exception as e:
-        out = {"events": [], "debug": {**debug, "error": f"fetch: {e}"}}
-        _cache_set(cache_key, out)
-        return out
+    # Covers redesigns their consensus page paths every season or two.
+    # Try the known historical patterns; first 200 wins.
+    candidate_urls = [
+        f"https://www.covers.com/sports/{league}/matchups",
+        f"https://contests.covers.com/consensus/topconsensus/{league.lower()}/expert/recent",
+        f"https://www.covers.com/sport/{league.lower()}/picks-consensus",
+        f"https://www.covers.com/picks/{league.lower()}",
+    ]
+    debug: dict = {"urls_tried": []}
+    html: str | None = None
+    final_url: str | None = None
+    for u in candidate_urls:
+        try:
+            r = requests.get(u, headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml",
+            }, timeout=HTTP_TIMEOUT, allow_redirects=True)
+            debug["urls_tried"].append({"url": u, "status": r.status_code,
+                                        "html_len": len(r.text or "")})
+            if r.status_code == 200 and (r.text or ""):
+                html = r.text
+                final_url = u
+                break
+        except Exception as e:
+            debug["urls_tried"].append({"url": u, "error": str(e)})
+    if html is None:
+        # Don't cache failures — iteration cost is too high if a wrong
+        # URL gets pinned for 30 min.
+        return {"events": [], "debug": {**debug, "error": "all URLs returned non-200"}}
+    debug["url"] = final_url
+    debug["html_len"] = len(html)
 
     events = _parse_covers_consensus(html, debug)
     out = {"events": events, "debug": {**debug, "events_extracted": len(events)}}
-    _cache_set(cache_key, out)
+    # Only cache when we got events. Empty extractions usually mean the
+    # selector regex needs another pattern — don't pin a broken result.
+    if events:
+        _cache_set(cache_key, out)
     return out
 
 
@@ -960,24 +1019,35 @@ def _fetch_vegasinsider_for_sport(sport: str) -> dict:
     if cached is not None:
         return cached
 
-    url = f"https://www.vegasinsider.com/{league}/matchups/"
-    debug = {"url": url}
-    try:
-        r = requests.get(url, headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml",
-        }, timeout=HTTP_TIMEOUT)
-        debug["status"] = r.status_code
-        debug["html_len"] = len(r.text or "")
-        if r.status_code != 200:
-            out = {"events": [], "debug": {**debug, "error": f"HTTP {r.status_code}"}}
-            _cache_set(cache_key, out)
-            return out
-        html = r.text or ""
-    except Exception as e:
-        out = {"events": [], "debug": {**debug, "error": f"fetch: {e}"}}
-        _cache_set(cache_key, out)
-        return out
+    candidate_urls = [
+        f"https://www.vegasinsider.com/{league}/matchups/",
+        f"https://www.vegasinsider.com/{league}/odds/las-vegas/",
+        f"https://www.vegasinsider.com/{league}/scores/",
+        f"https://www.vegasinsider.com/{league}/",
+    ]
+    debug: dict = {"urls_tried": []}
+    html: str | None = None
+    final_url: str | None = None
+    for u in candidate_urls:
+        try:
+            r = requests.get(u, headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml",
+            }, timeout=HTTP_TIMEOUT, allow_redirects=True)
+            debug["urls_tried"].append({"url": u, "status": r.status_code,
+                                        "html_len": len(r.text or "")})
+            if r.status_code == 200 and (r.text or ""):
+                html = r.text
+                final_url = u
+                break
+        except Exception as e:
+            debug["urls_tried"].append({"url": u, "error": str(e)})
+    if html is None:
+        # Don't cache failures — iteration cost is too high if a wrong
+        # URL gets pinned for 30 min.
+        return {"events": [], "debug": {**debug, "error": "all URLs returned non-200"}}
+    debug["url"] = final_url
+    debug["html_len"] = len(html)
 
     events = _parse_vi_consensus(html, debug)
     out = {"events": events, "debug": {**debug, "events_extracted": len(events)}}
