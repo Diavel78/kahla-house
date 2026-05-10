@@ -1686,6 +1686,23 @@ def _amer_to_prob_py(p):
     return 0.5
 
 
+def _prob_to_amer_py(prob):
+    """Inverse of `_amer_to_prob_py`. Used to convert Polymarket
+    share prices (0-1, = implied probability) to American odds for
+    storage in `bot_picks.actual_fill_price`."""
+    if prob is None:
+        return None
+    try:
+        prob = float(prob)
+    except (TypeError, ValueError):
+        return None
+    if not (0 < prob < 1):
+        return None
+    if prob >= 0.5:
+        return int(round(-prob * 100.0 / (1.0 - prob)))
+    return int(round((1.0 - prob) * 100.0 / prob))
+
+
 def _clv_extract_match_info(meta):
     """Parse Polymarket marketMetadata into the fields we need to look
     up the corresponding row in our markets table.
@@ -3618,6 +3635,223 @@ def api_handicapper_sport_counts():
             continue
         counts[s] = counts.get(s, 0) + 1
     return jsonify({"ok": True, "counts": counts, "now_iso": now.isoformat()})
+
+
+# ─────────────── Polymarket position → bot_picks sync ───────────────
+# Goal: the user's real Polymarket positions become the source of truth
+# for "did I take this pick" + actual fill price + resolution. Two
+# things happen per position:
+#   1. If there's a matching `bot_picks` row (same market_id /
+#      market_type / side) without actual_fill_* populated → update
+#      it with the user's actual entry.
+#   2. If no matching pick exists → auto-create a `bot_picks` row with
+#      `auto_linked=true` so the user's off-script bets still appear
+#      in pending / settled stats.
+#
+# Resolution: when PMM settles a position (closed, realized P&L
+# populated), grade the linked bot_pick from PMM rather than waiting
+# on ESPN. ESPN resolver still handles unlinked picks (Leans the user
+# didn't actually bet).
+#
+# Dry-run mode (default) returns the planned actions as JSON without
+# touching the DB — used to validate the mapping logic before flipping
+# to writes.
+
+def _pmm_position_to_intent(slug: str, pos: dict) -> dict:
+    """Map one Polymarket position into a sync intent dict.
+
+    Returns one of:
+      {action: 'skip',   reason: '...', slug: ...}
+      {action: 'sync',   slug, market_id, market_type, side,
+                          actual_fill_price, actual_fill_qty, pmm_side,
+                          polymarket_outcome, entry_line, event_name,
+                          event_start, sport}
+    The caller decides whether to update an existing pick, auto-create
+    a new one, or no-op based on what's already in `bot_picks`.
+    """
+    meta = pos.get("marketMetadata") or {}
+    extracted = _clv_extract_match_info(meta)
+    if not extracted:
+        return {"action": "skip", "reason": "non-sport / unparseable meta", "slug": slug}
+
+    matched = _clv_find_market(extracted)
+    if not matched:
+        return {"action": "skip", "reason": "no markets row for this game", "slug": slug,
+                "extracted": extracted}
+
+    market_id, away, home, user_side, event_start = matched
+    market_type = extracted["market_type"]
+
+    # TOT: override side from the outcome string (over/under) since
+    # `_clv_find_market` matches by team name and TOT has no team.
+    if market_type == "total":
+        raw_outcome_low = (extracted.get("raw_outcome") or "").lower()
+        if "over" in raw_outcome_low:
+            user_side = "over"
+        elif "under" in raw_outcome_low:
+            user_side = "under"
+        else:
+            return {"action": "skip",
+                    "reason": f"can't infer over/under from outcome={extracted.get('raw_outcome')}",
+                    "slug": slug}
+
+    # PMM share price (cost/qty, 0-1) → American odds for storage in
+    # actual_fill_price. PMM `netPosition` sign tells us YES vs NO.
+    net = _safe_float(pos.get("netPosition")) or 0
+    qty = abs(net)
+    cost = _safe_float(pos.get("cost"))
+    if qty <= 0 or cost is None:
+        return {"action": "skip", "reason": "no fill yet (qty=0 or cost missing)", "slug": slug}
+    entry_share_price = cost / qty
+    actual_fill_amer = _prob_to_amer_py(entry_share_price)
+
+    return {
+        "action":             "sync",
+        "slug":               slug,
+        "polymarket_outcome": extracted.get("raw_outcome") or (meta.get("outcome") or ""),
+        "market_id":          market_id,
+        "market_type":        market_type,
+        "side":               user_side,
+        "actual_fill_price":  actual_fill_amer,
+        "actual_fill_qty":    qty,
+        "actual_fill_share":  round(entry_share_price, 4),
+        "pmm_side":           "YES" if net >= 0 else "NO",
+        "entry_line":         extracted.get("point"),
+        "event_name":         f"{away} @ {home}",
+        "event_start":        event_start,
+        "sport":              extracted["sport"],
+    }
+
+
+def _pmm_units_for_qty(qty: float) -> tuple[int, str]:
+    """Map an actual fill quantity to the closest (units, confidence)
+    pair from our 1/3/5/10 tier scheme. 1 contract = 1 unit per the
+    user's convention. Rounds to nearest tier."""
+    q = max(1, int(round(qty)))
+    tiers = [(1, "low"), (3, "medium"), (5, "high"), (10, "whale")]
+    best = min(tiers, key=lambda t: abs(t[0] - q))
+    return best
+
+
+def _pmm_sync_run(dry_run: bool = True) -> dict:
+    """Pull current Polymarket positions and reconcile against bot_picks.
+    Default dry-run returns the planned actions without writing.
+    `dry_run=False` performs the updates / inserts."""
+    sb = get_supabase()
+    if sb is None:
+        return {"ok": False, "error": "Supabase not configured"}
+    try:
+        client = get_client()
+        positions = fetch_positions(client)
+    except Exception as e:
+        return {"ok": False, "error": f"PMM fetch: {e}"}
+
+    summary: dict = {
+        "ok":              True,
+        "dry_run":         dry_run,
+        "total_positions": len(positions),
+        "linked":          0,
+        "auto_created":    0,
+        "already_linked":  0,
+        "skipped":         0,
+        "errors":          [],
+    }
+    actions: list[dict] = []
+
+    for slug, pos in positions:
+        intent = _pmm_position_to_intent(slug, pos)
+        if intent.get("action") != "sync":
+            summary["skipped"] += 1
+            actions.append(intent)
+            continue
+
+        # Look up an existing pick for this game/side.
+        try:
+            existing = (sb.table("bot_picks")
+                        .select("id,actual_fill_price,units,confidence,asked_by")
+                        .eq("market_id", intent["market_id"])
+                        .eq("market_type", intent["market_type"])
+                        .eq("side", intent["side"])
+                        .order("picked_at", desc=True)
+                        .limit(1).execute().data) or []
+        except Exception as e:
+            summary["errors"].append(f"lookup {slug}: {e}")
+            actions.append({**intent, "action": "error", "error": str(e)})
+            continue
+
+        update_fields = {
+            "actual_fill_price":  intent["actual_fill_price"],
+            "actual_fill_qty":    intent["actual_fill_qty"],
+            "actual_fill_at":     datetime.now(timezone.utc).isoformat(),
+            "polymarket_slug":    intent["slug"],
+            "polymarket_outcome": intent["polymarket_outcome"],
+            "pmm_side":           intent["pmm_side"],
+        }
+
+        if existing:
+            pick = existing[0]
+            already_linked = pick.get("actual_fill_price") is not None
+            if already_linked:
+                summary["already_linked"] += 1
+                actions.append({**intent, "action": "already_linked", "pick_id": pick["id"]})
+                continue
+            actions.append({**intent, "action": "link", "pick_id": pick["id"]})
+            if not dry_run:
+                try:
+                    sb.table("bot_picks").update(update_fields).eq("id", pick["id"]).execute()
+                except Exception as e:
+                    summary["errors"].append(f"link {slug}: {e}")
+            summary["linked"] += 1
+        else:
+            # Auto-create. Recommendation = actual fill (no bot read
+            # exists, so the "recommendation" mirrors what the user did).
+            units, conf = _pmm_units_for_qty(intent["actual_fill_qty"])
+            insert_row = {
+                "asked_by":           "pmm_sync",
+                "query_text":         "auto-linked from Polymarket position",
+                "market_id":          intent["market_id"],
+                "sport":              intent["sport"],
+                "event_name":         intent["event_name"],
+                "event_start":        intent["event_start"],
+                "market_type":        intent["market_type"],
+                "side":               intent["side"],
+                "entry_book":         "PMM",
+                "entry_price":        intent["actual_fill_price"],
+                "entry_line":         intent.get("entry_line"),
+                "units":              units,
+                "confidence":         conf,
+                "auto_linked":        True,
+                **update_fields,
+            }
+            actions.append({**intent, "action": "auto_create", "row_preview": {
+                "units": units, "confidence": conf,
+                "entry_book": "PMM", "entry_price": intent["actual_fill_price"]}})
+            if not dry_run:
+                try:
+                    sb.table("bot_picks").insert(insert_row).execute()
+                except Exception as e:
+                    summary["errors"].append(f"insert {slug}: {e}")
+            summary["auto_created"] += 1
+
+    summary["actions"] = actions
+    return summary
+
+
+@app.route("/api/handicapper/pmm-sync")
+@admin_required
+def api_pmm_sync():
+    """Reconcile Polymarket positions against bot_picks. Admin only.
+
+    Query params:
+      dry=1 (default) — return the planned actions without writing.
+      dry=0           — actually update / insert rows.
+
+    Response shape (dry or not):
+      {ok, dry_run, total_positions, linked, auto_created, already_linked,
+       skipped, errors, actions: [{action, ...intent}]}
+    """
+    dry = request.args.get("dry", "1") != "0"
+    return jsonify(_pmm_sync_run(dry_run=dry))
 
 
 @app.route("/api/handicapper/pick", methods=["POST"])
