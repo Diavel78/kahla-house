@@ -33,7 +33,12 @@ from storage import supabase_client as db
 log = logging.getLogger(__name__)
 
 
-RESOLVE_LAG_HOURS = 4
+# 0 = check every pending pick from the moment its game starts. The
+# real "is this game over" gate is ESPN state='post', not an arbitrary
+# clock-based cushion. If a game's still in progress, the resolver
+# counts it as `not_final` and tries again next cron tick — cheap and
+# self-correcting. Was 4h, which delayed grading unnecessarily.
+RESOLVE_LAG_HOURS = 0
 
 _ESPN_PATH: dict[str, tuple[str, str]] = {
     "MLB":   ("baseball",   "mlb"),
