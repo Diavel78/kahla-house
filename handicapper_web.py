@@ -1372,6 +1372,26 @@ def _suggest_picks(odds: dict, splits: dict | None = None) -> list[dict]:
                          (cur["gates_cleared"], cur["combined_score"])):
             by_market[c["market_type"]] = c
 
+    # ML / SPR symmetric chalk filter — only one of them survives.
+    # SPR is a leveraged restatement of the ML directional bet, so we
+    # never want both:
+    #   • ML fair ≤ -140 (chalky)   → drop ML, keep SPR (cleaner
+    #     expression of a chalky directional bet at +EV prices).
+    #   • ML fair > -140 (lighter)  → drop SPR, keep ML (the variance
+    #     of the leveraged SPR isn't worth it when ML is reasonable;
+    #     bet the cleaner side).
+    # Runs BEFORE the gate-clearing step so SPR doesn't get into
+    # `chosen` just because its sharp_score happens to be higher than
+    # a non-sharp ML on a near-pickem game.
+    ml_c = by_market.get("moneyline")
+    sp_c = by_market.get("spread")
+    if ml_c and sp_c:
+        ml_fair = ml_c.get("fair_american")
+        if ml_fair is not None and ml_fair <= ML_CHALK_FAIR_CAP:
+            del by_market["moneyline"]
+        else:
+            del by_market["spread"]
+
     # Top pick across all markets — always shown, even as a forced lean.
     all_top = max(by_market.values(),
                   key=lambda c: (c["gates_cleared"], c["combined_score"]))
@@ -1384,32 +1404,6 @@ def _suggest_picks(odds: dict, splits: dict | None = None) -> list[dict]:
             continue
         if c["gates_cleared"]:
             chosen.append(c)
-
-    # ML / SPR exclusion — never both. They're correlated bets on the
-    # same direction.
-    #   1. If ML fair is chalky (≤ -140) AND a SPR alternative exists,
-    #      drop the chalky ML — the SPR is the cleaner expression.
-    #      Heavy chalk ML alone (no SPR) stays, since dropping it would
-    #      leave no ML/SPR pick at all on a game where the user might
-    #      still want one.
-    #   2. Otherwise, pick whichever has the stronger sharp signal;
-    #      tie → prefer ML (lower variance, cleaner bet than its
-    #      leveraged spread).
-    # The chalk-SPR filter (`SPR_CHALK_FAIR_CAP`) still drops a
-    # heavily-juiced SPR earlier; if both are chalky, ML survives.
-    has_ml  = any(c["market_type"] == "moneyline" for c in chosen)
-    has_spr = any(c["market_type"] == "spread"    for c in chosen)
-    if has_ml and has_spr:
-        ml  = next(c for c in chosen if c["market_type"] == "moneyline")
-        spr = next(c for c in chosen if c["market_type"] == "spread")
-        ml_fair = ml.get("fair_american")
-        if ml_fair is not None and ml_fair <= ML_CHALK_FAIR_CAP:
-            drop = ml
-        else:
-            ml_sharp  = ml.get("sharp_score")  or 0
-            spr_sharp = spr.get("sharp_score") or 0
-            drop = spr if ml_sharp >= spr_sharp else ml
-        chosen = [c for c in chosen if c is not drop]
 
     # Stable order: ML/SPR first, then TOT.
     chosen.sort(key=lambda c: 0 if c["market_type"] != "total" else 1)
