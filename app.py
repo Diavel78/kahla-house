@@ -3337,10 +3337,11 @@ def api_handicapper():
 
     now = datetime.now(timezone.utc)
     cutoff_30d = (now - timedelta(days=30)).isoformat()
-    # "Today" = US/Mountain calendar day. User is in MST, so anchoring
-    # to ET (or UTC) shifts the slate boundary out from under them at
-    # ~10pm-1am their time. Single-user app, hardcoded TZ is fine.
-    local_now = now.astimezone(ZoneInfo("America/Denver"))
+    # "Today" = MST calendar day, anchored to America/Phoenix (Arizona
+    # — no DST, MST year-round). Don't use America/Denver: it flips to
+    # MDT in summer and would slide the boundary an hour. Single-user
+    # app, hardcoded TZ is fine.
+    local_now = now.astimezone(ZoneInfo("America/Phoenix"))
     today_start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_start_iso = today_start_local.astimezone(timezone.utc).isoformat()
     cutoff_7d = (now - timedelta(days=7)).isoformat()
