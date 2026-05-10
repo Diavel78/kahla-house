@@ -615,13 +615,12 @@
             sigChips.push(`<span class="chip kickoff">${_fmtKickoff(r.event_start)}</span>`);
         }
 
-        const reasons = (r.reasons && r.reasons.length)
-            ? `<ul class="reasons">${r.reasons.map(b => `<li>${_esc(b)}</li>`).join('')}</ul>`
-            : '';
-        const analysis = r.analysis_md
-            ? `<button class="expand-btn" onclick="this.parentElement.classList.toggle('expanded')">Show full analysis ▾</button>
-               <div class="analysis">${_esc(r.analysis_md)}</div>`
-            : '';
+        // Reason bullets + analysis stay in the DB (`reasons` /
+        // `analysis_md` columns) for weekly regression review of the
+        // bot's logic — but they're not rendered on the pending /
+        // settled lists. Once a pick is logged the user has already
+        // seen the reasoning; the list just needs to be a clean
+        // tally of what's on the board.
 
         return `
             <li class="pick ${cls}" data-pick-id="${r.id}">
@@ -637,8 +636,6 @@
                     <span class="signals">${sigChips.join('')}</span>
                 </div>
                 ${resultHtml}
-                ${reasons}
-                ${analysis}
                 <div class="pick-actions">
                     ${kind === 'pending' ? `
                         <button class="settle-btn settle-won"  onclick="settlePick(${r.id}, 'won',  this)">✓ Won</button>
