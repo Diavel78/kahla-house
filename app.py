@@ -3337,11 +3337,12 @@ def api_handicapper():
 
     now = datetime.now(timezone.utc)
     cutoff_30d = (now - timedelta(days=30)).isoformat()
-    # "Today" = US/Eastern calendar day so it matches the user's mental
-    # model of "today's slate" regardless of UTC midnight.
-    et_now = now.astimezone(ZoneInfo("America/New_York"))
-    today_start_et = et_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_start_iso = today_start_et.astimezone(timezone.utc).isoformat()
+    # "Today" = US/Mountain calendar day. User is in MST, so anchoring
+    # to ET (or UTC) shifts the slate boundary out from under them at
+    # ~10pm-1am their time. Single-user app, hardcoded TZ is fine.
+    local_now = now.astimezone(ZoneInfo("America/Denver"))
+    today_start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_iso = today_start_local.astimezone(timezone.utc).isoformat()
     cutoff_7d = (now - timedelta(days=7)).isoformat()
 
     cols = ("id,picked_at,asked_by,query_text,sport,event_name,event_start,"
