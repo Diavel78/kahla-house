@@ -249,16 +249,30 @@ def _sharp_for_total(o_op, o_cu, u_op, u_cu) -> tuple | None:
     if not (o_avail or u_avail):
         return None
 
-    # Reference snapshot: prefer over (most totals are over-quoted in
-    # our data), fall back to under. Line direction reads the same from
-    # either side; vig direction is INVERTED (under getting more
-    # expensive means UNDER is sharp, mirror of over).
-    if o_avail:
-        ref_op, ref_cu = o_op, o_cu
-        ref_is_over = True
+    # Pick whichever side actually shows movement and use ITS snapshots
+    # for both the score AND the displayed chip. Previously we computed
+    # the score from the over-side (preferred reference) and then
+    # returned the under-side for display — which made the chip show
+    # flat-looking under prices like "-111 → -112" while the score
+    # was actually from a 1.0pt over-line move. Score and display now
+    # come from the same pair, so the chip reflects what moved.
+    def _move_size(op, cu) -> tuple[float, float]:
+        pt = abs((cu.get("line") or 0) - (op.get("line") or 0))
+        px = abs(cu["price_american"] - op["price_american"])
+        return pt, px
+
+    if o_avail and u_avail:
+        o_pt, o_px = _move_size(o_op, o_cu)
+        u_pt, u_px = _move_size(u_op, u_cu)
+        # Bigger line move wins; if line ties, bigger price move wins.
+        if (o_pt, o_px) >= (u_pt, u_px):
+            ref_op, ref_cu, ref_is_over = o_op, o_cu, True
+        else:
+            ref_op, ref_cu, ref_is_over = u_op, u_cu, False
+    elif o_avail:
+        ref_op, ref_cu, ref_is_over = o_op, o_cu, True
     else:
-        ref_op, ref_cu = u_op, u_cu
-        ref_is_over = False
+        ref_op, ref_cu, ref_is_over = u_op, u_cu, False
 
     pt_diff = (ref_cu.get("line") or 0) - (ref_op.get("line") or 0)
     px_diff = ref_cu["price_american"] - ref_op["price_american"]
@@ -268,11 +282,9 @@ def _sharp_for_total(o_op, o_cu, u_op, u_cu) -> tuple | None:
     elif pt_diff < 0:
         side = "under"  # line lowered → under has less room → sharp UNDER
     elif px_diff < 0:
-        # Reference side got more expensive (harder).
-        side = "over" if ref_is_over else "under"
+        side = "over" if ref_is_over else "under"   # ref got harder
     elif px_diff > 0:
-        # Reference side got cheaper (easier) → other side is sharp.
-        side = "under" if ref_is_over else "over"
+        side = "under" if ref_is_over else "over"   # ref got easier → other sharp
     else:
         return None
 
@@ -280,12 +292,6 @@ def _sharp_for_total(o_op, o_cu, u_op, u_cu) -> tuple | None:
                                  ref_op["price_american"], ref_cu["price_american"])
     if score is None:
         return None
-
-    # Prefer sharp-side snapshots for the display pair when available.
-    if side == "over" and o_avail:
-        return side, score, o_op, o_cu
-    if side == "under" and u_avail:
-        return side, score, u_op, u_cu
     return side, score, ref_op, ref_cu
 
 
