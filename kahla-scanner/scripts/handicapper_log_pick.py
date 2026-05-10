@@ -42,6 +42,110 @@ from storage import supabase_client as db
 log = logging.getLogger(__name__)
 
 
+def _fmt_amer(p) -> str:
+    if p is None:
+        return "?"
+    try:
+        v = int(p)
+    except (TypeError, ValueError):
+        return str(p)
+    return f"+{v}" if v > 0 else str(v)
+
+
+def _fmt_pt(v) -> str:
+    if v is None:
+        return ""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if f > 0 and abs(f) < 1000:
+        return f"+{f:g}"
+    return f"{f:g}"
+
+
+def auto_reasons(blob: dict, market_type: str, side: str,
+                 away: str, home: str) -> list[str]:
+    """Plain-English bullets grounded in this market's signals. Mirrors
+    `_buildReasons()` in templates/handicapper.html — keep them in sync.
+    Returns 1-3 bullets. Empty list if blob lacks usable data."""
+    if not blob:
+        return []
+    odds = (blob.get("odds") or {})
+    blk = (odds.get(market_type) or {})
+    mv = blk.get("movement") or {}
+    splits = blob.get("splits") or {}
+
+    side_name = (side or "").upper() if market_type == "total" else (
+        home if side == "home" else away
+    )
+    sharp_side = mv.get("sharp_side")
+    sharp_name = None
+    if sharp_side:
+        sharp_name = (sharp_side or "").upper() if market_type == "total" else (
+            home if sharp_side == "home" else away
+        )
+    score = mv.get("sharp_score") or 0
+
+    lines: list[str] = []
+
+    # Line movement
+    if mv:
+        oP, cP = mv.get("opener_price"), mv.get("current_price")
+        oL, cL = mv.get("opener_line"),  mv.get("current_line")
+        sharp_frag = (
+            f" — sharp side {sharp_name} ({score}/10)" if sharp_name
+            else f" — sharp {score}/10"
+        )
+        if market_type == "moneyline":
+            if oP is not None and cP is not None and oP != cP:
+                lines.append(f"Line moved {_fmt_amer(oP)} → {_fmt_amer(cP)}{sharp_frag}")
+            elif score == 0:
+                lines.append("PIN hasn't budged — flat market, no line signal")
+        else:
+            line_changed = (oL is not None and cL is not None and abs(cL - oL) >= 0.01)
+            if line_changed:
+                label = "Spread" if market_type == "spread" else "Total"
+                lines.append(f"{label} moved {_fmt_pt(oL)} → {_fmt_pt(cL)}{sharp_frag}")
+            elif oP is not None and cP is not None and oP != cP:
+                line_at = f" at {_fmt_pt(cL)}" if cL is not None else ""
+                lines.append(f"Vig moved {_fmt_amer(oP)} → {_fmt_amer(cP)}{line_at}{sharp_frag}")
+            elif score == 0:
+                lines.append("PIN line and vig flat — no movement signal")
+
+    # Public splits — ML only
+    if splits and market_type == "moneyline":
+        m_key = "home_money" if side == "home" else "away_money"
+        b_key = "home_bets"  if side == "home" else "away_bets"
+        m = splits.get(m_key)
+        b = splits.get(b_key)
+        if m is not None and b is not None:
+            try:
+                diff = round(float(m) - float(b))
+            except (TypeError, ValueError):
+                diff = 0
+            if diff >= 10:
+                lines.append(f"Public {m}% money / {b}% bets on {side_name} — sharp money divergence (+{diff}pp)")
+            elif diff <= -10:
+                lines.append(f"Public {m}% money / {b}% bets on {side_name} — square money, fade signal ({abs(diff)}pp)")
+            elif (m or 0) >= 65:
+                lines.append(f"Public heavy on {side_name} ({m}% money / {b}% bets)")
+            elif (m or 0) <= 35:
+                lines.append(f"Public light on {side_name} ({m}% money / {b}% bets) — contrarian side")
+            else:
+                lines.append(f"Public split flat ({b}% bets / {m}% money on {side_name}) — no public signal")
+
+    # Polymarket fair line (only when it differs from PIN's current price)
+    pin_side = (blk.get("pin_current") or {}).get(side) or {}
+    fair = pin_side.get("fair_american")
+    pin_now = pin_side.get("price")
+    if fair is not None and pin_now != fair:
+        pin_frag = f", PIN now {_fmt_amer(pin_now)}" if pin_now is not None else ""
+        lines.append(f"Polymarket target {_fmt_amer(fair)} — devigged fair{pin_frag}")
+
+    return lines[:3]
+
+
 def _already_logged(sb, market_id: str, market_type: str, side: str,
                     lookback_hours: int = 168) -> bool:
     cutoff = (datetime.now(timezone.utc)
@@ -152,6 +256,15 @@ def main(argv: list[str] | None = None) -> int:
             log.error("--signal-blob is not valid JSON: %s", e)
             return 2
 
+    # If caller didn't pass --reason and we have a signal blob, fall back
+    # to auto-generated bullets. Same wording as the on-page suggestion
+    # card so chat-logged picks aren't blank on /handicapper.
+    reasons = list(args.reason) if args.reason else []
+    if not reasons and signal_blob:
+        away, _, home = (m["event_name"] or "").partition(" @ ")
+        reasons = auto_reasons(signal_blob, args.market_type, args.side,
+                               away.strip(), home.strip())
+
     row = {
         "asked_by":    args.asked_by,
         "query_text":  args.query,
@@ -170,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
         "edge_pp":     args.edge_pp,
         "sharp_score": args.sharp_score,
         "analysis_md": analysis_md,
-        "reasons":     args.reason or None,
+        "reasons":     reasons or None,
         "signal_blob": signal_blob,
     }
 
