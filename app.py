@@ -3364,8 +3364,10 @@ def api_handicapper():
                        .limit(500).execute().data) or []
     except Exception as e:
         return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
+    # Today's slate = picks whose game started today (US/Eastern). Same
+    # mental model as the stat buckets above.
     settled = [r for r in settled_30d
-               if (r.get("settled_at") or "") >= today_start_iso]
+               if (r.get("event_start") or "") >= today_start_iso]
 
     def _new_bucket():
         return {"graded": 0, "won": 0, "lost": 0, "push": 0,
@@ -3376,6 +3378,11 @@ def api_handicapper():
     overall_30d    = _new_bucket()
     by_conf: dict = {c: _new_bucket()
                      for c in ("low", "medium", "high", "whale")}
+    # Bucket by EVENT_START, not settled_at. The bettor's "today" =
+    # today's slate (picks for games happening today), not "what the
+    # resolver happened to grade between UTC midnights". A pick on
+    # tonight's game made + graded today belongs in TODAY regardless of
+    # when the cron tick that updated the row fired.
     for r in settled_30d:
         st = r.get("status")
         if st not in ("won", "lost", "push"):
@@ -3384,18 +3391,18 @@ def api_handicapper():
             pnl = float(r.get("pnl_units") or 0)
         except (TypeError, ValueError):
             pnl = 0.0
-        settled_at = r.get("settled_at") or ""
+        event_start = r.get("event_start") or ""
         for bucket in (overall_30d, by_conf.get(r.get("confidence"))):
             if bucket is None:
                 continue
             bucket["graded"] += 1
             bucket[st] += 1
             bucket["units"] += pnl
-        if settled_at >= cutoff_7d:
+        if event_start >= cutoff_7d:
             overall_week["graded"] += 1
             overall_week[st] += 1
             overall_week["units"] += pnl
-        if settled_at >= today_start_iso:
+        if event_start >= today_start_iso:
             overall_today["graded"] += 1
             overall_today[st] += 1
             overall_today["units"] += pnl
