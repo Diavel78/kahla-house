@@ -966,26 +966,58 @@
             html += '</div>';
         }
 
-        // Splits
+        // Splits — always render the row so missing data is visible
+        // and per-source diagnostics surface when nothing matched.
         if (d.splits) {
             const sp = d.splits;
+            const matched = (sp.sources && sp.sources.length > 0);
             const sd = sp.sharp_diff;
             const sharpTag = (sd != null && Math.abs(sd) >= 10)
                 ? `<span class="sharp-tag">SHARP ${sd > 0 ? d.home : d.away} +${Math.abs(sd).toFixed(0)}%</span>`
                 : '';
-            const srcLabel = (sp.sources && sp.sources.length)
+            const srcLabel = matched
                 ? `blended (${sp.sources.join(' + ')})`
-                : 'unavailable';
-            const moneyRow = (sp.away_money != null || sp.home_money != null)
-                ? `<span class="stat">Money: <b>${_esc(d.away)}</b> ${sp.away_money ?? '—'}% · <b>${_esc(d.home)}</b> ${sp.home_money ?? '—'}%</span>`
-                : `<span class="stat" style="color:var(--text-muted)">Money %: only Action Network reports it · not in this blend</span>`;
-            html += `<div class="splits-row">
-                <div class="lbl">Public ML splits — ${_esc(srcLabel)} ${sharpTag}</div>
-                <div class="lane">
-                    <span class="stat">Bets: <b>${_esc(d.away)}</b> ${sp.away_bets ?? '—'}% · <b>${_esc(d.home)}</b> ${sp.home_bets ?? '—'}%</span>
-                    ${moneyRow}
-                </div>
-            </div>`;
+                : 'no match — see diagnostics below';
+            if (matched) {
+                const moneyRow = (sp.away_money != null || sp.home_money != null)
+                    ? `<span class="stat">Money: <b>${_esc(d.away)}</b> ${sp.away_money ?? '—'}% · <b>${_esc(d.home)}</b> ${sp.home_money ?? '—'}%</span>`
+                    : `<span class="stat" style="color:var(--text-muted)">Money %: only Action Network reports it · not in this blend</span>`;
+                html += `<div class="splits-row">
+                    <div class="lbl">Public ML splits — ${_esc(srcLabel)} ${sharpTag}</div>
+                    <div class="lane">
+                        <span class="stat">Bets: <b>${_esc(d.away)}</b> ${sp.away_bets ?? '—'}% · <b>${_esc(d.home)}</b> ${sp.home_bets ?? '—'}%</span>
+                        ${moneyRow}
+                    </div>
+                </div>`;
+            } else {
+                // Empty state — surface per-source diagnostics inline.
+                // If you see this in production, that's the iteration
+                // signal: which source returned events, and was the
+                // matched game one of the no-splits ones?
+                const ps = sp.per_source || {};
+                const tried = sp.sources_tried || ['action', 'covers', 'vegasinsider'];
+                const debugRows = tried.map(name => {
+                    const s = ps[name] || {};
+                    const status = s.matched ? '✓ matched' : '✗ no match';
+                    const evs = s.events_returned ?? '?';
+                    const samples = (s.sample_games || []).slice(0, 3).join(' · ');
+                    const fd = s.fetch_debug || {};
+                    const fetchErr = fd.error ? ` · err: ${_esc(fd.error)}` : '';
+                    const noSplits = (fd.games_no_splits && fd.games_no_splits.length)
+                        ? `<div style="margin-top:4px;padding-left:8px;color:var(--orange);font-size:10px">games returned w/o splits: ${_esc(fd.games_no_splits.slice(0,3).join(' · '))}</div>`
+                        : '';
+                    return `<div style="padding:6px 8px;background:var(--surface);border-radius:6px;margin-bottom:4px">
+                        <div><b style="color:var(--text)">${name}</b>: ${status} · ${evs} games extracted${fetchErr}</div>
+                        ${samples ? `<div style="color:var(--text-muted);font-size:10px;margin-top:2px">sample: ${_esc(samples)}</div>` : ''}
+                        ${noSplits}
+                    </div>`;
+                }).join('');
+                html += `<div class="splits-row" style="border-color:rgba(245,158,11,0.3)">
+                    <div class="lbl" style="color:var(--orange)">Public ML splits — ${_esc(srcLabel)}</div>
+                    <div style="font-size:11px;color:var(--text-secondary);margin-bottom:8px">No source matched this game. Per-source state:</div>
+                    ${debugRows}
+                </div>`;
+            }
         }
 
         // Pitchers (MLB only)
