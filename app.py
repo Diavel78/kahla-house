@@ -3518,8 +3518,31 @@ def api_handicapper_games():
     except Exception as e:
         return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
 
+    # Drop phantom markets — rows that no book has quoted in the last
+    # 24h. Markets table is never closed-out (CLAUDE.md note), so stale
+    # entries linger and previously showed up as "Tampa @ Montreal"
+    # ghost games. Real games (incl. ones with no PIN coverage) have
+    # SOMEONE quoting them; phantoms have nobody.
+    market_ids = [m["id"] for m in rows]
+    live_ids: set[str] = set()
+    if market_ids:
+        cutoff = (now - timedelta(hours=24)).isoformat()
+        try:
+            snap_rows = (sb.table("book_snapshots")
+                         .select("market_id")
+                         .in_("market_id", market_ids)
+                         .gte("captured_at", cutoff)
+                         .limit(5000).execute().data) or []
+            live_ids = {r["market_id"] for r in snap_rows if r.get("market_id")}
+        except Exception:
+            # Filter query failed — fall through unfiltered rather than
+            # black-holing the games tab.
+            live_ids = set(market_ids)
+
     games = []
     for m in rows:
+        if m["id"] not in live_ids:
+            continue
         en = m.get("event_name") or ""
         away = home = ""
         if " @ " in en:
@@ -3562,15 +3585,34 @@ def api_handicapper_sport_counts():
     before = (now + timedelta(hours=48)).isoformat()
     try:
         rows = (sb.table("markets")
-                .select("sport")
+                .select("id,sport")
                 .eq("status", "active")
                 .gte("event_start", after)
                 .lte("event_start", before)
                 .limit(2000).execute().data) or []
     except Exception as e:
         return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
+
+    # Same phantom-market filter as /api/handicapper/games so the tab
+    # badges don't count rows nobody quotes.
+    market_ids = [r["id"] for r in rows if r.get("id")]
+    live_ids: set[str] = set()
+    if market_ids:
+        cutoff = (now - timedelta(hours=24)).isoformat()
+        try:
+            snap_rows = (sb.table("book_snapshots")
+                         .select("market_id")
+                         .in_("market_id", market_ids)
+                         .gte("captured_at", cutoff)
+                         .limit(20000).execute().data) or []
+            live_ids = {r["market_id"] for r in snap_rows if r.get("market_id")}
+        except Exception:
+            live_ids = set(market_ids)
+
     counts: dict[str, int] = {}
     for r in rows:
+        if r.get("id") not in live_ids:
+            continue
         s = (r.get("sport") or "").upper()
         if not s:
             continue
