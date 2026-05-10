@@ -221,13 +221,17 @@
         .suggestion-card .pick-line .pick-units.units-5  { background: var(--green-dim);  color: var(--green); }
         .suggestion-card .pick-line .pick-units.units-10 { background: var(--gold-dim);   color: var(--gold); font-weight: 700; }
         .suggestion-card .pick-meta { font-size: 12px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; }
+        .suggestion-card .why { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); list-style: none; font-size: 13px; line-height: 1.55; color: var(--text); }
+        .suggestion-card .why li { padding: 3px 0 3px 16px; position: relative; }
+        .suggestion-card .why li::before { content: '•'; position: absolute; left: 4px; color: var(--blue); font-weight: 700; }
+        .suggestion-card.soft .why li::before { color: var(--orange); }
         .suggestion-card .actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
         .suggestion-card button { padding: 8px 14px; border-radius: 8px; font-size: 12px; cursor: pointer; font-family: inherit; border: 1px solid var(--border-light); background: var(--surface-2); color: var(--text); }
         .suggestion-card button.primary { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
         .suggestion-card button:hover { border-color: var(--blue); }
         .suggestion-pass { padding: 12px 16px; background: var(--surface-2); border: 1px dashed var(--border); border-radius: 10px; font-size: 13px; color: var(--text-secondary); margin-bottom: 18px; }
 
-        .market-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 18px; }
+        .market-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-bottom: 18px; }
         .market-card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
         .market-card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 8px; }
         .market-card .row { font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6; }
@@ -836,6 +840,10 @@
                     : '';
                 const meta = `sharp ${s.sharp_score || 0}${splitsFrag} · combined ${(s.combined_score*100).toFixed(0)}/100`;
                 const pinNow = (s.pin_current != null) ? ` · PIN now ${_fmtAmer(s.pin_current)}` : '';
+                const why = _buildReasons(s, d);
+                const whyHtml = why.length
+                    ? `<ul class="why">${why.map(b => `<li>${_esc(b)}</li>`).join('')}</ul>`
+                    : '';
                 html += `<div class="${cardCls}">
                     <div class="${headingCls}">${_esc(headingText)}</div>
                     <div class="pick-line">
@@ -845,6 +853,7 @@
                     </div>
                     <div class="pick-meta">Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow}</div>
                     <div class="pick-meta">${meta}</div>
+                    ${whyHtml}
                     ${s.gates_cleared ? '' : `<div class="soft-note">Sharp gate not cleared (need sharp ≥ 4). Chalk-flat market; this is the best read available — treat as 1u lean only.</div>`}
                     <div class="actions">
                         <button class="primary" onclick="openLog(false, ${i})">Log this pick</button>
@@ -860,12 +869,18 @@
             </div>`;
         }
 
-        // Markets grid
-        html += '<div class="market-grid">';
-        for (const mt of ['moneyline', 'spread', 'total']) {
-            html += renderMarketCard(mt, d.odds[mt] || {}, d);
+        // Markets grid — only render the markets the bot actually
+        // picked. If you pick ML, you see ML; if you pick ML + TOT,
+        // you see those two. Cuts the visual noise of irrelevant data.
+        const pickedMarkets = new Set(suggestions.map(s => s.market_type));
+        if (pickedMarkets.size) {
+            html += '<div class="market-grid">';
+            for (const mt of ['moneyline', 'spread', 'total']) {
+                if (!pickedMarkets.has(mt)) continue;
+                html += renderMarketCard(mt, d.odds[mt] || {}, d);
+            }
+            html += '</div>';
         }
-        html += '</div>';
 
         // Splits
         if (d.splits) {
@@ -1059,7 +1074,7 @@
         document.getElementById('lmSelection').value = _pendingPick.label;
         document.getElementById('lmUnits').value      = String(_pendingPick.seed_units || 1);
         document.getElementById('lmConfidence').value = _pendingPick.seed_conf || 'medium';
-        document.getElementById('lmReasons').value    = _buildReasons(_pendingPick, _lastDossier);
+        document.getElementById('lmReasons').value    = _buildReasons(_pendingPick, _lastDossier).join('\n');
         document.getElementById('lmAnalysis').value   = '';
         document.getElementById('logModal').classList.add('show');
     }
@@ -1076,54 +1091,86 @@
         return `${market} · ${sideName}${lineFrag} @ ${_fmtAmer(s.fair_american)} (PMM target)`;
     }
     function _buildReasons(pick, d) {
-        // Generate 1-3 bullet reasons grounded in THIS pick's actual
-        // signals (PIN movement on this market, splits, edge). Pre-fills
-        // the modal so the bullets match the bet — not a hardcoded
-        // template from a different market.
-        if (!pick || !d) return '';
+        // 2-3 plain-English bullets explaining the pick. Grounded in
+        // this market's actual signals (PIN line move, public splits,
+        // PIN devig target). Returns an ARRAY of bullet strings so the
+        // suggestion card and the modal textarea can both consume it.
+        if (!pick || !d) return [];
         const lines = [];
         const blk = (d.odds || {})[pick.market_type] || {};
         const mv = blk.movement;
         const sideName = pick.market_type === 'total'
             ? pick.side.toUpperCase()
             : (pick.side === 'home' ? d.home : d.away);
+        const sharpName = mv && mv.sharp_side
+            ? (pick.market_type === 'total'
+                ? mv.sharp_side.toUpperCase()
+                : (mv.sharp_side === 'home' ? d.home : d.away))
+            : null;
+        const score = mv && mv.sharp_score != null ? mv.sharp_score : 0;
 
-        // PIN movement (if relevant to this side or just any movement on this market).
+        // 1) Line movement — narrate per market type.
         if (mv) {
-            const oFrag = mv.opener_line != null ? ` (${_fmtPt(mv.opener_line)})` : '';
-            const cFrag = mv.current_line != null ? ` (${_fmtPt(mv.current_line)})` : '';
-            const sharpName = pick.market_type === 'total'
-                ? (mv.sharp_side || '').toUpperCase()
-                : (mv.sharp_side === 'home' ? d.home : d.away);
-            lines.push(`PIN: ${_fmtAmer(mv.opener_price)}${oFrag} → ${_fmtAmer(mv.current_price)}${cFrag} — sharp ${sharpName} (${mv.sharp_score})`);
-        }
-
-        // Polymarket entry target — PIN devigged fair on this side.
-        const pinSide = (blk.pin_current || {})[pick.side] || {};
-        if (pinSide.fair_american != null) {
-            const lineFrag = pick.line != null ? ` @ ${_fmtPt(pick.line)}` : '';
-            lines.push(`Polymarket target: ${_fmtAmer(pinSide.fair_american)}${lineFrag} (PIN devig fair)`);
-        }
-
-        // Splits divergence — only if material (≥10% gap between money and bets on this side).
-        const sp = d.splits;
-        if (sp && pick.market_type === 'moneyline') {
-            const moneyKey = pick.side === 'home' ? 'home_money' : 'away_money';
-            const betsKey  = pick.side === 'home' ? 'home_bets'  : 'away_bets';
-            const m = sp[moneyKey];
-            const b = sp[betsKey];
-            if (m != null && b != null) {
-                const diff = Math.round(m - b);
-                if (Math.abs(diff) >= 10) {
-                    const tag = diff > 0 ? `sharp money on ${sideName}` : `square money on ${sideName} (fade)`;
-                    lines.push(`Splits ${b}/${m} bets/money on ${sideName} — ${tag}`);
-                } else {
-                    lines.push(`Splits ${b}% bets / ${m}% money on ${sideName} — flat (no divergence)`);
+            const oP = mv.opener_price, cP = mv.current_price;
+            const oL = mv.opener_line, cL = mv.current_line;
+            const sharpFrag = sharpName
+                ? ` — sharp side ${sharpName} (${score}/10)`
+                : ` — sharp ${score}/10`;
+            if (pick.market_type === 'moneyline') {
+                if (oP != null && cP != null && oP !== cP) {
+                    lines.push(`Line moved ${_fmtAmer(oP)} → ${_fmtAmer(cP)}${sharpFrag}`);
+                } else if (score === 0) {
+                    lines.push('PIN hasn\'t budged — flat market, no line signal');
+                }
+            } else {
+                // SPR / TOT — line is primary, vig is secondary
+                const lineChanged = (oL != null && cL != null && Math.abs(cL - oL) >= 0.01);
+                if (lineChanged) {
+                    const label = pick.market_type === 'spread' ? 'Spread' : 'Total';
+                    lines.push(`${label} moved ${_fmtPt(oL)} → ${_fmtPt(cL)}${sharpFrag}`);
+                } else if (oP != null && cP != null && oP !== cP) {
+                    const lineAt = cL != null ? ` at ${_fmtPt(cL)}` : '';
+                    lines.push(`Vig moved ${_fmtAmer(oP)} → ${_fmtAmer(cP)}${lineAt}${sharpFrag}`);
+                } else if (score === 0) {
+                    lines.push('PIN line and vig flat — no movement signal');
                 }
             }
         }
 
-        return lines.join('\n');
+        // 2) Public splits — ML only (splits don't carry to SPR/TOT).
+        const sp = d.splits;
+        if (sp && pick.market_type === 'moneyline') {
+            const mKey = pick.side === 'home' ? 'home_money' : 'away_money';
+            const bKey = pick.side === 'home' ? 'home_bets'  : 'away_bets';
+            const m = sp[mKey], b = sp[bKey];
+            if (m != null && b != null) {
+                const diff = Math.round(m - b);
+                if (diff >= 10) {
+                    lines.push(`Public ${m}% money / ${b}% bets on ${sideName} — sharp money divergence (+${diff}pp)`);
+                } else if (diff <= -10) {
+                    lines.push(`Public ${m}% money / ${b}% bets on ${sideName} — square money, fade signal (${Math.abs(diff)}pp)`);
+                } else if (m >= 65) {
+                    lines.push(`Public heavy on ${sideName} (${m}% money / ${b}% bets) — fading the public if you're on the other side`);
+                } else if (m <= 35) {
+                    lines.push(`Public light on ${sideName} (${m}% money / ${b}% bets) — contrarian side`);
+                } else {
+                    lines.push(`Public split flat (${b}% bets / ${m}% money on ${sideName}) — no public signal`);
+                }
+            }
+        }
+
+        // 3) Polymarket entry target — only when it differs from PIN's
+        //    current price (otherwise it's trivial and just fills space).
+        const pinSide = (blk.pin_current || {})[pick.side] || {};
+        if (pinSide.fair_american != null) {
+            const pinNow = pinSide.price;
+            if (pinNow == null || pinNow !== pinSide.fair_american) {
+                const pinFrag = pinNow != null ? `, PIN now ${_fmtAmer(pinNow)}` : '';
+                lines.push(`Polymarket target ${_fmtAmer(pinSide.fair_american)} — devigged fair${pinFrag}`);
+            }
+        }
+
+        return lines.slice(0, 3);
     }
 
     function _seedManual(d) {
