@@ -167,6 +167,8 @@
         .sport-tab { padding: 8px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; color: var(--text-secondary); font-size: 13px; font-weight: 500; cursor: pointer; white-space: nowrap; transition: all 0.15s; font-family: inherit; }
         .sport-tab:hover { color: var(--text); border-color: var(--border-light); }
         .sport-tab.active { background: var(--blue-dim); border-color: var(--blue); color: var(--blue); font-weight: 600; }
+        .sport-tab .tab-count { display: inline-block; margin-left: 4px; padding: 1px 6px; border-radius: 999px; background: var(--bg); color: var(--text-muted); font-size: 10px; font-weight: 600; }
+        .sport-tab.active .tab-count { background: var(--blue); color: #fff; }
 
         /* Game list */
         .games-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 22px; }
@@ -488,9 +490,13 @@
         document.getElementById('auth-gate').style.display = 'none';
         document.getElementById('app').style.display = '';
         _initSportTabs();
+        _refreshSportTabOrder();
         loadGames();
         loadData(true);
         setInterval(() => loadData(false), 60_000);
+        // Re-sort tabs every 5 min so off-season sports drop to the
+        // right and games-publishing sports rise as their slates open.
+        setInterval(_refreshSportTabOrder, 5 * 60_000);
     });
 
     const _fmtAmer = p => (p == null ? '—' : (p > 0 ? `+${p}` : `${p}`));
@@ -709,6 +715,44 @@
                 loadGames();
             });
         });
+    }
+
+    async function _refreshSportTabOrder() {
+        // Re-order the sport-tab pills by upcoming-games count.
+        // Sports with games at the top, off-season sports drop right.
+        // The active sport is preserved (stays visually selected).
+        try {
+            const r = await authFetch('/api/handicapper/sport-counts');
+            const d = await r.json();
+            if (!d.ok) return;
+            const counts = d.counts || {};
+            const tabsEl = document.getElementById('sportTabs');
+            if (!tabsEl) return;
+            const items = Array.from(tabsEl.querySelectorAll('.sport-tab'));
+            // Sort: more games first; ties stable by current DOM order.
+            items.sort((a, b) => {
+                const ca = counts[a.dataset.sport] || 0;
+                const cb = counts[b.dataset.sport] || 0;
+                return cb - ca;
+            });
+            // Update label with count badge: "MLB 15", "UFC", "NFL".
+            items.forEach(t => {
+                const sport = t.dataset.sport;
+                const label = ({CBB:'NCAAB'})[sport] || sport;
+                const c = counts[sport] || 0;
+                t.innerHTML = c > 0
+                    ? `${label} <span class="tab-count">${c}</span>`
+                    : label;
+            });
+            // Re-append in sorted order. DOM updates in place.
+            items.forEach(t => tabsEl.appendChild(t));
+            // Keep the active tab in view if it dropped past the
+            // visible scroll window after re-sort.
+            const active = tabsEl.querySelector('.sport-tab.active');
+            if (active && active.scrollIntoView) {
+                active.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+            }
+        } catch { /* ignore — fall back to static order */ }
     }
 
     async function loadGames() {
