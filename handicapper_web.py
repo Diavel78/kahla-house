@@ -292,7 +292,12 @@ def _sharp_for_total(o_op, o_cu, u_op, u_cu) -> tuple | None:
                                  ref_op["price_american"], ref_cu["price_american"])
     if score is None:
         return None
-    return side, score, ref_op, ref_cu
+    # ref_side = which side the displayed snapshots are from.
+    # May differ from `side` (the inferred sharp side) when ref got
+    # easier — caller tags the bullet with this so the displayed
+    # prices aren't ambiguous.
+    ref_side = "over" if ref_is_over else "under"
+    return side, score, ref_op, ref_cu, ref_side
 
 
 # ──────────────────────────── Match resolution ────────────────────────────
@@ -638,10 +643,22 @@ def _build_market_block(market_type: str, sides: tuple[str, str],
 
     movement = None
     if sr:
-        side, score, op, cu = sr
+        # `_sharp_for_total` returns a 5-tuple including `ref_side` —
+        # which side the displayed snapshots actually belong to. For
+        # ML/SPR the ref_side IS the sharp side (those functions pick
+        # the side with the bigger move). For TOT, when the vig moved
+        # on the side that got EASIER, ref_side is the OPPOSITE of
+        # sharp_side, so the bullet needs to tag the displayed prices
+        # with which side they're from.
+        if len(sr) == 5:
+            side, score, op, cu, ref_side = sr
+        else:
+            side, score, op, cu = sr
+            ref_side = side
         movement = {
             "sharp_side":  side,
             "sharp_score": score,
+            "ref_side":    ref_side,
             "opener_price": op["price_american"],
             "opener_line":  op.get("line"),
             "current_price": cu["price_american"],

@@ -1269,14 +1269,23 @@
                     lines.push('PIN hasn\'t budged — flat market, no line signal');
                 }
             } else {
-                // SPR / TOT — line is primary, vig is secondary
+                // SPR / TOT — line is primary, vig is secondary.
+                // Tag the displayed prices with which side they're
+                // from, because for TOT the ref_side may be the
+                // OPPOSITE of sharp_side (vig moved on the side that
+                // got easier → other side sharp by elimination).
                 const lineChanged = (oL != null && cL != null && Math.abs(cL - oL) >= 0.01);
+                const refSide = mv && mv.ref_side;
+                let refTag = '';
+                if (refSide && pick.market_type === 'total') {
+                    refTag = ` [${refSide}]`;
+                }
                 if (lineChanged) {
                     const label = pick.market_type === 'spread' ? 'Spread' : 'Total';
                     lines.push(`${label} moved ${_fmtPt(oL)} → ${_fmtPt(cL)}${sharpFrag}`);
                 } else if (oP != null && cP != null && oP !== cP) {
                     const lineAt = cL != null ? ` at ${_fmtPt(cL)}` : '';
-                    lines.push(`Vig moved ${_fmtAmer(oP)} → ${_fmtAmer(cP)}${lineAt}${sharpFrag}`);
+                    lines.push(`PIN${refTag}: ${_fmtAmer(oP)} → ${_fmtAmer(cP)}${lineAt}${sharpFrag}`);
                 } else if (score === 0) {
                     lines.push('PIN line and vig flat — no movement signal');
                 }
