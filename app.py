@@ -11,6 +11,7 @@ import json
 import secrets
 import functools
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 import firebase_admin
 from firebase_admin import auth as fb_auth, credentials, firestore
