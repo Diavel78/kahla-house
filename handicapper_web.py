@@ -1192,6 +1192,13 @@ SPLITS_MIN_PP    = 10  # |money% − bets%| considered "material".
 SHARP_WEIGHT     = 0.7
 SPLITS_WEIGHT    = 0.3
 
+# Spread-only chalk filter. A SPR pick at -150 or worse is just a
+# leveraged ML — same directional bet at materially worse price/risk.
+# Drop SPR candidates this chalky and let the ML candidate (if it
+# qualifies) take its place. Doesn't apply to ML/TOT — heavy chalk
+# there has no better expression to switch to.
+SPR_CHALK_FAIR_CAP = -150
+
 
 def _splits_signal_pp(splits: dict | None, sharp_side: str | None,
                       market_type: str) -> float:
@@ -1278,6 +1285,17 @@ def _suggest_picks(odds: dict, splits: dict | None = None) -> list[dict]:
                 "gates_cleared":  gates_cleared,
             })
 
+    if not candidates:
+        return []
+
+    # Drop heavily-juiced SPR — it's a worse-EV restatement of the ML
+    # bet on the same side. ML candidate (if any) takes its slot.
+    candidates = [
+        c for c in candidates
+        if not (c["market_type"] == "spread"
+                and c.get("fair_american") is not None
+                and c["fair_american"] <= SPR_CHALK_FAIR_CAP)
+    ]
     if not candidates:
         return []
 

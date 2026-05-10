@@ -45,6 +45,13 @@ suggest one, do NOT also suggest the other. Pick the one with the
 better risk/reward read and let it stand alone. Total is independent
 and can pair with either.
 
+**Heavy-chalk SPR is a no.** When the spread side you'd recommend is
+priced -150 or worse on Polymarket / PIN devig fair, do NOT recommend
+SPR — recommend the ML instead. Laying -167 to take +1.5 cushion
+gives you almost no real edge over the ML; you've doubled the price
+to win the same money. If the ML is the better expression, just
+suggest ML.
+
 ## Workflow
 
 1. **Detect the question.** Triggers: any betting-flavored question about a
