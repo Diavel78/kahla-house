@@ -75,7 +75,12 @@
         .page-header .meta { font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; margin-top: 4px; }
         .page-header .lede { font-size: 13px; color: var(--text-secondary); margin-top: 8px; max-width: 720px; line-height: 1.5; }
 
-        .stat-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 22px; }
+        .stat-strip { display: flex; flex-direction: column; gap: 8px; padding: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 22px; }
+        .stat-tf { padding: 8px 0; border-bottom: 1px solid var(--border); }
+        .stat-tf:last-child { border-bottom: 0; padding-bottom: 0; }
+        .stat-tf:first-child { padding-top: 0; }
+        .stat-tf-head { font-size: 10px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); letter-spacing: 0.08em; font-weight: 700; margin-bottom: 6px; }
+        .stat-tf-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
         .stat-cell { text-align: center; }
         .stat-cell .label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
         .stat-cell .value { font-size: 18px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
@@ -288,7 +293,7 @@
         .modal button.primary { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
 
         @media (max-width: 720px) {
-            .stat-strip { grid-template-columns: repeat(2, 1fr); }
+            .stat-tf-grid { grid-template-columns: repeat(2, 1fr); }
             .conf-strip { grid-template-columns: repeat(2, 1fr); }
             .market-grid { grid-template-columns: 1fr; }
             .teams-grid { grid-template-columns: 1fr; }
@@ -306,7 +311,6 @@
                     <a href="/" class="nav-link">Home</a>
                     <a href="/odds" class="nav-link">Odds</a>
                     <a href="/dashboard" class="nav-link admin-only" style="display:none">Dashboard</a>
-                    <a href="/sharp-bot" class="nav-link admin-only" style="display:none">Sharp Bot</a>
                     <a href="/handicapper" class="nav-link active">Pick Bot</a>
                 </div>
             </div>
@@ -387,7 +391,7 @@
             </div>
 
             <div class="section">
-                <div class="section-title">Settled · 30d <span class="count" id="settledCount">0</span></div>
+                <div class="section-title">Settled today <span class="count" id="settledCount">0</span></div>
                 <ul class="picks" id="settledList"></ul>
             </div>
         </div>
@@ -523,6 +527,18 @@
             <div class="stat-cell"><div class="label">Units</div><div class="value ${unitsCls}">${_fmtUnits(s.units)}</div></div>
             <div class="stat-cell"><div class="label">ROI/pick</div><div class="value ${roiCls}">${roi}</div></div>
         `;
+    }
+
+    function _renderStatStack(today, week, all) {
+        // Three labeled timeframes stacked. Each row is a mini stat-
+        // strip so the user can see momentum at a glance (today's
+        // 5-pick run, vs the 7d, vs the 30d baseline).
+        const block = (label, s) => `
+            <div class="stat-tf">
+                <div class="stat-tf-head">${label}</div>
+                <div class="stat-tf-grid">${_renderStats(s)}</div>
+            </div>`;
+        return block('TODAY', today) + block('LAST 7 DAYS', week) + block('LAST 30 DAYS', all);
     }
 
     function _renderConfCard(name, s, units) {
@@ -1167,16 +1183,18 @@
                 body: JSON.stringify(body),
             });
             const out = await r.json();
-            if (out.skipped) {
-                alert('Already logged within the last 7 days (id ' + out.existing_id + ').');
-            } else if (out.ok) {
-                alert('Logged pick #' + out.id);
+            // Silent success — closing the modal + the new pending row
+            // appearing on refresh is feedback enough. No popup to
+            // dismiss. Errors still alert (they need attention); the
+            // already-logged-within-7-days case is silent too — the
+            // existing row is already visible on the page.
+            if (out.ok || out.skipped) {
+                closeLog();
                 loadData(true);
-            } else {
-                alert('Failed: ' + (out.error || 'unknown'));
                 return;
             }
-            closeLog();
+            alert('Failed: ' + (out.error || 'unknown'));
+            return;
         } catch (e) {
             alert('Request failed: ' + e);
         } finally {
@@ -1193,7 +1211,11 @@
             const data = await resp.json();
             if (!data.ok) throw new Error(data.error || 'unknown');
 
-            document.getElementById('overallStats').innerHTML = _renderStats(data.stats);
+            document.getElementById('overallStats').innerHTML = _renderStatStack(
+                data.stats_today || data.stats,
+                data.stats_week  || data.stats,
+                data.stats_30d   || data.stats,
+            );
             const conf = data.stats_by_confidence || {};
             const unitsForConf = {low:1, medium:3, high:5, whale:10};
             document.getElementById('confStrip').innerHTML =
@@ -1210,9 +1232,10 @@
                 : `<li class="empty">No pending picks. Ask Claude about a game to log one.</li>`;
             document.getElementById('settledList').innerHTML = settled.length
                 ? settled.slice(0, 50).map(r => _renderPick(r, 'settled')).join('')
-                : `<li class="empty">No settled picks yet.</li>`;
+                : `<li class="empty">Nothing settled today yet.</li>`;
 
-            const sign = data.stats.units > 0 ? '+' : '';
+            const allTime = data.stats_30d || data.stats;
+            const sign = allTime.units > 0 ? '+' : '';
             // Resolver heartbeat — shows last grading run age so we can
             // see if the cron's still alive. Red if stale (>90 min) or
             // crashed (error field non-null).
@@ -1234,7 +1257,7 @@
                 graded = ` · <span style="color:var(--red);font-size:11px">no resolver runs yet</span>`;
             }
             document.getElementById('meta').innerHTML =
-                `${data.window_days}d · ${sign}${(data.stats.units||0).toFixed(2)}u total · `
+                `30d · ${sign}${(allTime.units||0).toFixed(2)}u total · `
                 + `updated ${new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}`
                 + graded;
             status.textContent = 'Live';

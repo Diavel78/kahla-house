@@ -3336,6 +3336,12 @@ def api_handicapper():
 
     now = datetime.now(timezone.utc)
     cutoff_30d = (now - timedelta(days=30)).isoformat()
+    # "Today" = US/Eastern calendar day so it matches the user's mental
+    # model of "today's slate" regardless of UTC midnight.
+    et_now = now.astimezone(ZoneInfo("America/New_York"))
+    today_start_et = et_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_iso = today_start_et.astimezone(timezone.utc).isoformat()
+    cutoff_7d = (now - timedelta(days=7)).isoformat()
 
     cols = ("id,picked_at,asked_by,query_text,sport,event_name,event_start,"
             "market_type,side,entry_book,entry_price,entry_line,"
@@ -3347,20 +3353,29 @@ def api_handicapper():
                    .eq("status", "pending")
                    .order("event_start", desc=False)
                    .limit(500).execute().data) or []
-        settled = (sb.table("bot_picks").select(cols)
-                   .neq("status", "pending")
-                   .gte("settled_at", cutoff_30d)
-                   .order("settled_at", desc=True)
-                   .limit(500).execute().data) or []
+        # Settled list returned to the page = TODAY only. Yesterday's
+        # picks aren't displayed — they're in the rolling stats but not
+        # visually cluttering the page. 30d data still pulled for stats.
+        settled_30d = (sb.table("bot_picks").select(cols)
+                       .neq("status", "pending")
+                       .gte("settled_at", cutoff_30d)
+                       .order("settled_at", desc=True)
+                       .limit(500).execute().data) or []
     except Exception as e:
         return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
+    settled = [r for r in settled_30d
+               if (r.get("settled_at") or "") >= today_start_iso]
 
-    overall = {"graded": 0, "won": 0, "lost": 0, "push": 0,
-               "units": 0.0, "hit_rate": None, "roi": None}
-    by_conf: dict = {c: {"graded": 0, "won": 0, "lost": 0, "push": 0,
-                         "units": 0.0, "hit_rate": None, "roi": None}
+    def _new_bucket():
+        return {"graded": 0, "won": 0, "lost": 0, "push": 0,
+                "units": 0.0, "hit_rate": None, "roi": None}
+
+    overall_today  = _new_bucket()
+    overall_week   = _new_bucket()
+    overall_30d    = _new_bucket()
+    by_conf: dict = {c: _new_bucket()
                      for c in ("low", "medium", "high", "whale")}
-    for r in settled:
+    for r in settled_30d:
         st = r.get("status")
         if st not in ("won", "lost", "push"):
             continue
@@ -3368,15 +3383,21 @@ def api_handicapper():
             pnl = float(r.get("pnl_units") or 0)
         except (TypeError, ValueError):
             pnl = 0.0
-        overall["graded"] += 1
-        overall[st] += 1
-        overall["units"] += pnl
-        conf = r.get("confidence")
-        if conf in by_conf:
-            bucket = by_conf[conf]
+        settled_at = r.get("settled_at") or ""
+        for bucket in (overall_30d, by_conf.get(r.get("confidence"))):
+            if bucket is None:
+                continue
             bucket["graded"] += 1
             bucket[st] += 1
             bucket["units"] += pnl
+        if settled_at >= cutoff_7d:
+            overall_week["graded"] += 1
+            overall_week[st] += 1
+            overall_week["units"] += pnl
+        if settled_at >= today_start_iso:
+            overall_today["graded"] += 1
+            overall_today[st] += 1
+            overall_today["units"] += pnl
 
     def _finalize(s: dict) -> None:
         decided = s["won"] + s["lost"]
@@ -3386,8 +3407,7 @@ def api_handicapper():
             s["roi"] = round(s["units"] / s["graded"], 4)
         s["units"] = round(s["units"], 3)
 
-    _finalize(overall)
-    for s in by_conf.values():
+    for s in (overall_today, overall_week, overall_30d, *by_conf.values()):
         _finalize(s)
 
     # Resolver heartbeat — last bot_picks_resolver run from the
@@ -3411,8 +3431,11 @@ def api_handicapper():
         "now_iso":      now.isoformat(),
         "window_days":  30,
         "pending":      pending,
-        "settled":      settled,
-        "stats":        overall,
+        "settled":      settled,            # today only (display)
+        "stats_today":  overall_today,
+        "stats_week":   overall_week,
+        "stats_30d":    overall_30d,
+        "stats":        overall_30d,        # back-compat alias = 30d
         "stats_by_confidence": by_conf,
         "resolver":     resolver,
     })

@@ -282,7 +282,7 @@
                     <a href="/" class="nav-link">Home</a>
                     <a href="/odds" class="nav-link">Odds</a>
                     <a href="/dashboard" class="nav-link">Dashboard</a>
-                    <a href="/sharp-bot" class="nav-link active">Sharp Bot</a>
+                    <a href="/handicapper" class="nav-link bot-only" style="display:none">Pick Bot</a>
                 </div>
             </div>
             <div class="top-bar-right">
@@ -351,6 +351,9 @@
             if (!r.ok) { window.location.href = '/'; return; }
             const me = await r.json();
             if (!me.approved || me.role !== 'admin') { window.location.href = '/'; return; }
+            if (me.role === 'admin' || me.bot_access) {
+                document.querySelectorAll('.bot-only').forEach(el => { el.style.display = ''; });
+            }
         } catch { window.location.href = '/'; return; }
         document.getElementById('auth-gate').style.display = 'none';
         document.getElementById('app').style.display = '';
