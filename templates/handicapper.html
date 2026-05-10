@@ -976,7 +976,9 @@
                 ? `<span class="sharp-tag">SHARP ${sd > 0 ? d.home : d.away} +${Math.abs(sd).toFixed(0)}%</span>`
                 : '';
             const srcLabel = matched
-                ? `blended (${sp.sources.join(' + ')})`
+                ? (sp.sources.length === 1 && sp.sources[0] === 'action'
+                    ? 'Action Network'
+                    : `blended (${sp.sources.join(' + ')})`)
                 : 'no match — see diagnostics below';
             if (matched) {
                 const moneyRow = (sp.away_money != null || sp.home_money != null)

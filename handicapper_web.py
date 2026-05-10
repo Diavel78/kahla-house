@@ -730,27 +730,11 @@ def _http_get(url: str, **kwargs) -> dict | None:
         return None
 
 
-# ─── Multi-source splits ───
-# Three public splits sources, blended when ≥2 agree, fall through when
-# only 1 has data. Action Network = the only source with money% (sharp
-# fingerprint). Covers + VegasInsider give bets% (square fingerprint),
-# useful for filling Action's coverage gaps and as redundancy.
-#
-# Module-level sport-level cache (30 min TTL) so multiple dossier hits
-# in the same sport reuse one fetch per source.
-_SPLITS_CACHE: dict[str, dict] = {}
-_SPLITS_TTL = 30 * 60  # 30 min
-
-
-def _cache_get(key: str) -> dict | None:
-    hit = _SPLITS_CACHE.get(key)
-    if hit and (time.time() - hit["ts"]) < _SPLITS_TTL:
-        return hit["data"]
-    return None
-
-
-def _cache_set(key: str, data: dict) -> None:
-    _SPLITS_CACHE[key] = {"ts": time.time(), "data": data}
+# ─── Splits ───
+# We don't re-implement the Action Network scraper here; we reuse the
+# one in `app.py:_fetch_action_splits` (same orchestrator that powers
+# the /odds page splits row). Late-imported to avoid the circular load
+# that'd otherwise happen since app.py imports build_dossier from us.
 
 
 def _team_match(home: str, away: str, ev_home: str, ev_away: str) -> bool:
@@ -763,554 +747,77 @@ def _team_match(home: str, away: str, ev_home: str, ev_away: str) -> bool:
     return ((h in eh or eh in h) and (a in ea or ea in a))
 
 
-def _fetch_action_for_sport(sport: str) -> dict:
-    """Per-sport Action Network fetch via their JSON API. Returns
-    {events: [{home, away, ml: {away_bets, home_bets, away_money, home_money}}], debug}."""
-    league = _ACTION_LEAGUE.get(sport)
-    if not league:
-        return {"events": [], "debug": {"error": f"unsupported sport: {sport}"}}
-    cache_key = f"action:{sport}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
-
-    today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
-    url = f"https://api.actionnetwork.com/web/v2/scoreboard/{league}"
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Origin":  "https://www.actionnetwork.com",
-        "Referer": "https://www.actionnetwork.com/",
-    }
-    debug = {"url": url, "date": today}
-    # Direct fetch (not via _http_get) so we can capture status + response
-    # shape on every call — needed for diagnostics when the API returns
-    # 200 but with an unexpected envelope (which is what's happening now
-    # for matchups that should have splits).
-    try:
-        r = requests.get(url, params={"period": "game", "date": today},
-                         headers=headers, timeout=HTTP_TIMEOUT)
-        debug["status"] = r.status_code
-        if r.status_code != 200:
-            debug["body_sample"] = (r.text or "")[:200]
-            out = {"events": [], "debug": {**debug, "error": f"HTTP {r.status_code}"}}
-            _cache_set(cache_key, out)
-            return out
-        try:
-            data = r.json()
-        except Exception as e:
-            debug["body_sample"] = (r.text or "")[:200]
-            out = {"events": [], "debug": {**debug, "error": f"json parse: {e}"}}
-            _cache_set(cache_key, out)
-            return out
-    except Exception as e:
-        out = {"events": [], "debug": {**debug, "error": f"fetch: {e}"}}
-        _cache_set(cache_key, out)
-        return out
-    # Surface top-level keys so we can see if Action moved games to a
-    # different envelope (e.g. wrapped inside `data` / `results`).
-    if isinstance(data, dict):
-        debug["top_keys"] = sorted(list(data.keys()))[:20]
-    # Try several known game-list locations — Action has reshuffled
-    # this envelope before. First match wins.
-    if isinstance(data, dict):
-        candidate = (
-            data.get("games")
-            or (data.get("data") or {}).get("games")
-            or (data.get("results") or {}).get("games")
-            or data.get("scoreboard", {}).get("games")
-            or []
-        )
-        # Wrap the data dict back in a games-key shape for the rest of
-        # the parsing so the existing code below works unchanged.
-        data = {"games": candidate, **{k: v for k, v in data.items() if k != "games"}}
-    if not data:
-        out = {"events": [], "debug": {**debug, "error": "empty response"}}
-        _cache_set(cache_key, out)
-        return out
-    games = data.get("games") or []
-    events = []
-    games_no_splits = []  # diagnostic: games returned but splits structure wasn't attached
-    sample_top_keys: list[str] = []  # diagnostic: keys on a no-splits game so we can see what changed
-    for g in games:
-        ht = (g.get("home_team") or {})
-        at = (g.get("away_team") or {})
-        h_name = ht.get("full_name") or ht.get("display_name") or ht.get("short_name")
-        a_name = at.get("full_name") or at.get("display_name") or at.get("short_name")
-        if not (h_name and a_name):
-            continue
-        ml = _walk_splits(g)
-        if ml:
-            events.append({
-                "home_team": h_name,
-                "away_team": a_name,
-                "ml": ml,
-            })
-        else:
-            games_no_splits.append(f"{a_name} @ {h_name}")
-            if not sample_top_keys and isinstance(g, dict):
-                sample_top_keys = sorted(list(g.keys()))[:25]
-    # If our walker found nothing in any game, dump all percent-shaped
-    # paths from the first game so we can see Action's current schema
-    # and update _walk_splits' regex/key-name matching.
-    percent_paths_first_game: list[str] = []
-    if not events and games:
-        try:
-            percent_paths_first_game = _collect_percent_keys(games[0])[:30]
-        except Exception:
-            pass
-
-    out = {
-        "events": events,
-        "debug": {
-            **debug,
-            "game_count":               len(games),
-            "events_extracted":         len(events),
-            "games_no_splits":          games_no_splits[:8],
-            "sample_top_keys":          sample_top_keys,
-            "percent_paths_first_game": percent_paths_first_game,
-        },
-    }
-    # Only cache when we got events. Empty result is almost always a
-    # bug we need to iterate on, not a 30-min-stable state.
-    if events:
-        _cache_set(cache_key, out)
-    return out
-
-
-_COVERS_LEAGUE = {
-    "MLB":   "MLB",
-    "NBA":   "NBA",
-    "NHL":   "NHL",
-    "NFL":   "NFL",
-    "CBB":   "NCAAB",
-    "NCAAF": "NCAAF",
-}
-
-
-def _fetch_covers_for_sport(sport: str) -> dict:
-    """Per-sport Covers consensus fetch. Best-effort HTML scrape — Covers
-    publishes consensus PICK% (≈ bets%) per game on their consensus page.
-    No money% (only Action Network has that).
-
-    Day-1 selectors are educated guesses. Diagnostic info in `debug` so
-    /debug-splits surfaces what HTML we got and the parser can be tuned
-    iteratively without flailing."""
-    league = _COVERS_LEAGUE.get(sport)
-    if not league:
-        return {"events": [], "debug": {"error": f"unsupported sport: {sport}"}}
-    cache_key = f"covers:{sport}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
-
-    # Covers redesigns their consensus page paths every season or two.
-    # Try the known historical patterns; first 200 wins.
-    candidate_urls = [
-        f"https://www.covers.com/sports/{league}/matchups",
-        f"https://contests.covers.com/consensus/topconsensus/{league.lower()}/expert/recent",
-        f"https://www.covers.com/sport/{league.lower()}/picks-consensus",
-        f"https://www.covers.com/picks/{league.lower()}",
-    ]
-    debug: dict = {"urls_tried": []}
-    html: str | None = None
-    final_url: str | None = None
-    for u in candidate_urls:
-        try:
-            r = requests.get(u, headers={
-                "User-Agent": USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml",
-            }, timeout=HTTP_TIMEOUT, allow_redirects=True)
-            debug["urls_tried"].append({"url": u, "status": r.status_code,
-                                        "html_len": len(r.text or "")})
-            if r.status_code == 200 and (r.text or ""):
-                html = r.text
-                final_url = u
-                break
-        except Exception as e:
-            debug["urls_tried"].append({"url": u, "error": str(e)})
-    if html is None:
-        # Don't cache failures — iteration cost is too high if a wrong
-        # URL gets pinned for 30 min.
-        return {"events": [], "debug": {**debug, "error": "all URLs returned non-200"}}
-    debug["url"] = final_url
-    debug["html_len"] = len(html)
-
-    events = _parse_covers_consensus(html, debug)
-    out = {"events": events, "debug": {**debug, "events_extracted": len(events)}}
-    # Only cache when we got events. Empty extractions usually mean the
-    # selector regex needs another pattern — don't pin a broken result.
-    if events:
-        _cache_set(cache_key, out)
-    return out
-
-
-def _parse_covers_consensus(html: str, debug: dict) -> list[dict]:
-    """Extract consensus bets% per game. Covers' consensus page renders
-    a per-game card with team names and a picks % bar. Without a stable
-    public schema, we look for percentage text adjacent to team names.
-
-    Returns [{home_team, away_team, ml: {away_bets, home_bets}}]. Money%
-    not available from Covers."""
-    try:
-        from bs4 import BeautifulSoup
-    except Exception as e:
-        debug["bs4_error"] = str(e)
-        return []
-    soup = BeautifulSoup(html, "html.parser")
-    events: list[dict] = []
-    sample_blocks: list[str] = []
-
-    # Strategy: find every game-row container, then within each row
-    # extract team names + the two consensus % cells. Class names on
-    # Covers change periodically; try multiple selectors.
-    candidates = (
-        soup.select("[class*='cmg_consensus_pick_table_container']")
-        or soup.select("[class*='consensus-pick']")
-        or soup.select("[class*='matchup']")
-        or soup.select("table tr")
-    )
-    debug["candidate_count"] = len(candidates)
-
-    pct_re = re.compile(r"(\d{1,3})\s*%")
-    for c in candidates[:200]:  # cap to avoid pathological pages
-        text = c.get_text(" ", strip=True)
-        if not text:
-            continue
-        pcts = pct_re.findall(text)
-        if len(pcts) < 2:
-            continue
-        # Pull the two team names — usually the first two distinct
-        # capitalised tokens longer than 2 chars.
-        names = re.findall(r"\b([A-Z][A-Za-z\.&]{2,}(?:\s+[A-Z][A-Za-z\.&]+){0,3})\b", text)
-        names = [n for n in names if n.lower() not in {"vs", "consensus", "picks", "spread", "total", "over", "under", "money", "line"}]
-        if len(names) < 2:
-            continue
-        # Heuristic: away team listed first on Covers ("Away @ Home")
-        away_name, home_name = names[0], names[1]
-        try:
-            away_bets = float(pcts[0])
-            home_bets = float(pcts[1])
-        except ValueError:
-            continue
-        # Only accept if pcts roughly sum to 100 (otherwise we
-        # mis-grabbed something that wasn't a splits row).
-        if not (85 <= (away_bets + home_bets) <= 115):
-            continue
-        events.append({
-            "home_team": home_name,
-            "away_team": away_name,
-            "ml": {"away_bets": away_bets, "home_bets": home_bets,
-                   "away_money": None, "home_money": None},
-        })
-        if len(sample_blocks) < 3:
-            sample_blocks.append(text[:200])
-
-    debug["sample_blocks"] = sample_blocks
-    return events
-
-
-_VI_LEAGUE = {
-    "MLB":   "mlb",
-    "NBA":   "nba",
-    "NHL":   "nhl",
-    "NFL":   "nfl",
-    "CBB":   "college-basketball",
-    "NCAAF": "college-football",
-}
-
-
-def _fetch_vegasinsider_for_sport(sport: str) -> dict:
-    """Per-sport VegasInsider consensus fetch. Same shape as Covers —
-    bets% only, no money%. Best-effort scrape with diagnostics."""
-    league = _VI_LEAGUE.get(sport)
-    if not league:
-        return {"events": [], "debug": {"error": f"unsupported sport: {sport}"}}
-    cache_key = f"vi:{sport}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
-
-    candidate_urls = [
-        f"https://www.vegasinsider.com/{league}/matchups/",
-        f"https://www.vegasinsider.com/{league}/odds/las-vegas/",
-        f"https://www.vegasinsider.com/{league}/scores/",
-        f"https://www.vegasinsider.com/{league}/",
-    ]
-    debug: dict = {"urls_tried": []}
-    html: str | None = None
-    final_url: str | None = None
-    for u in candidate_urls:
-        try:
-            r = requests.get(u, headers={
-                "User-Agent": USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml",
-            }, timeout=HTTP_TIMEOUT, allow_redirects=True)
-            debug["urls_tried"].append({"url": u, "status": r.status_code,
-                                        "html_len": len(r.text or "")})
-            if r.status_code == 200 and (r.text or ""):
-                html = r.text
-                final_url = u
-                break
-        except Exception as e:
-            debug["urls_tried"].append({"url": u, "error": str(e)})
-    if html is None:
-        # Don't cache failures — iteration cost is too high if a wrong
-        # URL gets pinned for 30 min.
-        return {"events": [], "debug": {**debug, "error": "all URLs returned non-200"}}
-    debug["url"] = final_url
-    debug["html_len"] = len(html)
-
-    events = _parse_vi_consensus(html, debug)
-    out = {"events": events, "debug": {**debug, "events_extracted": len(events)}}
-    _cache_set(cache_key, out)
-    return out
-
-
-def _parse_vi_consensus(html: str, debug: dict) -> list[dict]:
-    """Extract consensus bets% per game from VegasInsider's matchups
-    page. Same caveats as Covers — selectors are educated guesses,
-    diagnostics surface what we found for iteration."""
-    try:
-        from bs4 import BeautifulSoup
-    except Exception as e:
-        debug["bs4_error"] = str(e)
-        return []
-    soup = BeautifulSoup(html, "html.parser")
-    events: list[dict] = []
-    sample_blocks: list[str] = []
-
-    candidates = (
-        soup.select("[class*='consensus']")
-        or soup.select("[class*='matchup']")
-        or soup.select("table tr")
-    )
-    debug["candidate_count"] = len(candidates)
-    pct_re = re.compile(r"(\d{1,3})\s*%")
-    for c in candidates[:200]:
-        text = c.get_text(" ", strip=True)
-        if not text:
-            continue
-        pcts = pct_re.findall(text)
-        if len(pcts) < 2:
-            continue
-        names = re.findall(r"\b([A-Z][A-Za-z\.&]{2,}(?:\s+[A-Z][A-Za-z\.&]+){0,3})\b", text)
-        names = [n for n in names if n.lower() not in {"vs", "at", "consensus", "picks", "spread", "total", "over", "under", "money", "line", "ml"}]
-        if len(names) < 2:
-            continue
-        away_name, home_name = names[0], names[1]
-        try:
-            away_bets = float(pcts[0])
-            home_bets = float(pcts[1])
-        except ValueError:
-            continue
-        if not (85 <= (away_bets + home_bets) <= 115):
-            continue
-        events.append({
-            "home_team": home_name,
-            "away_team": away_name,
-            "ml": {"away_bets": away_bets, "home_bets": home_bets,
-                   "away_money": None, "home_money": None},
-        })
-        if len(sample_blocks) < 3:
-            sample_blocks.append(text[:200])
-
-    debug["sample_blocks"] = sample_blocks
-    return events
-
-
-def _blend_ml(per_source: dict[str, dict | None]) -> dict:
-    """Average available bets% across sources. Money% is single-source
-    (Action Network only). Returns a splits dict in the same shape the
-    frontend expects, plus `sources` list of contributing source names
-    so the page can label what blended in."""
-    away_bets_vals: list[float] = []
-    home_bets_vals: list[float] = []
-    away_money = home_money = None
-    sources: list[str] = []
-
-    for name, data in per_source.items():
-        if not data:
-            continue
-        ab, hb = data.get("away_bets"), data.get("home_bets")
-        am, hm = data.get("away_money"), data.get("home_money")
-        contributed = False
-        if ab is not None:
-            away_bets_vals.append(float(ab)); contributed = True
-        if hb is not None:
-            home_bets_vals.append(float(hb)); contributed = True
-        if name == "action":
-            if am is not None:
-                away_money = float(am); contributed = True
-            if hm is not None:
-                home_money = float(hm); contributed = True
-        if contributed:
-            sources.append(name)
-
-    def _avg(vals: list[float]) -> float | None:
-        if not vals:
-            return None
-        return round(sum(vals) / len(vals), 1)
-
-    away_bets = _avg(away_bets_vals)
-    home_bets = _avg(home_bets_vals)
-    sharp_diff = None
-    # sharp_diff = money% on home minus bets% on home (positive = sharp HOME).
-    # Only computable when Action's money% is present alongside any bets%.
-    if home_money is not None and home_bets is not None:
-        sharp_diff = round(home_money - home_bets, 1)
-
-    return {
-        "away_bets":  away_bets,
-        "home_bets":  home_bets,
-        "away_money": away_money,
-        "home_money": home_money,
-        "sharp_diff": sharp_diff,
-        "sources":    sources,
-    }
-
 
 def _fetch_splits(sport: str, away: str, home: str) -> dict:
-    """Multi-source blended splits for one (away, home) pair. Hits
-    Action Network (money% + bets%), Covers (bets%), VegasInsider
-    (bets%) at the sport level (cached 30 min per source), then
-    matches each by two-way team-name containment and blends via
-    `_blend_ml`.
+    """Splits for one (away, home) pair. Calls into app.py's
+    `_fetch_action_splits` — the SAME orchestrator that powers the
+    /odds page splits row, which is known-working — instead of
+    duplicating the scraper. Matches the returned events by two-way
+    team-name containment and returns the matched event's ML splits.
 
-    ALWAYS returns a dict so the frontend can display the empty state
-    + per-source diagnostics. Check `sources` (list of matched sources)
-    to know if any data is present. `per_source` carries match status
-    + sample team names + extraction debug for each source — surfaced
-    on the page so we can see WHICH source failed and why instead of
-    silently rendering nothing."""
-    action_data = _fetch_action_for_sport(sport)
-    covers_data = _fetch_covers_for_sport(sport)
-    vi_data     = _fetch_vegasinsider_for_sport(sport)
+    ALWAYS returns a dict so the frontend can show the empty state
+    when nothing matched. `sources` lists what contributed (just
+    `action` for now — Covers / VegasInsider were dropped because
+    they were broken AND Action carries money% which is the only
+    real sharp signal).
 
-    def _summary(src_data: dict, ml: dict | None) -> dict:
-        evs = src_data.get("events") or []
-        sample = []
-        for ev in evs[:5]:
-            sample.append(f"{ev.get('away_team', '?')} @ {ev.get('home_team', '?')}")
-        return {
-            "matched":         ml is not None,
-            "events_returned": len(evs),
+    Late import of app.py to avoid circular import at module load."""
+    sources_tried = ["action"]
+    diagnostics: dict[str, dict] = {}
+    matched_ml: dict | None = None
+
+    try:
+        from app import _fetch_action_splits as _app_action  # late import
+        action = _app_action(_ACTION_LEAGUE.get(sport, sport).lower()) or {}
+    except Exception as e:
+        diagnostics["action"] = {
+            "matched":         False,
+            "events_returned": 0,
+            "sample_games":    [],
+            "fetch_debug":     {"error": f"app import: {e}"},
+        }
+        action = {"events": []}
+
+    events = action.get("events") or []
+    for ev in events:
+        if _team_match(home, away,
+                       ev.get("home_team", ""),
+                       ev.get("away_team", "")):
+            matched_ml = ev.get("ml") or None
+            break
+
+    if "action" not in diagnostics:
+        sample = [f"{e.get('away_team', '?')} @ {e.get('home_team', '?')}"
+                  for e in events[:5]]
+        diagnostics["action"] = {
+            "matched":         matched_ml is not None,
+            "events_returned": len(events),
             "sample_games":    sample,
-            "fetch_debug":     src_data.get("debug") or {},
+            "fetch_debug":     {
+                "source": action.get("source"),
+                "url":    action.get("url"),
+                "ok":     action.get("ok"),
+                "error":  action.get("error"),
+                "next_debug": action.get("next_debug"),
+                "api_debug":  action.get("api_debug"),
+            },
         }
 
-    def _find(events: list[dict]) -> dict | None:
-        for ev in events:
-            if _team_match(home, away, ev.get("home_team", ""), ev.get("away_team", "")):
-                return ev.get("ml")
-        return None
-
-    a_ml = _find(action_data.get("events") or [])
-    c_ml = _find(covers_data.get("events") or [])
-    v_ml = _find(vi_data.get("events") or [])
-    per_source: dict[str, dict | None] = {
-        "action":       a_ml,
-        "covers":       c_ml,
-        "vegasinsider": v_ml,
-    }
-    diagnostics = {
-        "action":       _summary(action_data, a_ml),
-        "covers":       _summary(covers_data, c_ml),
-        "vegasinsider": _summary(vi_data, v_ml),
-    }
-    sources_tried = ["action", "covers", "vegasinsider"]
-
-    if not any(v for v in per_source.values()):
+    if matched_ml is None:
         return {
-            "away_bets":    None, "home_bets":    None,
-            "away_money":   None, "home_money":   None,
-            "sharp_diff":   None,
-            "sources":      [],
+            "away_bets":     None, "home_bets":     None,
+            "away_money":    None, "home_money":    None,
+            "sharp_diff":    None,
+            "sources":       [],
             "sources_tried": sources_tried,
-            "per_source":   diagnostics,
+            "per_source":    diagnostics,
         }
-    blended = _blend_ml(per_source)
-    blended["sources_tried"] = sources_tried
-    blended["per_source"]    = diagnostics
-    return blended
+    out = dict(matched_ml)
+    out["sources"]       = ["action"]
+    out["sources_tried"] = sources_tried
+    out["per_source"]    = diagnostics
+    return out
 
-
-def _walk_splits(node: Any, depth: int = 0) -> dict | None:
-    """Recursively look for a node with percent-shaped keys for both
-    sides + both kinds (bets vs money). Flexible to key-naming
-    variations: snake_case / camelCase, singular / plural, percent /
-    pct, bet / bets / tickets, money / handle. When Action Network
-    reshuffles their schema, this regex-based matching adapts; the
-    old hardcoded-key version broke every time."""
-    if depth > 12 or not isinstance(node, (dict, list)):
-        return None
-    if isinstance(node, dict):
-        keys = list(node.keys())
-
-        def _match(side_re: str, kind_re: str) -> list[str]:
-            pat = rf"^{side_re}.*({kind_re}).*(percent|pct|share|pct_share)\b|^{side_re}.*pct\b"
-            return [k for k in keys
-                    if re.search(rf"^{side_re}.*({kind_re}).*(percent|pct)", k, re.I)]
-
-        away_bet_keys   = _match("away", "bet|ticket|wager")
-        home_bet_keys   = _match("home", "bet|ticket|wager")
-        away_money_keys = _match("away", "money|handle|dollar")
-        home_money_keys = _match("home", "money|handle|dollar")
-
-        if (away_bet_keys or home_bet_keys
-                or away_money_keys or home_money_keys):
-            ab = _pct(node, away_bet_keys)
-            hb = _pct(node, home_bet_keys)
-            am = _pct(node, away_money_keys)
-            hm = _pct(node, home_money_keys)
-            if any(v is not None for v in (ab, hb, am, hm)):
-                sd = round(hm - hb, 1) if (hm is not None and hb is not None) else None
-                return {"away_bets": ab, "home_bets": hb,
-                        "away_money": am, "home_money": hm,
-                        "sharp_diff": sd}
-        for v in node.values():
-            r = _walk_splits(v, depth + 1)
-            if r:
-                return r
-    elif isinstance(node, list):
-        for v in node:
-            r = _walk_splits(v, depth + 1)
-            if r:
-                return r
-    return None
-
-
-def _collect_percent_keys(node: Any, depth: int = 0,
-                          seen: set | None = None,
-                          path: str = "") -> list[str]:
-    """Diagnostic helper: walk a node and collect every dotted-path
-    that has 'percent' or 'pct' in the leaf key. Used to surface what
-    Action's response actually contains when our walker found nothing."""
-    if seen is None:
-        seen = set()
-    if depth > 12 or len(seen) > 40:
-        return list(seen)
-    if isinstance(node, dict):
-        for k, v in node.items():
-            new_path = f"{path}.{k}" if path else k
-            if re.search(r"percent|pct", str(k), re.I):
-                seen.add(new_path)
-            _collect_percent_keys(v, depth + 1, seen, new_path)
-    elif isinstance(node, list):
-        for i, v in enumerate(node[:3]):  # only sample first 3 items
-            _collect_percent_keys(v, depth + 1, seen, f"{path}[{i}]")
-    return sorted(seen)
-
-
-def _pct(d: dict, keys: list[str]) -> float | None:
-    for k in keys:
-        v = d.get(k)
-        if v is None:
-            continue
-        try:
-            return round(float(v), 1)
-        except (TypeError, ValueError):
-            pass
-    return None
 
 
 def _espn_scoreboard(sport: str, date_yyyymmdd: str) -> list:
