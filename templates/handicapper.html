@@ -943,10 +943,20 @@
                 </div>`;
             }
         } else {
+            // Full live_error here (no 60-char truncation like the
+            // badge) so the user can see WHICH events the Odds API
+            // returned and whether their game just isn't in the
+            // response (sport_key mismatch, name spelling, etc.).
+            const liveDiag = d.live_error
+                ? `<div style="margin-top:8px;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-muted);word-break:break-word">
+                     <b style="color:var(--orange)">Live fetch:</b> ${_esc(d.live_error)}
+                   </div>`
+                : '';
             html += `<div class="suggestion-pass">
                 <strong>No PIN data.</strong> Can't compute a devigged fair line for this game — no Polymarket target. Try
                 <button onclick="copyForClaude()" style="background:none;border:0;color:var(--blue);text-decoration:underline;cursor:pointer;font:inherit;padding:0">copying for Claude</button>
                 or check back closer to kickoff.
+                ${liveDiag}
             </div>`;
         }
 

@@ -45,7 +45,7 @@ ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 SPORT_KEYS = {
     "MLB":   "baseball_mlb",
     "NBA":   "basketball_nba",
-    "NHL":   "icehockey_nhl",
+    "NHL":   "icehockey_nhl",  # also try `icehockey_nhl_championship`
     "NFL":   "americanfootball_nfl",
     "CBB":   "basketball_ncaab",
     "NCAAF": "americanfootball_ncaaf",
@@ -515,15 +515,17 @@ def _fetch_live_event(sport: str, event_start_iso: str,
         return ev, None
     # No match — surface sample events from the response so we can
     # diagnose without re-hitting the API. Most failures are name
-    # mismatches (Odds API returns slight variants) or commence_time
-    # drift past our window.
+    # mismatches (Odds API returns slight variants), commence_time
+    # drift past our window, or the game being under a different
+    # sport_key entirely (e.g. NHL Stanley Cup specialty key).
     if not events:
-        return None, f"odds API returned 0 events for {sport}"
+        return None, f"odds API returned 0 events for sport_key={sport_key}"
     samples = ", ".join(
         f"{(e.get('away_team') or '?')}@{(e.get('home_team') or '?')}"
-        for e in events[:3]
+        for e in events[:8]
     )
-    return None, f"no match in {len(events)} events. samples: {samples}"
+    return None, (f"no match in {len(events)} events from sport_key={sport_key}. "
+                  f"samples: {samples}")
 
 
 def _live_event_to_latest(ev: dict) -> dict:
@@ -762,11 +764,19 @@ def _http_get(url: str, **kwargs) -> dict | None:
 
 def _team_match(home: str, away: str, ev_home: str, ev_away: str) -> bool:
     """Two-way substring match. Action uses 'Mariners', we have 'Seattle
-    Mariners'; both directions need to work."""
+    Mariners'; both directions need to work. Also normalize diacritics
+    so 'Montréal Canadiens' matches 'Montreal Canadiens' — without
+    this, NHL splits silently fail every Montreal game."""
     if not (home and away and ev_home and ev_away):
         return False
-    h, a = home.lower(), away.lower()
-    eh, ea = ev_home.lower(), ev_away.lower()
+    import unicodedata
+    def _norm(s: str) -> str:
+        # NFKD splits accented chars into base + combining mark; the
+        # mark has category "Mn" (Mark, nonspacing) which we drop.
+        return "".join(c for c in unicodedata.normalize("NFKD", s)
+                       if unicodedata.category(c) != "Mn").lower()
+    h, a = _norm(home), _norm(away)
+    eh, ea = _norm(ev_home), _norm(ev_away)
     return ((h in eh or eh in h) and (a in ea or ea in a))
 
 
