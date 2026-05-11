@@ -514,11 +514,15 @@
         if (fmt === '3dp') return v.toFixed(3).replace(/^0/, '');
         return String(v);
     }
-    const _fmtUnits = u => {
-        if (u == null) return '—';
-        const n = Number(u);
-        const sign = n > 0 ? '+' : '';
-        return `${sign}${n.toFixed(2)}u`;
+    // Stats are now expressed in actual $ PnL (matches the dashboard's
+    // $ accounting). The unit tier badges (1u/3u/5u/10u) remain as
+    // confidence-level classifiers on individual picks — they're a
+    // stake-tier label, not a P&L unit.
+    const _fmtPnl = v => {
+        if (v == null) return '—';
+        const n = Number(v);
+        const sign = n > 0 ? '+$' : (n < 0 ? '-$' : '$');
+        return `${sign}${Math.abs(n).toFixed(2)}`;
     };
     function _fmtKickoff(iso) {
         const d = new Date(iso);
@@ -557,14 +561,18 @@
 
     function _renderStats(s) {
         const hr = s.hit_rate == null ? '—' : `${(s.hit_rate*100).toFixed(1)}%`;
-        const roi = s.roi == null ? '—' : `${(s.roi >= 0 ? '+' : '')}${(s.roi*100).toFixed(1)}%`;
-        const unitsCls = s.units > 0 ? 'pos' : (s.units < 0 ? 'neg' : 'muted');
-        const roiCls   = (s.roi == null) ? 'muted' : (s.roi > 0 ? 'pos' : (s.roi < 0 ? 'neg' : 'muted'));
+        // s.roi is $/pick (actual_fill_pnl total / graded count).
+        const roiVal = s.roi == null ? null : s.roi;
+        const roi = roiVal == null ? '—'
+            : `${roiVal >= 0 ? '+$' : '-$'}${Math.abs(roiVal).toFixed(2)}`;
+        const pnlCls = s.pnl > 0 ? 'pos' : (s.pnl < 0 ? 'neg' : 'muted');
+        const roiCls = (roiVal == null) ? 'muted'
+            : (roiVal > 0 ? 'pos' : (roiVal < 0 ? 'neg' : 'muted'));
         return `
             <div class="stat-cell"><div class="label">Graded</div><div class="value">${s.graded}</div></div>
             <div class="stat-cell"><div class="label">Hit Rate</div><div class="value ${s.graded? '' : 'muted'}">${hr}</div></div>
-            <div class="stat-cell"><div class="label">Units</div><div class="value ${unitsCls}">${_fmtUnits(s.units)}</div></div>
-            <div class="stat-cell"><div class="label">ROI/pick</div><div class="value ${roiCls}">${roi}</div></div>
+            <div class="stat-cell"><div class="label">P&L</div><div class="value ${pnlCls}">${_fmtPnl(s.pnl)}</div></div>
+            <div class="stat-cell"><div class="label">$/pick</div><div class="value ${roiCls}">${roi}</div></div>
         `;
     }
 
@@ -581,11 +589,11 @@
     }
 
     function _renderConfCard(name, s, units) {
-        const pnlCls = s.units > 0 ? 'pos' : (s.units < 0 ? 'neg' : 'zero');
+        const pnlCls = s.pnl > 0 ? 'pos' : (s.pnl < 0 ? 'neg' : 'zero');
         const hr = s.hit_rate == null ? '—' : `${(s.hit_rate*100).toFixed(0)}%`;
         return `<div class="conf-card">
             <div class="head"><span class="name ${name}">${name.toUpperCase()}</span><span class="units-tag">${units}u</span></div>
-            <div class="body">${s.graded} graded · HR ${hr} · <span class="pnl ${pnlCls}">${_fmtUnits(s.units)}</span></div>
+            <div class="body">${s.graded} graded · HR ${hr} · <span class="pnl ${pnlCls}">${_fmtPnl(s.pnl)}</span></div>
         </div>`;
     }
 
@@ -627,7 +635,17 @@
         let resultHtml = '';
         if (kind === 'settled') {
             const badge = `<span class="badge ${r.status}">${(r.status || '').toUpperCase()}</span>`;
-            const pnlCls = r.pnl_units > 0 ? 'pos' : (r.pnl_units < 0 ? 'neg' : 'zero');
+            // Per-row PnL shows actual $ (matches the dashboard). Falls
+            // back to to-WIN pnl_units only when actual_fill_pnl is
+            // missing (manually-logged non-PMM picks).
+            const rowPnl = (r.actual_fill_pnl != null) ? r.actual_fill_pnl : null;
+            const pnlCls = rowPnl == null
+                ? (r.pnl_units > 0 ? 'pos' : (r.pnl_units < 0 ? 'neg' : 'zero'))
+                : (rowPnl > 0 ? 'pos' : (rowPnl < 0 ? 'neg' : 'zero'));
+            const pnlText = rowPnl != null ? _fmtPnl(rowPnl)
+                : (r.pnl_units != null
+                    ? `${r.pnl_units > 0 ? '+' : ''}${Number(r.pnl_units).toFixed(2)}u`
+                    : '—');
             // Guard against null/undefined fields — PMM-resolved rows
             // don't have ESPN score data, so result_score may be null
             // or have null fields. Render an empty score string in
@@ -640,7 +658,7 @@
             resultHtml = `
                 <div class="row3">
                     <span style="font-size:11px;color:var(--text-muted)">${score}${sep}settled ${_fmtSettled(r.settled_at)}</span>
-                    <span>${badge} <span class="pnl ${pnlCls}">${_fmtUnits(r.pnl_units)}</span></span>
+                    <span>${badge} <span class="pnl ${pnlCls}">${pnlText}</span></span>
                 </div>`;
         } else {
             sigChips.push(`<span class="chip kickoff">${_fmtKickoff(r.event_start)}</span>`);
@@ -1493,7 +1511,8 @@
                 : `<li class="empty">Nothing settled today yet.</li>`;
 
             const allTime = data.stats_30d || data.stats;
-            const sign = allTime.units > 0 ? '+' : '';
+            const totalPnl = Number(allTime.pnl || 0);
+            const sign = totalPnl > 0 ? '+$' : (totalPnl < 0 ? '-$' : '$');
             // Resolver heartbeat — shows last grading run age so we can
             // see if the cron's still alive. Red if stale (>90 min) or
             // crashed (error field non-null).
@@ -1515,7 +1534,7 @@
                 graded = ` · <span style="color:var(--red);font-size:11px">no resolver runs yet</span>`;
             }
             document.getElementById('meta').innerHTML =
-                `30d · ${sign}${(allTime.units||0).toFixed(2)}u total · `
+                `30d · ${sign}${Math.abs(totalPnl).toFixed(2)} total · `
                 + `updated ${new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}`
                 + graded;
             status.textContent = 'Live';

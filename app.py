@@ -3490,7 +3490,7 @@ def api_handicapper():
 
     def _new_bucket():
         return {"graded": 0, "won": 0, "lost": 0, "push": 0,
-                "units": 0.0, "hit_rate": None, "roi": None}
+                "pnl": 0.0, "hit_rate": None, "roi": None}
 
     overall_today  = _new_bucket()
     overall_week   = _new_bucket()
@@ -3502,12 +3502,20 @@ def api_handicapper():
     # resolver happened to grade between UTC midnights". A pick on
     # tonight's game made + graded today belongs in TODAY regardless of
     # when the cron tick that updated the row fired.
+    #
+    # PnL totals use actual_fill_pnl (real PMM dollar PnL on the user's
+    # actual fill), NOT pnl_units (theoretical to-WIN sizing). This
+    # matches the dashboard's $ accounting. The to-WIN math is
+    # mathematically correct but doesn't reflect the user's reality
+    # since they bet 1-3 contracts per pick, not theoretical to-WIN
+    # units. Rows without actual_fill_pnl (manually-logged non-PMM
+    # picks) contribute $0 to the totals.
     for r in settled_30d:
         st = r.get("status")
         if st not in ("won", "lost", "push"):
             continue
         try:
-            pnl = float(r.get("pnl_units") or 0)
+            pnl = float(r.get("actual_fill_pnl") or 0)
         except (TypeError, ValueError):
             pnl = 0.0
         event_start = r.get("event_start") or ""
@@ -3516,23 +3524,23 @@ def api_handicapper():
                 continue
             bucket["graded"] += 1
             bucket[st] += 1
-            bucket["units"] += pnl
+            bucket["pnl"] += pnl
         if event_start >= cutoff_7d:
             overall_week["graded"] += 1
             overall_week[st] += 1
-            overall_week["units"] += pnl
+            overall_week["pnl"] += pnl
         if event_start >= today_start_iso:
             overall_today["graded"] += 1
             overall_today[st] += 1
-            overall_today["units"] += pnl
+            overall_today["pnl"] += pnl
 
     def _finalize(s: dict) -> None:
         decided = s["won"] + s["lost"]
         if decided > 0:
             s["hit_rate"] = round(s["won"] / decided, 4)
         if s["graded"] > 0:
-            s["roi"] = round(s["units"] / s["graded"], 4)
-        s["units"] = round(s["units"], 3)
+            s["roi"] = round(s["pnl"] / s["graded"], 4)
+        s["pnl"] = round(s["pnl"], 2)
 
     for s in (overall_today, overall_week, overall_30d, *by_conf.values()):
         _finalize(s)
