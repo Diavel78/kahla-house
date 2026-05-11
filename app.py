@@ -3657,33 +3657,103 @@ def api_handicapper_sport_counts():
 # touching the DB — used to validate the mapping logic before flipping
 # to writes.
 
-def _pmm_position_to_intent(slug: str, pos: dict) -> dict:
-    """Map one Polymarket position into a sync intent dict.
+def _pmm_find_market(extracted: dict, sb) -> tuple | None:
+    """Wrapper around `_clv_find_market` that filters out phantom
+    markets — rows in `markets` that nobody has quoted in 24h.
+    Without this, multiple Montreal home games on the same date both
+    fuzz-match "Canadiens" and the matcher non-deterministically picks
+    one (e.g. the phantom Tampa @ Montreal row instead of the real
+    Buffalo @ Montreal). Mirrors the same filter `/api/handicapper/games`
+    uses to hide phantoms from the picker.
 
-    Returns one of:
-      {action: 'skip',   reason: '...', slug: ...}
-      {action: 'sync',   slug, market_id, market_type, side,
-                          actual_fill_price, actual_fill_qty, pmm_side,
-                          polymarket_outcome, entry_line, event_name,
-                          event_start, sport}
-    The caller decides whether to update an existing pick, auto-create
-    a new one, or no-op based on what's already in `bot_picks`.
+    Returns the same tuple shape as `_clv_find_market`:
+      (market_id, away, home, user_side, event_start_iso) or None.
     """
+    sport     = extracted["sport"]
+    bet_date  = extracted["bet_date"]
+    team_name = (extracted.get("team_name") or "").lower().strip()
+    if not team_name:
+        return None
+
+    try:
+        markets = (sb.table("markets")
+                   .select("id,event_name,event_start")
+                   .eq("sport", sport)
+                   .gte("event_start", f"{bet_date}T00:00:00+00:00")
+                   .lte("event_start", f"{bet_date}T23:59:59+00:00")
+                   .limit(50).execute().data) or []
+    except Exception:
+        return None
+    if not markets:
+        return None
+
+    # Phantom filter: keep only markets with snapshot activity in the
+    # last 7d (looser than the games-list filter since picks can be
+    # weeks old by sync time).
+    market_ids = [m["id"] for m in markets]
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    try:
+        snap = (sb.table("book_snapshots")
+                .select("market_id")
+                .in_("market_id", market_ids)
+                .gte("captured_at", cutoff)
+                .limit(5000).execute().data) or []
+        live_ids = {r["market_id"] for r in snap if r.get("market_id")}
+    except Exception:
+        live_ids = set(market_ids)
+    markets = [m for m in markets if m["id"] in live_ids]
+    if not markets:
+        return None
+
+    try:
+        from rapidfuzz import fuzz
+    except ImportError:
+        return None
+
+    best = None
+    best_score = 0
+    for m in markets:
+        ev = m.get("event_name") or ""
+        if " @ " not in ev:
+            continue
+        away, home = ev.split(" @ ", 1)
+        s_a = fuzz.partial_ratio(team_name, away.lower())
+        s_h = fuzz.partial_ratio(team_name, home.lower())
+        max_s = max(s_a, s_h)
+        if max_s > best_score and max_s >= 75:
+            best_score = max_s
+            user_side = "away" if s_a >= s_h else "home"
+            best = (m["id"], away, home, user_side, m["event_start"])
+    return best
+
+
+def _pmm_position_to_intent(slug: str, pos: dict, sb) -> dict:
+    """Map one Polymarket position into a sync intent dict."""
     meta = pos.get("marketMetadata") or {}
     extracted = _clv_extract_match_info(meta)
     if not extracted:
         return {"action": "skip", "reason": "non-sport / unparseable meta", "slug": slug}
 
-    matched = _clv_find_market(extracted)
+    matched = _pmm_find_market(extracted, sb)
     if not matched:
-        return {"action": "skip", "reason": "no markets row for this game", "slug": slug,
+        return {"action": "skip", "reason": "no live markets row for this game", "slug": slug,
                 "extracted": extracted}
 
     market_id, away, home, user_side, event_start = matched
     market_type = extracted["market_type"]
 
-    # TOT: override side from the outcome string (over/under) since
-    # `_clv_find_market` matches by team name and TOT has no team.
+    # PMM `netPosition` sign tells us YES vs NO on the contract.
+    net = _safe_float(pos.get("netPosition")) or 0
+    qty = abs(net)
+    cost = _safe_float(pos.get("cost"))
+    if qty <= 0 or cost is None:
+        return {"action": "skip", "reason": "no fill yet (qty=0 or cost missing)", "slug": slug}
+    pmm_side = "YES" if net >= 0 else "NO"
+
+    # NO contracts on a side flip the bet to the OPPOSITE side. Examples:
+    #   • ML "Canadiens" + NO → betting against Montreal → side = away
+    #   • SPR "Yankees -1.5" + NO → Yankees DON'T cover → side = away
+    #   • TOT "Over" + NO       → betting under → side = under
     if market_type == "total":
         raw_outcome_low = (extracted.get("raw_outcome") or "").lower()
         if "over" in raw_outcome_low:
@@ -3694,14 +3764,11 @@ def _pmm_position_to_intent(slug: str, pos: dict) -> dict:
             return {"action": "skip",
                     "reason": f"can't infer over/under from outcome={extracted.get('raw_outcome')}",
                     "slug": slug}
+        if pmm_side == "NO":
+            user_side = "under" if user_side == "over" else "over"
+    elif pmm_side == "NO":
+        user_side = "away" if user_side == "home" else "home"
 
-    # PMM share price (cost/qty, 0-1) → American odds for storage in
-    # actual_fill_price. PMM `netPosition` sign tells us YES vs NO.
-    net = _safe_float(pos.get("netPosition")) or 0
-    qty = abs(net)
-    cost = _safe_float(pos.get("cost"))
-    if qty <= 0 or cost is None:
-        return {"action": "skip", "reason": "no fill yet (qty=0 or cost missing)", "slug": slug}
     entry_share_price = cost / qty
     actual_fill_amer = _prob_to_amer_py(entry_share_price)
 
@@ -3715,7 +3782,7 @@ def _pmm_position_to_intent(slug: str, pos: dict) -> dict:
         "actual_fill_price":  actual_fill_amer,
         "actual_fill_qty":    qty,
         "actual_fill_share":  round(entry_share_price, 4),
-        "pmm_side":           "YES" if net >= 0 else "NO",
+        "pmm_side":           pmm_side,
         "entry_line":         extracted.get("point"),
         "event_name":         f"{away} @ {home}",
         "event_start":        event_start,
@@ -3726,11 +3793,14 @@ def _pmm_position_to_intent(slug: str, pos: dict) -> dict:
 def _pmm_units_for_qty(qty: float) -> tuple[int, str]:
     """Map an actual fill quantity to the closest (units, confidence)
     pair from our 1/3/5/10 tier scheme. 1 contract = 1 unit per the
-    user's convention. Rounds to nearest tier."""
-    q = max(1, int(round(qty)))
-    tiers = [(1, "low"), (3, "medium"), (5, "high"), (10, "whale")]
-    best = min(tiers, key=lambda t: abs(t[0] - q))
-    return best
+    user's convention. Rounds DOWN to the nearest tier so 8 contracts
+    becomes 5u not 10u — don't auto-inflate the user's confidence."""
+    q = max(1, int(qty))   # floor not round
+    tiers = [(10, "whale"), (5, "high"), (3, "medium"), (1, "low")]
+    for u, conf in tiers:
+        if q >= u:
+            return u, conf
+    return 1, "low"
 
 
 def _pmm_sync_run(dry_run: bool = True) -> dict:
@@ -3759,7 +3829,7 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
     actions: list[dict] = []
 
     for slug, pos in positions:
-        intent = _pmm_position_to_intent(slug, pos)
+        intent = _pmm_position_to_intent(slug, pos, sb)
         if intent.get("action") != "sync":
             summary["skipped"] += 1
             actions.append(intent)
