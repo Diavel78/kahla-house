@@ -3854,6 +3854,38 @@ def api_pmm_sync():
     return jsonify(_pmm_sync_run(dry_run=dry))
 
 
+@app.route("/pmm-sync")
+def pmm_sync_page():
+    """Auth'd browser-friendly wrapper for /api/handicapper/pmm-sync.
+    Always defaults to dry=1 in the URL so you don't accidentally
+    write by hitting the bare path. Add ?dry=0 explicitly to write."""
+    dry = request.args.get("dry", "1")
+    return ('''<!DOCTYPE html><html><head>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>firebase.initializeApp({apiKey:"AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",authDomain:"kahla-house.firebaseapp.com",projectId:"kahla-house"});</script>
+    </head><body style="background:#0b0e13;color:#e2e8f0;font-family:monospace;padding:16px;font-size:11px">
+    <h2 style="color:#f59e0b">PMM sync — dry=''' + dry + '''</h2>
+    <p style="color:#8890a8;font-size:12px">
+      <a href="/pmm-sync?dry=1" style="color:#4a7cff">dry=1 (preview)</a> ·
+      <a href="/pmm-sync?dry=0" style="color:#ef4444">dry=0 (WRITES — link/create rows)</a>
+    </p>
+    <pre id="out" style="white-space:pre-wrap;word-break:break-word">Loading...</pre>
+    <script>
+    firebase.auth().onAuthStateChanged(async u => {
+        if (!u) { document.getElementById("out").textContent = "Not logged in. Go to / first."; return; }
+        try {
+            const t = await u.getIdToken();
+            const r = await fetch("/api/handicapper/pmm-sync?dry=''' + dry + '''", {headers:{"Authorization":"Bearer "+t}});
+            const d = await r.json();
+            document.getElementById("out").textContent = JSON.stringify(d, null, 2);
+        } catch (e) {
+            document.getElementById("out").textContent = "ERROR: " + e.message;
+        }
+    });
+    </script></body></html>''')
+
+
 @app.route("/api/handicapper/pick", methods=["POST"])
 @bot_required
 def api_handicapper_pick():
