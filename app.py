@@ -4442,7 +4442,13 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
     except Exception as e:
         summary["errors"].append(f"activities fetch: {e}")
         activities = []
-    settled_cutoff = (datetime.now(timezone.utc) - timedelta(hours=48))
+    # 14 days back covers our 30-day stats window with margin. The
+    # earlier 48h cutoff silently lost actual_fill_pnl on any pick whose
+    # PMM activity feed entry rotated out of the window before the next
+    # auto-trigger run linked it — bot stats then read NULL → contribute
+    # $0, understating real losses (and overstating real wins on the
+    # next refresh).
+    settled_cutoff = (datetime.now(timezone.utc) - timedelta(days=14))
     summary["settled_linked"]       = 0
     summary["settled_auto_created"] = 0
     summary["settled_already_done"] = 0
@@ -4489,7 +4495,7 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
 
         try:
             existing = (sb.table("bot_picks")
-                        .select("id,status,actual_fill_price,pnl_units,settled_at")
+                        .select("id,status,actual_fill_price,actual_fill_pnl,pnl_units,settled_at")
                         .eq("market_id", intent["market_id"])
                         .eq("market_type", intent["market_type"])
                         .eq("side", intent["side"])
@@ -4506,8 +4512,13 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
             if cur_status in ("won", "lost", "push", "void") and pick.get("settled_at"):
                 # Already graded by resolver (ESPN). Don't overwrite —
                 # the resolver's grade is canonical for the bot's units.
-                # Just attach actual_fill_pnl if it isn't there yet.
-                if pick.get("actual_fill_price") is None:
+                # Re-attach actual_fill_* when actual_fill_pnl is NULL,
+                # even if actual_fill_price was set in a prior partial
+                # attach (or by an unrelated path). Previously gated on
+                # actual_fill_price alone, which left rows in a stuck
+                # "has fill price but no real PnL" state — those rows
+                # then contribute $0 to the bot stats forever.
+                if pick.get("actual_fill_pnl") is None:
                     update_only_fill = {
                         "actual_fill_price":  intent["actual_fill_price"],
                         "actual_fill_qty":    intent["actual_fill_qty"],
