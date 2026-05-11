@@ -3657,39 +3657,60 @@ def api_handicapper_sport_counts():
 # touching the DB — used to validate the mapping logic before flipping
 # to writes.
 
-def _pmm_find_market(extracted: dict, sb) -> tuple | None:
+def _pmm_find_market(extracted: dict, sb,
+                     debug: dict | None = None) -> tuple | None:
     """Wrapper around `_clv_find_market` that filters out phantom
-    markets — rows in `markets` that nobody has quoted in 24h.
-    Without this, multiple Montreal home games on the same date both
-    fuzz-match "Canadiens" and the matcher non-deterministically picks
-    one (e.g. the phantom Tampa @ Montreal row instead of the real
-    Buffalo @ Montreal). Mirrors the same filter `/api/handicapper/games`
-    uses to hide phantoms from the picker.
+    markets and uses an ET-based date window (PMM slugs use ET dates,
+    so an NHL game starting after 8 PM ET spills into next-day UTC
+    and a strict UTC window would miss it).
 
-    Returns the same tuple shape as `_clv_find_market`:
-      (market_id, away, home, user_side, event_start_iso) or None.
+    `debug` (if passed) gets populated with markets_in_window /
+    sample_event_names / markets_with_snapshots so the sync diagnostic
+    can show why a position was skipped.
+
+    Returns (market_id, away, home, user_side, event_start_iso) or None.
     """
     sport     = extracted["sport"]
     bet_date  = extracted["bet_date"]
     team_name = (extracted.get("team_name") or "").lower().strip()
     if not team_name:
+        if debug is not None:
+            debug["reason"] = "team_name empty"
         return None
 
+    # ET-based window: bet_date 00:00 ET = previous day 04:00 UTC
+    # (DST-agnostic 4h offset; close enough for matching purposes).
+    # Adds a ~28h window covering all games the slug could refer to.
+    try:
+        d = datetime.strptime(bet_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        if debug is not None:
+            debug["reason"] = f"bad bet_date {bet_date}"
+        return None
+    after  = (d + timedelta(hours=4)).isoformat()           # 04:00 UTC same day
+    before = (d + timedelta(days=1, hours=8)).isoformat()   # 08:00 UTC next day
     try:
         markets = (sb.table("markets")
                    .select("id,event_name,event_start")
                    .eq("sport", sport)
-                   .gte("event_start", f"{bet_date}T00:00:00+00:00")
-                   .lte("event_start", f"{bet_date}T23:59:59+00:00")
+                   .gte("event_start", after)
+                   .lte("event_start", before)
                    .limit(50).execute().data) or []
-    except Exception:
+    except Exception as e:
+        if debug is not None:
+            debug["reason"] = f"markets query: {e}"
         return None
+    if debug is not None:
+        debug["window"] = {"after": after, "before": before}
+        debug["markets_in_window"] = len(markets)
+        debug["sample_event_names"] = [m.get("event_name") for m in markets[:8]]
     if not markets:
+        if debug is not None:
+            debug["reason"] = "no markets in date window"
         return None
 
     # Phantom filter: keep only markets with snapshot activity in the
-    # last 7d (looser than the games-list filter since picks can be
-    # weeks old by sync time).
+    # last 7d.
     market_ids = [m["id"] for m in markets]
     cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
     try:
@@ -3701,18 +3722,27 @@ def _pmm_find_market(extracted: dict, sb) -> tuple | None:
         live_ids = {r["market_id"] for r in snap if r.get("market_id")}
     except Exception:
         live_ids = set(market_ids)
-    markets = [m for m in markets if m["id"] in live_ids]
-    if not markets:
+    markets_live = [m for m in markets if m["id"] in live_ids]
+    if debug is not None:
+        debug["markets_with_snapshots"] = len(markets_live)
+        debug["phantom_event_names"] = [m.get("event_name") for m in markets
+                                         if m["id"] not in live_ids][:8]
+    if not markets_live:
+        if debug is not None:
+            debug["reason"] = "all markets in window were phantoms (no snapshots in 7d)"
         return None
 
     try:
         from rapidfuzz import fuzz
     except ImportError:
+        if debug is not None:
+            debug["reason"] = "rapidfuzz not installed"
         return None
 
     best = None
     best_score = 0
-    for m in markets:
+    score_table: list[dict] = []
+    for m in markets_live:
         ev = m.get("event_name") or ""
         if " @ " not in ev:
             continue
@@ -3720,10 +3750,16 @@ def _pmm_find_market(extracted: dict, sb) -> tuple | None:
         s_a = fuzz.partial_ratio(team_name, away.lower())
         s_h = fuzz.partial_ratio(team_name, home.lower())
         max_s = max(s_a, s_h)
+        score_table.append({"event": ev, "s_away": s_a, "s_home": s_h})
         if max_s > best_score and max_s >= 75:
             best_score = max_s
             user_side = "away" if s_a >= s_h else "home"
             best = (m["id"], away, home, user_side, m["event_start"])
+    if debug is not None:
+        debug["fuzz_scores"] = score_table
+        debug["best_score"] = best_score
+        if not best:
+            debug["reason"] = f"no candidate scored >= 75 against team_name='{team_name}'"
     return best
 
 
@@ -3734,10 +3770,12 @@ def _pmm_position_to_intent(slug: str, pos: dict, sb) -> dict:
     if not extracted:
         return {"action": "skip", "reason": "non-sport / unparseable meta", "slug": slug}
 
-    matched = _pmm_find_market(extracted, sb)
+    match_debug: dict = {}
+    matched = _pmm_find_market(extracted, sb, match_debug)
     if not matched:
-        return {"action": "skip", "reason": "no live markets row for this game", "slug": slug,
-                "extracted": extracted}
+        return {"action": "skip",
+                "reason": match_debug.get("reason") or "no markets row for this game",
+                "slug": slug, "extracted": extracted, "match_debug": match_debug}
 
     market_id, away, home, user_side, event_start = matched
     market_type = extracted["market_type"]
