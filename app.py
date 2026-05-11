@@ -3376,8 +3376,13 @@ def api_handicapper():
         # Settled list returned to the page = TODAY only. Yesterday's
         # picks aren't displayed — they're in the rolling stats but not
         # visually cluttering the page. 30d data still pulled for stats.
+        # Settled list = won/lost/push/void only. 'recommended' rows
+        # (auto-logged on dossier view, never linked to a real bet)
+        # stay out of pending AND settled — they're invisible to the
+        # user but kept in the DB for regression / "what would the
+        # bot have suggested" analysis.
         settled_30d = (sb.table("bot_picks").select(cols)
-                       .neq("status", "pending")
+                       .in_("status", ["won", "lost", "push", "void"])
                        .gte("settled_at", cutoff_30d)
                        .order("settled_at", desc=True)
                        .limit(500).execute().data) or []
@@ -3498,8 +3503,78 @@ def api_handicapper_dossier():
             sb, q, sport, market_id=market_id, live=live)
     except Exception as e:
         return jsonify({"ok": False, "error": f"dossier build failed: {e}"}), 500
+    # Auto-log the bot's gates-cleared suggestions to bot_picks with
+    # status='recommended' so PMM sync always has a row to link the
+    # user's real bet to. Idempotent — no-op if a row already exists
+    # for (market_id, market_type, side).
+    if dossier.get("ok"):
+        try:
+            _auto_log_dossier_recs(sb, dossier, asked_by=getattr(g, "uid", None))
+        except Exception:
+            pass  # don't fail the dossier if logging breaks
     code = 200 if dossier.get("ok") else 404
     return jsonify(dossier), code
+
+
+def _auto_log_dossier_recs(sb, dossier: dict, asked_by: str | None) -> None:
+    """Persist the bot's gates-cleared suggestions to bot_picks with
+    status='recommended'. PMM sync flips them to 'pending' when it
+    finds a matching real bet; resolver leaves them alone otherwise.
+    Forced-lean suggestions (gates_cleared=False) are NOT logged —
+    they're noise the bot was forced to surface, not real picks."""
+    market_id   = dossier.get("market_id")
+    event_name  = dossier.get("event_name")
+    event_start = dossier.get("event_start_utc")
+    sport       = dossier.get("sport")
+    suggestions = dossier.get("suggestions") or []
+    if not (market_id and event_name and event_start and sport):
+        return
+    for s in suggestions:
+        if not s.get("gates_cleared"):
+            continue
+        market_type = s.get("market_type")
+        side        = s.get("side")
+        fair_amer   = s.get("fair_american")
+        units       = s.get("units")
+        conf        = s.get("confidence")
+        if not (market_type and side and fair_amer is not None and units and conf):
+            continue
+        # Dedup: skip if a pending or recommended row already covers
+        # this combo (any time horizon — recommendations don't expire).
+        try:
+            existing = (sb.table("bot_picks")
+                        .select("id")
+                        .eq("market_id", market_id)
+                        .eq("market_type", market_type)
+                        .eq("side", side)
+                        .in_("status", ["pending", "recommended"])
+                        .limit(1).execute().data) or []
+        except Exception:
+            return
+        if existing:
+            continue
+        row = {
+            "asked_by":    asked_by or "auto",
+            "query_text":  "auto-logged on dossier view",
+            "market_id":   market_id,
+            "sport":       sport,
+            "event_name":  event_name,
+            "event_start": event_start,
+            "market_type": market_type,
+            "side":        side,
+            "entry_book":  "PMM",
+            "entry_price": int(fair_amer),
+            "entry_line":  s.get("pin_line"),
+            "units":       int(units),
+            "confidence":  conf,
+            "fair_prob":   s.get("fair_prob"),
+            "sharp_score": s.get("sharp_score"),
+            "status":      "recommended",
+        }
+        try:
+            sb.table("bot_picks").insert(row).execute()
+        except Exception:
+            continue
 
 
 @app.route("/api/handicapper/games")
@@ -3873,13 +3948,17 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
             actions.append(intent)
             continue
 
-        # Look up an existing pick for this game/side.
+        # Look up an existing pick for this game/side. Accept both
+        # status='pending' (user clicked Log) AND status='recommended'
+        # (auto-logged on dossier view) — linking a PMM fill flips
+        # recommended → pending implicitly.
         try:
             existing = (sb.table("bot_picks")
-                        .select("id,actual_fill_price,units,confidence,asked_by")
+                        .select("id,actual_fill_price,units,confidence,asked_by,status")
                         .eq("market_id", intent["market_id"])
                         .eq("market_type", intent["market_type"])
                         .eq("side", intent["side"])
+                        .in_("status", ["pending", "recommended"])
                         .order("picked_at", desc=True)
                         .limit(1).execute().data) or []
         except Exception as e:
@@ -3894,6 +3973,7 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
             "polymarket_slug":    intent["slug"],
             "polymarket_outcome": intent["polymarket_outcome"],
             "pmm_side":           intent["pmm_side"],
+            "status":             "pending",   # flip recommended → pending on link
         }
 
         if existing:
@@ -3903,7 +3983,8 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
                 summary["already_linked"] += 1
                 actions.append({**intent, "action": "already_linked", "pick_id": pick["id"]})
                 continue
-            actions.append({**intent, "action": "link", "pick_id": pick["id"]})
+            actions.append({**intent, "action": "link", "pick_id": pick["id"],
+                            "prev_status": pick.get("status")})
             if not dry_run:
                 try:
                     sb.table("bot_picks").update(update_fields).eq("id", pick["id"]).execute()
