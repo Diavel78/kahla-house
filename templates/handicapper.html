@@ -514,15 +514,14 @@
         if (fmt === '3dp') return v.toFixed(3).replace(/^0/, '');
         return String(v);
     }
-    // Stats are now expressed in actual $ PnL (matches the dashboard's
-    // $ accounting). The unit tier badges (1u/3u/5u/10u) remain as
-    // confidence-level classifiers on individual picks — they're a
-    // stake-tier label, not a P&L unit.
+    // Display in units. On Polymarket each share resolves to $1, so
+    // 1 unit = 1 share. PnL value comes from actual_fill_pnl ($) which
+    // is numerically the same as shares-net since each share = $1.
     const _fmtPnl = v => {
         if (v == null) return '—';
         const n = Number(v);
-        const sign = n > 0 ? '+$' : (n < 0 ? '-$' : '$');
-        return `${sign}${Math.abs(n).toFixed(2)}`;
+        const sign = n > 0 ? '+' : (n < 0 ? '-' : '');
+        return `${sign}${Math.abs(n).toFixed(2)}u`;
     };
     function _fmtKickoff(iso) {
         const d = new Date(iso);
@@ -564,7 +563,7 @@
         // s.roi is $/pick (actual_fill_pnl total / graded count).
         const roiVal = s.roi == null ? null : s.roi;
         const roi = roiVal == null ? '—'
-            : `${roiVal >= 0 ? '+$' : '-$'}${Math.abs(roiVal).toFixed(2)}`;
+            : `${roiVal >= 0 ? '+' : '-'}${Math.abs(roiVal).toFixed(2)}u`;
         const pnlCls = s.pnl > 0 ? 'pos' : (s.pnl < 0 ? 'neg' : 'muted');
         const roiCls = (roiVal == null) ? 'muted'
             : (roiVal > 0 ? 'pos' : (roiVal < 0 ? 'neg' : 'muted'));
@@ -572,7 +571,7 @@
             <div class="stat-cell"><div class="label">Graded</div><div class="value">${s.graded}</div></div>
             <div class="stat-cell"><div class="label">Hit Rate</div><div class="value ${s.graded? '' : 'muted'}">${hr}</div></div>
             <div class="stat-cell"><div class="label">P&L</div><div class="value ${pnlCls}">${_fmtPnl(s.pnl)}</div></div>
-            <div class="stat-cell"><div class="label">$/pick</div><div class="value ${roiCls}">${roi}</div></div>
+            <div class="stat-cell"><div class="label">u/pick</div><div class="value ${roiCls}">${roi}</div></div>
         `;
     }
 
@@ -1512,7 +1511,7 @@
 
             const allTime = data.stats_30d || data.stats;
             const totalPnl = Number(allTime.pnl || 0);
-            const sign = totalPnl > 0 ? '+$' : (totalPnl < 0 ? '-$' : '$');
+            const sign = totalPnl > 0 ? '+' : (totalPnl < 0 ? '-' : '');
             // Resolver heartbeat — shows last grading run age so we can
             // see if the cron's still alive. Red if stale (>90 min) or
             // crashed (error field non-null).
@@ -1534,7 +1533,7 @@
                 graded = ` · <span style="color:var(--red);font-size:11px">no resolver runs yet</span>`;
             }
             document.getElementById('meta').innerHTML =
-                `30d · ${sign}${Math.abs(totalPnl).toFixed(2)} total · `
+                `30d · ${sign}${Math.abs(totalPnl).toFixed(2)}u total · `
                 + `updated ${new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}`
                 + graded;
             status.textContent = 'Live';
