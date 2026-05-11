@@ -3913,6 +3913,119 @@ def _pmm_position_to_intent(slug: str, pos: dict, sb) -> dict:
     }
 
 
+def _pmm_pnl_units(status: str, entry_price: int, units: int) -> float:
+    """To-WIN sizing math, mirrored from kahla-scanner's
+    bot_picks_resolver._pnl_units. Win = +units regardless of price;
+    loss = units × (stake/100 ratio at the entry price). Keep these
+    two implementations in sync — both reference the same convention
+    documented in CLAUDE.md."""
+    if status in ("push", "void"):
+        return 0.0
+    if status == "won":
+        return float(units)
+    p = int(entry_price)
+    if p > 0:
+        return -units * (100.0 / p)
+    return -units * (abs(p) / 100.0)
+
+
+def _pmm_settled_to_intent(act: dict, sb,
+                           match_debug: dict | None = None) -> dict:
+    """Map a Polymarket POSITION_RESOLUTION activity into a settled-side
+    sync intent. Returns the same shape as `_pmm_position_to_intent`
+    plus resolution fields (won, settled_at). Caller decides whether
+    to update an existing bot_picks row or auto-create a new one with
+    status=won/lost and pnl_units pre-computed."""
+    detail = act.get("positionResolution") or {}
+    if not detail:
+        return {"action": "skip", "reason": "no resolution detail"}
+    before = detail.get("beforePosition") or {}
+    meta = before.get("marketMetadata") or {}
+    extracted = _clv_extract_match_info(meta)
+    if not extracted:
+        return {"action": "skip", "reason": "non-sport / unparseable meta"}
+
+    _debug: dict = match_debug if match_debug is not None else {}
+    matched = _pmm_find_market(extracted, sb, _debug)
+    if not matched:
+        return {"action": "skip",
+                "reason": _debug.get("reason") or "no markets row",
+                "extracted": extracted, "match_debug": _debug}
+
+    market_id, away, home, user_side, event_start = matched
+    market_type = extracted["market_type"]
+
+    net = _safe_float(before.get("netPosition")) or 0
+    qty = abs(net)
+    cost = _safe_float(before.get("cost"))
+    if qty <= 0 or cost is None:
+        return {"action": "skip", "reason": "no fill data on settled position"}
+    pmm_side = "YES" if net >= 0 else "NO"
+
+    if market_type == "total":
+        raw_outcome_low = (extracted.get("raw_outcome") or "").lower()
+        if "over" in raw_outcome_low:
+            user_side = "over"
+        elif "under" in raw_outcome_low:
+            user_side = "under"
+        else:
+            return {"action": "skip",
+                    "reason": f"can't infer over/under from outcome={extracted.get('raw_outcome')}"}
+        if pmm_side == "NO":
+            user_side = "under" if user_side == "over" else "over"
+    elif pmm_side == "NO":
+        user_side = "away" if user_side == "home" else "home"
+
+    entry_share = cost / qty
+    actual_fill_amer = _prob_to_amer_py(entry_share)
+
+    # Which side resolved? POSITION_RESOLUTION_SIDE_YES means the YES
+    # contract paid out; user with held YES won, user with held NO lost
+    # (and vice versa).
+    res_side = (detail.get("side") or "").replace("POSITION_RESOLUTION_SIDE_", "")
+    held_yes = net > 0
+    yes_won = res_side in ("YES", "LONG")
+    no_won  = res_side in ("NO", "SHORT")
+    if not (yes_won or no_won):
+        # Push / void resolution (e.g. canceled market). Treat as void.
+        outcome_status = "void"
+    elif (held_yes and yes_won) or ((not held_yes) and no_won):
+        outcome_status = "won"
+    else:
+        outcome_status = "lost"
+
+    # PMM's real dollar PnL on the actual fill — separate from the
+    # bot-recommendation pnl_units. 1 contract pays $1 at resolution.
+    if outcome_status == "won":
+        actual_fill_pnl = round((1.0 - entry_share) * qty, 2)
+    elif outcome_status == "lost":
+        actual_fill_pnl = round(-entry_share * qty, 2)
+    else:
+        actual_fill_pnl = 0.0
+
+    timestamp = detail.get("updateTime") or detail.get("timestamp") or ""
+
+    return {
+        "action":             "settled",
+        "slug":               meta.get("slug") or extracted.get("raw_outcome", ""),
+        "polymarket_outcome": extracted.get("raw_outcome") or "",
+        "market_id":          market_id,
+        "market_type":        market_type,
+        "side":               user_side,
+        "actual_fill_price":  actual_fill_amer,
+        "actual_fill_qty":    qty,
+        "actual_fill_share":  round(entry_share, 4),
+        "actual_fill_pnl":    actual_fill_pnl,
+        "pmm_side":           pmm_side,
+        "entry_line":         extracted.get("point"),
+        "event_name":         f"{away} @ {home}",
+        "event_start":        event_start,
+        "sport":              extracted["sport"],
+        "outcome_status":     outcome_status,
+        "settled_at":         timestamp,
+    }
+
+
 def _pmm_units_for_qty(qty: float) -> tuple[int, str]:
     """Map an actual fill quantity to the closest (units, confidence)
     pair from our 1/3/5/10 tier scheme. 1 contract = 1 unit per the
@@ -4031,6 +4144,162 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
                 except Exception as e:
                     summary["errors"].append(f"insert {slug}: {e}")
             summary["auto_created"] += 1
+
+    # ─── Settled side: backfill POSITION_RESOLUTION activities ───
+    # Open positions disappear from `positions()` once they resolve, so
+    # the sync above misses any bet that already settled. We also scan
+    # recent activities for POSITION_RESOLUTION events, link/auto-create
+    # bot_picks rows for them with status=won/lost and pnl_units
+    # pre-computed. Bounded to the last 30 days (matches the page's
+    # settled window).
+    try:
+        activities = fetch_activities(client)
+    except Exception as e:
+        summary["errors"].append(f"activities fetch: {e}")
+        activities = []
+    settled_cutoff = (datetime.now(timezone.utc) - timedelta(days=30))
+    summary["settled_linked"]       = 0
+    summary["settled_auto_created"] = 0
+    summary["settled_already_done"] = 0
+    summary["settled_skipped"]      = 0
+
+    for act in activities:
+        if act.get("type") != "ACTIVITY_TYPE_POSITION_RESOLUTION":
+            continue
+        # Activity-level timestamp filter — Polymarket returns history
+        # going back far; we only care about recent resolutions.
+        ts = (act.get("positionResolution") or {}).get("updateTime") or ""
+        try:
+            ts_dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            if ts_dt < settled_cutoff:
+                continue
+        except Exception:
+            pass  # if we can't parse timestamp, include defensively
+
+        intent = _pmm_settled_to_intent(act, sb)
+        if intent.get("action") != "settled":
+            summary["settled_skipped"] += 1
+            actions.append(intent)
+            continue
+
+        try:
+            existing = (sb.table("bot_picks")
+                        .select("id,status,actual_fill_price,pnl_units,settled_at")
+                        .eq("market_id", intent["market_id"])
+                        .eq("market_type", intent["market_type"])
+                        .eq("side", intent["side"])
+                        .order("picked_at", desc=True)
+                        .limit(1).execute().data) or []
+        except Exception as e:
+            summary["errors"].append(f"settled lookup: {e}")
+            continue
+
+        status = intent["outcome_status"]
+        if existing:
+            pick = existing[0]
+            cur_status = pick.get("status")
+            if cur_status in ("won", "lost", "push", "void") and pick.get("settled_at"):
+                # Already graded by resolver (ESPN). Don't overwrite —
+                # the resolver's grade is canonical for the bot's units.
+                # Just attach actual_fill_pnl if it isn't there yet.
+                if pick.get("actual_fill_price") is None:
+                    update_only_fill = {
+                        "actual_fill_price":  intent["actual_fill_price"],
+                        "actual_fill_qty":    intent["actual_fill_qty"],
+                        "actual_fill_at":     intent["settled_at"] or pick.get("settled_at"),
+                        "actual_fill_pnl":    intent["actual_fill_pnl"],
+                        "polymarket_slug":    intent["slug"],
+                        "polymarket_outcome": intent["polymarket_outcome"],
+                        "pmm_side":           intent["pmm_side"],
+                    }
+                    actions.append({**intent, "action": "settled_attach_fill",
+                                    "pick_id": pick["id"]})
+                    if not dry_run:
+                        try:
+                            sb.table("bot_picks").update(update_only_fill).eq("id", pick["id"]).execute()
+                        except Exception as e:
+                            summary["errors"].append(f"settled fill attach: {e}")
+                    summary["settled_linked"] += 1
+                else:
+                    summary["settled_already_done"] += 1
+                    actions.append({**intent, "action": "settled_already_done",
+                                    "pick_id": pick["id"]})
+                continue
+            # Row exists in pending/recommended state → grade it.
+            units = int(pick.get("units") or 1) if isinstance(pick, dict) else 1
+            entry_price = int(pick.get("entry_price") or intent["actual_fill_price"] or 0)
+            # Need to refetch units + entry_price from DB. The above
+            # select doesn't include them — extend the select. Quick
+            # second fetch:
+            try:
+                full = (sb.table("bot_picks").select("units,entry_price")
+                        .eq("id", pick["id"]).single().execute().data) or {}
+                units = int(full.get("units") or units)
+                entry_price = int(full.get("entry_price") or entry_price)
+            except Exception:
+                pass
+            pnl_units = _pmm_pnl_units(status, entry_price, units)
+            update = {
+                "status":             status,
+                "pnl_units":          round(pnl_units, 4),
+                "settled_at":         intent["settled_at"] or datetime.now(timezone.utc).isoformat(),
+                "actual_fill_price":  intent["actual_fill_price"],
+                "actual_fill_qty":    intent["actual_fill_qty"],
+                "actual_fill_at":     intent["settled_at"],
+                "actual_fill_pnl":    intent["actual_fill_pnl"],
+                "polymarket_slug":    intent["slug"],
+                "polymarket_outcome": intent["polymarket_outcome"],
+                "pmm_side":           intent["pmm_side"],
+            }
+            actions.append({**intent, "action": "settled_link",
+                            "pick_id": pick["id"], "prev_status": cur_status,
+                            "pnl_units": round(pnl_units, 4)})
+            if not dry_run:
+                try:
+                    sb.table("bot_picks").update(update).eq("id", pick["id"]).execute()
+                except Exception as e:
+                    summary["errors"].append(f"settled link: {e}")
+            summary["settled_linked"] += 1
+        else:
+            # Auto-create a settled row from scratch.
+            units, conf = _pmm_units_for_qty(intent["actual_fill_qty"])
+            pnl_units = _pmm_pnl_units(status, intent["actual_fill_price"], units)
+            insert_row = {
+                "asked_by":           "pmm_sync",
+                "query_text":         "auto-linked from settled Polymarket position",
+                "market_id":          intent["market_id"],
+                "sport":              intent["sport"],
+                "event_name":         intent["event_name"],
+                "event_start":        intent["event_start"],
+                "market_type":        intent["market_type"],
+                "side":               intent["side"],
+                "entry_book":         "PMM",
+                "entry_price":        intent["actual_fill_price"],
+                "entry_line":         intent.get("entry_line"),
+                "units":              units,
+                "confidence":         conf,
+                "status":             status,
+                "pnl_units":          round(pnl_units, 4),
+                "settled_at":         intent["settled_at"] or datetime.now(timezone.utc).isoformat(),
+                "auto_linked":        True,
+                "actual_fill_price":  intent["actual_fill_price"],
+                "actual_fill_qty":    intent["actual_fill_qty"],
+                "actual_fill_at":     intent["settled_at"],
+                "actual_fill_pnl":    intent["actual_fill_pnl"],
+                "polymarket_slug":    intent["slug"],
+                "polymarket_outcome": intent["polymarket_outcome"],
+                "pmm_side":           intent["pmm_side"],
+            }
+            actions.append({**intent, "action": "settled_auto_create",
+                            "row_preview": {"units": units, "confidence": conf,
+                                            "pnl_units": round(pnl_units, 4),
+                                            "status": status}})
+            if not dry_run:
+                try:
+                    sb.table("bot_picks").insert(insert_row).execute()
+                except Exception as e:
+                    summary["errors"].append(f"settled insert: {e}")
+            summary["settled_auto_created"] += 1
 
     summary["actions"] = actions
     return summary
