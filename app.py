@@ -3435,15 +3435,10 @@ def api_handicapper():
     if sb is None:
         return jsonify({"ok": False, "error": "Supabase not configured"}), 503
 
-    # Auto-sync PMM positions on every page hit so the user never has
-    # to manually trigger /pmm-sync after placing a bet. Cached so
-    # /handicapper's 60s auto-refresh doesn't hammer the PMM API.
-    # Admin-only — sync uses admin's Polymarket SDK credentials.
-    try:
-        if (getattr(g, "user_data", {}) or {}).get("role") == "admin":
-            _pmm_sync_autotrigger()
-    except Exception:
-        pass
+    # Pick Bot is a picks tracker, not a real-bet ledger. It grades
+    # against ESPN final scores using the bot's recommended entry_price
+    # and ignores whether the user actually placed the bet on
+    # Polymarket. No pmm-sync wiring here.
 
     now = datetime.now(timezone.utc)
     cutoff_30d = (now - timedelta(days=30)).isoformat()
@@ -3503,19 +3498,17 @@ def api_handicapper():
     # tonight's game made + graded today belongs in TODAY regardless of
     # when the cron tick that updated the row fired.
     #
-    # PnL totals use actual_fill_pnl (real PMM dollar PnL on the user's
-    # actual fill), NOT pnl_units (theoretical to-WIN sizing). This
-    # matches the dashboard's $ accounting. The to-WIN math is
-    # mathematically correct but doesn't reflect the user's reality
-    # since they bet 1-3 contracts per pick, not theoretical to-WIN
-    # units. Rows without actual_fill_pnl (manually-logged non-PMM
-    # picks) contribute $0 to the totals.
+    # PnL totals use pnl_units (to-WIN sizing computed from the bot's
+    # entry_price + units). The bot is a picks tracker, not a real-
+    # bet ledger — it grades against ESPN final scores using the
+    # price the bot recommended, ignoring whether the user actually
+    # placed the bet on Polymarket at all.
     for r in settled_30d:
         st = r.get("status")
         if st not in ("won", "lost", "push"):
             continue
         try:
-            pnl = float(r.get("actual_fill_pnl") or 0)
+            pnl = float(r.get("pnl_units") or 0)
         except (TypeError, ValueError):
             pnl = 0.0
         event_start = r.get("event_start") or ""
@@ -3540,7 +3533,7 @@ def api_handicapper():
             s["hit_rate"] = round(s["won"] / decided, 4)
         if s["graded"] > 0:
             s["roi"] = round(s["pnl"] / s["graded"], 4)
-        s["pnl"] = round(s["pnl"], 2)
+        s["pnl"] = round(s["pnl"], 3)
 
     for s in (overall_today, overall_week, overall_30d, *by_conf.values()):
         _finalize(s)
