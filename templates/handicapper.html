@@ -514,9 +514,8 @@
         if (fmt === '3dp') return v.toFixed(3).replace(/^0/, '');
         return String(v);
     }
-    // Display in units. On Polymarket each share resolves to $1, so
-    // 1 unit = 1 share. PnL value comes from actual_fill_pnl ($) which
-    // is numerically the same as shares-net since each share = $1.
+    // Display in units (to-WIN from the bot's entry_price). Win at
+    // +N → +N/100u; win at -N → +100/N u. Loss → -<full risk> u.
     const _fmtPnl = v => {
         if (v == null) return '—';
         const n = Number(v);
@@ -560,7 +559,7 @@
 
     function _renderStats(s) {
         const hr = s.hit_rate == null ? '—' : `${(s.hit_rate*100).toFixed(1)}%`;
-        // s.roi is $/pick (actual_fill_pnl total / graded count).
+        // s.roi is u/pick (total pnl_units / graded count).
         const roiVal = s.roi == null ? null : s.roi;
         const roi = roiVal == null ? '—'
             : `${roiVal >= 0 ? '+' : '-'}${Math.abs(roiVal).toFixed(2)}u`;
@@ -608,43 +607,15 @@
         if (r.edge_pp != null) sigChips.push(`<span class="chip edge">+${Number(r.edge_pp).toFixed(1)}pp</span>`);
         if (r.sharp_score != null) sigChips.push(`<span class="chip sharp">SHARP ${r.sharp_score}</span>`);
 
-        // Provenance badge — quick label so the user can tell at a
-        // glance which is which:
-        //   • BET + REC = bot recommended AND user actually bet on PMM
-        //   • REC only  = bot recommended, user didn't (yet) bet
-        //   • BET only  = user bet on PMM with no bot rec (off-script)
-        const hasFill = r.actual_fill_price != null;
-        const hasRec  = !r.auto_linked;
-        if (hasFill && hasRec) {
-            sigChips.push(`<span class="chip prov bet-and-rec" title="Bet on PMM and bot recommended it">BET · REC</span>`);
-        } else if (hasFill) {
-            sigChips.push(`<span class="chip prov bet-only" title="Bet on PMM (off-script — no bot rec)">BET ONLY</span>`);
-        } else {
-            sigChips.push(`<span class="chip prov rec-only" title="Bot recommendation — not bet on PMM">REC ONLY</span>`);
-        }
-        // When both lines exist, show the actual fill alongside the
-        // bot's entry so the slippage is visible at a glance.
-        if (hasFill && hasRec && r.actual_fill_price !== r.entry_price) {
-            const fillSign = r.actual_fill_price > 0 ? '+' : '';
-            sigChips.push(`<span class="chip fill" title="Your actual Polymarket fill (vs bot's recommended ${r.entry_price})">fill ${fillSign}${r.actual_fill_price}</span>`);
-        }
 
         const cls = (kind === 'settled') ? (r.status || '') : '';
 
         let resultHtml = '';
         if (kind === 'settled') {
             const badge = `<span class="badge ${r.status}">${(r.status || '').toUpperCase()}</span>`;
-            // Per-row PnL shows actual $ (matches the dashboard). Falls
-            // back to to-WIN pnl_units only when actual_fill_pnl is
-            // missing (manually-logged non-PMM picks).
-            const rowPnl = (r.actual_fill_pnl != null) ? r.actual_fill_pnl : null;
-            const pnlCls = rowPnl == null
-                ? (r.pnl_units > 0 ? 'pos' : (r.pnl_units < 0 ? 'neg' : 'zero'))
-                : (rowPnl > 0 ? 'pos' : (rowPnl < 0 ? 'neg' : 'zero'));
-            const pnlText = rowPnl != null ? _fmtPnl(rowPnl)
-                : (r.pnl_units != null
-                    ? `${r.pnl_units > 0 ? '+' : ''}${Number(r.pnl_units).toFixed(2)}u`
-                    : '—');
+            // Per-row PnL = to-WIN units from the bot's entry_price.
+            const pnlCls = r.pnl_units > 0 ? 'pos' : (r.pnl_units < 0 ? 'neg' : 'zero');
+            const pnlText = _fmtPnl(r.pnl_units);
             // Guard against null/undefined fields — PMM-resolved rows
             // don't have ESPN score data, so result_score may be null
             // or have null fields. Render an empty score string in
