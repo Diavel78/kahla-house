@@ -4148,16 +4148,15 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
     # ─── Settled side: backfill POSITION_RESOLUTION activities ───
     # Open positions disappear from `positions()` once they resolve, so
     # the sync above misses any bet that already settled. We also scan
-    # recent activities for POSITION_RESOLUTION events, link/auto-create
-    # bot_picks rows for them with status=won/lost and pnl_units
-    # pre-computed. Bounded to the last 30 days (matches the page's
-    # settled window).
+    # recent activities for POSITION_RESOLUTION events. Bounded to the
+    # last 48h — that's when the Pick Bot went live; anything older
+    # isn't worth backfilling.
     try:
         activities = fetch_activities(client)
     except Exception as e:
         summary["errors"].append(f"activities fetch: {e}")
         activities = []
-    settled_cutoff = (datetime.now(timezone.utc) - timedelta(days=30))
+    settled_cutoff = (datetime.now(timezone.utc) - timedelta(hours=48))
     summary["settled_linked"]       = 0
     summary["settled_auto_created"] = 0
     summary["settled_already_done"] = 0
