@@ -3352,6 +3352,16 @@ def api_handicapper():
     if sb is None:
         return jsonify({"ok": False, "error": "Supabase not configured"}), 503
 
+    # Auto-sync PMM positions on every page hit so the user never has
+    # to manually trigger /pmm-sync after placing a bet. Cached so
+    # /handicapper's 60s auto-refresh doesn't hammer the PMM API.
+    # Admin-only — sync uses admin's Polymarket SDK credentials.
+    try:
+        if (getattr(g, "user_data", {}) or {}).get("role") == "admin":
+            _pmm_sync_autotrigger()
+    except Exception:
+        pass
+
     now = datetime.now(timezone.utc)
     cutoff_30d = (now - timedelta(days=30)).isoformat()
     # "Today" = MST calendar day, anchored to America/Phoenix (Arizona
@@ -4024,6 +4034,29 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
 
     summary["actions"] = actions
     return summary
+
+
+# Module-level cache so /api/handicapper's 60s page-refresh doesn't
+# re-hit Polymarket every time. Sync runs at most every 90s.
+_PMM_SYNC_LAST_TS: float = 0.0
+_PMM_SYNC_TTL_SEC = 90
+
+
+def _pmm_sync_autotrigger() -> None:
+    """Run the sync in WRITE mode if at least _PMM_SYNC_TTL_SEC has
+    elapsed since the last attempt. Called inline from /api/handicapper
+    so the user's bets show up on the next page refresh after placing
+    them on Polymarket — no manual URL-hitting required. Failures are
+    swallowed; the page must keep rendering even if PMM is down."""
+    global _PMM_SYNC_LAST_TS
+    import time as _time
+    if (_time.time() - _PMM_SYNC_LAST_TS) < _PMM_SYNC_TTL_SEC:
+        return
+    _PMM_SYNC_LAST_TS = _time.time()
+    try:
+        _pmm_sync_run(dry_run=False)
+    except Exception:
+        pass
 
 
 @app.route("/api/handicapper/pmm-sync")
