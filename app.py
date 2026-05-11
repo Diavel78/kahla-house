@@ -1703,6 +1703,56 @@ def _prob_to_amer_py(prob):
     return int(round((1.0 - prob) * 100.0 / prob))
 
 
+# PMM slug team-code → official team-name fragment used for substring
+# matching against our markets table's `event_name` field. PMM uses
+# standard sports abbreviations that aren't derivable from the full
+# name (St. Louis → "stl", Tampa Bay → "tb", LA Dodgers → "lad", LA
+# Angels → "laa", Chicago Cubs → "chc", Chicago White Sox → "chw").
+# Only the fragments needed for substring containment — full official
+# names are overkill. Add new entries here when sync skips with a
+# "no slug-code match" reason for a code not listed.
+_TEAM_CODE_MAP = {
+    # MLB
+    "ari": "arizona", "atl": "atlanta", "bal": "baltimore", "bos": "boston",
+    "chc": "chicago cubs", "chw": "chicago white sox", "cws": "chicago white sox",
+    "cin": "cincinnati", "cle": "cleveland", "col": "colorado", "det": "detroit",
+    "hou": "houston", "kc":  "kansas city", "laa": "angels", "lad": "dodgers",
+    "mia": "miami", "mil": "milwaukee", "min": "minnesota",
+    "nym": "mets", "nyy": "yankees", "oak": "athletics", "ath": "athletics",
+    "phi": "philadelphia", "pit": "pittsburgh", "sd": "san diego",
+    "sea": "seattle", "sf":  "san francisco", "stl": "st. louis",
+    "tb":  "tampa bay", "tex": "texas", "tor": "toronto", "was": "washington",
+    "wsh": "washington",
+    # NHL
+    "ana": "anaheim", "ari_nhl": "arizona coyotes", "bos_nhl": "bruins",
+    "buf": "buffalo", "cgy": "calgary", "car": "carolina", "chi": "chicago",
+    "col_nhl": "colorado avalanche", "cbj": "columbus", "dal": "dallas",
+    "det_nhl": "detroit red", "edm": "edmonton", "fla": "florida",
+    "la":  "los angeles kings", "lak": "los angeles kings", "min_nhl": "minnesota wild",
+    "mon": "montréal", "mtl": "montréal", "nsh": "nashville",
+    "nj":  "new jersey", "njd": "new jersey", "nyi": "islanders",
+    "nyr": "rangers", "ott": "ottawa", "phi_nhl": "flyers",
+    "pit_nhl": "penguins", "sj":  "san jose", "sjs": "san jose",
+    "sea_nhl": "kraken", "stl_nhl": "st. louis blues", "tb_nhl": "tampa bay light",
+    "tor_nhl": "toronto maple", "uta": "utah", "van": "vancouver",
+    "veg": "vegas", "vgk": "vegas", "was_nhl": "washington capitals",
+    "wpg": "winnipeg",
+    # NBA
+    "atl_nba": "hawks", "bos_nba": "celtics", "bkn": "brooklyn",
+    "cha": "charlotte", "chi_nba": "bulls", "cle_nba": "cleveland",
+    "dal_nba": "mavericks", "den": "denver", "det_nba": "pistons",
+    "gs": "golden state", "gsw": "golden state", "hou_nba": "rockets",
+    "ind": "indiana", "lac": "clippers", "lal": "lakers",
+    "mem": "memphis", "mia_nba": "heat", "mil_nba": "bucks",
+    "min_nba": "minnesota timber", "no": "new orleans", "nop": "new orleans",
+    "ny": "knicks", "nyk": "knicks", "okc": "oklahoma",
+    "orl": "orlando", "phi_nba": "76ers", "phx": "phoenix",
+    "por": "portland", "sac": "sacramento", "sa": "san antonio",
+    "sas": "san antonio", "tor_nba": "raptors", "uth": "utah",
+    "was_nba": "wizards", "wsh_nba": "wizards",
+}
+
+
 def _clv_extract_match_info(meta):
     """Parse Polymarket marketMetadata into the fields we need to look
     up the corresponding row in our markets table.
@@ -1734,6 +1784,18 @@ def _clv_extract_match_info(meta):
         return None
     bet_date = date_match.group(1)
 
+    # Extract the two team codes from the slug for fallback matching
+    # on TOT/SPR bets (where raw_outcome="Over"/"Under" doesn't help
+    # identify the game). PMM slug pattern: <prefix>-<sport>-<away>-
+    # <home>-YYYY-MM-DD. Codes are usually 2-4 lowercase letters.
+    slug_codes: dict = {}
+    code_match = re.match(
+        r"^[a-z]+-[a-z]+-([a-z]{2,4})-([a-z]{2,4})-\d{4}-\d{2}-\d{2}",
+        market_slug or event_slug or "",
+    )
+    if code_match:
+        slug_codes = {"away": code_match.group(1), "home": code_match.group(2)}
+
     outcome_lower = raw_outcome.strip().lower()
     point = None
     if outcome_lower in ("over", "under"):
@@ -1758,6 +1820,7 @@ def _clv_extract_match_info(meta):
         "market_type": market_type,
         "point":       point,
         "raw_outcome": raw_outcome,
+        "slug_codes":  slug_codes,
     }
 
 
@@ -3796,28 +3859,26 @@ def _pmm_find_market(extracted: dict, sb,
             debug["reason"] = "no markets in date window"
         return None
 
-    # Phantom filter: keep only markets with snapshot activity in the
-    # last 7d.
-    market_ids = [m["id"] for m in markets]
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-    try:
-        snap = (sb.table("book_snapshots")
-                .select("market_id")
-                .in_("market_id", market_ids)
-                .gte("captured_at", cutoff)
-                .limit(5000).execute().data) or []
-        live_ids = {r["market_id"] for r in snap if r.get("market_id")}
-    except Exception:
-        live_ids = set(market_ids)
-    markets_live = [m for m in markets if m["id"] in live_ids]
+    # No phantom filter for sync — the markets table is the source of
+    # truth for "what games exist". An absent snapshot just means the
+    # cron hasn't ingested odds for the game yet (off-season Odds API
+    # gaps, late-added games, etc.), NOT that the game is fake. The
+    # CLV path used to filter these because CLV needs snapshots for
+    # the math; sync just needs the market_id. Diagnostic info still
+    # emitted so the response shows snapshot coverage.
     if debug is not None:
-        debug["markets_with_snapshots"] = len(markets_live)
-        debug["phantom_event_names"] = [m.get("event_name") for m in markets
-                                         if m["id"] not in live_ids][:8]
-    if not markets_live:
-        if debug is not None:
-            debug["reason"] = "all markets in window were phantoms (no snapshots in 7d)"
-        return None
+        try:
+            market_ids = [m["id"] for m in markets]
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            snap = (sb.table("book_snapshots")
+                    .select("market_id")
+                    .in_("market_id", market_ids)
+                    .gte("captured_at", cutoff)
+                    .limit(5000).execute().data) or []
+            live_ids = {r["market_id"] for r in snap if r.get("market_id")}
+            debug["markets_with_snapshots"] = len(live_ids)
+        except Exception:
+            debug["markets_with_snapshots"] = -1
 
     try:
         from rapidfuzz import fuzz
@@ -3826,27 +3887,74 @@ def _pmm_find_market(extracted: dict, sb,
             debug["reason"] = "rapidfuzz not installed"
         return None
 
+    # Extract slug team codes for fallback matching on TOT/SPR bets
+    # whose raw_outcome is "Over"/"Under" / "+1.5" rather than a team
+    # name. Slug format: `<prefix>-<sport>-<away_code>-<home_code>-<date>`.
+    slug_codes = extracted.get("slug_codes") or {}
+    away_code = (slug_codes.get("away") or "").lower()
+    home_code = (slug_codes.get("home") or "").lower()
+
+    def _code_matches_event(code: str, side_name: str) -> bool:
+        """Heuristic: PMM uses standard team abbreviations (stl, sd, tb,
+        lad, nyy, etc.) that aren't trivially derivable from the
+        full event name. Use _TEAM_CODE_MAP for known mappings and
+        fall back to substring containment for the easy cases."""
+        if not code or not side_name:
+            return False
+        side_low = side_name.lower()
+        full = _TEAM_CODE_MAP.get(code)
+        if full and full.lower() in side_low:
+            return True
+        # Last-resort: hyphen-collapsed substring (catches "sd" → "san diego"
+        # when the abbreviation forms by initials of multi-word names).
+        if code in side_low.replace(" ", "").replace(".", ""):
+            return True
+        return False
+
     best = None
     best_score = 0
     score_table: list[dict] = []
-    for m in markets_live:
+    use_code_match = team_name in ("", "over", "under") or away_code and home_code
+    for m in markets:
         ev = m.get("event_name") or ""
         if " @ " not in ev:
             continue
         away, home = ev.split(" @ ", 1)
-        s_a = fuzz.partial_ratio(team_name, away.lower())
-        s_h = fuzz.partial_ratio(team_name, home.lower())
-        max_s = max(s_a, s_h)
-        score_table.append({"event": ev, "s_away": s_a, "s_home": s_h})
-        if max_s > best_score and max_s >= 75:
-            best_score = max_s
-            user_side = "away" if s_a >= s_h else "home"
-            best = (m["id"], away, home, user_side, m["event_start"])
+
+        if team_name and team_name not in ("over", "under"):
+            s_a = fuzz.partial_ratio(team_name, away.lower())
+            s_h = fuzz.partial_ratio(team_name, home.lower())
+            max_s = max(s_a, s_h)
+            score_table.append({"event": ev, "s_away": s_a, "s_home": s_h})
+            if max_s > best_score and max_s >= 75:
+                best_score = max_s
+                user_side = "away" if s_a >= s_h else "home"
+                best = (m["id"], away, home, user_side, m["event_start"])
+
+        # Slug-code matcher: TOT/SPR fallback when team_name doesn't
+        # apply. ALSO runs alongside team_name match as a confirmation
+        # for ambiguous fuzzy scores — slug codes are deterministic
+        # where fuzz ratios are not.
+        if away_code and home_code:
+            if _code_matches_event(away_code, away) and _code_matches_event(home_code, home):
+                # Codes pin down the game exactly. Pick side from the
+                # outcome direction (TOT side resolved later in the
+                # intent function; for ML the team_name match above
+                # already set best). Default to "home" — sync's later
+                # over/under override fixes TOT side.
+                code_user_side = "home"
+                score_table.append({"event": ev, "slug_match": True})
+                if not best or best_score < 100:
+                    best_score = 100
+                    best = (m["id"], away, home, code_user_side, m["event_start"])
+
     if debug is not None:
         debug["fuzz_scores"] = score_table
         debug["best_score"] = best_score
         if not best:
-            debug["reason"] = f"no candidate scored >= 75 against team_name='{team_name}'"
+            debug["reason"] = (f"no candidate scored >= 75 against "
+                               f"team_name='{team_name}' and no slug-code "
+                               f"match for ({away_code}, {home_code})")
     return best
 
 
