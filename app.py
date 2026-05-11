@@ -1785,17 +1785,26 @@ def _clv_extract_match_info(meta):
         return None
     bet_date = date_match.group(1)
 
-    # Extract the two team codes from the slug for fallback matching
-    # on TOT/SPR bets (where raw_outcome="Over"/"Under" doesn't help
-    # identify the game). PMM slug pattern: <prefix>-<sport>-<away>-
-    # <home>-YYYY-MM-DD. Codes are usually 2-4 lowercase letters.
+    # Extract team codes + optional line suffix from the slug. PMM
+    # slug patterns:
+    #   ML:     aec-mlb-stl-sd-2026-05-10
+    #   TOT:    tsc-mlb-stl-sd-2026-05-10-8pt5   (line = 8.5)
+    #   SPR:    similar `-1pt5` suffix where applicable
+    # Codes are usually 2-4 lowercase letters; line suffix is `\dpt\d`.
     slug_codes: dict = {}
+    slug_line: float | None = None
     code_match = re.match(
-        r"^[a-z]+-[a-z]+-([a-z]{2,4})-([a-z]{2,4})-\d{4}-\d{2}-\d{2}",
+        r"^[a-z]+-[a-z]+-([a-z]{2,4})-([a-z]{2,4})-\d{4}-\d{2}-\d{2}(?:-([0-9]+pt[0-9]+))?",
         market_slug or event_slug or "",
     )
     if code_match:
         slug_codes = {"away": code_match.group(1), "home": code_match.group(2)}
+        line_str = code_match.group(3)
+        if line_str:
+            try:
+                slug_line = float(line_str.replace("pt", "."))
+            except ValueError:
+                pass
 
     outcome_lower = raw_outcome.strip().lower()
     point = None
@@ -1804,11 +1813,21 @@ def _clv_extract_match_info(meta):
         m = re.search(r"(\d+\.?\d*)", title)
         if m:
             point = float(m.group(1))
+        # Slug suffix is more reliable than the title parser (which
+        # picks up incidental numbers in titles). Override when the
+        # slug carried a clean line value.
+        if slug_line is not None:
+            point = slug_line
     elif re.search(r"[+-]\d+\.?\d*", raw_outcome):
         market_type = "spread"
         m = re.search(r"([+-]?\d+\.?\d*)", raw_outcome)
         if m:
             point = float(m.group(1))
+        # Slug suffix override (matches the TOT case rationale).
+        if slug_line is not None and point is not None:
+            # Preserve sign from raw_outcome — slug just has magnitude.
+            sign = -1 if point < 0 else 1
+            point = sign * slug_line
     elif team_name or raw_outcome:
         market_type = "moneyline"
     else:
@@ -3442,7 +3461,7 @@ def api_handicapper():
             "units,confidence,fair_prob,edge_pp,sharp_score,"
             "analysis_md,reasons,"
             "status,pnl_units,result_score,settled_at,"
-            "actual_fill_price,actual_fill_qty,actual_fill_pnl,"
+            "actual_fill_price,actual_fill_qty,actual_fill_line,actual_fill_pnl,"
             "polymarket_outcome,pmm_side,auto_linked")
     try:
         pending = (sb.table("bot_picks").select(cols)
@@ -3965,6 +3984,47 @@ def _pmm_find_market(extracted: dict, sb,
     return best
 
 
+def _pmm_resolve_user_side(market_type: str, matched_side: str,
+                           pmm_side: str, entry_share: float,
+                           extracted: dict) -> str | None:
+    """Decide which side of the market (home/away or over/under) the
+    user actually bet on, given the raw PMM data. Verified empirically
+    against the user's PMM app screenshots (May 2026):
+
+    For ML/SPR:
+      - pmm_side=YES  → user bet the team named in polymarket_outcome.
+        Use matched_side (which was derived from fuzzy-matching the
+        team name against event_name's away/home).
+      - pmm_side=NO + entry_share < 0.50 → standard binary "bet
+        against named outcome" pattern. The named outcome is the
+        favorite (high price); user paid underdog price for NO. Flip
+        matched_side to get the OTHER team.
+      - pmm_side=NO + entry_share ≥ 0.50 → SDK anomaly where bet on
+        the favored team gets recorded with negative netPosition
+        (likely BUY_SHORT routing per CLAUDE.md gotcha #23). User
+        actually bet the named team — DO NOT flip.
+
+    For TOT, raw_outcome contains "Over"/"Under" directly. Same flip
+    rule: pmm_side=NO flips over↔under only when share < 0.50.
+    """
+    if market_type == "total":
+        raw_outcome_low = (extracted.get("raw_outcome") or "").lower()
+        if "over" in raw_outcome_low:
+            user_side = "over"
+        elif "under" in raw_outcome_low:
+            user_side = "under"
+        else:
+            return None
+        if pmm_side == "NO" and entry_share < 0.50:
+            user_side = "under" if user_side == "over" else "over"
+        return user_side
+
+    # ML / SPR — start from fuzzy-matched team side
+    if pmm_side == "NO" and entry_share < 0.50:
+        return "away" if matched_side == "home" else "home"
+    return matched_side
+
+
 def _pmm_position_to_intent(slug: str, pos: dict, sb) -> dict:
     """Map one Polymarket position into a sync intent dict."""
     meta = pos.get("marketMetadata") or {}
@@ -3990,27 +4050,18 @@ def _pmm_position_to_intent(slug: str, pos: dict, sb) -> dict:
         return {"action": "skip", "reason": "no fill yet (qty=0 or cost missing)", "slug": slug}
     pmm_side = "YES" if net >= 0 else "NO"
 
-    # NO contracts on a side flip the bet to the OPPOSITE side. Examples:
-    #   • ML "Canadiens" + NO → betting against Montreal → side = away
-    #   • SPR "Yankees -1.5" + NO → Yankees DON'T cover → side = away
-    #   • TOT "Over" + NO       → betting under → side = under
-    if market_type == "total":
-        raw_outcome_low = (extracted.get("raw_outcome") or "").lower()
-        if "over" in raw_outcome_low:
-            user_side = "over"
-        elif "under" in raw_outcome_low:
-            user_side = "under"
-        else:
-            return {"action": "skip",
-                    "reason": f"can't infer over/under from outcome={extracted.get('raw_outcome')}",
-                    "slug": slug}
-        if pmm_side == "NO":
-            user_side = "under" if user_side == "over" else "over"
-    elif pmm_side == "NO":
-        user_side = "away" if user_side == "home" else "home"
-
     entry_share_price = cost / qty
     actual_fill_amer = _prob_to_amer_py(entry_share_price)
+
+    # Side resolution — see _pmm_resolve_user_side for the share-price
+    # heuristic that handles PMM's BUY_SHORT routing quirk on favored
+    # teams (verified against the user's app screenshots).
+    user_side = _pmm_resolve_user_side(market_type, user_side, pmm_side,
+                                       entry_share_price, extracted)
+    if user_side is None:
+        return {"action": "skip",
+                "reason": f"can't infer side from outcome={extracted.get('raw_outcome')}",
+                "slug": slug}
 
     return {
         "action":             "sync",
@@ -4079,22 +4130,21 @@ def _pmm_settled_to_intent(act: dict, sb,
         return {"action": "skip", "reason": "no fill data on settled position"}
     pmm_side = "YES" if net >= 0 else "NO"
 
-    if market_type == "total":
-        raw_outcome_low = (extracted.get("raw_outcome") or "").lower()
-        if "over" in raw_outcome_low:
-            user_side = "over"
-        elif "under" in raw_outcome_low:
-            user_side = "under"
-        else:
-            return {"action": "skip",
-                    "reason": f"can't infer over/under from outcome={extracted.get('raw_outcome')}"}
-        if pmm_side == "NO":
-            user_side = "under" if user_side == "over" else "over"
-    elif pmm_side == "NO":
-        user_side = "away" if user_side == "home" else "home"
-
     entry_share = cost / qty
     actual_fill_amer = _prob_to_amer_py(entry_share)
+
+    # Side determination — see _pmm_resolve_user_side for the rules.
+    # Verified empirically against the user's PMM app screenshots:
+    # the SDK reports negative netPosition (pmm_side=NO) for SOME
+    # bets on the favored team's outcome (likely BUY_SHORT routing).
+    # The share price disambiguates: share ≥ 0.50 = paid favorite
+    # price = bet the named team regardless of pmm_side; share < 0.50
+    # = paid underdog price = standard binary "bet against named" flip.
+    user_side = _pmm_resolve_user_side(market_type, user_side, pmm_side,
+                                       entry_share, extracted)
+    if user_side is None:
+        return {"action": "skip",
+                "reason": f"can't infer side from outcome={extracted.get('raw_outcome')}"}
 
     # Which side resolved? POSITION_RESOLUTION_SIDE_YES means the YES
     # contract paid out; user with held YES won, user with held NO lost
@@ -4186,23 +4236,15 @@ def _pmm_trade_close_to_intent(act: dict, sb,
     actual_fill_amer = _prob_to_amer_py(entry_share)
 
     # Same side-resolution logic as POSITION_RESOLUTION — derive YES/NO
-    # from the BEFORE position's signed netPosition.
+    # from the BEFORE position's signed netPosition, then apply the
+    # share-price heuristic via _pmm_resolve_user_side.
     net = _safe_float(before.get("netPosition")) or 0
     pmm_side = "YES" if net >= 0 else "NO"
-
-    if market_type == "total":
-        raw_outcome_low = (extracted.get("raw_outcome") or "").lower()
-        if "over" in raw_outcome_low:
-            user_side = "over"
-        elif "under" in raw_outcome_low:
-            user_side = "under"
-        else:
-            return {"action": "skip",
-                    "reason": f"can't infer over/under from outcome={extracted.get('raw_outcome')}"}
-        if pmm_side == "NO":
-            user_side = "under" if user_side == "over" else "over"
-    elif pmm_side == "NO":
-        user_side = "away" if user_side == "home" else "home"
+    user_side = _pmm_resolve_user_side(market_type, user_side, pmm_side,
+                                       entry_share, extracted)
+    if user_side is None:
+        return {"action": "skip",
+                "reason": f"can't infer side from outcome={extracted.get('raw_outcome')}"}
 
     sold_qty = bq - aq
     sell_revenue = _safe_float(detail.get("cost"))
@@ -4326,6 +4368,7 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
             update_fields = {
                 "actual_fill_price":  intent["actual_fill_price"],
                 "actual_fill_qty":    intent["actual_fill_qty"],
+                "actual_fill_line":   intent.get("entry_line"),
                 "actual_fill_at":     datetime.now(timezone.utc).isoformat(),
                 "polymarket_slug":    intent["slug"],
                 "polymarket_outcome": intent["polymarket_outcome"],
@@ -4363,6 +4406,7 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
                 "auto_linked":        True,
                 "actual_fill_price":  intent["actual_fill_price"],
                 "actual_fill_qty":    intent["actual_fill_qty"],
+                "actual_fill_line":   intent.get("entry_line"),
                 "actual_fill_at":     datetime.now(timezone.utc).isoformat(),
                 "polymarket_slug":    intent["slug"],
                 "polymarket_outcome": intent["polymarket_outcome"],
@@ -4459,6 +4503,7 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
                     update_only_fill = {
                         "actual_fill_price":  intent["actual_fill_price"],
                         "actual_fill_qty":    intent["actual_fill_qty"],
+                        "actual_fill_line":   intent.get("entry_line"),
                         "actual_fill_at":     intent["settled_at"] or pick.get("settled_at"),
                         "actual_fill_pnl":    intent["actual_fill_pnl"],
                         "polymarket_slug":    intent["slug"],
@@ -4498,6 +4543,7 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
                 "settled_at":         intent["settled_at"] or datetime.now(timezone.utc).isoformat(),
                 "actual_fill_price":  intent["actual_fill_price"],
                 "actual_fill_qty":    intent["actual_fill_qty"],
+                "actual_fill_line":   intent.get("entry_line"),
                 "actual_fill_at":     intent["settled_at"],
                 "actual_fill_pnl":    intent["actual_fill_pnl"],
                 "polymarket_slug":    intent["slug"],
@@ -4537,6 +4583,7 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
                 "auto_linked":        True,
                 "actual_fill_price":  intent["actual_fill_price"],
                 "actual_fill_qty":    intent["actual_fill_qty"],
+                "actual_fill_line":   intent.get("entry_line"),
                 "actual_fill_at":     intent["settled_at"],
                 "actual_fill_pnl":    intent["actual_fill_pnl"],
                 "polymarket_slug":    intent["slug"],
