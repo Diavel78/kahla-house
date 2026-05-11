@@ -4028,6 +4028,108 @@ def _pmm_settled_to_intent(act: dict, sb,
     }
 
 
+def _pmm_trade_close_to_intent(act: dict, sb,
+                                match_debug: dict | None = None) -> dict:
+    """Map an ACTIVITY_TYPE_TRADE that closes (or partially closes) a
+    position into a settled-side sync intent. Catches the cases the
+    POSITION_RESOLUTION path misses — manual sells before resolution
+    AND auto-redemptions that fire as a TRADE rather than a separate
+    resolution event."""
+    detail = act.get("trade") or {}
+    if not detail:
+        return {"action": "skip", "reason": "no trade detail"}
+
+    before = detail.get("beforePosition") or {}
+    after = detail.get("afterPosition") or {}
+    bq = abs(_safe_float(before.get("netPosition")) or 0)
+    aq = abs(_safe_float(after.get("netPosition")) or 0)
+    sdk_rpnl = _safe_float(detail.get("realizedPnl"))
+    is_close = (sdk_rpnl is not None) or (bq > aq)
+    if not is_close:
+        return {"action": "skip", "reason": "not a closing trade"}
+
+    meta = before.get("marketMetadata") or after.get("marketMetadata") or {}
+    extracted = _clv_extract_match_info(meta)
+    if not extracted:
+        return {"action": "skip", "reason": "non-sport / unparseable meta"}
+
+    _debug: dict = match_debug if match_debug is not None else {}
+    matched = _pmm_find_market(extracted, sb, _debug)
+    if not matched:
+        return {"action": "skip",
+                "reason": _debug.get("reason") or "no markets row",
+                "extracted": extracted, "match_debug": _debug}
+
+    market_id, away, home, user_side, event_start = matched
+    market_type = extracted["market_type"]
+
+    cost_basis = _safe_float(before.get("cost"))
+    if cost_basis is None or bq <= 0:
+        return {"action": "skip", "reason": "no entry cost basis"}
+
+    entry_share = cost_basis / bq
+    actual_fill_amer = _prob_to_amer_py(entry_share)
+
+    # Same side-resolution logic as POSITION_RESOLUTION — derive YES/NO
+    # from the BEFORE position's signed netPosition.
+    net = _safe_float(before.get("netPosition")) or 0
+    pmm_side = "YES" if net >= 0 else "NO"
+
+    if market_type == "total":
+        raw_outcome_low = (extracted.get("raw_outcome") or "").lower()
+        if "over" in raw_outcome_low:
+            user_side = "over"
+        elif "under" in raw_outcome_low:
+            user_side = "under"
+        else:
+            return {"action": "skip",
+                    "reason": f"can't infer over/under from outcome={extracted.get('raw_outcome')}"}
+        if pmm_side == "NO":
+            user_side = "under" if user_side == "over" else "over"
+    elif pmm_side == "NO":
+        user_side = "away" if user_side == "home" else "home"
+
+    sold_qty = bq - aq
+    sell_revenue = _safe_float(detail.get("cost"))
+    if sell_revenue is None or sold_qty <= 0:
+        return {"action": "skip", "reason": "no sell revenue/qty"}
+
+    cost_basis_for_sold = entry_share * sold_qty
+    actual_fill_pnl = round(sell_revenue - cost_basis_for_sold, 2)
+    # Won/lost from realized PnL sign. Sells at break-even (within 1¢)
+    # are treated as push — rare but covers the case where the user
+    # closed out at exactly cost basis to free capital.
+    if actual_fill_pnl > 0.01:
+        outcome_status = "won"
+    elif actual_fill_pnl < -0.01:
+        outcome_status = "lost"
+    else:
+        outcome_status = "push"
+
+    timestamp = detail.get("updateTime") or detail.get("timestamp") or ""
+
+    return {
+        "action":             "settled",
+        "slug":               meta.get("slug") or extracted.get("raw_outcome", ""),
+        "polymarket_outcome": extracted.get("raw_outcome") or "",
+        "market_id":          market_id,
+        "market_type":        market_type,
+        "side":               user_side,
+        "actual_fill_price":  actual_fill_amer,
+        "actual_fill_qty":    sold_qty,
+        "actual_fill_share":  round(entry_share, 4),
+        "actual_fill_pnl":    actual_fill_pnl,
+        "pmm_side":           pmm_side,
+        "entry_line":         extracted.get("point"),
+        "event_name":         f"{away} @ {home}",
+        "event_start":        event_start,
+        "sport":              extracted["sport"],
+        "outcome_status":     outcome_status,
+        "settled_at":         timestamp,
+        "source":             "trade_close",
+    }
+
+
 def _pmm_units_for_qty(qty: float) -> tuple[int, str]:
     """Map an actual fill quantity to the closest (units, confidence)
     pair from our 1/3/5/10 tier scheme. 1 contract = 1 unit per the
@@ -4073,33 +4175,25 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
             actions.append(intent)
             continue
 
-        # Look up an existing pick for this game/side. Accept both
-        # status='pending' (user clicked Log) AND status='recommended'
-        # (auto-logged on dossier view) — linking a PMM fill flips
-        # recommended → pending implicitly.
+        # Look up an existing pick for this game/side. Accept ANY
+        # status — pending/recommended are the common paths (sync flips
+        # to pending on link), but already-graded rows (won/lost/push,
+        # via the ESPN resolver) still need their actual_fill attached
+        # so they render as BET · REC instead of REC ONLY. Without this
+        # filter expansion, settled-but-still-unredeemed PMM positions
+        # auto-create duplicates instead of linking.
         try:
             existing = (sb.table("bot_picks")
                         .select("id,actual_fill_price,units,confidence,asked_by,status")
                         .eq("market_id", intent["market_id"])
                         .eq("market_type", intent["market_type"])
                         .eq("side", intent["side"])
-                        .in_("status", ["pending", "recommended"])
                         .order("picked_at", desc=True)
                         .limit(1).execute().data) or []
         except Exception as e:
             summary["errors"].append(f"lookup {slug}: {e}")
             actions.append({**intent, "action": "error", "error": str(e)})
             continue
-
-        update_fields = {
-            "actual_fill_price":  intent["actual_fill_price"],
-            "actual_fill_qty":    intent["actual_fill_qty"],
-            "actual_fill_at":     datetime.now(timezone.utc).isoformat(),
-            "polymarket_slug":    intent["slug"],
-            "polymarket_outcome": intent["polymarket_outcome"],
-            "pmm_side":           intent["pmm_side"],
-            "status":             "pending",   # flip recommended → pending on link
-        }
 
         if existing:
             pick = existing[0]
@@ -4108,8 +4202,25 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
                 summary["already_linked"] += 1
                 actions.append({**intent, "action": "already_linked", "pick_id": pick["id"]})
                 continue
+
+            # Preserve the existing grade if the row is already settled
+            # — don't flip a 'lost' row back to 'pending' just because
+            # PMM still shows it as unredeemed. Only flip status when
+            # the row is in recommended/pending.
+            cur_status = pick.get("status") or "pending"
+            update_fields = {
+                "actual_fill_price":  intent["actual_fill_price"],
+                "actual_fill_qty":    intent["actual_fill_qty"],
+                "actual_fill_at":     datetime.now(timezone.utc).isoformat(),
+                "polymarket_slug":    intent["slug"],
+                "polymarket_outcome": intent["polymarket_outcome"],
+                "pmm_side":           intent["pmm_side"],
+            }
+            if cur_status in ("pending", "recommended"):
+                update_fields["status"] = "pending"
+
             actions.append({**intent, "action": "link", "pick_id": pick["id"],
-                            "prev_status": pick.get("status")})
+                            "prev_status": cur_status})
             if not dry_run:
                 try:
                     sb.table("bot_picks").update(update_fields).eq("id", pick["id"]).execute()
@@ -4135,7 +4246,13 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
                 "units":              units,
                 "confidence":         conf,
                 "auto_linked":        True,
-                **update_fields,
+                "actual_fill_price":  intent["actual_fill_price"],
+                "actual_fill_qty":    intent["actual_fill_qty"],
+                "actual_fill_at":     datetime.now(timezone.utc).isoformat(),
+                "polymarket_slug":    intent["slug"],
+                "polymarket_outcome": intent["polymarket_outcome"],
+                "pmm_side":           intent["pmm_side"],
+                "status":             "pending",
             }
             actions.append({**intent, "action": "auto_create", "row_preview": {
                 "units": units, "confidence": conf,
@@ -4164,22 +4281,42 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
     summary["settled_already_done"] = 0
     summary["settled_skipped"]      = 0
 
+    # Diagnostic: count activity types so we can see what we're
+    # actually working with. Helps debug "sync didn't link" reports.
+    summary["activity_types_seen"] = {}
+    summary["settled_skip_reasons"] = {}
     for act in activities:
-        if act.get("type") != "ACTIVITY_TYPE_POSITION_RESOLUTION":
+        t = act.get("type", "unknown")
+        summary["activity_types_seen"][t] = summary["activity_types_seen"].get(t, 0) + 1
+
+    for act in activities:
+        act_type = act.get("type")
+        # Iterate BOTH POSITION_RESOLUTION (clean automatic resolves)
+        # AND TRADE (sells before resolution + auto-redemptions that
+        # fire as a closing trade). The dashboard's compute_summary
+        # treats them the same way; sync needs to do the same.
+        if act_type == "ACTIVITY_TYPE_POSITION_RESOLUTION":
+            ts = (act.get("positionResolution") or {}).get("updateTime") or ""
+            intent_fn = _pmm_settled_to_intent
+        elif act_type == "ACTIVITY_TYPE_TRADE":
+            ts = (act.get("trade") or {}).get("updateTime") or ""
+            intent_fn = _pmm_trade_close_to_intent
+        else:
             continue
-        # Activity-level timestamp filter — Polymarket returns history
-        # going back far; we only care about recent resolutions.
-        ts = (act.get("positionResolution") or {}).get("updateTime") or ""
+
         try:
             ts_dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
             if ts_dt < settled_cutoff:
                 continue
         except Exception:
-            pass  # if we can't parse timestamp, include defensively
+            pass
 
-        intent = _pmm_settled_to_intent(act, sb)
+        intent = intent_fn(act, sb)
         if intent.get("action") != "settled":
             summary["settled_skipped"] += 1
+            reason = intent.get("reason") or "unknown"
+            summary["settled_skip_reasons"][reason] = (
+                summary["settled_skip_reasons"].get(reason, 0) + 1)
             actions.append(intent)
             continue
 
