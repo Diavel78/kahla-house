@@ -1713,7 +1713,8 @@ def _prob_to_amer_py(prob):
 # "no slug-code match" reason for a code not listed.
 _TEAM_CODE_MAP = {
     # MLB
-    "ari": "arizona", "atl": "atlanta", "bal": "baltimore", "bos": "boston",
+    "ari": "arizona", "az": "arizona", "atl": "atlanta",
+    "bal": "baltimore", "bos": "boston",
     "chc": "chicago cubs", "chw": "chicago white sox", "cws": "chicago white sox",
     "cin": "cincinnati", "cle": "cleveland", "col": "colorado", "det": "detroit",
     "hou": "houston", "kc":  "kansas city", "laa": "angels", "lad": "dodgers",
@@ -3913,14 +3914,15 @@ def _pmm_find_market(extracted: dict, sb,
 
     best = None
     best_score = 0
+    slug_code_winner = None  # exact match from slug codes — beats fuzz
     score_table: list[dict] = []
-    use_code_match = team_name in ("", "over", "under") or away_code and home_code
     for m in markets:
         ev = m.get("event_name") or ""
         if " @ " not in ev:
             continue
         away, home = ev.split(" @ ", 1)
 
+        s_a = s_h = 0
         if team_name and team_name not in ("over", "under"):
             s_a = fuzz.partial_ratio(team_name, away.lower())
             s_h = fuzz.partial_ratio(team_name, home.lower())
@@ -3931,26 +3933,31 @@ def _pmm_find_market(extracted: dict, sb,
                 user_side = "away" if s_a >= s_h else "home"
                 best = (m["id"], away, home, user_side, m["event_start"])
 
-        # Slug-code matcher: TOT/SPR fallback when team_name doesn't
-        # apply. ALSO runs alongside team_name match as a confirmation
-        # for ambiguous fuzzy scores — slug codes are deterministic
-        # where fuzz ratios are not.
-        if away_code and home_code:
+        # Slug-code path: an event whose BOTH team codes match the
+        # slug. Deterministic — beats fuzz unconditionally. Resolves
+        # ambiguities like team_name="Canadiens" tying 100% across
+        # both Buffalo@MTL and Tampa@MTL: slug codes (buf, mon) only
+        # match Buffalo@MTL.
+        if away_code and home_code and not slug_code_winner:
             if _code_matches_event(away_code, away) and _code_matches_event(home_code, home):
-                # Codes pin down the game exactly. Pick side from the
-                # outcome direction (TOT side resolved later in the
-                # intent function; for ML the team_name match above
-                # already set best). Default to "home" — sync's later
-                # over/under override fixes TOT side.
-                code_user_side = "home"
+                # Pick side from fuzz when available — for ML bets the
+                # team_name disambiguates which side the user took.
+                # For TOT/SPR, side gets resolved later in the intent
+                # function from the Over/Under outcome direction.
+                code_side = "home"
+                if s_a or s_h:
+                    code_side = "away" if s_a >= s_h else "home"
+                slug_code_winner = (m["id"], away, home, code_side, m["event_start"])
                 score_table.append({"event": ev, "slug_match": True})
-                if not best or best_score < 100:
-                    best_score = 100
-                    best = (m["id"], away, home, code_user_side, m["event_start"])
+
+    if slug_code_winner:
+        best = slug_code_winner
+        best_score = 100
 
     if debug is not None:
         debug["fuzz_scores"] = score_table
         debug["best_score"] = best_score
+        debug["slug_code_match"] = slug_code_winner is not None
         if not best:
             debug["reason"] = (f"no candidate scored >= 75 against "
                                f"team_name='{team_name}' and no slug-code "
