@@ -3377,7 +3377,9 @@ def api_handicapper():
             "market_type,side,entry_book,entry_price,entry_line,"
             "units,confidence,fair_prob,edge_pp,sharp_score,"
             "analysis_md,reasons,"
-            "status,pnl_units,result_score,settled_at")
+            "status,pnl_units,result_score,settled_at,"
+            "actual_fill_price,actual_fill_qty,actual_fill_pnl,"
+            "polymarket_outcome,pmm_side,auto_linked")
     try:
         pending = (sb.table("bot_picks").select(cols)
                    .eq("status", "pending")

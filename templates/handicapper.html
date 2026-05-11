@@ -126,6 +126,10 @@
         .pick .chip.edge { background: var(--green-dim); color: #4ade80; }
         .pick .chip.sharp { background: var(--blue-dim); color: var(--blue); }
         .pick .chip.kickoff { background: var(--bg); color: var(--text-secondary); border: 1px solid var(--border); }
+        .pick .chip.prov.bet-and-rec { background: var(--green-dim); color: var(--green); font-weight: 700; }
+        .pick .chip.prov.bet-only    { background: var(--blue-dim);  color: var(--blue);  font-weight: 700; }
+        .pick .chip.prov.rec-only    { background: var(--surface-2); color: var(--text-muted); }
+        .pick .chip.fill { background: var(--surface-2); color: var(--gold); font-family: 'JetBrains Mono', monospace; }
         .pick .chip.units-1  { background: rgba(255,255,255,0.04); color: var(--text-secondary); }
         .pick .chip.units-3  { background: var(--orange-dim); color: var(--orange); }
         .pick .chip.units-5  { background: var(--green-dim);  color: var(--green); }
@@ -597,18 +601,45 @@
         if (r.edge_pp != null) sigChips.push(`<span class="chip edge">+${Number(r.edge_pp).toFixed(1)}pp</span>`);
         if (r.sharp_score != null) sigChips.push(`<span class="chip sharp">SHARP ${r.sharp_score}</span>`);
 
+        // Provenance badge — quick label so the user can tell at a
+        // glance which is which:
+        //   • BET + REC = bot recommended AND user actually bet on PMM
+        //   • REC only  = bot recommended, user didn't (yet) bet
+        //   • BET only  = user bet on PMM with no bot rec (off-script)
+        const hasFill = r.actual_fill_price != null;
+        const hasRec  = !r.auto_linked;
+        if (hasFill && hasRec) {
+            sigChips.push(`<span class="chip prov bet-and-rec" title="Bet on PMM and bot recommended it">BET · REC</span>`);
+        } else if (hasFill) {
+            sigChips.push(`<span class="chip prov bet-only" title="Bet on PMM (off-script — no bot rec)">BET ONLY</span>`);
+        } else {
+            sigChips.push(`<span class="chip prov rec-only" title="Bot recommendation — not bet on PMM">REC ONLY</span>`);
+        }
+        // When both lines exist, show the actual fill alongside the
+        // bot's entry so the slippage is visible at a glance.
+        if (hasFill && hasRec && r.actual_fill_price !== r.entry_price) {
+            const fillSign = r.actual_fill_price > 0 ? '+' : '';
+            sigChips.push(`<span class="chip fill" title="Your actual Polymarket fill (vs bot's recommended ${r.entry_price})">fill ${fillSign}${r.actual_fill_price}</span>`);
+        }
+
         const cls = (kind === 'settled') ? (r.status || '') : '';
 
         let resultHtml = '';
         if (kind === 'settled') {
             const badge = `<span class="badge ${r.status}">${(r.status || '').toUpperCase()}</span>`;
             const pnlCls = r.pnl_units > 0 ? 'pos' : (r.pnl_units < 0 ? 'neg' : 'zero');
-            const score = r.result_score
-                ? `${r.result_score.away}-${r.result_score.home}`
+            // Guard against null/undefined fields — PMM-resolved rows
+            // don't have ESPN score data, so result_score may be null
+            // or have null fields. Render an empty score string in
+            // that case instead of "undefined-undefined".
+            const rs = r.result_score || {};
+            const score = (rs.away != null && rs.home != null)
+                ? `${rs.away}-${rs.home}`
                 : '';
+            const sep = score ? ' · ' : '';
             resultHtml = `
                 <div class="row3">
-                    <span style="font-size:11px;color:var(--text-muted)">${score} · settled ${_fmtSettled(r.settled_at)}</span>
+                    <span style="font-size:11px;color:var(--text-muted)">${score}${sep}settled ${_fmtSettled(r.settled_at)}</span>
                     <span>${badge} <span class="pnl ${pnlCls}">${_fmtUnits(r.pnl_units)}</span></span>
                 </div>`;
         } else {
