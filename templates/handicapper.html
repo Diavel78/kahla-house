@@ -1471,6 +1471,7 @@
             }
             if (out.ok || out.skipped) {
                 closeLog();
+                closeDossier();
                 loadData(true);
                 return;
             }
