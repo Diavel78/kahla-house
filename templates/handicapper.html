@@ -1400,7 +1400,10 @@
     }
 
     async function submitLog() {
-        if (!_pendingPick) return;
+        if (!_pendingPick) {
+            alert('No pick selected — close the modal and try again.');
+            return;
+        }
         const reasons = (document.getElementById('lmReasons').value || '')
             .split('\n').map(r => r.trim()).filter(Boolean);
         const analysis = document.getElementById('lmAnalysis').value || '';
@@ -1428,21 +1431,28 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
             });
-            const out = await r.json();
+            if (!r) {
+                alert('Not signed in — refresh the page.');
+                return;
+            }
+            let out;
+            try { out = await r.json(); }
+            catch (parseErr) {
+                alert(`Server returned non-JSON (HTTP ${r.status}). Check Vercel logs.`);
+                return;
+            }
             // Silent success — closing the modal + the new pending row
-            // appearing on refresh is feedback enough. No popup to
-            // dismiss. Errors still alert (they need attention); the
-            // already-logged-within-7-days case is silent too — the
-            // existing row is already visible on the page.
+            // appearing on refresh is feedback enough. Already-logged-
+            // within-7-days case is silent too — the existing row is
+            // already visible on the page.
             if (out.ok || out.skipped) {
                 closeLog();
                 loadData(true);
                 return;
             }
-            alert('Failed: ' + (out.error || 'unknown'));
-            return;
+            alert(`Failed (HTTP ${r.status}): ${out.error || 'unknown'}`);
         } catch (e) {
-            alert('Request failed: ' + e);
+            alert('Request failed: ' + (e && e.message ? e.message : e));
         } finally {
             submitBtn.disabled = false; submitBtn.textContent = 'Log Pick';
         }
