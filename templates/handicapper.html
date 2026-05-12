@@ -459,6 +459,7 @@
                 <button onclick="closeLog()">Cancel</button>
                 <button class="primary" id="lmSubmit" onclick="submitLog()">Log Pick</button>
             </div>
+            <div id="lmStatus" style="margin-top:12px;padding:8px 10px;border-radius:6px;font-size:13px;font-family:monospace;display:none;white-space:pre-wrap;word-break:break-word;"></div>
         </div>
     </div>
 
@@ -1251,6 +1252,7 @@
         document.getElementById('lmConfidence').value = _pendingPick.seed_conf || 'medium';
         document.getElementById('lmReasons').value    = _buildReasons(_pendingPick, _lastDossier).join('\n');
         document.getElementById('lmAnalysis').value   = '';
+        _lmStatus(null, '');
         document.getElementById('logModal').classList.add('show');
     }
     function closeLog() {
@@ -1399,9 +1401,28 @@
         };
     }
 
+    function _lmStatus(kind, msg) {
+        // Show feedback inside the modal — alert() is unreliable on
+        // mobile Safari, and silent failures leave the user staring
+        // at a button with no idea what happened.
+        const el = document.getElementById('lmStatus');
+        if (!el) return;
+        el.style.display = msg ? 'block' : 'none';
+        el.textContent = msg || '';
+        const colors = {
+            err:  ['#3a1a1a', '#ff8b8b'],
+            warn: ['#3a2a1a', '#ffc66e'],
+            info: ['#1a2a3a', '#9bd1ff'],
+        };
+        const [bg, fg] = colors[kind] || colors.info;
+        el.style.background = bg;
+        el.style.color = fg;
+    }
+
     async function submitLog() {
+        _lmStatus(null, '');
         if (!_pendingPick) {
-            alert('No pick selected — close the modal and try again.');
+            _lmStatus('err', 'No pick selected — close the modal and try again.');
             return;
         }
         const reasons = (document.getElementById('lmReasons').value || '')
@@ -1425,6 +1446,7 @@
         };
         const submitBtn = document.getElementById('lmSubmit');
         submitBtn.disabled = true; submitBtn.textContent = 'Logging…';
+        _lmStatus('info', 'POSTing to /api/handicapper/pick…');
         try {
             const r = await authFetch('/api/handicapper/pick', {
                 method: 'POST',
@@ -1432,27 +1454,29 @@
                 body: JSON.stringify(body),
             });
             if (!r) {
-                alert('Not signed in — refresh the page.');
+                _lmStatus('err', 'Not signed in. Refresh the page.');
                 return;
             }
-            let out;
-            try { out = await r.json(); }
-            catch (parseErr) {
-                alert(`Server returned non-JSON (HTTP ${r.status}). Check Vercel logs.`);
+            let raw = '';
+            try { raw = await r.text(); }
+            catch (readErr) {
+                _lmStatus('err', `Couldn't read response (HTTP ${r.status}): ${readErr.message || readErr}`);
                 return;
             }
-            // Silent success — closing the modal + the new pending row
-            // appearing on refresh is feedback enough. Already-logged-
-            // within-7-days case is silent too — the existing row is
-            // already visible on the page.
+            let out = null;
+            try { out = JSON.parse(raw); }
+            catch {
+                _lmStatus('err', `HTTP ${r.status} — non-JSON response:\n${raw.slice(0, 400)}`);
+                return;
+            }
             if (out.ok || out.skipped) {
                 closeLog();
                 loadData(true);
                 return;
             }
-            alert(`Failed (HTTP ${r.status}): ${out.error || 'unknown'}`);
+            _lmStatus('err', `HTTP ${r.status}: ${out.error || 'unknown'}\n${JSON.stringify(out).slice(0, 400)}`);
         } catch (e) {
-            alert('Request failed: ' + (e && e.message ? e.message : e));
+            _lmStatus('err', `Request threw: ${e && e.message ? e.message : e}`);
         } finally {
             submitBtn.disabled = false; submitBtn.textContent = 'Log Pick';
         }
