@@ -691,6 +691,24 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 - Vercel project: `kahla-house` (team: `diavel78s-projects`)
 - Domain: `thekahlahouse.com` + `www.thekahlahouse.com`
 
+## Operating Rules — read before debugging
+
+> **NEVER assume user error before checking the server.** When a feature
+> appears broken, the first move is ALWAYS to pull Vercel runtime logs
+> (`mcp__32c289bf-…__get_runtime_logs` with `projectId=prj_nGId8DxjshW5HEoxSM5VPdKrKgVB`)
+> and inspect actual HTTP statuses + paths. NOT to ask the user
+> clarifying questions, NOT to add diagnostic banners, NOT to reason
+> from the code about what "should" happen. Read the logs first.
+> Status-code mismatches (200 where 201 was expected, 4xx with no
+> client-side surface, 5xx silently swallowed) tell the truth in 10
+> seconds. Repeated assumptions of user error are unacceptable —
+> the user is not the bug.
+>
+> **Document why the bug exists, not just the fix.** Every fix in
+> "Known Issues" below started as someone saying "this should work"
+> and being wrong about why. Write it down so the next debug session
+> doesn't re-walk the same loop.
+
 ## Known Issues & Gotchas
 1. **The Odds API auth is `?api_key=` query param** — NOT a Bearer header. Easy to copy from one provider's pattern (Owls used Bearer) and break.
 2. **The Odds API credit cost = `markets × regions`** per `/odds` call. We use `h2h,spreads,totals` × `us,eu` = 6 credits. Don't add markets/regions casually — costs scale linearly. Adding `us2` (ESPN BET, Fanatics) would bump to 9 credits/call.
@@ -715,3 +733,4 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 21. **One-sided PIN snapshots: skip rather than guess.** When only one side of a market has a PIN snapshot in `book_snapshots`, use that side's direction directly: if it got more favored (negative diff), sharp = that side and we fire. If it got less favored, the actually-sharp side is the OTHER one but we don't have its prices to render — bail. Old `Infinity`-fallback heuristic always picked the available side regardless of direction; that bug is gone in both `_sharpSide()` (JS chip) and `_sharp_for_ml/spread/total()` (Python alert).
 22. **GitHub secrets often have trailing whitespace from copy-paste.** A trailing newline in `TELEGRAM_BOT_TOKEN` blew up `urllib` with `InvalidURL: URL can't contain control characters`. `sharp_alerts.py` now `.strip()`s both Telegram env vars at read time. If you add new secret-driven scripts, do the same defensively.
 23. **Polymarket `intent` flips price meaning on orders.** For `BUY_LONG`/`SELL_LONG` (buying/selling YES), the SDK `price` field is what the user pays/receives directly. For `BUY_SHORT`/`SELL_SHORT` (NO side), the SDK reports the YES-canonical price; real per-share price = `1 − price`. `/api/my-orders` flips only on `*_SHORT` intents — verified empirically against the Polymarket app.
+24. **`/api/handicapper/pick` 7-day dedup gate gets bypassed for web-side clicks.** `POST /api/handicapper/pick` returns HTTP 200 with `{ok:true, skipped:true, existing_id:X}` when a row already exists for the same `(market_id, market_type, side)` within 7 days. Useful gate for the chat flow (protects against double-asks / refreshes); useless for the web flow where the user explicitly clicked "Log Pick" — they want it logged. Symptom when broken: log button appears to do nothing because the modal closes silently on what it thinks is success. The modal now sends `allow_duplicate: true` on every click. If you ever see `POST /api/handicapper/pick → 200` (not 201) in Vercel logs and no row appears in `bot_picks`, the dedup is the culprit. Don't add a "are you sure?" UI — explicit click is sure enough.

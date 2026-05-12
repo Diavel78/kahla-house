@@ -1443,6 +1443,10 @@
             analysis_md: analysis || null,
             reasons:     reasons.length ? reasons : null,
             query_text:  (_lastDossier && _lastDossier.query) || null,
+            // Web-side click = explicit user intent. Skip the
+            // 7-day dedup gate, which exists to protect the chat
+            // flow from double-logs on a refresh / repeat ask.
+            allow_duplicate: true,
         };
         const submitBtn = document.getElementById('lmSubmit');
         submitBtn.disabled = true; submitBtn.textContent = 'Logging…';
