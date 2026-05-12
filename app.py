@@ -3599,78 +3599,15 @@ def api_handicapper_dossier():
             sb, q, sport, market_id=market_id, live=live)
     except Exception as e:
         return jsonify({"ok": False, "error": f"dossier build failed: {e}"}), 500
-    # Auto-log the bot's gates-cleared suggestions to bot_picks with
-    # status='recommended' so PMM sync always has a row to link the
-    # user's real bet to. Idempotent — no-op if a row already exists
-    # for (market_id, market_type, side).
-    if dossier.get("ok"):
-        try:
-            _auto_log_dossier_recs(sb, dossier, asked_by=getattr(g, "uid", None))
-        except Exception:
-            pass  # don't fail the dossier if logging breaks
+    # Pick Bot doesn't auto-log dossier views anymore. The 'recommended'
+    # row creation existed solely to give PMM sync a hook to link real
+    # bets to bot suggestions — that whole integration is gone, and
+    # leaving the auto-log here actively breaks the real Log Pick flow:
+    # opening the dossier wrote a hidden recommended row, then explicit
+    # Log Pick clicks dedup'd against it and silently skipped. Picks
+    # exist if and only if the user clicks Log on the website.
     code = 200 if dossier.get("ok") else 404
     return jsonify(dossier), code
-
-
-def _auto_log_dossier_recs(sb, dossier: dict, asked_by: str | None) -> None:
-    """Persist the bot's gates-cleared suggestions to bot_picks with
-    status='recommended'. PMM sync flips them to 'pending' when it
-    finds a matching real bet; resolver leaves them alone otherwise.
-    Forced-lean suggestions (gates_cleared=False) are NOT logged —
-    they're noise the bot was forced to surface, not real picks."""
-    market_id   = dossier.get("market_id")
-    event_name  = dossier.get("event_name")
-    event_start = dossier.get("event_start_utc")
-    sport       = dossier.get("sport")
-    suggestions = dossier.get("suggestions") or []
-    if not (market_id and event_name and event_start and sport):
-        return
-    for s in suggestions:
-        if not s.get("gates_cleared"):
-            continue
-        market_type = s.get("market_type")
-        side        = s.get("side")
-        fair_amer   = s.get("fair_american")
-        units       = s.get("units")
-        conf        = s.get("confidence")
-        if not (market_type and side and fair_amer is not None and units and conf):
-            continue
-        # Dedup: skip if a pending or recommended row already covers
-        # this combo (any time horizon — recommendations don't expire).
-        try:
-            existing = (sb.table("bot_picks")
-                        .select("id")
-                        .eq("market_id", market_id)
-                        .eq("market_type", market_type)
-                        .eq("side", side)
-                        .in_("status", ["pending", "recommended"])
-                        .limit(1).execute().data) or []
-        except Exception:
-            return
-        if existing:
-            continue
-        row = {
-            "asked_by":    asked_by or "auto",
-            "query_text":  "auto-logged on dossier view",
-            "market_id":   market_id,
-            "sport":       sport,
-            "event_name":  event_name,
-            "event_start": event_start,
-            "market_type": market_type,
-            "side":        side,
-            "entry_book":  "PMM",
-            "entry_price": int(fair_amer),
-            "entry_line":  s.get("pin_line"),
-            "units":       int(units),
-            "confidence":  conf,
-            "fair_prob":   s.get("fair_prob"),
-            "sharp_score": s.get("sharp_score"),
-            "status":      "recommended",
-        }
-        try:
-            sb.table("bot_picks").insert(row).execute()
-        except Exception:
-            continue
 
 
 @app.route("/api/handicapper/games")
