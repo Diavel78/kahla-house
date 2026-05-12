@@ -58,7 +58,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `/odds` | `odds.html` | admin + viewer | Odds Board — multi-book odds comparison, opener-vs-current movement, per-game line-movement chart modal |
 | `/dashboard` | `dashboard.html` | admin only | Polymarket P&L Dashboard — positions, closed trades, bet slip |
 | `/sharp-bot` | `sharp_bot.html` | admin only | Phase 4 paper-bet tracker — Steam / Early EV / Late EV columns, pending + settled-30d picks, per-bot hit rate / units / ROI |
-| `/handicapper` | `handicapper.html` | admin + `bot_access` | **Pick Bot** — handicapper picks tracker. Sport tabs + click-to-pick game list + collapsible search. Three-timeframe stats card (TODAY / 7d / 30d) on top, per-confidence-tier rollup (low/medium/high/whale → 1u/3u/5u/10u) below. Pending + today's-settled lists at the bottom. Picks made by Claude in chat OR by clicking a game card on the page. Every pick logs to `bot_picks`, auto-grades vs ESPN final scores. UFC ML auto-grades via ESPN MMA endpoint; SPR/TOT method-of-victory bets stay pending and use the per-row Won/Lost/Push manual settle buttons. PnL is **to-WIN** sizing. "Today" anchored to **America/Phoenix** (Arizona, no DST). Nav: Pick Bot is in the persistent top nav (replaced Sharp Bot — that one is admin-card-only on `/`). |
+| `/handicapper` | `handicapper.html` | admin + `bot_access` | **Pick Bot** — handicapper picks tracker. Sport tabs + click-to-pick game list + collapsible search. Three-timeframe stats card (TODAY / 7d / 30d) on top, per-confidence-tier rollup (low/medium/high → 1u/3u/5u) below. Pending + today's-settled lists at the bottom. Picks made by Claude in chat OR by clicking a game card on the page. Every pick logs to `bot_picks`, auto-grades vs ESPN final scores. UFC ML auto-grades via ESPN MMA endpoint; SPR/TOT method-of-victory bets stay pending and use the per-row Won/Lost/Push manual settle buttons. PnL is **to-WIN** sizing. "Today" anchored to **America/Phoenix** (Arizona, no DST). Nav: Pick Bot is in the persistent top nav (replaced Sharp Bot — that one is admin-card-only on `/`). Whale (10u) tier is disabled — see Sizing rubric below. |
 
 > **Odds-ingest cron (`kahla-scanner/`)**: minimal Python subproject at
 > `kahla-scanner/` runs `python -m scrapers.odds_api` every 30 min via
@@ -530,13 +530,22 @@ The decision runs on `by_market` BEFORE the gate-clearing step, so SPR can't sne
 - MLB Stats API `statsapi.mlb.com` — probable pitchers + season stats
 - ESPN injuries — every supported sport
 
-**Sizing rubric** (1u / 3u / 5u / 10u via the `confidence` chip):
+**Sizing rubric** (1u / 3u / 5u via the `confidence` chip):
 | Conf | Units | When |
 |---|---|---|
 | low | 1u | Forced lean — sharp_score < 4, chalk-flat market |
 | medium | 3u | Sharp ≥ 4, single signal |
 | high | 5u | Sharp ≥ 5 AND splits divergence ≥ 5pp aligned, OR sharp ≥ 4 + qualitative edge |
-| whale | 10u | Sharp ≥ 7 AND splits divergence ≥ 10pp aligned, multiple confirming reads. Rare. |
+
+> **Whale (10u) tier was disabled May 11 2026.** Live results showed
+> `sharp ≥ 7 AND splits ≥ 10pp aligned` hitting 23% over 35 picks
+> (~3 std devs below random) for -116.73u, while the high (5u) tier
+> hit 57% over 35 picks for +30.96u. The criteria turned out to be a
+> *fade* indicator in MLB — the market has already steamed both
+> signals by the time the bot fires them. Top sizing capped at 5u
+> until a higher tier can be shown to outperform. `bot_picks`
+> rows tagged `confidence='whale'` from before this date are
+> historical only; new picks never get the tier.
 
 **Schema** (`kahla-scanner/supabase/bot_picks.sql`): one row per pick. Columns include `units` (1/3/5), `confidence` (low/medium/high/max), `analysis_md` (full write-up rendered on the page), `reasons` (jsonb array of bullet reasons), plus the standard market/entry/resolution fields. Run manually in Supabase SQL editor.
 

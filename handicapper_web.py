@@ -1386,9 +1386,15 @@ def _suggest_picks(odds: dict, splits: dict | None = None) -> list[dict]:
     for c in candidates:
         s = c["sharp_score"]
         sp = c["splits_pp"]
-        if s >= 7 and sp >= SPLITS_MIN_PP:
-            c["units"], c["confidence"] = 10, "whale"
-        elif s >= 5 and sp >= 5:
+        # Whale (10u) tier disabled. Live results showed it hitting 23%
+        # over 35 picks (~3 std devs below random) for -116.73u while
+        # HIGH (5u) hit 57% over 35 picks for +30.96u. "Sharp 7+ AND
+        # money agrees ≥10pp" turns out to be a FADE indicator in MLB
+        # — the market has already priced in both signals by the time
+        # we see them, and chasing further just pays the steam. Cap top
+        # sizing at 5u (high) until we have data showing a higher tier
+        # actually outperforms.
+        if s >= 5 and sp >= 5:
             c["units"], c["confidence"] = 5, "high"
         elif s >= SHARP_SCORE_MIN:
             c["units"], c["confidence"] = 3, "medium"
