@@ -3643,31 +3643,17 @@ def api_handicapper_games():
     except Exception as e:
         return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
 
-    # Drop phantom markets — rows that no book has quoted in the last
-    # 24h. Markets table is never closed-out (CLAUDE.md note), so stale
-    # entries linger and previously showed up as "Tampa @ Montreal"
-    # ghost games. Real games (incl. ones with no PIN coverage) have
-    # SOMEONE quoting them; phantoms have nobody.
-    market_ids = [m["id"] for m in rows]
-    live_ids: set[str] = set()
-    if market_ids:
-        cutoff = (now - timedelta(hours=24)).isoformat()
-        try:
-            snap_rows = (sb.table("book_snapshots")
-                         .select("market_id")
-                         .in_("market_id", market_ids)
-                         .gte("captured_at", cutoff)
-                         .limit(5000).execute().data) or []
-            live_ids = {r["market_id"] for r in snap_rows if r.get("market_id")}
-        except Exception:
-            # Filter query failed — fall through unfiltered rather than
-            # black-holing the games tab.
-            live_ids = set(market_ids)
+    # Phantom-market filter removed. It was joining book_snapshots
+    # rows for last 24h and dropping markets with no snapshot row in
+    # that set — but the in_(market_ids) query had a hard 5000-row
+    # cap, which truncated on busy sports and silently disappeared
+    # real games from the list. The event_start window already
+    # excludes anything older than 90 min, so phantoms (markets
+    # nobody ever quoted) are rare. Clicking one just yields a
+    # "no data" dossier, not a crash.
 
     games = []
     for m in rows:
-        if m["id"] not in live_ids:
-            continue
         en = m.get("event_name") or ""
         away = home = ""
         if " @ " in en:
@@ -3718,26 +3704,11 @@ def api_handicapper_sport_counts():
     except Exception as e:
         return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
 
-    # Same phantom-market filter as /api/handicapper/games so the tab
-    # badges don't count rows nobody quotes.
-    market_ids = [r["id"] for r in rows if r.get("id")]
-    live_ids: set[str] = set()
-    if market_ids:
-        cutoff = (now - timedelta(hours=24)).isoformat()
-        try:
-            snap_rows = (sb.table("book_snapshots")
-                         .select("market_id")
-                         .in_("market_id", market_ids)
-                         .gte("captured_at", cutoff)
-                         .limit(20000).execute().data) or []
-            live_ids = {r["market_id"] for r in snap_rows if r.get("market_id")}
-        except Exception:
-            live_ids = set(market_ids)
-
+    # Phantom-market filter removed for the same reason as
+    # /api/handicapper/games — the snapshot-join query truncates and
+    # gives wrong counts. event_start window is the only filter now.
     counts: dict[str, int] = {}
     for r in rows:
-        if r.get("id") not in live_ids:
-            continue
         s = (r.get("sport") or "").upper()
         if not s:
             continue
