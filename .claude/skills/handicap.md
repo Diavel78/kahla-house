@@ -41,26 +41,30 @@ market for the same game (e.g. SPR + TOT). Log each as a separate
 
 **ML/SPR mutual exclusion — never both.** ML and spread on the same
 side are correlated (same directional bet, just leveraged). If you'd
-suggest one, do NOT also suggest the other. **Pick the better-priced
-expression**: less-negative American odds = bigger payout = the right
-version to take. Total is independent and can pair with either.
+suggest one, do NOT also suggest the other. Total is independent and
+can pair with either.
+
+**Symmetric chalk filter (matches the web bot's logic):**
+- **ML fair ≤ -140 (chalky)** → drop ML, keep SPR. At heavy chalk the
+  ML pays too little; the leveraged spread is the cleaner expression
+  of a chalky directional bet.
+- **ML fair > -140 (lighter)** → drop SPR, keep ML. SPR's variance
+  isn't worth it when ML is reasonable; just bet the cleaner side.
 
 Examples:
-* ML at +102, SPR at -167 → take ML. SPR is laying juice for a tiny
-  cushion you almost never need.
-* ML at -179, SPR at +120 → take **SPR -1.5**. The cushion is cheap;
-  same directional read at +120 vs -179 is a huge payout upgrade.
-* ML at -150, SPR at -130 → take SPR. Less chalky, similar risk.
+* ML fair -120, SPR fair -110 → take **ML**. ML is reasonable; no
+  need to add SPR variance.
+* ML fair -180, SPR fair -110 → take **SPR**. ML is chalky; the
+  spread is the cleaner expression.
+* ML fair -200, SPR fair -130 → take **SPR**. Heavy chalk; leveraged
+  is the way.
 
-The leveraged version is always worse EV than the better-priced
-sibling. Pick the one with the higher (less negative) American odds.
-
-**Heavy-chalk SPR alone is still a no.** When the spread side is
-priced -150 or worse on Polymarket / PIN devig fair AND the ML
-candidate didn't qualify, do NOT recommend SPR. That's a leveraged
-chalk bet with no better expression available — pass on the SPR
-entirely. The chalk filter applies to SPR only; heavy-chalk ML can
-still be recommended (no SPR alternative to switch to in that case).
+**Heavy-chalk SPR alone is still a no.** When SPR is the only
+candidate (ML didn't qualify) AND `fair_american <= -150`, do NOT
+recommend SPR. Leveraged chalk with no better expression is just a
+lame bet. Heavy-chalk ML alone IS still recommendable (no SPR
+alternative to switch to in that case — the heavy ML IS the cleanest
+expression of that read).
 
 ## Workflow
 
@@ -128,7 +132,7 @@ still be recommended (no SPR alternative to switch to in that case).
      --market-type {moneyline|spread|total} \
      --side {home|away|over|under} \
      --book PMM --price <PIN devig fair American> --line "" \
-     --units {1|3|5} --confidence {low|medium|high|max} \
+     --units {1|3|5} --confidence {low|medium|high} \
      --fair-prob 0.62 --sharp-score 6 \
      --analysis-file /tmp/analysis.md \
      --reason "..." --reason "..." \
@@ -261,11 +265,15 @@ Map confidence chip → units:
 |-----|-----|-----|
 | `low`    | 1u  | Forced lean. Sharp score < 4 (chalk-flat market), no splits divergence. Print it for tracking — don't talk yourself into it. |
 | `medium` | 3u  | Sharp ≥ 4, single signal (sharp move alone, no splits or injury edge to confirm). Most picks land here. |
-| `high`   | 5u  | Sharp ≥ 5 AND splits divergence ≥ 5pp on the same side, OR sharp ≥ 4 + a real qualitative edge (key injury, scratched ace, etc.). |
-| `whale`  | 10u | Sharp ≥ 7 AND splits divergence ≥ 10pp on the same side, multiple confirming reads, no major risk on the other side. Rare alignments — steam + RLM + qualitative edge. |
+| `high`   | 5u  | Sharp ≥ 5 AND splits divergence ≥ 5pp on the same side, OR sharp ≥ 4 + a real qualitative edge (key injury, scratched ace, etc.). Top sizing tier. |
 
-Push `whale` rarely. If you're using `whale` more than 1-2 picks per
-week, your bar is too low — the 10u tier should feel scary to call.
+**Whale (10u) tier is disabled.** Live data over 35 picks showed
+`sharp ≥ 7 AND splits ≥ 10pp aligned` hitting 23% (~3 std devs
+below random) for -116.73u in MLB — a fade indicator, not edge.
+Cap top sizing at `high` (5u). Don't pass `--confidence whale` to
+the log script even if signals look enormous; the resolver still
+accepts the value for historical-row compatibility but new picks
+should never get it.
 
 ### Never just "pass" — always give a forced lean
 
@@ -317,8 +325,18 @@ log step. Otherwise, always give an answer.
   "no injury report fetched" — don't invent a star being out.
 - **Don't recommend props.** Even if the user asks. Tell them props
   aren't covered and offer ML/SPR/TOT instead.
-- **Cite specifics.** "Edge of +2.4pp at DK on home -125 vs PIN devigged
-  -135" beats "good value on Toronto."
-- **One pick per game.** If both ML and a spread look good, take the one
-  with the better risk-adjusted edge. Don't double up.
+- **Cite specifics.** "PIN devigged fair -129 on home, sharp 7/10
+  toward home over the last 12h" beats "good value on Toronto." Don't
+  cite retail-book edges — the user doesn't bet there.
+- **Up to 2 picks per game.** One of {ML, SPR} (mutually exclusive
+  per the chalk filter above) plus an optional TOT. Total is
+  independent of the ML/SPR directional read.
 - **PIN above all.** When in doubt, ask "what does PIN say?" and align.
+- **Pick Bot has no Polymarket coupling.** Picks exist if and only if
+  this skill (or the web flow) explicitly logs them. Don't expect the
+  bot to auto-link the user's real bets — it doesn't. ESPN grades
+  every logged pick using the price you specified with `--price`.
+- **In-chat and web write to the same `bot_picks` table.** When the
+  user opens `/handicapper`, they see chat-logged picks alongside
+  web-clicked picks. Pick the one that matches the user's flow; don't
+  double-log.
