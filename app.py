@@ -1712,13 +1712,18 @@ def _fmt_pmm_price(p):
 
 
 def _send_fill_telegram(text):
-    """POST to Telegram sendMessage. No-op (False) when
-    TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID aren't set in Vercel env.
-    Stdlib urllib so we don't add a new dep just for this."""
+    """POST to Telegram sendMessage via the "Filled Bot" — a dedicated
+    Telegram bot for Polymarket fill notifications. No-op (False) when
+    FILLED_BOT_TOKEN / FILLED_BOT_CHAT_ID aren't set in Vercel env.
+    Stdlib urllib so we don't add a new dep just for this.
+
+    Distinct from the retired "sharp alerts" Telegram bot — the user
+    explicitly asked for a separate bot so fill messages are clearly
+    labeled in their Telegram client."""
     import urllib.request
     import urllib.error
-    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    token = (os.environ.get("FILLED_BOT_TOKEN") or "").strip()
+    chat_id = (os.environ.get("FILLED_BOT_CHAT_ID") or "").strip()
     if not token or not chat_id:
         return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"

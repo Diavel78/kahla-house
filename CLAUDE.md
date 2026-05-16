@@ -167,7 +167,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - `kahla-scanner/supabase/bot_picks.sql` — `bot_picks` table DDL (run manually in Supabase SQL editor)
 - `kahla-scanner/scrapers/odds_api.py` — The Odds API ingester (cron entry point)
 - `kahla-scanner/scripts/cleanup_snapshots.py` — nightly book_snapshots > 15d delete
-- `kahla-scanner/scripts/sharp_alerts.py` — Telegram steam + Sharp 7+ alerts (runs after each scanner-poll ingest). Also logs paper bets for the **steam bot** (Phase 4) — every Telegram steam fire writes a row to `paper_bets`.
+- `kahla-scanner/scripts/sharp_alerts.py` — **VESTIGIAL** (retired May 2026). Used to send `🚨 STEAM` + `⚡ SHARP N` Telegram alerts and log steam paper bets. Removed from `scanner-poll.yml`. Left in the repo as a reference implementation in case the steam-detection pipeline is ever resurrected. Not imported by anything live.
 - `kahla-scanner/scripts/paper_bets_picker.py` — Phase 4 Early/Late EV pickers. `--bot early` runs 1×/day via `paper-bets-early.yml`; `--bot late` runs every 30 min appended to `scanner-poll.yml`.
 - `kahla-scanner/_lib/sharp.py` — sharp-score math + sharp-side detection. Used by the paper-bet picker. (`sharp_alerts.py` still has local copies of these helpers — DRY violation kept on purpose to minimise blast radius on the live alert pipeline; both implementations are bytewise identical and any future fix lands in both.)
 - `kahla-scanner/_lib/paper_bets.py` — paper-bet shared helpers: PIN devig, best-entry finder, score formula, dedup check, insert helper, snapshot loaders.
@@ -191,8 +191,10 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `FLASK_SECRET_KEY` | Vercel env | Flask session secret |
 | `SUPABASE_URL` | GitHub Actions secret + Vercel env | Supabase Postgres URL |
 | `SUPABASE_SERVICE_KEY` | GitHub Actions secret + Vercel env | Supabase service key |
-| `TELEGRAM_BOT_TOKEN` | GitHub Actions secret **+ Vercel env** | Bot token from @BotFather. Used by `scripts/sharp_alerts.py` (GHA) AND `/api/polymarket/check-fills` (Vercel). Optional — both call sites are no-ops when missing. |
-| `TELEGRAM_CHAT_ID` | GitHub Actions secret **+ Vercel env** | Your Telegram user id (from `getUpdates`). Optional. Same dual location. |
+| `TELEGRAM_BOT_TOKEN` | GitHub Actions secret — **UNUSED as of May 2026** | Was used by the retired `scripts/sharp_alerts.py`. Safe to delete from GitHub secrets; nothing reads it anymore. |
+| `TELEGRAM_CHAT_ID` | GitHub Actions secret — **UNUSED as of May 2026** | Was used by the retired `scripts/sharp_alerts.py`. Safe to delete from GitHub secrets. |
+| `FILLED_BOT_TOKEN` | Vercel env | Telegram bot token for the **Filled Bot** (separate Telegram bot from the retired sharp alerts bot). Used by `/api/polymarket/check-fills` only. Get from @BotFather → `/newbot` → name it "Kahla House Filled Bot" or similar. |
+| `FILLED_BOT_CHAT_ID` | Vercel env | Your Telegram user id (numeric — same value you'd have used for `TELEGRAM_CHAT_ID`, since the recipient is still you). Get it by messaging the new Filled Bot once, then visiting `https://api.telegram.org/bot<FILLED_BOT_TOKEN>/getUpdates` and reading `chat.id`. |
 | `FILLS_CRON_SECRET` | Vercel env | Random shared secret matched by `/api/polymarket/check-fills?key=...`. Set to anything (`openssl rand -hex 32` works). Without it the endpoint returns 401 — that's the lockdown when the secret isn't configured. |
 
 ---
@@ -267,15 +269,23 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 
 ---
 
-## Polymarket Fill Alerts (Telegram)
+## Polymarket Fill Alerts ("Filled Bot")
 
-The Polymarket US app has no native fill notifications (only the international web app does). To plug that gap, `/api/polymarket/check-fills` is polled every ~1 min by **cron-job.org** and sends a Telegram message whenever an order crosses a fill milestone. Lives entirely on Vercel — no GitHub Action, no extra worker, reuses the Polymarket SDK already initialized in `app.py` and the same Telegram bot the sharp alerts use.
+The Polymarket US app has no native fill notifications (only the international web app does). To plug that gap, `/api/polymarket/check-fills` is polled every ~1 min by **cron-job.org** and sends a Telegram message via a dedicated bot called **Filled Bot** whenever an order crosses a fill milestone. Lives entirely on Vercel — no GitHub Action, no extra worker, reuses the Polymarket SDK already initialized in `app.py`.
+
+> **Why a separate Telegram bot.** The original design routed these
+> messages through the same bot as the (now-retired) sharp alerts.
+> User asked for a clean separation in May 2026 so fill notifications
+> arrive from a clearly-labeled "Filled Bot" handle, not mixed into a
+> bot that was previously associated with noisy alerts. Env vars are
+> `FILLED_BOT_TOKEN` / `FILLED_BOT_CHAT_ID` to make the routing
+> explicit at the code level too.
 
 ### Architecture
 - **Endpoint**: `GET /api/polymarket/check-fills?key=FILLS_CRON_SECRET` (in `app.py`). Auth is a shared-secret query param matched via `secrets.compare_digest` — Firebase tokens aren't an option for an unattended cron call. Empty/missing `FILLS_CRON_SECRET` env var locks the endpoint down (401).
 - **Trigger**: cron-job.org workflow, 1-min cadence. Same provider that triggers `scanner-poll.yml`. Free tier supports 1-min minimum interval with no per-job cost.
 - **State table**: Supabase `polymarket_fill_state` — one row per order_id we've ever seen. DDL in `kahla-scanner/supabase/polymarket_fill_alerts.sql`, run manually in Supabase SQL editor.
-- **Telegram**: same `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env vars the sharp alerts use, but read from Vercel env (not GitHub secrets). Both call sites strip whitespace defensively (Gotcha #22).
+- **Telegram**: dedicated `FILLED_BOT_TOKEN` / `FILLED_BOT_CHAT_ID` env vars in Vercel. Both stripped defensively for trailing whitespace (Gotcha #22). No-op when missing (route still responds 200 with `alerts_fired: 0`).
 
 ### Milestones
 Each cron tick: pull current orders via `client.orders.list()` → diff `cumQuantity` vs `polymarket_fill_state.last_cum_quantity` → fire one Telegram alert for the highest milestone newly crossed. Milestones tracked in the `alerts_sent` jsonb array on each row so we don't re-fire on subsequent ticks.
@@ -309,18 +319,20 @@ Same as `/api/my-orders` (Gotcha #7): the SDK's `price` field is the YES-canonic
 - **Telegram send fails** → still mark milestone as sent. A Telegram outage shouldn't queue up alerts that flood when the bot recovers (same posture as `sharp_alerts.py`).
 
 ### Setup checklist (after deploy)
-1. **Run the migration** in Supabase SQL editor: paste `kahla-scanner/supabase/polymarket_fill_alerts.sql`.
-2. **Set env vars** in Vercel project `kahla-house`:
+1. **Create the Filled Bot in Telegram**: message @BotFather → `/newbot` → name it (e.g. "Kahla House Filled Bot") → choose a username (e.g. `kahla_filled_bot`). BotFather returns a token. Send the new bot any message to "activate" it.
+2. **Get the chat ID** for the new bot: visit `https://api.telegram.org/bot<NEW_TOKEN>/getUpdates` in a browser — `chat.id` is your numeric Telegram user ID (same number as the old sharp alerts bot, since the recipient is still you).
+3. **Run the migration** in Supabase SQL editor: paste `kahla-scanner/supabase/polymarket_fill_alerts.sql`.
+4. **Set env vars** in Vercel project `kahla-house`:
+   - `FILLED_BOT_TOKEN` — the new bot token from step 1.
+   - `FILLED_BOT_CHAT_ID` — the chat ID from step 2.
    - `FILLS_CRON_SECRET` — generate something random (`openssl rand -hex 32`); the URL secret cron-job.org sends.
-   - `TELEGRAM_BOT_TOKEN` — copy from GitHub secrets (same bot the sharp alerts use).
-   - `TELEGRAM_CHAT_ID` — copy from GitHub secrets.
-3. **Redeploy** Vercel (env-var changes don't auto-rebuild — push any commit or hit "Redeploy" in the dashboard).
-4. **Create a cron-job.org job**:
+5. **Redeploy** Vercel (env-var changes don't auto-rebuild — push any commit or hit "Redeploy" in the dashboard).
+6. **Create a cron-job.org job**:
    - URL: `https://thekahlahouse.com/api/polymarket/check-fills?key=<FILLS_CRON_SECRET>`
    - Method: GET
    - Schedule: every 1 minute
    - Save / enable.
-5. **Smoke test**: place a tiny order on Polymarket. Within ~60s you should get either a `📈 25% FILLED` (partial) or `✅ FILLED` (instant) Telegram message. cron-job.org's response history shows each call's JSON return so you can confirm `processed > 0` and `alerts_fired` increments when a fill happens.
+7. **Smoke test**: place a tiny order on Polymarket. Within ~60s you should get either a `📈 25% FILLED` (partial) or `✅ FILLED` (instant) message from the Filled Bot. cron-job.org's response history shows each call's JSON return so you can confirm `processed > 0` and `alerts_fired` increments when a fill happens.
 
 ### Response shape (visible in cron-job.org history)
 ```json
@@ -435,9 +447,28 @@ The `_splitsSubScore` and `_divergenceSubScore` helpers are kept in the file (Ph
 - **7-9** — `tier-strong` (green)
 - **10**  — `tier-elite` (gold gradient)
 
-### Telegram alerts (Phase 3 — live)
+### Telegram alerts (Phase 3 — RETIRED May 2026)
 
-`kahla-scanner/scripts/sharp_alerts.py` runs immediately after each ingest cycle (appended step in `.github/workflows/scanner-poll.yml` — same 30-min cadence, no second cron registration). Sends two kinds of messages to Telegram:
+> **Bot retired.** The "sharp alerts bot" Telegram pings (`🚨 STEAM` +
+> `⚡ SHARP N`) were noise — turned off and the cron step removed from
+> `.github/workflows/scanner-poll.yml` entirely. `sharp_alerts.py` is
+> left in the repo as dead code in case the steam-detection pipeline
+> is ever resurrected; it is no longer invoked. The Telegram bot
+> itself can be deleted in BotFather at the user's leisure.
+>
+> **Knock-on effect**: the `/sharp-bot` page's **steam** column no
+> longer gets fresh picks (steam paper-bet logging lived inside
+> `sharp_alerts.py`). The early/late EV columns keep working via the
+> separate paper-bet pickers in the same workflow. Historical steam
+> rows in `paper_bets` stay queryable.
+>
+> **For fill notifications, a separate dedicated bot called "Filled
+> Bot" lives in `/api/polymarket/check-fills`** — see the Polymarket
+> Fill Alerts section above. Different bot, different env vars
+> (`FILLED_BOT_TOKEN` / `FILLED_BOT_CHAT_ID`), explicitly so fill
+> messages are clearly labeled in the Telegram client.
+
+`kahla-scanner/scripts/sharp_alerts.py` (vestigial — no longer invoked) used to run after each ingest cycle. When it was live, it sent two kinds of messages to Telegram:
 
 - **🚨 STEAM** — for each book on each (market_type, raw_side), computes the implied sharp side from THAT book's move via `_move_sharp_side()` (line direction first for SPR/TOT, vig fallback). A book only counts if its move clears the noise floor. Retail books: `STEAM_MIN_MOVE_CENTS = 5` (price) / `STEAM_MIN_LINE_MOVE = 0.5` (line). PIN: stricter `STEAM_PIN_MIN_MOVE_CENTS = 8` for vig confirmation — PIN is the sharp benchmark and a 5-6c PIN re-juice is indistinguishable from noise; we want unambiguous PIN movement (8c+) before treating it as confirmation. Groups books by `(market_type, sharp_side)`; fires when ≥`STEAM_BOOK_COUNT` (5) books point at the same sharp side **AND PIN is one of them with a confirming move**. Sample lines in the alert message tag the side when displaying opposite-side prices (e.g. `PIN [over]: …`) — the dedup'd `book_snapshots` table only writes rows when prices/lines actually change, so the side that moved may not be the side the alert is named after. Without the tag the user reasonably misreads PIN's over-side move as an under-side move on a `TOT UNDER` alert.
 - **⚡ SHARP N** — fires when any (market, market_type) crosses Sharp Score ≥`SHARP_THRESHOLD` (8 — started at 7, raised after first day produced too many alerts since heavy movers tripped ML+SPR+TOT separately). Score formula mirrors the on-card chip in `templates/odds.html` exactly so the Telegram alert matches what the user sees: `_amer_to_cents()` + `_move_score_ml()` + `_move_score_spr_tot()` are Python ports of the JS helpers.
