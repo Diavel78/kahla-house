@@ -2071,11 +2071,91 @@ def api_check_fills():
 
 
 # ---------------------------------------------------------------------------
-# CLV (Closing Line Value) — how each Polymarket bet compares to PIN's
-# closing line. Positive = you got a better price than the close (sharp).
-# Negative = you got picked off. Rolling 30-day average is the
-# professional metric for whether YOU are sharp regardless of W/L noise.
+# Debug endpoint for fill-detection issues. Returns recent state rows
+# side-by-side with recent TRADE activities so we can spot field
+# mismatches (e.g. order's slug doesn't equal trade's marketSlug).
+# Auth same as /api/polymarket/check-fills (shared secret query param).
+# Read-only — does not mutate state.
 # ---------------------------------------------------------------------------
+@app.route("/api/polymarket/debug-fills")
+def api_debug_fills():
+    expected = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    provided = (request.args.get("key") or "").strip()
+    if not expected or not secrets.compare_digest(provided, expected):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+
+    rows_data = []
+    try:
+        rows = (sb.table("polymarket_fill_state").select("*")
+                  .order("last_seen_at", desc=True).limit(20).execute().data) or []
+        for r in rows:
+            rows_data.append({
+                "order_id":    (r.get("order_id") or "")[:14],
+                "market_name": r.get("market_name"),
+                "slug":        r.get("slug"),
+                "terminal":    r.get("terminal"),
+                "last_state":  r.get("last_state"),
+                "alerts_sent": r.get("alerts_sent"),
+            })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"db: {e}"}), 500
+
+    trades = []
+    raw_trade_samples = []
+    try:
+        client = get_client()
+        act_resp = client.portfolio.activities(params={"limit": 100})
+        activities = act_resp.get("activities", []) or []
+        for act in activities:
+            if act.get("type") != "ACTIVITY_TYPE_TRADE":
+                continue
+            detail = act.get("ACTIVITY_TYPE_TRADE")
+            if not isinstance(detail, dict):
+                for k, v in act.items():
+                    if k.startswith("ACTIVITY_TYPE_") and isinstance(v, dict):
+                        detail = v
+                        break
+            if not isinstance(detail, dict):
+                continue
+            # Capture matching-relevant fields + full top-level key list
+            # so we can see the actual shape vs what my code assumes.
+            trades.append({
+                "marketSlug":  detail.get("marketSlug"),
+                "qty":         _safe_float(detail.get("qty")),
+                "price":       _safe_float(detail.get("price")),
+                "side":        detail.get("side"),
+                "updateTime":  detail.get("updateTime") or detail.get("timestamp"),
+                "top_keys":    sorted(list(detail.keys()))[:25],
+            })
+            if len(raw_trade_samples) < 2:
+                # First couple of trades — give a deeper view of metadata
+                # so we can spot alternate slug-like fields.
+                meta = detail.get("marketMetadata") or detail.get("beforePosition", {}).get("marketMetadata") or {}
+                raw_trade_samples.append({
+                    "marketMetadata_keys": sorted(list(meta.keys())) if isinstance(meta, dict) else [],
+                    "marketMetadata_slug": meta.get("slug") if isinstance(meta, dict) else None,
+                    "marketMetadata_title": meta.get("title") if isinstance(meta, dict) else None,
+                })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"sdk: {e}",
+                        "rows": rows_data}), 500
+
+    return jsonify({
+        "ok": True,
+        "row_count": len(rows_data),
+        "rows": rows_data,
+        "trade_count": len(trades),
+        "trades": trades,
+        "trade_samples": raw_trade_samples,
+    })
+
+
+# ---------------------------------------------------------------------------
+# CLV (Closing Line Value) — how each Polymarket bet compares to PIN's
 
 # Sport keys: Polymarket slug prefix → our scanner sport code.
 _PM_SLUG_TO_SPORT = {
