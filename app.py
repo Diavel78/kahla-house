@@ -1992,11 +1992,14 @@ def api_check_fills():
             for act in act_resp.get("activities", []):
                 if act.get("type") != "ACTIVITY_TYPE_TRADE":
                     continue
-                detail = act.get("ACTIVITY_TYPE_TRADE")
+                # SDK returns trade detail nested under "trade" key
+                # (NOT under "ACTIVITY_TYPE_TRADE" — verified via
+                # /api/polymarket/debug-fills sample_activities).
+                detail = act.get("trade")
                 if not isinstance(detail, dict):
-                    # Fallback for shape drift — find any ACTIVITY_TYPE_* key.
+                    # Defensive fallback for any future shape drift.
                     for k, v in act.items():
-                        if k.startswith("ACTIVITY_TYPE_") and isinstance(v, dict):
+                        if k != "type" and isinstance(v, dict):
                             detail = v
                             break
                 if isinstance(detail, dict) and detail.get("marketSlug"):
