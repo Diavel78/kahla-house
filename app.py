@@ -1997,7 +1997,14 @@ def api_check_fills():
     if disappeared:
         # One activities page (most-recent first) is more than enough for
         # any realistic per-user trade volume between two cron ticks.
+        # Additionally, only accept trades that happened in the last 3
+        # minutes — otherwise old historical trades on the same slug
+        # (e.g. a buy earlier today) can be falsely matched to a brand-
+        # new sell order that just disappeared, firing a spurious SOLD
+        # alert. 3 min absorbs cron jitter while keeping the window
+        # tight enough that only the actual triggering trade matches.
         recent_trades = []
+        trade_cutoff = datetime.now(timezone.utc) - timedelta(minutes=3)
         try:
             act_resp = client.portfolio.activities(params={"limit": 100})
             for act in act_resp.get("activities", []):
@@ -2013,8 +2020,22 @@ def api_check_fills():
                         if k != "type" and isinstance(v, dict):
                             detail = v
                             break
-                if isinstance(detail, dict) and detail.get("marketSlug"):
-                    recent_trades.append(detail)
+                if not isinstance(detail, dict) or not detail.get("marketSlug"):
+                    continue
+                t_str = detail.get("updateTime") or detail.get("timestamp") or ""
+                if not t_str:
+                    continue
+                try:
+                    t_dt = datetime.fromisoformat(t_str.replace("Z", "+00:00"))
+                    if t_dt.tzinfo is None:
+                        t_dt = t_dt.replace(tzinfo=timezone.utc)
+                except (ValueError, AttributeError):
+                    continue
+                if t_dt < trade_cutoff:
+                    # Activities are most-recent-first — once we see
+                    # one older than the cutoff, the rest are too.
+                    break
+                recent_trades.append(detail)
         except Exception:
             recent_trades = []
 
