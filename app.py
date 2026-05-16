@@ -2140,6 +2140,99 @@ def api_test_telegram():
 
 
 # ---------------------------------------------------------------------------
+# Debug endpoint for orders.list() inspection. Auth same as
+# /api/polymarket/check-fills. Returns raw response shape + multiple
+# param variations so we can see if the SDK is paginating / filtering
+# orders behind our back.
+# ---------------------------------------------------------------------------
+@app.route("/api/polymarket/debug-orders")
+def api_debug_orders():
+    expected = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    provided = (request.args.get("key") or "").strip()
+    if not expected or not secrets.compare_digest(provided, expected):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+
+    # Snapshot what's in our state table as non-terminal (what we
+    # currently think is "open").
+    try:
+        state_rows = (sb.table("polymarket_fill_state")
+                        .select("order_id,intent,side_label,pick,last_state,terminal")
+                        .eq("terminal", False)
+                        .execute().data) or []
+    except Exception as e:
+        state_rows = [{"db_error": str(e)}]
+
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 502
+
+    def _probe(label, **kwargs):
+        try:
+            resp = client.orders.list(**kwargs) if kwargs else client.orders.list()
+        except Exception as e:
+            return {"label": label, "error": str(e)}
+        if isinstance(resp, dict):
+            top_keys = sorted(list(resp.keys()))
+            orders_list = resp.get("orders", []) or []
+            other = {k: resp.get(k) for k in top_keys if k != "orders"}
+        else:
+            top_keys = []
+            orders_list = getattr(resp, "orders", []) or []
+            other = {"_repr": type(resp).__name__}
+
+        order_summaries = []
+        for o in orders_list:
+            def _g(k, default=None):
+                if isinstance(o, dict): return o.get(k, default)
+                return getattr(o, k, default)
+            md = _g("marketMetadata") or {}
+            order_summaries.append({
+                "id":    (_g("id") or "")[:14],
+                "state": _g("state"),
+                "intent": _g("intent"),
+                "pick": (md.get("outcome") if isinstance(md, dict) else None),
+                "qty":  _safe_float(_g("quantity")),
+                "cum":  _safe_float(_g("cumQuantity")),
+                "createTime": _g("createTime") or _g("insertTime"),
+            })
+
+        return {
+            "label":   label,
+            "count":   len(orders_list),
+            "top_keys": top_keys,
+            "other":   other,
+            "orders":  order_summaries,
+        }
+
+    probes = []
+    # Default — what check-fills currently uses.
+    probes.append(_probe("default"))
+    # Try explicit large limit.
+    probes.append(_probe("limit_500", params={"limit": 500}))
+    # Try positional/keyword limit alternatives in case SDK takes them.
+    try:
+        r = client.orders.list(params={"limit": 100, "states": ["ORDER_STATE_NEW",
+                                                                  "ORDER_STATE_PARTIALLY_FILLED",
+                                                                  "ORDER_STATE_PENDING_NEW"]})
+        probes.append({"label": "with_states_filter",
+                       "count": len((r.get("orders", []) if isinstance(r, dict) else []) or [])})
+    except Exception as e:
+        probes.append({"label": "with_states_filter", "error": str(e)})
+
+    return jsonify({
+        "ok": True,
+        "state_table_non_terminal_count": len(state_rows),
+        "state_table_non_terminal": state_rows,
+        "probes": probes,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Debug endpoint for fill-detection issues. Returns recent state rows
 # side-by-side with recent TRADE activities so we can spot field
 # mismatches (e.g. order's slug doesn't equal trade's marketSlug).
