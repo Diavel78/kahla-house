@@ -2071,6 +2071,40 @@ def api_check_fills():
 
 
 # ---------------------------------------------------------------------------
+# Test endpoint — fires one canned Telegram message via the Filled Bot
+# to verify the bot/token/chat-id are wired up before chasing
+# matching-logic bugs. Returns {ok, sent} so we can see success/failure
+# without depending on whether Telegram actually delivered (sent=True
+# means HTTP 200 from api.telegram.org).
+# ---------------------------------------------------------------------------
+@app.route("/api/polymarket/test-telegram")
+def api_test_telegram():
+    expected = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    provided = (request.args.get("key") or "").strip()
+    if not expected or not secrets.compare_digest(provided, expected):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    token = (os.environ.get("FILLED_BOT_TOKEN") or "").strip()
+    chat_id = (os.environ.get("FILLED_BOT_CHAT_ID") or "").strip()
+    if not token or not chat_id:
+        return jsonify({"ok": False, "error": "FILLED_BOT_TOKEN or FILLED_BOT_CHAT_ID missing in Vercel env",
+                        "token_present": bool(token),
+                        "chat_id_present": bool(chat_id)}), 500
+
+    sent = _send_fill_telegram(
+        "🧪 *Test message from Filled Bot*\n"
+        "If you can read this, Telegram + env vars are wired right.\n"
+        "The remaining bug is in fill detection / matching."
+    )
+    return jsonify({
+        "ok": True,
+        "sent": sent,
+        "token_prefix": token[:10] + "..." if len(token) > 10 else token,
+        "chat_id": chat_id,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Debug endpoint for fill-detection issues. Returns recent state rows
 # side-by-side with recent TRADE activities so we can spot field
 # mismatches (e.g. order's slug doesn't equal trade's marketSlug).
