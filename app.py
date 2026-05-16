@@ -1832,6 +1832,7 @@ def api_check_fills():
         oid = (o.get("id") if isinstance(o, dict) else getattr(o, "id", None))
         if oid:
             order_ids.append(oid)
+    seen_order_ids = set(order_ids)
 
     state_map = {}
     if order_ids:
@@ -1954,6 +1955,103 @@ def api_check_fills():
         upserts.append(row_snapshot)
         processed += 1
 
+    # ── Disappeared-order detector ────────────────────────────────
+    # Polymarket SDK's orders.list() returns ONLY currently-open orders;
+    # once an order fills (or is canceled / expired) it vanishes from
+    # the list entirely. So my milestone-diff loop above can never fire
+    # a 100% alert for a fully-filled order — by the time it's filled,
+    # we don't see it anymore. To detect full fills we:
+    #
+    #   1. Query state table for rows we know are still non-terminal.
+    #   2. Any non-terminal row whose order_id isn't in this tick's SDK
+    #      response is "disappeared" → it either filled or was canceled.
+    #   3. Cross-reference recent ACTIVITY_TYPE_TRADE entries against
+    #      each disappeared order's marketSlug. A matching trade in the
+    #      last ~30 min implies the order filled. No match implies the
+    #      user canceled it (no alert — user knows they canceled).
+    #
+    # First-tick-with-no-prior-state still snapshots open orders; the
+    # disappearance path only fires once we have history to compare
+    # against (i.e. starting on the SECOND cron tick after a deploy).
+    disappeared_filled = 0
+    disappeared_canceled = 0
+    try:
+        known_active = (sb.table("polymarket_fill_state")
+                          .select("*").eq("terminal", False).execute().data) or []
+    except Exception:
+        known_active = []
+
+    disappeared = [r for r in known_active if r["order_id"] not in seen_order_ids]
+
+    if disappeared:
+        # One activities page (most-recent first) is more than enough for
+        # any realistic per-user trade volume between two cron ticks.
+        recent_trades = []
+        try:
+            act_resp = client.portfolio.activities(params={"limit": 100})
+            for act in act_resp.get("activities", []):
+                if act.get("type") != "ACTIVITY_TYPE_TRADE":
+                    continue
+                detail = act.get("ACTIVITY_TYPE_TRADE")
+                if not isinstance(detail, dict):
+                    # Fallback for shape drift — find any ACTIVITY_TYPE_* key.
+                    for k, v in act.items():
+                        if k.startswith("ACTIVITY_TYPE_") and isinstance(v, dict):
+                            detail = v
+                            break
+                if isinstance(detail, dict) and detail.get("marketSlug"):
+                    recent_trades.append(detail)
+        except Exception:
+            recent_trades = []
+
+        for row in disappeared:
+            slug = row.get("slug") or ""
+            qty = _safe_float(row.get("quantity")) or 0
+
+            # Consume the first matching trade so two simultaneous orders
+            # on the same market don't both match the same trade.
+            match_idx = None
+            for i, t in enumerate(recent_trades):
+                if t.get("marketSlug") == slug:
+                    match_idx = i
+                    break
+
+            sent = list(row.get("alerts_sent") or [])
+            row_snapshot = {
+                "order_id":      row["order_id"],
+                "market_name":   row.get("market_name"),
+                "pick":          row.get("pick"),
+                "slug":          row.get("slug"),
+                "intent":        row.get("intent"),
+                "side_label":    row.get("side_label"),
+                "quantity":      qty,
+                "price":         row.get("price"),
+                "last_cum_quantity": row.get("last_cum_quantity") or 0,
+                "last_state":    row.get("last_state"),
+                "alerts_sent":   sent,
+                "order_created_at": row.get("order_created_at"),
+                "last_seen_at":  now_iso,
+                "terminal":      True,
+            }
+
+            if match_idx is not None:
+                recent_trades.pop(match_idx)
+                disappeared_filled += 1
+                # Fire 100% alert if we haven't already. Update the
+                # snapshot to reflect the full fill in the message body.
+                if "100" not in sent:
+                    row_snapshot["last_cum_quantity"] = qty
+                    row_snapshot["last_state"] = "ORDER_STATE_FILLED"
+                    row_snapshot["alerts_sent"] = sent + ["100"]
+                    msg = _format_fill_alert(row_snapshot, "100", 100.0)
+                    if _send_fill_telegram(msg):
+                        alerts_fired += 1
+            else:
+                disappeared_canceled += 1
+            # Either way, mark terminal so we stop scanning this row.
+
+            upserts.append(row_snapshot)
+
     if upserts:
         try:
             (sb.table("polymarket_fill_state")
@@ -1967,6 +2065,8 @@ def api_check_fills():
         "processed": processed,
         "alerts_fired": alerts_fired,
         "skipped_historical": skipped_historical,
+        "disappeared_filled": disappeared_filled,
+        "disappeared_canceled": disappeared_canceled,
     })
 
 

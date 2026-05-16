@@ -287,19 +287,26 @@ The Polymarket US app has no native fill notifications (only the international w
 - **State table**: Supabase `polymarket_fill_state` — one row per order_id we've ever seen. DDL in `kahla-scanner/supabase/polymarket_fill_alerts.sql`, run manually in Supabase SQL editor.
 - **Telegram**: dedicated `FILLED_BOT_TOKEN` / `FILLED_BOT_CHAT_ID` env vars in Vercel. Both stripped defensively for trailing whitespace (Gotcha #22). No-op when missing (route still responds 200 with `alerts_fired: 0`).
 
-### Milestones
-Each cron tick: pull current orders via `client.orders.list()` → diff `cumQuantity` vs `polymarket_fill_state.last_cum_quantity` → fire one Telegram alert for the highest milestone newly crossed. Milestones tracked in the `alerts_sent` jsonb array on each row so we don't re-fire on subsequent ticks.
+### Detection (two paths)
+
+Polymarket SDK's `client.orders.list()` returns ONLY currently-open orders — once an order fills (or is canceled / expired / rejected) it vanishes from the list entirely. So a naive "diff cumQuantity" loop can detect partial fills (the order is still open with more `cum_quantity`) but CAN'T detect full fills, because by the time it's fully filled we don't see it anymore. The route uses two complementary detection paths:
+
+**Path A — partial fills (orders still open).** For every order currently in `client.orders.list()`, compare `cumQuantity` against the row in `polymarket_fill_state.last_cum_quantity`. Crossing 25/50/75 thresholds fires one alert (the highest newly-crossed milestone), tracked via the `alerts_sent` jsonb array so we don't re-fire on subsequent ticks.
+
+**Path B — full fills (vanished orders).** After Path A, query `polymarket_fill_state` for rows where `terminal=false` but the `order_id` is NOT in this tick's SDK response. Those are "disappeared" orders — they either filled or were canceled. To disambiguate, fetch one page of recent activities via `client.portfolio.activities()` and look for an `ACTIVITY_TYPE_TRADE` with the same `marketSlug` (consuming each matched trade so two simultaneous orders on the same market don't double-match). A match implies fill → fire `100` alert; no match implies cancellation → silent terminal mark.
 
 | Milestone | Trigger |
 |---|---|
-| `25` | `cum_quantity / quantity` first crosses 25% |
-| `50` | `cum_quantity / quantity` first crosses 50% |
-| `75` | `cum_quantity / quantity` first crosses 75% |
-| `100` | `state == ORDER_STATE_FILLED` OR fill_pct >= 100. Has an explicit state gate so a partial sitting at 99.7% doesn't get falsely promoted. |
+| `25` | Path A: `cum_quantity / quantity` first crosses 25% |
+| `50` | Path A: `cum_quantity / quantity` first crosses 50% |
+| `75` | Path A: `cum_quantity / quantity` first crosses 75% |
+| `100` | Path A: `cum_quantity / quantity >= 100`; **OR** Path B: order vanished from SDK list AND a matching trade activity exists |
 
-**Only the highest milestone newly crossed in a single tick fires a Telegram message.** A market order that fills 0 → 100% between cron ticks sends one `✅ FILLED` message, not four. A slow chip-away sends one message per bucket crossed.
+**Only the highest milestone newly crossed in a single tick fires a Telegram message.** A market order that fills 0 → 100% between cron ticks sends one `✅ FILLED` message via Path B, not four.
 
-Cancellations (`ORDER_STATE_CANCELED`), expirations (`ORDER_STATE_EXPIRED`), and rejections (`ORDER_STATE_REJECTED`) DO NOT fire alerts — they just mark the row `terminal=true` so subsequent cron ticks can fast-skip it. Decision: cancel noise isn't useful, you cancel your own orders.
+Cancellations DO NOT fire alerts. Path B silently marks them terminal. Decision: cancel noise isn't useful, you cancel your own orders. False positives possible if the user has two orders on the same market and one fills while another cancels at roughly the same time — the cancel could match the filled trade and the actually-filled order would be classified as cancel. Edge case, accepted.
+
+**Edge case still uncovered:** an order placed AND fully filled within the same 60s cron tick window — we never snapshot its open state, so Path B has no row to look up, and the trade activity won't match any tracked order. Could be added later by cross-referencing trade activities against ALL state rows (not just disappeared ones) and synthesizing rows for unmatched trades.
 
 ### First-sight safety
 First-time-seen orders are handled three ways to avoid spamming on initial deploy:
@@ -338,9 +345,11 @@ Same as `/api/my-orders` (Gotcha #7): the SDK's `price` field is the YES-canonic
 ```json
 {
   "ok": true,
-  "processed": 8,              // orders we walked (excludes already-terminal rows)
-  "alerts_fired": 1,           // Telegram messages successfully sent this tick
-  "skipped_historical": 0      // first-sight terminal-but-old orders (no alert)
+  "processed": 8,                 // Path A: open orders we walked (excludes already-terminal rows)
+  "alerts_fired": 1,              // Telegram messages successfully sent this tick (Path A + B combined)
+  "skipped_historical": 0,        // Path A: first-sight terminal-but-old orders (no alert)
+  "disappeared_filled": 1,        // Path B: vanished orders matched to a trade (fired 100% alert)
+  "disappeared_canceled": 0       // Path B: vanished orders with no matching trade (silent cancel)
 }
 ```
 
