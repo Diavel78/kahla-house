@@ -1779,7 +1779,13 @@ def _is_fresh_terminal(order_created_at):
 
 
 def _format_fill_alert(row, milestone, fill_pct):
-    """Build the Telegram message for a fill milestone."""
+    """Build the Telegram message for a fill milestone.
+
+    Visually distinguishes buys vs sells via emoji + verb in the header:
+      buys  → ✅ FILLED  /  📈 25% FILLED
+      sells → 💰 SOLD    /  📤 25% SOLD
+    so the user can tell at a glance whether a notification is about
+    entering or exiting a position without having to read the side label."""
     pick = row.get("pick") or row.get("market_name") or "(unknown)"
     market = row.get("market_name") or ""
     price = _fmt_pmm_price(row.get("price"))
@@ -1787,11 +1793,16 @@ def _format_fill_alert(row, milestone, fill_pct):
     qty = row.get("quantity") or 0
     cum = row.get("last_cum_quantity") or 0
 
+    is_sell = (row.get("intent") or "").startswith("ORDER_INTENT_SELL_")
+    verb = "SOLD" if is_sell else "FILLED"
+    full_emoji = "💰" if is_sell else "✅"
+    partial_emoji = "📤" if is_sell else "📈"
+
     if milestone == "100":
-        header = "✅ *FILLED*"
+        header = f"{full_emoji} *{verb}*"
         progress = f"{int(cum)}/{int(qty)} shares"
     else:
-        header = f"📈 *{milestone}% FILLED*"
+        header = f"{partial_emoji} *{milestone}% {verb}*"
         progress = f"{int(cum)}/{int(qty)} shares ({fill_pct:.0f}%)"
 
     lines = [header]
