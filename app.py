@@ -2138,53 +2138,72 @@ def api_debug_fills():
     except Exception as e:
         return jsonify({"ok": False, "error": f"db: {e}"}), 500
 
+    type_counts = {}
     trades = []
-    raw_trade_samples = []
+    sample_activities = []
+    pages_walked = 0
     try:
         client = get_client()
-        act_resp = client.portfolio.activities(params={"limit": 100})
-        activities = act_resp.get("activities", []) or []
-        for act in activities:
-            if act.get("type") != "ACTIVITY_TYPE_TRADE":
-                continue
-            detail = act.get("ACTIVITY_TYPE_TRADE")
+        # Paginate same way the dashboard does — single page misses
+        # trades when newer non-trade activities push them past 100.
+        all_activities = []
+        cursor = None
+        for _ in range(20):
+            pages_walked += 1
+            params = {"limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+            act_resp = client.portfolio.activities(params=params)
+            page = act_resp.get("activities", []) or []
+            all_activities.extend(page)
+            if act_resp.get("eof", True) or not act_resp.get("nextCursor"):
+                break
+            cursor = act_resp.get("nextCursor")
+
+        for i, act in enumerate(all_activities):
+            t = act.get("type") or "(missing)"
+            type_counts[t] = type_counts.get(t, 0) + 1
+            if i < 3:
+                # Show raw top-level keys of first few activities so we
+                # can spot if the shape is different than expected.
+                sample_activities.append({
+                    "type":     t,
+                    "top_keys": sorted(list(act.keys())),
+                })
+            # Capture TRADE-shaped activities regardless of exact type
+            # string — in case the type tag has changed.
+            detail = act.get(t) if isinstance(act.get(t), dict) else None
             if not isinstance(detail, dict):
                 for k, v in act.items():
                     if k.startswith("ACTIVITY_TYPE_") and isinstance(v, dict):
                         detail = v
                         break
-            if not isinstance(detail, dict):
-                continue
-            # Capture matching-relevant fields + full top-level key list
-            # so we can see the actual shape vs what my code assumes.
-            trades.append({
-                "marketSlug":  detail.get("marketSlug"),
-                "qty":         _safe_float(detail.get("qty")),
-                "price":       _safe_float(detail.get("price")),
-                "side":        detail.get("side"),
-                "updateTime":  detail.get("updateTime") or detail.get("timestamp"),
-                "top_keys":    sorted(list(detail.keys()))[:25],
-            })
-            if len(raw_trade_samples) < 2:
-                # First couple of trades — give a deeper view of metadata
-                # so we can spot alternate slug-like fields.
-                meta = detail.get("marketMetadata") or detail.get("beforePosition", {}).get("marketMetadata") or {}
-                raw_trade_samples.append({
-                    "marketMetadata_keys": sorted(list(meta.keys())) if isinstance(meta, dict) else [],
-                    "marketMetadata_slug": meta.get("slug") if isinstance(meta, dict) else None,
-                    "marketMetadata_title": meta.get("title") if isinstance(meta, dict) else None,
+            if isinstance(detail, dict) and ("price" in detail or "qty" in detail) \
+                    and detail.get("marketSlug"):
+                trades.append({
+                    "type":        t,
+                    "marketSlug":  detail.get("marketSlug"),
+                    "qty":         _safe_float(detail.get("qty")),
+                    "price":       _safe_float(detail.get("price")),
+                    "side":        detail.get("side"),
+                    "updateTime":  detail.get("updateTime") or detail.get("timestamp"),
                 })
     except Exception as e:
         return jsonify({"ok": False, "error": f"sdk: {e}",
-                        "rows": rows_data}), 500
+                        "rows": rows_data,
+                        "pages_walked": pages_walked,
+                        "type_counts": type_counts}), 500
 
     return jsonify({
         "ok": True,
         "row_count": len(rows_data),
         "rows": rows_data,
-        "trade_count": len(trades),
-        "trades": trades,
-        "trade_samples": raw_trade_samples,
+        "activities_total": sum(type_counts.values()),
+        "pages_walked": pages_walked,
+        "type_counts": type_counts,
+        "sample_activities": sample_activities,
+        "trade_like_count": len(trades),
+        "trades": trades[:30],
     })
 
 
