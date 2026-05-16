@@ -47,6 +47,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `/api/data`, `/api/my-bets`, `/api/debug-trades`, `/api/debug-deposits`, `/api/debug-snap`, `/api/sharp-bot` | admin | `@admin_required` |
 | `/api/handicapper` | admin OR `bot_access=true` | `@bot_required` |
 | `/api/raw` (Polymarket SDK debug) | admin | `@admin_required` |
+| `/api/polymarket/check-fills` | **cron-only** | shared-secret `?key=FILLS_CRON_SECRET` (NOT Firebase) — pinged by cron-job.org every minute. See "Polymarket Fill Alerts" section below. |
 
 `@firebase_auth_required` itself rejects any user where `approved != true` (returns 403), so even API endpoints that don't need admin still keep `pending` users out. `@bot_required` adds an additional `role=='admin' OR bot_access==true` check on top of `@firebase_auth_required`.
 
@@ -110,6 +111,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `GET/POST /api/preferences` | Firebase | User settings (books, sport, order) in Firestore |
 | `GET /api/my-bets` | **Admin** | Active Polymarket positions (Dashboard only) |
 | `GET /api/my-orders` | **Admin** | Open / unfilled Polymarket limit orders (CLOB working orders). Filtered to NEW / PENDING_NEW / PENDING_REPLACE / PARTIALLY_FILLED states — filled, canceled, expired, rejected excluded. Powers the **Open Orders** section of the dashboard betslip so planned bets can be shared with friends before they fill. 30s server cache. |
+| `GET /api/polymarket/check-fills?key=...` | **cron-only** (shared secret) | Polymarket order fill detector. Polled every ~1 min by cron-job.org. Diffs current SDK orders against `polymarket_fill_state`; fires a Telegram alert when an order crosses a 25/50/75/100 fill milestone. Only the highest milestone newly crossed in any single tick alerts (a 0→100 market order fills sends one message, not four). Auth via `?key=FILLS_CRON_SECRET` env var. See "Polymarket Fill Alerts" section. |
 | `GET /api/clv` | **Admin** | Closing Line Value per open Polymarket position whose underlying game has started (so PIN has a closing line). Matches each Polymarket bet to our `markets` table (sport prefix + commence date + fuzzy team name), pulls PIN's last pre-`event_start` snapshots on both sides, devigs the pair, computes `(close_devig_prob − entry_implied_prob) × 100`. Positive = sharp entry, negative = got picked off. Returns per-bet records + `avg_clv_pp` rolling average across matched bets. 60s server cache. v1 covers open positions only — closed/settled bet history + 30-day rolling per-signal hit-rate is Phase 4 (Sharp Bot). |
 | `GET /api/data` | **Admin** | Dashboard P&L data (positions, balances, trades) |
 | `GET /api/sharp-bot` | **Admin** | Phase 4 paper-bet tracker payload. Returns `pending` (every `paper_bets` row with `status='pending'`, no age cap), `settled` (last 30 days), and `stats` (per-bot rollup: graded count, hit rate excluding pushes, total units, ROI per bet). Single endpoint, no caching — paper_bets queries are tiny. |
@@ -170,6 +172,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - `kahla-scanner/_lib/sharp.py` — sharp-score math + sharp-side detection. Used by the paper-bet picker. (`sharp_alerts.py` still has local copies of these helpers — DRY violation kept on purpose to minimise blast radius on the live alert pipeline; both implementations are bytewise identical and any future fix lands in both.)
 - `kahla-scanner/_lib/paper_bets.py` — paper-bet shared helpers: PIN devig, best-entry finder, score formula, dedup check, insert helper, snapshot loaders.
 - `kahla-scanner/supabase/paper_bets.sql` — `paper_bets` table DDL. Run manually in Supabase SQL editor.
+- `kahla-scanner/supabase/polymarket_fill_alerts.sql` — `polymarket_fill_state` table DDL (Telegram fill alerts). Run manually in Supabase SQL editor. See "Polymarket Fill Alerts" section.
 - `kahla-scanner/storage/{models,supabase_client}.py` — slim Supabase wrapper
 - `kahla-scanner/_lib/{matcher,normalize}.py` — team-name fuzzy match + odds math
 - `firestore.rules` — Firestore security rules (admin/approved helpers)
@@ -188,8 +191,9 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `FLASK_SECRET_KEY` | Vercel env | Flask session secret |
 | `SUPABASE_URL` | GitHub Actions secret + Vercel env | Supabase Postgres URL |
 | `SUPABASE_SERVICE_KEY` | GitHub Actions secret + Vercel env | Supabase service key |
-| `TELEGRAM_BOT_TOKEN` | GitHub Actions secret | Bot token from @BotFather. Used by `scripts/sharp_alerts.py`. Optional — alert step is a no-op when missing. |
-| `TELEGRAM_CHAT_ID` | GitHub Actions secret | Your Telegram user id (from `getUpdates`). Optional. |
+| `TELEGRAM_BOT_TOKEN` | GitHub Actions secret **+ Vercel env** | Bot token from @BotFather. Used by `scripts/sharp_alerts.py` (GHA) AND `/api/polymarket/check-fills` (Vercel). Optional — both call sites are no-ops when missing. |
+| `TELEGRAM_CHAT_ID` | GitHub Actions secret **+ Vercel env** | Your Telegram user id (from `getUpdates`). Optional. Same dual location. |
+| `FILLS_CRON_SECRET` | Vercel env | Random shared secret matched by `/api/polymarket/check-fills?key=...`. Set to anything (`openssl rand -hex 32` works). Without it the endpoint returns 401 — that's the lockdown when the secret isn't configured. |
 
 ---
 
@@ -260,6 +264,79 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
   - `costBasis` — original cost basis (on sells)
   - `originalPrice` — original entry price (on sells)
   - `beforePosition` / `afterPosition` — position state before/after trade (netPosition, cost fields may be null)
+
+---
+
+## Polymarket Fill Alerts (Telegram)
+
+The Polymarket US app has no native fill notifications (only the international web app does). To plug that gap, `/api/polymarket/check-fills` is polled every ~1 min by **cron-job.org** and sends a Telegram message whenever an order crosses a fill milestone. Lives entirely on Vercel — no GitHub Action, no extra worker, reuses the Polymarket SDK already initialized in `app.py` and the same Telegram bot the sharp alerts use.
+
+### Architecture
+- **Endpoint**: `GET /api/polymarket/check-fills?key=FILLS_CRON_SECRET` (in `app.py`). Auth is a shared-secret query param matched via `secrets.compare_digest` — Firebase tokens aren't an option for an unattended cron call. Empty/missing `FILLS_CRON_SECRET` env var locks the endpoint down (401).
+- **Trigger**: cron-job.org workflow, 1-min cadence. Same provider that triggers `scanner-poll.yml`. Free tier supports 1-min minimum interval with no per-job cost.
+- **State table**: Supabase `polymarket_fill_state` — one row per order_id we've ever seen. DDL in `kahla-scanner/supabase/polymarket_fill_alerts.sql`, run manually in Supabase SQL editor.
+- **Telegram**: same `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env vars the sharp alerts use, but read from Vercel env (not GitHub secrets). Both call sites strip whitespace defensively (Gotcha #22).
+
+### Milestones
+Each cron tick: pull current orders via `client.orders.list()` → diff `cumQuantity` vs `polymarket_fill_state.last_cum_quantity` → fire one Telegram alert for the highest milestone newly crossed. Milestones tracked in the `alerts_sent` jsonb array on each row so we don't re-fire on subsequent ticks.
+
+| Milestone | Trigger |
+|---|---|
+| `25` | `cum_quantity / quantity` first crosses 25% |
+| `50` | `cum_quantity / quantity` first crosses 50% |
+| `75` | `cum_quantity / quantity` first crosses 75% |
+| `100` | `state == ORDER_STATE_FILLED` OR fill_pct >= 100. Has an explicit state gate so a partial sitting at 99.7% doesn't get falsely promoted. |
+
+**Only the highest milestone newly crossed in a single tick fires a Telegram message.** A market order that fills 0 → 100% between cron ticks sends one `✅ FILLED` message, not four. A slow chip-away sends one message per bucket crossed.
+
+Cancellations (`ORDER_STATE_CANCELED`), expirations (`ORDER_STATE_EXPIRED`), and rejections (`ORDER_STATE_REJECTED`) DO NOT fire alerts — they just mark the row `terminal=true` so subsequent cron ticks can fast-skip it. Decision: cancel noise isn't useful, you cancel your own orders.
+
+### First-sight safety
+First-time-seen orders are handled three ways to avoid spamming on initial deploy:
+1. **Fresh open** → snapshot only. No fill has happened yet; partial fills caught on subsequent ticks normally.
+2. **Terminal + recent createTime (≤10 min ago)** → fire `100` alert. Catches market orders that fill instantly between two cron ticks before we ever saw their open state.
+3. **Terminal + old createTime** → snapshot terminal=true, no alert. Treats them as historical (placed before this feature existed, or pre-deploy).
+
+`_FILL_FRESH_TERMINAL_SECONDS = 600` covers a 1-min cron with generous slack for cron-job.org occasionally missing a tick.
+
+### NO-side price flip
+Same as `/api/my-orders` (Gotcha #7): the SDK's `price` field is the YES-canonical CLOB price. For `*_SHORT` intents (user picked NO) the real fill price is `1 - price`. The alert message reflects what the user actually paid for their picked outcome.
+
+### Failure / retry semantics
+- **SDK call fails** → bail with `502`, no state mutation. Next tick retries cleanly.
+- **DB read fails** → bail with `500`, no state mutation. Next tick retries cleanly.
+- **DB write fails after processing** → return `500` with partial counts. Next tick re-detects the same fills and re-attempts the write; idempotent because `alerts_sent` dedup is keyed by milestone, not by write success.
+- **Telegram send fails** → still mark milestone as sent. A Telegram outage shouldn't queue up alerts that flood when the bot recovers (same posture as `sharp_alerts.py`).
+
+### Setup checklist (after deploy)
+1. **Run the migration** in Supabase SQL editor: paste `kahla-scanner/supabase/polymarket_fill_alerts.sql`.
+2. **Set env vars** in Vercel project `kahla-house`:
+   - `FILLS_CRON_SECRET` — generate something random (`openssl rand -hex 32`); the URL secret cron-job.org sends.
+   - `TELEGRAM_BOT_TOKEN` — copy from GitHub secrets (same bot the sharp alerts use).
+   - `TELEGRAM_CHAT_ID` — copy from GitHub secrets.
+3. **Redeploy** Vercel (env-var changes don't auto-rebuild — push any commit or hit "Redeploy" in the dashboard).
+4. **Create a cron-job.org job**:
+   - URL: `https://thekahlahouse.com/api/polymarket/check-fills?key=<FILLS_CRON_SECRET>`
+   - Method: GET
+   - Schedule: every 1 minute
+   - Save / enable.
+5. **Smoke test**: place a tiny order on Polymarket. Within ~60s you should get either a `📈 25% FILLED` (partial) or `✅ FILLED` (instant) Telegram message. cron-job.org's response history shows each call's JSON return so you can confirm `processed > 0` and `alerts_fired` increments when a fill happens.
+
+### Response shape (visible in cron-job.org history)
+```json
+{
+  "ok": true,
+  "processed": 8,              // orders we walked (excludes already-terminal rows)
+  "alerts_fired": 1,           // Telegram messages successfully sent this tick
+  "skipped_historical": 0      // first-sight terminal-but-old orders (no alert)
+}
+```
+
+### Cost & limits
+- **cron-job.org**: free, unlimited. 1-min cadence supported.
+- **Vercel Hobby**: 1440 invocations/day × ~2s each ≈ <5 GB-hours/month, well under the 100 GB-hours/month allowance. Hobby's 10s function timeout is comfortable — each tick runs in 1-3s.
+- **Polymarket SDK**: no published rate limit hit at 1 call/min. The dashboard already polls `/api/my-orders` every 60s when open; this is the same call shape.
+- **Telegram**: 30 messages/sec global cap from Telegram, irrelevant at our volume.
 
 ---
 

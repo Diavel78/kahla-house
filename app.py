@@ -1655,6 +1655,317 @@ def api_my_orders():
 
 
 # ---------------------------------------------------------------------------
+# Polymarket fill alerts — Telegram notification when an order on
+# Polymarket fills. The US Polymarket app has no native fill
+# notifications (only the international web app does), so we poll the
+# SDK every minute via cron-job.org pinging /api/polymarket/check-fills
+# and diff cum_quantity against polymarket_fill_state in Supabase.
+#
+# Auth: shared-secret ?key= matched to FILLS_CRON_SECRET env var. Cron
+# services can't carry Firebase tokens; the secret is the gate.
+#
+# Milestones tracked per order (25 / 50 / 75 / 100). Only the highest
+# milestone newly crossed in any single tick fires a Telegram message —
+# a market order that fills 0 → 100% in one tick sends one alert, not
+# four. The alerts_sent jsonb array on each row prevents re-firing.
+#
+# First-sight safety:
+#   • Fresh open order   → snapshot only, no alert (placement isn't a fill)
+#   • Fresh terminal old → snapshot terminal=true, no alert (historical)
+#   • Fresh terminal new → fire "100" alert (instant fill between ticks).
+#     "New" = createTime within FILL_FRESH_TERMINAL_SECONDS.
+# ---------------------------------------------------------------------------
+
+# SDK order states that mean "this order will never fill more". Once we
+# see a row in one of these, mark terminal so the next cron tick can
+# fast-skip it.
+_TERMINAL_ORDER_STATES = {
+    "ORDER_STATE_FILLED",
+    "ORDER_STATE_CANCELED",
+    "ORDER_STATE_EXPIRED",
+    "ORDER_STATE_REJECTED",
+}
+
+# Fill-progress milestones. (key, threshold_pct). "100" has an extra
+# gate (requires FILLED state OR pct >= 100) handled in
+# _crossed_fill_milestones — partials can hover at 99.7% for a while
+# without us calling them "filled".
+_FILL_MILESTONES = (("25", 25.0), ("50", 50.0), ("75", 75.0), ("100", 100.0))
+
+# An order we've never seen before that's ALREADY in a terminal state
+# is either (a) historical, or (b) a brand-new market order that filled
+# instantly between cron ticks. We use createTime to tell them apart:
+# fresh terminal = real instant fill (fire 100 alert); old terminal =
+# historical (snapshot, skip). 10 min covers a typical 1-min cron with
+# generous tolerance for cron-job.org occasional misses.
+_FILL_FRESH_TERMINAL_SECONDS = 600
+
+
+def _fmt_pmm_price(p):
+    """Polymarket prices are 0-1 probabilities. Render as $0.42."""
+    if p is None:
+        return "?"
+    try:
+        return f"${float(p):.2f}"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _send_fill_telegram(text):
+    """POST to Telegram sendMessage. No-op (False) when
+    TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID aren't set in Vercel env.
+    Stdlib urllib so we don't add a new dep just for this."""
+    import urllib.request
+    import urllib.error
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    if not token or not chat_id:
+        return False
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = json.dumps({
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
+    }).encode()
+    req = urllib.request.Request(
+        url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status == 200
+    except (urllib.error.HTTPError, urllib.error.URLError):
+        return False
+
+
+def _crossed_fill_milestones(prev_pct, curr_pct, curr_state, already_sent):
+    """Return list of milestone keys newly crossed this tick (in
+    ascending threshold order). A milestone fires once per (order,
+    milestone) — already_sent is the persisted jsonb list."""
+    out = []
+    for key, threshold in _FILL_MILESTONES:
+        if key in already_sent:
+            continue
+        if key == "100":
+            crossed = (curr_state == "ORDER_STATE_FILLED") or curr_pct >= 100
+        else:
+            crossed = curr_pct >= threshold
+        if crossed:
+            out.append(key)
+    return out
+
+
+def _is_fresh_terminal(order_created_at):
+    """True iff the order's createTime is within the last
+    _FILL_FRESH_TERMINAL_SECONDS. Used to decide whether a first-sight
+    already-terminal order is a real instant fill (fire alert) or just
+    history (snapshot, skip). Returns False on parse failure — safer to
+    skip than spam."""
+    if not order_created_at:
+        return False
+    try:
+        # SDK returns ISO 8601; tolerate both "Z" and "+00:00".
+        s = order_created_at.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds() <= _FILL_FRESH_TERMINAL_SECONDS
+    except (ValueError, AttributeError):
+        return False
+
+
+def _format_fill_alert(row, milestone, fill_pct):
+    """Build the Telegram message for a fill milestone."""
+    pick = row.get("pick") or row.get("market_name") or "(unknown)"
+    market = row.get("market_name") or ""
+    price = _fmt_pmm_price(row.get("price"))
+    side = row.get("side_label") or ""
+    qty = row.get("quantity") or 0
+    cum = row.get("last_cum_quantity") or 0
+
+    if milestone == "100":
+        header = "✅ *FILLED*"
+        progress = f"{int(cum)}/{int(qty)} shares"
+    else:
+        header = f"📈 *{milestone}% FILLED*"
+        progress = f"{int(cum)}/{int(qty)} shares ({fill_pct:.0f}%)"
+
+    lines = [header]
+    if market and market != pick:
+        lines.append(f"_{market}_")
+    lines.append(f"*{pick}* · {side} @ {price}")
+    lines.append(progress)
+    return "\n".join(lines)
+
+
+@app.route("/api/polymarket/check-fills")
+def api_check_fills():
+    """Polymarket order fill detector. Pulled every ~1 min by
+    cron-job.org. Diffs current SDK orders against
+    polymarket_fill_state, sends Telegram per milestone crossed,
+    persists new state. Returns a small JSON payload that shows up in
+    cron-job.org's response history for live debugging."""
+    expected = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    provided = (request.args.get("key") or "").strip()
+    if not expected or not secrets.compare_digest(provided, expected):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+
+    # Pull orders from Polymarket. Failure = bail with no state mutation;
+    # the next tick will retry cleanly. Don't half-update state.
+    try:
+        client = get_client()
+        resp = client.orders.list()
+        raw = resp.get("orders") if isinstance(resp, dict) else getattr(resp, "orders", []) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"sdk: {e}"}), 502
+
+    order_ids = []
+    for o in raw:
+        oid = (o.get("id") if isinstance(o, dict) else getattr(o, "id", None))
+        if oid:
+            order_ids.append(oid)
+
+    state_map = {}
+    if order_ids:
+        try:
+            rows = (sb.table("polymarket_fill_state")
+                      .select("*").in_("order_id", order_ids).execute().data) or []
+            for r in rows:
+                state_map[r["order_id"]] = r
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"db read: {e}"}), 500
+
+    processed = 0
+    alerts_fired = 0
+    skipped_historical = 0
+    upserts = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for o in raw:
+        def _g(key, default=None, _o=o):
+            if isinstance(_o, dict): return _o.get(key, default)
+            return getattr(_o, key, default)
+
+        oid = _g("id") or ""
+        if not oid:
+            continue
+
+        state = _g("state") or ""
+        prev = state_map.get(oid)
+        # Fast-skip orders we already marked terminal — saves rebuilding
+        # rows for every long-dead order the SDK still returns.
+        if prev and prev.get("terminal"):
+            continue
+
+        qty = _safe_float(_g("quantity")) or 0
+        cum_qty = _safe_float(_g("cumQuantity")) or 0
+        raw_price = _safe_float(_g("price"))
+        intent = _g("intent") or ""
+        # Same NO-side price flip as /api/my-orders — display what the
+        # user actually paid for their picked outcome, not the
+        # YES-canonical complement.
+        needs_flip = intent.endswith("_SHORT")
+        if raw_price is not None and 0 <= raw_price <= 1 and needs_flip:
+            price = 1 - raw_price
+        else:
+            price = raw_price
+
+        md = _g("marketMetadata") or {}
+        if not isinstance(md, dict):
+            md = {k: getattr(md, k, None) for k in
+                  ("slug", "title", "outcome", "eventSlug", "team")}
+        slug = md.get("slug") or ""
+        title = md.get("title") or ""
+        outcome = md.get("outcome") or ""
+        team = md.get("team") or {}
+        team_name = team.get("name", "") if isinstance(team, dict) else ""
+
+        pick = outcome
+        if team_name and outcome and re.search(r"[0-9]", outcome):
+            pick = f"{team_name} {outcome}"
+        elif team_name:
+            pick = team_name
+
+        side_label = _INTENT_LABEL.get(
+            intent, intent.replace("ORDER_INTENT_", "").replace("_", " "))
+        order_created_at = _g("createTime") or _g("insertTime") or ""
+
+        fill_pct = (cum_qty / qty * 100) if qty else 0
+        already_sent = (prev or {}).get("alerts_sent") or []
+        is_terminal_now = state in _TERMINAL_ORDER_STATES
+
+        new_milestones = []
+        if not prev:
+            # First-sight order. Three sub-cases:
+            #   1) Open + un-filled         → snapshot, no alert
+            #   2) Terminal + recent create → fired between ticks, ALERT
+            #   3) Terminal + old create    → historical, snapshot only
+            if is_terminal_now and state == "ORDER_STATE_FILLED" \
+                    and _is_fresh_terminal(order_created_at):
+                new_milestones = ["100"]
+            elif is_terminal_now:
+                skipped_historical += 1
+        else:
+            prev_pct = ((prev.get("last_cum_quantity") or 0) / qty * 100) if qty else 0
+            new_milestones = _crossed_fill_milestones(
+                prev_pct=prev_pct, curr_pct=fill_pct,
+                curr_state=state, already_sent=already_sent)
+
+        new_alerts = list(already_sent) + [m for m in new_milestones if m not in already_sent]
+
+        row_snapshot = {
+            "order_id": oid,
+            "market_name": title,
+            "pick": pick,
+            "slug": slug,
+            "intent": intent,
+            "side_label": side_label,
+            "quantity": qty,
+            "price": price,
+            "last_cum_quantity": cum_qty,
+            "last_state": state,
+            "alerts_sent": new_alerts,
+            "order_created_at": order_created_at,
+            "last_seen_at": now_iso,
+            "terminal": is_terminal_now,
+        }
+        # Deliberately omit first_seen_at — the DB default `now()`
+        # handles initial INSERT, and omitting it from UPDATE preserves
+        # the original value across upserts.
+
+        if new_milestones:
+            top = new_milestones[-1]  # highest threshold crossed this tick
+            msg = _format_fill_alert(row_snapshot, top, fill_pct)
+            if _send_fill_telegram(msg):
+                alerts_fired += 1
+            # Even if Telegram send returned False, mark all crossed
+            # milestones as sent. A Telegram outage shouldn't queue up
+            # alerts that flood when the bot recovers — sharp_alerts.py
+            # treats Telegram as best-effort for the same reason.
+
+        upserts.append(row_snapshot)
+        processed += 1
+
+    if upserts:
+        try:
+            (sb.table("polymarket_fill_state")
+               .upsert(upserts, on_conflict="order_id").execute())
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"db write: {e}",
+                            "processed": processed, "alerts": alerts_fired}), 500
+
+    return jsonify({
+        "ok": True,
+        "processed": processed,
+        "alerts_fired": alerts_fired,
+        "skipped_historical": skipped_historical,
+    })
+
+
+# ---------------------------------------------------------------------------
 # CLV (Closing Line Value) — how each Polymarket bet compares to PIN's
 # closing line. Positive = you got a better price than the close (sharp).
 # Negative = you got picked off. Rolling 30-day average is the
