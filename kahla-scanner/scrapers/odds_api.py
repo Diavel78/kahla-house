@@ -85,8 +85,26 @@ ALLOWED_BOOKS = {
     "LV", "BVD", "ESPN", "FAN", "MB",
 }
 
-# How close (minutes) two event_start values must be to consider the same game.
-MATCH_WINDOW = timedelta(minutes=30)
+# How close two event_start values must be to consider the same game.
+# Per-sport because MLB doubleheaders are real (same teams, 3-5h apart on
+# the same day) and we MUST keep them as distinct markets. Everything
+# else plays once per day per team — a same-team match within 12h is
+# the same game even if the Odds API reports the commence_time hours
+# off (placeholder time vs corrected tip-off — common cause of dupes).
+MATCH_WINDOW = timedelta(minutes=30)  # legacy alias (MLB still uses it)
+_MATCH_WINDOW_BY_SPORT: dict[str, timedelta] = {
+    "MLB": timedelta(minutes=30),    # doubleheader protection
+    "NBA": timedelta(hours=12),
+    "NHL": timedelta(hours=12),
+    "NFL": timedelta(hours=12),
+    "CBB": timedelta(hours=12),
+    "NCAAF": timedelta(hours=12),
+    "UFC": timedelta(hours=6),       # UFC cards can have late/early changes
+}
+
+
+def _match_window_for(sport_code: str) -> timedelta:
+    return _MATCH_WINDOW_BY_SPORT.get(sport_code, MATCH_WINDOW)
 
 
 # ---------------------------------------------------------------------------
@@ -389,11 +407,19 @@ def _find_or_create_market(
     aliases: dict[str, str],
     existing: list[dict[str, Any]],
 ) -> str | None:
-    """Return market_id for this game. Reuses an existing markets row if the
-    teams + commence_time match within MATCH_WINDOW; otherwise inserts a new
-    row. `existing` is hoisted out of the caller — pass the same active-markets
-    list to every call within an ingest_sport run to avoid N+1 Supabase reads.
+    """Return market_id for this game. Reuses an existing markets row if
+    the teams match within the sport's match window; otherwise inserts a
+    new row. `existing` is hoisted out of the caller — pass the same
+    active-markets list to every call within an ingest_sport run to
+    avoid N+1 Supabase reads.
+
+    If the API now reports a different commence_time than the existing
+    row stores (e.g., placeholder time corrected to the real tip), the
+    existing row's event_start is UPDATED in place to the new time. Was
+    creating a duplicate markets row instead — that's how
+    "Cavaliers @ Pistons" ended up listed twice on /handicapper.
     """
+    window = _match_window_for(g.sport)
     venue_key = matcher._teams_key(g.home, g.away, aliases)
     for row in existing:
         row_start = _parse_iso(row.get("event_start", ""))
@@ -402,15 +428,39 @@ def _find_or_create_market(
             # g.commence_time, which made the window check pass for ANY row
             # with an unparseable date and matched the wrong game).
             continue
-        if abs(row_start - g.commence_time) > MATCH_WINDOW:
+        if abs(row_start - g.commence_time) > window:
             continue
         row_away, row_home = matcher._split_event_name(row.get("event_name", ""))
+        matched = False
         if row_home and row_away:
             if matcher._teams_key(row_home, row_away, aliases) == venue_key:
-                return row["id"]
-            score = matcher._fuzzy_teams_match(g.home, g.away, row_home, row_away, aliases)
-            if score >= matcher.FUZZY_THRESHOLD:
-                return row["id"]
+                matched = True
+            else:
+                score = matcher._fuzzy_teams_match(g.home, g.away, row_home, row_away, aliases)
+                if score >= matcher.FUZZY_THRESHOLD:
+                    matched = True
+        if not matched:
+            continue
+        # Existing row matches the same game — update its event_start
+        # if the API now reports a different time. Mutating in place
+        # keeps the row+id stable so all attached book_snapshots stay
+        # linked to it (no orphan history when a game is rescheduled).
+        if abs(row_start - g.commence_time) > timedelta(minutes=2):
+            try:
+                db.client().table("markets").update(
+                    {"event_start": g.commence_time.isoformat()}
+                ).eq("id", row["id"]).execute()
+                row["event_start"] = g.commence_time.isoformat()
+                log.info(
+                    "markets %s event_start %s → %s (drift %.0fm)",
+                    row["id"][:8], row_start.isoformat(),
+                    g.commence_time.isoformat(),
+                    (g.commence_time - row_start).total_seconds() / 60.0,
+                )
+            except Exception as e:
+                log.warning("event_start update failed for %s: %s",
+                            row.get("id"), e)
+        return row["id"]
     # No match — create a new markets row.
     m = Market(
         sport=g.sport,

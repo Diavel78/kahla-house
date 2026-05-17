@@ -4296,6 +4296,19 @@ def api_handicapper_games():
             "home":        home,
         })
 
+    # Dedup duplicate market rows for the same game. Cause: The Odds
+    # API sometimes reports a game's commence_time with several hours
+    # of drift between calls (initial placeholder time vs corrected
+    # tip-off). The ingest matcher's ±30 min window misses that drift
+    # and creates a NEW markets row, so the same Cavaliers @ Pistons
+    # game shows up twice in the list.
+    #
+    # Strategy: group by event_name. Within a group, the row with the
+    # LATER event_start is more likely the corrected one (the Odds API
+    # usually pushes a placeholder time forward to the real tip, not
+    # the other way around). For MLB, keep both when they're >1h apart
+    # — that's the doubleheader case (real, same teams same day).
+    games = _dedup_games(games, sport)
     return jsonify({
         "ok":      True,
         "sport":   sport,
@@ -4303,6 +4316,66 @@ def api_handicapper_games():
         "count":   len(games),
         "games":   games,
     })
+
+
+def _dedup_games(games: list[dict], sport: str) -> list[dict]:
+    """Collapse duplicate market rows for the same event_name. Returns
+    a new list sorted by event_start asc.
+
+    MLB doubleheaders are real (same teams same day, scheduled hours
+    apart). Anything else with the same event_name within a 6h window
+    is treated as a duplicate from Odds-API commence_time drift.
+    """
+    if not games:
+        return games
+    # Group by event_name (which already encodes away @ home).
+    grouped: dict[str, list[dict]] = {}
+    for g in games:
+        grouped.setdefault(g["event_name"], []).append(g)
+
+    out: list[dict] = []
+    is_mlb = sport.upper() == "MLB"
+    DUPE_WINDOW = timedelta(hours=1 if is_mlb else 6)
+    for name, gs in grouped.items():
+        if len(gs) == 1:
+            out.append(gs[0])
+            continue
+        # Sort by event_start asc, then walk and cluster anything within
+        # the dupe window. Each cluster collapses to its latest entry.
+        gs_sorted = sorted(
+            gs, key=lambda g: g["event_start"] or ""
+        )
+        clusters: list[list[dict]] = []
+        for g in gs_sorted:
+            try:
+                t = datetime.fromisoformat(
+                    (g["event_start"] or "").replace("Z", "+00:00")
+                )
+            except Exception:
+                # Unparseable timestamp — treat as its own cluster so
+                # we never silently drop it.
+                clusters.append([g])
+                continue
+            if clusters:
+                last_g = clusters[-1][-1]
+                try:
+                    last_t = datetime.fromisoformat(
+                        (last_g["event_start"] or "").replace("Z", "+00:00")
+                    )
+                except Exception:
+                    clusters.append([g])
+                    continue
+                if abs(t - last_t) <= DUPE_WINDOW:
+                    clusters[-1].append(g)
+                    continue
+            clusters.append([g])
+        # Pick latest event_start within each cluster.
+        for c in clusters:
+            winner = max(c, key=lambda g: g["event_start"] or "")
+            out.append(winner)
+
+    out.sort(key=lambda g: g["event_start"] or "")
+    return out
 
 
 @app.route("/api/handicapper/sport-counts")
@@ -4324,7 +4397,7 @@ def api_handicapper_sport_counts():
     before = (now + timedelta(hours=48)).isoformat()
     try:
         rows = (sb.table("markets")
-                .select("id,sport")
+                .select("id,sport,event_name,event_start")
                 .eq("status", "active")
                 .gte("event_start", after)
                 .lte("event_start", before)
@@ -4332,15 +4405,24 @@ def api_handicapper_sport_counts():
     except Exception as e:
         return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
 
-    # Phantom-market filter removed for the same reason as
-    # /api/handicapper/games — the snapshot-join query truncates and
-    # gives wrong counts. event_start window is the only filter now.
-    counts: dict[str, int] = {}
+    # Group rows by sport, then run the same dedup as /api/handicapper/games
+    # so the count matches what the user actually sees on the page.
+    # Without this, a duplicate Cavaliers @ Pistons inflates NBA's
+    # badge by 1 even though only one card renders.
+    by_sport: dict[str, list[dict]] = {}
     for r in rows:
         s = (r.get("sport") or "").upper()
         if not s:
             continue
-        counts[s] = counts.get(s, 0) + 1
+        by_sport.setdefault(s, []).append({
+            "market_id":   r["id"],
+            "event_name":  r.get("event_name") or "",
+            "event_start": r.get("event_start"),
+            "sport":       s,
+        })
+    counts: dict[str, int] = {
+        s: len(_dedup_games(gs, s)) for s, gs in by_sport.items()
+    }
     return jsonify({"ok": True, "counts": counts, "now_iso": now.isoformat()})
 
 
