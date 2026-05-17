@@ -98,22 +98,24 @@ MATCH_WINDOW = timedelta(minutes=30)
 # within 18h or if we're inside the overnight blackout window.
 #
 # The cron-job.org trigger fires this workflow at high frequency (every
-# 5 min); these gates decide per-sport whether THIS tick actually hits
+# 1 min); these gates decide per-sport whether THIS tick actually hits
 # The Odds API. The two together = adaptive cadence without rewriting
 # the scheduler. Cost model with us+eu (6 credits/call):
 #
 #   nearest game in:
-#     ≤ 2h           → poll every 5 min   (final-2h sharp window)
-#     2-6h           → poll every 15 min
-#     6-18h          → poll every 30 min
+#     ≤ 30 min       → poll every 2 min   (terminal steam window)
+#     30 min – 2h    → poll every 5 min   (final-2h sharp window)
+#     2 – 6h         → poll every 15 min
+#     6 – 18h        → poll every 30 min
 #     18h+ / none    → skip (off-season / nothing meaningful pre-game)
 #   overnight 10p-7a → skip regardless (no US games tip at 3am)
 #   no event in next 7d → skip (off-season)
 #
-# Sports with staggered start times (MLB) will sit in the 5-min bucket
-# for most of the afternoon — that's the point. Sport-wide endpoint
-# returns all games in one call, so one MLB call covers 15 games at
-# different start times.
+# Sports with staggered start times (MLB) cycle UP into the 2-min bucket
+# only during the actual 30-min pre-tip windows of individual games,
+# then DOWN to 15-min cadence once a game tips and the next game is
+# 2+ hours away. The sport-wide endpoint returns all games in one call,
+# so one MLB call still covers 15 games at different start times.
 #
 # All times are evaluated in the user's local TZ (America/Phoenix, no
 # DST). Phoenix is used everywhere else in the project for "today"
@@ -125,17 +127,22 @@ _BLACKOUT_START_HOUR = 22  # 10pm local
 _BLACKOUT_END_HOUR   = 7   # 7am local
 
 # (max_hours_to_game, cadence_minutes). Picked left-to-right; first
-# match wins. Trailing entry catches everything up to OFF_SEASON_LIMIT.
+# match wins. Trailing entry catches everything up to 18h.
 _CADENCE_BUCKETS: list[tuple[float, int]] = [
+    (0.5,  2),
     (2.0,  5),
     (6.0,  15),
     (18.0, 30),
 ]
-# Slack: cron-job.org ticks aren't perfectly evenly spaced and our own
-# DB write has latency, so "fire if last_run + cadence_min <= now" is
-# too tight — we'd skip the 5-min tick because the previous one wrote
-# at 4m58s ago. Fire if we're within `slack` of the target window.
-_CADENCE_SLACK_SEC = 60
+
+
+def _slack_for(cadence_min: int) -> int:
+    """Slack window in seconds so cron-job.org tick jitter doesn't make
+    us skip when we should fire. Scaled to ~15% of cadence with a 10s
+    floor and 60s ceiling so it never exceeds a meaningful fraction of
+    the cadence (e.g. 60s slack on a 2-min bucket would let us fire at
+    1m45s = effectively 1.75-min cadence, wasting credits)."""
+    return min(60, max(10, int(cadence_min * 60 * 0.15)))
 
 
 def _in_overnight_blackout(now: datetime | None = None) -> bool:
@@ -197,7 +204,8 @@ def _should_fire(sport_code: str) -> tuple[bool, dict[str, Any]]:
     last = db.last_ingest_run(sport_code, status="ok")
     if last is not None:
         elapsed_sec = (now - last).total_seconds()
-        target_sec = cadence * 60 - _CADENCE_SLACK_SEC
+        slack_sec = _slack_for(cadence)
+        target_sec = cadence * 60 - slack_sec
         if elapsed_sec < target_sec:
             return False, {
                 "status": "skipped:cadence",

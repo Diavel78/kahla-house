@@ -83,21 +83,24 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 > **Adaptive cadence** (per-sport gate in
 > `scrapers/odds_api.py:_should_fire`): each cron-job.org tick reads the
 > nearest upcoming `event_start` for each sport in Supabase and picks a
-> cadence bucket — `≤2h → 5min`, `2-6h → 15min`, `6-18h → 30min`, beyond
-> 18h skip. Overnight 10pm-7am MT skips entirely (no US games tip then).
-> Off-season sports (no event in the next 7d) skip. Every tick — fired
-> or skipped — writes a heartbeat row to `odds_ingest_runs` for
-> observability. The previous always-on every-30-min model was wasting
-> calls on far-out games where the line barely moves; adaptive cadence
-> reallocates the same budget toward the final 2 hours, when PIN
-> actually moves.
+> cadence bucket — `≤30min → 2min` (terminal steam window), `30min-2h →
+> 5min`, `2-6h → 15min`, `6-18h → 30min`, beyond 18h skip. Overnight
+> 10pm-7am MT skips entirely (no US games tip then). Off-season sports
+> (no event in the next 7d) skip. Every tick — fired or skipped —
+> writes a heartbeat row to `odds_ingest_runs` for observability. The
+> previous always-on every-30-min model was wasting calls on far-out
+> games where the line barely moves; adaptive cadence reallocates the
+> budget toward the final 30 min, where late steam happens.
 >
-> Cost (adaptive): typical 700-1,500 cr/day depending on slate. MLB busy
-> days are highest (~800/day) because of staggered starts — something is
-> always within 2h between 10am and 7pm. NBA/NHL/concentrated-tip sports
-> ~500/day. Fits comfortably in the $59/100K-credit tier with headroom
-> for spike days (UFC PPV, March Madness). cron-job.org must be set to
-> 5-min cadence so the gate can hit its tightest bucket.
+> Cost (adaptive): typical 1,800-2,500 cr/day depending on slate. MLB
+> busy days are highest (~900/day) because of staggered starts —
+> something is in the 2-min or 5-min bucket between 10am and 9pm.
+> NBA/NHL/concentrated-tip sports ~600/day. Fits in the $59/100K-credit
+> tier with ~25K-45K headroom for spike days (UFC PPV, March Madness).
+> **cron-job.org must be set to 1-min cadence** so the 2-min gate can
+> hit its tightest bucket reliably (gate slack scales: 2-min bucket
+> needs ~102s elapsed before re-firing; cron-job.org tick at 60s
+> would skip, tick at 120s would fire, effective 2-min cadence ✓).
 >
 > A second workflow `.github/workflows/snapshot-cleanup.yml` runs nightly
 > at 09:00 UTC and deletes `book_snapshots` rows older than 15 days —
@@ -872,7 +875,7 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 1. **The Odds API auth is `?api_key=` query param** — NOT a Bearer header. Easy to copy from one provider's pattern (Owls used Bearer) and break.
 2. **The Odds API credit cost = `markets × regions`** per `/odds` call. We use `h2h,spreads,totals` × `us,eu` = 6 credits. Don't add markets/regions casually — costs scale linearly. Adding `us2` (ESPN BET, Fanatics) would bump to 9 credits/call.
 3. **Pinnacle is in the EU region**, NOT US. If you ever drop `eu` from the regions param, PIN data stops flowing — and PIN is the entire sharp angle for openers/movement.
-4. **Cron is cron-job.org ONLY, at 5-min cadence** — the GitHub-native `*/30 * * * *` schedule on `scanner-poll.yml` was killed because it double-fired with cron-job.org and burned 2x credits via the concurrency queue. **cron-job.org must be set to 5-min intervals now** so the per-sport adaptive gate (`scrapers/odds_api.py:_should_fire`) can hit its tightest cadence in the final 2h pre-game. Idle ticks are cheap — the gate returns instantly with a heartbeat row in `odds_ingest_runs`. If cron-job.org dies, the "last odds update Nm ago" indicator on `/odds` will surface it within minutes; manually trigger from the Actions tab as recovery.
+4. **Cron is cron-job.org ONLY, at 1-min cadence** — the GitHub-native `*/30 * * * *` schedule on `scanner-poll.yml` was killed because it double-fired with cron-job.org and burned 2x credits via the concurrency queue. **cron-job.org must be set to 1-min intervals** so the per-sport adaptive gate (`scrapers/odds_api.py:_should_fire`) can hit its tightest cadence — the 2-min bucket in the final 30 min pre-game. Idle ticks are cheap — the gate returns instantly with a heartbeat row in `odds_ingest_runs`. If cron-job.org dies, the "PIN/cron Nm ago" indicator on the Pick Bot dossier will surface it within a minute; manually trigger from the Actions tab as recovery.
 5. **`cancel-in-progress: true`** on the scanner-poll concurrency group — any retry/manual-overlap kills the in-flight run instead of queueing. Each run is idempotent (dedup logic) so partial runs lose nothing.
 6. **`_cache` (Polymarket dashboard cache)** resets on Vercel cold start. Used by `api_my_bets` and `api_data` only. Odds/openers/snapshots safe in Supabase + Firestore.
 7. **SDK `price` field is the COMPLEMENT** — NEVER use for P&L *or for displaying order limit prices*. For positions/trades use `cost.value / qty` for real per-share price. For unfilled orders use `1 - price` (no cost field exists yet — they haven't filled). The `price` field returns the opposite side's price (YES when trading NO). Symptom: a +150 limit order shows up as -150ish in the betslip.

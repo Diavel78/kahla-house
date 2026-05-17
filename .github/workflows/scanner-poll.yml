@@ -13,16 +13,17 @@ name: Odds Ingest — Poll
 #
 # Adaptive cadence (per-sport gate in scrapers/odds_api.py:_should_fire):
 #   nearest game in:
-#     ≤ 2h           → poll every 5 min   (final-2h sharp window)
-#     2-6h           → poll every 15 min
-#     6-18h          → poll every 30 min
+#     ≤ 30 min       → poll every 2 min   (terminal steam window)
+#     30 min – 2h    → poll every 5 min   (final-2h sharp window)
+#     2 – 6h         → poll every 15 min
+#     6 – 18h        → poll every 30 min
 #     18h+ / none    → skip (off-season / nothing meaningful pre-game)
 #   overnight 10p-7a MT → skip regardless (no US games tip at 3am)
 #   no event in next 7d → skip (off-season)
 #
-# cron-job.org should fire this workflow every 5 min so the per-sport
-# gate can hit its tightest cadence. The gate writes a heartbeat row to
-# odds_ingest_runs on every tick (fired OR skipped) for observability.
+# cron-job.org should fire this workflow every 1 min so the per-sport
+# gate can hit its 2-min bucket reliably. The gate writes a heartbeat
+# row to odds_ingest_runs on every tick (fired OR skipped).
 #
 # Required GitHub repo secrets:
 #   ODDS_API_KEY         — from the-odds-api.com (paid tier)
@@ -35,11 +36,11 @@ name: Odds Ingest — Poll
 #
 # To add/remove sports: edit SPORTS_ENABLED below.
 
-# Trigger: cron-job.org pings workflow_dispatch every 5 min so the
-# adaptive cadence gate above can ramp up to 5-min cadence near tip.
-# Idle ticks are cheap — gate returns instantly with a heartbeat row.
-# concurrency:cancel-in-progress: true ensures we never queue two
-# overlapping runs.
+# Trigger: cron-job.org pings workflow_dispatch every 1 min so the
+# adaptive cadence gate above can hit its 2-min bucket in the final
+# 30 min pre-tip. Idle ticks are cheap — gate returns instantly with
+# a heartbeat row. concurrency:cancel-in-progress: true ensures we
+# never queue two overlapping runs.
 on:
   workflow_dispatch:
 
