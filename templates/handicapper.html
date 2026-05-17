@@ -821,18 +821,20 @@
     }
 
     async function pickGame(marketId) {
-        // Click-to-pick from the games list. Live=true → on-demand Odds
-        // API call (6 credits) so the dossier shows the current line,
-        // not the last 30-min cron snapshot. Opens as a modal overlay
-        // so the games-list scroll position is preserved when closed.
-        // After initial render, _startDossierRefresh kicks off a 30s
-        // cache-only poll so the pick/odds stay live as the cron
-        // (5-min cadence near tip) writes new PIN data.
+        // Click-to-pick from the games list. Pulls from Supabase cache
+        // only — no live=true. With the new adaptive cron (5-min cadence
+        // when nearest game is < 2h, 15-min when < 6h, 30-min when < 18h)
+        // the cached data is fresh enough that paying 6 Odds API credits
+        // per click was wasted burn. The dual freshness label ("PIN Xm
+        // ago · cron Ym ago") shows the user exactly how stale the
+        // displayed data is. After initial render, _startDossierRefresh
+        // kicks off a 30s cache-only poll so the suggestion stays
+        // current as the cron writes new PIN data.
         const dossierEl = document.getElementById('dossier');
         openDossierModal();
-        dossierEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">Pulling live odds + injuries + splits…</div>';
+        dossierEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">Pulling odds + injuries + splits…</div>';
         try {
-            const resp = await authFetch('/api/handicapper/dossier?live=true&market_id=' + encodeURIComponent(marketId));
+            const resp = await authFetch('/api/handicapper/dossier?market_id=' + encodeURIComponent(marketId));
             const data = await resp.json();
             if (!data.ok) {
                 dossierEl.innerHTML = `<div class="dossier-error"><strong>Couldn't build dossier.</strong> ${_esc(data.error || 'unknown error')}</div>`;
@@ -993,11 +995,10 @@
         })();
         const dt = new Date(d.event_start_utc);
 
-        const liveBadge = d.live_used
-            ? '<span style="font-size:10px;font-family:JetBrains Mono,monospace;padding:2px 8px;background:var(--green-dim);color:var(--green);border:1px solid rgba(34,197,94,0.3);border-radius:10px;font-weight:700;letter-spacing:0.04em;margin-left:8px;vertical-align:middle">LIVE ODDS</span>'
-            : (d.live_error
-                ? `<span title="${_esc(d.live_error)}" style="font-size:10px;font-family:JetBrains Mono,monospace;padding:2px 8px;background:var(--orange-dim);color:var(--orange);border:1px solid rgba(255,159,28,0.3);border-radius:10px;font-weight:700;letter-spacing:0.04em;margin-left:8px;vertical-align:middle">CACHED · ${_esc(d.live_error.slice(0, 60))}</span>`
-                : '');
+        // LIVE ODDS / CACHED badge removed — the dossier no longer
+        // does live Odds API fetches on click (cron's 5-min cadence near
+        // tip makes it unnecessary burn). The freshness label below
+        // ("PIN Xm ago · cron Ym ago") tells the full story.
 
         // Two-signal freshness label:
         //   • PIN Nm ago    — last time PIN's price/line actually moved
@@ -1021,12 +1022,12 @@
             : '';
         const inner = [pinFrag, cronFrag].filter(Boolean).join(' · ');
         const freshnessBadge = inner
-            ? `<span id="dossierFreshness" data-pin="${_esc(pinCaptured || '')}" data-cron="${_esc(cronLast || '')}" style="font-size:10px;font-family:JetBrains Mono,monospace;color:var(--text-muted);margin-left:6px;vertical-align:middle">· ${inner}</span>`
+            ? `<span id="dossierFreshness" data-pin="${_esc(pinCaptured || '')}" data-cron="${_esc(cronLast || '')}" style="font-size:10px;font-family:JetBrains Mono,monospace;color:var(--text-muted);margin-left:8px;vertical-align:middle">${inner}</span>`
             : '';
 
         let html = `<div class="dossier-head">
             <div>
-                <h2>${_esc(d.event_name)}${liveBadge}${freshnessBadge}</h2>
+                <h2>${_esc(d.event_name)}${freshnessBadge}</h2>
                 <div class="sub">${d.sport} · ${dt.toLocaleString([], {weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'})} · ${startsLabel}${d.venue ? ' · ' + _esc(d.venue) : ''}</div>
             </div>
         </div>`;
