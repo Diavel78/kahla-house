@@ -416,12 +416,12 @@
                 </div>
             </div>
 
-            <div class="section">
+            <div class="section" id="pendingSection">
                 <div class="section-title">Pending <span class="count" id="pendingCount">0</span></div>
                 <ul class="picks" id="pendingList"></ul>
             </div>
 
-            <div class="section">
+            <div class="section" id="settledSection">
                 <div class="section-title">Settled today <span class="count" id="settledCount">0</span></div>
                 <ul class="picks" id="settledList"></ul>
             </div>
@@ -482,6 +482,17 @@
     }
     function doLogout() { firebase.auth().signOut().then(() => { window.location.href = '/'; }); }
 
+    // Access tier — set during the /api/me probe below.
+    //   _canBet = true  → admin or bot_access=true: full Pick Bot
+    //                      (stats, pending/settled, log buttons all visible)
+    //   _canBet = false → approved viewer: read-only mode
+    //                      (sees bot's suggestion + market data; can't log,
+    //                       can't see what's been logged or by whom)
+    // The view-only mode exposes only what /api/handicapper/dossier returns,
+    // which carries zero logged-pick data — that's why we can open up the
+    // dossier endpoint to firebase_auth_required and trust the gate.
+    let _canBet = false;
+
     firebase.auth().onAuthStateChanged(async user => {
         if (!user) { window.location.href = '/'; return; }
         try {
@@ -490,12 +501,9 @@
             if (!r.ok) { window.location.href = '/'; return; }
             const me = await r.json();
             if (!me.approved) { window.location.href = '/'; return; }
-            // Bot access OR admin gets through. /api/handicapper enforces server-side too.
-            if (!me.bot_access && me.role !== 'admin') {
-                document.getElementById('auth-gate').innerHTML =
-                    '<h2>No Pick Bot access</h2><p>Ask an admin to grant you access from the User Management panel.</p>';
-                return;
-            }
+            // Any approved user can see Pick Bot in view-only mode.
+            // Admin or bot_access=true unlocks the full experience.
+            _canBet = (me.role === 'admin') || !!me.bot_access;
             // Show admin-only nav links if applicable.
             if (me.role === 'admin') {
                 document.querySelectorAll('.admin-only').forEach(el => el.style.display = '');
@@ -503,15 +511,41 @@
         } catch { window.location.href = '/'; return; }
         document.getElementById('auth-gate').style.display = 'none';
         document.getElementById('app').style.display = '';
+        _applyViewerMode();
         _initSportTabs();
         _refreshSportTabOrder();
         loadGames();
-        loadData(true);
-        setInterval(() => loadData(false), 60_000);
+        if (_canBet) {
+            loadData(true);
+            setInterval(() => loadData(false), 60_000);
+        }
         // Re-sort tabs every 5 min so off-season sports drop to the
         // right and games-publishing sports rise as their slates open.
         setInterval(_refreshSportTabOrder, 5 * 60_000);
     });
+
+    // Hide everything that requires bot_access when the user is a
+    // view-only viewer. Pure DOM toggling — the server-side gates
+    // (`@bot_required` on /api/handicapper + pick-mutation routes)
+    // are the actual security boundary.
+    function _applyViewerMode() {
+        if (_canBet) return;
+        // Hide stats card + confidence tier strip
+        ['overallStats', 'confStrip', 'pendingSection', 'settledSection']
+            .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+        // Hide the Refresh button — it's for stats only
+        document.querySelectorAll('.refresh-btn').forEach(b => b.style.display = 'none');
+        // Add a view-only banner under the page header
+        const meta = document.getElementById('meta');
+        if (meta) {
+            meta.innerHTML = '<span style="font-size:11px;font-family:JetBrains Mono,monospace;padding:3px 10px;background:var(--blue-dim);color:var(--blue);border:1px solid rgba(56,127,255,0.3);border-radius:10px;letter-spacing:0.04em;font-weight:700">VIEW-ONLY</span> <span style="color:var(--text-muted);font-size:13px;margin-left:8px">You can see what the bot picks. Logging + stats are admin-only.</span>';
+        }
+        // Soften the lede to match the limited capability
+        const lede = document.querySelector('.lede');
+        if (lede) {
+            lede.textContent = "Click a game to see the bot's read: PIN sharp signal, retail edge per side, public splits, injuries, recent form. The bot tags its suggested pick on each game; you can browse but not log.";
+        }
+    }
 
     const _fmtAmer = p => (p == null ? '—' : (p > 0 ? `+${p}` : `${p}`));
     const _fmtPt   = v => (v == null ? '' : (v > 0 ? `+${v}` : `${v}`));
@@ -1080,10 +1114,10 @@
                     <div class="pick-meta">Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow}</div>
                     ${whyHtml}
                     ${s.gates_cleared ? '' : `<div class="soft-note">Sharp gate not cleared (need sharp ≥ 4). Chalk-flat market; this is the best read available — treat as 1u lean only.</div>`}
-                    <div class="actions">
+                    ${_canBet ? `<div class="actions">
                         <button class="primary" onclick="openLog(false, ${i})">Log this pick</button>
                         <button onclick="copyForClaude()">Copy for Claude</button>
-                    </div>
+                    </div>` : ''}
                 </div>`;
             }
         } else {
@@ -1096,10 +1130,11 @@
                      <b style="color:var(--orange)">Live fetch:</b> ${_esc(d.live_error)}
                    </div>`
                 : '';
+            const claudeHint = _canBet
+                ? ` Try <button onclick="copyForClaude()" style="background:none;border:0;color:var(--blue);text-decoration:underline;cursor:pointer;font:inherit;padding:0">copying for Claude</button> or check back closer to kickoff.`
+                : ' Check back closer to kickoff.';
             html += `<div class="suggestion-pass">
-                <strong>No PIN data.</strong> Can't compute a devigged fair line for this game — no Polymarket target. Try
-                <button onclick="copyForClaude()" style="background:none;border:0;color:var(--blue);text-decoration:underline;cursor:pointer;font:inherit;padding:0">copying for Claude</button>
-                or check back closer to kickoff.
+                <strong>No PIN data.</strong> Can't compute a devigged fair line for this game — no Polymarket target.${claudeHint}
                 ${liveDiag}
             </div>`;
         }
@@ -1307,7 +1342,9 @@
             const onclickAttr = isBotPick
                 ? `openLog(false, ${sugIdx})`
                 : `pickSideFromGrid('${mt}', '${s}')`;
-            const btn = pinSnap
+            // Viewers see the same data + the BOT PICK highlight, but
+            // no Log buttons — they can't write to bot_picks.
+            const btn = (_canBet && pinSnap)
                 ? `<button class="${btnClass}" onclick="${onclickAttr}">${btnLabel}</button>`
                 : '';
 

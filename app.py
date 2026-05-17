@@ -4198,9 +4198,16 @@ def api_handicapper():
 
 
 @app.route("/api/handicapper/dossier")
-@bot_required
+@firebase_auth_required
 def api_handicapper_dossier():
     """Build the live pre-game dossier for one game.
+
+    Auth: any approved user (viewers included). The dossier shows the
+    bot's read on a game — picks, fair lines, splits, injuries. It
+    contains NO logged-pick data (no pending/settled rows leak through
+    here), so viewers seeing this can't see what's actually been
+    logged or by whom. Only `/api/handicapper` and the pick-mutation
+    endpoints stay `@bot_required` for that reason.
 
     Query params (one of `q` OR `market_id` required):
       q          — freeform team query, e.g. "Toronto vs Angels"
@@ -4239,10 +4246,13 @@ def api_handicapper_dossier():
 
 
 @app.route("/api/handicapper/games")
-@bot_required
+@firebase_auth_required
 def api_handicapper_games():
     """List active games for a sport — pre-game window only. Powers the
     click-to-pick UI on /handicapper.
+
+    Auth: any approved user (viewers included). The list is just
+    upcoming game metadata; no logged-pick data is exposed.
 
     Window: events starting in the next 48h (and within the last 90 min,
     so a late-asked-about live game still appears). Sorted by event_start.
@@ -4379,7 +4389,7 @@ def _dedup_games(games: list[dict], sport: str) -> list[dict]:
 
 
 @app.route("/api/handicapper/sport-counts")
-@bot_required
+@firebase_auth_required
 def api_handicapper_sport_counts():
     """One-shot count of upcoming games per sport. Powers the
     /handicapper page's dynamic sport-tab ordering — sports with the
