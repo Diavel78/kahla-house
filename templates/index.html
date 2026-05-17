@@ -348,6 +348,12 @@ function renderAppCards() {
     const isAdmin = role === 'admin';
     const isViewer = role === 'viewer' || isAdmin;
     const hasBot = isAdmin || !!CUD.bot_access;
+    // Pick Bot card shows for ANY approved user. bot_access=true (or
+    // admin) gets the full app; viewers without bot_access get the
+    // view-only flavor (bot picks visible, no log/stats — gated by
+    // _canBet in handicapper.html and @bot_required on the stats /
+    // mutation endpoints). The card itself just routes to the page.
+    const canSeePickBot = isViewer;
     let h = '';
     if (isViewer) {
         h += `<div class="app-card odds-app" style="cursor:default">
@@ -361,11 +367,21 @@ function renderAppCards() {
             <span class="arrow">&rarr;</span>
         </div>`;
     }
-    if (hasBot) {
+    if (canSeePickBot) {
+        // Subtle tag differentiates: admins/bot_access see "BOT",
+        // view-only viewers see "VIEW-ONLY" so they aren't surprised
+        // by the limited UI when they click in.
+        const tag = isAdmin ? ''
+            : (hasBot
+                ? '<span class="admin-badge">BOT</span>'
+                : '<span class="admin-badge" style="background:rgba(56,127,255,0.15);color:var(--blue);border-color:rgba(56,127,255,0.3)">VIEW</span>');
+        const blurb = hasBot
+            ? 'In-chat handicapper. Ask about a game on Claude — get a full pre-game analysis (PIN sharp signals, line movement, public splits, injuries, lineups) and a 1/3/5u recommendation. ML, spread, or total only.'
+            : "See what the bot picks on every game — sharp signal, fair line, splits, injuries. Read-only: no betting from this account.";
         h += `<div class="app-card pickbot-app" style="cursor:default">
             <span class="app-icon">&#127919;</span>
-            <h2>Pick Bot${isAdmin ? '' : '<span class="admin-badge">BOT</span>'}</h2>
-            <p>In-chat handicapper. Ask about a game on Claude — get a full pre-game analysis (PIN sharp signals, line movement, public splits, injuries, lineups) and a 1/3/5u recommendation. ML, spread, or total only.</p>
+            <h2>Pick Bot${tag}</h2>
+            <p>${blurb}</p>
             <span class="app-tag">Handicapping</span>
             <div class="app-sub-links">
                 <a href="/handicapper" class="app-sub-link">Open Pick Bot</a>
