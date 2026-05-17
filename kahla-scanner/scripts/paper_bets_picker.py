@@ -115,6 +115,9 @@ _SHARP_HELPERS = {
 }
 
 
+_TOT_FADE = {"over": "under", "under": "over"}
+
+
 def _build_candidates(sb, markets: list[dict]) -> list[Candidate]:
     if not markets:
         return []
@@ -136,22 +139,38 @@ def _build_candidates(sb, markets: list[dict]) -> list[Candidate]:
             r = helper(mid, openers, pin_current)
             if r is None:
                 continue
-            side, sharp_score, opener_snap, current_snap = r
+            detected_side, sharp_score, opener_snap, current_snap = r
             if sharp_score < pb.sharp_min_for(market_type):
                 continue
 
-            # TOT-only: line must be flat. Total line moves are
-            # disproportionately news-driven (weather, lineups, late
-            # scratches) — by the time retail catches up the info edge
-            # is gone. Pure vig drift on a held line is the cleaner
-            # sharp-opinion proxy. Empirically: TOT picks hit 38% over
-            # 97 picks (-2σ) under the line-OR-vig rule; this filter
-            # narrows TOT to the subset most likely to be sharp action.
-            if market_type == "total":
-                op_line = opener_snap.get("line")
-                cu_line = current_snap.get("line")
-                if op_line is None or cu_line is None or op_line != cu_line:
-                    continue
+            # ── TOT contrarian ────────────────────────────────────
+            # The bot's TOT picks lost 62% of the time over 97 graded
+            # picks (steam 38.6%/-1.75σ, early 43.5%, late 35.7%).
+            # The signal has predictive power; the polarity is just
+            # inverted. Mechanism: PIN moves on totals are usually
+            # news arrival (weather, lineups, late scratches) and by
+            # the time retail catches up there's no edge in either
+            # direction — but the LINE OVERSHOOTS the eventual outcome,
+            # so the side PIN moves AWAY FROM is actually closer to
+            # what hits. Fade the detected side.
+            #
+            # Gates for TOT under contrarian:
+            #   • sharp_score ≥ 5: signal must be strong enough that
+            #     we're confident the fade has bite
+            #   • NO flat-line filter: line moves are the strongest
+            #     fade candidates (news catch-up is exactly what we're
+            #     trading against)
+            #   • NO edge gate: PIN's devig says fade side is -EV by
+            #     definition (-(positive edge for original side)).
+            #     The fade thesis IS that PIN's TOT devig is wrong.
+            # Ranking still uses combined_score with abs(edge_pp), so
+            # stronger PIN signals (which we're more confidently
+            # fading) sort higher.
+            contrarian = (market_type == "total")
+            if contrarian:
+                side = _TOT_FADE[detected_side]
+            else:
+                side = detected_side
 
             fair_prob = pb.pin_devig_fair_prob(
                 mid, market_type, side, pin_current)
@@ -170,8 +189,19 @@ def _build_candidates(sb, markets: list[dict]) -> list[Candidate]:
             except (ValueError, TypeError):
                 continue
             edge_pp = (fair_prob - implied) * 100.0
-            if edge_pp < pb.edge_min_for(market_type):
-                continue
+
+            if contrarian:
+                # No edge gate; combined_score uses |edge_pp| so a
+                # strong PIN signal (which makes edge_pp very negative
+                # on the fade side) ranks as a high-conviction fade.
+                combined = (
+                    pb.SHARP_WEIGHT * (sharp_score / 10.0)
+                    + pb.EDGE_WEIGHT * min(abs(edge_pp) / pb.EDGE_CAP_PP, 1.0)
+                )
+            else:
+                if edge_pp < pb.edge_min_for(market_type):
+                    continue
+                combined = pb.combined_score(sharp_score, edge_pp)
 
             candidates.append(Candidate(
                 market       = market,
@@ -183,7 +213,7 @@ def _build_candidates(sb, markets: list[dict]) -> list[Candidate]:
                 entry_book   = entry["book"],
                 entry_price  = entry["price_american"],
                 entry_line   = entry.get("line"),
-                combined     = pb.combined_score(sharp_score, edge_pp),
+                combined     = combined,
                 opener_snap  = opener_snap,
                 current_snap = current_snap,
             ))
@@ -225,6 +255,7 @@ def _pick_and_insert(sb, bot: str, candidates: list[Candidate]) -> int:
                 "current_price": c.current_snap.get("price_american"),
                 "opener_line":   c.opener_snap.get("line"),
                 "current_line":  c.current_snap.get("line"),
+                "contrarian":    (c.market_type == "total"),
             },
         )
         if ok:

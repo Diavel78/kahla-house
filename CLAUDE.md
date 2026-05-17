@@ -526,21 +526,22 @@ Schema (`kahla-scanner/supabase/paper_bets.sql`): one row per logged bet with `b
 2. **Opener = earliest PIN snap from 1-12h ago** (not all-time). Stale openers across 24h+ of news flow inflated `sharp_score` for moves that were just information arrival, not sharp opinion. Markets with no PIN snap in the 1-12h window get no opener → skipped.
 3. Determine sharp side per market_type via `_lib/sharp.py` — same logic as the on-card chip.
 4. Per-market sharp gate: `sharp_min_for(market_type)` — `{moneyline: 4, spread: 4, total: 5}`.
-5. **TOT-only flat-line filter**: if `opener.line != current.line` for total markets, skip. Total line moves are disproportionately news-driven (weather, lineups, late scratches), where retail catches up by game time. Pure vig drift on a held line is the cleaner sharp-opinion proxy. Added after TOT picks hit 38% over 97 picks (~2σ below break-even) under the line-OR-vig rule.
-6. Devig PIN's two-way market for that side → `fair_prob`. Skip if either PIN side missing or (SPR/TOT) the home/away or over/under lines don't match.
+5. **TOT contrarian flip** (added after 97 graded TOT picks landed at 38.1% hit / ~2σ below break-even). The bot's TOT signal has predictive power; the polarity is just inverted. Mechanism: PIN moves on totals are usually news arrival (weather, lineups, late scratches); by the time we pick, retail has caught up and the line has overshot the eventual outcome. The side PIN moves AWAY from is closer to what hits. So: for `market_type == "total"`, the bet `side` is `_TOT_FADE[detected_side]` (over→under, under→over). All downstream fair_prob / entry / edge_pp work off the FADE side.
+6. Devig PIN's two-way market for the (possibly flipped) bet side → `fair_prob`. Skip if either PIN side missing or (SPR/TOT) the home/away or over/under lines don't match.
 7. Find best non-PIN entry price for that side. **Line gate for SPR/TOT**: entry book must quote at PIN's current line. ML has no line so any non-PIN book qualifies.
-8. `edge_pp = (fair_prob − implied_at_entry) × 100`. Per-market edge gate: `edge_min_for(market_type)` — `{moneyline: 1.0, spread: 1.5, total: 2.0}`. Tightened from the early flat-0.5pp gate that sat inside PIN's own margin band; SPR/TOT pushed harder because their retail vig is steeper.
-9. `combined_score = 0.25 × sharp_score/10 + 0.75 × min(edge_pp/5, 1.0)`. **Edge-primary** ranking. Old formula (0.6 sharp / 0.4 edge, cap 10pp) made a 0.5pp edge contribute 0.02 while sharp_score 5 contributed 0.30 — i.e. picks were ranked by PIN-movement magnitude with edge as a tiebreaker. Flipped: edge IS the +EV signal, sharp_score is the noise filter.
-10. Sort desc by `combined_score`, dedup by `market_id`, skip if bot already picked this market in the last 7 days, insert top 5.
+8. `edge_pp = (fair_prob − implied_at_entry) × 100`. Per-market edge gate: `edge_min_for(market_type)` — `{moneyline: 1.0, spread: 1.5}`. **TOT skips the edge gate** — under contrarian, PIN's devig of the fade side is negative by construction (fair = 1 − PIN_fair_for_detected_side), so a positive-edge filter would block everything. Signal strength is enforced upstream by `sharp_score ≥ 5`.
+9. `combined_score = 0.25 × sharp/10 + 0.75 × min(edge_pp/5, 1)` for ML/SPR. **For TOT use `abs(edge_pp)` instead of `edge_pp`** so a strong PIN signal (which makes fade-side edge very negative) ranks as a high-conviction fade rather than ranking near zero. Edge-primary ranking; sharp_score is the noise filter.
+10. Sort desc by `combined_score`, dedup by `market_id`, skip if bot already picked this market in the last 7 days, insert top 5. `signal_blob.contrarian = (market_type == "total")` so settled rows can be partitioned for review.
 
 **Steam paper bet logic** (`_log_steam_paper_bet` in `sharp_alerts.py`):
 1. Triggered after `_telegram_send` returns True. Under `STEAM_SILENT=1` (the live config), that's a no-op success — Telegram messages don't actually go out, but the paper-bet logging path runs end-to-end.
 2. UFC markets blocked at the main loop via `pb.BLOCKED_SPORTS` — steam logger never sees them.
-3. Entry = best price on the sharp side among the steaming books that are in the entry-book allowlist (`pb.ENTRY_BOOKS` = 14-book allowlist minus PIN). Entry line for SPR/TOT comes from that book's snapshot, NOT PIN's.
-4. `fair_prob` / `edge_pp` are computed when PIN devig is possible, otherwise null. Steam can fire without clean PIN data — we still want hit-rate tracking even without pre-bet edge.
-5. **Per-market edge gate** when `edge_pp` is computable: skip if `edge_pp < pb.edge_min_for(market_type)`. Tightened after steam over-indexed on TOT (59 of 109 picks at -14u). The detection logic is unchanged — only the logging is filtered.
-6. `sharp_score` is null for steam (the trigger is the burst event, not cumulative movement magnitude).
-7. Per-`(market_id, bot=steam)` dedup via `pb.already_picked()` — 7-day lookback.
+3. **TOT contrarian flip** — `sharp_side` is the OPPOSITE of `alert["sharp_side"]` for total markets. Same rationale as the picker (see Picker step 5). Steam-TOT was the worst segment (59 picks at 38.6% / -14u, the strongest individual evidence for the inversion).
+4. For ML/SPR (non-contrarian): entry = best price on the sharp side among the steaming books in `pb.ENTRY_BOOKS`. For TOT (contrarian): the steaming books moved the ORIGINAL side, so we widen the search to all non-PIN entry books that have a recent snap on the FADE side at PIN's current line — uses `pb.find_best_entry` with a latest-by-key built from `snaps_recent`.
+5. `fair_prob` / `edge_pp` computed when PIN devig possible, otherwise null. For TOT the fair_prob is for the fade side (= 1 − PIN_devig_for_detected_side), so edge_pp on the row is negative by PIN's reckoning — that's expected under the fade thesis.
+6. **Edge gate for ML/SPR only**: skip if `edge_pp < pb.edge_min_for(market_type)`. TOT picks have no edge gate (negative-by-construction).
+7. `sharp_score` is null for steam (the trigger is the burst event, not cumulative movement magnitude).
+8. Per-`(market_id, bot=steam)` dedup via `pb.already_picked()` — 7-day lookback. `signal_blob.contrarian` + `signal_blob.detected_side` tag the row for review.
 
 **Constants in `_lib/paper_bets.py`** (tightened after first ~250 graded picks):
 - `SHARP_SCORE_MIN_BY_MARKET = {moneyline: 4, spread: 4, total: 5}` — TOT bar raised

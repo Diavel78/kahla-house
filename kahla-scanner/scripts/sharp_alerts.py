@@ -706,23 +706,62 @@ def _log_steam_paper_bet(sb, market, alert, pin_current, snaps_recent):
     where PIN devig isn't possible — we still want hit-rate tracking)."""
     mid         = market["id"]
     market_type = alert["market_type"]
-    sharp_side  = alert["sharp_side"]
+    detected_side = alert["sharp_side"]
+
+    # TOT contrarian: bot's TOT picks lose 62% of the time. Flip the
+    # side at the source — fade the steam direction instead of
+    # following it. See paper_bets_picker._build_candidates for the
+    # full rationale.
+    contrarian = (market_type == "total")
+    if contrarian:
+        sharp_side = "under" if detected_side == "over" else "over"
+    else:
+        sharp_side = detected_side
+
     steam_books = set(alert["books"]) & pb.ENTRY_BOOKS
 
-    # Find best non-PIN price among the steaming books on the sharp side
-    # in the 'recent' window (the snaps that drove detection).
-    best = None
-    for s in snaps_recent:
-        if s["market_id"] != mid: continue
-        if s["market_type"] != market_type: continue
-        if s["side"] != sharp_side: continue
-        if s["book"] not in steam_books: continue
-        price = s.get("price_american")
-        if price is None: continue
-        if best is None or price > best["price_american"]:
-            best = s
+    if contrarian:
+        # For the fade side, the books that steamed on the original
+        # side may not have priced the opposite side recently. Search
+        # ALL non-PIN entry books for the fade-side price at PIN's
+        # current line. PIN current is the snapshot the alert was
+        # built off of, so its line is the post-steam line.
+        pin_snap = pin_current.get((mid, market_type, sharp_side))
+        target_line = pin_snap.get("line") if (pin_snap and market_type != "moneyline") else None
+        # Build a (market_id, book, market_type, side) → snap map from
+        # the recent + earlier window so find_best_entry can resolve.
+        latest_map: dict[tuple[str, str, str, str], dict] = {}
+        for s in snaps_recent:
+            if s["market_id"] != mid: continue
+            if s["market_type"] != market_type: continue
+            if s["side"] != sharp_side: continue
+            if s["book"] == "PIN": continue
+            key = (s["market_id"], s["book"], s["market_type"], s["side"])
+            cur = latest_map.get(key)
+            if cur is None or s["captured_at"] > cur["captured_at"]:
+                latest_map[key] = s
+        best = pb.find_best_entry(mid, market_type, sharp_side, target_line, latest_map)
+        if best is not None:
+            best = {
+                "book": best["book"],
+                "price_american": best["price_american"],
+                "line": best.get("line"),
+            }
+    else:
+        # Find best non-PIN price among the steaming books on the sharp side
+        # in the 'recent' window (the snaps that drove detection).
+        best = None
+        for s in snaps_recent:
+            if s["market_id"] != mid: continue
+            if s["market_type"] != market_type: continue
+            if s["side"] != sharp_side: continue
+            if s["book"] not in steam_books: continue
+            price = s.get("price_american")
+            if price is None: continue
+            if best is None or price > best["price_american"]:
+                best = s
     if best is None:
-        log.info("steam paper bet skipped (no entry book among steamers): %s %s/%s",
+        log.info("steam paper bet skipped (no entry book): %s %s/%s",
                  market.get("event_name"), market_type, sharp_side)
         return False
 
@@ -739,15 +778,15 @@ def _log_steam_paper_bet(sb, market, alert, pin_current, snaps_recent):
         except (ValueError, TypeError):
             edge_pp = None
 
-    # Apply per-market edge gate when computable. Steam previously
-    # logged every alert regardless of edge — that's how steam TOT
-    # got to 59 picks (54% of steam volume) at -14u. The gate filters
-    # marginal-edge steams (especially TOT) without changing the
-    # detection logic itself. When PIN devig isn't possible (no PIN
-    # snap on both sides) edge_pp stays None and we still log — those
-    # are rare enough that hit-rate tracking is more valuable than
-    # filtering them out.
-    if edge_pp is not None and edge_pp < pb.edge_min_for(market_type):
+    # ML/SPR: apply per-market edge gate when computable. Steam
+    # previously logged every alert regardless of edge — that's how
+    # steam TOT got to 59 picks at -14u. The gate filters marginal-
+    # edge steams without changing detection.
+    # TOT: NO edge gate — we're fading; PIN's devig of the fade side
+    # is negative by definition, so applying the gate would block
+    # everything. Signal strength is implied by the steam trigger
+    # itself (5+ books moving together).
+    if not contrarian and edge_pp is not None and edge_pp < pb.edge_min_for(market_type):
         log.info("steam paper bet skipped (edge %.2fpp < %.2fpp gate): %s %s/%s",
                  edge_pp, pb.edge_min_for(market_type),
                  market.get("event_name"), market_type, sharp_side)
@@ -766,8 +805,10 @@ def _log_steam_paper_bet(sb, market, alert, pin_current, snaps_recent):
         edge_pp=edge_pp,
         sharp_score=None,
         signal_blob={
-            "books":   list(alert["books"]),
-            "samples": [list(s) for s in alert.get("samples", [])],
+            "books":         list(alert["books"]),
+            "samples":       [list(s) for s in alert.get("samples", [])],
+            "contrarian":    contrarian,
+            "detected_side": detected_side,
         },
     )
 
