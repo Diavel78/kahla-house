@@ -522,28 +522,34 @@ All three bots ride the existing `scanner-poll.yml` 30-min cron — no extra wor
 Schema (`kahla-scanner/supabase/paper_bets.sql`): one row per logged bet with `bot ∈ {steam,early,late}`, locked entry book/price/line, signal context (`fair_prob`, `edge_pp`, `sharp_score`, `signal_blob`), and resolution fields (`status`, `pnl_units`, `result_score`, `settled_at`) populated later by Stage 2.
 
 **Picker selection logic for early/late** (`scripts/paper_bets_picker.py`):
-1. Fetch markets where `event_start` is inside the bot's window.
-2. Determine sharp side per market_type via `_lib/sharp.py` — same logic as the on-card chip + Telegram alerts.
-3. Filter to markets where `sharp_score ≥ 4`.
-4. Devig PIN's two-way market for that side → `fair_prob`. Skip if either PIN side is missing or (for SPR/TOT) the home/away or over/under lines don't match.
-5. Find the best non-PIN entry price for that side. **Line gate for SPR/TOT**: entry book must be quoting at PIN's current line, otherwise the devigged fair doesn't apply. ML has no line so any non-PIN book qualifies.
-6. `edge_pp = (fair_prob − implied_at_entry) × 100`. Filter `edge_pp ≥ 1.0pp`.
-7. `combined_score = 0.6 × sharp_score/10 + 0.4 × min(edge_pp/10, 1.0)`. Edge component capped at 10pp so a freak data error doesn't drown out genuine sharp signals.
-8. Sort candidates desc by `combined_score`, dedup by `market_id` (one bet per game per bot), skip any market already picked by this bot in the last 7 days, insert top 5.
+1. Fetch markets where `event_start` is inside the bot's window. UFC blocked at this step via `pb.BLOCKED_SPORTS` — resolver has no MMA endpoint.
+2. **Opener = earliest PIN snap from 1-12h ago** (not all-time). Stale openers across 24h+ of news flow inflated `sharp_score` for moves that were just information arrival, not sharp opinion. Markets with no PIN snap in the 1-12h window get no opener → skipped.
+3. Determine sharp side per market_type via `_lib/sharp.py` — same logic as the on-card chip.
+4. Per-market sharp gate: `sharp_min_for(market_type)` — `{moneyline: 4, spread: 4, total: 5}`.
+5. **TOT-only flat-line filter**: if `opener.line != current.line` for total markets, skip. Total line moves are disproportionately news-driven (weather, lineups, late scratches), where retail catches up by game time. Pure vig drift on a held line is the cleaner sharp-opinion proxy. Added after TOT picks hit 38% over 97 picks (~2σ below break-even) under the line-OR-vig rule.
+6. Devig PIN's two-way market for that side → `fair_prob`. Skip if either PIN side missing or (SPR/TOT) the home/away or over/under lines don't match.
+7. Find best non-PIN entry price for that side. **Line gate for SPR/TOT**: entry book must quote at PIN's current line. ML has no line so any non-PIN book qualifies.
+8. `edge_pp = (fair_prob − implied_at_entry) × 100`. Per-market edge gate: `edge_min_for(market_type)` — `{moneyline: 1.0, spread: 1.5, total: 2.0}`. Tightened from the early flat-0.5pp gate that sat inside PIN's own margin band; SPR/TOT pushed harder because their retail vig is steeper.
+9. `combined_score = 0.25 × sharp_score/10 + 0.75 × min(edge_pp/5, 1.0)`. **Edge-primary** ranking. Old formula (0.6 sharp / 0.4 edge, cap 10pp) made a 0.5pp edge contribute 0.02 while sharp_score 5 contributed 0.30 — i.e. picks were ranked by PIN-movement magnitude with edge as a tiebreaker. Flipped: edge IS the +EV signal, sharp_score is the noise filter.
+10. Sort desc by `combined_score`, dedup by `market_id`, skip if bot already picked this market in the last 7 days, insert top 5.
 
 **Steam paper bet logic** (`_log_steam_paper_bet` in `sharp_alerts.py`):
-1. Triggered after a successful Telegram steam send (so dedup gating is the existing `sharp_alerts` table — same 6h window).
-2. Entry = best price on the sharp side among the steaming books that are in the entry-book allowlist (`pb.ENTRY_BOOKS` = 14-book allowlist minus PIN). Entry line for SPR/TOT comes from that book's snapshot, NOT PIN's.
-3. `fair_prob` / `edge_pp` are computed when PIN devig is possible, otherwise null. Steam can fire without clean PIN data — we still want hit-rate tracking even without pre-bet edge.
-4. `sharp_score` is null for steam (the trigger is the burst event, not cumulative movement magnitude).
-5. Per-`(market_id, bot=steam)` dedup via `pb.already_picked()` — 7-day lookback. Avoids double-logging if a steam re-fires after the 6h alert dedup window expires but the game hasn't started yet.
+1. Triggered after `_telegram_send` returns True. Under `STEAM_SILENT=1` (the live config), that's a no-op success — Telegram messages don't actually go out, but the paper-bet logging path runs end-to-end.
+2. UFC markets blocked at the main loop via `pb.BLOCKED_SPORTS` — steam logger never sees them.
+3. Entry = best price on the sharp side among the steaming books that are in the entry-book allowlist (`pb.ENTRY_BOOKS` = 14-book allowlist minus PIN). Entry line for SPR/TOT comes from that book's snapshot, NOT PIN's.
+4. `fair_prob` / `edge_pp` are computed when PIN devig is possible, otherwise null. Steam can fire without clean PIN data — we still want hit-rate tracking even without pre-bet edge.
+5. **Per-market edge gate** when `edge_pp` is computable: skip if `edge_pp < pb.edge_min_for(market_type)`. Tightened after steam over-indexed on TOT (59 of 109 picks at -14u). The detection logic is unchanged — only the logging is filtered.
+6. `sharp_score` is null for steam (the trigger is the burst event, not cumulative movement magnitude).
+7. Per-`(market_id, bot=steam)` dedup via `pb.already_picked()` — 7-day lookback.
 
-**Constants in `_lib/paper_bets.py`** (tune as we get hit-rate data):
-- `SHARP_SCORE_MIN = 4`
-- `EDGE_PP_MIN = 0.5` (started at 1.0; lowered after first day produced zero picks because heavy-chalk markets had retail within 1pp of PIN devigged. 0.5pp still requires positive edge but catches realistic retail-lag cases.)
-- `SHARP_WEIGHT = 0.6`, `EDGE_WEIGHT = 0.4`
+**Constants in `_lib/paper_bets.py`** (tightened after first ~250 graded picks):
+- `SHARP_SCORE_MIN_BY_MARKET = {moneyline: 4, spread: 4, total: 5}` — TOT bar raised
+- `EDGE_PP_MIN_BY_MARKET = {moneyline: 1.0, spread: 1.5, total: 2.0}` — was a flat 0.5pp; under PIN's own margin band, so picking inside noise
+- `OPENER_MIN_AGE_HOURS = 1`, `OPENER_MAX_AGE_HOURS = 12` — opener freshness window
+- `SHARP_WEIGHT = 0.25`, `EDGE_WEIGHT = 0.75`, `EDGE_CAP_PP = 5.0` — edge-primary ranking (flipped from 0.6/0.4)
 - `MAX_PICKS_PER_RUN = 5`
-- `ENTRY_BOOKS = {DK, FD, MGM, CAE, HR, BET365, BR, BOL, LV, BVD, ESPN, FAN, MB}` — same 14-book allowlist as `_ALLOWED_BOOKS` minus PIN.
+- `BLOCKED_SPORTS = {UFC}` — resolver has no MMA scoreboard
+- `ENTRY_BOOKS = {DK, FD, MGM, CAE, HR, BET365, BR, BOL, LV, BVD, ESPN, FAN, MB}` — 14-book allowlist minus PIN
 
 ### Latent bug fixed in this stage
 

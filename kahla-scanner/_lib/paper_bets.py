@@ -21,21 +21,63 @@ from _lib.normalize import american_to_prob, devig_two_way
 
 log = logging.getLogger(__name__)
 
-# Pick filters. EV bets must clear BOTH thresholds. (Steam bets bypass
-# these — steam fires on the trigger event, not on cumulative state.)
-# Lowered EDGE_PP_MIN from 1.0 → 0.5 after first day's run produced zero
-# picks: heavy-chalk markets (Denver -503 etc.) had retail tracking PIN
-# within 1pp on every side. 0.5pp still requires a positive edge but
-# catches the realistic gap where retail is half a point softer than
-# PIN's devigged fair. We'll re-tighten if 30d hit-rate at this floor
-# under-performs.
-SHARP_SCORE_MIN = 4
-EDGE_PP_MIN     = 0.5
+# ─────────────────────── Pick filters ───────────────────────
+# Per-market gates. Tightened from the early-days flat constants
+# (SHARP_SCORE_MIN=4 / EDGE_PP_MIN=0.5) after ~250 graded picks
+# showed:
+#   • TOT picks losing at ~2σ below break-even (38% over 97 picks)
+#   • The 0.5pp gate is below PIN's own bid/ask margin band, so a
+#     0.5pp "edge" is statistically inside PIN's noise floor
+#   • SPR/TOT carry steeper retail vig (-110/-110 = ~4.5% per side),
+#     needing a wider edge to overcome
+# Higher bars across the board, with TOT pushed hardest. Will produce
+# fewer picks per cycle — that's the point. Sharp Bot needed to stop
+# picking marginal noise.
+SHARP_SCORE_MIN_BY_MARKET = {"moneyline": 4, "spread": 4, "total": 5}
+EDGE_PP_MIN_BY_MARKET     = {"moneyline": 1.0, "spread": 1.5, "total": 2.0}
 
-# Score weights — 60% sharp signal, 40% edge. Tunable once we have
-# resolved-bet data to grade each component's hit-rate.
-SHARP_WEIGHT = 0.6
-EDGE_WEIGHT  = 0.4
+# Back-compat aliases for any reader still importing the flat names.
+# Use the helpers below in new code.
+SHARP_SCORE_MIN = 4
+EDGE_PP_MIN     = 1.0
+
+
+def sharp_min_for(market_type: str) -> int:
+    return SHARP_SCORE_MIN_BY_MARKET.get(market_type, SHARP_SCORE_MIN)
+
+
+def edge_min_for(market_type: str) -> float:
+    return EDGE_PP_MIN_BY_MARKET.get(market_type, EDGE_PP_MIN)
+
+
+# ─────────────────────── Opener freshness ───────────────────────
+# Opener = earliest PIN snap WITHIN this age range. Was previously
+# "earliest ever captured" which for a 36h-old market meant a snap
+# from 2 days ago — making sharp_score include 2 days of news flow
+# (weather, lineup, late scratches), not sharp opinion.
+#   • MIN 1h: don't let an opener that's 5 minutes old produce a
+#     meaningless "huge move" reading
+#   • MAX 12h: stay inside the recent-action window where retail
+#     hasn't fully absorbed PIN's pricing
+# If no PIN snap exists in this range for a (market, market_type, side),
+# the helper returns no opener → picker skips that market_type. Fine;
+# very-new markets need data accumulation before they're tradeable.
+OPENER_MIN_AGE_HOURS = 1
+OPENER_MAX_AGE_HOURS = 12
+
+
+# ─────────────────────── Score weighting ───────────────────────
+# Old: 0.6 sharp / 0.4 edge with edge capped at 10pp. A 0.5pp edge
+# contributed 0.02 to combined_score while sharp_score 5 contributed
+# 0.30 — i.e. picks were ranked by PIN-movement magnitude, with edge
+# as a tiebreaker. That's backwards: edge_pp IS the +EV signal,
+# sharp_score is the noise filter.
+# Flipped to 0.25 / 0.75 with edge cap dropped to 5pp so a 2pp edge
+# contributes 0.30, comparable to sharp_score 6 (0.15). Edge dominates
+# pick ranking; sharp_score still gates qualification.
+SHARP_WEIGHT = 0.25
+EDGE_WEIGHT  = 0.75
+EDGE_CAP_PP  = 5.0
 
 # Max picks per picker run (per bot). Steam isn't capped — fires when
 # institutional flow synchronizes, which is rare enough to be self-
@@ -161,13 +203,13 @@ def find_best_entry(market_id: str, market_type: str, side: str,
 # ──────────────────────────── Score ────────────────────────────
 
 def combined_score(sharp_score: int, edge_pp: float) -> float:
-    """Pick-ranking formula. sharp_score 0-10, edge_pp ≥ 0.
-    Edge component is capped at 10pp so a freak 30pp 'edge' (almost
-    always a bad PIN snapshot) doesn't drown out genuine sharp signals.
-    """
+    """Pick-ranking formula. Edge is the primary signal (0.75 weight),
+    sharp_score is the noise filter (0.25 weight). See SHARP_WEIGHT /
+    EDGE_WEIGHT comment block for why this is flipped from the old
+    sharp-primary formula."""
     return (
         SHARP_WEIGHT * (max(0, sharp_score) / 10.0)
-        + EDGE_WEIGHT * min(max(0.0, edge_pp) / 10.0, 1.0)
+        + EDGE_WEIGHT * min(max(0.0, edge_pp) / EDGE_CAP_PP, 1.0)
     )
 
 
@@ -266,11 +308,23 @@ def fetch_latest_snapshots(sb, market_ids: Iterable[str],
 
 
 def fetch_pin_openers(sb, market_ids: Iterable[str]) -> dict:
-    """Earliest PIN snapshot per (market_id, market_type, side). Same
-    'opener' the on-card chip + Telegram alerts use."""
+    """Earliest PIN snapshot per (market_id, market_type, side) WITHIN
+    a recent age window — `OPENER_MIN_AGE_HOURS` to `OPENER_MAX_AGE_HOURS`
+    old. Used to be all-time earliest; that meant a 36h-old market's
+    "opener" was 2 days of news ago. Now the opener is a fresh-ish
+    baseline so sharp_score reflects recent decision-making by PIN.
+
+    Markets with no PIN snap in the window get no opener → picker
+    skips that (market, market_type, side). Acceptable: new markets
+    need an hour or two of data before they're tradeable, and very
+    old markets without recent PIN activity probably aren't worth
+    chasing anyway."""
     market_ids = list(market_ids)
     if not market_ids:
         return {}
+    now = datetime.now(timezone.utc)
+    lo_iso = (now - timedelta(hours=OPENER_MAX_AGE_HOURS)).isoformat()
+    hi_iso = (now - timedelta(hours=OPENER_MIN_AGE_HOURS)).isoformat()
     out: dict = {}
     CHUNK = 100
     for i in range(0, len(market_ids), CHUNK):
@@ -281,6 +335,8 @@ def fetch_pin_openers(sb, market_ids: Iterable[str]) -> dict:
                             "price_american,line,captured_at")
                     .in_("market_id", chunk)
                     .eq("book", "PIN")
+                    .gte("captured_at", lo_iso)
+                    .lte("captured_at", hi_iso)
                     .order("captured_at")
                     .limit(20000)
                     .execute().data) or []

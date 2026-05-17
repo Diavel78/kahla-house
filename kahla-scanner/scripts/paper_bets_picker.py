@@ -137,8 +137,21 @@ def _build_candidates(sb, markets: list[dict]) -> list[Candidate]:
             if r is None:
                 continue
             side, sharp_score, opener_snap, current_snap = r
-            if sharp_score < pb.SHARP_SCORE_MIN:
+            if sharp_score < pb.sharp_min_for(market_type):
                 continue
+
+            # TOT-only: line must be flat. Total line moves are
+            # disproportionately news-driven (weather, lineups, late
+            # scratches) — by the time retail catches up the info edge
+            # is gone. Pure vig drift on a held line is the cleaner
+            # sharp-opinion proxy. Empirically: TOT picks hit 38% over
+            # 97 picks (-2σ) under the line-OR-vig rule; this filter
+            # narrows TOT to the subset most likely to be sharp action.
+            if market_type == "total":
+                op_line = opener_snap.get("line")
+                cu_line = current_snap.get("line")
+                if op_line is None or cu_line is None or op_line != cu_line:
+                    continue
 
             fair_prob = pb.pin_devig_fair_prob(
                 mid, market_type, side, pin_current)
@@ -157,7 +170,7 @@ def _build_candidates(sb, markets: list[dict]) -> list[Candidate]:
             except (ValueError, TypeError):
                 continue
             edge_pp = (fair_prob - implied) * 100.0
-            if edge_pp < pb.EDGE_PP_MIN:
+            if edge_pp < pb.edge_min_for(market_type):
                 continue
 
             candidates.append(Candidate(

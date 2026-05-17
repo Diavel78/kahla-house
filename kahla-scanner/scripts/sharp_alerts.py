@@ -739,6 +739,20 @@ def _log_steam_paper_bet(sb, market, alert, pin_current, snaps_recent):
         except (ValueError, TypeError):
             edge_pp = None
 
+    # Apply per-market edge gate when computable. Steam previously
+    # logged every alert regardless of edge — that's how steam TOT
+    # got to 59 picks (54% of steam volume) at -14u. The gate filters
+    # marginal-edge steams (especially TOT) without changing the
+    # detection logic itself. When PIN devig isn't possible (no PIN
+    # snap on both sides) edge_pp stays None and we still log — those
+    # are rare enough that hit-rate tracking is more valuable than
+    # filtering them out.
+    if edge_pp is not None and edge_pp < pb.edge_min_for(market_type):
+        log.info("steam paper bet skipped (edge %.2fpp < %.2fpp gate): %s %s/%s",
+                 edge_pp, pb.edge_min_for(market_type),
+                 market.get("event_name"), market_type, sharp_side)
+        return False
+
     return pb.insert_paper_bet(
         sb,
         bot="steam",
