@@ -246,13 +246,22 @@
 
         .market-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-bottom: 18px; }
         .market-card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
-        .market-card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 8px; }
+        .market-card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+        .market-card h3 .bot-tag { font-size: 9px; padding: 2px 6px; background: var(--blue-dim); color: var(--blue); border-radius: 4px; letter-spacing: 0.04em; }
         .market-card .row { font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6; }
         .market-card .row .label { color: var(--text-muted); }
         .market-card .row .pin { color: var(--purple); }
         .market-card .row .best { color: var(--green); font-weight: 600; }
         .market-card .row .edge { color: var(--green); }
         .market-card .row .edge.neg { color: var(--text-muted); }
+        .market-card .side-block { padding: 6px 0; border-bottom: 1px dashed var(--border); }
+        .market-card .side-block:last-of-type { border-bottom: 0; }
+        .market-card .side-block.bot-picked { background: rgba(34,197,94,0.06); margin: 0 -12px; padding: 6px 12px; border-left: 2px solid var(--green); }
+        .market-card .side-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+        .market-card .side-head .name { color: var(--text); font-weight: 600; letter-spacing: 0; text-transform: none; font-size: 12px; }
+        .market-card .pick-side-btn { padding: 3px 8px; font-size: 10px; font-family: inherit; border: 1px solid var(--border-light); background: var(--surface-2); color: var(--text); border-radius: 5px; cursor: pointer; letter-spacing: 0.02em; }
+        .market-card .pick-side-btn:hover { background: var(--blue); border-color: var(--blue); color: #fff; }
+        .market-card .pick-side-btn.bot { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
         .market-card .move { font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 6px 8px; background: var(--surface-2); border-radius: 6px; margin-top: 8px; }
         .market-card .move .sharp { color: var(--blue); font-weight: 700; }
 
@@ -1095,18 +1104,20 @@
             </div>`;
         }
 
-        // Markets grid — only render the markets the bot actually
-        // picked. If you pick ML, you see ML; if you pick ML + TOT,
-        // you see those two. Cuts the visual noise of irrelevant data.
-        const pickedMarkets = new Set(suggestions.map(s => s.market_type));
-        if (pickedMarkets.size) {
-            html += '<div class="market-grid">';
-            for (const mt of ['moneyline', 'spread', 'total']) {
-                if (!pickedMarkets.has(mt)) continue;
-                html += renderMarketCard(mt, d.odds[mt] || {}, d);
-            }
-            html += '</div>';
+        // Markets grid — render ALL three markets (ML / SPR / TOT) so
+        // the user can log a pick the bot didn't suggest. Sides that
+        // ARE bot-picked get visually highlighted; every side has its
+        // own "Log this side" button that seeds the log modal from the
+        // panel data (PIN fair price + line).
+        // Build a (mt, side) → suggestion-index lookup so the renderer
+        // can flag suggested sides.
+        const sugIndex = new Map();
+        suggestions.forEach((s, i) => sugIndex.set(`${s.market_type}:${s.side}`, i));
+        html += '<div class="market-grid">';
+        for (const mt of ['moneyline', 'spread', 'total']) {
+            html += renderMarketCard(mt, d.odds[mt] || {}, d, sugIndex);
         }
+        html += '</div>';
 
         // Splits — always render the row so missing data is visible
         // and per-source diagnostics surface when nothing matched.
@@ -1265,25 +1276,48 @@
         el.innerHTML = html;
     }
 
-    function renderMarketCard(mt, blk, d) {
+    function renderMarketCard(mt, blk, d, sugIndex) {
+        // sugIndex: Map<"mt:side", suggestion_array_index>. Used to flag
+        // bot-picked sides (visual highlight + "BOT" tag on the button
+        // that goes to the same log flow openLog(false, idx) uses).
         const sides = mt === 'total' ? ['over', 'under'] : ['away', 'home'];
         const labelOf = s => mt === 'total' ? s.toUpperCase() : (s === 'home' ? d.home : d.away);
         const pin = blk.pin_current || {};
         const best = blk.best_entry || {};
         const mv = blk.movement;
         const title = ({moneyline:'Moneyline', spread:'Spread', total:'Total'})[mt] || mt;
+        const anyBotPicked = sides.some(s => sugIndex && sugIndex.has(`${mt}:${s}`));
 
-        let rows = '';
+        let blocks = '';
         for (const s of sides) {
             const pinSnap = pin[s];
             const bestSnap = best[s];
             const sideName = labelOf(s);
+            const sugIdx = sugIndex ? sugIndex.get(`${mt}:${s}`) : undefined;
+            const isBotPick = sugIdx != null;
+
+            // Per-side "log this side" button. Bot-picked sides reuse
+            // openLog(false, idx) so the modal seeds from the bot's
+            // suggestion (units/confidence/reasons). Non-bot sides go
+            // through pickSideFromGrid which builds an ad-hoc pick from
+            // the panel data — 1u low (forced lean) by default since
+            // there's no signal context to claim higher.
+            const btnLabel = isBotPick ? 'Log bot pick' : 'Log this side';
+            const btnClass = isBotPick ? 'pick-side-btn bot' : 'pick-side-btn';
+            const onclickAttr = isBotPick
+                ? `openLog(false, ${sugIdx})`
+                : `pickSideFromGrid('${mt}', '${s}')`;
+            const btn = pinSnap
+                ? `<button class="${btnClass}" onclick="${onclickAttr}">${btnLabel}</button>`
+                : '';
+
+            let rows = '';
             if (pinSnap) {
                 const ln = pinSnap.line;
                 const lineFrag = (ln != null) ? ` <span class="label">@${_fmtPt(ln)}</span>` : '';
                 const fair = pinSnap.fair_american;
                 const fairFrag = fair != null ? ` <span class="label">fair ${_fmtAmer(fair)}</span>` : '';
-                rows += `<div class="row"><span class="label">${_esc(sideName)} PIN:</span> <span class="pin">${_fmtAmer(pinSnap.price)}</span>${lineFrag}${fairFrag}</div>`;
+                rows += `<div class="row"><span class="label">PIN:</span> <span class="pin">${_fmtAmer(pinSnap.price)}</span>${lineFrag}${fairFrag}</div>`;
             }
             if (bestSnap) {
                 const ln = bestSnap.line;
@@ -1291,9 +1325,18 @@
                 const ep = bestSnap.edge_pp;
                 const edgeCls = (ep != null && ep >= 0) ? 'edge' : 'edge neg';
                 const edgeFrag = (ep != null) ? ` <span class="${edgeCls}">${ep > 0 ? '+' : ''}${ep.toFixed(1)}pp</span>` : '';
-                rows += `<div class="row"><span class="label">${_esc(sideName)} best:</span> <span class="best">${_fmtAmer(bestSnap.price_american)}</span>${lineFrag} <span class="label">[${_esc(bestSnap.book)}]</span>${edgeFrag}</div>`;
+                rows += `<div class="row"><span class="label">best:</span> <span class="best">${_fmtAmer(bestSnap.price_american)}</span>${lineFrag} <span class="label">[${_esc(bestSnap.book)}]</span>${edgeFrag}</div>`;
             }
+            if (!rows) rows = '<div style="font-size:11px;color:var(--text-muted)">no PIN data</div>';
+
+            const blockCls = 'side-block' + (isBotPick ? ' bot-picked' : '');
+            blocks += `<div class="${blockCls}">
+                <div class="side-head"><span class="name">${_esc(sideName)}</span>${btn}</div>
+                ${rows}
+            </div>`;
         }
+
+        const botTag = anyBotPicked ? '<span class="bot-tag">BOT PICK</span>' : '';
 
         let move = '';
         if (mv) {
@@ -1302,7 +1345,52 @@
             move = `<div class="move">PIN: <b>${_fmtAmer(mv.opener_price)}${oFrag}</b> → <b>${_fmtAmer(mv.current_price)}${cFrag}</b> <span class="sharp">SHARP ${(mv.sharp_side || '').toUpperCase()} = ${mv.sharp_score}</span></div>`;
         }
 
-        return `<div class="market-card"><h3>${title}</h3>${rows || '<div style="font-size:11px;color:var(--text-muted)">No PIN data</div>'}${move}</div>`;
+        return `<div class="market-card"><h3>${title}${botTag}</h3>${blocks}${move}</div>`;
+    }
+
+    // Seed an ad-hoc pick from a market panel side the bot didn't
+    // suggest. Pulls PIN devigged fair as the Polymarket target so the
+    // entry math matches what bot-suggested picks do (book='PMM',
+    // price=fair_american). Defaults to 1u/low — there's no bot signal
+    // to justify higher sizing on a side the bot rejected. User can
+    // bump units in the log modal if they have qualitative reasons.
+    function pickSideFromGrid(mt, side) {
+        if (!_lastDossier) return;
+        const blk = (_lastDossier.odds || {})[mt] || {};
+        const pin = (blk.pin_current || {})[side];
+        if (!pin || pin.fair_american == null) {
+            alert('No PIN devig on this side — can\'t set a Polymarket target.');
+            return;
+        }
+        const sideName = mt === 'total' ? side.toUpperCase()
+            : (side === 'home' ? _lastDossier.home : _lastDossier.away);
+        const mv = blk.movement || {};
+        const isMvSide = mv.sharp_side === side;
+        _pendingPick = {
+            market_id:   _lastDossier.market_id,
+            market_type: mt,
+            side:        side,
+            book:        'PMM',
+            price:       pin.fair_american,
+            line:        pin.line,
+            fair_prob:   pin.fair_prob,
+            edge_pp:     null,
+            // Only credit the sharp_score if THIS side is the side the
+            // weighted PIN movement pointed at. Otherwise this side has
+            // no movement-based signal — record 0 so the log row
+            // doesn't claim a sharp signal it doesn't have.
+            sharp_score: isMvSide ? (mv.sharp_score || 0) : 0,
+            label:       `${_shortMarket(mt)} ${sideName} @ fair ${_fmtAmer(pin.fair_american)}${pin.line != null ? ' ' + _fmtPt(pin.line) : ''}`,
+            seed_units:  1,
+            seed_conf:   'low',
+        };
+        document.getElementById('lmSelection').value  = _pendingPick.label;
+        document.getElementById('lmUnits').value      = '1';
+        document.getElementById('lmConfidence').value = 'low';
+        document.getElementById('lmReasons').value    = '';
+        document.getElementById('lmAnalysis').value   = '';
+        _lmStatus(null, '');
+        document.getElementById('logModal').classList.add('show');
     }
 
     function copyForClaude() {
