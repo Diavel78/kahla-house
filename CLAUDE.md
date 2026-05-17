@@ -63,14 +63,14 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `/handicapper` | `handicapper.html` | admin + `bot_access` | **Pick Bot** — handicapper picks tracker. Sport tabs + click-to-pick game list + collapsible search. Three-timeframe stats card (TODAY / 7d / 30d) on top, per-confidence-tier rollup (low/medium/high → 1u/3u/5u) below. Pending + today's-settled lists at the bottom. Picks made by Claude in chat OR by clicking a game card on the page. Every pick logs to `bot_picks`, auto-grades vs ESPN final scores. UFC ML auto-grades via ESPN MMA endpoint; SPR/TOT method-of-victory bets stay pending and use the per-row Won/Lost/Push manual settle buttons. PnL is **to-WIN** sizing. "Today" anchored to **America/Phoenix** (Arizona, no DST). Nav: Pick Bot is in the persistent top nav (replaced Sharp Bot — that one is admin-card-only on `/`). Whale (10u) tier is disabled — see Sizing rubric below. |
 
 > **Odds-ingest cron (`kahla-scanner/`)**: minimal Python subproject at
-> `kahla-scanner/` runs `python -m scrapers.odds_api` every 30 min via
-> GitHub Actions (`.github/workflows/scanner-poll.yml`). Triggered ONLY
-> by an external cron-job.org workflow_dispatch — the GitHub-native
-> schedule was killed because both firing every 30 min was queueing
-> back-to-back via the concurrency group, doubling credit burn.
-> `cancel-in-progress: true` so any retry/manual-overlap kills the
-> in-flight run; each run is idempotent (dedup) so partial runs lose
-> nothing.
+> `kahla-scanner/` runs `python -m scrapers.odds_api` on **adaptive
+> cadence** via GitHub Actions (`.github/workflows/scanner-poll.yml`).
+> Triggered ONLY by an external cron-job.org workflow_dispatch (every
+> 5 min) — the GitHub-native schedule was killed because both firing
+> concurrently was queueing back-to-back via the concurrency group,
+> doubling credit burn. `cancel-in-progress: true` so any retry/manual-
+> overlap kills the in-flight run; each run is idempotent (dedup) so
+> partial runs lose nothing.
 >
 > The cron hits The Odds API (https://the-odds-api.com) for
 > `/v4/sports/{sport_key}/odds` with `markets=h2h,spreads,totals` and
@@ -80,8 +80,24 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 > chart modal, AND the inline 3-row sparkline per game card — all reads,
 > no live odds-vendor API calls from Flask.
 >
-> Cost: 6 credits/call × 7 sports × 2 calls/hr × 24h × 30d = ~60K
-> credits/mo on the $59/100K-credit tier.
+> **Adaptive cadence** (per-sport gate in
+> `scrapers/odds_api.py:_should_fire`): each cron-job.org tick reads the
+> nearest upcoming `event_start` for each sport in Supabase and picks a
+> cadence bucket — `≤2h → 5min`, `2-6h → 15min`, `6-18h → 30min`, beyond
+> 18h skip. Overnight 10pm-7am MT skips entirely (no US games tip then).
+> Off-season sports (no event in the next 7d) skip. Every tick — fired
+> or skipped — writes a heartbeat row to `odds_ingest_runs` for
+> observability. The previous always-on every-30-min model was wasting
+> calls on far-out games where the line barely moves; adaptive cadence
+> reallocates the same budget toward the final 2 hours, when PIN
+> actually moves.
+>
+> Cost (adaptive): typical 700-1,500 cr/day depending on slate. MLB busy
+> days are highest (~800/day) because of staggered starts — something is
+> always within 2h between 10am and 7pm. NBA/NHL/concentrated-tip sports
+> ~500/day. Fits comfortably in the $59/100K-credit tier with headroom
+> for spike days (UFC PPV, March Madness). cron-job.org must be set to
+> 5-min cadence so the gate can hit its tightest bucket.
 >
 > A second workflow `.github/workflows/snapshot-cleanup.yml` runs nightly
 > at 09:00 UTC and deletes `book_snapshots` rows older than 15 days —
@@ -141,7 +157,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
   - **Firestore** — user prefs, openers (legacy), user management
   - **Supabase** (Postgres) — `markets` + `book_snapshots`. Sole source of truth for the Odds Board AND the line-movement chart. Written by the kahla-scanner cron, read by Flask.
 - **External APIs**:
-  - **The Odds API** (`https://api.the-odds-api.com/v4`) — every 30 min via cron-job.org → GitHub Actions; only the cron talks to it
+  - **The Odds API** (`https://api.the-odds-api.com/v4`) — adaptive cadence (5/15/30 min per sport based on time-to-nearest-game) via cron-job.org → GitHub Actions; only the cron talks to it. Overnight 10p-7a MT + off-season sports are skipped.
   - **ESPN free public scoreboard** (`https://site.api.espn.com/apis/site/v2/sports/...`) — 30s server cache; called from Flask `/api/odds` to merge live scores onto live games. No auth, no rate-limit issues at our volume.
   - **Action Network** (`https://api.actionnetwork.com/web/v2/scoreboard/{league}` + `https://www.actionnetwork.com/{sport}/public-betting`) — public betting splits (% bets / % money). 30-min server cache per (sport, date). No auth on the JSON API (browser UA + Referer header is enough). Falls back to scraping the SSR HTML's `__NEXT_DATA__` JSON or the rendered HTML table if the API misbehaves. Used by `/api/splits`.
   - **Polymarket US SDK** — Dashboard positions/P&L
@@ -166,6 +182,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - `kahla-scanner/scripts/bot_picks_resolver.py` — Pick Bot resolver. Runs every 30 min (last step of `scanner-poll.yml`). Grades pending `bot_picks` whose `event_start` has passed via ESPN final scores. UFC ML graded via ESPN MMA endpoint (`mma/ufc`). UFC SPR/TOT method-of-victory bets stay pending — user settles them via the page. Writes a heartbeat row to `resolver_runs` on every run (success or crash) so the `/handicapper` header can show "graded Nm ago" or red CRASHED with full traceback. PnL is to-WIN sizing — kept in sync with `app.py`'s manual-settle endpoint.
 - `kahla-scanner/scripts/handicapper_backtest.py` — Pick Bot backtest replay (rule-based, signals-only)
 - `kahla-scanner/supabase/bot_picks.sql` — `bot_picks` table DDL (run manually in Supabase SQL editor)
+- `kahla-scanner/supabase/odds_ingest_runs.sql` — heartbeat table for the adaptive-cadence ingest gate. Run manually in Supabase SQL editor. One row per cron tick per sport, records fire/skip decisions for observability.
 - `kahla-scanner/scrapers/odds_api.py` — The Odds API ingester (cron entry point)
 - `kahla-scanner/scripts/cleanup_snapshots.py` — nightly book_snapshots > 15d delete
 - `kahla-scanner/scripts/sharp_alerts.py` — Steam detection + steam paper-bet logger. Telegram alerts retired May 2026 (too noisy); the script itself runs every 30 min in `scanner-poll.yml` with `STEAM_SILENT=1`, which short-circuits `_telegram_send()` to a no-op success. End result: detection + dedup + paper-bet row insert all run; nothing pings the phone. UFC markets blocked via `pb.BLOCKED_SPORTS`. The `⚡ SHARP N` (sharp7) path is also short-circuited under STEAM_SILENT — its alerts never wrote paper-bets in the first place, so silent mode just makes it a no-op detection log. If you ever want the Telegram messages back, unset `STEAM_SILENT` and provide `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`. (Sharp-score math still uses local copies of the helpers in this file — keep them in sync with `kahla-scanner/_lib/sharp.py`.)
@@ -386,7 +403,7 @@ Same as `/api/my-orders` (Gotcha #7): the SDK's `price` field is the YES-canonic
 **Plan**: $59/mo, 100K credits/mo, "All sports / All bookmakers / All markets"
 **Cost formula**: each call to `/odds` costs `markets × regions` credits. We send `markets=h2h,spreads,totals` (3) and `regions=us,eu` (2) → **6 credits per call**. With 7 sports × 2 calls/hr × 24h × 30d = 60,480 credits/mo, fits in the 100K budget.
 
-> **Region gotcha**: Pinnacle is in the `eu` region, NOT `us`. Without `eu` in the regions param we'd get zero PIN data — defeating the whole sharp-tracking purpose. Adding the second region doubled the per-call credit cost, which is why the cron is at 30 min cadence (not 15).
+> **Region gotcha**: Pinnacle is in the `eu` region, NOT `us`. Without `eu` in the regions param we'd get zero PIN data — defeating the whole sharp-tracking purpose. The second region doubles the per-call credit cost (6 vs 3), which is part of why the cron uses an adaptive per-sport gate (see "Odds-ingest cron" above) instead of always-on polling.
 
 ### Endpoint Used
 
@@ -838,7 +855,7 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 1. **The Odds API auth is `?api_key=` query param** — NOT a Bearer header. Easy to copy from one provider's pattern (Owls used Bearer) and break.
 2. **The Odds API credit cost = `markets × regions`** per `/odds` call. We use `h2h,spreads,totals` × `us,eu` = 6 credits. Don't add markets/regions casually — costs scale linearly. Adding `us2` (ESPN BET, Fanatics) would bump to 9 credits/call.
 3. **Pinnacle is in the EU region**, NOT US. If you ever drop `eu` from the regions param, PIN data stops flowing — and PIN is the entire sharp angle for openers/movement.
-4. **Cron is cron-job.org ONLY** — the GitHub-native `*/30 * * * *` schedule on `scanner-poll.yml` was killed because it double-fired with cron-job.org and burned 2x credits via the concurrency queue. If cron-job.org dies, the "last odds update Nm ago" indicator on `/odds` will surface it within minutes; manually trigger from the Actions tab as recovery.
+4. **Cron is cron-job.org ONLY, at 5-min cadence** — the GitHub-native `*/30 * * * *` schedule on `scanner-poll.yml` was killed because it double-fired with cron-job.org and burned 2x credits via the concurrency queue. **cron-job.org must be set to 5-min intervals now** so the per-sport adaptive gate (`scrapers/odds_api.py:_should_fire`) can hit its tightest cadence in the final 2h pre-game. Idle ticks are cheap — the gate returns instantly with a heartbeat row in `odds_ingest_runs`. If cron-job.org dies, the "last odds update Nm ago" indicator on `/odds` will surface it within minutes; manually trigger from the Actions tab as recovery.
 5. **`cancel-in-progress: true`** on the scanner-poll concurrency group — any retry/manual-overlap kills the in-flight run instead of queueing. Each run is idempotent (dedup logic) so partial runs lose nothing.
 6. **`_cache` (Polymarket dashboard cache)** resets on Vercel cold start. Used by `api_my_bets` and `api_data` only. Odds/openers/snapshots safe in Supabase + Firestore.
 7. **SDK `price` field is the COMPLEMENT** — NEVER use for P&L *or for displaying order limit prices*. For positions/trades use `cost.value / qty` for real per-share price. For unfilled orders use `1 - price` (no cost field exists yet — they haven't filled). The `price` field returns the opposite side's price (YES when trading NO). Symptom: a +150 limit order shows up as -150ish in the betslip.
@@ -861,3 +878,4 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 24. **`/api/handicapper/pick` 7-day dedup gate gets bypassed for web-side clicks.** `POST /api/handicapper/pick` returns HTTP 200 with `{ok:true, skipped:true, existing_id:X}` when a row already exists for the same `(market_id, market_type, side)` within 7 days. Useful gate for the chat flow (protects against double-asks / refreshes); useless for the web flow where the user explicitly clicked "Log Pick" — they want it logged. Symptom when broken: log button appears to do nothing because the modal closes silently on what it thinks is success. The modal now sends `allow_duplicate: true` on every click. If you ever see `POST /api/handicapper/pick → 200` (not 201) in Vercel logs and no row appears in `bot_picks`, the dedup is the culprit. Don't add a "are you sure?" UI — explicit click is sure enough.
 25. **No "phantom market" filter on `/api/handicapper/games` or `/sport-counts`.** Previous version joined `book_snapshots` rows for last 24h and dropped markets nobody had quoted. The `in_(market_ids)` snapshot fetch had a hard 5000-row cap (20000 on sport-counts). Once busy enough — full Wednesday NHL playoff + MLB slate is plenty — the query truncated, some market_ids fell out of the snapshot set, and those real games got falsely classified as phantoms and disappeared from the games list. Removed the filter entirely. event_start window is the only filter. Worst case: an actual phantom (rare — a market created for a game that got moved/cancelled) shows in the list; clicking it yields a "no data" dossier. Trade-off accepted — silently hiding the real slate is worse than the occasional dead row. If phantom cleanup becomes necessary, add a nightly script that deletes `markets` rows with zero `book_snapshots` ever (NOT a runtime join on the hot path).
 26. **Pick Bot has NO Polymarket coupling.** Picks exist if and only if the user explicitly clicked Log Pick on the web or ran `handicapper_log_pick.py` from chat. The `/api/handicapper/pmm-sync` admin endpoint is still in the code (manual one-shot), but Pick Bot does NOT auto-trigger it, does NOT auto-create `status='recommended'` rows on dossier view, and does NOT read `actual_fill_*` columns from `bot_picks` in any path. Stats sum `pnl_units` (to-WIN from the bot's recommended entry_price), full stop. The dashboard (`/api/my-bets`, `/api/clv`, etc.) is independent — it tracks real Polymarket activity for the user, but never writes to or reads from `bot_picks`. Don't re-introduce auto-linking without explicit user request; the previous integration produced ghost rows that broke the only flow that should work.
+27. **Adaptive ingest cadence is per-sport, gated in Python, NOT in cron-job.org.** cron-job.org just fires the workflow every 5 min; `scrapers/odds_api.py:_should_fire` decides per-sport whether THIS tick actually hits The Odds API based on (a) overnight blackout 10p-7a MT, (b) nearest upcoming event in that sport (off-season skip if none in 7d, cadence-bucket pick if within 18h), (c) time since last successful run in `odds_ingest_runs`. Every tick — fired or skipped — writes a heartbeat row. Symptoms of misconfiguration: (a) cron-job.org left at 30-min interval = MLB's 5-min bucket can never actually fire at 5-min cadence, you'll get 30-min cadence regardless. (b) `odds_ingest_runs` table missing = `last_ingest_run` returns None forever, gate always fires (wastes credits) — run the migration in `kahla-scanner/supabase/odds_ingest_runs.sql`. (c) Lots of `skipped:cadence` heartbeats per sport per hour = healthy, that's the gate working. (d) `skipped:offseason` for an active sport = `markets.event_start` window is wrong, check that the ingest is actually creating new market rows.

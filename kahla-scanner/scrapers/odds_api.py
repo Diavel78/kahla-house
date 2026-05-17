@@ -25,8 +25,9 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -86,6 +87,127 @@ ALLOWED_BOOKS = {
 
 # How close (minutes) two event_start values must be to consider the same game.
 MATCH_WINDOW = timedelta(minutes=30)
+
+
+# ---------------------------------------------------------------------------
+# Adaptive cadence — per-sport gate driven by time-to-nearest-game
+# ---------------------------------------------------------------------------
+#
+# Before each Odds API call we look at the nearest upcoming game in that
+# sport and pick a cadence bucket. Skip the sport entirely if nothing is
+# within 18h or if we're inside the overnight blackout window.
+#
+# The cron-job.org trigger fires this workflow at high frequency (every
+# 5 min); these gates decide per-sport whether THIS tick actually hits
+# The Odds API. The two together = adaptive cadence without rewriting
+# the scheduler. Cost model with us+eu (6 credits/call):
+#
+#   nearest game in:
+#     ≤ 2h           → poll every 5 min   (final-2h sharp window)
+#     2-6h           → poll every 15 min
+#     6-18h          → poll every 30 min
+#     18h+ / none    → skip (off-season / nothing meaningful pre-game)
+#   overnight 10p-7a → skip regardless (no US games tip at 3am)
+#   no event in next 7d → skip (off-season)
+#
+# Sports with staggered start times (MLB) will sit in the 5-min bucket
+# for most of the afternoon — that's the point. Sport-wide endpoint
+# returns all games in one call, so one MLB call covers 15 games at
+# different start times.
+#
+# All times are evaluated in the user's local TZ (America/Phoenix, no
+# DST). Phoenix is used everywhere else in the project for "today"
+# anchoring; keeping it consistent here means the blackout window is
+# 10pm-7am MT year-round.
+
+_LOCAL_TZ = ZoneInfo("America/Phoenix")
+_BLACKOUT_START_HOUR = 22  # 10pm local
+_BLACKOUT_END_HOUR   = 7   # 7am local
+
+# (max_hours_to_game, cadence_minutes). Picked left-to-right; first
+# match wins. Trailing entry catches everything up to OFF_SEASON_LIMIT.
+_CADENCE_BUCKETS: list[tuple[float, int]] = [
+    (2.0,  5),
+    (6.0,  15),
+    (18.0, 30),
+]
+# Slack: cron-job.org ticks aren't perfectly evenly spaced and our own
+# DB write has latency, so "fire if last_run + cadence_min <= now" is
+# too tight — we'd skip the 5-min tick because the previous one wrote
+# at 4m58s ago. Fire if we're within `slack` of the target window.
+_CADENCE_SLACK_SEC = 60
+
+
+def _in_overnight_blackout(now: datetime | None = None) -> bool:
+    """True if local time is in the 10pm-7am blackout window."""
+    now = now or datetime.now(timezone.utc)
+    local = now.astimezone(_LOCAL_TZ)
+    hr = local.hour
+    if _BLACKOUT_START_HOUR <= _BLACKOUT_END_HOUR:
+        return _BLACKOUT_START_HOUR <= hr < _BLACKOUT_END_HOUR
+    # Window wraps midnight (the common case: 22-7).
+    return hr >= _BLACKOUT_START_HOUR or hr < _BLACKOUT_END_HOUR
+
+
+def _cadence_for_next_game(hours_to_game: float | None) -> int | None:
+    """Returns the cadence in minutes for the given time-to-nearest-game,
+    or None if we should skip this sport (no games in 18h)."""
+    if hours_to_game is None:
+        return None
+    if hours_to_game < 0:
+        # Game already started — useful only if more games follow soon.
+        # The caller should pass the NEXT upcoming game (not in-progress),
+        # so a negative value here means "no more games today, off-season-ish".
+        return None
+    for max_h, cad in _CADENCE_BUCKETS:
+        if hours_to_game <= max_h:
+            return cad
+    return None  # >18h out
+
+
+def _should_fire(sport_code: str) -> tuple[bool, dict[str, Any]]:
+    """Decide whether to call The Odds API for `sport_code` on this tick.
+
+    Returns (fire?, meta) where `meta` carries the diagnostic fields we
+    log to odds_ingest_runs regardless of outcome:
+        status        — 'ok' or 'skipped:<reason>' (final status set by caller on ok)
+        cadence_min   — chosen cadence (None when skipped)
+        next_game_h   — hours until nearest upcoming game (None when off-season)
+        detail        — free-form note
+
+    Pure function of (now, nearest event, last successful run); no
+    side effects.
+    """
+    if _in_overnight_blackout():
+        return False, {"status": "skipped:overnight", "detail": "10pm-7am MT"}
+
+    nxt = db.nearest_upcoming_event(sport_code)
+    if nxt is None:
+        return False, {"status": "skipped:offseason",
+                       "detail": "no event in next 7d"}
+
+    now = datetime.now(timezone.utc)
+    hours_to = (nxt - now).total_seconds() / 3600.0
+    cadence = _cadence_for_next_game(hours_to)
+    if cadence is None:
+        return False, {"status": "skipped:cadence",
+                       "next_game_h": hours_to,
+                       "detail": f"nearest game in {hours_to:.1f}h (>18h cap)"}
+
+    last = db.last_ingest_run(sport_code, status="ok")
+    if last is not None:
+        elapsed_sec = (now - last).total_seconds()
+        target_sec = cadence * 60 - _CADENCE_SLACK_SEC
+        if elapsed_sec < target_sec:
+            return False, {
+                "status": "skipped:cadence",
+                "cadence_min": cadence,
+                "next_game_h": hours_to,
+                "detail": (f"last ok run {elapsed_sec:.0f}s ago, "
+                           f"need {target_sec:.0f}s for {cadence}m cadence"),
+            }
+
+    return True, {"cadence_min": cadence, "next_game_h": hours_to}
 
 
 # ---------------------------------------------------------------------------
@@ -359,16 +481,56 @@ def _dedup_unchanged(
 # Ingest one sport / all sports
 # ---------------------------------------------------------------------------
 
-def ingest_sport(sport_code: str) -> dict[str, int]:
+def ingest_sport(sport_code: str, force: bool = False) -> dict[str, int]:
+    """Fetch + write snapshots for one sport, gated by the adaptive
+    cadence rules in `_should_fire`. Pass `force=True` to bypass the gate
+    (useful for manual runs / `--force` on the CLI).
+
+    Every invocation writes a heartbeat row to `odds_ingest_runs` —
+    skipped ticks too — so we can see per-sport that the cron is alive
+    and which decisions it's making.
+    """
     counts = {"games": 0, "matched": 0, "created": 0, "candidate": 0,
               "snapshots": 0, "deduped": 0}
+
+    meta: dict[str, Any] = {}
+    if not force:
+        fire, meta = _should_fire(sport_code)
+        if not fire:
+            log.info("Odds API %s: %s (%s)",
+                     sport_code, meta.get("status"), meta.get("detail"))
+            db.record_ingest_run(
+                sport=sport_code,
+                status=meta.get("status") or "skipped:unknown",
+                cadence_min=meta.get("cadence_min"),
+                next_game_h=meta.get("next_game_h"),
+                detail=meta.get("detail"),
+            )
+            return counts
+
     raw = fetch_odds(sport_code)
     if raw is None:
+        db.record_ingest_run(
+            sport=sport_code,
+            status="error",
+            cadence_min=meta.get("cadence_min"),
+            next_game_h=meta.get("next_game_h"),
+            detail="fetch_odds returned None",
+        )
         return counts
     games = parse_games(sport_code, raw)
     counts["games"] = len(games)
     if not games:
         log.info("Odds API %s: 0 games parsed", sport_code)
+        db.record_ingest_run(
+            sport=sport_code,
+            status="ok",
+            cadence_min=meta.get("cadence_min"),
+            next_game_h=meta.get("next_game_h"),
+            events=0,
+            snapshots=0,
+            detail="no games returned",
+        )
         return counts
 
     aliases = db.list_team_aliases(sport_code)
@@ -407,16 +569,24 @@ def ingest_sport(sport_code: str) -> dict[str, int]:
         sport_code, counts["games"], counts["matched"], counts["created"],
         counts["candidate"], counts["deduped"], counts["snapshots"],
     )
+    db.record_ingest_run(
+        sport=sport_code,
+        status="ok",
+        cadence_min=meta.get("cadence_min"),
+        next_game_h=meta.get("next_game_h"),
+        events=counts["games"],
+        snapshots=counts["snapshots"],
+    )
     return counts
 
 
-def ingest_all() -> None:
+def ingest_all(force: bool = False) -> None:
     for sport in config.sports_enabled:
         if sport not in SPORT_KEYS:
             log.debug("skip sport %s (no Odds API mapping)", sport)
             continue
         try:
-            ingest_sport(sport)
+            ingest_sport(sport, force=force)
         except Exception as e:
             log.exception("Odds API ingest %s crashed: %s", sport, e)
 
@@ -429,11 +599,17 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     p = argparse.ArgumentParser(prog="odds_api")
     p.add_argument("--sport", help="Single sport (e.g. MLB). Default: all SPORTS_ENABLED.")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass the adaptive cadence gate. Always hit the API. "
+             "Useful for backfills/debugging — every call still costs 6 credits.",
+    )
     args = p.parse_args(argv)
     if args.sport:
-        ingest_sport(args.sport.upper())
+        ingest_sport(args.sport.upper(), force=args.force)
     else:
-        ingest_all()
+        ingest_all(force=args.force)
     return 0
 
 

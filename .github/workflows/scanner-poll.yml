@@ -10,8 +10,19 @@ name: Odds Ingest — Poll
 #
 # Cost math (The Odds API charges credits = markets × regions per call):
 #   3 markets × 2 regions = 6 credits per call
-#   7 sports × 2 calls/hour × 24h × 30 days = 10,080 calls/month
-#   = 60,480 credits/month, fits in the $59 100K-credit tier
+#
+# Adaptive cadence (per-sport gate in scrapers/odds_api.py:_should_fire):
+#   nearest game in:
+#     ≤ 2h           → poll every 5 min   (final-2h sharp window)
+#     2-6h           → poll every 15 min
+#     6-18h          → poll every 30 min
+#     18h+ / none    → skip (off-season / nothing meaningful pre-game)
+#   overnight 10p-7a MT → skip regardless (no US games tip at 3am)
+#   no event in next 7d → skip (off-season)
+#
+# cron-job.org should fire this workflow every 5 min so the per-sport
+# gate can hit its tightest cadence. The gate writes a heartbeat row to
+# odds_ingest_runs on every tick (fired OR skipped) for observability.
 #
 # Required GitHub repo secrets:
 #   ODDS_API_KEY         — from the-odds-api.com (paid tier)
@@ -24,12 +35,11 @@ name: Odds Ingest — Poll
 #
 # To add/remove sports: edit SPORTS_ENABLED below.
 
-# Trigger: cron-job.org pings workflow_dispatch every 30 min. We used to
-# also have a GitHub-native `*/30 * * * *` schedule as a backup, but with
-# both running every 30 min the workflow was queueing back-to-back via the
-# concurrency group — burning ~2x the Odds API credits for the same data.
-# cron-job.org has been reliable; the "last odds update Nm ago" status on
-# /odds will surface any cron failure within a refresh cycle.
+# Trigger: cron-job.org pings workflow_dispatch every 5 min so the
+# adaptive cadence gate above can ramp up to 5-min cadence near tip.
+# Idle ticks are cheap — gate returns instantly with a heartbeat row.
+# concurrency:cancel-in-progress: true ensures we never queue two
+# overlapping runs.
 on:
   workflow_dispatch:
 
