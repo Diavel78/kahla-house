@@ -1737,10 +1737,17 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     # use `suggestions` (list) so multi-pick games render correctly.
     suggestion = suggestions[0] if suggestions else None
 
-    # Data freshness — when was the most recent PIN snap captured? Used
-    # by the dossier UI to show "PIN data Nm ago" so the user knows how
-    # fresh the displayed lines are, and to drive the auto-refresh
-    # loop's decision about whether to re-fetch.
+    # Data freshness — two distinct signals so the UI can tell apart
+    # "PIN hasn't moved" from "cron is broken":
+    #   • pin_latest_captured: timestamp of the most recent PIN snap row.
+    #     Because book_snapshots is dedup'd, this only advances when
+    #     PIN ACTUALLY MOVES. A 12-min-old PIN snap on a near-tip game
+    #     is normal if PIN held its line.
+    #   • cron_last_run: timestamp of the most recent SUCCESSFUL Odds
+    #     API ingest for this sport from odds_ingest_runs. Advances
+    #     every 5 min near tip regardless of whether PIN moved.
+    # If pin is old but cron is fresh: PIN just held steady. Healthy.
+    # If both are old: cron is stuck. Look at odds_ingest_runs heartbeats.
     pin_latest_captured = None
     for (book, _mt, _side), snap in latest.items():
         if book != "PIN":
@@ -1750,6 +1757,22 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
             continue
         if pin_latest_captured is None or str(ts) > str(pin_latest_captured):
             pin_latest_captured = ts
+
+    cron_last_run = None
+    try:
+        res = (sb.table("odds_ingest_runs")
+               .select("fetched_at")
+               .eq("sport", sport)
+               .eq("status", "ok")
+               .order("fetched_at", desc=True)
+               .limit(1)
+               .execute().data) or []
+        if res:
+            cron_last_run = res[0].get("fetched_at")
+    except Exception:
+        # Table missing or query failure — fall through. The freshness
+        # label just won't show the "cron Nm ago" half.
+        pass
 
     return {
         "ok":              True,
@@ -1782,6 +1805,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         "live_error":      live_error,
         "data_freshness":  {
             "pin_latest_captured": pin_latest_captured,
+            "cron_last_run":       cron_last_run,
             "source":              "live" if live_used else "cached",
         },
         "generated_at":    datetime.now(timezone.utc).isoformat(),

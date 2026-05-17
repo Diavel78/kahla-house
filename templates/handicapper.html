@@ -896,12 +896,21 @@
     }
     function _tickFreshnessLabel() {
         // Just update the "Nm ago" text without re-fetching. Keeps the
-        // badge counting up between full polls.
+        // badge counting up between full polls. Reads the source ISOs
+        // from data-attrs and rebuilds the inner spans — same shape as
+        // renderDossier() so the colors stay consistent.
         const el = document.getElementById('dossierFreshness');
         if (!el) return;
-        const iso = el.getAttribute('title');
-        if (!iso) return;
-        el.textContent = `· PIN ${_fmtAgo(iso)}`;
+        const pin = el.getAttribute('data-pin') || '';
+        const cron = el.getAttribute('data-cron') || '';
+        const parts = [];
+        if (pin)  parts.push(`<span title="${_esc(pin)}">PIN ${_esc(_fmtAgo(pin))}</span>`);
+        if (cron) {
+            const ageMin = Math.round((Date.now() - new Date(cron).getTime()) / 60000);
+            const color = ageMin > 10 ? 'var(--red)' : 'var(--text-muted)';
+            parts.push(`<span title="${_esc(cron)}" style="color:${color}">cron ${_esc(_fmtAgo(cron))}</span>`);
+        }
+        if (parts.length) el.innerHTML = '· ' + parts.join(' · ');
     }
 
     function openDossierModal() {
@@ -990,12 +999,29 @@
                 ? `<span title="${_esc(d.live_error)}" style="font-size:10px;font-family:JetBrains Mono,monospace;padding:2px 8px;background:var(--orange-dim);color:var(--orange);border:1px solid rgba(255,159,28,0.3);border-radius:10px;font-weight:700;letter-spacing:0.04em;margin-left:8px;vertical-align:middle">CACHED · ${_esc(d.live_error.slice(0, 60))}</span>`
                 : '');
 
-        // PIN freshness — small label so the user knows how recent the
-        // displayed lines are. Auto-poll keeps this current.
-        const pinCaptured = (d.data_freshness || {}).pin_latest_captured;
-        const freshnessLabel = pinCaptured ? _fmtAgo(pinCaptured) : '';
-        const freshnessBadge = freshnessLabel
-            ? `<span id="dossierFreshness" title="${_esc(pinCaptured)}" style="font-size:10px;font-family:JetBrains Mono,monospace;color:var(--text-muted);margin-left:6px;vertical-align:middle">· PIN ${_esc(freshnessLabel)}</span>`
+        // Two-signal freshness label:
+        //   • PIN Nm ago    — last time PIN's price/line actually moved
+        //   • cron Nm ago   — last successful Odds API ingest for this sport
+        // When they diverge (PIN old, cron fresh): PIN is steady, healthy.
+        // When both are old: cron is stuck.
+        // Color the cron half red when it's > 10 min — that's the symptom
+        // worth surfacing visually.
+        const df = d.data_freshness || {};
+        const pinCaptured = df.pin_latest_captured;
+        const cronLast    = df.cron_last_run;
+        const pinFrag = pinCaptured
+            ? `<span title="${_esc(pinCaptured)}">PIN ${_esc(_fmtAgo(pinCaptured))}</span>`
+            : '';
+        const cronAgeMin = cronLast
+            ? Math.round((Date.now() - new Date(cronLast).getTime()) / 60000)
+            : null;
+        const cronColor = (cronAgeMin != null && cronAgeMin > 10) ? 'var(--red)' : 'var(--text-muted)';
+        const cronFrag = cronLast
+            ? `<span title="${_esc(cronLast)}" style="color:${cronColor}">cron ${_esc(_fmtAgo(cronLast))}</span>`
+            : '';
+        const inner = [pinFrag, cronFrag].filter(Boolean).join(' · ');
+        const freshnessBadge = inner
+            ? `<span id="dossierFreshness" data-pin="${_esc(pinCaptured || '')}" data-cron="${_esc(cronLast || '')}" style="font-size:10px;font-family:JetBrains Mono,monospace;color:var(--text-muted);margin-left:6px;vertical-align:middle">· ${inner}</span>`
             : '';
 
         let html = `<div class="dossier-head">
