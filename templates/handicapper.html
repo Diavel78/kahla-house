@@ -558,6 +558,22 @@
     function _shortMarket(mt) { return ({moneyline:'ML', spread:'SPR', total:'TOT'})[mt] || mt; }
     function _esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 
+    function _fmtAgo(iso) {
+        // Short "Nm ago" / "Nh ago" / "Ns ago" — keep it compact for the
+        // dossier badge. Future timestamps (clock skew) render as "now".
+        if (!iso) return '';
+        const t = new Date(iso).getTime();
+        if (!Number.isFinite(t)) return '';
+        const sec = Math.max(0, Math.round((Date.now() - t) / 1000));
+        if (sec < 45)   return `${sec}s ago`;
+        const min = Math.round(sec / 60);
+        if (min < 60)   return `${min}m ago`;
+        const hr  = Math.round(min / 60);
+        if (hr < 24)    return `${hr}h ago`;
+        const d   = Math.round(hr / 24);
+        return `${d}d ago`;
+    }
+
     function _renderStats(s) {
         const hr = s.hit_rate == null ? '—' : `${(s.hit_rate*100).toFixed(1)}%`;
         // s.roi is u/pick (total pnl_units / graded count).
@@ -809,6 +825,9 @@
         // API call (6 credits) so the dossier shows the current line,
         // not the last 30-min cron snapshot. Opens as a modal overlay
         // so the games-list scroll position is preserved when closed.
+        // After initial render, _startDossierRefresh kicks off a 30s
+        // cache-only poll so the pick/odds stay live as the cron
+        // (5-min cadence near tip) writes new PIN data.
         const dossierEl = document.getElementById('dossier');
         openDossierModal();
         dossierEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">Pulling live odds + injuries + splits…</div>';
@@ -821,6 +840,7 @@
             }
             _lastDossier = data;
             renderDossier(data);
+            _startDossierRefresh(marketId);
         } catch (e) {
             dossierEl.innerHTML = `<div class="dossier-error">Request failed: ${_esc(String(e))}</div>`;
         }
@@ -829,6 +849,60 @@
     // ─── Dossier (web-side ask) ───
     let _lastDossier = null;
     let _pendingPick = null;
+
+    // Auto-refresh: while the dossier modal is open, re-fetch the
+    // dossier every 30s so the suggestion/odds reflect whatever the
+    // 5-min ingest cron has written. NOT a live=true call — cache only,
+    // so this costs zero Odds API credits.
+    let _dossierRefreshTimer = null;
+    let _dossierRefreshMarketId = null;   // null = nothing to refresh (search-mode dossier)
+    let _dossierAgoTicker = null;         // ticks the "Nm ago" label every 15s
+    const DOSSIER_REFRESH_MS = 30000;
+    const DOSSIER_AGO_TICK_MS = 15000;
+
+    function _startDossierRefresh(marketId) {
+        _stopDossierRefresh();
+        if (!marketId) return;  // freeform-search dossiers don't auto-refresh
+        _dossierRefreshMarketId = marketId;
+        _dossierRefreshTimer = setInterval(_pollDossier, DOSSIER_REFRESH_MS);
+        _dossierAgoTicker = setInterval(_tickFreshnessLabel, DOSSIER_AGO_TICK_MS);
+    }
+    function _stopDossierRefresh() {
+        if (_dossierRefreshTimer) { clearInterval(_dossierRefreshTimer); _dossierRefreshTimer = null; }
+        if (_dossierAgoTicker)    { clearInterval(_dossierAgoTicker);    _dossierAgoTicker    = null; }
+        _dossierRefreshMarketId = null;
+    }
+    async function _pollDossier() {
+        const mid = _dossierRefreshMarketId;
+        if (!mid) return;
+        // Skip if the modal isn't actually visible (tab switched, etc.)
+        const overlay = document.getElementById('dossierOverlay');
+        if (!overlay || !overlay.classList.contains('show')) return;
+        try {
+            // NO live=true — cache-only fetch. The 5-min cron is writing
+            // fresh PIN data to Supabase; that's what we want here.
+            const resp = await authFetch('/api/handicapper/dossier?market_id=' + encodeURIComponent(mid));
+            const data = await resp.json();
+            if (!data.ok || _dossierRefreshMarketId !== mid) return;  // modal closed or switched
+            // Preserve scroll position across re-render.
+            const scrollTop = overlay.scrollTop;
+            _lastDossier = data;
+            renderDossier(data);
+            overlay.scrollTop = scrollTop;
+        } catch (e) {
+            // Silent failure — next tick will retry. Don't tear down
+            // the modal because a single poll missed.
+        }
+    }
+    function _tickFreshnessLabel() {
+        // Just update the "Nm ago" text without re-fetching. Keeps the
+        // badge counting up between full polls.
+        const el = document.getElementById('dossierFreshness');
+        if (!el) return;
+        const iso = el.getAttribute('title');
+        if (!iso) return;
+        el.textContent = `· PIN ${_fmtAgo(iso)}`;
+    }
 
     function openDossierModal() {
         const overlay = document.getElementById('dossierOverlay');
@@ -842,6 +916,7 @@
     function closeDossier() {
         document.getElementById('dossierOverlay').classList.remove('show');
         document.body.style.overflow = '';
+        _stopDossierRefresh();
     }
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
@@ -880,6 +955,10 @@
             }
             _lastDossier = data;
             renderDossier(data);
+            // Auto-refresh from cache while the modal is open. Doesn't
+            // burn live-fetch credits — just keeps suggestion + lines
+            // current with the 5-min ingest cron.
+            if (data.market_id) _startDossierRefresh(data.market_id);
         } catch (e) {
             dossierEl.innerHTML = `<div class="dossier-error">Request failed: ${_esc(String(e))}</div>`;
         } finally {
@@ -910,9 +989,18 @@
             : (d.live_error
                 ? `<span title="${_esc(d.live_error)}" style="font-size:10px;font-family:JetBrains Mono,monospace;padding:2px 8px;background:var(--orange-dim);color:var(--orange);border:1px solid rgba(255,159,28,0.3);border-radius:10px;font-weight:700;letter-spacing:0.04em;margin-left:8px;vertical-align:middle">CACHED · ${_esc(d.live_error.slice(0, 60))}</span>`
                 : '');
+
+        // PIN freshness — small label so the user knows how recent the
+        // displayed lines are. Auto-poll keeps this current.
+        const pinCaptured = (d.data_freshness || {}).pin_latest_captured;
+        const freshnessLabel = pinCaptured ? _fmtAgo(pinCaptured) : '';
+        const freshnessBadge = freshnessLabel
+            ? `<span id="dossierFreshness" title="${_esc(pinCaptured)}" style="font-size:10px;font-family:JetBrains Mono,monospace;color:var(--text-muted);margin-left:6px;vertical-align:middle">· PIN ${_esc(freshnessLabel)}</span>`
+            : '';
+
         let html = `<div class="dossier-head">
             <div>
-                <h2>${_esc(d.event_name)}${liveBadge}</h2>
+                <h2>${_esc(d.event_name)}${liveBadge}${freshnessBadge}</h2>
                 <div class="sub">${d.sport} · ${dt.toLocaleString([], {weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'})} · ${startsLabel}${d.venue ? ' · ' + _esc(d.venue) : ''}</div>
             </div>
         </div>`;

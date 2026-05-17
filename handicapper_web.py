@@ -1737,6 +1737,20 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     # use `suggestions` (list) so multi-pick games render correctly.
     suggestion = suggestions[0] if suggestions else None
 
+    # Data freshness — when was the most recent PIN snap captured? Used
+    # by the dossier UI to show "PIN data Nm ago" so the user knows how
+    # fresh the displayed lines are, and to drive the auto-refresh
+    # loop's decision about whether to re-fetch.
+    pin_latest_captured = None
+    for (book, _mt, _side), snap in latest.items():
+        if book != "PIN":
+            continue
+        ts = snap.get("captured_at")
+        if not ts:
+            continue
+        if pin_latest_captured is None or str(ts) > str(pin_latest_captured):
+            pin_latest_captured = ts
+
     return {
         "ok":              True,
         "query":           query or market["event_name"],
@@ -1766,5 +1780,9 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         ],
         "live_used":       live_used,
         "live_error":      live_error,
+        "data_freshness":  {
+            "pin_latest_captured": pin_latest_captured,
+            "source":              "live" if live_used else "cached",
+        },
         "generated_at":    datetime.now(timezone.utc).isoformat(),
     }
