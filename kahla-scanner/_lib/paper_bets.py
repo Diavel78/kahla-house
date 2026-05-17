@@ -42,6 +42,14 @@ EDGE_WEIGHT  = 0.4
 # limiting in practice (~0-3/day).
 MAX_PICKS_PER_RUN = 5
 
+# Sports the paper-bet system refuses to pick. UFC paper bets sit
+# pending forever because paper_bets_resolver.py has no MMA scoreboard
+# endpoint to grade against (ESPN's MMA API is per-event, not a
+# consolidated scoreboard). Blocked at pick time so the pending queue
+# doesn't fill with rows that will never settle. Also clipped by the
+# steam logger so a UFC steam alert doesn't slip through.
+BLOCKED_SPORTS = {"UFC"}
+
 # Books we'll book a bet at. PIN excluded (it's the benchmark, not the
 # entry — we're trying to beat the sharp line at retail). Others are the
 # 14-book allowlist minus PIN.

@@ -3984,9 +3984,37 @@ def sharp_bot_json_page():
             const r = await fetch('/api/sharp-bot', {headers:{'Authorization':'Bearer '+t}});
             if (!r.ok) { msg.textContent = 'HTTP ' + r.status; return; }
             const d = await r.json();
+            const nowMs = Date.parse(d.now_iso);
+            // Overdue pending: event_start has passed but row is still
+            // pending. That's the resolver-stuck list — UFC bets sit
+            // here forever (no ESPN MMA endpoint), postponed games sit
+            // here until they replay, ESPN match-failures sit here
+            // until the team-name substring lands.
+            const overdue = (d.pending || [])
+                .filter(p => Date.parse(p.event_start) < nowMs)
+                .map(p => ({
+                    id: p.id,
+                    bot: p.bot,
+                    sport: p.sport,
+                    event_name: p.event_name,
+                    event_start: p.event_start,
+                    hours_late: Math.round((nowMs - Date.parse(p.event_start)) / 3.6e6 * 10) / 10,
+                    market_type: p.market_type,
+                    side: p.side,
+                    entry_book: p.entry_book,
+                    entry_price: p.entry_price,
+                    entry_line: p.entry_line,
+                }))
+                .sort((a, b) => b.hours_late - a.hours_late);
+            const overdue_by_sport = {};
+            for (const r of overdue) {
+                overdue_by_sport[r.sport] = (overdue_by_sport[r.sport] || 0) + 1;
+            }
             const view = FULL ? d : {
                 ok: d.ok, now_iso: d.now_iso,
                 heartbeat: d.heartbeat,
+                overdue_by_sport,
+                overdue_pending: overdue,
                 stats_all_time: d.stats_all_time,
                 stats_7d: d.stats_7d,
                 stats_30d: d.stats,

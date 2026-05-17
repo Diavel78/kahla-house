@@ -90,7 +90,7 @@ def _fetch_markets_in_window(sb, low: timedelta, high: timedelta) -> list[dict]:
     lo_iso = (now + low).isoformat()
     hi_iso = (now + high).isoformat()
     try:
-        return (sb.table("markets")
+        rows = (sb.table("markets")
                 .select("id,sport,event_name,event_start")
                 .eq("status", "active")
                 .gte("event_start", lo_iso)
@@ -101,6 +101,9 @@ def _fetch_markets_in_window(sb, low: timedelta, high: timedelta) -> list[dict]:
     except Exception as e:
         log.error("markets fetch failed: %s", e)
         return []
+    # UFC blocked at the source — resolver can't grade MMA so picking
+    # them just fills the pending queue with dead rows.
+    return [m for m in rows if (m.get("sport") or "") not in pb.BLOCKED_SPORTS]
 
 
 # ─────────────────────────── Build candidates ──────────────────────────

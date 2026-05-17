@@ -70,15 +70,20 @@ jobs:
           SPORTS_ENABLED:       NFL,NBA,MLB,NHL,CBB,NCAAF,UFC
         run: python -m scrapers.odds_api
 
-      # Sharp/steam Telegram alerts step REMOVED May 2026. The
-      # "sharp alerts bot" was retired as Telegram noise — see
-      # CLAUDE.md "Telegram alerts (Phase 3 — RETIRED)". The steam
-      # paper-bet column on /sharp-bot no longer receives fresh picks;
-      # only the early/late EV pickers below still feed the tracker.
-      # scripts/sharp_alerts.py is left in the repo as dead code in
-      # case the steam pipeline is ever resurrected — it is no longer
-      # invoked. Fill alerts (Polymarket fills → "Filled Bot") live
-      # in app.py:/api/polymarket/check-fills, polled by cron-job.org.
+      # Steam detection + paper-bet logging, NO Telegram. STEAM_SILENT=1
+      # short-circuits _telegram_send() so the alert pipeline runs end-
+      # to-end (detect + dedup + log paper_bets row) without spamming
+      # Telegram. The previous retirement removed this step entirely,
+      # which also killed steam paper-bet logging — it lived inside this
+      # script's success path. We want the picks, just not the pings.
+      # continue-on-error: a flaky run never blocks downstream pickers.
+      - name: Steam detection — paper-bet logging only (silent)
+        continue-on-error: true
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          STEAM_SILENT:         "1"
+        run: python -m scripts.sharp_alerts
 
       # Phase 4 — Early + Late EV paper-bet pickers. Both ride this
       # same 30-min cron. Per-bot dedup means re-runs only fill new

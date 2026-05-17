@@ -59,7 +59,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `/odds` | `odds.html` | admin + viewer | Odds Board — multi-book odds comparison, opener-vs-current movement, per-game line-movement chart modal |
 | `/dashboard` | `dashboard.html` | admin only | Polymarket P&L Dashboard — positions, closed trades, bet slip |
 | `/sharp-bot` | `sharp_bot.html` | admin only | Phase 4 paper-bet tracker — Steam / Early EV / Late EV columns, pending + settled-30d picks, per-bot hit rate / units / ROI |
-| `/sharp-bot.json` | inline HTML | admin only | Mobile-friendly JSON dump of `/api/sharp-bot`'s rollup blocks (heartbeat, all-time, 7d, by_market, 30d) with a Copy button. Default view trims the bulky `pending`/`settled` arrays; `?full=1` includes them. Built for "review stats on my phone, paste into Claude" — Supabase SQL editor is unusable on mobile. |
+| `/sharp-bot.json` | inline HTML | admin only | Mobile-friendly JSON dump of `/api/sharp-bot`'s rollup blocks (heartbeat, all-time, 7d, by_market, 30d) with a Copy button. Also surfaces `overdue_pending` + `overdue_by_sport` — every `status='pending'` row whose `event_start < now`, sorted by how late, with sport/market/side/entry so you can see exactly what's stuck (UFC bets, postponed games, ESPN-unmatched picks). Default view trims the bulky full `pending`/`settled` arrays; `?full=1` includes them. Built for "review stats on my phone, paste into Claude" — Supabase SQL editor is unusable on mobile. |
 | `/handicapper` | `handicapper.html` | admin + `bot_access` | **Pick Bot** — handicapper picks tracker. Sport tabs + click-to-pick game list + collapsible search. Three-timeframe stats card (TODAY / 7d / 30d) on top, per-confidence-tier rollup (low/medium/high → 1u/3u/5u) below. Pending + today's-settled lists at the bottom. Picks made by Claude in chat OR by clicking a game card on the page. Every pick logs to `bot_picks`, auto-grades vs ESPN final scores. UFC ML auto-grades via ESPN MMA endpoint; SPR/TOT method-of-victory bets stay pending and use the per-row Won/Lost/Push manual settle buttons. PnL is **to-WIN** sizing. "Today" anchored to **America/Phoenix** (Arizona, no DST). Nav: Pick Bot is in the persistent top nav (replaced Sharp Bot — that one is admin-card-only on `/`). Whale (10u) tier is disabled — see Sizing rubric below. |
 
 > **Odds-ingest cron (`kahla-scanner/`)**: minimal Python subproject at
@@ -168,7 +168,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 - `kahla-scanner/supabase/bot_picks.sql` — `bot_picks` table DDL (run manually in Supabase SQL editor)
 - `kahla-scanner/scrapers/odds_api.py` — The Odds API ingester (cron entry point)
 - `kahla-scanner/scripts/cleanup_snapshots.py` — nightly book_snapshots > 15d delete
-- `kahla-scanner/scripts/sharp_alerts.py` — **VESTIGIAL** (retired May 2026). Used to send `🚨 STEAM` + `⚡ SHARP N` Telegram alerts and log steam paper bets. Removed from `scanner-poll.yml`. Left in the repo as a reference implementation in case the steam-detection pipeline is ever resurrected. Not imported by anything live.
+- `kahla-scanner/scripts/sharp_alerts.py` — Steam detection + steam paper-bet logger. Telegram alerts retired May 2026 (too noisy); the script itself runs every 30 min in `scanner-poll.yml` with `STEAM_SILENT=1`, which short-circuits `_telegram_send()` to a no-op success. End result: detection + dedup + paper-bet row insert all run; nothing pings the phone. UFC markets blocked via `pb.BLOCKED_SPORTS`. The `⚡ SHARP N` (sharp7) path is also short-circuited under STEAM_SILENT — its alerts never wrote paper-bets in the first place, so silent mode just makes it a no-op detection log. If you ever want the Telegram messages back, unset `STEAM_SILENT` and provide `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`. (Sharp-score math still uses local copies of the helpers in this file — keep them in sync with `kahla-scanner/_lib/sharp.py`.)
 - `kahla-scanner/scripts/paper_bets_picker.py` — Phase 4 Early/Late EV pickers. `--bot early` runs 1×/day via `paper-bets-early.yml`; `--bot late` runs every 30 min appended to `scanner-poll.yml`.
 - `kahla-scanner/_lib/sharp.py` — sharp-score math + sharp-side detection. Used by the paper-bet picker. (`sharp_alerts.py` still has local copies of these helpers — DRY violation kept on purpose to minimise blast radius on the live alert pipeline; both implementations are bytewise identical and any future fix lands in both.)
 - `kahla-scanner/_lib/paper_bets.py` — paper-bet shared helpers: PIN devig, best-entry finder, score formula, dedup check, insert helper, snapshot loaders.
@@ -513,9 +513,9 @@ All three bots ride the existing `scanner-poll.yml` 30-min cron — no extra wor
 
 | Bot | Trigger / window | Cap | Where |
 |---|---|---|---|
-| **steam** | A Telegram STEAM alert fires (5+ books moved same direction in last ~30 min) | uncapped (steam is rare; ~0-3/day in practice) | Logged from `scripts/sharp_alerts.py` after a successful Telegram send + dedup pass. |
-| **early** | Cumulative PIN movement on games starting in 12–18h | top 5 per run | Appended step in `scanner-poll.yml`. |
-| **late** | Cumulative PIN movement on games starting in 0–2h | top 5 per run | Appended step in `scanner-poll.yml`. |
+| **steam** | A STEAM detection fires (5+ books moved same direction in last ~30 min, PIN confirming) | uncapped (steam is rare; ~0-3/day in practice) | Logged from `scripts/sharp_alerts.py`. Runs with `STEAM_SILENT=1` in `scanner-poll.yml` — Telegram send is a no-op; the dedup + paper-bet logging path still executes. UFC blocked via `pb.BLOCKED_SPORTS`. |
+| **early** | Cumulative PIN movement on games starting in 10–36h | top 5 per run | Appended step in `scanner-poll.yml`. UFC blocked. |
+| **late** | Cumulative PIN movement on games starting in 0–5h | top 5 per run | Appended step in `scanner-poll.yml`. UFC blocked. |
 
 ### Stage 1 — live (this commit)
 

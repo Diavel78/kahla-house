@@ -168,7 +168,15 @@ def _sharp_side_total(over_point_diff, over_price_diff):
 # ──────────────────────── Telegram ────────────────────────────
 def _telegram_send(token, chat_id, text):
     """POST to Telegram sendMessage. Returns True on 200, else False
-    (logged). Uses Markdown so price/odds formatting renders nicely."""
+    (logged). Uses Markdown so price/odds formatting renders nicely.
+
+    When `STEAM_SILENT=1`, returns True without hitting Telegram. The
+    rest of the steam pipeline (alert dedup + paper-bet logging) checks
+    this return value as "alert successful", so a no-op True keeps the
+    paper-bet logger running. Lets the bot keep recording picks without
+    flooding the user's phone."""
+    if (os.environ.get("STEAM_SILENT") or "").strip() in ("1", "true", "yes"):
+        return True
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = json.dumps({
         "chat_id": chat_id,
@@ -756,9 +764,12 @@ def main(argv=None):
 
     token   = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     chat_id = (os.environ.get("TELEGRAM_CHAT_ID")   or "").strip()
-    if not token or not chat_id:
+    silent  = (os.environ.get("STEAM_SILENT") or "").strip() in ("1", "true", "yes")
+    if not silent and (not token or not chat_id):
         log.warning("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — exiting (no-op).")
         return 0
+    if silent:
+        log.info("STEAM_SILENT=1 — running detection + paper-bet logging only")
 
     sb = db.client()
     markets = _fetch_active_markets(sb)
@@ -793,6 +804,10 @@ def main(argv=None):
     sent_sharp = 0
     for mid in market_ids:
         market = market_by_id[mid]
+        # Skip blocklisted sports (UFC) — paper-bet resolver can't grade
+        # them, so logging steam picks would just queue dead rows.
+        if (market.get("sport") or "") in pb.BLOCKED_SPORTS:
+            continue
         away, home = _split_event_name(market.get("event_name") or "")
         if not (away and home): continue
 
