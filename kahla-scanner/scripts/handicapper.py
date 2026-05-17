@@ -42,7 +42,6 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from _lib import paper_bets as pb
-from _lib import sharp
 from _lib.normalize import american_to_prob, devig_two_way
 from storage import supabase_client as db
 
@@ -181,37 +180,270 @@ def _latest_snapshots(sb, market_id: str) -> dict:
     return out
 
 
-def _pin_opener(sb, market_id: str) -> dict:
-    """Earliest PIN snapshot per (market_type, side)."""
+# ─── Recency-weighted PIN history (Pick Bot scoring) ───────────────────
+# Replaces the legacy "earliest PIN snap of all time" anchor with a
+# 18h-capped rolling history. Sharp side + score are computed from the
+# weighted sum of consecutive deltas, where each delta is amplified by
+# how recent its newer endpoint is. Result: late steam (last 15 min)
+# dominates the score, 18h-old news barely contributes.
+#
+# Pick Bot scope ONLY. _lib.sharp.* (used by paper_bets pickers and
+# steam alerts) is unchanged — Sharp Bot keeps its own 1-12h opener
+# window logic.
+
+_PIN_HISTORY_HOURS = 18
+
+# Same weight table as handicapper_web.py — keep them aligned so the
+# web flow and the in-chat CLI produce the same score for the same data.
+_RECENCY_WEIGHTS: tuple[tuple[float, float], ...] = (
+    (15,   1.00),
+    (60,   0.60),
+    (120,  0.35),
+    (360,  0.18),
+    (1080, 0.08),
+)
+
+
+def _recency_weight(age_min: float) -> float:
+    if age_min < 0:
+        age_min = 0
+    for cap, w in _RECENCY_WEIGHTS:
+        if age_min < cap:
+            return w
+    return 0.0
+
+
+def _amer_to_cents(p: Any) -> float | None:
+    if p is None:
+        return None
+    try:
+        p = float(p)
+    except (TypeError, ValueError):
+        return None
+    if p < 0:
+        return -p - 100
+    if p > 0:
+        return -(p - 100)
+    return 0
+
+
+def _snap_age_min(snap: dict, now: datetime) -> float:
+    ts = snap.get("captured_at")
+    if not ts:
+        return 1e9
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except Exception:
+        return 1e9
+    return max(0.0, (now - dt).total_seconds() / 60.0)
+
+
+def _weighted_signed_delta(snaps: list[dict], field: str, *,
+                           transform: Any = None,
+                           now: datetime | None = None) -> float:
+    if not snaps or len(snaps) < 2:
+        return 0.0
+    now = now or datetime.now(timezone.utc)
+    total = 0.0
+    prev_val = snaps[0].get(field)
+    if transform is not None:
+        prev_val = transform(prev_val)
+    if prev_val is None:
+        prev_val = 0
+    for cur in snaps[1:]:
+        cur_val = cur.get(field)
+        if transform is not None:
+            cur_val = transform(cur_val)
+        if cur_val is None:
+            continue
+        delta = cur_val - prev_val
+        if delta:
+            total += delta * _recency_weight(_snap_age_min(cur, now))
+        prev_val = cur_val
+    return total
+
+
+def _weighted_sharp_for_ml(home_snaps: list[dict],
+                           away_snaps: list[dict]) -> tuple | None:
+    now = datetime.now(timezone.utc)
+    h_avail = len(home_snaps) >= 2
+    a_avail = len(away_snaps) >= 2
+    if not (h_avail or a_avail):
+        return None
+    h_w = (_weighted_signed_delta(home_snaps, "price_american",
+                                   transform=_amer_to_cents, now=now)
+           if h_avail else 0.0)
+    a_w = (_weighted_signed_delta(away_snaps, "price_american",
+                                   transform=_amer_to_cents, now=now)
+           if a_avail else 0.0)
+    if h_avail and a_avail:
+        if abs(h_w - a_w) < 0.5:
+            return None
+        if h_w > a_w:
+            side, snaps, weighted = "home", home_snaps, h_w
+        else:
+            side, snaps, weighted = "away", away_snaps, a_w
+    elif h_avail:
+        if h_w <= 0.5:
+            return None
+        side, snaps, weighted = "home", home_snaps, h_w
+    else:
+        if a_w <= 0.5:
+            return None
+        side, snaps, weighted = "away", away_snaps, a_w
+    score = min(10, round(abs(weighted)))
+    if score <= 0:
+        return None
+    return side, score, snaps[0], snaps[-1]
+
+
+def _weighted_sharp_for_spread(home_snaps: list[dict],
+                               away_snaps: list[dict]) -> tuple | None:
+    now = datetime.now(timezone.utc)
+    h_avail = len(home_snaps) >= 2
+    a_avail = len(away_snaps) >= 2
+    if not (h_avail or a_avail):
+        return None
+    h_line = _weighted_signed_delta(home_snaps, "line", now=now) if h_avail else 0.0
+    a_line = _weighted_signed_delta(away_snaps, "line", now=now) if a_avail else 0.0
+    h_px = (_weighted_signed_delta(home_snaps, "price_american",
+                                    transform=_amer_to_cents, now=now)
+            if h_avail else 0.0)
+    a_px = (_weighted_signed_delta(away_snaps, "price_american",
+                                    transform=_amer_to_cents, now=now)
+            if a_avail else 0.0)
+
+    if h_avail and a_avail:
+        line_diff = h_line - a_line
+        if abs(line_diff) >= 0.05:
+            if h_line < a_line:
+                side, snaps, score_mag = "home", home_snaps, abs(h_line) * 10
+            else:
+                side, snaps, score_mag = "away", away_snaps, abs(a_line) * 10
+        else:
+            px_diff = h_px - a_px
+            if abs(px_diff) < 1.0:
+                return None
+            if h_px > a_px:
+                side, snaps, score_mag = "home", home_snaps, abs(h_px)
+            else:
+                side, snaps, score_mag = "away", away_snaps, abs(a_px)
+    else:
+        ref_snaps = home_snaps if h_avail else away_snaps
+        ref_is_home = h_avail
+        rl = _weighted_signed_delta(ref_snaps, "line", now=now)
+        rp = _weighted_signed_delta(ref_snaps, "price_american",
+                                     transform=_amer_to_cents, now=now)
+        if abs(rl) >= 0.05:
+            ref_harder = rl < 0
+            score_mag = abs(rl) * 10
+        elif abs(rp) >= 1.0:
+            ref_harder = rp > 0
+            score_mag = abs(rp)
+        else:
+            return None
+        if ref_is_home:
+            side = "home" if ref_harder else "away"
+        else:
+            side = "away" if ref_harder else "home"
+        if (side == "home") != ref_is_home:
+            return None
+        snaps = ref_snaps
+
+    score = min(10, round(score_mag))
+    if score <= 0:
+        return None
+    return side, score, snaps[0], snaps[-1]
+
+
+def _weighted_sharp_for_total(over_snaps: list[dict],
+                              under_snaps: list[dict]) -> tuple | None:
+    now = datetime.now(timezone.utc)
+    o_avail = len(over_snaps) >= 2
+    u_avail = len(under_snaps) >= 2
+    if not (o_avail or u_avail):
+        return None
+
+    def _mag(snaps: list[dict]) -> tuple[float, float]:
+        ln = abs(_weighted_signed_delta(snaps, "line", now=now))
+        px = abs(_weighted_signed_delta(snaps, "price_american",
+                                         transform=_amer_to_cents, now=now))
+        return ln, px
+
+    if o_avail and u_avail:
+        if _mag(over_snaps) >= _mag(under_snaps):
+            ref_snaps, ref_is_over = over_snaps, True
+        else:
+            ref_snaps, ref_is_over = under_snaps, False
+    elif o_avail:
+        ref_snaps, ref_is_over = over_snaps, True
+    else:
+        ref_snaps, ref_is_over = under_snaps, False
+
+    line_w = _weighted_signed_delta(ref_snaps, "line", now=now)
+    price_w = _weighted_signed_delta(ref_snaps, "price_american",
+                                       transform=_amer_to_cents, now=now)
+
+    if abs(line_w) >= 0.05:
+        side = "over" if line_w > 0 else "under"
+        score_mag = abs(line_w) * 10
+    elif abs(price_w) >= 1.0:
+        if price_w > 0:
+            side = "over" if ref_is_over else "under"
+        else:
+            side = "under" if ref_is_over else "over"
+        score_mag = abs(price_w)
+    else:
+        return None
+
+    score = min(10, round(score_mag))
+    if score <= 0:
+        return None
+    ref_side = "over" if ref_is_over else "under"
+    return side, score, ref_snaps[0], ref_snaps[-1], ref_side
+
+
+def _pin_history(sb, market_id: str) -> dict[tuple[str, str], list[dict]]:
+    """All PIN snapshots in the last 18h, grouped by (market_type, side),
+    sorted ASC by captured_at. Replaces the legacy `_pin_opener` which
+    returned only the all-time-earliest snap per side.
+    """
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(hours=_PIN_HISTORY_HOURS)).isoformat()
     rows = (sb.table("book_snapshots")
             .select("market_type,side,price_american,line,captured_at")
             .eq("market_id", market_id)
             .eq("book", "PIN")
+            .gte("captured_at", cutoff)
             .order("captured_at")
-            .limit(1000)
+            .limit(5000)
             .execute().data) or []
-    out: dict = {}
+    out: dict[tuple[str, str], list[dict]] = {}
     for r in rows:
         key = (r["market_type"], r["side"])
-        if key not in out:
-            out[key] = r
+        out.setdefault(key, []).append(r)
     return out
 
 
 def _build_market_block(market_type: str, sides: tuple[str, str],
-                        latest: dict, pin_opener: dict) -> dict:
+                        latest: dict, pin_history: dict) -> dict:
     """One block per market type. Shape:
        {pin: {a: {price, line, fair_prob}, b: {...}, devig: {a, b}},
         opener_pin: {a: {price, line}, b: {...}},
         movement: {sharp_side, score, opener_price, current_price, ...},
         best_entry: {a: {book, price, line, edge_pp}, b: {...}},
-        all_books: [{book, a_price, b_price, ...}, ...]}"""
+        all_books: [{book, a_price, b_price, ...}, ...]}
+
+    `pin_history` is the new shape: {(market_type, side): [snaps...]}.
+    The displayed opener is the oldest snap in the 18h window."""
     a, b = sides
 
     pin_a = latest.get(("PIN", market_type, a))
     pin_b = latest.get(("PIN", market_type, b))
-    op_a  = pin_opener.get((market_type, a))
-    op_b  = pin_opener.get((market_type, b))
+    snaps_a = pin_history.get((market_type, a), [])
+    snaps_b = pin_history.get((market_type, b), [])
+    op_a  = snaps_a[0] if snaps_a else None
+    op_b  = snaps_b[0] if snaps_b else None
 
     # Devig PIN current to fair prob per side. SPR/TOT need matched lines.
     fair_a = fair_b = None
@@ -231,35 +463,41 @@ def _build_market_block(market_type: str, sides: tuple[str, str],
             except (ValueError, TypeError):
                 pass
 
-    # Sharp side / score using existing _lib.sharp helpers (need the
-    # same key shape as paper_bets — (market_id, market_type, side)).
-    # We synthesize a fake market_id so the helper functions work.
-    fake_mid = "X"
-    op_keyed = {(fake_mid, market_type, s): v for (mt, s), v in pin_opener.items() if mt == market_type for _ in [0]}
-    cur_keyed = {(fake_mid, "PIN", market_type, s): v for (b_, mt, s), v in latest.items()
-                 if b_ == "PIN" and mt == market_type}
-    pin_cur_keyed = {(fake_mid, market_type, s): v
-                     for (b_, mt, s), v in latest.items()
-                     if b_ == "PIN" and mt == market_type}
-
-    sharp_result = None
+    # Recency-weighted sharp side + score. Local helpers, not _lib.sharp
+    # (that one's reserved for paper_bets / steam — different window).
     if market_type == "moneyline":
-        sharp_result = sharp.sharp_for_ml(fake_mid, op_keyed, pin_cur_keyed)
+        sharp_result = _weighted_sharp_for_ml(
+            pin_history.get(("moneyline", "home"), []),
+            pin_history.get(("moneyline", "away"), []),
+        )
     elif market_type == "spread":
-        sharp_result = sharp.sharp_for_spread(fake_mid, op_keyed, pin_cur_keyed)
-    elif market_type == "total":
-        sharp_result = sharp.sharp_for_total(fake_mid, op_keyed, pin_cur_keyed)
+        sharp_result = _weighted_sharp_for_spread(
+            pin_history.get(("spread", "home"), []),
+            pin_history.get(("spread", "away"), []),
+        )
+    else:
+        sharp_result = _weighted_sharp_for_total(
+            pin_history.get(("total", "over"), []),
+            pin_history.get(("total", "under"), []),
+        )
 
     movement = None
     if sharp_result:
-        side, score, op, cu = sharp_result
+        if len(sharp_result) == 5:
+            side, score, op, cu, ref_side = sharp_result
+        else:
+            side, score, op, cu = sharp_result
+            ref_side = side
         movement = {
             "sharp_side": side,
             "sharp_score": score,
+            "ref_side":   ref_side,
             "opener_price": op["price_american"],
             "opener_line":  op.get("line"),
+            "opener_captured": op.get("captured_at"),
             "current_price": cu["price_american"],
             "current_line":  cu.get("line"),
+            "window_hours":  _PIN_HISTORY_HOURS,
         }
 
     # Best non-PIN entry per side. For SPR/TOT we line-gate to PIN's
@@ -712,7 +950,7 @@ def build_dossier(sb, query: str, sport_hint: str | None) -> dict:
 
     # Odds: ML / SPR / TOT
     latest = _latest_snapshots(sb, market["id"])
-    pin_op = _pin_opener(sb, market["id"])
+    pin_op = _pin_history(sb, market["id"])
     odds = {
         "moneyline": _build_market_block("moneyline", ("away", "home"),
                                           latest, pin_op),
