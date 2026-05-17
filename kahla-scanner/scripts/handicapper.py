@@ -159,13 +159,19 @@ def _find_market(sb, query: str, sport_hint: str | None
 # ──────────────────────────── Odds dossier ────────────────────────────
 
 def _latest_snapshots(sb, market_id: str) -> dict:
-    """All books, all (market_type, side) within last 24h. Same anchor
-    pattern as _lib.paper_bets.fetch_latest_snapshots but for one market."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    """Latest snapshot per (book, market_type, side) for one market —
+    NO time cutoff (was 24h). PIN dedup means a steady line on PIN can
+    have its only row hours or even days old (CLAUDE.md gotcha #10);
+    a hard 24h cutoff would filter PIN out and show "no PIN data" while
+    PIN is in fact on screen everywhere else.
+
+    Scoped to one market_id so the result set is small — even a stable
+    game has at most ~14 books × 3 markets × 2 sides ≈ 84 keys. We
+    over-fetch (limit 5000) for safety, then take first-per-key from
+    the desc-ordered list."""
     rows = (sb.table("book_snapshots")
             .select("book,market_type,side,price_american,line,captured_at")
             .eq("market_id", market_id)
-            .gte("captured_at", cutoff)
             .order("captured_at", desc=True)
             .limit(5000)
             .execute().data) or []
