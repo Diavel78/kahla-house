@@ -1142,11 +1142,6 @@
                         const evtCount = dg.events_returned != null ? `${dg.events_returned} events` : '';
                         const sfb = dg.search_fallback_returned != null
                             ? ` · search fallback ${dg.search_fallback_returned}` : '';
-                        // Per-event match-attempt diagnostic. Shows which
-                        // events were considered and whether each passed
-                        // the team-name match — fastest way to see whether
-                        // matching is broken vs the event isn't in the
-                        // response at all.
                         let attemptLines = '';
                         if (Array.isArray(dg.match_attempts) && dg.match_attempts.length) {
                             attemptLines = '<div style="margin-top:4px;font-family:JetBrains Mono,monospace">' +
@@ -1159,7 +1154,25 @@
                         const normedHomeAway = (dg.normalized_away || dg.normalized_home)
                             ? `<div style="margin-top:2px">looking for: <b>${_esc(dg.normalized_away||'')}</b> + <b>${_esc(dg.normalized_home||'')}</b> (tokens: ${_esc(dg.away_last_token||'')}, ${_esc(dg.home_last_token||'')})</div>`
                             : '';
-                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:4px">PMM debug: tag=${_esc(dg.tag || '?')} · ${evtCount}${sfb}${pm.error ? ' · err: ' + _esc(String(pm.error).slice(0, 80)) : ''}${normedHomeAway}${attemptLines}</div>`;
+                        // Post-match diagnostics — what happened after a
+                        // successful team match (markets fetch attempts).
+                        // These tell us why lookup() returned None despite
+                        // matching.
+                        const postMatchBits = [];
+                        if (dg.matched_markets_count != null)
+                            postMatchBits.push(`matched_markets_count: ${dg.matched_markets_count}`);
+                        if (dg.markets_list_count != null)
+                            postMatchBits.push(`markets_list_count: ${dg.markets_list_count}`);
+                        if (dg.markets_list_error)
+                            postMatchBits.push(`markets_list_error: ${String(dg.markets_list_error).slice(0,100)}`);
+                        if (dg.retrieved_full_via_slug)
+                            postMatchBits.push(`retrieved_full_via_slug: ${dg.retrieved_full_via_slug}`);
+                        if (dg.retrieve_by_slug_error)
+                            postMatchBits.push(`retrieve_by_slug_error: ${String(dg.retrieve_by_slug_error).slice(0,100)}`);
+                        const postMatch = postMatchBits.length
+                            ? `<div style="margin-top:2px;color:var(--orange)">post-match: ${_esc(postMatchBits.join(' · '))}</div>`
+                            : '';
+                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:4px">PMM debug: tag=${_esc(dg.tag || '?')} · ${evtCount}${sfb}${pm.error ? ' · err: ' + _esc(String(pm.error).slice(0, 80)) : ''}${normedHomeAway}${attemptLines}${postMatch}</div>`;
                     }
                     metaLine = `Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow} <span style="color:var(--text-muted);font-size:10px">(no PMM match — projection skipped)</span>${dbg}`;
                 }
