@@ -456,9 +456,22 @@ All silent — never breaks the dossier. Cascading fallbacks:
 - BBO per market_slug: 30 sec.
 Both are module-level dicts in `pmm_markets.py` — survive across requests on a warm Vercel container, cold start resets.
 
+### PMM API schema gotchas
+
+The `polymarket_us` SDK's TypedDict declarations for Market/Event don't match the actual API response shape. Things learned the hard way (May 2026 build):
+
+- **Market field is `question`, NOT `title`.** TypedDict declares `title: str` but it comes back null. The human-readable text is in `question`.
+- **No `team` field on markets.** Team identity is encoded in `question` text only (e.g., "Spread: Baltimore Orioles (+4.5)" — the team named first is the YES side).
+- **Each PMM market is a single binary YES/NO.** Not "one market per side." For a game, PMM has e.g. `Spread: Orioles (+4.5)` as ONE market where YES = Orioles cover. The other side (Rays -4.5) is derived by inverting bid/ask. `pmm_markets._inverse_quote` + `_inverse_side` synthesize this.
+- **`outcomes` and `outcomePrices` arrays are null** in markets.list responses. Don't rely on them. Use `bestBidQuote` / `bestAskQuote` (embedded objects with `{value, currency}`) instead.
+- **`events.list` returns event metadata with EMPTY `markets` array.** To get the actual markets, follow with `markets.list({eventSlug: [matched_slug]})`. `pmm_markets._search_event` does this; don't remove it.
+- **Use `sportsMarketTypeV2` for classification.** `SPORTS_MARKET_TYPE_MONEYLINE` / `_SPREAD` / `_TOTAL`. The lowercase `sportsMarketType` v1 field disambiguates prop variants (skip anything that's not `moneyline` / `spreads` / `totals` / `h2h` — variants like `baseball_team_first_five_total` map to `_TOTAL` but aren't main lines).
+- **Line is in `line` field directly.** Floating-point, always positive for spreads (sign is implicit by team perspective). `pmm_push_rates.project_fair_to_half_point` handles the sign flip when projecting to the inverse side.
+- **PMM convention for totals: YES = OVER.** If a market's `question` explicitly says "under" we honor it; otherwise default to over.
+
 ### What to update when PMM coverage changes
 
-If PMM adds/drops a sport: update `_SPORT_TAG_SLUG` in `pmm_markets.py`. If PMM's market title / outcome format changes (rare but it's happened), the heuristics in `_classify_market` are the place to fix. The `dossier.pmm_meta.error` + matched/event_slug fields make this visible to the UI for debugging.
+If PMM adds/drops a sport: update `_SPORT_TAG_SLUG` in `pmm_markets.py`. If PMM's market `question` / `sportsMarketTypeV2` format changes, fix `_classify_market`. The `dossier.pmm_meta.error` + matched/event_slug fields make this visible to the UI for debugging.
 
 ---
 
