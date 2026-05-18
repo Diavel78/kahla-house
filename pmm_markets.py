@@ -240,6 +240,28 @@ def _search_event(client, sport: str, away: str, home: str,
             (e.get("title") if isinstance(e, dict) else getattr(e, "title", ""))
             for e in events[:8]
         ]
+        # Show normalized inputs + per-event match attempts so we can
+        # see exactly which event the matcher considered and why it
+        # rejected each. Truncate at 8 to keep payload small.
+        diag["normalized_away"] = _norm(away)
+        diag["normalized_home"] = _norm(home)
+        away_last_dbg = _last_token(away)
+        home_last_dbg = _last_token(home)
+        diag["away_last_token"] = away_last_dbg
+        diag["home_last_token"] = home_last_dbg
+        attempts_dbg = []
+        for e in events[:8]:
+            t = e.get("title") if isinstance(e, dict) else getattr(e, "title", "")
+            tn = _norm(t)
+            attempts_dbg.append({
+                "title":         t,
+                "title_norm":    tn,
+                "p1_away":       _name_match(t, away),
+                "p1_home":       _name_match(t, home),
+                "p2_away_tok":   bool(away_last_dbg and away_last_dbg in tn),
+                "p2_home_tok":   bool(home_last_dbg and home_last_dbg in tn),
+            })
+        diag["match_attempts"] = attempts_dbg
 
     matched = _match_event_to_game(events, away, home)
     # If filter-based search returned nothing useful, try a name search.

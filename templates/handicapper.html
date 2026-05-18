@@ -1139,11 +1139,27 @@
                     const dg = pm.diag || {};
                     let dbg = '';
                     if (pm.error || dg.events_returned != null) {
-                        const titles = (dg.sample_event_titles || []).slice(0, 3).join(' · ');
                         const evtCount = dg.events_returned != null ? `${dg.events_returned} events` : '';
                         const sfb = dg.search_fallback_returned != null
                             ? ` · search fallback ${dg.search_fallback_returned}` : '';
-                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:4px">PMM debug: tag=${_esc(dg.tag || '?')} · ${evtCount}${sfb}${titles ? ' · sample: ' + _esc(titles) : ''}${pm.error ? ' · err: ' + _esc(String(pm.error).slice(0, 80)) : ''}</div>`;
+                        // Per-event match-attempt diagnostic. Shows which
+                        // events were considered and whether each passed
+                        // the team-name match — fastest way to see whether
+                        // matching is broken vs the event isn't in the
+                        // response at all.
+                        let attemptLines = '';
+                        if (Array.isArray(dg.match_attempts) && dg.match_attempts.length) {
+                            attemptLines = '<div style="margin-top:4px;font-family:JetBrains Mono,monospace">' +
+                                dg.match_attempts.slice(0, 8).map(a => {
+                                    const flags = `p1[a:${a.p1_away?'✓':'✗'} h:${a.p1_home?'✓':'✗'}] p2[a:${a.p2_away_tok?'✓':'✗'} h:${a.p2_home_tok?'✓':'✗'}]`;
+                                    return `<div style="padding-left:6px">${_esc(a.title || '(no title)')} — ${flags}</div>`;
+                                }).join('') +
+                                '</div>';
+                        }
+                        const normedHomeAway = (dg.normalized_away || dg.normalized_home)
+                            ? `<div style="margin-top:2px">looking for: <b>${_esc(dg.normalized_away||'')}</b> + <b>${_esc(dg.normalized_home||'')}</b> (tokens: ${_esc(dg.away_last_token||'')}, ${_esc(dg.home_last_token||'')})</div>`
+                            : '';
+                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:4px">PMM debug: tag=${_esc(dg.tag || '?')} · ${evtCount}${sfb}${pm.error ? ' · err: ' + _esc(String(pm.error).slice(0, 80)) : ''}${normedHomeAway}${attemptLines}</div>`;
                     }
                     metaLine = `Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow} <span style="color:var(--text-muted);font-size:10px">(no PMM match — projection skipped)</span>${dbg}`;
                 }
