@@ -264,26 +264,65 @@ def _search_event(client, sport: str, away: str, home: str,
         diag["match_attempts"] = attempts_dbg
 
     matched = _match_event_to_game(events, away, home)
-    # Events.list returns event metadata + tags but NOT the nested
-    # markets list (despite Event's TypedDict declaring markets). So
-    # after we identify the match, refetch via retrieve_by_slug to get
-    # the actual markets. Without this, lookup() returns None for every
-    # game (markets list empty → guard at the top returns None).
+    # Events.list returns event metadata but NOT the nested markets
+    # list (despite Event's TypedDict declaring markets). Hit the
+    # markets.list endpoint directly with eventSlug filter — that one
+    # IS documented to return markets. Try retrieve_by_slug as a
+    # secondary fallback in case markets.list doesn't work for some
+    # event types.
     if matched is not None:
         slug = matched.get("slug") if isinstance(matched, dict) else getattr(matched, "slug", None)
-        markets = matched.get("markets") if isinstance(matched, dict) else getattr(matched, "markets", None)
-        markets = markets or []
-        if not markets and slug:
+        existing_markets = matched.get("markets") if isinstance(matched, dict) else getattr(matched, "markets", None)
+        existing_markets = existing_markets or []
+        if not existing_markets and slug:
+            fetched_markets: list = []
+            # Approach A: markets.list(eventSlug=[slug])
             try:
-                full = client.events.retrieve_by_slug(slug)
-                ev_full = full.get("event") if isinstance(full, dict) else getattr(full, "event", None)
-                if ev_full is not None:
-                    matched = ev_full
-                    if diag is not None:
-                        diag["retrieved_full_via_slug"] = slug
+                mresp = client.markets.list({
+                    "eventSlug": [slug],
+                    "closed":    False,
+                    "limit":     100,
+                })
+                ms = mresp.get("markets") if isinstance(mresp, dict) else getattr(mresp, "markets", None)
+                fetched_markets = ms or []
+                if diag is not None:
+                    diag["markets_list_count"] = len(fetched_markets)
             except Exception as e:
                 if diag is not None:
-                    diag["retrieve_by_slug_error"] = str(e)[:200]
+                    diag["markets_list_error"] = str(e)[:200]
+            # Approach B: events.retrieve_by_slug (returns event with
+            # markets sometimes — depends on PMM endpoint behavior).
+            if not fetched_markets:
+                try:
+                    full = client.events.retrieve_by_slug(slug)
+                    ev_full = full.get("event") if isinstance(full, dict) else getattr(full, "event", None)
+                    if ev_full is not None:
+                        mk = ev_full.get("markets") if isinstance(ev_full, dict) else getattr(ev_full, "markets", None)
+                        if mk:
+                            fetched_markets = mk
+                            if diag is not None:
+                                diag["retrieved_full_via_slug"] = slug
+                except Exception as e:
+                    if diag is not None:
+                        diag["retrieve_by_slug_error"] = str(e)[:200]
+            # Attach fetched markets back onto the matched event so
+            # downstream code (_event_to_dict) sees them.
+            if fetched_markets:
+                if isinstance(matched, dict):
+                    matched["markets"] = fetched_markets
+                else:
+                    try:
+                        setattr(matched, "markets", fetched_markets)
+                    except Exception:
+                        # If we can't mutate the SDK object, wrap into
+                        # a plain dict carrying the markets.
+                        matched = {
+                            "id":        matched.get("id") if hasattr(matched, "get") else getattr(matched, "id", None),
+                            "slug":      slug,
+                            "title":     matched.get("title") if hasattr(matched, "get") else getattr(matched, "title", ""),
+                            "startTime": matched.get("startTime") if hasattr(matched, "get") else getattr(matched, "startTime", ""),
+                            "markets":   fetched_markets,
+                        }
         if diag is not None:
             mk = matched.get("markets") if isinstance(matched, dict) else getattr(matched, "markets", None)
             diag["matched_markets_count"] = len(mk or [])
