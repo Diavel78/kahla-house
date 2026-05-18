@@ -115,6 +115,34 @@ def _name_match(haystack: str, needle: str) -> bool:
     return n in h or h in n
 
 
+def _side_by_first_mention(question: str, away: str, home: str) -> str | None:
+    """Pick home/away based on which team is named FIRST in the question.
+    PMM questions like "Spread: Baltimore Orioles (+4.5)" or "Baltimore
+    Orioles to win" name the YES-side team first. If both teams appear
+    (e.g., "Team A to win vs Team B"), the earlier one is YES.
+
+    Returns "home", "away", or None if neither team is found."""
+    q = _norm(question)
+    if not q:
+        return None
+    a, h = _norm(away), _norm(home)
+    a_pos = q.find(a) if a else -1
+    h_pos = q.find(h) if h else -1
+    if a_pos < 0 and h_pos < 0:
+        # Last-token fallback (PMM sometimes uses just the nickname)
+        a_last = _last_token(away)
+        h_last = _last_token(home)
+        a_pos = q.find(a_last) if a_last else -1
+        h_pos = q.find(h_last) if h_last else -1
+    if a_pos < 0 and h_pos < 0:
+        return None
+    if h_pos < 0:
+        return "away"
+    if a_pos < 0:
+        return "home"
+    return "away" if a_pos < h_pos else "home"
+
+
 def _last_token(team_name: str) -> str:
     """Last word in a team name. 'Baltimore Orioles' → 'orioles'.
     Used as a looser match fallback when PMM uses just the team
@@ -433,44 +461,49 @@ def _event_to_dict(ev: Any) -> dict:
 
 
 def _market_to_dict(m: Any) -> dict:
+    """Normalize one SDK Market into a plain dict containing only the
+    fields downstream code uses. PMM's actual response shape (post-
+    discovery): question / sportsMarketType{V2} / line / bestBidQuote /
+    bestAskQuote / marketSides. No `team` field at all (post-discovery
+    May 2026)."""
     def g(k):
         return m.get(k) if isinstance(m, dict) else getattr(m, k, None)
-    team = g("team")
-    team_dict = None
-    if team:
-        tg = (lambda k: team.get(k) if isinstance(team, dict) else getattr(team, k, None))
-        team_dict = {
-            "name":         tg("name"),
-            "abbreviation": tg("abbreviation"),
-            "alias":        tg("alias"),
-            "safeName":     tg("safeName"),
-        }
     return {
-        "id":      g("id"),
-        "slug":    g("slug"),
-        "title":   g("title"),
-        "outcome": g("outcome"),
-        "active":  g("active"),
-        "closed":  g("closed"),
-        "team":    team_dict,
+        "id":                  g("id"),
+        "slug":                g("slug"),
+        "question":            g("question"),
+        "description":         g("description"),
+        "sportsMarketType":    g("sportsMarketType"),
+        "sportsMarketTypeV2":  g("sportsMarketTypeV2"),
+        "line":                g("line"),
+        "spreadTotalSuffix":   g("spreadTotalSuffix"),
+        "marketSides":         g("marketSides"),
+        "bestBidQuote":        g("bestBidQuote"),
+        "bestAskQuote":        g("bestAskQuote"),
+        "active":              g("active"),
+        "closed":              g("closed"),
     }
 
 
 # ──────────────────────────── Market classification ────────────────────────────
 
-# Total line pattern. PMM titles often look like:
-#   "Cleveland Cavaliers vs. Detroit Pistons - Total Over/Under 215.5"
-# or outcomes look like "Over 215.5" / "Under 215.5".
-_TOTAL_LINE_RE = re.compile(r"\b(?:o|over|u|under|total)\s*(\d+(?:\.\d+)?)\b", re.IGNORECASE)
-# Spread line pattern. Outcomes look like "Cleveland Cavaliers -7.5"
-# or titles include "Spread" with the line. Handles both `-7.5` and
-# `+7.5` forms.
-_SPREAD_LINE_RE = re.compile(r"([+-]\d+(?:\.\d+)?)\b")
-# Heuristic keyword sets for market type. Polymarket varies these by
-# era / sport so we keep them loose.
-_TOTAL_KEYWORDS = ("total", "over/under", "over under", "points scored")
-_SPREAD_KEYWORDS = ("spread", "handicap")
-_ML_KEYWORDS = ("moneyline", "match winner", "to win")
+# sportsMarketTypeV2 → our market_type bucket. Field is directly on
+# each market in the API response (no regex on titles needed). Variants
+# like `baseball_team_first_five_total` are filed under SPORTS_MARKET_
+# TYPE_TOTAL too — we filter those out by checking the lowercase
+# sportsMarketType (v1) field against a primary-types allowlist.
+_MARKET_TYPE_BUCKET: dict[str, str] = {
+    "SPORTS_MARKET_TYPE_MONEYLINE": "ml",
+    "SPORTS_MARKET_TYPE_SPREAD":    "spread",
+    "SPORTS_MARKET_TYPE_TOTAL":     "total",
+}
+# Primary-type slugs we accept. Anything else under the same V2 bucket
+# is a prop variation (e.g. first-five-innings, first-inning, etc.).
+_PRIMARY_TYPE_SLUGS: set[str] = {
+    "moneyline", "h2h",
+    "spreads", "spread", "handicap",
+    "totals", "total", "over_under",
+}
 
 
 def _classify_market(m: dict, away: str, home: str
@@ -482,61 +515,115 @@ def _classify_market(m: dict, away: str, home: str
       line:        float for spread/total, None for ml
       side:        "home" | "away" for ml/spread, "over" | "under" for total
 
-    Heuristic — Polymarket's market titles vary, so we look at title +
-    outcome + team name together. Returns None when we can't confidently
-    classify (don't guess on ambiguous markets)."""
-    title = (m.get("title") or "").lower()
-    outcome = (m.get("outcome") or "").lower()
-    team = (m.get("team") or {}).get("name") or ""
+    Uses the real API schema (post-discovery May 2026):
+      sportsMarketTypeV2: 'SPORTS_MARKET_TYPE_MONEYLINE' / '_SPREAD' / '_TOTAL'
+      sportsMarketType:   'moneyline' / 'spreads' / 'totals' / variants
+      line:               numeric line (e.g. 4.5)
+      question:           human-readable like "Spread: Baltimore Orioles (+4.5)"
+                          → encodes which team is the YES side
+    """
+    v2 = m.get("sportsMarketTypeV2") or ""
+    v1 = (m.get("sportsMarketType") or "").lower()
+    bucket = _MARKET_TYPE_BUCKET.get(v2)
+    if not bucket:
+        return None
+    # Skip prop variants (first-five, first-inning, etc.) — they live
+    # under the same V2 bucket but have non-primary V1 slugs.
+    if v1 not in _PRIMARY_TYPE_SLUGS:
+        return None
 
-    # TOTAL — title or outcome mentions over/under
-    if any(k in title for k in _TOTAL_KEYWORDS) or outcome.startswith(("over ", "under ", "o ", "u ")):
-        mt = _TOTAL_LINE_RE.search(outcome) or _TOTAL_LINE_RE.search(title)
-        if not mt:
-            return None
-        line = float(mt.group(1))
-        if outcome.startswith(("over", "o ")) or "over" in outcome:
-            side = "over"
-        elif outcome.startswith(("under", "u ")) or "under" in outcome:
-            side = "under"
-        else:
-            return None
-        return ("total", line, side)
+    line = m.get("line")
+    if line is not None:
+        try:
+            line = float(line)
+        except (TypeError, ValueError):
+            line = None
 
-    # SPREAD — title says "spread" or outcome contains a signed point
-    spread_kw = any(k in title for k in _SPREAD_KEYWORDS)
-    spread_pt = _SPREAD_LINE_RE.search(outcome) or _SPREAD_LINE_RE.search(title)
-    if spread_kw or (spread_pt and team):
-        if not spread_pt:
-            return None
-        line = float(spread_pt.group(1))
-        # Side = which team's spread this is. Match outcome's team
-        # field against home/away.
-        if team and _name_match(team, home):
-            side = "home"
-        elif team and _name_match(team, away):
-            side = "away"
-        else:
-            # Title-based fallback
-            if _name_match(outcome, home):
-                side = "home"
-            elif _name_match(outcome, away):
-                side = "away"
-            else:
-                return None
-        return ("spread", line, side)
+    question = m.get("question") or ""
 
-    # MONEYLINE — outcome is a team name with no point spread embedded.
-    # No keyword required — PMM moneyline market titles vary widely
-    # (often just "Cavaliers vs Pistons"). If a market has a team and
-    # NO numeric line, we treat it as ML.
-    if team and not _SPREAD_LINE_RE.search(outcome) and not _TOTAL_LINE_RE.search(outcome):
-        if _name_match(team, home):
-            return ("ml", None, "home")
-        if _name_match(team, away):
-            return ("ml", None, "away")
+    if bucket == "ml":
+        side = _side_by_first_mention(question, away, home)
+        return ("ml", None, side) if side else None
+
+    if bucket == "spread":
+        # Question pattern: "Spread: Baltimore Orioles (+4.5)" — the
+        # team named first IS the YES side. Line comes from the
+        # `line` field. The synthetic inverse side is generated
+        # downstream (one PMM market = both sides via bid/ask invert).
+        side = _side_by_first_mention(question, away, home)
+        return ("spread", line, side) if side else None
+
+    if bucket == "total":
+        # Question pattern truncated to "Baltimore Orioles vs. Tampa Bay
+        # Rays: O/" — PMM's convention is YES = OVER for these binary
+        # total markets. If the question explicitly says "under" we
+        # honor that; otherwise default to over.
+        q = question.lower()
+        if "under" in q and "over" not in q:
+            return ("total", line, "under")
+        return ("total", line, "over")
 
     return None
+
+
+def _get_market_quote(m: dict) -> dict | None:
+    """Read bestBidQuote / bestAskQuote directly off the market.
+    PMM embeds the BBO on every market in the markets.list response —
+    no separate bbo() call required."""
+    bid = _safe_amount(m.get("bestBidQuote"))
+    ask = _safe_amount(m.get("bestAskQuote"))
+    if bid is None and ask is None:
+        return None
+    mid = ((bid + ask) / 2) if (bid is not None and ask is not None) else (bid or ask)
+    return {
+        "bid": bid,
+        "ask": ask,
+        "mid": mid,
+        "bid_american":  _prob_to_american(bid) if bid is not None else None,
+        "ask_american":  _prob_to_american(ask) if ask is not None else None,
+        "mid_american":  _prob_to_american(mid) if mid is not None else None,
+    }
+
+
+def _inverse_quote(quote: dict | None) -> dict | None:
+    """For a binary YES market, derive the NO side's quote.
+    NO bid = 1 - YES ask. NO ask = 1 - YES bid. (Bid/ask flip on inverse.)
+    """
+    if not quote:
+        return None
+    y_bid = quote.get("bid")
+    y_ask = quote.get("ask")
+    n_bid = (1.0 - y_ask) if y_ask is not None else None
+    n_ask = (1.0 - y_bid) if y_bid is not None else None
+    n_mid = ((n_bid + n_ask) / 2) if (n_bid is not None and n_ask is not None) else (n_bid or n_ask)
+    return {
+        "bid": n_bid,
+        "ask": n_ask,
+        "mid": n_mid,
+        "bid_american":  _prob_to_american(n_bid) if n_bid is not None else None,
+        "ask_american":  _prob_to_american(n_ask) if n_ask is not None else None,
+        "mid_american":  _prob_to_american(n_mid) if n_mid is not None else None,
+    }
+
+
+def _inverse_side(market_type: str, side: str, line: float | None
+                  ) -> tuple[str | None, float | None]:
+    """Return (side, line) for the inverse of a binary YES market.
+       ml home → away (no line change)
+       spread +4.5 home → -4.5 away (line flips sign)
+       total over 4.5 → under 4.5 (line unchanged)
+    """
+    if market_type == "ml":
+        opp = "away" if side == "home" else "home"
+        return opp, None
+    if market_type == "spread":
+        opp = "away" if side == "home" else "home"
+        inv_line = -line if line is not None else None
+        return opp, inv_line
+    if market_type == "total":
+        opp = "under" if side == "over" else "over"
+        return opp, line
+    return None, None
 
 
 # ──────────────────────────── BBO fetch ────────────────────────────
@@ -632,23 +719,37 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
         if classify_diag is not None:
             classify_diag.append({
                 "slug":       m.get("slug"),
-                "title":      m.get("title"),
-                "outcome":    m.get("outcome"),
-                "team":       (m.get("team") or {}).get("name"),
+                "title":      m.get("question"),
+                "outcome":    m.get("sportsMarketType"),
+                "team":       None,  # no team field on PMM markets
                 "classified": result,
             })
         if not result:
             continue
         mt, line, side = result
-        entry = {
+        quote = _get_market_quote(m) if with_bbo else None
+        # Direct entry — the YES side of this binary market.
+        out[mt].append({
             "side":  side,
             "line":  line,
             "slug":  m.get("slug"),
-            "title": m.get("title"),
-        }
-        if with_bbo and m.get("slug"):
-            entry["quote"] = _get_bbo(client, m["slug"])
-        out[mt].append(entry)
+            "title": m.get("question"),
+            "quote": quote,
+        })
+        # Synthesized inverse entry — derive the NO side's pricing
+        # from this same market. PMM doesn't publish a separate market
+        # for the NO side; we synthesize it so best_line_for() can
+        # find it when the bot asks for the opposite side.
+        inv_side, inv_line = _inverse_side(mt, side, line)
+        if inv_side is not None:
+            out[mt].append({
+                "side":      inv_side,
+                "line":      inv_line,
+                "slug":      m.get("slug"),
+                "title":     m.get("question"),
+                "quote":     _inverse_quote(quote),
+                "synthetic": True,
+            })
 
     if classify_diag is not None:
         diag["markets_classified"] = classify_diag
