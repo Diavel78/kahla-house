@@ -327,29 +327,40 @@ def _search_event(client, sport: str, away: str, home: str,
             mk = matched.get("markets") if isinstance(matched, dict) else getattr(matched, "markets", None)
             mk_list = mk or []
             diag["matched_markets_count"] = len(mk_list)
-            # Dump RAW keys + values on the first market so we can see
-            # what data shape the API actually returned. _market_to_dict
-            # might be looking for the wrong fields.
+            # First market full keys (one-time discovery — once we know
+            # the schema this can go).
             if mk_list:
                 first = mk_list[0]
                 if isinstance(first, dict):
                     diag["first_market_keys"] = list(first.keys())
-                    # Stringify values briefly so we can read them
-                    sample = {}
-                    for k, v in list(first.items())[:30]:
-                        try:
-                            s = str(v) if v is not None else None
-                            if s and len(s) > 100:
-                                s = s[:100] + "..."
-                            sample[k] = s
-                        except Exception:
-                            sample[k] = "<?>"
-                    diag["first_market_sample"] = sample
-                else:
-                    diag["first_market_keys"] = [
-                        a for a in dir(first)
-                        if not a.startswith("_") and not callable(getattr(first, a, None))
-                    ]
+            # Targeted dump: the fields we actually need (sportsMarketType,
+            # line, outcomes, outcomePrices, marketSides identifier) for
+            # the first 8 markets, so we can see the spread of types and
+            # how to classify them.
+            sample_markets = []
+            for m in mk_list[:8]:
+                g = (lambda k: m.get(k) if isinstance(m, dict) else getattr(m, k, None))
+                outcomes = g("outcomes")
+                outcomePrices = g("outcomePrices")
+                marketSides = g("marketSides")
+                identifier = None
+                if marketSides and isinstance(marketSides, list) and marketSides:
+                    ms0 = marketSides[0]
+                    if isinstance(ms0, dict):
+                        identifier = ms0.get("identifier")
+                sample_markets.append({
+                    "question":            (str(g("question") or "")[:60]),
+                    "sportsMarketType":    g("sportsMarketType"),
+                    "sportsMarketTypeV2":  g("sportsMarketTypeV2"),
+                    "line":                g("line"),
+                    "outcomes":            outcomes,
+                    "outcomePrices":       outcomePrices,
+                    "spreadTotalSuffix":   g("spreadTotalSuffix"),
+                    "identifier":          identifier,
+                    "active":              g("active"),
+                    "closed":              g("closed"),
+                })
+            diag["markets_sample"] = sample_markets
 
     # If filter-based search returned nothing useful, try a name search.
     # Polymarket's tag filter occasionally misses events that the

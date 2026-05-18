@@ -1195,12 +1195,19 @@
                         // of 'title' etc.
                         let rawLines = '';
                         if (dg.first_market_keys && dg.first_market_keys.length) {
-                            rawLines += `<div style="margin-top:4px;font-family:JetBrains Mono,monospace;color:var(--green)">first market keys: ${_esc(dg.first_market_keys.join(', '))}</div>`;
+                            rawLines += `<div style="margin-top:4px;font-family:JetBrains Mono,monospace;color:var(--green)">keys: ${_esc(dg.first_market_keys.join(', '))}</div>`;
                         }
-                        if (dg.first_market_sample) {
-                            const sampleStr = Object.entries(dg.first_market_sample)
-                                .map(([k, v]) => `${k}=${v || 'null'}`).join(' · ');
-                            rawLines += `<div style="margin-top:2px;font-family:JetBrains Mono,monospace;color:var(--text-secondary)">first market: ${_esc(sampleStr.slice(0, 600))}</div>`;
+                        // Targeted dump — sportsMarketType + line + outcomes
+                        // + identifier per market. This is the data we need
+                        // to rewrite _classify_market against.
+                        if (Array.isArray(dg.markets_sample) && dg.markets_sample.length) {
+                            rawLines += '<div style="margin-top:4px;font-family:JetBrains Mono,monospace;color:var(--text-secondary)">markets sample:' +
+                                dg.markets_sample.map(m => {
+                                    const oc = Array.isArray(m.outcomes) ? `[${m.outcomes.join(',')}]` : 'null';
+                                    const px = Array.isArray(m.outcomePrices) ? `[${m.outcomePrices.join(',')}]` : 'null';
+                                    return `<div style="padding-left:6px">type=${_esc(String(m.sportsMarketType||'-'))}/${_esc(String(m.sportsMarketTypeV2||'-'))} line=${_esc(String(m.line||'-'))} suffix=${_esc(String(m.spreadTotalSuffix||'-'))} ident=${_esc(String(m.identifier||'-'))} outcomes=${_esc(oc)} prices=${_esc(px)} q='${_esc(String(m.question||'').slice(0,40))}'</div>`;
+                                }).join('') +
+                                '</div>';
                         }
                         dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:4px">PMM debug: tag=${_esc(dg.tag || '?')} · ${evtCount}${sfb}${pm.error ? ' · err: ' + _esc(String(pm.error).slice(0, 80)) : ''}${normedHomeAway}${attemptLines}${postMatch}${classifyLines}${rawLines}</div>`;
                     }
