@@ -759,11 +759,11 @@ def _fetch_odds_from_snapshots(sport_path: str):
     """
     sb = get_supabase()
     if sb is None:
-        return [], [], []
+        return [], [], [], None
 
     sport_code = _SPORT_PATH_TO_CODE.get(sport_path)
     if not sport_code:
-        return [], [], []
+        return [], [], [], None
 
     now = datetime.now(timezone.utc)
     # Show games from 6h ago (in-progress / just-started) through the next
@@ -786,19 +786,22 @@ def _fetch_odds_from_snapshots(sport_path: str):
             or []
         )
     except Exception:
-        return [], [], []
+        return [], [], [], None
 
     if not markets:
-        return [], [], []
+        return [], [], [], None
 
     market_ids = [m["id"] for m in markets]
 
-    # Fresh snapshots from the last 90 min — covers two cron runs (30 min
-    # cadence + slack). Markets without ANY snapshot in this window are
-    # considered stale: either duplicate Owls-era rows the new cron didn't
-    # match, or games whose books stopped posting after they started. We
-    # filter those out below so the board only shows live, updated markets.
-    fresh_cutoff = (now - timedelta(minutes=90)).isoformat()
+    # Snapshot freshness window: 18h. Was 90 min back when the cron ran
+    # always-on at 30-min cadence and any market missing a row inside
+    # that window was clearly dead. Now that cadence is adaptive (5/15/
+    # 30-min near games, SKIP outside 18h) a healthy game with PIN
+    # sitting on its line might not get a new row for hours — its only
+    # snapshot would be many cycles old. 18h matches the cron's "skip
+    # beyond this" cap, so any game we're polling for has a snap within
+    # this window. Beyond 18h, the cron isn't writing anyway.
+    fresh_cutoff = (now - timedelta(hours=18)).isoformat()
     try:
         snaps = (
             sb.table("book_snapshots")
@@ -821,7 +824,7 @@ def _fetch_odds_from_snapshots(sport_path: str):
     markets = [m for m in markets if m["id"] in fresh_market_ids]
     market_ids = [m["id"] for m in markets]
     if not markets:
-        return [], [], []
+        return [], [], [], None
 
     # Live-game freeze. Once a game's event_start passes we want the BOARD
     # to display the closing line (last pre-start snapshot per book) and stop
