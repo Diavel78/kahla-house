@@ -1131,85 +1131,14 @@
                     metaLine = `Limit-order at ${_fmtAmer(s.fair_american)} or better · ${askFrag}${bidFrag}${pinFrag}`;
                 } else {
                     const pinNow = (s.pin_current != null) ? ` · PIN now ${_fmtAmer(s.pin_current)}` : '';
-                    // Show a compact PMM-debug line so we can see WHY
-                    // PMM didn't match (tag used, events returned, sample
-                    // titles). Helps tune matching without copy-pasting
-                    // the whole dossier into Claude.
+                    // Concise diag — only the bits useful when something
+                    // breaks: error message + event count tried.
                     const pm = d.pmm_meta || {};
                     const dg = pm.diag || {};
                     let dbg = '';
-                    if (pm.error || dg.events_returned != null) {
-                        const evtCount = dg.events_returned != null ? `${dg.events_returned} events` : '';
-                        const sfb = dg.search_fallback_returned != null
-                            ? ` · search fallback ${dg.search_fallback_returned}` : '';
-                        let attemptLines = '';
-                        if (Array.isArray(dg.match_attempts) && dg.match_attempts.length) {
-                            attemptLines = '<div style="margin-top:4px;font-family:JetBrains Mono,monospace">' +
-                                dg.match_attempts.slice(0, 8).map(a => {
-                                    const flags = `p1[a:${a.p1_away?'✓':'✗'} h:${a.p1_home?'✓':'✗'}] p2[a:${a.p2_away_tok?'✓':'✗'} h:${a.p2_home_tok?'✓':'✗'}]`;
-                                    return `<div style="padding-left:6px">${_esc(a.title || '(no title)')} — ${flags}</div>`;
-                                }).join('') +
-                                '</div>';
-                        }
-                        const normedHomeAway = (dg.normalized_away || dg.normalized_home)
-                            ? `<div style="margin-top:2px">looking for: <b>${_esc(dg.normalized_away||'')}</b> + <b>${_esc(dg.normalized_home||'')}</b> (tokens: ${_esc(dg.away_last_token||'')}, ${_esc(dg.home_last_token||'')})</div>`
-                            : '';
-                        // Post-match diagnostics — what happened after a
-                        // successful team match (markets fetch attempts).
-                        // These tell us why lookup() returned None despite
-                        // matching.
-                        const postMatchBits = [];
-                        if (dg.matched_markets_count != null)
-                            postMatchBits.push(`matched_markets_count: ${dg.matched_markets_count}`);
-                        if (dg.markets_list_count != null)
-                            postMatchBits.push(`markets_list_count: ${dg.markets_list_count}`);
-                        if (dg.markets_list_error)
-                            postMatchBits.push(`markets_list_error: ${String(dg.markets_list_error).slice(0,100)}`);
-                        if (dg.retrieved_full_via_slug)
-                            postMatchBits.push(`retrieved_full_via_slug: ${dg.retrieved_full_via_slug}`);
-                        if (dg.retrieve_by_slug_error)
-                            postMatchBits.push(`retrieve_by_slug_error: ${String(dg.retrieve_by_slug_error).slice(0,100)}`);
-                        if (dg.counts)
-                            postMatchBits.push(`counts: ml=${dg.counts.ml||0} spread=${dg.counts.spread||0} total=${dg.counts.total||0}`);
-                        const postMatch = postMatchBits.length
-                            ? `<div style="margin-top:2px;color:var(--orange)">post-match: ${_esc(postMatchBits.join(' · '))}</div>`
-                            : '';
-                        // Per-market classification — what each PMM
-                        // market looks like + whether _classify_market
-                        // bucketed it as ml/spread/total or rejected it.
-                        // First 6 only to keep payload small.
-                        let classifyLines = '';
-                        if (Array.isArray(dg.markets_classified) && dg.markets_classified.length) {
-                            classifyLines = '<div style="margin-top:4px;font-family:JetBrains Mono,monospace;color:var(--text-secondary)">classify:' +
-                                dg.markets_classified.slice(0, 6).map(c => {
-                                    const cls = c.classified ? `→ ${c.classified.join('/')}` : '→ null';
-                                    return `<div style="padding-left:6px">[${_esc(c.team||'-')}] title='${_esc((c.title||'').slice(0,40))}' outcome='${_esc((c.outcome||'').slice(0,30))}' ${cls}</div>`;
-                                }).join('') +
-                                '</div>';
-                        }
-                        // Raw first-market field dump — when classifier
-                        // shows all empty fields, this tells us what
-                        // fields the API ACTUALLY returned vs what we
-                        // were looking for. The keys list shows whether
-                        // we should be reading 'name'/'question' instead
-                        // of 'title' etc.
-                        let rawLines = '';
-                        if (dg.first_market_keys && dg.first_market_keys.length) {
-                            rawLines += `<div style="margin-top:4px;font-family:JetBrains Mono,monospace;color:var(--green)">keys: ${_esc(dg.first_market_keys.join(', '))}</div>`;
-                        }
-                        // Targeted dump — sportsMarketType + line + outcomes
-                        // + identifier per market. This is the data we need
-                        // to rewrite _classify_market against.
-                        if (Array.isArray(dg.markets_sample) && dg.markets_sample.length) {
-                            rawLines += '<div style="margin-top:4px;font-family:JetBrains Mono,monospace;color:var(--text-secondary)">markets sample:' +
-                                dg.markets_sample.map(m => {
-                                    const oc = Array.isArray(m.outcomes) ? `[${m.outcomes.join(',')}]` : 'null';
-                                    const px = Array.isArray(m.outcomePrices) ? `[${m.outcomePrices.join(',')}]` : 'null';
-                                    return `<div style="padding-left:6px">type=${_esc(String(m.sportsMarketType||'-'))}/${_esc(String(m.sportsMarketTypeV2||'-'))} line=${_esc(String(m.line||'-'))} suffix=${_esc(String(m.spreadTotalSuffix||'-'))} ident=${_esc(String(m.identifier||'-'))} outcomes=${_esc(oc)} prices=${_esc(px)} q='${_esc(String(m.question||'').slice(0,40))}'</div>`;
-                                }).join('') +
-                                '</div>';
-                        }
-                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:4px">PMM debug: tag=${_esc(dg.tag || '?')} · ${evtCount}${sfb}${pm.error ? ' · err: ' + _esc(String(pm.error).slice(0, 80)) : ''}${normedHomeAway}${attemptLines}${postMatch}${classifyLines}${rawLines}</div>`;
+                    if (pm.error) {
+                        const evtCount = dg.events_returned != null ? ` (searched ${dg.events_returned})` : '';
+                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:2px">PMM: ${_esc(String(pm.error).slice(0, 120))}${evtCount}</div>`;
                     }
                     metaLine = `Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow} <span style="color:var(--text-muted);font-size:10px">(no PMM match — projection skipped)</span>${dbg}`;
                 }

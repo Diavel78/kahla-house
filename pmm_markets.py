@@ -63,9 +63,6 @@ _SPORT_TAG_SLUG: dict[str, str] = {
 _EVENT_CACHE: dict[str, tuple[float, dict | None]] = {}
 _EVENT_CACHE_TTL_SEC = 5 * 60
 
-_BBO_CACHE: dict[str, tuple[float, dict | None]] = {}
-_BBO_CACHE_TTL_SEC = 30
-
 
 # ──────────────────────────── Math helpers ────────────────────────────
 
@@ -263,33 +260,6 @@ def _search_event(client, sport: str, away: str, home: str,
 
     if diag is not None:
         diag["events_returned"] = len(events)
-        diag["attempt_used"] = used_attempt
-        diag["sample_event_titles"] = [
-            (e.get("title") if isinstance(e, dict) else getattr(e, "title", ""))
-            for e in events[:8]
-        ]
-        # Show normalized inputs + per-event match attempts so we can
-        # see exactly which event the matcher considered and why it
-        # rejected each. Truncate at 8 to keep payload small.
-        diag["normalized_away"] = _norm(away)
-        diag["normalized_home"] = _norm(home)
-        away_last_dbg = _last_token(away)
-        home_last_dbg = _last_token(home)
-        diag["away_last_token"] = away_last_dbg
-        diag["home_last_token"] = home_last_dbg
-        attempts_dbg = []
-        for e in events[:8]:
-            t = e.get("title") if isinstance(e, dict) else getattr(e, "title", "")
-            tn = _norm(t)
-            attempts_dbg.append({
-                "title":         t,
-                "title_norm":    tn,
-                "p1_away":       _name_match(t, away),
-                "p1_home":       _name_match(t, home),
-                "p2_away_tok":   bool(away_last_dbg and away_last_dbg in tn),
-                "p2_home_tok":   bool(home_last_dbg and home_last_dbg in tn),
-            })
-        diag["match_attempts"] = attempts_dbg
 
     matched = _match_event_to_game(events, away, home)
     # Events.list returns event metadata but NOT the nested markets
@@ -304,7 +274,8 @@ def _search_event(client, sport: str, away: str, home: str,
         existing_markets = existing_markets or []
         if not existing_markets and slug:
             fetched_markets: list = []
-            # Approach A: markets.list(eventSlug=[slug])
+            # Primary: markets.list(eventSlug=[slug]) — returns markets
+            # with embedded bestBidQuote/bestAskQuote.
             try:
                 mresp = client.markets.list({
                     "eventSlug": [slug],
@@ -313,13 +284,11 @@ def _search_event(client, sport: str, away: str, home: str,
                 })
                 ms = mresp.get("markets") if isinstance(mresp, dict) else getattr(mresp, "markets", None)
                 fetched_markets = ms or []
-                if diag is not None:
-                    diag["markets_list_count"] = len(fetched_markets)
             except Exception as e:
                 if diag is not None:
                     diag["markets_list_error"] = str(e)[:200]
-            # Approach B: events.retrieve_by_slug (returns event with
-            # markets sometimes — depends on PMM endpoint behavior).
+            # Secondary fallback: events.retrieve_by_slug. Rarely needed
+            # in practice but cheap to keep as a safety net.
             if not fetched_markets:
                 try:
                     full = client.events.retrieve_by_slug(slug)
@@ -328,13 +297,10 @@ def _search_event(client, sport: str, away: str, home: str,
                         mk = ev_full.get("markets") if isinstance(ev_full, dict) else getattr(ev_full, "markets", None)
                         if mk:
                             fetched_markets = mk
-                            if diag is not None:
-                                diag["retrieved_full_via_slug"] = slug
                 except Exception as e:
                     if diag is not None:
                         diag["retrieve_by_slug_error"] = str(e)[:200]
-            # Attach fetched markets back onto the matched event so
-            # downstream code (_event_to_dict) sees them.
+            # Attach fetched markets back onto the matched event.
             if fetched_markets:
                 if isinstance(matched, dict):
                     matched["markets"] = fetched_markets
@@ -342,8 +308,6 @@ def _search_event(client, sport: str, away: str, home: str,
                     try:
                         setattr(matched, "markets", fetched_markets)
                     except Exception:
-                        # If we can't mutate the SDK object, wrap into
-                        # a plain dict carrying the markets.
                         matched = {
                             "id":        matched.get("id") if hasattr(matched, "get") else getattr(matched, "id", None),
                             "slug":      slug,
@@ -351,44 +315,6 @@ def _search_event(client, sport: str, away: str, home: str,
                             "startTime": matched.get("startTime") if hasattr(matched, "get") else getattr(matched, "startTime", ""),
                             "markets":   fetched_markets,
                         }
-        if diag is not None:
-            mk = matched.get("markets") if isinstance(matched, dict) else getattr(matched, "markets", None)
-            mk_list = mk or []
-            diag["matched_markets_count"] = len(mk_list)
-            # First market full keys (one-time discovery — once we know
-            # the schema this can go).
-            if mk_list:
-                first = mk_list[0]
-                if isinstance(first, dict):
-                    diag["first_market_keys"] = list(first.keys())
-            # Targeted dump: the fields we actually need (sportsMarketType,
-            # line, outcomes, outcomePrices, marketSides identifier) for
-            # the first 8 markets, so we can see the spread of types and
-            # how to classify them.
-            sample_markets = []
-            for m in mk_list[:8]:
-                g = (lambda k: m.get(k) if isinstance(m, dict) else getattr(m, k, None))
-                outcomes = g("outcomes")
-                outcomePrices = g("outcomePrices")
-                marketSides = g("marketSides")
-                identifier = None
-                if marketSides and isinstance(marketSides, list) and marketSides:
-                    ms0 = marketSides[0]
-                    if isinstance(ms0, dict):
-                        identifier = ms0.get("identifier")
-                sample_markets.append({
-                    "question":            (str(g("question") or "")[:60]),
-                    "sportsMarketType":    g("sportsMarketType"),
-                    "sportsMarketTypeV2":  g("sportsMarketTypeV2"),
-                    "line":                g("line"),
-                    "outcomes":            outcomes,
-                    "outcomePrices":       outcomePrices,
-                    "spreadTotalSuffix":   g("spreadTotalSuffix"),
-                    "identifier":          identifier,
-                    "active":              g("active"),
-                    "closed":              g("closed"),
-                })
-            diag["markets_sample"] = sample_markets
 
     # If filter-based search returned nothing useful, try a name search.
     # Polymarket's tag filter occasionally misses events that the
@@ -405,12 +331,6 @@ def _search_event(client, sport: str, away: str, home: str,
             if isinstance(sresp, dict):
                 search_events = sresp.get("events") or sresp.get("results") or []
             if search_events:
-                if diag is not None:
-                    diag["search_fallback_returned"] = len(search_events)
-                    diag["search_sample_titles"] = [
-                        (e.get("title") if isinstance(e, dict) else getattr(e, "title", ""))
-                        for e in search_events[:8]
-                    ]
                 matched = _match_event_to_game(search_events, away, home)
                 # search result event likely lacks `markets` — refetch by slug
                 if matched is not None:
@@ -626,44 +546,6 @@ def _inverse_side(market_type: str, side: str, line: float | None
     return None, None
 
 
-# ──────────────────────────── BBO fetch ────────────────────────────
-
-def _get_bbo(client, slug: str) -> dict | None:
-    """Fetch best bid/ask for a market slug. Caches 30s.
-
-    Returns {bid: float|None, ask: float|None, mid: float|None,
-             bid_american: int|None, ask_american: int|None,
-             mid_american: int|None}
-    or None on failure (silent — caller falls back gracefully).
-    """
-    cached = _BBO_CACHE.get(slug)
-    if cached and (time.time() - cached[0]) < _BBO_CACHE_TTL_SEC:
-        return cached[1]
-    try:
-        resp = client.markets.bbo(slug)
-    except Exception as e:
-        log.debug("bbo %s failed: %s", slug, e)
-        _BBO_CACHE[slug] = (time.time(), None)
-        return None
-
-    def field(k):
-        return resp.get(k) if isinstance(resp, dict) else getattr(resp, k, None)
-
-    bid = _safe_amount(field("bestBid"))
-    ask = _safe_amount(field("bestAsk"))
-    mid = ((bid + ask) / 2) if (bid is not None and ask is not None) else (bid or ask)
-    out = {
-        "bid": bid,
-        "ask": ask,
-        "mid": mid,
-        "bid_american":  _prob_to_american(bid) if bid is not None else None,
-        "ask_american":  _prob_to_american(ask) if ask is not None else None,
-        "mid_american":  _prob_to_american(mid) if mid is not None else None,
-    }
-    _BBO_CACHE[slug] = (time.time(), out)
-    return out
-
-
 # ──────────────────────────── Public entry point ────────────────────────────
 
 def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
@@ -709,21 +591,12 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
         "spread": [],
         "total":  [],
     }
-    classify_diag = [] if diag is not None else None
     for m in ev["markets"]:
         # Skip markets that have closed (settled, expired, etc.) — we
         # only want live tradeable markets for the limit-order target.
         if m.get("closed") or not m.get("active"):
             continue
         result = _classify_market(m, away, home)
-        if classify_diag is not None:
-            classify_diag.append({
-                "slug":       m.get("slug"),
-                "title":      m.get("question"),
-                "outcome":    m.get("sportsMarketType"),
-                "team":       None,  # no team field on PMM markets
-                "classified": result,
-            })
         if not result:
             continue
         mt, line, side = result
@@ -751,8 +624,7 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
                 "synthetic": True,
             })
 
-    if classify_diag is not None:
-        diag["markets_classified"] = classify_diag
+    if diag is not None:
         diag["counts"] = {k: len(out.get(k, [])) for k in ("ml", "spread", "total")}
     return out
 
