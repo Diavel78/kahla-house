@@ -264,6 +264,30 @@ def _search_event(client, sport: str, away: str, home: str,
         diag["match_attempts"] = attempts_dbg
 
     matched = _match_event_to_game(events, away, home)
+    # Events.list returns event metadata + tags but NOT the nested
+    # markets list (despite Event's TypedDict declaring markets). So
+    # after we identify the match, refetch via retrieve_by_slug to get
+    # the actual markets. Without this, lookup() returns None for every
+    # game (markets list empty → guard at the top returns None).
+    if matched is not None:
+        slug = matched.get("slug") if isinstance(matched, dict) else getattr(matched, "slug", None)
+        markets = matched.get("markets") if isinstance(matched, dict) else getattr(matched, "markets", None)
+        markets = markets or []
+        if not markets and slug:
+            try:
+                full = client.events.retrieve_by_slug(slug)
+                ev_full = full.get("event") if isinstance(full, dict) else getattr(full, "event", None)
+                if ev_full is not None:
+                    matched = ev_full
+                    if diag is not None:
+                        diag["retrieved_full_via_slug"] = slug
+            except Exception as e:
+                if diag is not None:
+                    diag["retrieve_by_slug_error"] = str(e)[:200]
+        if diag is not None:
+            mk = matched.get("markets") if isinstance(matched, dict) else getattr(matched, "markets", None)
+            diag["matched_markets_count"] = len(mk or [])
+
     # If filter-based search returned nothing useful, try a name search.
     # Polymarket's tag filter occasionally misses events that the
     # search-by-query endpoint finds.
