@@ -233,6 +233,12 @@
         .suggestion-card .pick-line .pick-units.units-3  { background: var(--orange-dim); color: var(--orange); }
         .suggestion-card .pick-line .pick-units.units-5  { background: var(--green-dim);  color: var(--green); }
         .suggestion-card .pick-line .pick-units.units-10 { background: var(--gold-dim);   color: var(--gold); font-weight: 700; }
+        .suggestion-card .pick-line .venue-tag { display: inline-block; padding: 2px 8px; border-radius: 6px; font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.04em; vertical-align: middle; margin-left: 4px; }
+        .suggestion-card .pick-line .venue-tag.pmm { background: rgba(168,85,247,0.18); color: #c084fc; border: 1px solid rgba(168,85,247,0.35); }
+        .suggestion-card .pick-line .venue-tag.pin { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border); }
+        .market-card .pmm-row { font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 4px 8px; margin-top: 4px; background: rgba(168,85,247,0.06); border-left: 2px solid rgba(168,85,247,0.35); border-radius: 4px; color: var(--text); }
+        .market-card .pmm-row .pmm-lbl { color: #c084fc; font-weight: 700; letter-spacing: 0.04em; margin-right: 6px; }
+        .market-card .pmm-row .pmm-target { color: var(--green); font-weight: 600; }
         .suggestion-card .pick-meta { font-size: 12px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; }
         .suggestion-card .why { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); list-style: none; font-size: 13px; line-height: 1.55; color: var(--text); }
         .suggestion-card .why li { padding: 3px 0 3px 16px; position: relative; }
@@ -1091,7 +1097,20 @@
                 const sideLabel = s.market_type === 'total'
                     ? s.side.toUpperCase()
                     : (s.side === 'home' ? d.home : d.away);
-                const lineFrag = (s.pin_line == null) ? '' : ` ${_fmtPt(s.pin_line)}`;
+                // PMM-aware display. If PMM has a market for this side,
+                // the pick line shows PMM's line + projected fair as
+                // the limit-order target; otherwise falls back to PIN
+                // line + PIN fair.
+                // s.pmm_line: line PMM actually offers (may differ from PIN by 0.5)
+                // s.fair_american: PMM-projected fair (or PIN fair if no PMM)
+                // s.pin_fair_american + s.pin_line: PIN's raw values, for reference
+                // s.pmm_ask_american / pmm_bid_american: current PMM order book
+                const usingPmm = (s.pmm_line != null) || (s.pmm_ask_american != null);
+                const displayLine = usingPmm && s.pmm_line != null ? s.pmm_line : s.pin_line;
+                const lineFrag = (displayLine == null) ? '' : ` ${_fmtPt(displayLine)}`;
+                const venueTag = usingPmm
+                    ? '<span class="venue-tag pmm">PMM</span>'
+                    : '<span class="venue-tag pin">PIN line</span>';
                 const cardCls = s.gates_cleared ? 'suggestion-card' : 'suggestion-card soft';
                 const headingText = s.gates_cleared
                     ? (multi
@@ -1099,7 +1118,21 @@
                         : 'Bot Suggests — Polymarket Target')
                     : 'Lean — would pass, but if forced';
                 const headingCls = s.gates_cleared ? 'lbl' : 'lbl soft';
-                const pinNow = (s.pin_current != null) ? ` · PIN now ${_fmtAmer(s.pin_current)}` : '';
+                // Meta line:
+                //   PMM available → "PMM asking -110 · bid -118 · PIN was -107 @ 204"
+                //   No PMM        → "PIN now -107 (no PMM market found)"
+                let metaLine = '';
+                if (usingPmm) {
+                    const askFrag = s.pmm_ask_american != null ? `PMM asking ${_fmtAmer(s.pmm_ask_american)}` : 'PMM (no current ask)';
+                    const bidFrag = s.pmm_bid_american != null ? ` · bid ${_fmtAmer(s.pmm_bid_american)}` : '';
+                    const pinFrag = (s.pin_fair_american != null && s.pin_line != null)
+                        ? ` · PIN fair ${_fmtAmer(s.pin_fair_american)} @ ${_fmtPt(s.pin_line)}`
+                        : '';
+                    metaLine = `Limit-order at ${_fmtAmer(s.fair_american)} or better · ${askFrag}${bidFrag}${pinFrag}`;
+                } else {
+                    const pinNow = (s.pin_current != null) ? ` · PIN now ${_fmtAmer(s.pin_current)}` : '';
+                    metaLine = `Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow} <span style="color:var(--text-muted);font-size:10px">(no PMM match — projection skipped)</span>`;
+                }
                 const why = _buildReasons(s, d);
                 const whyHtml = why.length
                     ? `<ul class="why">${why.map(b => `<li>${_esc(b)}</li>`).join('')}</ul>`
@@ -1107,11 +1140,11 @@
                 html += `<div class="${cardCls}">
                     <div class="${headingCls}">${_esc(headingText)}</div>
                     <div class="pick-line">
-                        ${market} · ${_esc(sideLabel)}${lineFrag}
+                        ${market} · ${_esc(sideLabel)}${lineFrag} ${venueTag}
                         <span class="target">@ ${_fmtAmer(s.fair_american)}</span>
                         <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>
                     </div>
-                    <div class="pick-meta">Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow}</div>
+                    <div class="pick-meta">${metaLine}</div>
                     ${whyHtml}
                     ${s.gates_cleared ? '' : `<div class="soft-note">Sharp gate not cleared (need sharp ≥ 4). Chalk-flat market; this is the best read available — treat as 1u lean only.</div>`}
                     ${_canBet ? `<div class="actions">
@@ -1366,10 +1399,28 @@
             }
             if (!rows) rows = '<div style="font-size:11px;color:var(--text-muted)">no PIN data</div>';
 
+            // PMM row — shows actual Polymarket line + current bid/ask
+            // + PIN-projected fair as the limit-order target. Only
+            // rendered when PMM has a market for this side.
+            const pmmBlock = ((blk.polymarket || {})[s]) || null;
+            let pmmRow = '';
+            if (pmmBlock) {
+                const lnFrag = (pmmBlock.line != null) ? ` @${_fmtPt(pmmBlock.line)}` : '';
+                const q = pmmBlock.quote || {};
+                const askFrag = (q.ask_american != null) ? ` ask <b>${_fmtAmer(q.ask_american)}</b>` : '';
+                const bidFrag = (q.bid_american != null) ? ` · bid ${_fmtAmer(q.bid_american)}` : '';
+                const proj = pmmBlock.projected || {};
+                const targetFrag = (proj.fair_american != null)
+                    ? ` · <span class="pmm-target">target ${_fmtAmer(proj.fair_american)}</span>`
+                    : '';
+                pmmRow = `<div class="pmm-row"><span class="pmm-lbl">PMM</span>${lnFrag}${askFrag}${bidFrag}${targetFrag}</div>`;
+            }
+
             const blockCls = 'side-block' + (isBotPick ? ' bot-picked' : '');
             blocks += `<div class="${blockCls}">
                 <div class="side-head"><span class="name">${_esc(sideName)}</span>${btn}</div>
                 ${rows}
+                ${pmmRow}
             </div>`;
         }
 
@@ -1399,6 +1450,16 @@
             alert('No PIN devig on this side — can\'t set a Polymarket target.');
             return;
         }
+        // Prefer the PMM-projected fair + PMM line if PMM has a market
+        // for this side; falls back to PIN values. Logging at the PMM
+        // line + projected fair matches what the bot itself would
+        // recommend, so resolver grading is consistent.
+        const pmm = ((blk.polymarket || {})[side]) || null;
+        const proj = (pmm && pmm.projected) || {};
+        const useProj = proj.fair_american != null;
+        const entryPrice = useProj ? proj.fair_american : pin.fair_american;
+        const entryLine  = (useProj && pmm.line != null) ? pmm.line : pin.line;
+        const entryProb  = (useProj && proj.fair_prob != null) ? proj.fair_prob : pin.fair_prob;
         const sideName = mt === 'total' ? side.toUpperCase()
             : (side === 'home' ? _lastDossier.home : _lastDossier.away);
         const mv = blk.movement || {};
@@ -1408,16 +1469,12 @@
             market_type: mt,
             side:        side,
             book:        'PMM',
-            price:       pin.fair_american,
-            line:        pin.line,
-            fair_prob:   pin.fair_prob,
+            price:       entryPrice,
+            line:        entryLine,
+            fair_prob:   entryProb,
             edge_pp:     null,
-            // Only credit the sharp_score if THIS side is the side the
-            // weighted PIN movement pointed at. Otherwise this side has
-            // no movement-based signal — record 0 so the log row
-            // doesn't claim a sharp signal it doesn't have.
             sharp_score: isMvSide ? (mv.sharp_score || 0) : 0,
-            label:       `${_shortMarket(mt)} ${sideName} @ fair ${_fmtAmer(pin.fair_american)}${pin.line != null ? ' ' + _fmtPt(pin.line) : ''}`,
+            label:       `${_shortMarket(mt)} ${sideName} @ ${useProj ? 'PMM-projected' : 'PIN'} fair ${_fmtAmer(entryPrice)}${entryLine != null ? ' ' + _fmtPt(entryLine) : ''}`,
             seed_units:  1,
             seed_conf:   'low',
         };
@@ -1477,7 +1534,10 @@
             side:        s.side,
             book:        'PMM',
             price:       s.fair_american,
-            line:        s.pin_line,
+            // Use PMM line when projection available, else PIN line.
+            // Matches the entry_price (s.fair_american), which is
+            // already PMM-projected when PMM has a market.
+            line:        (s.pmm_line != null ? s.pmm_line : s.pin_line),
             fair_prob:   s.fair_prob,
             edge_pp:     null,
             sharp_score: s.sharp_score,

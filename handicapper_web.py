@@ -530,6 +530,77 @@ def _latest_snapshots(sb, market_id: str) -> dict:
 _PIN_HISTORY_HOURS = 18
 
 
+def _attach_pmm_to_odds(odds: dict, pmm: dict, sport: str) -> None:
+    """For each market_type block in `odds`, attach a `polymarket` field
+    carrying:
+        {
+          event_slug, event_title,
+          home: { line, slug, title, quote, projected: {...} },
+          away: { ... },
+          # for total:
+          over:  { line, slug, title, quote, projected: {...} },
+          under: { ... },
+        }
+
+    Each side's `projected` block holds the PIN-derived fair_prob /
+    fair_american at PMM's line (push-rate adjusted from PIN fair).
+    The UI uses `projected.fair_american` as the recommended
+    limit-order price and compares it against `quote.ask_american` to
+    show "is PMM offering a better price than fair?".
+    """
+    import pmm_markets
+    from pmm_push_rates import project_fair_to_half_point
+
+    mt_map = {"moneyline": "ml", "spread": "spread", "total": "total"}
+    side_pairs = {"moneyline": ("away", "home"),
+                  "spread":    ("away", "home"),
+                  "total":     ("over", "under")}
+
+    for market_type, blk in odds.items():
+        pmm_key = mt_map.get(market_type)
+        if not pmm_key:
+            continue
+        pin_current = blk.get("pin_current") or {}
+        a, b = side_pairs[market_type]
+        out: dict = {
+            "event_slug":  pmm.get("event_slug"),
+            "event_title": pmm.get("event_title"),
+        }
+        for side in (a, b):
+            pin_side = pin_current.get(side) or {}
+            pin_line = pin_side.get("line")
+            pin_fair_prob = pin_side.get("fair_prob")
+            entry = pmm_markets.best_line_for(pmm, pmm_key, side, pin_line)
+            if not entry:
+                out[side] = None
+                continue
+            block: dict = {
+                "line":  entry.get("line"),
+                "slug":  entry.get("slug"),
+                "title": entry.get("title"),
+                "quote": entry.get("quote"),
+            }
+            # Project PIN's devigged fair onto PMM's line. ML has no
+            # line shift; just carry PIN fair through unchanged. SPR/TOT
+            # apply push-rate math.
+            if pmm_key == "ml":
+                projected_prob = pin_fair_prob
+                proj_meta = {"applicable": pin_fair_prob is not None,
+                             "note": "ml — no line shift"}
+            else:
+                projected_prob, proj_meta = project_fair_to_half_point(
+                    sport, pmm_key, pin_line, entry.get("line"),
+                    side, pin_fair_prob,
+                )
+            block["projected"] = {
+                "fair_prob":     round(projected_prob, 4) if projected_prob is not None else None,
+                "fair_american": _prob_to_american(projected_prob) if projected_prob is not None else None,
+                "meta":          proj_meta,
+            }
+            out[side] = block
+        blk["polymarket"] = out
+
+
 def _pin_history(sb, market_id: str) -> dict[tuple[str, str], list[dict]]:
     """All PIN snapshots in the last 18h, grouped by (market_type, side)
     and sorted ASC by captured_at. Replaces the legacy `_pin_opener`
@@ -1515,15 +1586,39 @@ def _suggest_picks(odds: dict, splits: dict | None = None) -> list[dict]:
                   + SPLITS_WEIGHT * min(max(0.0, splits_pp) / 30.0, 1.0))
             gates_cleared = score_for_side >= SHARP_SCORE_MIN
 
+            # PMM-projected fair: if a Polymarket market exists for
+            # this side AND the push-rate projection is applicable
+            # (delta ≤ 0.5 between PIN and PMM lines), prefer the
+            # projected fair at PMM's line as the limit-order target.
+            # When projection ISN'T applicable (multi-point gap, missing
+            # push rate), keep PIN's line + PIN fair as a coherent pair
+            # so we never display "PMM line + PIN fair" together
+            # (inconsistent and misleading).
+            pmm_block = (blk.get("polymarket") or {}).get(side)
+            pmm_proj = (pmm_block or {}).get("projected") or {}
+            pmm_line = (pmm_block or {}).get("line")
+            pmm_quote = (pmm_block or {}).get("quote") or {}
+            projected_american = pmm_proj.get("fair_american")
+            use_pmm = projected_american is not None
+            target_fair_american = projected_american if use_pmm else fair_american
+            target_line = pmm_line if use_pmm else pin.get("line")
+
             candidates.append({
                 "market_type":    mt,
                 "side":           side,
                 "sharp_score":    score_for_side,
                 "splits_pp":      round(splits_pp, 1),
                 "fair_prob":      fair_prob,
-                "fair_american":  fair_american,
+                "fair_american":  target_fair_american,   # PMM-projected when applicable
+                "pin_fair_american": fair_american,        # raw PIN fair at PIN's line, for reference
                 "pin_current":    pin.get("price"),
                 "pin_line":       pin.get("line"),
+                "pmm_line":       pmm_line if use_pmm else None,  # only surface when projection was applied
+                "pmm_ask_american": pmm_quote.get("ask_american"),
+                "pmm_bid_american": pmm_quote.get("bid_american"),
+                "pmm_mid_american": pmm_quote.get("mid_american"),
+                "pmm_slug":       (pmm_block or {}).get("slug"),
+                "uses_pmm_projection": use_pmm,
                 "combined_score": round(cs, 4),
                 "gates_cleared":  gates_cleared,
             })
@@ -1702,6 +1797,37 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
 
     splits = _fetch_splits(sport, away, home) if (away and home) else None
 
+    # Polymarket lookup — the user bets on Polymarket, so we want the
+    # actual PMM line + current bid/ask alongside PIN's devigged fair.
+    # Plus we project PIN's fair onto PMM's line via push-rate math so
+    # the dossier can show a meaningful limit-order target.
+    # Lookup is silent-fail: any exception falls back to no PMM data.
+    pmm_data: dict | None = None
+    pmm_error: str | None = None
+    if away and home and event_start:
+        try:
+            from app import get_client as _get_pmm_client  # lazy import: app.py
+            import pmm_markets
+            try:
+                client = _get_pmm_client()
+            except Exception as e:
+                client = None
+                pmm_error = f"pmm client unavailable: {str(e)[:120]}"
+            if client:
+                pmm_data = pmm_markets.lookup(client, sport, away, home, event_start)
+                if not pmm_data:
+                    pmm_error = "no matching PMM event"
+        except Exception as e:
+            pmm_error = f"pmm lookup failed: {str(e)[:160]}"
+            pmm_data = None
+
+    # Attach PMM market info onto each odds[market_type] block so the
+    # UI can render PMM line + bid/ask next to PIN fair, plus the
+    # PIN-derived fair projected onto PMM's line as the limit-order
+    # target. Skipped silently when no PMM data.
+    if pmm_data:
+        _attach_pmm_to_odds(odds, pmm_data, sport)
+
     espn_block: dict = {}
     if sport in _ESPN_PATH and bet_dt and away and home:
         date_key = bet_dt.astimezone(ZoneInfo("America/New_York")).strftime("%Y%m%d")
@@ -1818,6 +1944,12 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
             "pin_latest_captured": pin_latest_captured,
             "cron_last_run":       cron_last_run,
             "source":              "live" if live_used else "cached",
+        },
+        "pmm_meta":        {
+            "matched":     bool(pmm_data),
+            "event_slug":  (pmm_data or {}).get("event_slug"),
+            "event_title": (pmm_data or {}).get("event_title"),
+            "error":       pmm_error,
         },
         "generated_at":    datetime.now(timezone.utc).isoformat(),
     }

@@ -397,6 +397,71 @@ Same as `/api/my-orders` (Gotcha #7): the SDK's `price` field is the YES-canonic
 
 ---
 
+## Polymarket Market Lookup (Pick Bot)
+
+For each Pick Bot dossier, we look up the matching Polymarket event and pull its ML / Spread / Total markets with live bid/ask, so the suggestion card can target PMM's actual line at a PMM-equivalent fair price (push-rate-adjusted from PIN's devigged fair). Implementation in `pmm_markets.py` + `pmm_push_rates.py`.
+
+### Flow
+
+1. Dossier resolves game → `(sport, away, home, event_start_iso)`.
+2. `pmm_markets.lookup(client, sport, away, home, event_start_iso)`:
+   - Calls `client.events.list(tagSlug=<sport-slug>, startTimeMin=event_start-12h, startTimeMax=event_start+12h, active=true, closed=false, limit=100)`.
+   - Walks returned events; matches by two-way team-name substring (lowercased + accents stripped) on the event title OR on a market's `team.name` field.
+   - For the matched event, classifies each child market via title + outcome heuristics → `ml`, `spread`, or `total` with line + side.
+   - For each classified market, calls `client.markets.bbo(slug)` → best bid/ask (cached 30s).
+3. `_attach_pmm_to_odds()` in `handicapper_web.py` walks the structured PMM result and attaches a `polymarket` block onto each `odds[market_type]` block — per-side line, slug, quote (bid/ask/mid), and projected fair (PIN's devig pushed to PMM's line via push rate).
+4. `_suggest_picks` prefers the projected fair as `fair_american` when projection is applicable; falls back to PIN raw fair otherwise (e.g., PMM line >0.5 pts from PIN — push-rate projection isn't reliable beyond one half-point).
+
+### Push-rate tables (`pmm_push_rates.py`)
+
+| Sport | Market | Key line(s) | Push rate | Other lines |
+|---|---|---|---|---|
+| NFL | spread | 3 | 9.5% | 1.5% default |
+| NFL | spread | 7 | 5.5% | |
+| NFL | total | 41, 44, 47 | ~3% | 1.5% default |
+| NBA | spread | 3 | 4% | 2.5% default |
+| NBA | total | 200, 210, 220 | 3% | 2.5% default |
+| NHL | total | 5 | 6% | 2% default |
+| NHL | total | 6 | 5% | |
+| MLB | total | 8 | 3% | 2% default |
+| CBB | spread | 3 | 4.5% | 2.5% default |
+| NCAAF | spread | 3 | 7.5% | 1.5% default |
+
+Sources: Stanford Wong's "Sharper" + Sports Insights archives + BoydsBets. Numbers are rounded to nearest 0.5% — they're approximations, but the half-point shift order-of-magnitude matters more than precise calibration. Half-point PIN lines return 0 (push impossible). UFC has no spread/total markets in the conventional sense — push rates are 0.
+
+### Projection math
+
+For TOTAL (line moved by ±0.5):
+- Line raised (204 → 204.5): pushes (games totaling exactly 204) now resolve as UNDER. So `p_under += push`, `p_over -= push`.
+- Line lowered (204 → 203.5): reverse — pushes now resolve as OVER.
+
+For SPREAD (per-side line moved by ±0.5):
+- Lines are stored per side (home -7, away +7 are mirrors). A NEGATIVE delta on a side's own line = harder for that side = prob shifts DOWN. Both home and away use `shift_sign = sign(delta)` — no mirror flip needed (delta itself is the side-specific signal).
+
+For ML: no line, no projection — PIN fair passes through unchanged.
+
+### Failure modes
+
+All silent — never breaks the dossier. Cascading fallbacks:
+- PMM SDK call fails → no `polymarket` block on any market → UI shows PIN data only (current behavior pre-PMM).
+- PMM event matches but no spread/total market → only ML gets PMM data → others fall back.
+- PMM line >0.5 pts from PIN → projection returns None → suggestion falls back to PIN line + PIN fair (consistent pair, never "PMM line at PIN fair" inconsistent).
+- Each PMM-related field on the suggestion candidate is null-safe; the frontend renders nothing when fields are missing.
+
+`dossier.pmm_meta` carries `{matched, event_slug, event_title, error}` for diagnostic surfaces.
+
+### Caches
+
+- Event search results: 5 min per `(sport, normalized away/home, date)` key.
+- BBO per market_slug: 30 sec.
+Both are module-level dicts in `pmm_markets.py` — survive across requests on a warm Vercel container, cold start resets.
+
+### What to update when PMM coverage changes
+
+If PMM adds/drops a sport: update `_SPORT_TAG_SLUG` in `pmm_markets.py`. If PMM's market title / outcome format changes (rare but it's happened), the heuristics in `_classify_market` are the place to fix. The `dossier.pmm_meta.error` + matched/event_slug fields make this visible to the UI for debugging.
+
+---
+
 ## Domain Knowledge — Movement
 
 - **Movement / Historical Line Data**: The per-game footer movement bar + the inline sparklines + the click-through chart. All driven by Supabase `book_snapshots`.
@@ -653,7 +718,7 @@ The decision runs on `by_market` BEFORE the gate-clearing step, so SPR can't sne
 
 **Color-tiered kickoff timer.** The `.when` cell on each game row colors by urgency: ≥ 2h → grey (default), 1-2h → yellow, 15-60m → green, < 15m → red bold. Live/done games render as default grey "live/done" string. Pure visual cue — sort order is still by `event_start` ascending.
 
-**Polymarket execution.** Suggestions name the side and give the **PIN devigged American** (`fair_american`) as the limit-order target. The user does NOT bet at retail sportsbooks — DK/FD/MGM prices are reference data only, not where to bet. Every logged pick uses `entry_book='PMM'` + `entry_price=fair_american`. Resolver grades against ESPN final scores using the entered fair price.
+**Polymarket execution.** Suggestions name the side and give a limit-order target in American odds. The target is a **PMM-projected fair** whenever Polymarket has a market for that side: PIN's devigged fair_prob at PIN's line is shifted by the push rate to PIN's line ± 0.5 to project the equivalent fair at the line PMM actually offers (e.g., PIN under 204 fair -107 → PMM offers under 204.5 → target ≈ -114, push-adjusted). When PMM has no market (or PIN line is >0.5 pts away from PMM's line, so projection isn't reliable), the suggestion falls back to PIN's raw devigged American at PIN's line. The user does NOT bet at retail sportsbooks — DK/FD/MGM prices are reference data only, not where to bet. Every logged pick uses `entry_book='PMM'` + `entry_price` = the displayed target (PMM-projected or PIN, whichever the suggestion used). The dossier suggestion card carries both: the PMM-projected target + PMM's current bid/ask + PIN's raw fair as reference. Resolver grades against ESPN final scores using the entered line + price. See "Polymarket Market Lookup" section below.
 
 **Click-to-pick is cache-only — no per-click Odds API burn.** The Pick button on the games list used to pass `live=true` (6 credits/click) to get moment-fresh lines, but the new adaptive cron polls every 5 min when nearest game is < 2h out, so cached data is fresh enough. Dossiers now always pull from Supabase. The freshness label "PIN Xm ago · cron Ym ago" tells you how fresh — PIN half = last time PIN's price/line changed (book_snapshots dedup, so unchanged PIN doesn't advance this), cron half = last successful Odds API ingest for this sport from `odds_ingest_runs`. Cron half turns red when > 10m old (broken-cron symptom). Auto-refresh polls the dossier every 30s from cache while the modal is open. The `live=true` query param still works on the backend for manual curl debugging — no UI exposes it.
 
