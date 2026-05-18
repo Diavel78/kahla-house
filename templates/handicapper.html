@@ -1169,10 +1169,25 @@
                             postMatchBits.push(`retrieved_full_via_slug: ${dg.retrieved_full_via_slug}`);
                         if (dg.retrieve_by_slug_error)
                             postMatchBits.push(`retrieve_by_slug_error: ${String(dg.retrieve_by_slug_error).slice(0,100)}`);
+                        if (dg.counts)
+                            postMatchBits.push(`counts: ml=${dg.counts.ml||0} spread=${dg.counts.spread||0} total=${dg.counts.total||0}`);
                         const postMatch = postMatchBits.length
                             ? `<div style="margin-top:2px;color:var(--orange)">post-match: ${_esc(postMatchBits.join(' · '))}</div>`
                             : '';
-                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:4px">PMM debug: tag=${_esc(dg.tag || '?')} · ${evtCount}${sfb}${pm.error ? ' · err: ' + _esc(String(pm.error).slice(0, 80)) : ''}${normedHomeAway}${attemptLines}${postMatch}</div>`;
+                        // Per-market classification — what each PMM
+                        // market looks like + whether _classify_market
+                        // bucketed it as ml/spread/total or rejected it.
+                        // First 6 only to keep payload small.
+                        let classifyLines = '';
+                        if (Array.isArray(dg.markets_classified) && dg.markets_classified.length) {
+                            classifyLines = '<div style="margin-top:4px;font-family:JetBrains Mono,monospace;color:var(--text-secondary)">classify:' +
+                                dg.markets_classified.slice(0, 6).map(c => {
+                                    const cls = c.classified ? `→ ${c.classified.join('/')}` : '→ null';
+                                    return `<div style="padding-left:6px">[${_esc(c.team||'-')}] title='${_esc((c.title||'').slice(0,40))}' outcome='${_esc((c.outcome||'').slice(0,30))}' ${cls}</div>`;
+                                }).join('') +
+                                '</div>';
+                        }
+                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:4px">PMM debug: tag=${_esc(dg.tag || '?')} · ${evtCount}${sfb}${pm.error ? ' · err: ' + _esc(String(pm.error).slice(0, 80)) : ''}${normedHomeAway}${attemptLines}${postMatch}${classifyLines}</div>`;
                     }
                     metaLine = `Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow} <span style="color:var(--text-muted);font-size:10px">(no PMM match — projection skipped)</span>${dbg}`;
                 }
