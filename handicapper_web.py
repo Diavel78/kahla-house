@@ -1804,6 +1804,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     # Lookup is silent-fail: any exception falls back to no PMM data.
     pmm_data: dict | None = None
     pmm_error: str | None = None
+    pmm_diag: dict = {}
     if away and home and event_start:
         try:
             from app import get_client as _get_pmm_client  # lazy import: app.py
@@ -1814,7 +1815,9 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
                 client = None
                 pmm_error = f"pmm client unavailable: {str(e)[:120]}"
             if client:
-                pmm_data = pmm_markets.lookup(client, sport, away, home, event_start)
+                pmm_data = pmm_markets.lookup(
+                    client, sport, away, home, event_start, diag=pmm_diag,
+                )
                 if not pmm_data:
                     pmm_error = "no matching PMM event"
         except Exception as e:
@@ -1950,6 +1953,11 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
             "event_slug":  (pmm_data or {}).get("event_slug"),
             "event_title": (pmm_data or {}).get("event_title"),
             "error":       pmm_error,
+            # Diagnostic dump — what tag was used, time window, events
+            # PMM returned, sample titles, classification results.
+            # Surfaces here so the UI / Copy-for-Claude can show it for
+            # iteration on matching/classification heuristics.
+            "diag":        pmm_diag,
         },
         "generated_at":    datetime.now(timezone.utc).isoformat(),
     }

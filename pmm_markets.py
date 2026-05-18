@@ -115,6 +115,52 @@ def _name_match(haystack: str, needle: str) -> bool:
     return n in h or h in n
 
 
+def _last_token(team_name: str) -> str:
+    """Last word in a team name. 'Baltimore Orioles' → 'orioles'.
+    Used as a looser match fallback when PMM uses just the team
+    nickname in event titles."""
+    parts = [p for p in _norm(team_name).split() if len(p) >= 3]
+    return parts[-1] if parts else ""
+
+
+def _match_event_to_game(events: list, away: str, home: str) -> Any | None:
+    """Walk a list of PMM events looking for one referring to the
+    away vs home game. Tries progressively looser matches:
+      1. Title contains BOTH full team names
+      2. Title contains BOTH team last-tokens (e.g., 'orioles' + 'rays')
+      3. Any market within the event has team.name matching one of
+         our teams AND title mentions the other
+    Returns the matched event (untouched SDK object) or None."""
+    away_last = _last_token(away)
+    home_last = _last_token(home)
+    for ev in events:
+        title = ev.get("title") if isinstance(ev, dict) else getattr(ev, "title", "")
+        # Pass 1: full team names
+        if _name_match(title, away) and _name_match(title, home):
+            return ev
+        # Pass 2: last tokens (Orioles + Rays)
+        if away_last and home_last:
+            t_norm = _norm(title)
+            if away_last in t_norm and home_last in t_norm:
+                return ev
+    for ev in events:
+        markets = ev.get("markets") if isinstance(ev, dict) else getattr(ev, "markets", [])
+        markets = markets or []
+        title = ev.get("title") if isinstance(ev, dict) else getattr(ev, "title", "")
+        for m in markets:
+            team = m.get("team") if isinstance(m, dict) else getattr(m, "team", None)
+            tname = None
+            if team:
+                tname = (team.get("name") if isinstance(team, dict)
+                         else getattr(team, "name", None))
+            mtitle = m.get("title") if isinstance(m, dict) else getattr(m, "title", "")
+            if tname and (_name_match(tname, away) or _name_match(tname, home)):
+                if _name_match(mtitle, away) or _name_match(mtitle, home) \
+                   or _name_match(title, away) or _name_match(title, home):
+                    return ev
+    return None
+
+
 # ──────────────────────────── Event search ────────────────────────────
 
 def _search_event(client, sport: str, away: str, home: str,
@@ -156,57 +202,91 @@ def _search_event(client, sport: str, away: str, home: str,
         diag["window_min"] = win_min
         diag["window_max"] = win_max
 
-    try:
-        from polymarket_us.types.events import EventsListParams
-        params: EventsListParams = {
-            "tagSlug":       tag,
-            "active":        True,
-            "closed":        False,
-            "startTimeMin":  win_min,
-            "startTimeMax":  win_max,
-            "limit":         100,
-        }
-        resp = client.events.list(params)
-    except Exception as e:
-        if diag is not None:
-            diag["error"] = f"events.list failed: {str(e)[:200]}"
-        return None
+    # Try a couple param shapes. Polymarket events aren't always
+    # `active=true` until close to tip, and sometimes the tag filter
+    # alone misses events that need `relatedTags=true`. Iterate until
+    # we get a non-empty response, then proceed with team matching.
+    attempts = [
+        {"tagSlug": tag, "closed": False,
+         "startTimeMin": win_min, "startTimeMax": win_max, "limit": 100},
+        {"tagSlug": tag, "closed": False, "relatedTags": True,
+         "startTimeMin": win_min, "startTimeMax": win_max, "limit": 100},
+        {"tagSlug": tag, "closed": False, "limit": 200},   # no time filter as fallback
+    ]
+    events: list = []
+    last_error = None
+    used_attempt = None
+    for i, params in enumerate(attempts):
+        try:
+            resp = client.events.list(params)
+        except Exception as e:
+            last_error = f"events.list attempt {i} failed: {str(e)[:200]}"
+            continue
+        evs = resp.get("events") if isinstance(resp, dict) else getattr(resp, "events", None)
+        evs = evs or []
+        if evs:
+            events = evs
+            used_attempt = i
+            break
+        if used_attempt is None and evs is not None:
+            used_attempt = i  # record that the call succeeded even if empty
+    if not events and last_error and diag is not None:
+        diag["error"] = last_error
 
-    events = resp.get("events") if isinstance(resp, dict) else getattr(resp, "events", None)
-    events = events or []
     if diag is not None:
         diag["events_returned"] = len(events)
+        diag["attempt_used"] = used_attempt
         diag["sample_event_titles"] = [
             (e.get("title") if isinstance(e, dict) else getattr(e, "title", ""))
-            for e in events[:5]
+            for e in events[:8]
         ]
 
-    matched = None
-    for ev in events:
-        title = ev.get("title") if isinstance(ev, dict) else getattr(ev, "title", "")
-        markets = ev.get("markets") if isinstance(ev, dict) else getattr(ev, "markets", [])
-        markets = markets or []
-        # Title containing both teams is the strongest signal.
-        if _name_match(title, away) and _name_match(title, home):
-            matched = ev
-            break
-        # Fallback: any market within the event whose team field
-        # matches one of our teams + title contains the other.
-        for m in markets:
-            team = m.get("team") if isinstance(m, dict) else getattr(m, "team", None)
-            tname = None
-            if team:
-                tname = (team.get("name") if isinstance(team, dict) else getattr(team, "name", None))
-            mtitle = m.get("title") if isinstance(m, dict) else getattr(m, "title", "")
-            if tname and (_name_match(tname, away) or _name_match(tname, home)):
-                if _name_match(mtitle, away) and _name_match(mtitle, home):
-                    matched = ev
-                    break
-        if matched:
-            break
+    matched = _match_event_to_game(events, away, home)
+    # If filter-based search returned nothing useful, try a name search.
+    # Polymarket's tag filter occasionally misses events that the
+    # search-by-query endpoint finds.
+    if matched is None:
+        try:
+            sresp = client.search.query({
+                "query":  f"{away} {home}",
+                "status": "upcoming",
+                "limit":  20,
+            })
+            # Search response shape varies; look for events list
+            search_events = []
+            if isinstance(sresp, dict):
+                search_events = sresp.get("events") or sresp.get("results") or []
+            if search_events:
+                if diag is not None:
+                    diag["search_fallback_returned"] = len(search_events)
+                    diag["search_sample_titles"] = [
+                        (e.get("title") if isinstance(e, dict) else getattr(e, "title", ""))
+                        for e in search_events[:8]
+                    ]
+                matched = _match_event_to_game(search_events, away, home)
+                # search result event likely lacks `markets` — refetch by slug
+                if matched is not None:
+                    slug = matched.get("slug") if isinstance(matched, dict) else getattr(matched, "slug", None)
+                    if slug:
+                        try:
+                            full = client.events.retrieve_by_slug(slug)
+                            ev = full.get("event") if isinstance(full, dict) else getattr(full, "event", None)
+                            if ev:
+                                matched = ev
+                        except Exception as e:
+                            if diag is not None:
+                                diag["retrieve_by_slug_error"] = str(e)[:200]
+        except Exception as e:
+            if diag is not None:
+                diag["search_fallback_error"] = str(e)[:200]
 
     result = _event_to_dict(matched) if matched else None
-    _EVENT_CACHE[cache_key] = (time.time(), result)
+    # Only cache successful matches. Caching None would freeze "no
+    # match" results for the TTL, which kills iteration speed when
+    # we're tuning matching heuristics. Cost of not caching misses
+    # is minimal — one extra round-trip per minute per missed game.
+    if result is not None:
+        _EVENT_CACHE[cache_key] = (time.time(), result)
     if diag is not None:
         diag["matched"] = bool(matched)
         if matched:
