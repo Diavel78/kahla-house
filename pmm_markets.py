@@ -325,7 +325,31 @@ def _search_event(client, sport: str, away: str, home: str,
                         }
         if diag is not None:
             mk = matched.get("markets") if isinstance(matched, dict) else getattr(matched, "markets", None)
-            diag["matched_markets_count"] = len(mk or [])
+            mk_list = mk or []
+            diag["matched_markets_count"] = len(mk_list)
+            # Dump RAW keys + values on the first market so we can see
+            # what data shape the API actually returned. _market_to_dict
+            # might be looking for the wrong fields.
+            if mk_list:
+                first = mk_list[0]
+                if isinstance(first, dict):
+                    diag["first_market_keys"] = list(first.keys())
+                    # Stringify values briefly so we can read them
+                    sample = {}
+                    for k, v in list(first.items())[:30]:
+                        try:
+                            s = str(v) if v is not None else None
+                            if s and len(s) > 100:
+                                s = s[:100] + "..."
+                            sample[k] = s
+                        except Exception:
+                            sample[k] = "<?>"
+                    diag["first_market_sample"] = sample
+                else:
+                    diag["first_market_keys"] = [
+                        a for a in dir(first)
+                        if not a.startswith("_") and not callable(getattr(first, a, None))
+                    ]
 
     # If filter-based search returned nothing useful, try a name search.
     # Polymarket's tag filter occasionally misses events that the

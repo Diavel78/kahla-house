@@ -1187,7 +1187,22 @@
                                 }).join('') +
                                 '</div>';
                         }
-                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:4px">PMM debug: tag=${_esc(dg.tag || '?')} · ${evtCount}${sfb}${pm.error ? ' · err: ' + _esc(String(pm.error).slice(0, 80)) : ''}${normedHomeAway}${attemptLines}${postMatch}${classifyLines}</div>`;
+                        // Raw first-market field dump — when classifier
+                        // shows all empty fields, this tells us what
+                        // fields the API ACTUALLY returned vs what we
+                        // were looking for. The keys list shows whether
+                        // we should be reading 'name'/'question' instead
+                        // of 'title' etc.
+                        let rawLines = '';
+                        if (dg.first_market_keys && dg.first_market_keys.length) {
+                            rawLines += `<div style="margin-top:4px;font-family:JetBrains Mono,monospace;color:var(--green)">first market keys: ${_esc(dg.first_market_keys.join(', '))}</div>`;
+                        }
+                        if (dg.first_market_sample) {
+                            const sampleStr = Object.entries(dg.first_market_sample)
+                                .map(([k, v]) => `${k}=${v || 'null'}`).join(' · ');
+                            rawLines += `<div style="margin-top:2px;font-family:JetBrains Mono,monospace;color:var(--text-secondary)">first market: ${_esc(sampleStr.slice(0, 600))}</div>`;
+                        }
+                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:4px">PMM debug: tag=${_esc(dg.tag || '?')} · ${evtCount}${sfb}${pm.error ? ' · err: ' + _esc(String(pm.error).slice(0, 80)) : ''}${normedHomeAway}${attemptLines}${postMatch}${classifyLines}${rawLines}</div>`;
                     }
                     metaLine = `Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow} <span style="color:var(--text-muted);font-size:10px">(no PMM match — projection skipped)</span>${dbg}`;
                 }
