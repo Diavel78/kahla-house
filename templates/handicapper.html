@@ -270,6 +270,9 @@
         .market-card .pick-side-btn.bot { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
         .market-card .move { font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 6px 8px; background: var(--surface-2); border-radius: 6px; margin-top: 8px; }
         .market-card .move .sharp { color: var(--blue); font-weight: 700; }
+        .market-card .move .move-note { color: var(--text-muted); font-size: 10px; margin-left: 6px; }
+        .market-card .row .pin-open { color: var(--text-muted); font-size: 11px; }
+        .market-card .opener-age { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); margin-top: 6px; }
 
         .splits-row { padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 18px; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
         .splits-row .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 6px; }
@@ -1396,7 +1399,22 @@
                 const lineFrag = (ln != null) ? ` <span class="label">@${_fmtPt(ln)}</span>` : '';
                 const fair = pinSnap.fair_american;
                 const fairFrag = fair != null ? ` <span class="label">fair ${_fmtAmer(fair)}</span>` : '';
-                rows += `<div class="row"><span class="label">PIN:</span> <span class="pin">${_fmtAmer(pinSnap.price)}</span>${lineFrag}${fairFrag}</div>`;
+                // ALWAYS show where PIN opened when it moved — independent
+                // of whether the recency-weighted sharp score cleared any
+                // threshold. The score tells you HOW MUCH the move counts;
+                // this tells you the move happened at all. Renders as
+                // "(open -183)" or "(open 104 @6.5)" when price/line differ.
+                const opener = (blk.pin_opener || {})[s];
+                let openFrag = '';
+                if (opener && opener.price != null) {
+                    const lineMoved = opener.line != null && ln != null && Math.abs(opener.line - ln) > 0.001;
+                    const priceMoved = opener.price !== pinSnap.price;
+                    if (priceMoved || lineMoved) {
+                        const oLn = lineMoved ? ` @${_fmtPt(opener.line)}` : '';
+                        openFrag = ` <span class="pin-open">(open ${_fmtAmer(opener.price)}${oLn})</span>`;
+                    }
+                }
+                rows += `<div class="row"><span class="label">PIN:</span> <span class="pin">${_fmtAmer(pinSnap.price)}</span>${lineFrag}${fairFrag}${openFrag}</div>`;
             }
             if (bestSnap) {
                 const ln = bestSnap.line;
@@ -1435,14 +1453,25 @@
 
         const botTag = anyBotPicked ? '<span class="bot-tag">BOT PICK</span>' : '';
 
+        // Sharp-score chip — only when the recency-weighted score scored
+        // a side. The open→current movement itself now shows per-side
+        // above (always visible), so this chip is just the "how much
+        // does it count" annotation: which side and the weighted score.
         let move = '';
         if (mv) {
-            const oFrag = mv.opener_line != null ? ` (${_fmtPt(mv.opener_line)})` : '';
-            const cFrag = mv.current_line != null ? ` (${_fmtPt(mv.current_line)})` : '';
-            move = `<div class="move">PIN: <b>${_fmtAmer(mv.opener_price)}${oFrag}</b> → <b>${_fmtAmer(mv.current_price)}${cFrag}</b> <span class="sharp">SHARP ${(mv.sharp_side || '').toUpperCase()} = ${mv.sharp_score}</span></div>`;
+            move = `<div class="move"><span class="sharp">SHARP ${(mv.sharp_side || '').toUpperCase()} = ${mv.sharp_score}</span> <span class="move-note">recency-weighted</span></div>`;
         }
 
-        return `<div class="market-card"><h3>${title}${botTag}</h3>${blocks}${move}</div>`;
+        // Opener-age footer — shows WHEN PIN opened so an old move that
+        // scores low is self-explanatory ("PIN opener captured 10h ago"
+        // → the move is stale → low weight → low score).
+        let openerAge = '';
+        const anyOpener = sides.map(s => (blk.pin_opener || {})[s]).find(o => o && o.captured);
+        if (anyOpener && anyOpener.captured) {
+            openerAge = `<div class="opener-age">PIN opened ${_esc(_fmtAgo(anyOpener.captured))}</div>`;
+        }
+
+        return `<div class="market-card"><h3>${title}${botTag}</h3>${blocks}${move}${openerAge}</div>`;
     }
 
     // Seed an ad-hoc pick from a market panel side the bot didn't
