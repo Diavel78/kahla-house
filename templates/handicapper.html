@@ -531,6 +531,9 @@
         // Re-sort tabs every 5 min so off-season sports drop to the
         // right and games-publishing sports rise as their slates open.
         setInterval(_refreshSportTabOrder, 5 * 60_000);
+        // Tick the kickoff countdowns every minute so "57m" → "56m"
+        // without re-fetching the games list.
+        setInterval(_tickKickoffs, 60_000);
     });
 
     // Hide everything that requires bot_access when the user is a
@@ -861,7 +864,7 @@
             list.innerHTML = games.map(g => {
                 const matchup = g.away && g.home ? `${_esc(g.away)} @ ${_esc(g.home)}` : _esc(g.event_name);
                 return `<li class="game-row">
-                    <span class="when ${_kickoffTier(g.event_start)}">${_fmtKickoff(g.event_start)}</span>
+                    <span class="when ${_kickoffTier(g.event_start)}" data-start="${_esc(g.event_start)}">${_fmtKickoff(g.event_start)}</span>
                     <span class="matchup">${matchup}</span>
                     <button class="pick-btn" onclick="pickGame('${g.market_id}')">Pick</button>
                 </li>`;
@@ -870,6 +873,21 @@
             list.innerHTML = `<li class="games-empty" style="color:var(--red)">Failed to load: ${_esc(String(e))}</li>`;
             count.textContent = '0';
         }
+    }
+
+    // Tick the games-list kickoff countdowns every minute so "57m"
+    // ages to "56m" etc. without a re-fetch. Walks the rendered
+    // .when[data-start] cells and recomputes label + color tier from
+    // the stored event_start. Pure DOM update — no network, no API
+    // credit cost. The 5-min _refreshSportTabOrder still handles
+    // re-sorting + picking up newly-published games.
+    function _tickKickoffs() {
+        document.querySelectorAll('#gamesList .when[data-start]').forEach(el => {
+            const iso = el.getAttribute('data-start');
+            if (!iso) return;
+            el.textContent = _fmtKickoff(iso);
+            el.className = 'when ' + _kickoffTier(iso);
+        });
     }
 
     async function pickGame(marketId) {
