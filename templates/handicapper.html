@@ -365,11 +365,6 @@
                 <p class="lede">Ask about a game and get the full pre-game read: PIN sharp signal, retail edge per side, public splits, injuries, recent form, lineups. Bot suggests a 1/3/5u play if signals + edge clear the bar — otherwise it'll tell you to pass. ML, spread, total only.</p>
             </div>
 
-            <!-- Performance stats — kept up top so the lifetime read is
-                 visible at a glance before scrolling into pick selection. -->
-            <div class="stat-strip" id="overallStats"></div>
-            <div class="conf-strip" id="confStrip"></div>
-
             <!-- Sport tabs -->
             <div class="sport-tabs" id="sportTabs">
                 <button class="sport-tab active" data-sport="MLB">MLB</button>
@@ -424,6 +419,13 @@
                     <div id="dossier"></div>
                 </div>
             </div>
+
+            <!-- Performance stats — moved to the bottom so the games
+                 list is the first thing on the page. Overall P&L +
+                 grading heartbeat, then the low/medium/high/whale
+                 confidence-tier rollup, then pending + settled. -->
+            <div class="stat-strip" id="overallStats"></div>
+            <div class="conf-strip" id="confStrip"></div>
 
             <div class="section" id="pendingSection">
                 <div class="section-title">Pending <span class="count" id="pendingCount">0</span></div>
