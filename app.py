@@ -4084,7 +4084,7 @@ def api_handicapper():
 
     cols = ("id,picked_at,asked_by,query_text,sport,event_name,event_start,"
             "market_type,side,entry_book,entry_price,entry_line,"
-            "units,confidence,fair_prob,edge_pp,sharp_score,"
+            "units,confidence,fair_prob,edge_pp,sharp_score,clv_pp,"
             "analysis_md,reasons,"
             "status,pnl_units,result_score,settled_at,"
             "actual_fill_price,actual_fill_qty,actual_fill_line,actual_fill_pnl,"
@@ -4116,7 +4116,14 @@ def api_handicapper():
 
     def _new_bucket():
         return {"graded": 0, "won": 0, "lost": 0, "push": 0,
-                "pnl": 0.0, "hit_rate": None, "roi": None}
+                "pnl": 0.0, "hit_rate": None, "roi": None,
+                # CLV (closing line value) rollup. clv_sum / clv_n track
+                # the running average across picks that HAVE a CLV value
+                # (PIN closing pair existed); avg_clv_pp is finalized
+                # below. CLV is the edge-proof metric — positive average
+                # = the bot is consistently beating the close, which is
+                # +EV regardless of short-run W/L variance.
+                "clv_sum": 0.0, "clv_n": 0, "avg_clv_pp": None}
 
     overall_today  = _new_bucket()
     overall_week   = _new_bucket()
@@ -4143,20 +4150,28 @@ def api_handicapper():
         except (TypeError, ValueError):
             pnl = 0.0
         event_start = r.get("event_start") or ""
-        for bucket in (overall_30d, by_conf.get(r.get("confidence"))):
-            if bucket is None:
-                continue
+        try:
+            clv = r.get("clv_pp")
+            clv = float(clv) if clv is not None else None
+        except (TypeError, ValueError):
+            clv = None
+
+        def _add(bucket):
             bucket["graded"] += 1
             bucket[st] += 1
             bucket["pnl"] += pnl
+            if clv is not None:
+                bucket["clv_sum"] += clv
+                bucket["clv_n"] += 1
+
+        for bucket in (overall_30d, by_conf.get(r.get("confidence"))):
+            if bucket is None:
+                continue
+            _add(bucket)
         if event_start >= cutoff_7d:
-            overall_week["graded"] += 1
-            overall_week[st] += 1
-            overall_week["pnl"] += pnl
+            _add(overall_week)
         if event_start >= today_start_iso:
-            overall_today["graded"] += 1
-            overall_today[st] += 1
-            overall_today["pnl"] += pnl
+            _add(overall_today)
 
     def _finalize(s: dict) -> None:
         decided = s["won"] + s["lost"]
@@ -4164,6 +4179,8 @@ def api_handicapper():
             s["hit_rate"] = round(s["won"] / decided, 4)
         if s["graded"] > 0:
             s["roi"] = round(s["pnl"] / s["graded"], 4)
+        if s["clv_n"] > 0:
+            s["avg_clv_pp"] = round(s["clv_sum"] / s["clv_n"], 2)
         s["pnl"] = round(s["pnl"], 3)
 
     for s in (overall_today, overall_week, overall_30d, *by_conf.values()):

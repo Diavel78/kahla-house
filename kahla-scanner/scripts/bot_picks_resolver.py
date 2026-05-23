@@ -255,6 +255,79 @@ def _grade(bet: dict, home_score: int, away_score: int) -> str | None:
     return None
 
 
+def _amer_to_prob(p) -> float | None:
+    """American odds → implied probability (with vig)."""
+    try:
+        p = int(p)
+    except (TypeError, ValueError):
+        return None
+    if p > 0:
+        return 100.0 / (p + 100.0)
+    if p < 0:
+        return -p / (-p + 100.0)
+    return 0.5
+
+
+def _pin_close_pair(sb, market_id: str, market_type: str,
+                    before_iso: str) -> dict | None:
+    """PIN's last pre-event_start snapshot on BOTH sides of a market.
+
+    Returns {side: implied_prob} once both sides have a snapshot before
+    the close, else None. Mirrors app.py:_clv_pin_close_pair so Pick Bot
+    CLV uses the same closing-line source as the dashboard CLV.
+    """
+    sides = ("over", "under") if market_type == "total" else ("home", "away")
+    out: dict[str, float] = {}
+    for side in sides:
+        try:
+            rows = (sb.table("book_snapshots")
+                    .select("price_american")
+                    .eq("market_id", market_id)
+                    .eq("book", "PIN")
+                    .eq("market_type", market_type)
+                    .eq("side", side)
+                    .lte("captured_at", before_iso)
+                    .order("captured_at", desc=True)
+                    .limit(1)
+                    .execute().data) or []
+        except Exception:
+            continue
+        if not rows:
+            continue
+        prob = _amer_to_prob(rows[0].get("price_american"))
+        if prob is not None:
+            out[side] = prob
+    return out if len(out) == 2 else None
+
+
+def _compute_clv(sb, bet: dict) -> float | None:
+    """Closing Line Value in percentage points for one pick.
+
+    clv_pp = (closing_devig_prob_for_side − entry_implied_prob) × 100
+
+    PIN's closing line = its last snapshot before event_start, devigged
+    against the other side. Positive = the bot was early on the side the
+    line later moved toward (sharp). None when PIN has no closing pair or
+    the entry price is unreadable.
+    """
+    market_id = bet.get("market_id")
+    mt = bet.get("market_type")
+    side = bet.get("side")
+    if not (market_id and mt and side):
+        return None
+    entry_prob = _amer_to_prob(bet.get("entry_price"))
+    if entry_prob is None:
+        return None
+    pair = _pin_close_pair(sb, market_id, mt, bet.get("event_start") or "")
+    if not pair or side not in pair:
+        return None
+    total = sum(pair.values())
+    if total <= 0:
+        return None
+    close_devig = pair[side] / total
+    return round((close_devig - entry_prob) * 100.0, 2)
+
+
 def _pnl_units(status: str, entry_price: int, units: int) -> float:
     """To-WIN sizing. The user bets to win N units, not to risk N units.
     So a win is always exactly +units, regardless of price. A loss is
@@ -282,8 +355,8 @@ def _fetch_pending(sb) -> list[dict]:
               - timedelta(hours=RESOLVE_LAG_HOURS)).isoformat()
     try:
         return (sb.table("bot_picks")
-                .select("id,sport,event_name,event_start,market_type,"
-                        "side,entry_book,entry_price,entry_line,units")
+                .select("id,market_id,sport,event_name,event_start,market_type,"
+                        "side,entry_book,entry_price,entry_line,units,clv_pp")
                 .eq("status", "pending")
                 .lt("event_start", cutoff)
                 .order("event_start")
@@ -295,14 +368,20 @@ def _fetch_pending(sb) -> list[dict]:
 
 
 def _update(sb, pick_id: int, status: str, pnl: float,
-            result_score: dict) -> bool:
+            result_score: dict, clv_pp: float | None = None) -> bool:
     try:
-        sb.table("bot_picks").update({
+        payload = {
             "status":       status,
             "pnl_units":    pnl,
             "result_score": result_score,
             "settled_at":   datetime.now(timezone.utc).isoformat(),
-        }).eq("id", pick_id).execute()
+        }
+        # Only write CLV when we have a value AND the row doesn't already
+        # carry one — closing line is fixed at event_start, so it never
+        # needs recomputing.
+        if clv_pp is not None:
+            payload["clv_pp"] = clv_pp
+        sb.table("bot_picks").update(payload).eq("id", pick_id).execute()
         return True
     except Exception as e:
         log.warning("update failed for pick %s: %s", pick_id, e)
@@ -404,7 +483,15 @@ def main(argv: list[str] | None = None) -> int:
                 }
             units = bet.get("units") or 1
             pnl = _pnl_units(status, bet["entry_price"], units)
-            if not _update(sb, bet["id"], status, pnl, result):
+            # Closing Line Value — compute once (skip if already set).
+            # Best-effort: a missing PIN closing pair just leaves it NULL.
+            clv = None
+            if bet.get("clv_pp") is None:
+                try:
+                    clv = _compute_clv(sb, bet)
+                except Exception as e:
+                    log.warning("clv compute failed for pick %s: %s", bet["id"], e)
+            if not _update(sb, bet["id"], status, pnl, result, clv):
                 continue
 
             if status == "won":  won  += 1

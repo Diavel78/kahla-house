@@ -80,7 +80,7 @@
         .stat-tf:last-child { border-bottom: 0; padding-bottom: 0; }
         .stat-tf:first-child { padding-top: 0; }
         .stat-tf-head { font-size: 10px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); letter-spacing: 0.08em; font-weight: 700; margin-bottom: 6px; }
-        .stat-tf-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+        .stat-tf-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
         .stat-cell { text-align: center; }
         .stat-cell .label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
         .stat-cell .value { font-size: 18px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
@@ -126,6 +126,8 @@
         .pick .chip.edge { background: var(--green-dim); color: #4ade80; }
         .pick .chip.sharp { background: var(--blue-dim); color: var(--blue); }
         .pick .chip.kickoff { background: var(--bg); color: var(--text-secondary); border: 1px solid var(--border); }
+        .pick .chip.clv.pos { background: var(--green-dim); color: #4ade80; }
+        .pick .chip.clv.neg { background: var(--red-dim, rgba(248,113,113,0.12)); color: var(--red); }
         .pick .chip.prov.bet-and-rec { background: var(--green-dim); color: var(--green); font-weight: 700; }
         .pick .chip.prov.bet-only    { background: var(--blue-dim);  color: var(--blue);  font-weight: 700; }
         .pick .chip.prov.rec-only    { background: var(--surface-2); color: var(--text-muted); }
@@ -240,6 +242,7 @@
         .market-card .pmm-row .pmm-lbl { color: #c084fc; font-weight: 700; letter-spacing: 0.04em; margin-right: 6px; }
         .market-card .pmm-row .pmm-target { color: var(--green); font-weight: 600; }
         .suggestion-card .pick-meta { font-size: 12px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; }
+        .suggestion-card .pick-kelly { font-size: 11px; color: var(--gold); font-family: 'JetBrains Mono', monospace; margin: 4px 0 6px; }
         .suggestion-card .why { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); list-style: none; font-size: 13px; line-height: 1.55; color: var(--text); }
         .suggestion-card .why li { padding: 3px 0 3px 16px; position: relative; }
         .suggestion-card .why li::before { content: '•'; position: absolute; left: 4px; color: var(--blue); font-weight: 700; }
@@ -296,6 +299,20 @@
         .tc-row .tc-val:last-child  { text-align: left; }
         .tc-row .tc-val.tc-better { color: var(--green); font-weight: 700; }
         .tc-row .tc-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; white-space: nowrap; }
+        /* Power rating + weather reference cards */
+        .pr-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0 8px; }
+        .pr-cell { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; background: var(--surface-2); border-radius: 10px; }
+        .pr-cell .pr-lbl { font-size: 11px; color: var(--text-muted); }
+        .pr-cell .pr-val { font-size: 18px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+        .pr-cell .pr-fair { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+        .pr-line { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+        .wx-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0 6px; }
+        .wx-cell { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; background: var(--surface-2); border-radius: 10px; text-align: center; }
+        .wx-cell .wx-lbl { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+        .wx-cell .wx-val { font-size: 15px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+        .wx-dome { font-size: 13px; color: var(--text-secondary); padding: 8px 0; }
+        .wx-foot { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+        @media (max-width: 640px) { .wx-grid { grid-template-columns: repeat(2, 1fr); } }
 
         .teams-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
         .team-card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
@@ -640,11 +657,20 @@
         const pnlCls = s.pnl > 0 ? 'pos' : (s.pnl < 0 ? 'neg' : 'muted');
         const roiCls = (roiVal == null) ? 'muted'
             : (roiVal > 0 ? 'pos' : (roiVal < 0 ? 'neg' : 'muted'));
+        // CLV (avg closing line value, pp) — the edge-proof metric.
+        // Positive average = consistently beating the close = +EV
+        // regardless of short-run W/L noise.
+        const clvVal = s.avg_clv_pp == null ? null : s.avg_clv_pp;
+        const clv = clvVal == null ? '—'
+            : `${clvVal >= 0 ? '+' : ''}${Number(clvVal).toFixed(2)}pp`;
+        const clvCls = (clvVal == null) ? 'muted'
+            : (clvVal > 0 ? 'pos' : (clvVal < 0 ? 'neg' : 'muted'));
         return `
             <div class="stat-cell"><div class="label">Graded</div><div class="value">${s.graded}</div></div>
             <div class="stat-cell"><div class="label">Hit Rate</div><div class="value ${s.graded? '' : 'muted'}">${hr}</div></div>
             <div class="stat-cell"><div class="label">P&L</div><div class="value ${pnlCls}">${_fmtPnl(s.pnl)}</div></div>
             <div class="stat-cell"><div class="label">u/pick</div><div class="value ${roiCls}">${roi}</div></div>
+            <div class="stat-cell"><div class="label" title="Avg closing line value — beat the close = +EV">CLV</div><div class="value ${clvCls}">${clv}</div></div>
         `;
     }
 
@@ -680,6 +706,11 @@
         if (r.confidence) sigChips.push(`<span class="chip conf-${r.confidence}">${r.confidence.toUpperCase()}</span>`);
         if (r.edge_pp != null) sigChips.push(`<span class="chip edge">+${Number(r.edge_pp).toFixed(1)}pp</span>`);
         if (r.sharp_score != null) sigChips.push(`<span class="chip sharp">SHARP ${r.sharp_score}</span>`);
+        // CLV chip — green when we beat the close, red when picked off.
+        if (r.clv_pp != null) {
+            const c = Number(r.clv_pp);
+            sigChips.push(`<span class="chip clv ${c >= 0 ? 'pos' : 'neg'}" title="Closing line value">CLV ${c >= 0 ? '+' : ''}${c.toFixed(1)}pp</span>`);
+        }
 
 
         const cls = (kind === 'settled') ? (r.status || '') : '';
@@ -1176,6 +1207,7 @@
                         <span class="target">@ ${_fmtAmer(s.fair_american)}</span>
                         <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>
                     </div>
+                    ${(s.edge_pp != null && s.edge_pp > 0) ? `<div class="pick-kelly">est. edge +${Number(s.edge_pp).toFixed(1)}pp${s.kelly_pct ? ` · ¼-Kelly ${Number(s.kelly_pct).toFixed(1)}% BR` : ''} → ${s.units}u</div>` : ''}
                     <div class="pick-meta">${metaLine}</div>
                     ${whyHtml}
                     ${s.gates_cleared ? '' : `<div class="soft-note">Sharp gate not cleared (need sharp ≥ 4). Chalk-flat market; this is the best read available — treat as 1u lean only.</div>`}
@@ -1317,6 +1349,67 @@
                 <div class="lbl">Probable Pitchers</div>
                 ${mkRow(d.away, pp.away)}
                 ${mkRow(d.home, pp.home)}
+            </div>`;
+        }
+
+        // Power rating — our independent number vs the market. Confirms
+        // or cautions the pick (feeds the Kelly edge only when it agrees
+        // with the sharp side); surfaced here as a reference card.
+        if (d.power_rating) {
+            const p = d.power_rating;
+            const homeP = p.p_home != null ? `${(p.p_home*100).toFixed(0)}%` : '—';
+            const awayP = p.p_away != null ? `${(p.p_away*100).toFixed(0)}%` : '—';
+            const marginTeam = (p.proj_margin_home != null && p.proj_margin_home >= 0) ? d.home : d.away;
+            const marginAbs = p.proj_margin_home != null ? Math.abs(p.proj_margin_home).toFixed(1) : null;
+            const eHome = p.edge_home_pp, eAway = p.edge_away_pp;
+            const fairA = p.fair_away_american != null ? ` <span class="pr-fair">${_fmtAmer(p.fair_away_american)}</span>` : '';
+            const fairH = p.fair_home_american != null ? ` <span class="pr-fair">${_fmtAmer(p.fair_home_american)}</span>` : '';
+            const edgeFrag = (eHome != null || eAway != null)
+                ? `<div class="pr-line">vs PIN fair: <b>${_esc(d.away)}</b> ${eAway!=null?(eAway>=0?'+':'')+eAway.toFixed(1)+'pp':'—'} · <b>${_esc(d.home)}</b> ${eHome!=null?(eHome>=0?'+':'')+eHome.toFixed(1)+'pp':'—'}</div>`
+                : '';
+            const totFrag = (p.total_line != null && p.proj_total != null)
+                ? `<div class="pr-line">Total: model <b>${p.proj_total}</b> vs line ${_fmtPt(p.total_line)} → leans <b>${(p.total_lean||'—').toUpperCase()}</b></div>`
+                : (p.proj_total != null ? `<div class="pr-line">Projected total: <b>${p.proj_total}</b></div>` : '');
+            html += `<div class="card">
+                <div class="card-head">
+                    <h3>Power rating</h3>
+                    <span class="ref-tag" title="Independent model built from season team stats — confirms/cautions, never the sole driver">OUR NUMBER</span>
+                </div>
+                <div class="pr-grid">
+                    <div class="pr-cell"><span class="pr-lbl">${_esc(d.away)}</span><span class="pr-val">${awayP}${fairA}</span></div>
+                    <div class="pr-cell"><span class="pr-lbl">${_esc(d.home)}</span><span class="pr-val">${homeP}${fairH}</span></div>
+                </div>
+                ${marginAbs != null ? `<div class="pr-line">Projected: <b>${_esc(marginTeam)}</b> by ${marginAbs}</div>` : ''}
+                ${totFrag}
+                ${edgeFrag}
+            </div>`;
+        }
+
+        // Weather — outdoor MLB/NFL venues only (free Open-Meteo).
+        // Reference context for the analyst; not auto-sized.
+        if (d.weather) {
+            const w = d.weather;
+            let body;
+            if (w.dome) {
+                body = `<div class="wx-dome">${_esc(w.stadium || '')} — ${_esc(w.note || 'Indoor / fixed roof.')}</div>`;
+            } else {
+                const cell = (lbl, val) => `<div class="wx-cell"><span class="wx-lbl">${lbl}</span><span class="wx-val">${val}</span></div>`;
+                const parts = [];
+                if (w.temp_f != null)     parts.push(cell('Temp', `${Math.round(w.temp_f)}°F`));
+                if (w.wind_mph != null)   parts.push(cell('Wind', `${Math.round(w.wind_mph)} mph ${_esc(w.wind_dir || '')}`));
+                if (w.precip_pct != null) parts.push(cell('Precip', `${Math.round(w.precip_pct)}%`));
+                if (w.summary)            parts.push(cell('Sky', _esc(w.summary)));
+                body = parts.length
+                    ? `<div class="wx-grid">${parts.join('')}</div>`
+                    : `<div class="wx-dome">No forecast available.</div>`;
+            }
+            html += `<div class="card">
+                <div class="card-head">
+                    <h3>Weather</h3>
+                    <span class="ref-tag" title="Free Open-Meteo forecast near game time — reference only">REFERENCE</span>
+                </div>
+                ${body}
+                ${(!w.dome && w.stadium) ? `<div class="wx-foot">${_esc(w.stadium)} · forecast near game time</div>` : ''}
             </div>`;
         }
 
@@ -1597,7 +1690,7 @@
             // already PMM-projected when PMM has a market.
             line:        (s.pmm_line != null ? s.pmm_line : s.pin_line),
             fair_prob:   s.fair_prob,
-            edge_pp:     null,
+            edge_pp:     s.edge_pp ?? null,
             sharp_score: s.sharp_score,
             label:       _suggestLabel(s, _lastDossier),
             seed_units:  s.units,
@@ -1718,7 +1811,27 @@
             }
         }
 
-        // 3) Polymarket entry target — only when it differs from PIN's
+        // 3) Power-rating model — our independent number vs the market.
+        //    Confirmation when it agrees with the side, caution when it
+        //    disagrees. Ranks above the trivial target bullet below.
+        const pr = d.power_rating;
+        if (pr) {
+            if (pick.market_type === 'total') {
+                if (pr.total_lean && pr.proj_total != null && pr.total_line != null) {
+                    const agree = pr.total_lean === pick.side;
+                    lines.push(`Power model projects ${pr.proj_total} vs line ${_fmtPt(pr.total_line)} — ${agree ? 'agrees' : 'disagrees'} (leans ${pr.total_lean.toUpperCase()})`);
+                }
+            } else {
+                const e = pick.side === 'home' ? pr.edge_home_pp : pr.edge_away_pp;
+                if (e != null && e > 1) {
+                    lines.push(`Power model agrees on ${sideName} — +${e.toFixed(1)}pp over PIN fair`);
+                } else if (e != null && e < -1) {
+                    lines.push(`Power model disagrees on ${sideName} — ${e.toFixed(1)}pp under PIN fair (caution)`);
+                }
+            }
+        }
+
+        // 4) Polymarket entry target — only when it differs from PIN's
         //    current price (otherwise it's trivial and just fills space).
         const pinSide = (blk.pin_current || {})[pick.side] || {};
         if (pinSide.fair_american != null) {

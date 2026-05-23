@@ -1,0 +1,23 @@
+-- bot_picks migration 007 — Closing Line Value.
+--
+-- Adds a per-pick CLV measurement (percentage points). The resolver
+-- computes it once the game has started, by pulling PIN's last
+-- pre-event_start snapshot on both sides of the pick's market, devigging
+-- the pair, and comparing the closing devigged prob for the pick's side
+-- against the implied prob of the entry_price the bot locked in.
+--
+--   clv_pp = (closing_devig_prob_for_side − entry_implied_prob) × 100
+--
+-- Positive = the bot was on the right side of the close (line moved
+-- toward us after we picked = we were early / sharp). Negative = we got
+-- picked off. CLV is the truth serum: it grades pick QUALITY independent
+-- of the noisy W/L outcome, so we can prove edge in ~100 picks instead
+-- of needing 1000+ for hit-rate to stabilize.
+--
+-- Nullable: stays NULL when PIN has no closing pair (one-sided market,
+-- offseason, ESPN-unmatched UFC method bets that never reach the
+-- resolver, etc.).
+--
+-- Run in Supabase SQL editor. Idempotent.
+
+alter table bot_picks add column if not exists clv_pp numeric;

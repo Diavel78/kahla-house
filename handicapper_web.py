@@ -20,6 +20,7 @@ authoritative — it backs the live picker logic that's been running.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import time
@@ -130,6 +131,13 @@ def _devig_two_way(p_a: float, p_b: float) -> float:
     if total <= 0:
         raise ValueError("Sum of probs must be > 0")
     return p_a / total
+
+
+def _american_to_decimal(price: int) -> float:
+    """American odds → decimal odds (total return per 1 staked)."""
+    if price > 0:
+        return 1.0 + price / 100.0
+    return 1.0 + 100.0 / abs(price)
 
 
 def _amer_to_cents(p: Any) -> float | None:
@@ -1514,6 +1522,364 @@ SPR_CHALK_FAIR_CAP = -150
 ML_CHALK_FAIR_CAP = -140
 
 
+# ──────────────────────────── Kelly sizing ────────────────────────────
+#
+# This bot bets AT the devigged fair price (Polymarket limit orders), so
+# there's no price discrepancy to Kelly off directly — the edge is the
+# SIGNAL: recency-weighted PIN movement, aligned public money, and the
+# independent power-rating model agreeing. We translate signal strength
+# into a provisional edge estimate (fair-prob percentage points), then
+# size with quarter-Kelly. These per-signal coefficients are a
+# conservative first guess; the CLV column (migration 007) measures the
+# bot's realized edge over time so Stage-4 self-tuning can replace them
+# with calibrated numbers. Sizing snaps to the existing 1/3/5u tiers:
+# a pick that doesn't clear the sharp gate is always a 1u low lean; a
+# gated pick is 3u medium, promoted to 5u high only when the ¼-Kelly
+# stake clears KELLY_HIGH_PCT (genuinely strong multi-signal agreement).
+KELLY_FRACTION       = 0.25     # quarter-Kelly — survives variance
+EDGE_PER_SHARP_POINT = 0.40     # pp of edge per point of sharp_score (≤4pp at 10)
+EDGE_PER_SPLITS_PP   = 0.10     # pp of edge per aligned money−bets pp (≤3pp at 30)
+MODEL_EDGE_WEIGHT    = 0.25     # fraction of (model_prob − PIN_fair) credited
+MODEL_EDGE_CAP_PP    = 1.5      # the crude model only NUDGES — never drives sizing
+EDGE_CAP_PP          = 6.0      # hard cap so a crude input can't blow up sizing
+KELLY_HIGH_PCT       = 2.5      # ¼-Kelly stake ≥ this %BR → 5u high
+
+
+def _kelly_units(fair_prob, fair_american, edge_pp,
+                 gates_cleared) -> tuple[int, str, float]:
+    """(units, confidence, kelly_pct). Quarter-Kelly stake from the
+    signal-derived edge, snapped to the 1/3/5u tiers. Ungated picks are
+    always a 1u low lean. Gated picks float between 3u and 5u by stake."""
+    if not gates_cleared:
+        return 1, "low", 0.0
+    if fair_prob is None or fair_american is None or not edge_pp or edge_pp <= 0:
+        return 3, "medium", 0.0
+    true_p = min(max(fair_prob + edge_pp / 100.0, 0.01), 0.99)
+    try:
+        dec = _american_to_decimal(int(fair_american))
+    except (TypeError, ValueError):
+        return 3, "medium", 0.0
+    b = dec - 1.0
+    if b <= 0:
+        return 3, "medium", 0.0
+    f = true_p - (1.0 - true_p) / b      # full Kelly fraction
+    kelly_pct = max(0.0, f) * KELLY_FRACTION * 100.0
+    if kelly_pct >= KELLY_HIGH_PCT:
+        return 5, "high", round(kelly_pct, 2)
+    return 3, "medium", round(kelly_pct, 2)
+
+
+# ──────────────────────────── Power rating ────────────────────────────
+#
+# An OUR-number-vs-the-market check, built from the team-comparison
+# stats the dossier already fetches (zero extra API calls, zero cost).
+# Crude (no SOS, no Elo) but genuinely independent of the betting line —
+# so when it AGREES with the sharp side it's a confirmation we credit
+# toward sizing, and when it DISAGREES it's a caution flag. v1 projects a
+# margin from offense-vs-defense season averages, converts to a win prob
+# via a per-sport logistic, and compares to PIN's devigged fair.
+#   off  — team-compare key for points/runs/goals scored per game
+#   def  — team-compare key for points/runs/goals allowed per game
+#   hfa  — home-field advantage in those same units
+#   scale— logistic scale (margin that moves win-prob ~1 logit)
+_POWER_MODELS = {
+    "MLB":   {"off": "rpg",                "def": "era",               "hfa": 0.20, "scale": 1.6},
+    "NBA":   {"off": "avgPoints",          "def": "avgPointsAgainst",  "hfa": 2.5,  "scale": 7.0},
+    "CBB":   {"off": "avgPoints",          "def": "avgPointsAgainst",  "hfa": 3.5,  "scale": 7.5},
+    "NFL":   {"off": "totalPointsPerGame", "def": "avgPointsAgainst",  "hfa": 2.0,  "scale": 8.0},
+    "NCAAF": {"off": "totalPointsPerGame", "def": "avgPointsAgainst",  "hfa": 3.0,  "scale": 9.0},
+    "NHL":   {"off": "avgGoals",           "def": "avgGoalsAgainst",   "hfa": 0.20, "scale": 1.6},
+}
+
+
+def _power_rating(sport: str, team_compare: dict | None,
+                  odds: dict | None) -> dict | None:
+    """Independent projection from team-compare stats. Returns a block
+    with projected margin/total, model win probs, model fair lines, and
+    the model-vs-PIN edge per side. None when the sport isn't modeled or
+    the offense/defense stats are missing. Silent — never raises."""
+    model = _POWER_MODELS.get(sport)
+    if not (model and team_compare):
+        return None
+    vals: dict = {}
+    for f in team_compare.get("fields") or []:
+        vals[f.get("key")] = (f.get("away"), f.get("home"))
+    off = vals.get(model["off"])
+    deff = vals.get(model["def"])
+    if not (off and deff):
+        return None
+    a_off, h_off = _to_float(off[0]), _to_float(off[1])
+    a_def, h_def = _to_float(deff[0]), _to_float(deff[1])
+    if None in (a_off, h_off, a_def, h_def):
+        return None
+    # Expected scoring = average of each team's offense and the
+    # opponent's defense (both already in per-game units).
+    exp_home = (h_off + a_def) / 2.0
+    exp_away = (a_off + h_def) / 2.0
+    margin = (exp_home - exp_away) + model["hfa"]   # home perspective
+    proj_total = exp_home + exp_away
+    try:
+        p_home = 1.0 / (1.0 + math.exp(-margin / model["scale"]))
+    except OverflowError:
+        p_home = 1.0 if margin > 0 else 0.0
+    p_home = min(max(p_home, 0.01), 0.99)
+    p_away = 1.0 - p_home
+
+    block: dict = {
+        "exp_home":          round(exp_home, 2),
+        "exp_away":          round(exp_away, 2),
+        "proj_margin_home":  round(margin, 2),
+        "proj_total":        round(proj_total, 2),
+        "p_home":            round(p_home, 4),
+        "p_away":            round(p_away, 4),
+        "fair_home_american": _prob_to_american(p_home),
+        "fair_away_american": _prob_to_american(p_away),
+        "off_field":         model["off"],
+        "def_field":         model["def"],
+    }
+
+    ml = (odds or {}).get("moneyline") or {}
+    pin_cur = ml.get("pin_current") or {}
+    pin_home = (pin_cur.get("home") or {}).get("fair_prob")
+    pin_away = (pin_cur.get("away") or {}).get("fair_prob")
+    if pin_home is not None:
+        block["edge_home_pp"] = round((p_home - pin_home) * 100.0, 1)
+    if pin_away is not None:
+        block["edge_away_pp"] = round((p_away - pin_away) * 100.0, 1)
+
+    tot = (odds or {}).get("total") or {}
+    over_pin = (tot.get("pin_current") or {}).get("over") or {}
+    tline = over_pin.get("line")
+    if tline is not None:
+        try:
+            tl = float(tline)
+            block["total_line"] = tl
+            block["total_diff"] = round(proj_total - tl, 2)
+            block["total_lean"] = ("over" if proj_total > tl
+                                   else "under" if proj_total < tl else None)
+        except (TypeError, ValueError):
+            pass
+    return block
+
+
+def _model_edge_for_side(power: dict | None, market_type: str,
+                         side: str) -> float:
+    """Power-rating edge contribution for a candidate side, in fair-prob
+    pp, credited only when the model AGREES with the side (confirmation
+    bonus — we never let a crude model talk us INTO a side it dislikes,
+    and never bet harder against our own number). 0 when no model / no
+    agreement."""
+    if not power:
+        return 0.0
+    if market_type in ("moneyline", "spread"):
+        e = power.get(f"edge_{side}_pp")
+        if e is not None and e > 0:
+            return min(e * MODEL_EDGE_WEIGHT, MODEL_EDGE_CAP_PP)
+        return 0.0
+    if market_type == "total":
+        if power.get("total_lean") == side:
+            # Each point of model-vs-line gap → a modest edge nudge.
+            nudge = abs(power.get("total_diff") or 0.0) * MODEL_EDGE_WEIGHT
+            return min(nudge, MODEL_EDGE_CAP_PP)
+        return 0.0
+    return 0.0
+
+
+# ──────────────────────────── Weather ────────────────────────────
+#
+# Outdoor-sport weather for the dossier — wind / temp / precip at the
+# venue near first pitch / kickoff. Free via Open-Meteo (no API key, no
+# signup, no quota). Only MLB + NFL are modeled — they're the
+# weather-sensitive outdoor sports we can enumerate stadiums for; indoor
+# sports (NBA / NHL / CBB) and the hundreds of NCAAF venues are skipped.
+# Climate-controlled domes / fixed-roof / usually-closed-retractable
+# stadiums are flagged dome=True and skip the fetch entirely. v1 reports
+# the conditions as a reference card (the analyst / Claude reads it); it
+# does NOT auto-size off wind — that needs park orientation we don't
+# encode yet.
+#   key (mascot substring of the home team name) → (lat, lon, name, dome)
+_MLB_PARKS: dict[str, tuple] = {
+    "diamondbacks": (33.45, -112.07, "Chase Field", True),
+    "braves":       (33.89, -84.47,  "Truist Park", False),
+    "orioles":      (39.28, -76.62,  "Camden Yards", False),
+    "red sox":      (42.35, -71.10,  "Fenway Park", False),
+    "cubs":         (41.95, -87.66,  "Wrigley Field", False),
+    "white sox":    (41.83, -87.63,  "Rate Field", False),
+    "reds":         (39.10, -84.51,  "Great American Ball Park", False),
+    "guardians":    (41.50, -81.69,  "Progressive Field", False),
+    "rockies":      (39.76, -104.99, "Coors Field", False),
+    "tigers":       (42.34, -83.05,  "Comerica Park", False),
+    "astros":       (29.76, -95.36,  "Daikin Park", True),
+    "royals":       (39.05, -94.48,  "Kauffman Stadium", False),
+    "angels":       (33.80, -117.88, "Angel Stadium", False),
+    "dodgers":      (34.07, -118.24, "Dodger Stadium", False),
+    "marlins":      (25.78, -80.22,  "loanDepot park", True),
+    "brewers":      (43.03, -87.97,  "American Family Field", True),
+    "twins":        (44.98, -93.28,  "Target Field", False),
+    "mets":         (40.76, -73.85,  "Citi Field", False),
+    "yankees":      (40.83, -73.93,  "Yankee Stadium", False),
+    "athletics":    (38.58, -121.51, "Sutter Health Park", False),
+    "phillies":     (39.91, -75.17,  "Citizens Bank Park", False),
+    "pirates":      (40.45, -80.01,  "PNC Park", False),
+    "padres":       (32.71, -117.16, "Petco Park", False),
+    "giants":       (37.78, -122.39, "Oracle Park", False),
+    "mariners":     (47.59, -122.33, "T-Mobile Park", False),
+    "cardinals":    (38.62, -90.19,  "Busch Stadium", False),
+    "rays":         (27.77, -82.65,  "Tropicana Field", True),
+    "rangers":      (32.75, -97.08,  "Globe Life Field", True),
+    "blue jays":    (43.64, -79.39,  "Rogers Centre", True),
+    "nationals":    (38.87, -77.01,  "Nationals Park", False),
+}
+_NFL_STADIUMS: dict[str, tuple] = {
+    "cardinals":   (33.53, -112.26, "State Farm Stadium", True),
+    "falcons":     (33.76, -84.40,  "Mercedes-Benz Stadium", True),
+    "ravens":      (39.28, -76.62,  "M&T Bank Stadium", False),
+    "bills":       (42.77, -78.79,  "Highmark Stadium", False),
+    "panthers":    (35.23, -80.85,  "Bank of America Stadium", False),
+    "bears":       (41.86, -87.62,  "Soldier Field", False),
+    "bengals":     (39.10, -84.52,  "Paycor Stadium", False),
+    "browns":      (41.51, -81.70,  "Huntington Bank Field", False),
+    "cowboys":     (32.75, -97.09,  "AT&T Stadium", True),
+    "broncos":     (39.74, -105.02, "Empower Field", False),
+    "lions":       (42.34, -83.05,  "Ford Field", True),
+    "packers":     (44.50, -88.06,  "Lambeau Field", False),
+    "texans":      (29.68, -95.41,  "NRG Stadium", True),
+    "colts":       (39.76, -86.16,  "Lucas Oil Stadium", True),
+    "jaguars":     (30.32, -81.64,  "EverBank Stadium", False),
+    "chiefs":      (39.05, -94.48,  "Arrowhead Stadium", False),
+    "raiders":     (36.09, -115.18, "Allegiant Stadium", True),
+    "chargers":    (33.95, -118.34, "SoFi Stadium", True),
+    "rams":        (33.95, -118.34, "SoFi Stadium", True),
+    "dolphins":    (25.96, -80.24,  "Hard Rock Stadium", False),
+    "vikings":     (44.97, -93.26,  "U.S. Bank Stadium", True),
+    "patriots":    (42.09, -71.26,  "Gillette Stadium", False),
+    "saints":      (29.95, -90.08,  "Caesars Superdome", True),
+    "giants":      (40.81, -74.07,  "MetLife Stadium", False),
+    "jets":        (40.81, -74.07,  "MetLife Stadium", False),
+    "eagles":      (39.90, -75.17,  "Lincoln Financial Field", False),
+    "steelers":    (40.45, -80.02,  "Acrisure Stadium", False),
+    "49ers":       (37.40, -121.97, "Levi's Stadium", False),
+    "seahawks":    (47.60, -122.33, "Lumen Field", False),
+    "buccaneers":  (27.98, -82.50,  "Raymond James Stadium", False),
+    "titans":      (36.17, -86.77,  "Nissan Stadium", False),
+    "commanders":  (38.91, -76.86,  "Northwest Stadium", False),
+}
+_WEATHER_CACHE: dict[tuple, tuple[float, dict]] = {}
+
+
+def _stadium_coords(sport: str, home: str | None) -> dict | None:
+    table = {"MLB": _MLB_PARKS, "NFL": _NFL_STADIUMS}.get(sport)
+    if not (table and home):
+        return None
+    h = home.lower()
+    for key, (lat, lon, name, dome) in table.items():
+        if key in h:
+            return {"lat": lat, "lon": lon, "name": name, "dome": dome}
+    return None
+
+
+def _compass(deg) -> str | None:
+    d = _to_float(deg)
+    if d is None:
+        return None
+    dirs = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+            "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+    return dirs[int((d % 360) / 22.5 + 0.5) % 16]
+
+
+def _wmo_summary(code) -> str | None:
+    c = _to_float(code)
+    if c is None:
+        return None
+    c = int(c)
+    if c == 0:                 return "Clear"
+    if c in (1, 2, 3):         return "Partly cloudy"
+    if c in (45, 48):          return "Fog"
+    if 51 <= c <= 57:          return "Drizzle"
+    if 61 <= c <= 67:          return "Rain"
+    if 71 <= c <= 77:          return "Snow"
+    if 80 <= c <= 82:          return "Rain showers"
+    if 85 <= c <= 86:          return "Snow showers"
+    if 95 <= c <= 99:          return "Thunderstorm"
+    return None
+
+
+def _fetch_weather(sport: str, home: str | None,
+                   event_start: str | None) -> dict | None:
+    """Open-Meteo conditions at the venue near event_start. Free, no key.
+    Returns None for indoor/unmodeled sports; a {'dome': True, ...} block
+    for climate-controlled venues (no fetch); otherwise temp/wind/precip
+    at the nearest forecast hour. Silent on any failure."""
+    coords = _stadium_coords(sport, home)
+    if not coords:
+        return None
+    if coords.get("dome"):
+        return {"dome": True, "stadium": coords["name"],
+                "note": "Indoor / fixed roof — weather not a factor."}
+    if not event_start:
+        return None
+    try:
+        dt = (datetime.fromisoformat(event_start.replace("Z", "+00:00"))
+              .astimezone(timezone.utc))
+    except Exception:
+        return None
+    hour_key = dt.strftime("%Y-%m-%dT%H:00")
+    ck = (round(coords["lat"], 3), round(coords["lon"], 3), hour_key)
+    hit = _WEATHER_CACHE.get(ck)
+    now = time.time()
+    if hit and now - hit[0] < 1800:
+        return hit[1]
+    data = _http_get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude": coords["lat"], "longitude": coords["lon"],
+            "hourly": ("temperature_2m,precipitation_probability,"
+                       "wind_speed_10m,wind_direction_10m,weather_code"),
+            "temperature_unit": "fahrenheit", "wind_speed_unit": "mph",
+            "timezone": "UTC", "forecast_days": 3,
+        },
+    )
+    hourly = (data or {}).get("hourly") or {}
+    times = hourly.get("time") or []
+    if not times:
+        return None
+    idx = None
+    if hour_key in times:
+        idx = times.index(hour_key)
+    else:
+        best = None
+        for i, t in enumerate(times):
+            try:
+                tt = datetime.fromisoformat(t).replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+            diff = abs((tt - dt).total_seconds())
+            if best is None or diff < best[0]:
+                best = (diff, i)
+        if best:
+            idx = best[1]
+    if idx is None:
+        return None
+
+    def _at(key):
+        arr = hourly.get(key) or []
+        return arr[idx] if idx < len(arr) else None
+
+    out = {
+        "dome":         False,
+        "stadium":      coords["name"],
+        "temp_f":       _at("temperature_2m"),
+        "wind_mph":     _at("wind_speed_10m"),
+        "wind_dir_deg": _at("wind_direction_10m"),
+        "wind_dir":     _compass(_at("wind_direction_10m")),
+        "precip_pct":   _at("precipitation_probability"),
+        "summary":      _wmo_summary(_at("weather_code")),
+        "for_hour_utc": hour_key,
+    }
+    _WEATHER_CACHE[ck] = (now, out)
+    return out
+
+
 def _splits_signal_pp(splits: dict | None, sharp_side: str | None,
                       market_type: str) -> float:
     """Return the splits-divergence percentage points for the sharp side.
@@ -1536,7 +1902,8 @@ def _splits_signal_pp(splits: dict | None, sharp_side: str | None,
         return 0.0
 
 
-def _suggest_picks(odds: dict, splits: dict | None = None) -> list[dict]:
+def _suggest_picks(odds: dict, splits: dict | None = None,
+                   power: dict | None = None) -> list[dict]:
     """Polymarket-execution picks. Returns a list — there can be more
     than one on a game. Behaviour:
 
@@ -1559,11 +1926,12 @@ def _suggest_picks(odds: dict, splits: dict | None = None) -> list[dict]:
 
     Returns [] when no PIN snapshot exists on any side of any market.
 
-    Sizing tiers:
-      sharp ≥ 7 + splits ≥ 10pp aligned → 10u whale
-      sharp ≥ 5 + splits ≥ 5pp  aligned → 5u high
-      sharp ≥ 4                          → 3u medium
-      else                               → 1u low (forced lean)
+    Sizing is quarter-Kelly off the signal-derived edge_pp (sharp +
+    aligned splits + power-rating confirmation), snapped to tiers:
+      gate not cleared (sharp < 4)       → 1u low (forced lean)
+      gate cleared, ¼-Kelly < 2.5%BR     → 3u medium
+      gate cleared, ¼-Kelly ≥ 2.5%BR     → 5u high
+    Whale (10u) stays disabled. See _kelly_units / EDGE_* constants.
     """
     candidates: list[dict] = []
     for mt in ("moneyline", "spread", "total"):
@@ -1585,6 +1953,19 @@ def _suggest_picks(odds: dict, splits: dict | None = None) -> list[dict]:
             cs = (SHARP_WEIGHT * (score_for_side / 10.0)
                   + SPLITS_WEIGHT * min(max(0.0, splits_pp) / 30.0, 1.0))
             gates_cleared = score_for_side >= SHARP_SCORE_MIN
+
+            # Provisional edge estimate (fair-prob pp) that drives Kelly
+            # sizing + finally populates the edge_pp column. The sharp +
+            # splits terms only count on the side the sharp money points
+            # at; the power-rating term is a confirmation bonus when our
+            # independent model agrees with this side.
+            model_edge = _model_edge_for_side(power, mt, side)
+            edge_pp = round(min(
+                score_for_side * EDGE_PER_SHARP_POINT
+                + max(0.0, splits_pp) * EDGE_PER_SPLITS_PP
+                + model_edge,
+                EDGE_CAP_PP,
+            ), 2)
 
             # PMM-projected fair: if a Polymarket market exists for
             # this side AND the push-rate projection is applicable
@@ -1608,6 +1989,8 @@ def _suggest_picks(odds: dict, splits: dict | None = None) -> list[dict]:
                 "side":           side,
                 "sharp_score":    score_for_side,
                 "splits_pp":      round(splits_pp, 1),
+                "edge_pp":        edge_pp,
+                "model_edge_pp":  round(model_edge, 2),
                 "fair_prob":      fair_prob,
                 "fair_american":  target_fair_american,   # PMM-projected when applicable
                 "pin_fair_american": fair_american,        # raw PIN fair at PIN's line, for reference
@@ -1637,25 +2020,20 @@ def _suggest_picks(odds: dict, splits: dict | None = None) -> list[dict]:
     if not candidates:
         return []
 
-    # Best candidate per market_type (with sizing applied).
+    # Best candidate per market_type (with Kelly sizing applied).
+    # Sizing is now quarter-Kelly off the signal-derived edge_pp, snapped
+    # to the 1/3/5u tiers, replacing the old fixed "sharp≥5 AND splits≥5"
+    # thresholds. The sharp gate (gates_cleared) still decides whether a
+    # pick is real (≥3u) vs a forced 1u lean; Kelly only chooses 3u vs 5u
+    # among gated picks. Whale (10u) stays disabled — live results showed
+    # it was a FADE indicator (23% over 35 picks). The CLV column will
+    # let Stage-4 recalibrate the edge coefficients from realized data.
     by_market: dict[str, dict] = {}
     for c in candidates:
-        s = c["sharp_score"]
-        sp = c["splits_pp"]
-        # Whale (10u) tier disabled. Live results showed it hitting 23%
-        # over 35 picks (~3 std devs below random) for -116.73u while
-        # HIGH (5u) hit 57% over 35 picks for +30.96u. "Sharp 7+ AND
-        # money agrees ≥10pp" turns out to be a FADE indicator in MLB
-        # — the market has already priced in both signals by the time
-        # we see them, and chasing further just pays the steam. Cap top
-        # sizing at 5u (high) until we have data showing a higher tier
-        # actually outperforms.
-        if s >= 5 and sp >= 5:
-            c["units"], c["confidence"] = 5, "high"
-        elif s >= SHARP_SCORE_MIN:
-            c["units"], c["confidence"] = 3, "medium"
-        else:
-            c["units"], c["confidence"] = 1, "low"
+        units, conf, kelly_pct = _kelly_units(
+            c.get("fair_prob"), c.get("fair_american"),
+            c.get("edge_pp"), c.get("gates_cleared"))
+        c["units"], c["confidence"], c["kelly_pct"] = units, conf, kelly_pct
         cur = by_market.get(c["market_type"])
         if (not cur) or ((c["gates_cleared"], c["combined_score"]) >
                          (cur["gates_cleared"], cur["combined_score"])):
@@ -1871,7 +2249,12 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
             _espn_team_record(away_t), _espn_team_record(home_t),
         )
 
-    suggestions = _suggest_picks(odds, splits)
+    # Independent power rating from the team-compare stats (no extra
+    # fetch) + outdoor-venue weather (free Open-Meteo). Both silent-fail.
+    power_rating = _power_rating(sport, team_compare, odds)
+    weather = _fetch_weather(sport, home, event_start) if (home and event_start) else None
+
+    suggestions = _suggest_picks(odds, splits, power_rating)
     # Keep the singular `suggestion` field as an alias for the top pick
     # so any caller still expecting it doesn't break. New code should
     # use `suggestions` (list) so multi-pick games render correctly.
@@ -1934,6 +2317,8 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         } if espn_block else None,
         "mlb":             mlb_extra or None,
         "team_compare":    team_compare,
+        "weather":         weather,
+        "power_rating":    power_rating,
         "suggestion":      suggestion,
         "suggestions":     suggestions,
         "alt_matches":     [
