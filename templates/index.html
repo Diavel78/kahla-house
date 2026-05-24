@@ -352,24 +352,6 @@ function renderAppCards() {
     // mutation endpoints). The card itself just routes to the page.
     const canSeePickBot = isViewer;
     let h = '';
-    if (isViewer) {
-        h += `<a href="/odds" class="app-card odds-app">
-            <span class="app-icon">&#127922;</span>
-            <h2>Odds Board</h2>
-            <p>Multi-sportsbook odds comparison, Circa splits, sharp indicators, line movement, and player props across all books.</p>
-            <span class="app-tag">Sports Betting</span>
-            <span class="arrow">&rarr;</span>
-        </a>`;
-    }
-    if (isViewer) {
-        h += `<a href="/games" class="app-card games-app">
-            <span class="app-icon">&#127183;</span>
-            <h2>Games</h2>
-            <p>Card-game scoring sheets. Pick a game and keep score — Clubs Diamonds Hearts Spades to start. Mobile-friendly, saves as you go.</p>
-            <span class="app-tag">Scorekeeping</span>
-            <span class="arrow">&rarr;</span>
-        </a>`;
-    }
     if (canSeePickBot) {
         // Subtle tag differentiates: admins/bot_access see "BOT",
         // view-only viewers see "VIEW-ONLY" so they aren't surprised
@@ -395,6 +377,24 @@ function renderAppCards() {
             <h2>Dashboard<span class="admin-badge">ADMIN</span></h2>
             <p>Polymarket position tracking with P&amp;L, open and closed trades, maker rewards, and shareable bet slips.</p>
             <span class="app-tag">P&amp;L Tracking</span>
+            <span class="arrow">&rarr;</span>
+        </a>`;
+    }
+    if (isViewer) {
+        h += `<a href="/odds" class="app-card odds-app">
+            <span class="app-icon">&#127922;</span>
+            <h2>Odds Board</h2>
+            <p>Multi-sportsbook odds comparison, Circa splits, sharp indicators, line movement, and player props across all books.</p>
+            <span class="app-tag">Sports Betting</span>
+            <span class="arrow">&rarr;</span>
+        </a>`;
+    }
+    if (isViewer) {
+        h += `<a href="/games" class="app-card games-app">
+            <span class="app-icon">&#127183;</span>
+            <h2>Games</h2>
+            <p>Card-game scoring sheets. Pick a game and keep score — Clubs Diamonds Hearts Spades to start. Mobile-friendly, saves as you go.</p>
+            <span class="app-tag">Scorekeeping</span>
             <span class="arrow">&rarr;</span>
         </a>`;
     }
