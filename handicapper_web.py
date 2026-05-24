@@ -1769,6 +1769,92 @@ def _rest_days(sb, team_key: str | None, event_start_iso: str | None) -> int | N
         return None
 
 
+# Injuries → rating. The biggest free lever, esp. NBA: a star sitting is
+# the largest single mover, and we already FETCH ESPN injuries — we just
+# weren't using them in the number. We value an out player by his scoring
+# (PPG from ESPN team leaders) and dock the team's projected scoring by a
+# fraction of it (a replacement scores some + usage redistributes, so the
+# net hit is well under his full average). NBA only for v1 — NHL/NFL
+# injury value is murkier and MLB is dominated by the starter we already
+# model. Heavily guarded: any fetch/parse/match failure → no adjustment.
+_INJURY_SPORTS  = {"NBA"}
+# Net team-scoring hit is FAR less than an out player's raw PPG —
+# replacements score and usage redistributes. Empirically a star's on/off
+# net is ~25% of his points, so a 27-PPG star out ≈ a ~6-7 pt margin hit
+# (defensible) rather than 13.5 (overcorrection). Capped per side so three
+# guys out can't nuke the projection.
+_INJURY_FACTOR  = 0.25
+_INJURY_MAX_PTS = 10.0
+
+
+def _espn_scoring_leaders(sport: str, team_id: str | None) -> dict:
+    """{player_name_lower: points_per_game} from ESPN's team leaders.
+    One call. Empty dict on any failure."""
+    pair = _ESPN_PATH.get(sport)
+    if not (pair and team_id):
+        return {}
+    grp, lg = pair
+    url = f"https://site.api.espn.com/apis/site/v2/sports/{grp}/{lg}/teams/{team_id}"
+    data = _http_get(url)
+    if not data:
+        return {}
+    team = data.get("team") or {}
+    out: dict = {}
+    for cat in team.get("leaders") or []:
+        nm = (cat.get("name") or cat.get("abbreviation") or "").lower()
+        if "point" not in nm and nm not in ("scoring", "ppg", "pts"):
+            continue
+        for ld in cat.get("leaders") or []:
+            ath = ld.get("athlete") or {}
+            name = (ath.get("displayName") or "").lower()
+            ppg = _to_float(ld.get("displayValue")) or _to_float(ld.get("value"))
+            if name and ppg is not None:
+                out[name] = ppg
+    return out
+
+
+def _injury_out(status: str | None) -> bool:
+    """True when an ESPN injury status means the player won't play.
+    Day-to-day / questionable / probable are uncertain — don't count."""
+    s = (status or "").lower()
+    return ("out" in s or "injured reserve" in s or "season" in s
+            or "suspension" in s or "-day-il" in s)
+
+
+def _injury_penalties(sport: str, espn_block: dict | None) -> dict | None:
+    """Per-side projected-scoring penalty (in points) from OUT players
+    matched to team scoring leaders. None when nothing applies. Guarded —
+    a missing leaders fetch just yields a 0 penalty for that side."""
+    if sport not in _INJURY_SPORTS or not espn_block:
+        return None
+    pen: dict = {}
+    notes: dict = {}
+    for side in ("home", "away"):
+        tb = espn_block.get(side) or {}
+        leaders = _espn_scoring_leaders(sport, tb.get("id"))
+        p, outs = 0.0, []
+        if leaders:
+            for inj in tb.get("injuries") or []:
+                if not _injury_out(inj.get("status")):
+                    continue
+                nm = (inj.get("name") or "").lower()
+                ppg = leaders.get(nm)
+                if ppg is None:
+                    for lname, v in leaders.items():
+                        if nm and (nm in lname or lname in nm):
+                            ppg = v
+                            break
+                if ppg is not None:
+                    p += ppg * _INJURY_FACTOR
+                    outs.append(inj.get("name"))
+        pen[side] = round(min(p, _INJURY_MAX_PTS), 2)
+        notes[side] = outs
+    if not (pen.get("home") or pen.get("away")):
+        return None
+    return {"home": pen["home"], "away": pen["away"],
+            "home_out": notes["home"], "away_out": notes["away"]}
+
+
 # MLB starting-pitcher blend. The starter pitches ~6 of 9 innings, so he
 # carries ~60% of run prevention on his day; the rest is bullpen (≈ team
 # def). ERA is regressed toward league average by innings pitched so a
@@ -1867,7 +1953,8 @@ def _park_factor(home: str | None) -> float:
 def _power_rating_v2(sb, sport: str, odds: dict | None,
                      away: str | None, home: str | None,
                      pitchers: dict | None = None,
-                     event_start: str | None = None) -> dict | None:
+                     event_start: str | None = None,
+                     injuries: dict | None = None) -> dict | None:
     """The real model — projects from the cron-computed opponent-adjusted
     ratings snapshot. Flask reads the precomputed ratings (it can't import
     the kahla-scanner engine) and does the lightweight off/def → margin/
@@ -1911,6 +1998,19 @@ def _power_rating_v2(sb, sport: str, odds: dict | None,
 
     exp_home = h_off + (a_def - league_avg) + hfa / 2.0
     exp_away = a_off + (h_def - league_avg) - hfa / 2.0
+
+    # Injuries — dock the injured team's projected scoring by the (already
+    # value-weighted) penalty. Reduces that side's margin AND the total.
+    inj_note = None
+    if injuries:
+        hp = _to_float(injuries.get("home")) or 0.0
+        ap = _to_float(injuries.get("away")) or 0.0
+        if hp or ap:
+            exp_home = max(0.0, exp_home - hp)
+            exp_away = max(0.0, exp_away - ap)
+            inj_note = {"home": round(hp, 2), "away": round(ap, 2),
+                        "home_out": injuries.get("home_out") or [],
+                        "away_out": injuries.get("away_out") or []}
 
     # MLB park factor — scale both sides' expected runs by the venue's
     # run environment (Coors inflates, Petco suppresses). Moves the total
@@ -1970,6 +2070,7 @@ def _power_rating_v2(sb, sport: str, odds: dict | None,
         "sp":                sp_note,
         "park_factor":       park_factor,
         "rest":              rest_note,
+        "injuries":          inj_note,
     }
     return _pr_attach_market_compare(block, odds, p_home, p_away, proj_total)
 
@@ -1978,12 +2079,14 @@ def _power_rating(sb, sport: str, team_compare: dict | None,
                   odds: dict | None, away: str | None = None,
                   home: str | None = None,
                   pitchers: dict | None = None,
-                  event_start: str | None = None) -> dict | None:
+                  event_start: str | None = None,
+                  injuries: dict | None = None) -> dict | None:
     """Prefer the real opponent-adjusted ratings (cron-computed snapshot);
     fall back to the v1 raw-season-stat projection when no snapshot exists
     for the sport yet, or the teams aren't in it. Silent — never raises."""
     try:
-        v2 = _power_rating_v2(sb, sport, odds, away, home, pitchers, event_start)
+        v2 = _power_rating_v2(sb, sport, odds, away, home, pitchers,
+                              event_start, injuries)
     except Exception:
         v2 = None
     block = v2 or _power_rating_v1(sport, team_compare, odds)
@@ -2587,9 +2690,10 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     # Independent power rating — prefers the cron-computed opponent-
     # adjusted ratings snapshot (Supabase), falls back to the v1 raw-stat
     # projection. Plus outdoor-venue weather (free Open-Meteo). Silent-fail.
+    injury_pen = _injury_penalties(sport, espn_block)
     power_rating = _power_rating(sb, sport, team_compare, odds, away, home,
                                  (mlb_extra or {}).get("probable_pitchers"),
-                                 event_start)
+                                 event_start, injury_pen)
     weather = _fetch_weather(sport, home, event_start) if (home and event_start) else None
 
     suggestions = _suggest_picks(odds, splits, power_rating)

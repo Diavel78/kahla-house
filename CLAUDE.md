@@ -910,12 +910,24 @@ only (ESPN finals + MLB Stats API + Supabase). Phased:
     `rest`; card shows a B2B line + "+ rest" footer. Two cheap
     game_results lookups, gated to NBA/NHL. Needs `event_start` threaded
     through `_power_rating`.
-  - **Still TODO:** injuries/inactives → rating (we FETCH ESPN injuries
-    but only display them; folding a star-out into the team rating needs
-    per-player value — the biggest free lever left, esp. NBA); dedicated
-    bullpen ERA (SP blend's 0.4·team_def is a bullpen PROXY today — true
-    reliever-only split needs a roster fetch); prior-season carryover
-    prior (cold-start); home/road splits, pace.
+  - **Injuries → rating (built, NBA, UNTESTED vs live ESPN):**
+    `_injury_penalties` matches each team's OUT players (from the ESPN
+    injuries we already fetch) to its scoring leaders (`_espn_scoring_leaders`,
+    one ESPN team-endpoint call per team) and docks that team's projected
+    scoring by `_INJURY_FACTOR = 0.25 × out players' PPG` (net on/off is far
+    below raw PPG — replacements + usage redistribution), capped at
+    `_INJURY_MAX_PTS = 10` per side. So a 27-PPG star out ≈ a ~6.75-pt hit
+    (defensible), a bench guy ≈ nothing. NBA only (`_INJURY_SPORTS`) — MLB
+    is dominated by the starter we already model; NHL/NFL injury value is
+    murkier. Reduces the injured side's margin AND the total. Block carries
+    `injuries`; card shows the out players + "+ injuries" footer. Fully
+    guarded (any fetch/parse/match failure → no adjustment). **Built blind
+    — not verified against the live ESPN leaders shape; if the endpoint
+    differs it silently no-ops. Sanity-check on a real NBA game with a
+    known star out.**
+  - **Still TODO:** dedicated bullpen ERA (SP blend's 0.4·team_def is a
+    bullpen PROXY today — true reliever-only split needs a roster fetch);
+    prior-season carryover prior (cold-start); home/road splits, pace.
 - **Phase 4 (built — backtest harness):** `scripts/backtest_power_ratings.py`
   walk-forward replays the model on `game_results` (for each date, ratings
   from ONLY prior games → project → grade vs final). Reports per sport: ML
