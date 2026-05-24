@@ -234,10 +234,30 @@
             .wrap { padding: 14px 10px 80px; }
             .game-select { min-width: 0; flex: 1 1 100%; }
             .controls .btn { flex: 1 1 auto; }
-            .hcell { min-width: 84px; width: 84px; padding: 7px 6px !important; }
-            .bt { width: 34px; font-size: 15px; }
-            .bt-labels span { width: 34px; }
+            .hcell { min-width: 56px; width: 56px; padding: 6px 5px !important; }
+            .hcell .hnum { font-size: 10px; }
+            .hcell .cards { font-size: 13px; }
+            .hcell .hmain { gap: 4px; }
+            .suit { font-size: 14px; }
+            .hcell .ind { font-size: 9px; }
+            thead th.pcol { min-width: 76px; padding: 7px 3px !important; }
+            td.pcell { padding: 6px 3px !important; }
+            .bt-row { gap: 3px; }
+            .bt { width: 32px; font-size: 14px; padding: 5px 1px; }
+            .bt-labels { gap: 3px; }
+            .bt-labels span { width: 32px; }
+            .bt-lbl { font-size: 8px; }
+            .pname { font-size: 12px; padding: 4px 4px; }
+            .rm-btn { width: 20px; height: 20px; font-size: 13px; }
+            .zc { font-size: 9px; }
+            tfoot .tot { font-size: 17px; }
             .sb-chip { min-width: 0; }
+        }
+        @media (max-width: 380px) {
+            .hcell { min-width: 48px; width: 48px; padding: 5px 4px !important; }
+            thead th.pcol { min-width: 70px; }
+            .bt { width: 30px; }
+            .bt-labels span { width: 30px; }
         }
     </style>
 </head>
