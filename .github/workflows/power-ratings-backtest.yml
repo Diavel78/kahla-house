@@ -1,0 +1,50 @@
+name: Power Ratings — Backtest
+
+# Manually-triggered walk-forward backtest of the power-ratings model
+# against the season's actual results (game_results). Prints ML accuracy,
+# Brier score, margin/total MAE, and a calibration table per sport to the
+# run log — read it there. No writes, no schedule; run it whenever you
+# want to check whether the model actually predicts outcomes before
+# trusting it / widening its sizing leash.
+#
+# Validates the opponent-adjusted TEAM ratings core only (game_results
+# stores scores, not historical probable pitchers or closing lines).
+#
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sport:
+        description: "Single sport (MLB/NBA/NHL/NFL/CBB/NCAAF) or blank for all"
+        required: false
+        default: ""
+      warmup:
+        description: "Prior games required before grading begins"
+        required: false
+        default: "60"
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run backtest
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.sport }}" ]; then ARGS="--sport ${{ github.event.inputs.sport }}"; fi
+          python -m scripts.backtest_power_ratings $ARGS --warmup ${{ github.event.inputs.warmup || '60' }}

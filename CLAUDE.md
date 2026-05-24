@@ -881,9 +881,20 @@ only (ESPN finals + MLB Stats API + Supabase). Phased:
     check ratings once the season backfill (days=200) has run.
 - **Phase 3:** calibrate hfa/scale + margin→prob/cover from the season's
   actual results (replace eyeballed `SPORT_PARAMS`); home/road splits, pace.
-- **Phase 4:** backtest the model vs ESPN finals AND closing lines; widen
-  the model's sizing cap (`MODEL_EDGE_CAP_PP`) only on sports/markets where
-  it provably beats the close (CLV).
+- **Phase 4 (built — backtest harness):** `scripts/backtest_power_ratings.py`
+  walk-forward replays the model on `game_results` (for each date, ratings
+  from ONLY prior games → project → grade vs final). Reports per sport: ML
+  accuracy vs the home baseline, Brier (calibration), margin/total MAE, and
+  a calibration table (win-rate per prob bucket — should rise monotonically
+  if honest). Run via `.github/workflows/power-ratings-backtest.yml`
+  (manual workflow_dispatch; metrics print to the run log). Validated on
+  synthetic data: recovered 77.5% acc vs 52.5% baseline, Brier 0.159.
+  LIMITATIONS: validates the TEAM-ratings core only — NOT the MLB pitcher
+  layer (historical probables aren't stored) and NOT closing-line value
+  (book_snapshots only retains 15d, so model-vs-close accrues forward via
+  `bot_picks.clv_pp` bucketed by model-agree/disagree). Only widen
+  `MODEL_EDGE_CAP_PP` past 1.5pp once the backtest + live CLV both say the
+  model beats the close on a given sport/market.
 
 The ratings flow through the same capped (1.5pp) sizing nudge as v1, so
 even un-sanity-checked early ratings are bounded; widen the cap only after
