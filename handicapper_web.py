@@ -1602,52 +1602,12 @@ _POWER_MODELS = {
 }
 
 
-def _power_rating(sport: str, team_compare: dict | None,
-                  odds: dict | None) -> dict | None:
-    """Independent projection from team-compare stats. Returns a block
-    with projected margin/total, model win probs, model fair lines, and
-    the model-vs-PIN edge per side. None when the sport isn't modeled or
-    the offense/defense stats are missing. Silent — never raises."""
-    model = _POWER_MODELS.get(sport)
-    if not (model and team_compare):
-        return None
-    vals: dict = {}
-    for f in team_compare.get("fields") or []:
-        vals[f.get("key")] = (f.get("away"), f.get("home"))
-    off = vals.get(model["off"])
-    deff = vals.get(model["def"])
-    if not (off and deff):
-        return None
-    a_off, h_off = _to_float(off[0]), _to_float(off[1])
-    a_def, h_def = _to_float(deff[0]), _to_float(deff[1])
-    if None in (a_off, h_off, a_def, h_def):
-        return None
-    # Expected scoring = average of each team's offense and the
-    # opponent's defense (both already in per-game units).
-    exp_home = (h_off + a_def) / 2.0
-    exp_away = (a_off + h_def) / 2.0
-    margin = (exp_home - exp_away) + model["hfa"]   # home perspective
-    proj_total = exp_home + exp_away
-    try:
-        p_home = 1.0 / (1.0 + math.exp(-margin / model["scale"]))
-    except OverflowError:
-        p_home = 1.0 if margin > 0 else 0.0
-    p_home = min(max(p_home, 0.01), 0.99)
-    p_away = 1.0 - p_home
-
-    block: dict = {
-        "exp_home":          round(exp_home, 2),
-        "exp_away":          round(exp_away, 2),
-        "proj_margin_home":  round(margin, 2),
-        "proj_total":        round(proj_total, 2),
-        "p_home":            round(p_home, 4),
-        "p_away":            round(p_away, 4),
-        "fair_home_american": _prob_to_american(p_home),
-        "fair_away_american": _prob_to_american(p_away),
-        "off_field":         model["off"],
-        "def_field":         model["def"],
-    }
-
+def _pr_attach_market_compare(block: dict, odds: dict | None,
+                              p_home: float, p_away: float,
+                              proj_total: float) -> dict:
+    """Attach model-vs-PIN edges + total lean to a power-rating block.
+    Shared by the v1 (raw-stat) and v2 (opponent-adjusted) projections so
+    both produce the identical shape the UI + sizing expect."""
     ml = (odds or {}).get("moneyline") or {}
     pin_cur = ml.get("pin_current") or {}
     pin_home = (pin_cur.get("home") or {}).get("fair_prob")
@@ -1670,6 +1630,141 @@ def _power_rating(sport: str, team_compare: dict | None,
         except (TypeError, ValueError):
             pass
     return block
+
+
+def _power_rating_v1(sport: str, team_compare: dict | None,
+                     odds: dict | None) -> dict | None:
+    """v1 fallback — crude projection from raw team-compare season stats
+    (no opponent adjustment). Used only when no opponent-adjusted ratings
+    snapshot exists for the sport yet. Silent — never raises."""
+    model = _POWER_MODELS.get(sport)
+    if not (model and team_compare):
+        return None
+    vals: dict = {}
+    for f in team_compare.get("fields") or []:
+        vals[f.get("key")] = (f.get("away"), f.get("home"))
+    off = vals.get(model["off"])
+    deff = vals.get(model["def"])
+    if not (off and deff):
+        return None
+    a_off, h_off = _to_float(off[0]), _to_float(off[1])
+    a_def, h_def = _to_float(deff[0]), _to_float(deff[1])
+    if None in (a_off, h_off, a_def, h_def):
+        return None
+    exp_home = (h_off + a_def) / 2.0
+    exp_away = (a_off + h_def) / 2.0
+    margin = (exp_home - exp_away) + model["hfa"]
+    proj_total = exp_home + exp_away
+    try:
+        p_home = 1.0 / (1.0 + math.exp(-margin / model["scale"]))
+    except OverflowError:
+        p_home = 1.0 if margin > 0 else 0.0
+    p_home = min(max(p_home, 0.01), 0.99)
+    p_away = 1.0 - p_home
+    block: dict = {
+        "exp_home":          round(exp_home, 2),
+        "exp_away":          round(exp_away, 2),
+        "proj_margin_home":  round(margin, 2),
+        "proj_total":        round(proj_total, 2),
+        "p_home":            round(p_home, 4),
+        "p_away":            round(p_away, 4),
+        "fair_home_american": _prob_to_american(p_home),
+        "fair_away_american": _prob_to_american(p_away),
+        "source":            "v1-stats",
+    }
+    return _pr_attach_market_compare(block, odds, p_home, p_away, proj_total)
+
+
+def _load_power_snapshot(sb, sport: str) -> dict | None:
+    """Latest opponent-adjusted ratings snapshot for a sport (written by
+    the kahla-scanner compute_power_ratings cron). None if absent."""
+    try:
+        rows = (sb.table("power_ratings")
+                .select("league_avg,ratings,params,n_games,computed_at")
+                .eq("sport", sport)
+                .order("computed_at", desc=True)
+                .limit(1).execute().data) or []
+    except Exception:
+        return None
+    return rows[0] if rows else None
+
+
+def _pr_find_team(ratings: dict, name: str | None) -> dict | None:
+    if not name:
+        return None
+    if name in ratings:
+        return ratings[name]
+    nl = name.lower()
+    for k, v in ratings.items():
+        kl = (k or "").lower()
+        if kl and (nl in kl or kl in nl):
+            return v
+    return None
+
+
+def _power_rating_v2(sb, sport: str, odds: dict | None,
+                     away: str | None, home: str | None) -> dict | None:
+    """The real model — projects from the cron-computed opponent-adjusted
+    ratings snapshot. Flask reads the precomputed ratings (it can't import
+    the kahla-scanner engine) and does the lightweight off/def → margin/
+    total projection inline. None when no snapshot or teams unmatched."""
+    snap = _load_power_snapshot(sb, sport)
+    if not snap:
+        return None
+    ratings = snap.get("ratings") or {}
+    league_avg = _to_float(snap.get("league_avg")) or 0.0
+    params = snap.get("params") or {}
+    hfa = _to_float(params.get("hfa")) or 0.0
+    scale = _to_float(params.get("scale")) or 1.0
+    h = _pr_find_team(ratings, home)
+    a = _pr_find_team(ratings, away)
+    if not (h and a):
+        return None
+    h_off, h_def = _to_float(h.get("off")), _to_float(h.get("def"))
+    a_off, a_def = _to_float(a.get("off")), _to_float(a.get("def"))
+    if None in (h_off, h_def, a_off, a_def):
+        return None
+    exp_home = h_off + (a_def - league_avg) + hfa / 2.0
+    exp_away = a_off + (h_def - league_avg) - hfa / 2.0
+    margin = exp_home - exp_away
+    proj_total = exp_home + exp_away
+    try:
+        p_home = 1.0 / (1.0 + math.exp(-margin / scale)) if scale > 0 else (
+            1.0 if margin > 0 else 0.0)
+    except OverflowError:
+        p_home = 1.0 if margin > 0 else 0.0
+    p_home = min(max(p_home, 0.01), 0.99)
+    p_away = 1.0 - p_home
+    block: dict = {
+        "exp_home":          round(exp_home, 2),
+        "exp_away":          round(exp_away, 2),
+        "proj_margin_home":  round(margin, 2),
+        "proj_total":        round(proj_total, 2),
+        "p_home":            round(p_home, 4),
+        "p_away":            round(p_away, 4),
+        "fair_home_american": _prob_to_american(p_home),
+        "fair_away_american": _prob_to_american(p_away),
+        "home_net":          _to_float(h.get("net")),
+        "away_net":          _to_float(a.get("net")),
+        "source":            "v2-adjusted",
+        "n_games":           snap.get("n_games"),
+    }
+    return _pr_attach_market_compare(block, odds, p_home, p_away, proj_total)
+
+
+def _power_rating(sb, sport: str, team_compare: dict | None,
+                  odds: dict | None, away: str | None = None,
+                  home: str | None = None) -> dict | None:
+    """Prefer the real opponent-adjusted ratings (cron-computed snapshot);
+    fall back to the v1 raw-season-stat projection when no snapshot exists
+    for the sport yet, or the teams aren't in it. Silent — never raises."""
+    try:
+        v2 = _power_rating_v2(sb, sport, odds, away, home)
+    except Exception:
+        v2 = None
+    if v2:
+        return v2
+    return _power_rating_v1(sport, team_compare, odds)
 
 
 def _model_edge_for_side(power: dict | None, market_type: str,
@@ -2260,9 +2355,10 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
             _espn_team_record(away_t), _espn_team_record(home_t),
         )
 
-    # Independent power rating from the team-compare stats (no extra
-    # fetch) + outdoor-venue weather (free Open-Meteo). Both silent-fail.
-    power_rating = _power_rating(sport, team_compare, odds)
+    # Independent power rating — prefers the cron-computed opponent-
+    # adjusted ratings snapshot (Supabase), falls back to the v1 raw-stat
+    # projection. Plus outdoor-venue weather (free Open-Meteo). Silent-fail.
+    power_rating = _power_rating(sb, sport, team_compare, odds, away, home)
     weather = _fetch_weather(sport, home, event_start) if (home and event_start) else None
 
     suggestions = _suggest_picks(odds, splits, power_rating)

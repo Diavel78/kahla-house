@@ -850,19 +850,34 @@ only (ESPN finals + MLB Stats API + Supabase). Phased:
     `game_results`. `--days N` backfills a season. Idempotent upsert.
   - `kahla-scanner/scripts/compute_power_ratings.py` — reads the window of
     finals per sport, runs the engine, writes a `power_ratings` snapshot.
-- **Phase 2 (next):** MLB pitcher-aware scoring (blend the probable
-  starter's rate stats + bullpen + park factor into the run projection),
-  then wire `handicapper_web._power_rating` to PREFER the Supabase ratings
-  (silent fallback to v1 raw-stat model when absent). Sanity-check the
-  computed ratings before they touch sizing.
+- **Phase 2 (partly built):**
+  - **Integration (built):** `handicapper_web._power_rating(sb, sport,
+    team_compare, odds, away, home)` now PREFERS the opponent-adjusted
+    snapshot. `_power_rating_v2` reads the latest `power_ratings` row from
+    Supabase and does the off/def → margin/total projection inline (Flask
+    can't import the kahla-scanner engine, so the heavy solve stays in the
+    cron and only the lightweight projection runs in Flask); falls back to
+    `_power_rating_v1` (raw-stat) when no snapshot / teams unmatched. Both
+    share `_pr_attach_market_compare` so the block shape is identical. The
+    dossier card shows a source footer ("opponent-adjusted · N games" vs
+    "season-stats fallback") so you can SEE which model is live.
+  - **Cron (built):** `.github/workflows/power-ratings.yml` — daily
+    schedule (11:00 UTC) runs `ingest_results` + `compute_power_ratings`;
+    `workflow_dispatch` with a `days` input backfills a season (set ~200).
+    Separate from `scanner-poll.yml` so it doesn't touch the 1-min hot path.
+  - **Still TODO:** run the backfill (Actions → Power Ratings → Run
+    workflow, days=200) + sanity-check the real ratings via the dossier
+    card BEFORE trusting them; then MLB pitcher-aware scoring (blend the
+    probable starter + bullpen + park factor into the run projection).
 - **Phase 3:** calibrate hfa/scale + margin→prob/cover from the season's
   actual results (replace eyeballed `SPORT_PARAMS`); home/road splits, pace.
 - **Phase 4:** backtest the model vs ESPN finals AND closing lines; widen
   the model's sizing cap (`MODEL_EDGE_CAP_PP`) only on sports/markets where
   it provably beats the close (CLV).
 
-Not yet wired into `scanner-poll.yml` — needs a manual backfill + a
-ratings sanity-check first, then the cron steps get added.
+The ratings flow through the same capped (1.5pp) sizing nudge as v1, so
+even un-sanity-checked early ratings are bounded; widen the cap only after
+CLV validates them.
 
 ### Stage 4 — self-tuning (deferred until ~14d of resolved data)
 

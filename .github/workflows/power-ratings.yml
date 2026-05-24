@@ -1,0 +1,61 @@
+name: Power Ratings — Ingest + Compute
+
+# Builds the bot's independent power ratings:
+#   1. ingest_results.py — pull completed game final scores from ESPN
+#      into the game_results table.
+#   2. compute_power_ratings.py — solve opponent-adjusted off/def ratings
+#      per sport and write a power_ratings snapshot Flask reads.
+#
+# Runs once daily (finals don't change, and ratings shift slowly). The
+# scheduled run scans the last couple days; to BACKFILL a season, trigger
+# manually (Actions tab → Run workflow) with `days` set high, e.g. 200.
+#
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY.
+# Free — ESPN scoreboard is public, no Odds API credits touched.
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Days of finals to ingest (use ~200 for a season backfill)"
+        required: false
+        default: "2"
+  schedule:
+    # 11:00 UTC ≈ 4am MT — after the latest US games have gone final.
+    - cron: "0 11 * * *"
+
+concurrency:
+  group: power-ratings
+  cancel-in-progress: true
+
+jobs:
+  rate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: kahla-scanner
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Ingest ESPN finals
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.ingest_results --days ${{ github.event.inputs.days || '2' }}
+
+      - name: Compute power ratings
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.compute_power_ratings
