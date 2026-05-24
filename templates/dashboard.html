@@ -1006,8 +1006,10 @@
 
         for (const c of closed) {
             let result = '';
-            if (c.type === 'Transfer') {
+            if (c.type === 'Transfer' || c.type === 'Liquidity Program') {
                 result = '<span class="badge badge-win">Maker</span>';
+            } else if (c.type === 'Taker Fee Rebate') {
+                result = '<span class="badge badge-win">Rebate</span>';
             } else if (c.type === 'Trade') {
                 result = '<span class="badge badge-sold">Sold</span>';
             } else if (c.pnl !== null && c.pnl > 0) {

@@ -371,6 +371,16 @@ def enrich_positions(client, positions):
     return enriched
 
 
+# Polymarket renamed the maker-reward activity (May 2026): the old
+# ACTIVITY_TYPE_TRANSFER was split into ACTIVITY_TYPE_LIQUIDITY_PROGRAM
+# (maker / liquidity-provider rewards) and ACTIVITY_TYPE_TAKER_FEE_REBATE
+# (fee rebates). All three are Polymarket paying you — income that rolls
+# into the Maker Rewards card + total P&L. These are the human labels
+# _activity_type_label() emits, which is what each parsed row's "type"
+# field holds. TRANSFER kept for back-compat with older accounts.
+_REWARD_TYPE_LABELS = {"Transfer", "Liquidity Program", "Taker Fee Rebate"}
+
+
 def compute_summary(enriched, parsed_activities, tz_offset_minutes=0):
     total_invested = 0.0
     total_current = 0.0
@@ -400,7 +410,7 @@ def compute_summary(enriched, parsed_activities, tz_offset_minutes=0):
         has_pnl = act["pnl"] is not None
         is_resolution = act["type"] == "Position Resolution"
         is_trade_close = act["type"] == "Trade" and act.get("_is_close") and has_pnl
-        is_maker = act["type"] == "Transfer" and has_pnl
+        is_maker = act["type"] in _REWARD_TYPE_LABELS and has_pnl
 
         if is_maker:
             maker_rewards += act["pnl"]
@@ -480,6 +490,10 @@ def parse_activities(client, activities):
         "ACTIVITY_TYPE_TRANSFER": "transfer",
         "ACTIVITY_TYPE_ACCOUNT_DEPOSIT": "deposit",
         "ACTIVITY_TYPE_ACCOUNT_WITHDRAWAL": "withdrawal",
+        # Maker rewards + fee rebates (May 2026 rename of TRANSFER). Both
+        # nest their payload under the accountBalanceChange key.
+        "ACTIVITY_TYPE_LIQUIDITY_PROGRAM": "accountBalanceChange",
+        "ACTIVITY_TYPE_TAKER_FEE_REBATE": "accountBalanceChange",
     }
 
     def _pick_from_meta(meta: dict) -> str:
@@ -601,9 +615,21 @@ def parse_activities(client, activities):
             pnl = amount
 
         elif act_type == "ACTIVITY_TYPE_TRANSFER":
-            # Maker rewards — count as P&L income
+            # Maker rewards (legacy type) — count as P&L income
             amount = _safe_float(detail.get("amount"))
             market = "Maker Reward"
+            pnl = amount
+            is_close = False
+
+        elif act_type in ("ACTIVITY_TYPE_LIQUIDITY_PROGRAM",
+                          "ACTIVITY_TYPE_TAKER_FEE_REBATE"):
+            # Maker / liquidity-provider rewards + taker fee rebates — the
+            # May 2026 replacement for ACTIVITY_TYPE_TRANSFER. Payload is
+            # under the accountBalanceChange key (mapped above). Income.
+            amount = _safe_float(detail.get("amount"))
+            market = ("Maker Reward"
+                      if act_type == "ACTIVITY_TYPE_LIQUIDITY_PROGRAM"
+                      else "Fee Rebate")
             pnl = amount
             is_close = False
 
@@ -3146,7 +3172,7 @@ def api_data():
     closed_positions = [a for a in parsed_acts
                         if a["type"] == "Position Resolution"
                         or (a["type"] == "Trade" and a.get("_is_close") and a.get("pnl") is not None)
-                        or (a["type"] == "Transfer" and a.get("pnl") is not None)]
+                        or (a["type"] in _REWARD_TYPE_LABELS and a.get("pnl") is not None)]
 
     tz_offset = request.args.get("tz", 0, type=int)
     summary = compute_summary(enriched, parsed_acts, tz_offset_minutes=tz_offset)
