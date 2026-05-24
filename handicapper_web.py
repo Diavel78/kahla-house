@@ -1234,6 +1234,15 @@ def _mlb_probables(event_iso: str, away: str, home: str) -> dict:
     if not data:
         return {}
     away_n, home_n = away.lower(), home.lower()
+    try:
+        target = datetime.fromisoformat(event_iso.replace("Z", "+00:00"))
+    except Exception:
+        target = None
+    # Collect EVERY game matching by team name. A doubleheader returns two
+    # (same teams, same day) — pick the one whose scheduled start is closest
+    # to this dossier's event_start, so game 2 doesn't silently inherit game
+    # 1's probable pitchers / game_pk / venue.
+    cands = []
     for d in data.get("dates", []) or []:
         for g in d.get("games", []) or []:
             home_t = ((g.get("teams") or {}).get("home") or {}).get("team", {})
@@ -1245,15 +1254,29 @@ def _mlb_probables(event_iso: str, away: str, home: str) -> dict:
             if not ((home_n in hn or hn in home_n) and
                     (away_n in an or an in away_n)):
                 continue
-            return {
-                "venue": (g.get("venue") or {}).get("name"),
-                "away":  _mlb_pitcher_block(((g.get("teams") or {}).get("away") or {}).get("probablePitcher")),
-                "home":  _mlb_pitcher_block(((g.get("teams") or {}).get("home") or {}).get("probablePitcher")),
-                "away_team_id": away_t.get("id"),
-                "home_team_id": home_t.get("id"),
-                "game_pk":      g.get("gamePk"),
-            }
-    return {}
+            cands.append((g, home_t, away_t))
+    if not cands:
+        return {}
+    g, home_t, away_t = cands[0]
+    if target and len(cands) > 1:
+        dated = []
+        for c in cands:
+            try:
+                gd = datetime.fromisoformat((c[0].get("gameDate") or "").replace("Z", "+00:00"))
+                dated.append((c, gd))
+            except Exception:
+                continue
+        if dated:
+            g, home_t, away_t = min(
+                dated, key=lambda x: abs((x[1] - target).total_seconds()))[0]
+    return {
+        "venue": (g.get("venue") or {}).get("name"),
+        "away":  _mlb_pitcher_block(((g.get("teams") or {}).get("away") or {}).get("probablePitcher")),
+        "home":  _mlb_pitcher_block(((g.get("teams") or {}).get("home") or {}).get("probablePitcher")),
+        "away_team_id": away_t.get("id"),
+        "home_team_id": home_t.get("id"),
+        "game_pk":      g.get("gamePk"),
+    }
 
 
 # MLB lineup layer — we model the starter, but the OFFENSE projection
