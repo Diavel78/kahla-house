@@ -3830,7 +3830,7 @@ def api_handicapper():
     today_start_iso = today_start_local.astimezone(timezone.utc).isoformat()
     cutoff_7d = (now - timedelta(days=7)).isoformat()
 
-    cols = ("id,picked_at,asked_by,query_text,sport,event_name,event_start,"
+    cols = ("id,market_id,picked_at,asked_by,query_text,sport,event_name,event_start,"
             "market_type,side,entry_book,entry_price,entry_line,"
             "units,confidence,fair_prob,edge_pp,sharp_score,clv_pp,"
             "analysis_md,reasons,"

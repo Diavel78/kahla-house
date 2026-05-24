@@ -192,6 +192,12 @@
         .game-row .pick-btn { padding: 6px 12px; background: var(--blue); color: #fff; border: 0; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; }
         .game-row .pick-btn:hover { background: #5b8aff; }
         .game-row .pick-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        /* Logged: admin/bot_access has already logged a pick on this game.
+           Green instead of blue so it reads "done, already chose." Viewers
+           never reach this — _loggedMarketIds is only populated by loadData,
+           which is gated to _canBet. */
+        .game-row .pick-btn.logged { background: var(--green); }
+        .game-row .pick-btn.logged:hover { background: #2ee06a; }
         .games-empty { padding: 20px; text-align: center; font-size: 12px; color: var(--text-muted); }
 
         /* Ask form */
@@ -521,6 +527,10 @@
     // which carries zero logged-pick data — that's why we can open up the
     // dossier endpoint to firebase_auth_required and trust the gate.
     let _canBet = false;
+    // market_ids the current user has already logged a pick on (pending or
+    // settled-today). Populated ONLY by loadData, which is gated to _canBet
+    // — so for viewers this stays empty and Pick buttons never turn green.
+    let _loggedMarketIds = new Set();
 
     firebase.auth().onAuthStateChanged(async user => {
         if (!user) { window.location.href = '/'; return; }
@@ -897,16 +907,31 @@
             }
             list.innerHTML = games.map(g => {
                 const matchup = g.away && g.home ? `${_esc(g.away)} @ ${_esc(g.home)}` : _esc(g.event_name);
+                const logged = _canBet && _loggedMarketIds.has(g.market_id);
                 return `<li class="game-row">
                     <span class="when ${_kickoffTier(g.event_start)}" data-start="${_esc(g.event_start)}">${_fmtKickoff(g.event_start)}</span>
                     <span class="matchup">${matchup}</span>
-                    <button class="pick-btn" onclick="pickGame('${g.market_id}')">Pick</button>
+                    <button class="pick-btn${logged ? ' logged' : ''}" data-mid="${_esc(g.market_id)}" onclick="pickGame('${g.market_id}')">${logged ? '✓ Pick' : 'Pick'}</button>
                 </li>`;
             }).join('');
         } catch (e) {
             list.innerHTML = `<li class="games-empty" style="color:var(--red)">Failed to load: ${_esc(String(e))}</li>`;
             count.textContent = '0';
         }
+    }
+
+    // Re-color already-rendered Pick buttons from the logged-pick set.
+    // Handles the timing gap: the games list and the picks data load via
+    // separate calls, so games may render before loadData populates the
+    // set (or after a new pick is logged / deleted). Admin/bot_access only
+    // — viewers never call loadData, so the set is empty and nothing turns
+    // green here.
+    function _markLoggedGames() {
+        document.querySelectorAll('#gamesList .pick-btn[data-mid]').forEach(btn => {
+            const logged = _canBet && _loggedMarketIds.has(btn.getAttribute('data-mid'));
+            btn.classList.toggle('logged', logged);
+            btn.textContent = logged ? '✓ Pick' : 'Pick';
+        });
     }
 
     // Tick the games-list kickoff countdowns every minute so "57m"
@@ -2023,6 +2048,13 @@
 
             const pending = data.pending || [];
             const settled = data.settled || [];
+            // Rebuild the "already logged" set so the games list can green
+            // out games we've picked. Pending covers upcoming/active games;
+            // settled-today is harmless (those market_ids rarely match an
+            // upcoming game). Then re-color any already-rendered buttons.
+            _loggedMarketIds = new Set();
+            [...pending, ...settled].forEach(r => { if (r.market_id) _loggedMarketIds.add(r.market_id); });
+            _markLoggedGames();
             document.getElementById('pendingCount').textContent = pending.length;
             document.getElementById('settledCount').textContent = settled.length;
             document.getElementById('pendingList').innerHTML = pending.length
