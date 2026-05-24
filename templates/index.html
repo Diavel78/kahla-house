@@ -124,6 +124,10 @@ body::after {
 .app-card.dashboard-app::before { background: linear-gradient(90deg, var(--blue), var(--cyan)); }
 .app-card.dashboard-app:hover { border-color: rgba(74,124,255,0.3); box-shadow: 0 8px 40px rgba(74,124,255,0.08), 0 0 0 1px rgba(74,124,255,0.15); }
 .app-card.dashboard-app .app-tag { background: var(--blue-dim); color: var(--blue); }
+
+.app-card.games-app::before { background: linear-gradient(90deg, var(--purple), var(--blue)); }
+.app-card.games-app:hover { border-color: rgba(168,85,247,0.3); box-shadow: 0 8px 40px rgba(168,85,247,0.08), 0 0 0 1px rgba(168,85,247,0.15); }
+.app-card.games-app .app-tag { background: var(--purple-dim); color: var(--purple); }
 .dashboard-app:hover .arrow { color: var(--blue); }
 .admin-badge { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 9px; padding: 3px 8px; border-radius: 5px; background: var(--red-dim); color: #f87171; margin-left: 8px; letter-spacing: 0.05em; vertical-align: middle; }
 .app-icon { font-size: 1.5em; margin-bottom: 8px; display: block; }
@@ -354,6 +358,15 @@ function renderAppCards() {
             <h2>Odds Board</h2>
             <p>Multi-sportsbook odds comparison, Circa splits, sharp indicators, line movement, and player props across all books.</p>
             <span class="app-tag">Sports Betting</span>
+            <span class="arrow">&rarr;</span>
+        </a>`;
+    }
+    if (isViewer) {
+        h += `<a href="/games" class="app-card games-app">
+            <span class="app-icon">&#127183;</span>
+            <h2>Games</h2>
+            <p>Card-game scoring sheets. Pick a game and keep score — Clubs Diamonds Hearts Spades to start. Mobile-friendly, saves as you go.</p>
+            <span class="app-tag">Scorekeeping</span>
             <span class="arrow">&rarr;</span>
         </a>`;
     }

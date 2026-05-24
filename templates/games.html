@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kahla House — Games</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- Firebase Auth (compat mode) -->
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>
+        const FC = {
+            apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
+            authDomain: "kahla-house.firebaseapp.com",
+            projectId: "kahla-house",
+            storageBucket: "kahla-house.firebasestorage.app",
+            messagingSenderId: "1029771942929",
+            appId: "1:1029771942929:web:76358096dbb868e375a5b0"
+        };
+        firebase.initializeApp(FC);
+    </script>
+
+    <style>
+        :root {
+            --bg: #0b0e13;
+            --surface: #13171e;
+            --surface-2: #1a1f2b;
+            --surface-3: #1f2533;
+            --border: #1e2530;
+            --border-light: #2a3140;
+            --text: #e2e8f0;
+            --text-secondary: #8890a8;
+            --text-muted: #555d78;
+            --blue: #4a7cff;
+            --blue-dim: rgba(74,124,255,0.08);
+            --green: #22c55e;
+            --green-dim: rgba(34,197,94,0.10);
+            --orange: #f59e0b;
+            --orange-dim: rgba(245,158,11,0.10);
+            --red: #ef4444;
+            --red-dim: rgba(239,68,68,0.10);
+            --purple: #a855f7;
+            --purple-dim: rgba(168,85,247,0.10);
+            --cyan: #06b6d4;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html { overflow-x: hidden; }
+        body {
+            font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            -webkit-text-size-adjust: 100%;
+        }
+
+        /* Top Bar */
+        .top-bar {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0 24px; height: 56px; background: var(--surface);
+            border-bottom: 1px solid var(--border); position: relative; z-index: 10;
+        }
+        .top-bar-left { display: flex; align-items: center; gap: 16px; }
+        .top-bar-logo {
+            width: 36px; height: 36px; background: linear-gradient(135deg, var(--blue), var(--purple));
+            border-radius: 10px; display: flex; align-items: center; justify-content: center;
+            font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 14px; color: #fff; letter-spacing: -0.5px;
+        }
+        .top-bar-title { font-size: 16px; font-weight: 700; color: var(--text); letter-spacing: -0.3px; }
+        .nav-links { display: flex; gap: 4px; margin-left: 12px; }
+        .nav-link {
+            padding: 6px 14px; font-size: 13px; font-weight: 600; color: var(--text-secondary);
+            text-decoration: none; border-radius: 8px; transition: all 0.15s;
+        }
+        .nav-link:hover { color: var(--text); background: var(--surface-2); }
+        .nav-link.active { color: #fff; background: var(--blue); }
+        .top-bar-right { display: flex; align-items: center; gap: 12px; }
+        .logout-btn {
+            padding: 6px 14px; background: var(--surface-2); color: var(--text-secondary);
+            border: 1px solid var(--border); border-radius: 8px; font-size: 12px; font-weight: 600;
+            font-family: 'DM Sans', sans-serif; cursor: pointer; transition: all 0.15s;
+        }
+        .logout-btn:hover { background: var(--border); color: var(--text); }
+
+        .spinner {
+            display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border);
+            border-top-color: var(--blue); border-radius: 50%; animation: spin .7s linear infinite;
+            vertical-align: middle; margin-right: 6px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .auth-loading {
+            display: flex; align-items: center; justify-content: center; min-height: 100vh;
+            color: var(--text-muted); font-size: 14px;
+        }
+
+        /* Page wrap */
+        .wrap { max-width: 1100px; margin: 0 auto; padding: 20px 24px 80px; }
+        .page-head { margin-bottom: 18px; }
+        .page-head h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.4px; }
+        .page-head p { color: var(--text-secondary); font-size: 13px; margin-top: 4px; }
+
+        /* Controls */
+        .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 16px; }
+        .game-select {
+            background: var(--surface); border: 1px solid var(--border-light); border-radius: 10px;
+            padding: 10px 14px; color: var(--text); font-size: 14px; font-weight: 600;
+            font-family: 'DM Sans', sans-serif; cursor: pointer; min-width: 220px;
+        }
+        .game-select option { background: var(--surface); }
+        .btn {
+            padding: 9px 14px; border-radius: 9px; font-size: 13px; font-weight: 600;
+            font-family: 'DM Sans', sans-serif; cursor: pointer; border: 1px solid var(--border-light);
+            background: var(--surface-2); color: var(--text); transition: all 0.15s;
+        }
+        .btn:hover { background: var(--surface-3); }
+        .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+        .btn.primary:hover { filter: brightness(1.1); }
+        .btn.danger { color: #f87171; border-color: rgba(239,68,68,0.3); }
+        .btn.danger:hover { background: var(--red-dim); }
+
+        /* Rules panel */
+        .rules { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; overflow: hidden; }
+        .rules summary {
+            cursor: pointer; padding: 12px 16px; font-weight: 700; font-size: 13px; list-style: none;
+            display: flex; align-items: center; gap: 8px; color: var(--text);
+        }
+        .rules summary::-webkit-details-marker { display: none; }
+        .rules summary::before { content: '\25B8'; color: var(--text-muted); transition: transform 0.15s; }
+        .rules[open] summary::before { transform: rotate(90deg); }
+        .rules .body { padding: 0 16px 14px; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+        .rules .body ul { margin: 6px 0 6px 18px; }
+        .rules .body code {
+            font-family: 'JetBrains Mono', monospace; font-size: 12px; background: var(--surface-2);
+            padding: 1px 6px; border-radius: 5px; color: var(--text);
+        }
+
+        /* Scoreboard summary */
+        .scoreboard { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+        .sb-chip {
+            background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+            padding: 10px 14px; min-width: 110px; flex: 1 1 auto; max-width: 220px;
+        }
+        .sb-chip .nm { font-size: 12px; color: var(--text-secondary); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .sb-chip .val { font-size: 26px; font-weight: 800; font-family: 'JetBrains Mono', monospace; letter-spacing: -1px; margin-top: 2px; }
+        .sb-chip.leader { border-color: rgba(34,197,94,0.4); box-shadow: 0 0 0 1px rgba(34,197,94,0.15); }
+        .sb-chip.leader .val { color: var(--green); }
+        .sb-chip.leader .nm::after { content: ' \1F451'; }
+
+        /* Sheet table */
+        .sheet-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; -webkit-overflow-scrolling: touch; }
+        table.sheet { border-collapse: separate; border-spacing: 0; width: 100%; min-width: 100%; }
+        table.sheet th, table.sheet td { border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); padding: 0; }
+        table.sheet th:last-child, table.sheet td:last-child { border-right: none; }
+
+        /* Hand column (sticky left) */
+        .hcell {
+            position: sticky; left: 0; z-index: 3; background: var(--surface-2);
+            min-width: 116px; width: 116px; padding: 8px 10px !important; text-align: left; vertical-align: top;
+        }
+        thead .hcell, tfoot .hcell { z-index: 4; }
+        .hcell .hnum { font-size: 11px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+        .hcell .hmain { display: flex; align-items: center; gap: 6px; margin-top: 1px; }
+        .hcell .cards { font-weight: 800; font-size: 15px; }
+        .suit { font-size: 16px; line-height: 1; }
+        .suit.red { color: #ff6b81; }
+        .suit.black { color: #cdd5e6; }
+        .nt-tag { font-size: 10px; font-weight: 800; letter-spacing: 0.04em; }
+        .hcell .ind { margin-top: 5px; font-size: 10px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); line-height: 1.5; }
+        .ind .warn { color: var(--orange); font-weight: 700; }
+        .ind .bad { color: #f87171; font-weight: 700; }
+        .ind .ok { color: var(--green); }
+
+        /* Player header */
+        thead th.pcol { background: var(--surface); min-width: 92px; padding: 8px 6px !important; vertical-align: top; }
+        .pname {
+            width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+            padding: 5px 6px; color: var(--text); font-size: 13px; font-weight: 700; font-family: 'DM Sans', sans-serif; text-align: center;
+        }
+        .pname:focus { outline: none; border-color: var(--blue); }
+        .phead-row { display: flex; align-items: center; gap: 4px; }
+        .rm-btn {
+            flex: 0 0 auto; width: 22px; height: 22px; border-radius: 6px; border: 1px solid var(--border);
+            background: var(--surface-2); color: var(--text-muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 0;
+        }
+        .rm-btn:hover { color: #f87171; border-color: rgba(239,68,68,0.3); }
+        .zc { display: block; text-align: center; font-size: 10px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); margin-top: 4px; }
+        .zc.bad { color: #f87171; font-weight: 700; }
+
+        /* Player cells */
+        td.pcell { background: var(--surface); padding: 6px 5px !important; text-align: center; vertical-align: middle; }
+        .bt-row { display: flex; gap: 4px; justify-content: center; }
+        .bt {
+            width: 38px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+            padding: 5px 2px; color: var(--text); font-size: 14px; font-weight: 600; text-align: center;
+            font-family: 'JetBrains Mono', monospace; -moz-appearance: textfield;
+        }
+        .bt::-webkit-outer-spin-button, .bt::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        .bt:focus { outline: none; border-color: var(--blue); }
+        .bt-lbl { font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+        .bt-labels { display: flex; gap: 4px; justify-content: center; margin-bottom: 2px; }
+        .bt-labels span { width: 38px; }
+        .scbadge {
+            display: inline-block; margin-top: 5px; min-width: 34px; padding: 2px 7px; border-radius: 999px;
+            font-size: 12px; font-weight: 800; font-family: 'JetBrains Mono', monospace; background: var(--surface-2); color: var(--text-muted);
+        }
+        .scbadge.made { background: var(--green-dim); color: #4ade80; }
+        .scbadge.miss { background: var(--orange-dim); color: var(--orange); }
+        .scbadge.neg { background: var(--red-dim); color: #f87171; }
+
+        /* Special hand row tints */
+        tr.sp-notrump td.pcell, tr.sp-notrump .hcell { background: rgba(74,124,255,0.06); }
+        tr.sp-blind td.pcell, tr.sp-blind .hcell { background: rgba(168,85,247,0.06); }
+        tr.sp-negative td.pcell, tr.sp-negative .hcell { background: rgba(239,68,68,0.06); }
+
+        /* Footer totals */
+        tfoot td, tfoot th { background: var(--surface-3); padding: 10px 6px !important; }
+        tfoot .hcell { background: var(--surface-3); font-weight: 800; font-size: 12px; }
+        .tot {
+            text-align: center; font-size: 20px; font-weight: 800; font-family: 'JetBrains Mono', monospace; letter-spacing: -0.5px;
+        }
+        .tot.lead { color: var(--green); }
+
+        .empty-hint { padding: 30px; text-align: center; color: var(--text-muted); font-size: 14px; }
+
+        @media (max-width: 768px) {
+            .top-bar { padding: 8px 12px; height: auto; flex-wrap: wrap; gap: 6px; }
+            .top-bar-title { display: none; }
+            .nav-links { margin-left: 6px; gap: 2px; }
+            .nav-link { font-size: 11px; padding: 4px 8px; }
+            .logout-btn { padding: 5px 10px; font-size: 11px; }
+            .wrap { padding: 14px 10px 80px; }
+            .game-select { min-width: 0; flex: 1 1 100%; }
+            .controls .btn { flex: 1 1 auto; }
+            .hcell { min-width: 84px; width: 84px; padding: 7px 6px !important; }
+            .bt { width: 34px; font-size: 15px; }
+            .bt-labels span { width: 34px; }
+            .sb-chip { min-width: 0; }
+        }
+    </style>
+</head>
+<body>
+    <div class="auth-loading" id="auth-gate"><span class="spinner"></span> Authenticating...</div>
+
+    <div id="app" style="display:none;max-width:100vw;overflow-x:hidden">
+        <div class="top-bar">
+            <div class="top-bar-left">
+                <div class="top-bar-logo">KH</div>
+                <div class="top-bar-title">The Kahla House</div>
+                <div class="nav-links">
+                    <a href="/" class="nav-link">Home</a>
+                    <a href="/odds" class="nav-link">Odds</a>
+                    <a href="/games" class="nav-link active">Games</a>
+                    <a href="/dashboard" class="nav-link admin-only" style="display:none">Dashboard</a>
+                    <a href="/handicapper" class="nav-link bot-only" style="display:none">Pick Bot</a>
+                </div>
+            </div>
+            <div class="top-bar-right">
+                <button class="logout-btn" onclick="doLogout()">Logout</button>
+            </div>
+        </div>
+
+        <div class="wrap">
+            <div class="page-head">
+                <h1>Games</h1>
+                <p>Pick a game and keep score. Saves automatically on this device.</p>
+            </div>
+
+            <div class="controls">
+                <select class="game-select" id="gameSelect" onchange="onGameChange()">
+                    <option value="cdhs">Clubs &middot; Diamonds &middot; Hearts &middot; Spades</option>
+                </select>
+                <button class="btn" onclick="addPlayer()">+ Add player</button>
+                <button class="btn danger" onclick="newGame()">New game</button>
+            </div>
+
+            <details class="rules" id="rulesPanel">
+                <summary>How scoring works</summary>
+                <div class="body">
+                    <ul>
+                        <li>17 hands: deal <code>7,6,5,4,3,2,1</code>, then three middle hands of 7 cards (<strong>No Trump</strong>, <strong>Blind Diamonds</strong>, <strong>Negative Spades</strong>), then <code>1,2,3,4,5,6,7</code> back up.</li>
+                        <li>Trump cycles &clubs; &diams; &hearts; &spades; continuously through the up-and-down hands. Blind Diamonds = you bid before seeing your hand.</li>
+                        <li>Make your bid exactly &rarr; <code>bid &times; 11</code>. A made <strong>0 bid</strong> scores <code>10</code>. Miss your bid &rarr; you score the number of tricks you took.</li>
+                        <li><strong>Negative Spades</strong>: spades are trump and every trick you take is <code>&minus;10</code>.</li>
+                        <li>Each player may bid 0 at most <strong>3 times</strong> per game. Total bids on a hand can't equal the cards dealt (screw-the-dealer).</li>
+                    </ul>
+                </div>
+            </details>
+
+            <div class="scoreboard" id="scoreboard"></div>
+            <div class="sheet-wrap" id="sheetWrap"></div>
+        </div>
+    </div>
+
+    <script>
+    // ─── Firebase Auth Guard ───
+    function doLogout() { firebase.auth().signOut().then(() => { window.location.href = '/'; }); }
+
+    firebase.auth().onAuthStateChanged(async user => {
+        if (!user) { window.location.href = '/'; return; }
+        try {
+            const token = await user.getIdToken();
+            const r = await fetch('/api/me', { headers: { 'Authorization': 'Bearer ' + token } });
+            if (!r.ok) { window.location.href = '/'; return; }
+            const me = await r.json();
+            if (!me.approved || (me.role !== 'admin' && me.role !== 'viewer')) { window.location.href = '/'; return; }
+            if (me.role === 'admin') document.querySelectorAll('.admin-only').forEach(el => el.style.display = '');
+            if (me.role === 'admin' || me.bot_access) document.querySelectorAll('.bot-only').forEach(el => el.style.display = '');
+        } catch (e) { window.location.href = '/'; return; }
+        document.getElementById('auth-gate').style.display = 'none';
+        document.getElementById('app').style.display = '';
+        initApp();
+    });
+
+    // ─── Clubs · Diamonds · Hearts · Spades ───
+    // 17 hands. Trump cycles C,D,H,S continuously across the up-and-down
+    // numbered hands; the 3 middle 7-card hands are special and don't
+    // advance the cycle (descending ends on Hearts, so ascending picks up
+    // at Spades).
+    const SUIT = {
+        C: { sym: '♣', cls: 'black', name: 'Clubs' },
+        D: { sym: '♦', cls: 'red',   name: 'Diamonds' },
+        H: { sym: '♥', cls: 'red',   name: 'Hearts' },
+        S: { sym: '♠', cls: 'black', name: 'Spades' },
+    };
+    const CDHS_HANDS = [
+        { cards: 7, trump: 'C' }, { cards: 6, trump: 'D' }, { cards: 5, trump: 'H' }, { cards: 4, trump: 'S' },
+        { cards: 3, trump: 'C' }, { cards: 2, trump: 'D' }, { cards: 1, trump: 'H' },
+        { cards: 7, trump: 'NT', special: 'notrump',  label: 'No Trump' },
+        { cards: 7, trump: 'D',  special: 'blind',     label: 'Blind ♦' },
+        { cards: 7, trump: 'S',  special: 'negative',  label: 'Neg ♠' },
+        { cards: 1, trump: 'S' }, { cards: 2, trump: 'C' }, { cards: 3, trump: 'D' }, { cards: 4, trump: 'H' },
+        { cards: 5, trump: 'S' }, { cards: 6, trump: 'C' }, { cards: 7, trump: 'D' },
+    ];
+    const MAX_ZERO_BIDS = 3;
+    const STORE_KEY = 'kh_games_cdhs_v1';
+
+    let state = null; // { players:[{id,name}], entries:{ "h": { pid:{bid,tricks} } } }
+    let nextPid = 1;
+
+    function initApp() {
+        load();
+        render();
+    }
+
+    function load() {
+        try {
+            const raw = localStorage.getItem(STORE_KEY);
+            if (raw) {
+                state = JSON.parse(raw);
+                if (state && Array.isArray(state.players) && state.players.length) {
+                    nextPid = Math.max(...state.players.map(p => p.id)) + 1;
+                    if (!state.entries) state.entries = {};
+                    return;
+                }
+            }
+        } catch (e) { /* fall through to default */ }
+        state = { players: [], entries: {} };
+        addPlayer('Player 1', true);
+        addPlayer('Player 2', true);
+        addPlayer('Player 3', true);
+        addPlayer('Player 4', true);
+    }
+
+    function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) {} }
+
+    function onGameChange() { /* only one game for now */ render(); }
+
+    function addPlayer(name, skipRender) {
+        const id = nextPid++;
+        state.players.push({ id, name: name || ('Player ' + state.players.length) });
+        if (!skipRender) { save(); render(); }
+    }
+
+    function removePlayer(id) {
+        if (state.players.length <= 1) return;
+        const p = state.players.find(x => x.id === id);
+        if (!confirm('Remove ' + (p ? p.name : 'this player') + ' and their scores?')) return;
+        state.players = state.players.filter(x => x.id !== id);
+        for (const h in state.entries) { if (state.entries[h]) delete state.entries[h][id]; }
+        save(); render();
+    }
+
+    function renamePlayer(id, val) {
+        const p = state.players.find(x => x.id === id);
+        if (p) { p.name = val; save(); renderScoreboard(); }
+    }
+
+    function newGame() {
+        if (!confirm('Clear all scores for a new game? (Players are kept.)')) return;
+        state.entries = {};
+        save(); render();
+    }
+
+    // ── entry helpers ──
+    function getEntry(h, pid) {
+        if (!state.entries[h]) state.entries[h] = {};
+        if (!state.entries[h][pid]) state.entries[h][pid] = { bid: null, tricks: null };
+        return state.entries[h][pid];
+    }
+
+    function setVal(h, pid, key, raw) {
+        const hand = CDHS_HANDS[h];
+        const e = getEntry(h, pid);
+        if (raw === '' || raw == null) { e[key] = null; }
+        else {
+            let n = parseInt(raw, 10);
+            if (isNaN(n)) n = null;
+            else { if (n < 0) n = 0; if (n > hand.cards) n = hand.cards; }
+            e[key] = n;
+        }
+        save();
+        refreshDerived();
+    }
+
+    // ── scoring ──
+    function handScore(hand, e) {
+        if (hand.special === 'negative') {
+            if (e.tricks == null) return null;
+            return -10 * e.tricks;
+        }
+        if (e.bid == null || e.tricks == null) return null;
+        if (e.tricks === e.bid) return e.bid === 0 ? 10 : e.bid * 11;
+        return e.tricks;
+    }
+
+    function playerTotal(pid) {
+        let t = 0, any = false;
+        CDHS_HANDS.forEach((hand, h) => {
+            const e = (state.entries[h] || {})[pid];
+            if (!e) return;
+            const s = handScore(hand, e);
+            if (s != null) { t += s; any = true; }
+        });
+        return any ? t : 0;
+    }
+
+    function zeroBids(pid) {
+        let n = 0;
+        CDHS_HANDS.forEach((hand, h) => {
+            if (hand.special === 'negative') return;
+            const e = (state.entries[h] || {})[pid];
+            if (e && e.bid === 0) n++;
+        });
+        return n;
+    }
+
+    // ── render ──
+    function render() {
+        const wrap = document.getElementById('sheetWrap');
+        if (!state.players.length) {
+            wrap.innerHTML = '<div class="empty-hint">Add a player to start scoring.</div>';
+            renderScoreboard();
+            return;
+        }
+        let head = '<thead><tr><th class="hcell"><span class="hnum">HAND</span></th>';
+        state.players.forEach(p => {
+            head += `<th class="pcol">
+                <div class="phead-row">
+                    <input class="pname" value="${esc(p.name)}" maxlength="14"
+                        oninput="renamePlayer(${p.id}, this.value)">
+                    <button class="rm-btn" title="Remove" onclick="removePlayer(${p.id})">&times;</button>
+                </div>
+                <span class="zc" id="zc-${p.id}"></span>
+            </th>`;
+        });
+        head += '</tr></thead>';
+
+        let bodyRows = '';
+        CDHS_HANDS.forEach((hand, h) => {
+            const spCls = hand.special ? ' sp-' + hand.special : '';
+            bodyRows += `<tr class="hand-row${spCls}">${handCell(hand, h)}`;
+            state.players.forEach(p => {
+                bodyRows += playerCell(hand, h, p.id);
+            });
+            bodyRows += '</tr>';
+        });
+
+        let foot = '<tfoot><tr><th class="hcell">TOTAL</th>';
+        state.players.forEach(p => {
+            foot += `<td class="pcell"><div class="tot" id="tot-${p.id}">0</div></td>`;
+        });
+        foot += '</tr></tfoot>';
+
+        wrap.innerHTML = `<table class="sheet">${head}<tbody>${bodyRows}</tbody>${foot}</table>`;
+        refreshDerived();
+        renderScoreboard();
+    }
+
+    function handCell(hand, h) {
+        let trumpHtml;
+        if (hand.trump === 'NT') trumpHtml = '<span class="nt-tag" style="color:var(--blue)">NT</span>';
+        else { const s = SUIT[hand.trump]; trumpHtml = `<span class="suit ${s.cls}">${s.sym}</span>`; }
+        const label = hand.label ? `<span class="nt-tag" style="color:var(--text-secondary)">${hand.label}</span>` : '';
+        return `<td class="hcell">
+            <span class="hnum">#${h + 1}</span>
+            <div class="hmain"><span class="cards">${hand.cards}</span>${trumpHtml}</div>
+            ${label ? '<div style="margin-top:2px">' + label + '</div>' : ''}
+            <div class="ind" id="hi-${h}"></div>
+        </td>`;
+    }
+
+    function playerCell(hand, h, pid) {
+        const e = getEntry(h, pid);
+        const bidVal = e.bid == null ? '' : e.bid;
+        const trVal = e.tricks == null ? '' : e.tricks;
+        if (hand.special === 'negative') {
+            return `<td class="pcell">
+                <div class="bt-labels"><span class="bt-lbl">tricks</span></div>
+                <div class="bt-row">
+                    <input class="bt" type="number" inputmode="numeric" min="0" max="${hand.cards}"
+                        value="${trVal}" oninput="setVal(${h},${pid},'tricks',this.value)">
+                </div>
+                <span class="scbadge" id="sc-${h}-${pid}">&ndash;</span>
+            </td>`;
+        }
+        return `<td class="pcell">
+            <div class="bt-labels"><span class="bt-lbl">bid</span><span class="bt-lbl">got</span></div>
+            <div class="bt-row">
+                <input class="bt" type="number" inputmode="numeric" min="0" max="${hand.cards}"
+                    value="${bidVal}" oninput="setVal(${h},${pid},'bid',this.value)">
+                <input class="bt" type="number" inputmode="numeric" min="0" max="${hand.cards}"
+                    value="${trVal}" oninput="setVal(${h},${pid},'tricks',this.value)">
+            </div>
+            <span class="scbadge" id="sc-${h}-${pid}">&ndash;</span>
+        </td>`;
+    }
+
+    // Recompute every derived display (scores, indicators, totals, leader)
+    // WITHOUT touching input values — preserves focus/cursor while typing.
+    function refreshDerived() {
+        // cell score badges
+        CDHS_HANDS.forEach((hand, h) => {
+            state.players.forEach(p => {
+                const e = (state.entries[h] || {})[p.id] || { bid: null, tricks: null };
+                const badge = document.getElementById(`sc-${h}-${p.id}`);
+                if (!badge) return;
+                const s = handScore(hand, e);
+                if (s == null) { badge.textContent = '–'; badge.className = 'scbadge'; }
+                else {
+                    badge.textContent = s > 0 ? '+' + s : '' + s;
+                    let c = 'scbadge';
+                    if (s < 0) c += ' neg';
+                    else if (hand.special !== 'negative' && e.bid != null && e.tricks === e.bid) c += ' made';
+                    else if (e.bid != null) c += ' miss';
+                    badge.className = c;
+                }
+            });
+            // hand indicator: bid sum (screw-the-dealer) + trick sum
+            const ind = document.getElementById(`hi-${h}`);
+            if (ind) ind.innerHTML = handIndicator(hand, h);
+        });
+
+        // totals + leader
+        let max = -Infinity;
+        const totals = {};
+        state.players.forEach(p => { const t = playerTotal(p.id); totals[p.id] = t; if (t > max) max = t; });
+        const anyScore = Object.values(state.entries).some(hm => hm && Object.values(hm).some(e => e && (e.bid != null || e.tricks != null)));
+        state.players.forEach(p => {
+            const cell = document.getElementById(`tot-${p.id}`);
+            if (cell) { cell.textContent = totals[p.id]; cell.className = 'tot' + (anyScore && totals[p.id] === max ? ' lead' : ''); }
+            const zc = document.getElementById(`zc-${p.id}`);
+            if (zc) {
+                const z = zeroBids(p.id);
+                zc.textContent = `0-bids ${z}/${MAX_ZERO_BIDS}`;
+                zc.className = 'zc' + (z > MAX_ZERO_BIDS ? ' bad' : '');
+            }
+        });
+
+        renderScoreboard(totals, anyScore, max);
+    }
+
+    function handIndicator(hand, h) {
+        const hm = state.entries[h] || {};
+        let bidSum = 0, bidCount = 0, trickSum = 0, trickCount = 0;
+        state.players.forEach(p => {
+            const e = hm[p.id];
+            if (!e) return;
+            if (e.bid != null) { bidSum += e.bid; bidCount++; }
+            if (e.tricks != null) { trickSum += e.tricks; trickCount++; }
+        });
+        let out = '';
+        if (hand.special !== 'negative') {
+            const allBid = bidCount === state.players.length && state.players.length > 0;
+            const illegal = allBid && bidSum === hand.cards;
+            out += `<div>bids <span class="${illegal ? 'bad' : ''}">${bidCount ? bidSum : '–'}</span>${illegal ? ' ✕=cards' : ''}</div>`;
+        }
+        let tCls = '';
+        if (trickCount === state.players.length && state.players.length > 0) tCls = (trickSum === hand.cards) ? 'ok' : 'bad';
+        else if (trickSum > hand.cards) tCls = 'bad';
+        out += `<div>tricks <span class="${tCls}">${trickCount ? trickSum : '–'}</span>/${hand.cards}</div>`;
+        return out;
+    }
+
+    function renderScoreboard(totals, anyScore, max) {
+        if (!totals) {
+            totals = {}; max = -Infinity;
+            state.players.forEach(p => { const t = playerTotal(p.id); totals[p.id] = t; if (t > max) max = t; });
+            anyScore = Object.values(state.entries).some(hm => hm && Object.values(hm).some(e => e && (e.bid != null || e.tricks != null)));
+        }
+        let h = '';
+        state.players.forEach(p => {
+            const lead = anyScore && totals[p.id] === max;
+            h += `<div class="sb-chip${lead ? ' leader' : ''}">
+                <div class="nm">${esc(p.name)}</div>
+                <div class="val">${totals[p.id]}</div>
+            </div>`;
+        });
+        document.getElementById('scoreboard').innerHTML = h;
+    }
+
+    function esc(s) {
+        if (s == null) return '';
+        const d = document.createElement('div'); d.textContent = s;
+        return d.innerHTML.replace(/"/g, '&quot;');
+    }
+    </script>
+</body>
+</html>
