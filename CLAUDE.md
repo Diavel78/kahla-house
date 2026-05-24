@@ -925,9 +925,22 @@ only (ESPN finals + MLB Stats API + Supabase). Phased:
     — not verified against the live ESPN leaders shape; if the endpoint
     differs it silently no-ops. Sanity-check on a real NBA game with a
     known star out.**
-  - **Still TODO:** dedicated bullpen ERA (SP blend's 0.4·team_def is a
-    bullpen PROXY today — true reliever-only split needs a roster fetch);
-    prior-season carryover prior (cold-start); home/road splits, pace.
+  - **MLB bullpen (built, UNTESTED vs live split):** the SP blend covers
+    ~60% of innings (the starter); the other ~40% used to lean on the
+    full-staff `team_def` rating as a bullpen proxy. `_mlb_bullpen_era`
+    now pulls the REAL reliever-only season ERA in one MLB Stats API call
+    (`statSplits` + `sitCodes=rp`), lightly regressed toward team_def
+    (`0.75·bp + 0.25·team_def`) to temper a thin/early sample, and feeds
+    the non-starter share. So a leaky pen behind a good rotation (or the
+    reverse) is no longer masked — verified on synthetic data that a 5.20
+    pen correctly drops that team's win prob vs a 3.10 pen. Falls back to
+    the team_def proxy when the split is unavailable. Block carries `bp`;
+    card footer shows "+ bullpen". **Built blind against the live
+    statSplits shape (this session's sandbox network allowlist blocks
+    statsapi.mlb.com) — guarded so a shape mismatch is a silent no-op.
+    Sanity-check on a real MLB game once it's live.**
+  - **Still TODO:** prior-season carryover prior (cold-start); home/road
+    splits, pace.
 - **Phase 4 (built — backtest harness):** `scripts/backtest_power_ratings.py`
   walk-forward replays the model on `game_results` (for each date, ratings
   from ONLY prior games → project → grade vs final). Reports per sport: ML

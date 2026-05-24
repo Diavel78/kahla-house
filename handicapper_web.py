@@ -1922,6 +1922,33 @@ def _starter_runs(pitcher: dict | None, league_pitch: float) -> float | None:
     return reliability * talent + (1.0 - reliability) * league_pitch
 
 
+# Bullpen — the SP blend covers ~60% of innings (the starter); the other
+# ~40% is the bullpen, which the SP-blend approximates with the full-staff
+# `team_def` rating. That's a proxy: a great rotation can mask a leaky pen
+# and vice-versa. MLB Stats API exposes a reliever-only season split in ONE
+# call (statSplits + sitCodes=rp), so we can use the real bullpen ERA for
+# the non-starter share instead of the whole-staff number. Guarded — None
+# on any failure → caller keeps the team_def proxy.
+def _mlb_bullpen_era(team_id, season: int) -> float | None:
+    if not team_id:
+        return None
+    url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats"
+    data = _http_get(url, params={"stats": "statSplits", "sitCodes": "rp",
+                                  "group": "pitching", "season": season,
+                                  "gameType": "R"})
+    if not data:
+        return None
+    try:
+        splits = ((data.get("stats") or [{}])[0].get("splits") or [])
+        for sp in splits:
+            era = _to_float((sp.get("stat") or {}).get("era"))
+            if era is not None:
+                return era
+    except Exception:
+        return None
+    return None
+
+
 # MLB park run factors — environment multiplier on projected scoring
 # (100 = neutral; >100 hitter-friendly, <100 pitcher-friendly). Applied
 # to BOTH teams' expected runs, so it mostly moves the TOTAL (Coors vs
@@ -1985,16 +2012,28 @@ def _power_rating_v2(sb, sport: str, odds: dict | None,
     # opposing starter's (sample-regressed) ERA on the runs scale. Each
     # team's offense is projected against the OPPONENT's starter.
     sp_note = None
+    bp_note = None
     if sport == "MLB" and pitchers:
+        season = datetime.now(timezone.utc).year
         away_sp = _starter_runs(pitchers.get("away"), league_avg)
         home_sp = _starter_runs(pitchers.get("home"), league_avg)
+        # Real reliever ERA for the ~40% non-starter innings, lightly
+        # regressed toward the full-staff rating to temper a thin/early
+        # sample. Falls back to team_def when the split is unavailable.
+        away_bp = _mlb_bullpen_era(pitchers.get("away_team_id"), season)
+        home_bp = _mlb_bullpen_era(pitchers.get("home_team_id"), season)
+        a_pen = (0.75 * away_bp + 0.25 * a_def) if away_bp is not None else a_def
+        h_pen = (0.75 * home_bp + 0.25 * h_def) if home_bp is not None else h_def
         if away_sp is not None:
-            a_def = _SP_INNINGS_SHARE * away_sp + (1 - _SP_INNINGS_SHARE) * a_def
+            a_def = _SP_INNINGS_SHARE * away_sp + (1 - _SP_INNINGS_SHARE) * a_pen
         if home_sp is not None:
-            h_def = _SP_INNINGS_SHARE * home_sp + (1 - _SP_INNINGS_SHARE) * h_def
+            h_def = _SP_INNINGS_SHARE * home_sp + (1 - _SP_INNINGS_SHARE) * h_pen
         if away_sp is not None or home_sp is not None:
             sp_note = {"away_sp_runs": (round(away_sp, 2) if away_sp is not None else None),
                        "home_sp_runs": (round(home_sp, 2) if home_sp is not None else None)}
+        if away_bp is not None or home_bp is not None:
+            bp_note = {"away_bp_era": (round(away_bp, 2) if away_bp is not None else None),
+                       "home_bp_era": (round(home_bp, 2) if home_bp is not None else None)}
 
     exp_home = h_off + (a_def - league_avg) + hfa / 2.0
     exp_away = a_off + (h_def - league_avg) - hfa / 2.0
@@ -2068,6 +2107,8 @@ def _power_rating_v2(sb, sport: str, odds: dict | None,
         "n_games":           snap.get("n_games"),
         "sp_adjusted":       sp_note is not None,
         "sp":                sp_note,
+        "bp_adjusted":       bp_note is not None,
+        "bp":                bp_note,
         "park_factor":       park_factor,
         "rest":              rest_note,
         "injuries":          inj_note,
