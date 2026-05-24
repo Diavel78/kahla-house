@@ -1715,8 +1715,11 @@
         // recommend, so resolver grading is consistent.
         const pmm = ((blk.polymarket || {})[side]) || null;
         const proj = (pmm && pmm.projected) || {};
+        const pmmBid = (pmm && pmm.quote && pmm.quote.bid_american != null) ? pmm.quote.bid_american : null;
         const useProj = proj.fair_american != null;
-        const entryPrice = useProj ? proj.fair_american : pin.fair_american;
+        // Maker entry = the PMM bid (where we rest/fill), falling back to the
+        // projected/PIN fair when there's no live bid. Drives CLV + profit.
+        const entryPrice = (pmmBid != null) ? pmmBid : (useProj ? proj.fair_american : pin.fair_american);
         const entryLine  = (useProj && pmm.line != null) ? pmm.line : pin.line;
         const entryProb  = (useProj && proj.fair_prob != null) ? proj.fair_prob : pin.fair_prob;
         const sideName = mt === 'total' ? side.toUpperCase()
@@ -1733,7 +1736,7 @@
             fair_prob:   entryProb,
             edge_pp:     null,
             sharp_score: isMvSide ? (mv.sharp_score || 0) : 0,
-            label:       `${_shortMarket(mt)} ${sideName} @ ${useProj ? 'PMM-projected' : 'PIN'} fair ${_fmtAmer(entryPrice)}${entryLine != null ? ' ' + _fmtPt(entryLine) : ''}`,
+            label:       `${_shortMarket(mt)} ${sideName} @ ${pmmBid != null ? 'PMM bid' : (useProj ? 'PMM-projected fair' : 'PIN fair')} ${_fmtAmer(entryPrice)}${entryLine != null ? ' ' + _fmtPt(entryLine) : ''}`,
             seed_units:  1,
             seed_conf:   'low',
         };
@@ -1792,7 +1795,11 @@
             market_type: s.market_type,
             side:        s.side,
             book:        'PMM',
-            price:       s.fair_american,
+            // Maker entry: we rest a limit on the PMM bid and fill there, so
+            // log the BID as the entry — that's our real maker price, better
+            // than the fair/ask, and it's what CLV + to-win profit key off.
+            // Falls back to the projected fair when PMM has no live bid.
+            price:       (s.pmm_bid_american != null ? s.pmm_bid_american : s.fair_american),
             // Use PMM line when projection available, else PIN line.
             // Matches the entry_price (s.fair_american), which is
             // already PMM-projected when PMM has a market.
@@ -1824,7 +1831,10 @@
             ? s.side.toUpperCase()
             : (s.side === 'home' ? d.home : d.away);
         const lineFrag = (s.pin_line == null) ? '' : ` ${_fmtPt(s.pin_line)}`;
-        return `${market} · ${sideName}${lineFrag} @ ${_fmtAmer(s.fair_american)} (PMM target)`;
+        // Show the maker entry we actually log (PMM bid), not the fair/ask.
+        const makerEntry = (s.pmm_bid_american != null) ? s.pmm_bid_american : s.fair_american;
+        const entryLbl   = (s.pmm_bid_american != null) ? 'PMM bid' : 'PMM target';
+        return `${market} · ${sideName}${lineFrag} @ ${_fmtAmer(makerEntry)} (${entryLbl})`;
     }
     function _buildReasons(pick, d) {
         // 2-3 plain-English bullets explaining the pick. Grounded in
@@ -1964,12 +1974,15 @@
             : ((awayPin && awayPin.fair_american != null) ? { side: 'away', pin: awayPin } : null);
         if (!choice) return null;
         const sideName = choice.side === 'home' ? d.home : d.away;
+        // Maker entry = the PMM bid when available, else the PIN fair.
+        const pmmSide = ((ml.polymarket || {})[choice.side]) || null;
+        const pmmBid = (pmmSide && pmmSide.quote && pmmSide.quote.bid_american != null) ? pmmSide.quote.bid_american : null;
         return {
             market_id:   d.market_id,
             market_type: 'moneyline',
             side:        choice.side,
             book:        'PMM',
-            price:       choice.pin.fair_american,
+            price:       (pmmBid != null ? pmmBid : choice.pin.fair_american),
             line:        null,
             fair_prob:   choice.pin.fair_prob,
             edge_pp:     null,
