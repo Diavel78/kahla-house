@@ -877,10 +877,21 @@ only (ESPN finals + MLB Stats API + Supabase). Phased:
     `sp_adjusted` + the per-side starter runs; card footer shows "+
     starting pitcher". This fixed the Ginn-vs-Giolito blind spot — the
     model now responds to the matchup instead of fading good pitchers.
-  - **Still TODO:** bullpen + park factor on top of the starter; sanity-
-    check ratings once the season backfill (days=200) has run.
-- **Phase 3:** calibrate hfa/scale + margin→prob/cover from the season's
-  actual results (replace eyeballed `SPORT_PARAMS`); home/road splits, pace.
+- **Phase 3 (partly built):**
+  - **MLB park factor (built):** `_park_factor` / `_MLB_PARK_FACTORS` —
+    venue run environment (Coors 112 … Petco 96 … Mariners 94; 100 =
+    neutral, unknown defaults 100). `_power_rating_v2` scales BOTH teams'
+    expected runs by `pf/100` for MLB after the pitcher blend, so it moves
+    the TOTAL most (≈1.4-run Coors-vs-Petco swing on the same matchup) and
+    lightly amplifies the margin. Block carries `park_factor`; card footer
+    shows "+ park N". Free, static table, no calls.
+  - **Still TODO:** dedicated bullpen ERA (the SP blend's 0.4·team_def is
+    an opponent-adjusted bullpen PROXY today — a true reliever-only split
+    needs a roster-split fetch, deferred); calibrate hfa/scale +
+    margin→prob/cover from actual results (NBA is already well-calibrated
+    at Brier 0.215 so low priority; MLB can't be const-calibrated into
+    signal — it needs the pitcher/park layers we're adding + live CLV);
+    home/road splits, pace.
 - **Phase 4 (built — backtest harness):** `scripts/backtest_power_ratings.py`
   walk-forward replays the model on `game_results` (for each date, ratings
   from ONLY prior games → project → grade vs final). Reports per sport: ML

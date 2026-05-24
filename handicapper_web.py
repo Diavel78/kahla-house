@@ -1759,6 +1759,34 @@ def _starter_runs(pitcher: dict | None, league_pitch: float) -> float | None:
     return reliability * era + (1.0 - reliability) * league_pitch
 
 
+# MLB park run factors — environment multiplier on projected scoring
+# (100 = neutral; >100 hitter-friendly, <100 pitcher-friendly). Applied
+# to BOTH teams' expected runs, so it mostly moves the TOTAL (Coors vs
+# Petco is a huge swing) with a small amplification of the margin.
+# Approximate 3-year run factors from public park-factor data; keyed by
+# the HOME team (the park is theirs). Unknown parks default to 100.
+_MLB_PARK_FACTORS: dict[str, float] = {
+    "rockies": 112, "red sox": 104, "reds": 104, "yankees": 103,
+    "phillies": 102, "orioles": 101, "rangers": 101, "cubs": 101,
+    "diamondbacks": 101, "royals": 101, "angels": 100, "braves": 100,
+    "blue jays": 100, "nationals": 100, "twins": 100, "white sox": 100,
+    "astros": 99, "dodgers": 99, "cardinals": 99, "brewers": 99,
+    "pirates": 98, "mets": 98, "guardians": 98, "marlins": 97,
+    "rays": 97, "tigers": 97, "athletics": 97, "padres": 96,
+    "giants": 95, "mariners": 94,
+}
+
+
+def _park_factor(home: str | None) -> float:
+    if not home:
+        return 100.0
+    hl = home.lower()
+    for key, pf in _MLB_PARK_FACTORS.items():
+        if key in hl:
+            return float(pf)
+    return 100.0
+
+
 def _power_rating_v2(sb, sport: str, odds: dict | None,
                      away: str | None, home: str | None,
                      pitchers: dict | None = None) -> dict | None:
@@ -1805,6 +1833,18 @@ def _power_rating_v2(sb, sport: str, odds: dict | None,
 
     exp_home = h_off + (a_def - league_avg) + hfa / 2.0
     exp_away = a_off + (h_def - league_avg) - hfa / 2.0
+
+    # MLB park factor — scale both sides' expected runs by the venue's
+    # run environment (Coors inflates, Petco suppresses). Moves the total
+    # most; lightly amplifies the margin.
+    park_factor = None
+    if sport == "MLB":
+        pf = _park_factor(home)
+        if pf and pf != 100.0:
+            exp_home *= pf / 100.0
+            exp_away *= pf / 100.0
+        park_factor = pf
+
     margin = exp_home - exp_away
     proj_total = exp_home + exp_away
     try:
@@ -1829,6 +1869,7 @@ def _power_rating_v2(sb, sport: str, odds: dict | None,
         "n_games":           snap.get("n_games"),
         "sp_adjusted":       sp_note is not None,
         "sp":                sp_note,
+        "park_factor":       park_factor,
     }
     return _pr_attach_market_compare(block, odds, p_home, p_away, proj_total)
 

@@ -1383,7 +1383,7 @@
                 ${totFrag}
                 ${edgeFrag}
                 <div class="wx-foot">${p.source === 'v2-adjusted'
-                    ? `opponent-adjusted${p.sp_adjusted ? ' + starting pitcher' : ''}${p.n_games != null ? ` · ${p.n_games} games` : ''}`
+                    ? `opponent-adjusted${p.sp_adjusted ? ' + starting pitcher' : ''}${(p.park_factor != null && p.park_factor !== 100) ? ` + park ${p.park_factor}` : ''}${p.n_games != null ? ` · ${p.n_games} games` : ''}`
                     : 'season-stats fallback (no opponent-adjusted ratings yet)'}${p.feeds_sizing ? ' · feeds sizing' : ' · reference only (not backtest-validated for this sport)'}</div>
             </div>`;
         }
