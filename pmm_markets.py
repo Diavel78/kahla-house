@@ -112,25 +112,40 @@ def _name_match(haystack: str, needle: str) -> bool:
     return n in h or h in n
 
 
+def _team_mention_pos(q_norm: str, team: str) -> int:
+    """Earliest position in the normalized question where this team is
+    identifiable, trying full name → city/region → mascot last-token.
+    Returns -1 if none of the variants appear.
+
+    The city variant is essential: PMM titles many NBA/NFL markets by
+    city ("Spread: Oklahoma City (-3)", "Oklahoma City to win"), where
+    neither the full name "oklahoma city thunder" nor the mascot
+    "thunder" appears — so without it ML/spread markets fail side
+    detection and get silently dropped."""
+    best = -1
+    for cand in (_norm(team), _city_tokens(team), _last_token(team)):
+        if not cand:
+            continue
+        p = q_norm.find(cand)
+        if p >= 0 and (best < 0 or p < best):
+            best = p
+    return best
+
+
 def _side_by_first_mention(question: str, away: str, home: str) -> str | None:
     """Pick home/away based on which team is named FIRST in the question.
-    PMM questions like "Spread: Baltimore Orioles (+4.5)" or "Baltimore
-    Orioles to win" name the YES-side team first. If both teams appear
-    (e.g., "Team A to win vs Team B"), the earlier one is YES.
+    PMM questions like "Spread: Baltimore Orioles (+4.5)" or "Oklahoma
+    City to win" name the YES-side team first. If both teams appear
+    (e.g., "Team A to win vs Team B"), the earlier one is YES. Each team
+    is matched by full name, city/region, OR mascot (see
+    _team_mention_pos) so city-titled markets resolve correctly.
 
     Returns "home", "away", or None if neither team is found."""
     q = _norm(question)
     if not q:
         return None
-    a, h = _norm(away), _norm(home)
-    a_pos = q.find(a) if a else -1
-    h_pos = q.find(h) if h else -1
-    if a_pos < 0 and h_pos < 0:
-        # Last-token fallback (PMM sometimes uses just the nickname)
-        a_last = _last_token(away)
-        h_last = _last_token(home)
-        a_pos = q.find(a_last) if a_last else -1
-        h_pos = q.find(h_last) if h_last else -1
+    a_pos = _team_mention_pos(q, away)
+    h_pos = _team_mention_pos(q, home)
     if a_pos < 0 and h_pos < 0:
         return None
     if h_pos < 0:
