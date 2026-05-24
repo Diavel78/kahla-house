@@ -1383,7 +1383,7 @@
                 ${totFrag}
                 ${edgeFrag}
                 <div class="wx-foot">${p.source === 'v2-adjusted'
-                    ? `opponent-adjusted${p.n_games != null ? ` · ${p.n_games} games` : ''}`
+                    ? `opponent-adjusted${p.sp_adjusted ? ' + starting pitcher' : ''}${p.n_games != null ? ` · ${p.n_games} games` : ''}`
                     : 'season-stats fallback (no opponent-adjusted ratings yet)'}</div>
             </div>`;
         }

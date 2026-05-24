@@ -1702,12 +1702,57 @@ def _pr_find_team(ratings: dict, name: str | None) -> dict | None:
     return None
 
 
+# MLB starting-pitcher blend. The starter pitches ~6 of 9 innings, so he
+# carries ~60% of run prevention on his day; the rest is bullpen (≈ team
+# def). ERA is regressed toward league average by innings pitched so a
+# tiny early-season / just-recalled sample (e.g. a 5-IP 5.40) doesn't
+# dominate — a full-season workload trusts the ERA, a sliver regresses
+# most of the way back to average.
+_SP_INNINGS_SHARE = 0.6
+_SP_IP_REGRESS    = 45.0          # innings at which ERA gets ~half its weight
+_SP_ERA_CLAMP     = (1.5, 8.0)    # sane bounds on a starter's runs/9
+
+
+def _ip_to_float(ip) -> float | None:
+    """MLB innings-pitched are stored ballpark-style: '51.1' = 51 ⅓
+    innings (.1 = 1 out, .2 = 2 outs), NOT 51.1 decimal. Parse correctly."""
+    if ip is None:
+        return None
+    try:
+        s = str(ip)
+        if "." in s:
+            whole, frac = s.split(".", 1)
+            outs = int(frac[0]) if frac and frac[0] in "012" else 0
+            return float(whole or 0) + outs / 3.0
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _starter_runs(pitcher: dict | None, league_pitch: float) -> float | None:
+    """A starter's expected runs-allowed-per-9, ERA regressed toward the
+    league baseline by innings pitched. None when no usable ERA."""
+    if not pitcher:
+        return None
+    era = _to_float(pitcher.get("era"))
+    if era is None:
+        return None
+    era = min(max(era, _SP_ERA_CLAMP[0]), _SP_ERA_CLAMP[1])
+    ip = _ip_to_float(pitcher.get("ip")) or 0.0
+    reliability = ip / (ip + _SP_IP_REGRESS)
+    return reliability * era + (1.0 - reliability) * league_pitch
+
+
 def _power_rating_v2(sb, sport: str, odds: dict | None,
-                     away: str | None, home: str | None) -> dict | None:
+                     away: str | None, home: str | None,
+                     pitchers: dict | None = None) -> dict | None:
     """The real model — projects from the cron-computed opponent-adjusted
     ratings snapshot. Flask reads the precomputed ratings (it can't import
     the kahla-scanner engine) and does the lightweight off/def → margin/
-    total projection inline. None when no snapshot or teams unmatched."""
+    total projection inline. For MLB, the opponent's run-prevention is
+    blended with TONIGHT's starting pitcher (regressed for sample) so a
+    Ginn-vs-Giolito mismatch actually moves the number instead of being
+    invisible. None when no snapshot or teams unmatched."""
     snap = _load_power_snapshot(sb, sport)
     if not snap:
         return None
@@ -1724,6 +1769,24 @@ def _power_rating_v2(sb, sport: str, odds: dict | None,
     a_off, a_def = _to_float(a.get("off")), _to_float(a.get("def"))
     if None in (h_off, h_def, a_off, a_def):
         return None
+
+    # MLB pitcher adjustment — the starter dominates run prevention on his
+    # day, and the season-long team `def` rating is blind to who's actually
+    # on the mound tonight. Blend the opponent's team defense with the
+    # opposing starter's (sample-regressed) ERA on the runs scale. Each
+    # team's offense is projected against the OPPONENT's starter.
+    sp_note = None
+    if sport == "MLB" and pitchers:
+        away_sp = _starter_runs(pitchers.get("away"), league_avg)
+        home_sp = _starter_runs(pitchers.get("home"), league_avg)
+        if away_sp is not None:
+            a_def = _SP_INNINGS_SHARE * away_sp + (1 - _SP_INNINGS_SHARE) * a_def
+        if home_sp is not None:
+            h_def = _SP_INNINGS_SHARE * home_sp + (1 - _SP_INNINGS_SHARE) * h_def
+        if away_sp is not None or home_sp is not None:
+            sp_note = {"away_sp_runs": (round(away_sp, 2) if away_sp is not None else None),
+                       "home_sp_runs": (round(home_sp, 2) if home_sp is not None else None)}
+
     exp_home = h_off + (a_def - league_avg) + hfa / 2.0
     exp_away = a_off + (h_def - league_avg) - hfa / 2.0
     margin = exp_home - exp_away
@@ -1748,18 +1811,21 @@ def _power_rating_v2(sb, sport: str, odds: dict | None,
         "away_net":          _to_float(a.get("net")),
         "source":            "v2-adjusted",
         "n_games":           snap.get("n_games"),
+        "sp_adjusted":       sp_note is not None,
+        "sp":                sp_note,
     }
     return _pr_attach_market_compare(block, odds, p_home, p_away, proj_total)
 
 
 def _power_rating(sb, sport: str, team_compare: dict | None,
                   odds: dict | None, away: str | None = None,
-                  home: str | None = None) -> dict | None:
+                  home: str | None = None,
+                  pitchers: dict | None = None) -> dict | None:
     """Prefer the real opponent-adjusted ratings (cron-computed snapshot);
     fall back to the v1 raw-season-stat projection when no snapshot exists
     for the sport yet, or the teams aren't in it. Silent — never raises."""
     try:
-        v2 = _power_rating_v2(sb, sport, odds, away, home)
+        v2 = _power_rating_v2(sb, sport, odds, away, home, pitchers)
     except Exception:
         v2 = None
     if v2:
@@ -2358,7 +2424,8 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     # Independent power rating — prefers the cron-computed opponent-
     # adjusted ratings snapshot (Supabase), falls back to the v1 raw-stat
     # projection. Plus outdoor-venue weather (free Open-Meteo). Silent-fail.
-    power_rating = _power_rating(sb, sport, team_compare, odds, away, home)
+    power_rating = _power_rating(sb, sport, team_compare, odds, away, home,
+                                 (mlb_extra or {}).get("probable_pitchers"))
     weather = _fetch_weather(sport, home, event_start) if (home and event_start) else None
 
     suggestions = _suggest_picks(odds, splits, power_rating)

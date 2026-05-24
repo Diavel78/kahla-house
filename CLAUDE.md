@@ -865,10 +865,20 @@ only (ESPN finals + MLB Stats API + Supabase). Phased:
     schedule (11:00 UTC) runs `ingest_results` + `compute_power_ratings`;
     `workflow_dispatch` with a `days` input backfills a season (set ~200).
     Separate from `scanner-poll.yml` so it doesn't touch the 1-min hot path.
-  - **Still TODO:** run the backfill (Actions → Power Ratings → Run
-    workflow, days=200) + sanity-check the real ratings via the dossier
-    card BEFORE trusting them; then MLB pitcher-aware scoring (blend the
-    probable starter + bullpen + park factor into the run projection).
+  - **MLB pitcher-aware (built):** `_power_rating_v2` blends the
+    opponent's team `def` rating with TONIGHT's starting pitcher on the
+    runs scale — `def_eff = 0.6·starter_runs + 0.4·team_def` (starter ≈ 6
+    of 9 innings). `_starter_runs` regresses the starter's ERA toward
+    league average by innings pitched (`_SP_IP_REGRESS = 45`) so a tiny
+    early-season/just-recalled sample doesn't dominate (e.g. a 5-IP 5.40
+    barely moves; a 51-IP 2.98 counts). `_ip_to_float` parses MLB's
+    ballpark IP notation ('51.1' = 51⅓). Pitchers come from the dossier's
+    existing `probable_pitchers` (no new fetch). Block carries
+    `sp_adjusted` + the per-side starter runs; card footer shows "+
+    starting pitcher". This fixed the Ginn-vs-Giolito blind spot — the
+    model now responds to the matchup instead of fading good pitchers.
+  - **Still TODO:** bullpen + park factor on top of the starter; sanity-
+    check ratings once the season backfill (days=200) has run.
 - **Phase 3:** calibrate hfa/scale + margin→prob/cover from the season's
   actual results (replace eyeballed `SPORT_PARAMS`); home/road splits, pace.
 - **Phase 4:** backtest the model vs ESPN finals AND closing lines; widen
