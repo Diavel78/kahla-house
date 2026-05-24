@@ -1718,6 +1718,57 @@ def _pr_find_team(ratings: dict, name: str | None) -> dict | None:
     return None
 
 
+def _pr_find_key(ratings: dict, name: str | None) -> str | None:
+    """The canonical game_results team name for a dossier team — so the
+    rest/schedule query matches exactly. Same substring logic as
+    _pr_find_team but returns the key."""
+    if not name:
+        return None
+    if name in ratings:
+        return name
+    nl = name.lower()
+    for k in ratings:
+        kl = (k or "").lower()
+        if kl and (nl in kl or kl in nl):
+            return k
+    return None
+
+
+# Rest / schedule fatigue. Only sports where the second night of a
+# back-to-back is a real, measurable drag (daily-grind MLB doesn't apply —
+# "days rest" isn't a fatigue signal when everyone plays every day; its
+# fatigue lives in the bullpen instead). Margin penalty in the sport's
+# scoring units, applied to a team caught on a B2B vs a rested opponent.
+_REST_PARAMS = {
+    "NBA": {"b2b_margin": 2.0},    # second night ≈ -2 pts
+    "NHL": {"b2b_margin": 0.30},   # tired legs/goalie ≈ -0.3 goals
+}
+
+
+def _rest_days(sb, team_key: str | None, event_start_iso: str | None) -> int | None:
+    """Calendar days since the team's last completed game before this one,
+    from game_results. None when unknown. Silent — never raises."""
+    if not (team_key and event_start_iso):
+        return None
+    try:
+        rows = (sb.table("game_results")
+                .select("event_start")
+                .or_(f"home.eq.{team_key},away.eq.{team_key}")
+                .lt("event_start", event_start_iso)
+                .order("event_start", desc=True)
+                .limit(1).execute().data) or []
+    except Exception:
+        return None
+    if not rows:
+        return None
+    try:
+        g = datetime.fromisoformat(event_start_iso.replace("Z", "+00:00"))
+        l = datetime.fromisoformat(str(rows[0]["event_start"]).replace("Z", "+00:00"))
+        return (g.date() - l.date()).days
+    except Exception:
+        return None
+
+
 # MLB starting-pitcher blend. The starter pitches ~6 of 9 innings, so he
 # carries ~60% of run prevention on his day; the rest is bullpen (≈ team
 # def). ERA is regressed toward league average by innings pitched so a
@@ -1815,7 +1866,8 @@ def _park_factor(home: str | None) -> float:
 
 def _power_rating_v2(sb, sport: str, odds: dict | None,
                      away: str | None, home: str | None,
-                     pitchers: dict | None = None) -> dict | None:
+                     pitchers: dict | None = None,
+                     event_start: str | None = None) -> dict | None:
     """The real model — projects from the cron-computed opponent-adjusted
     ratings snapshot. Flask reads the precomputed ratings (it can't import
     the kahla-scanner engine) and does the lightweight off/def → margin/
@@ -1873,6 +1925,27 @@ def _power_rating_v2(sb, sport: str, odds: dict | None,
 
     margin = exp_home - exp_away
     proj_total = exp_home + exp_away
+
+    # Rest / schedule — penalize a team caught on the second night of a
+    # back-to-back vs a rested opponent (NBA/NHL). Margin-only; total left
+    # alone. Two cheap game_results lookups, gated to those sports.
+    rest_note = None
+    rp = _REST_PARAMS.get(sport)
+    if rp and event_start:
+        hk = _pr_find_key(ratings, home)
+        ak = _pr_find_key(ratings, away)
+        hr = _rest_days(sb, hk, event_start)
+        ar = _rest_days(sb, ak, event_start)
+        if hr is not None and ar is not None:
+            h_b2b, a_b2b = hr <= 1, ar <= 1
+            pen = rp["b2b_margin"]
+            if h_b2b and not a_b2b:
+                margin -= pen
+            elif a_b2b and not h_b2b:
+                margin += pen
+            rest_note = {"home_rest": hr, "away_rest": ar,
+                         "home_b2b": h_b2b, "away_b2b": a_b2b}
+
     try:
         p_home = 1.0 / (1.0 + math.exp(-margin / scale)) if scale > 0 else (
             1.0 if margin > 0 else 0.0)
@@ -1896,6 +1969,7 @@ def _power_rating_v2(sb, sport: str, odds: dict | None,
         "sp_adjusted":       sp_note is not None,
         "sp":                sp_note,
         "park_factor":       park_factor,
+        "rest":              rest_note,
     }
     return _pr_attach_market_compare(block, odds, p_home, p_away, proj_total)
 
@@ -1903,12 +1977,13 @@ def _power_rating_v2(sb, sport: str, odds: dict | None,
 def _power_rating(sb, sport: str, team_compare: dict | None,
                   odds: dict | None, away: str | None = None,
                   home: str | None = None,
-                  pitchers: dict | None = None) -> dict | None:
+                  pitchers: dict | None = None,
+                  event_start: str | None = None) -> dict | None:
     """Prefer the real opponent-adjusted ratings (cron-computed snapshot);
     fall back to the v1 raw-season-stat projection when no snapshot exists
     for the sport yet, or the teams aren't in it. Silent — never raises."""
     try:
-        v2 = _power_rating_v2(sb, sport, odds, away, home, pitchers)
+        v2 = _power_rating_v2(sb, sport, odds, away, home, pitchers, event_start)
     except Exception:
         v2 = None
     block = v2 or _power_rating_v1(sport, team_compare, odds)
@@ -2513,7 +2588,8 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     # adjusted ratings snapshot (Supabase), falls back to the v1 raw-stat
     # projection. Plus outdoor-venue weather (free Open-Meteo). Silent-fail.
     power_rating = _power_rating(sb, sport, team_compare, odds, away, home,
-                                 (mlb_extra or {}).get("probable_pitchers"))
+                                 (mlb_extra or {}).get("probable_pitchers"),
+                                 event_start)
     weather = _fetch_weather(sport, home, event_start) if (home and event_start) else None
 
     suggestions = _suggest_picks(odds, splits, power_rating)

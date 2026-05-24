@@ -1382,8 +1382,9 @@
                 ${marginAbs != null ? `<div class="pr-line">Projected: <b>${_esc(marginTeam)}</b> by ${marginAbs}</div>` : ''}
                 ${totFrag}
                 ${edgeFrag}
+                ${(p.rest && (p.rest.home_b2b || p.rest.away_b2b)) ? `<div class="pr-line">Rest: <b>${p.rest.away_b2b ? _esc(d.away) + ' on B2B' : _esc(d.away) + ' ' + p.rest.away_rest + 'd'}</b> · <b>${p.rest.home_b2b ? _esc(d.home) + ' on B2B' : _esc(d.home) + ' ' + p.rest.home_rest + 'd'}</b></div>` : ''}
                 <div class="wx-foot">${p.source === 'v2-adjusted'
-                    ? `opponent-adjusted${p.sp_adjusted ? ' + starting pitcher' : ''}${(p.park_factor != null && p.park_factor !== 100) ? ` + park ${p.park_factor}` : ''}${p.n_games != null ? ` · ${p.n_games} games` : ''}`
+                    ? `opponent-adjusted${p.sp_adjusted ? ' + starting pitcher' : ''}${(p.park_factor != null && p.park_factor !== 100) ? ` + park ${p.park_factor}` : ''}${(p.rest && (p.rest.home_b2b || p.rest.away_b2b)) ? ' + rest' : ''}${p.n_games != null ? ` · ${p.n_games} games` : ''}`
                     : 'season-stats fallback (no opponent-adjusted ratings yet)'}${p.feeds_sizing ? ' · feeds sizing' : ' · reference only (not backtest-validated for this sport)'}</div>
             </div>`;
         }

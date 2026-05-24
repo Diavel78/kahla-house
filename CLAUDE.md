@@ -900,9 +900,22 @@ only (ESPN finals + MLB Stats API + Supabase). Phased:
     next compute. Replaces the eyeballed `SPORT_PARAMS` guesses (those are
     now just fallbacks). Verified on synthetic data: recovered true HFA +
     a lower-Brier scale than the eyeballed default.
-  - **Still TODO:** dedicated bullpen ERA (the SP blend's 0.4·team_def is
-    an opponent-adjusted bullpen PROXY today — a true reliever-only split
-    needs a roster-split fetch, deferred); home/road splits, pace.
+  - **Rest / schedule (built):** `_REST_PARAMS` (`NBA` -2.0 pts, `NHL`
+    -0.30 goals). `_power_rating_v2` looks up each team's last completed
+    game in `game_results` (`_rest_days` via `_pr_find_key` for an exact
+    name match) and, when one team is on the second night of a B2B vs a
+    rested opponent, applies a margin penalty (margin-only; total left
+    alone). MLB intentionally excluded — daily play means "days rest" isn't
+    a fatigue signal (its fatigue is bullpen, not legs). Block carries
+    `rest`; card shows a B2B line + "+ rest" footer. Two cheap
+    game_results lookups, gated to NBA/NHL. Needs `event_start` threaded
+    through `_power_rating`.
+  - **Still TODO:** injuries/inactives → rating (we FETCH ESPN injuries
+    but only display them; folding a star-out into the team rating needs
+    per-player value — the biggest free lever left, esp. NBA); dedicated
+    bullpen ERA (SP blend's 0.4·team_def is a bullpen PROXY today — true
+    reliever-only split needs a roster fetch); prior-season carryover
+    prior (cold-start); home/road splits, pace.
 - **Phase 4 (built — backtest harness):** `scripts/backtest_power_ratings.py`
   walk-forward replays the model on `game_results` (for each date, ratings
   from ONLY prior games → project → grade vs final). Reports per sport: ML
