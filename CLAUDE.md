@@ -184,7 +184,7 @@ A view-only banner appears under the page header instead of the lede. Server-sid
 - `templates/odds.html` — Odds board (~2230 lines, includes splits row + sparklines)
 - `templates/dashboard.html` — P&L dashboard (~1130 lines)
 - `templates/handicapper.html` — Pick Bot page: search bar + dossier renderer + log-pick modal + history (admin + bot_access)
-- `handicapper_web.py` — Flask-portable port of the dossier builder. Self-contained: math helpers + recency-weighted sharp-side/score + match resolution + free public data fetches (Supabase, ESPN, Action Network, MLB Stats API). Backs `/api/handicapper/dossier`. **Keep in sync with `kahla-scanner/scripts/handicapper.py`** — rules logic must agree. The weighted-score helpers (`_weighted_sharp_for_ml/spread/total`, `_recency_weight`, `_pin_history`) are mirrored verbatim between the two files.
+- `handicapper_web.py` — Flask-portable port of the dossier builder. Self-contained: math helpers + recency-weighted sharp-side/score + match resolution + free public data fetches (Supabase, ESPN, Action Network, MLB Stats API). Backs `/api/handicapper/dossier`. **Keep in sync with `kahla-scanner/scripts/handicapper.py`** — rules logic must agree. The weighted-score helpers (`_weighted_sharp_for_ml/spread/total`, `_recency_weight`, `_pin_history`) are mirrored verbatim between the two files. **Also hosts the entire power-model projection** (`_power_rating` / `_power_rating_v2` + the per-game layers: `_starter_runs`/`_fip`, `_mlb_bullpen_era`, `_park_factor`, `_mlb_lineup_dock`, `_nhl_goalies`, `_injury_penalties`/`_espn_leaders`, `_rest_days`, `_kelly_units`) and the suggestion logic (`_suggest_picks`) — these are web-only (the CLI dossier has no suggestion/projection logic, so they don't violate the mirror rule).
 - `templates/index.html` — Landing page with auth + admin + role-based app cards
 - `.claude/skills/handicap.md` — **Pick Bot skill**: routing + analyst workflow + betting strategy doc. Auto-applies on betting-flavored questions about a specific game. Read this for the PIN-anchor / line-movement / splits-divergence / sizing rules.
 - `.claude/hooks/session-start.sh` — **Claude Code Web SessionStart hook**. Installs kahla-scanner Python deps in the sandbox and plumbs `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` / `ODDS_API_KEY` (each set as Claude Code secrets) through `$CLAUDE_ENV_FILE` so the in-chat `/handicap` flow can run the dossier CLI directly. Local sessions short-circuit (`CLAUDE_CODE_REMOTE != true`). Skips Flask deps — `firebase-admin` pulls a PyJWT version that fights with the sandbox system Python, and Flask runs on Vercel anyway.
@@ -194,6 +194,15 @@ A view-only banner appears under the page header instead of the lede. Server-sid
 - `kahla-scanner/scripts/handicapper_log_pick.py` — Pick Bot pick logger (writes to `bot_picks`)
 - `kahla-scanner/scripts/bot_picks_resolver.py` — Pick Bot resolver. Runs every cron-job.org tick (1 min as of May 2026; was 30 min) as the last step of `scanner-poll.yml`. Idempotent — already-graded rows are skipped, so 1-min cadence just means faster pickup of newly-completed games. Grades pending `bot_picks` whose `event_start` has passed via ESPN final scores. UFC ML graded via ESPN MMA endpoint (`mma/ufc`). UFC SPR/TOT method-of-victory bets stay pending — user settles them via the page. Writes a heartbeat row to `resolver_runs` on every run (success or crash) so the `/handicapper` header can show "graded Nm ago" or red CRASHED with full traceback. PnL is to-WIN sizing — kept in sync with `app.py`'s manual-settle endpoint. Also computes **Closing Line Value** (`clv_pp`) per pick at grade time via `_compute_clv` (PIN's pre-`event_start` closing pair from `book_snapshots`, devigged, vs the entry price) — written once, never recomputed.
 - `kahla-scanner/scripts/handicapper_backtest.py` — Pick Bot backtest replay (rule-based, signals-only)
+- **Power-ratings pipeline (the real OUR-NUMBER engine — see "Power-ratings pipeline" section):**
+  - `kahla-scanner/_lib/power_ratings.py` — the engine: iterative opponent-adjusted off/def/net (SRS variant), recency half-life decay, `project()` + `margin_to_prob()` + `calibrate()` (fits HFA + logistic scale from results). Pure Python. Runs in the cron only (Flask can't import the kahla-scanner subproject).
+  - `kahla-scanner/scripts/ingest_results.py` — pulls ESPN finals into `game_results` (`--days N` backfills). Idempotent upsert.
+  - `kahla-scanner/scripts/compute_power_ratings.py` — reads the finals window per sport, runs the engine + calibration, writes one `power_ratings` snapshot row per sport.
+  - `kahla-scanner/scripts/backtest_power_ratings.py` — walk-forward backtest harness (per-sport accuracy/Brier/calibration). Validates the TEAM core only (not the MLB pitcher layer, not live CLV).
+  - `kahla-scanner/supabase/power_ratings.sql` — DDL for `game_results` + `power_ratings`. **Run manually in Supabase SQL editor before the pipeline works** (else Flask silently uses the v1 season-stat fallback).
+  - `.github/workflows/power-ratings.yml` — daily 11:00 UTC: `ingest_results` + `compute_power_ratings`; `workflow_dispatch` with `days` input backfills a season. Separate from `scanner-poll.yml`.
+  - `.github/workflows/power-ratings-backtest.yml` — manual `workflow_dispatch`; prints walk-forward metrics to the run log.
+  - The Flask-side projection lives in `handicapper_web.py:_power_rating_v2` (reads the latest `power_ratings` snapshot, runs the lightweight off/def→margin projection + all the per-game layers: pitcher, bullpen, park, lineup, goalie, injuries, rest). `_power_rating_v1` is the raw-season-stat fallback.
 - `kahla-scanner/supabase/bot_picks.sql` — `bot_picks` table DDL (run manually in Supabase SQL editor)
 - `kahla-scanner/supabase/odds_ingest_runs.sql` — heartbeat table for the adaptive-cadence ingest gate. Run manually in Supabase SQL editor. One row per cron tick per sport, records fire/skip decisions for observability.
 - `kahla-scanner/scrapers/odds_api.py` — The Odds API ingester (cron entry point)
@@ -828,7 +837,66 @@ The v1 power rating (`handicapper_web.py:_power_rating`, raw season
 averages) is being replaced by a proper **opponent-adjusted, recency-
 weighted** engine so the bot's independent number actually has an opinion
 the market doesn't, instead of being a noisy season-average. Free data
-only (ESPN finals + MLB Stats API + Supabase). Phased:
+only (ESPN finals + MLB Stats API + Supabase). Phased.
+
+#### Model at a glance (what feeds the OUR NUMBER card)
+
+The opponent-adjusted ratings (`power_ratings` snapshot) are the base; on
+top of them each layer below adjusts the per-team projected scoring before
+margin/total/win-prob are derived. All layers are silent-fail (a missing
+fetch / shape mismatch → no adjustment, never a broken dossier). The card
+footer lists which layers fired (`opponent-adjusted + starting pitcher +
+bullpen + … · N games`). The whole block is a capped (`MODEL_EDGE_CAP_PP =
+1.5pp`) confirmation nudge to Kelly sizing — and ONLY when the sport is in
+`MODEL_SIZING_SPORTS` (else "reference only").
+
+| Layer | Sport(s) | Effect | Feeds sizing? | Live-tested? |
+|---|---|---|---|---|
+| Opponent-adjusted off/def (SRS) | all | base margin/total | per gate below | NBA ✓ (backtest) |
+| Recency half-life weighting | all | recent games weigh more | — | ✓ synthetic |
+| Fitted HFA + logistic scale | all | calibrated per sport from results | — | ✓ synthetic |
+| Starting pitcher (FIP/ERA blend) | MLB | ~60% of run prevention | yes (MLB) | live ✓ (footer) |
+| Bullpen reliever-ERA split | MLB | ~40% non-starter innings | yes (MLB) | live ✓ (footer) |
+| Park factor | MLB | venue run environment | yes (MLB) | ✓ static table |
+| Lineup (resting regulars) | MLB | dock runs for top-OPS bats out | yes (MLB) | ⚠ untested vs live |
+| Goalie GAA (50/50 w/ team def) | NHL | backup in net → opp scores more | **NO** (NHL off) | ⚠ untested vs live |
+| Injuries — offense dock + opp bump | NBA | star out; lost D raises opponent | yes (NBA) | ⚠ untested vs live |
+| QB-out fixed dock (passing leader) | NFL/NCAAF | starter QB out → −6.5 | yes (when on) | ⚠ untested (off-season) |
+| Rest / B2B penalty | NBA/NHL | 2nd-of-B2B vs rested foe | margin only | ✓ synthetic |
+
+`MODEL_SIZING_SPORTS = {"NBA", "MLB"}` (NBA backtest-proven; MLB included
+because the backtest can't see the pitcher layer that the live model HAS —
+judged via live CLV). NHL/NFL/NCAAF/CBB are **reference-only** until their
+live models prove out on CLV. Whale (10u) tier still disabled.
+
+#### Activation checklist (manual steps for the pipeline to go live)
+
+The code is deployed (Flask reads whatever snapshot exists; no snapshot →
+silent v1 fallback). To actually populate ratings + CLV:
+
+1. **Run two Supabase migrations** in the SQL editor (idempotent):
+   - `kahla-scanner/supabase/power_ratings.sql` → creates `game_results`
+     + `power_ratings` tables. **Until this runs, every game uses the v1
+     season-stat fallback** (card footer: "season-stats fallback").
+   - `kahla-scanner/supabase/bot_picks_migrations/007_clv.sql` → adds
+     `clv_pp`. **Until this runs, CLV stays NULL** on every pick/stat.
+2. **Backfill a season + first compute:** trigger
+   `.github/workflows/power-ratings.yml` via `workflow_dispatch` with the
+   `days` input set to ~200. That runs `ingest_results --days 200` then
+   `compute_power_ratings` (which also calibrates HFA/scale). After it
+   finishes, dossiers show "opponent-adjusted · N games".
+3. **Confirm the daily cron** — `power-ratings.yml` is scheduled 11:00 UTC
+   (ingest yesterday's finals + recompute). Separate workflow from the
+   1-min `scanner-poll.yml` hot path on purpose.
+4. **(optional) Validate:** trigger
+   `.github/workflows/power-ratings-backtest.yml` (`workflow_dispatch`) —
+   walk-forward metrics print to the run log (per-sport accuracy vs
+   baseline, Brier, calibration table). Use it to decide which sports earn
+   `MODEL_SIZING_SPORTS`.
+5. **Live CLV review (~2 weeks):** every web-logged pick stores
+   `signal_blob.model.agree`; bucket settled `bot_picks` by it and compare
+   `clv_pp` / win-rate. Model-agree beating model-disagree (and the close)
+   earns a sport a wider `MODEL_EDGE_CAP_PP`.
 
 - **Phase 1 (built):** the foundation.
   - `kahla-scanner/_lib/power_ratings.py` — the engine. Iterative adjusted
