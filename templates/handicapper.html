@@ -1579,8 +1579,13 @@
         // above (always visible), so this chip is just the "how much
         // does it count" annotation: which side and the weighted score.
         let move = '';
-        if (mv) {
+        if (mv && mv.sharp_score != null) {
             move = `<div class="move"><span class="sharp">SHARP ${(mv.sharp_side || '').toUpperCase()} = ${mv.sharp_score}</span> <span class="move-note">recency-weighted</span></div>`;
+        } else if (sides.some(s => pin[s])) {
+            // PIN data exists but no recency-weighted sharp move cleared the
+            // floor — say so explicitly (same blue as the score) so a quiet
+            // market reads as "computed, no action" not "broken/missing".
+            move = `<div class="move"><span class="sharp">No Sharp Action</span></div>`;
         }
 
         // Opener-age footer — shows WHEN PIN opened so an old move that
