@@ -109,7 +109,7 @@ body::after {
 
 /* APP CARDS */
 .apps-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 40px; }
-.app-card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 32px 24px; text-decoration: none; color: var(--text); transition: all 0.3s ease; position: relative; overflow: hidden; opacity: 0; animation: fadeUp 0.6s ease forwards; }
+.app-card { display: block; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 18px 24px; text-decoration: none; color: var(--text); transition: all 0.3s ease; position: relative; overflow: hidden; cursor: pointer; opacity: 0; animation: fadeUp 0.6s ease forwards; }
 .app-card:nth-child(1) { animation-delay: 0.3s; }
 .app-card:nth-child(2) { animation-delay: 0.4s; }
 .app-card:nth-child(3) { animation-delay: 0.5s; }
@@ -126,15 +126,12 @@ body::after {
 .app-card.dashboard-app .app-tag { background: var(--blue-dim); color: var(--blue); }
 .dashboard-app:hover .arrow { color: var(--blue); }
 .admin-badge { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 9px; padding: 3px 8px; border-radius: 5px; background: var(--red-dim); color: #f87171; margin-left: 8px; letter-spacing: 0.05em; vertical-align: middle; }
-.app-icon { font-size: 2em; margin-bottom: 18px; display: block; }
-.app-card h2 { font-size: 1.1em; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.01em; }
-.app-card p { color: var(--text-muted); font-size: 0.84em; line-height: 1.55; margin-bottom: 18px; }
+.app-icon { font-size: 1.5em; margin-bottom: 8px; display: block; }
+.app-card h2 { font-size: 1.1em; font-weight: 700; margin-bottom: 6px; letter-spacing: -0.01em; }
+.app-card p { color: var(--text-muted); font-size: 0.84em; line-height: 1.45; margin-bottom: 10px; }
 .app-tag { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 0.65em; padding: 4px 10px; border-radius: 6px; letter-spacing: 0.03em; }
-.arrow { position: absolute; bottom: 24px; right: 24px; color: var(--text-muted); font-size: 1.2em; transition: all 0.3s ease; opacity: 0.4; }
+.arrow { position: absolute; bottom: 16px; right: 20px; color: var(--text-muted); font-size: 1.2em; transition: all 0.3s ease; opacity: 0.4; }
 .app-card:hover .arrow { opacity: 1; transform: translateX(4px); }
-.app-sub-links { display: flex; gap: 8px; margin-top: 12px; }
-.app-sub-link { font-size: 12px; font-weight: 600; color: var(--blue); text-decoration: none; padding: 4px 10px; background: var(--blue-dim); border-radius: 6px; transition: .15s; }
-.app-sub-link:hover { background: rgba(74,124,255,0.2); }
 
 /* ADMIN PANEL */
 .admin-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--rl); overflow: hidden; opacity: 0; animation: fadeUp 0.6s ease 0.6s forwards; }
@@ -352,16 +349,13 @@ function renderAppCards() {
     const canSeePickBot = isViewer;
     let h = '';
     if (isViewer) {
-        h += `<div class="app-card odds-app" style="cursor:default">
+        h += `<a href="/odds" class="app-card odds-app">
             <span class="app-icon">&#127922;</span>
             <h2>Odds Board</h2>
             <p>Multi-sportsbook odds comparison, Circa splits, sharp indicators, line movement, and player props across all books.</p>
             <span class="app-tag">Sports Betting</span>
-            <div class="app-sub-links">
-                <a href="/odds" class="app-sub-link">Odds Board</a>
-            </div>
             <span class="arrow">&rarr;</span>
-        </div>`;
+        </a>`;
     }
     if (canSeePickBot) {
         // Subtle tag differentiates: admins/bot_access see "BOT",
@@ -374,28 +368,22 @@ function renderAppCards() {
         const blurb = hasBot
             ? 'In-chat handicapper. Ask about a game on Claude — get a full pre-game analysis (PIN sharp signals, line movement, public splits, injuries, lineups) and a 1/3/5u recommendation. ML, spread, or total only.'
             : "See what the bot picks on every game — sharp signal, fair line, splits, injuries. Read-only: no betting from this account.";
-        h += `<div class="app-card pickbot-app" style="cursor:default">
+        h += `<a href="/handicapper" class="app-card pickbot-app">
             <span class="app-icon">&#127919;</span>
             <h2>Pick Bot${tag}</h2>
             <p>${blurb}</p>
             <span class="app-tag">Handicapping</span>
-            <div class="app-sub-links">
-                <a href="/handicapper" class="app-sub-link">Open Pick Bot</a>
-            </div>
             <span class="arrow">&rarr;</span>
-        </div>`;
+        </a>`;
     }
     if (isAdmin) {
-        h += `<div class="app-card dashboard-app" style="cursor:default">
+        h += `<a href="/dashboard" class="app-card dashboard-app">
             <span class="app-icon">&#128202;</span>
             <h2>Dashboard<span class="admin-badge">ADMIN</span></h2>
             <p>Polymarket position tracking with P&amp;L, open and closed trades, maker rewards, and shareable bet slips.</p>
             <span class="app-tag">P&amp;L Tracking</span>
-            <div class="app-sub-links">
-                <a href="/dashboard" class="app-sub-link">Open Dashboard</a>
-            </div>
             <span class="arrow">&rarr;</span>
-        </div>`;
+        </a>`;
     }
     if (!h) {
         h = '<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text-muted)"><h3 style="color:var(--text-secondary);margin-bottom:8px">No Apps Assigned</h3><p>An administrator needs to grant you access.</p></div>';
