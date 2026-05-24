@@ -178,6 +178,14 @@ def handicapper_page():
     return render_template("handicapper.html")
 
 
+@app.route("/games")
+def games_page():
+    """Card-game scoring sheets — any approved user (client-side gated via /api/me)."""
+    resp = make_response(render_template("games.html"))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
 # ---------------------------------------------------------------------------
 # Polymarket SDK client
 # ---------------------------------------------------------------------------
