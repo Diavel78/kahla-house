@@ -148,6 +148,17 @@ def _last_token(team_name: str) -> str:
     return parts[-1] if parts else ""
 
 
+def _city_tokens(team_name: str) -> str:
+    """Everything BEFORE the trailing mascot — the city/region part.
+    'Oklahoma City Thunder' → 'oklahoma city'; 'Spurs' → ''. PMM
+    occasionally titles NBA/NFL events by city ("Oklahoma City vs
+    San Antonio") where the mascot last-token isn't present, so a
+    both-cities-present pass catches those."""
+    parts = [p for p in _norm(team_name).split() if len(p) >= 3]
+    return " ".join(parts[:-1]) if len(parts) >= 2 else ""
+
+
+
 def _match_event_to_game(events: list, away: str, home: str) -> Any | None:
     """Walk a list of PMM events looking for one referring to the
     away vs home game. Tries progressively looser matches:
@@ -167,6 +178,16 @@ def _match_event_to_game(events: list, away: str, home: str) -> Any | None:
         if away_last and home_last:
             t_norm = _norm(title)
             if away_last in t_norm and home_last in t_norm:
+                return ev
+    # Pass 2.5: city/region tokens both present ("Oklahoma City vs
+    # San Antonio") — for events PMM titles by city instead of mascot.
+    away_city = _city_tokens(away)
+    home_city = _city_tokens(home)
+    if away_city and home_city:
+        for ev in events:
+            title = ev.get("title") if isinstance(ev, dict) else getattr(ev, "title", "")
+            t_norm = _norm(title)
+            if away_city in t_norm and home_city in t_norm:
                 return ev
     for ev in events:
         markets = ev.get("markets") if isinstance(ev, dict) else getattr(ev, "markets", [])
@@ -238,9 +259,18 @@ def _search_event(client, sport: str, away: str, home: str,
          "startTimeMin": win_min, "startTimeMax": win_max, "limit": 100},
         {"tagSlug": tag, "closed": False, "limit": 200},   # no time filter as fallback
     ]
+    # Try EACH param shape, accumulating a deduped union of events, and
+    # attempt a team match after each. Stop as soon as we match — but do
+    # NOT stop just because a shape returned a non-empty (possibly wrong)
+    # result. The old code broke on the first non-empty response, so when
+    # the tight time-windowed query returned a single unrelated NBA event
+    # it never reached the broad `limit:200` fallback that actually
+    # contained the game. (NBA playoff games were the recurring victim.)
     events: list = []
+    seen_slugs: set = set()
     last_error = None
     used_attempt = None
+    matched = None
     for i, params in enumerate(attempts):
         try:
             resp = client.events.list(params)
@@ -249,19 +279,27 @@ def _search_event(client, sport: str, away: str, home: str,
             continue
         evs = resp.get("events") if isinstance(resp, dict) else getattr(resp, "events", None)
         evs = evs or []
-        if evs:
-            events = evs
+        for ev in evs:
+            slug = ev.get("slug") if isinstance(ev, dict) else getattr(ev, "slug", None)
+            if slug and slug in seen_slugs:
+                continue
+            if slug:
+                seen_slugs.add(slug)
+            events.append(ev)
+        m = _match_event_to_game(events, away, home)
+        if m is not None:
+            matched = m
             used_attempt = i
             break
-        if used_attempt is None and evs is not None:
-            used_attempt = i  # record that the call succeeded even if empty
     if not events and last_error and diag is not None:
         diag["error"] = last_error
 
     if diag is not None:
         diag["events_returned"] = len(events)
-
-    matched = _match_event_to_game(events, away, home)
+        diag["sample_event_titles"] = [
+            ((e.get("title") if isinstance(e, dict) else getattr(e, "title", "")) or "")
+            for e in events[:8]
+        ]
     # Events.list returns event metadata but NOT the nested markets
     # list (despite Event's TypedDict declaring markets). Hit the
     # markets.list endpoint directly with eventSlug filter — that one

@@ -1315,7 +1315,9 @@
                     let dbg = '';
                     if (pm.error) {
                         const evtCount = dg.events_returned != null ? ` (searched ${dg.events_returned})` : '';
-                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:2px">PMM: ${_esc(String(pm.error).slice(0, 120))}${evtCount}</div>`;
+                        const titles = (dg.sample_event_titles || []).filter(Boolean).slice(0, 3).join(' · ');
+                        const sawFrag = titles ? `<div style="color:var(--text-muted);font-size:10px">saw: ${_esc(titles)}</div>` : '';
+                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:2px">PMM: ${_esc(String(pm.error).slice(0, 120))}${evtCount}</div>${sawFrag}`;
                     }
                     metaLine = `Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow} <span style="color:var(--text-muted);font-size:10px">(no PMM match — projection skipped)</span>${dbg}`;
                 }
