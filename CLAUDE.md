@@ -910,21 +910,47 @@ only (ESPN finals + MLB Stats API + Supabase). Phased:
     `rest`; card shows a B2B line + "+ rest" footer. Two cheap
     game_results lookups, gated to NBA/NHL. Needs `event_start` threaded
     through `_power_rating`.
-  - **Injuries → rating (built, NBA, UNTESTED vs live ESPN):**
-    `_injury_penalties` matches each team's OUT players (from the ESPN
-    injuries we already fetch) to its scoring leaders (`_espn_scoring_leaders`,
-    one ESPN team-endpoint call per team) and docks that team's projected
-    scoring by `_INJURY_FACTOR = 0.25 × out players' PPG` (net on/off is far
-    below raw PPG — replacements + usage redistribution), capped at
-    `_INJURY_MAX_PTS = 10` per side. So a 27-PPG star out ≈ a ~6.75-pt hit
-    (defensible), a bench guy ≈ nothing. NBA only (`_INJURY_SPORTS`) — MLB
-    is dominated by the starter we already model; NHL/NFL injury value is
-    murkier. Reduces the injured side's margin AND the total. Block carries
-    `injuries`; card shows the out players + "+ injuries" footer. Fully
-    guarded (any fetch/parse/match failure → no adjustment). **Built blind
-    — not verified against the live ESPN leaders shape; if the endpoint
-    differs it silently no-ops. Sanity-check on a real NBA game with a
-    known star out.**
+  - **Injuries → rating (built, NBA + NFL/NCAAF, UNTESTED vs live ESPN):**
+    `_injury_penalties` reads the ESPN injuries we already fetch. **NBA:**
+    matches OUT players to scoring leaders (`_espn_scoring_leaders` via the
+    generic `_espn_leaders`, one team-endpoint call) and docks that team's
+    offense by `_INJURY_FACTOR = 0.25 × PPG` (net on/off ≪ raw PPG), capped
+    `_INJURY_MAX_PTS = 10`. **Asymmetry fix (May 2026):** a two-way star's
+    DEFENSE is gone too, so the OPPONENT's offense is RAISED by
+    `_INJURY_DEF_SHARE = 0.35 × the offensive dock` (`home_def_loss` /
+    `away_def_loss` in the block) — previously a defensive anchor out never
+    moved the opponent's number; now a 27-PPG star out docks his team ~6.75
+    AND adds ~2.36 to the opponent. **NFL/NCAAF:** a starter QB out is the
+    dominant football injury — fires a fixed `_QB_OUT_PTS = 6.5` offense dock
+    ONLY when the OUT player is the team's passing leader (`_espn_leaders(…,
+    "passing")`), so a 3rd-string QB on the report doesn't trigger it. MLB
+    is handled by the pitcher + lineup layers; NHL by the goalie layer.
+    Block carries `injuries`; card shows out players + "+ injuries". Fully
+    guarded. **Built blind vs the live ESPN leaders shape; silent no-op if
+    it differs — sanity-check on a real NBA game (star out) + an NFL game
+    (QB out) once live.**
+  - **NHL goalie (built, UNTESTED vs live ESPN):** the starting goalie is
+    hockey's pitcher-equivalent and team_def is blind to who's in the
+    crease. `_nhl_goalies` pulls each team's #1 goalie GAA from ESPN team
+    leaders (the GAA-ranked leader = likely starter) and `_power_rating_v2`
+    blends it 50/50 into that team's `def`. Neutral when it's the usual
+    starter (GAA ≈ team_def), correctly raises the opponent's expected goals
+    when a worse-GAA backup is in net. v1 uses the GAA leader as the #1 — a
+    confirmed-starter feed (Daily Faceoff-style) would catch the specific
+    backup start better. Block carries `goalie`; card shows per-side GAA +
+    "+ goalie". Guarded → no-op. **Sanity-check on a real NHL game,
+    especially one with a confirmed backup start.**
+  - **MLB lineup (built, UNTESTED vs live):** the pitcher layer is solid but
+    the OFFENSE projection assumed the standard lineup. `_mlb_lineup_dock`
+    fetches tonight's posted batting order (`/game/{gamePk}/boxscore`, only
+    starters carry a `battingOrder`) and the team's top-OPS hitters
+    (`/teams/{id}/leaders?leaderCategories=onBasePlusSlugging`); a top hitter
+    NOT in the posted lineup docks `_MLB_REST_RUNS = 0.18` runs each (cap
+    `_MLB_REST_MAX = 0.6`). Lineups post ~3-4h pre-game → clean no-op before
+    that (the dossier auto-refresh picks it up). `game_pk` now threaded
+    through `_mlb_probables`. Block carries `lineup`; card shows "Resting:
+    …" + "+ lineup". **Sanity-check on an MLB game within ~3h of first
+    pitch where a regular is getting a rest day.**
   - **MLB bullpen (built, UNTESTED vs live split):** the SP blend covers
     ~60% of innings (the starter); the other ~40% used to lean on the
     full-staff `team_def` rating as a bullpen proxy. `_mlb_bullpen_era`
@@ -940,7 +966,8 @@ only (ESPN finals + MLB Stats API + Supabase). Phased:
     statsapi.mlb.com) — guarded so a shape mismatch is a silent no-op.
     Sanity-check on a real MLB game once it's live.**
   - **Still TODO:** prior-season carryover prior (cold-start); home/road
-    splits, pace.
+    splits, pace (NBA/NHL); confirmed-starter goalie feed; MLB umpire +
+    platoon/handedness splits.
 - **Phase 4 (built — backtest harness):** `scripts/backtest_power_ratings.py`
   walk-forward replays the model on `game_results` (for each date, ratings
   from ONLY prior games → project → grade vs final). Reports per sport: ML

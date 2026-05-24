@@ -1251,8 +1251,84 @@ def _mlb_probables(event_iso: str, away: str, home: str) -> dict:
                 "home":  _mlb_pitcher_block(((g.get("teams") or {}).get("home") or {}).get("probablePitcher")),
                 "away_team_id": away_t.get("id"),
                 "home_team_id": home_t.get("id"),
+                "game_pk":      g.get("gamePk"),
             }
     return {}
+
+
+# MLB lineup layer — we model the starter, but the OFFENSE projection
+# assumes the team's standard run output. When regulars sit (day-after-
+# night, a getaway day, September rest) the posted lineup is materially
+# weaker. We can't price every bat free, so we detect the high-value case:
+# a top-OPS hitter who's NOT in tonight's posted batting order → dock a
+# small chunk of that team's projected runs per missing regular. Lineups
+# post ~3-4h pre-game; before that the boxscore battingOrder is empty and
+# this is a clean no-op (the dossier auto-refresh picks it up later).
+_MLB_REST_RUNS = 0.18      # runs docked per missing top-OPS regular
+_MLB_REST_MAX  = 0.6       # cap per side
+
+
+def _mlb_posted_lineup(game_pk) -> dict | None:
+    if not game_pk:
+        return None
+    data = _http_get(f"https://statsapi.mlb.com/api/v1/game/{game_pk}/boxscore")
+    if not data:
+        return None
+    teams = data.get("teams") or {}
+    out: dict = {}
+    for side in ("home", "away"):
+        names = set()
+        for p in ((teams.get(side) or {}).get("players") or {}).values():
+            if p.get("battingOrder"):     # only starters carry a batting order
+                nm = ((p.get("person") or {}).get("fullName") or "").lower()
+                if nm:
+                    names.add(nm)
+        if names:
+            out[side] = names
+    return out or None
+
+
+def _mlb_hitting_leaders(team_id, season: int, limit: int = 4) -> list:
+    """Top hitters by OPS (original-case full names). One call, [] on fail."""
+    if not team_id:
+        return []
+    data = _http_get(f"https://statsapi.mlb.com/api/v1/teams/{team_id}/leaders",
+                     params={"leaderCategories": "onBasePlusSlugging",
+                             "season": season, "leaderGameTypes": "R",
+                             "limit": limit})
+    if not data:
+        return []
+    out = []
+    for lc in (data.get("teamLeaders") or data.get("leaders") or []):
+        for ld in lc.get("leaders") or []:
+            nm = ((ld.get("person") or {}).get("fullName") or "")
+            if nm:
+                out.append(nm)
+    return out
+
+
+def _mlb_lineup_dock(game_pk, away_id, home_id, season: int) -> dict | None:
+    """Dock projected runs for top-OPS regulars absent from the posted
+    lineup. None when no lineup posted / nobody material is missing."""
+    lineup = _mlb_posted_lineup(game_pk)
+    if not lineup:
+        return None
+    dock: dict = {}
+    notes: dict = {}
+    for side, tid in (("home", home_id), ("away", away_id)):
+        present = lineup.get(side)
+        miss = []
+        if present:
+            for full in _mlb_hitting_leaders(tid, season):
+                ln = full.lower()
+                if not any(ln in p or p in ln for p in present):
+                    miss.append(full)
+        dock[side] = round(min(len(miss) * _MLB_REST_RUNS, _MLB_REST_MAX), 2)
+        notes[side] = miss
+    if not (dock.get("home") or dock.get("away")):
+        return None
+    return {"home": dock["home"], "away": dock["away"],
+            "home_out": notes["home"], "away_out": notes["away"]}
 
 
 # ────────────────────────── Team comparison ──────────────────────────
@@ -1769,27 +1845,39 @@ def _rest_days(sb, team_key: str | None, event_start_iso: str | None) -> int | N
         return None
 
 
-# Injuries → rating. The biggest free lever, esp. NBA: a star sitting is
-# the largest single mover, and we already FETCH ESPN injuries — we just
-# weren't using them in the number. We value an out player by his scoring
-# (PPG from ESPN team leaders) and dock the team's projected scoring by a
-# fraction of it (a replacement scores some + usage redistributes, so the
-# net hit is well under his full average). NBA only for v1 — NHL/NFL
-# injury value is murkier and MLB is dominated by the starter we already
-# model. Heavily guarded: any fetch/parse/match failure → no adjustment.
-_INJURY_SPORTS  = {"NBA"}
+# Injuries → rating. The biggest free lever — a key player sitting is the
+# largest single mover, and we already FETCH ESPN injuries. Two flavors:
+#   • NBA: value an OUT player by his scoring (PPG from ESPN team leaders),
+#     dock his team's offense by a fraction of it, AND raise the OPPONENT's
+#     offense by a smaller fraction (a two-way star's DEFENSE is gone too —
+#     the asymmetry fix: a defensive anchor out helps the other team score).
+#   • NFL/NCAAF: a QB out is the dominant football injury (≈ a touchdown of
+#     line value). We fire a fixed offense dock only when the team's PASSING
+#     leader (the starter) is the one ruled out — so a 3rd-string QB on the
+#     report doesn't trigger it.
+# MLB is dominated by the starter we already model (+ the lineup layer);
+# NHL value lives in the goalie layer. Heavily guarded everywhere.
+_INJURY_NBA_SPORTS = {"NBA"}
+_INJURY_QB_SPORTS  = {"NFL", "NCAAF"}
 # Net team-scoring hit is FAR less than an out player's raw PPG —
-# replacements score and usage redistributes. Empirically a star's on/off
-# net is ~25% of his points, so a 27-PPG star out ≈ a ~6-7 pt margin hit
-# (defensible) rather than 13.5 (overcorrection). Capped per side so three
-# guys out can't nuke the projection.
-_INJURY_FACTOR  = 0.25
-_INJURY_MAX_PTS = 10.0
+# replacements score and usage redistributes. A star's on/off net is ~25%
+# of his points, so a 27-PPG star out ≈ a ~6.75-pt offense hit (defensible)
+# rather than 13.5. Capped per side so multiple guys out can't nuke it.
+_INJURY_FACTOR    = 0.25
+_INJURY_MAX_PTS   = 10.0
+# Asymmetry: part of a two-way star's value is defense — when he's out his
+# team's D weakens, so the OPPONENT scores more. We don't have per-player
+# defensive metrics free, so approximate it as a fraction of the (PPG-based)
+# offensive hit. Crude but directionally right + bounded.
+_INJURY_DEF_SHARE = 0.35
+_QB_OUT_PTS       = 6.5     # starter→backup QB dropoff in projected points
 
 
-def _espn_scoring_leaders(sport: str, team_id: str | None) -> dict:
-    """{player_name_lower: points_per_game} from ESPN's team leaders.
-    One call. Empty dict on any failure."""
+def _espn_leaders(sport: str, team_id: str | None, keyword: str,
+                  alt: tuple = ()) -> dict:
+    """{player_name_lower: stat_value} from ESPN's team-leaders block for
+    the category whose name contains `keyword` (e.g. 'point' for NBA PPG,
+    'passing' for the starting QB). One call. Empty on any failure."""
     pair = _ESPN_PATH.get(sport)
     if not (pair and team_id):
         return {}
@@ -1802,15 +1890,19 @@ def _espn_scoring_leaders(sport: str, team_id: str | None) -> dict:
     out: dict = {}
     for cat in team.get("leaders") or []:
         nm = (cat.get("name") or cat.get("abbreviation") or "").lower()
-        if "point" not in nm and nm not in ("scoring", "ppg", "pts"):
+        if keyword not in nm and nm not in alt:
             continue
         for ld in cat.get("leaders") or []:
             ath = ld.get("athlete") or {}
             name = (ath.get("displayName") or "").lower()
-            ppg = _to_float(ld.get("displayValue")) or _to_float(ld.get("value"))
-            if name and ppg is not None:
-                out[name] = ppg
+            val = _to_float(ld.get("displayValue")) or _to_float(ld.get("value"))
+            if name and val is not None:
+                out[name] = val
     return out
+
+
+def _espn_scoring_leaders(sport: str, team_id: str | None) -> dict:
+    return _espn_leaders(sport, team_id, "point", ("scoring", "ppg", "pts"))
 
 
 def _injury_out(status: str | None) -> bool:
@@ -1821,37 +1913,62 @@ def _injury_out(status: str | None) -> bool:
             or "suspension" in s or "-day-il" in s)
 
 
-def _injury_penalties(sport: str, espn_block: dict | None) -> dict | None:
-    """Per-side projected-scoring penalty (in points) from OUT players
-    matched to team scoring leaders. None when nothing applies. Guarded —
-    a missing leaders fetch just yields a 0 penalty for that side."""
-    if sport not in _INJURY_SPORTS or not espn_block:
+def _match_leader(name: str, leaders: dict):
+    """Resolve an injured player's name to a leaders-dict value via exact
+    then two-way substring containment. None when no match."""
+    nm = (name or "").lower()
+    if not nm:
         return None
-    pen: dict = {}
+    if nm in leaders:
+        return leaders[nm]
+    for lname, v in leaders.items():
+        if nm in lname or lname in nm:
+            return v
+    return None
+
+
+def _injury_penalties(sport: str, espn_block: dict | None) -> dict | None:
+    """Per-side injury adjustment. Returns offense docks (`home`/`away`),
+    opponent-scoring bumps from lost defense (`home_def_loss`/`away_def_loss`,
+    NBA only), and the out-player name lists. None when nothing applies.
+    Guarded — a missing leaders fetch yields a 0 for that side."""
+    if not espn_block:
+        return None
+    nba = sport in _INJURY_NBA_SPORTS
+    qb  = sport in _INJURY_QB_SPORTS
+    if not (nba or qb):
+        return None
+    dock: dict = {}
+    dloss: dict = {}
     notes: dict = {}
     for side in ("home", "away"):
         tb = espn_block.get(side) or {}
-        leaders = _espn_scoring_leaders(sport, tb.get("id"))
-        p, outs = 0.0, []
-        if leaders:
-            for inj in tb.get("injuries") or []:
-                if not _injury_out(inj.get("status")):
-                    continue
-                nm = (inj.get("name") or "").lower()
-                ppg = leaders.get(nm)
-                if ppg is None:
-                    for lname, v in leaders.items():
-                        if nm and (nm in lname or lname in nm):
-                            ppg = v
-                            break
+        p, dl, outs = 0.0, 0.0, []
+        injuries = [i for i in (tb.get("injuries") or []) if _injury_out(i.get("status"))]
+        if nba:
+            leaders = _espn_scoring_leaders(sport, tb.get("id"))
+            for inj in injuries:
+                ppg = _match_leader(inj.get("name"), leaders) if leaders else None
                 if ppg is not None:
                     p += ppg * _INJURY_FACTOR
+                    dl += ppg * _INJURY_FACTOR * _INJURY_DEF_SHARE
                     outs.append(inj.get("name"))
-        pen[side] = round(min(p, _INJURY_MAX_PTS), 2)
+        elif qb:
+            qbs = _espn_leaders(sport, tb.get("id"), "passing")
+            for inj in injuries:
+                if (inj.get("pos") or "").upper() != "QB":
+                    continue
+                if qbs and _match_leader(inj.get("name"), qbs) is not None:
+                    p += _QB_OUT_PTS          # starter QB out
+                    outs.append(inj.get("name"))
+                    break                      # one QB hit per team
+        dock[side]  = round(min(p, _INJURY_MAX_PTS), 2)
+        dloss[side] = round(dl, 2)
         notes[side] = outs
-    if not (pen.get("home") or pen.get("away")):
+    if not (dock.get("home") or dock.get("away")):
         return None
-    return {"home": pen["home"], "away": pen["away"],
+    return {"home": dock["home"], "away": dock["away"],
+            "home_def_loss": dloss["home"], "away_def_loss": dloss["away"],
             "home_out": notes["home"], "away_out": notes["away"]}
 
 
@@ -1949,6 +2066,35 @@ def _mlb_bullpen_era(team_id, season: int) -> float | None:
     return None
 
 
+# NHL goalie layer — the starting goalie is to hockey what the starter is
+# to baseball: he carries most of goal prevention on his night, and the
+# season-long team `def` rating is blind to who's actually in the crease.
+# We blend the team's #1 goalie's GAA (ESPN team leaders) 50/50 with the
+# team_def rating. When the goalie is the usual starter, GAA ≈ what team_def
+# already reflects → the blend is ~neutral (no harm). When a backup with a
+# worse GAA gets the net, it correctly raises the opponent's expected goals.
+# A confirmed-starter feed would be better (catches the specific backup
+# start) — this v1 uses the GAA leader as the likely #1. Guarded → no-op.
+def _nhl_goalies(espn_block: dict | None) -> dict | None:
+    if not espn_block:
+        return None
+    out: dict = {}
+    for side in ("home", "away"):
+        tb = espn_block.get(side) or {}
+        gaa_by = _espn_leaders("NHL", tb.get("id"), "average",
+                               ("goalsagainstaverage", "gaa"))
+        if not gaa_by:
+            out[side] = None
+            out[side + "_name"] = None
+            continue
+        name, gaa = next(iter(gaa_by.items()))   # leaders are ranked; #1 first
+        out[side] = gaa
+        out[side + "_name"] = name
+    if out.get("home") is None and out.get("away") is None:
+        return None
+    return out
+
+
 # MLB park run factors — environment multiplier on projected scoring
 # (100 = neutral; >100 hitter-friendly, <100 pitcher-friendly). Applied
 # to BOTH teams' expected runs, so it mostly moves the TOTAL (Coors vs
@@ -1981,7 +2127,9 @@ def _power_rating_v2(sb, sport: str, odds: dict | None,
                      away: str | None, home: str | None,
                      pitchers: dict | None = None,
                      event_start: str | None = None,
-                     injuries: dict | None = None) -> dict | None:
+                     injuries: dict | None = None,
+                     goalies: dict | None = None,
+                     lineup: dict | None = None) -> dict | None:
     """The real model — projects from the cron-computed opponent-adjusted
     ratings snapshot. Flask reads the precomputed ratings (it can't import
     the kahla-scanner engine) and does the lightweight off/def → margin/
@@ -2035,21 +2183,54 @@ def _power_rating_v2(sb, sport: str, odds: dict | None,
             bp_note = {"away_bp_era": (round(away_bp, 2) if away_bp is not None else None),
                        "home_bp_era": (round(home_bp, 2) if home_bp is not None else None)}
 
+    # NHL goalie — blend the starting goalie's GAA into his team's defense
+    # (50/50 with team_def). Neutral when it's the usual starter; raises the
+    # opponent's expected goals when a worse-GAA backup is in the crease.
+    goalie_note = None
+    if sport == "NHL" and goalies:
+        ag, hg = goalies.get("away"), goalies.get("home")
+        if ag is not None:
+            a_def = 0.5 * ag + 0.5 * a_def
+        if hg is not None:
+            h_def = 0.5 * hg + 0.5 * h_def
+        if ag is not None or hg is not None:
+            goalie_note = {"away_gaa": (round(ag, 2) if ag is not None else None),
+                           "home_gaa": (round(hg, 2) if hg is not None else None),
+                           "away_name": goalies.get("away_name"),
+                           "home_name": goalies.get("home_name")}
+
     exp_home = h_off + (a_def - league_avg) + hfa / 2.0
     exp_away = a_off + (h_def - league_avg) - hfa / 2.0
 
-    # Injuries — dock the injured team's projected scoring by the (already
-    # value-weighted) penalty. Reduces that side's margin AND the total.
+    # Injuries — dock the injured team's offense, AND (NBA) raise the
+    # OPPONENT's offense by the lost-defense share (a two-way star out
+    # weakens his team's D, so the other team scores more).
     inj_note = None
     if injuries:
         hp = _to_float(injuries.get("home")) or 0.0
         ap = _to_float(injuries.get("away")) or 0.0
-        if hp or ap:
-            exp_home = max(0.0, exp_home - hp)
-            exp_away = max(0.0, exp_away - ap)
+        h_dloss = _to_float(injuries.get("home_def_loss")) or 0.0
+        a_dloss = _to_float(injuries.get("away_def_loss")) or 0.0
+        if hp or ap or h_dloss or a_dloss:
+            exp_home = max(0.0, exp_home - hp + a_dloss)   # away D weakened → home scores more
+            exp_away = max(0.0, exp_away - ap + h_dloss)   # home D weakened → away scores more
             inj_note = {"home": round(hp, 2), "away": round(ap, 2),
+                        "home_def_loss": round(h_dloss, 2),
+                        "away_def_loss": round(a_dloss, 2),
                         "home_out": injuries.get("home_out") or [],
                         "away_out": injuries.get("away_out") or []}
+
+    # MLB lineup — dock projected runs for top-OPS regulars resting tonight.
+    lineup_note = None
+    if sport == "MLB" and lineup:
+        lh = _to_float(lineup.get("home")) or 0.0
+        la = _to_float(lineup.get("away")) or 0.0
+        if lh or la:
+            exp_home = max(0.0, exp_home - lh)
+            exp_away = max(0.0, exp_away - la)
+            lineup_note = {"home": round(lh, 2), "away": round(la, 2),
+                           "home_out": lineup.get("home_out") or [],
+                           "away_out": lineup.get("away_out") or []}
 
     # MLB park factor — scale both sides' expected runs by the venue's
     # run environment (Coors inflates, Petco suppresses). Moves the total
@@ -2109,9 +2290,11 @@ def _power_rating_v2(sb, sport: str, odds: dict | None,
         "sp":                sp_note,
         "bp_adjusted":       bp_note is not None,
         "bp":                bp_note,
+        "goalie":            goalie_note,
         "park_factor":       park_factor,
         "rest":              rest_note,
         "injuries":          inj_note,
+        "lineup":            lineup_note,
     }
     return _pr_attach_market_compare(block, odds, p_home, p_away, proj_total)
 
@@ -2121,13 +2304,15 @@ def _power_rating(sb, sport: str, team_compare: dict | None,
                   home: str | None = None,
                   pitchers: dict | None = None,
                   event_start: str | None = None,
-                  injuries: dict | None = None) -> dict | None:
+                  injuries: dict | None = None,
+                  goalies: dict | None = None,
+                  lineup: dict | None = None) -> dict | None:
     """Prefer the real opponent-adjusted ratings (cron-computed snapshot);
     fall back to the v1 raw-season-stat projection when no snapshot exists
     for the sport yet, or the teams aren't in it. Silent — never raises."""
     try:
         v2 = _power_rating_v2(sb, sport, odds, away, home, pitchers,
-                              event_start, injuries)
+                              event_start, injuries, goalies, lineup)
     except Exception:
         v2 = None
     block = v2 or _power_rating_v1(sport, team_compare, odds)
@@ -2732,9 +2917,15 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     # adjusted ratings snapshot (Supabase), falls back to the v1 raw-stat
     # projection. Plus outdoor-venue weather (free Open-Meteo). Silent-fail.
     injury_pen = _injury_penalties(sport, espn_block)
+    goalie_blk = _nhl_goalies(espn_block) if sport == "NHL" else None
+    _pp = (mlb_extra or {}).get("probable_pitchers") or {}
+    lineup_dock = (_mlb_lineup_dock(_pp.get("game_pk"), _pp.get("away_team_id"),
+                                    _pp.get("home_team_id"),
+                                    datetime.now(timezone.utc).year)
+                   if sport == "MLB" and _pp else None)
     power_rating = _power_rating(sb, sport, team_compare, odds, away, home,
                                  (mlb_extra or {}).get("probable_pitchers"),
-                                 event_start, injury_pen)
+                                 event_start, injury_pen, goalie_blk, lineup_dock)
     weather = _fetch_weather(sport, home, event_start) if (home and event_start) else None
 
     suggestions = _suggest_picks(odds, splits, power_rating)
