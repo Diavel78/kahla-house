@@ -1539,17 +1539,18 @@ ML_CHALK_FAIR_CAP = -140
 KELLY_FRACTION       = 0.25     # quarter-Kelly — survives variance
 EDGE_PER_SHARP_POINT = 0.40     # pp of edge per point of sharp_score (≤4pp at 10)
 EDGE_PER_SPLITS_PP   = 0.10     # pp of edge per aligned money−bets pp (≤3pp at 30)
-# The power rating is a crude season-stats projection trying to second-
-# guess Pinnacle — the sharpest book in the world, whose line already
-# prices in pitchers, injuries, SOS, everything our model can't (MLB it's
-# even blind to the starting pitcher). It does NOT feed sizing. It's a
-# watch-only divergence flag on the dossier; we only consider giving it
-# weight if/when CLV data PROVES its agree/disagree calls correlate with
-# beating the close. Flip MODEL_FEEDS_SIZING to True (after validating) to
-# re-enable the capped confirmation nudge.
-MODEL_FEEDS_SIZING   = False
-MODEL_EDGE_WEIGHT    = 0.25     # (inert while MODEL_FEEDS_SIZING=False)
-MODEL_EDGE_CAP_PP    = 1.5      # (inert while MODEL_FEEDS_SIZING=False)
+# The power rating is the bot's INDEPENDENT number — the whole point of
+# not just riding PIN's coattails. It feeds sizing as a CAPPED
+# confirmation nudge when it agrees with the sharp side (never the sole
+# driver, never bets against itself). v1 is a crude season-stats
+# projection; the real opponent-adjusted, pitcher-aware engine is being
+# built (see kahla-scanner power-ratings pipeline). The cap (1.5pp) keeps
+# the crude version from doing damage while the good one comes online, and
+# CLV measures whether its calls actually beat the close so we can widen
+# the cap as it proves out.
+MODEL_FEEDS_SIZING   = True
+MODEL_EDGE_WEIGHT    = 0.25     # fraction of (model_prob − PIN_fair) credited
+MODEL_EDGE_CAP_PP    = 1.5      # cap on the nudge — widen as CLV proves the model
 EDGE_CAP_PP          = 6.0      # hard cap so a crude input can't blow up sizing
 KELLY_HIGH_PCT       = 2.5      # ¼-Kelly stake ≥ this %BR → 5u high
 
