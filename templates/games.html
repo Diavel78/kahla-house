@@ -104,11 +104,12 @@
 
         /* Controls */
         .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 16px; }
-        .game-select {
+        .game-select, .title-input {
             background: var(--surface); border: 1px solid var(--border-light); border-radius: 10px;
             padding: 10px 14px; color: var(--text); font-size: 14px; font-weight: 600;
             font-family: 'DM Sans', sans-serif; cursor: pointer; min-width: 220px;
         }
+        .title-input { cursor: text; min-width: 160px; }
         .game-select option { background: var(--surface); }
         .btn {
             padding: 9px 14px; border-radius: 9px; font-size: 13px; font-weight: 600;
@@ -116,10 +117,16 @@
             background: var(--surface-2); color: var(--text); transition: all 0.15s;
         }
         .btn:hover { background: var(--surface-3); }
-        .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
-        .btn.primary:hover { filter: brightness(1.1); }
         .btn.danger { color: #f87171; border-color: rgba(239,68,68,0.3); }
         .btn.danger:hover { background: var(--red-dim); }
+        .seg { display: inline-flex; border: 1px solid var(--border-light); border-radius: 9px; overflow: hidden; }
+        .seg button {
+            padding: 9px 12px; font-size: 12px; font-weight: 700; border: none; cursor: pointer;
+            background: var(--surface-2); color: var(--text-secondary); font-family: 'DM Sans', sans-serif;
+        }
+        .seg button.on { background: var(--blue); color: #fff; }
+        .round-ctrls { display: inline-flex; gap: 6px; align-items: center; }
+        .round-ctrls .cnt { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--text-secondary); min-width: 56px; text-align: center; }
 
         /* Rules panel */
         .rules { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; overflow: hidden; }
@@ -155,7 +162,7 @@
         table.sheet th, table.sheet td { border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); padding: 0; }
         table.sheet th:last-child, table.sheet td:last-child { border-right: none; }
 
-        /* Hand column (sticky left) */
+        /* Hand / round / category column (sticky left) */
         .hcell {
             position: sticky; left: 0; z-index: 3; background: var(--surface-2);
             min-width: 116px; width: 116px; padding: 8px 10px !important; text-align: left; vertical-align: top;
@@ -164,6 +171,7 @@
         .hcell .hnum { font-size: 11px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
         .hcell .hmain { display: flex; align-items: center; gap: 6px; margin-top: 1px; }
         .hcell .cards { font-weight: 800; font-size: 15px; }
+        .hcell .clabel { font-weight: 700; font-size: 13px; }
         .suit { font-size: 16px; line-height: 1; }
         .suit.red { color: #ff6b81; }
         .suit.black { color: #cdd5e6; }
@@ -172,6 +180,12 @@
         .ind .warn { color: var(--orange); font-weight: 700; }
         .ind .bad { color: #f87171; font-weight: 700; }
         .ind .ok { color: var(--green); }
+
+        /* Section + subtotal rows (Yahtzee) */
+        tr.sec-row td { background: var(--surface-3); font-weight: 800; font-size: 11px; letter-spacing: 0.08em;
+            color: var(--text-secondary); padding: 6px 10px !important; text-transform: uppercase; }
+        tr.sub-row .hcell, tr.sub-row td { background: var(--surface-2); }
+        .subval { text-align: center; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 14px; color: var(--text-secondary); }
 
         /* Player header */
         thead th.pcol { background: var(--surface); min-width: 92px; padding: 8px 6px !important; vertical-align: top; }
@@ -197,6 +211,7 @@
             padding: 5px 2px; color: var(--text); font-size: 14px; font-weight: 600; text-align: center;
             font-family: 'JetBrains Mono', monospace; -moz-appearance: textfield;
         }
+        .bt.wide { width: 56px; }
         .bt::-webkit-outer-spin-button, .bt::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
         .bt:focus { outline: none; border-color: var(--blue); }
         .bt-lbl { font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
@@ -210,7 +225,7 @@
         .scbadge.miss { background: var(--orange-dim); color: var(--orange); }
         .scbadge.neg { background: var(--red-dim); color: #f87171; }
 
-        /* Special hand row tints */
+        /* Special hand row tints (CDHS) */
         tr.sp-notrump td.pcell, tr.sp-notrump .hcell { background: rgba(74,124,255,0.06); }
         tr.sp-blind td.pcell, tr.sp-blind .hcell { background: rgba(168,85,247,0.06); }
         tr.sp-negative td.pcell, tr.sp-negative .hcell { background: rgba(239,68,68,0.06); }
@@ -237,6 +252,7 @@
             .hcell { min-width: 56px; width: 56px; padding: 6px 5px !important; }
             .hcell .hnum { font-size: 10px; }
             .hcell .cards { font-size: 13px; }
+            .hcell .clabel { font-size: 11px; }
             .hcell .hmain { gap: 4px; }
             .suit { font-size: 14px; }
             .hcell .ind { font-size: 9px; }
@@ -244,6 +260,7 @@
             td.pcell { padding: 6px 3px !important; }
             .bt-row { gap: 3px; }
             .bt { width: 32px; font-size: 14px; padding: 5px 1px; }
+            .bt.wide { width: 50px; }
             .bt-labels { gap: 3px; }
             .bt-labels span { width: 32px; }
             .bt-lbl { font-size: 8px; }
@@ -257,6 +274,7 @@
             .hcell { min-width: 48px; width: 48px; padding: 5px 4px !important; }
             thead th.pcol { min-width: 70px; }
             .bt { width: 30px; }
+            .bt.wide { width: 46px; }
             .bt-labels span { width: 30px; }
         }
     </style>
@@ -288,25 +306,16 @@
                 <p>Pick a game and keep score. Saves automatically on this device.</p>
             </div>
 
-            <div class="controls">
-                <select class="game-select" id="gameSelect" onchange="onGameChange()">
-                    <option value="cdhs">Clubs &middot; Diamonds &middot; Hearts &middot; Spades</option>
-                </select>
+            <div class="controls" id="controls">
+                <select class="game-select" id="gameSelect" onchange="onGameChange(this.value)"></select>
+                <span id="extraControls"></span>
                 <button class="btn" onclick="addPlayer()">+ Add player</button>
                 <button class="btn danger" onclick="newGame()">New game</button>
             </div>
 
             <details class="rules" id="rulesPanel">
                 <summary>How scoring works</summary>
-                <div class="body">
-                    <ul>
-                        <li>17 hands: deal <code>7,6,5,4,3,2,1</code>, then three middle hands of 7 cards (<strong>No Trump</strong>, <strong>Blind Diamonds</strong>, <strong>Negative Spades</strong>), then <code>1,2,3,4,5,6,7</code> back up.</li>
-                        <li>Trump cycles &clubs; &diams; &hearts; &spades; continuously through the up-and-down hands. Blind Diamonds = you bid before seeing your hand.</li>
-                        <li>Make your bid exactly &rarr; <code>bid &times; 11</code>. A made <strong>0 bid</strong> scores <code>10</code>. Miss your bid &rarr; you score the number of tricks you took.</li>
-                        <li><strong>Negative Spades</strong>: spades are trump and every trick you take is <code>&minus;10</code>.</li>
-                        <li>Each player may bid 0 at most <strong>3 times</strong> per game. Total bids on a hand can't equal the cards dealt (screw-the-dealer).</li>
-                    </ul>
-                </div>
+                <div class="body" id="rulesBody"></div>
             </details>
 
             <div class="scoreboard" id="scoreboard"></div>
@@ -334,17 +343,27 @@
         initApp();
     });
 
-    // ─── Clubs · Diamonds · Hearts · Spades ───
-    // 17 hands. Trump cycles C,D,H,S continuously across the up-and-down
-    // numbered hands; the 3 middle 7-card hands are special and don't
-    // advance the cycle (descending ends on Hearts, so ascending picks up
-    // at Spades).
+    // ════════════════════════════════════════════════════════════════
+    //  GAME REGISTRY
+    //  Three sheet engines:
+    //   • bidtrick — rows = hands, each cell has bid + got, per-hand score
+    //                (CDHS, Oh Hell, Wizard, Spades)
+    //   • rounds   — rows = rounds, one number per cell, running total
+    //                (Hearts, Golf, Rummy, Blank pad)
+    //   • yahtzee  — fixed category grid with auto upper-bonus + total
+    //  Each game stores its own state under kh_games_<id>_v1.
+    // ════════════════════════════════════════════════════════════════
     const SUIT = {
         C: { sym: '♣', cls: 'black', name: 'Clubs' },
         D: { sym: '♦', cls: 'red',   name: 'Diamonds' },
         H: { sym: '♥', cls: 'red',   name: 'Hearts' },
         S: { sym: '♠', cls: 'black', name: 'Spades' },
     };
+    const suitAt = i => ['C', 'D', 'H', 'S'][((i % 4) + 4) % 4];
+
+    // CDHS: 17 hands; trump cycles continuously across the numbered hands,
+    // the three 7-card middle hands don't advance the cycle (descending
+    // ends on Hearts, ascending picks up on Spades).
     const CDHS_HANDS = [
         { cards: 7, trump: 'C' }, { cards: 6, trump: 'D' }, { cards: 5, trump: 'H' }, { cards: 4, trump: 'S' },
         { cards: 3, trump: 'C' }, { cards: 2, trump: 'D' }, { cards: 1, trump: 'H' },
@@ -354,279 +373,541 @@
         { cards: 1, trump: 'S' }, { cards: 2, trump: 'C' }, { cards: 3, trump: 'D' }, { cards: 4, trump: 'H' },
         { cards: 5, trump: 'S' }, { cards: 6, trump: 'C' }, { cards: 7, trump: 'D' },
     ];
-    const MAX_ZERO_BIDS = 3;
-    const STORE_KEY = 'kh_games_cdhs_v1';
+    // Oh Hell: down 7→1 then back up to 7; trump rotates.
+    const OHHELL_HANDS = [7, 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6, 7].map((c, i) => ({ cards: c, trump: suitAt(i) }));
 
-    let state = null; // { players:[{id,name}], entries:{ "h": { pid:{bid,tricks} } } }
+    const YZ_UPPER = [['ones', 'Aces (1s)'], ['twos', 'Twos'], ['threes', 'Threes'], ['fours', 'Fours'], ['fives', 'Fives'], ['sixes', 'Sixes']];
+    const YZ_LOWER = [['k3', '3 of a kind'], ['k4', '4 of a kind'], ['fh', 'Full house (25)'], ['ss', 'Sm straight (30)'],
+                      ['ls', 'Lg straight (40)'], ['yz', 'YAHTZEE (50)'], ['ch', 'Chance'], ['yzb', 'Yahtzee bonus (+100 ea)']];
+
+    const GAMES = [
+        {
+            id: 'cdhs', name: 'Clubs · Diamonds · Hearts · Spades', kind: 'bidtrick',
+            handsFor: () => CDHS_HANDS, screwDealer: true,
+            score: (h, e) => {
+                if (h.special === 'negative') return e.tricks == null ? null : -10 * e.tricks;
+                if (e.bid == null || e.tricks == null) return null;
+                if (e.tricks === e.bid) return e.bid === 0 ? 10 : e.bid * 11;
+                return e.tricks;
+            },
+            cellClass: (h, e, s) => {
+                if (s == null) return '';
+                if (h.special === 'negative') return s < 0 ? 'neg' : '';
+                if (e.bid != null && e.tricks === e.bid) return 'made';
+                if (e.bid != null) return 'miss';
+                return '';
+            },
+            playerNote: pid => { const z = cdhsZeros(pid); return { text: `0-bids ${z}/3`, bad: z > 3 }; },
+            rules: `<ul>
+                <li>17 hands: deal <code>7,6,5,4,3,2,1</code>, then three 7-card middle hands (<strong>No Trump</strong>, <strong>Blind Diamonds</strong>, <strong>Negative Spades</strong>), then <code>1,2,3,4,5,6,7</code> back up.</li>
+                <li>Trump cycles ♣♦♥♠ continuously through the numbered hands. Blind Diamonds = bid before seeing your hand.</li>
+                <li>Make your bid exactly → <code>bid×11</code>. A made <strong>0 bid</strong> → <code>10</code>. Miss → you score the tricks you took.</li>
+                <li><strong>Negative Spades</strong>: spades trump, every trick is <code>−10</code>.</li>
+                <li>Bid 0 at most <strong>3×</strong> per game. Total bids on a hand can't equal cards dealt (screw-the-dealer).</li>
+            </ul>`,
+        },
+        {
+            id: 'ohhell', name: 'Oh Hell', kind: 'bidtrick',
+            handsFor: () => OHHELL_HANDS, screwDealer: true,
+            score: (h, e) => (e.bid == null || e.tricks == null) ? null : (e.tricks === e.bid ? 10 + e.bid : 0),
+            cellClass: (h, e, s) => s == null ? '' : (e.tricks === e.bid ? 'made' : 'miss'),
+            rules: `<ul>
+                <li>Deal <code>7</code> down to <code>1</code>, then back up to <code>7</code> (13 hands). Trump rotates ♣♦♥♠ each hand.</li>
+                <li>Bid your tricks. Make it <em>exactly</em> → <code>10 + bid</code>. Miss by any amount → <code>0</code>.</li>
+                <li>Screw-the-dealer: total bids on a hand can't equal the cards dealt.</li>
+                <li class="note">House-rule variant. Tell me if you score made bids differently (e.g. 10 + tricks, or 1 per trick).</li>
+            </ul>`,
+        },
+        {
+            id: 'wizard', name: 'Wizard', kind: 'bidtrick',
+            handsFor: st => {
+                const n = Math.max(1, (st.players || []).length || 4);
+                const r = Math.max(1, Math.min(20, Math.floor(60 / n)));
+                return Array.from({ length: r }, (_, i) => ({ cards: i + 1, trump: suitAt(i) }));
+            },
+            score: (h, e) => (e.bid == null || e.tricks == null) ? null : (e.tricks === e.bid ? 20 + 10 * e.bid : -10 * Math.abs(e.tricks - e.bid)),
+            cellClass: (h, e, s) => s == null ? '' : (e.tricks === e.bid ? 'made' : 'neg'),
+            rules: `<ul>
+                <li>Number of rounds = <code>60 ÷ players</code> (15 for 4 players). Round <em>n</em> deals <em>n</em> cards.</li>
+                <li>Bid exact tricks. Make it → <code>20 + 10×bid</code>. Miss → <code>−10</code> per trick over/under.</li>
+                <li>Rounds recompute automatically when you add or remove players.</li>
+            </ul>`,
+        },
+        {
+            id: 'spades', name: 'Spades (cutthroat)', kind: 'bidtrick', addRounds: true,
+            handsFor: st => Array.from({ length: st.rounds || 4 }, (_, i) => ({ cards: 13, trump: 'S', label: '#' + (i + 1) })),
+            score: (h, e) => {
+                if (e.bid == null || e.tricks == null) return null;
+                if (e.bid === 0) return e.tricks === 0 ? 100 : -100;     // nil
+                return e.tricks >= e.bid ? (10 * e.bid + (e.tricks - e.bid)) : (-10 * e.bid);
+            },
+            cellClass: (h, e, s) => s == null ? '' : (s < 0 ? 'neg' : 'made'),
+            total: (pid, sum) => sum - 100 * Math.floor(spadesBags(pid) / 10),
+            playerNote: pid => ({ text: `bags ${spadesBags(pid)}`, bad: false }),
+            rules: `<ul>
+                <li>Every hand deals 13. Bid your tricks; add a round each hand. Cutthroat (no partners — read partner totals off the board).</li>
+                <li>Make your bid → <code>10×bid</code>, plus <code>1</code> per overtrick (bag). Get set (under your bid) → <code>−10×bid</code>.</li>
+                <li><strong>Nil</strong> (bid 0): make it → <code>+100</code>, fail → <code>−100</code> (your tricks still count as bags).</li>
+                <li>Every <code>10</code> bags → <code>−100</code> penalty (applied to the total automatically).</li>
+                <li class="note">Blind nil not included. Want partnerships (2v2) instead of cutthroat? Tell me.</li>
+            </ul>`,
+        },
+        {
+            id: 'hearts', name: 'Hearts', kind: 'rounds', lowWins: true,
+            roundLabel: 'Round', defaultRounds: 4, cellMin: 0, cellMax: 26, roundTarget: 26,
+            rules: `<ul>
+                <li>Each round, enter the points each player took (hearts = 1 each, Q♠ = 13; 26 total).</li>
+                <li><strong>Lowest total wins.</strong> Play until someone hits 100.</li>
+                <li><strong>Shooting the moon</strong>: if a player takes all 26, enter <code>0</code> for them and <code>26</code> for everyone else.</li>
+            </ul>`,
+        },
+        {
+            id: 'golf', name: 'Golf', kind: 'rounds', lowWins: true,
+            roundLabel: 'Hole', defaultRounds: 9,
+            rules: `<ul>
+                <li>Enter each player's score per hole/round. <strong>Lowest total wins.</strong></li>
+                <li>Defaults to 9 holes — add more with <code>+ Round</code> for 18. Negative scores are allowed.</li>
+            </ul>`,
+        },
+        {
+            id: 'rummy', name: 'Rummy / Gin', kind: 'rounds', lowWins: false,
+            roundLabel: 'Round', defaultRounds: 4, target: 500,
+            rules: `<ul>
+                <li>Enter each player's points per round. <strong>Highest total wins</strong>, play to <code>500</code>.</li>
+                <li class="note">If your house plays low-deadwood-wins, use the Blank pad and flip it to "Low wins" — or tell me and I'll add a toggle here.</li>
+            </ul>`,
+        },
+        {
+            id: 'yahtzee', name: 'Yahtzee', kind: 'yahtzee',
+            rules: `<ul>
+                <li>Enter the points scored in each box. <strong>Upper bonus</strong> (+35) applies automatically when the upper section totals ≥ 63.</li>
+                <li>Full house = 25, small straight = 30, large straight = 40, Yahtzee = 50. Extra Yahtzees: put <code>100</code> each in the bonus row.</li>
+                <li><strong>Highest grand total wins.</strong></li>
+            </ul>`,
+        },
+        {
+            id: 'blank', name: 'Blank score pad', kind: 'rounds', freeform: true,
+            roundLabel: 'Round', defaultRounds: 4,
+            rules: `<ul>
+                <li>A do-anything pad: name the game, add players + rounds, and enter any number (negatives OK).</li>
+                <li>Flip <strong>High wins / Low wins</strong> to set who's winning. Totals + leader update live.</li>
+            </ul>`,
+        },
+    ];
+    const GAME_BY_ID = Object.fromEntries(GAMES.map(g => [g.id, g]));
+    const SEL_KEY = 'kh_games_sel';
+
+    let G = null;          // current game definition
+    let state = null;      // current game state
     let nextPid = 1;
 
+    function storeKey(id) { return 'kh_games_' + id + '_v1'; }
+    function effLowWins() { return G.freeform ? !!state.lowWins : !!G.lowWins; }
+
     function initApp() {
-        load();
+        const sel = document.getElementById('gameSelect');
+        sel.innerHTML = GAMES.map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join('');
+        let start = 'cdhs';
+        try { const s = localStorage.getItem(SEL_KEY); if (s && GAME_BY_ID[s]) start = s; } catch (e) {}
+        sel.value = start;
+        selectGame(start);
+    }
+
+    function onGameChange(id) { selectGame(id); }
+
+    function selectGame(id) {
+        G = GAME_BY_ID[id] || GAMES[0];
+        try { localStorage.setItem(SEL_KEY, G.id); } catch (e) {}
+        loadState();
+        document.getElementById('rulesBody').innerHTML = G.rules;
+        renderControls();
         render();
     }
 
-    function load() {
+    function defaultState() {
+        const st = { players: [], entries: {} };
+        if (G.kind === 'rounds' || G.addRounds) st.rounds = G.defaultRounds || 4;
+        if (G.freeform) { st.lowWins = false; st.title = ''; }
+        nextPid = 1;
+        st.players = [1, 2, 3, 4].map(i => ({ id: i, name: 'Player ' + i }));
+        nextPid = 5;
+        return st;
+    }
+
+    function loadState() {
+        state = null;
         try {
-            const raw = localStorage.getItem(STORE_KEY);
+            const raw = localStorage.getItem(storeKey(G.id));
             if (raw) {
-                state = JSON.parse(raw);
-                if (state && Array.isArray(state.players) && state.players.length) {
-                    nextPid = Math.max(...state.players.map(p => p.id)) + 1;
-                    if (!state.entries) state.entries = {};
-                    return;
+                const s = JSON.parse(raw);
+                if (s && Array.isArray(s.players) && s.players.length) {
+                    if (!s.entries) s.entries = {};
+                    if ((G.kind === 'rounds' || G.addRounds) && !s.rounds) s.rounds = G.defaultRounds || 4;
+                    state = s;
+                    nextPid = Math.max(...s.players.map(p => p.id)) + 1;
                 }
             }
-        } catch (e) { /* fall through to default */ }
-        state = { players: [], entries: {} };
-        addPlayer('Player 1', true);
-        addPlayer('Player 2', true);
-        addPlayer('Player 3', true);
-        addPlayer('Player 4', true);
+        } catch (e) { /* fall through */ }
+        if (!state) state = defaultState();
     }
 
-    function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) {} }
+    function save() { try { localStorage.setItem(storeKey(G.id), JSON.stringify(state)); } catch (e) {} }
 
-    function onGameChange() { /* only one game for now */ render(); }
+    // ── Controls (game-specific extras) ──
+    function renderControls() {
+        const box = document.getElementById('extraControls');
+        let h = '';
+        if (G.freeform) {
+            h += `<input class="title-input" id="blankTitle" maxlength="28" placeholder="Game name"
+                value="${esc(state.title || '')}" oninput="setTitle(this.value)">`;
+        }
+        if (G.kind === 'rounds' || G.addRounds) {
+            const lbl = G.roundLabel || 'Round';
+            h += `<span class="round-ctrls">
+                <button class="btn" onclick="removeRound()">− ${lbl}</button>
+                <span class="cnt" id="roundCnt">${state.rounds} ${lbl.toLowerCase()}s</span>
+                <button class="btn" onclick="addRound()">+ ${lbl}</button>
+            </span>`;
+        }
+        if (G.freeform) {
+            h += `<span class="seg">
+                <button id="winHigh" class="${state.lowWins ? '' : 'on'}" onclick="setWin(false)">High wins</button>
+                <button id="winLow" class="${state.lowWins ? 'on' : ''}" onclick="setWin(true)">Low wins</button>
+            </span>`;
+        }
+        box.innerHTML = h;
+    }
 
-    function addPlayer(name, skipRender) {
+    function setTitle(v) { state.title = v; save(); }
+    function setWin(low) {
+        state.lowWins = low; save();
+        document.getElementById('winHigh').className = low ? '' : 'on';
+        document.getElementById('winLow').className = low ? 'on' : '';
+        refreshDerived();
+    }
+    function addRound() { state.rounds = (state.rounds || G.defaultRounds || 4) + 1; save(); renderControls(); render(); }
+    function removeRound() {
+        if ((state.rounds || 0) <= 1) return;
+        const idx = state.rounds - 1;
+        if (state.entries[idx] && Object.keys(state.entries[idx]).length &&
+            !confirm('Remove the last ' + (G.roundLabel || 'round').toLowerCase() + ' and its scores?')) return;
+        state.rounds -= 1;
+        delete state.entries[idx];
+        save(); renderControls(); render();
+    }
+
+    // ── Player management (shared) ──
+    function addPlayer() {
         const id = nextPid++;
-        state.players.push({ id, name: name || ('Player ' + state.players.length) });
-        if (!skipRender) { save(); render(); }
+        state.players.push({ id, name: 'Player ' + state.players.length });
+        save(); render();
     }
-
     function removePlayer(id) {
         if (state.players.length <= 1) return;
         const p = state.players.find(x => x.id === id);
         if (!confirm('Remove ' + (p ? p.name : 'this player') + ' and their scores?')) return;
         state.players = state.players.filter(x => x.id !== id);
-        for (const h in state.entries) { if (state.entries[h]) delete state.entries[h][id]; }
+        if (G.kind === 'yahtzee') { delete state.entries[id]; }
+        else { for (const h in state.entries) { if (state.entries[h]) delete state.entries[h][id]; } }
         save(); render();
     }
-
     function renamePlayer(id, val) {
         const p = state.players.find(x => x.id === id);
         if (p) { p.name = val; save(); renderScoreboard(); }
     }
-
     function newGame() {
         if (!confirm('Clear all scores for a new game? (Players are kept.)')) return;
         state.entries = {};
         save(); render();
     }
 
-    // ── entry helpers ──
-    function getEntry(h, pid) {
-        if (!state.entries[h]) state.entries[h] = {};
-        if (!state.entries[h][pid]) state.entries[h][pid] = { bid: null, tricks: null };
-        return state.entries[h][pid];
-    }
-
-    function setVal(h, pid, key, raw) {
-        const hand = CDHS_HANDS[h];
-        const e = getEntry(h, pid);
-        if (raw === '' || raw == null) { e[key] = null; }
-        else {
-            let n = parseInt(raw, 10);
-            if (isNaN(n)) n = null;
-            else { if (n < 0) n = 0; if (n > hand.cards) n = hand.cards; }
-            e[key] = n;
-        }
-        save();
-        refreshDerived();
-    }
-
-    // ── scoring ──
-    function handScore(hand, e) {
-        if (hand.special === 'negative') {
-            if (e.tricks == null) return null;
-            return -10 * e.tricks;
-        }
-        if (e.bid == null || e.tricks == null) return null;
-        if (e.tricks === e.bid) return e.bid === 0 ? 10 : e.bid * 11;
-        return e.tricks;
-    }
-
-    function playerTotal(pid) {
-        let t = 0, any = false;
-        CDHS_HANDS.forEach((hand, h) => {
-            const e = (state.entries[h] || {})[pid];
-            if (!e) return;
-            const s = handScore(hand, e);
-            if (s != null) { t += s; any = true; }
-        });
-        return any ? t : 0;
-    }
-
-    function zeroBids(pid) {
+    // ════════════════ helpers used by game defs ════════════════
+    function cellOf(h, pid) { return (state.entries[h] || {})[pid]; }
+    function cdhsZeros(pid) {
         let n = 0;
         CDHS_HANDS.forEach((hand, h) => {
             if (hand.special === 'negative') return;
-            const e = (state.entries[h] || {})[pid];
+            const e = cellOf(h, pid);
             if (e && e.bid === 0) n++;
         });
         return n;
     }
+    function spadesBags(pid) {
+        let b = 0;
+        const hands = G.handsFor(state);
+        hands.forEach((hand, h) => {
+            const e = cellOf(h, pid);
+            if (!e || e.bid == null || e.tricks == null) return;
+            if (e.bid === 0) { if (e.tricks > 0) b += e.tricks; }
+            else if (e.tricks > e.bid) b += e.tricks - e.bid;
+        });
+        return b;
+    }
 
-    // ── render ──
+    // ════════════════ input handlers ════════════════
+    function getCell(h, pid) {
+        if (!state.entries[h]) state.entries[h] = {};
+        if (!state.entries[h][pid]) state.entries[h][pid] = { bid: null, tricks: null };
+        return state.entries[h][pid];
+    }
+    function setBT(h, pid, key, raw) {
+        const hand = G.handsFor(state)[h];
+        const e = getCell(h, pid);
+        if (raw === '' || raw == null) e[key] = null;
+        else { let n = parseInt(raw, 10); if (isNaN(n)) n = null; else { if (n < 0) n = 0; if (n > hand.cards) n = hand.cards; } e[key] = n; }
+        save(); refreshDerived();
+    }
+    function setRound(h, pid, raw) {
+        if (!state.entries[h]) state.entries[h] = {};
+        if (raw === '' || raw == null) { state.entries[h][pid] = null; }
+        else {
+            let n = parseInt(raw, 10);
+            if (isNaN(n)) n = null;
+            else { if (G.cellMin != null && n < G.cellMin) n = G.cellMin; if (G.cellMax != null && n > G.cellMax) n = G.cellMax; }
+            state.entries[h][pid] = n;
+        }
+        save(); refreshDerived();
+    }
+    function setYz(pid, k, raw) {
+        if (!state.entries[pid]) state.entries[pid] = {};
+        if (raw === '' || raw == null) { delete state.entries[pid][k]; }
+        else { let n = parseInt(raw, 10); if (isNaN(n)) { delete state.entries[pid][k]; } else { if (n < 0) n = 0; state.entries[pid][k] = n; } }
+        save(); refreshDerived();
+    }
+
+    // ════════════════ totals ════════════════
+    function playerTotal(pid) {
+        if (G.kind === 'yahtzee') return yzTotal(pid).total;
+        if (G.kind === 'rounds') {
+            let t = 0;
+            for (let h = 0; h < state.rounds; h++) { const v = (state.entries[h] || {})[pid]; if (typeof v === 'number') t += v; }
+            return t;
+        }
+        // bidtrick
+        let sum = 0;
+        G.handsFor(state).forEach((hand, h) => { const s = G.score(hand, cellOf(h, pid) || {}); if (s != null) sum += s; });
+        return G.total ? G.total(pid, sum) : sum;
+    }
+    function yzTotal(pid) {
+        const e = state.entries[pid] || {};
+        let upper = 0; YZ_UPPER.forEach(([k]) => { if (typeof e[k] === 'number') upper += e[k]; });
+        const bonus = upper >= 63 ? 35 : 0;
+        let lower = 0; YZ_LOWER.forEach(([k]) => { if (typeof e[k] === 'number') lower += e[k]; });
+        return { upper, bonus, lower, total: upper + bonus + lower };
+    }
+    function anyData() {
+        if (G.kind === 'yahtzee') return state.players.some(p => state.entries[p.id] && Object.keys(state.entries[p.id]).length);
+        return Object.values(state.entries).some(hm => hm && (typeof hm === 'number' ? true :
+            Object.values(hm).some(v => v != null && (typeof v === 'number' ? true : (v.bid != null || v.tricks != null)))));
+    }
+    function computeTotalsLeader() {
+        const totals = {};
+        state.players.forEach(p => totals[p.id] = playerTotal(p.id));
+        const vals = state.players.map(p => totals[p.id]);
+        const best = effLowWins() ? Math.min(...vals) : Math.max(...vals);
+        return { totals, best, has: anyData() };
+    }
+
+    // ════════════════ render dispatch ════════════════
     function render() {
         const wrap = document.getElementById('sheetWrap');
-        if (!state.players.length) {
-            wrap.innerHTML = '<div class="empty-hint">Add a player to start scoring.</div>';
-            renderScoreboard();
-            return;
-        }
-        let head = '<thead><tr><th class="hcell"><span class="hnum">HAND</span></th>';
-        state.players.forEach(p => {
-            head += `<th class="pcol">
-                <div class="phead-row">
-                    <input class="pname" value="${esc(p.name)}" maxlength="14"
-                        oninput="renamePlayer(${p.id}, this.value)">
-                    <button class="rm-btn" title="Remove" onclick="removePlayer(${p.id})">&times;</button>
-                </div>
-                <span class="zc" id="zc-${p.id}"></span>
-            </th>`;
-        });
-        head += '</tr></thead>';
-
-        let bodyRows = '';
-        CDHS_HANDS.forEach((hand, h) => {
-            const spCls = hand.special ? ' sp-' + hand.special : '';
-            bodyRows += `<tr class="hand-row${spCls}">${handCell(hand, h)}`;
-            state.players.forEach(p => {
-                bodyRows += playerCell(hand, h, p.id);
-            });
-            bodyRows += '</tr>';
-        });
-
-        let foot = '<tfoot><tr><th class="hcell">TOTAL</th>';
-        state.players.forEach(p => {
-            foot += `<td class="pcell"><div class="tot" id="tot-${p.id}">0</div></td>`;
-        });
-        foot += '</tr></tfoot>';
-
-        wrap.innerHTML = `<table class="sheet">${head}<tbody>${bodyRows}</tbody>${foot}</table>`;
+        if (!state.players.length) { wrap.innerHTML = '<div class="empty-hint">Add a player to start scoring.</div>'; renderScoreboard(); return; }
+        if (G.kind === 'yahtzee') renderYahtzee(wrap);
+        else if (G.kind === 'rounds') renderRounds(wrap);
+        else renderBidtrick(wrap);
         refreshDerived();
         renderScoreboard();
     }
 
+    function headerRow(firstLabel) {
+        let h = `<thead><tr><th class="hcell"><span class="hnum">${firstLabel}</span></th>`;
+        state.players.forEach(p => {
+            const note = G.playerNote ? `<span class="zc" id="zc-${p.id}"></span>` : '';
+            h += `<th class="pcol">
+                <div class="phead-row">
+                    <input class="pname" value="${esc(p.name)}" maxlength="14" oninput="renamePlayer(${p.id}, this.value)">
+                    <button class="rm-btn" title="Remove" onclick="removePlayer(${p.id})">&times;</button>
+                </div>${note}
+            </th>`;
+        });
+        return h + '</tr></thead>';
+    }
+    function footerRow(label) {
+        let f = `<tfoot><tr><th class="hcell">${label || 'TOTAL'}</th>`;
+        state.players.forEach(p => { f += `<td class="pcell"><div class="tot" id="tot-${p.id}">0</div></td>`; });
+        return f + '</tr></tfoot>';
+    }
+
+    // ---- bidtrick ----
+    function renderBidtrick(wrap) {
+        const hands = G.handsFor(state);
+        let body = '';
+        hands.forEach((hand, h) => {
+            const spCls = hand.special ? ' sp-' + hand.special : '';
+            body += `<tr class="hand-row${spCls}">${handCell(hand, h)}`;
+            state.players.forEach(p => { body += btCell(hand, h, p.id); });
+            body += '</tr>';
+        });
+        wrap.innerHTML = `<table class="sheet">${headerRow('HAND')}<tbody>${body}</tbody>${footerRow()}</table>`;
+    }
     function handCell(hand, h) {
         let trumpHtml;
         if (hand.trump === 'NT') trumpHtml = '<span class="nt-tag" style="color:var(--blue)">NT</span>';
         else { const s = SUIT[hand.trump]; trumpHtml = `<span class="suit ${s.cls}">${s.sym}</span>`; }
-        const label = hand.label ? `<span class="nt-tag" style="color:var(--text-secondary)">${hand.label}</span>` : '';
+        const label = hand.label ? `<div style="margin-top:2px"><span class="nt-tag" style="color:var(--text-secondary)">${hand.label}</span></div>` : '';
         return `<td class="hcell">
             <span class="hnum">#${h + 1}</span>
             <div class="hmain"><span class="cards">${hand.cards}</span>${trumpHtml}</div>
-            ${label ? '<div style="margin-top:2px">' + label + '</div>' : ''}
+            ${label}
             <div class="ind" id="hi-${h}"></div>
         </td>`;
     }
-
-    function playerCell(hand, h, pid) {
-        const e = getEntry(h, pid);
+    function btCell(hand, h, pid) {
+        const e = getCell(h, pid);
         const bidVal = e.bid == null ? '' : e.bid;
         const trVal = e.tricks == null ? '' : e.tricks;
         if (hand.special === 'negative') {
             return `<td class="pcell">
                 <div class="bt-labels"><span class="bt-lbl">tricks</span></div>
-                <div class="bt-row">
-                    <input class="bt" type="number" inputmode="numeric" min="0" max="${hand.cards}"
-                        value="${trVal}" oninput="setVal(${h},${pid},'tricks',this.value)">
-                </div>
+                <div class="bt-row"><input class="bt" type="number" inputmode="numeric" min="0" max="${hand.cards}"
+                    value="${trVal}" oninput="setBT(${h},${pid},'tricks',this.value)"></div>
                 <span class="scbadge" id="sc-${h}-${pid}">&ndash;</span>
             </td>`;
         }
         return `<td class="pcell">
             <div class="bt-labels"><span class="bt-lbl">bid</span><span class="bt-lbl">got</span></div>
             <div class="bt-row">
-                <input class="bt" type="number" inputmode="numeric" min="0" max="${hand.cards}"
-                    value="${bidVal}" oninput="setVal(${h},${pid},'bid',this.value)">
-                <input class="bt" type="number" inputmode="numeric" min="0" max="${hand.cards}"
-                    value="${trVal}" oninput="setVal(${h},${pid},'tricks',this.value)">
+                <input class="bt" type="number" inputmode="numeric" min="0" max="${hand.cards}" value="${bidVal}" oninput="setBT(${h},${pid},'bid',this.value)">
+                <input class="bt" type="number" inputmode="numeric" min="0" max="${hand.cards}" value="${trVal}" oninput="setBT(${h},${pid},'tricks',this.value)">
             </div>
             <span class="scbadge" id="sc-${h}-${pid}">&ndash;</span>
         </td>`;
     }
 
-    // Recompute every derived display (scores, indicators, totals, leader)
-    // WITHOUT touching input values — preserves focus/cursor while typing.
-    function refreshDerived() {
-        // cell score badges
-        CDHS_HANDS.forEach((hand, h) => {
+    // ---- rounds ----
+    function renderRounds(wrap) {
+        const lbl = G.roundLabel || 'Round';
+        let body = '';
+        for (let h = 0; h < state.rounds; h++) {
+            body += `<tr><td class="hcell"><span class="hnum">${lbl.toUpperCase()}</span><div class="hmain"><span class="clabel">${lbl} ${h + 1}</span></div><div class="ind" id="hi-${h}"></div></td>`;
             state.players.forEach(p => {
-                const e = (state.entries[h] || {})[p.id] || { bid: null, tricks: null };
-                const badge = document.getElementById(`sc-${h}-${p.id}`);
-                if (!badge) return;
-                const s = handScore(hand, e);
-                if (s == null) { badge.textContent = '–'; badge.className = 'scbadge'; }
-                else {
-                    badge.textContent = s > 0 ? '+' + s : '' + s;
-                    let c = 'scbadge';
-                    if (s < 0) c += ' neg';
-                    else if (hand.special !== 'negative' && e.bid != null && e.tricks === e.bid) c += ' made';
-                    else if (e.bid != null) c += ' miss';
-                    badge.className = c;
-                }
+                const v = (state.entries[h] || {})[p.id];
+                const val = (typeof v === 'number') ? v : '';
+                body += `<td class="pcell"><div class="bt-row"><input class="bt wide" type="number" inputmode="numeric"
+                    value="${val}" oninput="setRound(${h},${p.id},this.value)"></div></td>`;
             });
-            // hand indicator: bid sum (screw-the-dealer) + trick sum
-            const ind = document.getElementById(`hi-${h}`);
-            if (ind) ind.innerHTML = handIndicator(hand, h);
-        });
-
-        // totals + leader
-        let max = -Infinity;
-        const totals = {};
-        state.players.forEach(p => { const t = playerTotal(p.id); totals[p.id] = t; if (t > max) max = t; });
-        const anyScore = Object.values(state.entries).some(hm => hm && Object.values(hm).some(e => e && (e.bid != null || e.tricks != null)));
-        state.players.forEach(p => {
-            const cell = document.getElementById(`tot-${p.id}`);
-            if (cell) { cell.textContent = totals[p.id]; cell.className = 'tot' + (anyScore && totals[p.id] === max ? ' lead' : ''); }
-            const zc = document.getElementById(`zc-${p.id}`);
-            if (zc) {
-                const z = zeroBids(p.id);
-                zc.textContent = `0-bids ${z}/${MAX_ZERO_BIDS}`;
-                zc.className = 'zc' + (z > MAX_ZERO_BIDS ? ' bad' : '');
-            }
-        });
-
-        renderScoreboard(totals, anyScore, max);
+            body += '</tr>';
+        }
+        wrap.innerHTML = `<table class="sheet">${headerRow(lbl.toUpperCase())}<tbody>${body}</tbody>${footerRow()}</table>`;
     }
 
-    function handIndicator(hand, h) {
+    // ---- yahtzee ----
+    function renderYahtzee(wrap) {
+        const ncol = state.players.length + 1;
+        const yzInput = (pid, k) => {
+            const v = (state.entries[pid] || {})[k];
+            return `<td class="pcell"><div class="bt-row"><input class="bt wide" type="number" inputmode="numeric"
+                value="${typeof v === 'number' ? v : ''}" oninput="setYz(${pid},'${k}',this.value)"></div></td>`;
+        };
+        const catRow = (k, label) => {
+            let r = `<tr><td class="hcell"><div class="hmain"><span class="clabel">${label}</span></div></td>`;
+            state.players.forEach(p => { r += yzInput(p.id, k); });
+            return r + '</tr>';
+        };
+        let body = `<tr class="sec-row"><td colspan="${ncol}">Upper section</td></tr>`;
+        YZ_UPPER.forEach(([k, l]) => body += catRow(k, l));
+        body += `<tr class="sub-row"><td class="hcell"><span class="clabel">Upper subtotal</span></td>`;
+        state.players.forEach(p => body += `<td class="pcell"><div class="subval" id="yup-${p.id}">0</div></td>`);
+        body += '</tr>';
+        body += `<tr class="sub-row"><td class="hcell"><span class="clabel">Bonus (≥63 → 35)</span></td>`;
+        state.players.forEach(p => body += `<td class="pcell"><div class="subval" id="ybn-${p.id}">0</div></td>`);
+        body += '</tr>';
+        body += `<tr class="sec-row"><td colspan="${ncol}">Lower section</td></tr>`;
+        YZ_LOWER.forEach(([k, l]) => body += catRow(k, l));
+        wrap.innerHTML = `<table class="sheet">${headerRow('CATEGORY')}<tbody>${body}</tbody>${footerRow('GRAND TOTAL')}</table>`;
+    }
+
+    // ════════════════ refresh derived (no input rebuild → keeps focus) ════════════════
+    function refreshDerived() {
+        if (G.kind === 'bidtrick') refreshBidtrick();
+        else if (G.kind === 'rounds') refreshRounds();
+        else refreshYahtzee();
+        const { totals, best, has } = computeTotalsLeader();
+        state.players.forEach(p => {
+            const cell = document.getElementById(`tot-${p.id}`);
+            if (cell) { cell.textContent = totals[p.id]; cell.className = 'tot' + (has && totals[p.id] === best ? ' lead' : ''); }
+        });
+        renderScoreboard(totals, best, has);
+    }
+
+    function refreshBidtrick() {
+        const hands = G.handsFor(state);
+        hands.forEach((hand, h) => {
+            state.players.forEach(p => {
+                const e = cellOf(h, p.id) || { bid: null, tricks: null };
+                const badge = document.getElementById(`sc-${h}-${p.id}`);
+                if (!badge) return;
+                const s = G.score(hand, e);
+                if (s == null) { badge.textContent = '–'; badge.className = 'scbadge'; }
+                else { badge.textContent = s > 0 ? '+' + s : '' + s; const c = G.cellClass(hand, e, s); badge.className = 'scbadge' + (c ? ' ' + c : ''); }
+            });
+            const ind = document.getElementById(`hi-${h}`);
+            if (ind) ind.innerHTML = btIndicator(hand, h);
+        });
+        if (G.playerNote) state.players.forEach(p => {
+            const zc = document.getElementById(`zc-${p.id}`);
+            if (zc) { const n = G.playerNote(p.id); zc.textContent = n.text; zc.className = 'zc' + (n.bad ? ' bad' : ''); }
+        });
+    }
+    function btIndicator(hand, h) {
         const hm = state.entries[h] || {};
         let bidSum = 0, bidCount = 0, trickSum = 0, trickCount = 0;
         state.players.forEach(p => {
-            const e = hm[p.id];
-            if (!e) return;
+            const e = hm[p.id]; if (!e) return;
             if (e.bid != null) { bidSum += e.bid; bidCount++; }
             if (e.tricks != null) { trickSum += e.tricks; trickCount++; }
         });
+        const np = state.players.length;
         let out = '';
         if (hand.special !== 'negative') {
-            const allBid = bidCount === state.players.length && state.players.length > 0;
-            const illegal = allBid && bidSum === hand.cards;
+            const illegal = G.screwDealer && bidCount === np && np > 0 && bidSum === hand.cards;
             out += `<div>bids <span class="${illegal ? 'bad' : ''}">${bidCount ? bidSum : '–'}</span>${illegal ? ' ✕=cards' : ''}</div>`;
         }
         let tCls = '';
-        if (trickCount === state.players.length && state.players.length > 0) tCls = (trickSum === hand.cards) ? 'ok' : 'bad';
+        if (trickCount === np && np > 0) tCls = (trickSum === hand.cards) ? 'ok' : 'bad';
         else if (trickSum > hand.cards) tCls = 'bad';
         out += `<div>tricks <span class="${tCls}">${trickCount ? trickSum : '–'}</span>/${hand.cards}</div>`;
         return out;
     }
 
-    function renderScoreboard(totals, anyScore, max) {
-        if (!totals) {
-            totals = {}; max = -Infinity;
-            state.players.forEach(p => { const t = playerTotal(p.id); totals[p.id] = t; if (t > max) max = t; });
-            anyScore = Object.values(state.entries).some(hm => hm && Object.values(hm).some(e => e && (e.bid != null || e.tricks != null)));
+    function refreshRounds() {
+        if (!G.roundTarget) return;
+        for (let h = 0; h < state.rounds; h++) {
+            const ind = document.getElementById(`hi-${h}`);
+            if (!ind) continue;
+            const hm = state.entries[h] || {};
+            let sum = 0, cnt = 0;
+            state.players.forEach(p => { const v = hm[p.id]; if (typeof v === 'number') { sum += v; cnt++; } });
+            const cls = (cnt === state.players.length && cnt > 0 && sum !== G.roundTarget) ? 'bad' : '';
+            ind.innerHTML = `<div>pts <span class="${cls}">${cnt ? sum : '–'}</span>/${G.roundTarget}</div>`;
         }
+    }
+
+    function refreshYahtzee() {
+        state.players.forEach(p => {
+            const t = yzTotal(p.id);
+            const up = document.getElementById(`yup-${p.id}`); if (up) up.textContent = t.upper;
+            const bn = document.getElementById(`ybn-${p.id}`); if (bn) { bn.textContent = t.bonus; bn.style.color = t.bonus ? 'var(--green)' : ''; }
+        });
+    }
+
+    // ════════════════ scoreboard ════════════════
+    function renderScoreboard(totals, best, has) {
+        if (totals === undefined) { const r = computeTotalsLeader(); totals = r.totals; best = r.best; has = r.has; }
         let h = '';
         state.players.forEach(p => {
-            const lead = anyScore && totals[p.id] === max;
-            h += `<div class="sb-chip${lead ? ' leader' : ''}">
-                <div class="nm">${esc(p.name)}</div>
-                <div class="val">${totals[p.id]}</div>
-            </div>`;
+            const lead = has && totals[p.id] === best;
+            h += `<div class="sb-chip${lead ? ' leader' : ''}"><div class="nm">${esc(p.name)}</div><div class="val">${totals[p.id]}</div></div>`;
         });
         document.getElementById('scoreboard').innerHTML = h;
     }
