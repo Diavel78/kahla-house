@@ -822,6 +822,48 @@ The edge estimate (`edge_pp`, which now finally populates the long-nullable `bot
 
 **Strategy principles** (full doc in `.claude/skills/handicap.md`): PIN is the sharpest book — PIN devigged is the fair line, every other book is shaded for retail bias. Line movement signals: steam (5+ books move together w/ PIN confirming), reverse line movement (RLM) when line moves against the public-money side, early move (12-36h pre-game, sharp model edge) vs late move (final 2h, near-CLV). Public splits divergence: `% money` >> `% bets` on a side = sharp money. Public-bias fades: favorites, overs, home, big-name brands, recent winners. Late scratches in MLB / NBA / NHL / NFL — note + downsize / pass.
 
+### Power-ratings pipeline (real model) — replacing the crude v1
+
+The v1 power rating (`handicapper_web.py:_power_rating`, raw season
+averages) is being replaced by a proper **opponent-adjusted, recency-
+weighted** engine so the bot's independent number actually has an opinion
+the market doesn't, instead of being a noisy season-average. Free data
+only (ESPN finals + MLB Stats API + Supabase). Phased:
+
+- **Phase 1 (built):** the foundation.
+  - `kahla-scanner/_lib/power_ratings.py` — the engine. Iterative adjusted
+    offense/defense (an SRS variant): each team gets `off` (points it'd
+    score vs a league-avg defense), `def` (points it'd allow vs a league-
+    avg offense), and `net = off − def` (expected margin vs an average team
+    on a neutral field), solved by repeatedly adjusting raw scoring for the
+    strength of opponents actually faced. Recent games weigh more (exp
+    half-life decay). `project(ratings, home, away, hfa)` → expected
+    home/away scores + margin + total; `margin_to_prob(margin, scale)` →
+    win prob. `SPORT_PARAMS` holds per-sport hfa/scale/half-life. Pure
+    Python (no numpy). Verified on synthetic unbalanced schedules — recovers
+    true strength + correct ranking where raw PPG can't.
+  - `kahla-scanner/supabase/power_ratings.sql` — DDL for `game_results`
+    (every completed game's final score, ESPN, dedup on (sport, espn_id))
+    + `power_ratings` (one jsonb snapshot row per sport per compute run).
+    **Run in Supabase SQL editor before the pipeline works.**
+  - `kahla-scanner/scripts/ingest_results.py` — pulls ESPN finals into
+    `game_results`. `--days N` backfills a season. Idempotent upsert.
+  - `kahla-scanner/scripts/compute_power_ratings.py` — reads the window of
+    finals per sport, runs the engine, writes a `power_ratings` snapshot.
+- **Phase 2 (next):** MLB pitcher-aware scoring (blend the probable
+  starter's rate stats + bullpen + park factor into the run projection),
+  then wire `handicapper_web._power_rating` to PREFER the Supabase ratings
+  (silent fallback to v1 raw-stat model when absent). Sanity-check the
+  computed ratings before they touch sizing.
+- **Phase 3:** calibrate hfa/scale + margin→prob/cover from the season's
+  actual results (replace eyeballed `SPORT_PARAMS`); home/road splits, pace.
+- **Phase 4:** backtest the model vs ESPN finals AND closing lines; widen
+  the model's sizing cap (`MODEL_EDGE_CAP_PP`) only on sports/markets where
+  it provably beats the close (CLV).
+
+Not yet wired into `scanner-poll.yml` — needs a manual backfill + a
+ratings sanity-check first, then the cron steps get added.
+
 ### Stage 4 — self-tuning (deferred until ~14d of resolved data)
 
 Rolling 30-day per-signal hit-rate fed back into `combined_score` weights. `_splitsSubScore` and `_divergenceSubScore` (currently dormant in `templates/odds.html`) come into play here — the picker can blend additional signals once we have outcome data to grade their contribution. Also: CLV closed/settled history rollup (Phase 4 per the CLV section above).
