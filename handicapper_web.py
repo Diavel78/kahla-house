@@ -2899,6 +2899,20 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         except Exception as e:
             pmm_error = f"pmm lookup failed: {str(e)[:160]}"
             pmm_data = None
+        # Instrument the lookup outcome to Vercel runtime logs so a miss is
+        # diagnosable from the server side (no UI round-trip needed): which
+        # tag/window was used, how many events PMM returned, and their titles.
+        try:
+            _samples = " | ".join(
+                (pmm_diag.get("sample_event_titles") or [])[:5])
+            print(f"[pmm] {sport} {away}@{home} matched={bool(pmm_data)} "
+                  f"err={pmm_error!r} tag={pmm_diag.get('tag')!r} "
+                  f"win={pmm_diag.get('window_min')}..{pmm_diag.get('window_max')} "
+                  f"events={pmm_diag.get('events_returned')} "
+                  f"matched_title={pmm_diag.get('matched_title')!r} "
+                  f"samples=[{_samples}]")
+        except Exception:
+            pass
 
     # Attach PMM market info onto each odds[market_type] block so the
     # UI can render PMM line + bid/ask next to PIN fair, plus the
