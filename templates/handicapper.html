@@ -1384,7 +1384,7 @@
                 ${edgeFrag}
                 <div class="wx-foot">${p.source === 'v2-adjusted'
                     ? `opponent-adjusted${p.sp_adjusted ? ' + starting pitcher' : ''}${p.n_games != null ? ` · ${p.n_games} games` : ''}`
-                    : 'season-stats fallback (no opponent-adjusted ratings yet)'}</div>
+                    : 'season-stats fallback (no opponent-adjusted ratings yet)'}${p.feeds_sizing ? ' · feeds sizing' : ' · reference only (not backtest-validated for this sport)'}</div>
             </div>`;
         }
 

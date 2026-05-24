@@ -1539,16 +1539,26 @@ ML_CHALK_FAIR_CAP = -140
 KELLY_FRACTION       = 0.25     # quarter-Kelly — survives variance
 EDGE_PER_SHARP_POINT = 0.40     # pp of edge per point of sharp_score (≤4pp at 10)
 EDGE_PER_SPLITS_PP   = 0.10     # pp of edge per aligned money−bets pp (≤3pp at 30)
-# The power rating is the bot's INDEPENDENT number — the whole point of
-# not just riding PIN's coattails. It feeds sizing as a CAPPED
-# confirmation nudge when it agrees with the sharp side (never the sole
-# driver, never bets against itself). v1 is a crude season-stats
-# projection; the real opponent-adjusted, pitcher-aware engine is being
-# built (see kahla-scanner power-ratings pipeline). The cap (1.5pp) keeps
-# the crude version from doing damage while the good one comes online, and
-# CLV measures whether its calls actually beat the close so we can widen
-# the cap as it proves out.
+# The power rating is the bot's INDEPENDENT number. It feeds sizing as a
+# CAPPED confirmation nudge when it agrees with the sharp side — but ONLY
+# for sports where the walk-forward backtest showed real predictive signal
+# (scripts/backtest_power_ratings.py). Everywhere else the card still
+# renders (informative, pitcher-aware for MLB) but contributes 0 to the
+# edge, because an unvalidated model has no business sizing a bet.
+#
+# Backtest verdict (May 2026, ~900 games/sport):
+#   NBA   — 66.6% vs 54.1% baseline, Brier 0.215, calibration rises → SIGNAL
+#   CBB   — 66% vs 57.6%, Brier 0.235, but thin/noisy + off-season → hold
+#   MLB   — 52.5% vs 55.8% baseline, Brier 0.277, flat calibration → NOISE
+#           (team core can't predict baseball without the pitcher; the
+#            pitcher layer may rescue it but can't be backtested yet)
+#   NHL   — 55.6% vs 52.1%, Brier 0.256 (> coinflip), flat → too weak
+#   NFL/NCAAF — insufficient data (off-season)
+# Only NBA earns sizing today. MLB stays display-only until the pitcher-
+# aware version proves out via LIVE CLV (bucket bot_picks.clv_pp by
+# model-agree vs disagree); then add it here.
 MODEL_FEEDS_SIZING   = True
+MODEL_SIZING_SPORTS  = {"NBA"}  # sports whose model beat the backtest gate
 MODEL_EDGE_WEIGHT    = 0.25     # fraction of (model_prob − PIN_fair) credited
 MODEL_EDGE_CAP_PP    = 1.5      # cap on the nudge — widen as CLV proves the model
 EDGE_CAP_PP          = 6.0      # hard cap so a crude input can't blow up sizing
@@ -1828,9 +1838,13 @@ def _power_rating(sb, sport: str, team_compare: dict | None,
         v2 = _power_rating_v2(sb, sport, odds, away, home, pitchers)
     except Exception:
         v2 = None
-    if v2:
-        return v2
-    return _power_rating_v1(sport, team_compare, odds)
+    block = v2 or _power_rating_v1(sport, team_compare, odds)
+    if block is not None:
+        # Per-sport sizing gate: only sports that cleared the backtest
+        # feed the Kelly edge. Everywhere else the card still shows but
+        # contributes 0 (see MODEL_SIZING_SPORTS).
+        block["feeds_sizing"] = sport in MODEL_SIZING_SPORTS
+    return block
 
 
 def _model_edge_for_side(power: dict | None, market_type: str,
@@ -1838,10 +1852,11 @@ def _model_edge_for_side(power: dict | None, market_type: str,
     """Power-rating edge contribution for a candidate side, in fair-prob
     pp, credited only when the model AGREES with the side (confirmation
     bonus — we never let a crude model talk us INTO a side it dislikes,
-    and never bet harder against our own number). 0 when no model / no
-    agreement. Currently INERT (MODEL_FEEDS_SIZING=False) — the model is
-    a watch-only flag until CLV validates it; returns 0 regardless."""
-    if not power or not MODEL_FEEDS_SIZING:
+    and never bet harder against our own number). 0 when no model, no
+    agreement, or the sport hasn't cleared the backtest gate
+    (`power.feeds_sizing` — set per-sport in _power_rating). So MLB/NHL
+    models show on the card but contribute 0 to the edge."""
+    if not power or not MODEL_FEEDS_SIZING or not power.get("feeds_sizing"):
         return 0.0
     if market_type in ("moneyline", "spread"):
         e = power.get(f"edge_{side}_pp")

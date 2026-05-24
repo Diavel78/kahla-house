@@ -895,6 +895,20 @@ only (ESPN finals + MLB Stats API + Supabase). Phased:
   `bot_picks.clv_pp` bucketed by model-agree/disagree). Only widen
   `MODEL_EDGE_CAP_PP` past 1.5pp once the backtest + live CLV both say the
   model beats the close on a given sport/market.
+  - **First real run (May 2026, ~900 games/sport):** NBA 66.6% vs 54.1%
+    baseline / Brier 0.215 / rising calibration → SIGNAL. CBB 66% vs 57.6%
+    / Brier 0.235 but thin + noisy → hold. **MLB 52.5% vs 55.8% baseline /
+    Brier 0.277 / flat calibration → NOISE** (team core can't predict
+    baseball without the pitcher). NHL 55.6% vs 52.1% / Brier 0.256 → too
+    weak. NFL/NCAAF off-season (insufficient).
+  - **Per-sport sizing gate (shipped):** `MODEL_SIZING_SPORTS = {"NBA"}` in
+    `handicapper_web.py`. `_power_rating` stamps `feeds_sizing = sport in
+    MODEL_SIZING_SPORTS` on every block; `_model_edge_for_side` returns 0
+    unless that flag is set. So only NBA's model nudges Kelly today; MLB/
+    NHL/etc. still render the card (MLB pitcher-aware, informative) but
+    contribute 0 to the edge. Card footer shows "feeds sizing" vs
+    "reference only (not backtest-validated for this sport)". MLB earns
+    back in only when the pitcher-aware version proves out via live CLV.
 
 The ratings flow through the same capped (1.5pp) sizing nudge as v1, so
 even un-sanity-checked early ratings are bounded; widen the cap only after
