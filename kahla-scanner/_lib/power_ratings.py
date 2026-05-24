@@ -215,3 +215,57 @@ def margin_to_prob(margin: float, scale: float) -> float:
     except OverflowError:
         p = 1.0 if margin > 0 else 0.0
     return min(max(p, 0.01), 0.99)
+
+
+def calibrate(games: list[dict], ratings: dict,
+              fallback_hfa: float = 0.0,
+              fallback_scale: float = 1.0) -> dict | None:
+    """Fit HFA + logistic scale from the actual results, replacing the
+    eyeballed SPORT_PARAMS guesses.
+
+    HFA = the empirical mean home margin over the window (the real home
+    edge in this sport's run/point units). Scale = the value that
+    minimizes the Brier score of margin_to_prob(projected_margin, scale)
+    against actual home wins, grid-searched. Returns {hfa, scale, brier,
+    n} or None when too few gradable games. In-sample (one-param logistic
+    + an empirical mean — negligible overfit) but on the same opponent-
+    adjusted ratings the live projection uses, so it's the right mapping.
+    """
+    if not (games and ratings):
+        return None
+    # Empirical HFA = mean home margin.
+    margins = [float(g["home_score"]) - float(g["away_score"])
+               for g in games
+               if g.get("home_score") is not None and g.get("away_score") is not None]
+    if not margins:
+        return None
+    hfa = sum(margins) / len(margins)
+
+    # Build (model_margin, home_won) pairs from the ratings projection.
+    pairs: list[tuple[float, int]] = []
+    for g in games:
+        hs, as_ = g.get("home_score"), g.get("away_score")
+        if hs is None or as_ is None or hs == as_:
+            continue
+        proj = project(ratings, g["home"], g["away"], hfa=hfa)
+        if not proj:
+            continue
+        pairs.append((proj["margin"], 1 if float(hs) > float(as_) else 0))
+    if len(pairs) < 30:
+        return None
+
+    # Grid-search scale for minimum Brier. Wide grid covers run sports
+    # (~1-3) through point sports (~6-12).
+    best_scale, best_brier = fallback_scale, None
+    s = 0.5
+    while s <= 16.0:
+        b = sum((margin_to_prob(m, s) - w) ** 2 for m, w in pairs) / len(pairs)
+        if best_brier is None or b < best_brier:
+            best_brier, best_scale = b, s
+        s += 0.25
+    return {
+        "hfa":   round(hfa, 3),
+        "scale": round(best_scale, 2),
+        "brier": round(best_brier, 4),
+        "n":     len(pairs),
+    }

@@ -885,13 +885,19 @@ only (ESPN finals + MLB Stats API + Supabase). Phased:
     the TOTAL most (≈1.4-run Coors-vs-Petco swing on the same matchup) and
     lightly amplifies the margin. Block carries `park_factor`; card footer
     shows "+ park N". Free, static table, no calls.
+  - **HFA + scale calibration (built):** `power_ratings.calibrate(games,
+    ratings)` fits HFA = empirical mean home margin and the logistic
+    `scale` = the value minimizing Brier of `margin_to_prob` vs actual
+    home wins (grid-searched 0.5–16). `compute_power_ratings` calls it and
+    writes the fitted `hfa`/`scale` into the snapshot `params` (with
+    `calibrated`/`fit_brier`/`fit_n`); `_power_rating_v2` already reads
+    hfa/scale from params, so calibrated values flow automatically on the
+    next compute. Replaces the eyeballed `SPORT_PARAMS` guesses (those are
+    now just fallbacks). Verified on synthetic data: recovered true HFA +
+    a lower-Brier scale than the eyeballed default.
   - **Still TODO:** dedicated bullpen ERA (the SP blend's 0.4·team_def is
     an opponent-adjusted bullpen PROXY today — a true reliever-only split
-    needs a roster-split fetch, deferred); calibrate hfa/scale +
-    margin→prob/cover from actual results (NBA is already well-calibrated
-    at Brier 0.215 so low priority; MLB can't be const-calibrated into
-    signal — it needs the pitcher/park layers we're adding + live CLV);
-    home/road splits, pace.
+    needs a roster-split fetch, deferred); home/road splits, pace.
 - **Phase 4 (built — backtest harness):** `scripts/backtest_power_ratings.py`
   walk-forward replays the model on `game_results` (for each date, ratings
   from ONLY prior games → project → grade vs final). Reports per sport: ML

@@ -104,10 +104,21 @@ def main(argv: list[str] | None = None) -> int:
         if not ratings:
             log.info("compute %s: ratings came back empty — skipping", sport)
             continue
+        # Calibrate HFA + scale from the actual results, overriding the
+        # eyeballed SPORT_PARAMS defaults. v2 reads hfa/scale from params.
+        cal = pr.calibrate(games, ratings,
+                           fallback_hfa=params.get("hfa", 0.0),
+                           fallback_scale=params.get("scale", 1.0))
+        if cal:
+            params = {**params, "hfa": cal["hfa"], "scale": cal["scale"],
+                      "calibrated": True, "fit_brier": cal["brier"],
+                      "fit_n": cal["n"]}
         if _write_snapshot(sb, sport, ratings, params):
-            log.info("compute %s: %d teams from %d games (league_avg %.2f)",
+            cal_frag = (f" · fit hfa={cal['hfa']} scale={cal['scale']} "
+                        f"brier={cal['brier']}") if cal else " · uncalibrated"
+            log.info("compute %s: %d teams from %d games (league_avg %.2f)%s",
                      sport, len(ratings["teams"]), ratings["n_games"],
-                     ratings["league_avg"])
+                     ratings["league_avg"], cal_frag)
             done += 1
 
     log.info("compute_power_ratings done: %d sports rated", done)
