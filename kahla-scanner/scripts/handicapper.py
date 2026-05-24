@@ -783,6 +783,18 @@ def _espn_team_injuries(sport: str, team_id: str | None) -> list:
     return out
 
 
+def _espn_score_int(raw) -> int | None:
+    # ESPN's team-SCHEDULE endpoint returns competitor score as an object
+    # ({"value": 5.0, "displayValue": "5"}), not the plain string the
+    # scoreboard endpoint gives. Handle dict / str / number uniformly.
+    if isinstance(raw, dict):
+        raw = raw.get("value", raw.get("displayValue"))
+    try:
+        return int(float(raw))
+    except (ValueError, TypeError):
+        return None
+
+
 def _espn_team_recent(sport: str, team_id: str | None, n: int = 10) -> list:
     """Last N completed games for a team. Uses team schedule endpoint."""
     if not team_id:
@@ -816,10 +828,9 @@ def _espn_team_recent(sport: str, team_id: str | None, n: int = 10) -> list:
         opp = next((c for c in cs if (c.get("team") or {}).get("id") != team_id), None)
         if not (me and opp):
             continue
-        try:
-            me_score = int(me.get("score") or 0)
-            opp_score = int(opp.get("score") or 0)
-        except (ValueError, TypeError):
+        me_score = _espn_score_int(me.get("score"))
+        opp_score = _espn_score_int(opp.get("score"))
+        if me_score is None or opp_score is None:
             continue
         result = "W" if me_score > opp_score else ("L" if me_score < opp_score else "T")
         out.append({
