@@ -198,6 +198,11 @@
            which is gated to _canBet. */
         .game-row .pick-btn.logged { background: var(--green); }
         .game-row .pick-btn.logged:hover { background: #2ee06a; }
+        /* Lean: bot evaluated this in-window game and it's a lean/pass, not
+           a real pick — muted grey so it reads "skip." Blue stays "look."
+           Set only by the background verdict prefetch (admin/bot_access). */
+        .game-row .pick-btn.lean { background: #3a4150; color: var(--text-secondary); }
+        .game-row .pick-btn.lean:hover { background: #454d5e; }
         .games-empty { padding: 20px; text-align: center; font-size: 12px; color: var(--text-muted); }
 
         /* Ask form */
@@ -531,6 +536,18 @@
     // settled-today). Populated ONLY by loadData, which is gated to _canBet
     // — so for viewers this stays empty and Pick buttons never turn green.
     let _loggedMarketIds = new Set();
+    // Per-game bot VERDICT cache for the games list (admin/bot_access only).
+    // {market_id: {verdict:'pick'|'lean', fetchedAt}}. Filled by a throttled
+    // background prefetch of the SAME /api/handicapper/dossier call a click
+    // uses — so the button color reflects the FULL model verdict
+    // (gates_cleared = real pick vs lean), not a PIN-only shortcut. Only
+    // games inside the 2h window are evaluated. Cheap: cache-only dossier
+    // (no Odds API credits), free public data, server-cached.
+    let _currentGames = [];
+    let _verdictCache = new Map();
+    let _verdictInFlight = new Set();
+    const VERDICT_WINDOW_MS = 2 * 60 * 60 * 1000;   // 2h start window
+    const VERDICT_TTL_MS    = 5 * 60 * 1000;        // re-fetch stale verdicts
 
     firebase.auth().onAuthStateChanged(async user => {
         if (!user) { window.location.href = '/'; return; }
@@ -557,6 +574,10 @@
         if (_canBet) {
             loadData(true);
             setInterval(() => loadData(false), 60_000);
+            // Refresh in-window game verdicts every 5 min (matches the cron's
+            // odds cadence) so a sitting page picks up games crossing into the
+            // 2h window + verdicts flipping as lines move.
+            setInterval(_prefetchVerdicts, 5 * 60_000);
         }
         // Re-sort tabs every 5 min so off-season sports drop to the
         // right and games-publishing sports rise as their slates open.
@@ -900,6 +921,7 @@
             const data = await r.json();
             if (!data.ok) throw new Error(data.error || 'fetch failed');
             const games = data.games || [];
+            _currentGames = games;
             count.textContent = games.length;
             if (!games.length) {
                 list.innerHTML = '<li class="games-empty">No upcoming games for this sport.</li>';
@@ -914,6 +936,11 @@
                     <button class="pick-btn${logged ? ' logged' : ''}" data-mid="${_esc(g.market_id)}" onclick="pickGame('${g.market_id}')">${logged ? '✓ Pick' : 'Pick'}</button>
                 </li>`;
             }).join('');
+            // Apply cached verdict colors immediately (tab-switch-back), then
+            // kick off the background prefetch for any in-window game whose
+            // verdict is missing/stale.
+            _colorPickButtons();
+            _prefetchVerdicts();
         } catch (e) {
             list.innerHTML = `<li class="games-empty" style="color:var(--red)">Failed to load: ${_esc(String(e))}</li>`;
             count.textContent = '0';
@@ -926,12 +953,55 @@
     // set (or after a new pick is logged / deleted). Admin/bot_access only
     // — viewers never call loadData, so the set is empty and nothing turns
     // green here.
-    function _markLoggedGames() {
+    function _colorPickButtons() {
         document.querySelectorAll('#gamesList .pick-btn[data-mid]').forEach(btn => {
-            const logged = _canBet && _loggedMarketIds.has(btn.getAttribute('data-mid'));
-            btn.classList.toggle('logged', logged);
+            const mid = btn.getAttribute('data-mid');
+            const logged = _canBet && _loggedMarketIds.has(mid);
+            const v = (_canBet && !logged) ? _verdictCache.get(mid) : null;
+            btn.classList.toggle('logged', !!logged);          // green ✓ (wins)
+            btn.classList.toggle('lean', !!(v && v.verdict === 'lean'));  // grey
             btn.textContent = logged ? '✓ Pick' : 'Pick';
+            // verdict==='pick' (or unevaluated) → no class → default blue
         });
+    }
+
+    // Background prefetch of the real bot verdict for games inside the 2h
+    // window. Throttled to 2 concurrent, admin/bot_access only, cache-only
+    // dossier (no Odds API credits). Hits the SAME endpoint a click uses, so
+    // the color is the full model verdict (gates_cleared), identical to what
+    // you'd see opening the dossier. Failures leave the button at default.
+    async function _prefetchVerdicts() {
+        if (!_canBet) return;
+        const now = Date.now();
+        const due = (_currentGames || []).filter(g => {
+            const t = Date.parse(g.event_start);
+            if (isNaN(t)) return false;
+            const dt = t - now;
+            if (dt > VERDICT_WINDOW_MS || dt < -90 * 60 * 1000) return false;  // within 2h ahead, not long-past
+            if (_verdictInFlight.has(g.market_id)) return false;
+            const c = _verdictCache.get(g.market_id);
+            return !c || (now - c.fetchedAt) > VERDICT_TTL_MS;
+        });
+        if (!due.length) return;
+        const queue = due.slice();
+        const work = async () => {
+            while (queue.length) {
+                const g = queue.shift();
+                _verdictInFlight.add(g.market_id);
+                try {
+                    const r = await authFetch('/api/handicapper/dossier?market_id=' + encodeURIComponent(g.market_id));
+                    const d = await r.json();
+                    if (d && d.ok) {
+                        const sugg = d.suggestions || (d.suggestion ? [d.suggestion] : []);
+                        const isPick = sugg.some(s => s && s.gates_cleared);
+                        _verdictCache.set(g.market_id, { verdict: isPick ? 'pick' : 'lean', fetchedAt: Date.now() });
+                        _colorPickButtons();
+                    }
+                } catch (e) { /* leave default on failure */ }
+                finally { _verdictInFlight.delete(g.market_id); }
+            }
+        };
+        await Promise.all([work(), work()]);   // 2 at a time
     }
 
     // Tick the games-list kickoff countdowns every minute so "57m"
@@ -2054,7 +2124,7 @@
             // upcoming game). Then re-color any already-rendered buttons.
             _loggedMarketIds = new Set();
             [...pending, ...settled].forEach(r => { if (r.market_id) _loggedMarketIds.add(r.market_id); });
-            _markLoggedGames();
+            _colorPickButtons();
             document.getElementById('pendingCount').textContent = pending.length;
             document.getElementById('settledCount').textContent = settled.length;
             document.getElementById('pendingList').innerHTML = pending.length
