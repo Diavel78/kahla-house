@@ -920,7 +920,16 @@
             const r = await authFetch('/api/handicapper/games?sport=' + encodeURIComponent(_activeSport));
             const data = await r.json();
             if (!data.ok) throw new Error(data.error || 'fetch failed');
-            const games = data.games || [];
+            // Pre-game only: drop any game that's already started. The API
+            // window starts at now, but client/server clock skew (or a
+            // game tipping off between fetch and render) can leak a live
+            // one through — filter defensively so the list never shows a
+            // game you can't pre-game bet.
+            const now = Date.now();
+            const games = (data.games || []).filter(g => {
+                const t = Date.parse(g.event_start);
+                return isNaN(t) || t > now;
+            });
             _currentGames = games;
             count.textContent = games.length;
             if (!games.length) {
@@ -1011,12 +1020,30 @@
     // credit cost. The 5-min _refreshSportTabOrder still handles
     // re-sorting + picking up newly-published games.
     function _tickKickoffs() {
+        const now = Date.now();
+        let removed = false;
         document.querySelectorAll('#gamesList .when[data-start]').forEach(el => {
             const iso = el.getAttribute('data-start');
             if (!iso) return;
+            // A game that tips off while the list is open drops out — it's
+            // live now and can't be pre-game bet. Removes the row without
+            // waiting for the 5-min re-fetch.
+            const t = Date.parse(iso);
+            if (!isNaN(t) && t <= now) {
+                const row = el.closest('.game-row');
+                if (row) { row.remove(); removed = true; }
+                return;
+            }
             el.textContent = _fmtKickoff(iso);
             el.className = 'when ' + _kickoffTier(iso);
         });
+        if (removed) {
+            const list = document.getElementById('gamesList');
+            const count = document.getElementById('gamesCount');
+            const remaining = list.querySelectorAll('.game-row').length;
+            if (count) count.textContent = remaining;
+            if (!remaining) list.innerHTML = '<li class="games-empty">No upcoming games for this sport.</li>';
+        }
     }
 
     async function pickGame(marketId) {

@@ -4022,8 +4022,9 @@ def api_handicapper_games():
     Auth: any approved user (viewers included). The list is just
     upcoming game metadata; no logged-pick data is exposed.
 
-    Window: events starting in the next 48h (and within the last 90 min,
-    so a late-asked-about live game still appears). Sorted by event_start.
+    Window: events starting from now through the next 48h. Live/done
+    games (event_start already passed) are excluded — you can't make a
+    pre-game pick on a game that's underway. Sorted by event_start.
 
     Lightweight: only event_name + start time + ids. The dossier (with
     odds, splits, injuries) is fetched on click via /api/handicapper/dossier."""
@@ -4035,7 +4036,7 @@ def api_handicapper_games():
         return jsonify({"ok": False, "error": "missing sport param"}), 400
 
     now = datetime.now(timezone.utc)
-    after  = (now - timedelta(minutes=90)).isoformat()
+    after  = now.isoformat()
     before = (now + timedelta(hours=48)).isoformat()
     try:
         rows = (sb.table("markets")
@@ -4054,7 +4055,7 @@ def api_handicapper_games():
     # that set — but the in_(market_ids) query had a hard 5000-row
     # cap, which truncated on busy sports and silently disappeared
     # real games from the list. The event_start window already
-    # excludes anything older than 90 min, so phantoms (markets
+    # excludes anything that's already started, so phantoms (markets
     # nobody ever quoted) are rare. Clicking one just yields a
     # "no data" dossier, not a crash.
 
@@ -4162,8 +4163,8 @@ def api_handicapper_sport_counts():
     """One-shot count of upcoming games per sport. Powers the
     /handicapper page's dynamic sport-tab ordering — sports with the
     most games go left, off-season sports drop to the right. Same
-    pre-game window as /api/handicapper/games (last 90 min through
-    next 48h).
+    pre-game window as /api/handicapper/games (now through next 48h;
+    live/done games excluded).
 
     Returns: {ok: True, counts: {MLB: 15, NBA: 0, ...}}
     """
@@ -4171,7 +4172,7 @@ def api_handicapper_sport_counts():
     if sb is None:
         return jsonify({"ok": False, "error": "Supabase not configured"}), 503
     now = datetime.now(timezone.utc)
-    after  = (now - timedelta(minutes=90)).isoformat()
+    after  = now.isoformat()
     before = (now + timedelta(hours=48)).isoformat()
     try:
         rows = (sb.table("markets")
