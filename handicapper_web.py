@@ -1725,8 +1725,15 @@ def _pr_find_team(ratings: dict, name: str | None) -> dict | None:
 # dominate — a full-season workload trusts the ERA, a sliver regresses
 # most of the way back to average.
 _SP_INNINGS_SHARE = 0.6
-_SP_IP_REGRESS    = 45.0          # innings at which ERA gets ~half its weight
+_SP_IP_REGRESS    = 45.0          # innings at which the rate gets ~half its weight
 _SP_ERA_CLAMP     = (1.5, 8.0)    # sane bounds on a starter's runs/9
+# FIP (fielding-independent pitching) is built only from K / BB / HR — the
+# outcomes a pitcher controls — so it predicts future run prevention
+# better than past ERA and stabilizes much faster on small samples (it
+# strips out defense + sequencing luck). We blend it with ERA as the
+# starter's true-talent run rate. Constant ~3.15 puts FIP on the ERA scale.
+_FIP_CONSTANT = 3.15
+_FIP_WEIGHT   = 0.6               # FIP favored over ERA (more predictive)
 
 
 def _ip_to_float(ip) -> float | None:
@@ -1745,18 +1752,37 @@ def _ip_to_float(ip) -> float | None:
         return None
 
 
+def _fip(pitcher: dict | None) -> float | None:
+    """Fielding-independent pitching from the starter's per-9 peripherals
+    (which the dossier already fetches). FIP = (13·HR9 + 3·BB9 − 2·K9)/9 +
+    constant. None when any peripheral is missing."""
+    if not pitcher:
+        return None
+    k9 = _to_float(pitcher.get("k_per_9"))
+    bb9 = _to_float(pitcher.get("bb_per_9"))
+    hr9 = _to_float(pitcher.get("hr_per_9"))
+    if None in (k9, bb9, hr9):
+        return None
+    return (13.0 * hr9 + 3.0 * bb9 - 2.0 * k9) / 9.0 + _FIP_CONSTANT
+
+
 def _starter_runs(pitcher: dict | None, league_pitch: float) -> float | None:
-    """A starter's expected runs-allowed-per-9, ERA regressed toward the
-    league baseline by innings pitched. None when no usable ERA."""
+    """A starter's expected runs-allowed-per-9: a FIP/ERA talent blend
+    regressed toward the league baseline by innings pitched. FIP leads
+    (more predictive, stabilizes faster) but falls back to ERA when the
+    peripherals are missing. None when there's no usable ERA."""
     if not pitcher:
         return None
     era = _to_float(pitcher.get("era"))
     if era is None:
         return None
-    era = min(max(era, _SP_ERA_CLAMP[0]), _SP_ERA_CLAMP[1])
+    clamp = lambda v: min(max(v, _SP_ERA_CLAMP[0]), _SP_ERA_CLAMP[1])
+    era = clamp(era)
+    fip = _fip(pitcher)
+    talent = clamp(_FIP_WEIGHT * fip + (1.0 - _FIP_WEIGHT) * era) if fip is not None else era
     ip = _ip_to_float(pitcher.get("ip")) or 0.0
     reliability = ip / (ip + _SP_IP_REGRESS)
-    return reliability * era + (1.0 - reliability) * league_pitch
+    return reliability * talent + (1.0 - reliability) * league_pitch
 
 
 # MLB park run factors — environment multiplier on projected scoring

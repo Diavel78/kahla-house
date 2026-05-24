@@ -868,10 +868,15 @@ only (ESPN finals + MLB Stats API + Supabase). Phased:
   - **MLB pitcher-aware (built):** `_power_rating_v2` blends the
     opponent's team `def` rating with TONIGHT's starting pitcher on the
     runs scale — `def_eff = 0.6·starter_runs + 0.4·team_def` (starter ≈ 6
-    of 9 innings). `_starter_runs` regresses the starter's ERA toward
+    of 9 innings). `_starter_runs` uses a FIP/ERA talent blend
+    (`_fip` = (13·HR9 + 3·BB9 − 2·K9)/9 + 3.15 from the peripherals the
+    dossier already fetches; `_FIP_WEIGHT = 0.6` favors FIP as more
+    predictive + faster-stabilizing — it sees through ERA noise like a
+    low-WHIP pitcher with an inflated ERA), then regresses that toward
     league average by innings pitched (`_SP_IP_REGRESS = 45`) so a tiny
     early-season/just-recalled sample doesn't dominate (e.g. a 5-IP 5.40
-    barely moves; a 51-IP 2.98 counts). `_ip_to_float` parses MLB's
+    barely moves; a 51-IP 2.98 counts). Falls back to ERA-only when
+    peripherals are missing. `_ip_to_float` parses MLB's
     ballpark IP notation ('51.1' = 51⅓). Pitchers come from the dossier's
     existing `probable_pitchers` (no new fetch). Block carries
     `sp_adjusted` + the per-side starter runs; card footer shows "+
