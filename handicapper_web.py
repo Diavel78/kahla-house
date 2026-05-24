@@ -1554,11 +1554,17 @@ EDGE_PER_SPLITS_PP   = 0.10     # pp of edge per aligned money−bets pp (≤3pp
 #            pitcher layer may rescue it but can't be backtested yet)
 #   NHL   — 55.6% vs 52.1%, Brier 0.256 (> coinflip), flat → too weak
 #   NFL/NCAAF — insufficient data (off-season)
-# Only NBA earns sizing today. MLB stays display-only until the pitcher-
-# aware version proves out via LIVE CLV (bucket bot_picks.clv_pp by
-# model-agree vs disagree); then add it here.
+#
+# CRUCIAL: the backtest is TEAM-RATINGS ONLY — it can't include the MLB
+# starting pitcher (no historical probables stored). The LIVE MLB model
+# IS pitcher-aware (Phase 2b), so the "MLB = noise" verdict judges a model
+# we don't actually run. MLB is therefore UNTESTED, not disproven — so we
+# leave it ON (the 1.5pp cap bounds the risk) and judge the pitcher-aware
+# version via LIVE CLV bucketed by model-agree/disagree over ~2 weeks.
+# NHL stays OFF: it has no pitcher layer, so the backtest DOES fairly
+# represent its live model, and it was weak. NBA stays ON (proven).
 MODEL_FEEDS_SIZING   = True
-MODEL_SIZING_SPORTS  = {"NBA"}  # sports whose model beat the backtest gate
+MODEL_SIZING_SPORTS  = {"NBA", "MLB"}  # NBA backtest-proven; MLB pitcher-aware, CLV-pending
 MODEL_EDGE_WEIGHT    = 0.25     # fraction of (model_prob − PIN_fair) credited
 MODEL_EDGE_CAP_PP    = 1.5      # cap on the nudge — widen as CLV proves the model
 EDGE_CAP_PP          = 6.0      # hard cap so a crude input can't blow up sizing

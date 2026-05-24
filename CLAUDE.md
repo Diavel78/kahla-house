@@ -901,14 +901,24 @@ only (ESPN finals + MLB Stats API + Supabase). Phased:
     Brier 0.277 / flat calibration → NOISE** (team core can't predict
     baseball without the pitcher). NHL 55.6% vs 52.1% / Brier 0.256 → too
     weak. NFL/NCAAF off-season (insufficient).
-  - **Per-sport sizing gate (shipped):** `MODEL_SIZING_SPORTS = {"NBA"}` in
-    `handicapper_web.py`. `_power_rating` stamps `feeds_sizing = sport in
-    MODEL_SIZING_SPORTS` on every block; `_model_edge_for_side` returns 0
-    unless that flag is set. So only NBA's model nudges Kelly today; MLB/
-    NHL/etc. still render the card (MLB pitcher-aware, informative) but
-    contribute 0 to the edge. Card footer shows "feeds sizing" vs
-    "reference only (not backtest-validated for this sport)". MLB earns
-    back in only when the pitcher-aware version proves out via live CLV.
+  - **Per-sport sizing gate (shipped):** `MODEL_SIZING_SPORTS = {"NBA",
+    "MLB"}` in `handicapper_web.py`. `_power_rating` stamps `feeds_sizing =
+    sport in MODEL_SIZING_SPORTS`; `_model_edge_for_side` returns 0 unless
+    set. NBA is backtest-proven. **MLB is included despite the team-core
+    backtest reading as noise — because the backtest CAN'T see the starting
+    pitcher and the live MLB model IS pitcher-aware, so MLB is *untested*,
+    not disproven.** It rides the 1.5pp cap (bounded risk) and gets judged
+    via LIVE CLV over ~2 weeks. **NHL stays OFF** on purpose: no pitcher
+    layer means the backtest fairly represents its live model, and it was
+    weak. Card footer shows "feeds sizing" vs "reference only".
+  - **Review instrumentation (shipped):** every web-logged pick now stores
+    `signal_blob.model = {source, feeds_sizing, sp_adjusted, n_games,
+    edge_pp, agree}` for the picked side (in `templates/handicapper.html`
+    submitLog). So the 2-week MLB review = bucket settled `bot_picks` by
+    `signal_blob.model.agree` and compare `clv_pp` / win-rate / pnl. If
+    model-agree picks beat model-disagree (and beat the close), the
+    pitcher-aware MLB model earns a wider cap; if not, drop MLB from
+    `MODEL_SIZING_SPORTS`.
 
 The ratings flow through the same capped (1.5pp) sizing nudge as v1, so
 even un-sanity-checked early ratings are bounded; widen the cap only after

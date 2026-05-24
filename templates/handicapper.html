@@ -1917,6 +1917,35 @@
             analysis_md: analysis || null,
             reasons:     reasons.length ? reasons : null,
             query_text:  (_lastDossier && _lastDossier.query) || null,
+            // Capture the power model's read on this side so we can later
+            // bucket CLV by whether the model agreed (the 2-week MLB
+            // pitcher-aware validation). `agree`/`edge_pp` are the keys
+            // that matter; for totals edge_pp is the signed run gap.
+            signal_blob: (function () {
+                const pr = _lastDossier && _lastDossier.power_rating;
+                if (!pr) return null;
+                let me = null;
+                if (_pendingPick.market_type === 'total') {
+                    if (pr.total_lean != null && pr.total_diff != null) {
+                        me = (pr.total_lean === _pendingPick.side)
+                            ? Math.abs(pr.total_diff) : -Math.abs(pr.total_diff);
+                    }
+                } else {
+                    me = (_pendingPick.side === 'home') ? pr.edge_home_pp : pr.edge_away_pp;
+                }
+                return {
+                    model: {
+                        source:       pr.source || null,
+                        feeds_sizing: !!pr.feeds_sizing,
+                        sp_adjusted:  !!pr.sp_adjusted,
+                        n_games:      pr.n_games ?? null,
+                        edge_pp:      (me != null ? me : null),
+                        agree:        (me != null ? me > 0 : null),
+                    },
+                    sharp_score: _pendingPick.sharp_score ?? null,
+                    edge_pp:     _pendingPick.edge_pp ?? null,
+                };
+            })(),
             // Web-side click = explicit user intent. Skip the
             // 7-day dedup gate, which exists to protect the chat
             // flow from double-logs on a refresh / repeat ask.
