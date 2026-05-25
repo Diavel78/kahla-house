@@ -1149,7 +1149,7 @@ def _team_block(comp_team: dict | None) -> dict:
     }
 
 
-def _espn_team_injuries(sport: str, team_id: str | None) -> list:
+def _espn_team_injuries(sport: str, team_id: str | None, diag: dict | None = None) -> list:
     if not team_id:
         return []
     pair = _ESPN_PATH.get(sport)
@@ -1160,22 +1160,23 @@ def _espn_team_injuries(sport: str, team_id: str | None) -> list:
            f"{grp}/{lg}/teams/{team_id}/injuries")
     status = None
     data = None
+    body_snip = None
     try:
         r = requests.get(url, timeout=HTTP_TIMEOUT,
                          headers={"User-Agent": "Mozilla/5.0"})
         status = r.status_code
         if status == 200:
             data = r.json()
+        else:
+            body_snip = (r.text or "")[:200]
     except Exception as e:
         log.warning("ESPN injuries %s %s failed: %s", sport, team_id, e)
-    # Log BEFORE any early return so a failed fetch (non-200 / network) is
-    # visible in Vercel logs — an empty result could be a fetch failure OR
-    # a parse-key mismatch, and only the status + raw keys disambiguate.
-    try:
-        print(f"[inj] {sport} team={team_id} status={status} "
-              f"keys={list((data or {}).keys())[:8]}")
-    except Exception:
-        pass
+        body_snip = f"exc: {str(e)[:160]}"
+    if diag is not None:
+        diag["status"] = status
+        diag["keys"] = list((data or {}).keys())[:8]
+        if body_snip:
+            diag["body"] = body_snip
     if not data:
         return []
     # ESPN's injuries endpoint shape varies by host/sport: sometimes a
@@ -1196,13 +1197,9 @@ def _espn_team_injuries(sport: str, team_id: str | None) -> list:
             records.extend(x for x in el["injuries"] if isinstance(x, dict))
         else:
             records.append(el)
-    # One-line diagnostic so an empty result is debuggable from Vercel
-    # logs without a UI round-trip (which ESPN key was present + count).
-    try:
-        print(f"[inj] {sport} team={team_id} keys={list(data.keys())[:6]} "
-              f"raw={len(raw or [])} records={len(records)}")
-    except Exception:
-        pass
+    if diag is not None:
+        diag["raw_len"] = len(raw or [])
+        diag["records"] = len(records)
     out = []
     for it in records[:25]:
         ath = it.get("athlete") or {}
@@ -2970,8 +2967,10 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         if m:
             home_t = _team_block(m["home"])
             away_t = _team_block(m["away"])
-            home_t["injuries"] = _espn_team_injuries(sport, home_t.get("id"))
-            away_t["injuries"] = _espn_team_injuries(sport, away_t.get("id"))
+            _inj_dbg_h: dict = {}
+            _inj_dbg_a: dict = {}
+            home_t["injuries"] = _espn_team_injuries(sport, home_t.get("id"), diag=_inj_dbg_h)
+            away_t["injuries"] = _espn_team_injuries(sport, away_t.get("id"), diag=_inj_dbg_a)
             home_t["recent"]   = _espn_team_recent(sport, home_t.get("id"))
             away_t["recent"]   = _espn_team_recent(sport, away_t.get("id"))
             comp = (m["event"].get("competitions") or [{}])[0]
@@ -2980,6 +2979,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
                 "broadcasts": [b.get("names") for b in comp.get("broadcasts") or [] if b.get("names")],
                 "home":       home_t,
                 "away":       away_t,
+                "inj_debug":  {"home": _inj_dbg_h, "away": _inj_dbg_a},
             }
 
     mlb_extra = {}
