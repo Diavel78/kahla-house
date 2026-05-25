@@ -707,8 +707,13 @@ def _espn_scoreboard(sport: str, date_yyyymmdd: str) -> list:
 
 def _espn_match_event(events: list, away: str, home: str,
                       bet_start: datetime | None) -> dict | None:
-    """Two-way substring + ±90min match (mirrors paper_bets_resolver)."""
-    away_n, home_n = away.lower(), home.lower()
+    """Two-way substring + ±90min match (mirrors paper_bets_resolver).
+    Accents stripped so "Montréal Canadiens" matches ESPN's "Montreal"."""
+    import unicodedata
+    def _na(s: str) -> str:
+        return "".join(c for c in unicodedata.normalize("NFKD", s or "")
+                       if unicodedata.category(c) != "Mn").lower()
+    away_n, home_n = _na(away), _na(home)
     for g in events:
         comp = (g.get("competitions") or [{}])[0]
         cs = comp.get("competitors") or []
@@ -716,8 +721,8 @@ def _espn_match_event(events: list, away: str, home: str,
             continue
         h = next((c for c in cs if c.get("homeAway") == "home"), cs[0])
         a = next((c for c in cs if c.get("homeAway") == "away"), cs[1])
-        h_name = ((h.get("team") or {}).get("displayName") or "").lower()
-        a_name = ((a.get("team") or {}).get("displayName") or "").lower()
+        h_name = _na((h.get("team") or {}).get("displayName") or "")
+        a_name = _na((a.get("team") or {}).get("displayName") or "")
         if not h_name or not a_name:
             continue
         if not ((home_n in h_name or h_name in home_n) and
