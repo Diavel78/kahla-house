@@ -1357,14 +1357,19 @@ def _mlb_posted_lineup(game_pk) -> dict | None:
     teams = data.get("teams") or {}
     out: dict = {}
     for side in ("home", "away"):
-        names = set()
+        batters: set = set()
+        pitchers: set = set()
         for p in ((teams.get(side) or {}).get("players") or {}).values():
-            if p.get("battingOrder"):     # only starters carry a batting order
-                nm = ((p.get("person") or {}).get("fullName") or "").lower()
-                if nm:
-                    names.add(nm)
-        if names:
-            out[side] = names
+            nm = ((p.get("person") or {}).get("fullName") or "").lower()
+            if not nm:
+                continue
+            pos = ((p.get("position") or {}).get("abbreviation") or "").upper()
+            if pos == "P":
+                pitchers.add(nm)        # pitchers never bat (DH era) — exclude
+            if p.get("battingOrder"):   # only starters carry a batting order
+                batters.add(nm)
+        if batters:
+            out[side] = {"batters": batters, "pitchers": pitchers}
     return out or None
 
 
@@ -1389,7 +1394,11 @@ def _mlb_hitting_leaders(team_id, season: int, limit: int = 4) -> list:
 
 def _mlb_lineup_dock(game_pk, away_id, home_id, season: int) -> dict | None:
     """Dock projected runs for top-OPS regulars absent from the posted
-    lineup. None when no lineup posted / nobody material is missing."""
+    lineup. None when no lineup posted / nobody material is missing.
+
+    Pitchers are excluded: they don't bat in the DH era, so a starter
+    who isn't pitching today (normal rotation) must never count as a
+    resting hitter — that was docking runs for the whole rotation."""
     lineup = _mlb_posted_lineup(game_pk)
     if not lineup:
         return None
@@ -1399,9 +1408,13 @@ def _mlb_lineup_dock(game_pk, away_id, home_id, season: int) -> dict | None:
         present = lineup.get(side)
         miss = []
         if present:
+            batters = present["batters"]
+            pitchers = present["pitchers"]
             for full in _mlb_hitting_leaders(tid, season):
                 ln = full.lower()
-                if not any(ln in p or p in ln for p in present):
+                in_lineup = any(ln in p or p in ln for p in batters)
+                is_pitcher = any(ln in p or p in ln for p in pitchers)
+                if not in_lineup and not is_pitcher:
                     miss.append(full)
         dock[side] = round(min(len(miss) * _MLB_REST_RUNS, _MLB_REST_MAX), 2)
         notes[side] = miss
