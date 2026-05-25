@@ -10,6 +10,8 @@
 
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <!-- html2canvas: rasterizes the bet-slip modal to a PNG for sharing -->
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
     <script>
         const FC = {
             apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
@@ -362,6 +364,38 @@
             .teams-grid { grid-template-columns: 1fr; }
             .ask-row { flex-direction: column; }
         }
+
+        /* --- Bet Slip modal (mirrors the Dashboard betslip, fed by bot_picks) --- */
+        .betslip-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 1000; justify-content: center; align-items: center; backdrop-filter: blur(6px); }
+        .betslip-overlay.open { display: flex; }
+        .betslip { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; width: 460px; max-width: 92vw; max-height: 85vh; overflow-y: auto; box-shadow: 0 24px 64px rgba(0,0,0,0.5); }
+        .betslip-header { padding: 22px 24px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+        .betslip-header h2 { font-size: 16px; font-weight: 700; color: var(--text); letter-spacing: 1.5px; font-family: 'JetBrains Mono', monospace; margin: 0; }
+        .betslip-date { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+        .betslip-actions { display: flex; align-items: center; gap: 8px; }
+        .betslip-share { background: var(--surface-2); border: 1px solid var(--border); color: var(--text); font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; padding: 6px 12px; border-radius: 8px; cursor: pointer; transition: all 0.15s; }
+        .betslip-share:hover { background: var(--blue-dim); border-color: var(--blue); }
+        .betslip-share:disabled { opacity: 0.5; cursor: wait; }
+        .betslip-close { background: none; border: none; color: var(--text-muted); font-size: 22px; cursor: pointer; padding: 4px 8px; border-radius: 8px; line-height: 1; transition: all 0.15s; }
+        .betslip-close:hover { background: var(--surface-2); color: var(--text); }
+        .betslip.capturing { max-height: none !important; overflow: visible !important; }
+        .betslip-body { padding: 8px 0; }
+        .betslip-item { padding: 13px 24px; border-bottom: 1px solid rgba(30,37,48,0.5); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+        .betslip-item:last-child { border-bottom: none; }
+        .betslip-market { font-size: 14px; font-weight: 600; color: var(--text); flex: 1; min-width: 0; }
+        .betslip-market .bs-sub { display: block; font-size: 11px; font-weight: 600; color: var(--text-muted); margin-top: 3px; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.03em; }
+        .betslip-odds { font-size: 16px; font-weight: 700; font-family: 'JetBrains Mono', monospace; white-space: nowrap; padding: 6px 12px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border); }
+        .betslip-odds.fav { color: var(--orange); }
+        .betslip-odds.dog { color: var(--blue); }
+        .betslip-result { font-size: 13px; font-weight: 700; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.5px; white-space: nowrap; padding: 6px 12px; border-radius: 8px; min-width: 44px; text-align: center; }
+        .betslip-result.won  { color: var(--green); background: var(--green-dim); border: 1px solid rgba(34,197,94,0.35); }
+        .betslip-result.lost { color: var(--red); background: var(--red-dim); border: 1px solid rgba(239,68,68,0.35); }
+        .betslip-result.push { color: var(--text-muted); background: var(--surface-2); border: 1px solid var(--border); }
+        .betslip-section-label { padding: 12px 24px 6px; font-size: 10px; font-weight: 700; letter-spacing: 1.2px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; text-transform: uppercase; }
+        .betslip-footer { padding: 14px 24px 18px; border-top: 1px solid var(--border); text-align: center; }
+        .betslip-footer span { font-size: 11px; color: var(--text-muted); letter-spacing: 1px; font-family: 'JetBrains Mono', monospace; font-weight: 600; }
+        .betslip-empty { padding: 36px 24px; text-align: center; color: var(--text-muted); font-size: 14px; }
+        .betslip-btn { background: linear-gradient(135deg, var(--orange), #d97706); color: var(--bg); border: none; font-weight: 700; font-size: 12px; letter-spacing: 0.3px; padding: 6px 12px; border-radius: 8px; cursor: pointer; font-family: inherit; }
     </style>
 </head>
 <body>
@@ -381,6 +415,7 @@
             <div class="top-bar-row" style="justify-content:flex-end">
                 <div class="top-bar-right">
                     <span class="status" id="status">Loading…</span>
+                    <button class="betslip-btn" id="betslipBtn" onclick="openBetSlip()">Bet Slip</button>
                     <button class="refresh-btn" onclick="loadData(true)">Refresh</button>
                     <button class="logout-btn" onclick="doLogout()">Logout</button>
                 </div>
@@ -466,6 +501,29 @@
                 <div class="section-title">Settled today <span class="count" id="settledCount">0</span></div>
                 <ul class="picks" id="settledList"></ul>
             </div>
+        </div>
+    </div>
+
+    <!-- Bet Slip modal — sportsbook-ticket view of the bot's logged
+         picks (pending + settled today), shareable as a PNG. Same layout
+         as the Dashboard betslip, but fed by bot_picks instead of the
+         Polymarket SDK. -->
+    <div class="betslip-overlay" id="betslip-overlay" onclick="closeBetSlipOutside(event)">
+        <div class="betslip" id="betslip">
+            <div class="betslip-header">
+                <div>
+                    <h2>PICK BOT</h2>
+                    <div class="betslip-date" id="betslip-date"></div>
+                </div>
+                <div class="betslip-actions">
+                    <button class="betslip-share" id="betslip-share-btn" onclick="shareBetSlip()" title="Save / share as image">Share</button>
+                    <button class="betslip-close" onclick="closeBetSlip()">&times;</button>
+                </div>
+            </div>
+            <div class="betslip-body" id="betslip-body">
+                <div class="betslip-empty">No picks</div>
+            </div>
+            <div class="betslip-footer"><span id="betslip-footer-text"></span></div>
         </div>
     </div>
 
@@ -597,8 +655,11 @@
         // Hide stats card + confidence tier strip
         ['overallStats', 'confStrip', 'pendingSection', 'settledSection']
             .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
-        // Hide the Refresh button — it's for stats only
+        // Hide the Refresh + Bet Slip buttons — both are pick/stats
+        // surfaces, irrelevant to view-only viewers (who can't log picks).
         document.querySelectorAll('.refresh-btn').forEach(b => b.style.display = 'none');
+        const bsBtn = document.getElementById('betslipBtn');
+        if (bsBtn) bsBtn.style.display = 'none';
         // Hide the status pill — it only ever shows the resolver heartbeat,
         // which loadData (gated to _canBet) populates. Viewers never call
         // loadData, so it would otherwise sit on "Loading…" forever.
@@ -2150,6 +2211,148 @@
         }
     }
 
+    // ── Bet Slip ──────────────────────────────────────────────────────
+    // Sportsbook-ticket view of the bot's logged picks, fed by the same
+    // bot_picks data loadData already fetched (NOT the Polymarket SDK).
+    // Pending picks + today's settled, shareable as a PNG.
+    let _lastPending = [];
+    let _lastSettled = [];
+    let _lastStatsToday = null;
+
+    function _betslipLabel(r) {
+        // "Cubs @ Pirates" main line + "TOTAL · UNDER 8.5 @ -109" sub.
+        const game = (r.event_name || '').trim();
+        const market = _shortMarket(r.market_type);
+        const sideLabel = (r.market_type === 'total')
+            ? (r.side || '').toUpperCase()
+            : (r.side === 'home' ? 'HOME' : 'AWAY');
+        const ln = (r.entry_line == null) ? '' : ` ${_fmtPt(r.entry_line)}`;
+        const units = (r.units != null) ? ` · ${r.units}u` : '';
+        return { game, sub: `${market} · ${sideLabel}${ln}${units}` };
+    }
+
+    function openBetSlip() {
+        const overlay = document.getElementById('betslip-overlay');
+        const body = document.getElementById('betslip-body');
+        const dateEl = document.getElementById('betslip-date');
+        const footer = document.getElementById('betslip-footer-text');
+        const now = new Date();
+        dateEl.textContent = now.toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' });
+
+        const pending = _lastPending || [];
+        const settled = _lastSettled || [];
+
+        if (!pending.length && !settled.length) {
+            body.innerHTML = '<div class="betslip-empty">No picks logged</div>';
+        } else {
+            let html = '';
+            if (pending.length) {
+                html += '<div class="betslip-section-label">Pending</div>';
+                for (const r of pending) {
+                    const { game, sub } = _betslipLabel(r);
+                    const odds = r.entry_price;
+                    const oddsCls = (odds != null) ? (odds < 0 ? 'fav' : 'dog') : '';
+                    html += `<div class="betslip-item">
+                        <div class="betslip-market">${_esc(game)}<span class="bs-sub">${_esc(sub)}</span></div>
+                        <div class="betslip-odds ${oddsCls}">${_fmtAmer(odds)}</div>
+                    </div>`;
+                }
+            }
+            if (settled.length) {
+                html += '<div class="betslip-section-label">Settled Today</div>';
+                for (const r of settled) {
+                    const { game, sub } = _betslipLabel(r);
+                    const odds = r.entry_price;
+                    const oddsCls = (odds != null) ? (odds < 0 ? 'fav' : 'dog') : '';
+                    const st = (r.status || '').toLowerCase();
+                    const resultCls = (st === 'won') ? 'won' : (st === 'lost' ? 'lost' : 'push');
+                    const resultLabel = st === 'won' ? 'W' : (st === 'lost' ? 'L' : 'PUSH');
+                    const oddsCell = (odds != null)
+                        ? `<div class="betslip-odds ${oddsCls}" style="margin-right:8px">${_fmtAmer(odds)}</div>` : '';
+                    html += `<div class="betslip-item">
+                        <div class="betslip-market">${_esc(game)}<span class="bs-sub">${_esc(sub)} · ${_fmtPnl(r.pnl_units)}</span></div>
+                        <div style="display:flex;align-items:center;gap:0">
+                            ${oddsCell}
+                            <div class="betslip-result ${resultCls}">${resultLabel}</div>
+                        </div>
+                    </div>`;
+                }
+            }
+            body.innerHTML = html;
+        }
+
+        // Footer: today's record + net units (won-lost-push · ±Nu).
+        const s = _lastStatsToday;
+        if (s && (s.graded || pending.length)) {
+            const net = Number(s.pnl || 0);
+            const sign = net > 0 ? '+' : (net < 0 ? '-' : '');
+            footer.textContent = `TODAY · ${s.won||0}-${s.lost||0}-${s.push||0} · ${sign}${Math.abs(net).toFixed(2)}u · ${pending.length} pending`;
+        } else {
+            footer.textContent = `${pending.length} pending`;
+        }
+
+        overlay.classList.add('open');
+    }
+    window.openBetSlip = openBetSlip;
+
+    function closeBetSlip() { document.getElementById('betslip-overlay').classList.remove('open'); }
+    window.closeBetSlip = closeBetSlip;
+    function closeBetSlipOutside(e) { if (e.target === document.getElementById('betslip-overlay')) closeBetSlip(); }
+    window.closeBetSlipOutside = closeBetSlipOutside;
+
+    // Rasterize the slip to a PNG → navigator.share() on mobile, download
+    // on desktop. Same approach as the Dashboard betslip.
+    async function shareBetSlip() {
+        const btn  = document.getElementById('betslip-share-btn');
+        const slip = document.getElementById('betslip');
+        if (!slip || !window.html2canvas) return;
+        btn.disabled = true;
+        const origLabel = btn.textContent;
+        btn.textContent = 'Saving…';
+        const actions = slip.querySelector('.betslip-actions');
+        const prevDisplay = actions ? actions.style.display : '';
+        if (actions) actions.style.display = 'none';
+        slip.classList.add('capturing');
+        try {
+            if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch {} }
+            const canvas = await html2canvas(slip, {
+                backgroundColor: getComputedStyle(slip).backgroundColor || '#0d1117',
+                scale: 2, useCORS: true, logging: false,
+                windowHeight: slip.scrollHeight + 40, height: slip.scrollHeight,
+            });
+            const filename = 'kahla-house-pickbot-' + new Date().toISOString().slice(0, 10) + '.png';
+            const blob = await new Promise(res => canvas.toBlob(res, 'image/png', 0.95));
+            if (blob && navigator.canShare) {
+                const file = new File([blob], filename, { type: 'image/png' });
+                if (navigator.canShare({ files: [file] })) {
+                    try {
+                        await navigator.share({ files: [file], title: 'Kahla House — Pick Bot', text: "The bot's slate. Fade at your own risk." });
+                        return;
+                    } catch (err) {
+                        if (err && err.name === 'AbortError') return;
+                        if (err) console.warn('share:', err);
+                    }
+                }
+            }
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = filename;
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        } catch (err) {
+            console.error('shareBetSlip:', err);
+            alert('Could not generate image: ' + (err.message || err));
+        } finally {
+            slip.classList.remove('capturing');
+            if (actions) actions.style.display = prevDisplay;
+            btn.disabled = false;
+            btn.textContent = origLabel;
+        }
+    }
+    window.shareBetSlip = shareBetSlip;
+
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeBetSlip(); });
+
     async function loadData(showLoading) {
         const status = document.getElementById('status');
         if (showLoading) status.textContent = 'Loading…';
@@ -2173,6 +2376,10 @@
 
             const pending = data.pending || [];
             const settled = data.settled || [];
+            // Stash for the Bet Slip modal (sportsbook-ticket view).
+            _lastPending = pending;
+            _lastSettled = settled;
+            _lastStatsToday = data.stats_today || data.stats || null;
             // Rebuild the "already logged" set so the games list can green
             // out games we've picked. Pending covers upcoming/active games;
             // settled-today is harmless (those market_ids rarely match an
