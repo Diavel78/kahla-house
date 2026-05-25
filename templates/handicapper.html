@@ -598,6 +598,11 @@
             .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
         // Hide the Refresh button — it's for stats only
         document.querySelectorAll('.refresh-btn').forEach(b => b.style.display = 'none');
+        // Hide the status pill — it only ever shows the resolver heartbeat,
+        // which loadData (gated to _canBet) populates. Viewers never call
+        // loadData, so it would otherwise sit on "Loading…" forever.
+        const statusEl = document.getElementById('status');
+        if (statusEl) statusEl.style.display = 'none';
         // Add a view-only banner under the page header
         const meta = document.getElementById('meta');
         if (meta) {
