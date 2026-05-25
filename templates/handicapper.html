@@ -686,6 +686,33 @@
         return `${d}d ago`;
     }
 
+    // The odds-ingest cron intentionally skips 10pm–7am MT (America/Phoenix,
+    // no DST) — no US games tip overnight. During that window a stale cron
+    // heartbeat is EXPECTED, not a failure, so the freshness badge should
+    // read muted "idle (overnight)" rather than alarming red. Mirrors
+    // _LOCAL_TZ / _BLACKOUT_START_HOUR / _BLACKOUT_END_HOUR in odds_api.py.
+    function _inOvernightBlackout() {
+        try {
+            const parts = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/Phoenix', hour: '2-digit', hourCycle: 'h23'
+            }).formatToParts(new Date());
+            const hr = parseInt((parts.find(p => p.type === 'hour') || {}).value, 10);
+            return hr >= 22 || hr < 7;
+        } catch { return false; }
+    }
+
+    // Shared builder for the "cron …" half of the freshness badge so the
+    // live tick and the full render stay consistent.
+    function _cronFreshHtml(cronIso) {
+        if (!cronIso) return '';
+        const overnight = _inOvernightBlackout();
+        const ageMin = Math.round((Date.now() - new Date(cronIso).getTime()) / 60000);
+        const color = (!overnight && Number.isFinite(ageMin) && ageMin > 10)
+            ? 'var(--red)' : 'var(--text-muted)';
+        const text = overnight ? 'cron idle (overnight)' : `cron ${_fmtAgo(cronIso)}`;
+        return `<span title="${_esc(cronIso)}" style="color:${color}">${_esc(text)}</span>`;
+    }
+
     function _renderStats(s) {
         const hr = s.hit_rate == null ? '—' : `${(s.hit_rate*100).toFixed(1)}%`;
         // s.roi is u/pick (total pnl_units / graded count).
@@ -1139,11 +1166,7 @@
         const cron = el.getAttribute('data-cron') || '';
         const parts = [];
         if (pin)  parts.push(`<span title="${_esc(pin)}">PIN ${_esc(_fmtAgo(pin))}</span>`);
-        if (cron) {
-            const ageMin = Math.round((Date.now() - new Date(cron).getTime()) / 60000);
-            const color = ageMin > 10 ? 'var(--red)' : 'var(--text-muted)';
-            parts.push(`<span title="${_esc(cron)}" style="color:${color}">cron ${_esc(_fmtAgo(cron))}</span>`);
-        }
+        if (cron) parts.push(_cronFreshHtml(cron));
         if (parts.length) el.innerHTML = '· ' + parts.join(' · ');
     }
 
@@ -1245,13 +1268,7 @@
         const pinFrag = pinCaptured
             ? `<span title="${_esc(pinCaptured)}">PIN ${_esc(_fmtAgo(pinCaptured))}</span>`
             : '';
-        const cronAgeMin = cronLast
-            ? Math.round((Date.now() - new Date(cronLast).getTime()) / 60000)
-            : null;
-        const cronColor = (cronAgeMin != null && cronAgeMin > 10) ? 'var(--red)' : 'var(--text-muted)';
-        const cronFrag = cronLast
-            ? `<span title="${_esc(cronLast)}" style="color:${cronColor}">cron ${_esc(_fmtAgo(cronLast))}</span>`
-            : '';
+        const cronFrag = _cronFreshHtml(cronLast);
         const inner = [pinFrag, cronFrag].filter(Boolean).join(' · ');
         const freshnessBadge = inner
             ? `<span id="dossierFreshness" data-pin="${_esc(pinCaptured || '')}" data-cron="${_esc(cronLast || '')}" style="font-size:10px;font-family:JetBrains Mono,monospace;color:var(--text-muted);margin-left:8px;vertical-align:middle">${inner}</span>`
