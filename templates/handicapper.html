@@ -405,17 +405,6 @@
                 <button class="sport-tab" data-sport="UFC">UFC</button>
             </div>
 
-            <!-- Game list (auto-populates per selected sport) -->
-            <div class="games-card">
-                <div class="games-head">
-                    <h3 id="gamesTitle">MLB — upcoming</h3>
-                    <span class="count" id="gamesCount">…</span>
-                </div>
-                <ul class="games-list" id="gamesList">
-                    <li class="games-empty">Loading…</li>
-                </ul>
-            </div>
-
             <!-- Search (collapsed by default — game list is primary) -->
             <div class="ask-card" id="askCard">
                 <div class="ask-toggle" onclick="document.getElementById('askCard').classList.toggle('expanded')">
@@ -438,9 +427,21 @@
                         </select>
                         <button class="ask-submit" id="askSubmit" onclick="askGame()">Build dossier</button>
                     </div>
-                    <div class="ask-hint">Free-form: "Yankees vs Red Sox", "Lakers Nuggets tonight", "MIN @ DEN". Same window as the list above.</div>
+                    <div class="ask-hint">Free-form: "Yankees vs Red Sox", "Lakers Nuggets tonight", "MIN @ DEN". Same window as the list below.</div>
                 </div>
             </div>
+
+            <!-- Game list (auto-populates per selected sport) -->
+            <div class="games-card">
+                <div class="games-head">
+                    <h3 id="gamesTitle">MLB — upcoming</h3>
+                    <span class="count" id="gamesCount">…</span>
+                </div>
+                <ul class="games-list" id="gamesList">
+                    <li class="games-empty">Loading…</li>
+                </ul>
+            </div>
+
 
             <div class="dossier-overlay" id="dossierOverlay" onclick="if(event.target===this)closeDossier()">
                 <div class="dossier">
