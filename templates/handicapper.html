@@ -1309,7 +1309,7 @@
                 const displayLine = usingPmm && s.pmm_line != null ? s.pmm_line : s.pin_line;
                 const lineFrag = (displayLine == null) ? '' : ` ${_fmtPt(displayLine)}`;
                 const venueTag = usingPmm
-                    ? '<span class="venue-tag pmm">PMM</span>'
+                    ? '<span class="venue-tag pmm">Poly</span>'
                     : '<span class="venue-tag pin">PIN line</span>';
                 const cardCls = s.gates_cleared ? 'suggestion-card' : 'suggestion-card soft';
                 const headingText = s.gates_cleared
@@ -1323,7 +1323,7 @@
                 //   No PMM        → "PIN now -107 (no PMM market found)"
                 let metaLine = '';
                 if (usingPmm) {
-                    const askFrag = s.pmm_ask_american != null ? `PMM asking ${_fmtAmer(s.pmm_ask_american)}` : 'PMM (no current ask)';
+                    const askFrag = s.pmm_ask_american != null ? `Poly asking ${_fmtAmer(s.pmm_ask_american)}` : 'Poly (no current ask)';
                     const bidFrag = s.pmm_bid_american != null ? ` · bid ${_fmtAmer(s.pmm_bid_american)}` : '';
                     const pinFrag = (s.pin_fair_american != null && s.pin_line != null)
                         ? ` · PIN fair ${_fmtAmer(s.pin_fair_american)} @ ${_fmtPt(s.pin_line)}`
@@ -1340,9 +1340,9 @@
                         const evtCount = dg.events_returned != null ? ` (searched ${dg.events_returned})` : '';
                         const titles = (dg.sample_event_titles || []).filter(Boolean).slice(0, 3).join(' · ');
                         const sawFrag = titles ? `<div style="color:var(--text-muted);font-size:10px">saw: ${_esc(titles)}</div>` : '';
-                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:2px">PMM: ${_esc(String(pm.error).slice(0, 120))}${evtCount}</div>${sawFrag}`;
+                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:2px">Poly: ${_esc(String(pm.error).slice(0, 120))}${evtCount}</div>${sawFrag}`;
                     }
-                    metaLine = `Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow} <span style="color:var(--text-muted);font-size:10px">(no PMM match — projection skipped)</span>${dbg}`;
+                    metaLine = `Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow} <span style="color:var(--text-muted);font-size:10px">(no Poly match — projection skipped)</span>${dbg}`;
                 }
                 const why = _buildReasons(s, d);
                 const whyHtml = why.length
@@ -1631,7 +1631,6 @@
         const sides = mt === 'total' ? ['over', 'under'] : ['away', 'home'];
         const labelOf = s => mt === 'total' ? s.toUpperCase() : (s === 'home' ? d.home : d.away);
         const pin = blk.pin_current || {};
-        const best = blk.best_entry || {};
         const mv = blk.movement;
         const title = ({moneyline:'Moneyline', spread:'Spread', total:'Total'})[mt] || mt;
         const anyBotPicked = sides.some(s => sugIndex && sugIndex.has(`${mt}:${s}`));
@@ -1639,7 +1638,6 @@
         let blocks = '';
         for (const s of sides) {
             const pinSnap = pin[s];
-            const bestSnap = best[s];
             const sideName = labelOf(s);
             const sugIdx = sugIndex ? sugIndex.get(`${mt}:${s}`) : undefined;
             const isBotPick = sugIdx != null;
@@ -1684,19 +1682,11 @@
                 }
                 rows += `<div class="row"><span class="label">PIN:</span> <span class="pin">${_fmtAmer(pinSnap.price)}</span>${lineFrag}${fairFrag}${openFrag}</div>`;
             }
-            if (bestSnap) {
-                const ln = bestSnap.line;
-                const lineFrag = (ln != null) ? ` <span class="label">@${_fmtPt(ln)}</span>` : '';
-                const ep = bestSnap.edge_pp;
-                const edgeCls = (ep != null && ep >= 0) ? 'edge' : 'edge neg';
-                const edgeFrag = (ep != null) ? ` <span class="${edgeCls}">${ep > 0 ? '+' : ''}${ep.toFixed(1)}pp</span>` : '';
-                rows += `<div class="row"><span class="label">best:</span> <span class="best">${_fmtAmer(bestSnap.price_american)}</span>${lineFrag} <span class="label">[${_esc(bestSnap.book)}]</span>${edgeFrag}</div>`;
-            }
             if (!rows) rows = '<div style="font-size:11px;color:var(--text-muted)">no PIN data</div>';
 
-            // PMM row — shows actual Polymarket line + current bid/ask
+            // Poly row — shows actual Polymarket line + current bid/ask
             // + PIN-projected fair as the limit-order target. Only
-            // rendered when PMM has a market for this side.
+            // rendered when Polymarket has a market for this side.
             const pmmBlock = ((blk.polymarket || {})[s]) || null;
             let pmmRow = '';
             if (pmmBlock) {
@@ -1708,7 +1698,7 @@
                 const targetFrag = (proj.fair_american != null)
                     ? ` · <span class="pmm-target">target ${_fmtAmer(proj.fair_american)}</span>`
                     : '';
-                pmmRow = `<div class="pmm-row"><span class="pmm-lbl">PMM</span>${lnFrag}${askFrag}${bidFrag}${targetFrag}</div>`;
+                pmmRow = `<div class="pmm-row"><span class="pmm-lbl">Poly</span>${lnFrag}${askFrag}${bidFrag}${targetFrag}</div>`;
             }
 
             const blockCls = 'side-block' + (isBotPick ? ' bot-picked' : '');
@@ -1788,7 +1778,7 @@
             fair_prob:   entryProb,
             edge_pp:     null,
             sharp_score: isMvSide ? (mv.sharp_score || 0) : 0,
-            label:       `${_shortMarket(mt)} ${sideName} @ ${pmmBid != null ? 'PMM bid' : (useProj ? 'PMM-projected fair' : 'PIN fair')} ${_fmtAmer(entryPrice)}${entryLine != null ? ' ' + _fmtPt(entryLine) : ''}`,
+            label:       `${_shortMarket(mt)} ${sideName} @ ${pmmBid != null ? 'Poly bid' : (useProj ? 'Poly-projected fair' : 'PIN fair')} ${_fmtAmer(entryPrice)}${entryLine != null ? ' ' + _fmtPt(entryLine) : ''}`,
             seed_units:  1,
             seed_conf:   'low',
         };
@@ -1885,7 +1875,7 @@
         const lineFrag = (s.pin_line == null) ? '' : ` ${_fmtPt(s.pin_line)}`;
         // Show the maker entry we actually log (PMM bid), not the fair/ask.
         const makerEntry = (s.pmm_bid_american != null) ? s.pmm_bid_american : s.fair_american;
-        const entryLbl   = (s.pmm_bid_american != null) ? 'PMM bid' : 'PMM target';
+        const entryLbl   = (s.pmm_bid_american != null) ? 'Poly bid' : 'Poly target';
         return `${market} · ${sideName}${lineFrag} @ ${_fmtAmer(makerEntry)} (${entryLbl})`;
     }
     function _buildReasons(pick, d) {
@@ -2039,7 +2029,7 @@
             fair_prob:   choice.pin.fair_prob,
             edge_pp:     null,
             sharp_score: (ml.movement || {}).sharp_score,
-            label:       `ML · ${sideName} @ ${_fmtAmer(choice.pin.fair_american)} (PMM target)`,
+            label:       `ML · ${sideName} @ ${_fmtAmer(choice.pin.fair_american)} (Poly target)`,
             seed_units:  1,
             seed_conf:   'medium',
         };
