@@ -1158,7 +1158,24 @@ def _espn_team_injuries(sport: str, team_id: str | None) -> list:
     grp, lg = pair
     url = (f"https://site.web.api.espn.com/apis/site/v2/sports/"
            f"{grp}/{lg}/teams/{team_id}/injuries")
-    data = _http_get(url)
+    status = None
+    data = None
+    try:
+        r = requests.get(url, timeout=HTTP_TIMEOUT,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        status = r.status_code
+        if status == 200:
+            data = r.json()
+    except Exception as e:
+        log.warning("ESPN injuries %s %s failed: %s", sport, team_id, e)
+    # Log BEFORE any early return so a failed fetch (non-200 / network) is
+    # visible in Vercel logs — an empty result could be a fetch failure OR
+    # a parse-key mismatch, and only the status + raw keys disambiguate.
+    try:
+        print(f"[inj] {sport} team={team_id} status={status} "
+              f"keys={list((data or {}).keys())[:8]}")
+    except Exception:
+        pass
     if not data:
         return []
     # ESPN's injuries endpoint shape varies by host/sport: sometimes a
