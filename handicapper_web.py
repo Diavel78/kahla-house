@@ -1161,9 +1161,33 @@ def _espn_team_injuries(sport: str, team_id: str | None) -> list:
     data = _http_get(url)
     if not data:
         return []
-    items = data.get("items", []) or []
+    # ESPN's injuries endpoint shape varies by host/sport: sometimes a
+    # flat list under "items", sometimes under "injuries", and sometimes
+    # grouped per team (each group is {team..., injuries:[...]}). Reading
+    # only "items" left the list empty for every sport. Pull whichever
+    # key exists and flatten team-grouped shapes down to injury records.
+    raw = data.get("injuries")
+    if raw is None:
+        raw = data.get("items") or []
+    records: list = []
+    for el in (raw or []):
+        if not isinstance(el, dict):
+            continue
+        if el.get("athlete"):
+            records.append(el)                      # direct injury record
+        elif isinstance(el.get("injuries"), list):
+            records.extend(x for x in el["injuries"] if isinstance(x, dict))
+        else:
+            records.append(el)
+    # One-line diagnostic so an empty result is debuggable from Vercel
+    # logs without a UI round-trip (which ESPN key was present + count).
+    try:
+        print(f"[inj] {sport} team={team_id} keys={list(data.keys())[:6]} "
+              f"raw={len(raw or [])} records={len(records)}")
+    except Exception:
+        pass
     out = []
-    for it in items[:25]:
+    for it in records[:25]:
         ath = it.get("athlete") or {}
         out.append({
             "name":   ath.get("displayName") or ath.get("shortName"),

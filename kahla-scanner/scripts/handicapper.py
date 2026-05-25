@@ -765,12 +765,28 @@ def _espn_team_injuries(sport: str, team_id: str | None) -> list:
         r = httpx.get(url, timeout=HTTP_TIMEOUT)
         if r.status_code != 200:
             return []
-        items = (r.json() or {}).get("items", []) or []
+        data = r.json() or {}
     except Exception as e:
         log.warning("ESPN injuries %s %s failed: %s", sport, team_id, e)
         return []
+    # ESPN injuries shape varies: flat list under "items", under
+    # "injuries", or grouped per team ({team..., injuries:[...]}). Reading
+    # only "items" left the list empty for every sport. Flatten all shapes.
+    raw = data.get("injuries")
+    if raw is None:
+        raw = data.get("items") or []
+    records: list = []
+    for el in (raw or []):
+        if not isinstance(el, dict):
+            continue
+        if el.get("athlete"):
+            records.append(el)
+        elif isinstance(el.get("injuries"), list):
+            records.extend(x for x in el["injuries"] if isinstance(x, dict))
+        else:
+            records.append(el)
     out = []
-    for it in items[:25]:
+    for it in records[:25]:
         ath = it.get("athlete") or {}
         out.append({
             "name":   ath.get("displayName") or ath.get("shortName"),
