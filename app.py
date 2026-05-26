@@ -159,6 +159,79 @@ def landing():
     return render_template("index.html")
 
 
+_APPLE_TOUCH_ICON_B64 = (
+    "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"
+)
+
+
+# ── Home Screen / favicon icon ──────────────────────────────────────────
+# iOS uses <link rel="apple-touch-icon"> (in each template head) when you
+# "Add to Home Screen", and also probes /apple-touch-icon*.png at the root.
+# We serve one branded "KH" PNG (purple→blue gradient) for every variant.
+# Inlined as base64 so it always ships with the function (vercel.json
+# routes everything to app.py — there's no static-file handler).
+import base64 as _b64
+_APPLE_TOUCH_ICON_PNG = _b64.b64decode("".join(_APPLE_TOUCH_ICON_B64.split()))
+
+
+@app.route("/apple-touch-icon.png")
+@app.route("/apple-touch-icon-precomposed.png")
+@app.route("/apple-touch-icon-120x120.png")
+@app.route("/apple-touch-icon-152x152.png")
+@app.route("/apple-touch-icon-167x167.png")
+@app.route("/apple-touch-icon-180x180.png")
+@app.route("/favicon.ico")
+def apple_touch_icon():
+    resp = make_response(_APPLE_TOUCH_ICON_PNG)
+    resp.headers["Content-Type"] = "image/png"
+    resp.headers["Cache-Control"] = "public, max-age=604800"
+    return resp
+
+
+
 @app.route("/odds")
 def odds_page():
     resp = make_response(render_template("odds.html"))
