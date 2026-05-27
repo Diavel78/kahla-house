@@ -249,10 +249,10 @@ body::before { content: ''; position: fixed; inset: 0; background-image: linear-
         <!-- AVAILABILITY / SCHEDULING -->
         <div class="section">
             <div class="section-head">
-                <h2>&#128336; Find a Meeting Time</h2>
+                <h2>&#128336; Find a Meeting Day</h2>
                 <button class="btn btn-ghost btn-sm" onclick="loadAll()">Refresh</button>
             </div>
-            <p style="color:var(--text-muted);font-size:.9em;margin:-6px 0 14px">Tap the days you <b>can't</b> make it (tap again to clear). Days everyone can do light up green, and we suggest times on the right.</p>
+            <p style="color:var(--text-muted);font-size:.9em;margin:-6px 0 14px">Book club meets at <b>5:00 PM</b>, any day of the week. Tap a day you <b>can't</b> make 5:00 (tap again to clear), or add a specific busy time below. Days everyone can make light up green, and we suggest them on the right.</p>
             <div class="cal-wrap">
                 <div class="cal">
                     <div class="cal-head">
@@ -263,7 +263,7 @@ body::before { content: ''; position: fixed; inset: 0; background-image: linear-
                     <div class="cal-legend">
                         <span><i class="lg-dot" style="background:var(--red)"></i> You're busy</span>
                         <span><i class="lg-dot" style="background:var(--orange)"></i> You're partly busy</span>
-                        <span><i class="lg-dot" style="box-shadow:0 0 0 1px var(--green) inset"></i> Everyone can make it</span>
+                        <span><i class="lg-dot" style="box-shadow:0 0 0 1px var(--green) inset"></i> Everyone free at 5 PM</span>
                     </div>
                     <div class="tr-form">
                         <div class="form-group"><label>Busy only part of a day?</label><input type="date" id="trDate"></div>
@@ -419,11 +419,17 @@ async function loadAll() {
 
 /* ===== availability / scheduling ===== */
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const MEET_START = 8 * 60, MEET_END = 22 * 60;   // suggest meetings 8:00 AM–10:00 PM
+// Book club meets at 5:00 PM on any day of the week. Scheduling is about
+// finding a DAY everyone can make that slot — not a free time window.
+const MEET_HHMM = '17:00', MEET_LABEL = '5:00 PM';
+const MEET_START_MIN = 17 * 60, MEET_END_MIN = 19 * 60;   // assume ~2h (5–7 PM) for conflict checks
 let _calCur = new Date(); _calCur.setDate(1);
+function blocksSlot(entry) {
+    if (entry.allDay) return true;
+    return (entry.ranges || []).some(r => toMin(r.start) < MEET_END_MIN && toMin(r.end) > MEET_START_MIN);
+}
 function isoDate(dt) { const y = dt.getFullYear(), m = String(dt.getMonth() + 1).padStart(2, '0'), d = String(dt.getDate()).padStart(2, '0'); return `${y}-${m}-${d}`; }
 function toMin(hhmm) { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; }
-function minLabel(m) { let h = Math.floor(m / 60); const mm = m % 60, ap = h >= 12 ? 'PM' : 'AM'; let hh = h % 12; if (hh === 0) hh = 12; return `${hh}:${String(mm).padStart(2, '0')} ${ap}`; }
 function calMove(d) { _calCur.setMonth(_calCur.getMonth() + d); renderAvailability(); }
 function mergedMembers() {
     const others = (STATE.avail.members || []).filter(m => m.uid !== _uid);
@@ -434,8 +440,8 @@ function renderAvailability() {
     const today = new Date(); today.setHours(0, 0, 0, 0);
     document.getElementById('calMonthName').textContent = _calCur.toLocaleString('en-US', { month: 'long', year: 'numeric' });
     const members = mergedMembers();
-    const busyCount = {}, allDayCount = {};
-    members.forEach(m => { for (const [d, v] of Object.entries(m.busy || {})) { busyCount[d] = (busyCount[d] || 0) + 1; if (v.allDay) allDayCount[d] = (allDayCount[d] || 0) + 1; } });
+    const byDate = {};
+    members.forEach(m => { for (const [d, v] of Object.entries(m.busy || {})) (byDate[d] = byDate[d] || []).push({ uid: m.uid, name: m.name, ...v }); });
     const rosterN = (STATE.avail.roster || []).length || members.length;
     const startPad = _calCur.getDay();
     const daysInMonth = new Date(_calCur.getFullYear(), _calCur.getMonth() + 1, 0).getDate();
@@ -445,18 +451,19 @@ function renderAvailability() {
         const dt = new Date(_calCur.getFullYear(), _calCur.getMonth(), day);
         const ds = isoDate(dt), past = dt < today;
         const mine = _myBusy[ds];
+        const blockers = (byDate[ds] || []).filter(blocksSlot);   // can't make the 5 PM slot
         let cls = 'cal-cell';
         if (dt.getTime() === today.getTime()) cls += ' today';
         if (past) cls += ' past';
         if (mine && mine.allDay) cls += ' me-busy';
         else if (mine && mine.ranges && mine.ranges.length) cls += ' me-partial';
-        if (!past && !allDayCount[ds] && rosterN > 0) cls += ' all-free';
-        const others = (busyCount[ds] || 0) - (mine ? 1 : 0);
+        if (!past && rosterN > 0 && blockers.length === 0) cls += ' all-free';
+        const others = blockers.filter(b => b.uid !== _uid).length;
         cells += `<div class="${cls}" ${past ? '' : `onclick="toggleDay('${ds}')"`}><span>${day}</span>${others > 0 ? `<span class="others">${others} out</span>` : ''}</div>`;
     }
     document.getElementById('calGrid').innerHTML = cells;
-    document.getElementById('rosterCount').textContent = rosterN + ' member' + (rosterN === 1 ? '' : 's') + ' in the club';
-    renderSuggestions(members, today);
+    document.getElementById('rosterCount').textContent = rosterN + ' member' + (rosterN === 1 ? '' : 's') + ' · meets at ' + MEET_LABEL;
+    renderSuggestions(byDate, today, rosterN);
     renderMemberChips();
 }
 
@@ -483,46 +490,22 @@ function saveBusy() {
     }, 450);
 }
 
-function freeIntervals(busyRanges) {
-    let free = [[MEET_START, MEET_END]];
-    busyRanges.forEach(([bs, be]) => {
-        const next = [];
-        free.forEach(([fs, fe]) => {
-            if (be <= fs || bs >= fe) { next.push([fs, fe]); return; }
-            if (bs > fs) next.push([fs, bs]);
-            if (be < fe) next.push([be, fe]);
-        });
-        free = next;
-    });
-    return free;
-}
-
-function renderSuggestions(members, today) {
-    const byDate = {};
-    members.forEach(m => { for (const [d, v] of Object.entries(m.busy || {})) (byDate[d] = byDate[d] || []).push({ uid: m.uid, name: m.name, ...v }); });
+function renderSuggestions(byDate, today, rosterN) {
     const sugg = [];
     for (let i = 0; i < 42 && sugg.length < 8; i++) {
         const dt = new Date(today); dt.setDate(today.getDate() + i);
-        const ds = isoDate(dt), entries = byDate[ds] || [];
-        if (entries.some(e => e.allDay)) continue;   // someone can't make any time
-        const busyRanges = [];
-        entries.forEach(e => (e.ranges || []).forEach(r => busyRanges.push([toMin(r.start), toMin(r.end)])));
-        const free = freeIntervals(busyRanges).filter(([s, e]) => e - s >= 60);
-        if (!free.length) continue;
-        sugg.push({ ds, dt, free, fullyFree: busyRanges.length === 0, partials: entries.filter(e => e.ranges && e.ranges.length).length });
+        const ds = isoDate(dt);
+        const blockers = (byDate[ds] || []).filter(blocksSlot);   // can't make the 5 PM slot
+        if (blockers.length === 0) sugg.push({ ds, dt });
     }
     const el = document.getElementById('sugList');
-    if (!sugg.length) { el.innerHTML = `<div class="empty" style="padding:18px">No day in the next 6 weeks works for everyone yet. As members mark their availability, suggestions will appear here.</div>`; return; }
+    if (!sugg.length) { el.innerHTML = `<div class="empty" style="padding:18px">No day in the next 6 weeks has everyone free at ${MEET_LABEL} yet. As members mark when they're busy, open days show up here.</div>`; return; }
     el.innerHTML = sugg.slice(0, 6).map((s, idx) => {
         const dl = s.dt.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
-        const block = [...s.free].sort((a, b) => (b[1] - b[0]) - (a[1] - a[0]))[0];   // largest free window
-        const timeTxt = s.fullyFree ? 'Everyone free all day' : `Everyone free ${minLabel(block[0])} – ${minLabel(block[1])}`;
-        const startHHMM = `${String(Math.floor(block[0] / 60)).padStart(2, '0')}:${String(block[0] % 60).padStart(2, '0')}`;
         return `<div class="sug-item ${idx === 0 ? 'best' : ''}">
             <div class="sug-date">${dl}</div>
-            <div class="sug-time">${timeTxt}</div>
-            <div class="sug-sub">${s.fullyFree ? 'No conflicts' : s.partials + ' member' + (s.partials === 1 ? '' : 's') + ' partly busy — this window avoids them'}</div>
-            <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="useSlot('${s.ds}','${s.fullyFree ? '19:00' : startHHMM}')">Set as meeting</button>
+            <div class="sug-time">Everyone free at ${MEET_LABEL}</div>
+            <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="useSlot('${s.ds}','${MEET_HHMM}')">Set as meeting</button>
         </div>`;
     }).join('');
 }
