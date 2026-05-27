@@ -30,6 +30,11 @@ Plus a **per-user capability** in Firestore `users/{uid}.bot_access` (boolean):
 - Admins always have it implicitly (the gates treat `role=admin` as `bot_access=true`).
 - Admin pill toggle in User Management: ON / OFF (greyed out for pending/unapproved users).
 
+A second, fully independent **per-user capability** in Firestore `users/{uid}.book_club_access` (boolean) gates the **Book Club** (see the "Book Club" section below):
+- Toggleable via the **Book Club pill** in User Management — its own column, separate from the Pick Bot pill. Book Club is a non-betting surface; granting it has nothing to do with `bot_access`.
+- Admins always have it implicitly (gates treat `role=admin` as `book_club_access=true`).
+- Server gate is `@book_club_required` (admin OR `book_club_access`) on `/api/book-club*`; `/api/me` returns `book_club_access` so the page + landing card gate client-side.
+
 Approval flow:
 - Sign-up creates a `pending` user doc with `approved: false`. The pending screen tells them to wait.
 - Admins see pending users in the User Management panel on `/` with **Approve as Viewer** / **Approve as Admin** / **Reject** buttons.
@@ -73,6 +78,7 @@ A view-only banner appears under the page header instead of the lede. Server-sid
 | `/odds` | `odds.html` | admin + viewer | Odds Board — multi-book odds comparison, opener-vs-current movement, per-game line-movement chart modal |
 | `/dashboard` | `dashboard.html` | admin only | Polymarket P&L Dashboard — positions, closed trades, bet slip |
 | `/games` | `games.html` | admin + viewer (any approved) | **Games** — card/dice scoring sheets. A `<select>` picks the game; the sheet renders below. Fully client-side + offline: each game persists its own state to `localStorage` (`kh_games_<id>_v1`; last-selected game in `kh_games_sel`), no backend/API/Firestore writes — the route just renders the static template (auth-gated client-side via `/api/me`, same pattern as `/odds`). Mobile-first (sticky left column, horizontal scroll, shrunk hand column on phones). **Game registry + 3 sheet engines** (see `games.html` Key-Files note for the architecture): **bidtrick** (rows=hands, bid+got per cell) = CDHS, Oh Hell, Wizard, Spades; **rounds** (rows=rounds, one number per cell, running total, high- or low-wins) = Hearts, Golf, Rummy, Blank pad; **yahtzee** (fixed category grid, auto upper-bonus + grand total). Shared: variable players (add/remove/rename), running totals + leader crown (min for low-wins games), per-game rules panel, New game clears scores but keeps players; rounds/Spades have +/− Round buttons; Blank pad has an editable title + High/Low-wins toggle. **CDHS rules** (the original game): 17 hands — deal 7,6,5,4,3,2,1, then three 7-card middle hands (No Trump, Blind Diamonds = bid before seeing hand, Negative Spades = spades trump, every trick −10), then 1,2,3,4,5,6,7 back up. Trump cycles ♣♦♥♠ continuously across the numbered hands (middle hands don't advance it, so descending ends on ♥ and ascending picks up on ♠). Scoring: make bid exactly → bid×11; a made 0 bid → 10; miss → tricks taken. Each player may bid 0 at most 3× (soft counter). Total bids ≠ cards dealt (screw-the-dealer; shown as an indicator). **Other games' scoring** (documented in each game's rules panel): Oh Hell 7→1→7, made=10+bid else 0; Wizard rounds=60÷players, made=20+10×bid else −10/trick off; Spades cutthroat (no partners) 10×bid + 1/bag, set=−10×bid, nil ±100, every 10 bags −100; Hearts low-wins shoot-the-moon; Yahtzee standard (+35 upper bonus ≥63). Several non-CDHS games use common house-rule defaults flagged in their panel — if a household plays a variant, change the def's `score()` in `games.html`. |
+| `/book-club` | `book_club.html` | admin + `book_club_access` | **Book Club** — a non-betting surface, fully separate from the gambling apps. Shared Firestore-backed reading list, per-member ratings/reviews, meeting schedule, a next-read **vote**, and an **availability calendar** that suggests meeting times when everyone's free. Client-gated via `/api/me` (`book_club_access` OR admin); server-gated `@book_club_required` on all `/api/book-club*`. See the "Book Club" section below. |
 | `/handicapper` | `handicapper.html` | admin + viewer + `bot_access` (viewer = read-only) | **Pick Bot** — handicapper picks tracker. **Page order: sport tabs → games list → search → stats strip → confidence tiers → pending → settled.** Games are at the TOP (moved there May 2026 by user request — they wanted picks-first, stats at the bottom). The three-timeframe stats card (TODAY / 7d / 30d), per-confidence-tier rollup (low/medium/high → 1u/3u/5u), and pending + today's-settled lists all live at the BOTTOM. Elements keep IDs `#overallStats` / `#confStrip` / `#pendingSection` / `#settledSection` regardless of position (loadData populates in place; viewer-mode hiding targets the same IDs). Picks made by Claude in chat OR by clicking a game card on the page. Every pick logs to `bot_picks`, auto-grades vs ESPN final scores. UFC ML auto-grades via ESPN MMA endpoint; SPR/TOT method-of-victory bets stay pending and use the per-row Won/Lost/Push manual settle buttons. PnL is **to-WIN** sizing. "Today" anchored to **America/Phoenix** (Arizona, no DST). Nav: Pick Bot is in the persistent top nav (Sharp Bot's website surface was removed May 2026 — page, card, and API all gone; its paper_bets backend still runs silently on the cron). Whale (10u) tier is disabled — see Sizing rubric below. **Viewers** get a view-only flavor (sport tabs + games + dossier with bot's read; no stats, no log buttons, no pending/settled — see "Pick Bot view-only mode" in Access Control above). |
 
 > **Odds-ingest cron (`kahla-scanner/`)**: minimal Python subproject at
@@ -163,6 +169,36 @@ A view-only banner appears under the page header instead of the lede. Server-sid
 | `/debug-snap?sport=mlb` | Firebase (page) | Browser-friendly wrapper for `/api/debug-snap` |
 | `/debug-splits?sport=mlb` | Firebase (page) | Browser-friendly view of `/api/splits` for the splits scraper. Shows raw events, source (`json_api` / `next_data` / `table`), `failed_samples` for unmatched rows, `next_debug` (sample top keys + first candidate field shape), and `api_debug` (URL, status, game count, splits paths seen). Built specifically to iterate on Action Network's shape changes without hitting their site directly from curl. |
 
+## Book Club (`/book-club`)
+
+A **completely separate, non-betting** surface for the family's book club. Lives in the same Flask app + Firebase project but shares nothing with the gambling apps — its own access pill (`book_club_access`), its own Firestore collections, its own page. Added May 2026.
+
+**Access**: gated by the independent `book_club_access` capability (admins implicit) — see Access Control. Page bounces non-members via `/api/me`; every API route is `@book_club_required` (the real gate). All writes go through the Flask **Admin SDK**, so `firestore.rules` is untouched and the client never talks to Firestore directly for book-club data.
+
+**Data model** (3 Firestore collections, schemaless — no migrations):
+- `book_club_books/{id}` — `{title, author, cover_url, status ∈ {reading,upcoming,finished}, meeting_date 'YYYY-MM-DD', meeting_time 'HH:MM', meeting_location, notes, added_by, added_by_name, created_at, ratings: {uid: {rating 1-5, review, name, updated_at}}}`. "Currently reading" = books with `status='reading'`; the shelf = all books; the meeting schedule = books with a `meeting_date`, sorted.
+- `book_club_polls/{id}` — next-read vote. `{question, status ∈ {open,closed}, options: [{id, title, author, cover_url}] (2-3), votes: {uid: option_id}, created_by, created_by_name, created_at, closed_at}`. One vote per member (keyed by uid, changeable while open). Winner = single option with the most votes (ties → no winner).
+- `book_club_availability/{uid}` — `{name, updated_at, busy: {'YYYY-MM-DD': {allDay:true} | {ranges:[{start 'HH:MM', end}]}}}`. One doc per member; missing date = available.
+
+**API routes** (all `@book_club_required`; poll create/close/delete + are admin-only, checked inline):
+| Route | Method | Who | Purpose |
+|---|---|---|---|
+| `/api/book-club` | GET | member | All books + all polls + `me` in one payload (page fetches/refreshes once). |
+| `/api/book-club/book` | POST | member | Add a book. |
+| `/api/book-club/book/<id>` | PATCH | member | Edit fields (title/author/cover/status/meeting/notes). |
+| `/api/book-club/book/<id>` | DELETE | admin OR adder | Remove a book. |
+| `/api/book-club/book/<id>/rating` | POST | member | Upsert the caller's own rating (1-5) + review. |
+| `/api/book-club/poll` | POST | **admin** | Open a vote with 2-3 candidate books. |
+| `/api/book-club/poll/<id>/vote` | POST | member | Cast/change one vote (rejected if poll closed). |
+| `/api/book-club/poll/<id>/close` | POST | **admin** | Close the vote; `add_winner:true` also drops the winner onto the shelf as `status='upcoming'`. |
+| `/api/book-club/poll/<id>` | DELETE | **admin** | Delete a vote. |
+| `/api/book-club/availability` | GET | member | Everyone's `busy` maps + the roster (approved users with access) for the suggester. |
+| `/api/book-club/availability` | POST | member | Replace the caller's own `busy` map (sanitized server-side: date/time regex, start<end). |
+
+**Scheduling / suggestion engine** (all client-side in `book_club.html`): a month calendar where each member taps the days they **can't** make it (toggles `{allDay:true}`); a separate form adds partial-day busy ranges. The suggester scans the next ~6 weeks, skips any day where someone is all-day busy, subtracts everyone's busy ranges from an 8:00 AM–10:00 PM window via interval subtraction (`freeIntervals`), and lists conflict-free days with the largest common free window. "Set as meeting" PATCHes the currently-reading book's `meeting_date`/`meeting_time`. Calendar greens out days nobody has fully blocked; member chips show who's submitted availability.
+
+**To extend**: add a field → handle it in `_serialize_book`/the POST/PATCH allowlist in `app.py` AND the modal in `book_club.html`. The whole feature is isolated — touching it can't affect odds/dashboard/pick-bot.
+
 ## Tech Stack
 
 - **Backend**: Flask (Python), single file `app.py`, Vercel serverless
@@ -217,7 +253,8 @@ A view-only banner appears under the page header instead of the lede. Server-sid
 - `kahla-scanner/supabase/polymarket_fill_alerts.sql` — `polymarket_fill_state` table DDL (Telegram fill alerts). Run manually in Supabase SQL editor. See "Polymarket Fill Alerts" section.
 - `kahla-scanner/storage/{models,supabase_client}.py` — slim Supabase wrapper
 - `kahla-scanner/_lib/{matcher,normalize}.py` — team-name fuzzy match + odds math
-- `firestore.rules` — Firestore security rules (admin/approved helpers)
+- `templates/book_club.html` — **Book Club page**: self-contained (embedded CSS/JS, Firebase auth + `authFetch` + `/api/me` gate, same pattern as `handicapper.html`). Five sections: Currently Reading, **Find a Meeting Time** (availability calendar + suggestion engine), Next-Read Vote, Meeting Schedule, Reading List. All data via the `/api/book-club*` endpoints — no Supabase, no client-side Firestore SDK writes (unlike `index.html`, which writes the `users` collection directly). The availability suggester is pure client-side interval math (`freeIntervals` subtracts everyone's busy ranges from an 8:00 AM–10:00 PM window per day, skips days anyone marked all-day busy, ranks conflict-free days). "Set as meeting" PATCHes the currently-reading book's `meeting_date`/`meeting_time`.
+- `firestore.rules` — Firestore security rules (admin/approved helpers). **Not touched by Book Club** — its collections (`book_club_books` / `book_club_polls` / `book_club_availability`) are written ONLY by the Flask Admin SDK (which bypasses rules), so they need no client rules; the `book_club_access` field on user docs is already covered by `allow update: if isAdmin()`.
 - `vercel.json` — Vercel deployment config
 - `requirements.txt` — Python deps (flask, polymarket-us, requests, python-dotenv, firebase-admin, supabase, **beautifulsoup4**, **lxml**)
 - `.env` — Local env vars (DO NOT COMMIT — contains API keys)

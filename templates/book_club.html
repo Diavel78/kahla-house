@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kahla House — Book Club</title>
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Book Club">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,600;0,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script>
+const FC = {
+    apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
+    authDomain: "kahla-house.firebaseapp.com",
+    projectId: "kahla-house",
+    storageBucket: "kahla-house.firebasestorage.app",
+    messagingSenderId: "1029771942929",
+    appId: "1:1029771942929:web:76358096dbb868e375a5b0"
+};
+firebase.initializeApp(FC);
+</script>
+<style>
+:root {
+    --bg: #0b0e13; --surface: #13171e; --surface-2: #1a1f2b; --border: #1e2530;
+    --text: #e2e8f0; --text-secondary: #8890a8; --text-muted: #555d78;
+    --blue: #4a7cff; --blue-hover: #5e8dff; --blue-dim: rgba(74,124,255,0.1);
+    --green: #22c55e; --green-dim: rgba(34,197,94,0.12);
+    --orange: #f59e0b; --orange-dim: rgba(245,158,11,0.12);
+    --red: #ef4444; --red-dim: rgba(239,68,68,0.1);
+    --cyan: #06b6d4; --cyan-dim: rgba(6,182,212,0.12);
+    --gold: #fbbf24;
+    --r: 8px; --rl: 12px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; overflow-x: hidden; }
+body::before { content: ''; position: fixed; inset: 0; background-image: linear-gradient(rgba(6,182,212,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(6,182,212,0.03) 1px, transparent 1px); background-size: 60px 60px; pointer-events: none; z-index: 0; }
+
+#auth-gate { display: flex; align-items: center; justify-content: center; min-height: 100vh; color: var(--text-muted); position: relative; z-index: 1; }
+
+/* TOP BAR */
+.top-bar { width: 100%; max-width: 1080px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; padding: 18px 24px; position: relative; z-index: 1; flex-wrap: wrap; gap: 12px; }
+.top-bar-left { display: flex; align-items: center; gap: 12px; }
+.top-bar-logo { width: 36px; height: 36px; background: linear-gradient(135deg, var(--cyan), var(--green)); border-radius: var(--r); display: flex; align-items: center; justify-content: center; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 11px; color: #fff; }
+.top-bar-title { font-size: 15px; font-weight: 600; }
+.nav-links { display: flex; gap: 6px; }
+.nav-links a { color: var(--text-secondary); text-decoration: none; font-size: 13px; font-weight: 500; padding: 6px 12px; border-radius: var(--r); transition: .15s; }
+.nav-links a:hover { color: var(--text); background: var(--surface); }
+.nav-links a.active { color: var(--cyan); background: var(--cyan-dim); }
+.top-bar-right { display: flex; align-items: center; gap: 12px; }
+.user-chip { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 20px; font-size: 13px; }
+.user-chip .avatar { width: 24px; height: 24px; background: var(--cyan); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: #fff; }
+.logout-btn { background: none; border: 1px solid var(--border); color: var(--text-muted); padding: 6px 14px; border-radius: 6px; font-family: 'DM Sans', sans-serif; font-size: 13px; cursor: pointer; transition: .2s; }
+.logout-btn:hover { color: var(--text); border-color: var(--text-muted); }
+
+.wrap { max-width: 1080px; margin: 0 auto; padding: 8px 24px 60px; position: relative; z-index: 1; }
+.page-head { margin: 18px 0 28px; }
+.page-head .mark { font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: .25em; text-transform: uppercase; color: var(--cyan); margin-bottom: 8px; }
+.page-head h1 { font-size: 2em; font-weight: 700; letter-spacing: -.02em; }
+.page-head p { color: var(--text-muted); margin-top: 6px; }
+
+.section { margin-bottom: 36px; }
+.section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; gap: 10px; flex-wrap: wrap; }
+.section-head h2 { font-size: 1.15em; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.section-head .count { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted); background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 2px 9px; }
+
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 9px 16px; border-radius: var(--r); font-family: 'DM Sans', sans-serif; font-size: 13px; font-weight: 600; border: none; cursor: pointer; transition: .15s; white-space: nowrap; }
+.btn-primary { background: var(--cyan); color: #06222a; }
+.btn-primary:hover { background: #22c9e8; }
+.btn-ghost { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+.btn-ghost:hover { border-color: var(--text-muted); }
+.btn-danger { background: var(--red-dim); color: #f87171; border: 1px solid rgba(239,68,68,.3); }
+.btn-danger:hover { background: rgba(239,68,68,.2); }
+.btn-sm { padding: 6px 12px; font-size: 12px; }
+
+/* CURRENT READ */
+.current-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }
+.current-card { display: flex; gap: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--rl); padding: 18px; position: relative; overflow: hidden; }
+.current-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, var(--cyan), var(--green)); }
+.cover { width: 86px; height: 128px; border-radius: 6px; object-fit: cover; flex-shrink: 0; background: var(--surface-2); border: 1px solid var(--border); }
+.cover-fallback { width: 86px; height: 128px; border-radius: 6px; flex-shrink: 0; background: var(--surface-2); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 1.8em; color: var(--text-muted); }
+.book-body { flex: 1; min-width: 0; }
+.book-body h3 { font-size: 1.1em; font-weight: 700; line-height: 1.25; }
+.book-body .author { color: var(--text-secondary); font-size: .9em; margin-top: 2px; }
+.meta-line { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+.chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--border); font-size: 12px; }
+.chip.meet { background: var(--blue-dim); border-color: rgba(74,124,255,.3); color: #9bb8ff; }
+.chip.rating { background: rgba(251,191,36,.12); border-color: rgba(251,191,36,.3); color: var(--gold); }
+.card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+
+/* STATUS BADGE */
+.status-badge { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 10px; padding: 3px 8px; border-radius: 5px; letter-spacing: .04em; text-transform: uppercase; }
+.status-badge.reading { background: var(--green-dim); color: #4ade80; }
+.status-badge.upcoming { background: var(--blue-dim); color: #9bb8ff; }
+.status-badge.finished { background: var(--surface-2); color: var(--text-muted); }
+
+/* SHELF */
+.shelf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+.shelf-card { display: flex; gap: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--rl); padding: 14px; }
+.shelf-card .cover, .shelf-card .cover-fallback { width: 60px; height: 90px; }
+.shelf-card h3 { font-size: .98em; font-weight: 600; line-height: 1.25; }
+
+/* VOTE */
+.poll-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--rl); padding: 18px; }
+.poll-card.open { border-color: rgba(6,182,212,.35); }
+.poll-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.poll-head h3 { font-size: 1.05em; font-weight: 700; }
+.poll-opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.opt { border: 1px solid var(--border); border-radius: var(--r); padding: 12px; cursor: pointer; transition: .15s; background: var(--surface-2); position: relative; }
+.opt:hover { border-color: var(--cyan); }
+.opt.mine { border-color: var(--cyan); box-shadow: 0 0 0 1px var(--cyan) inset; }
+.opt.win { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold) inset; }
+.opt.closed { cursor: default; }
+.opt.closed:hover { border-color: var(--border); }
+.opt .opt-title { font-weight: 600; font-size: .95em; }
+.opt .opt-author { color: var(--text-secondary); font-size: .82em; margin-top: 2px; }
+.opt-bar-track { height: 6px; border-radius: 4px; background: var(--bg); margin-top: 10px; overflow: hidden; }
+.opt-bar-fill { height: 100%; background: linear-gradient(90deg, var(--cyan), var(--green)); border-radius: 4px; transition: width .4s; }
+.opt-meta { display: flex; justify-content: space-between; margin-top: 6px; font-size: 11px; color: var(--text-muted); }
+.opt .you-tag { position: absolute; top: 8px; right: 8px; font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--cyan); background: var(--cyan-dim); padding: 2px 6px; border-radius: 4px; }
+.opt .win-tag { position: absolute; top: 8px; right: 8px; font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--gold); background: rgba(251,191,36,.15); padding: 2px 6px; border-radius: 4px; }
+
+/* SCHEDULE */
+.sched-list { display: flex; flex-direction: column; gap: 10px; }
+.sched-row { display: flex; align-items: center; gap: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 12px 14px; }
+.sched-row.next { border-color: rgba(74,124,255,.4); background: linear-gradient(90deg, var(--blue-dim), var(--surface)); }
+.sched-date { text-align: center; min-width: 56px; }
+.sched-date .d { font-size: 1.4em; font-weight: 700; line-height: 1; }
+.sched-date .m { font-family: 'JetBrains Mono', monospace; font-size: 10px; text-transform: uppercase; color: var(--text-muted); letter-spacing: .1em; }
+.sched-body { flex: 1; min-width: 0; }
+.sched-body .t { font-weight: 600; }
+.sched-body .sub { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+
+.empty { text-align: center; padding: 32px; color: var(--text-muted); border: 1px dashed var(--border); border-radius: var(--rl); font-size: .92em; }
+
+/* STARS */
+.stars { display: inline-flex; gap: 2px; }
+.star { color: var(--text-muted); font-size: 1.05em; }
+.star.on { color: var(--gold); }
+.star.pick { cursor: pointer; font-size: 1.7em; }
+.reviews { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.review { font-size: 12px; color: var(--text-secondary); border-left: 2px solid var(--border); padding-left: 8px; }
+.review b { color: var(--text); font-weight: 600; }
+
+/* CALENDAR / AVAILABILITY */
+.cal-wrap { display: grid; grid-template-columns: 1.25fr 1fr; gap: 18px; align-items: start; }
+.cal, .sug-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--rl); padding: 16px; }
+.cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.cal-head .mname { font-weight: 700; }
+.cal-nav { display: flex; gap: 6px; }
+.cal-nav button { background: var(--surface-2); border: 1px solid var(--border); color: var(--text); width: 30px; height: 30px; border-radius: 6px; cursor: pointer; font-size: 16px; }
+.cal-nav button:hover { border-color: var(--text-muted); }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.cal-dow { text-align: center; font-size: 10px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); text-transform: uppercase; padding-bottom: 4px; }
+.cal-cell { aspect-ratio: 1; border: 1px solid var(--border); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 13px; cursor: pointer; position: relative; background: var(--bg); transition: .1s; }
+.cal-cell:hover { border-color: var(--cyan); }
+.cal-cell.pad { background: transparent; border: none; cursor: default; }
+.cal-cell.past { opacity: .3; cursor: default; }
+.cal-cell.past:hover { border-color: var(--border); }
+.cal-cell.me-busy { background: var(--red-dim); border-color: rgba(239,68,68,.5); color: #f87171; }
+.cal-cell.me-partial { background: var(--orange-dim); border-color: rgba(245,158,11,.4); }
+.cal-cell.all-free { box-shadow: 0 0 0 1px var(--green) inset; }
+.cal-cell.today { font-weight: 700; }
+.cal-cell .others { position: absolute; bottom: 2px; font-size: 8px; color: var(--text-muted); white-space: nowrap; }
+.cal-legend { display: flex; gap: 14px; margin-top: 12px; font-size: 11px; color: var(--text-muted); flex-wrap: wrap; }
+.cal-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.lg-dot { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+.tr-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.tr-form .form-group { margin-bottom: 0; }
+.tr-form input { padding: 7px 10px; font-size: 13px; }
+.sug-item { border: 1px solid var(--border); border-radius: var(--r); padding: 12px; margin-bottom: 10px; background: var(--surface-2); }
+.sug-item.best { border-color: rgba(34,197,94,.4); }
+.sug-date { font-weight: 700; }
+.sug-time { font-size: 13px; color: var(--green); margin-top: 3px; }
+.sug-sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+.member-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.mchip { font-size: 11px; padding: 3px 9px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-secondary); }
+.mchip.responded { border-color: rgba(34,197,94,.35); color: #4ade80; }
+@media (max-width: 820px) { .cal-wrap { grid-template-columns: 1fr; } }
+
+/* MODAL */
+.overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 200; align-items: center; justify-content: center; padding: 20px; }
+.overlay.show { display: flex; }
+.modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--rl); width: 100%; max-width: 480px; max-height: 90vh; overflow-y: auto; box-shadow: 0 24px 70px rgba(0,0,0,.5); }
+.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px; border-bottom: 1px solid var(--border); }
+.modal-head h3 { font-size: 1.05em; font-weight: 700; }
+.modal-x { background: none; border: none; color: var(--text-muted); font-size: 22px; cursor: pointer; line-height: 1; }
+.modal-x:hover { color: var(--text); }
+.modal-body { padding: 20px; }
+.modal-foot { display: flex; gap: 10px; justify-content: flex-end; padding: 16px 20px; border-top: 1px solid var(--border); }
+.form-group { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
+.form-row { display: flex; gap: 12px; }
+.form-row .form-group { flex: 1; }
+.form-group label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--text-secondary); }
+.form-group input, .form-group select, .form-group textarea { padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--r); color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 14px; }
+.form-group input:focus, .form-group select:focus, .form-group textarea:focus { outline: none; border-color: var(--cyan); }
+.form-group textarea { resize: vertical; min-height: 72px; }
+.poll-opt-edit { border: 1px solid var(--border); border-radius: var(--r); padding: 12px; margin-bottom: 10px; background: var(--bg); }
+.poll-opt-edit .lbl { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--cyan); margin-bottom: 8px; }
+
+/* TOAST */
+.toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 300; display: flex; flex-direction: column; gap: 8px; }
+.toast { padding: 12px 20px; border-radius: var(--r); font-size: 14px; font-weight: 500; background: var(--surface); border: 1px solid var(--border); box-shadow: 0 4px 16px rgba(0,0,0,.3); animation: toastIn .3s ease; }
+.toast.success { border-left: 3px solid var(--green); }
+.toast.error { border-left: 3px solid var(--red); }
+.toast.info { border-left: 3px solid var(--cyan); }
+@keyframes toastIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+@media (max-width: 600px) {
+    .top-bar { padding: 14px 16px; }
+    .wrap { padding: 8px 16px 60px; }
+    .nav-links { order: 3; width: 100%; }
+}
+</style>
+</head>
+<body>
+
+<div id="auth-gate">Loading…</div>
+
+<div id="app" style="display:none">
+    <div class="top-bar">
+        <div class="top-bar-left">
+            <div class="top-bar-logo">KH</div>
+            <div class="top-bar-title">Book Club</div>
+            <div class="nav-links"><a href="/">Home</a><a href="/book-club" class="active">Book Club</a></div>
+        </div>
+        <div class="top-bar-right">
+            <div class="user-chip"><div class="avatar" id="uAvatar">?</div><span id="uName">—</span></div>
+            <button class="logout-btn" onclick="doLogout()">Logout</button>
+        </div>
+    </div>
+
+    <div class="wrap">
+        <div class="page-head">
+            <div class="mark">The Kahla House</div>
+            <h1>Book Club</h1>
+            <p>What we're reading, what's next, and when we meet.</p>
+        </div>
+
+        <!-- CURRENTLY READING -->
+        <div class="section">
+            <div class="section-head"><h2>&#128214; Currently Reading</h2></div>
+            <div id="currentWrap"></div>
+        </div>
+
+        <!-- AVAILABILITY / SCHEDULING -->
+        <div class="section">
+            <div class="section-head">
+                <h2>&#128336; Find a Meeting Time</h2>
+                <button class="btn btn-ghost btn-sm" onclick="loadAll()">Refresh</button>
+            </div>
+            <p style="color:var(--text-muted);font-size:.9em;margin:-6px 0 14px">Tap the days you <b>can't</b> make it (tap again to clear). Days everyone can do light up green, and we suggest times on the right.</p>
+            <div class="cal-wrap">
+                <div class="cal">
+                    <div class="cal-head">
+                        <div class="mname" id="calMonthName"></div>
+                        <div class="cal-nav"><button onclick="calMove(-1)">&#8249;</button><button onclick="calMove(1)">&#8250;</button></div>
+                    </div>
+                    <div class="cal-grid" id="calGrid"></div>
+                    <div class="cal-legend">
+                        <span><i class="lg-dot" style="background:var(--red)"></i> You're busy</span>
+                        <span><i class="lg-dot" style="background:var(--orange)"></i> You're partly busy</span>
+                        <span><i class="lg-dot" style="box-shadow:0 0 0 1px var(--green) inset"></i> Everyone can make it</span>
+                    </div>
+                    <div class="tr-form">
+                        <div class="form-group"><label>Busy only part of a day?</label><input type="date" id="trDate"></div>
+                        <div class="form-group"><label>From</label><input type="time" id="trStart"></div>
+                        <div class="form-group"><label>To</label><input type="time" id="trEnd"></div>
+                        <button class="btn btn-ghost btn-sm" onclick="addTimeRange()">Add</button>
+                    </div>
+                </div>
+                <div class="sug-panel">
+                    <h3 style="font-size:1em;font-weight:700;margin-bottom:4px">Suggested times</h3>
+                    <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px" id="rosterCount"></div>
+                    <div id="sugList"></div>
+                    <div class="member-chips" id="memberChips"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- NEXT-READ VOTE -->
+        <div class="section">
+            <div class="section-head">
+                <h2>&#128499;&#65039; Next-Read Vote</h2>
+                <button class="btn btn-primary btn-sm admin-only" style="display:none" onclick="openPollModal()">+ Start a vote</button>
+            </div>
+            <div id="pollWrap"></div>
+        </div>
+
+        <!-- MEETING SCHEDULE -->
+        <div class="section">
+            <div class="section-head"><h2>&#128197; Meeting Schedule</h2></div>
+            <div id="schedWrap"></div>
+        </div>
+
+        <!-- READING LIST -->
+        <div class="section">
+            <div class="section-head">
+                <h2>&#128218; Reading List <span class="count" id="shelfCount">0</span></h2>
+                <button class="btn btn-primary btn-sm" onclick="openBookModal()">+ Add a book</button>
+            </div>
+            <div id="shelfWrap"></div>
+        </div>
+    </div>
+</div>
+
+<!-- BOOK MODAL -->
+<div class="overlay" id="bookOverlay">
+    <div class="modal">
+        <div class="modal-head"><h3 id="bookModalTitle">Add a book</h3><button class="modal-x" onclick="closeModal('bookOverlay')">&times;</button></div>
+        <div class="modal-body">
+            <input type="hidden" id="bookId">
+            <div class="form-group"><label>Title *</label><input id="bTitle" placeholder="The Midnight Library"></div>
+            <div class="form-group"><label>Author</label><input id="bAuthor" placeholder="Matt Haig"></div>
+            <div class="form-group"><label>Cover image URL</label><input id="bCover" placeholder="https://…"></div>
+            <div class="form-group"><label>Status</label><select id="bStatus"><option value="upcoming">Upcoming</option><option value="reading">Currently reading</option><option value="finished">Finished</option></select></div>
+            <div class="form-row">
+                <div class="form-group"><label>Meeting date</label><input type="date" id="bDate"></div>
+                <div class="form-group"><label>Time</label><input type="time" id="bTime"></div>
+            </div>
+            <div class="form-group"><label>Meeting location</label><input id="bLoc" placeholder="Rob's house / Zoom"></div>
+            <div class="form-group"><label>Notes</label><textarea id="bNotes" placeholder="Optional notes for the club"></textarea></div>
+        </div>
+        <div class="modal-foot"><button class="btn btn-ghost" onclick="closeModal('bookOverlay')">Cancel</button><button class="btn btn-primary" id="bookSaveBtn" onclick="saveBook()">Save</button></div>
+    </div>
+</div>
+
+<!-- RATE MODAL -->
+<div class="overlay" id="rateOverlay">
+    <div class="modal">
+        <div class="modal-head"><h3>Rate this book</h3><button class="modal-x" onclick="closeModal('rateOverlay')">&times;</button></div>
+        <div class="modal-body">
+            <input type="hidden" id="rateBookId">
+            <div id="rateBookTitle" style="font-weight:600;margin-bottom:14px"></div>
+            <div class="form-group"><label>Your rating</label><div class="stars" id="ratePicker"></div></div>
+            <div class="form-group"><label>Review (optional)</label><textarea id="rateReview" placeholder="What did you think?"></textarea></div>
+        </div>
+        <div class="modal-foot"><button class="btn btn-ghost" onclick="closeModal('rateOverlay')">Cancel</button><button class="btn btn-primary" onclick="saveRating()">Save rating</button></div>
+    </div>
+</div>
+
+<!-- POLL MODAL -->
+<div class="overlay" id="pollOverlay">
+    <div class="modal">
+        <div class="modal-head"><h3>Start a next-read vote</h3><button class="modal-x" onclick="closeModal('pollOverlay')">&times;</button></div>
+        <div class="modal-body">
+            <div class="form-group"><label>Question</label><input id="pQuestion" placeholder="Next read" value="Next read"></div>
+            <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">Add 2 or 3 candidate books. The club votes; you pick the winner when you close it.</p>
+            <div id="pollOptsEdit"></div>
+        </div>
+        <div class="modal-foot"><button class="btn btn-ghost" onclick="closeModal('pollOverlay')">Cancel</button><button class="btn btn-primary" onclick="savePoll()">Open vote</button></div>
+    </div>
+</div>
+
+<div class="toast-container" id="toastC"></div>
+
+<script>
+/* ===== auth ===== */
+async function authFetch(url, options = {}) {
+    const user = firebase.auth().currentUser;
+    if (!user) { window.location.href = '/'; return null; }
+    const token = await user.getIdToken();
+    const headers = { ...(options.headers || {}), 'Authorization': 'Bearer ' + token };
+    if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+    return fetch(url, { ...options, headers });
+}
+function doLogout() { firebase.auth().signOut().then(() => { window.location.href = '/'; }); }
+
+let _uid = null, _isAdmin = false;
+let STATE = { books: [], polls: [], me: {}, avail: { members: [], roster: [], me_name: 'You' } };
+let _myBusy = {};
+
+firebase.auth().onAuthStateChanged(async user => {
+    if (!user) { window.location.href = '/'; return; }
+    try {
+        const token = await user.getIdToken();
+        const r = await fetch('/api/me', { headers: { 'Authorization': 'Bearer ' + token } });
+        if (!r.ok) { window.location.href = '/'; return; }
+        const me = await r.json();
+        if (!me.approved) { window.location.href = '/'; return; }
+        // Book Club is gated by its own capability (admins implicit).
+        if (!me.book_club_access && me.role !== 'admin') { window.location.href = '/'; return; }
+        _uid = me.uid;
+        _isAdmin = me.role === 'admin';
+        document.getElementById('uName').textContent = me.displayName || me.email;
+        document.getElementById('uAvatar').textContent = (me.displayName || me.email || '?').split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
+        if (_isAdmin) document.querySelectorAll('.admin-only').forEach(el => el.style.display = '');
+    } catch { window.location.href = '/'; return; }
+    document.getElementById('auth-gate').style.display = 'none';
+    document.getElementById('app').style.display = '';
+    loadAll();
+});
+
+/* ===== helpers ===== */
+function esc(s) { if (s === null || s === undefined) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function toast(m, t) { const c = document.getElementById('toastC'), el = document.createElement('div'); el.className = 'toast ' + (t || 'info'); el.textContent = m; c.appendChild(el); setTimeout(() => el.remove(), 3000); }
+function coverHTML(b, cls) { return b.cover_url ? `<img class="cover ${cls || ''}" src="${esc(b.cover_url)}" alt="" onerror="this.outerHTML='<div class=\\'cover-fallback ${cls || ''}\\'>&#128214;</div>'">` : `<div class="cover-fallback ${cls || ''}">&#128214;</div>`; }
+function starsHTML(n) { let h = '<span class="stars">'; for (let i = 1; i <= 5; i++) h += `<span class="star ${i <= Math.round(n) ? 'on' : ''}">&#9733;</span>`; return h + '</span>'; }
+function myRating(b) { return (b.ratings || []).find(r => r.uid === _uid); }
+function fmtDateParts(iso) { if (!iso) return null; const d = new Date(iso + 'T00:00:00'); if (isNaN(d)) return null; return { d: d.getDate(), m: d.toLocaleString('en-US', { month: 'short' }), full: d.toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric' }) }; }
+
+/* ===== load + render ===== */
+async function loadAll() {
+    const [r1, r2] = await Promise.all([authFetch('/api/book-club'), authFetch('/api/book-club/availability')]);
+    if (r1 && r1.ok) { const d = await r1.json(); STATE.books = d.books || []; STATE.polls = d.polls || []; STATE.me = d.me || {}; }
+    else { toast('Could not load the book club', 'error'); }
+    if (r2 && r2.ok) {
+        STATE.avail = await r2.json();
+        const mine = (STATE.avail.members || []).find(m => m.uid === _uid);
+        _myBusy = mine ? JSON.parse(JSON.stringify(mine.busy || {})) : {};
+    }
+    renderCurrent(); renderAvailability(); renderPolls(); renderSchedule(); renderShelf();
+}
+
+/* ===== availability / scheduling ===== */
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MEET_START = 8 * 60, MEET_END = 22 * 60;   // suggest meetings 8:00 AM–10:00 PM
+let _calCur = new Date(); _calCur.setDate(1);
+function isoDate(dt) { const y = dt.getFullYear(), m = String(dt.getMonth() + 1).padStart(2, '0'), d = String(dt.getDate()).padStart(2, '0'); return `${y}-${m}-${d}`; }
+function toMin(hhmm) { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; }
+function minLabel(m) { let h = Math.floor(m / 60); const mm = m % 60, ap = h >= 12 ? 'PM' : 'AM'; let hh = h % 12; if (hh === 0) hh = 12; return `${hh}:${String(mm).padStart(2, '0')} ${ap}`; }
+function calMove(d) { _calCur.setMonth(_calCur.getMonth() + d); renderAvailability(); }
+function mergedMembers() {
+    const others = (STATE.avail.members || []).filter(m => m.uid !== _uid);
+    return [...others, { uid: _uid, name: STATE.avail.me_name || 'You', busy: _myBusy }];
+}
+
+function renderAvailability() {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    document.getElementById('calMonthName').textContent = _calCur.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+    const members = mergedMembers();
+    const busyCount = {}, allDayCount = {};
+    members.forEach(m => { for (const [d, v] of Object.entries(m.busy || {})) { busyCount[d] = (busyCount[d] || 0) + 1; if (v.allDay) allDayCount[d] = (allDayCount[d] || 0) + 1; } });
+    const rosterN = (STATE.avail.roster || []).length || members.length;
+    const startPad = _calCur.getDay();
+    const daysInMonth = new Date(_calCur.getFullYear(), _calCur.getMonth() + 1, 0).getDate();
+    let cells = DOW.map(d => `<div class="cal-dow">${d}</div>`).join('');
+    for (let i = 0; i < startPad; i++) cells += `<div class="cal-cell pad"></div>`;
+    for (let day = 1; day <= daysInMonth; day++) {
+        const dt = new Date(_calCur.getFullYear(), _calCur.getMonth(), day);
+        const ds = isoDate(dt), past = dt < today;
+        const mine = _myBusy[ds];
+        let cls = 'cal-cell';
+        if (dt.getTime() === today.getTime()) cls += ' today';
+        if (past) cls += ' past';
+        if (mine && mine.allDay) cls += ' me-busy';
+        else if (mine && mine.ranges && mine.ranges.length) cls += ' me-partial';
+        if (!past && !allDayCount[ds] && rosterN > 0) cls += ' all-free';
+        const others = (busyCount[ds] || 0) - (mine ? 1 : 0);
+        cells += `<div class="${cls}" ${past ? '' : `onclick="toggleDay('${ds}')"`}><span>${day}</span>${others > 0 ? `<span class="others">${others} out</span>` : ''}</div>`;
+    }
+    document.getElementById('calGrid').innerHTML = cells;
+    document.getElementById('rosterCount').textContent = rosterN + ' member' + (rosterN === 1 ? '' : 's') + ' in the club';
+    renderSuggestions(members, today);
+    renderMemberChips();
+}
+
+function toggleDay(ds) {
+    if (_myBusy[ds]) delete _myBusy[ds]; else _myBusy[ds] = { allDay: true };
+    saveBusy(); renderAvailability();
+}
+function addTimeRange() {
+    const d = document.getElementById('trDate').value, s = document.getElementById('trStart').value, e = document.getElementById('trEnd').value;
+    if (!d || !s || !e) { toast('Pick a date and a start/end time', 'error'); return; }
+    if (s >= e) { toast('End time must be after start time', 'error'); return; }
+    if (_myBusy[d] && _myBusy[d].allDay) { toast('That day is already marked busy all day', 'info'); return; }
+    const ranges = ((_myBusy[d] && _myBusy[d].ranges) || []).concat([{ start: s, end: e }]);
+    _myBusy[d] = { ranges };
+    document.getElementById('trStart').value = ''; document.getElementById('trEnd').value = '';
+    saveBusy(); renderAvailability(); toast('Marked busy ' + s + '–' + e + ' on ' + d, 'success');
+}
+let _saveTimer = null;
+function saveBusy() {
+    clearTimeout(_saveTimer);
+    _saveTimer = setTimeout(async () => {
+        const r = await authFetch('/api/book-club/availability', { method: 'POST', body: JSON.stringify({ busy: _myBusy }) });
+        if (!r || !r.ok) toast('Could not save your availability', 'error');
+    }, 450);
+}
+
+function freeIntervals(busyRanges) {
+    let free = [[MEET_START, MEET_END]];
+    busyRanges.forEach(([bs, be]) => {
+        const next = [];
+        free.forEach(([fs, fe]) => {
+            if (be <= fs || bs >= fe) { next.push([fs, fe]); return; }
+            if (bs > fs) next.push([fs, bs]);
+            if (be < fe) next.push([be, fe]);
+        });
+        free = next;
+    });
+    return free;
+}
+
+function renderSuggestions(members, today) {
+    const byDate = {};
+    members.forEach(m => { for (const [d, v] of Object.entries(m.busy || {})) (byDate[d] = byDate[d] || []).push({ uid: m.uid, name: m.name, ...v }); });
+    const sugg = [];
+    for (let i = 0; i < 42 && sugg.length < 8; i++) {
+        const dt = new Date(today); dt.setDate(today.getDate() + i);
+        const ds = isoDate(dt), entries = byDate[ds] || [];
+        if (entries.some(e => e.allDay)) continue;   // someone can't make any time
+        const busyRanges = [];
+        entries.forEach(e => (e.ranges || []).forEach(r => busyRanges.push([toMin(r.start), toMin(r.end)])));
+        const free = freeIntervals(busyRanges).filter(([s, e]) => e - s >= 60);
+        if (!free.length) continue;
+        sugg.push({ ds, dt, free, fullyFree: busyRanges.length === 0, partials: entries.filter(e => e.ranges && e.ranges.length).length });
+    }
+    const el = document.getElementById('sugList');
+    if (!sugg.length) { el.innerHTML = `<div class="empty" style="padding:18px">No day in the next 6 weeks works for everyone yet. As members mark their availability, suggestions will appear here.</div>`; return; }
+    el.innerHTML = sugg.slice(0, 6).map((s, idx) => {
+        const dl = s.dt.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+        const block = [...s.free].sort((a, b) => (b[1] - b[0]) - (a[1] - a[0]))[0];   // largest free window
+        const timeTxt = s.fullyFree ? 'Everyone free all day' : `Everyone free ${minLabel(block[0])} – ${minLabel(block[1])}`;
+        const startHHMM = `${String(Math.floor(block[0] / 60)).padStart(2, '0')}:${String(block[0] % 60).padStart(2, '0')}`;
+        return `<div class="sug-item ${idx === 0 ? 'best' : ''}">
+            <div class="sug-date">${dl}</div>
+            <div class="sug-time">${timeTxt}</div>
+            <div class="sug-sub">${s.fullyFree ? 'No conflicts' : s.partials + ' member' + (s.partials === 1 ? '' : 's') + ' partly busy — this window avoids them'}</div>
+            <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="useSlot('${s.ds}','${s.fullyFree ? '19:00' : startHHMM}')">Set as meeting</button>
+        </div>`;
+    }).join('');
+}
+
+function renderMemberChips() {
+    const responded = new Set((STATE.avail.members || []).map(m => m.uid));
+    responded.add(_uid);
+    const roster = STATE.avail.roster || [];
+    const el = document.getElementById('memberChips');
+    if (!roster.length) { el.innerHTML = ''; return; }
+    el.innerHTML = '<div style="width:100%;font-size:11px;color:var(--text-muted);margin-bottom:2px">Members (✓ = marked availability)</div>'
+        + roster.map(m => `<span class="mchip ${responded.has(m.uid) ? 'responded' : ''}">${esc(m.name)}${responded.has(m.uid) ? ' ✓' : ''}</span>`).join('');
+}
+
+async function useSlot(ds, hhmm) {
+    const reading = STATE.books.find(b => b.status === 'reading');
+    if (!reading) { toast('No "currently reading" book to schedule — add one first', 'info'); return; }
+    const r = await authFetch('/api/book-club/book/' + reading.id, { method: 'PATCH', body: JSON.stringify({ meeting_date: ds, meeting_time: hhmm }) });
+    if (r && r.ok) { toast('Meeting set for "' + reading.title + '"', 'success'); loadAll(); }
+    else { toast('Could not set the meeting', 'error'); }
+}
+
+function renderCurrent() {
+    const reading = STATE.books.filter(b => b.status === 'reading');
+    const wrap = document.getElementById('currentWrap');
+    if (!reading.length) { wrap.innerHTML = `<div class="empty">No book in progress. Add one and set its status to <b>Currently reading</b>.</div>`; return; }
+    wrap.innerHTML = `<div class="current-grid">${reading.map(b => {
+        const mine = myRating(b);
+        const meet = b.meeting_date ? fmtDateParts(b.meeting_date) : null;
+        return `<div class="current-card">
+            ${coverHTML(b)}
+            <div class="book-body">
+                <h3>${esc(b.title)}</h3>
+                <div class="author">${esc(b.author) || '&nbsp;'}</div>
+                <div class="meta-line">
+                    ${meet ? `<span class="chip meet">&#128197; ${esc(meet.full)}${b.meeting_time ? ' · ' + esc(b.meeting_time) : ''}</span>` : ''}
+                    ${b.meeting_location ? `<span class="chip">&#128205; ${esc(b.meeting_location)}</span>` : ''}
+                    <span class="chip rating">${b.avg_rating != null ? '&#9733; ' + b.avg_rating + ' (' + b.rating_count + ')' : 'No ratings yet'}</span>
+                </div>
+                ${renderReviews(b)}
+                <div class="card-actions">
+                    <button class="btn btn-ghost btn-sm" onclick="openRate('${b.id}')">${mine ? 'Edit my rating' : 'Rate it'}</button>
+                    <button class="btn btn-ghost btn-sm" onclick="editBook('${b.id}')">Edit</button>
+                    ${canDelete(b) ? `<button class="btn btn-danger btn-sm" onclick="deleteBook('${b.id}')">Delete</button>` : ''}
+                </div>
+            </div>
+        </div>`;
+    }).join('')}</div>`;
+}
+
+function renderReviews(b) {
+    if (!b.ratings || !b.ratings.length) return '';
+    return `<div class="reviews">${b.ratings.filter(r => r.review).slice(0, 4).map(r => `<div class="review"><b>${esc(r.name)}</b> ${starsHTML(r.rating)} — ${esc(r.review)}</div>`).join('')}</div>`;
+}
+
+function renderPolls() {
+    const wrap = document.getElementById('pollWrap');
+    const polls = [...STATE.polls].sort((a, b) => (a.status === 'open' ? -1 : 1) - (b.status === 'open' ? -1 : 1) || (b.created_at || '').localeCompare(a.created_at || ''));
+    if (!polls.length) { wrap.innerHTML = `<div class="empty">No vote running. ${_isAdmin ? 'Start one to let the club pick the next read.' : 'An admin can start one.'}</div>`; return; }
+    wrap.innerHTML = polls.map(p => {
+        const closed = p.status === 'closed';
+        return `<div class="poll-card ${closed ? '' : 'open'}" style="margin-bottom:14px">
+            <div class="poll-head">
+                <h3>${esc(p.question)} ${closed ? '<span class="status-badge finished">Closed</span>' : '<span class="status-badge reading">Open</span>'}</h3>
+                <div style="display:flex;gap:6px;align-items:center">
+                    <span style="font-size:12px;color:var(--text-muted)">${p.total_votes} vote${p.total_votes === 1 ? '' : 's'}</span>
+                    ${_isAdmin && !closed ? `<button class="btn btn-ghost btn-sm" onclick="closePoll('${p.id}')">Close &amp; pick winner</button>` : ''}
+                    ${_isAdmin ? `<button class="btn btn-danger btn-sm" onclick="deletePoll('${p.id}')">Delete</button>` : ''}
+                </div>
+            </div>
+            <div class="poll-opts">${p.options.map(o => {
+                const pct = p.total_votes ? Math.round(o.votes / p.total_votes * 100) : 0;
+                const isMine = p.my_vote === o.id;
+                const isWin = closed && p.winner === o.id;
+                return `<div class="opt ${isMine ? 'mine' : ''} ${isWin ? 'win' : ''} ${closed ? 'closed' : ''}" ${closed ? '' : `onclick="vote('${p.id}','${o.id}')"`}>
+                    ${isMine && !closed ? '<span class="you-tag">YOUR VOTE</span>' : ''}
+                    ${isWin ? '<span class="win-tag">WINNER</span>' : ''}
+                    <div class="opt-title">${esc(o.title)}</div>
+                    <div class="opt-author">${esc(o.author) || '&nbsp;'}</div>
+                    <div class="opt-bar-track"><div class="opt-bar-fill" style="width:${pct}%"></div></div>
+                    <div class="opt-meta"><span>${o.votes} vote${o.votes === 1 ? '' : 's'}</span><span>${pct}%</span></div>
+                </div>`;
+            }).join('')}</div>
+        </div>`;
+    }).join('');
+}
+
+function renderSchedule() {
+    const wrap = document.getElementById('schedWrap');
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const items = STATE.books.filter(b => b.meeting_date).sort((a, b) => a.meeting_date.localeCompare(b.meeting_date));
+    if (!items.length) { wrap.innerHTML = `<div class="empty">No meetings scheduled. Add a meeting date when you add or edit a book.</div>`; return; }
+    const nextIdx = items.findIndex(b => new Date(b.meeting_date + 'T00:00:00') >= today);
+    wrap.innerHTML = `<div class="sched-list">${items.map((b, i) => {
+        const dp = fmtDateParts(b.meeting_date);
+        return `<div class="sched-row ${i === nextIdx ? 'next' : ''}">
+            <div class="sched-date"><div class="d">${dp ? dp.d : '?'}</div><div class="m">${dp ? dp.m : ''}</div></div>
+            <div class="sched-body">
+                <div class="t">${esc(b.title)} ${i === nextIdx ? '<span class="status-badge upcoming" style="margin-left:4px">Next up</span>' : ''}</div>
+                <div class="sub">${b.meeting_time ? esc(b.meeting_time) + ' · ' : ''}${esc(b.meeting_location) || 'Location TBD'}</div>
+            </div>
+        </div>`;
+    }).join('')}</div>`;
+}
+
+function renderShelf() {
+    const wrap = document.getElementById('shelfWrap');
+    const order = { upcoming: 0, reading: 1, finished: 2 };
+    const items = [...STATE.books].sort((a, b) => (order[a.status] - order[b.status]) || (a.title || '').localeCompare(b.title || ''));
+    document.getElementById('shelfCount').textContent = items.length;
+    if (!items.length) { wrap.innerHTML = `<div class="empty">The shelf is empty. Add the first book!</div>`; return; }
+    wrap.innerHTML = `<div class="shelf-grid">${items.map(b => {
+        const mine = myRating(b);
+        return `<div class="shelf-card">
+            ${coverHTML(b)}
+            <div class="book-body">
+                <h3>${esc(b.title)}</h3>
+                <div class="author">${esc(b.author) || '&nbsp;'}</div>
+                <div class="meta-line">
+                    <span class="status-badge ${b.status}">${b.status}</span>
+                    ${b.avg_rating != null ? `<span class="chip rating">&#9733; ${b.avg_rating}</span>` : ''}
+                </div>
+                <div class="card-actions">
+                    <button class="btn btn-ghost btn-sm" onclick="openRate('${b.id}')">${mine ? '&#9733; ' + mine.rating : 'Rate'}</button>
+                    <button class="btn btn-ghost btn-sm" onclick="editBook('${b.id}')">Edit</button>
+                    ${canDelete(b) ? `<button class="btn btn-danger btn-sm" onclick="deleteBook('${b.id}')">Delete</button>` : ''}
+                </div>
+            </div>
+        </div>`;
+    }).join('')}</div>`;
+}
+
+function canDelete(b) { return _isAdmin || b.added_by === _uid; }
+
+/* ===== book add/edit ===== */
+function openBookModal() {
+    document.getElementById('bookModalTitle').textContent = 'Add a book';
+    document.getElementById('bookId').value = '';
+    ['bTitle', 'bAuthor', 'bCover', 'bDate', 'bTime', 'bLoc', 'bNotes'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('bStatus').value = 'upcoming';
+    showModal('bookOverlay'); document.getElementById('bTitle').focus();
+}
+function editBook(id) {
+    const b = STATE.books.find(x => x.id === id); if (!b) return;
+    document.getElementById('bookModalTitle').textContent = 'Edit book';
+    document.getElementById('bookId').value = b.id;
+    document.getElementById('bTitle').value = b.title || '';
+    document.getElementById('bAuthor').value = b.author || '';
+    document.getElementById('bCover').value = b.cover_url || '';
+    document.getElementById('bStatus').value = b.status || 'upcoming';
+    document.getElementById('bDate').value = b.meeting_date || '';
+    document.getElementById('bTime').value = b.meeting_time || '';
+    document.getElementById('bLoc').value = b.meeting_location || '';
+    document.getElementById('bNotes').value = b.notes || '';
+    showModal('bookOverlay');
+}
+async function saveBook() {
+    const title = document.getElementById('bTitle').value.trim();
+    if (!title) { toast('Title is required', 'error'); return; }
+    const payload = {
+        title, author: document.getElementById('bAuthor').value.trim(),
+        cover_url: document.getElementById('bCover').value.trim(),
+        status: document.getElementById('bStatus').value,
+        meeting_date: document.getElementById('bDate').value,
+        meeting_time: document.getElementById('bTime').value,
+        meeting_location: document.getElementById('bLoc').value.trim(),
+        notes: document.getElementById('bNotes').value.trim(),
+    };
+    const id = document.getElementById('bookId').value;
+    const btn = document.getElementById('bookSaveBtn'); btn.disabled = true;
+    const r = id
+        ? await authFetch('/api/book-club/book/' + id, { method: 'PATCH', body: JSON.stringify(payload) })
+        : await authFetch('/api/book-club/book', { method: 'POST', body: JSON.stringify(payload) });
+    btn.disabled = false;
+    if (r && r.ok) { closeModal('bookOverlay'); toast(id ? 'Book updated' : 'Book added', 'success'); loadAll(); }
+    else { const e = r ? await r.json() : {}; toast(e.error || 'Save failed', 'error'); }
+}
+async function deleteBook(id) {
+    if (!confirm('Remove this book from the shelf?')) return;
+    const r = await authFetch('/api/book-club/book/' + id, { method: 'DELETE' });
+    if (r && r.ok) { toast('Book removed', 'success'); loadAll(); }
+    else { const e = r ? await r.json() : {}; toast(e.error || 'Delete failed', 'error'); }
+}
+
+/* ===== rating ===== */
+let _ratePick = 0;
+function openRate(id) {
+    const b = STATE.books.find(x => x.id === id); if (!b) return;
+    document.getElementById('rateBookId').value = id;
+    document.getElementById('rateBookTitle').textContent = b.title;
+    const mine = myRating(b);
+    _ratePick = mine ? mine.rating : 0;
+    document.getElementById('rateReview').value = mine ? (mine.review || '') : '';
+    renderRatePicker();
+    showModal('rateOverlay');
+}
+function renderRatePicker() {
+    const el = document.getElementById('ratePicker');
+    let h = '';
+    for (let i = 1; i <= 5; i++) h += `<span class="star pick ${i <= _ratePick ? 'on' : ''}" onclick="_ratePick=${i};renderRatePicker()">&#9733;</span>`;
+    el.innerHTML = h;
+}
+async function saveRating() {
+    if (!_ratePick) { toast('Pick a star rating', 'error'); return; }
+    const id = document.getElementById('rateBookId').value;
+    const r = await authFetch('/api/book-club/book/' + id + '/rating', { method: 'POST', body: JSON.stringify({ rating: _ratePick, review: document.getElementById('rateReview').value.trim() }) });
+    if (r && r.ok) { closeModal('rateOverlay'); toast('Rating saved', 'success'); loadAll(); }
+    else { const e = r ? await r.json() : {}; toast(e.error || 'Could not save rating', 'error'); }
+}
+
+/* ===== poll ===== */
+function openPollModal() {
+    document.getElementById('pQuestion').value = 'Next read';
+    document.getElementById('pollOptsEdit').innerHTML = [0, 1, 2].map(i => `
+        <div class="poll-opt-edit">
+            <div class="lbl">Book ${i + 1}${i === 2 ? ' (optional)' : ''}</div>
+            <div class="form-group"><label>Title</label><input id="po${i}t"></div>
+            <div class="form-row">
+                <div class="form-group"><label>Author</label><input id="po${i}a"></div>
+                <div class="form-group"><label>Cover URL</label><input id="po${i}c"></div>
+            </div>
+        </div>`).join('');
+    showModal('pollOverlay'); document.getElementById('po0t').focus();
+}
+async function savePoll() {
+    const options = [];
+    for (let i = 0; i < 3; i++) {
+        const t = document.getElementById('po' + i + 't').value.trim();
+        if (t) options.push({ title: t, author: document.getElementById('po' + i + 'a').value.trim(), cover_url: document.getElementById('po' + i + 'c').value.trim() });
+    }
+    if (options.length < 2) { toast('Add at least 2 books to vote on', 'error'); return; }
+    const r = await authFetch('/api/book-club/poll', { method: 'POST', body: JSON.stringify({ question: document.getElementById('pQuestion').value.trim() || 'Next read', options }) });
+    if (r && r.ok) { closeModal('pollOverlay'); toast('Vote opened', 'success'); loadAll(); }
+    else { const e = r ? await r.json() : {}; toast(e.error || 'Could not open vote', 'error'); }
+}
+async function vote(pollId, optId) {
+    const r = await authFetch('/api/book-club/poll/' + pollId + '/vote', { method: 'POST', body: JSON.stringify({ option_id: optId }) });
+    if (r && r.ok) { loadAll(); } else { const e = r ? await r.json() : {}; toast(e.error || 'Vote failed', 'error'); }
+}
+async function closePoll(pollId) {
+    const addWinner = confirm('Close this vote?\n\nOK = close AND add the winning book to the reading list.\nCancel = just close (you can add it manually).');
+    // confirm only gives OK/Cancel; both close the poll, OK also adds winner.
+    const r = await authFetch('/api/book-club/poll/' + pollId + '/close', { method: 'POST', body: JSON.stringify({ add_winner: addWinner }) });
+    if (r && r.ok) { const d = await r.json(); toast(d.added_book_id ? 'Vote closed — winner added to the shelf' : 'Vote closed', 'success'); loadAll(); }
+    else { const e = r ? await r.json() : {}; toast(e.error || 'Could not close vote', 'error'); }
+}
+async function deletePoll(pollId) {
+    if (!confirm('Delete this vote entirely?')) return;
+    const r = await authFetch('/api/book-club/poll/' + pollId, { method: 'DELETE' });
+    if (r && r.ok) { toast('Vote deleted', 'success'); loadAll(); }
+    else { const e = r ? await r.json() : {}; toast(e.error || 'Delete failed', 'error'); }
+}
+
+/* ===== modal utils ===== */
+function showModal(id) { document.getElementById(id).classList.add('show'); }
+function closeModal(id) { document.getElementById(id).classList.remove('show'); }
+document.querySelectorAll('.overlay').forEach(o => o.addEventListener('click', e => { if (e.target === o) o.classList.remove('show'); }));
+document.addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.overlay.show').forEach(o => o.classList.remove('show')); });
+</script>
+</body>
+</html>

@@ -150,6 +150,20 @@ def bot_required(f):
     return wrapper
 
 
+def book_club_required(f):
+    """Require Firebase auth + book_club_access (admin always implicit).
+    Used for the Book Club page + API. Independent of bot_access — the
+    Book Club is a separate, non-betting surface gated by its own pill."""
+    @functools.wraps(f)
+    @firebase_auth_required
+    def wrapper(*args, **kwargs):
+        role = g.user_data.get("role")
+        if role != "admin" and not g.user_data.get("book_club_access"):
+            return jsonify({"ok": False, "error": "Book Club access required"}), 403
+        return f(*args, **kwargs)
+    return wrapper
+
+
 # ---------------------------------------------------------------------------
 # Page routes (serve templates — auth handled client-side by Firebase JS SDK)
 # ---------------------------------------------------------------------------
@@ -840,6 +854,16 @@ def handicapper_page():
 def games_page():
     """Card-game scoring sheets — any approved user (client-side gated via /api/me)."""
     resp = make_response(render_template("games.html"))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
+@app.route("/book-club")
+def book_club_page():
+    """Book Club — admin + book_club_access gated (client-side via /api/me).
+    A separate, non-betting surface (shared reading list, ratings, meetings,
+    and next-read voting). Server gate is @book_club_required on the API."""
+    resp = make_response(render_template("book_club.html"))
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
 
@@ -1922,6 +1946,7 @@ def api_me():
         "displayName": g.user_data.get("displayName"),
         "email": g.user_data.get("email"),
         "bot_access": bool(g.user_data.get("bot_access")) or role == "admin",
+        "book_club_access": bool(g.user_data.get("book_club_access")) or role == "admin",
     })
 
 
@@ -1967,6 +1992,456 @@ def api_preferences_save():
         return jsonify({"ok": True, "saved": list(filtered.keys())})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# API routes — Book Club (Firestore-backed, shared across members)
+# ---------------------------------------------------------------------------
+# Two collections:
+#   book_club_books/{id}  — the shared shelf (reading / upcoming / finished),
+#                           each carrying optional meeting info + a per-member
+#                           ratings map.
+#   book_club_polls/{id}  — next-read votes. An admin posts 2-3 candidate
+#                           books; members cast one vote each; admin closes.
+# Writes go through the Admin SDK (bypasses firestore.rules); the
+# @book_club_required decorator is the real access gate. Poll create/close/
+# delete is admin-only (checked inline); voting + the shelf are open to any
+# book_club member.
+
+_BOOK_CLUB_BOOKS = "book_club_books"
+_BOOK_CLUB_POLLS = "book_club_polls"
+_BOOK_CLUB_AVAIL = "book_club_availability"
+_BOOK_STATUSES = {"reading", "upcoming", "finished"}
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TIME_RE = re.compile(r"^\d{2}:\d{2}$")
+
+
+def _bc_display_name():
+    return g.user_data.get("displayName") or g.user_data.get("email") or "Member"
+
+
+def _bc_iso(ts):
+    """Serialize a Firestore timestamp / datetime to ISO, else passthrough."""
+    return ts.isoformat() if hasattr(ts, "isoformat") else (ts or "")
+
+
+def _serialize_book(doc_id, data):
+    """Shape a book doc for the API and compute the average rating."""
+    ratings_map = data.get("ratings") or {}
+    ratings = []
+    total = 0.0
+    for uid, r in ratings_map.items():
+        if not isinstance(r, dict):
+            continue
+        try:
+            val = float(r.get("rating") or 0)
+        except (TypeError, ValueError):
+            val = 0.0
+        ratings.append({
+            "uid": uid,
+            "name": r.get("name") or "Member",
+            "rating": val,
+            "review": r.get("review") or "",
+        })
+        total += val
+    avg = round(total / len(ratings), 2) if ratings else None
+    return {
+        "id": doc_id,
+        "title": data.get("title") or "",
+        "author": data.get("author") or "",
+        "cover_url": data.get("cover_url") or "",
+        "status": data.get("status") if data.get("status") in _BOOK_STATUSES else "upcoming",
+        "meeting_date": data.get("meeting_date") or "",
+        "meeting_time": data.get("meeting_time") or "",
+        "meeting_location": data.get("meeting_location") or "",
+        "notes": data.get("notes") or "",
+        "added_by": data.get("added_by") or "",
+        "added_by_name": data.get("added_by_name") or "",
+        "created_at": _bc_iso(data.get("created_at")),
+        "ratings": ratings,
+        "avg_rating": avg,
+        "rating_count": len(ratings),
+    }
+
+
+def _serialize_poll(doc_id, data, my_uid):
+    """Shape a poll doc + tally votes. Reveals who voted for what only as
+    counts; surfaces the caller's own current vote separately."""
+    options = data.get("options") or []
+    votes = data.get("votes") or {}
+    tally = {}
+    for opt in options:
+        tally[opt.get("id")] = 0
+    for _voter, opt_id in votes.items():
+        if opt_id in tally:
+            tally[opt_id] += 1
+    total = sum(tally.values())
+    out_opts = []
+    for opt in options:
+        oid = opt.get("id")
+        out_opts.append({
+            "id": oid,
+            "title": opt.get("title") or "",
+            "author": opt.get("author") or "",
+            "cover_url": opt.get("cover_url") or "",
+            "votes": tally.get(oid, 0),
+        })
+    winner = None
+    if out_opts:
+        top = max(out_opts, key=lambda o: o["votes"])
+        # Only call a winner if there's at least one vote and no tie at the top.
+        if top["votes"] > 0 and sum(1 for o in out_opts if o["votes"] == top["votes"]) == 1:
+            winner = top["id"]
+    return {
+        "id": doc_id,
+        "question": data.get("question") or "Next read",
+        "status": "closed" if data.get("status") == "closed" else "open",
+        "options": out_opts,
+        "total_votes": total,
+        "my_vote": votes.get(my_uid),
+        "winner": winner,
+        "created_by": data.get("created_by") or "",
+        "created_by_name": data.get("created_by_name") or "",
+        "created_at": _bc_iso(data.get("created_at")),
+    }
+
+
+@app.route("/api/book-club")
+@book_club_required
+def api_book_club_list():
+    """All books + all polls in one payload (page fetches/refreshes once)."""
+    db = get_db()
+    try:
+        books = [_serialize_book(d.id, d.to_dict() or {})
+                 for d in db.collection(_BOOK_CLUB_BOOKS).stream()]
+        polls = [_serialize_poll(d.id, d.to_dict() or {}, g.uid)
+                 for d in db.collection(_BOOK_CLUB_POLLS).stream()]
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({
+        "ok": True,
+        "books": books,
+        "polls": polls,
+        "me": {
+            "uid": g.uid,
+            "name": _bc_display_name(),
+            "role": g.user_data.get("role"),
+            "is_admin": g.user_data.get("role") == "admin",
+        },
+    })
+
+
+@app.route("/api/book-club/book", methods=["POST"])
+@book_club_required
+def api_book_club_add():
+    body = request.get_json(force=True, silent=True) or {}
+    title = (body.get("title") or "").strip()
+    if not title:
+        return jsonify({"ok": False, "error": "Title is required"}), 400
+    status = (body.get("status") or "upcoming").strip()
+    if status not in _BOOK_STATUSES:
+        status = "upcoming"
+    doc = {
+        "title": title,
+        "author": (body.get("author") or "").strip(),
+        "cover_url": (body.get("cover_url") or "").strip(),
+        "status": status,
+        "meeting_date": (body.get("meeting_date") or "").strip(),
+        "meeting_time": (body.get("meeting_time") or "").strip(),
+        "meeting_location": (body.get("meeting_location") or "").strip(),
+        "notes": (body.get("notes") or "").strip(),
+        "added_by": g.uid,
+        "added_by_name": _bc_display_name(),
+        "created_at": firestore.SERVER_TIMESTAMP,
+        "ratings": {},
+    }
+    db = get_db()
+    try:
+        ref = db.collection(_BOOK_CLUB_BOOKS).document()
+        ref.set(doc)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "id": ref.id}), 201
+
+
+@app.route("/api/book-club/book/<book_id>", methods=["PATCH"])
+@book_club_required
+def api_book_club_update(book_id):
+    body = request.get_json(force=True, silent=True) or {}
+    allowed = {"title", "author", "cover_url", "status", "meeting_date",
+               "meeting_time", "meeting_location", "notes"}
+    updates = {}
+    for k in allowed:
+        if k not in body:
+            continue
+        v = body[k]
+        if isinstance(v, str):
+            v = v.strip()
+        if k == "status" and v not in _BOOK_STATUSES:
+            continue
+        updates[k] = v
+    if not updates:
+        return jsonify({"ok": False, "error": "No valid fields to update"}), 400
+    db = get_db()
+    try:
+        ref = db.collection(_BOOK_CLUB_BOOKS).document(book_id)
+        if not ref.get().exists:
+            return jsonify({"ok": False, "error": "Book not found"}), 404
+        ref.update(updates)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "updated": list(updates.keys())})
+
+
+@app.route("/api/book-club/book/<book_id>", methods=["DELETE"])
+@book_club_required
+def api_book_club_delete(book_id):
+    db = get_db()
+    try:
+        ref = db.collection(_BOOK_CLUB_BOOKS).document(book_id)
+        snap = ref.get()
+        if not snap.exists:
+            return jsonify({"ok": False, "error": "Book not found"}), 404
+        data = snap.to_dict() or {}
+        if g.user_data.get("role") != "admin" and data.get("added_by") != g.uid:
+            return jsonify({"ok": False,
+                            "error": "Only an admin or the person who added this book can remove it"}), 403
+        ref.delete()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/book-club/book/<book_id>/rating", methods=["POST"])
+@book_club_required
+def api_book_club_rate(book_id):
+    """Upsert the caller's own rating + review for a book (one per member)."""
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        rating = int(body.get("rating"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "rating must be an integer 1-5"}), 400
+    if rating < 1 or rating > 5:
+        return jsonify({"ok": False, "error": "rating must be between 1 and 5"}), 400
+    review = (body.get("review") or "").strip()
+    db = get_db()
+    try:
+        ref = db.collection(_BOOK_CLUB_BOOKS).document(book_id)
+        if not ref.get().exists:
+            return jsonify({"ok": False, "error": "Book not found"}), 404
+        ref.update({
+            "ratings." + g.uid: {
+                "rating": rating,
+                "review": review,
+                "name": _bc_display_name(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/book-club/poll", methods=["POST"])
+@book_club_required
+def api_book_club_poll_create():
+    """Admin-only: open a next-read vote with 2-3 candidate books."""
+    if g.user_data.get("role") != "admin":
+        return jsonify({"ok": False, "error": "Only an admin can start a vote"}), 403
+    body = request.get_json(force=True, silent=True) or {}
+    raw_options = body.get("options") or []
+    options = []
+    for i, o in enumerate(raw_options):
+        if not isinstance(o, dict):
+            continue
+        title = (o.get("title") or "").strip()
+        if not title:
+            continue
+        options.append({
+            "id": "opt" + str(i),
+            "title": title,
+            "author": (o.get("author") or "").strip(),
+            "cover_url": (o.get("cover_url") or "").strip(),
+        })
+    if len(options) < 2:
+        return jsonify({"ok": False, "error": "A vote needs at least 2 books"}), 400
+    if len(options) > 3:
+        options = options[:3]
+    doc = {
+        "question": (body.get("question") or "Next read").strip() or "Next read",
+        "status": "open",
+        "options": options,
+        "votes": {},
+        "created_by": g.uid,
+        "created_by_name": _bc_display_name(),
+        "created_at": firestore.SERVER_TIMESTAMP,
+    }
+    db = get_db()
+    try:
+        ref = db.collection(_BOOK_CLUB_POLLS).document()
+        ref.set(doc)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "id": ref.id}), 201
+
+
+@app.route("/api/book-club/poll/<poll_id>/vote", methods=["POST"])
+@book_club_required
+def api_book_club_poll_vote(poll_id):
+    """Any member: cast (or change) a single vote on an open poll."""
+    body = request.get_json(force=True, silent=True) or {}
+    option_id = (body.get("option_id") or "").strip()
+    if not option_id:
+        return jsonify({"ok": False, "error": "option_id is required"}), 400
+    db = get_db()
+    try:
+        ref = db.collection(_BOOK_CLUB_POLLS).document(poll_id)
+        snap = ref.get()
+        if not snap.exists:
+            return jsonify({"ok": False, "error": "Vote not found"}), 404
+        data = snap.to_dict() or {}
+        if data.get("status") == "closed":
+            return jsonify({"ok": False, "error": "This vote is closed"}), 409
+        valid_ids = {o.get("id") for o in (data.get("options") or [])}
+        if option_id not in valid_ids:
+            return jsonify({"ok": False, "error": "Invalid option"}), 400
+        ref.update({"votes." + g.uid: option_id})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/book-club/poll/<poll_id>/close", methods=["POST"])
+@book_club_required
+def api_book_club_poll_close(poll_id):
+    """Admin-only: close a poll. Optionally add the winning book to the shelf
+    (status='upcoming') when body has add_winner=true."""
+    if g.user_data.get("role") != "admin":
+        return jsonify({"ok": False, "error": "Only an admin can close a vote"}), 403
+    body = request.get_json(force=True, silent=True) or {}
+    db = get_db()
+    try:
+        ref = db.collection(_BOOK_CLUB_POLLS).document(poll_id)
+        snap = ref.get()
+        if not snap.exists:
+            return jsonify({"ok": False, "error": "Vote not found"}), 404
+        data = snap.to_dict() or {}
+        poll = _serialize_poll(poll_id, data, g.uid)
+        ref.update({"status": "closed", "closed_at": firestore.SERVER_TIMESTAMP})
+        added_id = None
+        if body.get("add_winner") and poll.get("winner"):
+            win = next((o for o in poll["options"] if o["id"] == poll["winner"]), None)
+            if win:
+                book_ref = db.collection(_BOOK_CLUB_BOOKS).document()
+                book_ref.set({
+                    "title": win["title"],
+                    "author": win["author"],
+                    "cover_url": win["cover_url"],
+                    "status": "upcoming",
+                    "meeting_date": "", "meeting_time": "", "meeting_location": "",
+                    "notes": "Won the club vote",
+                    "added_by": g.uid,
+                    "added_by_name": _bc_display_name(),
+                    "created_at": firestore.SERVER_TIMESTAMP,
+                    "ratings": {},
+                })
+                added_id = book_ref.id
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "winner": poll.get("winner"), "added_book_id": added_id})
+
+
+@app.route("/api/book-club/poll/<poll_id>", methods=["DELETE"])
+@book_club_required
+def api_book_club_poll_delete(poll_id):
+    """Admin-only: delete a poll."""
+    if g.user_data.get("role") != "admin":
+        return jsonify({"ok": False, "error": "Only an admin can delete a vote"}), 403
+    db = get_db()
+    try:
+        ref = db.collection(_BOOK_CLUB_POLLS).document(poll_id)
+        if not ref.get().exists:
+            return jsonify({"ok": False, "error": "Vote not found"}), 404
+        ref.delete()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/book-club/availability")
+@book_club_required
+def api_book_club_availability_get():
+    """Everyone's unavailability + the club roster, so the page can suggest
+    meeting times when all members are free. `busy` is a map keyed by date
+    ('YYYY-MM-DD') → {allDay:true} or {ranges:[{start,end}]}. A member who
+    hasn't marked a date is assumed available then."""
+    db = get_db()
+    try:
+        members = []
+        for d in db.collection(_BOOK_CLUB_AVAIL).stream():
+            data = d.to_dict() or {}
+            members.append({
+                "uid": d.id,
+                "name": data.get("name") or "Member",
+                "busy": data.get("busy") or {},
+                "updated_at": _bc_iso(data.get("updated_at")),
+            })
+        # Roster = approved users who can reach the club (admin or the pill).
+        roster = []
+        for u in db.collection("users").stream():
+            ud = u.to_dict() or {}
+            if not ud.get("approved"):
+                continue
+            if ud.get("role") == "admin" or ud.get("book_club_access"):
+                roster.append({
+                    "uid": u.id,
+                    "name": ud.get("displayName") or ud.get("email") or "Member",
+                })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({
+        "ok": True,
+        "members": members,
+        "roster": roster,
+        "me_uid": g.uid,
+        "me_name": _bc_display_name(),
+    })
+
+
+@app.route("/api/book-club/availability", methods=["POST"])
+@book_club_required
+def api_book_club_availability_save():
+    """Upsert the caller's own unavailability map (replaces it wholesale)."""
+    body = request.get_json(force=True, silent=True) or {}
+    busy = body.get("busy")
+    if not isinstance(busy, dict):
+        return jsonify({"ok": False, "error": "busy must be an object keyed by date"}), 400
+    clean = {}
+    for k, v in busy.items():
+        if not _DATE_RE.match(str(k)) or not isinstance(v, dict):
+            continue
+        if v.get("allDay"):
+            clean[k] = {"allDay": True}
+            continue
+        ranges = []
+        for r in (v.get("ranges") or []):
+            if (isinstance(r, dict)
+                    and _TIME_RE.match(str(r.get("start", "")))
+                    and _TIME_RE.match(str(r.get("end", "")))
+                    and str(r["start"]) < str(r["end"])):
+                ranges.append({"start": r["start"], "end": r["end"]})
+        if ranges:
+            clean[k] = {"ranges": ranges}
+    db = get_db()
+    try:
+        db.collection(_BOOK_CLUB_AVAIL).document(g.uid).set({
+            "name": _bc_display_name(),
+            "busy": clean,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "saved": len(clean)})
 
 
 # ---------------------------------------------------------------------------
