@@ -194,10 +194,10 @@ A **completely separate, non-betting** surface for the family's book club. Lives
 | Route | Method | Who | Purpose |
 |---|---|---|---|
 | `/api/book-club` | GET | member | All books + all polls + `me` in one payload (page fetches/refreshes once). |
-| `/api/book-club/book` | POST | member | Add a book. |
-| `/api/book-club/book/<id>` | PATCH | member | Edit fields (title/author/cover/status/meeting/notes). |
-| `/api/book-club/book/<id>` | DELETE | manager OR adder | Remove a book. |
-| `/api/book-club/book/<id>/rating` | POST | member | Upsert the caller's own rating (1-5) + review. |
+| `/api/book-club/book` | POST | **manager** | Add a book. |
+| `/api/book-club/book/<id>` | PATCH | **manager** | Edit fields (title/author/cover/status/meeting/notes). Includes "Set as meeting." |
+| `/api/book-club/book/<id>` | DELETE | **manager** | Remove a book. |
+| `/api/book-club/book/<id>/rating` | POST | member | Upsert the caller's own rating (1-5) + review (stays open to all members). |
 | `/api/book-club/poll` | POST | **manager** | Open a vote with 2-3 candidate books. |
 | `/api/book-club/poll/<id>/vote` | POST | member | Cast/change one vote (rejected if poll closed). |
 | `/api/book-club/poll/<id>/close` | POST | **manager** | Close the vote; `add_winner:true` also drops the winner onto the shelf as `status='upcoming'`. |
@@ -205,7 +205,7 @@ A **completely separate, non-betting** surface for the family's book club. Lives
 | `/api/book-club/availability` | GET | member | Everyone's `busy` maps + the roster (approved users with access) for the suggester. |
 | `/api/book-club/availability` | POST | member | Replace the caller's own `busy` map (sanitized server-side: date/time regex, start<end). |
 
-**Scheduling / suggestion engine** (all client-side in `book_club.html`): the club meets at a **fixed 5:00 PM** slot (`MEET_HHMM='17:00'`) on any day of the week, so scheduling is "which DAY can everyone make 5 PM," NOT "what time window is free." A month calendar where each member taps the days they **can't** make 5:00 (toggles `{allDay:true}`); a separate form adds partial-day busy ranges. `blocksSlot(entry)` = the member is all-day busy OR has a range overlapping the 5–7 PM check window (`MEET_START_MIN`/`MEET_END_MIN`, ~2h assumed). The suggester scans the next ~6 weeks and lists every day where **zero** members `blocksSlot` (everyone free at 5 PM). "Set as meeting" PATCHes the currently-reading book's `meeting_date` + `meeting_time='17:00'`. Calendar greens out days nobody blocks at 5 PM; member chips show who's submitted availability. **If the club's meeting time ever changes, edit the `MEET_*` constants** — that's the single source.
+**Scheduling / suggestion engine** (all client-side in `book_club.html`): the club meets at a **fixed 5:00 PM** slot (`MEET_HHMM='17:00'`) on any day of the week. Availability is **day-level only — there is NO time-of-day tracking** (removed by user request): a member taps the days they **can't** make it (toggles `{allDay:true}`); an unmarked day = assumed available. The suggester scans the next ~6 weeks and lists every day where **zero** members marked off. "Set as meeting" (manager-only) PATCHes the currently-reading book's `meeting_date` + `meeting_time='17:00'`. Calendar greens out days nobody marked off; member chips show who's submitted availability. The 5 PM slot is informational + the value "Set as meeting" writes — **if the meeting time ever changes, edit `MEET_HHMM`/`MEET_LABEL`**. Marking availability + viewing suggestions is open to all members; only managers commit a meeting.
 
 **To extend**: add a field → handle it in `_serialize_book`/the POST/PATCH allowlist in `app.py` AND the modal in `book_club.html`. The whole feature is isolated — touching it can't affect odds/dashboard/pick-bot.
 
@@ -263,7 +263,7 @@ A **completely separate, non-betting** surface for the family's book club. Lives
 - `kahla-scanner/supabase/polymarket_fill_alerts.sql` — `polymarket_fill_state` table DDL (Telegram fill alerts). Run manually in Supabase SQL editor. See "Polymarket Fill Alerts" section.
 - `kahla-scanner/storage/{models,supabase_client}.py` — slim Supabase wrapper
 - `kahla-scanner/_lib/{matcher,normalize}.py` — team-name fuzzy match + odds math
-- `templates/book_club.html` — **Book Club page**: self-contained (embedded CSS/JS, Firebase auth + `authFetch` + `/api/me` gate, same pattern as `handicapper.html`). Five sections: Currently Reading, **Find a Meeting Day** (availability calendar + suggestion engine), Next-Read Vote, Meeting Schedule, Reading List. All data via the `/api/book-club*` endpoints — no Supabase, no client-side Firestore SDK writes (unlike `index.html`, which writes the `users` collection directly). The availability suggester is anchored on the fixed 5:00 PM meeting slot (`MEET_*` constants): `blocksSlot()` flags members who are all-day busy or have a range overlapping ~5–7 PM, and the suggester lists days where nobody blocks 5 PM. "Set as meeting" PATCHes the currently-reading book's `meeting_date` + `meeting_time='17:00'`.
+- `templates/book_club.html` — **Book Club page**: self-contained (embedded CSS/JS, Firebase auth + `authFetch` + `/api/me` gate, same pattern as `handicapper.html`). Five sections: Currently Reading, **Find a Meeting Day** (day-level availability calendar + suggestion engine), Next-Read Vote, Meeting Schedule, Reading List. All data via the `/api/book-club*` endpoints — no Supabase, no client-side Firestore SDK writes (unlike `index.html`, which writes the `users` collection directly). Availability is day-level only (members mark whole days off; no time-of-day); the suggester lists days nobody marked off and "Set as meeting" (manager-only) pins the current book to that day at 5 PM. **Book add/edit/delete + Set-as-meeting are gated to club managers** (`_canManage` client-side, `_is_club_manager()` server-side); voting, rating, and marking availability stay open to all members.
 - `firestore.rules` — Firestore security rules (admin/approved helpers). **Not touched by Book Club** — its collections (`book_club_books` / `book_club_polls` / `book_club_availability`) are written ONLY by the Flask Admin SDK (which bypasses rules), so they need no client rules; the `book_club_access` field on user docs is already covered by `allow update: if isAdmin()`.
 - `vercel.json` — Vercel deployment config
 - `requirements.txt` — Python deps (flask, polymarket-us, requests, python-dotenv, firebase-admin, supabase, **beautifulsoup4**, **lxml**)

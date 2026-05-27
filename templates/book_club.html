@@ -161,17 +161,13 @@ body::before { content: ''; position: fixed; inset: 0; background-image: linear-
 .cal-cell.past { opacity: .3; cursor: default; }
 .cal-cell.past:hover { border-color: var(--border); }
 .cal-cell.me-busy { background: var(--red-dim); border-color: rgba(239,68,68,.5); color: #f87171; }
-.cal-cell.me-partial { background: var(--orange-dim); border-color: rgba(245,158,11,.4); }
 .cal-cell.all-free { box-shadow: 0 0 0 1px var(--green) inset; }
 .cal-cell.today { font-weight: 700; }
 .cal-cell .others { position: absolute; bottom: 2px; font-size: 8px; color: var(--text-muted); white-space: nowrap; }
 .cal-legend { display: flex; gap: 14px; margin-top: 12px; font-size: 11px; color: var(--text-muted); flex-wrap: wrap; }
 .cal-legend span { display: inline-flex; align-items: center; gap: 5px; }
 .lg-dot { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
-.tr-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
-.tr-form .form-group { margin-bottom: 0; }
-.tr-form input { padding: 7px 10px; font-size: 13px; }
-.sug-item { border: 1px solid var(--border); border-radius: var(--r); padding: 12px; margin-bottom: 10px; background: var(--surface-2); }
+.sug-item {border: 1px solid var(--border); border-radius: var(--r); padding: 12px; margin-bottom: 10px; background: var(--surface-2); }
 .sug-item.best { border-color: rgba(34,197,94,.4); }
 .sug-date { font-weight: 700; }
 .sug-time { font-size: 13px; color: var(--green); margin-top: 3px; }
@@ -252,7 +248,7 @@ body::before { content: ''; position: fixed; inset: 0; background-image: linear-
                 <h2>&#128336; Find a Meeting Day</h2>
                 <button class="btn btn-ghost btn-sm" onclick="loadAll()">Refresh</button>
             </div>
-            <p style="color:var(--text-muted);font-size:.9em;margin:-6px 0 14px">Book club meets at <b>5:00 PM</b>, any day of the week. Tap a day you <b>can't</b> make 5:00 (tap again to clear), or add a specific busy time below. Days everyone can make light up green, and we suggest them on the right.</p>
+            <p style="color:var(--text-muted);font-size:.9em;margin:-6px 0 14px">Book club meets at <b>5:00 PM</b>, any day of the week. Tap any day you <b>can't</b> make it (tap again to clear). If you don't mark a day, we assume you can come. Days everyone can make light up green, and we suggest them on the right.</p>
             <div class="cal-wrap">
                 <div class="cal">
                     <div class="cal-head">
@@ -261,15 +257,8 @@ body::before { content: ''; position: fixed; inset: 0; background-image: linear-
                     </div>
                     <div class="cal-grid" id="calGrid"></div>
                     <div class="cal-legend">
-                        <span><i class="lg-dot" style="background:var(--red)"></i> You're busy</span>
-                        <span><i class="lg-dot" style="background:var(--orange)"></i> You're partly busy</span>
-                        <span><i class="lg-dot" style="box-shadow:0 0 0 1px var(--green) inset"></i> Everyone free at 5 PM</span>
-                    </div>
-                    <div class="tr-form">
-                        <div class="form-group"><label>Busy only part of a day?</label><input type="date" id="trDate"></div>
-                        <div class="form-group"><label>From</label><input type="time" id="trStart"></div>
-                        <div class="form-group"><label>To</label><input type="time" id="trEnd"></div>
-                        <button class="btn btn-ghost btn-sm" onclick="addTimeRange()">Add</button>
+                        <span><i class="lg-dot" style="background:var(--red)"></i> Day you can't make it</span>
+                        <span><i class="lg-dot" style="box-shadow:0 0 0 1px var(--green) inset"></i> Everyone available</span>
                     </div>
                 </div>
                 <div class="sug-panel">
@@ -300,7 +289,7 @@ body::before { content: ''; position: fixed; inset: 0; background-image: linear-
         <div class="section">
             <div class="section-head">
                 <h2>&#128218; Reading List <span class="count" id="shelfCount">0</span></h2>
-                <button class="btn btn-primary btn-sm" onclick="openBookModal()">+ Add a book</button>
+                <button class="btn btn-primary btn-sm manage-only" style="display:none" onclick="openBookModal()">+ Add a book</button>
             </div>
             <div id="shelfWrap"></div>
         </div>
@@ -419,17 +408,11 @@ async function loadAll() {
 
 /* ===== availability / scheduling ===== */
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-// Book club meets at 5:00 PM on any day of the week. Scheduling is about
-// finding a DAY everyone can make that slot — not a free time window.
+// Book club meets at 5:00 PM. Availability is DAY-LEVEL only: a member
+// marks the days they're unavailable; an unmarked day = they can come.
 const MEET_HHMM = '17:00', MEET_LABEL = '5:00 PM';
-const MEET_START_MIN = 17 * 60, MEET_END_MIN = 19 * 60;   // assume ~2h (5–7 PM) for conflict checks
 let _calCur = new Date(); _calCur.setDate(1);
-function blocksSlot(entry) {
-    if (entry.allDay) return true;
-    return (entry.ranges || []).some(r => toMin(r.start) < MEET_END_MIN && toMin(r.end) > MEET_START_MIN);
-}
 function isoDate(dt) { const y = dt.getFullYear(), m = String(dt.getMonth() + 1).padStart(2, '0'), d = String(dt.getDate()).padStart(2, '0'); return `${y}-${m}-${d}`; }
-function toMin(hhmm) { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; }
 function calMove(d) { _calCur.setMonth(_calCur.getMonth() + d); renderAvailability(); }
 function mergedMembers() {
     const others = (STATE.avail.members || []).filter(m => m.uid !== _uid);
@@ -451,12 +434,11 @@ function renderAvailability() {
         const dt = new Date(_calCur.getFullYear(), _calCur.getMonth(), day);
         const ds = isoDate(dt), past = dt < today;
         const mine = _myBusy[ds];
-        const blockers = (byDate[ds] || []).filter(blocksSlot);   // can't make the 5 PM slot
+        const blockers = byDate[ds] || [];   // members who marked this day off
         let cls = 'cal-cell';
         if (dt.getTime() === today.getTime()) cls += ' today';
         if (past) cls += ' past';
-        if (mine && mine.allDay) cls += ' me-busy';
-        else if (mine && mine.ranges && mine.ranges.length) cls += ' me-partial';
+        if (mine) cls += ' me-busy';
         if (!past && rosterN > 0 && blockers.length === 0) cls += ' all-free';
         const others = blockers.filter(b => b.uid !== _uid).length;
         cells += `<div class="${cls}" ${past ? '' : `onclick="toggleDay('${ds}')"`}><span>${day}</span>${others > 0 ? `<span class="others">${others} out</span>` : ''}</div>`;
@@ -470,16 +452,6 @@ function renderAvailability() {
 function toggleDay(ds) {
     if (_myBusy[ds]) delete _myBusy[ds]; else _myBusy[ds] = { allDay: true };
     saveBusy(); renderAvailability();
-}
-function addTimeRange() {
-    const d = document.getElementById('trDate').value, s = document.getElementById('trStart').value, e = document.getElementById('trEnd').value;
-    if (!d || !s || !e) { toast('Pick a date and a start/end time', 'error'); return; }
-    if (s >= e) { toast('End time must be after start time', 'error'); return; }
-    if (_myBusy[d] && _myBusy[d].allDay) { toast('That day is already marked busy all day', 'info'); return; }
-    const ranges = ((_myBusy[d] && _myBusy[d].ranges) || []).concat([{ start: s, end: e }]);
-    _myBusy[d] = { ranges };
-    document.getElementById('trStart').value = ''; document.getElementById('trEnd').value = '';
-    saveBusy(); renderAvailability(); toast('Marked busy ' + s + '–' + e + ' on ' + d, 'success');
 }
 let _saveTimer = null;
 function saveBusy() {
@@ -495,7 +467,7 @@ function renderSuggestions(byDate, today, rosterN) {
     for (let i = 0; i < 42 && sugg.length < 8; i++) {
         const dt = new Date(today); dt.setDate(today.getDate() + i);
         const ds = isoDate(dt);
-        const blockers = (byDate[ds] || []).filter(blocksSlot);   // can't make the 5 PM slot
+        const blockers = byDate[ds] || [];   // members who marked this day off
         if (blockers.length === 0) sugg.push({ ds, dt });
     }
     const el = document.getElementById('sugList');
@@ -504,8 +476,8 @@ function renderSuggestions(byDate, today, rosterN) {
         const dl = s.dt.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
         return `<div class="sug-item ${idx === 0 ? 'best' : ''}">
             <div class="sug-date">${dl}</div>
-            <div class="sug-time">Everyone free at ${MEET_LABEL}</div>
-            <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="useSlot('${s.ds}','${MEET_HHMM}')">Set as meeting</button>
+            <div class="sug-time">Everyone available — ${MEET_LABEL}</div>
+            ${_canManage ? `<button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="useSlot('${s.ds}','${MEET_HHMM}')">Set as meeting</button>` : ''}
         </div>`;
     }).join('');
 }
@@ -548,8 +520,8 @@ function renderCurrent() {
                 ${renderReviews(b)}
                 <div class="card-actions">
                     <button class="btn btn-ghost btn-sm" onclick="openRate('${b.id}')">${mine ? 'Edit my rating' : 'Rate it'}</button>
-                    <button class="btn btn-ghost btn-sm" onclick="editBook('${b.id}')">Edit</button>
-                    ${canDelete(b) ? `<button class="btn btn-danger btn-sm" onclick="deleteBook('${b.id}')">Delete</button>` : ''}
+                    ${_canManage ? `<button class="btn btn-ghost btn-sm" onclick="editBook('${b.id}')">Edit</button>
+                    <button class="btn btn-danger btn-sm" onclick="deleteBook('${b.id}')">Delete</button>` : ''}
                 </div>
             </div>
         </div>`;
@@ -630,15 +602,13 @@ function renderShelf() {
                 </div>
                 <div class="card-actions">
                     <button class="btn btn-ghost btn-sm" onclick="openRate('${b.id}')">${mine ? '&#9733; ' + mine.rating : 'Rate'}</button>
-                    <button class="btn btn-ghost btn-sm" onclick="editBook('${b.id}')">Edit</button>
-                    ${canDelete(b) ? `<button class="btn btn-danger btn-sm" onclick="deleteBook('${b.id}')">Delete</button>` : ''}
+                    ${_canManage ? `<button class="btn btn-ghost btn-sm" onclick="editBook('${b.id}')">Edit</button>
+                    <button class="btn btn-danger btn-sm" onclick="deleteBook('${b.id}')">Delete</button>` : ''}
                 </div>
             </div>
         </div>`;
     }).join('')}</div>`;
 }
-
-function canDelete(b) { return _isAdmin || b.added_by === _uid; }
 
 /* ===== book add/edit ===== */
 function openBookModal() {

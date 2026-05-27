@@ -2017,7 +2017,6 @@ _BOOK_CLUB_POLLS = "book_club_polls"
 _BOOK_CLUB_AVAIL = "book_club_availability"
 _BOOK_STATUSES = {"reading", "upcoming", "finished"}
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_TIME_RE = re.compile(r"^\d{2}:\d{2}$")
 
 
 def _bc_display_name():
@@ -2144,6 +2143,8 @@ def api_book_club_list():
 @app.route("/api/book-club/book", methods=["POST"])
 @book_club_required
 def api_book_club_add():
+    if not _is_club_manager():
+        return jsonify({"ok": False, "error": "Only a club manager can add books"}), 403
     body = request.get_json(force=True, silent=True) or {}
     title = (body.get("title") or "").strip()
     if not title:
@@ -2177,6 +2178,8 @@ def api_book_club_add():
 @app.route("/api/book-club/book/<book_id>", methods=["PATCH"])
 @book_club_required
 def api_book_club_update(book_id):
+    if not _is_club_manager():
+        return jsonify({"ok": False, "error": "Only a club manager can edit books"}), 403
     body = request.get_json(force=True, silent=True) or {}
     allowed = {"title", "author", "cover_url", "status", "meeting_date",
                "meeting_time", "meeting_location", "notes"}
@@ -2208,14 +2211,11 @@ def api_book_club_update(book_id):
 def api_book_club_delete(book_id):
     db = get_db()
     try:
+        if not _is_club_manager():
+            return jsonify({"ok": False, "error": "Only a club manager can remove books"}), 403
         ref = db.collection(_BOOK_CLUB_BOOKS).document(book_id)
-        snap = ref.get()
-        if not snap.exists:
+        if not ref.get().exists:
             return jsonify({"ok": False, "error": "Book not found"}), 404
-        data = snap.to_dict() or {}
-        if not _is_club_manager() and data.get("added_by") != g.uid:
-            return jsonify({"ok": False,
-                            "error": "Only a club manager or the person who added this book can remove it"}), 403
         ref.delete()
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -2381,10 +2381,10 @@ def api_book_club_poll_delete(poll_id):
 @app.route("/api/book-club/availability")
 @book_club_required
 def api_book_club_availability_get():
-    """Everyone's unavailability + the club roster, so the page can suggest
-    meeting times when all members are free. `busy` is a map keyed by date
-    ('YYYY-MM-DD') → {allDay:true} or {ranges:[{start,end}]}. A member who
-    hasn't marked a date is assumed available then."""
+    """Everyone's days-off + the club roster, so the page can suggest days
+    when all members are free. `busy` is a map keyed by date ('YYYY-MM-DD')
+    → {allDay:true}. Availability is day-level only (no time-of-day): a
+    member who hasn't marked a date is assumed available that day."""
     db = get_db()
     try:
         members = []
@@ -2421,27 +2421,16 @@ def api_book_club_availability_get():
 @app.route("/api/book-club/availability", methods=["POST"])
 @book_club_required
 def api_book_club_availability_save():
-    """Upsert the caller's own unavailability map (replaces it wholesale)."""
+    """Upsert the caller's own days-off map (replaces it wholesale). Each
+    value is coerced to {allDay:true} — availability is day-level only."""
     body = request.get_json(force=True, silent=True) or {}
     busy = body.get("busy")
     if not isinstance(busy, dict):
         return jsonify({"ok": False, "error": "busy must be an object keyed by date"}), 400
     clean = {}
     for k, v in busy.items():
-        if not _DATE_RE.match(str(k)) or not isinstance(v, dict):
-            continue
-        if v.get("allDay"):
+        if _DATE_RE.match(str(k)) and isinstance(v, dict) and (v.get("allDay") or v.get("ranges")):
             clean[k] = {"allDay": True}
-            continue
-        ranges = []
-        for r in (v.get("ranges") or []):
-            if (isinstance(r, dict)
-                    and _TIME_RE.match(str(r.get("start", "")))
-                    and _TIME_RE.match(str(r.get("end", "")))
-                    and str(r["start"]) < str(r["end"])):
-                ranges.append({"start": r["start"], "end": r["end"]})
-        if ranges:
-            clean[k] = {"ranges": ranges}
     db = get_db()
     try:
         db.collection(_BOOK_CLUB_AVAIL).document(g.uid).set({
