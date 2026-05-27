@@ -147,6 +147,7 @@ body::before { content: ''; position: fixed; inset: 0; background-image: linear-
 
 /* CALENDAR / AVAILABILITY */
 .cal-wrap { display: grid; grid-template-columns: 1.25fr 1fr; gap: 18px; align-items: start; }
+.cal-wrap.solo { grid-template-columns: 1fr; }   /* members: no suggestions panel */
 .cal, .sug-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--rl); padding: 16px; }
 .cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .cal-head .mname { font-weight: 700; }
@@ -248,8 +249,8 @@ body::before { content: ''; position: fixed; inset: 0; background-image: linear-
                 <h2>&#128336; Find a Meeting Day</h2>
                 <button class="btn btn-ghost btn-sm" onclick="loadAll()">Refresh</button>
             </div>
-            <p style="color:var(--text-muted);font-size:.9em;margin:-6px 0 14px">Book club meets at <b>5:00 PM</b>, any day of the week. Tap any day you <b>can't</b> make it (tap again to clear). If you don't mark a day, we assume you can come. Days everyone can make light up green, and we suggest them on the right.</p>
-            <div class="cal-wrap">
+            <p style="color:var(--text-muted);font-size:.9em;margin:-6px 0 14px">Book club meets at <b>5:00 PM</b>, any day of the week. Tap any day you <b>can't</b> make it (tap again to clear). If you don't mark a day, we assume you can come. Days everyone can make light up green.</p>
+            <div class="cal-wrap" id="calWrap">
                 <div class="cal">
                     <div class="cal-head">
                         <div class="mname" id="calMonthName"></div>
@@ -261,8 +262,8 @@ body::before { content: ''; position: fixed; inset: 0; background-image: linear-
                         <span><i class="lg-dot" style="box-shadow:0 0 0 1px var(--green) inset"></i> Everyone available</span>
                     </div>
                 </div>
-                <div class="sug-panel">
-                    <h3 style="font-size:1em;font-weight:700;margin-bottom:4px">Suggested times</h3>
+                <div class="sug-panel manage-only" style="display:none">
+                    <h3 style="font-size:1em;font-weight:700;margin-bottom:4px">Suggested days</h3>
                     <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px" id="rosterCount"></div>
                     <div id="sugList"></div>
                     <div class="member-chips" id="memberChips"></div>
@@ -279,8 +280,8 @@ body::before { content: ''; position: fixed; inset: 0; background-image: linear-
             <div id="pollWrap"></div>
         </div>
 
-        <!-- MEETING SCHEDULE -->
-        <div class="section">
+        <!-- MEETING SCHEDULE (manager-only) -->
+        <div class="section manage-only" style="display:none">
             <div class="section-head"><h2>&#128197; Meeting Schedule</h2></div>
             <div id="schedWrap"></div>
         </div>
@@ -379,6 +380,8 @@ firebase.auth().onAuthStateChanged(async user => {
         document.getElementById('uAvatar').textContent = (me.displayName || me.email || '?').split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
         if (_isAdmin) document.querySelectorAll('.admin-only').forEach(el => el.style.display = '');
         if (_canManage) document.querySelectorAll('.manage-only').forEach(el => el.style.display = '');
+        // Members don't get the Suggested Days panel → calendar spans full width.
+        if (!_canManage) document.getElementById('calWrap').classList.add('solo');
     } catch { window.location.href = '/'; return; }
     document.getElementById('auth-gate').style.display = 'none';
     document.getElementById('app').style.display = '';
