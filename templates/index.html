@@ -240,7 +240,7 @@ select.role-select option { background: var(--surface); }
         <div class="apps-grid" id="appsGrid"></div>
         <div class="admin-panel" id="adminPanel" style="display:none">
             <div class="admin-hdr"><h2>User Management</h2><span class="badge" id="pendingBadge" style="display:none">0 pending</span></div>
-            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>Pick Bot</th><th>Book Club</th><th>Games</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
+            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>Pick Bot</th><th>Book Club</th><th>Club Mgr</th><th>Games</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
         </div>
         <div class="footer">The Kahla House &middot; thekahlahouse.com</div>
     </div>
@@ -355,7 +355,7 @@ function renderAppCards() {
     const isAdmin = role === 'admin';
     const isViewer = role === 'viewer' || isAdmin;
     const hasBot = isAdmin || !!CUD.bot_access;
-    const hasBookClub = isAdmin || !!CUD.book_club_access;
+    const hasBookClub = isAdmin || !!CUD.book_club_access || !!CUD.book_club_manager;
     const hasGames = isAdmin || !!CUD.games_access;
     // Pick Bot card shows for ANY approved user. bot_access=true (or
     // admin) gets the full app; viewers without bot_access get the
@@ -454,6 +454,7 @@ function loadAdminPanel() {
                 </select></td>
                 <td>${botPill(u)}</td>
                 <td>${bookClubPill(u)}</td>
+                <td>${clubMgrPill(u)}</td>
                 <td>${gamesPill(u)}</td>
                 <td>${!isMe && !u.approved
                     ? `<button class="btn btn-sm" style="background:var(--green);color:#fff;font-size:12px;margin-right:6px" onclick="approveUser('${u.id}','viewer')">Approve as Viewer</button><button class="btn btn-sm" style="background:var(--red-dim);color:#f87171;font-size:12px;margin-right:6px;border:1px solid rgba(239,68,68,.3)" onclick="approveUser('${u.id}','admin')">Approve as Admin</button><button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:12px" onclick="rejectUser('${u.id}','${E(u.displayName)}')">Reject</button>`
@@ -505,6 +506,24 @@ function bookClubPill(u) {
 async function toggleBookClubAccess(uid, on) {
     await db.collection('users').doc(uid).update({ book_club_access: on });
     toast('Book Club access ' + (on ? 'granted' : 'revoked'), 'success');
+}
+
+function clubMgrPill(u) {
+    // Club managers (officers) can run the votes + manage the shelf without
+    // being platform admins. Manager implies Book Club access server-side.
+    if (u.role === 'admin') {
+        return `<span class="bot-pill on implicit" title="Admins manage the club implicitly">ON</span>`;
+    }
+    if (u.role === 'pending' || !u.approved) {
+        return `<span class="bot-pill implicit" title="Approve user first">OFF</span>`;
+    }
+    const on = !!u.book_club_manager;
+    return `<span class="bot-pill ${on ? 'on' : ''}" onclick="toggleClubManager('${u.id}',${on ? 'false' : 'true'})">${on ? 'ON' : 'OFF'}</span>`;
+}
+
+async function toggleClubManager(uid, on) {
+    await db.collection('users').doc(uid).update({ book_club_manager: on });
+    toast('Club Manager ' + (on ? 'granted' : 'revoked'), 'success');
 }
 
 function gamesPill(u) {

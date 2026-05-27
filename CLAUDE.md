@@ -33,7 +33,13 @@ Plus a **per-user capability** in Firestore `users/{uid}.bot_access` (boolean):
 A second, fully independent **per-user capability** in Firestore `users/{uid}.book_club_access` (boolean) gates the **Book Club** (see the "Book Club" section below):
 - Toggleable via the **Book Club pill** in User Management — its own column, separate from the Pick Bot pill. Book Club is a non-betting surface; granting it has nothing to do with `bot_access`.
 - Admins always have it implicitly (gates treat `role=admin` as `book_club_access=true`).
-- Server gate is `@book_club_required` (admin OR `book_club_access`) on `/api/book-club*`; `/api/me` returns `book_club_access` so the page + landing card gate client-side.
+- Server gate is `@book_club_required` (admin OR `book_club_access` OR `book_club_manager`) on `/api/book-club*`; `/api/me` returns `book_club_access` so the page + landing card gate client-side.
+
+A companion capability `users/{uid}.book_club_manager` (boolean) makes a member a **Club Manager (officer)** — they can create/close/delete the next-read **votes** and delete any book on the shelf, WITHOUT being a platform admin (so no Dashboard/Odds/Pick Bot/User-Management exposure). Multiple members can be managers.
+- Toggled via the **Club Mgr pill** in User Management. Admins are managers implicitly.
+- **Manager implies Book Club access** — `@book_club_required`, the landing card, and `/api/me`'s `book_club_access` all treat `book_club_manager=true` as access, so you don't have to flip both pills (though doing so is harmless). `/api/me` also returns `book_club_manager`.
+- Server check is the `_is_club_manager()` helper (`role=='admin' OR book_club_manager`); it gates the three poll endpoints + book-delete. Client-side, `_canManage` in `book_club.html` shows the vote-management buttons (`.manage-only`).
+- This exists because `admin` is global/all-or-nothing (it can't be scoped to just the book club, and admin's implicit access to every capability can't be toggled off) — making a book-club officer an admin would hand them the betting tools + user management, which is wrong.
 
 A third independent **per-user capability** in Firestore `users/{uid}.games_access` (boolean) gates the **Games** page:
 - Toggleable via the **Games pill** in User Management — its own column. Was previously open to any approved user; as of May 2026 it's opt-in per user (admins implicit), same model as the Book Club / Pick Bot pills.
@@ -184,18 +190,18 @@ A **completely separate, non-betting** surface for the family's book club. Lives
 - `book_club_polls/{id}` — next-read vote. `{question, status ∈ {open,closed}, options: [{id, title, author, cover_url}] (2-3), votes: {uid: option_id}, created_by, created_by_name, created_at, closed_at}`. One vote per member (keyed by uid, changeable while open). Winner = single option with the most votes (ties → no winner).
 - `book_club_availability/{uid}` — `{name, updated_at, busy: {'YYYY-MM-DD': {allDay:true} | {ranges:[{start 'HH:MM', end}]}}}`. One doc per member; missing date = available.
 
-**API routes** (all `@book_club_required`; poll create/close/delete + are admin-only, checked inline):
+**API routes** (all `@book_club_required`; the **manager**-marked ones additionally require `_is_club_manager()` — admin OR `book_club_manager` — checked inline):
 | Route | Method | Who | Purpose |
 |---|---|---|---|
 | `/api/book-club` | GET | member | All books + all polls + `me` in one payload (page fetches/refreshes once). |
 | `/api/book-club/book` | POST | member | Add a book. |
 | `/api/book-club/book/<id>` | PATCH | member | Edit fields (title/author/cover/status/meeting/notes). |
-| `/api/book-club/book/<id>` | DELETE | admin OR adder | Remove a book. |
+| `/api/book-club/book/<id>` | DELETE | manager OR adder | Remove a book. |
 | `/api/book-club/book/<id>/rating` | POST | member | Upsert the caller's own rating (1-5) + review. |
-| `/api/book-club/poll` | POST | **admin** | Open a vote with 2-3 candidate books. |
+| `/api/book-club/poll` | POST | **manager** | Open a vote with 2-3 candidate books. |
 | `/api/book-club/poll/<id>/vote` | POST | member | Cast/change one vote (rejected if poll closed). |
-| `/api/book-club/poll/<id>/close` | POST | **admin** | Close the vote; `add_winner:true` also drops the winner onto the shelf as `status='upcoming'`. |
-| `/api/book-club/poll/<id>` | DELETE | **admin** | Delete a vote. |
+| `/api/book-club/poll/<id>/close` | POST | **manager** | Close the vote; `add_winner:true` also drops the winner onto the shelf as `status='upcoming'`. |
+| `/api/book-club/poll/<id>` | DELETE | **manager** | Delete a vote. |
 | `/api/book-club/availability` | GET | member | Everyone's `busy` maps + the roster (approved users with access) for the suggester. |
 | `/api/book-club/availability` | POST | member | Replace the caller's own `busy` map (sanitized server-side: date/time regex, start<end). |
 

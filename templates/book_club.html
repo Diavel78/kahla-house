@@ -285,7 +285,7 @@ body::before { content: ''; position: fixed; inset: 0; background-image: linear-
         <div class="section">
             <div class="section-head">
                 <h2>&#128499;&#65039; Next-Read Vote</h2>
-                <button class="btn btn-primary btn-sm admin-only" style="display:none" onclick="openPollModal()">+ Start a vote</button>
+                <button class="btn btn-primary btn-sm manage-only" style="display:none" onclick="openPollModal()">+ Start a vote</button>
             </div>
             <div id="pollWrap"></div>
         </div>
@@ -369,7 +369,7 @@ async function authFetch(url, options = {}) {
 }
 function doLogout() { firebase.auth().signOut().then(() => { window.location.href = '/'; }); }
 
-let _uid = null, _isAdmin = false;
+let _uid = null, _isAdmin = false, _canManage = false;
 let STATE = { books: [], polls: [], me: {}, avail: { members: [], roster: [], me_name: 'You' } };
 let _myBusy = {};
 
@@ -385,9 +385,11 @@ firebase.auth().onAuthStateChanged(async user => {
         if (!me.book_club_access && me.role !== 'admin') { window.location.href = '/'; return; }
         _uid = me.uid;
         _isAdmin = me.role === 'admin';
+        _canManage = _isAdmin || !!me.book_club_manager;
         document.getElementById('uName').textContent = me.displayName || me.email;
         document.getElementById('uAvatar').textContent = (me.displayName || me.email || '?').split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
         if (_isAdmin) document.querySelectorAll('.admin-only').forEach(el => el.style.display = '');
+        if (_canManage) document.querySelectorAll('.manage-only').forEach(el => el.style.display = '');
     } catch { window.location.href = '/'; return; }
     document.getElementById('auth-gate').style.display = 'none';
     document.getElementById('app').style.display = '';
@@ -579,7 +581,7 @@ function renderReviews(b) {
 function renderPolls() {
     const wrap = document.getElementById('pollWrap');
     const polls = [...STATE.polls].sort((a, b) => (a.status === 'open' ? -1 : 1) - (b.status === 'open' ? -1 : 1) || (b.created_at || '').localeCompare(a.created_at || ''));
-    if (!polls.length) { wrap.innerHTML = `<div class="empty">No vote running. ${_isAdmin ? 'Start one to let the club pick the next read.' : 'An admin can start one.'}</div>`; return; }
+    if (!polls.length) { wrap.innerHTML = `<div class="empty">No vote running. ${_canManage ? 'Start one to let the club pick the next read.' : 'A club manager can start one.'}</div>`; return; }
     wrap.innerHTML = polls.map(p => {
         const closed = p.status === 'closed';
         return `<div class="poll-card ${closed ? '' : 'open'}" style="margin-bottom:14px">
@@ -587,8 +589,8 @@ function renderPolls() {
                 <h3>${esc(p.question)} ${closed ? '<span class="status-badge finished">Closed</span>' : '<span class="status-badge reading">Open</span>'}</h3>
                 <div style="display:flex;gap:6px;align-items:center">
                     <span style="font-size:12px;color:var(--text-muted)">${p.total_votes} vote${p.total_votes === 1 ? '' : 's'}</span>
-                    ${_isAdmin && !closed ? `<button class="btn btn-ghost btn-sm" onclick="closePoll('${p.id}')">Close &amp; pick winner</button>` : ''}
-                    ${_isAdmin ? `<button class="btn btn-danger btn-sm" onclick="deletePoll('${p.id}')">Delete</button>` : ''}
+                    ${_canManage && !closed ? `<button class="btn btn-ghost btn-sm" onclick="closePoll('${p.id}')">Close &amp; pick winner</button>` : ''}
+                    ${_canManage ? `<button class="btn btn-danger btn-sm" onclick="deletePoll('${p.id}')">Delete</button>` : ''}
                 </div>
             </div>
             <div class="poll-opts">${p.options.map(o => {

@@ -158,7 +158,9 @@ def book_club_required(f):
     @firebase_auth_required
     def wrapper(*args, **kwargs):
         role = g.user_data.get("role")
-        if role != "admin" and not g.user_data.get("book_club_access"):
+        if (role != "admin"
+                and not g.user_data.get("book_club_access")
+                and not g.user_data.get("book_club_manager")):
             return jsonify({"ok": False, "error": "Book Club access required"}), 403
         return f(*args, **kwargs)
     return wrapper
@@ -1946,7 +1948,8 @@ def api_me():
         "displayName": g.user_data.get("displayName"),
         "email": g.user_data.get("email"),
         "bot_access": bool(g.user_data.get("bot_access")) or role == "admin",
-        "book_club_access": bool(g.user_data.get("book_club_access")) or role == "admin",
+        "book_club_access": bool(g.user_data.get("book_club_access")) or bool(g.user_data.get("book_club_manager")) or role == "admin",
+        "book_club_manager": bool(g.user_data.get("book_club_manager")) or role == "admin",
         "games_access": bool(g.user_data.get("games_access")) or role == "admin",
     })
 
@@ -2019,6 +2022,12 @@ _TIME_RE = re.compile(r"^\d{2}:\d{2}$")
 
 def _bc_display_name():
     return g.user_data.get("displayName") or g.user_data.get("email") or "Member"
+
+
+def _is_club_manager():
+    """Club managers (officers) can run votes + manage the shelf without
+    being platform admins. Admins are managers implicitly."""
+    return g.user_data.get("role") == "admin" or bool(g.user_data.get("book_club_manager"))
 
 
 def _bc_iso(ts):
@@ -2204,9 +2213,9 @@ def api_book_club_delete(book_id):
         if not snap.exists:
             return jsonify({"ok": False, "error": "Book not found"}), 404
         data = snap.to_dict() or {}
-        if g.user_data.get("role") != "admin" and data.get("added_by") != g.uid:
+        if not _is_club_manager() and data.get("added_by") != g.uid:
             return jsonify({"ok": False,
-                            "error": "Only an admin or the person who added this book can remove it"}), 403
+                            "error": "Only a club manager or the person who added this book can remove it"}), 403
         ref.delete()
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -2246,9 +2255,9 @@ def api_book_club_rate(book_id):
 @app.route("/api/book-club/poll", methods=["POST"])
 @book_club_required
 def api_book_club_poll_create():
-    """Admin-only: open a next-read vote with 2-3 candidate books."""
-    if g.user_data.get("role") != "admin":
-        return jsonify({"ok": False, "error": "Only an admin can start a vote"}), 403
+    """Club managers (or admins): open a next-read vote with 2-3 candidate books."""
+    if not _is_club_manager():
+        return jsonify({"ok": False, "error": "Only a club manager can start a vote"}), 403
     body = request.get_json(force=True, silent=True) or {}
     raw_options = body.get("options") or []
     options = []
@@ -2315,10 +2324,10 @@ def api_book_club_poll_vote(poll_id):
 @app.route("/api/book-club/poll/<poll_id>/close", methods=["POST"])
 @book_club_required
 def api_book_club_poll_close(poll_id):
-    """Admin-only: close a poll. Optionally add the winning book to the shelf
-    (status='upcoming') when body has add_winner=true."""
-    if g.user_data.get("role") != "admin":
-        return jsonify({"ok": False, "error": "Only an admin can close a vote"}), 403
+    """Club managers (or admins): close a poll. Optionally add the winning
+    book to the shelf (status='upcoming') when body has add_winner=true."""
+    if not _is_club_manager():
+        return jsonify({"ok": False, "error": "Only a club manager can close a vote"}), 403
     body = request.get_json(force=True, silent=True) or {}
     db = get_db()
     try:
@@ -2355,9 +2364,9 @@ def api_book_club_poll_close(poll_id):
 @app.route("/api/book-club/poll/<poll_id>", methods=["DELETE"])
 @book_club_required
 def api_book_club_poll_delete(poll_id):
-    """Admin-only: delete a poll."""
-    if g.user_data.get("role") != "admin":
-        return jsonify({"ok": False, "error": "Only an admin can delete a vote"}), 403
+    """Club managers (or admins): delete a poll."""
+    if not _is_club_manager():
+        return jsonify({"ok": False, "error": "Only a club manager can delete a vote"}), 403
     db = get_db()
     try:
         ref = db.collection(_BOOK_CLUB_POLLS).document(poll_id)
