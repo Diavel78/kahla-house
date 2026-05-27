@@ -2115,6 +2115,161 @@ def _serialize_poll(doc_id, data, my_uid):
     }
 
 
+# --- Meeting-invite email (Resend) ------------------------------------------
+# When a manager sets a book's date + location (the book itself is the third
+# piece), an invite emails to every approved book-club member. Auto-fires on
+# add/edit, deduped by a signature of (title|date|time|location) stored on the
+# book, so unrelated edits don't re-blast but a real date/location change does.
+# Requires RESEND_API_KEY (+ a verified sender domain) in Vercel — no-ops
+# gracefully when unset.
+
+def _book_club_recipients(db):
+    """Approved users who can reach the club (admin / book_club_access /
+    book_club_manager), deduped by email."""
+    out, seen = [], set()
+    for u in db.collection("users").stream():
+        ud = u.to_dict() or {}
+        if not ud.get("approved"):
+            continue
+        if not (ud.get("role") == "admin" or ud.get("book_club_access") or ud.get("book_club_manager")):
+            continue
+        email = (ud.get("email") or "").strip()
+        if not email or email.lower() in seen:
+            continue
+        seen.add(email.lower())
+        out.append({"email": email, "name": ud.get("displayName") or "there"})
+    return out
+
+
+def _meeting_ready(d):
+    return bool((d.get("title") or "").strip()
+                and (d.get("meeting_date") or "").strip()
+                and (d.get("meeting_location") or "").strip())
+
+
+def _meeting_signature(d):
+    return "|".join([(d.get("title") or "").strip(),
+                     (d.get("meeting_date") or "").strip(),
+                     (d.get("meeting_time") or "").strip(),
+                     (d.get("meeting_location") or "").strip()])
+
+
+def _send_email_resend(api_key, to_email, subject, html):
+    from_addr = os.getenv("BOOK_CLUB_FROM_EMAIL",
+                          "Kahla House Book Club <bookclub@thekahlahouse.com>").strip()
+    resp = _http.post(
+        "https://api.resend.com/emails",
+        headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
+        json={"from": from_addr, "to": [to_email], "subject": subject, "html": html},
+        timeout=8,
+    )
+    return resp.status_code in (200, 201)
+
+
+def _build_invite_email(d):
+    """Returns (subject, html_template). html_template has a {{NAME}}
+    placeholder for per-recipient personalization."""
+    from urllib.parse import quote_plus
+
+    def esc(s):
+        return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    title = (d.get("title") or "Book Club").strip()
+    author = (d.get("author") or "").strip()
+    loc = (d.get("meeting_location") or "").strip()
+    notes = (d.get("notes") or "").strip()
+    cover = (d.get("cover_url") or "").strip()
+    time_str = (d.get("meeting_time") or "17:00").strip()
+    try:
+        start = datetime.strptime(d["meeting_date"] + " " + time_str, "%Y-%m-%d %H:%M")
+    except Exception:
+        start = datetime.strptime(d["meeting_date"], "%Y-%m-%d")
+    end = start + timedelta(hours=2)
+    pretty_date = start.strftime("%A, %B ") + str(start.day) + start.strftime(", %Y")
+    h12 = start.hour % 12 or 12
+    pretty_time = "%d:%02d %s" % (h12, start.minute, "AM" if start.hour < 12 else "PM")
+
+    cal_text = "Book Club: " + title
+    cal_details = "Kahla House Book Club — " + title + (" by " + author if author else "")
+    g_dates = start.strftime("%Y%m%dT%H%M%S") + "/" + end.strftime("%Y%m%dT%H%M%S")
+    google = ("https://calendar.google.com/calendar/render?action=TEMPLATE&text="
+              + quote_plus(cal_text) + "&dates=" + g_dates + "&ctz=America/Phoenix&details="
+              + quote_plus(cal_details) + "&location=" + quote_plus(loc))
+    outlook = ("https://outlook.live.com/calendar/0/deeplink/compose?path=/calendar/action/compose&rru=addevent&subject="
+               + quote_plus(cal_text) + "&startdt=" + start.strftime("%Y-%m-%dT%H:%M:%S") + "-07:00"
+               + "&enddt=" + end.strftime("%Y-%m-%dT%H:%M:%S") + "-07:00&location="
+               + quote_plus(loc) + "&body=" + quote_plus(cal_details))
+
+    subject = "\U0001F4DA Book Club: %s — %s at %s" % (title, pretty_date, pretty_time)
+    cover_html = ('<img src="%s" alt="" width="84" style="border-radius:6px;float:left;margin:0 16px 8px 0">' % esc(cover)) if cover else ""
+    author_html = ('<div style="color:#64748b">by %s</div>' % esc(author)) if author else ""
+    notes_html = ('<p style="color:#475569;margin:14px 0 0;clear:both">%s</p>' % esc(notes)) if notes else ""
+    html = ("""
+<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:560px;margin:0 auto;color:#0f172a">
+  <div style="background:linear-gradient(135deg,#06b6d4,#22c55e);color:#fff;padding:20px 24px;border-radius:12px 12px 0 0">
+    <div style="font-size:13px;letter-spacing:.12em;text-transform:uppercase;opacity:.85">The Kahla House Book Club</div>
+    <div style="font-size:22px;font-weight:700;margin-top:4px">You're invited!</div>
+  </div>
+  <div style="border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;padding:24px">
+    <p style="margin:0 0 16px">Hi {{NAME}}, here are the details for our next meeting:</p>
+    %s
+    <div style="font-size:18px;font-weight:700">%s</div>
+    %s
+    <table style="margin:16px 0;font-size:15px;line-height:1.9;clear:both">
+      <tr><td style="color:#64748b;padding-right:14px">\U0001F4C5 Date</td><td style="font-weight:600">%s</td></tr>
+      <tr><td style="color:#64748b;padding-right:14px">\U0001F554 Time</td><td style="font-weight:600">%s</td></tr>
+      <tr><td style="color:#64748b;padding-right:14px">\U0001F4CD Where</td><td style="font-weight:600">%s</td></tr>
+    </table>
+    %s
+    <div style="margin-top:20px">
+      <a href="%s" style="display:inline-block;background:#06b6d4;color:#fff;text-decoration:none;padding:10px 16px;border-radius:8px;font-weight:600;margin:0 8px 8px 0">Add to Google Calendar</a>
+      <a href="%s" style="display:inline-block;background:#1f2937;color:#fff;text-decoration:none;padding:10px 16px;border-radius:8px;font-weight:600">Add to Outlook</a>
+    </div>
+    <p style="color:#94a3b8;font-size:12px;margin-top:24px">See you there! — The Kahla House Book Club · thekahlahouse.com/book-club</p>
+  </div>
+</div>""" % (cover_html, esc(title), author_html, esc(pretty_date), esc(pretty_time), esc(loc), notes_html, google, outlook))
+    return subject, html
+
+
+def _maybe_send_meeting_invite(db, book_id, data):
+    """Auto-send a meeting invite when a book has title+date+location AND that
+    combination changed since the last send. Never raises — returns a status
+    dict the caller surfaces in the API response."""
+    if not _meeting_ready(data):
+        return {"sent": False, "reason": "incomplete"}
+    sig = _meeting_signature(data)
+    if data.get("invite_signature") == sig:
+        return {"sent": False, "reason": "unchanged"}
+    api_key = os.getenv("RESEND_API_KEY", "").strip()
+    if not api_key:
+        return {"sent": False, "reason": "email_not_configured"}
+    try:
+        recipients = _book_club_recipients(db)
+    except Exception:
+        recipients = []
+    if not recipients:
+        return {"sent": False, "reason": "no_recipients"}
+    subject, html_tpl = _build_invite_email(data)
+    sent = 0
+    for r in recipients:
+        name = (r["name"] or "there").replace("<", "").replace(">", "")
+        try:
+            if _send_email_resend(api_key, r["email"], subject, html_tpl.replace("{{NAME}}", name)):
+                sent += 1
+        except Exception:
+            pass
+    if sent > 0:
+        try:
+            db.collection(_BOOK_CLUB_BOOKS).document(book_id).update({
+                "invite_signature": sig,
+                "invite_sent_at": firestore.SERVER_TIMESTAMP,
+                "invite_sent_count": sent,
+            })
+        except Exception:
+            pass
+    return {"sent": sent > 0, "count": sent, "recipients": len(recipients)}
+
+
 @app.route("/api/book-club")
 @book_club_required
 def api_book_club_list():
@@ -2172,7 +2327,8 @@ def api_book_club_add():
         ref.set(doc)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
-    return jsonify({"ok": True, "id": ref.id}), 201
+    invite = _maybe_send_meeting_invite(db, ref.id, doc)
+    return jsonify({"ok": True, "id": ref.id, "invite": invite}), 201
 
 
 @app.route("/api/book-club/book/<book_id>", methods=["PATCH"])
@@ -2201,9 +2357,11 @@ def api_book_club_update(book_id):
         if not ref.get().exists:
             return jsonify({"ok": False, "error": "Book not found"}), 404
         ref.update(updates)
+        fresh = ref.get().to_dict() or {}
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
-    return jsonify({"ok": True, "updated": list(updates.keys())})
+    invite = _maybe_send_meeting_invite(db, book_id, fresh)
+    return jsonify({"ok": True, "updated": list(updates.keys()), "invite": invite})
 
 
 @app.route("/api/book-club/book/<book_id>", methods=["DELETE"])

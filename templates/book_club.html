@@ -312,6 +312,7 @@ body::before { content: ''; position: fixed; inset: 0; background-image: linear-
                 <div class="form-group"><label>Time</label><input type="time" id="bTime"></div>
             </div>
             <div class="form-group"><label>Meeting location</label><input id="bLoc" placeholder="Rob's house / Zoom"></div>
+            <p style="font-size:11px;color:var(--cyan);margin:-6px 0 10px">&#9993; Once a date <b>and</b> location are set, saving emails the whole club a meeting invite.</p>
             <div class="form-group"><label>Notes</label><textarea id="bNotes" placeholder="Optional notes for the club"></textarea></div>
         </div>
         <div class="modal-foot"><button class="btn btn-ghost" onclick="closeModal('bookOverlay')">Cancel</button><button class="btn btn-primary" id="bookSaveBtn" onclick="saveBook()">Save</button></div>
@@ -495,11 +496,17 @@ function renderMemberChips() {
         + roster.map(m => `<span class="mchip ${responded.has(m.uid) ? 'responded' : ''}">${esc(m.name)}${responded.has(m.uid) ? ' ✓' : ''}</span>`).join('');
 }
 
+function _inviteToast(d, fallback) {
+    if (d && d.invite && d.invite.sent) { toast('Invite emailed to ' + d.invite.count + ' member' + (d.invite.count === 1 ? '' : 's'), 'success'); return; }
+    if (d && d.invite && d.invite.reason === 'email_not_configured') { toast("Saved — email invites aren't set up yet", 'info'); return; }
+    toast(fallback, 'success');
+}
+
 async function useSlot(ds, hhmm) {
     const reading = STATE.books.find(b => b.status === 'reading');
     if (!reading) { toast('No "currently reading" book to schedule — add one first', 'info'); return; }
     const r = await authFetch('/api/book-club/book/' + reading.id, { method: 'PATCH', body: JSON.stringify({ meeting_date: ds, meeting_time: hhmm }) });
-    if (r && r.ok) { toast('Meeting set for "' + reading.title + '"', 'success'); loadAll(); }
+    if (r && r.ok) { const d = await r.json(); _inviteToast(d, 'Meeting set for "' + reading.title + '"'); loadAll(); }
     else { toast('Could not set the meeting', 'error'); }
 }
 
@@ -653,7 +660,7 @@ async function saveBook() {
         ? await authFetch('/api/book-club/book/' + id, { method: 'PATCH', body: JSON.stringify(payload) })
         : await authFetch('/api/book-club/book', { method: 'POST', body: JSON.stringify(payload) });
     btn.disabled = false;
-    if (r && r.ok) { closeModal('bookOverlay'); toast(id ? 'Book updated' : 'Book added', 'success'); loadAll(); }
+    if (r && r.ok) { const d = await r.json(); closeModal('bookOverlay'); _inviteToast(d, id ? 'Book updated' : 'Book added'); loadAll(); }
     else { const e = r ? await r.json() : {}; toast(e.error || 'Save failed', 'error'); }
 }
 async function deleteBook(id) {
