@@ -1157,6 +1157,76 @@ def _team_block(comp_team: dict | None) -> dict:
     }
 
 
+def _normalize_injury_records(records: list) -> list:
+    """Shape ESPN injury records (from either the per-team or league-wide
+    feed — same field names) into the dossier's flat injury dicts."""
+    out = []
+    for it in records[:25]:
+        if not isinstance(it, dict):
+            continue
+        ath = it.get("athlete") or {}
+        out.append({
+            "name":   ath.get("displayName") or ath.get("shortName"),
+            "pos":    ((ath.get("position") or {}).get("abbreviation")),
+            "status": it.get("status"),
+            "type":   (it.get("type") or {}).get("description"),
+            "detail": it.get("shortComment") or it.get("longComment"),
+            "date":   it.get("date"),
+        })
+    return out
+
+
+# League-wide ESPN injuries feed. The per-team /teams/{id}/injuries route
+# comes back EMPTY for NHL (works for NFL/NBA/MLB) — the league-wide
+# endpoint carries the data ESPN omits from the per-team route. One call
+# returns every team grouped by id, so we fetch once per sport, cache it,
+# and filter to the team that needs it.
+_INJURY_CACHE: dict[str, tuple[float, dict]] = {}
+_INJURY_CACHE_TTL_SEC = 600
+
+
+def _espn_league_injuries(sport: str, diag: dict | None = None) -> dict[str, list]:
+    pair = _ESPN_PATH.get(sport)
+    if not pair:
+        return {}
+    cached = _INJURY_CACHE.get(sport)
+    if cached and (time.time() - cached[0]) < _INJURY_CACHE_TTL_SEC:
+        return cached[1]
+    grp, lg = pair
+    url = f"https://site.api.espn.com/apis/site/v2/sports/{grp}/{lg}/injuries"
+    status = None
+    data = None
+    body_snip = None
+    try:
+        r = requests.get(url, timeout=HTTP_TIMEOUT,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        status = r.status_code
+        if status == 200:
+            data = r.json()
+        else:
+            body_snip = (r.text or "")[:200]
+    except Exception as e:
+        log.warning("ESPN league injuries %s failed: %s", sport, e)
+        body_snip = f"exc: {str(e)[:160]}"
+    out: dict[str, list] = {}
+    for grp_obj in ((data or {}).get("injuries") or []):
+        if not isinstance(grp_obj, dict):
+            continue
+        team = grp_obj.get("team") or {}
+        tid = str(grp_obj.get("id") or team.get("id") or "")
+        recs = grp_obj.get("injuries")
+        if tid and isinstance(recs, list):
+            out[tid] = _normalize_injury_records(recs)
+    if status == 200:  # only cache a successful fetch, so a blip retries
+        _INJURY_CACHE[sport] = (time.time(), out)
+    if diag is not None:
+        diag["league_status"] = status
+        diag["league_teams"] = len(out)
+        if body_snip:
+            diag["league_body"] = body_snip
+    return out
+
+
 def _espn_team_injuries(sport: str, team_id: str | None, diag: dict | None = None) -> list:
     if not team_id:
         return []
@@ -1185,40 +1255,38 @@ def _espn_team_injuries(sport: str, team_id: str | None, diag: dict | None = Non
         diag["keys"] = list((data or {}).keys())[:8]
         if body_snip:
             diag["body"] = body_snip
-    if not data:
-        return []
     # ESPN's injuries endpoint shape varies by host/sport: sometimes a
     # flat list under "items", sometimes under "injuries", and sometimes
     # grouped per team (each group is {team..., injuries:[...]}). Reading
     # only "items" left the list empty for every sport. Pull whichever
     # key exists and flatten team-grouped shapes down to injury records.
-    raw = data.get("injuries")
-    if raw is None:
-        raw = data.get("items") or []
+    raw: list = []
     records: list = []
-    for el in (raw or []):
-        if not isinstance(el, dict):
-            continue
-        if el.get("athlete"):
-            records.append(el)                      # direct injury record
-        elif isinstance(el.get("injuries"), list):
-            records.extend(x for x in el["injuries"] if isinstance(x, dict))
-        else:
-            records.append(el)
+    if data:
+        raw = data.get("injuries")
+        if raw is None:
+            raw = data.get("items") or []
+        for el in (raw or []):
+            if not isinstance(el, dict):
+                continue
+            if el.get("athlete"):
+                records.append(el)                      # direct injury record
+            elif isinstance(el.get("injuries"), list):
+                records.extend(x for x in el["injuries"] if isinstance(x, dict))
+            else:
+                records.append(el)
+    out = _normalize_injury_records(records)
     if diag is not None:
         diag["raw_len"] = len(raw or [])
         diag["records"] = len(records)
-    out = []
-    for it in records[:25]:
-        ath = it.get("athlete") or {}
-        out.append({
-            "name":   ath.get("displayName") or ath.get("shortName"),
-            "pos":    ((ath.get("position") or {}).get("abbreviation")),
-            "status": it.get("status"),
-            "type":   (it.get("type") or {}).get("description"),
-            "detail": it.get("shortComment") or it.get("longComment"),
-            "date":   it.get("date"),
-        })
+        diag["source"] = "team" if out else None
+    # NHL's per-team route returns nothing — fall back to the league-wide
+    # feed (one cached call) and slice out this team's injuries.
+    if not out:
+        league = _espn_league_injuries(sport, diag=diag)
+        out = league.get(str(team_id), [])
+        if diag is not None and out:
+            diag["source"] = "league"
     return out
 
 
@@ -3098,6 +3166,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
             "home":       espn_block.get("home"),
             "away":       espn_block.get("away"),
             "broadcasts": espn_block.get("broadcasts"),
+            "inj_debug":  espn_block.get("inj_debug"),
         } if espn_block else None,
         "mlb":             mlb_extra or None,
         "team_compare":    team_compare,
