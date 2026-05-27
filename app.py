@@ -1947,6 +1947,7 @@ def api_me():
         "email": g.user_data.get("email"),
         "bot_access": bool(g.user_data.get("bot_access")) or role == "admin",
         "book_club_access": bool(g.user_data.get("book_club_access")) or role == "admin",
+        "games_access": bool(g.user_data.get("games_access")) or role == "admin",
     })
 
 

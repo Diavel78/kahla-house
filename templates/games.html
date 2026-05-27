@@ -339,7 +339,7 @@
             const r = await fetch('/api/me', { headers: { 'Authorization': 'Bearer ' + token } });
             if (!r.ok) { window.location.href = '/'; return; }
             const me = await r.json();
-            if (!me.approved || (me.role !== 'admin' && me.role !== 'viewer')) { window.location.href = '/'; return; }
+            if (!me.approved || (me.role !== 'admin' && !me.games_access)) { window.location.href = '/'; return; }
             if (me.role === 'admin') document.querySelectorAll('.admin-only').forEach(el => el.style.display = '');
             if (me.role === 'admin' || me.bot_access) document.querySelectorAll('.bot-only').forEach(el => el.style.display = '');
         } catch (e) { window.location.href = '/'; return; }

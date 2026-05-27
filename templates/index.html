@@ -240,7 +240,7 @@ select.role-select option { background: var(--surface); }
         <div class="apps-grid" id="appsGrid"></div>
         <div class="admin-panel" id="adminPanel" style="display:none">
             <div class="admin-hdr"><h2>User Management</h2><span class="badge" id="pendingBadge" style="display:none">0 pending</span></div>
-            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>Pick Bot</th><th>Book Club</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
+            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>Pick Bot</th><th>Book Club</th><th>Games</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
         </div>
         <div class="footer">The Kahla House &middot; thekahlahouse.com</div>
     </div>
@@ -356,6 +356,7 @@ function renderAppCards() {
     const isViewer = role === 'viewer' || isAdmin;
     const hasBot = isAdmin || !!CUD.bot_access;
     const hasBookClub = isAdmin || !!CUD.book_club_access;
+    const hasGames = isAdmin || !!CUD.games_access;
     // Pick Bot card shows for ANY approved user. bot_access=true (or
     // admin) gets the full app; viewers without bot_access get the
     // view-only flavor (bot picks visible, no log/stats — gated by
@@ -412,7 +413,7 @@ function renderAppCards() {
             <span class="arrow">&rarr;</span>
         </a>`;
     }
-    if (isViewer) {
+    if (hasGames) {
         h += `<a href="/games" class="app-card games-app">
             <span class="app-icon">&#127183;</span>
             <h2>Games</h2>
@@ -453,6 +454,7 @@ function loadAdminPanel() {
                 </select></td>
                 <td>${botPill(u)}</td>
                 <td>${bookClubPill(u)}</td>
+                <td>${gamesPill(u)}</td>
                 <td>${!isMe && !u.approved
                     ? `<button class="btn btn-sm" style="background:var(--green);color:#fff;font-size:12px;margin-right:6px" onclick="approveUser('${u.id}','viewer')">Approve as Viewer</button><button class="btn btn-sm" style="background:var(--red-dim);color:#f87171;font-size:12px;margin-right:6px;border:1px solid rgba(239,68,68,.3)" onclick="approveUser('${u.id}','admin')">Approve as Admin</button><button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:12px" onclick="rejectUser('${u.id}','${E(u.displayName)}')">Reject</button>`
                     : isMe ? '<span style="color:var(--text-muted);font-size:12px">You</span>'
@@ -503,6 +505,24 @@ function bookClubPill(u) {
 async function toggleBookClubAccess(uid, on) {
     await db.collection('users').doc(uid).update({ book_club_access: on });
     toast('Book Club access ' + (on ? 'granted' : 'revoked'), 'success');
+}
+
+function gamesPill(u) {
+    // Admins always have implicit access — show as "ON" but uneditable.
+    if (u.role === 'admin') {
+        return `<span class="bot-pill on implicit" title="Admins always have Games access">ON</span>`;
+    }
+    // Pending / unapproved users can't have access — pill stays grey.
+    if (u.role === 'pending' || !u.approved) {
+        return `<span class="bot-pill implicit" title="Approve user first">OFF</span>`;
+    }
+    const on = !!u.games_access;
+    return `<span class="bot-pill ${on ? 'on' : ''}" onclick="toggleGamesAccess('${u.id}',${on ? 'false' : 'true'})">${on ? 'ON' : 'OFF'}</span>`;
+}
+
+async function toggleGamesAccess(uid, on) {
+    await db.collection('users').doc(uid).update({ games_access: on });
+    toast('Games access ' + (on ? 'granted' : 'revoked'), 'success');
 }
 
 async function approveUser(uid, role) {
