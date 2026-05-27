@@ -2217,7 +2217,9 @@ def _build_invite_email(d):
 
     club = esc(BOOK_CLUB_NAME)
     subject = "\U0001F4DA %s: %s — %s at %s" % (BOOK_CLUB_NAME, title, pretty_date, pretty_time)
-    cover_html = ('<img src="%s" alt="" width="84" style="border-radius:6px;float:left;margin:0 16px 8px 0">' % esc(cover)) if cover else ""
+    # Only embed an http(s) cover — data-URI covers (phone uploads) bloat the
+    # email and are blocked by most clients, so skip them in the invite.
+    cover_html = ('<img src="%s" alt="" width="84" style="border-radius:6px;float:left;margin:0 16px 8px 0">' % esc(cover)) if cover.startswith(("http://", "https://")) else ""
     author_html = ('<div style="color:#64748b">by %s</div>' % esc(author)) if author else ""
     notes_html = ('<p style="color:#475569;margin:14px 0 0;clear:both">%s</p>' % esc(notes)) if notes else ""
     html = ("""
