@@ -19,7 +19,7 @@ from firebase_admin import auth as fb_auth, credentials, firestore
 from dotenv import load_dotenv
 from flask import (
     Flask, render_template, request,
-    jsonify, g, make_response,
+    jsonify, g, make_response, send_file,
 )
 
 load_dotenv()
@@ -828,6 +828,18 @@ _APPLE_TOUCH_ICON_PNG = _b64.b64decode("".join(_APPLE_TOUCH_ICON_B64.split()))
 def apple_touch_icon():
     resp = make_response(_APPLE_TOUCH_ICON_PNG)
     resp.headers["Content-Type"] = "image/png"
+    resp.headers["Cache-Control"] = "public, max-age=604800"
+    return resp
+
+
+_WELL_RED_LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "well-red-logo.png")
+
+
+@app.route("/book-club-logo.png")
+def book_club_logo():
+    """Well Red Book Club logo — served from disk (ships with the function,
+    same as templates). Used as the page hero, favicon, and app-card icon."""
+    resp = make_response(send_file(_WELL_RED_LOGO, mimetype="image/png"))
     resp.headers["Cache-Control"] = "public, max-age=604800"
     return resp
 
