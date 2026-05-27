@@ -1107,7 +1107,15 @@ def _espn_scoreboard(sport: str, date_yyyymmdd: str) -> list:
 
 def _espn_match_event(events: list, away: str, home: str,
                       bet_start: datetime | None) -> dict | None:
-    away_n, home_n = away.lower(), home.lower()
+    # Strip accents before matching — The Odds API sends "Montréal
+    # Canadiens" (é) while ESPN lists "Montreal Canadiens" (e), so a raw
+    # lowercase substring test never matched and the whole ESPN block
+    # (records, recent form, injuries) came back null for any accented team.
+    import unicodedata
+    def _na(s: str) -> str:
+        return "".join(c for c in unicodedata.normalize("NFKD", s or "")
+                       if unicodedata.category(c) != "Mn").lower()
+    away_n, home_n = _na(away), _na(home)
     for g in events:
         comp = (g.get("competitions") or [{}])[0]
         cs = comp.get("competitors") or []
@@ -1115,8 +1123,8 @@ def _espn_match_event(events: list, away: str, home: str,
             continue
         h = next((c for c in cs if c.get("homeAway") == "home"), cs[0])
         a = next((c for c in cs if c.get("homeAway") == "away"), cs[1])
-        h_name = ((h.get("team") or {}).get("displayName") or "").lower()
-        a_name = ((a.get("team") or {}).get("displayName") or "").lower()
+        h_name = _na((h.get("team") or {}).get("displayName") or "")
+        a_name = _na((a.get("team") or {}).get("displayName") or "")
         if not h_name or not a_name:
             continue
         if not ((home_n in h_name or h_name in home_n) and
@@ -1149,21 +1157,13 @@ def _team_block(comp_team: dict | None) -> dict:
     }
 
 
-def _espn_team_injuries(sport: str, team_id: str | None) -> list:
-    if not team_id:
-        return []
-    pair = _ESPN_PATH.get(sport)
-    if not pair:
-        return []
-    grp, lg = pair
-    url = (f"https://site.web.api.espn.com/apis/site/v2/sports/"
-           f"{grp}/{lg}/teams/{team_id}/injuries")
-    data = _http_get(url)
-    if not data:
-        return []
-    items = data.get("items", []) or []
+def _normalize_injury_records(records: list) -> list:
+    """Shape ESPN injury records (from either the per-team or league-wide
+    feed — same field names) into the dossier's flat injury dicts."""
     out = []
-    for it in items[:25]:
+    for it in records[:25]:
+        if not isinstance(it, dict):
+            continue
         ath = it.get("athlete") or {}
         out.append({
             "name":   ath.get("displayName") or ath.get("shortName"),
@@ -1174,6 +1174,132 @@ def _espn_team_injuries(sport: str, team_id: str | None) -> list:
             "date":   it.get("date"),
         })
     return out
+
+
+# League-wide ESPN injuries feed. The per-team /teams/{id}/injuries route
+# comes back EMPTY for NHL (works for NFL/NBA/MLB) — the league-wide
+# endpoint carries the data ESPN omits from the per-team route. One call
+# returns every team grouped by id, so we fetch once per sport, cache it,
+# and filter to the team that needs it.
+_INJURY_CACHE: dict[str, tuple[float, dict]] = {}
+_INJURY_CACHE_TTL_SEC = 600
+
+
+def _espn_league_injuries(sport: str, diag: dict | None = None) -> dict[str, list]:
+    pair = _ESPN_PATH.get(sport)
+    if not pair:
+        return {}
+    cached = _INJURY_CACHE.get(sport)
+    if cached and (time.time() - cached[0]) < _INJURY_CACHE_TTL_SEC:
+        return cached[1]
+    grp, lg = pair
+    url = f"https://site.api.espn.com/apis/site/v2/sports/{grp}/{lg}/injuries"
+    status = None
+    data = None
+    body_snip = None
+    try:
+        r = requests.get(url, timeout=HTTP_TIMEOUT,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        status = r.status_code
+        if status == 200:
+            data = r.json()
+        else:
+            body_snip = (r.text or "")[:200]
+    except Exception as e:
+        log.warning("ESPN league injuries %s failed: %s", sport, e)
+        body_snip = f"exc: {str(e)[:160]}"
+    out: dict[str, list] = {}
+    for grp_obj in ((data or {}).get("injuries") or []):
+        if not isinstance(grp_obj, dict):
+            continue
+        team = grp_obj.get("team") or {}
+        tid = str(grp_obj.get("id") or team.get("id") or "")
+        recs = grp_obj.get("injuries")
+        if tid and isinstance(recs, list):
+            out[tid] = _normalize_injury_records(recs)
+    if status == 200:  # only cache a successful fetch, so a blip retries
+        _INJURY_CACHE[sport] = (time.time(), out)
+    if diag is not None:
+        diag["league_status"] = status
+        diag["league_teams"] = len(out)
+        if body_snip:
+            diag["league_body"] = body_snip
+    return out
+
+
+def _espn_team_injuries(sport: str, team_id: str | None, diag: dict | None = None) -> list:
+    if not team_id:
+        return []
+    pair = _ESPN_PATH.get(sport)
+    if not pair:
+        return []
+    grp, lg = pair
+    url = (f"https://site.web.api.espn.com/apis/site/v2/sports/"
+           f"{grp}/{lg}/teams/{team_id}/injuries")
+    status = None
+    data = None
+    body_snip = None
+    try:
+        r = requests.get(url, timeout=HTTP_TIMEOUT,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        status = r.status_code
+        if status == 200:
+            data = r.json()
+        else:
+            body_snip = (r.text or "")[:200]
+    except Exception as e:
+        log.warning("ESPN injuries %s %s failed: %s", sport, team_id, e)
+        body_snip = f"exc: {str(e)[:160]}"
+    if diag is not None:
+        diag["status"] = status
+        diag["keys"] = list((data or {}).keys())[:8]
+        if body_snip:
+            diag["body"] = body_snip
+    # ESPN's injuries endpoint shape varies by host/sport: sometimes a
+    # flat list under "items", sometimes under "injuries", and sometimes
+    # grouped per team (each group is {team..., injuries:[...]}). Reading
+    # only "items" left the list empty for every sport. Pull whichever
+    # key exists and flatten team-grouped shapes down to injury records.
+    raw: list = []
+    records: list = []
+    if data:
+        raw = data.get("injuries")
+        if raw is None:
+            raw = data.get("items") or []
+        for el in (raw or []):
+            if not isinstance(el, dict):
+                continue
+            if el.get("athlete"):
+                records.append(el)                      # direct injury record
+            elif isinstance(el.get("injuries"), list):
+                records.extend(x for x in el["injuries"] if isinstance(x, dict))
+            else:
+                records.append(el)
+    out = _normalize_injury_records(records)
+    if diag is not None:
+        diag["raw_len"] = len(raw or [])
+        diag["records"] = len(records)
+        diag["source"] = "team" if out else None
+    # NHL's per-team route returns nothing — fall back to the league-wide
+    # feed (one cached call) and slice out this team's injuries.
+    if not out:
+        league = _espn_league_injuries(sport, diag=diag)
+        out = league.get(str(team_id), [])
+        if diag is not None and out:
+            diag["source"] = "league"
+    return out
+
+
+def _espn_score_int(raw) -> int | None:
+    # ESPN's team-SCHEDULE endpoint returns competitor score as an object
+    # ({"value": 5.0, "displayValue": "5"}), not the plain string the
+    # scoreboard endpoint gives. Handle dict / str / number uniformly.
+    if isinstance(raw, dict):
+        raw = raw.get("value", raw.get("displayValue"))
+    try:
+        return int(float(raw))
+    except (ValueError, TypeError):
+        return None
 
 
 def _espn_team_recent(sport: str, team_id: str | None, n: int = 10) -> list:
@@ -1202,10 +1328,9 @@ def _espn_team_recent(sport: str, team_id: str | None, n: int = 10) -> list:
         opp = next((c for c in cs if (c.get("team") or {}).get("id") != team_id), None)
         if not (me and opp):
             continue
-        try:
-            me_score = int(me.get("score") or 0)
-            opp_score = int(opp.get("score") or 0)
-        except (ValueError, TypeError):
+        me_score = _espn_score_int(me.get("score"))
+        opp_score = _espn_score_int(opp.get("score"))
+        if me_score is None or opp_score is None:
             continue
         result = "W" if me_score > opp_score else ("L" if me_score < opp_score else "T")
         out.append({
@@ -1234,6 +1359,15 @@ def _mlb_probables(event_iso: str, away: str, home: str) -> dict:
     if not data:
         return {}
     away_n, home_n = away.lower(), home.lower()
+    try:
+        target = datetime.fromisoformat(event_iso.replace("Z", "+00:00"))
+    except Exception:
+        target = None
+    # Collect EVERY game matching by team name. A doubleheader returns two
+    # (same teams, same day) — pick the one whose scheduled start is closest
+    # to this dossier's event_start, so game 2 doesn't silently inherit game
+    # 1's probable pitchers / game_pk / venue.
+    cands = []
     for d in data.get("dates", []) or []:
         for g in d.get("games", []) or []:
             home_t = ((g.get("teams") or {}).get("home") or {}).get("team", {})
@@ -1245,15 +1379,29 @@ def _mlb_probables(event_iso: str, away: str, home: str) -> dict:
             if not ((home_n in hn or hn in home_n) and
                     (away_n in an or an in away_n)):
                 continue
-            return {
-                "venue": (g.get("venue") or {}).get("name"),
-                "away":  _mlb_pitcher_block(((g.get("teams") or {}).get("away") or {}).get("probablePitcher")),
-                "home":  _mlb_pitcher_block(((g.get("teams") or {}).get("home") or {}).get("probablePitcher")),
-                "away_team_id": away_t.get("id"),
-                "home_team_id": home_t.get("id"),
-                "game_pk":      g.get("gamePk"),
-            }
-    return {}
+            cands.append((g, home_t, away_t))
+    if not cands:
+        return {}
+    g, home_t, away_t = cands[0]
+    if target and len(cands) > 1:
+        dated = []
+        for c in cands:
+            try:
+                gd = datetime.fromisoformat((c[0].get("gameDate") or "").replace("Z", "+00:00"))
+                dated.append((c, gd))
+            except Exception:
+                continue
+        if dated:
+            g, home_t, away_t = min(
+                dated, key=lambda x: abs((x[1] - target).total_seconds()))[0]
+    return {
+        "venue": (g.get("venue") or {}).get("name"),
+        "away":  _mlb_pitcher_block(((g.get("teams") or {}).get("away") or {}).get("probablePitcher")),
+        "home":  _mlb_pitcher_block(((g.get("teams") or {}).get("home") or {}).get("probablePitcher")),
+        "away_team_id": away_t.get("id"),
+        "home_team_id": home_t.get("id"),
+        "game_pk":      g.get("gamePk"),
+    }
 
 
 # MLB lineup layer — we model the starter, but the OFFENSE projection
@@ -1277,14 +1425,19 @@ def _mlb_posted_lineup(game_pk) -> dict | None:
     teams = data.get("teams") or {}
     out: dict = {}
     for side in ("home", "away"):
-        names = set()
+        batters: set = set()
+        pitchers: set = set()
         for p in ((teams.get(side) or {}).get("players") or {}).values():
-            if p.get("battingOrder"):     # only starters carry a batting order
-                nm = ((p.get("person") or {}).get("fullName") or "").lower()
-                if nm:
-                    names.add(nm)
-        if names:
-            out[side] = names
+            nm = ((p.get("person") or {}).get("fullName") or "").lower()
+            if not nm:
+                continue
+            pos = ((p.get("position") or {}).get("abbreviation") or "").upper()
+            if pos == "P":
+                pitchers.add(nm)        # pitchers never bat (DH era) — exclude
+            if p.get("battingOrder"):   # only starters carry a batting order
+                batters.add(nm)
+        if batters:
+            out[side] = {"batters": batters, "pitchers": pitchers}
     return out or None
 
 
@@ -1309,7 +1462,11 @@ def _mlb_hitting_leaders(team_id, season: int, limit: int = 4) -> list:
 
 def _mlb_lineup_dock(game_pk, away_id, home_id, season: int) -> dict | None:
     """Dock projected runs for top-OPS regulars absent from the posted
-    lineup. None when no lineup posted / nobody material is missing."""
+    lineup. None when no lineup posted / nobody material is missing.
+
+    Pitchers are excluded: they don't bat in the DH era, so a starter
+    who isn't pitching today (normal rotation) must never count as a
+    resting hitter — that was docking runs for the whole rotation."""
     lineup = _mlb_posted_lineup(game_pk)
     if not lineup:
         return None
@@ -1319,9 +1476,13 @@ def _mlb_lineup_dock(game_pk, away_id, home_id, season: int) -> dict | None:
         present = lineup.get(side)
         miss = []
         if present:
+            batters = present["batters"]
+            pitchers = present["pitchers"]
             for full in _mlb_hitting_leaders(tid, season):
                 ln = full.lower()
-                if not any(ln in p or p in ln for p in present):
+                in_lineup = any(ln in p or p in ln for p in batters)
+                is_pitcher = any(ln in p or p in ln for p in pitchers)
+                if not in_lineup and not is_pitcher:
                     miss.append(full)
         dock[side] = round(min(len(miss) * _MLB_REST_RUNS, _MLB_REST_MAX), 2)
         notes[side] = miss
@@ -2865,6 +3026,20 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         except Exception as e:
             pmm_error = f"pmm lookup failed: {str(e)[:160]}"
             pmm_data = None
+        # Instrument the lookup outcome to Vercel runtime logs so a miss is
+        # diagnosable from the server side (no UI round-trip needed): which
+        # tag/window was used, how many events PMM returned, and their titles.
+        try:
+            _samples = " | ".join(
+                (pmm_diag.get("sample_event_titles") or [])[:5])
+            print(f"[pmm] {sport} {away}@{home} matched={bool(pmm_data)} "
+                  f"err={pmm_error!r} tag={pmm_diag.get('tag')!r} "
+                  f"win={pmm_diag.get('window_min')}..{pmm_diag.get('window_max')} "
+                  f"events={pmm_diag.get('events_returned')} "
+                  f"matched_title={pmm_diag.get('matched_title')!r} "
+                  f"samples=[{_samples}]")
+        except Exception:
+            pass
 
     # Attach PMM market info onto each odds[market_type] block so the
     # UI can render PMM line + bid/ask next to PIN fair, plus the
@@ -2881,8 +3056,10 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         if m:
             home_t = _team_block(m["home"])
             away_t = _team_block(m["away"])
-            home_t["injuries"] = _espn_team_injuries(sport, home_t.get("id"))
-            away_t["injuries"] = _espn_team_injuries(sport, away_t.get("id"))
+            _inj_dbg_h: dict = {}
+            _inj_dbg_a: dict = {}
+            home_t["injuries"] = _espn_team_injuries(sport, home_t.get("id"), diag=_inj_dbg_h)
+            away_t["injuries"] = _espn_team_injuries(sport, away_t.get("id"), diag=_inj_dbg_a)
             home_t["recent"]   = _espn_team_recent(sport, home_t.get("id"))
             away_t["recent"]   = _espn_team_recent(sport, away_t.get("id"))
             comp = (m["event"].get("competitions") or [{}])[0]
@@ -2891,6 +3068,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
                 "broadcasts": [b.get("names") for b in comp.get("broadcasts") or [] if b.get("names")],
                 "home":       home_t,
                 "away":       away_t,
+                "inj_debug":  {"home": _inj_dbg_h, "away": _inj_dbg_a},
             }
 
     mlb_extra = {}
@@ -2988,6 +3166,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
             "home":       espn_block.get("home"),
             "away":       espn_block.get("away"),
             "broadcasts": espn_block.get("broadcasts"),
+            "inj_debug":  espn_block.get("inj_debug"),
         } if espn_block else None,
         "mlb":             mlb_extra or None,
         "team_compare":    team_compare,

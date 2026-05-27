@@ -112,25 +112,40 @@ def _name_match(haystack: str, needle: str) -> bool:
     return n in h or h in n
 
 
+def _team_mention_pos(q_norm: str, team: str) -> int:
+    """Earliest position in the normalized question where this team is
+    identifiable, trying full name → city/region → mascot last-token.
+    Returns -1 if none of the variants appear.
+
+    The city variant is essential: PMM titles many NBA/NFL markets by
+    city ("Spread: Oklahoma City (-3)", "Oklahoma City to win"), where
+    neither the full name "oklahoma city thunder" nor the mascot
+    "thunder" appears — so without it ML/spread markets fail side
+    detection and get silently dropped."""
+    best = -1
+    for cand in (_norm(team), _city_tokens(team), _last_token(team)):
+        if not cand:
+            continue
+        p = q_norm.find(cand)
+        if p >= 0 and (best < 0 or p < best):
+            best = p
+    return best
+
+
 def _side_by_first_mention(question: str, away: str, home: str) -> str | None:
     """Pick home/away based on which team is named FIRST in the question.
-    PMM questions like "Spread: Baltimore Orioles (+4.5)" or "Baltimore
-    Orioles to win" name the YES-side team first. If both teams appear
-    (e.g., "Team A to win vs Team B"), the earlier one is YES.
+    PMM questions like "Spread: Baltimore Orioles (+4.5)" or "Oklahoma
+    City to win" name the YES-side team first. If both teams appear
+    (e.g., "Team A to win vs Team B"), the earlier one is YES. Each team
+    is matched by full name, city/region, OR mascot (see
+    _team_mention_pos) so city-titled markets resolve correctly.
 
     Returns "home", "away", or None if neither team is found."""
     q = _norm(question)
     if not q:
         return None
-    a, h = _norm(away), _norm(home)
-    a_pos = q.find(a) if a else -1
-    h_pos = q.find(h) if h else -1
-    if a_pos < 0 and h_pos < 0:
-        # Last-token fallback (PMM sometimes uses just the nickname)
-        a_last = _last_token(away)
-        h_last = _last_token(home)
-        a_pos = q.find(a_last) if a_last else -1
-        h_pos = q.find(h_last) if h_last else -1
+    a_pos = _team_mention_pos(q, away)
+    h_pos = _team_mention_pos(q, home)
     if a_pos < 0 and h_pos < 0:
         return None
     if h_pos < 0:
@@ -146,6 +161,17 @@ def _last_token(team_name: str) -> str:
     nickname in event titles."""
     parts = [p for p in _norm(team_name).split() if len(p) >= 3]
     return parts[-1] if parts else ""
+
+
+def _city_tokens(team_name: str) -> str:
+    """Everything BEFORE the trailing mascot — the city/region part.
+    'Oklahoma City Thunder' → 'oklahoma city'; 'Spurs' → ''. PMM
+    occasionally titles NBA/NFL events by city ("Oklahoma City vs
+    San Antonio") where the mascot last-token isn't present, so a
+    both-cities-present pass catches those."""
+    parts = [p for p in _norm(team_name).split() if len(p) >= 3]
+    return " ".join(parts[:-1]) if len(parts) >= 2 else ""
+
 
 
 def _match_event_to_game(events: list, away: str, home: str) -> Any | None:
@@ -167,6 +193,16 @@ def _match_event_to_game(events: list, away: str, home: str) -> Any | None:
         if away_last and home_last:
             t_norm = _norm(title)
             if away_last in t_norm and home_last in t_norm:
+                return ev
+    # Pass 2.5: city/region tokens both present ("Oklahoma City vs
+    # San Antonio") — for events PMM titles by city instead of mascot.
+    away_city = _city_tokens(away)
+    home_city = _city_tokens(home)
+    if away_city and home_city:
+        for ev in events:
+            title = ev.get("title") if isinstance(ev, dict) else getattr(ev, "title", "")
+            t_norm = _norm(title)
+            if away_city in t_norm and home_city in t_norm:
                 return ev
     for ev in events:
         markets = ev.get("markets") if isinstance(ev, dict) else getattr(ev, "markets", [])
@@ -238,9 +274,18 @@ def _search_event(client, sport: str, away: str, home: str,
          "startTimeMin": win_min, "startTimeMax": win_max, "limit": 100},
         {"tagSlug": tag, "closed": False, "limit": 200},   # no time filter as fallback
     ]
+    # Try EACH param shape, accumulating a deduped union of events, and
+    # attempt a team match after each. Stop as soon as we match — but do
+    # NOT stop just because a shape returned a non-empty (possibly wrong)
+    # result. The old code broke on the first non-empty response, so when
+    # the tight time-windowed query returned a single unrelated NBA event
+    # it never reached the broad `limit:200` fallback that actually
+    # contained the game. (NBA playoff games were the recurring victim.)
     events: list = []
+    seen_slugs: set = set()
     last_error = None
     used_attempt = None
+    matched = None
     for i, params in enumerate(attempts):
         try:
             resp = client.events.list(params)
@@ -249,19 +294,27 @@ def _search_event(client, sport: str, away: str, home: str,
             continue
         evs = resp.get("events") if isinstance(resp, dict) else getattr(resp, "events", None)
         evs = evs or []
-        if evs:
-            events = evs
+        for ev in evs:
+            slug = ev.get("slug") if isinstance(ev, dict) else getattr(ev, "slug", None)
+            if slug and slug in seen_slugs:
+                continue
+            if slug:
+                seen_slugs.add(slug)
+            events.append(ev)
+        m = _match_event_to_game(events, away, home)
+        if m is not None:
+            matched = m
             used_attempt = i
             break
-        if used_attempt is None and evs is not None:
-            used_attempt = i  # record that the call succeeded even if empty
     if not events and last_error and diag is not None:
         diag["error"] = last_error
 
     if diag is not None:
         diag["events_returned"] = len(events)
-
-    matched = _match_event_to_game(events, away, home)
+        diag["sample_event_titles"] = [
+            ((e.get("title") if isinstance(e, dict) else getattr(e, "title", "")) or "")
+            for e in events[:8]
+        ]
     # Events.list returns event metadata but NOT the nested markets
     # list (despite Event's TypedDict declaring markets). Hit the
     # markets.list endpoint directly with eventSlug filter — that one

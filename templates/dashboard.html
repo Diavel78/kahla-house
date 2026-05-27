@@ -4,6 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Kahla House — Dashboard</title>
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <link rel="icon" type="image/png" href="/apple-touch-icon.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Dashboard">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -1006,8 +1011,10 @@
 
         for (const c of closed) {
             let result = '';
-            if (c.type === 'Transfer') {
+            if (c.type === 'Transfer' || c.type === 'Liquidity Program') {
                 result = '<span class="badge badge-win">Maker</span>';
+            } else if (c.type === 'Taker Fee Rebate') {
+                result = '<span class="badge badge-win">Rebate</span>';
             } else if (c.type === 'Trade') {
                 result = '<span class="badge badge-sold">Sold</span>';
             } else if (c.pnl !== null && c.pnl > 0) {

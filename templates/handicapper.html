@@ -4,12 +4,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Kahla House — Pick Bot</title>
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <link rel="icon" type="image/png" href="/apple-touch-icon.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Pick Bot">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <!-- html2canvas: rasterizes the bet-slip modal to a PNG for sharing -->
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
     <script>
         const FC = {
             apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
@@ -192,6 +199,17 @@
         .game-row .pick-btn { padding: 6px 12px; background: var(--blue); color: #fff; border: 0; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; }
         .game-row .pick-btn:hover { background: #5b8aff; }
         .game-row .pick-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        /* Logged: admin/bot_access has already logged a pick on this game.
+           Green instead of blue so it reads "done, already chose." Viewers
+           never reach this — _loggedMarketIds is only populated by loadData,
+           which is gated to _canBet. */
+        .game-row .pick-btn.logged { background: var(--green); }
+        .game-row .pick-btn.logged:hover { background: #2ee06a; }
+        /* Lean: bot evaluated this in-window game and it's a lean/pass, not
+           a real pick — muted grey so it reads "skip." Blue stays "look."
+           Set only by the background verdict prefetch (admin/bot_access). */
+        .game-row .pick-btn.lean { background: #3a4150; color: var(--text-secondary); }
+        .game-row .pick-btn.lean:hover { background: #454d5e; }
         .games-empty { padding: 20px; text-align: center; font-size: 12px; color: var(--text-muted); }
 
         /* Ask form */
@@ -351,6 +369,38 @@
             .teams-grid { grid-template-columns: 1fr; }
             .ask-row { flex-direction: column; }
         }
+
+        /* --- Bet Slip modal (mirrors the Dashboard betslip, fed by bot_picks) --- */
+        .betslip-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 1000; justify-content: center; align-items: center; backdrop-filter: blur(6px); }
+        .betslip-overlay.open { display: flex; }
+        .betslip { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; width: 460px; max-width: 92vw; max-height: 85vh; overflow-y: auto; box-shadow: 0 24px 64px rgba(0,0,0,0.5); }
+        .betslip-header { padding: 22px 24px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+        .betslip-header h2 { font-size: 16px; font-weight: 700; color: var(--text); letter-spacing: 1.5px; font-family: 'JetBrains Mono', monospace; margin: 0; }
+        .betslip-date { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+        .betslip-actions { display: flex; align-items: center; gap: 8px; }
+        .betslip-share { background: var(--surface-2); border: 1px solid var(--border); color: var(--text); font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; padding: 6px 12px; border-radius: 8px; cursor: pointer; transition: all 0.15s; }
+        .betslip-share:hover { background: var(--blue-dim); border-color: var(--blue); }
+        .betslip-share:disabled { opacity: 0.5; cursor: wait; }
+        .betslip-close { background: none; border: none; color: var(--text-muted); font-size: 22px; cursor: pointer; padding: 4px 8px; border-radius: 8px; line-height: 1; transition: all 0.15s; }
+        .betslip-close:hover { background: var(--surface-2); color: var(--text); }
+        .betslip.capturing { max-height: none !important; overflow: visible !important; }
+        .betslip-body { padding: 8px 0; }
+        .betslip-item { padding: 13px 24px; border-bottom: 1px solid rgba(30,37,48,0.5); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+        .betslip-item:last-child { border-bottom: none; }
+        .betslip-market { font-size: 14px; font-weight: 600; color: var(--text); flex: 1; min-width: 0; }
+        .betslip-market .bs-sub { display: block; font-size: 11px; font-weight: 600; color: var(--text-muted); margin-top: 3px; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.03em; }
+        .betslip-odds { font-size: 16px; font-weight: 700; font-family: 'JetBrains Mono', monospace; white-space: nowrap; padding: 6px 12px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border); }
+        .betslip-odds.fav { color: var(--orange); }
+        .betslip-odds.dog { color: var(--blue); }
+        .betslip-result { font-size: 13px; font-weight: 700; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.5px; white-space: nowrap; padding: 6px 12px; border-radius: 8px; min-width: 44px; text-align: center; }
+        .betslip-result.won  { color: var(--green); background: var(--green-dim); border: 1px solid rgba(34,197,94,0.35); }
+        .betslip-result.lost { color: var(--red); background: var(--red-dim); border: 1px solid rgba(239,68,68,0.35); }
+        .betslip-result.push { color: var(--text-muted); background: var(--surface-2); border: 1px solid var(--border); }
+        .betslip-section-label { padding: 12px 24px 6px; font-size: 10px; font-weight: 700; letter-spacing: 1.2px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; text-transform: uppercase; }
+        .betslip-footer { padding: 14px 24px 18px; border-top: 1px solid var(--border); text-align: center; }
+        .betslip-footer span { font-size: 11px; color: var(--text-muted); letter-spacing: 1px; font-family: 'JetBrains Mono', monospace; font-weight: 600; }
+        .betslip-empty { padding: 36px 24px; text-align: center; color: var(--text-muted); font-size: 14px; }
+        .betslip-btn { background: linear-gradient(135deg, var(--orange), #d97706); color: var(--bg); border: none; font-weight: 700; font-size: 12px; letter-spacing: 0.3px; padding: 6px 12px; border-radius: 8px; cursor: pointer; font-family: inherit; }
     </style>
 </head>
 <body>
@@ -370,6 +420,7 @@
             <div class="top-bar-row" style="justify-content:flex-end">
                 <div class="top-bar-right">
                     <span class="status" id="status">Loading…</span>
+                    <button class="betslip-btn" id="betslipBtn" onclick="openBetSlip()">Bet Slip</button>
                     <button class="refresh-btn" onclick="loadData(true)">Refresh</button>
                     <button class="logout-btn" onclick="doLogout()">Logout</button>
                 </div>
@@ -394,17 +445,6 @@
                 <button class="sport-tab" data-sport="UFC">UFC</button>
             </div>
 
-            <!-- Game list (auto-populates per selected sport) -->
-            <div class="games-card">
-                <div class="games-head">
-                    <h3 id="gamesTitle">MLB — upcoming</h3>
-                    <span class="count" id="gamesCount">…</span>
-                </div>
-                <ul class="games-list" id="gamesList">
-                    <li class="games-empty">Loading…</li>
-                </ul>
-            </div>
-
             <!-- Search (collapsed by default — game list is primary) -->
             <div class="ask-card" id="askCard">
                 <div class="ask-toggle" onclick="document.getElementById('askCard').classList.toggle('expanded')">
@@ -427,9 +467,21 @@
                         </select>
                         <button class="ask-submit" id="askSubmit" onclick="askGame()">Build dossier</button>
                     </div>
-                    <div class="ask-hint">Free-form: "Yankees vs Red Sox", "Lakers Nuggets tonight", "MIN @ DEN". Same window as the list above.</div>
+                    <div class="ask-hint">Free-form: "Yankees vs Red Sox", "Lakers Nuggets tonight", "MIN @ DEN". Same window as the list below.</div>
                 </div>
             </div>
+
+            <!-- Game list (auto-populates per selected sport) -->
+            <div class="games-card">
+                <div class="games-head">
+                    <h3 id="gamesTitle">MLB — upcoming</h3>
+                    <span class="count" id="gamesCount">…</span>
+                </div>
+                <ul class="games-list" id="gamesList">
+                    <li class="games-empty">Loading…</li>
+                </ul>
+            </div>
+
 
             <div class="dossier-overlay" id="dossierOverlay" onclick="if(event.target===this)closeDossier()">
                 <div class="dossier">
@@ -454,6 +506,29 @@
                 <div class="section-title">Settled today <span class="count" id="settledCount">0</span></div>
                 <ul class="picks" id="settledList"></ul>
             </div>
+        </div>
+    </div>
+
+    <!-- Bet Slip modal — sportsbook-ticket view of the bot's logged
+         picks (pending + settled today), shareable as a PNG. Same layout
+         as the Dashboard betslip, but fed by bot_picks instead of the
+         Polymarket SDK. -->
+    <div class="betslip-overlay" id="betslip-overlay" onclick="closeBetSlipOutside(event)">
+        <div class="betslip" id="betslip">
+            <div class="betslip-header">
+                <div>
+                    <h2>PICK BOT</h2>
+                    <div class="betslip-date" id="betslip-date"></div>
+                </div>
+                <div class="betslip-actions">
+                    <button class="betslip-share" id="betslip-share-btn" onclick="shareBetSlip()" title="Save / share as image">Share</button>
+                    <button class="betslip-close" onclick="closeBetSlip()">&times;</button>
+                </div>
+            </div>
+            <div class="betslip-body" id="betslip-body">
+                <div class="betslip-empty">No picks</div>
+            </div>
+            <div class="betslip-footer"><span id="betslip-footer-text"></span></div>
         </div>
     </div>
 
@@ -521,6 +596,22 @@
     // which carries zero logged-pick data — that's why we can open up the
     // dossier endpoint to firebase_auth_required and trust the gate.
     let _canBet = false;
+    // market_ids the current user has already logged a pick on (pending or
+    // settled-today). Populated ONLY by loadData, which is gated to _canBet
+    // — so for viewers this stays empty and Pick buttons never turn green.
+    let _loggedMarketIds = new Set();
+    // Per-game bot VERDICT cache for the games list (admin/bot_access only).
+    // {market_id: {verdict:'pick'|'lean', fetchedAt}}. Filled by a throttled
+    // background prefetch of the SAME /api/handicapper/dossier call a click
+    // uses — so the button color reflects the FULL model verdict
+    // (gates_cleared = real pick vs lean), not a PIN-only shortcut. Only
+    // games inside the 2h window are evaluated. Cheap: cache-only dossier
+    // (no Odds API credits), free public data, server-cached.
+    let _currentGames = [];
+    let _verdictCache = new Map();
+    let _verdictInFlight = new Set();
+    const VERDICT_WINDOW_MS = 2 * 60 * 60 * 1000;   // 2h start window
+    const VERDICT_TTL_MS    = 5 * 60 * 1000;        // re-fetch stale verdicts
 
     firebase.auth().onAuthStateChanged(async user => {
         if (!user) { window.location.href = '/'; return; }
@@ -547,6 +638,10 @@
         if (_canBet) {
             loadData(true);
             setInterval(() => loadData(false), 60_000);
+            // Refresh in-window game verdicts every 5 min (matches the cron's
+            // odds cadence) so a sitting page picks up games crossing into the
+            // 2h window + verdicts flipping as lines move.
+            setInterval(_prefetchVerdicts, 5 * 60_000);
         }
         // Re-sort tabs every 5 min so off-season sports drop to the
         // right and games-publishing sports rise as their slates open.
@@ -565,8 +660,16 @@
         // Hide stats card + confidence tier strip
         ['overallStats', 'confStrip', 'pendingSection', 'settledSection']
             .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
-        // Hide the Refresh button — it's for stats only
+        // Hide the Refresh + Bet Slip buttons — both are pick/stats
+        // surfaces, irrelevant to view-only viewers (who can't log picks).
         document.querySelectorAll('.refresh-btn').forEach(b => b.style.display = 'none');
+        const bsBtn = document.getElementById('betslipBtn');
+        if (bsBtn) bsBtn.style.display = 'none';
+        // Hide the status pill — it only ever shows the resolver heartbeat,
+        // which loadData (gated to _canBet) populates. Viewers never call
+        // loadData, so it would otherwise sit on "Loading…" forever.
+        const statusEl = document.getElementById('status');
+        if (statusEl) statusEl.style.display = 'none';
         // Add a view-only banner under the page header
         const meta = document.getElementById('meta');
         if (meta) {
@@ -647,6 +750,33 @@
         if (hr < 24)    return `${hr}h ago`;
         const d   = Math.round(hr / 24);
         return `${d}d ago`;
+    }
+
+    // The odds-ingest cron intentionally skips 10pm–7am MT (America/Phoenix,
+    // no DST) — no US games tip overnight. During that window a stale cron
+    // heartbeat is EXPECTED, not a failure, so the freshness badge should
+    // read muted "idle (overnight)" rather than alarming red. Mirrors
+    // _LOCAL_TZ / _BLACKOUT_START_HOUR / _BLACKOUT_END_HOUR in odds_api.py.
+    function _inOvernightBlackout() {
+        try {
+            const parts = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/Phoenix', hour: '2-digit', hourCycle: 'h23'
+            }).formatToParts(new Date());
+            const hr = parseInt((parts.find(p => p.type === 'hour') || {}).value, 10);
+            return hr >= 22 || hr < 7;
+        } catch { return false; }
+    }
+
+    // Shared builder for the "cron …" half of the freshness badge so the
+    // live tick and the full render stay consistent.
+    function _cronFreshHtml(cronIso) {
+        if (!cronIso) return '';
+        const overnight = _inOvernightBlackout();
+        const ageMin = Math.round((Date.now() - new Date(cronIso).getTime()) / 60000);
+        const color = (!overnight && Number.isFinite(ageMin) && ageMin > 10)
+            ? 'var(--red)' : 'var(--text-muted)';
+        const text = overnight ? 'cron idle (overnight)' : `cron ${_fmtAgo(cronIso)}`;
+        return `<span title="${_esc(cronIso)}" style="color:${color}">${_esc(text)}</span>`;
     }
 
     function _renderStats(s) {
@@ -889,7 +1019,17 @@
             const r = await authFetch('/api/handicapper/games?sport=' + encodeURIComponent(_activeSport));
             const data = await r.json();
             if (!data.ok) throw new Error(data.error || 'fetch failed');
-            const games = data.games || [];
+            // Pre-game only: drop any game that's already started. The API
+            // window starts at now, but client/server clock skew (or a
+            // game tipping off between fetch and render) can leak a live
+            // one through — filter defensively so the list never shows a
+            // game you can't pre-game bet.
+            const now = Date.now();
+            const games = (data.games || []).filter(g => {
+                const t = Date.parse(g.event_start);
+                return isNaN(t) || t > now;
+            });
+            _currentGames = games;
             count.textContent = games.length;
             if (!games.length) {
                 list.innerHTML = '<li class="games-empty">No upcoming games for this sport.</li>';
@@ -897,16 +1037,79 @@
             }
             list.innerHTML = games.map(g => {
                 const matchup = g.away && g.home ? `${_esc(g.away)} @ ${_esc(g.home)}` : _esc(g.event_name);
+                const logged = _canBet && _loggedMarketIds.has(g.market_id);
                 return `<li class="game-row">
                     <span class="when ${_kickoffTier(g.event_start)}" data-start="${_esc(g.event_start)}">${_fmtKickoff(g.event_start)}</span>
                     <span class="matchup">${matchup}</span>
-                    <button class="pick-btn" onclick="pickGame('${g.market_id}')">Pick</button>
+                    <button class="pick-btn${logged ? ' logged' : ''}" data-mid="${_esc(g.market_id)}" onclick="pickGame('${g.market_id}')">${logged ? '✓ Pick' : 'Pick'}</button>
                 </li>`;
             }).join('');
+            // Apply cached verdict colors immediately (tab-switch-back), then
+            // kick off the background prefetch for any in-window game whose
+            // verdict is missing/stale.
+            _colorPickButtons();
+            _prefetchVerdicts();
         } catch (e) {
             list.innerHTML = `<li class="games-empty" style="color:var(--red)">Failed to load: ${_esc(String(e))}</li>`;
             count.textContent = '0';
         }
+    }
+
+    // Re-color already-rendered Pick buttons from the logged-pick set.
+    // Handles the timing gap: the games list and the picks data load via
+    // separate calls, so games may render before loadData populates the
+    // set (or after a new pick is logged / deleted). Admin/bot_access only
+    // — viewers never call loadData, so the set is empty and nothing turns
+    // green here.
+    function _colorPickButtons() {
+        document.querySelectorAll('#gamesList .pick-btn[data-mid]').forEach(btn => {
+            const mid = btn.getAttribute('data-mid');
+            const logged = _canBet && _loggedMarketIds.has(mid);
+            const v = (_canBet && !logged) ? _verdictCache.get(mid) : null;
+            btn.classList.toggle('logged', !!logged);          // green ✓ (wins)
+            btn.classList.toggle('lean', !!(v && v.verdict === 'lean'));  // grey
+            btn.textContent = logged ? '✓ Pick' : 'Pick';
+            // verdict==='pick' (or unevaluated) → no class → default blue
+        });
+    }
+
+    // Background prefetch of the real bot verdict for games inside the 2h
+    // window. Throttled to 2 concurrent, admin/bot_access only, cache-only
+    // dossier (no Odds API credits). Hits the SAME endpoint a click uses, so
+    // the color is the full model verdict (gates_cleared), identical to what
+    // you'd see opening the dossier. Failures leave the button at default.
+    async function _prefetchVerdicts() {
+        if (!_canBet) return;
+        const now = Date.now();
+        const due = (_currentGames || []).filter(g => {
+            const t = Date.parse(g.event_start);
+            if (isNaN(t)) return false;
+            const dt = t - now;
+            if (dt > VERDICT_WINDOW_MS || dt < -90 * 60 * 1000) return false;  // within 2h ahead, not long-past
+            if (_verdictInFlight.has(g.market_id)) return false;
+            const c = _verdictCache.get(g.market_id);
+            return !c || (now - c.fetchedAt) > VERDICT_TTL_MS;
+        });
+        if (!due.length) return;
+        const queue = due.slice();
+        const work = async () => {
+            while (queue.length) {
+                const g = queue.shift();
+                _verdictInFlight.add(g.market_id);
+                try {
+                    const r = await authFetch('/api/handicapper/dossier?market_id=' + encodeURIComponent(g.market_id));
+                    const d = await r.json();
+                    if (d && d.ok) {
+                        const sugg = d.suggestions || (d.suggestion ? [d.suggestion] : []);
+                        const isPick = sugg.some(s => s && s.gates_cleared);
+                        _verdictCache.set(g.market_id, { verdict: isPick ? 'pick' : 'lean', fetchedAt: Date.now() });
+                        _colorPickButtons();
+                    }
+                } catch (e) { /* leave default on failure */ }
+                finally { _verdictInFlight.delete(g.market_id); }
+            }
+        };
+        await Promise.all([work(), work()]);   // 2 at a time
     }
 
     // Tick the games-list kickoff countdowns every minute so "57m"
@@ -916,12 +1119,30 @@
     // credit cost. The 5-min _refreshSportTabOrder still handles
     // re-sorting + picking up newly-published games.
     function _tickKickoffs() {
+        const now = Date.now();
+        let removed = false;
         document.querySelectorAll('#gamesList .when[data-start]').forEach(el => {
             const iso = el.getAttribute('data-start');
             if (!iso) return;
+            // A game that tips off while the list is open drops out — it's
+            // live now and can't be pre-game bet. Removes the row without
+            // waiting for the 5-min re-fetch.
+            const t = Date.parse(iso);
+            if (!isNaN(t) && t <= now) {
+                const row = el.closest('.game-row');
+                if (row) { row.remove(); removed = true; }
+                return;
+            }
             el.textContent = _fmtKickoff(iso);
             el.className = 'when ' + _kickoffTier(iso);
         });
+        if (removed) {
+            const list = document.getElementById('gamesList');
+            const count = document.getElementById('gamesCount');
+            const remaining = list.querySelectorAll('.game-row').length;
+            if (count) count.textContent = remaining;
+            if (!remaining) list.innerHTML = '<li class="games-empty">No upcoming games for this sport.</li>';
+        }
     }
 
     async function pickGame(marketId) {
@@ -1011,11 +1232,7 @@
         const cron = el.getAttribute('data-cron') || '';
         const parts = [];
         if (pin)  parts.push(`<span title="${_esc(pin)}">PIN ${_esc(_fmtAgo(pin))}</span>`);
-        if (cron) {
-            const ageMin = Math.round((Date.now() - new Date(cron).getTime()) / 60000);
-            const color = ageMin > 10 ? 'var(--red)' : 'var(--text-muted)';
-            parts.push(`<span title="${_esc(cron)}" style="color:${color}">cron ${_esc(_fmtAgo(cron))}</span>`);
-        }
+        if (cron) parts.push(_cronFreshHtml(cron));
         if (parts.length) el.innerHTML = '· ' + parts.join(' · ');
     }
 
@@ -1117,13 +1334,7 @@
         const pinFrag = pinCaptured
             ? `<span title="${_esc(pinCaptured)}">PIN ${_esc(_fmtAgo(pinCaptured))}</span>`
             : '';
-        const cronAgeMin = cronLast
-            ? Math.round((Date.now() - new Date(cronLast).getTime()) / 60000)
-            : null;
-        const cronColor = (cronAgeMin != null && cronAgeMin > 10) ? 'var(--red)' : 'var(--text-muted)';
-        const cronFrag = cronLast
-            ? `<span title="${_esc(cronLast)}" style="color:${cronColor}">cron ${_esc(_fmtAgo(cronLast))}</span>`
-            : '';
+        const cronFrag = _cronFreshHtml(cronLast);
         const inner = [pinFrag, cronFrag].filter(Boolean).join(' · ');
         const freshnessBadge = inner
             ? `<span id="dossierFreshness" data-pin="${_esc(pinCaptured || '')}" data-cron="${_esc(cronLast || '')}" style="font-size:10px;font-family:JetBrains Mono,monospace;color:var(--text-muted);margin-left:8px;vertical-align:middle">${inner}</span>`
@@ -1164,7 +1375,7 @@
                 const displayLine = usingPmm && s.pmm_line != null ? s.pmm_line : s.pin_line;
                 const lineFrag = (displayLine == null) ? '' : ` ${_fmtPt(displayLine)}`;
                 const venueTag = usingPmm
-                    ? '<span class="venue-tag pmm">PMM</span>'
+                    ? '<span class="venue-tag pmm">Poly</span>'
                     : '<span class="venue-tag pin">PIN line</span>';
                 const cardCls = s.gates_cleared ? 'suggestion-card' : 'suggestion-card soft';
                 const headingText = s.gates_cleared
@@ -1178,7 +1389,7 @@
                 //   No PMM        → "PIN now -107 (no PMM market found)"
                 let metaLine = '';
                 if (usingPmm) {
-                    const askFrag = s.pmm_ask_american != null ? `PMM asking ${_fmtAmer(s.pmm_ask_american)}` : 'PMM (no current ask)';
+                    const askFrag = s.pmm_ask_american != null ? `Poly asking ${_fmtAmer(s.pmm_ask_american)}` : 'Poly (no current ask)';
                     const bidFrag = s.pmm_bid_american != null ? ` · bid ${_fmtAmer(s.pmm_bid_american)}` : '';
                     const pinFrag = (s.pin_fair_american != null && s.pin_line != null)
                         ? ` · PIN fair ${_fmtAmer(s.pin_fair_american)} @ ${_fmtPt(s.pin_line)}`
@@ -1193,9 +1404,11 @@
                     let dbg = '';
                     if (pm.error) {
                         const evtCount = dg.events_returned != null ? ` (searched ${dg.events_returned})` : '';
-                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:2px">PMM: ${_esc(String(pm.error).slice(0, 120))}${evtCount}</div>`;
+                        const titles = (dg.sample_event_titles || []).filter(Boolean).slice(0, 3).join(' · ');
+                        const sawFrag = titles ? `<div style="color:var(--text-muted);font-size:10px">saw: ${_esc(titles)}</div>` : '';
+                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:2px">Poly: ${_esc(String(pm.error).slice(0, 120))}${evtCount}</div>${sawFrag}`;
                     }
-                    metaLine = `Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow} <span style="color:var(--text-muted);font-size:10px">(no PMM match — projection skipped)</span>${dbg}`;
+                    metaLine = `Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow} <span style="color:var(--text-muted);font-size:10px">(no Poly match — projection skipped)</span>${dbg}`;
                 }
                 const why = _buildReasons(s, d);
                 const whyHtml = why.length
@@ -1229,8 +1442,8 @@
                    </div>`
                 : '';
             const claudeHint = _canBet
-                ? ` Try <button onclick="copyForClaude()" style="background:none;border:0;color:var(--blue);text-decoration:underline;cursor:pointer;font:inherit;padding:0">copying for Claude</button> or check back closer to kickoff.`
-                : ' Check back closer to kickoff.';
+                ? ` Try <button onclick="copyForClaude()" style="background:none;border:0;color:var(--blue);text-decoration:underline;cursor:pointer;font:inherit;padding:0">copying for Claude</button> or check back closer to start.`
+                : ' Check back closer to start.';
             html += `<div class="suggestion-pass">
                 <strong>No PIN data.</strong> Can't compute a devigged fair line for this game — no Polymarket target.${claudeHint}
                 ${liveDiag}
@@ -1484,7 +1697,6 @@
         const sides = mt === 'total' ? ['over', 'under'] : ['away', 'home'];
         const labelOf = s => mt === 'total' ? s.toUpperCase() : (s === 'home' ? d.home : d.away);
         const pin = blk.pin_current || {};
-        const best = blk.best_entry || {};
         const mv = blk.movement;
         const title = ({moneyline:'Moneyline', spread:'Spread', total:'Total'})[mt] || mt;
         const anyBotPicked = sides.some(s => sugIndex && sugIndex.has(`${mt}:${s}`));
@@ -1492,7 +1704,6 @@
         let blocks = '';
         for (const s of sides) {
             const pinSnap = pin[s];
-            const bestSnap = best[s];
             const sideName = labelOf(s);
             const sugIdx = sugIndex ? sugIndex.get(`${mt}:${s}`) : undefined;
             const isBotPick = sugIdx != null;
@@ -1537,19 +1748,11 @@
                 }
                 rows += `<div class="row"><span class="label">PIN:</span> <span class="pin">${_fmtAmer(pinSnap.price)}</span>${lineFrag}${fairFrag}${openFrag}</div>`;
             }
-            if (bestSnap) {
-                const ln = bestSnap.line;
-                const lineFrag = (ln != null) ? ` <span class="label">@${_fmtPt(ln)}</span>` : '';
-                const ep = bestSnap.edge_pp;
-                const edgeCls = (ep != null && ep >= 0) ? 'edge' : 'edge neg';
-                const edgeFrag = (ep != null) ? ` <span class="${edgeCls}">${ep > 0 ? '+' : ''}${ep.toFixed(1)}pp</span>` : '';
-                rows += `<div class="row"><span class="label">best:</span> <span class="best">${_fmtAmer(bestSnap.price_american)}</span>${lineFrag} <span class="label">[${_esc(bestSnap.book)}]</span>${edgeFrag}</div>`;
-            }
             if (!rows) rows = '<div style="font-size:11px;color:var(--text-muted)">no PIN data</div>';
 
-            // PMM row — shows actual Polymarket line + current bid/ask
+            // Poly row — shows actual Polymarket line + current bid/ask
             // + PIN-projected fair as the limit-order target. Only
-            // rendered when PMM has a market for this side.
+            // rendered when Polymarket has a market for this side.
             const pmmBlock = ((blk.polymarket || {})[s]) || null;
             let pmmRow = '';
             if (pmmBlock) {
@@ -1561,7 +1764,7 @@
                 const targetFrag = (proj.fair_american != null)
                     ? ` · <span class="pmm-target">target ${_fmtAmer(proj.fair_american)}</span>`
                     : '';
-                pmmRow = `<div class="pmm-row"><span class="pmm-lbl">PMM</span>${lnFrag}${askFrag}${bidFrag}${targetFrag}</div>`;
+                pmmRow = `<div class="pmm-row"><span class="pmm-lbl">Poly</span>${lnFrag}${askFrag}${bidFrag}${targetFrag}</div>`;
             }
 
             const blockCls = 'side-block' + (isBotPick ? ' bot-picked' : '');
@@ -1579,8 +1782,13 @@
         // above (always visible), so this chip is just the "how much
         // does it count" annotation: which side and the weighted score.
         let move = '';
-        if (mv) {
+        if (mv && mv.sharp_score != null) {
             move = `<div class="move"><span class="sharp">SHARP ${(mv.sharp_side || '').toUpperCase()} = ${mv.sharp_score}</span> <span class="move-note">recency-weighted</span></div>`;
+        } else if (sides.some(s => pin[s])) {
+            // PIN data exists but no recency-weighted sharp move cleared the
+            // floor — say so explicitly (same blue as the score) so a quiet
+            // market reads as "computed, no action" not "broken/missing".
+            move = `<div class="move"><span class="sharp">No Sharp Action</span></div>`;
         }
 
         // Opener-age footer — shows WHEN PIN opened so an old move that
@@ -1615,8 +1823,11 @@
         // recommend, so resolver grading is consistent.
         const pmm = ((blk.polymarket || {})[side]) || null;
         const proj = (pmm && pmm.projected) || {};
+        const pmmBid = (pmm && pmm.quote && pmm.quote.bid_american != null) ? pmm.quote.bid_american : null;
         const useProj = proj.fair_american != null;
-        const entryPrice = useProj ? proj.fair_american : pin.fair_american;
+        // Maker entry = the PMM bid (where we rest/fill), falling back to the
+        // projected/PIN fair when there's no live bid. Drives CLV + profit.
+        const entryPrice = (pmmBid != null) ? pmmBid : (useProj ? proj.fair_american : pin.fair_american);
         const entryLine  = (useProj && pmm.line != null) ? pmm.line : pin.line;
         const entryProb  = (useProj && proj.fair_prob != null) ? proj.fair_prob : pin.fair_prob;
         const sideName = mt === 'total' ? side.toUpperCase()
@@ -1633,7 +1844,7 @@
             fair_prob:   entryProb,
             edge_pp:     null,
             sharp_score: isMvSide ? (mv.sharp_score || 0) : 0,
-            label:       `${_shortMarket(mt)} ${sideName} @ ${useProj ? 'PMM-projected' : 'PIN'} fair ${_fmtAmer(entryPrice)}${entryLine != null ? ' ' + _fmtPt(entryLine) : ''}`,
+            label:       `${_shortMarket(mt)} ${sideName} @ ${pmmBid != null ? 'Poly bid' : (useProj ? 'Poly-projected fair' : 'PIN fair')} ${_fmtAmer(entryPrice)}${entryLine != null ? ' ' + _fmtPt(entryLine) : ''}`,
             seed_units:  1,
             seed_conf:   'low',
         };
@@ -1692,7 +1903,11 @@
             market_type: s.market_type,
             side:        s.side,
             book:        'PMM',
-            price:       s.fair_american,
+            // Maker entry: we rest a limit on the PMM bid and fill there, so
+            // log the BID as the entry — that's our real maker price, better
+            // than the fair/ask, and it's what CLV + to-win profit key off.
+            // Falls back to the projected fair when PMM has no live bid.
+            price:       (s.pmm_bid_american != null ? s.pmm_bid_american : s.fair_american),
             // Use PMM line when projection available, else PIN line.
             // Matches the entry_price (s.fair_american), which is
             // already PMM-projected when PMM has a market.
@@ -1724,7 +1939,10 @@
             ? s.side.toUpperCase()
             : (s.side === 'home' ? d.home : d.away);
         const lineFrag = (s.pin_line == null) ? '' : ` ${_fmtPt(s.pin_line)}`;
-        return `${market} · ${sideName}${lineFrag} @ ${_fmtAmer(s.fair_american)} (PMM target)`;
+        // Show the maker entry we actually log (PMM bid), not the fair/ask.
+        const makerEntry = (s.pmm_bid_american != null) ? s.pmm_bid_american : s.fair_american;
+        const entryLbl   = (s.pmm_bid_american != null) ? 'Poly bid' : 'Poly target';
+        return `${market} · ${sideName}${lineFrag} @ ${_fmtAmer(makerEntry)} (${entryLbl})`;
     }
     function _buildReasons(pick, d) {
         // 2-3 plain-English bullets explaining the pick. Grounded in
@@ -1864,17 +2082,20 @@
             : ((awayPin && awayPin.fair_american != null) ? { side: 'away', pin: awayPin } : null);
         if (!choice) return null;
         const sideName = choice.side === 'home' ? d.home : d.away;
+        // Maker entry = the PMM bid when available, else the PIN fair.
+        const pmmSide = ((ml.polymarket || {})[choice.side]) || null;
+        const pmmBid = (pmmSide && pmmSide.quote && pmmSide.quote.bid_american != null) ? pmmSide.quote.bid_american : null;
         return {
             market_id:   d.market_id,
             market_type: 'moneyline',
             side:        choice.side,
             book:        'PMM',
-            price:       choice.pin.fair_american,
+            price:       (pmmBid != null ? pmmBid : choice.pin.fair_american),
             line:        null,
             fair_prob:   choice.pin.fair_prob,
             edge_pp:     null,
             sharp_score: (ml.movement || {}).sharp_score,
-            label:       `ML · ${sideName} @ ${_fmtAmer(choice.pin.fair_american)} (PMM target)`,
+            label:       `ML · ${sideName} @ ${_fmtAmer(choice.pin.fair_american)} (Poly target)`,
             seed_units:  1,
             seed_conf:   'medium',
         };
@@ -1995,6 +2216,148 @@
         }
     }
 
+    // ── Bet Slip ──────────────────────────────────────────────────────
+    // Sportsbook-ticket view of the bot's logged picks, fed by the same
+    // bot_picks data loadData already fetched (NOT the Polymarket SDK).
+    // Pending picks + today's settled, shareable as a PNG.
+    let _lastPending = [];
+    let _lastSettled = [];
+    let _lastStatsToday = null;
+
+    function _betslipLabel(r) {
+        // "Cubs @ Pirates" main line + "TOTAL · UNDER 8.5 @ -109" sub.
+        const game = (r.event_name || '').trim();
+        const market = _shortMarket(r.market_type);
+        const sideLabel = (r.market_type === 'total')
+            ? (r.side || '').toUpperCase()
+            : (r.side === 'home' ? 'HOME' : 'AWAY');
+        const ln = (r.entry_line == null) ? '' : ` ${_fmtPt(r.entry_line)}`;
+        const units = (r.units != null) ? ` · ${r.units}u` : '';
+        return { game, sub: `${market} · ${sideLabel}${ln}${units}` };
+    }
+
+    function openBetSlip() {
+        const overlay = document.getElementById('betslip-overlay');
+        const body = document.getElementById('betslip-body');
+        const dateEl = document.getElementById('betslip-date');
+        const footer = document.getElementById('betslip-footer-text');
+        const now = new Date();
+        dateEl.textContent = now.toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' });
+
+        const pending = _lastPending || [];
+        const settled = _lastSettled || [];
+
+        if (!pending.length && !settled.length) {
+            body.innerHTML = '<div class="betslip-empty">No picks logged</div>';
+        } else {
+            let html = '';
+            if (pending.length) {
+                html += '<div class="betslip-section-label">Pending</div>';
+                for (const r of pending) {
+                    const { game, sub } = _betslipLabel(r);
+                    const odds = r.entry_price;
+                    const oddsCls = (odds != null) ? (odds < 0 ? 'fav' : 'dog') : '';
+                    html += `<div class="betslip-item">
+                        <div class="betslip-market">${_esc(game)}<span class="bs-sub">${_esc(sub)}</span></div>
+                        <div class="betslip-odds ${oddsCls}">${_fmtAmer(odds)}</div>
+                    </div>`;
+                }
+            }
+            if (settled.length) {
+                html += '<div class="betslip-section-label">Settled Today</div>';
+                for (const r of settled) {
+                    const { game, sub } = _betslipLabel(r);
+                    const odds = r.entry_price;
+                    const oddsCls = (odds != null) ? (odds < 0 ? 'fav' : 'dog') : '';
+                    const st = (r.status || '').toLowerCase();
+                    const resultCls = (st === 'won') ? 'won' : (st === 'lost' ? 'lost' : 'push');
+                    const resultLabel = st === 'won' ? 'W' : (st === 'lost' ? 'L' : 'PUSH');
+                    const oddsCell = (odds != null)
+                        ? `<div class="betslip-odds ${oddsCls}" style="margin-right:8px">${_fmtAmer(odds)}</div>` : '';
+                    html += `<div class="betslip-item">
+                        <div class="betslip-market">${_esc(game)}<span class="bs-sub">${_esc(sub)} · ${_fmtPnl(r.pnl_units)}</span></div>
+                        <div style="display:flex;align-items:center;gap:0">
+                            ${oddsCell}
+                            <div class="betslip-result ${resultCls}">${resultLabel}</div>
+                        </div>
+                    </div>`;
+                }
+            }
+            body.innerHTML = html;
+        }
+
+        // Footer: today's record + net units (won-lost-push · ±Nu).
+        const s = _lastStatsToday;
+        if (s && (s.graded || pending.length)) {
+            const net = Number(s.pnl || 0);
+            const sign = net > 0 ? '+' : (net < 0 ? '-' : '');
+            footer.textContent = `TODAY · ${s.won||0}-${s.lost||0}-${s.push||0} · ${sign}${Math.abs(net).toFixed(2)}u · ${pending.length} pending`;
+        } else {
+            footer.textContent = `${pending.length} pending`;
+        }
+
+        overlay.classList.add('open');
+    }
+    window.openBetSlip = openBetSlip;
+
+    function closeBetSlip() { document.getElementById('betslip-overlay').classList.remove('open'); }
+    window.closeBetSlip = closeBetSlip;
+    function closeBetSlipOutside(e) { if (e.target === document.getElementById('betslip-overlay')) closeBetSlip(); }
+    window.closeBetSlipOutside = closeBetSlipOutside;
+
+    // Rasterize the slip to a PNG → navigator.share() on mobile, download
+    // on desktop. Same approach as the Dashboard betslip.
+    async function shareBetSlip() {
+        const btn  = document.getElementById('betslip-share-btn');
+        const slip = document.getElementById('betslip');
+        if (!slip || !window.html2canvas) return;
+        btn.disabled = true;
+        const origLabel = btn.textContent;
+        btn.textContent = 'Saving…';
+        const actions = slip.querySelector('.betslip-actions');
+        const prevDisplay = actions ? actions.style.display : '';
+        if (actions) actions.style.display = 'none';
+        slip.classList.add('capturing');
+        try {
+            if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch {} }
+            const canvas = await html2canvas(slip, {
+                backgroundColor: getComputedStyle(slip).backgroundColor || '#0d1117',
+                scale: 2, useCORS: true, logging: false,
+                windowHeight: slip.scrollHeight + 40, height: slip.scrollHeight,
+            });
+            const filename = 'kahla-house-pickbot-' + new Date().toISOString().slice(0, 10) + '.png';
+            const blob = await new Promise(res => canvas.toBlob(res, 'image/png', 0.95));
+            if (blob && navigator.canShare) {
+                const file = new File([blob], filename, { type: 'image/png' });
+                if (navigator.canShare({ files: [file] })) {
+                    try {
+                        await navigator.share({ files: [file], title: 'Kahla House — Pick Bot', text: "The bot's slate. Fade at your own risk." });
+                        return;
+                    } catch (err) {
+                        if (err && err.name === 'AbortError') return;
+                        if (err) console.warn('share:', err);
+                    }
+                }
+            }
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = filename;
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        } catch (err) {
+            console.error('shareBetSlip:', err);
+            alert('Could not generate image: ' + (err.message || err));
+        } finally {
+            slip.classList.remove('capturing');
+            if (actions) actions.style.display = prevDisplay;
+            btn.disabled = false;
+            btn.textContent = origLabel;
+        }
+    }
+    window.shareBetSlip = shareBetSlip;
+
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeBetSlip(); });
+
     async function loadData(showLoading) {
         const status = document.getElementById('status');
         if (showLoading) status.textContent = 'Loading…';
@@ -2018,6 +2381,17 @@
 
             const pending = data.pending || [];
             const settled = data.settled || [];
+            // Stash for the Bet Slip modal (sportsbook-ticket view).
+            _lastPending = pending;
+            _lastSettled = settled;
+            _lastStatsToday = data.stats_today || data.stats || null;
+            // Rebuild the "already logged" set so the games list can green
+            // out games we've picked. Pending covers upcoming/active games;
+            // settled-today is harmless (those market_ids rarely match an
+            // upcoming game). Then re-color any already-rendered buttons.
+            _loggedMarketIds = new Set();
+            [...pending, ...settled].forEach(r => { if (r.market_id) _loggedMarketIds.add(r.market_id); });
+            _colorPickButtons();
             document.getElementById('pendingCount').textContent = pending.length;
             document.getElementById('settledCount').textContent = settled.length;
             document.getElementById('pendingList').innerHTML = pending.length

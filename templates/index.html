@@ -4,6 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>The Kahla House</title>
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Kahla House">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,600;0,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
@@ -128,6 +133,11 @@ body::after {
 .app-card.games-app::before { background: linear-gradient(90deg, var(--purple), var(--blue)); }
 .app-card.games-app:hover { border-color: rgba(168,85,247,0.3); box-shadow: 0 8px 40px rgba(168,85,247,0.08), 0 0 0 1px rgba(168,85,247,0.15); }
 .app-card.games-app .app-tag { background: var(--purple-dim); color: var(--purple); }
+
+.app-card.bookclub-app::before { background: linear-gradient(90deg, var(--cyan), var(--green)); }
+.app-card.bookclub-app:hover { border-color: rgba(6,182,212,0.3); box-shadow: 0 8px 40px rgba(6,182,212,0.08), 0 0 0 1px rgba(6,182,212,0.15); }
+.app-card.bookclub-app .app-tag { background: var(--cyan-dim); color: var(--cyan); }
+.bookclub-app:hover .arrow { color: var(--cyan); }
 .dashboard-app:hover .arrow { color: var(--blue); }
 .admin-badge { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 9px; padding: 3px 8px; border-radius: 5px; background: var(--red-dim); color: #f87171; margin-left: 8px; letter-spacing: 0.05em; vertical-align: middle; }
 .app-icon { font-size: 1.5em; margin-bottom: 8px; display: block; }
@@ -230,7 +240,7 @@ select.role-select option { background: var(--surface); }
         <div class="apps-grid" id="appsGrid"></div>
         <div class="admin-panel" id="adminPanel" style="display:none">
             <div class="admin-hdr"><h2>User Management</h2><span class="badge" id="pendingBadge" style="display:none">0 pending</span></div>
-            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>Pick Bot</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
+            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>Pick Bot</th><th>Book Club</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
         </div>
         <div class="footer">The Kahla House &middot; thekahlahouse.com</div>
     </div>
@@ -345,6 +355,7 @@ function renderAppCards() {
     const isAdmin = role === 'admin';
     const isViewer = role === 'viewer' || isAdmin;
     const hasBot = isAdmin || !!CUD.bot_access;
+    const hasBookClub = isAdmin || !!CUD.book_club_access;
     // Pick Bot card shows for ANY approved user. bot_access=true (or
     // admin) gets the full app; viewers without bot_access get the
     // view-only flavor (bot picks visible, no log/stats — gated by
@@ -352,24 +363,6 @@ function renderAppCards() {
     // mutation endpoints). The card itself just routes to the page.
     const canSeePickBot = isViewer;
     let h = '';
-    if (isViewer) {
-        h += `<a href="/odds" class="app-card odds-app">
-            <span class="app-icon">&#127922;</span>
-            <h2>Odds Board</h2>
-            <p>Multi-sportsbook odds comparison, Circa splits, sharp indicators, line movement, and player props across all books.</p>
-            <span class="app-tag">Sports Betting</span>
-            <span class="arrow">&rarr;</span>
-        </a>`;
-    }
-    if (isViewer) {
-        h += `<a href="/games" class="app-card games-app">
-            <span class="app-icon">&#127183;</span>
-            <h2>Games</h2>
-            <p>Card-game scoring sheets. Pick a game and keep score — Clubs Diamonds Hearts Spades to start. Mobile-friendly, saves as you go.</p>
-            <span class="app-tag">Scorekeeping</span>
-            <span class="arrow">&rarr;</span>
-        </a>`;
-    }
     if (canSeePickBot) {
         // Subtle tag differentiates: admins/bot_access see "BOT",
         // view-only viewers see "VIEW-ONLY" so they aren't surprised
@@ -389,12 +382,42 @@ function renderAppCards() {
             <span class="arrow">&rarr;</span>
         </a>`;
     }
+    if (hasBookClub) {
+        // Book Club is a separate, non-betting surface gated by its own
+        // book_club_access pill (admins implicit). Shared reading list,
+        // ratings, meetings, and next-read voting.
+        h += `<a href="/book-club" class="app-card bookclub-app">
+            <span class="app-icon">&#128218;</span>
+            <h2>Book Club</h2>
+            <p>The family reading list &mdash; what we're reading now, what's next, meeting dates, member ratings, and a vote on the next pick.</p>
+            <span class="app-tag">Reading</span>
+            <span class="arrow">&rarr;</span>
+        </a>`;
+    }
     if (isAdmin) {
         h += `<a href="/dashboard" class="app-card dashboard-app">
             <span class="app-icon">&#128202;</span>
             <h2>Dashboard<span class="admin-badge">ADMIN</span></h2>
             <p>Polymarket position tracking with P&amp;L, open and closed trades, maker rewards, and shareable bet slips.</p>
             <span class="app-tag">P&amp;L Tracking</span>
+            <span class="arrow">&rarr;</span>
+        </a>`;
+    }
+    if (isViewer) {
+        h += `<a href="/odds" class="app-card odds-app">
+            <span class="app-icon">&#127922;</span>
+            <h2>Odds Board</h2>
+            <p>Multi-sportsbook odds comparison, Circa splits, sharp indicators, line movement, and player props across all books.</p>
+            <span class="app-tag">Sports Betting</span>
+            <span class="arrow">&rarr;</span>
+        </a>`;
+    }
+    if (isViewer) {
+        h += `<a href="/games" class="app-card games-app">
+            <span class="app-icon">&#127183;</span>
+            <h2>Games</h2>
+            <p>Card-game scoring sheets. Pick a game and keep score — Clubs Diamonds Hearts Spades to start. Mobile-friendly, saves as you go.</p>
+            <span class="app-tag">Scorekeeping</span>
             <span class="arrow">&rarr;</span>
         </a>`;
     }
@@ -429,6 +452,7 @@ function loadAdminPanel() {
                     <option value="pending" ${u.role === 'pending' ? 'selected' : ''}>Pending</option>
                 </select></td>
                 <td>${botPill(u)}</td>
+                <td>${bookClubPill(u)}</td>
                 <td>${!isMe && !u.approved
                     ? `<button class="btn btn-sm" style="background:var(--green);color:#fff;font-size:12px;margin-right:6px" onclick="approveUser('${u.id}','viewer')">Approve as Viewer</button><button class="btn btn-sm" style="background:var(--red-dim);color:#f87171;font-size:12px;margin-right:6px;border:1px solid rgba(239,68,68,.3)" onclick="approveUser('${u.id}','admin')">Approve as Admin</button><button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:12px" onclick="rejectUser('${u.id}','${E(u.displayName)}')">Reject</button>`
                     : isMe ? '<span style="color:var(--text-muted);font-size:12px">You</span>'
@@ -461,6 +485,24 @@ async function setRole(uid, role) {
 async function toggleBotAccess(uid, on) {
     await db.collection('users').doc(uid).update({ bot_access: on });
     toast('Pick Bot access ' + (on ? 'granted' : 'revoked'), 'success');
+}
+
+function bookClubPill(u) {
+    // Admins always have implicit access — show as "ON" but uneditable.
+    if (u.role === 'admin') {
+        return `<span class="bot-pill on implicit" title="Admins always have Book Club access">ON</span>`;
+    }
+    // Pending / unapproved users can't have access — pill stays grey.
+    if (u.role === 'pending' || !u.approved) {
+        return `<span class="bot-pill implicit" title="Approve user first">OFF</span>`;
+    }
+    const on = !!u.book_club_access;
+    return `<span class="bot-pill ${on ? 'on' : ''}" onclick="toggleBookClubAccess('${u.id}',${on ? 'false' : 'true'})">${on ? 'ON' : 'OFF'}</span>`;
+}
+
+async function toggleBookClubAccess(uid, on) {
+    await db.collection('users').doc(uid).update({ book_club_access: on });
+    toast('Book Club access ' + (on ? 'granted' : 'revoked'), 'success');
 }
 
 async function approveUser(uid, role) {
