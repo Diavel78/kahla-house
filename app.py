@@ -2017,6 +2017,9 @@ _BOOK_CLUB_POLLS = "book_club_polls"
 _BOOK_CLUB_AVAIL = "book_club_availability"
 _BOOK_STATUSES = {"reading", "upcoming", "finished"}
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# Display name for the club, used in invite emails (subject/header/footer +
+# default sender name). Override via env without a code change if it changes.
+BOOK_CLUB_NAME = os.getenv("BOOK_CLUB_NAME", "Well Red Book Club")
 
 
 def _bc_display_name():
@@ -2156,7 +2159,7 @@ def _meeting_signature(d):
 
 def _send_email_resend(api_key, to_email, subject, html):
     from_addr = os.getenv("BOOK_CLUB_FROM_EMAIL",
-                          "Kahla House Book Club <bookclub@thekahlahouse.com>").strip()
+                          BOOK_CLUB_NAME + " <bookclub@thekahlahouse.com>").strip()
     resp = _http.post(
         "https://api.resend.com/emails",
         headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
@@ -2190,7 +2193,7 @@ def _build_invite_email(d):
     pretty_time = "%d:%02d %s" % (h12, start.minute, "AM" if start.hour < 12 else "PM")
 
     cal_text = "Book Club: " + title
-    cal_details = "Kahla House Book Club — " + title + (" by " + author if author else "")
+    cal_details = BOOK_CLUB_NAME + " — " + title + (" by " + author if author else "")
     g_dates = start.strftime("%Y%m%dT%H%M%S") + "/" + end.strftime("%Y%m%dT%H%M%S")
     google = ("https://calendar.google.com/calendar/render?action=TEMPLATE&text="
               + quote_plus(cal_text) + "&dates=" + g_dates + "&ctz=America/Phoenix&details="
@@ -2200,14 +2203,15 @@ def _build_invite_email(d):
                + "&enddt=" + end.strftime("%Y-%m-%dT%H:%M:%S") + "-07:00&location="
                + quote_plus(loc) + "&body=" + quote_plus(cal_details))
 
-    subject = "\U0001F4DA Book Club: %s — %s at %s" % (title, pretty_date, pretty_time)
+    club = esc(BOOK_CLUB_NAME)
+    subject = "\U0001F4DA %s: %s — %s at %s" % (BOOK_CLUB_NAME, title, pretty_date, pretty_time)
     cover_html = ('<img src="%s" alt="" width="84" style="border-radius:6px;float:left;margin:0 16px 8px 0">' % esc(cover)) if cover else ""
     author_html = ('<div style="color:#64748b">by %s</div>' % esc(author)) if author else ""
     notes_html = ('<p style="color:#475569;margin:14px 0 0;clear:both">%s</p>' % esc(notes)) if notes else ""
     html = ("""
 <div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:560px;margin:0 auto;color:#0f172a">
   <div style="background:linear-gradient(135deg,#06b6d4,#22c55e);color:#fff;padding:20px 24px;border-radius:12px 12px 0 0">
-    <div style="font-size:13px;letter-spacing:.12em;text-transform:uppercase;opacity:.85">The Kahla House Book Club</div>
+    <div style="font-size:13px;letter-spacing:.12em;text-transform:uppercase;opacity:.85">%s</div>
     <div style="font-size:22px;font-weight:700;margin-top:4px">You're invited!</div>
   </div>
   <div style="border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;padding:24px">
@@ -2225,9 +2229,9 @@ def _build_invite_email(d):
       <a href="%s" style="display:inline-block;background:#06b6d4;color:#fff;text-decoration:none;padding:10px 16px;border-radius:8px;font-weight:600;margin:0 8px 8px 0">Add to Google Calendar</a>
       <a href="%s" style="display:inline-block;background:#1f2937;color:#fff;text-decoration:none;padding:10px 16px;border-radius:8px;font-weight:600">Add to Outlook</a>
     </div>
-    <p style="color:#94a3b8;font-size:12px;margin-top:24px">See you there! — The Kahla House Book Club · thekahlahouse.com/book-club</p>
+    <p style="color:#94a3b8;font-size:12px;margin-top:24px">See you there! — %s · thekahlahouse.com/book-club</p>
   </div>
-</div>""" % (cover_html, esc(title), author_html, esc(pretty_date), esc(pretty_time), esc(loc), notes_html, google, outlook))
+</div>""" % (club, cover_html, esc(title), author_html, esc(pretty_date), esc(pretty_time), esc(loc), notes_html, google, outlook, club))
     return subject, html
 
 
