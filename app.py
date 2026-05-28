@@ -166,6 +166,20 @@ def book_club_required(f):
     return wrapper
 
 
+def odds_required(f):
+    """Require Firebase auth + odds_access (admin always implicit).
+    Gates the Odds Board page + its data endpoints. The `viewer` role no
+    longer implies Odds access — it's an explicit per-user pill now."""
+    @functools.wraps(f)
+    @firebase_auth_required
+    def wrapper(*args, **kwargs):
+        role = g.user_data.get("role")
+        if role != "admin" and not g.user_data.get("odds_access"):
+            return jsonify({"ok": False, "error": "Odds access required"}), 403
+        return f(*args, **kwargs)
+    return wrapper
+
+
 # ---------------------------------------------------------------------------
 # Page routes (serve templates — auth handled client-side by Firebase JS SDK)
 # ---------------------------------------------------------------------------
@@ -1690,7 +1704,7 @@ def _fetch_odds_from_snapshots(sport_path: str):
 # ---------------------------------------------------------------------------
 
 @app.route("/api/openers/scanner")
-@firebase_auth_required
+@odds_required
 def api_openers_scanner():
     """Scanner-backed first-seen lines for upcoming games in this sport.
 
@@ -1817,7 +1831,7 @@ def api_openers_scanner():
 
 
 @app.route("/api/openers", methods=["GET"])
-@firebase_auth_required
+@odds_required
 def api_openers_get():
     """Retrieve opening lines for a sport from Firestore (permanent per game ID).
 
@@ -1866,7 +1880,7 @@ def _migrate_old_openers(db, sport):
 
 
 @app.route("/api/openers", methods=["POST"])
-@firebase_auth_required
+@odds_required
 def api_openers_save():
     """Store opening lines for a sport to Firestore (permanent per game ID).
     Body: { "sport": "mlb", "events": { ... } }
@@ -1963,6 +1977,7 @@ def api_me():
         "book_club_access": bool(g.user_data.get("book_club_access")) or bool(g.user_data.get("book_club_manager")) or role == "admin",
         "book_club_manager": bool(g.user_data.get("book_club_manager")) or role == "admin",
         "games_access": bool(g.user_data.get("games_access")) or role == "admin",
+        "odds_access": bool(g.user_data.get("odds_access")) or role == "admin",
     })
 
 
@@ -2624,7 +2639,7 @@ def api_book_club_availability_save():
 # ---------------------------------------------------------------------------
 
 @app.route("/api/odds")
-@firebase_auth_required
+@odds_required
 def api_odds():
     """Return events with latest snapshots from Supabase. Cron-only — no
     live odds-vendor API call here. Cron writes to book_snapshots every 30
@@ -4384,7 +4399,7 @@ def _parse_action_splits_html(html: str) -> dict:
 
 
 @app.route("/api/splits")
-@firebase_auth_required
+@odds_required
 def api_splits():
     """Public betting splits (% of bets, % of money) per game.
     Source: Action Network public-betting HTML, scraped + cached 30 min.
@@ -4541,7 +4556,7 @@ def _parse_iso(ts: str) -> datetime | None:
 
 
 @app.route("/api/odds/history-batch")
-@firebase_auth_required
+@odds_required
 def api_odds_history_batch():
     """6-hour PIN history for every active game in a sport, batched.
     Powers the inline sparklines rendered in each game card on the Odds Board.
@@ -4694,7 +4709,7 @@ def api_odds_history_batch():
 
 
 @app.route("/api/odds/history")
-@firebase_auth_required
+@odds_required
 def api_odds_history():
     """Return book_snapshots history for one event's market.
 
@@ -5300,7 +5315,7 @@ def api_handicapper():
 
 
 @app.route("/api/handicapper/dossier")
-@firebase_auth_required
+@bot_required
 def api_handicapper_dossier():
     """Build the live pre-game dossier for one game.
 
@@ -5348,7 +5363,7 @@ def api_handicapper_dossier():
 
 
 @app.route("/api/handicapper/games")
-@firebase_auth_required
+@bot_required
 def api_handicapper_games():
     """List active games for a sport — pre-game window only. Powers the
     click-to-pick UI on /handicapper.
@@ -5492,7 +5507,7 @@ def _dedup_games(games: list[dict], sport: str) -> list[dict]:
 
 
 @app.route("/api/handicapper/sport-counts")
-@firebase_auth_required
+@bot_required
 def api_handicapper_sport_counts():
     """One-shot count of upcoming games per sport. Powers the
     /handicapper page's dynamic sport-tab ordering — sports with the

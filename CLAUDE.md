@@ -45,6 +45,12 @@ A third independent **per-user capability** in Firestore `users/{uid}.games_acce
 - Toggleable via the **Games pill** in User Management — its own column. Was previously open to any approved user; as of May 2026 it's opt-in per user (admins implicit), same model as the Book Club / Pick Bot pills.
 - Games has **no server API** (the page is fully client-side, state in `localStorage`), so there's no decorator — gating is client-side only via `/api/me`'s `games_access` flag (the `/games` page bounces users without it, and the landing card only renders for them). This is fine: there's no server-side data to protect, unlike Book Club / betting apps.
 
+A fourth independent **per-user capability** in Firestore `users/{uid}.odds_access` (boolean) gates the **Odds Board**:
+- Toggleable via the **Odds pill** in User Management (admins implicit). Added May 2026 — previously Odds was open to any `viewer`, which meant a book-club-only member could see the betting board. Now every app is behind its own pill and the `viewer` role grants **nothing** by itself.
+- Server gate is `@odds_required` (admin OR `odds_access`) on the odds data endpoints (`/api/odds`, `/api/odds/history`, `/api/odds/history-batch`, `/api/openers*`, `/api/splits`); `/api/me` returns `odds_access`; the `/odds` page + landing card gate client-side.
+
+> **Access model (May 2026): every app behind its own pill.** The `viewer` role is now just "approved, non-admin" — it confers NO app access on its own. Each surface requires its explicit capability: Odds (`odds_access`), Pick Bot (`bot_access`), Book Club (`book_club_access`/`book_club_manager`), Games (`games_access`); Dashboard is admin-only. Admins hold every capability implicitly. **The old Pick Bot "viewer view-only" tier was removed** — `/handicapper` (page + dossier/games/sport-counts endpoints) now requires `bot_access`, so a plain viewer is bounced and can't see the bot's read at all. Consequence: existing viewers lost Odds/Pick Bot until an admin grants them the pills.
+
 Approval flow:
 - Sign-up creates a `pending` user doc with `approved: false`. The pending screen tells them to wait.
 - Admins see pending users in the User Management panel on `/` with **Approve as Viewer** / **Approve as Admin** / **Reject** buttons.
@@ -54,20 +60,28 @@ Approval flow:
 Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | Page / API | Roles allowed | Server gate |
 |---|---|---|
-| `/odds` (page) | admin, viewer | client probes `/api/me` and bounces unauthorized |
-| `/api/odds`, `/api/odds/history`, `/api/odds/history-batch`, `/api/openers*`, `/api/preferences` | any approved | `@firebase_auth_required` (rejects pending) |
+| `/odds` (page) | admin + `odds_access` | client probes `/api/me` and bounces unauthorized |
+| `/api/odds`, `/api/odds/history`, `/api/odds/history-batch`, `/api/openers*` | admin + `odds_access` | `@odds_required` |
+| `/api/preferences` | any approved | `@firebase_auth_required` (generic user prefs) |
 | `/dashboard` (page) | admin | client probes `/api/me` and bounces non-admins |
-| `/handicapper` (page) | admin, viewer, `bot_access=true` | client probes `/api/me`; viewers get **read-only mode** (see picks, can't log or view logged-pick history); admin + bot_access get full UI |
+| `/handicapper` (page) | admin + `bot_access` | client probes `/api/me`; bounces anyone without `bot_access` (the viewer view-only tier was removed May 2026) |
 | `/api/data`, `/api/my-bets`, `/api/debug-trades`, `/api/debug-deposits`, `/api/debug-snap`, `/api/sharp-bot` | admin | `@admin_required` |
 | `/api/handicapper` (stats payload) | admin OR `bot_access=true` | `@bot_required` — viewers don't see logged-pick stats or pending/settled rows |
-| `/api/handicapper/dossier`, `/api/handicapper/games`, `/api/handicapper/sport-counts` | any approved | `@firebase_auth_required` — these only expose game metadata + the bot's current read; no logged-pick data leaks through |
+| `/api/handicapper/dossier`, `/api/handicapper/games`, `/api/handicapper/sport-counts` | admin + `bot_access` | `@bot_required` — Pick Bot is fully gated now (was `@firebase_auth_required` when the view-only tier existed) |
 | `/api/handicapper/pick` (POST), `/api/handicapper/pick/<id>` (DELETE), `/api/handicapper/pick/<id>/settle` (POST) | admin OR `bot_access=true` | `@bot_required` — write/management only for the betting tier |
 | `/api/raw` (Polymarket SDK debug) | admin | `@admin_required` |
 | `/api/polymarket/check-fills` | **cron-only** | shared-secret `?key=FILLS_CRON_SECRET` (NOT Firebase) — pinged by cron-job.org every minute. See "Polymarket Fill Alerts" section below. |
 
 `@firebase_auth_required` itself rejects any user where `approved != true` (returns 403), so even API endpoints that don't need admin still keep `pending` users out. `@bot_required` adds an additional `role=='admin' OR bot_access==true` check on top of `@firebase_auth_required`.
 
-**Pick Bot view-only mode (viewers, no `bot_access`):**
+**Pick Bot view-only mode (viewers, no `bot_access`) — REMOVED May 2026.**
+
+> This tier no longer exists. `/handicapper` (page + the dossier/games/
+> sport-counts endpoints) now requires `bot_access`, so a plain viewer is
+> bounced entirely and never sees the bot's read. The `_canBet` flag +
+> `_applyViewerMode()` code remains in `handicapper.html` but is now
+> effectively dead (everyone who reaches the page is `_canBet=true`). The
+> description below is kept for historical context only.
 
 A viewer who opens `/handicapper` sees the same sport tabs + game list + dossier modal as a `bot_access` user — they can browse games and see the bot's read on each one (suggested pick, fair line, splits, injuries). What they DON'T see:
 - Top stats card (P&L / U-per-pick) — hidden via `#overallStats`

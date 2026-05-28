@@ -621,9 +621,10 @@
             if (!r.ok) { window.location.href = '/'; return; }
             const me = await r.json();
             if (!me.approved) { window.location.href = '/'; return; }
-            // Any approved user can see Pick Bot in view-only mode.
-            // Admin or bot_access=true unlocks the full experience.
+            // Pick Bot now requires explicit access — admin or bot_access.
+            // A plain viewer (e.g. a book-club-only member) is bounced out.
             _canBet = (me.role === 'admin') || !!me.bot_access;
+            if (!_canBet) { window.location.href = '/'; return; }
             // Show admin-only nav links if applicable.
             if (me.role === 'admin') {
                 document.querySelectorAll('.admin-only').forEach(el => el.style.display = '');
