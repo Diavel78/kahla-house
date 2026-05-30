@@ -33,6 +33,9 @@ name: Odds Ingest — Poll
 #   TELEGRAM_CHAT_ID     — optional; user id from /getUpdates.
 #                          Both required to send alerts; if either is
 #                          missing the alert step exits as a no-op.
+#   FILLS_CRON_SECRET    — optional; same value as the Vercel env var.
+#                          Enables the redundant Polymarket fill-alert
+#                          ping step below. If unset, that step no-ops.
 #
 # To add/remove sports: edit SPORTS_ENABLED below.
 
@@ -139,3 +142,28 @@ jobs:
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python -m scripts.bot_picks_resolver
+
+      # Polymarket Filled Bot — fill-alert ping. Redundant trigger for
+      # /api/polymarket/check-fills, which is normally hit every minute by
+      # a STANDALONE cron-job.org job. That standalone job has silently
+      # auto-disabled itself more than once (cron-job.org kills jobs after
+      # repeated failures), killing fill alerts. Riding this already-alive
+      # cron-job.org workflow_dispatch trigger removes that single point of
+      # failure — the endpoint is idempotent (milestone-keyed dedup in
+      # polymarket_fill_state), so being pinged by both this and the
+      # standalone job is harmless. continue-on-error + a guard on the
+      # secret keep a flaky ping from ever blocking the odds pipeline.
+      - name: Polymarket — fill-alert ping
+        continue-on-error: true
+        working-directory: .
+        env:
+          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
+        run: |
+          if [ -z "$FILLS_CRON_SECRET" ]; then
+            echo "FILLS_CRON_SECRET not set — skipping fill-alert ping (no-op)."
+            exit 0
+          fi
+          code=$(curl -sS -m 25 -o /tmp/fills.json -w '%{http_code}' \
+            "https://thekahlahouse.com/api/polymarket/check-fills?key=${FILLS_CRON_SECRET}" || echo "000")
+          echo "check-fills HTTP $code"
+          cat /tmp/fills.json 2>/dev/null || true
