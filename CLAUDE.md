@@ -647,59 +647,15 @@ The `_splitsSubScore` and `_divergenceSubScore` helpers are kept in the file (Ph
 - **7-9** — `tier-strong` (green)
 - **10**  — `tier-elite` (gold gradient)
 
-### Telegram alerts (Phase 3 — RETIRED May 2026)
+### Telegram alerts (RETIRED May 2026)
 
-> **Bot retired.** The "sharp alerts bot" Telegram pings (`🚨 STEAM` +
-> `⚡ SHARP N`) were noise — turned off and the cron step removed from
-> `.github/workflows/scanner-poll.yml` entirely. `sharp_alerts.py` is
-> left in the repo as dead code in case the steam-detection pipeline
-> is ever resurrected; it is no longer invoked. The Telegram bot
-> itself can be deleted in BotFather at the user's leisure.
->
-> **Knock-on effect**: the `/sharp-bot` page's **steam** column no
-> longer gets fresh picks (steam paper-bet logging lived inside
-> `sharp_alerts.py`). The early/late EV columns keep working via the
-> separate paper-bet pickers in the same workflow. Historical steam
-> rows in `paper_bets` stay queryable.
->
-> **For fill notifications, a separate dedicated bot called "Filled
-> Bot" lives in `/api/polymarket/check-fills`** — see the Polymarket
-> Fill Alerts section above. Different bot, different env vars
-> (`FILLED_BOT_TOKEN` / `FILLED_BOT_CHAT_ID`), explicitly so fill
-> messages are clearly labeled in the Telegram client.
+The "sharp alerts bot" Telegram pings (`🚨 STEAM` / `⚡ SHARP N`) were noise — turned off, the cron step removed from `scanner-poll.yml`, `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` now unused. `kahla-scanner/scripts/sharp_alerts.py` survives only as the steam paper-bet logger (runs `STEAM_SILENT=1` — see Sharp Bot below); its Telegram path is a no-op. Full alert logic + the `sharp_alerts` table DDL are in git history if ever resurrected. (Fill notifications are a SEPARATE live bot — see "Polymarket Fill Alerts" above.)
 
-`kahla-scanner/scripts/sharp_alerts.py` (vestigial — no longer invoked) used to run after each ingest cycle. When it was live, it sent two kinds of messages to Telegram:
-
-- **🚨 STEAM** — for each book on each (market_type, raw_side), computes the implied sharp side from THAT book's move via `_move_sharp_side()` (line direction first for SPR/TOT, vig fallback). A book only counts if its move clears the noise floor. Retail books: `STEAM_MIN_MOVE_CENTS = 5` (price) / `STEAM_MIN_LINE_MOVE = 0.5` (line). PIN: stricter `STEAM_PIN_MIN_MOVE_CENTS = 8` for vig confirmation — PIN is the sharp benchmark and a 5-6c PIN re-juice is indistinguishable from noise; we want unambiguous PIN movement (8c+) before treating it as confirmation. Groups books by `(market_type, sharp_side)`; fires when ≥`STEAM_BOOK_COUNT` (5) books point at the same sharp side **AND PIN is one of them with a confirming move**. Sample lines in the alert message tag the side when displaying opposite-side prices (e.g. `PIN [over]: …`) — the dedup'd `book_snapshots` table only writes rows when prices/lines actually change, so the side that moved may not be the side the alert is named after. Without the tag the user reasonably misreads PIN's over-side move as an under-side move on a `TOT UNDER` alert.
-- **⚡ SHARP N** — fires when any (market, market_type) crosses Sharp Score ≥`SHARP_THRESHOLD` (8 — started at 7, raised after first day produced too many alerts since heavy movers tripped ML+SPR+TOT separately). Score formula mirrors the on-card chip in `templates/odds.html` exactly so the Telegram alert matches what the user sees: `_amer_to_cents()` + `_move_score_ml()` + `_move_score_spr_tot()` are Python ports of the JS helpers.
-
-Pre-game only: `ACTIVE_WINDOW` runs from `now − LIVE_BUFFER_MIN (5min)` to `now + ACTIVE_WINDOW_HOURS (24h)`. Alerts on already-live games would be useless — line is no longer pre-game and you can't act on it. Time formatting: `_fmt_local()` formats to America/Denver with day+date prefix (`Sun Apr 26 · 5:00 PM MT`) so a Saturday-night alert about Sunday's game can't be mistaken for in-progress one.
-
-STEAM message renders the SHARP side's prices (not the raw_side that triggered detection) so an alert that says "sharp HOUSTON ROCKETS" lists Houston prices, not Lakers prices. SPR/TOT samples include the line value (`+7.0 -112 → +6.5 -119`), ML is price-only.
-
-Dedupe via the `sharp_alerts` Supabase table — duplicate (market_id, market_type, alert_type, side) within `DEDUPE_HOURS` (24 — was 6, bumped to one-alert-per-game-per-day so sustained moves don't re-fire all afternoon) is suppressed. Required schema:
-
-```sql
-CREATE TABLE IF NOT EXISTS sharp_alerts (
-  id          BIGSERIAL PRIMARY KEY,
-  market_id   UUID NOT NULL,
-  market_type TEXT NOT NULL,
-  alert_type  TEXT NOT NULL,           -- 'steam' or 'sharp7'
-  side        TEXT,                     -- home/away/over/under
-  sent_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  payload     JSONB
-);
-CREATE INDEX IF NOT EXISTS idx_sharp_alerts_dedup
-  ON sharp_alerts (market_id, market_type, alert_type, side, sent_at DESC);
-```
-
-Setup: BotFather → `/newbot` → token; message bot anything; visit `https://api.telegram.org/bot<TOKEN>/getUpdates` → grab `chat.id`. Add as GitHub secrets `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`. Alert step skips silently when either is missing, so the workflow doesn't break if you tear down the bot.
-
-## Phase 4 — Sharp Bot (paper bets)
+## Sharp Bot — paper bets (backend-only, no UI)
 
 Three independent paper-bet bots writing to a single Supabase table (`paper_bets`). Each bot represents a distinct thesis about when sharp signals are actionable; logging them separately is the only way to know which strategy actually wins money.
 
-All three bots ride the existing `scanner-poll.yml` 30-min cron — no extra workflows or cron-job.org entries. Per-bot dedup (`(market_id, bot)` × 7-day lookback) means a game gets picked the first time it qualifies in each bot's window and is skipped on later cycles.
+All three bots ride the existing `scanner-poll.yml` cron — no extra workflows or cron-job.org entries. Per-bot dedup (`(market_id, bot)` × 7-day lookback) means a game gets picked the first time it qualifies in each bot's window and is skipped on later cycles.
 
 | Bot | Trigger / window | Cap | Where |
 |---|---|---|---|
@@ -707,85 +663,29 @@ All three bots ride the existing `scanner-poll.yml` 30-min cron — no extra wor
 | **early** | Cumulative PIN movement on games starting in 10–36h | top 5 per run | Appended step in `scanner-poll.yml`. UFC blocked. |
 | **late** | Cumulative PIN movement on games starting in 0–5h | top 5 per run | Appended step in `scanner-poll.yml`. UFC blocked. |
 
-### Stage 1 — live (this commit)
+> **No website surface (UI removed May 2026).** Sharp Bot's `/sharp-bot`
+> page + `templates/sharp_bot.html` + `GET /api/sharp-bot` + the `/` card
+> were deleted — Pick Bot is the product now. The **backend still runs
+> silently** on the cron, accumulating strategy data in `paper_bets`. To
+> resurrect the UI, restore the route/template/endpoint from git history;
+> the data will be waiting. Everything below is the live BACKEND.
 
-Schema (`kahla-scanner/supabase/paper_bets.sql`): one row per logged bet with `bot ∈ {steam,early,late}`, locked entry book/price/line, signal context (`fair_prob`, `edge_pp`, `sharp_score`, `signal_blob`), and resolution fields (`status`, `pnl_units`, `result_score`, `settled_at`) populated later by Stage 2.
+**Pickers** (`scripts/paper_bets_picker.py` for early/late; `_log_steam_paper_bet` in `sharp_alerts.py` for steam): per market, find the sharp side (`_lib/sharp.py`, same logic as the on-card chip), devig PIN for `fair_prob`, find best non-PIN entry (`ENTRY_BOOKS`; SPR/TOT entry must quote at PIN's current line), compute `edge_pp`, rank by `combined_score = 0.25·sharp/10 + 0.75·min(edge_pp/5,1)`, dedup per `(market_id, bot)` over 7 days, insert top 5. Schema in `kahla-scanner/supabase/paper_bets.sql`.
 
-**Picker selection logic for early/late** (`scripts/paper_bets_picker.py`):
-1. Fetch markets where `event_start` is inside the bot's window. UFC blocked at this step via `pb.BLOCKED_SPORTS` — resolver has no MMA endpoint.
-2. **Opener = earliest PIN snap from 1-12h ago** (not all-time). Stale openers across 24h+ of news flow inflated `sharp_score` for moves that were just information arrival, not sharp opinion. Markets with no PIN snap in the 1-12h window get no opener → skipped.
-3. Determine sharp side per market_type via `_lib/sharp.py` — same logic as the on-card chip.
-4. Per-market sharp gate: `sharp_min_for(market_type)` — `{moneyline: 4, spread: 4, total: 5}`.
-5. **TOT contrarian flip** (added after 97 graded TOT picks landed at 38.1% hit / ~2σ below break-even). The bot's TOT signal has predictive power; the polarity is just inverted. Mechanism: PIN moves on totals are usually news arrival (weather, lineups, late scratches); by the time we pick, retail has caught up and the line has overshot the eventual outcome. The side PIN moves AWAY from is closer to what hits. So: for `market_type == "total"`, the bet `side` is `_TOT_FADE[detected_side]` (over→under, under→over). All downstream fair_prob / entry / edge_pp work off the FADE side.
-6. Devig PIN's two-way market for the (possibly flipped) bet side → `fair_prob`. Skip if either PIN side missing or (SPR/TOT) the home/away or over/under lines don't match.
-7. Find best non-PIN entry price for that side. **Line gate for SPR/TOT**: entry book must quote at PIN's current line. ML has no line so any non-PIN book qualifies.
-8. `edge_pp = (fair_prob − implied_at_entry) × 100`. Per-market edge gate: `edge_min_for(market_type)` — `{moneyline: 1.0, spread: 1.5}`. **TOT skips the edge gate** — under contrarian, PIN's devig of the fade side is negative by construction (fair = 1 − PIN_fair_for_detected_side), so a positive-edge filter would block everything. Signal strength is enforced upstream by `sharp_score ≥ 5`.
-9. `combined_score = 0.25 × sharp/10 + 0.75 × min(edge_pp/5, 1)` for ML/SPR. **For TOT use `abs(edge_pp)` instead of `edge_pp`** so a strong PIN signal (which makes fade-side edge very negative) ranks as a high-conviction fade rather than ranking near zero. Edge-primary ranking; sharp_score is the noise filter.
-10. Sort desc by `combined_score`, dedup by `market_id`, skip if bot already picked this market in the last 7 days, insert top 5. `signal_blob.contrarian = (market_type == "total")` so settled rows can be partitioned for review.
+**TOT contrarian flip** (the one non-obvious rule — keep it): for `market_type=="total"`, the bet side is the OPPOSITE of the detected sharp side (`_TOT_FADE`). Rationale: PIN total moves are mostly news arrival (weather/lineups); by pick time retail has overshot, so the side PIN moved AWAY from is closer to what hits. Discovered after steam-TOT hit 38.6% over 59 picks (−14u). Downstream `fair_prob`/`edge_pp` are computed on the FADE side (so TOT `edge_pp` is negative by construction → TOT skips the edge gate and ranks on `abs(edge_pp)`). `signal_blob.contrarian=true` tags these rows.
 
-**Steam paper bet logic** (`_log_steam_paper_bet` in `sharp_alerts.py`):
-1. Triggered after `_telegram_send` returns True. Under `STEAM_SILENT=1` (the live config), that's a no-op success — Telegram messages don't actually go out, but the paper-bet logging path runs end-to-end.
-2. UFC markets blocked at the main loop via `pb.BLOCKED_SPORTS` — steam logger never sees them.
-3. **TOT contrarian flip** — `sharp_side` is the OPPOSITE of `alert["sharp_side"]` for total markets. Same rationale as the picker (see Picker step 5). Steam-TOT was the worst segment (59 picks at 38.6% / -14u, the strongest individual evidence for the inversion).
-4. For ML/SPR (non-contrarian): entry = best price on the sharp side among the steaming books in `pb.ENTRY_BOOKS`. For TOT (contrarian): the steaming books moved the ORIGINAL side, so we widen the search to all non-PIN entry books that have a recent snap on the FADE side at PIN's current line — uses `pb.find_best_entry` with a latest-by-key built from `snaps_recent`.
-5. `fair_prob` / `edge_pp` computed when PIN devig possible, otherwise null. For TOT the fair_prob is for the fade side (= 1 − PIN_devig_for_detected_side), so edge_pp on the row is negative by PIN's reckoning — that's expected under the fade thesis.
-6. **Edge gate for ML/SPR only**: skip if `edge_pp < pb.edge_min_for(market_type)`. TOT picks have no edge gate (negative-by-construction).
-7. `sharp_score` is null for steam (the trigger is the burst event, not cumulative movement magnitude).
-8. Per-`(market_id, bot=steam)` dedup via `pb.already_picked()` — 7-day lookback. `signal_blob.contrarian` + `signal_blob.detected_side` tag the row for review.
+**Tuning constants** (`_lib/paper_bets.py`, tightened after ~250 graded picks):
+- `SHARP_SCORE_MIN_BY_MARKET = {ml:4, spread:4, total:5}`
+- `EDGE_PP_MIN_BY_MARKET = {ml:1.0, spread:1.5, total:2.0}`
+- `OPENER_MIN/MAX_AGE_HOURS = 1/12` (opener = earliest PIN snap in that window, NOT all-time — stale openers inflated scores with news-arrival moves)
+- `SHARP_WEIGHT/EDGE_WEIGHT = 0.25/0.75`, `EDGE_CAP_PP = 5.0`, `MAX_PICKS_PER_RUN = 5`
+- `BLOCKED_SPORTS = {UFC}` (resolver has no MMA endpoint), `ENTRY_BOOKS` = 14-book allowlist minus PIN
 
-**Constants in `_lib/paper_bets.py`** (tightened after first ~250 graded picks):
-- `SHARP_SCORE_MIN_BY_MARKET = {moneyline: 4, spread: 4, total: 5}` — TOT bar raised
-- `EDGE_PP_MIN_BY_MARKET = {moneyline: 1.0, spread: 1.5, total: 2.0}` — was a flat 0.5pp; under PIN's own margin band, so picking inside noise
-- `OPENER_MIN_AGE_HOURS = 1`, `OPENER_MAX_AGE_HOURS = 12` — opener freshness window
-- `SHARP_WEIGHT = 0.25`, `EDGE_WEIGHT = 0.75`, `EDGE_CAP_PP = 5.0` — edge-primary ranking (flipped from 0.6/0.4)
-- `MAX_PICKS_PER_RUN = 5`
-- `BLOCKED_SPORTS = {UFC}` — resolver has no MMA scoreboard
-- `ENTRY_BOOKS = {DK, FD, MGM, CAE, HR, BET365, BR, BOL, LV, BVD, ESPN, FAN, MB}` — 14-book allowlist minus PIN
+**Resolver** (`scripts/paper_bets_resolver.py`, appended to `scanner-poll.yml`, runs every cron tick, idempotent): for each pending row with `event_start < now−4h`, match ESPN scoreboard by team substring + ±90 min (same as Flask's `_merge_espn_scores`), skip unless `state=='post'`, grade ML/SPR/TOT, write `pnl_units` at flat 1u to-WIN sizing + `result_score` + `settled_at`. UFC + postponed games stay pending.
 
-### Latent bug fixed in this stage
+**Self-tuning (roadmap, not built):** roll 30-day per-signal hit-rate back into `combined_score` weights (brings the dormant `_splitsSubScore` / `_divergenceSubScore` in `odds.html` into play) + a CLV closed/settled history rollup. Edge gates are hand-tuned in the meantime (`EDGE_PP_MIN_BY_MARKET`) — heavy-chalk tight markets needed the gate lowered so genuinely +EV 0.3–0.9pp picks weren't all rejected.
 
-`scripts/sharp_alerts.py` previously wrote `_record_alert(... payload={"books": ..., "direction": ..., "raw_side": ...})` after a successful steam send, but `_detect_steam` never put `direction` or `raw_side` keys into its alert dict — so any real steam fire would `KeyError` before `_record_alert` was called, leaving the dedup row unwritten and the next cycle re-firing the same alert. Now the payload is `{"books", "samples"}` (keys that actually exist in `_detect_steam` output).
-
-### Stage 2 — resolver (live)
-
-`scripts/paper_bets_resolver.py`, appended step in `scanner-poll.yml` (now runs every 1 min — the cron-job.org cadence — but idempotent, already-graded rows skip). For each `paper_bets` row with `status='pending'` and `event_start < now - 4h`:
-1. Look up ESPN scoreboard for the bet's sport on the bet's US/Eastern date (per-run in-memory cache so 5-15 bets on the same night = 1 ESPN call).
-2. Match by lowercase team-name substring (two-way) + commence_time within ±90 min — same logic as Flask's `_merge_espn_scores`.
-3. Skip if `state != 'post'` (game still in-progress / postponed — try again next cycle).
-4. Grade:
-   - **ML**: side wins iff their score > opponent's. Tie → push.
-   - **SPR**: `(side_score − opp_score) + entry_line` > 0 = won, < 0 = lost, == 0 = push.
-   - **TOT**: total vs `entry_line` (over wins on >, under on <, push on ==).
-5. `pnl_units` = flat 1u sizing: win @ +N → `+N/100`, win @ −N → `+100/N`, loss → `−1.0`, push/void → `0`.
-6. Update `status`, `pnl_units`, `result_score` (`{home, away, total}`), `settled_at`.
-
-UFC bets stay pending — ESPN has no consolidated MMA scoreboard endpoint. Manual resolution for now (low volume). Postponed games (`PPD` / `state` stuck at `pre`/`in` past expected end) also stay pending until ESPN's state flips to `post`.
-
-### Stage 3 — admin UI (REMOVED from website May 2026)
-
-> **The Sharp Bot website surface was removed** — Pick Bot is the primary
-> product now, and Sharp Bot's three paper-bet bots were redundant clutter.
-> Deleted: the `/sharp-bot` page + `templates/sharp_bot.html`, the
-> `/sharp-bot.json` mobile JSON view, the `GET /api/sharp-bot` endpoint,
-> and the Sharp Bot card on `/`. **The paper_bets BACKEND pipeline is
-> intentionally still running** — the early/late EV pickers, the steam
-> logger in `sharp_alerts.py` (STEAM_SILENT), and `paper_bets_resolver.py`
-> all keep firing on the cron and logging to `paper_bets`. So the strategy
-> data keeps accumulating in Supabase; there's just no website surface for
-> it. To bring the UI back, restore the route + template + endpoint (git
-> history) — the data will be waiting. The description below documents the
-> removed UI for that purpose.
-
-The page rendered three columns side-by-side (steam / early / late). Mobile stacked them. Per column:
-- **Stat strip**: Graded count, Hit Rate (excludes pushes from denominator), Total Units, ROI per bet (`units / graded`).
-- **Pending list**: every `paper_bets` row where `status='pending'`, sorted by `event_start` asc. Each row shows event/sport, market+side+entry, edge_pp + sharp_score chips, kickoff countdown.
-- **Settled · 30d list**: every row settled in the last 30d, sorted by `settled_at` desc. Same row layout plus W/L/Push badge, final score, settled-time-ago, pnl_units.
-
-Auto-refreshes every 60s. Manual Refresh button in the top bar. The endpoint returns `pending` (no age cap), `settled` (last 30d), and `stats` (per-bot rollup) in a single payload — page polls one URL.
-
-Nav link added to `/odds` (admin-only, hidden for viewers) and `/dashboard` (admin-only by virtue of the page itself). Sharp Bot card on `/` is rendered alongside the Dashboard card under the admin app section.
-
-### Pick Bot — Phase 5 (handicapper, dual flow)
+## Pick Bot — handicapper (dual flow)
 
 Different from Sharp Bot. Sharp Bot is fully automated (cron picks from rule-based logic). Pick Bot is **interactive**: the user types a game name and gets the full pre-game data + a rule-based pick suggestion + the option to either log it directly or pull a long-form narrative from Claude.
 
@@ -908,7 +808,7 @@ The edge estimate (`edge_pp`, which now finally populates the long-nullable `bot
 
 **Strategy principles** (full doc in `.claude/skills/handicap.md`): PIN is the sharpest book — PIN devigged is the fair line, every other book is shaded for retail bias. Line movement signals: steam (5+ books move together w/ PIN confirming), reverse line movement (RLM) when line moves against the public-money side, early move (12-36h pre-game, sharp model edge) vs late move (final 2h, near-CLV). Public splits divergence: `% money` >> `% bets` on a side = sharp money. Public-bias fades: favorites, overs, home, big-name brands, recent winners. Late scratches in MLB / NBA / NHL / NFL — note + downsize / pass.
 
-### Power-ratings pipeline (real model) — replacing the crude v1
+## Power-ratings pipeline (Pick Bot's OUR-NUMBER engine)
 
 The v1 power rating (`handicapper_web.py:_power_rating`, raw season
 averages) is being replaced by a proper **opponent-adjusted, recency-
@@ -978,219 +878,22 @@ silent v1 fallback). To actually populate ratings + CLV:
    `clv_pp` / win-rate. Model-agree beating model-disagree (and the close)
    earns a sport a wider `MODEL_EDGE_CAP_PP`.
 
-- **Phase 1 (built):** the foundation.
-  - `kahla-scanner/_lib/power_ratings.py` — the engine. Iterative adjusted
-    offense/defense (an SRS variant): each team gets `off` (points it'd
-    score vs a league-avg defense), `def` (points it'd allow vs a league-
-    avg offense), and `net = off − def` (expected margin vs an average team
-    on a neutral field), solved by repeatedly adjusting raw scoring for the
-    strength of opponents actually faced. Recent games weigh more (exp
-    half-life decay). `project(ratings, home, away, hfa)` → expected
-    home/away scores + margin + total; `margin_to_prob(margin, scale)` →
-    win prob. `SPORT_PARAMS` holds per-sport hfa/scale/half-life. Pure
-    Python (no numpy). Verified on synthetic unbalanced schedules — recovers
-    true strength + correct ranking where raw PPG can't.
-  - `kahla-scanner/supabase/power_ratings.sql` — DDL for `game_results`
-    (every completed game's final score, ESPN, dedup on (sport, espn_id))
-    + `power_ratings` (one jsonb snapshot row per sport per compute run).
-    Must exist before the pipeline works — **already applied** (May 2026);
-    re-run via `run_sql.sh -f` or the SQL editor on a rebuild.
-  - `kahla-scanner/scripts/ingest_results.py` — pulls ESPN finals into
-    `game_results`. `--days N` backfills a season. Idempotent upsert.
-  - `kahla-scanner/scripts/compute_power_ratings.py` — reads the window of
-    finals per sport, runs the engine, writes a `power_ratings` snapshot.
-- **Phase 2 (partly built):**
-  - **Integration (built):** `handicapper_web._power_rating(sb, sport,
-    team_compare, odds, away, home)` now PREFERS the opponent-adjusted
-    snapshot. `_power_rating_v2` reads the latest `power_ratings` row from
-    Supabase and does the off/def → margin/total projection inline (Flask
-    can't import the kahla-scanner engine, so the heavy solve stays in the
-    cron and only the lightweight projection runs in Flask); falls back to
-    `_power_rating_v1` (raw-stat) when no snapshot / teams unmatched. Both
-    share `_pr_attach_market_compare` so the block shape is identical. The
-    dossier card shows a source footer ("opponent-adjusted · N games" vs
-    "season-stats fallback") so you can SEE which model is live.
-  - **Cron (built):** `.github/workflows/power-ratings.yml` — daily
-    schedule (11:00 UTC) runs `ingest_results` + `compute_power_ratings`;
-    `workflow_dispatch` with a `days` input backfills a season (set ~200).
-    Separate from `scanner-poll.yml` so it doesn't touch the 1-min hot path.
-  - **MLB pitcher-aware (built):** `_power_rating_v2` blends the
-    opponent's team `def` rating with TONIGHT's starting pitcher on the
-    runs scale — `def_eff = 0.6·starter_runs + 0.4·team_def` (starter ≈ 6
-    of 9 innings). `_starter_runs` uses a FIP/ERA talent blend
-    (`_fip` = (13·HR9 + 3·BB9 − 2·K9)/9 + 3.15 from the peripherals the
-    dossier already fetches; `_FIP_WEIGHT = 0.6` favors FIP as more
-    predictive + faster-stabilizing — it sees through ERA noise like a
-    low-WHIP pitcher with an inflated ERA), then regresses that toward
-    league average by innings pitched (`_SP_IP_REGRESS = 45`) so a tiny
-    early-season/just-recalled sample doesn't dominate (e.g. a 5-IP 5.40
-    barely moves; a 51-IP 2.98 counts). Falls back to ERA-only when
-    peripherals are missing. `_ip_to_float` parses MLB's
-    ballpark IP notation ('51.1' = 51⅓). Pitchers come from the dossier's
-    existing `probable_pitchers` (no new fetch). Block carries
-    `sp_adjusted` + the per-side starter runs; card footer shows "+
-    starting pitcher". This fixed the Ginn-vs-Giolito blind spot — the
-    model now responds to the matchup instead of fading good pitchers.
-- **Phase 3 (partly built):**
-  - **MLB park factor (built):** `_park_factor` / `_MLB_PARK_FACTORS` —
-    venue run environment (Coors 112 … Petco 96 … Mariners 94; 100 =
-    neutral, unknown defaults 100). `_power_rating_v2` scales BOTH teams'
-    expected runs by `pf/100` for MLB after the pitcher blend, so it moves
-    the TOTAL most (≈1.4-run Coors-vs-Petco swing on the same matchup) and
-    lightly amplifies the margin. Block carries `park_factor`; card footer
-    shows "+ park N". Free, static table, no calls.
-  - **HFA + scale calibration (built):** `power_ratings.calibrate(games,
-    ratings)` fits HFA = empirical mean home margin and the logistic
-    `scale` = the value minimizing Brier of `margin_to_prob` vs actual
-    home wins (grid-searched 0.5–16). `compute_power_ratings` calls it and
-    writes the fitted `hfa`/`scale` into the snapshot `params` (with
-    `calibrated`/`fit_brier`/`fit_n`); `_power_rating_v2` already reads
-    hfa/scale from params, so calibrated values flow automatically on the
-    next compute. Replaces the eyeballed `SPORT_PARAMS` guesses (those are
-    now just fallbacks). Verified on synthetic data: recovered true HFA +
-    a lower-Brier scale than the eyeballed default.
-  - **Rest / schedule (built):** `_REST_PARAMS` (`NBA` -2.0 pts, `NHL`
-    -0.30 goals). `_power_rating_v2` looks up each team's last completed
-    game in `game_results` (`_rest_days` via `_pr_find_key` for an exact
-    name match) and, when one team is on the second night of a B2B vs a
-    rested opponent, applies a margin penalty (margin-only; total left
-    alone). MLB intentionally excluded — daily play means "days rest" isn't
-    a fatigue signal (its fatigue is bullpen, not legs). Block carries
-    `rest`; card shows a B2B line + "+ rest" footer. Two cheap
-    game_results lookups, gated to NBA/NHL. Needs `event_start` threaded
-    through `_power_rating`.
-  - **Injuries → rating (built, NBA + NFL/NCAAF, UNTESTED vs live ESPN):**
-    `_injury_penalties` reads the ESPN injuries we already fetch. **NBA:**
-    matches OUT players to scoring leaders (`_espn_scoring_leaders` via the
-    generic `_espn_leaders`, one team-endpoint call) and docks that team's
-    offense by `_INJURY_FACTOR = 0.25 × PPG` (net on/off ≪ raw PPG), capped
-    `_INJURY_MAX_PTS = 10`. **Asymmetry fix (May 2026):** a two-way star's
-    DEFENSE is gone too, so the OPPONENT's offense is RAISED by
-    `_INJURY_DEF_SHARE = 0.35 × the offensive dock` (`home_def_loss` /
-    `away_def_loss` in the block) — previously a defensive anchor out never
-    moved the opponent's number; now a 27-PPG star out docks his team ~6.75
-    AND adds ~2.36 to the opponent. **NFL/NCAAF:** a starter QB out is the
-    dominant football injury — fires a fixed `_QB_OUT_PTS = 6.5` offense dock
-    ONLY when the OUT player is the team's passing leader (`_espn_leaders(…,
-    "passing")`), so a 3rd-string QB on the report doesn't trigger it. MLB
-    is handled by the pitcher + lineup layers; NHL by the goalie layer.
-    Block carries `injuries`; card shows out players + "+ injuries". Fully
-    guarded. **Built blind vs the live ESPN leaders shape; silent no-op if
-    it differs — sanity-check on a real NBA game (star out) + an NFL game
-    (QB out) once live.**
-  - **NHL goalie (built, UNTESTED vs live ESPN):** the starting goalie is
-    hockey's pitcher-equivalent and team_def is blind to who's in the
-    crease. `_nhl_goalies` pulls each team's #1 goalie GAA from ESPN team
-    leaders (the GAA-ranked leader = likely starter) and `_power_rating_v2`
-    blends it 50/50 into that team's `def`. Neutral when it's the usual
-    starter (GAA ≈ team_def), correctly raises the opponent's expected goals
-    when a worse-GAA backup is in net. v1 uses the GAA leader as the #1 — a
-    confirmed-starter feed (Daily Faceoff-style) would catch the specific
-    backup start better. Block carries `goalie`; card shows per-side GAA +
-    "+ goalie". Guarded → no-op. **Sanity-check on a real NHL game,
-    especially one with a confirmed backup start.**
-  - **MLB lineup (built, UNTESTED vs live):** the pitcher layer is solid but
-    the OFFENSE projection assumed the standard lineup. `_mlb_lineup_dock`
-    fetches tonight's posted batting order (`/game/{gamePk}/boxscore`, only
-    starters carry a `battingOrder`) and the team's top-OPS hitters
-    (`/teams/{id}/leaders?leaderCategories=onBasePlusSlugging`); a top hitter
-    NOT in the posted lineup docks `_MLB_REST_RUNS = 0.18` runs each (cap
-    `_MLB_REST_MAX = 0.6`). Lineups post ~3-4h pre-game → clean no-op before
-    that (the dossier auto-refresh picks it up). `game_pk` now threaded
-    through `_mlb_probables`. Block carries `lineup`; card shows "Resting:
-    …" + "+ lineup". **Sanity-check on an MLB game within ~3h of first
-    pitch where a regular is getting a rest day.**
-  - **MLB bullpen (built, UNTESTED vs live split):** the SP blend covers
-    ~60% of innings (the starter); the other ~40% used to lean on the
-    full-staff `team_def` rating as a bullpen proxy. `_mlb_bullpen_era`
-    now pulls the REAL reliever-only season ERA in one MLB Stats API call
-    (`statSplits` + `sitCodes=rp`), lightly regressed toward team_def
-    (`0.75·bp + 0.25·team_def`) to temper a thin/early sample, and feeds
-    the non-starter share. So a leaky pen behind a good rotation (or the
-    reverse) is no longer masked — verified on synthetic data that a 5.20
-    pen correctly drops that team's win prob vs a 3.10 pen. Falls back to
-    the team_def proxy when the split is unavailable. Block carries `bp`;
-    card footer shows "+ bullpen". **Built blind against the live
-    statSplits shape (this session's sandbox network allowlist blocks
-    statsapi.mlb.com) — guarded so a shape mismatch is a silent no-op.
-    Sanity-check on a real MLB game once it's live.**
-  - **Still TODO:** prior-season carryover prior (cold-start); home/road
-    splits, pace (NBA/NHL); confirmed-starter goalie feed; MLB umpire +
-    platoon/handedness splits.
-- **Phase 4 (built — backtest harness):** `scripts/backtest_power_ratings.py`
-  walk-forward replays the model on `game_results` (for each date, ratings
-  from ONLY prior games → project → grade vs final). Reports per sport: ML
-  accuracy vs the home baseline, Brier (calibration), margin/total MAE, and
-  a calibration table (win-rate per prob bucket — should rise monotonically
-  if honest). Run via `.github/workflows/power-ratings-backtest.yml`
-  (manual workflow_dispatch; metrics print to the run log). Validated on
-  synthetic data: recovered 77.5% acc vs 52.5% baseline, Brier 0.159.
-  LIMITATIONS: validates the TEAM-ratings core only — NOT the MLB pitcher
-  layer (historical probables aren't stored) and NOT closing-line value
-  (book_snapshots only retains 15d, so model-vs-close accrues forward via
-  `bot_picks.clv_pp` bucketed by model-agree/disagree). Only widen
-  `MODEL_EDGE_CAP_PP` past 1.5pp once the backtest + live CLV both say the
-  model beats the close on a given sport/market.
-  - **First real run (May 2026, ~900 games/sport):** NBA 66.6% vs 54.1%
-    baseline / Brier 0.215 / rising calibration → SIGNAL. CBB 66% vs 57.6%
-    / Brier 0.235 but thin + noisy → hold. **MLB 52.5% vs 55.8% baseline /
-    Brier 0.277 / flat calibration → NOISE** (team core can't predict
-    baseball without the pitcher). NHL 55.6% vs 52.1% / Brier 0.256 → too
-    weak. NFL/NCAAF off-season (insufficient).
-  - **Per-sport sizing gate (shipped):** `MODEL_SIZING_SPORTS = {"NBA",
-    "MLB"}` in `handicapper_web.py`. `_power_rating` stamps `feeds_sizing =
-    sport in MODEL_SIZING_SPORTS`; `_model_edge_for_side` returns 0 unless
-    set. NBA is backtest-proven. **MLB is included despite the team-core
-    backtest reading as noise — because the backtest CAN'T see the starting
-    pitcher and the live MLB model IS pitcher-aware, so MLB is *untested*,
-    not disproven.** It rides the 1.5pp cap (bounded risk) and gets judged
-    via LIVE CLV over ~2 weeks. **NHL stays OFF** on purpose: no pitcher
-    layer means the backtest fairly represents its live model, and it was
-    weak. Card footer shows "feeds sizing" vs "reference only".
-  - **Review instrumentation (shipped):** every web-logged pick now stores
-    `signal_blob.model = {source, feeds_sizing, sp_adjusted, n_games,
-    edge_pp, agree}` for the picked side (in `templates/handicapper.html`
-    submitLog). So the 2-week MLB review = bucket settled `bot_picks` by
-    `signal_blob.model.agree` and compare `clv_pp` / win-rate / pnl. If
-    model-agree picks beat model-disagree (and beat the close), the
-    pitcher-aware MLB model earns a wider cap; if not, drop MLB from
-    `MODEL_SIZING_SPORTS`.
+**Engine + cron (`kahla-scanner/`):** `_lib/power_ratings.py` is the solver — iterative opponent-adjusted off/def/net (SRS variant), recency half-life decay, `project()` + `margin_to_prob()` + `calibrate()` (fits HFA = mean home margin + logistic `scale` minimizing Brier; written into the snapshot `params`, replacing the eyeballed `SPORT_PARAMS` fallbacks). `ingest_results.py` (ESPN finals → `game_results`, `--days N` backfills) + `compute_power_ratings.py` (solve + write one `power_ratings` snapshot/sport) run daily via `.github/workflows/power-ratings.yml` (11:00 UTC; `workflow_dispatch` `days` input backfills ~200). Separate workflow from the 1-min hot path.
 
-The ratings flow through the same capped (1.5pp) sizing nudge as v1, so
-even un-sanity-checked early ratings are bounded; widen the cap only after
-CLV validates them.
+**Flask side (`handicapper_web.py`):** `_power_rating` prefers `_power_rating_v2` (reads latest snapshot, runs the lightweight off/def → margin/total/win-prob projection inline since Flask can't import the cron engine), falls back to `_power_rating_v1` (raw season stats) when no snapshot / unmatched teams. Card footer shows which is live ("opponent-adjusted · N games" vs "season-stats fallback"). Per-game adjustment layers (all silent-fail, footer lists which fired) — see the "Model at a glance" table above for the sport/sizing/tested matrix; the non-obvious constants:
+- **MLB starting pitcher:** `def_eff = 0.6·starter_runs + 0.4·team_def`. `_starter_runs` = FIP/ERA blend (`_fip=(13·HR9+3·BB9−2·K9)/9+3.15`, `_FIP_WEIGHT=0.6`), regressed toward league avg by IP (`_SP_IP_REGRESS=45`); `_ip_to_float` parses '51.1'=51⅓. From the dossier's existing `probable_pitchers`.
+- **MLB bullpen:** real reliever-only ERA (`statSplits`+`sitCodes=rp`), `0.75·bp + 0.25·team_def`, feeds the ~40% non-starter share.
+- **MLB park:** `_MLB_PARK_FACTORS` (Coors 112 … Petco 96; 100 neutral) scales both teams' runs by `pf/100`.
+- **MLB lineup:** top-OPS hitter not in tonight's posted boxscore lineup docks `_MLB_REST_RUNS=0.18` each (cap `0.6`); no-op until lineups post ~3-4h out.
+- **NBA injuries:** OUT scoring leader docks offense `0.25·PPG` (cap 10); two-way star also RAISES opponent offense by `0.35·` the dock (`_INJURY_DEF_SHARE`).
+- **NFL/NCAAF injuries:** `_QB_OUT_PTS=6.5` dock, fires only when the OUT player is the passing leader.
+- **NHL goalie:** #1 GAA (proxy for starter) blended 50/50 into team `def`; raises opponent goals when a worse backup is in.
+- **Rest:** `_REST_PARAMS` (NBA −2.0, NHL −0.30) margin penalty on 2nd-of-B2B vs rested foe (MLB excluded — daily play). Needs `event_start` threaded through.
+- **TODO:** prior-season cold-start prior; home/road + pace splits; confirmed-starter goalie feed; MLB umpire/platoon splits. Several layers (lineup, goalie, NBA/NFL injuries, bullpen) were built blind to the live ESPN/MLB shapes — guarded to no-op on mismatch, **sanity-check each against a real game once live**.
 
-### Stage 4 — self-tuning (deferred until ~14d of resolved data)
+**Backtest** (`scripts/backtest_power_ratings.py`, `.github/workflows/power-ratings-backtest.yml`): walk-forward (ratings from prior games only → project → grade), reports per-sport accuracy vs home baseline + Brier + calibration table. **Validates the TEAM core only** — not the MLB pitcher layer (no historical probables) and not CLV (15d snapshot retention; model-vs-close accrues forward via `bot_picks.clv_pp` bucketed by model-agree). First real run (~900 games/sport): **NBA 66.6% vs 54.1% → signal; MLB team-core 52.5% → noise** (can't predict baseball without the pitcher); NHL/CBB too weak.
 
-Rolling 30-day per-signal hit-rate fed back into `combined_score` weights. `_splitsSubScore` and `_divergenceSubScore` (currently dormant in `templates/odds.html`) come into play here — the picker can blend additional signals once we have outcome data to grade their contribution. Also: CLV closed/settled history rollup (Phase 4 per the CLV section above).
-
-### Active investigation — paused 2026-04-27 night
-
-First production day at `EDGE_PP_MIN = 1.0` produced **zero picks across all three bots**. Diagnostic queries confirmed:
-- `book_snapshots` flowing fine (200+ rows per 30-min cycle)
-- `sharp_alerts` firing (got SHARP 7 / 9 / 10 Telegram alerts on `Minnesota Timberwolves @ Denver Nuggets` Mon 8:40 PM MT)
-- `paper_bets` empty
-
-Manual edge math on the Wolves @ Nuggets game (Denver -503 ML, Denver -10.5 SPR -113, UNDER 222 -111) showed retail books tracking PIN within ~1pp on every side — heavy chalk + tight markets meant the 1.0pp gate rejected genuinely +EV picks at 0.3-0.9pp.
-
-Lowered to `EDGE_PP_MIN = 0.5` in commit `92df774`. **Resume tomorrow:**
-1. Re-run `select bot, count(*), max(picked_at) from paper_bets group by bot;` — if still 0 across the board, threshold isn't the issue. Likely culprits to chase next:
-   - Picker erroring out (check GitHub Actions log for the `Paper bets — Early/Late EV picker` step)
-   - SPR/TOT line gate too strict (entry book must match PIN's line *exactly* — common case where PIN is at -10.5 but DK is at -10 fails)
-   - `pin_devig_fair_prob` returning None on mismatched-line markets
-2. If picks ARE flowing, watch hit rate by edge tier as data accumulates. If 0.5-1.0pp picks lose money but 1.0+pp picks win, raise the gate back. If 0-0.5pp would have won, lower further.
-3. Diagnostic query template (paste into Supabase SQL editor):
-   ```sql
-   with latest as (
-     select distinct on (book, market_type, side)
-       book, market_type, side, price_american, line
-     from book_snapshots
-     where market_id in (select id from markets where event_name ilike '%KEYWORD%' and event_start > now())
-     order by book, market_type, side, captured_at desc
-   )
-   select market_type, side, book, price_american, line from latest order by market_type, side, book;
-   ```
-   Replace `%KEYWORD%` with a team name to inspect any game's PIN-vs-retail spread.
+**Sizing gate:** `MODEL_SIZING_SPORTS = {NBA, MLB}` — NBA backtest-proven; **MLB included despite the noisy team-core backtest precisely because the live MLB model is pitcher-aware (the backtest can't see that), so it's untested not disproven** — rides the 1.5pp cap and gets judged on live CLV. NHL/NFL/NCAAF/CBB stay reference-only. `_power_rating` stamps `feeds_sizing`; `_model_edge_for_side` returns 0 when off. Every web-logged pick stores `signal_blob.model = {source, feeds_sizing, sp_adjusted, n_games, edge_pp, agree}` so settled picks can be bucketed by model-agree for the ~2-week MLB CLV review. Whale (10u) still disabled. Widen `MODEL_EDGE_CAP_PP` past 1.5pp only after backtest + live CLV both say a sport beats the close.
 
 ## Action Network — Public Betting Splits
 
