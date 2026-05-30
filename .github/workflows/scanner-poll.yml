@@ -172,25 +172,26 @@ jobs:
           if [ -z "$FILLS_CRON_SECRET" ]; then
             echo "::warning::FILLS_CRON_SECRET is empty in the Actions env — the GitHub repo secret is missing or misnamed. Pinging anyway (will 401) so the call is observable."
           fi
-          # HTTP 000 means no response at all. Disambiguate WHY: capture
-          # curl's exit code (28=timeout, 6=DNS, 7=conn-refused, 35=TLS),
-          # time_total, error text, and a control ping to a known host (to
-          # confirm general egress works). Hit www directly (no apex redirect).
+          # Strip ALL whitespace from the secret before building the URL —
+          # GitHub secrets routinely carry a trailing newline from copy-paste,
+          # and curl rejects a URL with an embedded control char ("curl (3):
+          # URL rejected: Malformed input"). Same class of bug as the Telegram
+          # token (gotcha #22). Vercel's side already .strip()s its env, so
+          # sanitizing here makes the two keys match.
+          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
           set +e
           curl -sS -m 30 -o /tmp/fills.json -w '%{http_code} t=%{time_total}' \
-            "https://www.thekahlahouse.com/api/polymarket/check-fills?key=${FILLS_CRON_SECRET}" \
+            "https://www.thekahlahouse.com/api/polymarket/check-fills?key=${KEY}" \
             >/tmp/cw 2>/tmp/ce
           exitc=$?
           metrics=$(cat /tmp/cw 2>/dev/null)
           errtail=$(tr '\n' ' ' < /tmp/ce 2>/dev/null | tail -c 90)
-          ctrl=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' https://api.github.com/zen 2>/dev/null || echo ERR)
-          echo "check-fills: exit=$exitc $metrics ctrl=$ctrl err=$errtail"
+          echo "check-fills: exit=$exitc $metrics err=$errtail"
           cat /tmp/fills.json 2>/dev/null || true
-          # DIAGNOSTIC BEACON (temporary): record the result to Supabase — a
-          # channel we can read without GitHub Actions log access. Remove once
+          # DIAGNOSTIC BEACON (temporary): record the result to Supabase so we
+          # can confirm the fix without GitHub Actions log access. Remove once
           # the bot is verified working.
-          secref="set"; [ -z "$FILLS_CRON_SECRET" ] && secref="empty"
-          det="exit=$exitc $metrics ctrl=$ctrl sec=$secref err=$errtail"
+          det="exit=$exitc $metrics keylen=${#KEY} err=$errtail"
           det=$(printf '%s' "$det" | tr -d '"\\' | cut -c1-240)
           if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_SERVICE_KEY" ]; then
             curl -sS -m 10 -X POST "${SUPABASE_URL}/rest/v1/odds_ingest_runs" \
