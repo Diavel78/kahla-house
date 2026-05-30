@@ -166,38 +166,20 @@ jobs:
         continue-on-error: true
         env:
           FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
           if [ -z "$FILLS_CRON_SECRET" ]; then
-            echo "::warning::FILLS_CRON_SECRET is empty in the Actions env — the GitHub repo secret is missing or misnamed. Pinging anyway (will 401) so the call is observable."
+            echo "FILLS_CRON_SECRET not set — skipping fill-alert ping (no-op)."
+            exit 0
           fi
           # Strip ALL whitespace from the secret before building the URL —
           # GitHub secrets routinely carry a trailing newline from copy-paste,
-          # and curl rejects a URL with an embedded control char ("curl (3):
-          # URL rejected: Malformed input"). Same class of bug as the Telegram
-          # token (gotcha #22). Vercel's side already .strip()s its env, so
-          # sanitizing here makes the two keys match.
+          # and curl then rejects the URL with an embedded control char
+          # ("curl (3): URL rejected: Malformed input"), so the request never
+          # sends and the bot silently dies (HTTP 000, no Vercel log). Same
+          # class of bug as the Telegram token (gotcha #22). Vercel's side
+          # already .strip()s its env, so this makes the two keys match.
+          # DO NOT remove this sanitize — it's the whole reason this works.
           KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
-          set +e
-          curl -sS -m 30 -o /tmp/fills.json -w '%{http_code} t=%{time_total}' \
-            "https://www.thekahlahouse.com/api/polymarket/check-fills?key=${KEY}" \
-            >/tmp/cw 2>/tmp/ce
-          exitc=$?
-          metrics=$(cat /tmp/cw 2>/dev/null)
-          errtail=$(tr '\n' ' ' < /tmp/ce 2>/dev/null | tail -c 90)
-          echo "check-fills: exit=$exitc $metrics err=$errtail"
-          cat /tmp/fills.json 2>/dev/null || true
-          # DIAGNOSTIC BEACON (temporary): record the result to Supabase so we
-          # can confirm the fix without GitHub Actions log access. Remove once
-          # the bot is verified working.
-          det="exit=$exitc $metrics keylen=${#KEY} err=$errtail"
-          det=$(printf '%s' "$det" | tr -d '"\\' | cut -c1-240)
-          if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_SERVICE_KEY" ]; then
-            curl -sS -m 10 -X POST "${SUPABASE_URL}/rest/v1/odds_ingest_runs" \
-              -H "apikey: ${SUPABASE_SERVICE_KEY}" \
-              -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
-              -H "Content-Type: application/json" \
-              -d "{\"sport\":\"FILLPING\",\"status\":\"ping\",\"detail\":\"$det\",\"fetched_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" \
-              >/dev/null 2>&1 || true
-          fi
+          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
+            "https://www.thekahlahouse.com/api/polymarket/check-fills?key=${KEY}" || echo "000")
+          echo "check-fills HTTP $code"
