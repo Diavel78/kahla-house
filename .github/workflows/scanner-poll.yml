@@ -166,14 +166,29 @@ jobs:
         continue-on-error: true
         env:
           FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
           if [ -z "$FILLS_CRON_SECRET" ]; then
             echo "::warning::FILLS_CRON_SECRET is empty in the Actions env — the GitHub repo secret is missing or misnamed. Pinging anyway (will 401) so the call is observable."
           fi
           # -L follows the apex→www redirect if Vercel issues one. Always
-          # ping (even with an empty secret) so the request is visible in
-          # Vercel runtime logs: 200 = working, 401 = secret mismatch.
+          # ping (even with an empty secret) so the result is observable.
           code=$(curl -sSL -m 15 -o /tmp/fills.json -w '%{http_code}' \
             "https://thekahlahouse.com/api/polymarket/check-fills?key=${FILLS_CRON_SECRET}" || echo "000")
           echo "check-fills HTTP $code"
           cat /tmp/fills.json 2>/dev/null || true
+          # DIAGNOSTIC BEACON (temporary): record the ping result to Supabase
+          # — a channel we can read without GitHub Actions log access. A row
+          # appearing at all proves this job runs (cron is on main HEAD); the
+          # status code tells us where the chain breaks (200 ok / 401 secret /
+          # 403 edge-firewall / 000 network). Remove once the bot is verified.
+          secref="set"; [ -z "$FILLS_CRON_SECRET" ] && secref="empty"
+          if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_SERVICE_KEY" ]; then
+            curl -sS -m 10 -X POST "${SUPABASE_URL}/rest/v1/odds_ingest_runs" \
+              -H "apikey: ${SUPABASE_SERVICE_KEY}" \
+              -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
+              -H "Content-Type: application/json" \
+              -d "{\"sport\":\"FILLPING\",\"status\":\"ping:${code}\",\"detail\":\"secret=${secref}\",\"fetched_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" \
+              >/dev/null 2>&1 || true
+          fi
