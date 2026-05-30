@@ -55,6 +55,24 @@ else
   echo "[session-start] (Website at /handicapper still works — it reads env from Vercel.)" >&2
 fi
 
+# Management-API credentials for running SQL / migrations directly from the
+# sandbox (so DDL changes don't have to be hand-run in the Supabase mobile
+# SQL editor). SUPABASE_ACCESS_TOKEN is an account-level personal token;
+# SUPABASE_PROJECT_REF is the project subdomain. Used by
+# scripts/run_sql.sh (Management API: POST /v1/projects/{ref}/database/query).
+# Requires the env's network allowlist to include api.supabase.com.
+if [ -n "${SUPABASE_ACCESS_TOKEN:-}" ]; then
+  echo "export SUPABASE_ACCESS_TOKEN=\"${SUPABASE_ACCESS_TOKEN}\"" >> "$CLAUDE_ENV_FILE"
+fi
+if [ -n "${SUPABASE_PROJECT_REF:-}" ]; then
+  echo "export SUPABASE_PROJECT_REF=\"${SUPABASE_PROJECT_REF}\"" >> "$CLAUDE_ENV_FILE"
+fi
+if [ -n "${SUPABASE_ACCESS_TOKEN:-}" ] && [ -n "${SUPABASE_PROJECT_REF:-}" ]; then
+  echo "[session-start] Supabase Management API creds plumbed (run_sql.sh enabled)" >&2
+else
+  echo "[session-start] note: SUPABASE_ACCESS_TOKEN / SUPABASE_PROJECT_REF not set — run_sql.sh disabled (direct SQL/migrations from chat unavailable)." >&2
+fi
+
 if [ -n "${ODDS_API_KEY:-}" ]; then
   echo "export ODDS_API_KEY=\"${ODDS_API_KEY}\"" >> "$CLAUDE_ENV_FILE"
   echo "[session-start] ODDS_API_KEY plumbed through (in-chat live odds enabled)" >&2
