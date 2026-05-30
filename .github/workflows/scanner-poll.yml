@@ -143,19 +143,27 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python -m scripts.bot_picks_resolver
 
-      # Polymarket Filled Bot — fill-alert ping. Redundant trigger for
-      # /api/polymarket/check-fills, which is normally hit every minute by
-      # a STANDALONE cron-job.org job. That standalone job has silently
-      # auto-disabled itself more than once (cron-job.org kills jobs after
-      # repeated failures), killing fill alerts. Riding this already-alive
-      # cron-job.org workflow_dispatch trigger removes that single point of
-      # failure — the endpoint is idempotent (milestone-keyed dedup in
-      # polymarket_fill_state), so being pinged by both this and the
-      # standalone job is harmless. continue-on-error + a guard on the
-      # secret keep a flaky ping from ever blocking the odds pipeline.
+  # Polymarket Filled Bot — fill-alert ping. Redundant trigger for
+  # /api/polymarket/check-fills, which is normally hit every minute by a
+  # STANDALONE cron-job.org job that has silently auto-disabled itself more
+  # than once (cron-job.org kills jobs after repeated failures), killing
+  # fill alerts. Riding this already-alive workflow_dispatch trigger removes
+  # that single point of failure — the endpoint is idempotent (milestone-
+  # keyed dedup in polymarket_fill_state), so double-pinging is harmless.
+  #
+  # SEPARATE PARALLEL JOB on purpose: the `poll` job runs longer than the
+  # 60s cron cadence on a busy slate, so concurrency:cancel-in-progress
+  # guillotines it mid-run — a ping appended as poll's LAST step never
+  # executed (the early odds-ingest heartbeat landed, the trailing ping did
+  # not). As its own job it runs concurrently and finishes in ~10s, well
+  # inside the cancellation window, so it actually fires every tick. No
+  # checkout / Python needed — it's just a curl.
+  fill_ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
       - name: Polymarket — fill-alert ping
         continue-on-error: true
-        working-directory: .
         env:
           FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
         run: |
@@ -165,7 +173,7 @@ jobs:
           # -L follows the apex→www redirect if Vercel issues one. Always
           # ping (even with an empty secret) so the request is visible in
           # Vercel runtime logs: 200 = working, 401 = secret mismatch.
-          code=$(curl -sSL -m 25 -o /tmp/fills.json -w '%{http_code}' \
+          code=$(curl -sSL -m 15 -o /tmp/fills.json -w '%{http_code}' \
             "https://thekahlahouse.com/api/polymarket/check-fills?key=${FILLS_CRON_SECRET}" || echo "000")
           echo "check-fills HTTP $code"
           cat /tmp/fills.json 2>/dev/null || true
