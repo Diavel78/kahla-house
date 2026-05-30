@@ -16,7 +16,12 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 > - If the sandbox blocks `git push origin main` with a 403 (proxy enforces a branch policy), **use the GitHub MCP tools to open a PR from your branch into `main` and immediately squash-merge it**. That gets the change to `main` and triggers the Vercel deploy. Don't stop at "push failed" — the merge is the goal.
 > - "I pushed to the feature branch and you can merge when ready" is **WRONG**. Don't do this. The user has said this so many times. If you find yourself typing that sentence, stop and merge to `main` instead.
 >
-> **DOC RULE**: Whenever code or behavior changes, update this CLAUDE.md in the same commit. The project is too sprawling to navigate without an accurate map.
+> **DOC RULE — this file is a BRIEFING, not a changelog.** It exists so a fresh agent who has never seen this code knows what they can't safely figure out by reading it. Keep it lean:
+> - **Update it when** a change adds a landmine / non-obvious behavior, makes a decision someone might undo (capture the *why*), or moves/renames/removes a major piece (fix the map). **Edit the relevant section in place — don't append a new one.**
+> - **Leave it alone when** a change just adds normal feature code that reads fine on its own. Most changes need NO doc edit. The code is the doc.
+> - **Prefer cutting over adding.** If a section now describes removed or changed behavior, delete/shrink it in the same commit. When a feature is retired, replace its section with a 1-2 line stub pointing at git history — don't keep the full spec.
+> - The four things that earn a spot: **gotchas/landmines, decisions + their why, the map (where things live), and invariants (rules you must not break).** Everything else is a deletion candidate.
+> - The file should stay roughly the same size over time, not grow. If it feels heavy, do a deletion pass.
 
 ## Access Control (read this first)
 
