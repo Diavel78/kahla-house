@@ -160,10 +160,12 @@ jobs:
           FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
         run: |
           if [ -z "$FILLS_CRON_SECRET" ]; then
-            echo "FILLS_CRON_SECRET not set — skipping fill-alert ping (no-op)."
-            exit 0
+            echo "::warning::FILLS_CRON_SECRET is empty in the Actions env — the GitHub repo secret is missing or misnamed. Pinging anyway (will 401) so the call is observable."
           fi
-          code=$(curl -sS -m 25 -o /tmp/fills.json -w '%{http_code}' \
+          # -L follows the apex→www redirect if Vercel issues one. Always
+          # ping (even with an empty secret) so the request is visible in
+          # Vercel runtime logs: 200 = working, 401 = secret mismatch.
+          code=$(curl -sSL -m 25 -o /tmp/fills.json -w '%{http_code}' \
             "https://thekahlahouse.com/api/polymarket/check-fills?key=${FILLS_CRON_SECRET}" || echo "000")
           echo "check-fills HTTP $code"
           cat /tmp/fills.json 2>/dev/null || true
