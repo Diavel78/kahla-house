@@ -530,7 +530,7 @@
                     <span class="count" id="gamesCount">…</span>
                 </div>
                 <div class="pick-legend" id="pickLegend">
-                    <span><i class="lg u05"></i>0.5u</span>
+                    <span><i class="lg u05"></i>0.25u</span>
                     <span><i class="lg u1"></i>1u</span>
                     <span><i class="lg u3"></i>3u</span>
                     <span><i class="lg u5"></i>5u</span>
@@ -605,6 +605,7 @@
                 <div class="field">
                     <label>Units</label>
                     <select id="lmUnits">
+                        <option value="0.25">0.25u</option>
                         <option value="0.5">0.5u</option>
                         <option value="1">1u</option>
                         <option value="3">3u</option>
@@ -1229,7 +1230,7 @@
     }
 
     // Compact chip label for a recommended bet, e.g. "ML Reds +115 · 1u",
-    // "TOT O8.5 -107 · 1u", "1ST YRFI +108 · 0.5u". Team → last word (mascot).
+    // "TOT O8.5 -107 · 1u", "1ST YRFI +108 · 0.25u". Team → last word (mascot).
     function _pickChipLabel(mt, side, line, price, units, d) {
         const mkt = _shortMarket(mt);
         let sideLbl;
@@ -1315,10 +1316,10 @@
                             const pb = (d.nrfi.polymarket || {})[side] || {};
                             const price = (pb.bid_american != null) ? pb.bid_american
                                 : (side === 'no' ? d.nrfi.nrfi_fair_american : d.nrfi.yrfi_fair_american);
-                            picks.push({ market_type: 'nrfi', side, units: 0.5,
-                                _chip: _pickChipLabel('nrfi', side, null, price, 0.5, d),
+                            picks.push({ market_type: 'nrfi', side, units: 0.25,
+                                _chip: _pickChipLabel('nrfi', side, null, price, 0.25, d),
                                 _body: { market_id: mid, market_type: 'nrfi', side, book: 'PMM',
-                                    price, line: null, units: 0.5, confidence: 'low',
+                                    price, line: null, units: 0.25, confidence: 'low',
                                     fair_prob: (side === 'no' ? d.nrfi.p_nrfi : d.nrfi.p_yrfi),
                                     edge_pp: (pb.edge_pp != null ? pb.edge_pp : null), sharp_score: null,
                                     reasons: d.nrfi.reasons || [], query_text: d.query || null,
@@ -1883,7 +1884,7 @@
         // NRFI / YRFI — first-inning model (MLB only). We compute the
         // model fair, pull Polymarket's 1st-inning price, and the BET
         // determination is the edge of our fair vs PMM's maker entry
-        // (bid). The +EV side's button lights up green; flat 0.5u for now.
+        // (bid). The +EV side's button lights up green; flat 0.25u for now.
         // No PMM market → model fair shown for reference, no lit button.
         if (d.nrfi) {
             const n = d.nrfi;
@@ -1907,7 +1908,7 @@
             let detFrag;
             if (n.bet_side) {
                 const lbl = n.bet_side === 'no' ? 'NRFI' : 'YRFI';
-                detFrag = `<div class="pr-line" style="color:var(--green);font-weight:600">▶ BET ${lbl} @ ${_fmtAmer(n.entry_price)} (Poly bid) · +${n.bet_edge_pp}pp edge · 0.5u</div>`;
+                detFrag = `<div class="pr-line" style="color:var(--green);font-weight:600">▶ BET ${lbl} @ ${_fmtAmer(n.entry_price)} (Poly bid) · +${n.bet_edge_pp}pp edge · 0.25u</div>`;
             } else if (n.pmm_matched) {
                 detFrag = `<div class="pr-line" style="color:var(--text-muted)">Pass — model fair within 3pp of Poly's price on both sides.</div>`;
             } else {
@@ -1922,7 +1923,7 @@
             const obpNote = (inp.home_obp_src === 'team' || inp.away_obp_src === 'team')
                 ? ` · top-of-order from team OBP (lineup not posted yet)` : ` · top-of-order from posted lineup`;
             // Buttons: the +EV side is the green BET action; the other
-            // side stays available for a manual log (also 0.5u).
+            // side stays available for a manual log (also 0.25u).
             const mkBtn = (side, lbl) => {
                 const isBet = n.bet_side === side;
                 return `<button class="${isBet ? 'bet' : ''}" onclick="logNrfi('${side}')">${isBet ? 'BET ' : 'Log '}${lbl}</button>`;
@@ -1934,7 +1935,7 @@
             html += `<div class="card">
                 <div class="card-head">
                     <h3>First inning — NRFI / YRFI</h3>
-                    <span class="ref-tag" title="Model fair from the opposing starters + top-of-order on-base + park + temp. P(NRFI)=q_top·q_bot. BET = our fair beats Polymarket's maker entry (bid) by ≥3pp. Flat 0.5u while we review the setup.">OUR NUMBER vs POLY</span>
+                    <span class="ref-tag" title="Model fair from the opposing starters + top-of-order on-base + park + temp. P(NRFI)=q_top·q_bot. BET = our fair beats Polymarket's maker entry (bid) by ≥3pp. Flat 0.25u while we review the setup.">OUR NUMBER vs POLY</span>
                 </div>
                 <div class="pr-grid">
                     ${cell('no', 'NRFI (no run)', nrfiPct, n.nrfi_fair_american)}
@@ -2209,7 +2210,7 @@
         // Seed the log modal for an NRFI/YRFI pick. side: 'no' (NRFI) /
         // 'yes' (YRFI). Maker entry = Polymarket's BID for that side when
         // PMM has the market (where we rest the limit), else the model
-        // fair. Flat 0.5u for now. Resolver grades W/L off the 1st-inning
+        // fair. Flat 0.25u for now. Resolver grades W/L off the 1st-inning
         // linescore. No line.
         if (!_lastDossier || !_lastDossier.nrfi) return;
         const n = _lastDossier.nrfi;
@@ -2231,11 +2232,11 @@
             edge_pp:     edge,
             sharp_score: null,
             label:       `1st Inning · ${label} @ ${_fmtAmer(makerEntry)} (${entryLbl})`,
-            seed_units:  0.5,
+            seed_units:  0.25,
             seed_conf:   'low',
         };
         document.getElementById('lmSelection').value  = _pendingPick.label;
-        document.getElementById('lmUnits').value      = '0.5';
+        document.getElementById('lmUnits').value      = '0.25';
         document.getElementById('lmConfidence').value = 'low';
         document.getElementById('lmReasons').value    = (n.reasons || []).join('\n');
         document.getElementById('lmAnalysis').value   = '';

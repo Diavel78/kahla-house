@@ -6477,8 +6477,8 @@ def api_handicapper_pick():
         units_val = float(body["units"])
     except (TypeError, ValueError):
         units_val = None
-    if units_val not in (0.5, 1, 3, 5, 10):
-        return jsonify({"ok": False, "error": "units must be 0.5/1/3/5/10"}), 400
+    if units_val not in (0.25, 0.5, 1, 3, 5, 10):
+        return jsonify({"ok": False, "error": "units must be 0.25/0.5/1/3/5/10"}), 400
 
     line_val = body.get("line")
     if body["market_type"] in ("spread", "total"):
