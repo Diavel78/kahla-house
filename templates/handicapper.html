@@ -305,6 +305,9 @@
            pick is an upgrade on what you logged, or a new market on a game
            you've already bet. Overrides the unit tier (attention wins). */
         .suggestion-card button.primary.up  { background: #a855f7; border-color: #a855f7; color: #fff; }
+        /* Already logged this market at the bot's current size → green,
+           matching the dashboard's green "logged" button. */
+        .suggestion-card button.primary.done { background: var(--green); border-color: var(--green); color: #04210f; }
         /* "You've already logged this market" badge on the suggestion card. */
         .sug-logged { display: inline-block; margin-left: 8px; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; letter-spacing: 0.03em; vertical-align: middle; }
         .sug-logged.same { background: var(--green-dim); color: var(--green); }
@@ -1502,6 +1505,7 @@
                         sugBtnCls = 'primary up'; sugBtnLabel = `Add to ${_uStr(s.units)}`;
                         loggedBadge = `<span class="sug-logged up">↑ ADD — you have ${_uStr(lu)}</span>`;
                     } else if (lu != null) {                     // already logged this market
+                        sugBtnCls = 'primary done'; sugBtnLabel = '✓ Logged';
                         loggedBadge = `<span class="sug-logged same">✓ logged ${_uStr(lu)}</span>`;
                     } else if (gameHasLogged) {                  // new market on a bet game
                         sugBtnCls = 'primary up'; sugBtnLabel = 'Log new pick';
