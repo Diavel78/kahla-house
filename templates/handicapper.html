@@ -535,8 +535,8 @@
                     <span><i class="lg u3"></i>3u</span>
                     <span><i class="lg u5"></i>5u</span>
                     <span><i class="lg lean"></i>lean</span>
-                    <span><i class="lg logged"></i>logged</span>
-                    <span><i class="lg upgrade"></i>add / new</span>
+                    <span class="legend-log"><i class="lg logged"></i>logged</span>
+                    <span class="legend-log"><i class="lg upgrade"></i>add / new</span>
                 </div>
                 <ul class="games-list" id="gamesList">
                     <li class="games-empty">Loading…</li>
@@ -648,16 +648,22 @@
     }
     function doLogout() { firebase.auth().signOut().then(() => { window.location.href = '/'; }); }
 
-    // Access tier — set during the /api/me probe below.
-    //   _canBet = true  → admin or bot_access=true: full Pick Bot
-    //                      (stats, pending/settled, log buttons all visible)
-    //   _canBet = false → approved viewer: read-only mode
-    //                      (sees bot's suggestion + market data; can't log,
-    //                       can't see what's been logged or by whom)
-    // The view-only mode exposes only what /api/handicapper/dossier returns,
-    // which carries zero logged-pick data — that's why we can open up the
-    // dossier endpoint to firebase_auth_required and trust the gate.
-    let _canBet = false;
+    // TWO access tiers on Pick Bot:
+    //   _canBet (VIEW)  = admin OR bot_access — can load the page + see the
+    //                     games list, picks, UNITS, colors, and the dossier
+    //                     read. (Name kept for churn; means "can view.")
+    //   _canLog (LOG)   = admin ONLY — can log bets + see the log
+    //                     (pending/settled/stats/P&L) + the green/upgrade/
+    //                     conflict states. Logging exists for the admin's
+    //                     regression testing; bot_access friends never log,
+    //                     never see the log, and never see "green".
+    // A bot_access (non-admin) user is the read-only tier: chips show the
+    // recommended bet + units (tier-colored), tapping opens Details, and
+    // nothing ever renders as logged. Server backs this: the dossier/games/
+    // sport-counts endpoints are @bot_required (the read, zero log data);
+    // the stats payload + all pick-mutation endpoints are @admin_required.
+    let _canBet = false;   // VIEW
+    let _canLog = false;   // LOG (admin only)
     // market_ids the current user has already logged a pick on (pending or
     // settled-today). Populated ONLY by loadData, which is gated to _canBet
     // — so for viewers this stays empty and Pick buttons never turn green.
@@ -695,7 +701,8 @@
             if (!me.approved) { window.location.href = '/'; return; }
             // Pick Bot now requires explicit access — admin or bot_access.
             // A plain viewer (e.g. a book-club-only member) is bounced out.
-            _canBet = (me.role === 'admin') || !!me.bot_access;
+            _canBet = (me.role === 'admin') || !!me.bot_access;   // VIEW
+            _canLog = (me.role === 'admin');                       // LOG (admin only)
             if (!_canBet) { window.location.href = '/'; return; }
             // Show admin-only nav links if applicable.
             if (me.role === 'admin') {
@@ -708,14 +715,16 @@
         _initSportTabs();
         _refreshSportTabOrder();
         loadGames();
-        if (_canBet) {
+        // The log/stats payload is admin-only (regression data).
+        if (_canLog) {
             loadData(true);
             setInterval(() => loadData(false), 60_000);
-            // Refresh in-window game verdicts every 5 min (matches the cron's
-            // odds cadence) so a sitting page picks up games crossing into the
-            // 2h window + verdicts flipping as lines move.
-            setInterval(_prefetchVerdicts, 5 * 60_000);
         }
+        // The verdict prefetch drives the line-2 chips — runs for ANY viewer
+        // (admin or bot_access) since the dossier read is open to bot_access.
+        // It picks up games crossing into the 2h window + verdicts flipping
+        // as lines move. (Initial run also fires from loadGames.)
+        setInterval(_prefetchVerdicts, 5 * 60_000);
         // Re-sort tabs every 5 min so off-season sports drop to the
         // right and games-publishing sports rise as their slates open.
         setInterval(_refreshSportTabOrder, 5 * 60_000);
@@ -724,30 +733,32 @@
         setInterval(_tickKickoffs, 60_000);
     });
 
-    // Hide everything that requires bot_access when the user is a
-    // view-only viewer. Pure DOM toggling — the server-side gates
-    // (`@bot_required` on /api/handicapper + pick-mutation routes)
-    // are the actual security boundary.
+    // Read-only mode for bot_access (non-admin) users: they see the picks +
+    // units but NOT the log. Hide every log/stats surface. The server-side
+    // gates are the real boundary (stats + pick-mutation routes are
+    // @admin_required; the dossier/games read stays @bot_required).
     function _applyViewerMode() {
-        if (_canBet) return;
-        // Hide stats card + confidence tier strip + the pick-button legend
-        // (viewers' buttons are all plain blue — the tier colors never apply).
-        ['overallStats', 'confStrip', 'pendingSection', 'settledSection', 'pickLegend']
+        if (_canLog) return;   // admin keeps everything
+        // Hide the log surfaces: top stats card, confidence strip, pending +
+        // settled lists. NOT the legend — view-only DOES see color-tiered
+        // unit chips; only its logged/add-new keys are hidden below.
+        ['overallStats', 'confStrip', 'pendingSection', 'settledSection']
             .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
-        // Hide the Refresh + Bet Slip buttons — both are pick/stats
-        // surfaces, irrelevant to view-only viewers (who can't log picks).
+        // Hide legend keys that only ever apply to logged data (green /
+        // violet chips never render for a non-logger).
+        document.querySelectorAll('#pickLegend .legend-log').forEach(el => el.style.display = 'none');
+        // Hide the Refresh + Bet Slip buttons — both are pick/stats surfaces.
         document.querySelectorAll('.refresh-btn').forEach(b => b.style.display = 'none');
         const bsBtn = document.getElementById('betslipBtn');
         if (bsBtn) bsBtn.style.display = 'none';
-        // Hide the status pill — it only ever shows the resolver heartbeat,
-        // which loadData (gated to _canBet) populates. Viewers never call
-        // loadData, so it would otherwise sit on "Loading…" forever.
+        // Hide the status pill — it shows the resolver heartbeat, which
+        // loadData (admin-only) populates; otherwise it'd sit on "Loading…".
         const statusEl = document.getElementById('status');
         if (statusEl) statusEl.style.display = 'none';
         // Add a view-only banner under the page header
         const meta = document.getElementById('meta');
         if (meta) {
-            meta.innerHTML = '<span style="font-size:11px;font-family:JetBrains Mono,monospace;padding:3px 10px;background:var(--blue-dim);color:var(--blue);border:1px solid rgba(56,127,255,0.3);border-radius:10px;letter-spacing:0.04em;font-weight:700">VIEW-ONLY</span> <span style="color:var(--text-muted);font-size:13px;margin-left:8px">You can see what the bot picks. Logging + stats are admin-only.</span>';
+            meta.innerHTML = '<span style="font-size:11px;font-family:JetBrains Mono,monospace;padding:3px 10px;background:var(--blue-dim);color:var(--blue);border:1px solid rgba(56,127,255,0.3);border-radius:10px;letter-spacing:0.04em;font-weight:700">VIEW-ONLY</span> <span style="color:var(--text-muted);font-size:13px;margin-left:8px">You see the bot\'s picks + units. Logging + the log are admin-only.</span>';
         }
         // Soften the lede to match the limited capability
         const lede = document.querySelector('.lede');
@@ -1159,7 +1170,7 @@
     //              logged ML, this is SPR; or the other side) → never "add"
     //   'new'      a market in a GROUP you haven't bet, on a logged game
     function _pickState(mid, mt, side, units) {
-        if (!_canBet) return { state: 'fresh' };
+        if (!_canLog) return { state: 'fresh' };   // non-loggers never see logged/upgrade/conflict
         const lp = _loggedPicks.get(mid);
         if (!lp || !lp.size) return { state: 'fresh' };
         const same = lp.get(mt);
@@ -1200,7 +1211,11 @@
             if (!picks.length) { el.innerHTML = `<span class="pick-line-note">no pick — lean</span>`; return; }
             el.innerHTML = picks.map((p, i) => {
                 const ps = _pickState(mid, p.market_type, p.side, p.units);
-                let cls = _uClass(p.units), label = p._chip, click = `oneTapLog('${mid}',${i})`, title = `Tap to log ${p._chip}`;
+                // Default chip: tier-colored. Admins one-tap to log; view-only
+                // (bot_access) users can't log, so the chip opens Details.
+                let cls = _uClass(p.units), label = p._chip;
+                let click = _canLog ? `oneTapLog('${mid}',${i})` : `pickGame('${mid}')`;
+                let title = _canLog ? `Tap to log ${p._chip}` : `Tap for the full read`;
                 if (ps.state === 'logged') {
                     cls = 'logged'; label = '✓ ' + p._chip; click = `pickGame('${mid}')`; title = 'Already logged — open Details';
                 } else if (ps.state === 'upgrade') {
@@ -1321,7 +1336,7 @@
 
     // One-tap log a recommended bet straight from a line-2 chip (no modal).
     async function oneTapLog(mid, idx) {
-        if (!_canBet) return;
+        if (!_canLog) return;   // admin-only — logging is regression data
         const v = _verdictCache.get(mid);
         const p = v && v.picks && v.picks[idx];
         if (!p) return;
@@ -1684,10 +1699,10 @@
                     <div class="pick-meta">${metaLine}</div>
                     ${whyHtml}
                     ${s.gates_cleared ? '' : `<div class="soft-note">Sharp gate not cleared (need sharp ≥ 4). Chalk-flat market; this is the best read available — treat as 1u lean only.</div>`}
-                    ${_canBet ? `<div class="actions">
-                        <button class="${sugBtnCls}" onclick="openLog(false, ${i})">${sugBtnLabel}</button>
+                    <div class="actions">
+                        ${_canLog ? `<button class="${sugBtnCls}" onclick="openLog(false, ${i})">${sugBtnLabel}</button>` : ''}
                         <button onclick="copyForClaude()">Copy for Claude</button>
-                    </div>` : ''}
+                    </div>
                 </div>`;
             }
         } else {
@@ -1912,7 +1927,7 @@
                 const isBet = n.bet_side === side;
                 return `<button class="${isBet ? 'bet' : ''}" onclick="logNrfi('${side}')">${isBet ? 'BET ' : 'Log '}${lbl}</button>`;
             };
-            const btns = _canBet ? `<div class="nrfi-actions">
+            const btns = _canLog ? `<div class="nrfi-actions">
                 ${mkBtn('no', 'NRFI')}
                 ${mkBtn('yes', 'YRFI')}
             </div>` : '';
@@ -2052,9 +2067,9 @@
             const onclickAttr = isBotPick
                 ? `openLog(false, ${sugIdx})`
                 : `pickSideFromGrid('${mt}', '${s}')`;
-            // Viewers see the same data + the BOT PICK highlight, but
-            // no Log buttons — they can't write to bot_picks.
-            const btn = (_canBet && pinSnap)
+            // View-only (bot_access) users see the same data + the BOT PICK
+            // highlight, but no Log buttons — logging is admin-only.
+            const btn = (_canLog && pinSnap)
                 ? `<button class="${btnClass}" onclick="${onclickAttr}">${btnLabel}</button>`
                 : '';
 

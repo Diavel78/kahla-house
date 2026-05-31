@@ -5150,7 +5150,7 @@ def api_debug_trades():
 # ---------------------------------------------------------------------------
 
 @app.route("/api/handicapper")
-@bot_required
+@admin_required   # log/stats payload (pending/settled/P&L) is admin-only — logging is for regression testing, Rob only. bot_access sees picks via the dossier, never the log.
 def api_handicapper():
     """JSON for /handicapper. Returns pending picks (no age cap), settled
     picks from the last 30d, and rollup stats from bot_picks (the in-chat
@@ -6436,7 +6436,7 @@ def pmm_sync_page():
 
 
 @app.route("/api/handicapper/pick", methods=["POST"])
-@bot_required
+@admin_required   # logging is admin-only (regression testing)
 def api_handicapper_pick():
     """Log a pick to bot_picks. Body matches the bot_picks columns —
     see kahla-scanner/scripts/handicapper_log_pick.py for the same
@@ -6541,7 +6541,7 @@ def api_handicapper_pick():
 
 
 @app.route("/api/handicapper/pick/<int:pick_id>", methods=["DELETE"])
-@bot_required
+@admin_required   # admin-only (only admin logs)
 def api_handicapper_pick_delete(pick_id: int):
     """Delete a pick. Authorization:
       • admin can delete any pick
@@ -6575,7 +6575,7 @@ def api_handicapper_pick_delete(pick_id: int):
 
 
 @app.route("/api/handicapper/pick/<int:pick_id>/settle", methods=["POST"])
-@bot_required
+@admin_required   # admin-only (only admin logs)
 def api_handicapper_pick_settle(pick_id: int):
     """Manually settle a pending pick. Use case: UFC fights (no auto-grade
     for SPR/TOT method-of-victory bets), or any pick where the resolver
