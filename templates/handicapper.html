@@ -189,42 +189,36 @@
         .games-head h3 { font-size: 13px; font-weight: 600; }
         .games-head .count { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); padding: 2px 8px; background: var(--bg); border-radius: 10px; border: 1px solid var(--border); }
         .games-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
-        .game-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; transition: border-color 0.15s; }
+        /* Every game is TWO lines: line 1 = kickoff + matchup + Details
+           button; line 2 = the bot's recommended bets as one-tap log chips
+           (or a grey note when there's no pick / the game is outside the
+           2h window). No expand — always shown. */
+        .game-row { display: flex; flex-direction: column; gap: 7px; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; transition: border-color 0.15s; }
         .game-row:hover { border-color: var(--border-light); }
+        .game-line1 { display: flex; align-items: center; gap: 8px; }
         .game-row .matchup { font-size: 14px; font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-        .game-row .when { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); margin-right: 6px; white-space: nowrap; }
+        .game-row .when { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); white-space: nowrap; }
         .game-row .when.tier-soon     { color: var(--gold); }
         .game-row .when.tier-close    { color: var(--green); }
         .game-row .when.tier-imminent { color: var(--red); font-weight: 700; }
-        .game-row .pick-btn { padding: 6px 12px; background: var(--blue); color: #fff; border: 0; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; min-width: 64px; }
-        .game-row .pick-btn:hover { filter: brightness(1.1); }
-        .game-row .pick-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        /* ── Pick-button state machine (admin/bot_access only — set by the
-           background verdict prefetch + loadData; viewers stay default blue
-           since _verdictCache / _loggedMarketIds only populate under _canBet).
-
-           UNIT-TIERED prominence for NOT-yet-logged actionable picks — the
-           bigger the bot's recommended stake, the louder the button:
-             0.5u → muted blue (NRFI, experimental)
-             1u   → blue        (standard)
-             3u   → amber       (prominent)
-             5u   → gold ring    (loudest)
-           lean / pass → grey ("skip"). Unevaluated (outside 2h window) →
-           default blue. */
-        .game-row .pick-btn.u05 { background: #2b3a5e; color: #b9cdf2; }
-        .game-row .pick-btn.u1  { background: var(--blue); color: #fff; }
-        .game-row .pick-btn.u3  { background: var(--orange); color: #1c1306; }
-        .game-row .pick-btn.u5  { background: var(--gold); color: #2a1f02; box-shadow: 0 0 0 2px rgba(250,204,21,0.30); }
-        .game-row .pick-btn.lean { background: #3a4150; color: var(--text-secondary); }
-        /* Logged: you've already bet this game. Green = "done." */
-        .game-row .pick-btn.logged { background: var(--green); color: #04210f; }
-        /* Attention: you've logged here BUT the bot now wants more — either
-           a pick in a market you haven't bet (new), or your existing bet got
-           STRONGER (units went up → add to it). Gold + ring so it can't be
-           missed, since you'd otherwise never know without re-opening. */
-        .game-row .pick-btn.upgrade { background: #a855f7; color: #fff; box-shadow: 0 0 0 2px rgba(168,85,247,0.55); animation: khPulse 1.6s ease-in-out infinite; }
+        .details-btn { padding: 5px 12px; background: var(--surface-2); color: var(--text); border: 1px solid var(--border-light); border-radius: 8px; font-size: 11px; font-weight: 600; cursor: pointer; font-family: inherit; white-space: nowrap; }
+        .details-btn:hover { border-color: var(--blue); }
+        /* Line 2 — one-tap log chips, color-tiered by stake (louder = bigger
+           bet). Tapping a chip logs that bet instantly at the recommended
+           units (blind-follow). Logged / opposite-side states recolor it. */
+        .game-line2 { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+        .pick-chip { padding: 4px 9px; border: 0; border-radius: 7px; font-size: 11px; font-weight: 600; cursor: pointer; font-family: inherit; color: #fff; }
+        .pick-chip:hover { filter: brightness(1.1); }
+        .pick-chip.u05 { background: #2b3a5e; color: #b9cdf2; }
+        .pick-chip.u1  { background: var(--blue); color: #fff; }
+        .pick-chip.u3  { background: var(--orange); color: #1c1306; }
+        .pick-chip.u5  { background: var(--gold); color: #2a1f02; box-shadow: 0 0 0 2px rgba(250,204,21,0.30); }
+        .pick-chip.logged  { background: var(--green); color: #04210f; }
+        .pick-chip.upgrade { background: #a855f7; color: #fff; box-shadow: 0 0 0 2px rgba(168,85,247,0.55); animation: khPulse 1.6s ease-in-out infinite; }
+        .pick-chip.conflict { background: var(--surface-2); color: var(--text-secondary); border: 1px solid rgba(239,68,68,0.4); }
         @keyframes khPulse { 0%,100% { box-shadow: 0 0 0 2px rgba(168,85,247,0.55); } 50% { box-shadow: 0 0 0 4px rgba(168,85,247,0.18); } }
-        /* Color legend for the pick buttons (admin/bot_access only). */
+        .pick-line-note { font-size: 11px; color: var(--text-muted); font-style: italic; }
+        /* Color legend for the pick chips (admin/bot_access only). */
         .pick-legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 10px; font-size: 10px; color: var(--text-muted); }
         .pick-legend span { display: inline-flex; align-items: center; gap: 4px; }
         .pick-legend .lg { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
@@ -1119,17 +1113,19 @@
             }
             list.innerHTML = games.map(g => {
                 const matchup = g.away && g.home ? `${_esc(g.away)} @ ${_esc(g.home)}` : _esc(g.event_name);
-                const logged = _canBet && _loggedMarketIds.has(g.market_id);
                 return `<li class="game-row">
-                    <span class="when ${_kickoffTier(g.event_start)}" data-start="${_esc(g.event_start)}">${_fmtKickoff(g.event_start)}</span>
-                    <span class="matchup">${matchup}</span>
-                    <button class="pick-btn${logged ? ' logged' : ''}" data-mid="${_esc(g.market_id)}" onclick="pickGame('${g.market_id}')">${logged ? '✓ Pick' : 'Pick'}</button>
+                    <div class="game-line1">
+                        <span class="when ${_kickoffTier(g.event_start)}" data-start="${_esc(g.event_start)}">${_fmtKickoff(g.event_start)}</span>
+                        <span class="matchup">${matchup}</span>
+                        <button class="details-btn" onclick="pickGame('${g.market_id}')">Details ›</button>
+                    </div>
+                    <div class="game-line2" data-mid="${_esc(g.market_id)}" data-start="${_esc(g.event_start)}"></div>
                 </li>`;
             }).join('');
-            // Apply cached verdict colors immediately (tab-switch-back), then
-            // kick off the background prefetch for any in-window game whose
-            // verdict is missing/stale.
-            _colorPickButtons();
+            // Fill the second line (picks / lean note) immediately from any
+            // cached verdicts, then kick off the background prefetch for any
+            // in-window game whose verdict is missing/stale.
+            _renderPickLines();
             _prefetchVerdicts();
         } catch (e) {
             list.innerHTML = `<li class="games-empty" style="color:var(--red)">Failed to load: ${_esc(String(e))}</li>`;
@@ -1177,57 +1173,95 @@
                 return { state: 'conflict', logged: { mt: t, units: info.units, side: info.side } };
         return { state: 'new', logged: null };
     }
-    const _STATE_CLASSES = ['u05', 'u1', 'u3', 'u5', 'lean', 'logged', 'upgrade'];
-
-    function _colorPickButtons() {
-        document.querySelectorAll('#gamesList .pick-btn[data-mid]').forEach(btn => {
-            const mid = btn.getAttribute('data-mid');
-            btn.classList.remove(..._STATE_CLASSES);
-            if (!_canBet) { btn.textContent = 'Pick'; return; }   // viewers: plain blue
-
+    // Render the second line of every game row: the bot's recommended bets
+    // as one-tap log chips (color-tiered by stake), or a grey note. Rules:
+    //   • > 2h to start  → grey "lean only, outside pick window" (no chips —
+    //     the bot's read isn't actionable that far out).
+    //   • ≤ 2h, verdict cached → one chip per recommended bet. Tap = log it
+    //     instantly at the recommended units (blind-follow). Logged / upgrade
+    //     / opposite-side (conflict) states recolor the chip.
+    //   • ≤ 2h, not yet evaluated → "evaluating…" until the prefetch lands.
+    function _renderPickLines() {
+        const now = Date.now();
+        document.querySelectorAll('#gamesList .game-line2[data-mid]').forEach(el => {
+            if (!_canBet) { el.innerHTML = ''; return; }   // viewers: no picks line
+            const mid = el.getAttribute('data-mid');
+            const start = Date.parse(el.getAttribute('data-start'));
+            const dt = isNaN(start) ? null : (start - now);
+            if (dt == null || dt > VERDICT_WINDOW_MS) {
+                el.innerHTML = `<span class="pick-line-note">lean only, outside pick window</span>`;
+                return;
+            }
             const v = _verdictCache.get(mid);
-            const picks = (v && v.picks) || [];
-            const logged = _loggedMarketIds.has(mid);
-
-            // Among current actionable picks, find the best NEW (a group
-            // you haven't bet) and the best UPGRADE (same bet, bigger size).
-            // Correlated/opposite sides of what you've logged are 'conflict'
-            // and drive neither — so a Twins-ML game won't pulse to add the
-            // Pirates spread.
-            let newUnits = 0, upgradeUnits = 0;
-            for (const p of picks) {
-                const ps = _pickState(mid, p.mt, p.side, p.units);
-                if (ps.state === 'upgrade') upgradeUnits = Math.max(upgradeUnits, p.units);
-                else if (ps.state === 'new') newUnits = Math.max(newUnits, p.units);
-            }
-            const bestActionable = picks.length ? Math.max(...picks.map(p => p.units)) : 0;
-
-            let cls, label;
-            if (logged && (upgradeUnits || newUnits)) {
-                // Already bet here, but there's more to do — loudest signal.
-                cls = 'upgrade';
-                label = upgradeUnits
-                    ? `↑ ${_uStr(upgradeUnits)}`           // existing bet got stronger
-                    : `✓ +${_uStr(newUnits)}`;             // a new market opened up
-            } else if (logged) {
-                cls = 'logged'; label = '✓ Pick';
-            } else if (bestActionable) {
-                cls = _uClass(bestActionable); label = `Pick ${_uStr(bestActionable)}`;
-            } else if (v) {
-                cls = 'lean'; label = 'Pick';              // evaluated, no real pick
-            } else {
-                cls = ''; label = 'Pick';                  // not evaluated (outside window)
-            }
-            if (cls) btn.classList.add(cls);
-            btn.textContent = label;
+            if (!v) { el.innerHTML = `<span class="pick-line-note">evaluating…</span>`; return; }
+            const picks = v.picks || [];
+            if (!picks.length) { el.innerHTML = `<span class="pick-line-note">no pick — lean</span>`; return; }
+            el.innerHTML = picks.map((p, i) => {
+                const ps = _pickState(mid, p.market_type, p.side, p.units);
+                let cls = _uClass(p.units), label = p._chip, click = `oneTapLog('${mid}',${i})`, title = `Tap to log ${p._chip}`;
+                if (ps.state === 'logged') {
+                    cls = 'logged'; label = '✓ ' + p._chip; click = `pickGame('${mid}')`; title = 'Already logged — open Details';
+                } else if (ps.state === 'upgrade') {
+                    cls = 'upgrade'; label = '↑ ' + p._chip; title = `Add up to ${_uStr(p.units)}`;
+                } else if (ps.state === 'conflict') {
+                    cls = 'conflict'; label = '⚠ ' + p._chip; click = `pickGame('${mid}')`; title = 'Opposite of a bet you logged — open Details';
+                }
+                return `<button class="pick-chip ${cls}" title="${_esc(title)}" onclick="${click}">${_esc(label)}</button>`;
+            }).join('');
         });
+    }
+
+    // Compact chip label for a recommended bet, e.g. "ML Reds +115 · 1u",
+    // "TOT O8.5 -107 · 1u", "1ST YRFI +108 · 0.5u". Team → last word (mascot).
+    function _pickChipLabel(mt, side, line, price, units, d) {
+        const mkt = _shortMarket(mt);
+        let sideLbl;
+        if (mt === 'nrfi') sideLbl = (side === 'no' ? 'NRFI' : 'YRFI');
+        else if (mt === 'total') sideLbl = (side === 'over' ? 'O' : 'U');
+        else { const t = (side === 'home' ? d.home : d.away) || side; sideLbl = t.split(' ').pop(); }
+        const lineFrag = (line != null && mt !== 'nrfi')
+            ? (mt === 'total' ? _fmtPt(Math.abs(line)) : ' ' + _fmtPt(line)) : '';
+        const sep = (mt === 'total') ? '' : ' ';
+        return `${mkt} ${sideLbl}${sep}${lineFrag} ${_fmtAmer(price)} · ${_uStr(units)}`.replace(/\s+/g, ' ').trim();
+    }
+
+    // Build the /api/handicapper/pick POST body for a recommended bet so a
+    // one-tap chip can log without opening the modal. Mirrors submitLog's
+    // body (maker entry = PMM bid, reasons from the signals). Keep in sync.
+    function _suggestionToBody(s, mid, d) {
+        const price = (s.pmm_bid_american != null ? s.pmm_bid_american : s.fair_american);
+        const line  = (s.pmm_line != null ? s.pmm_line : s.pin_line);
+        const pr = d.power_rating;
+        let me = null;
+        if (pr) {
+            if (s.market_type === 'total') {
+                if (pr.total_lean != null && pr.total_diff != null)
+                    me = (pr.total_lean === s.side) ? Math.abs(pr.total_diff) : -Math.abs(pr.total_diff);
+            } else if (s.market_type !== 'nrfi') {
+                me = (s.side === 'home') ? pr.edge_home_pp : pr.edge_away_pp;
+            }
+        }
+        return {
+            market_id: mid, market_type: s.market_type, side: s.side, book: 'PMM',
+            price, line: (line != null ? line : null),
+            units: s.units, confidence: s.confidence,
+            fair_prob: s.fair_prob ?? null, edge_pp: s.edge_pp ?? null,
+            sharp_score: s.sharp_score ?? null,
+            reasons: _buildReasons(s, d), query_text: d.query || null,
+            signal_blob: pr ? { model: { source: pr.source || null, feeds_sizing: !!pr.feeds_sizing,
+                sp_adjusted: !!pr.sp_adjusted, n_games: pr.n_games ?? null,
+                edge_pp: (me != null ? me : null), agree: (me != null ? me > 0 : null) },
+                sharp_score: s.sharp_score ?? null, edge_pp: s.edge_pp ?? null } : null,
+            allow_duplicate: true,
+            _line: line, _price: price,
+        };
     }
 
     // Background prefetch of the real bot verdict for games inside the 2h
     // window. Throttled to 2 concurrent, admin/bot_access only, cache-only
-    // dossier (no Odds API credits). Hits the SAME endpoint a click uses, so
-    // the color is the full model verdict (gates_cleared), identical to what
-    // you'd see opening the dossier. Failures leave the button at default.
+    // dossier (no Odds API credits). Hits the SAME endpoint Details uses, so
+    // the chips are the full model output. Stores each recommended bet with
+    // its display chip + a ready-to-POST body for one-tap logging.
     async function _prefetchVerdicts() {
         if (!_canBet) return;
         const now = Date.now();
@@ -1245,29 +1279,65 @@
         const work = async () => {
             while (queue.length) {
                 const g = queue.shift();
-                _verdictInFlight.add(g.market_id);
+                const mid = g.market_id;
+                _verdictInFlight.add(mid);
                 try {
-                    const r = await authFetch('/api/handicapper/dossier?market_id=' + encodeURIComponent(g.market_id));
+                    const r = await authFetch('/api/handicapper/dossier?market_id=' + encodeURIComponent(mid));
                     const d = await r.json();
                     if (d && d.ok) {
                         const sugg = d.suggestions || (d.suggestion ? [d.suggestion] : []);
-                        // Actionable picks (gate cleared) with their units +
-                        // market_type, so the button can color by unit tier
-                        // AND detect new/stronger picks vs what's logged.
-                        const picks = sugg
-                            .filter(s => s && s.gates_cleared)
-                            .map(s => ({ mt: s.market_type, units: Number(s.units) || 1, side: s.side }));
-                        // NRFI: actionable only when the model found a +EV
-                        // side vs Polymarket; flat 0.5u for now.
-                        if (d.nrfi && d.nrfi.bet_side) picks.push({ mt: 'nrfi', units: 0.5, side: d.nrfi.bet_side });
-                        _verdictCache.set(g.market_id, { picks, fetchedAt: Date.now() });
-                        _colorPickButtons();
+                        const picks = sugg.filter(s => s && s.gates_cleared).map(s => {
+                            const body = _suggestionToBody(s, mid, d);
+                            return { market_type: s.market_type, side: s.side, units: Number(s.units) || 1,
+                                     _chip: _pickChipLabel(s.market_type, s.side, body._line, body._price, s.units, d),
+                                     _body: body };
+                        });
+                        // NRFI: actionable only when the model found a +EV side.
+                        if (d.nrfi && d.nrfi.bet_side) {
+                            const side = d.nrfi.bet_side;
+                            const pb = (d.nrfi.polymarket || {})[side] || {};
+                            const price = (pb.bid_american != null) ? pb.bid_american
+                                : (side === 'no' ? d.nrfi.nrfi_fair_american : d.nrfi.yrfi_fair_american);
+                            picks.push({ market_type: 'nrfi', side, units: 0.5,
+                                _chip: _pickChipLabel('nrfi', side, null, price, 0.5, d),
+                                _body: { market_id: mid, market_type: 'nrfi', side, book: 'PMM',
+                                    price, line: null, units: 0.5, confidence: 'low',
+                                    fair_prob: (side === 'no' ? d.nrfi.p_nrfi : d.nrfi.p_yrfi),
+                                    edge_pp: (pb.edge_pp != null ? pb.edge_pp : null), sharp_score: null,
+                                    reasons: d.nrfi.reasons || [], query_text: d.query || null,
+                                    allow_duplicate: true } });
+                        }
+                        _verdictCache.set(mid, { picks, fetchedAt: Date.now() });
+                        _renderPickLines();
                     }
-                } catch (e) { /* leave default on failure */ }
-                finally { _verdictInFlight.delete(g.market_id); }
+                } catch (e) { /* leave note on failure */ }
+                finally { _verdictInFlight.delete(mid); }
             }
         };
         await Promise.all([work(), work()]);   // 2 at a time
+    }
+
+    // One-tap log a recommended bet straight from a line-2 chip (no modal).
+    async function oneTapLog(mid, idx) {
+        if (!_canBet) return;
+        const v = _verdictCache.get(mid);
+        const p = v && v.picks && v.picks[idx];
+        if (!p) return;
+        // Safety: never one-tap the opposite/correlated side of a logged bet.
+        if (_pickState(mid, p.market_type, p.side, p.units).state === 'conflict') { pickGame(mid); return; }
+        try {
+            const r = await authFetch('/api/handicapper/pick', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(p._body),
+            });
+            const out = r ? await r.json().catch(() => null) : null;
+            if (out && (out.ok || out.skipped)) {
+                _toast(out.skipped ? 'Already logged ✓' : `Logged ${p._chip} ✓`);
+                loadData(false);
+            } else {
+                _toast('Log failed' + (out && out.error ? ': ' + out.error : ''), 'err');
+            }
+        } catch (e) { _toast('Log failed', 'err'); }
     }
 
     // Tick the games-list kickoff countdowns every minute so "57m"
@@ -1301,6 +1371,9 @@
             if (count) count.textContent = remaining;
             if (!remaining) list.innerHTML = '<li class="games-empty">No upcoming games for this sport.</li>';
         }
+        // Refresh the picks line too — a game crossing into the 2h window
+        // flips from the "outside pick window" note to live chips.
+        _renderPickLines();
     }
 
     async function pickGame(marketId) {
@@ -2725,7 +2798,7 @@
                 if (!prev || u > prev.units) m.set(r.market_type, { units: u, side: r.side });
                 _loggedPicks.set(r.market_id, m);
             });
-            _colorPickButtons();
+            _renderPickLines();
             document.getElementById('pendingCount').textContent = pending.length;
             document.getElementById('settledCount').textContent = settled.length;
             document.getElementById('pendingList').innerHTML = pending.length
