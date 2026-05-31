@@ -198,8 +198,8 @@
         .game-line1 { display: flex; align-items: center; gap: 8px; }
         .game-row .matchup { font-size: 14px; font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
         .game-row .when { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); white-space: nowrap; }
-        .game-row .when.tier-soon     { color: var(--gold); }
-        .game-row .when.tier-close    { color: var(--green); }
+        .game-row .when.tier-soon     { color: var(--green); }
+        .game-row .when.tier-close    { color: var(--gold); }
         .game-row .when.tier-imminent { color: var(--red); font-weight: 700; }
         .details-btn { padding: 5px 12px; background: var(--surface-2); color: var(--text); border: 1px solid var(--border-light); border-radius: 8px; font-size: 11px; font-weight: 600; cursor: pointer; font-family: inherit; white-space: nowrap; }
         .details-btn:hover { border-color: var(--blue); }
@@ -801,11 +801,12 @@
         return d.toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
     }
     function _kickoffTier(iso) {
-        // Color tier for the games-list timer:
-        //   < 15m  → red+bold (imminent)
-        //   15-60m → green    (close)
-        //   1-2h   → yellow   (soon)
+        // Color tier for the games-list timer — ramps green → yellow → red
+        // as kickoff approaches (normal traffic-light urgency):
         //   ≥ 2h   → grey     (far, default — no class)
+        //   1-2h   → green    (first color: plenty of time)
+        //   15-60m → yellow   (getting close)
+        //   < 15m  → red+bold (imminent)
         const diffMin = Math.round((new Date(iso) - new Date()) / 60_000);
         if (diffMin < 0)   return '';
         if (diffMin < 15)  return 'tier-imminent';
