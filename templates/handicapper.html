@@ -308,10 +308,14 @@
         /* Already logged this market at the bot's current size → green,
            matching the dashboard's green "logged" button. */
         .suggestion-card button.primary.done { background: var(--green); border-color: var(--green); color: #04210f; }
+        /* Correlated/opposite side of a bet you already have — neutral, so
+           it doesn't read as an actionable "add." */
+        .suggestion-card button.primary.muted { background: var(--surface-2); border-color: var(--border-light); color: var(--text-secondary); }
         /* "You've already logged this market" badge on the suggestion card. */
         .sug-logged { display: inline-block; margin-left: 8px; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; letter-spacing: 0.03em; vertical-align: middle; }
         .sug-logged.same { background: var(--green-dim); color: var(--green); }
         .sug-logged.up   { background: rgba(168,85,247,0.18); color: #c084fc; border: 1px solid rgba(168,85,247,0.4); }
+        .sug-logged.warn { background: rgba(239,68,68,0.15); color: #fca5a5; border: 1px solid rgba(239,68,68,0.4); }
         /* NRFI/YRFI card action buttons — match the suggestion-card look
            (was unstyled/garish). The +EV BET side is green-primary. */
         .nrfi-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
@@ -1143,6 +1147,36 @@
     const _uClass = u => (u >= 5 ? 'u5' : u >= 3 ? 'u3' : u >= 1 ? 'u1' : 'u05');
     // Dossier-button stake tier (1u = blue default = no class).
     const _tierCls = u => (u >= 5 ? 't5' : u >= 3 ? 't3' : (u != null && u < 1) ? 't05' : '');
+    // ML and SPR are the SAME directional bet (the bot picks one or the
+    // other, never both), so they share a "side" group. TOT and NRFI are
+    // their own axes. This is what stops us from flagging the opposite
+    // (or correlated) side of a market you've already bet as a "new" pick
+    // — you can't bet Twins ML and Pirates -1.5 on the same game.
+    const _mktGroup = mt => (mt === 'moneyline' || mt === 'spread') ? 'side' : mt;
+    // Classify a candidate pick against what's already logged on the game:
+    //   'fresh'    game has no logged picks (size by tier)
+    //   'upgrade'  same exact bet logged at FEWER units → add up
+    //   'logged'   same exact bet already logged at ≥ units
+    //   'conflict' a correlated/opposite bet is logged (same group — e.g.
+    //              logged ML, this is SPR; or the other side) → never "add"
+    //   'new'      a market in a GROUP you haven't bet, on a logged game
+    function _pickState(mid, mt, side, units) {
+        if (!_canBet) return { state: 'fresh' };
+        const lp = _loggedPicks.get(mid);
+        if (!lp || !lp.size) return { state: 'fresh' };
+        const same = lp.get(mt);
+        if (same) {
+            const logged = { mt, units: same.units, side: same.side };
+            if (same.side === side)
+                return { state: (units > same.units) ? 'upgrade' : 'logged', logged };
+            return { state: 'conflict', logged };          // opposite side, same market
+        }
+        const grp = _mktGroup(mt);
+        for (const [t, info] of lp)
+            if (_mktGroup(t) === grp)
+                return { state: 'conflict', logged: { mt: t, units: info.units, side: info.side } };
+        return { state: 'new', logged: null };
+    }
     const _STATE_CLASSES = ['u05', 'u1', 'u3', 'u5', 'lean', 'logged', 'upgrade'];
 
     function _colorPickButtons() {
@@ -1154,19 +1188,17 @@
             const v = _verdictCache.get(mid);
             const picks = (v && v.picks) || [];
             const logged = _loggedMarketIds.has(mid);
-            const loggedUnits = _loggedPicks.get(mid) || new Map();   // mt -> units
 
-            // Among current actionable picks, find:
-            //   newUnits     — best stake in a market_type NOT yet logged.
-            //   upgradeUnits — best stake where the market IS logged but the
-            //                  bot now wants MORE than we logged (add to it).
+            // Among current actionable picks, find the best NEW (a group
+            // you haven't bet) and the best UPGRADE (same bet, bigger size).
+            // Correlated/opposite sides of what you've logged are 'conflict'
+            // and drive neither — so a Twins-ML game won't pulse to add the
+            // Pirates spread.
             let newUnits = 0, upgradeUnits = 0;
             for (const p of picks) {
-                if (loggedUnits.has(p.mt)) {
-                    if (p.units > (loggedUnits.get(p.mt) || 0)) upgradeUnits = Math.max(upgradeUnits, p.units);
-                } else {
-                    newUnits = Math.max(newUnits, p.units);
-                }
+                const ps = _pickState(mid, p.mt, p.side, p.units);
+                if (ps.state === 'upgrade') upgradeUnits = Math.max(upgradeUnits, p.units);
+                else if (ps.state === 'new') newUnits = Math.max(newUnits, p.units);
             }
             const bestActionable = picks.length ? Math.max(...picks.map(p => p.units)) : 0;
 
@@ -1224,10 +1256,10 @@
                         // AND detect new/stronger picks vs what's logged.
                         const picks = sugg
                             .filter(s => s && s.gates_cleared)
-                            .map(s => ({ mt: s.market_type, units: Number(s.units) || 1 }));
+                            .map(s => ({ mt: s.market_type, units: Number(s.units) || 1, side: s.side }));
                         // NRFI: actionable only when the model found a +EV
                         // side vs Polymarket; flat 0.5u for now.
-                        if (d.nrfi && d.nrfi.bet_side) picks.push({ mt: 'nrfi', units: 0.5 });
+                        if (d.nrfi && d.nrfi.bet_side) picks.push({ mt: 'nrfi', units: 0.5, side: d.nrfi.bet_side });
                         _verdictCache.set(g.market_id, { picks, fetchedAt: Date.now() });
                         _colorPickButtons();
                     }
@@ -1489,28 +1521,31 @@
                 const sideLabel = s.market_type === 'total'
                     ? s.side.toUpperCase()
                     : (s.side === 'home' ? d.home : d.away);
-                // Button state mirrors the games-list (dashboard) color so
-                // they match: violet "attention" when this pick is an
-                // upgrade on what you logged OR a new market on a game
-                // you've already bet; otherwise unit-tier colored. Badge
-                // tells you the logged state.
+                // Button state mirrors the games-list (dashboard) color and
+                // respects market groups, so we never prompt you to add the
+                // opposite/correlated side of a bet you already have.
                 let sugBtnCls = 'primary ' + _tierCls(s.units);
                 let sugBtnLabel = 'Log this pick';
                 let loggedBadge = '';
-                if (_canBet) {
-                    const lm = _loggedPicks.get(d.market_id) || new Map();
-                    const lu = lm.get(s.market_type);            // units logged on THIS market
-                    const gameHasLogged = _loggedMarketIds.has(d.market_id);
-                    if (lu != null && s.units > lu) {            // existing bet got stronger
-                        sugBtnCls = 'primary up'; sugBtnLabel = `Add to ${_uStr(s.units)}`;
-                        loggedBadge = `<span class="sug-logged up">↑ ADD — you have ${_uStr(lu)}</span>`;
-                    } else if (lu != null) {                     // already logged this market
-                        sugBtnCls = 'primary done'; sugBtnLabel = '✓ Logged';
-                        loggedBadge = `<span class="sug-logged same">✓ logged ${_uStr(lu)}</span>`;
-                    } else if (gameHasLogged) {                  // new market on a bet game
-                        sugBtnCls = 'primary up'; sugBtnLabel = 'Log new pick';
-                        loggedBadge = `<span class="sug-logged up">＋ NEW</span>`;
-                    }
+                const ps = _pickState(d.market_id, s.market_type, s.side, s.units);
+                if (ps.state === 'upgrade') {
+                    sugBtnCls = 'primary up'; sugBtnLabel = `Add to ${_uStr(s.units)}`;
+                    loggedBadge = `<span class="sug-logged up">↑ ADD — you have ${_uStr(ps.logged.units)}</span>`;
+                } else if (ps.state === 'logged') {
+                    sugBtnCls = 'primary done'; sugBtnLabel = '✓ Logged';
+                    loggedBadge = `<span class="sug-logged same">✓ logged ${_uStr(ps.logged.units)}</span>`;
+                } else if (ps.state === 'conflict') {
+                    // You're already on this game in a correlated market —
+                    // don't nudge the other side. Neutral button + a warning.
+                    sugBtnCls = 'primary muted'; sugBtnLabel = 'Log anyway';
+                    const lg = ps.logged;
+                    const lgSide = (lg.side === 'home') ? d.home : (lg.side === 'away') ? d.away : (lg.side || '').toUpperCase();
+                    loggedBadge = (lg.side !== s.side)
+                        ? `<span class="sug-logged warn">⚠ opposite of your ${_shortMarket(lg.mt)} (${_esc(lgSide)})</span>`
+                        : `<span class="sug-logged same">↔ correlated w/ your ${_shortMarket(lg.mt)}</span>`;
+                } else if (ps.state === 'new') {
+                    sugBtnCls = 'primary up'; sugBtnLabel = 'Log new pick';
+                    loggedBadge = `<span class="sug-logged up">＋ NEW</span>`;
                 }
                 // PMM-aware display. If PMM has a market for this side,
                 // the pick line shows PMM's line + projected fair as
@@ -2686,7 +2721,8 @@
                 if (!r.market_id || !r.market_type) return;
                 const m = _loggedPicks.get(r.market_id) || new Map();
                 const u = Number(r.units) || 1;
-                m.set(r.market_type, Math.max(m.get(r.market_type) || 0, u));
+                const prev = m.get(r.market_type);
+                if (!prev || u > prev.units) m.set(r.market_type, { units: u, side: r.side });
                 _loggedPicks.set(r.market_id, m);
             });
             _colorPickButtons();
