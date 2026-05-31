@@ -1399,15 +1399,11 @@
         const p = Math.max(0, Math.min(1, prob));
         const col = `hsl(${Math.round(p * 120)},75%,48%)`;   // 0 red · 60 yellow · 120 green
         const dash = `${(p * C).toFixed(1)} ${C.toFixed(1)}`;
-        // Model-estimated gauges (no live market) render softer + a "~" so
-        // they read as a guess, not a real Polymarket price.
-        const est = (src === 'model');
-        const op = est ? 0.62 : 1;
-        const tip = est ? 'estimated from the game state' : (src === 'decided' ? 'decided' : 'live Polymarket odds');
+        const tip = (src === 'decided') ? 'decided' : 'live Polymarket odds';
         return `<div class="win-gauge" title="${tip}"><svg width="${size}" height="${size}">${track}` +
                `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="${col}" stroke-width="4" ` +
-               `stroke-linecap="round" stroke-dasharray="${dash}" opacity="${op}"/></svg>` +
-               `<span class="wg-num" style="color:${col}">${est ? '~' : ''}${Math.round(p * 100)}</span></div>`;
+               `stroke-linecap="round" stroke-dasharray="${dash}"/></svg>` +
+               `<span class="wg-num" style="color:${col}">${Math.round(p * 100)}</span></div>`;
     }
 
     function _liveBetLabel(r) {
