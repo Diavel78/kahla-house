@@ -2756,9 +2756,9 @@ def _fetch_weather(sport: str, home: str | None,
 # Half-inning run-scoring is zero-inflated/bursty (lots of 1-2-3 innings
 # then crooked numbers), so Poisson(λ≈0.53) overpredicts scoring (gives
 # YRFI ≈ 63% vs the observed ~47-50%). We anchor the logistic so
-# league-average inputs land at NRFI_Q_BASE (≈0.725 → NRFI ≈ 0.525),
-# matching the real baseline; the slope NRFI_Q_SLOPE is a provisional
-# guess the backtest harness (scripts/nrfi_backtest.py) recalibrates.
+# league-average inputs land at NRFI_Q_BASE (≈0.713 → NRFI ≈ 0.508),
+# recentered on the observed 2026 base rate (see the constant); the slope
+# NRFI_Q_SLOPE is a provisional guess the backtest (nrfi_backtest.py) tunes.
 #
 #   xr = NRFI_XR0 · off_ratio · pitch_ratio · park_ratio · wx_ratio
 #     off_ratio   = top_order_obp / NRFI_LG_OBP      (top-of-order on-base)
@@ -2775,7 +2775,12 @@ def _fetch_weather(sport: str, home: str | None,
 NRFI_XR0       = 0.53     # league-avg expected runs in a first half-inning
 NRFI_LG_OBP    = 0.315    # league-average on-base percentage
 NRFI_LG_RA9    = 4.30     # league-average runs allowed / 9 (matches _starter_runs scale)
-NRFI_Q_BASE    = 0.725    # scoreless-half prob at league-average inputs (→ NRFI ≈ 0.525)
+NRFI_Q_BASE    = 0.713    # scoreless-half prob at league-avg inputs (→ NRFI ≈ 0.508).
+                          # Recentered May 2026: a 796-game 2026 backtest put the
+                          # observed NRFI base rate at 48.6% (offense up vs the
+                          # historical ~52.5%) and the model mean at 50.3% — biased
+                          # +1.7pp high at 0.725. 0.713 drops model mean onto ~48.6%.
+                          # The market prices this season's environment, so we match it.
 NRFI_Q_SLOPE   = 2.0      # logistic sensitivity to xr — backtest-calibrated
 NRFI_TOP_BOOST = 1.10     # top-of-order OBP ≈ 10% above team OBP (fallback only)
 NRFI_LEAN_PP   = 4.0      # |our NRFI% − baseline NRFI%| ≥ this → model lean (context only)

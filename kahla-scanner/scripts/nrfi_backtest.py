@@ -60,7 +60,7 @@ log = logging.getLogger(__name__)
 NRFI_XR0       = 0.53
 NRFI_LG_OBP    = 0.315
 NRFI_LG_RA9    = 4.30
-NRFI_Q_BASE    = 0.725
+NRFI_Q_BASE    = 0.713   # recentered on the observed 2026 NRFI base rate (48.6%)
 NRFI_Q_SLOPE   = 2.0
 NRFI_TOP_BOOST = 1.10
 _FIP_CONSTANT  = 3.15
@@ -283,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  accuracy @ p>0.5      : {acc*100:5.1f}%   vs majority-class {maj_acc*100:5.1f}%")
     print("\n  calibration (predicted bucket → realized NRFI%):")
     for lo in (0.30, 0.40, 0.45, 0.50, 0.55, 0.60):
-        hi = lo + (0.10 if lo in (0.30, 0.40) else 0.05)
+        hi = lo + (0.10 if lo == 0.30 else 0.05)   # non-overlapping bins
         bucket = [a for p, a in samples if lo <= p < hi]
         if not bucket:
             print(f"    {lo:.2f}–{hi:.2f}:   (none)")
