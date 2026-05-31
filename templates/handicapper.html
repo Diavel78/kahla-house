@@ -300,6 +300,11 @@
         .suggestion-card button.primary.t05 { background: #2b3a5e; border-color: #2b3a5e; color: #b9cdf2; }
         .suggestion-card button.primary.t3  { background: var(--orange); border-color: var(--orange); color: #1c1306; }
         .suggestion-card button.primary.t5  { background: var(--gold); border-color: var(--gold); color: #2a1f02; }
+        /* Attention (violet) — matches the games-list "add / new" button so
+           the dossier action speaks the same color as the dashboard: this
+           pick is an upgrade on what you logged, or a new market on a game
+           you've already bet. Overrides the unit tier (attention wins). */
+        .suggestion-card button.primary.up  { background: #a855f7; border-color: #a855f7; color: #fff; }
         /* "You've already logged this market" badge on the suggestion card. */
         .sug-logged { display: inline-block; margin-left: 8px; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; letter-spacing: 0.03em; vertical-align: middle; }
         .sug-logged.same { background: var(--green-dim); color: var(--green); }
@@ -1481,17 +1486,26 @@
                 const sideLabel = s.market_type === 'total'
                     ? s.side.toUpperCase()
                     : (s.side === 'home' ? d.home : d.away);
-                // Logged/upgrade badge — so when you open a game flagged
-                // "add/new" you can see whether THIS pick is a fresh market
-                // or a bump on something you already logged at fewer units.
+                // Button state mirrors the games-list (dashboard) color so
+                // they match: violet "attention" when this pick is an
+                // upgrade on what you logged OR a new market on a game
+                // you've already bet; otherwise unit-tier colored. Badge
+                // tells you the logged state.
+                let sugBtnCls = 'primary ' + _tierCls(s.units);
+                let sugBtnLabel = 'Log this pick';
                 let loggedBadge = '';
                 if (_canBet) {
-                    const lm = _loggedPicks.get(d.market_id);
-                    const lu = lm ? lm.get(s.market_type) : undefined;
-                    if (lu != null) {
-                        loggedBadge = (s.units > lu)
-                            ? `<span class="sug-logged up">↑ ADD — you have ${_uStr(lu)}</span>`
-                            : `<span class="sug-logged same">✓ logged ${_uStr(lu)}</span>`;
+                    const lm = _loggedPicks.get(d.market_id) || new Map();
+                    const lu = lm.get(s.market_type);            // units logged on THIS market
+                    const gameHasLogged = _loggedMarketIds.has(d.market_id);
+                    if (lu != null && s.units > lu) {            // existing bet got stronger
+                        sugBtnCls = 'primary up'; sugBtnLabel = `Add to ${_uStr(s.units)}`;
+                        loggedBadge = `<span class="sug-logged up">↑ ADD — you have ${_uStr(lu)}</span>`;
+                    } else if (lu != null) {                     // already logged this market
+                        loggedBadge = `<span class="sug-logged same">✓ logged ${_uStr(lu)}</span>`;
+                    } else if (gameHasLogged) {                  // new market on a bet game
+                        sugBtnCls = 'primary up'; sugBtnLabel = 'Log new pick';
+                        loggedBadge = `<span class="sug-logged up">＋ NEW</span>`;
                     }
                 }
                 // PMM-aware display. If PMM has a market for this side,
@@ -1557,7 +1571,7 @@
                     ${whyHtml}
                     ${s.gates_cleared ? '' : `<div class="soft-note">Sharp gate not cleared (need sharp ≥ 4). Chalk-flat market; this is the best read available — treat as 1u lean only.</div>`}
                     ${_canBet ? `<div class="actions">
-                        <button class="primary ${_tierCls(s.units)}" onclick="openLog(false, ${i})">${(s.units > ((_loggedPicks.get(d.market_id) || new Map()).get(s.market_type) || 0) && (_loggedPicks.get(d.market_id) || new Map()).has(s.market_type)) ? `Add to ${_uStr(s.units)}` : 'Log this pick'}</button>
+                        <button class="${sugBtnCls}" onclick="openLog(false, ${i})">${sugBtnLabel}</button>
                         <button onclick="copyForClaude()">Copy for Claude</button>
                     </div>` : ''}
                 </div>`;

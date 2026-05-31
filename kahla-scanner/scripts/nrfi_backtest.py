@@ -85,9 +85,13 @@ _pitcher_cache: dict[int, float | None] = {}
 _team_obp_cache: dict[int, float | None] = {}
 
 
+_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/124 Safari/537.36")
+
+
 def _get(url: str, params: dict | None = None) -> dict | None:
     try:
-        r = httpx.get(url, params=params or {}, timeout=15)
+        r = httpx.get(url, params=params or {}, headers={"User-Agent": _UA}, timeout=15)
         if r.status_code != 200:
             return None
         return r.json()
