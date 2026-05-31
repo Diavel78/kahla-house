@@ -1775,10 +1775,18 @@ ML_CHALK_FAIR_CAP = -140
 # size with quarter-Kelly. These per-signal coefficients are a
 # conservative first guess; the CLV column (migration 007) measures the
 # bot's realized edge over time so Stage-4 self-tuning can replace them
-# with calibrated numbers. Sizing snaps to the existing 1/3/5u tiers:
-# a pick that doesn't clear the sharp gate is always a 1u low lean; a
-# gated pick is 3u medium, promoted to 5u high only when the ¼-Kelly
-# stake clears KELLY_HIGH_PCT (genuinely strong multi-signal agreement).
+# with calibrated numbers. Sizing snaps to the existing 1/3/5u tiers.
+#
+# 1u IS THE DEFAULT BET (rev. May 2026). Standard bankroll discipline:
+# ~90% of plays are 1u, 3u/5u are the rare strong-conviction spots. So a
+# pick that CLEARS the sharp gate is still a 1u low bet UNLESS the
+# ¼-Kelly stake is genuinely large — only then does it step up to 3u
+# (≥ KELLY_MED_PCT) or 5u (≥ KELLY_HIGH_PCT). A pick that does NOT clear
+# the gate is also a 1u low (forced lean). The difference between a real
+# 1u pick and a 1u lean is `gates_cleared` (the card heading + button
+# color key off it), NOT the unit size. Before this rev every gated pick
+# defaulted to 3u, so the bot never produced a 1u recommendation — wrong
+# for unit-based betting where 1u is the workhorse.
 KELLY_FRACTION       = 0.25     # quarter-Kelly — survives variance
 EDGE_PER_SHARP_POINT = 0.40     # pp of edge per point of sharp_score (≤4pp at 10)
 EDGE_PER_SPLITS_PP   = 0.10     # pp of edge per aligned money−bets pp (≤3pp at 30)
@@ -1811,31 +1819,46 @@ MODEL_SIZING_SPORTS  = {"NBA", "MLB"}  # NBA backtest-proven; MLB pitcher-aware,
 MODEL_EDGE_WEIGHT    = 0.25     # fraction of (model_prob − PIN_fair) credited
 MODEL_EDGE_CAP_PP    = 1.5      # cap on the nudge — widen as CLV proves the model
 EDGE_CAP_PP          = 6.0      # hard cap so a crude input can't blow up sizing
-KELLY_HIGH_PCT       = 2.5      # ¼-Kelly stake ≥ this %BR → 5u high
+# Two ¼-Kelly stake thresholds gate the step-up off the default 1u. Set
+# so the BULK of gated picks stay 1u: with edge_pp dominated by
+# sharp_score·0.40, a typical sharp-3-to-6 read yields a ¼-Kelly stake
+# of ~0.6-1.6% → 1u. 3u needs ~4pp of edge (sharp ≈7, or sharp ≈5 with
+# aligned splits/model); 5u needs a near-cap multi-signal read. Raised
+# from the old single 2.5% (which made 3u the floor) to make 3u/5u the
+# exception, not the rule.
+KELLY_MED_PCT        = 2.0      # ¼-Kelly stake ≥ this %BR → 3u medium
+KELLY_HIGH_PCT       = 3.0      # ¼-Kelly stake ≥ this %BR → 5u high
 
 
 def _kelly_units(fair_prob, fair_american, edge_pp,
                  gates_cleared) -> tuple[int, str, float]:
     """(units, confidence, kelly_pct). Quarter-Kelly stake from the
-    signal-derived edge, snapped to the 1/3/5u tiers. Ungated picks are
-    always a 1u low lean. Gated picks float between 3u and 5u by stake."""
+    signal-derived edge, snapped to the 1/3/5u tiers.
+
+    1u is the DEFAULT — both for forced leans (gate not cleared) AND for
+    real picks whose ¼-Kelly stake is ordinary. A real pick only steps up
+    to 3u (≥ KELLY_MED_PCT) or 5u (≥ KELLY_HIGH_PCT) on a genuinely large
+    stake. Real-pick-vs-lean is conveyed by `gates_cleared`, not units."""
     if not gates_cleared:
         return 1, "low", 0.0
+    # Gated pick but no usable edge estimate → standard 1u bet.
     if fair_prob is None or fair_american is None or not edge_pp or edge_pp <= 0:
-        return 3, "medium", 0.0
+        return 1, "low", 0.0
     true_p = min(max(fair_prob + edge_pp / 100.0, 0.01), 0.99)
     try:
         dec = _american_to_decimal(int(fair_american))
     except (TypeError, ValueError):
-        return 3, "medium", 0.0
+        return 1, "low", 0.0
     b = dec - 1.0
     if b <= 0:
-        return 3, "medium", 0.0
+        return 1, "low", 0.0
     f = true_p - (1.0 - true_p) / b      # full Kelly fraction
     kelly_pct = max(0.0, f) * KELLY_FRACTION * 100.0
     if kelly_pct >= KELLY_HIGH_PCT:
         return 5, "high", round(kelly_pct, 2)
-    return 3, "medium", round(kelly_pct, 2)
+    if kelly_pct >= KELLY_MED_PCT:
+        return 3, "medium", round(kelly_pct, 2)
+    return 1, "low", round(kelly_pct, 2)
 
 
 # ──────────────────────────── Power rating ────────────────────────────
@@ -2758,10 +2781,12 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
     Returns [] when no PIN snapshot exists on any side of any market.
 
     Sizing is quarter-Kelly off the signal-derived edge_pp (sharp +
-    aligned splits + power-rating confirmation), snapped to tiers:
-      gate not cleared (sharp < 4)       → 1u low (forced lean)
-      gate cleared, ¼-Kelly < 2.5%BR     → 3u medium
-      gate cleared, ¼-Kelly ≥ 2.5%BR     → 5u high
+    aligned splits + power-rating confirmation), snapped to tiers —
+    1u is the DEFAULT, 3u/5u are rare strong-conviction step-ups:
+      gate not cleared (sharp < 3)       → 1u low (forced lean)
+      gate cleared, ¼-Kelly < 2.0%BR     → 1u low (standard pick)
+      gate cleared, 2.0%BR ≤ ¼K < 3.0%BR → 3u medium
+      gate cleared, ¼-Kelly ≥ 3.0%BR     → 5u high
     Whale (10u) stays disabled. See _kelly_units / EDGE_* constants.
     """
     candidates: list[dict] = []
@@ -2854,9 +2879,10 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
     # Best candidate per market_type (with Kelly sizing applied).
     # Sizing is now quarter-Kelly off the signal-derived edge_pp, snapped
     # to the 1/3/5u tiers, replacing the old fixed "sharp≥5 AND splits≥5"
-    # thresholds. The sharp gate (gates_cleared) still decides whether a
-    # pick is real (≥3u) vs a forced 1u lean; Kelly only chooses 3u vs 5u
-    # among gated picks. Whale (10u) stays disabled — live results showed
+    # thresholds. 1u is the default for a real pick; Kelly only promotes
+    # to 3u/5u on a large stake. The sharp gate (gates_cleared) decides
+    # real-pick (blue "Bot Suggests") vs forced lean (grey) — independent
+    # of unit size, so a real pick can be 1u. Whale (10u) stays disabled — live results showed
     # it was a FADE indicator (23% over 35 picks). The CLV column will
     # let Stage-4 recalibrate the edge coefficients from realized data.
     by_market: dict[str, dict] = {}

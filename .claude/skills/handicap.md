@@ -259,13 +259,19 @@ on Polymarket at PIN's devigged fair. Confirming signals come from
 public splits divergence and qualitative reads (injuries, lineups,
 weather, scratches).
 
+**1u is the DEFAULT — most picks should be 1u.** Standard bankroll
+discipline: ~90% of bets are 1u, 3u and 5u are the rare strong-conviction
+plays. Don't talk yourself into 3u/5u because the read "feels good" — those
+sizes are for when multiple independent signals stack on the same side.
+When in doubt, it's a 1u.
+
 Map confidence chip → units:
 
 | Confidence | Units | When to use |
 |-----|-----|-----|
-| `low`    | 1u  | Forced lean. Sharp score < 3 (chalk-flat market), no splits divergence. Print it for tracking — don't talk yourself into it. |
-| `medium` | 3u  | Sharp ≥ 3, single signal (sharp move alone, no splits or injury edge to confirm). Most picks land here. |
-| `high`   | 5u  | Sharp ≥ 5 AND splits divergence ≥ 5pp on the same side, OR sharp ≥ 3 + a real qualitative edge (key injury, scratched ace, etc.). Top sizing tier. |
+| `low`    | 1u  | **The default — where most picks land.** Either a real pick (gate cleared, sharp ≥ 3) at an ordinary edge, OR a forced lean (gate not cleared). The real-pick-vs-lean distinction is in how you frame it, not the size — 1u is the workhorse either way. |
+| `medium` | 3u  | Uncommon. Strong multi-signal agreement: sharp ≈7+, OR sharp ≥ 5 with aligned splits (≥ 5pp same side) / a real qualitative edge (key injury, scratched ace). Not "a sharp move alone." |
+| `high`   | 5u  | Rare. Near-max conviction — high sharp + aligned public money + an independent qualitative/model edge all pointing the same way. If you're reaching to justify it, it's a 3u. |
 
 **Whale (10u) tier is disabled.** Live data over 35 picks showed
 `sharp ≥ 7 AND splits ≥ 10pp aligned` hitting 23% (~3 std devs
