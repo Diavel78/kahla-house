@@ -5447,6 +5447,51 @@ def _live_market_prob(bet: dict, away: str, home: str, client, pmm_cache: dict):
     return round(mid_prob, 4) if isinstance(mid_prob, (int, float)) else None
 
 
+def _live_win_estimate(bet: dict, m: dict, sport: str):
+    """Lightweight live win-expectancy from the current game state — the
+    'logical guess' used when Polymarket has no live in-play price. Models
+    the remaining game as a normal random walk: projected outcome = current
+    state, with uncertainty that shrinks toward zero as the game ends (so a
+    late lead reads ~100%). MLB only for now (it reasons in innings); other
+    sports return None and fall back to a grey gauge.
+
+    P(win) = Φ(edge / σ), σ ∝ √(innings left). At the final out σ→0, so a
+    decided game snaps to ~100/0 even before ESPN flips the state to post."""
+    if (sport or "").upper() != "MLB":
+        return None
+    a, h = m.get("away_score"), m.get("home_score")
+    if a is None or h is None:
+        return None
+    import math
+    try:
+        period = int(m.get("period") or 0)
+    except (TypeError, ValueError):
+        period = 0
+    status = (m.get("display_status") or "").lower()
+    is_top = "top" in status
+    over = (m.get("state") == "post") or any(k in status for k in ("final", "end", "f/"))
+    # Full innings of baseball left (both teams), rough but enough.
+    innings_left = 0.0 if (over and period >= 9) else max(0.0, (9 - period) + (0.5 if is_top else 0.0))
+
+    def _phi(x):
+        return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+    mt, side, line = bet.get("market_type"), bet.get("side"), bet.get("entry_line")
+    sigma = max(0.1, 1.3 * math.sqrt(innings_left))   # run-differential spread
+    if mt == "moneyline":
+        lead = (h - a) if side == "home" else (a - h)
+        return round(_phi(lead / sigma), 4)
+    if mt == "spread" and line is not None:
+        cover = ((h - a) + float(line)) if side == "home" else ((a - h) + float(line))
+        return round(_phi(cover / sigma), 4)
+    if mt == "total" and line is not None:
+        proj = (a + h) + innings_left * 0.95          # ~0.95 combined runs/inning
+        sig_t = max(0.3, 1.3 * math.sqrt(innings_left))
+        p_over = _phi((proj - float(line)) / sig_t)
+        return round(p_over if side == "over" else (1.0 - p_over), 4)
+    return None
+
+
 @app.route("/api/handicapper/live")
 @admin_required   # your in-progress bets — only the admin logs, so admin-only
 def api_handicapper_live():
@@ -5480,9 +5525,11 @@ def api_handicapper_live():
         if not m or m.get("state") not in ("in", "live", "post"):
             continue   # only in-progress (or just-final, awaiting grade)
 
+        # Win prob, in priority: decided (final / NRFI 1st done) → live
+        # Polymarket price → model estimate from the game state → grey.
         win_prob = _live_decided_prob(bet, m)
+        prob_src = "decided" if win_prob is not None else None
         if win_prob is None:
-            # Not decided → live market price. Init the PMM client lazily.
             if client is None:
                 try:
                     client = get_client()
@@ -5490,6 +5537,12 @@ def api_handicapper_live():
                     client = None
             if client is not None:
                 win_prob = _live_market_prob(bet, away, home, client, pmm_cache)
+                if win_prob is not None:
+                    prob_src = "market"
+        if win_prob is None:
+            win_prob = _live_win_estimate(bet, m, bet.get("sport"))
+            if win_prob is not None:
+                prob_src = "model"
 
         out.append({
             "id":            bet["id"],
@@ -5504,6 +5557,7 @@ def api_handicapper_live():
             "entry_line":    bet.get("entry_line"),
             "score":         m,
             "win_prob":      win_prob,
+            "prob_src":      prob_src,   # decided | market | model
         })
     return jsonify({"ok": True, "live": out})
 
