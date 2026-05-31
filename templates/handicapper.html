@@ -734,7 +734,9 @@
         if (diffH < 24) return `${Math.round(diffH)}h ago`;
         return d.toLocaleString([], {month:'short', day:'numeric'});
     }
-    function _shortMarket(mt) { return ({moneyline:'ML', spread:'SPR', total:'TOT'})[mt] || mt; }
+    function _shortMarket(mt) { return ({moneyline:'ML', spread:'SPR', total:'TOT', nrfi:'1ST'})[mt] || mt; }
+    // NRFI uses yes/no sides → human labels NRFI (no run) / YRFI (run).
+    function _nrfiSideLabel(side) { return side === 'no' ? 'NRFI' : side === 'yes' ? 'YRFI' : (side || '').toUpperCase(); }
     function _esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 
     function _fmtAgo(iso) {
@@ -829,9 +831,11 @@
 
     function _renderPick(r, kind) {
         const market = _shortMarket(r.market_type);
-        const sideLabel = (r.market_type === 'total')
-            ? (r.side || '').toUpperCase()
-            : (r.side === 'home' ? 'HOME' : 'AWAY');
+        const sideLabel = (r.market_type === 'nrfi')
+            ? _nrfiSideLabel(r.side)
+            : (r.market_type === 'total')
+                ? (r.side || '').toUpperCase()
+                : (r.side === 'home' ? 'HOME' : 'AWAY');
         const lineFrag = (r.entry_line == null) ? '' : ` ${_fmtPt(r.entry_line)}`;
         const sigChips = [];
         sigChips.push(`<span class="chip units-${r.units}">${r.units}u</span>`);
@@ -1607,6 +1611,47 @@
             </div>`;
         }
 
+        // NRFI / YRFI — first-inning model (MLB only). OUR-NUMBER prop:
+        // no line in our feed, so we show the model fair %/American + a
+        // lean vs the ~52.5% league baseline. The user shops a book/PMM
+        // price beating our fair. Log buttons seed market_type='nrfi'.
+        if (d.nrfi) {
+            const n = d.nrfi;
+            const nrfiPct = (n.p_nrfi * 100).toFixed(0);
+            const yrfiPct = (n.p_yrfi * 100).toFixed(0);
+            const leanLabel = n.lean === 'no' ? 'NRFI' : n.lean === 'yes' ? 'YRFI' : null;
+            const diff = n.diff_vs_baseline_pp;
+            const leanFrag = leanLabel
+                ? `<div class="pr-line">Lean <b>${leanLabel}</b> — model ${diff >= 0 ? '+' : ''}${diff}pp vs ~${(n.baseline_nrfi*100).toFixed(0)}% baseline. Shop a price beating <b>${_fmtAmer(n[n.lean === 'no' ? 'nrfi_fair_american' : 'yrfi_fair_american'])}</b>.</div>`
+                : `<div class="pr-line" style="color:var(--text-muted)">No edge vs the ~${(n.baseline_nrfi*100).toFixed(0)}% baseline — near a coin flip, pass unless you find a soft price.</div>`;
+            const whyHtml = (n.reasons || []).length
+                ? `<ul class="why" style="margin-top:10px">${n.reasons.map(b => `<li>${_esc(b)}</li>`).join('')}</ul>`
+                : '';
+            const inp = n.inputs || {};
+            const spNote = (inp.home_sp_known === false || inp.away_sp_known === false)
+                ? ` <span style="color:var(--orange)">(starter unannounced → league-avg used)</span>` : '';
+            const obpNote = (inp.home_obp_src === 'team' || inp.away_obp_src === 'team')
+                ? ` · top-of-order from team OBP (lineup not posted yet)` : ` · top-of-order from posted lineup`;
+            const btns = _canBet ? `<div class="actions" style="margin-top:10px">
+                <button class="primary" onclick="logNrfi('no')">Log NRFI @ ${_fmtAmer(n.nrfi_fair_american)}</button>
+                <button onclick="logNrfi('yes')">Log YRFI @ ${_fmtAmer(n.yrfi_fair_american)}</button>
+            </div>` : '';
+            html += `<div class="card">
+                <div class="card-head">
+                    <h3>First inning — NRFI / YRFI</h3>
+                    <span class="ref-tag" title="Model fair from the opposing starters + top-of-order on-base + park + temp. P(NRFI)=q_top·q_bot, two independent scoreless half-innings. No line in our feed — shop a book/Polymarket price beating the fair.">OUR NUMBER</span>
+                </div>
+                <div class="pr-grid">
+                    <div class="pr-cell"><span class="pr-lbl">NRFI (no run)</span><span class="pr-val">${nrfiPct}% <span class="pr-fair">${_fmtAmer(n.nrfi_fair_american)}</span></span></div>
+                    <div class="pr-cell"><span class="pr-lbl">YRFI (run scores)</span><span class="pr-val">${yrfiPct}% <span class="pr-fair">${_fmtAmer(n.yrfi_fair_american)}</span></span></div>
+                </div>
+                ${leanFrag}
+                ${whyHtml}
+                <div class="wx-foot">scoreless halves: away ${(n.q_top*100).toFixed(0)}% · home ${(n.q_bot*100).toFixed(0)}%${obpNote}${spNote} · v1 — calibrating via backtest</div>
+                ${btns}
+            </div>`;
+        }
+
         // Weather — outdoor MLB/NFL venues only (free Open-Meteo).
         // Reference context for the analyst; not auto-sized.
         if (d.weather) {
@@ -1853,6 +1898,39 @@
         document.getElementById('lmUnits').value      = '1';
         document.getElementById('lmConfidence').value = 'low';
         document.getElementById('lmReasons').value    = '';
+        document.getElementById('lmAnalysis').value   = '';
+        _lmStatus(null, '');
+        document.getElementById('logModal').classList.add('show');
+    }
+
+    function logNrfi(side) {
+        // Seed the log modal for an NRFI/YRFI pick. side: 'no' (NRFI) /
+        // 'yes' (YRFI). entry_price = the model's fair American for that
+        // side (the user shops a better price; resolver grades W/L off
+        // the 1st-inning linescore). No line.
+        if (!_lastDossier || !_lastDossier.nrfi) return;
+        const n = _lastDossier.nrfi;
+        const prob = side === 'no' ? n.p_nrfi : n.p_yrfi;
+        const fair = side === 'no' ? n.nrfi_fair_american : n.yrfi_fair_american;
+        const label = _nrfiSideLabel(side);
+        _pendingPick = {
+            market_id:   _lastDossier.market_id,
+            market_type: 'nrfi',
+            side:        side,
+            book:        'PMM',
+            price:       fair,
+            line:        null,
+            fair_prob:   prob,
+            edge_pp:     null,
+            sharp_score: null,
+            label:       `1st Inning · ${label} @ ${_fmtAmer(fair)} (model fair)`,
+            seed_units:  1,
+            seed_conf:   'low',
+        };
+        document.getElementById('lmSelection').value  = _pendingPick.label;
+        document.getElementById('lmUnits').value      = '1';
+        document.getElementById('lmConfidence').value = 'low';
+        document.getElementById('lmReasons').value    = (n.reasons || []).join('\n');
         document.getElementById('lmAnalysis').value   = '';
         _lmStatus(null, '');
         document.getElementById('logModal').classList.add('show');
@@ -2152,7 +2230,11 @@
                 const pr = _lastDossier && _lastDossier.power_rating;
                 if (!pr) return null;
                 let me = null;
-                if (_pendingPick.market_type === 'total') {
+                if (_pendingPick.market_type === 'nrfi') {
+                    // First-inning model isn't the game power rating — no
+                    // ML/total edge applies. Leave model edge null.
+                    me = null;
+                } else if (_pendingPick.market_type === 'total') {
                     if (pr.total_lean != null && pr.total_diff != null) {
                         me = (pr.total_lean === _pendingPick.side)
                             ? Math.abs(pr.total_diff) : -Math.abs(pr.total_diff);
@@ -2229,9 +2311,11 @@
         // "Cubs @ Pirates" main line + "TOTAL · UNDER 8.5 @ -109" sub.
         const game = (r.event_name || '').trim();
         const market = _shortMarket(r.market_type);
-        const sideLabel = (r.market_type === 'total')
-            ? (r.side || '').toUpperCase()
-            : (r.side === 'home' ? 'HOME' : 'AWAY');
+        const sideLabel = (r.market_type === 'nrfi')
+            ? _nrfiSideLabel(r.side)
+            : (r.market_type === 'total')
+                ? (r.side || '').toUpperCase()
+                : (r.side === 'home' ? 'HOME' : 'AWAY');
         const ln = (r.entry_line == null) ? '' : ` ${_fmtPt(r.entry_line)}`;
         const units = (r.units != null) ? ` · ${r.units}u` : '';
         return { game, sub: `${market} · ${sideLabel}${ln}${units}` };

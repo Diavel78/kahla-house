@@ -2734,6 +2734,225 @@ def _fetch_weather(sport: str, home: str | None,
     return out
 
 
+# ─────────────────────── NRFI / YRFI first-inning model ───────────────────────
+#
+# The Pick Bot's first DERIVATIVE market. NRFI = No Run First Inning
+# (neither team scores in the 1st); YRFI = a run scores top or bottom of
+# the 1st. MLB only. Web-only (like the power model) — the CLI dossier
+# has no projection logic, so this isn't mirrored into
+# kahla-scanner/scripts/handicapper.py.
+#
+# THE CORE INSIGHT (why this isn't a scaled game total):
+#   1. The first inning ALWAYS faces the top of the order (hitters 1-2-3).
+#      A team can be league-average overall but run a monster 1-2-3 — so
+#      the offense input is the top-of-order on-base, NOT team RPG.
+#   2. It's TWO independent half-innings vs two different pitchers, so:
+#         P(NRFI) = q_top · q_bot
+#      top half:    AWAY top-of-order bats vs HOME starting pitcher
+#      bottom half: HOME top-of-order bats vs AWAY starting pitcher
+#
+# Each q (scoreless-half prob) maps an "expected first-inning runs" index
+# (xr) through a CALIBRATED LOGISTIC — deliberately NOT raw Poisson.
+# Half-inning run-scoring is zero-inflated/bursty (lots of 1-2-3 innings
+# then crooked numbers), so Poisson(λ≈0.53) overpredicts scoring (gives
+# YRFI ≈ 63% vs the observed ~47-50%). We anchor the logistic so
+# league-average inputs land at NRFI_Q_BASE (≈0.725 → NRFI ≈ 0.525),
+# matching the real baseline; the slope NRFI_Q_SLOPE is a provisional
+# guess the backtest harness (scripts/nrfi_backtest.py) recalibrates.
+#
+#   xr = NRFI_XR0 · off_ratio · pitch_ratio · park_ratio · wx_ratio
+#     off_ratio   = top_order_obp / NRFI_LG_OBP      (top-of-order on-base)
+#     pitch_ratio = opposing_sp_ra9 / NRFI_LG_RA9    (the starter)
+#     park_ratio  = park_factor / 100
+#     wx_ratio    = small temp-only nudge (wind needs park orientation we
+#                   don't encode → surfaced as reference, not sized; same
+#                   stance as the power model's weather layer)
+#
+# OUR-NUMBER-ONLY: there's no NRFI line in our odds feed, so the card
+# shows the model's fair %/American + a lean RELATIVE to the league
+# baseline (our number materially off ~50/50 is where the shopping value
+# is). The user shops a book/Polymarket price beating our fair.
+NRFI_XR0       = 0.53     # league-avg expected runs in a first half-inning
+NRFI_LG_OBP    = 0.315    # league-average on-base percentage
+NRFI_LG_RA9    = 4.30     # league-average runs allowed / 9 (matches _starter_runs scale)
+NRFI_Q_BASE    = 0.725    # scoreless-half prob at league-average inputs (→ NRFI ≈ 0.525)
+NRFI_Q_SLOPE   = 2.0      # logistic sensitivity to xr — backtest-calibrated
+NRFI_TOP_BOOST = 1.10     # top-of-order OBP ≈ 10% above team OBP (fallback only)
+NRFI_LEAN_PP   = 4.0      # |our NRFI% − baseline NRFI%| ≥ this → actionable lean
+
+
+def _nrfi_half_scoreless(xr: float) -> float:
+    """Map expected first-half-inning runs (xr) to P(scoreless half).
+    Calibrated logistic anchored so xr == NRFI_XR0 → NRFI_Q_BASE."""
+    k0 = math.log(NRFI_Q_BASE / (1.0 - NRFI_Q_BASE)) + NRFI_Q_SLOPE * NRFI_XR0
+    z = k0 - NRFI_Q_SLOPE * max(0.0, xr)
+    # Clamp to keep a single scoreless prob sane (0.40–0.92 covers the
+    # realistic per-half range; the product still spans ~0.16–0.85 NRFI).
+    return min(0.92, max(0.40, 1.0 / (1.0 + math.exp(-z))))
+
+
+def _nrfi_team_obp(team_id, season: int) -> float | None:
+    """Team season OBP from MLB Stats API. None on any failure."""
+    if not team_id:
+        return None
+    data = _http_get(f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats",
+                     params={"stats": "season", "group": "hitting", "season": season})
+    if not data:
+        return None
+    try:
+        sp = ((data.get("stats") or [{}])[0].get("splits") or [{}])
+        s = (sp[0].get("stat") or {}) if sp else {}
+        return _to_float(s.get("obp"))
+    except Exception:
+        return None
+
+
+def _nrfi_lineup_top_obp(box: dict | None, side: str) -> float | None:
+    """Average season OBP of the posted top-3 batting-order spots for one
+    side, read from the boxscore's per-player seasonStats. None when the
+    lineup isn't posted yet (~3-4h pre-game) or OBP is missing — caller
+    falls back to team OBP × NRFI_TOP_BOOST.
+
+    battingOrder is a string: '100'/'200'/'300' = the 1/2/3 hole starters
+    ('101' etc. = subs in that slot, ignored)."""
+    if not box:
+        return None
+    players = ((box.get("teams") or {}).get(side) or {}).get("players") or {}
+    top: dict[int, float] = {}
+    for p in players.values():
+        bo = p.get("battingOrder")
+        if not bo:
+            continue
+        try:
+            slot = int(bo) // 100
+        except (TypeError, ValueError):
+            continue
+        if slot not in (1, 2, 3) or int(bo) % 100 != 0:
+            continue  # only the starting 1/2/3 hitters
+        obp = _to_float((((p.get("seasonStats") or {}).get("batting") or {}).get("obp")))
+        if obp is not None:
+            top[slot] = obp
+    vals = list(top.values())
+    if not vals:
+        return None
+    return sum(vals) / len(vals)
+
+
+def _nrfi_model(sport: str, pitchers: dict | None, away: str | None,
+                home: str | None, game_pk, weather: dict | None) -> dict | None:
+    """First-inning NRFI/YRFI model. MLB only; None otherwise or when we
+    can't build a usable input set. Silent-fail throughout — never raises
+    into the dossier. See the section header for the math + rationale."""
+    if sport != "MLB" or not (away and home):
+        return None
+    season = datetime.now(timezone.utc).year
+    away_p = (pitchers or {}).get("away") or None
+    home_p = (pitchers or {}).get("home") or None
+
+    # Opposing starter run-prevention (RA9 talent blend). Missing/​unannounced
+    # starter falls back to the league average so we still produce a number.
+    home_sp = _starter_runs(home_p, NRFI_LG_RA9)
+    away_sp = _starter_runs(away_p, NRFI_LG_RA9)
+    home_sp_used = home_sp if home_sp is not None else NRFI_LG_RA9
+    away_sp_used = away_sp if away_sp is not None else NRFI_LG_RA9
+
+    # Top-of-order on-base. Prefer the posted lineup's 1/2/3 hitters
+    # (the structural edge); fall back to team OBP × boost before the
+    # lineup posts. If we can't get OBP at all, bail — without an offense
+    # input the model is just a pitcher number and not worth showing.
+    box = (_http_get(f"https://statsapi.mlb.com/api/v1/game/{game_pk}/boxscore")
+           if game_pk else None)
+    away_id = (pitchers or {}).get("away_team_id")
+    home_id = (pitchers or {}).get("home_team_id")
+
+    def _obp_for(side: str, team_id) -> tuple[float | None, str]:
+        lo = _nrfi_lineup_top_obp(box, side)
+        if lo is not None:
+            return lo, "lineup"
+        team = _nrfi_team_obp(team_id, season)
+        if team is not None:
+            return team * NRFI_TOP_BOOST, "team"
+        return None, "none"
+
+    away_obp, away_src = _obp_for("away", away_id)
+    home_obp, home_src = _obp_for("home", home_id)
+    if away_obp is None or home_obp is None:
+        return None
+
+    park = _park_factor(home) / 100.0
+
+    # Weather: temp-only nudge (warm air carries; cold suppresses). Wind
+    # needs park orientation we don't encode, so it's reference-only —
+    # consistent with the power model's stance. Domes / no forecast → 1.0.
+    wx = 1.0
+    temp_f = None
+    if weather and not weather.get("dome"):
+        temp_f = _to_float(weather.get("temp_f"))
+        if temp_f is not None:
+            wx = min(1.10, max(0.94, 1.0 + (temp_f - 70.0) * 0.002))
+
+    # Expected first-half-inning runs per side.
+    xr_top = NRFI_XR0 * (away_obp / NRFI_LG_OBP) * (home_sp_used / NRFI_LG_RA9) * park * wx
+    xr_bot = NRFI_XR0 * (home_obp / NRFI_LG_OBP) * (away_sp_used / NRFI_LG_RA9) * park * wx
+    q_top = _nrfi_half_scoreless(xr_top)   # away scoreless in top 1st
+    q_bot = _nrfi_half_scoreless(xr_bot)   # home scoreless in bottom 1st
+    p_nrfi = q_top * q_bot
+    p_yrfi = 1.0 - p_nrfi
+
+    baseline_nrfi = NRFI_Q_BASE * NRFI_Q_BASE
+    diff_pp = (p_nrfi - baseline_nrfi) * 100.0
+    if diff_pp >= NRFI_LEAN_PP:
+        lean = "no"          # model NRFI well above baseline → NRFI value
+    elif diff_pp <= -NRFI_LEAN_PP:
+        lean = "yes"         # model YRFI well above baseline → YRFI value
+    else:
+        lean = None
+
+    # Plain-English reasons (mirror the suggestion-card bullet style).
+    reasons: list[str] = []
+    sp_bits = []
+    if home_p and home_p.get("name"):
+        sp_bits.append(f"{home_p['name']} {home_sp_used:.2f} RA9")
+    if away_p and away_p.get("name"):
+        sp_bits.append(f"{away_p['name']} {away_sp_used:.2f} RA9")
+    if sp_bits:
+        reasons.append("Starters (1st-inning run prevention): " + " · ".join(sp_bits))
+    reasons.append(
+        f"Top-of-order OBP — {away}: {away_obp:.3f} ({away_src}), "
+        f"{home}: {home_obp:.3f} ({home_src})")
+    if abs(park - 1.0) >= 0.02:
+        reasons.append(f"Park run factor {round(park*100)} ({'hitter' if park > 1 else 'pitcher'}-friendly)")
+    if temp_f is not None and abs(wx - 1.0) >= 0.01:
+        reasons.append(f"Temp {round(temp_f)}°F ({'warm — runs up' if wx > 1 else 'cold — runs down'})")
+    reasons.append(
+        f"Model NRFI {round(p_nrfi*100)}% vs ~{round(baseline_nrfi*100)}% league baseline → "
+        + ("lean NRFI" if lean == "no" else "lean YRFI" if lean == "yes"
+           else "no edge vs baseline"))
+
+    return {
+        "p_nrfi":              round(p_nrfi, 4),
+        "p_yrfi":              round(p_yrfi, 4),
+        "nrfi_fair_american":  _prob_to_american(p_nrfi),
+        "yrfi_fair_american":  _prob_to_american(p_yrfi),
+        "q_top":               round(q_top, 4),
+        "q_bot":               round(q_bot, 4),
+        "xr_top":              round(xr_top, 3),
+        "xr_bot":              round(xr_bot, 3),
+        "lean":                lean,             # 'no' (NRFI) / 'yes' (YRFI) / None
+        "diff_vs_baseline_pp": round(diff_pp, 1),
+        "baseline_nrfi":       round(baseline_nrfi, 4),
+        "gates_cleared":       lean is not None,
+        "inputs": {
+            "away_obp": round(away_obp, 3), "home_obp": round(home_obp, 3),
+            "away_obp_src": away_src, "home_obp_src": home_src,
+            "home_sp_ra9": round(home_sp_used, 2), "away_sp_ra9": round(away_sp_used, 2),
+            "home_sp_known": home_sp is not None, "away_sp_known": away_sp is not None,
+            "park_factor": round(park * 100), "temp_f": temp_f, "wx_mult": round(wx, 3),
+        },
+        "reasons":             reasons,
+    }
+
+
 def _splits_signal_pp(splits: dict | None, sharp_side: str | None,
                       market_type: str) -> float:
     """Return the splits-divergence percentage points for the sharp side.
@@ -3138,6 +3357,19 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
                                  event_start, injury_pen, goalie_blk, lineup_dock)
     weather = _fetch_weather(sport, home, event_start) if (home and event_start) else None
 
+    # NRFI / YRFI first-inning model (MLB only) — an OUR-NUMBER prop
+    # priced from the opposing starters + top-of-order on-base + park +
+    # temp. No line in our feed, so it's surfaced as a standalone card
+    # with a lean-vs-baseline; the user shops a book/PMM price. Silent-fail.
+    nrfi = None
+    if sport == "MLB":
+        try:
+            nrfi = _nrfi_model(sport, (mlb_extra or {}).get("probable_pitchers"),
+                               away, home, _pp.get("game_pk"), weather)
+        except Exception as e:
+            log.warning("nrfi model failed: %s", e)
+            nrfi = None
+
     suggestions = _suggest_picks(odds, splits, power_rating)
     # Keep the singular `suggestion` field as an alias for the top pick
     # so any caller still expecting it doesn't break. New code should
@@ -3204,6 +3436,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         "team_compare":    team_compare,
         "weather":         weather,
         "power_rating":    power_rating,
+        "nrfi":            nrfi,
         "suggestion":      suggestion,
         "suggestions":     suggestions,
         "alt_matches":     [

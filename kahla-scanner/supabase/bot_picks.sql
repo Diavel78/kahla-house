@@ -9,7 +9,8 @@
 --   1. Sized 1/3/5 units (confidence-tiered) instead of flat 1u.
 --   2. Carries the user's question + the analyst write-up so each pick
 --      is a self-contained record we can review later.
---   3. Markets limited to ML / SPR / TOT — no props.
+--   3. Markets: ML / SPR / TOT, plus NRFI/YRFI (first-inning, added in
+--      migration 008 — market_type 'nrfi', side 'yes'/'no'). No other props.
 --
 -- Run in Supabase SQL editor.
 
