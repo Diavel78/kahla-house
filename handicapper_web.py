@@ -1739,7 +1739,13 @@ def _mlb_pitcher_block(p: dict | None) -> dict:
 #   2. Public splits divergence (% money − % bets on the sharp side)
 # Combined score = how much the read agrees with itself. The
 # Polymarket entry target = PIN devigged American on the sharp side.
-SHARP_SCORE_MIN  = 4   # Sharp signal threshold.
+SHARP_SCORE_MIN  = 3   # Sharp signal threshold. Lowered 4→3 May 2026:
+                       # at 4 the recency-weighted score left most of the
+                       # slate as grey leans (you need fresh steam in the
+                       # last ~hour to clear 4). A ~3¢ recent PIN move (or
+                       # a bigger older one) is a real-enough signal to bet.
+                       # Late-steam recency weighting is untouched — this
+                       # only widens what counts as a "real pick" vs lean.
 SPLITS_MIN_PP    = 10  # |money% − bets%| considered "material".
 SHARP_WEIGHT     = 0.7
 SPLITS_WEIGHT    = 0.3

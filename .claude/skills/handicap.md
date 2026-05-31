@@ -263,9 +263,9 @@ Map confidence chip → units:
 
 | Confidence | Units | When to use |
 |-----|-----|-----|
-| `low`    | 1u  | Forced lean. Sharp score < 4 (chalk-flat market), no splits divergence. Print it for tracking — don't talk yourself into it. |
-| `medium` | 3u  | Sharp ≥ 4, single signal (sharp move alone, no splits or injury edge to confirm). Most picks land here. |
-| `high`   | 5u  | Sharp ≥ 5 AND splits divergence ≥ 5pp on the same side, OR sharp ≥ 4 + a real qualitative edge (key injury, scratched ace, etc.). Top sizing tier. |
+| `low`    | 1u  | Forced lean. Sharp score < 3 (chalk-flat market), no splits divergence. Print it for tracking — don't talk yourself into it. |
+| `medium` | 3u  | Sharp ≥ 3, single signal (sharp move alone, no splits or injury edge to confirm). Most picks land here. |
+| `high`   | 5u  | Sharp ≥ 5 AND splits divergence ≥ 5pp on the same side, OR sharp ≥ 3 + a real qualitative edge (key injury, scratched ace, etc.). Top sizing tier. |
 
 **Whale (10u) tier is disabled.** Live data over 35 picks showed
 `sharp ≥ 7 AND splits ≥ 10pp aligned` hitting 23% (~3 std devs
@@ -285,7 +285,7 @@ such. Phrasing template:
 > [side / market / line / book / price] for 1u. Confidence: low.
 > Reasoning: [one or two sentences]."*
 
-When the gates ARE cleared (sharp ≥ 4 AND edge ≥ 0.5pp + a confirming
+When the gates ARE cleared (sharp ≥ 3 AND edge ≥ 0.5pp + a confirming
 signal), use the normal Bot Suggests language and the standard sizing
 rubric (1u/3u/5u).
 
