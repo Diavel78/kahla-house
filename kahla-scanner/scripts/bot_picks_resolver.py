@@ -195,7 +195,8 @@ def _match_espn(bet: dict, espn_events: list[dict]) -> dict | None:
             if abs((bet_start - comp_dt).total_seconds()) > 90 * 60:
                 continue
 
-        state = ((comp.get("status") or {}).get("type") or {}).get("state", "")
+        status = (comp.get("status") or {})
+        state = (status.get("type") or {}).get("state", "")
 
         def _score(c):
             v = c.get("score")
@@ -206,11 +207,55 @@ def _match_espn(bet: dict, espn_events: list[dict]) -> dict | None:
             except (ValueError, TypeError):
                 return None
 
+        # First-inning runs from the per-period linescore (for NRFI/YRFI
+        # grading). linescores[0].value = inning-1 runs for that competitor;
+        # present once the game is underway. None until then.
+        def _inn1(c):
+            ls = c.get("linescores") or []
+            if not ls:
+                return None
+            try:
+                return int(float(ls[0].get("value")))
+            except (ValueError, TypeError):
+                return None
+
+        # period = current inning (MLB). >= 2 means the 1st is fully done.
+        try:
+            period = int(status.get("period"))
+        except (ValueError, TypeError):
+            period = None
+
         return {
             "state":      state,
             "home_score": _score(h),
             "away_score": _score(a),
+            "inn1_home":  _inn1(h),
+            "inn1_away":  _inn1(a),
+            "period":     period,
         }
+    return None
+
+
+def _grade_nrfi(bet: dict, m: dict) -> str | None:
+    """Grade an NRFI/YRFI pick from the first-inning linescore. Returns
+    won/lost, or None when the 1st inning isn't decided yet (retry next
+    tick). YRFI (a run scored) resolves the instant either half-inning
+    posts a run — even mid-game. NRFI requires the full 1st inning to be
+    complete (state post, or we're already in inning >= 2)."""
+    a1 = m.get("inn1_away")
+    h1 = m.get("inn1_home")
+    if a1 is None and h1 is None:
+        return None  # no linescore yet — game hasn't really started
+    ran = (a1 or 0) > 0 or (h1 or 0) > 0
+    if not ran:
+        first_done = (m.get("state") == "post") or ((m.get("period") or 0) >= 2)
+        if not first_done:
+            return None  # bottom of the 1st may still be in progress
+    side = bet.get("side")
+    if side == "yes":
+        return "won" if ran else "lost"
+    if side == "no":
+        return "won" if not ran else "lost"
     return None
 
 
@@ -444,6 +489,29 @@ def main(argv: list[str] | None = None) -> int:
             if not m:
                 unmatched += 1
                 continue
+
+            # NRFI / YRFI — graded off the 1st-inning linescore, NOT the
+            # final, so it bypasses the post gate (can settle the moment
+            # the 1st inning is decided). No CLV (no NRFI line in our feed).
+            if bet.get("market_type") == "nrfi":
+                status = _grade_nrfi(bet, m)
+                if status is None:
+                    not_final += 1
+                    continue
+                units = bet.get("units") or 1
+                pnl = _pnl_units(status, bet["entry_price"], units)
+                a1, h1 = m.get("inn1_away"), m.get("inn1_home")
+                result = {"inn1_away": a1, "inn1_home": h1,
+                          "first_inning_runs": (a1 or 0) + (h1 or 0)}
+                if not _update(sb, bet["id"], status, pnl, result, None):
+                    continue
+                if status == "won":  won += 1
+                else:                lost += 1
+                log.info("RESOLVED bot_pick %s NRFI/%s @ %du -> %s pnl=%+.3fu (1st: %s-%s)",
+                         bet["event_name"], bet["side"], units,
+                         status.upper(), pnl, a1, h1)
+                continue
+
             if m["state"] != "post":
                 not_final += 1
                 continue
