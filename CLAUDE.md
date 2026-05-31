@@ -71,7 +71,8 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `/api/odds`, `/api/odds/history`, `/api/odds/history-batch`, `/api/openers*` | admin + `odds_access` | `@odds_required` |
 | `/api/preferences` | any approved | `@firebase_auth_required` (generic user prefs) |
 | `/dashboard` (page) | admin | client probes `/api/me` and bounces non-admins |
-| `/handicapper` (page) | admin + `bot_access` | client probes `/api/me`; bounces anyone without `bot_access`. `bot_access` = view-only (sees picks+units, no log); admin = log too |
+| `/handicapper` (page) | admin + `bot_access` | client probes `/api/me`; bounces anyone without `bot_access`. Every `bot_access` user logs + tracks their OWN book (per-user); admin also gets manual-settle + the Analytics link |
+| `/handicapper-analytics` (page) | admin | client probes `/api/me` and bounces non-admins — global all-users rollup |
 | `/api/data`, `/api/my-bets`, `/api/debug-trades`, `/api/debug-deposits`, `/api/debug-snap`, `/api/sharp-bot` | admin | `@admin_required` |
 | `/api/handicapper` (stats payload) | admin + `bot_access` | `@bot_required` — filtered to `asked_by==g.uid` (each user's own pending/settled/stats/CLV) |
 | `/api/handicapper/live` (in-progress bets + live score + win-%) | admin + `bot_access` | `@bot_required` — filtered to `asked_by==g.uid` (the caller's own pending bets) |
@@ -84,15 +85,15 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 
 `@firebase_auth_required` itself rejects any user where `approved != true` (returns 403), so even API endpoints that don't need admin still keep `pending` users out. `@bot_required` adds an additional `role=='admin' OR bot_access==true` check on top of `@firebase_auth_required`.
 
-**Pick Bot view-only tier (revised late May 2026): `bot_access` = see picks, admin = log.**
+**Pick Bot per-user logging (multi-user rev, late May 2026): everyone with `bot_access` logs + tracks their own book.**
 
-A `bot_access` (non-admin) user — a friend following along — sees the full sport tabs + games list + the line-2 pick chips (recommended bet + **units** + tier colors) + the dossier modal with the bot's read (suggested pick, fair line, splits, injuries, NRFI model, "Copy for Claude"). What they DON'T get:
-- Top stats card (`#overallStats`), confidence strip (`#confStrip`), pending (`#pendingSection`), settled (`#settledSection`), the betslip, the refresh button, the status/heartbeat pill — all hidden by `_applyViewerMode()`.
-- Any **log action** — line-2 chips open Details instead of one-tapping to log; the dossier's "Log this pick" / "Log this side" / "Log bot pick" / NRFI buttons aren't rendered.
-- Any **green/"logged"/"upgrade"/"conflict" state** — `_pickState` returns `'fresh'` when `!_canLog`, so a non-logger never sees what's been logged. The legend's `.legend-log` keys (logged / add-new) are hidden too.
-- A VIEW-ONLY banner shows under the header.
+A `bot_access` (non-admin) user sees the full sport tabs + games list + line-2 pick chips (recommended bet + **units** + tier colors) + the dossier modal (suggested pick, fair line, splits, injuries, NRFI model, "Copy for Claude") AND can **log the bot's picks as their own bets** and track them. Their `/handicapper` shows their OWN: top stats card (`#overallStats`), confidence strip, pending + settled lists, betslip, refresh, live tracker, and the green/upgrade/conflict pick states — all scoped server-side to `asked_by==g.uid`, so they only ever see their own picks/ROI/CLV (never another user's). One-tap chips, "Log this pick"/"Log this side"/"Log bot pick"/NRFI buttons all work for them.
 
-**Why:** logging exists for the **admin's regression testing** of the bot (only Rob logs), so `bot_picks` writes + the log/stats payload are admin-only. The dossier read carries zero logged-pick data (gotcha #32), so it's safe to show `bot_access`. Client flags: `_canBet` (VIEW = admin OR `bot_access`) + `_canLog` (admin only). Server boundary: stats + pick-mutation routes are `@admin_required`; dossier/games/sport-counts are `@bot_required`.
+**What stays admin-only:**
+- **Manual settle** (the per-row ✓Won/✗Lost/=Push buttons) — gated by `_isAdmin` client-side, `@admin_required` server-side. Non-admins rely on the auto-resolver for grading; the admin grades anyone's un-gradeable pick (UFC method bets, postponed, ESPN-unmatched) from the **analytics page** (admin can settle ANY user's row).
+- **Global analytics** — `/handicapper-analytics` (+ `GET /api/handicapper/analytics`, `@admin_required`): the aggregate of EVERY user's picks/outcomes/CLV (the model-tuning signal) — global stat buckets, a per-user leaderboard, all-users pending (with settle buttons), today's settled across everyone. Linked from the Pick Bot nav for admins only.
+
+**Client flags:** `_canBet` (admin OR `bot_access`) gates the page; `_canLog` is an alias for `_canBet` (view ⇒ log); `_isAdmin` gates JUST settle + the analytics link. `_applyViewerMode()` is now a no-op (the old VIEW-ONLY tier is gone). `_pickState` / `_loggedPicks` / `_loggedMarketIds` are populated from the per-user scoped `/api/handicapper`, so the logged/green states are inherently per-user. **Server boundary:** dossier/games/sport-counts + stats payload + pick POST/DELETE + live are `@bot_required` and filtered to the caller; settle + analytics are `@admin_required`.
 
 ## Pages & Routes
 
