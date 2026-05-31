@@ -74,6 +74,7 @@ Per-page gating (client-side via `/api/me` probe + server-side via decorators):
 | `/handicapper` (page) | admin + `bot_access` | client probes `/api/me`; bounces anyone without `bot_access`. `bot_access` = view-only (sees picks+units, no log); admin = log too |
 | `/api/data`, `/api/my-bets`, `/api/debug-trades`, `/api/debug-deposits`, `/api/debug-snap`, `/api/sharp-bot` | admin | `@admin_required` |
 | `/api/handicapper` (stats payload) | **admin only** | `@admin_required` — the log (pending/settled/P&L) is the admin's regression data; `bot_access` never sees it |
+| `/api/handicapper/live` (in-progress bets + live score + win-%) | **admin only** | `@admin_required` — it's the admin's own pending bets |
 | `/api/handicapper/dossier`, `/api/handicapper/games`, `/api/handicapper/sport-counts` | admin + `bot_access` | `@bot_required` — the bot's READ (picks/fair/splits/injuries), zero logged-pick data, so the view-only tier can see it |
 | `/api/handicapper/pick` (POST), `/api/handicapper/pick/<id>` (DELETE), `/api/handicapper/pick/<id>/settle` (POST) | **admin only** | `@admin_required` — logging is the admin's regression-testing tool; `bot_access` users can't write `bot_picks` |
 | `/api/raw` (Polymarket SDK debug) | admin | `@admin_required` |
@@ -829,6 +830,16 @@ The Pick Bot's first **derivative** market. NRFI = No Run First Inning (neither 
 **Schema:** market_type `'nrfi'`, side `'yes'`(YRFI)/`'no'`(NRFI) — added by `bot_picks_migrations/008_nrfi.sql` (alters the market_type + side CHECK constraints; **already applied to the live DB**). `app.py:/api/handicapper/pick` validates nrfi→yes/no. `entry_line` NULL.
 
 **Backtest:** `kahla-scanner/scripts/nrfi_backtest.py` (+ `.github/workflows/nrfi-backtest.yml`, `workflow_dispatch`). Pulls completed MLB games from the MLB Stats API (hydrates 1st-inning linescore + probables in one call/date), predicts P(NRFI), reports base rate / model mean / Brier / accuracy / calibration table. **Limitation (documented in the script):** uses current-season cumulative stats = mild lookahead leakage, and team-OBP fallback (no historical lineup) — it's a **calibration/anchor check on the model FORM, not a clean walk-forward edge proof**. Tune `NRFI_Q_BASE`/`NRFI_Q_SLOPE` in **both** `handicapper_web.py` AND `nrfi_backtest.py` (constants mirrored on purpose — keep in sync). v1 is reference; let live results prove the edge.
+
+### Live tracker (`/api/handicapper/live` + the "Live — your bets" section)
+
+A small/lightweight scoreboard on `/handicapper` showing the admin's **PENDING bets whose game is in progress** — NOT a general scoreboard, only games you've bet (admin-only; `bot_access` has no bets). Pre-game pick list still excludes live games; this is a separate surface fed by `bot_picks` pending + the ESPN scoreboard already cached for the Odds Board.
+
+Per row: a **circular win-% gauge** (SVG ring that fills + shifts red 0% → yellow 50% → green 100% by hue) + the live score (Away N–N Home · status/inning/clock) + the bet (`ML Reds +115 · 1u`). Tapping a row opens that game's dossier. Endpoint `/api/handicapper/live` (`@admin_required`, polled 30s) matches each pending bet to ESPN (`_live_match_espn`, team substring + ±90min), keeps only `state ∈ {in, live, post}`, and computes **`win_prob`**:
+- **Decided** (`_live_decided_prob`): game FINAL → graded 1/0/0.5 from the score; NRFI/YRFI once the 1st inning is complete → 1/0 from the linescore. (A just-final bet shows 100/0 in the brief window before the resolver grades it out of pending.)
+- **Live, not decided** (`_live_market_prob`): the current **Polymarket implied probability** for the side (`pmm_markets.lookup` → `best_line_for` → `quote.mid`) — i.e., the market's live odds your bet hits. `null` (grey gauge) when PMM has no live in-play market for it (e.g. NRFI closes after the 1st). **PMM in-play coverage is the open question** — the gauge greys gracefully when there's no live line; confirm against a real live game.
+
+PMM lookups are cached per `market_id` within the request; usually only a handful of live bets at once.
 
 **Strategy principles** (full doc in `.claude/skills/handicap.md`): PIN is the sharpest book — PIN devigged is the fair line, every other book is shaded for retail bias. Line movement signals: steam (5+ books move together w/ PIN confirming), reverse line movement (RLM) when line moves against the public-money side, early move (12-36h pre-game, sharp model edge) vs late move (final 2h, near-CLV). Public splits divergence: `% money` >> `% bets` on a side = sharp money. Public-bias fades: favorites, overs, home, big-name brands, recent winners. Late scratches in MLB / NBA / NHL / NFL — note + downsize / pass.
 

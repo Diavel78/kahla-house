@@ -5314,6 +5314,200 @@ def api_handicapper():
     })
 
 
+def _live_split_event(name: str):
+    if name and " @ " in name:
+        a, h = name.split(" @ ", 1)
+        return a.strip(), h.strip()
+    return None, None
+
+
+def _live_match_espn(events: list, away: str, home: str, event_start_iso: str):
+    """Match a bot_pick's game to an ESPN scoreboard entry. Returns a score
+    dict {state, away_score, home_score, period, clock, display_status,
+    inn1_away, inn1_home} or None. Team substring + ±90 min, same pattern
+    as the resolver / _merge_espn_scores."""
+    if not (away and home):
+        return None
+    an, hn = away.lower(), home.lower()
+    bet_dt = _parse_iso(event_start_iso) if event_start_iso else None
+    for g in events:
+        comp = (g.get("competitions") or [{}])[0]
+        cs = comp.get("competitors") or []
+        if len(cs) != 2:
+            continue
+        h = next((c for c in cs if c.get("homeAway") == "home"), cs[0])
+        a = next((c for c in cs if c.get("homeAway") == "away"), cs[1])
+        h_name = ((h.get("team") or {}).get("displayName") or "").lower()
+        a_name = ((a.get("team") or {}).get("displayName") or "").lower()
+        if not h_name or not a_name:
+            continue
+        if not ((hn in h_name or h_name in hn) and (an in a_name or a_name in an)):
+            continue
+        comp_dt = _parse_iso(comp.get("date") or g.get("date") or "")
+        if bet_dt and comp_dt and abs((bet_dt - comp_dt).total_seconds()) > 90 * 60:
+            continue
+        status = comp.get("status") or {}
+        type_ = status.get("type") or {}
+
+        def _int(v):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+
+        def _inn1(c):
+            ls = c.get("linescores") or []
+            if not ls:
+                return None
+            return _int((ls[0] or {}).get("value"))
+
+        return {
+            "state":          type_.get("state", ""),
+            "display_status": type_.get("shortDetail") or type_.get("description") or "",
+            "period":         status.get("period"),
+            "clock":          status.get("displayClock") or "",
+            "away_score":     _int(a.get("score")),
+            "home_score":     _int(h.get("score")),
+            "inn1_away":      _inn1(a),
+            "inn1_home":      _inn1(h),
+        }
+    return None
+
+
+def _live_decided_prob(bet: dict, m: dict):
+    """Win prob (1.0/0.0/0.5) when the bet is already decided by the current
+    game state — final score, or NRFI/YRFI once the 1st inning is complete.
+    Returns None when it's not yet decided (caller falls back to the live
+    market price)."""
+    mt, side = bet.get("market_type"), bet.get("side")
+    a, h = m.get("away_score"), m.get("home_score")
+    line = bet.get("entry_line")
+    final = m.get("state") == "post"
+
+    if mt == "nrfi":
+        a1, h1 = m.get("inn1_away"), m.get("inn1_home")
+        if a1 is None and h1 is None:
+            return None
+        ran = (a1 or 0) > 0 or (h1 or 0) > 0
+        if not ran and not (final or (m.get("period") or 0) >= 2):
+            return None    # 1st inning not complete yet
+        yrfi = ran
+        won = (side == "yes" and yrfi) or (side == "no" and not yrfi)
+        return 1.0 if won else 0.0
+
+    if not final or a is None or h is None:
+        return None
+    if mt == "moneyline":
+        if a == h:
+            return 0.5
+        winner = "home" if h > a else "away"
+        return 1.0 if side == winner else 0.0
+    if mt == "total" and line is not None:
+        tot = a + h
+        if tot == float(line):
+            return 0.5
+        over = tot > float(line)
+        return 1.0 if (side == "over") == over else 0.0
+    if mt == "spread" and line is not None:
+        margin = (h - a) + float(line) if side == "home" else (a - h) + float(line)
+        if margin == 0:
+            return 0.5
+        return 1.0 if margin > 0 else 0.0
+    return None
+
+
+_PMM_LIVE_KEY = {"moneyline": "ml", "spread": "spread", "total": "total", "nrfi": "nrfi"}
+
+
+def _live_market_prob(bet: dict, away: str, home: str, client, pmm_cache: dict):
+    """Current Polymarket implied probability for the bet's side (the live
+    'odds of winning'), or None when PMM has no live market for it."""
+    mid = bet.get("market_id")
+    if mid not in pmm_cache:
+        try:
+            import pmm_markets
+            pmm_cache[mid] = pmm_markets.lookup(
+                client, bet.get("sport") or "", away, home,
+                bet.get("event_start") or "")
+        except Exception:
+            pmm_cache[mid] = None
+    pmm = pmm_cache.get(mid)
+    if not pmm:
+        return None
+    key = _PMM_LIVE_KEY.get(bet.get("market_type"))
+    if not key:
+        return None
+    try:
+        import pmm_markets
+        entry = pmm_markets.best_line_for(pmm, key, bet.get("side"), bet.get("entry_line"))
+    except Exception:
+        entry = None
+    q = (entry or {}).get("quote") or {}
+    mid_prob = q.get("mid")
+    return round(mid_prob, 4) if isinstance(mid_prob, (int, float)) else None
+
+
+@app.route("/api/handicapper/live")
+@admin_required   # your in-progress bets — only the admin logs, so admin-only
+def api_handicapper_live():
+    """Live tracker: the admin's PENDING bets whose game is in progress,
+    enriched with the ESPN live score + a current win probability (live
+    Polymarket price, or a deterministic 1/0 once the bet is decided). Powers
+    the small 'Live' scoreboard section on /handicapper. Polled ~30s."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+    try:
+        pending = (sb.table("bot_picks")
+                   .select("id,market_id,sport,event_name,event_start,"
+                           "market_type,side,units,entry_price,entry_line")
+                   .eq("status", "pending")
+                   .order("event_start", desc=False)
+                   .limit(200).execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"pending fetch: {e}"}), 500
+
+    espn_cache: dict = {}
+    pmm_cache: dict = {}
+    client = None
+    out = []
+    for bet in pending:
+        away, home = _live_split_event(bet.get("event_name") or "")
+        sp = (bet.get("sport") or "").lower()
+        if sp not in espn_cache:
+            espn_cache[sp] = _fetch_espn_scoreboard(sp)
+        m = _live_match_espn(espn_cache[sp], away, home, bet.get("event_start"))
+        if not m or m.get("state") not in ("in", "live", "post"):
+            continue   # only in-progress (or just-final, awaiting grade)
+
+        win_prob = _live_decided_prob(bet, m)
+        if win_prob is None:
+            # Not decided → live market price. Init the PMM client lazily.
+            if client is None:
+                try:
+                    client = get_client()
+                except Exception:
+                    client = None
+            if client is not None:
+                win_prob = _live_market_prob(bet, away, home, client, pmm_cache)
+
+        out.append({
+            "id":            bet["id"],
+            "market_id":     bet["market_id"],
+            "event_name":    bet["event_name"],
+            "away":          away,
+            "home":          home,
+            "market_type":   bet["market_type"],
+            "side":          bet["side"],
+            "units":         bet["units"],
+            "entry_price":   bet["entry_price"],
+            "entry_line":    bet.get("entry_line"),
+            "score":         m,
+            "win_prob":      win_prob,
+        })
+    return jsonify({"ok": True, "live": out})
+
+
 @app.route("/api/handicapper/dossier")
 @bot_required
 def api_handicapper_dossier():
