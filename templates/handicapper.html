@@ -222,8 +222,8 @@
            a pick in a market you haven't bet (new), or your existing bet got
            STRONGER (units went up → add to it). Gold + ring so it can't be
            missed, since you'd otherwise never know without re-opening. */
-        .game-row .pick-btn.upgrade { background: var(--gold); color: #2a1f02; box-shadow: 0 0 0 2px rgba(250,204,21,0.55); animation: khPulse 1.6s ease-in-out infinite; }
-        @keyframes khPulse { 0%,100% { box-shadow: 0 0 0 2px rgba(250,204,21,0.55); } 50% { box-shadow: 0 0 0 4px rgba(250,204,21,0.20); } }
+        .game-row .pick-btn.upgrade { background: #a855f7; color: #fff; box-shadow: 0 0 0 2px rgba(168,85,247,0.55); animation: khPulse 1.6s ease-in-out infinite; }
+        @keyframes khPulse { 0%,100% { box-shadow: 0 0 0 2px rgba(168,85,247,0.55); } 50% { box-shadow: 0 0 0 4px rgba(168,85,247,0.18); } }
         /* Color legend for the pick buttons (admin/bot_access only). */
         .pick-legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 10px; font-size: 10px; color: var(--text-muted); }
         .pick-legend span { display: inline-flex; align-items: center; gap: 4px; }
@@ -233,7 +233,7 @@
         .pick-legend .lg.u5 { background: var(--gold); }
         .pick-legend .lg.lean { background: #3a4150; }
         .pick-legend .lg.logged { background: var(--green); }
-        .pick-legend .lg.upgrade { background: var(--gold); box-shadow: 0 0 0 1.5px rgba(250,204,21,0.5); }
+        .pick-legend .lg.upgrade { background: #a855f7; box-shadow: 0 0 0 1.5px rgba(168,85,247,0.5); }
         .games-empty { padding: 20px; text-align: center; font-size: 12px; color: var(--text-muted); }
 
         /* Ask form */
@@ -292,7 +292,24 @@
         .suggestion-card .actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
         .suggestion-card button { padding: 8px 14px; border-radius: 8px; font-size: 12px; cursor: pointer; font-family: inherit; border: 1px solid var(--border-light); background: var(--surface-2); color: var(--text); }
         .suggestion-card button.primary { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
-        .suggestion-card button:hover { border-color: var(--blue); }
+        .suggestion-card button:hover { filter: brightness(1.08); }
+        /* Unit-tier coloring for the dossier's primary "Log this pick"
+           button — same stake language as the games-list buttons, so when
+           you open a game flagged for an upgrade you can see at a glance
+           which side is the big one. 1u stays blue (.primary default). */
+        .suggestion-card button.primary.t05 { background: #2b3a5e; border-color: #2b3a5e; color: #b9cdf2; }
+        .suggestion-card button.primary.t3  { background: var(--orange); border-color: var(--orange); color: #1c1306; }
+        .suggestion-card button.primary.t5  { background: var(--gold); border-color: var(--gold); color: #2a1f02; }
+        /* "You've already logged this market" badge on the suggestion card. */
+        .sug-logged { display: inline-block; margin-left: 8px; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; letter-spacing: 0.03em; vertical-align: middle; }
+        .sug-logged.same { background: var(--green-dim); color: var(--green); }
+        .sug-logged.up   { background: rgba(168,85,247,0.18); color: #c084fc; border: 1px solid rgba(168,85,247,0.4); }
+        /* NRFI/YRFI card action buttons — match the suggestion-card look
+           (was unstyled/garish). The +EV BET side is green-primary. */
+        .nrfi-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+        .nrfi-actions button { padding: 8px 14px; border-radius: 8px; font-size: 12px; cursor: pointer; font-family: inherit; border: 1px solid var(--border-light); background: var(--surface-2); color: var(--text); font-weight: 600; }
+        .nrfi-actions button:hover { filter: brightness(1.08); }
+        .nrfi-actions button.bet { background: var(--green); border-color: var(--green); color: #04210f; }
         .suggestion-pass { padding: 12px 16px; background: var(--surface-2); border: 1px dashed var(--border); border-radius: 10px; font-size: 13px; color: var(--text-secondary); margin-bottom: 18px; }
 
         .market-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-bottom: 18px; }
@@ -313,6 +330,9 @@
         .market-card .pick-side-btn { padding: 3px 8px; font-size: 10px; font-family: inherit; border: 1px solid var(--border-light); background: var(--surface-2); color: var(--text); border-radius: 5px; cursor: pointer; letter-spacing: 0.02em; }
         .market-card .pick-side-btn:hover { background: var(--blue); border-color: var(--blue); color: #fff; }
         .market-card .pick-side-btn.bot { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
+        .market-card .pick-side-btn.bot.t05 { background: #2b3a5e; border-color: #2b3a5e; color: #b9cdf2; }
+        .market-card .pick-side-btn.bot.t3  { background: var(--orange); border-color: var(--orange); color: #1c1306; }
+        .market-card .pick-side-btn.bot.t5  { background: var(--gold); border-color: var(--gold); color: #2a1f02; }
         .market-card .move { font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 6px 8px; background: var(--surface-2); border-radius: 6px; margin-top: 8px; }
         .market-card .move .sharp { color: var(--blue); font-weight: 700; }
         .market-card .move .move-note { color: var(--text-muted); font-size: 10px; margin-left: 6px; }
@@ -1113,6 +1133,8 @@
     // green here.
     const _uStr = u => (u === 0.5 ? '0.5u' : `${u}u`);
     const _uClass = u => (u >= 5 ? 'u5' : u >= 3 ? 'u3' : u >= 1 ? 'u1' : 'u05');
+    // Dossier-button stake tier (1u = blue default = no class).
+    const _tierCls = u => (u >= 5 ? 't5' : u >= 3 ? 't3' : (u != null && u < 1) ? 't05' : '');
     const _STATE_CLASSES = ['u05', 'u1', 'u3', 'u5', 'lean', 'logged', 'upgrade'];
 
     function _colorPickButtons() {
@@ -1459,6 +1481,19 @@
                 const sideLabel = s.market_type === 'total'
                     ? s.side.toUpperCase()
                     : (s.side === 'home' ? d.home : d.away);
+                // Logged/upgrade badge — so when you open a game flagged
+                // "add/new" you can see whether THIS pick is a fresh market
+                // or a bump on something you already logged at fewer units.
+                let loggedBadge = '';
+                if (_canBet) {
+                    const lm = _loggedPicks.get(d.market_id);
+                    const lu = lm ? lm.get(s.market_type) : undefined;
+                    if (lu != null) {
+                        loggedBadge = (s.units > lu)
+                            ? `<span class="sug-logged up">↑ ADD — you have ${_uStr(lu)}</span>`
+                            : `<span class="sug-logged same">✓ logged ${_uStr(lu)}</span>`;
+                    }
+                }
                 // PMM-aware display. If PMM has a market for this side,
                 // the pick line shows PMM's line + projected fair as
                 // the limit-order target; otherwise falls back to PIN
@@ -1515,14 +1550,14 @@
                     <div class="pick-line">
                         ${market} · ${_esc(sideLabel)}${lineFrag} ${venueTag}
                         <span class="target">@ ${_fmtAmer(s.fair_american)}</span>
-                        <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>
+                        <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>${loggedBadge}
                     </div>
                     ${(s.edge_pp != null && s.edge_pp > 0) ? `<div class="pick-kelly">est. edge +${Number(s.edge_pp).toFixed(1)}pp${s.kelly_pct ? ` · ¼-Kelly ${Number(s.kelly_pct).toFixed(1)}% BR` : ''} → ${s.units}u</div>` : ''}
                     <div class="pick-meta">${metaLine}</div>
                     ${whyHtml}
                     ${s.gates_cleared ? '' : `<div class="soft-note">Sharp gate not cleared (need sharp ≥ 4). Chalk-flat market; this is the best read available — treat as 1u lean only.</div>`}
                     ${_canBet ? `<div class="actions">
-                        <button class="primary" onclick="openLog(false, ${i})">Log this pick</button>
+                        <button class="primary ${_tierCls(s.units)}" onclick="openLog(false, ${i})">${(s.units > ((_loggedPicks.get(d.market_id) || new Map()).get(s.market_type) || 0) && (_loggedPicks.get(d.market_id) || new Map()).has(s.market_type)) ? `Add to ${_uStr(s.units)}` : 'Log this pick'}</button>
                         <button onclick="copyForClaude()">Copy for Claude</button>
                     </div>` : ''}
                 </div>`;
@@ -1743,15 +1778,13 @@
                 ? ` <span style="color:var(--orange)">(starter unannounced → league-avg used)</span>` : '';
             const obpNote = (inp.home_obp_src === 'team' || inp.away_obp_src === 'team')
                 ? ` · top-of-order from team OBP (lineup not posted yet)` : ` · top-of-order from posted lineup`;
-            // Buttons: the +EV side is the primary (green) action; the
-            // other side stays available for a manual log (also 0.5u).
+            // Buttons: the +EV side is the green BET action; the other
+            // side stays available for a manual log (also 0.5u).
             const mkBtn = (side, lbl) => {
                 const isBet = n.bet_side === side;
-                const cls = isBet ? 'primary' : '';
-                const style = isBet ? 'style="background:var(--green);border-color:var(--green)"' : '';
-                return `<button class="${cls}" ${style} onclick="logNrfi('${side}')">${isBet ? 'BET' : 'Log'} ${lbl}</button>`;
+                return `<button class="${isBet ? 'bet' : ''}" onclick="logNrfi('${side}')">${isBet ? 'BET ' : 'Log '}${lbl}</button>`;
             };
-            const btns = _canBet ? `<div class="actions" style="margin-top:10px">
+            const btns = _canBet ? `<div class="nrfi-actions">
                 ${mkBtn('no', 'NRFI')}
                 ${mkBtn('yes', 'YRFI')}
             </div>` : '';
@@ -1880,7 +1913,14 @@
             // the panel data — 1u low (forced lean) by default since
             // there's no signal context to claim higher.
             const btnLabel = isBotPick ? 'Log bot pick' : 'Log this side';
-            const btnClass = isBotPick ? 'pick-side-btn bot' : 'pick-side-btn';
+            // Tier-color the bot-pick button by the suggestion's stake so
+            // the market grid speaks the same color language as the cards.
+            let btnClass = isBotPick ? 'pick-side-btn bot' : 'pick-side-btn';
+            if (isBotPick) {
+                const su = ((d.suggestions || [])[sugIdx] || {}).units;
+                const tc = _tierCls(su || 1);
+                if (tc) btnClass += ' ' + tc;
+            }
             const onclickAttr = isBotPick
                 ? `openLog(false, ${sugIdx})`
                 : `pickSideFromGrid('${mt}', '${s}')`;
