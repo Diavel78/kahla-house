@@ -232,6 +232,10 @@
         .games-empty { padding: 20px; text-align: center; font-size: 12px; color: var(--text-muted); }
         /* Live tracker — compact rows: win-% gauge + score + your bet. */
         .live-card .games-head h3 { color: var(--red); }
+        .live-proj { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 700; margin-left: 6px; }
+        .live-proj.pos { color: var(--green); }
+        .live-proj.neg { color: var(--red); }
+        .live-proj.zero { color: var(--text-muted); }
         .live-list { display: flex; flex-direction: column; gap: 8px; }
         .live-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; }
         .live-row .lv-mid { flex: 1; min-width: 0; }
@@ -540,7 +544,7 @@
                  until there's a live bet. Small/lightweight scoreboard. -->
             <div class="games-card live-card" id="liveSection" style="display:none">
                 <div class="games-head">
-                    <h3>🔴 Live — your bets</h3>
+                    <h3>🔴 Live — your bets <span id="liveProj" class="live-proj"></span></h3>
                     <span class="count" id="liveCount">…</span>
                 </div>
                 <div id="liveList"></div>
@@ -1416,6 +1420,17 @@
         return `<b>${mkt} ${_esc(side)}</b> @ ${price} · ${_uStr(Number(r.units))}`;
     }
 
+    // Expected units for a bet at its current win prob, using the same
+    // to-WIN math as the resolver: win → +units, loss → the cost to chase
+    // that win at the entry price. null prob → null (can't project).
+    function _projUnits(prob, units, price) {
+        if (prob == null) return null;
+        units = Number(units); price = Number(price);
+        if (!isFinite(units) || !isFinite(price)) return null;
+        const lossPnl = price > 0 ? -units * (100 / price) : -units * (Math.abs(price) / 100);
+        return prob * units + (1 - prob) * lossPnl;
+    }
+
     async function loadLive() {
         if (!_canLog) return;
         let data;
@@ -1430,6 +1445,20 @@
         if (!rows.length) { sec.style.display = 'none'; return; }
         sec.style.display = '';
         document.getElementById('liveCount').textContent = rows.length;
+        // Projected book P&L — sum expected units across live bets that have
+        // a win prob (grey/no-odds rows are skipped).
+        let proj = 0, projN = 0;
+        rows.forEach(r => {
+            const pu = _projUnits(r.win_prob, r.units, r.entry_price);
+            if (pu != null) { proj += pu; projN++; }
+        });
+        const projEl = document.getElementById('liveProj');
+        if (projN) {
+            projEl.textContent = `${proj >= 0 ? '+' : ''}${proj.toFixed(2)}u proj`;
+            projEl.className = 'live-proj ' + (proj > 0.005 ? 'pos' : proj < -0.005 ? 'neg' : 'zero');
+        } else {
+            projEl.textContent = '';
+        }
         list.className = 'live-list';
         list.innerHTML = rows.map(r => {
             const s = r.score || {};
