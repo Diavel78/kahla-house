@@ -2778,7 +2778,8 @@ NRFI_LG_RA9    = 4.30     # league-average runs allowed / 9 (matches _starter_ru
 NRFI_Q_BASE    = 0.725    # scoreless-half prob at league-average inputs (→ NRFI ≈ 0.525)
 NRFI_Q_SLOPE   = 2.0      # logistic sensitivity to xr — backtest-calibrated
 NRFI_TOP_BOOST = 1.10     # top-of-order OBP ≈ 10% above team OBP (fallback only)
-NRFI_LEAN_PP   = 4.0      # |our NRFI% − baseline NRFI%| ≥ this → actionable lean
+NRFI_LEAN_PP   = 4.0      # |our NRFI% − baseline NRFI%| ≥ this → model lean (context only)
+NRFI_EDGE_MIN_PP = 3.0    # our fair − PMM maker entry ≥ this (pp) → light the BET button
 
 
 def _nrfi_half_scoreless(xr: float) -> float:
@@ -2839,10 +2840,17 @@ def _nrfi_lineup_top_obp(box: dict | None, side: str) -> float | None:
 
 
 def _nrfi_model(sport: str, pitchers: dict | None, away: str | None,
-                home: str | None, game_pk, weather: dict | None) -> dict | None:
+                home: str | None, game_pk, weather: dict | None,
+                pmm_nrfi: list | None = None) -> dict | None:
     """First-inning NRFI/YRFI model. MLB only; None otherwise or when we
     can't build a usable input set. Silent-fail throughout — never raises
-    into the dossier. See the section header for the math + rationale."""
+    into the dossier. See the section header for the math + rationale.
+
+    `pmm_nrfi` is the Polymarket first-inning market entries (from
+    pmm_markets.lookup) when PMM lists one. We compute the model fair,
+    then — if PMM has a price — the EDGE vs PMM's maker entry (bid) per
+    side and flag the +EV side as the bet. No PMM market → model fair +
+    lean only, no bet flag (the determination NEEDS a price to shop)."""
     if sport != "MLB" or not (away and home):
         return None
     season = datetime.now(timezone.utc).year
@@ -2908,8 +2916,63 @@ def _nrfi_model(sport: str, pitchers: dict | None, away: str | None,
     else:
         lean = None
 
+    # ── Polymarket edge + bet determination ──
+    # Maker-only entry: we rest a limit on the PMM BID for the side we
+    # want and fill there. So edge = our_fair_prob − bid_prob for the
+    # side. The +EV side with the largest edge ≥ NRFI_EDGE_MIN_PP is THE
+    # bet (button lights up); below threshold (or no PMM market) → pass.
+    our_prob = {"no": p_nrfi, "yes": p_yrfi}
+    pmm_block: dict = {}
+    for e in (pmm_nrfi or []):
+        side = e.get("side")
+        q = e.get("quote") or {}
+        if side in ("no", "yes") and (q.get("bid") is not None or q.get("ask") is not None):
+            # Keep the better (higher) bid if PMM somehow returns two.
+            prev = pmm_block.get(side)
+            if prev is None or (q.get("bid") or 0) > (prev.get("bid") or 0):
+                pmm_block[side] = {
+                    "bid": q.get("bid"), "ask": q.get("ask"), "mid": q.get("mid"),
+                    "bid_american": q.get("bid_american"),
+                    "ask_american": q.get("ask_american"),
+                    "mid_american": q.get("mid_american"),
+                    "slug": e.get("slug"),
+                }
+    bet_side = None
+    bet_edge_pp = None
+    entry_price = None
+    for side in ("no", "yes"):
+        blk = pmm_block.get(side)
+        if not blk or blk.get("bid") is None:
+            continue
+        edge = (our_prob[side] - blk["bid"]) * 100.0   # pp, vs maker entry
+        blk["edge_pp"] = round(edge, 1)
+        if edge >= NRFI_EDGE_MIN_PP and (bet_edge_pp is None or edge > bet_edge_pp):
+            bet_side = side
+            bet_edge_pp = round(edge, 1)
+            entry_price = blk.get("bid_american")
+    pmm_matched = bool(pmm_block)
+    # Gate on the PMM edge — the user's call: NRFI only "lights up" when
+    # there's a real price to beat, not on the model-vs-baseline lean.
+    gates_cleared = bet_side is not None
+
     # Plain-English reasons (mirror the suggestion-card bullet style).
     reasons: list[str] = []
+    _amer = lambda a: ("+" + str(a)) if (a is not None and a > 0) else (str(a) if a is not None else "?")
+    if pmm_matched and bet_side:
+        side_lbl = "NRFI" if bet_side == "no" else "YRFI"
+        reasons.append(
+            f"BET {side_lbl} — model fair "
+            f"{round(our_prob[bet_side]*100)}% vs Polymarket bid "
+            f"{_amer(pmm_block[bet_side].get('bid_american'))} "
+            f"→ +{bet_edge_pp}pp edge (rest a maker limit at the bid)")
+    elif pmm_matched:
+        reasons.append(
+            "No edge vs Polymarket — model fair within "
+            f"{NRFI_EDGE_MIN_PP}pp of PMM's price on both sides. Pass.")
+    else:
+        reasons.append(
+            "No Polymarket 1st-inning market found — can't price an edge. "
+            "Model fair shown for reference; shop a book price beating it.")
     sp_bits = []
     if home_p and home_p.get("name"):
         sp_bits.append(f"{home_p['name']} {home_sp_used:.2f} RA9")
@@ -2938,10 +3001,16 @@ def _nrfi_model(sport: str, pitchers: dict | None, away: str | None,
         "q_bot":               round(q_bot, 4),
         "xr_top":              round(xr_top, 3),
         "xr_bot":              round(xr_bot, 3),
-        "lean":                lean,             # 'no' (NRFI) / 'yes' (YRFI) / None
+        "lean":                lean,             # model vs baseline: 'no'/'yes'/None (context)
         "diff_vs_baseline_pp": round(diff_pp, 1),
         "baseline_nrfi":       round(baseline_nrfi, 4),
-        "gates_cleared":       lean is not None,
+        # Polymarket-driven bet determination (the actionable signal).
+        "polymarket":          pmm_block or None,   # {no:{...}, yes:{...}} with edge_pp per side
+        "pmm_matched":         pmm_matched,
+        "bet_side":            bet_side,            # 'no'(NRFI)/'yes'(YRFI)/None
+        "bet_edge_pp":         bet_edge_pp,
+        "entry_price":         entry_price,         # PMM bid American for the bet side (maker entry)
+        "gates_cleared":       gates_cleared,       # true only when a +EV PMM side exists
         "inputs": {
             "away_obp": round(away_obp, 3), "home_obp": round(home_obp, 3),
             "away_obp_src": away_src, "home_obp_src": home_src,
@@ -3365,7 +3434,8 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     if sport == "MLB":
         try:
             nrfi = _nrfi_model(sport, (mlb_extra or {}).get("probable_pitchers"),
-                               away, home, _pp.get("game_pk"), weather)
+                               away, home, _pp.get("game_pk"), weather,
+                               pmm_nrfi=(pmm_data or {}).get("nrfi"))
         except Exception as e:
             log.warning("nrfi model failed: %s", e)
             nrfi = None

@@ -196,20 +196,44 @@
         .game-row .when.tier-soon     { color: var(--gold); }
         .game-row .when.tier-close    { color: var(--green); }
         .game-row .when.tier-imminent { color: var(--red); font-weight: 700; }
-        .game-row .pick-btn { padding: 6px 12px; background: var(--blue); color: #fff; border: 0; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; }
-        .game-row .pick-btn:hover { background: #5b8aff; }
+        .game-row .pick-btn { padding: 6px 12px; background: var(--blue); color: #fff; border: 0; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; min-width: 64px; }
+        .game-row .pick-btn:hover { filter: brightness(1.1); }
         .game-row .pick-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        /* Logged: admin/bot_access has already logged a pick on this game.
-           Green instead of blue so it reads "done, already chose." Viewers
-           never reach this — _loggedMarketIds is only populated by loadData,
-           which is gated to _canBet. */
-        .game-row .pick-btn.logged { background: var(--green); }
-        .game-row .pick-btn.logged:hover { background: #2ee06a; }
-        /* Lean: bot evaluated this in-window game and it's a lean/pass, not
-           a real pick — muted grey so it reads "skip." Blue stays "look."
-           Set only by the background verdict prefetch (admin/bot_access). */
+        /* ── Pick-button state machine (admin/bot_access only — set by the
+           background verdict prefetch + loadData; viewers stay default blue
+           since _verdictCache / _loggedMarketIds only populate under _canBet).
+
+           UNIT-TIERED prominence for NOT-yet-logged actionable picks — the
+           bigger the bot's recommended stake, the louder the button:
+             0.5u → muted blue (NRFI, experimental)
+             1u   → blue        (standard)
+             3u   → amber       (prominent)
+             5u   → gold ring    (loudest)
+           lean / pass → grey ("skip"). Unevaluated (outside 2h window) →
+           default blue. */
+        .game-row .pick-btn.u05 { background: #2b3a5e; color: #b9cdf2; }
+        .game-row .pick-btn.u1  { background: var(--blue); color: #fff; }
+        .game-row .pick-btn.u3  { background: var(--orange); color: #1c1306; }
+        .game-row .pick-btn.u5  { background: var(--gold); color: #2a1f02; box-shadow: 0 0 0 2px rgba(250,204,21,0.30); }
         .game-row .pick-btn.lean { background: #3a4150; color: var(--text-secondary); }
-        .game-row .pick-btn.lean:hover { background: #454d5e; }
+        /* Logged: you've already bet this game. Green = "done." */
+        .game-row .pick-btn.logged { background: var(--green); color: #04210f; }
+        /* Attention: you've logged here BUT the bot now wants more — either
+           a pick in a market you haven't bet (new), or your existing bet got
+           STRONGER (units went up → add to it). Gold + ring so it can't be
+           missed, since you'd otherwise never know without re-opening. */
+        .game-row .pick-btn.upgrade { background: var(--gold); color: #2a1f02; box-shadow: 0 0 0 2px rgba(250,204,21,0.55); animation: khPulse 1.6s ease-in-out infinite; }
+        @keyframes khPulse { 0%,100% { box-shadow: 0 0 0 2px rgba(250,204,21,0.55); } 50% { box-shadow: 0 0 0 4px rgba(250,204,21,0.20); } }
+        /* Color legend for the pick buttons (admin/bot_access only). */
+        .pick-legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 10px; font-size: 10px; color: var(--text-muted); }
+        .pick-legend span { display: inline-flex; align-items: center; gap: 4px; }
+        .pick-legend .lg { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+        .pick-legend .lg.u1 { background: var(--blue); }
+        .pick-legend .lg.u3 { background: var(--orange); }
+        .pick-legend .lg.u5 { background: var(--gold); }
+        .pick-legend .lg.lean { background: #3a4150; }
+        .pick-legend .lg.logged { background: var(--green); }
+        .pick-legend .lg.upgrade { background: var(--gold); box-shadow: 0 0 0 1.5px rgba(250,204,21,0.5); }
         .games-empty { padding: 20px; text-align: center; font-size: 12px; color: var(--text-muted); }
 
         /* Ask form */
@@ -323,6 +347,7 @@
         .pr-cell .pr-lbl { font-size: 11px; color: var(--text-muted); }
         .pr-cell .pr-val { font-size: 18px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
         .pr-cell .pr-fair { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+        .pr-cell .pr-sub { font-size: 11px; font-family: 'JetBrains Mono', monospace; color: var(--text-secondary); margin-top: 2px; }
         .pr-line { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
         .wx-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0 6px; }
         .wx-cell { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; background: var(--surface-2); border-radius: 10px; text-align: center; }
@@ -477,6 +502,14 @@
                     <h3 id="gamesTitle">MLB — upcoming</h3>
                     <span class="count" id="gamesCount">…</span>
                 </div>
+                <div class="pick-legend" id="pickLegend">
+                    <span><i class="lg u1"></i>1u</span>
+                    <span><i class="lg u3"></i>3u</span>
+                    <span><i class="lg u5"></i>5u</span>
+                    <span><i class="lg lean"></i>lean</span>
+                    <span><i class="lg logged"></i>logged</span>
+                    <span><i class="lg upgrade"></i>add / new</span>
+                </div>
                 <ul class="games-list" id="gamesList">
                     <li class="games-empty">Loading…</li>
                 </ul>
@@ -544,6 +577,7 @@
                 <div class="field">
                     <label>Units</label>
                     <select id="lmUnits">
+                        <option value="0.5">0.5u</option>
                         <option value="1">1u</option>
                         <option value="3">3u</option>
                         <option value="5">5u</option>
@@ -600,11 +634,21 @@
     // settled-today). Populated ONLY by loadData, which is gated to _canBet
     // — so for viewers this stays empty and Pick buttons never turn green.
     let _loggedMarketIds = new Set();
+    // market_id -> Map(market_type -> max units logged) for PENDING picks.
+    // Drives two button signals on an already-logged game:
+    //   • NEW    — an actionable pick in a market_type not in this map.
+    //   • UPGRADE — a market_type IS in the map but the bot now suggests
+    //               MORE units than logged (e.g. Nationals 1u → 3u → add).
+    // Keyed on market_type (not side) so the opposite side of a market
+    // already bet isn't mistaken for a new opportunity. Pending-only —
+    // you can't add to a settled bet.
+    let _loggedPicks = new Map();
     // Per-game bot VERDICT cache for the games list (admin/bot_access only).
-    // {market_id: {verdict:'pick'|'lean', fetchedAt}}. Filled by a throttled
-    // background prefetch of the SAME /api/handicapper/dossier call a click
-    // uses — so the button color reflects the FULL model verdict
-    // (gates_cleared = real pick vs lean), not a PIN-only shortcut. Only
+    // {market_id: {picks:[{mt, units}], fetchedAt}} — `picks` is every
+    // gate-cleared suggestion (+ NRFI bet side) with its recommended
+    // units. Filled by a throttled background prefetch of the SAME
+    // /api/handicapper/dossier call a click uses, so the button color is
+    // the FULL model verdict (unit-tiered), not a PIN-only shortcut. Only
     // games inside the 2h window are evaluated. Cheap: cache-only dossier
     // (no Odds API credits), free public data, server-cached.
     let _currentGames = [];
@@ -658,8 +702,9 @@
     // are the actual security boundary.
     function _applyViewerMode() {
         if (_canBet) return;
-        // Hide stats card + confidence tier strip
-        ['overallStats', 'confStrip', 'pendingSection', 'settledSection']
+        // Hide stats card + confidence tier strip + the pick-button legend
+        // (viewers' buttons are all plain blue — the tier colors never apply).
+        ['overallStats', 'confStrip', 'pendingSection', 'settledSection', 'pickLegend']
             .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
         // Hide the Refresh + Bet Slip buttons — both are pick/stats
         // surfaces, irrelevant to view-only viewers (who can't log picks).
@@ -1066,15 +1111,53 @@
     // set (or after a new pick is logged / deleted). Admin/bot_access only
     // — viewers never call loadData, so the set is empty and nothing turns
     // green here.
+    const _uStr = u => (u === 0.5 ? '0.5u' : `${u}u`);
+    const _uClass = u => (u >= 5 ? 'u5' : u >= 3 ? 'u3' : u >= 1 ? 'u1' : 'u05');
+    const _STATE_CLASSES = ['u05', 'u1', 'u3', 'u5', 'lean', 'logged', 'upgrade'];
+
     function _colorPickButtons() {
         document.querySelectorAll('#gamesList .pick-btn[data-mid]').forEach(btn => {
             const mid = btn.getAttribute('data-mid');
-            const logged = _canBet && _loggedMarketIds.has(mid);
-            const v = (_canBet && !logged) ? _verdictCache.get(mid) : null;
-            btn.classList.toggle('logged', !!logged);          // green ✓ (wins)
-            btn.classList.toggle('lean', !!(v && v.verdict === 'lean'));  // grey
-            btn.textContent = logged ? '✓ Pick' : 'Pick';
-            // verdict==='pick' (or unevaluated) → no class → default blue
+            btn.classList.remove(..._STATE_CLASSES);
+            if (!_canBet) { btn.textContent = 'Pick'; return; }   // viewers: plain blue
+
+            const v = _verdictCache.get(mid);
+            const picks = (v && v.picks) || [];
+            const logged = _loggedMarketIds.has(mid);
+            const loggedUnits = _loggedPicks.get(mid) || new Map();   // mt -> units
+
+            // Among current actionable picks, find:
+            //   newUnits     — best stake in a market_type NOT yet logged.
+            //   upgradeUnits — best stake where the market IS logged but the
+            //                  bot now wants MORE than we logged (add to it).
+            let newUnits = 0, upgradeUnits = 0;
+            for (const p of picks) {
+                if (loggedUnits.has(p.mt)) {
+                    if (p.units > (loggedUnits.get(p.mt) || 0)) upgradeUnits = Math.max(upgradeUnits, p.units);
+                } else {
+                    newUnits = Math.max(newUnits, p.units);
+                }
+            }
+            const bestActionable = picks.length ? Math.max(...picks.map(p => p.units)) : 0;
+
+            let cls, label;
+            if (logged && (upgradeUnits || newUnits)) {
+                // Already bet here, but there's more to do — loudest signal.
+                cls = 'upgrade';
+                label = upgradeUnits
+                    ? `↑ ${_uStr(upgradeUnits)}`           // existing bet got stronger
+                    : `✓ +${_uStr(newUnits)}`;             // a new market opened up
+            } else if (logged) {
+                cls = 'logged'; label = '✓ Pick';
+            } else if (bestActionable) {
+                cls = _uClass(bestActionable); label = `Pick ${_uStr(bestActionable)}`;
+            } else if (v) {
+                cls = 'lean'; label = 'Pick';              // evaluated, no real pick
+            } else {
+                cls = ''; label = 'Pick';                  // not evaluated (outside window)
+            }
+            if (cls) btn.classList.add(cls);
+            btn.textContent = label;
         });
     }
 
@@ -1106,8 +1189,16 @@
                     const d = await r.json();
                     if (d && d.ok) {
                         const sugg = d.suggestions || (d.suggestion ? [d.suggestion] : []);
-                        const isPick = sugg.some(s => s && s.gates_cleared);
-                        _verdictCache.set(g.market_id, { verdict: isPick ? 'pick' : 'lean', fetchedAt: Date.now() });
+                        // Actionable picks (gate cleared) with their units +
+                        // market_type, so the button can color by unit tier
+                        // AND detect new/stronger picks vs what's logged.
+                        const picks = sugg
+                            .filter(s => s && s.gates_cleared)
+                            .map(s => ({ mt: s.market_type, units: Number(s.units) || 1 }));
+                        // NRFI: actionable only when the model found a +EV
+                        // side vs Polymarket; flat 0.5u for now.
+                        if (d.nrfi && d.nrfi.bet_side) picks.push({ mt: 'nrfi', units: 0.5 });
+                        _verdictCache.set(g.market_id, { picks, fetchedAt: Date.now() });
                         _colorPickButtons();
                     }
                 } catch (e) { /* leave default on failure */ }
@@ -1611,19 +1702,39 @@
             </div>`;
         }
 
-        // NRFI / YRFI — first-inning model (MLB only). OUR-NUMBER prop:
-        // no line in our feed, so we show the model fair %/American + a
-        // lean vs the ~52.5% league baseline. The user shops a book/PMM
-        // price beating our fair. Log buttons seed market_type='nrfi'.
+        // NRFI / YRFI — first-inning model (MLB only). We compute the
+        // model fair, pull Polymarket's 1st-inning price, and the BET
+        // determination is the edge of our fair vs PMM's maker entry
+        // (bid). The +EV side's button lights up green; flat 0.5u for now.
+        // No PMM market → model fair shown for reference, no lit button.
         if (d.nrfi) {
             const n = d.nrfi;
+            const pmm = n.polymarket || {};
             const nrfiPct = (n.p_nrfi * 100).toFixed(0);
             const yrfiPct = (n.p_yrfi * 100).toFixed(0);
-            const leanLabel = n.lean === 'no' ? 'NRFI' : n.lean === 'yes' ? 'YRFI' : null;
-            const diff = n.diff_vs_baseline_pp;
-            const leanFrag = leanLabel
-                ? `<div class="pr-line">Lean <b>${leanLabel}</b> — model ${diff >= 0 ? '+' : ''}${diff}pp vs ~${(n.baseline_nrfi*100).toFixed(0)}% baseline. Shop a price beating <b>${_fmtAmer(n[n.lean === 'no' ? 'nrfi_fair_american' : 'yrfi_fair_american'])}</b>.</div>`
-                : `<div class="pr-line" style="color:var(--text-muted)">No edge vs the ~${(n.baseline_nrfi*100).toFixed(0)}% baseline — near a coin flip, pass unless you find a soft price.</div>`;
+            // Per-side cell: model fair + (when present) PMM bid/ask + edge.
+            const cell = (side, lbl, pct, fairA) => {
+                const pb = pmm[side];
+                const isBet = n.bet_side === side;
+                const pmmFrag = pb
+                    ? `<div class="pr-sub">Poly bid ${_fmtAmer(pb.bid_american)} · ask ${_fmtAmer(pb.ask_american)}${pb.edge_pp != null ? ` · <b style="color:${pb.edge_pp >= 0 ? 'var(--green)' : 'var(--red)'}">${pb.edge_pp >= 0 ? '+' : ''}${pb.edge_pp}pp</b>` : ''}</div>`
+                    : `<div class="pr-sub" style="color:var(--text-muted)">no Poly price</div>`;
+                return `<div class="pr-cell" style="${isBet ? 'outline:1px solid var(--green);border-radius:8px' : ''}">
+                    <span class="pr-lbl">${lbl}${isBet ? ' ✓' : ''}</span>
+                    <span class="pr-val">${pct}% <span class="pr-fair">${_fmtAmer(fairA)}</span></span>
+                    ${pmmFrag}
+                </div>`;
+            };
+            // Determination line.
+            let detFrag;
+            if (n.bet_side) {
+                const lbl = n.bet_side === 'no' ? 'NRFI' : 'YRFI';
+                detFrag = `<div class="pr-line" style="color:var(--green);font-weight:600">▶ BET ${lbl} @ ${_fmtAmer(n.entry_price)} (Poly bid) · +${n.bet_edge_pp}pp edge · 0.5u</div>`;
+            } else if (n.pmm_matched) {
+                detFrag = `<div class="pr-line" style="color:var(--text-muted)">Pass — model fair within 3pp of Poly's price on both sides.</div>`;
+            } else {
+                detFrag = `<div class="pr-line" style="color:var(--orange)">No Polymarket 1st-inning market found — can't price an edge (see "Copy for Claude" → pmm_meta to confirm Poly's offerings).</div>`;
+            }
             const whyHtml = (n.reasons || []).length
                 ? `<ul class="why" style="margin-top:10px">${n.reasons.map(b => `<li>${_esc(b)}</li>`).join('')}</ul>`
                 : '';
@@ -1632,20 +1743,28 @@
                 ? ` <span style="color:var(--orange)">(starter unannounced → league-avg used)</span>` : '';
             const obpNote = (inp.home_obp_src === 'team' || inp.away_obp_src === 'team')
                 ? ` · top-of-order from team OBP (lineup not posted yet)` : ` · top-of-order from posted lineup`;
+            // Buttons: the +EV side is the primary (green) action; the
+            // other side stays available for a manual log (also 0.5u).
+            const mkBtn = (side, lbl) => {
+                const isBet = n.bet_side === side;
+                const cls = isBet ? 'primary' : '';
+                const style = isBet ? 'style="background:var(--green);border-color:var(--green)"' : '';
+                return `<button class="${cls}" ${style} onclick="logNrfi('${side}')">${isBet ? 'BET' : 'Log'} ${lbl}</button>`;
+            };
             const btns = _canBet ? `<div class="actions" style="margin-top:10px">
-                <button class="primary" onclick="logNrfi('no')">Log NRFI @ ${_fmtAmer(n.nrfi_fair_american)}</button>
-                <button onclick="logNrfi('yes')">Log YRFI @ ${_fmtAmer(n.yrfi_fair_american)}</button>
+                ${mkBtn('no', 'NRFI')}
+                ${mkBtn('yes', 'YRFI')}
             </div>` : '';
             html += `<div class="card">
                 <div class="card-head">
                     <h3>First inning — NRFI / YRFI</h3>
-                    <span class="ref-tag" title="Model fair from the opposing starters + top-of-order on-base + park + temp. P(NRFI)=q_top·q_bot, two independent scoreless half-innings. No line in our feed — shop a book/Polymarket price beating the fair.">OUR NUMBER</span>
+                    <span class="ref-tag" title="Model fair from the opposing starters + top-of-order on-base + park + temp. P(NRFI)=q_top·q_bot. BET = our fair beats Polymarket's maker entry (bid) by ≥3pp. Flat 0.5u while we review the setup.">OUR NUMBER vs POLY</span>
                 </div>
                 <div class="pr-grid">
-                    <div class="pr-cell"><span class="pr-lbl">NRFI (no run)</span><span class="pr-val">${nrfiPct}% <span class="pr-fair">${_fmtAmer(n.nrfi_fair_american)}</span></span></div>
-                    <div class="pr-cell"><span class="pr-lbl">YRFI (run scores)</span><span class="pr-val">${yrfiPct}% <span class="pr-fair">${_fmtAmer(n.yrfi_fair_american)}</span></span></div>
+                    ${cell('no', 'NRFI (no run)', nrfiPct, n.nrfi_fair_american)}
+                    ${cell('yes', 'YRFI (run scores)', yrfiPct, n.yrfi_fair_american)}
                 </div>
-                ${leanFrag}
+                ${detFrag}
                 ${whyHtml}
                 <div class="wx-foot">scoreless halves: away ${(n.q_top*100).toFixed(0)}% · home ${(n.q_bot*100).toFixed(0)}%${obpNote}${spNote} · v1 — calibrating via backtest</div>
                 ${btns}
@@ -1905,30 +2024,35 @@
 
     function logNrfi(side) {
         // Seed the log modal for an NRFI/YRFI pick. side: 'no' (NRFI) /
-        // 'yes' (YRFI). entry_price = the model's fair American for that
-        // side (the user shops a better price; resolver grades W/L off
-        // the 1st-inning linescore). No line.
+        // 'yes' (YRFI). Maker entry = Polymarket's BID for that side when
+        // PMM has the market (where we rest the limit), else the model
+        // fair. Flat 0.5u for now. Resolver grades W/L off the 1st-inning
+        // linescore. No line.
         if (!_lastDossier || !_lastDossier.nrfi) return;
         const n = _lastDossier.nrfi;
         const prob = side === 'no' ? n.p_nrfi : n.p_yrfi;
         const fair = side === 'no' ? n.nrfi_fair_american : n.yrfi_fair_american;
+        const pb = (n.polymarket || {})[side];
+        const makerEntry = (pb && pb.bid_american != null) ? pb.bid_american : fair;
+        const entryLbl = (pb && pb.bid_american != null) ? 'Poly bid' : 'model fair';
+        const edge = (pb && pb.edge_pp != null) ? pb.edge_pp : null;
         const label = _nrfiSideLabel(side);
         _pendingPick = {
             market_id:   _lastDossier.market_id,
             market_type: 'nrfi',
             side:        side,
             book:        'PMM',
-            price:       fair,
+            price:       makerEntry,
             line:        null,
             fair_prob:   prob,
-            edge_pp:     null,
+            edge_pp:     edge,
             sharp_score: null,
-            label:       `1st Inning · ${label} @ ${_fmtAmer(fair)} (model fair)`,
-            seed_units:  1,
+            label:       `1st Inning · ${label} @ ${_fmtAmer(makerEntry)} (${entryLbl})`,
+            seed_units:  0.5,
             seed_conf:   'low',
         };
         document.getElementById('lmSelection').value  = _pendingPick.label;
-        document.getElementById('lmUnits').value      = '1';
+        document.getElementById('lmUnits').value      = '0.5';
         document.getElementById('lmConfidence').value = 'low';
         document.getElementById('lmReasons').value    = (n.reasons || []).join('\n');
         document.getElementById('lmAnalysis').value   = '';
@@ -2011,6 +2135,22 @@
     function closeLog() {
         document.getElementById('logModal').classList.remove('show');
         _pendingPick = null;
+    }
+    // Transient confirmation toast (bottom-center). Used after logging a
+    // pick so the dossier can stay open for the next bet.
+    function _toast(msg, kind) {
+        let t = document.getElementById('khToast');
+        if (!t) {
+            t = document.createElement('div');
+            t.id = 'khToast';
+            t.style.cssText = 'position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:10000;padding:11px 20px;border-radius:10px;font-weight:600;font-size:14px;color:#fff;box-shadow:0 6px 24px rgba(0,0,0,0.45);opacity:0;transition:opacity .2s;pointer-events:none';
+            document.body.appendChild(t);
+        }
+        t.textContent = msg;
+        t.style.background = (kind === 'err') ? 'var(--red)' : 'var(--green)';
+        t.style.opacity = '1';
+        clearTimeout(t._h);
+        t._h = setTimeout(() => { t.style.opacity = '0'; }, 1800);
     }
     function _suggestLabel(s, d) {
         const market = _shortMarket(s.market_type);
@@ -2286,9 +2426,12 @@
                 return;
             }
             if (out.ok || out.skipped) {
+                // Close ONLY the log modal — keep the game dossier open so
+                // you can log multiple bets on the same game back-to-back
+                // without re-opening it. A toast confirms each log.
                 closeLog();
-                closeDossier();
-                loadData(true);
+                _toast(out.skipped ? 'Already logged ✓' : 'Pick logged ✓');
+                loadData(false);
                 return;
             }
             _lmStatus('err', `HTTP ${r.status}: ${out.error || 'unknown'}\n${JSON.stringify(out).slice(0, 400)}`);
@@ -2476,6 +2619,18 @@
             // upcoming game). Then re-color any already-rendered buttons.
             _loggedMarketIds = new Set();
             [...pending, ...settled].forEach(r => { if (r.market_id) _loggedMarketIds.add(r.market_id); });
+            // Per-(game, market_type) max units from PENDING picks only —
+            // drives the new/upgrade button signals (you can't add to a
+            // settled bet). e.g. logged ML 1u; bot now suggests 3u → the
+            // game button pulses "↑ 3u" instead of sitting green.
+            _loggedPicks = new Map();
+            pending.forEach(r => {
+                if (!r.market_id || !r.market_type) return;
+                const m = _loggedPicks.get(r.market_id) || new Map();
+                const u = Number(r.units) || 1;
+                m.set(r.market_type, Math.max(m.get(r.market_type) || 0, u));
+                _loggedPicks.set(r.market_id, m);
+            });
             _colorPickButtons();
             document.getElementById('pendingCount').textContent = pending.length;
             document.getElementById('settledCount').textContent = settled.length;

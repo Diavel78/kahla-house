@@ -6473,8 +6473,12 @@ def api_handicapper_pick():
         return jsonify({"ok": False, "error": "bad side"}), 400
     if body["confidence"] not in ("low", "medium", "high", "whale"):
         return jsonify({"ok": False, "error": "bad confidence"}), 400
-    if body["units"] not in (1, 3, 5, 10):
-        return jsonify({"ok": False, "error": "units must be 1/3/5/10"}), 400
+    try:
+        units_val = float(body["units"])
+    except (TypeError, ValueError):
+        units_val = None
+    if units_val not in (0.5, 1, 3, 5, 10):
+        return jsonify({"ok": False, "error": "units must be 0.5/1/3/5/10"}), 400
 
     line_val = body.get("line")
     if body["market_type"] in ("spread", "total"):
@@ -6519,7 +6523,7 @@ def api_handicapper_pick():
         "entry_book":  body["book"],
         "entry_price": int(body["price"]),
         "entry_line":  float(line_val) if line_val is not None else None,
-        "units":       int(body["units"]),
+        "units":       units_val,
         "confidence":  body["confidence"],
         "fair_prob":   body.get("fair_prob"),
         "edge_pp":     body.get("edge_pp"),

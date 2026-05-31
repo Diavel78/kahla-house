@@ -539,6 +539,39 @@ def _classify_market(m: dict, away: str, home: str
     return None
 
 
+# First-inning (NRFI/YRFI) detection. PMM files these OUTSIDE the
+# ml/spread/total buckets (_classify_market returns None for them), so we
+# sniff them separately by text. PMM's exact schema for first-inning
+# markets is UNVERIFIED from our side — the lookup() diagnostic dumps
+# every market's question/type so we can confirm + tune this against a
+# real MLB event. Detection is permissive on purpose; the diag is the
+# ground truth.
+_FI_HINTS = ("1st inning", "first inning", "1st-inning", "first-inning",
+             "inning 1", "1st_inning", "first_inning")
+
+
+def _classify_first_inning(m: dict) -> tuple[str, float | None, str] | None:
+    """Detect a game-level NRFI/YRFI market. Returns ('nrfi', None, side)
+    where side is the YES outcome: 'yes' = a run scores in the 1st (YRFI),
+    'no' = no run (NRFI). None if this isn't a first-inning run market.
+
+    Orientation comes from the question framing: a "no run / scoreless"
+    phrasing makes YES = NRFI; a "run scored" phrasing makes YES = YRFI.
+    The opposite side is synthesized from the bid/ask inverse downstream."""
+    q = (m.get("question") or "")
+    text = (q + " " + str(m.get("slug") or "") + " "
+            + str(m.get("sportsMarketType") or "")).lower()
+    if not any(h in text for h in _FI_HINTS):
+        return None
+    # Must concern a run scoring (not a 1st-inning strikeout/hit/etc prop).
+    if not any(k in text for k in ("run", "runs", "score", "scored",
+                                   "scoreless", "nrfi", "yrfi")):
+        return None
+    no_frame = any(k in text for k in ("no run", "no runs", "scoreless", "nrfi"))
+    yes_side = "no" if no_frame else "yes"
+    return ("nrfi", None, yes_side)
+
+
 def _get_market_quote(m: dict) -> dict | None:
     """Read bestBidQuote / bestAskQuote directly off the market.
     PMM embeds the BBO on every market in the markets.list response —
@@ -643,7 +676,22 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
         "ml":     [],
         "spread": [],
         "total":  [],
+        "nrfi":   [],
     }
+    # Discovery diagnostic — dump EVERY market on the event (question +
+    # type slugs + line + closed/active) so we can see exactly what PMM
+    # offers for a game, including whether it has a first-inning market
+    # and what its schema looks like. This is how we confirm/tune the
+    # NRFI detection without being able to inspect the SDK from a sandbox.
+    if diag is not None:
+        diag["all_markets"] = [
+            {"q": (mm.get("question") or "")[:80],
+             "v1": mm.get("sportsMarketType"),
+             "v2": mm.get("sportsMarketTypeV2"),
+             "line": mm.get("line"),
+             "closed": bool(mm.get("closed")), "active": bool(mm.get("active"))}
+            for mm in (ev.get("markets") or [])[:50]
+        ]
     for m in ev["markets"]:
         # Skip markets that have closed (settled, expired, etc.) — we
         # only want live tradeable markets for the limit-order target.
@@ -651,6 +699,21 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
             continue
         result = _classify_market(m, away, home)
         if not result:
+            # Not a primary ml/spread/total — try the first-inning
+            # (NRFI/YRFI) sniff before giving up on this market.
+            fi = _classify_first_inning(m)
+            if fi:
+                mt, line, side = fi
+                quote = _get_market_quote(m) if with_bbo else None
+                out["nrfi"].append({"side": side, "line": None,
+                                    "slug": m.get("slug"),
+                                    "title": m.get("question"), "quote": quote})
+                opp = "no" if side == "yes" else "yes"
+                out["nrfi"].append({"side": opp, "line": None,
+                                    "slug": m.get("slug"),
+                                    "title": m.get("question"),
+                                    "quote": _inverse_quote(quote),
+                                    "synthetic": True})
             continue
         mt, line, side = result
         quote = _get_market_quote(m) if with_bbo else None
@@ -678,7 +741,7 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
             })
 
     if diag is not None:
-        diag["counts"] = {k: len(out.get(k, [])) for k in ("ml", "spread", "total")}
+        diag["counts"] = {k: len(out.get(k, [])) for k in ("ml", "spread", "total", "nrfi")}
     return out
 
 
