@@ -484,6 +484,7 @@
                     <a href="/games" class="nav-link">Games</a>
                     <a href="/dashboard" class="nav-link admin-only" style="display:none">Dashboard</a>
                     <a href="/handicapper" class="nav-link active">Pick Bot</a>
+                    <a href="/handicapper-analytics" class="nav-link admin-only" style="display:none">Analytics</a>
                 </div>
             </div>
             <div class="top-bar-row" style="justify-content:flex-end">
@@ -676,22 +677,26 @@
     }
     function doLogout() { firebase.auth().signOut().then(() => { window.location.href = '/'; }); }
 
-    // TWO access tiers on Pick Bot:
-    //   _canBet (VIEW)  = admin OR bot_access — can load the page + see the
-    //                     games list, picks, UNITS, colors, and the dossier
-    //                     read. (Name kept for churn; means "can view.")
-    //   _canLog (LOG)   = admin ONLY — can log bets + see the log
-    //                     (pending/settled/stats/P&L) + the green/upgrade/
-    //                     conflict states. Logging exists for the admin's
-    //                     regression testing; bot_access friends never log,
-    //                     never see the log, and never see "green".
-    // A bot_access (non-admin) user is the read-only tier: chips show the
-    // recommended bet + units (tier-colored), tapping opens Details, and
-    // nothing ever renders as logged. Server backs this: the dossier/games/
-    // sport-counts endpoints are @bot_required (the read, zero log data);
-    // the stats payload + all pick-mutation endpoints are @admin_required.
-    let _canBet = false;   // VIEW
-    let _canLog = false;   // LOG (admin only)
+    // PER-USER Pick Bot (multi-user rev): EVERY bot_access user logs the
+    // bot's picks as their OWN bets and tracks their OWN book — private to
+    // them (server scopes every read to asked_by==g.uid).
+    //   _canBet  = admin OR bot_access — load the page, see games/picks/units,
+    //              the dossier read, AND log + track. (Name kept for churn.)
+    //   _canLog  = _canBet — logging is no longer admin-only. Anyone who can
+    //              view can log + see THEIR log (pending/settled/stats/P&L/
+    //              CLV/live) + the green/upgrade/conflict states for THEIR
+    //              own picks.
+    //   _isAdmin = admin only — gates JUST the manual settle buttons (users
+    //              rely on the auto-resolver; the admin grades un-gradeable
+    //              rows for everyone from /handicapper-analytics) and the
+    //              global analytics nav link.
+    // Server backs this: dossier/games/sport-counts + the stats payload +
+    // pick POST/DELETE are all @bot_required and filtered to the caller;
+    // manual settle stays @admin_required; the GLOBAL analytics rollup is
+    // @admin_required.
+    let _canBet = false;   // VIEW + LOG (per-user)
+    let _canLog = false;   // = _canBet (kept as a name many call-sites use)
+    let _isAdmin = false;  // manual-settle + analytics-link gate
     // market_ids the current user has already logged a pick on (pending or
     // settled-today). Populated ONLY by loadData, which is gated to _canBet
     // — so for viewers this stays empty and Pick buttons never turn green.
@@ -729,11 +734,12 @@
             if (!me.approved) { window.location.href = '/'; return; }
             // Pick Bot now requires explicit access — admin or bot_access.
             // A plain viewer (e.g. a book-club-only member) is bounced out.
-            _canBet = (me.role === 'admin') || !!me.bot_access;   // VIEW
-            _canLog = (me.role === 'admin');                       // LOG (admin only)
+            _canBet = (me.role === 'admin') || !!me.bot_access;   // VIEW + LOG
+            _canLog = _canBet;                                     // per-user: view ⇒ log
+            _isAdmin = (me.role === 'admin');                      // settle + analytics gate
             if (!_canBet) { window.location.href = '/'; return; }
             // Show admin-only nav links if applicable.
-            if (me.role === 'admin') {
+            if (_isAdmin) {
                 document.querySelectorAll('.admin-only').forEach(el => el.style.display = '');
             }
         } catch { window.location.href = '/'; return; }
@@ -743,7 +749,9 @@
         _initSportTabs();
         _refreshSportTabOrder();
         loadGames();
-        // The log/stats payload is admin-only (regression data).
+        // Per-user log/stats payload — runs for any bot_access user; the
+        // server scopes pending/settled/stats to asked_by==g.uid so each
+        // user sees only their own book.
         if (_canLog) {
             loadData(true);
             setInterval(() => loadData(false), 60_000);
@@ -765,11 +773,16 @@
         setInterval(_tickKickoffs, 60_000);
     });
 
-    // Read-only mode for bot_access (non-admin) users: they see the picks +
-    // units but NOT the log. Hide every log/stats surface. The server-side
-    // gates are the real boundary (stats + pick-mutation routes are
-    // @admin_required; the dossier/games read stays @bot_required).
+    // PER-USER rev: there is no longer a read-only tier — every bot_access
+    // user logs + sees THEIR OWN log/stats (scoped server-side to
+    // asked_by==g.uid). This function is now a no-op for anyone who reaches
+    // the page (_canLog === _canBet, and we only get here if _canBet). The
+    // hide-everything body below is retained, dead, only as documentation of
+    // what the old VIEW-ONLY tier suppressed — guarded off by the early
+    // return so it never runs.
     function _applyViewerMode() {
+        return;   // per-user model: no view-only tier; everyone sees their own book
+        // eslint-disable-next-line no-unreachable
         if (_canLog) return;   // admin keeps everything
         // Hide the log surfaces: top stats card, confidence strip, pending +
         // settled lists. NOT the legend — view-only DOES see color-tiered
@@ -1014,7 +1027,7 @@
                 </div>
                 ${resultHtml}
                 <div class="pick-actions">
-                    ${kind === 'pending' ? `
+                    ${(kind === 'pending' && _isAdmin) ? `
                         <button class="settle-btn settle-won"  onclick="settlePick(${r.id}, 'won',  this)">✓ Won</button>
                         <button class="settle-btn settle-lost" onclick="settlePick(${r.id}, 'lost', this)">✗ Lost</button>
                         <button class="settle-btn settle-push" onclick="settlePick(${r.id}, 'push', this)">= Push</button>

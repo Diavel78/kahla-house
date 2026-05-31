@@ -5150,11 +5150,12 @@ def api_debug_trades():
 # ---------------------------------------------------------------------------
 
 @app.route("/api/handicapper")
-@admin_required   # log/stats payload (pending/settled/P&L) is admin-only — logging is for regression testing, Rob only. bot_access sees picks via the dossier, never the log.
+@bot_required   # PER-USER: every bot_access user logs + tracks their OWN book. Scoped to asked_by==g.uid below — each user sees only their own pending/settled/stats/CLV. The aggregate of ALL users' picks (the model-tuning signal) lives behind the admin-only /api/handicapper/analytics surface.
 def api_handicapper():
-    """JSON for /handicapper. Returns pending picks (no age cap), settled
-    picks from the last 30d, and rollup stats from bot_picks (the in-chat
-    handicapper's table).
+    """JSON for /handicapper. Returns the CALLER'S OWN pending picks (no age
+    cap), their settled picks from the last 30d, and their rollup stats from
+    bot_picks. Every row is filtered to asked_by==g.uid so each user's book +
+    ROI is private to them.
 
     Stats: hit_rate (excludes pushes), total units, ROI per pick (units /
     graded). Per-confidence-tier rollup so we can see if 'max' picks
@@ -5189,6 +5190,7 @@ def api_handicapper():
     try:
         pending = (sb.table("bot_picks").select(cols)
                    .eq("status", "pending")
+                   .eq("asked_by", g.uid)
                    .order("event_start", desc=False)
                    .limit(500).execute().data) or []
         # Settled list returned to the page = TODAY only. Yesterday's
@@ -5201,6 +5203,7 @@ def api_handicapper():
         # bot have suggested" analysis.
         settled_30d = (sb.table("bot_picks").select(cols)
                        .in_("status", ["won", "lost", "push", "void"])
+                       .eq("asked_by", g.uid)
                        .gte("settled_at", cutoff_30d)
                        .order("settled_at", desc=True)
                        .limit(500).execute().data) or []
@@ -5448,12 +5451,13 @@ def _live_market_prob(bet: dict, away: str, home: str, client, pmm_cache: dict):
 
 
 @app.route("/api/handicapper/live")
-@admin_required   # your in-progress bets — only the admin logs, so admin-only
+@bot_required   # PER-USER: the CALLER'S OWN in-progress bets (asked_by==g.uid)
 def api_handicapper_live():
-    """Live tracker: the admin's PENDING bets whose game is in progress,
+    """Live tracker: the caller's OWN PENDING bets whose game is in progress,
     enriched with the ESPN live score + a current win probability (live
     Polymarket price, or a deterministic 1/0 once the bet is decided). Powers
-    the small 'Live' scoreboard section on /handicapper. Polled ~30s."""
+    the small 'Live' scoreboard section on /handicapper. Polled ~30s.
+    Scoped to asked_by==g.uid so each user only sees their own live book."""
     sb = get_supabase()
     if sb is None:
         return jsonify({"ok": False, "error": "Supabase not configured"}), 503
@@ -5462,6 +5466,7 @@ def api_handicapper_live():
                    .select("id,market_id,sport,event_name,event_start,"
                            "market_type,side,units,entry_price,entry_line")
                    .eq("status", "pending")
+                   .eq("asked_by", g.uid)
                    .order("event_start", desc=False)
                    .limit(200).execute().data) or []
     except Exception as e:
@@ -6635,7 +6640,7 @@ def pmm_sync_page():
 
 
 @app.route("/api/handicapper/pick", methods=["POST"])
-@admin_required   # logging is admin-only (regression testing)
+@bot_required   # PER-USER: any bot_access user logs the bot's picks as their OWN bets (row stamped asked_by=g.uid). The dedup below is scoped to the caller so user B can still log a pick user A already logged.
 def api_handicapper_pick():
     """Log a pick to bot_picks. Body matches the bot_picks columns —
     see kahla-scanner/scripts/handicapper_log_pick.py for the same
@@ -6697,10 +6702,15 @@ def api_handicapper_pick():
     if not body.get("allow_duplicate"):
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=168)).isoformat()
         try:
+            # LANDMINE (gotcha #24, multi-user rev): the 7-day dedup is
+            # scoped to the CALLER (asked_by==g.uid). Without this, user B
+            # couldn't log a pick user A already logged — the global match
+            # would silently skip it. Each user has their own dedup window.
             existing = (sb.table("bot_picks").select("id")
                         .eq("market_id", body["market_id"])
                         .eq("market_type", body["market_type"])
                         .eq("side", body["side"])
+                        .eq("asked_by", g.uid)
                         .gte("picked_at", cutoff)
                         .limit(1).execute().data) or []
         except Exception:
@@ -6740,7 +6750,7 @@ def api_handicapper_pick():
 
 
 @app.route("/api/handicapper/pick/<int:pick_id>", methods=["DELETE"])
-@admin_required   # admin-only (only admin logs)
+@bot_required   # PER-USER: admin deletes any pick; a bot_access user deletes only their own (asked_by==g.uid). The admin-OR-owner check is enforced inline below.
 def api_handicapper_pick_delete(pick_id: int):
     """Delete a pick. Authorization:
       • admin can delete any pick
@@ -6774,15 +6784,18 @@ def api_handicapper_pick_delete(pick_id: int):
 
 
 @app.route("/api/handicapper/pick/<int:pick_id>/settle", methods=["POST"])
-@admin_required   # admin-only (only admin logs)
+@admin_required   # MANUAL SETTLE IS ADMIN-ONLY. Non-admins rely on the auto-resolver for their grades; their un-gradeable picks (UFC method bets, postponed games) are settled by the admin from the global /handicapper-analytics page (admin can settle ANY user's row). This keeps users from mis-grading their own book while still giving every pick a path to resolution.
 def api_handicapper_pick_settle(pick_id: int):
     """Manually settle a pending pick. Use case: UFC fights (no auto-grade
     for SPR/TOT method-of-victory bets), or any pick where the resolver
     can't reach ESPN reliably (rare). Body: {status: 'won'|'lost'|'push'}.
     Computes pnl_units via the same to-WIN math the resolver uses.
 
-    Authorization: admin OR owner of the row (asked_by). Same gate as
-    the delete endpoint."""
+    Authorization: admin only (the decorator). The admin can settle ANY
+    user's pick — the analytics page surfaces all users' pending rows with
+    Won/Lost/Push buttons so un-gradeable picks across the whole user base
+    still get resolved. The inline admin-OR-owner check below is retained
+    as defense-in-depth / for any future per-owner settle path."""
     body = request.get_json(silent=True) or {}
     new_status = (body.get("status") or "").strip()
     if new_status not in ("won", "lost", "push"):
@@ -6833,6 +6846,161 @@ def api_handicapper_pick_settle(pick_id: int):
         return jsonify({"ok": False, "error": f"update failed: {e}"}), 500
     return jsonify({"ok": True, "id": pick_id, "status": new_status,
                     "pnl_units": round(pnl, 3)})
+
+
+# ---------------------------------------------------------------------------
+# Pick Bot — admin GLOBAL analytics (all users' picks)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/handicapper/analytics")
+@admin_required   # GLOBAL view across EVERY user's bot_picks — the model-tuning signal. Per-user pages scope to asked_by; this one deliberately doesn't.
+def api_handicapper_analytics():
+    """Admin-only global rollup of ALL users' picks (the labeled dataset for
+    model tuning). Returns global stat buckets (today/7d/30d), a per-user
+    leaderboard (graded/won/lost/push/units/roi/hit_rate/avg_clv_pp +
+    pending count), every user's pending picks (so the admin can settle any
+    un-gradeable row), and today's settled across everyone. Each row carries
+    asked_by + the asker's display name."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+
+    now = datetime.now(timezone.utc)
+    cutoff_30d = (now - timedelta(days=30)).isoformat()
+    cutoff_7d = (now - timedelta(days=7)).isoformat()
+    local_now = now.astimezone(ZoneInfo("America/Phoenix"))
+    today_start_iso = (local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+                       .astimezone(timezone.utc).isoformat())
+
+    cols = ("id,market_id,picked_at,asked_by,query_text,sport,event_name,event_start,"
+            "market_type,side,entry_book,entry_price,entry_line,"
+            "units,confidence,fair_prob,edge_pp,sharp_score,clv_pp,"
+            "analysis_md,reasons,status,pnl_units,result_score,settled_at")
+    try:
+        pending = (sb.table("bot_picks").select(cols)
+                   .eq("status", "pending")
+                   .order("event_start", desc=False)
+                   .limit(2000).execute().data) or []
+        settled_30d = (sb.table("bot_picks").select(cols)
+                       .in_("status", ["won", "lost", "push", "void"])
+                       .gte("settled_at", cutoff_30d)
+                       .order("settled_at", desc=True)
+                       .limit(5000).execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
+
+    # uid -> display name (one Firestore read of the users collection).
+    names: dict = {}
+    try:
+        db = get_db()
+        for u in db.collection("users").stream():
+            ud = u.to_dict() or {}
+            names[u.id] = ud.get("displayName") or ud.get("email") or u.id
+    except Exception:
+        names = {}
+
+    def _bucket():
+        return {"graded": 0, "won": 0, "lost": 0, "push": 0, "pnl": 0.0,
+                "hit_rate": None, "roi": None,
+                "clv_sum": 0.0, "clv_n": 0, "avg_clv_pp": None}
+
+    def _add(b, st, pnl, clv):
+        b["graded"] += 1
+        b[st] += 1
+        b["pnl"] += pnl
+        if clv is not None:
+            b["clv_sum"] += clv
+            b["clv_n"] += 1
+
+    def _finalize(s):
+        decided = s["won"] + s["lost"]
+        if decided > 0:
+            s["hit_rate"] = round(s["won"] / decided, 4)
+        if s["graded"] > 0:
+            s["roi"] = round(s["pnl"] / s["graded"], 4)
+        if s["clv_n"] > 0:
+            s["avg_clv_pp"] = round(s["clv_sum"] / s["clv_n"], 2)
+        s["pnl"] = round(s["pnl"], 3)
+
+    g_today, g_week, g_30d = _bucket(), _bucket(), _bucket()
+    per_user: dict = {}
+    for r in settled_30d:
+        st = r.get("status")
+        if st not in ("won", "lost", "push"):
+            continue
+        try:
+            pnl = float(r.get("pnl_units") or 0)
+        except (TypeError, ValueError):
+            pnl = 0.0
+        try:
+            clv = r.get("clv_pp")
+            clv = float(clv) if clv is not None else None
+        except (TypeError, ValueError):
+            clv = None
+        es = r.get("event_start") or ""
+        uid = r.get("asked_by") or "unknown"
+        pu = per_user.setdefault(uid, _bucket())
+        _add(pu, st, pnl, clv)
+        _add(g_30d, st, pnl, clv)
+        if es >= cutoff_7d:
+            _add(g_week, st, pnl, clv)
+        if es >= today_start_iso:
+            _add(g_today, st, pnl, clv)
+
+    # Pending counts per user.
+    pending_count: dict = {}
+    for r in pending:
+        uid = r.get("asked_by") or "unknown"
+        pending_count[uid] = pending_count.get(uid, 0) + 1
+
+    leaderboard = []
+    for uid, b in per_user.items():
+        _finalize(b)
+        leaderboard.append({
+            "uid": uid, "name": names.get(uid, uid),
+            "pending": pending_count.get(uid, 0), **b,
+        })
+    # Surface users who only have pending picks (no graded rows yet) too —
+    # an all-zero bucket (hit_rate/roi/avg_clv_pp stay None).
+    for uid, cnt in pending_count.items():
+        if uid not in per_user:
+            leaderboard.append({
+                "uid": uid, "name": names.get(uid, uid), "pending": cnt,
+                **_bucket(),
+            })
+    leaderboard.sort(key=lambda x: (x.get("pnl") or 0), reverse=True)
+
+    for s in (g_today, g_week, g_30d):
+        _finalize(s)
+
+    # Attach asker name to every pending + today's-settled row for the UI.
+    def _name(r):
+        r["asked_by_name"] = names.get(r.get("asked_by"), r.get("asked_by") or "—")
+        return r
+    pending = [_name(r) for r in pending]
+    settled_today = [_name(r) for r in settled_30d
+                     if (r.get("event_start") or "") >= today_start_iso]
+
+    return jsonify({
+        "ok": True,
+        "now_iso": now.isoformat(),
+        "stats_today": g_today,
+        "stats_week": g_week,
+        "stats_30d": g_30d,
+        "leaderboard": leaderboard,
+        "pending": pending,
+        "settled": settled_today,
+        "user_count": len(set(list(per_user.keys()) + list(pending_count.keys()))),
+    })
+
+
+@app.route("/handicapper-analytics")
+def handicapper_analytics_page():
+    """Admin-only GLOBAL Pick Bot analytics (all users' picks + outcomes/CLV).
+    Client-gated via /api/me (bounces non-admins); the data endpoint is
+    @admin_required. Lets the admin see the aggregate labeled dataset for
+    model tuning AND settle any user's un-gradeable pending pick."""
+    return render_template("handicapper_analytics.html")
 
 
 # ---------------------------------------------------------------------------
