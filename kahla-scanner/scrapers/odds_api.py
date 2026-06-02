@@ -153,6 +153,16 @@ _CADENCE_BUCKETS: list[tuple[float, int]] = [
     (18.0, 30),
 ]
 
+# Discovery poll: when a sport has NO upcoming game in our DB it LOOKS
+# off-season — but it might just be a scheduling GAP (e.g. Stanley Cup
+# Final games sit 2+ days apart and the last one aged out of the window).
+# If we skip forever we never DISCOVER the newly-scheduled games (the
+# cold-start trap — won't fetch because nothing's upcoming, nothing's
+# upcoming because we won't fetch). So re-probe The Odds API on this slow
+# cadence; one hit re-seeds the DB and normal cadence resumes. Cheap
+# (6 cr × ~4/day per dormant sport).
+_DISCOVERY_SEC = 6 * 3600  # 6h
+
 
 def _slack_for(cadence_min: int) -> int:
     """Slack window in seconds so cron-job.org tick jitter doesn't make
@@ -206,12 +216,24 @@ def _should_fire(sport_code: str) -> tuple[bool, dict[str, Any]]:
     if _in_overnight_blackout():
         return False, {"status": "skipped:overnight", "detail": "10pm-7am MT"}
 
+    now = datetime.now(timezone.utc)
     nxt = db.nearest_upcoming_event(sport_code)
     if nxt is None:
-        return False, {"status": "skipped:offseason",
-                       "detail": "no event in next 7d"}
+        # Nothing upcoming in our DB. Don't skip forever — re-probe the API
+        # on the discovery cadence so a scheduling gap (or a new season)
+        # gets picked up instead of freezing the sport out (cold-start trap;
+        # this is what stranded NHL during the Stanley Cup Final). A poll
+        # that finds games re-seeds the DB and normal cadence resumes; a
+        # poll that finds nothing writes an 'ok' heartbeat, throttling the
+        # next probe by _DISCOVERY_SEC.
+        last_ok = db.last_ingest_run(sport_code, status="ok")
+        if last_ok is not None and (now - last_ok).total_seconds() < _DISCOVERY_SEC:
+            wait_h = (_DISCOVERY_SEC - (now - last_ok).total_seconds()) / 3600.0
+            return False, {"status": "skipped:offseason",
+                           "detail": f"no upcoming game; next discovery probe in {wait_h:.1f}h"}
+        return True, {"status": "ok", "cadence_min": None,
+                      "detail": "discovery probe (no upcoming game in DB)"}
 
-    now = datetime.now(timezone.utc)
     hours_to = (nxt - now).total_seconds() / 3600.0
     cadence = _cadence_for_next_game(hours_to)
     if cadence is None:
