@@ -56,6 +56,8 @@
         .settle-won:hover{border-color:var(--green);color:var(--green);background:var(--green-dim)}
         .settle-lost:hover{border-color:var(--red);color:var(--red);background:var(--red-dim)}
         .settle-push:hover{border-color:var(--orange);color:var(--orange);background:var(--orange-dim)}
+        .settle-del{margin-left:auto;color:var(--text-muted)}
+        .settle-del:hover{border-color:var(--red);color:var(--red);background:var(--red-dim)}
         .conf{font-size:10px;font-weight:700;letter-spacing:.6px;font-family:'JetBrains Mono',monospace;padding:2px 7px;border-radius:6px;background:var(--surface-2);color:var(--text-muted)}
         .empty,.loading{color:var(--text-muted);font-size:14px;padding:18px 4px}
         .res-badge{font-size:11px;font-weight:700;font-family:'JetBrains Mono',monospace;padding:3px 9px;border-radius:7px}
@@ -201,6 +203,7 @@
                 <button class="settle-btn settle-won"  onclick="settlePick(${r.id},'won',this)">✓ Won</button>
                 <button class="settle-btn settle-lost" onclick="settlePick(${r.id},'lost',this)">✗ Lost</button>
                 <button class="settle-btn settle-push" onclick="settlePick(${r.id},'push',this)">= Push</button>
+                <button class="settle-btn settle-del" onclick="deletePick(${r.id},this)">🗑 Delete</button>
             </div>
         </li>`;
     }
@@ -230,6 +233,21 @@
             if (d && d.ok) { load(); }
             else { alert('Settle failed: ' + ((d && d.error) || 'unknown')); btns.forEach(b => b.disabled = false); }
         } catch (e) { alert('Settle error: ' + e.message); btns.forEach(b => b.disabled = false); }
+    }
+
+    async function deletePick(pickId, btn){
+        // Admin can delete ANY user's pick (server DELETE is admin-OR-owner).
+        // Use case: a user accidentally double-logged a bet.
+        if (!confirm('Delete this pick? This is permanent — use it to remove an accidental duplicate.')) return;
+        const row = btn.closest('.pick');
+        const btns = row ? row.querySelectorAll('.settle-btn') : [btn];
+        btns.forEach(b => b.disabled = true);
+        try {
+            const r = await authFetch(`/api/handicapper/pick/${pickId}`, { method:'DELETE' });
+            const d = r ? await r.json() : null;
+            if (d && d.ok) { load(); }
+            else { alert('Delete failed: ' + ((d && d.error) || 'unknown')); btns.forEach(b => b.disabled = false); }
+        } catch (e) { alert('Delete error: ' + e.message); btns.forEach(b => b.disabled = false); }
     }
 
     async function load(){
