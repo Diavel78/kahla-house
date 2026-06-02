@@ -236,6 +236,8 @@
         .live-proj.pos { color: var(--green); }
         .live-proj.neg { color: var(--red); }
         .live-proj.zero { color: var(--text-muted); }
+        .live-hint { font-size: 10px; color: var(--text-muted); margin: -4px 0 8px; }
+        .live-hint .ehint { color: rgba(255,255,255,0.55); }
         .live-list { display: flex; flex-direction: column; gap: 8px; }
         .live-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; }
         .live-row .lv-mid { flex: 1; min-width: 0; }
@@ -244,7 +246,7 @@
         .live-row .lv-status { font-size: 11px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; margin-left: 6px; }
         .live-row .lv-bet { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
         .live-row .lv-bet b { color: var(--text); }
-        .win-gauge { flex: 0 0 auto; position: relative; width: 38px; height: 38px; }
+        .win-gauge { flex: 0 0 auto; position: relative; width: 44px; height: 44px; }
         .win-gauge svg { transform: rotate(-90deg); }
         .win-gauge .wg-num { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
 
@@ -548,6 +550,7 @@
                     <h3>🔴 Live — your bets <span id="liveProj" class="live-proj"></span></h3>
                     <span class="count" id="liveCount">…</span>
                 </div>
+                <div class="live-hint">ring: <span class="ehint">○ inner = your entry odds</span> · outer = live win %</div>
                 <div id="liveList"></div>
             </div>
 
@@ -1404,22 +1407,39 @@
     }
 
     // ── Live tracker (admin only) ──────────────────────────────────────
-    // A small circular win-% gauge: ring fills with the live win prob and
-    // shifts red(0%) → yellow(50%) → green(100%). null prob → grey "—".
-    function _winGauge(prob, src) {
-        const r = 15, C = 2 * Math.PI * r, size = 38, c = size / 2;
-        const track = `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="#2a2f3a" stroke-width="4"/>`;
+    function _amerToProb(a) {
+        a = Number(a);
+        if (!isFinite(a) || a === 0) return null;
+        return a > 0 ? 100 / (a + 100) : (-a) / ((-a) + 100);
+    }
+
+    // Dual concentric win-% gauge: OUTER ring = current live win prob (fills
+    // + shifts red 0% → yellow 50% → green 100%); INNER ring (soft white) =
+    // the implied odds of YOUR entry price. Outer well past inner = your bet
+    // is beating where you got in; outer collapsed inside it = it's gone
+    // south. Center number = current win %. null current → grey "—".
+    function _winGauge(prob, src, entryPrice) {
+        const size = 44, c = size / 2, rO = 17, rI = 10.5;
+        const CO = 2 * Math.PI * rO, CI = 2 * Math.PI * rI;
+        const ep = _amerToProb(entryPrice);
+        const arc = (r, C, frac, col, w) =>
+            `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="${col}" stroke-width="${w}" ` +
+            `stroke-linecap="round" stroke-dasharray="${(Math.max(0, Math.min(1, frac)) * C).toFixed(1)} ${C.toFixed(1)}"/>`;
+        const trackO = `<circle cx="${c}" cy="${c}" r="${rO}" fill="none" stroke="#2a2f3a" stroke-width="4"/>`;
+        const trackI = ep != null ? `<circle cx="${c}" cy="${c}" r="${rI}" fill="none" stroke="#22262e" stroke-width="3"/>` : '';
+        const innerArc = ep != null ? arc(rI, CI, ep, 'rgba(255,255,255,0.55)', 3) : '';
         if (prob == null) {
-            return `<div class="win-gauge"><svg width="${size}" height="${size}">${track}</svg>` +
+            return `<div class="win-gauge" title="${ep != null ? 'you bet at ' + Math.round(ep * 100) + '%' : ''}">` +
+                   `<svg width="${size}" height="${size}">${trackO}${trackI}${innerArc}</svg>` +
                    `<span class="wg-num" style="color:var(--text-muted)">—</span></div>`;
         }
         const p = Math.max(0, Math.min(1, prob));
-        const col = `hsl(${Math.round(p * 120)},75%,48%)`;   // 0 red · 60 yellow · 120 green
-        const dash = `${(p * C).toFixed(1)} ${C.toFixed(1)}`;
-        const tip = (src === 'decided') ? 'decided' : 'live Polymarket odds';
-        return `<div class="win-gauge" title="${tip}"><svg width="${size}" height="${size}">${track}` +
-               `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="${col}" stroke-width="4" ` +
-               `stroke-linecap="round" stroke-dasharray="${dash}"/></svg>` +
+        const col = `hsl(${Math.round(p * 120)},75%,48%)`;
+        const tip = ep != null
+            ? `live ${Math.round(p * 100)}% · you bet at ${Math.round(ep * 100)}%`
+            : (src === 'decided' ? 'decided' : 'live odds');
+        return `<div class="win-gauge" title="${tip}"><svg width="${size}" height="${size}">` +
+               `${trackO}${trackI}${arc(rO, CO, p, col, 4)}${innerArc}</svg>` +
                `<span class="wg-num" style="color:${col}">${Math.round(p * 100)}</span></div>`;
     }
 
@@ -1479,7 +1499,7 @@
             const away = (r.away || '').split(' ').pop(), home = (r.home || '').split(' ').pop();
             const status = _esc(s.display_status || (s.state === 'post' ? 'FINAL' : 'LIVE'));
             return `<div class="live-row" onclick="pickGame('${r.market_id}')" style="cursor:pointer">
-                ${_winGauge(r.win_prob, r.prob_src)}
+                ${_winGauge(r.win_prob, r.prob_src, r.entry_price)}
                 <div class="lv-mid">
                     <div class="lv-score"><span class="sc">${_esc(away)} ${sc} ${_esc(home)}</span><span class="lv-status">${status}</span></div>
                     <div class="lv-bet">${_liveBetLabel(r)}</div>
