@@ -216,6 +216,9 @@
                 <span><span class="pick-who">${_esc(r.asked_by_name)}</span> <span class="res-badge res-${st}">${st.toUpperCase()} ${r.pnl_units!=null?_u(r.pnl_units):''}</span></span>
             </div>
             <div class="pick-meta">${_esc(_pickTitle(r))}${r.clv_pp!=null?(' · CLV '+(r.clv_pp>=0?'+':'')+r.clv_pp+'pp'):''}</div>
+            <div class="settle-row">
+                <button class="settle-btn settle-del" onclick="deletePick(${r.id},this)">🗑 Delete</button>
+            </div>
         </li>`;
     }
 
