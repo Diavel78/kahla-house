@@ -201,6 +201,27 @@
         .game-row .when.tier-soon     { color: var(--green); }
         .game-row .when.tier-close    { color: var(--gold); }
         .game-row .when.tier-imminent { color: var(--red); font-weight: 700; }
+        /* PRIME row (90-120 min to first pitch — the bot's proven size-up
+           window). Green glow reinforces the traffic light: green = GO =
+           the window to bet. Reuses --green (no new hue), accent-not-fill:
+           a thin left rail + faint wash + tight soft glow + a small pill.
+           Toggled live by _tickKickoffs as games cross the window. */
+        .game-row.prime {
+            border-color: rgba(34,197,94,0.42);
+            border-left: 2px solid var(--green);
+            background: linear-gradient(90deg, rgba(34,197,94,0.07), var(--bg) 42%);
+            box-shadow: 0 0 0 1px rgba(34,197,94,0.10), 0 0 18px -7px rgba(34,197,94,0.50);
+        }
+        .game-row.prime:hover { border-color: var(--green); }
+        .game-row .prime-tag {
+            display: none;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 9px; font-weight: 700; letter-spacing: 0.07em;
+            color: var(--green); background: var(--green-dim);
+            border: 1px solid rgba(34,197,94,0.40);
+            padding: 1px 6px; border-radius: 999px; text-transform: uppercase;
+        }
+        .game-row.prime .prime-tag { display: inline-block; }
         .details-btn { padding: 5px 12px; background: var(--surface-2); color: var(--text); border: 1px solid var(--border-light); border-radius: 8px; font-size: 11px; font-weight: 600; cursor: pointer; font-family: inherit; white-space: nowrap; }
         .details-btn:hover { border-color: var(--blue); }
         /* Line 2 — one-tap log chips, color-tiered by stake (louder = bigger
@@ -864,6 +885,13 @@
         if (diffMin < 120) return 'tier-soon';
         return '';
     }
+    // PRIME window = 90-120 min to first pitch (matches the server's
+    // timing_window==='prime' + the only window the bot sizes past 1u).
+    // Drives the green prime glow/pill on the games-list row.
+    function _isPrime(iso) {
+        const diffMin = Math.round((new Date(iso) - new Date()) / 60_000);
+        return diffMin >= 90 && diffMin <= 120;
+    }
     function _fmtSettled(iso) {
         const d = new Date(iso);
         const diffH = (Date.now() - d) / 3_600_000;
@@ -1178,9 +1206,10 @@
             }
             list.innerHTML = games.map(g => {
                 const matchup = g.away && g.home ? `${_esc(g.away)} @ ${_esc(g.home)}` : _esc(g.event_name);
-                return `<li class="game-row">
+                return `<li class="game-row ${_isPrime(g.event_start) ? 'prime' : ''}">
                     <div class="game-line1">
                         <span class="when ${_kickoffTier(g.event_start)}" data-start="${_esc(g.event_start)}">${_fmtKickoff(g.event_start)}</span>
+                        <span class="prime-tag">Prime</span>
                         <span class="matchup">${matchup}</span>
                         <button class="details-btn" onclick="pickGame('${g.market_id}')">Details ›</button>
                     </div>
@@ -1537,6 +1566,10 @@
             }
             el.textContent = _fmtKickoff(iso);
             el.className = 'when ' + _kickoffTier(iso);
+            // Toggle the green prime glow as a game crosses into/out of
+            // the 90-120 min window (no re-fetch — the pill follows via CSS).
+            const row = el.closest('.game-row');
+            if (row) row.classList.toggle('prime', _isPrime(iso));
         });
         if (removed) {
             const list = document.getElementById('gamesList');
