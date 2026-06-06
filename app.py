@@ -3167,6 +3167,158 @@ def _format_fill_alert(row, milestone, fill_pct):
     return "\n".join(lines)
 
 
+# ──────────────── Pick Bot prime-window alerts ────────────────
+# Telegram heads-up (via the Filled Bot) when a cluster of games crosses
+# into the PRIME betting window — 90-120 min before first pitch, the
+# 1.5-2h band where the bot's live picks demonstrably print (68.4%,
+# +27u over 38 picks in the 118-pick review). One BATCHED message per
+# sport ("5 MLB games entering the prime betting window"), NOT one per
+# game. Dedup via the `prime_alerts` table so each game pings once.
+#
+# Pinged every ~1 min by the scanner cron (a curl step alongside the
+# fill-alert ping — no new cron-job.org job). Auth: shared-secret ?key=
+# matched to PRIME_CRON_SECRET, falling back to FILLS_CRON_SECRET so no
+# new secret is required. Telegram routes through _send_fill_telegram
+# (the Filled Bot creds already in Vercel env).
+_PRIME_LO_MIN       = 90    # window opens 90 min before first pitch
+_PRIME_HI_MIN       = 120   # window closes at 120 min (the 2h chip-pick cap)
+_PRIME_BATCH_HI_MIN = 150   # look 30 min past prime to pull a whole cluster into one alert
+_PRIME_QUIET_BEFORE = 7     # don't alert before 7am AZ (no overnight/early-morning pings)
+
+
+def _fmt_az_time(dt: datetime) -> str:
+    """UTC datetime → 'h:MM AM' in Arizona time (no leading zero)."""
+    local = dt.astimezone(ZoneInfo("America/Phoenix"))
+    return local.strftime("%I:%M %p").lstrip("0")
+
+
+@app.route("/api/handicapper/prime-alert")
+def api_handicapper_prime_alert():
+    """Send a batched Telegram alert when games enter the prime betting
+    window (90-120 min pre-tip). One message per sport for the whole
+    cluster; deduped via `prime_alerts`. Returns a small JSON payload so
+    the cron-job history shows what fired."""
+    expected = (os.environ.get("PRIME_CRON_SECRET")
+                or os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    provided = (request.args.get("key") or "").strip()
+    if not expected or not secrets.compare_digest(provided, expected):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+
+    now = datetime.now(timezone.utc)
+    # Quiet hours — no pings before 7am Arizona time (a game would have to
+    # start ~9am for its prime window to land that early; none do).
+    if now.astimezone(ZoneInfo("America/Phoenix")).hour < _PRIME_QUIET_BEFORE:
+        return jsonify({"ok": True, "alerted": 0, "reason": "quiet hours"})
+
+    lo = (now + timedelta(minutes=_PRIME_LO_MIN)).isoformat()
+    hi = (now + timedelta(minutes=_PRIME_BATCH_HI_MIN)).isoformat()
+    prime_hi = now + timedelta(minutes=_PRIME_HI_MIN)
+
+    try:
+        rows = (sb.table("markets")
+                .select("id,sport,event_name,event_start")
+                .eq("status", "active")
+                .gte("event_start", lo)
+                .lte("event_start", hi)
+                .order("event_start")
+                .execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"markets query: {e}"}), 500
+    if not rows:
+        return jsonify({"ok": True, "alerted": 0, "reason": "no games in window"})
+
+    # Drop games we've already pinged (per-game dedup).
+    ids = [r["id"] for r in rows]
+    try:
+        ex = (sb.table("prime_alerts").select("market_id")
+              .in_("market_id", ids).execute().data) or []
+        already = {e["market_id"] for e in ex}
+    except Exception as e:
+        # Table missing/unreadable — bail rather than risk spamming.
+        return jsonify({"ok": False, "error": f"prime_alerts read: {e}"}), 500
+    fresh = [r for r in rows if r["id"] not in already]
+    if not fresh:
+        return jsonify({"ok": True, "alerted": 0, "reason": "all already alerted"})
+
+    # Group by sport; only fire a sport whose EARLIEST fresh game has
+    # actually entered prime (≤120 min out) — so we don't pre-fire a
+    # cluster that's still 2h+ away. Once fired, the whole batch (out to
+    # +150 min) is marked so the trailing games don't re-ping.
+    by_sport: dict[str, list] = {}
+    for r in fresh:
+        by_sport.setdefault(r["sport"], []).append(r)
+
+    sports_fired = 0
+    marked: list[dict] = []
+    for sport, games in by_sport.items():
+        games.sort(key=lambda g: g["event_start"])
+        try:
+            earliest = datetime.fromisoformat(
+                str(games[0]["event_start"]).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if earliest > prime_hi:
+            continue  # leading edge not in prime yet — wait for a later tick
+
+        if _send_fill_telegram(_build_prime_alert_msg(sport, games)):
+            sports_fired += 1
+            for g in games:
+                marked.append({"market_id": g["id"], "sport": sport,
+                               "event_start": g["event_start"],
+                               "alerted_at": now.isoformat()})
+
+    if marked:
+        try:
+            sb.table("prime_alerts").upsert(marked).execute()
+        except Exception as e:
+            # Send happened but the mark failed — next tick may re-ping.
+            # Rare; surfaced in the response for visibility.
+            return jsonify({"ok": False, "error": f"mark failed: {e}",
+                            "sports_fired": sports_fired}), 500
+
+    # Opportunistic cleanup — drop rows older than 2 days (markets long over).
+    try:
+        cutoff = (now - timedelta(days=2)).isoformat()
+        sb.table("prime_alerts").delete().lt("alerted_at", cutoff).execute()
+    except Exception:
+        pass
+
+    return jsonify({"ok": True, "sports_fired": sports_fired,
+                    "games_marked": len(marked)})
+
+
+def _build_prime_alert_msg(sport: str, games: list) -> str:
+    """Batched Telegram message body for one sport's prime-window cluster.
+    Markdown — matches the Filled Bot's other messages."""
+    n = len(games)
+    starts = []
+    for g in games:
+        try:
+            starts.append(datetime.fromisoformat(
+                str(g["event_start"]).replace("Z", "+00:00")))
+        except Exception:
+            pass
+    when = ""
+    if starts:
+        lo_t, hi_t = _fmt_az_time(min(starts)), _fmt_az_time(max(starts))
+        when = (f"🕐 First pitch {lo_t} AZ" if lo_t == hi_t
+                else f"🕐 First pitch {lo_t}–{hi_t} AZ")
+    plural = "game" if n == 1 else "games"
+    lines = [f"🎯 *{n} {sport} {plural}* entering the prime betting window"]
+    if when:
+        lines.append(when + "  (1.5–2h out)")
+    for g in games[:8]:
+        lines.append(f"• {g.get('event_name', '?')}")
+    if n > 8:
+        lines.append(f"…and {n - 8} more")
+    lines.append("Make your picks → thekahlahouse.com/handicapper")
+    return "\n".join(lines)
+
+
 @app.route("/api/polymarket/check-fills")
 def api_check_fills():
     """Polymarket order fill detector. Pulled every ~1 min by

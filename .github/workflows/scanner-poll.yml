@@ -183,3 +183,23 @@ jobs:
           code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
             "https://www.thekahlahouse.com/api/polymarket/check-fills?key=${KEY}" || echo "000")
           echo "check-fills HTTP $code"
+
+      # Pick Bot prime-window alert ping. Same lightweight curl pattern —
+      # /api/handicapper/prime-alert fires a batched Telegram (via the
+      # Filled Bot) when a cluster of games enters the 90-120 min pre-tip
+      # window, deduped server-side via the prime_alerts table. Reuses
+      # FILLS_CRON_SECRET (the endpoint accepts it as a fallback), so no
+      # new secret is needed. Idempotent — double-pinging is harmless.
+      - name: Pick Bot — prime-window alert ping
+        continue-on-error: true
+        env:
+          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
+        run: |
+          if [ -z "$FILLS_CRON_SECRET" ]; then
+            echo "FILLS_CRON_SECRET not set — skipping prime-window ping (no-op)."
+            exit 0
+          fi
+          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
+          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
+            "https://www.thekahlahouse.com/api/handicapper/prime-alert?key=${KEY}" || echo "000")
+          echo "prime-alert HTTP $code"
