@@ -748,7 +748,10 @@
     let _currentGames = [];
     let _verdictCache = new Map();
     let _verdictInFlight = new Set();
-    const VERDICT_WINDOW_MS = 2 * 60 * 60 * 1000;   // 2h start window
+    const VERDICT_WINDOW_MS = 2.5 * 60 * 60 * 1000; // 2.5h evaluator window — surfaces picks out to 150m.
+                                                    // 60-120m = prime (glow + size-up); 120-150m = 'early'
+                                                    // test window (chips at 1u, no glow). Cron polls 5-min
+                                                    // out to 2.5h (odds_api EVAL boundary) so these aren't stale.
     const VERDICT_TTL_MS    = 5 * 60 * 1000;        // re-fetch stale verdicts
 
     firebase.auth().onAuthStateChanged(async user => {
@@ -1271,12 +1274,13 @@
     }
     // Render the second line of every game row: the bot's recommended bets
     // as one-tap log chips (color-tiered by stake), or a grey note. Rules:
-    //   • > 2h to start  → grey "lean only, outside pick window" (no chips —
+    //   • > 2.5h to start → grey "lean only, outside pick window" (no chips —
     //     the bot's read isn't actionable that far out).
-    //   • ≤ 2h, verdict cached → one chip per recommended bet. Tap = log it
+    //   • ≤ 2.5h, verdict cached → one chip per recommended bet. Tap = log it
     //     instantly at the recommended units (blind-follow). Logged / upgrade
-    //     / opposite-side (conflict) states recolor the chip.
-    //   • ≤ 2h, not yet evaluated → "evaluating…" until the prefetch lands.
+    //     / opposite-side (conflict) states recolor the chip. 120-150m picks
+    //     are capped at 1u ('early' test window) and don't glow.
+    //   • ≤ 2.5h, not yet evaluated → "evaluating…" until the prefetch lands.
     function _renderPickLines() {
         const now = Date.now();
         document.querySelectorAll('#gamesList .game-line2[data-mid]').forEach(el => {

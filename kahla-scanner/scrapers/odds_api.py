@@ -146,9 +146,18 @@ _BLACKOUT_END_HOUR   = 7   # 7am local
 
 # (max_hours_to_game, cadence_minutes). Picked left-to-right; first
 # match wins. Trailing entry catches everything up to 18h.
+#
+# The 5-min bucket runs to 2.5h (not 2h) on purpose: the Pick Bot's
+# picker/evaluator surfaces picks out to 150 min (the 120-150 "early"
+# test window — sharp money often moves the line BEFORE the 2h mark, so
+# we want to catch it). Polling those games at the old 15-min cadence
+# would show stale lines and miss the very movement we're chasing, so
+# the 120-150 window gets the same 5-min freshness as the 60-120
+# betting window. Keep this boundary in sync with handicapper_web.py's
+# EVAL_WINDOW_MAX (150). Modest credit cost — well within headroom.
 _CADENCE_BUCKETS: list[tuple[float, int]] = [
     (0.5,  2),
-    (2.0,  5),
+    (2.5,  5),
     (6.0,  15),
     (18.0, 30),
 ]

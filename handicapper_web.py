@@ -1793,26 +1793,35 @@ _TOTAL_MODEL_VETO_DIFF = 1.0     # runs of model-vs-line disagreement to veto th
 # Kelly says. Picks keep their `timing_window` tag for the card badge +
 # future analysis (it lands in signal_blob when logged).
 LATE_WINDOW_MIN = 60                   # < 1h to first pitch → cap units at 1u (last-hour picks underperform)
-_PRIME_WINDOW   = (60, 120)            # 1-2h out = the betting window (60-120 = 63.9%, +31u over 61).
+_PRIME_WINDOW   = (60, 120)            # 1-2h out = the betting window (60-120 = 63.9%, +31u over 61). SIZES UP.
 _PRIME_CORE     = (90, 120)            # 90-120 is the HAMMER sub-bucket (68.4%, +27u over 38) — tracked via prime_core.
-                                       # Upper bound IS the 2h chip pick window — we don't pick past it.
+EVAL_WINDOW_MAX = 150                  # the picker/evaluator surfaces picks out to 2.5h. 120-150 = 'early' TEST
+                                       # window (capped 1u, NOT prime sizing) — hypothesis: sharp money moves the
+                                       # line before the 2h mark, so picking earlier captures CLV. Measured via
+                                       # signal_blob.timing_window=='early' + clv_pp before any promotion to sizing.
 
 
 def _timing_window(starts_in_min) -> str | None:
     """Classify a pick by minutes before first pitch:
-      late   (<60)     — capped to 1u, the mushy last-hour window (52.9%)
-      prime  (60-120)  — the betting window, green glow + size-up (63.9%)
-      early  (>120)    — outside the 2h chip pick window.
-    The 60-90 vs 90-120 split inside prime is preserved separately via
-    `prime_core` (see _is_prime_core) for analytics — the +27u hammer is
-    in the 90-120 core; 60-90 is solid (+3.9u) but lighter."""
+      late   (<60)      — capped to 1u, the mushy last-hour window (52.9%)
+      prime  (60-120)   — the betting window, green glow + size-up (63.9%)
+      early  (120-150)  — the NEW farther-out TEST window: actionable at 1u
+                          (capped, no glow), surfaced because sharp money
+                          often moves the line before the 2h mark. Measured
+                          via clv_pp before any promotion to sizing.
+      far    (>150)     — outside the picker/evaluator window entirely.
+    The 60-90 vs 90-120 split inside prime is preserved via `prime_core`
+    (see _is_prime_core) — the +27u hammer is the 90-120 core; 60-90 is
+    solid (+3.9u) but lighter."""
     if starts_in_min is None:
         return None
     if starts_in_min < LATE_WINDOW_MIN:
         return "late"
     if _PRIME_WINDOW[0] <= starts_in_min <= _PRIME_WINDOW[1]:
         return "prime"
-    return "early"
+    if starts_in_min <= EVAL_WINDOW_MAX:
+        return "early"
+    return "far"
 
 
 def _is_prime_core(starts_in_min) -> bool | None:
