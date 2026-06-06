@@ -1848,7 +1848,7 @@
                 // Timing badge — picks made 1.5-2h out are the proven edge
                 // window; last-hour picks get sized down to 1u.
                 const timingBadge = s.timing_window === 'prime'
-                    ? '<span class="time-badge prime" title="1-2.5h before first pitch — the bot\'s proven edge window">PRIME WINDOW</span>'
+                    ? '<span class="time-badge prime" title="1.5-2h before first pitch — the bot\'s proven gold window (68.4%, +27u)">PRIME WINDOW</span>'
                     : (s.timing_window === 'late'
                         ? `<span class="time-badge late" title="Under 1h to first pitch — last-hour picks underperform${s.late_capped ? '; sized down to 1u' : ''}">LATE${s.late_capped ? ' · capped 1u' : ''}</span>`
                         : '');

@@ -1792,19 +1792,25 @@ _TOTAL_MODEL_VETO_DIFF = 1.0     # runs of model-vs-line disagreement to veto th
 # last-hour picks: a < 1h-out pick never sizes above 1u no matter what
 # Kelly says. Picks keep their `timing_window` tag for the card badge +
 # future analysis (it lands in signal_blob when logged).
-LATE_WINDOW_MIN = 60                  # < 1h to first pitch → cap units at 1u
-_PRIME_WINDOW   = (60, 150)           # 1-2.5h out = the bot's proven edge window
+LATE_WINDOW_MIN = 60                   # < 1h to first pitch → cap units at 1u (last-hour picks underperform)
+_PRIME_WINDOW   = (90, 120)            # 1.5-2h out = the proven gold window (68.4%, +27u over 38).
+                                       # Upper bound IS the 2h chip pick window — we don't pick past it.
 
 
 def _timing_window(starts_in_min) -> str | None:
-    """Classify a pick by how long before first pitch it's being made.
-    'prime' (the proven edge window) / 'late' (cap sizing) / 'early'."""
+    """Classify a pick by minutes before first pitch:
+      late   (<60)    — capped to 1u, the mushy last-hour window (52.9%)
+      normal (60-90)  — fine, no badge (56.5%)
+      prime  (90-120) — the proven edge window, green badge (68.4%)
+      early  (>120)   — outside the 2h chip pick window."""
     if starts_in_min is None:
         return None
     if starts_in_min < LATE_WINDOW_MIN:
         return "late"
     if _PRIME_WINDOW[0] <= starts_in_min <= _PRIME_WINDOW[1]:
         return "prime"
+    if starts_in_min < _PRIME_WINDOW[0]:
+        return "normal"
     return "early"
 
 
