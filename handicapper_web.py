@@ -189,12 +189,12 @@ def _amer_to_cents(p: Any) -> float | None:
 #     < 0 → sharp UNDER. Line flat → fall back to vig direction.
 
 _RECENCY_WEIGHTS: tuple[tuple[float, float], ...] = (
-    (15,   1.00),
-    (60,   0.60),
-    (120,  0.35),
-    (360,  0.18),
-    (1080, 0.08),
-)
+    (15,   0.75),   # was 1.00 — trimmed June 2026: a 118-pick review showed
+    (60,   0.50),   # was 0.60   last-hour picks underperform, so the freshest
+    (120,  0.35),   #            ticks were over-trusted as "steam" when they're
+    (360,  0.18),   #            often retail noise. Kept mild (not gutted) so
+    (1080, 0.08),   #            genuine prime-window steam still scores enough
+)                   #            to size up. The pick-time cap is the precise lever.
 
 
 def _recency_weight(age_min: float) -> float:
@@ -3274,13 +3274,18 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
         units, conf, kelly_pct = _kelly_units(
             c.get("fair_prob"), c.get("fair_american"),
             c.get("edge_pp"), c.get("gates_cleared"))
-        # Late-window sizing cap — picks made < 1h before first pitch
-        # underperform (last-hour PIN moves are noisier than the 1.5-2h
-        # window). Never let Kelly size one above 1u; tag it so the card
-        # can flag it. Only caps DOWN, never up.
-        if c.get("timing_window") == "late" and units > 1:
+        # Sizing concentrated in the PRIME window — only picks made 90-120
+        # min before first pitch can size past 1u. That 38-pick window
+        # carried +27u at 68.4%; 60-90 was modest (+3.9u), the last hour
+        # mush. So everything OUTSIDE prime with a known kickoff time is
+        # capped at 1u (caps DOWN only; unknown kickoff → no cap). `late`
+        # picks (<60m) keep the amber badge flag too.
+        tw = c.get("timing_window")
+        if tw is not None and tw != "prime" and units > 1:
             units, conf = 1, "low"
-            c["late_capped"] = True
+            c["size_capped"] = True
+            if tw == "late":
+                c["late_capped"] = True
         c["units"], c["confidence"], c["kelly_pct"] = units, conf, kelly_pct
         cur = by_market.get(c["market_type"])
         if (not cur) or ((c["gates_cleared"], c["combined_score"]) >

@@ -202,11 +202,11 @@ _PIN_HISTORY_HOURS = 18
 # Same weight table as handicapper_web.py — keep them aligned so the
 # web flow and the in-chat CLI produce the same score for the same data.
 _RECENCY_WEIGHTS: tuple[tuple[float, float], ...] = (
-    (15,   1.00),
-    (60,   0.60),
-    (120,  0.35),
-    (360,  0.18),
-    (1080, 0.08),
+    (15,   0.75),   # was 1.00 — trimmed June 2026 (mirror of handicapper_web.py):
+    (60,   0.50),   # was 0.60   last-hour picks underperform, so the freshest
+    (120,  0.35),   #            ticks were over-trusted as "steam" when they're
+    (360,  0.18),   #            often retail noise. Kept mild so genuine prime-
+    (1080, 0.08),   #            window steam still scores enough to size up.
 )
 
 
