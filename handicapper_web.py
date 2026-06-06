@@ -1764,6 +1764,76 @@ SPR_CHALK_FAIR_CAP = -150
 # exclusion block in `_suggest_picks`.
 ML_CHALK_FAIR_CAP = -140
 
+# ─── Total-side veto (the "Rockies under" fix, June 2026) ───
+# The TOT side is chosen purely from PIN line movement, so the bot will
+# happily follow PIN's total down into Coors and bet an under in the most
+# hitter-friendly park in baseball — the power model watches it happen but
+# (by design) only nudges SIZING, never the side. Over 118 graded picks
+# MLB unders went 13-17 (-0.17u) vs overs 10-6 (+1.86u), and EVERY Rockies
+# under lost (4-for-4, -5.84u). These two vetoes let the OUR-NUMBER read
+# DEMOTE a total pick to a forced lean (so it stops being a real
+# recommendation / one-tap chip) when it disagrees with the side:
+#   • Park veto (MLB) — independent of the model, from the static park-
+#     factor table. PF ≥ 104 (Coors 112, Fenway/GABP 104) kills unders;
+#     PF ≤ 96 (Petco/Oracle/T-Mobile) kills overs.
+#   • Model veto — our projected total disagrees by ≥ 1 run, but only when
+#     the model feeds sizing for the sport (we trust the number).
+_PARK_UNDER_VETO       = 104.0   # park factor ≥ this → don't recommend an under
+_PARK_OVER_VETO        = 96.0    # park factor ≤ this → don't recommend an over
+_TOTAL_MODEL_VETO_DIFF = 1.0     # runs of model-vs-line disagreement to veto the opposite side
+
+# ─── Timing window (the proven-edge fix, June 2026) ───
+# Picks made 1.5-2h before first pitch carried the entire edge (38 picks,
+# 68.4%, +27.06u) while last-hour picks were mush (51 picks, 52.9%,
+# +3.72u — and totals in that window were outright negative). The recency
+# weighting over-trusts last-15-min PIN twitches (retail pile-on, lineup-
+# reaction overshoots) as if they were clean sharp steam. We can't easily
+# retune that without global blast radius, so instead we CAP sizing on
+# last-hour picks: a < 1h-out pick never sizes above 1u no matter what
+# Kelly says. Picks keep their `timing_window` tag for the card badge +
+# future analysis (it lands in signal_blob when logged).
+LATE_WINDOW_MIN = 60                  # < 1h to first pitch → cap units at 1u
+_PRIME_WINDOW   = (60, 150)           # 1-2.5h out = the bot's proven edge window
+
+
+def _timing_window(starts_in_min) -> str | None:
+    """Classify a pick by how long before first pitch it's being made.
+    'prime' (the proven edge window) / 'late' (cap sizing) / 'early'."""
+    if starts_in_min is None:
+        return None
+    if starts_in_min < LATE_WINDOW_MIN:
+        return "late"
+    if _PRIME_WINDOW[0] <= starts_in_min <= _PRIME_WINDOW[1]:
+        return "prime"
+    return "early"
+
+
+def _total_conflict_reason(sport: str | None, home: str | None,
+                           power: dict | None, side: str) -> str | None:
+    """Reason the OUR-NUMBER read materially disagrees with a TOTAL side
+    that PIN movement picked — else None. Used to veto an under/over down
+    to a forced lean. See the constants above for the rationale."""
+    if side not in ("over", "under"):
+        return None
+    # Park veto (MLB) — independent of the model, so it fires even on a v1
+    # season-stat fallback or an unmatched team. This is the Rockies guard.
+    if sport == "MLB" and home:
+        pf = _park_factor(home)
+        mascot = home.split()[-1] if home.split() else home
+        if side == "under" and pf >= _PARK_UNDER_VETO:
+            return f"{mascot} park factor {round(pf)} (hitter-friendly) — fading the under"
+        if side == "over" and pf <= _PARK_OVER_VETO:
+            return f"{mascot} park factor {round(pf)} (pitcher-friendly) — fading the over"
+    # Model-lean veto — only when the model feeds sizing for this sport
+    # (i.e. it cleared the backtest gate and we trust the projected total).
+    if power and power.get("feeds_sizing"):
+        lean = power.get("total_lean")
+        diff = _to_float(power.get("total_diff"))
+        if lean and lean != side and diff is not None and abs(diff) >= _TOTAL_MODEL_VETO_DIFF:
+            pt = power.get("proj_total")
+            return f"model projects {pt} ({lean} by {abs(diff):.1f}) — disagrees with the {side}"
+    return None
+
 
 # ──────────────────────────── Kelly sizing ────────────────────────────
 #
@@ -3050,7 +3120,9 @@ def _splits_signal_pp(splits: dict | None, sharp_side: str | None,
 
 
 def _suggest_picks(odds: dict, splits: dict | None = None,
-                   power: dict | None = None) -> list[dict]:
+                   power: dict | None = None, *,
+                   sport: str | None = None, home: str | None = None,
+                   starts_in_min=None) -> list[dict]:
     """Polymarket-execution picks. Returns a list — there can be more
     than one on a game. Behaviour:
 
@@ -3103,6 +3175,17 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                   + SPLITS_WEIGHT * min(max(0.0, splits_pp) / 30.0, 1.0))
             gates_cleared = score_for_side >= SHARP_SCORE_MIN
 
+            # Total-side veto — the OUR-NUMBER read can DEMOTE a total pick
+            # to a forced lean when it disagrees with the side PIN movement
+            # chose (hitter-park unders, model-projected total the other
+            # way). Stops the bot recommending Rockies/Coors unders. ML/SPR
+            # are untouched — the veto is totals-only.
+            conflict_reason = None
+            if mt == "total":
+                conflict_reason = _total_conflict_reason(sport, home, power, side)
+                if conflict_reason:
+                    gates_cleared = False
+
             # Provisional edge estimate (fair-prob pp) that drives Kelly
             # sizing + finally populates the edge_pp column. The sharp +
             # splits terms only count on the side the sharp money points
@@ -3153,6 +3236,8 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 "uses_pmm_projection": use_pmm,
                 "combined_score": round(cs, 4),
                 "gates_cleared":  gates_cleared,
+                "conflict_reason": conflict_reason,
+                "timing_window":  _timing_window(starts_in_min),
             })
 
     if not candidates:
@@ -3183,6 +3268,13 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
         units, conf, kelly_pct = _kelly_units(
             c.get("fair_prob"), c.get("fair_american"),
             c.get("edge_pp"), c.get("gates_cleared"))
+        # Late-window sizing cap — picks made < 1h before first pitch
+        # underperform (last-hour PIN moves are noisier than the 1.5-2h
+        # window). Never let Kelly size one above 1u; tag it so the card
+        # can flag it. Only caps DOWN, never up.
+        if c.get("timing_window") == "late" and units > 1:
+            units, conf = 1, "low"
+            c["late_capped"] = True
         c["units"], c["confidence"], c["kelly_pct"] = units, conf, kelly_pct
         cur = by_market.get(c["market_type"])
         if (not cur) or ((c["gates_cleared"], c["combined_score"]) >
@@ -3445,7 +3537,9 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
             log.warning("nrfi model failed: %s", e)
             nrfi = None
 
-    suggestions = _suggest_picks(odds, splits, power_rating)
+    suggestions = _suggest_picks(odds, splits, power_rating,
+                                 sport=sport, home=home,
+                                 starts_in_min=starts_in_min)
     # Keep the singular `suggestion` field as an alias for the top pick
     # so any caller still expecting it doesn't break. New code should
     # use `suggestions` (list) so multi-pick games render correctly.

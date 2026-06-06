@@ -292,6 +292,9 @@
         .suggestion-card .pick-line .pick-units.units-5  { background: var(--green-dim);  color: var(--green); }
         .suggestion-card .pick-line .pick-units.units-10 { background: var(--gold-dim);   color: var(--gold); font-weight: 700; }
         .suggestion-card .pick-line .venue-tag { display: inline-block; padding: 2px 8px; border-radius: 6px; font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.04em; vertical-align: middle; margin-left: 4px; }
+        .suggestion-card .pick-line .time-badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.04em; vertical-align: middle; margin-left: 6px; }
+        .suggestion-card .pick-line .time-badge.prime { background: var(--green-dim); color: var(--green); border: 1px solid rgba(34,197,94,0.35); }
+        .suggestion-card .pick-line .time-badge.late  { background: var(--orange-dim); color: var(--orange); border: 1px solid rgba(249,115,22,0.35); }
         .suggestion-card .pick-line .venue-tag.pmm { background: rgba(168,85,247,0.18); color: #c084fc; border: 1px solid rgba(168,85,247,0.35); }
         .suggestion-card .pick-line .venue-tag.pin { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border); }
         .market-card .pmm-row { font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 4px 8px; margin-top: 4px; background: rgba(168,85,247,0.06); border-left: 2px solid rgba(168,85,247,0.35); border-radius: 4px; color: var(--text); }
@@ -561,7 +564,7 @@
                     <span class="count" id="gamesCount">…</span>
                 </div>
                 <div class="pick-legend" id="pickLegend">
-                    <span><i class="lg u05"></i>0.25u</span>
+                    <span><i class="lg u05"></i>≤0.5u</span>
                     <span><i class="lg u1"></i>1u</span>
                     <span><i class="lg u3"></i>3u</span>
                     <span><i class="lg u5"></i>5u</span>
@@ -1278,7 +1281,7 @@
     }
 
     // Compact chip label for a recommended bet, e.g. "ML Reds +115 · 1u",
-    // "TOT O8.5 -107 · 1u", "1ST YRFI +108 · 0.25u". Team → last word (mascot).
+    // "TOT O8.5 -107 · 1u", "1ST YRFI +108 · 0.5u". Team → last word (mascot).
     function _pickChipLabel(mt, side, line, price, units, d) {
         const mkt = _shortMarket(mt);
         let sideLbl;
@@ -1314,10 +1317,13 @@
             fair_prob: s.fair_prob ?? null, edge_pp: s.edge_pp ?? null,
             sharp_score: s.sharp_score ?? null,
             reasons: _buildReasons(s, d), query_text: d.query || null,
-            signal_blob: pr ? { model: { source: pr.source || null, feeds_sizing: !!pr.feeds_sizing,
-                sp_adjusted: !!pr.sp_adjusted, n_games: pr.n_games ?? null,
-                edge_pp: (me != null ? me : null), agree: (me != null ? me > 0 : null) },
-                sharp_score: s.sharp_score ?? null, edge_pp: s.edge_pp ?? null } : null,
+            signal_blob: {
+                model: pr ? { source: pr.source || null, feeds_sizing: !!pr.feeds_sizing,
+                    sp_adjusted: !!pr.sp_adjusted, n_games: pr.n_games ?? null,
+                    edge_pp: (me != null ? me : null), agree: (me != null ? me > 0 : null) } : null,
+                sharp_score: s.sharp_score ?? null, edge_pp: s.edge_pp ?? null,
+                timing_window: s.timing_window ?? null, late_capped: !!s.late_capped,
+                conflict_reason: s.conflict_reason ?? null },
             allow_duplicate: true,
             _line: line, _price: price,
         };
@@ -1364,10 +1370,10 @@
                             const pb = (d.nrfi.polymarket || {})[side] || {};
                             const price = (pb.bid_american != null) ? pb.bid_american
                                 : (side === 'no' ? d.nrfi.nrfi_fair_american : d.nrfi.yrfi_fair_american);
-                            picks.push({ market_type: 'nrfi', side, units: 0.25,
-                                _chip: _pickChipLabel('nrfi', side, null, price, 0.25, d),
+                            picks.push({ market_type: 'nrfi', side, units: 0.5,
+                                _chip: _pickChipLabel('nrfi', side, null, price, 0.5, d),
                                 _body: { market_id: mid, market_type: 'nrfi', side, book: 'PMM',
-                                    price, line: null, units: 0.25, confidence: 'low',
+                                    price, line: null, units: 0.5, confidence: 'low',
                                     fair_prob: (side === 'no' ? d.nrfi.p_nrfi : d.nrfi.p_yrfi),
                                     edge_pp: (pb.edge_pp != null ? pb.edge_pp : null), sharp_score: null,
                                     reasons: d.nrfi.reasons || [], query_text: d.query || null,
@@ -1839,17 +1845,30 @@
                 const whyHtml = why.length
                     ? `<ul class="why">${why.map(b => `<li>${_esc(b)}</li>`).join('')}</ul>`
                     : '';
+                // Timing badge — picks made 1.5-2h out are the proven edge
+                // window; last-hour picks get sized down to 1u.
+                const timingBadge = s.timing_window === 'prime'
+                    ? '<span class="time-badge prime" title="1-2.5h before first pitch — the bot\'s proven edge window">PRIME WINDOW</span>'
+                    : (s.timing_window === 'late'
+                        ? `<span class="time-badge late" title="Under 1h to first pitch — last-hour picks underperform${s.late_capped ? '; sized down to 1u' : ''}">LATE${s.late_capped ? ' · capped 1u' : ''}</span>`
+                        : '');
+                // Veto note — the OUR-NUMBER read demoted this total to a
+                // lean because it disagrees with the side (e.g. a Coors
+                // under). Shown instead of the generic sharp-gate note.
+                const softNote = s.conflict_reason
+                    ? `<div class="soft-note">Demoted to a lean — ${_esc(s.conflict_reason)}. The model disagrees with this total; treat as 1u lean at most.</div>`
+                    : (s.gates_cleared ? '' : `<div class="soft-note">Sharp gate not cleared (need sharp ≥ 3). Chalk-flat market; this is the best read available — treat as 1u lean only.</div>`);
                 html += `<div class="${cardCls}">
                     <div class="${headingCls}">${_esc(headingText)}</div>
                     <div class="pick-line">
                         ${market} · ${_esc(sideLabel)}${lineFrag} ${venueTag}
                         <span class="target">@ ${_fmtAmer(s.fair_american)}</span>
-                        <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>${loggedBadge}
+                        <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>${timingBadge}${loggedBadge}
                     </div>
                     ${(s.edge_pp != null && s.edge_pp > 0) ? `<div class="pick-kelly">est. edge +${Number(s.edge_pp).toFixed(1)}pp${s.kelly_pct ? ` · ¼-Kelly ${Number(s.kelly_pct).toFixed(1)}% BR` : ''} → ${s.units}u</div>` : ''}
                     <div class="pick-meta">${metaLine}</div>
                     ${whyHtml}
-                    ${s.gates_cleared ? '' : `<div class="soft-note">Sharp gate not cleared (need sharp ≥ 4). Chalk-flat market; this is the best read available — treat as 1u lean only.</div>`}
+                    ${softNote}
                     <div class="actions">
                         ${_canLog ? `<button class="${sugBtnCls}" onclick="openLog(false, ${i})">${sugBtnLabel}</button>` : ''}
                         <button onclick="copyForClaude()">Copy for Claude</button>
@@ -2034,7 +2053,7 @@
         // NRFI / YRFI — first-inning model (MLB only). We compute the
         // model fair, pull Polymarket's 1st-inning price, and the BET
         // determination is the edge of our fair vs PMM's maker entry
-        // (bid). The +EV side's button lights up green; flat 0.25u for now.
+        // (bid). The +EV side's button lights up green; flat 0.5u.
         // No PMM market → model fair shown for reference, no lit button.
         if (d.nrfi) {
             const n = d.nrfi;
@@ -2058,7 +2077,7 @@
             let detFrag;
             if (n.bet_side) {
                 const lbl = n.bet_side === 'no' ? 'NRFI' : 'YRFI';
-                detFrag = `<div class="pr-line" style="color:var(--green);font-weight:600">▶ BET ${lbl} @ ${_fmtAmer(n.entry_price)} (Poly bid) · +${n.bet_edge_pp}pp edge · 0.25u</div>`;
+                detFrag = `<div class="pr-line" style="color:var(--green);font-weight:600">▶ BET ${lbl} @ ${_fmtAmer(n.entry_price)} (Poly bid) · +${n.bet_edge_pp}pp edge · 0.5u</div>`;
             } else if (n.pmm_matched) {
                 detFrag = `<div class="pr-line" style="color:var(--text-muted)">Pass — model fair within 3pp of Poly's price on both sides.</div>`;
             } else {
@@ -2073,7 +2092,7 @@
             const obpNote = (inp.home_obp_src === 'team' || inp.away_obp_src === 'team')
                 ? ` · top-of-order from team OBP (lineup not posted yet)` : ` · top-of-order from posted lineup`;
             // Buttons: the +EV side is the green BET action; the other
-            // side stays available for a manual log (also 0.25u).
+            // side stays available for a manual log (also 0.5u).
             const mkBtn = (side, lbl) => {
                 const isBet = n.bet_side === side;
                 return `<button class="${isBet ? 'bet' : ''}" onclick="logNrfi('${side}')">${isBet ? 'BET ' : 'Log '}${lbl}</button>`;
@@ -2085,7 +2104,7 @@
             html += `<div class="card">
                 <div class="card-head">
                     <h3>First inning — NRFI / YRFI</h3>
-                    <span class="ref-tag" title="Model fair from the opposing starters + top-of-order on-base + park + temp. P(NRFI)=q_top·q_bot. BET = our fair beats Polymarket's maker entry (bid) by ≥3pp. Flat 0.25u while we review the setup.">OUR NUMBER vs POLY</span>
+                    <span class="ref-tag" title="Model fair from the opposing starters + top-of-order on-base + park + temp. P(NRFI)=q_top·q_bot. BET = our fair beats Polymarket's maker entry (bid) by ≥3pp. Flat 0.5u (71% over 21 graded picks).">OUR NUMBER vs POLY</span>
                 </div>
                 <div class="pr-grid">
                     ${cell('no', 'NRFI (no run)', nrfiPct, n.nrfi_fair_american)}
@@ -2360,7 +2379,7 @@
         // Seed the log modal for an NRFI/YRFI pick. side: 'no' (NRFI) /
         // 'yes' (YRFI). Maker entry = Polymarket's BID for that side when
         // PMM has the market (where we rest the limit), else the model
-        // fair. Flat 0.25u for now. Resolver grades W/L off the 1st-inning
+        // fair. Flat 0.5u. Resolver grades W/L off the 1st-inning
         // linescore. No line.
         if (!_lastDossier || !_lastDossier.nrfi) return;
         const n = _lastDossier.nrfi;
@@ -2382,11 +2401,11 @@
             edge_pp:     edge,
             sharp_score: null,
             label:       `1st Inning · ${label} @ ${_fmtAmer(makerEntry)} (${entryLbl})`,
-            seed_units:  0.25,
+            seed_units:  0.5,
             seed_conf:   'low',
         };
         document.getElementById('lmSelection').value  = _pendingPick.label;
-        document.getElementById('lmUnits').value      = '0.25';
+        document.getElementById('lmUnits').value      = '0.5';
         document.getElementById('lmConfidence').value = 'low';
         document.getElementById('lmReasons').value    = (n.reasons || []).join('\n');
         document.getElementById('lmAnalysis').value   = '';
