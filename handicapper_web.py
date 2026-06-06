@@ -1793,25 +1793,35 @@ _TOTAL_MODEL_VETO_DIFF = 1.0     # runs of model-vs-line disagreement to veto th
 # Kelly says. Picks keep their `timing_window` tag for the card badge +
 # future analysis (it lands in signal_blob when logged).
 LATE_WINDOW_MIN = 60                   # < 1h to first pitch → cap units at 1u (last-hour picks underperform)
-_PRIME_WINDOW   = (90, 120)            # 1.5-2h out = the proven gold window (68.4%, +27u over 38).
+_PRIME_WINDOW   = (60, 120)            # 1-2h out = the betting window (60-120 = 63.9%, +31u over 61).
+_PRIME_CORE     = (90, 120)            # 90-120 is the HAMMER sub-bucket (68.4%, +27u over 38) — tracked via prime_core.
                                        # Upper bound IS the 2h chip pick window — we don't pick past it.
 
 
 def _timing_window(starts_in_min) -> str | None:
     """Classify a pick by minutes before first pitch:
-      late   (<60)    — capped to 1u, the mushy last-hour window (52.9%)
-      normal (60-90)  — fine, no badge (56.5%)
-      prime  (90-120) — the proven edge window, green badge (68.4%)
-      early  (>120)   — outside the 2h chip pick window."""
+      late   (<60)     — capped to 1u, the mushy last-hour window (52.9%)
+      prime  (60-120)  — the betting window, green glow + size-up (63.9%)
+      early  (>120)    — outside the 2h chip pick window.
+    The 60-90 vs 90-120 split inside prime is preserved separately via
+    `prime_core` (see _is_prime_core) for analytics — the +27u hammer is
+    in the 90-120 core; 60-90 is solid (+3.9u) but lighter."""
     if starts_in_min is None:
         return None
     if starts_in_min < LATE_WINDOW_MIN:
         return "late"
     if _PRIME_WINDOW[0] <= starts_in_min <= _PRIME_WINDOW[1]:
         return "prime"
-    if starts_in_min < _PRIME_WINDOW[0]:
-        return "normal"
     return "early"
+
+
+def _is_prime_core(starts_in_min) -> bool | None:
+    """True when the pick is in the 90-120 HAMMER sub-bucket of prime.
+    Kept distinct from `timing_window` so the next review can still
+    compare the 60-90 half against the proven 90-120 core."""
+    if starts_in_min is None:
+        return None
+    return _PRIME_CORE[0] <= starts_in_min <= _PRIME_CORE[1]
 
 
 def _total_conflict_reason(sport: str | None, home: str | None,
@@ -3244,6 +3254,7 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 "gates_cleared":  gates_cleared,
                 "conflict_reason": conflict_reason,
                 "timing_window":  _timing_window(starts_in_min),
+                "prime_core":     _is_prime_core(starts_in_min),
             })
 
     if not candidates:
