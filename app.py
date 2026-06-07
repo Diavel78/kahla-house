@@ -2739,6 +2739,11 @@ _KALSHI_BASES = [
 _KALSHI_SERIES = {"MLB": "KXMLBGAME", "NBA": "KXNBAGAME", "NHL": "KXNHLGAME"}
 # Sports the cent-logger + cross-confirm trigger cover (cent data flows).
 _PM_SPORTS = ["MLB", "NBA", "NHL"]
+# How far out the cross-confirm watcher tracks each sport. MLB is dense
+# (daily) so 12h is plenty; NBA/NHL playoff series are 2-3 days apart, so
+# we watch farther out to catch the early line movement on the next game
+# (few games, so the per-game PMM budget cost is negligible).
+_PM_WINDOW_H = {"MLB": 12, "NBA": 96, "NHL": 96}
 _KALSHI_CACHE: dict[str, tuple[float, dict]] = {}
 _KALSHI_TTL = 30  # seconds
 
@@ -3097,11 +3102,13 @@ def api_pm_snapshot():
         return jsonify({"ok": False, "error": "supabase unavailable"}), 503
 
     now = datetime.now(timezone.utc)
-    hi = (now + timedelta(hours=12)).isoformat()
 
     # Gather upcoming games across every cent-logged sport, tagged with sport.
+    # Per-sport watch window: MLB 12h, NBA/NHL out to 96h (catch playoff-gap
+    # early movement on the next Finals/Cup game).
     all_games = []
     for sp in _PM_SPORTS:
+        hi = (now + timedelta(hours=_PM_WINDOW_H.get(sp, 12))).isoformat()
         try:
             rows_sp = (sb.table("markets").select("id,event_name,event_start")
                        .eq("sport", sp).eq("status", "active")
@@ -6364,17 +6371,23 @@ def api_handicapper_games():
         return jsonify({"ok": False, "error": "missing sport param"}), 400
 
     now = datetime.now(timezone.utc)
-    after  = now.isoformat()
-    before = (now + timedelta(hours=48)).isoformat()
-    try:
-        rows = (sb.table("markets")
+    after = now.isoformat()
+
+    def _fetch(hours):
+        return (sb.table("markets")
                 .select("id,sport,event_name,event_start,status")
-                .eq("status", "active")
-                .eq("sport", sport)
+                .eq("status", "active").eq("sport", sport)
                 .gte("event_start", after)
-                .lte("event_start", before)
-                .order("event_start")
-                .limit(200).execute().data) or []
+                .lte("event_start", (now + timedelta(hours=hours)).isoformat())
+                .order("event_start").limit(200).execute().data) or []
+    try:
+        rows = _fetch(48)
+        if not rows:
+            # Sparse sport (playoff series — Cup/Finals games are 2-3 days
+            # apart, NFL is weekly), so the 48h window comes up empty even
+            # though the next game IS posted. Extend to find it so the tab
+            # isn't blank. Dense sports never hit this path.
+            rows = _fetch(168)   # 7 days
     except Exception as e:
         return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
 
@@ -6500,22 +6513,20 @@ def api_handicapper_sport_counts():
     if sb is None:
         return jsonify({"ok": False, "error": "Supabase not configured"}), 503
     now = datetime.now(timezone.utc)
-    after  = now.isoformat()
-    before = (now + timedelta(hours=48)).isoformat()
+    after = now.isoformat()
+    cut48 = (now + timedelta(hours=48)).isoformat()
     try:
         rows = (sb.table("markets")
                 .select("id,sport,event_name,event_start")
                 .eq("status", "active")
                 .gte("event_start", after)
-                .lte("event_start", before)
-                .limit(2000).execute().data) or []
+                .lte("event_start", (now + timedelta(hours=168)).isoformat())
+                .limit(4000).execute().data) or []
     except Exception as e:
         return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
 
     # Group rows by sport, then run the same dedup as /api/handicapper/games
     # so the count matches what the user actually sees on the page.
-    # Without this, a duplicate Cavaliers @ Pistons inflates NBA's
-    # badge by 1 even though only one card renders.
     by_sport: dict[str, list[dict]] = {}
     for r in rows:
         s = (r.get("sport") or "").upper()
@@ -6527,9 +6538,14 @@ def api_handicapper_sport_counts():
             "event_start": r.get("event_start"),
             "sport":       s,
         })
-    counts: dict[str, int] = {
-        s: len(_dedup_games(gs, s)) for s, gs in by_sport.items()
-    }
+    # Mirror the games-list "48h, else next game" window: count imminent
+    # (≤48h) games; if a sport has none, count its next game(s) out to 7d
+    # so playoff/weekly sports (NHL/NBA Finals, NFL) show a badge instead
+    # of looking off-season.
+    counts: dict[str, int] = {}
+    for s, gs in by_sport.items():
+        near = [g for g in gs if (g.get("event_start") or "") <= cut48]
+        counts[s] = len(_dedup_games(near if near else gs, s))
     return jsonify({"ok": True, "counts": counts, "now_iso": now.isoformat()})
 
 
