@@ -174,3 +174,22 @@ jobs:
           code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
             "https://www.thekahlahouse.com/api/pm-snapshot?key=${KEY}" || echo "000")
           echo "pm-snapshot HTTP $code"
+
+      # Pick Bot paperlog ping. /api/handicapper/paperlog auto-logs every
+      # gate-cleared suggestion for upcoming MLB games (5h->1min window) into
+      # pickbot_paperlog — the complete bot-suggestion dataset for the 2-week
+      # review. Budgeted server-side so it stays under Vercel's 10s; stale-
+      # game-first cycles coverage across ticks. Reuses FILLS_CRON_SECRET.
+      - name: Pick Bot — paperlog ping
+        continue-on-error: true
+        env:
+          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
+        run: |
+          if [ -z "$FILLS_CRON_SECRET" ]; then
+            echo "FILLS_CRON_SECRET not set — skipping paperlog ping (no-op)."
+            exit 0
+          fi
+          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
+          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
+            "https://www.thekahlahouse.com/api/handicapper/paperlog?key=${KEY}" || echo "000")
+          echo "paperlog HTTP $code"

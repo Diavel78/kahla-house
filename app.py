@@ -3066,6 +3066,137 @@ def api_pm_snapshot():
                     "kalshi_base": kal.get("base_used"), **st})
 
 
+@app.route("/api/handicapper/paperlog")
+def api_handicapper_paperlog():
+    """Cron-pinged ~1/min. Auto-logs every GATE-CLEARED Pick Bot suggestion
+    for upcoming MLB games across the 5h->1min pre-game window into
+    pickbot_paperlog — one row per (game, market) each time the suggested
+    (side, units) CHANGES (a flip or a size up/down). The complete bot-
+    suggestion dataset for the 2-week review, separate from the user's real
+    bot_picks. No forced leans (gates_cleared only). Budgeted (~8s) so we
+    never exceed Vercel's 10s; stale-game-first ordering cycles coverage
+    across ticks. Auth: ?key= matched to PAPERLOG_SECRET or FILLS_CRON_SECRET."""
+    import time as _time
+    import handicapper_web
+    expected = (os.environ.get("PAPERLOG_SECRET")
+                or os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    provided = (request.args.get("key") or "").strip()
+    if not expected or not secrets.compare_digest(provided, expected):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+
+    now = datetime.now(timezone.utc)
+    lo = (now + timedelta(minutes=1)).isoformat()    # stop 1 min before tip
+    hi = (now + timedelta(hours=5)).isoformat()      # start 5h out
+    try:
+        raw = (sb.table("markets").select("id,event_name,event_start,sport")
+               .eq("sport", "MLB").eq("status", "active")
+               .gte("event_start", lo).lte("event_start", hi)
+               .order("event_start").execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"markets: {e}"}), 500
+    games, seen = [], set()           # dedup duplicate market rows (gotcha #30)
+    for g in raw:
+        n = g.get("event_name") or ""
+        if n and n not in seen:
+            seen.add(n)
+            games.append(g)
+    if not games:
+        return jsonify({"ok": True, "games": 0, "reason": "no upcoming MLB in 5h"})
+
+    # Recent paperlog → (a) last logged_at/game for stale-first ordering,
+    # (b) last (side,units) per (game,market) for the bet-change dedup.
+    mids = [g["id"] for g in games]
+    last_logged, last_bet = {}, {}
+    try:
+        recent = (sb.table("pickbot_paperlog")
+                  .select("market_id,market_type,side,units,logged_at")
+                  .in_("market_id", mids)
+                  .gte("logged_at", (now - timedelta(hours=6)).isoformat())
+                  .order("logged_at", desc=True).limit(5000).execute().data) or []
+        for r in recent:
+            last_logged.setdefault(r["market_id"], r["logged_at"])
+            last_bet.setdefault((r["market_id"], r["market_type"]),
+                                (r.get("side"), r.get("units")))
+    except Exception:
+        pass
+    games.sort(key=lambda g: last_logged.get(g["id"]) or "")   # never-logged first
+
+    deadline = _time.time() + 8.0
+    rows, processed, with_pick = [], 0, 0
+    for g in games:
+        if _time.time() >= deadline:
+            break
+        try:
+            d = handicapper_web.build_dossier(sb, None, None, market_id=g["id"])
+        except Exception:
+            continue
+        processed += 1
+        en, es, sp = d.get("event_name"), d.get("event_start_utc"), d.get("sport")
+        sim = d.get("starts_in_min")
+        tw = handicapper_web._timing_window(sim)
+        pc = handicapper_web._is_prime_core(sim)
+
+        bets = []
+        for s in (d.get("suggestions") or []):
+            if not (s.get("gates_cleared") and s.get("market_type") and s.get("side")):
+                continue
+            entry = s.get("pmm_bid_american")
+            if entry is None:
+                entry = s.get("fair_american")
+            bets.append({
+                "market_type": s["market_type"], "side": s["side"],
+                "units": s.get("units"), "confidence": s.get("confidence"),
+                "line": (s.get("pmm_line") if s.get("uses_pmm_projection") else s.get("pin_line")),
+                "entry_price": entry, "fair_american": s.get("fair_american"),
+                "sharp_score": s.get("sharp_score"), "edge_pp": s.get("edge_pp"),
+                "signal_blob": {"combined_score": s.get("combined_score"),
+                                "model_edge_pp": s.get("model_edge_pp"),
+                                "splits_pp": s.get("splits_pp"),
+                                "uses_pmm_projection": s.get("uses_pmm_projection")},
+            })
+        nrfi = d.get("nrfi") or {}
+        if nrfi.get("gates_cleared") and nrfi.get("bet_side"):
+            bs = nrfi["bet_side"]
+            bets.append({
+                "market_type": "nrfi", "side": bs, "units": 0.5, "confidence": "low",
+                "line": None, "entry_price": nrfi.get("entry_price"),
+                "fair_american": (nrfi.get("nrfi_fair_american") if bs == "no"
+                                  else nrfi.get("yrfi_fair_american")),
+                "sharp_score": None, "edge_pp": nrfi.get("bet_edge_pp"),
+                "signal_blob": {"p_nrfi": nrfi.get("p_nrfi")},
+            })
+        if bets:
+            with_pick += 1
+        for b in bets:
+            k = (g["id"], b["market_type"])
+            if last_bet.get(k) == (b["side"], b["units"]):   # unchanged bet → skip
+                continue
+            last_bet[k] = (b["side"], b["units"])            # no dup within this tick
+            rows.append({
+                "market_id": g["id"], "event_name": en, "event_start": es, "sport": sp,
+                "market_type": b["market_type"], "side": b["side"], "line": b["line"],
+                "entry_price": b["entry_price"], "units": b["units"],
+                "confidence": b["confidence"], "timing_window": tw, "prime_core": pc,
+                "starts_in_min": (round(sim) if sim is not None else None),
+                "sharp_score": b["sharp_score"], "edge_pp": b["edge_pp"],
+                "fair_american": b["fair_american"], "gates_cleared": True,
+                "signal_blob": b["signal_blob"], "logged_at": now.isoformat(),
+            })
+    new_rows = 0
+    if rows:
+        try:
+            sb.table("pickbot_paperlog").insert(rows).execute()
+            new_rows = len(rows)
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"insert: {e}",
+                            "processed": processed}), 500
+    return jsonify({"ok": True, "games": len(games), "processed": processed,
+                    "with_pick": with_pick, "new_rows": new_rows})
+
+
 def _merge_espn_scores(sport: str, events: list) -> list:
     """Attach a `score` field to each event whose teams + start time match
     an ESPN scoreboard entry. Score shape:
