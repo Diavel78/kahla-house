@@ -2878,6 +2878,24 @@ def debug_orderbook():
         out["polymarket"]["client_resources"] = sorted(
             m for m in dir(client) if not m.startswith("_"))
         slug = (request.args.get("slug") or "").strip()
+        if not slug:
+            # Auto-find a live PMM market slug from the soonest MLB game so the
+            # book-method call below actually runs without needing a ?slug=.
+            try:
+                import pmm_markets as _pm
+                _sb = get_supabase()
+                g = ((_sb.table("markets").select("event_name,event_start")
+                      .eq("sport", "MLB").eq("status", "active")
+                      .gte("event_start", datetime.now(timezone.utc).isoformat())
+                      .order("event_start").limit(1).execute().data) or []) if _sb else []
+                if g and " @ " in (g[0].get("event_name") or ""):
+                    aw, hm = [s.strip() for s in g[0]["event_name"].split(" @ ", 1)]
+                    data = _pm.lookup(client, "MLB", aw, hm, g[0]["event_start"])
+                    ml = (data or {}).get("ml") or []
+                    slug = (ml[0].get("slug") if ml else "") or ""
+                    out["polymarket"]["auto_slug"] = slug
+            except Exception as e:
+                out["polymarket"]["auto_slug_error"] = str(e)[:200]
         if slug:
             try:
                 out["polymarket"]["bbo"] = client.markets.bbo(slug)
