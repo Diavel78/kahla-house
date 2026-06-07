@@ -6357,7 +6357,7 @@ def api_handicapper_games():
     Auth: any approved user (viewers included). The list is just
     upcoming game metadata; no logged-pick data is exposed.
 
-    Window: events starting from now through the next 48h. Live/done
+    Window: events starting from now through the next 7 days. Live/done
     games (event_start already passed) are excluded — you can't make a
     pre-game pick on a game that's underway. Sorted by event_start.
 
@@ -6371,23 +6371,24 @@ def api_handicapper_games():
         return jsonify({"ok": False, "error": "missing sport param"}), 400
 
     now = datetime.now(timezone.utc)
-    after = now.isoformat()
-
-    def _fetch(hours):
-        return (sb.table("markets")
-                .select("id,sport,event_name,event_start,status")
-                .eq("status", "active").eq("sport", sport)
-                .gte("event_start", after)
-                .lte("event_start", (now + timedelta(hours=hours)).isoformat())
-                .order("event_start").limit(200).execute().data) or []
+    after  = now.isoformat()
+    # Flat 7-day window — show every upcoming game we have odds for. Display
+    # is decoupled from the pick/trigger windows: far games still render as
+    # "outside pick window" (no chips), they just appear on the list. In-
+    # season daily/playoff sports (MLB/NBA/NHL) only hold ~1-2 days in markets
+    # so they show in full; NFL's weekly gap is covered; and the window auto-
+    # caps the offseason sports whose full-season schedule is posted (NFL 155
+    # games / NCAAF 79, out to ~200 days) — only the next 7 days ever appear.
+    before = (now + timedelta(hours=168)).isoformat()
     try:
-        rows = _fetch(48)
-        if not rows:
-            # Sparse sport (playoff series — Cup/Finals games are 2-3 days
-            # apart, NFL is weekly), so the 48h window comes up empty even
-            # though the next game IS posted. Extend to find it so the tab
-            # isn't blank. Dense sports never hit this path.
-            rows = _fetch(168)   # 7 days
+        rows = (sb.table("markets")
+                .select("id,sport,event_name,event_start,status")
+                .eq("status", "active")
+                .eq("sport", sport)
+                .gte("event_start", after)
+                .lte("event_start", before)
+                .order("event_start")
+                .limit(200).execute().data) or []
     except Exception as e:
         return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
 
@@ -6504,7 +6505,7 @@ def api_handicapper_sport_counts():
     """One-shot count of upcoming games per sport. Powers the
     /handicapper page's dynamic sport-tab ordering — sports with the
     most games go left, off-season sports drop to the right. Same
-    pre-game window as /api/handicapper/games (now through next 48h;
+    pre-game window as /api/handicapper/games (now through next 7 days;
     live/done games excluded).
 
     Returns: {ok: True, counts: {MLB: 15, NBA: 0, ...}}
@@ -6513,14 +6514,14 @@ def api_handicapper_sport_counts():
     if sb is None:
         return jsonify({"ok": False, "error": "Supabase not configured"}), 503
     now = datetime.now(timezone.utc)
-    after = now.isoformat()
-    cut48 = (now + timedelta(hours=48)).isoformat()
+    after  = now.isoformat()
+    before = (now + timedelta(hours=168)).isoformat()   # flat 7-day, matches /games
     try:
         rows = (sb.table("markets")
                 .select("id,sport,event_name,event_start")
                 .eq("status", "active")
                 .gte("event_start", after)
-                .lte("event_start", (now + timedelta(hours=168)).isoformat())
+                .lte("event_start", before)
                 .limit(4000).execute().data) or []
     except Exception as e:
         return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
@@ -6538,14 +6539,9 @@ def api_handicapper_sport_counts():
             "event_start": r.get("event_start"),
             "sport":       s,
         })
-    # Mirror the games-list "48h, else next game" window: count imminent
-    # (≤48h) games; if a sport has none, count its next game(s) out to 7d
-    # so playoff/weekly sports (NHL/NBA Finals, NFL) show a badge instead
-    # of looking off-season.
-    counts: dict[str, int] = {}
-    for s, gs in by_sport.items():
-        near = [g for g in gs if (g.get("event_start") or "") <= cut48]
-        counts[s] = len(_dedup_games(near if near else gs, s))
+    counts: dict[str, int] = {
+        s: len(_dedup_games(gs, s)) for s, gs in by_sport.items()
+    }
     return jsonify({"ok": True, "counts": counts, "now_iso": now.isoformat()})
 
 
