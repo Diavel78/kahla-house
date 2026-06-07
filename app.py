@@ -2928,41 +2928,52 @@ def _kalshi_book(ticker: str) -> dict | None:
             "best_ask": asks[0][0] if asks else None}
 
 
+def _pmm_taker_fee_cents(price_cents) -> float:
+    """Polymarket US TAKER fee per share, in cents. Empirically 5c · p·(1-p)
+    (p = price in dollars) — peaks at 1.25c/share at 50c, tapers to the wings.
+    Makers pay ZERO. Confirmed on live tickets: 54c -> $1.24/100sh, 47c ->
+    $1.25/100sh. The fee PEAKS at coin-flips, exactly where sharp action lives,
+    so taking a 50/50 is the most expensive case."""
+    if price_cents is None:
+        return 0.0
+    p = max(0.0, min(1.0, price_cents / 100.0))
+    return round(5.0 * p * (1.0 - p), 2)
+
+
 def _book_signal(book: dict | None, edge_units: float = 1) -> dict | None:
-    """Make-vs-take recommendation for BUYING this side, from its book.
-    The core read: a maker BUY only fills if SELLERS hit your bid. A bid-heavy
-    book (buyers stacked, thin asks) means the price is about to rise — your
-    maker won't fill, it'll run away — so TAKE. A balanced/ask-heavy book means
-    sellers will hit you — MAKE and pocket the spread. Tight spread or big edge
-    also push to TAKE (nothing to save / don't risk missing)."""
+    """Make-vs-take for BUYING this side, FEE-AWARE. A maker fills only if
+    SELLERS hit your bid and pays ZERO fee; a taker crosses to the ask AND
+    pays the taker fee, so taking costs `spread + fee` (~2c+ near 50/50 where
+    the fee peaks) — which eats most edges. So DEFAULT MAKE; only TAKE when the
+    book says your maker will very likely MISS (strongly bid-heavy = buyers
+    stacked, price running) and securing the bet beats that all-in cost. The
+    reported take price is the FEE-INCLUSIVE effective cost, not the lying ask."""
     if not book or book.get("best_bid") is None or book.get("best_ask") is None:
         return None
     bb, ba = book["best_bid"], book["best_ask"]
     spread = ba - bb
+    fee = _pmm_taker_fee_cents(ba)
+    take_eff = round(ba + fee, 2)          # TRUE cost of taking (ask + fee)
+    take_cost = round(spread + fee, 2)     # take vs make, all-in
     # Top-of-book sizes only (best + one behind) — see _BOOK_TOP_LVLS.
     top_bid = sum(q for _, q in book["bids"][:_BOOK_TOP_LVLS])
     top_ask = sum(q for _, q in book["asks"][:_BOOK_TOP_LVLS])
     imb = round(top_bid / top_ask, 2) if top_ask else None
 
     take, why = False, []
-    if spread >= 5:
-        # Wide spread = thin book; crossing it costs more than any edge.
-        why.append(f"wide {spread}c spread (thin book) — rest a maker, don't pay it")
-    elif spread <= 1:
+    if imb is not None and imb >= 3.0:
         take = True
-        why.append(f"{spread}c spread — at the touch, just take")
-    elif imb is not None and imb >= 2.0:
+        why.append(f"bid-heavy {imb}x — maker will miss; worth the {take_cost}c all-in")
+    elif edge_units >= 5 and imb is not None and imb >= 2.0:
         take = True
-        why.append(f"bid-heavy {imb}x · {spread}c — buyers stacked, maker won't fill")
-    elif edge_units >= 5:
-        take = True
-        why.append(f"5u conviction · {spread}c — don't risk missing")
+        why.append(f"5u + bid-heavy {imb}x — don't risk missing a big edge")
     else:
-        why.append(f"balanced ({imb}x) · {spread}c spread — rest the maker")
+        why.append(f"rest the maker — taking costs {take_cost}c ({spread}c spread + {fee}c fee)")
     return {"rec": "TAKE" if take else "MAKE",
-            "target": ba if take else bb,          # lift the ask / rest at bid
-            "best_bid": bb, "best_ask": ba, "spread": spread,
-            "imbalance": imb,
+            "make_price": bb, "take_price": ba, "take_fee": fee,
+            "take_eff": take_eff, "take_cost": take_cost,
+            "target": take_eff if take else bb,    # fee-inclusive take / rest at bid
+            "best_bid": bb, "best_ask": ba, "spread": spread, "imbalance": imb,
             "top_bid_size": round(top_bid), "top_ask_size": round(top_ask),
             "why": why}
 
