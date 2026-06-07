@@ -2860,6 +2860,106 @@ def _fetch_kalshi_orderbook(ticker: str) -> dict:
     return {"error": last}
 
 
+# ───────────── Order-book depth readers + make/take signal ─────────────
+# Both venues expose a full ladder. Normalize each to a common per-side shape
+# {best_bid, best_ask, bids:[(cent,size)], asks:[(cent,size)]} for the side
+# you'd BUY, so the make/take math is venue-agnostic.
+_BOOK_NEAR_CENTS = 5   # levels within 5c of the touch count as "near" (ignore
+                       # the penny parking orders sitting at 1-2c / 97-99c)
+
+
+def _pmm_book(client, slug: str) -> dict | None:
+    """Polymarket markets.book(slug) -> normalized side book in cents.
+    bids = buyers of this side, asks (offers) = sellers of this side."""
+    try:
+        md = (client.markets.book(slug) or {}).get("marketData") or {}
+    except Exception:
+        return None
+
+    def lv(rows):
+        out = []
+        for r in (rows or []):
+            try:
+                c = round(float((r.get("px") or {}).get("value")) * 100)
+                q = float(r.get("qty"))
+                if 0 < c < 100 and q > 0:
+                    out.append((c, q))
+            except Exception:
+                pass
+        return out
+    bids = sorted(lv(md.get("bids")),   key=lambda x: -x[0])
+    asks = sorted(lv(md.get("offers")), key=lambda x:  x[0])
+    return {"bids": bids, "asks": asks,
+            "best_bid": bids[0][0] if bids else None,
+            "best_ask": asks[0][0] if asks else None}
+
+
+def _kalshi_book(ticker: str) -> dict | None:
+    """Kalshi orderbook for one side -> normalized book in cents. yes_dollars
+    = bids for this side; no_dollars = the other side's bids, which become
+    THIS side's asks at (100 - no_price)."""
+    ob = _fetch_kalshi_orderbook(ticker)
+    data = (ob.get("data") or {}).get("orderbook_fp") or {}
+    if not data:
+        return None
+
+    def cents(rows):
+        out = []
+        for pair in (rows or []):
+            try:
+                c = round(float(pair[0]) * 100)
+                q = float(pair[1])
+                if 0 < c < 100 and q > 0:
+                    out.append((c, q))
+            except Exception:
+                pass
+        return out
+    bids = sorted(cents(data.get("yes_dollars")), key=lambda x: -x[0])
+    asks = sorted([(100 - c, q) for c, q in cents(data.get("no_dollars"))],
+                  key=lambda x: x[0])
+    return {"bids": bids, "asks": asks,
+            "best_bid": bids[0][0] if bids else None,
+            "best_ask": asks[0][0] if asks else None}
+
+
+def _book_signal(book: dict | None, edge_units: float = 1) -> dict | None:
+    """Make-vs-take recommendation for BUYING this side, from its book.
+    The core read: a maker BUY only fills if SELLERS hit your bid. A bid-heavy
+    book (buyers stacked, thin asks) means the price is about to rise — your
+    maker won't fill, it'll run away — so TAKE. A balanced/ask-heavy book means
+    sellers will hit you — MAKE and pocket the spread. Tight spread or big edge
+    also push to TAKE (nothing to save / don't risk missing)."""
+    if not book or book.get("best_bid") is None or book.get("best_ask") is None:
+        return None
+    bb, ba = book["best_bid"], book["best_ask"]
+    spread = ba - bb
+    near_bid = sum(q for c, q in book["bids"] if c >= bb - _BOOK_NEAR_CENTS)
+    near_ask = sum(q for c, q in book["asks"] if c <= ba + _BOOK_NEAR_CENTS)
+    imb = round(near_bid / near_ask, 2) if near_ask else None
+
+    take, why = False, []
+    if spread >= 5:
+        # Wide spread = thin book; crossing it costs more than any edge.
+        why.append(f"wide {spread}c spread (thin book) — rest a maker, don't pay it")
+    elif spread <= 1:
+        take = True
+        why.append(f"{spread}c spread — at the touch, just take")
+    elif imb is not None and imb >= 2.0:
+        take = True
+        why.append(f"bid-heavy {imb}x · {spread}c — buyers stacked, maker won't fill")
+    elif edge_units >= 5:
+        take = True
+        why.append(f"5u conviction · {spread}c — don't risk missing")
+    else:
+        why.append(f"balanced ({imb}x) · {spread}c spread — rest the maker")
+    return {"rec": "TAKE" if take else "MAKE",
+            "target": ba if take else bb,          # lift the ask / rest at bid
+            "best_bid": bb, "best_ask": ba, "spread": spread,
+            "imbalance": imb,
+            "near_bid_size": round(near_bid), "near_ask_size": round(near_ask),
+            "why": why}
+
+
 @app.route("/debug-orderbook")
 def debug_orderbook():
     """Probe the FULL depth ladder on both venues (read-only, public market
@@ -2911,14 +3011,12 @@ def debug_orderbook():
                      [a for a in dir(m) if not a.startswith("_")]))
             except Exception as e:
                 out["polymarket"]["market_keys_error"] = str(e)[:200]
-            for name in ("orderbook", "order_book", "book", "depth",
-                         "get_order_book", "orderBook", "get_book"):
-                fn = getattr(client.markets, name, None)
-                if callable(fn):
-                    try:
-                        out["polymarket"][f"try_{name}"] = fn(slug)
-                    except Exception as e:
-                        out["polymarket"][f"try_{name}_error"] = str(e)[:200]
+            # Normalized book + make/take signal (the real output).
+            pb = _pmm_book(client, slug)
+            out["polymarket"]["book_top5"] = None if not pb else {
+                "best_bid": pb["best_bid"], "best_ask": pb["best_ask"],
+                "bids": pb["bids"][:5], "asks": pb["asks"][:5]}
+            out["polymarket"]["make_take"] = _book_signal(pb)
     except Exception as e:
         out["polymarket"]["error"] = f"{type(e).__name__}: {e}"[:200]
 
@@ -2930,7 +3028,11 @@ def debug_orderbook():
         ticker = mk[0]["ticker"] if mk else None
     out["kalshi"]["ticker"] = ticker
     if ticker:
-        out["kalshi"]["orderbook"] = _fetch_kalshi_orderbook(ticker)
+        kb = _kalshi_book(ticker)
+        out["kalshi"]["book_top5"] = None if not kb else {
+            "best_bid": kb["best_bid"], "best_ask": kb["best_ask"],
+            "bids": kb["bids"][:5], "asks": kb["asks"][:5]}
+        out["kalshi"]["make_take"] = _book_signal(kb)
     return jsonify(out)
 
 
