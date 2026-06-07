@@ -2820,12 +2820,15 @@ def debug_kalshi():
     secrets), so no auth — hit it in a browser: /debug-kalshi?sport=mlb.
     `raw_sample` shows the true field names so we can lock the parser, then
     build the PMM+Kalshi cent-move detector on top. Temporary verify tool."""
-    sport = (request.args.get("sport") or "mlb").lower()
-    series = _KALSHI_SERIES.get(sport)
+    # ?series= probes a raw Kalshi series ticker directly (to discover the
+    # per-game series for new sports, e.g. KXNBAGAME); ?sport= uses the map.
+    series = (request.args.get("series") or "").strip().upper()
     if not series:
-        return jsonify({"ok": False,
-                        "error": f"unknown sport '{sport}'",
-                        "known": list(_KALSHI_SERIES)}), 400
+        sport = (request.args.get("sport") or "mlb").lower()
+        series = _KALSHI_SERIES.get(sport)
+        if not series:
+            return jsonify({"ok": False, "error": f"unknown sport '{sport}'",
+                            "known": list(_KALSHI_SERIES)}), 400
     return jsonify(_fetch_kalshi_markets(series))
 
 
@@ -2980,6 +2983,72 @@ def _pm_insert_changed(sb, rows, now) -> int:
     return len(ins)
 
 
+# ───────────── Cross-confirm trigger (PMM+Kalshi → on-demand PINN pull) ─────
+_XCONFIRM_MOVE = 1   # cents — both feeds must move >= this, same direction
+
+
+def _in_blackout_mt(now) -> bool:
+    """10pm–7am America/Phoenix = the odds-ingest blackout (user asleep)."""
+    h = now.astimezone(ZoneInfo("America/Phoenix")).hour
+    return h >= 22 or h < 7
+
+
+def _xconfirm_detect(sb, cur: dict, now) -> dict:
+    """`cur`: {market_id: {sport, pmm_home, kalshi_home, starts_in_min}}.
+    For each game, compare current HOME cents to the stored baseline; when
+    BOTH PMM and Kalshi have drifted >= _XCONFIRM_MOVE the SAME direction
+    (and the game is >60min out and we're not in blackout), write a per-sport
+    `odds_pull_requests` row + reset that game's baseline. Kalshi orientation
+    is trusted — a same-city PMM side-flip just makes the signs disagree, so
+    the AND doesn't fire (safe, no false trigger). The per-sport 5-min cap +
+    blackout are enforced cron-side when the request is consumed."""
+    out = {"triggered": [], "baselined": 0}
+    if not cur or _in_blackout_mt(now):
+        return out
+    mids = list(cur.keys())
+    base = {}
+    try:
+        rows = (sb.table("xconfirm_state").select("market_id,pmm_base,kalshi_base")
+                .in_("market_id", mids).execute().data) or []
+        for r in rows:
+            base[r["market_id"]] = (r.get("pmm_base"), r.get("kalshi_base"))
+    except Exception:
+        pass
+    upserts, trig = [], set()
+    for mid, c in cur.items():
+        ph, kh = c["pmm_home"], c["kalshi_home"]
+        b = base.get(mid)
+        if not b or b[0] is None or b[1] is None:           # first sight → baseline
+            upserts.append({"market_id": mid, "sport": c["sport"],
+                            "pmm_base": ph, "kalshi_base": kh,
+                            "baseline_at": now.isoformat(), "last_trigger_at": None})
+            continue
+        if (c.get("starts_in_min") or 0) <= 60:             # >60min rule
+            continue
+        pd, kd = ph - b[0], kh - b[1]
+        if abs(pd) >= _XCONFIRM_MOVE and abs(kd) >= _XCONFIRM_MOVE and (pd > 0) == (kd > 0):
+            trig.add(c["sport"])
+            upserts.append({"market_id": mid, "sport": c["sport"],
+                            "pmm_base": ph, "kalshi_base": kh,
+                            "baseline_at": now.isoformat(),
+                            "last_trigger_at": now.isoformat()})
+    out["baselined"] = len(upserts)
+    if upserts:
+        try:
+            sb.table("xconfirm_state").upsert(upserts).execute()
+        except Exception:
+            pass
+    for sp in trig:
+        try:
+            sb.table("odds_pull_requests").upsert({
+                "sport": sp, "requested_at": now.isoformat(),
+                "consumed_at": None, "reason": "xconfirm"}).execute()
+        except Exception:
+            pass
+    out["triggered"] = sorted(trig)
+    return out
+
+
 @app.route("/api/pm-snapshot")
 def api_pm_snapshot():
     """Cron-pinged ~1/min. Logs free PMM + Kalshi cents per side for upcoming
@@ -3023,6 +3092,7 @@ def api_pm_snapshot():
 
     rows, seen_names = [], set()
     st = {"pmm_games": 0, "kalshi_games": 0, "pmm_skipped": 0}
+    cur = {}   # market_id -> current home cents (both feeds) for the trigger
     for g in games:
         name = g.get("event_name") or ""
         if " @ " not in name or name in seen_names:
@@ -3060,10 +3130,22 @@ def api_pm_snapshot():
                     continue
                 rows.append((mid, source, side, int(c)))
 
+        # Capture both feeds' HOME cents for the cross-confirm trigger.
+        if (pmm.get("home") not in (None, 0)) and (kc.get("home") not in (None, 0)):
+            try:
+                sim = round((datetime.fromisoformat(str(g["event_start"]).replace("Z", "+00:00"))
+                             - now).total_seconds() / 60)
+            except Exception:
+                sim = None
+            cur[mid] = {"sport": "MLB", "pmm_home": int(pmm["home"]),
+                        "kalshi_home": int(kc["home"]), "starts_in_min": sim}
+
     inserted = _pm_insert_changed(sb, rows, now)
+    xc = _xconfirm_detect(sb, cur, now)
     return jsonify({"ok": True, "games": len(seen_names), "inserted": inserted,
                     "kalshi_ok": kal.get("ok"), "kalshi_count": kal.get("count"),
-                    "kalshi_base": kal.get("base_used"), **st})
+                    "kalshi_base": kal.get("base_used"),
+                    "xconfirm_triggered": xc["triggered"], **st})
 
 
 @app.route("/api/handicapper/paperlog")
