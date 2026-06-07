@@ -128,22 +128,21 @@ A `bot_access` (non-admin) user sees the full sport tabs + games list + line-2 p
 > chart modal, AND the inline 3-row sparkline per game card — all reads,
 > no live odds-vendor API calls from Flask.
 >
-> **Adaptive cadence** (per-sport gate in
-> `scrapers/odds_api.py:_should_fire`): each cron-job.org tick reads the
-> nearest upcoming `event_start` for each sport in Supabase and picks a
-> cadence bucket — `≤30min → 2min` (terminal steam window), `30min-2.5h →
-> 5min`, `2.5-6h → 15min`, `6-18h → 30min`, beyond 18h skip. **The 5-min
-> bucket runs to 2.5h (not 2h) on purpose** — the Pick Bot's picker
-> surfaces picks out to 150min (the 120-150 "early" test window), and
-> polling those at 15-min would show stale lines and miss the pre-2h
-> sharp movement we're trying to catch. Keep this 2.5h boundary in sync
-> with `handicapper_web.py:EVAL_WINDOW_MAX` (150). Overnight
-> 10pm-7am MT skips entirely (no US games tip then). Off-season sports
-> (no event in the next 7d) skip. Every tick — fired or skipped —
-> writes a heartbeat row to `odds_ingest_runs` for observability. The
-> previous always-on every-30-min model was wasting calls on far-out
-> games where the line barely moves; adaptive cadence reallocates the
-> budget toward the final 30 min, where late steam happens.
+ **Adaptive cadence** (per-sport gate in
+> `scrapers/odds_api.py:_should_fire`, **rewritten June 2026 — event-driven**):
+> each cron-job.org tick reads the nearest upcoming `event_start` per sport.
+> **Near window (≤3h): tight blind cadence** — `≤30min → 2min` (terminal
+> steam), `30min-3h → 5min` (covers the 60-180min prime window). **Far out
+> (>3h): TRIGGER-ONLY** for `_TRIGGER_SPORTS` (MLB/NBA/NHL) — no blind
+> polling; pulls fire only when the free PMM+Kalshi cross-confirm detector
+> writes an `odds_pull_requests` row (per-sport 5-min cap). Non-trigger
+> sports keep the legacy `3-6h → 15min`, `6-18h → 30min`, beyond-18h skip.
+> **Blackout 10pm-7am MT** skips entirely **except one 3am MT snapshot** per
+> in-season sport (so we see overnight movement). Off-season sports (no
+> event in 7d) skip. Every tick writes a heartbeat to `odds_ingest_runs`.
+> See the "Prediction-market cross-confirm" Step 3 note for the trigger
+> mechanism. The old blind 2.5h/15min/30min model wasted calls on far-out
+> flat lines; event-driven pulls only when the line actually moves.
 >
 > Cost (adaptive): typical 1,800-2,500 cr/day depending on slate. MLB
 > busy days are highest (~900/day) because of staggered starts —
@@ -674,7 +673,7 @@ Two new systems built June 2026, both cron-pinged Flask endpoints (curl steps in
 **1. PMM + Kalshi cross-confirm (the free, low-latency steam detector — Steps 1-2 of 3 built).** The thesis (proven on real snapshots): **Polymarket + Kalshi are deep free exchanges whose cent prices move WITH the sharp number — and our paid Odds-API view of Pinnacle is double-delayed** (their refresh + our cadence + a 10pm-7am blackout), so the free direct feeds LEAD our PINN capture (measured ~4-7 min on KC@MIN, and PINN is blind overnight). Plan: a **1¢ move on BOTH PMM AND Kalshi (same direction)** triggers an on-demand paid PINN pull — event-driven instead of blind-timed.
 > - **Kalshi reader** (`_fetch_kalshi_markets` in `app.py`): public, **no API key**. Base `https://api.elections.kalshi.com/trade-api/v2`, `GET /markets?series_ticker=KXMLBGAME&status=open`. **LANDMINE:** prices are dollar STRINGS (`yes_bid_dollars:"0.5100"`=51¢), NOT `yes_bid`/`last_price` (those are null) — `_kalshi_cents()` converts. Two rows per event (`-BOS`/`-NYY`); `yes_sub_title`=the side; ticker `KXMLBGAME-26JUN071335BOSNYY-BOS` = date+ET-time+teams+side. `/debug-kalshi?sport=mlb` dumps the raw shape. Read-only signal — **we don't bet Kalshi**.
 > - **Logger** (`/api/pm-snapshot` → `pm_snapshots` table, `_pmm_ml_cents`+`_kalshi_ml_index`+`_match_kalshi`): every ~1 min logs PMM+Kalshi mid-cents per side for our upcoming MLB games (deduped on cent change), matched to our games by mascot→Kalshi-code map + nearest ET date. Kalshi = 1 bulk call; PMM per-game under a 7s budget (Vercel 10s). **Validation result: 14/15 games agreed within 0-2¢** — premise confirmed. **GOTCHA — same-city PMM flip:** PMM's matcher swaps sides on two-team cities (Angels/Dodgers, Cubs/White Sox, Mets/Yankees) → PMM and Kalshi disagree >15¢. Kalshi's ticker codes are unambiguous, so the Step-3 trigger trusts Kalshi orientation (a flip just makes the AND not fire = safe).
-> - **Step 3 (NOT built yet):** wire the 1¢-AND → on-demand PINN pull (per-sport 5-min cap, >60min to tip, respect blackout). Kalshi from-scratch was the cost; data's accumulating to validate first.
+> - **Step 3 (BUILT June 2026 — event-driven, replaces blind far-out polling):** Flask `/api/pm-snapshot` `_xconfirm_detect` compares each game's PMM+Kalshi HOME cents to a per-game baseline (`xconfirm_state`); when BOTH drift ≥1¢ same direction (>60min to tip, not blackout) it upserts a per-sport `odds_pull_requests` row + resets the baseline. The cron (`odds_api._should_fire`) then **relaxed its cadence**: tight blind ≤3h (2-min terminal, 5-min to the 3h prime edge); FAR out (>3h) is **trigger-only** for `_TRIGGER_SPORTS` (={MLB,NBA,NHL}) — pulls only on a fresh pull-request, **per-sport 5-min cap** (≥5min since last ok run); non-trigger sports keep legacy 15/30-min far cadence. Blackout 10pm-7am MT kept, **plus one 3am MT snapshot** per in-season sport (one-shot via the >30min-since-last-run guard). Net: far-out blind polling killed → credit savings, event-driven freshness. **GOTCHAS:** Kalshi orientation is trusted — a same-city PMM side-flip (Angels/Dodgers, Cubs/White Sox, Mets/Yankees) makes the deltas disagree so the AND **safely no-fires** (no false trigger, but that game won't trigger). NBA/NHL team codes are standard tricodes (SAS/NYK, VGK/CAR confirmed; rest best-effort — a wrong code just fails that game's match). The trigger only works for games inside pm-snapshot's **12h window**, so far sports (Finals 1-2 days out) don't pull until ≤12h (or the 3am snapshot). Sport-driven config: `_KALSHI_SERIES` + `_TEAM_TO_KALSHI` + `_PM_SPORTS` (app.py) + `_TRIGGER_SPORTS` (odds_api) — add all four to cover a new sport.
 
 **2. Pick Bot paperlog (`/api/handicapper/paperlog` → `pickbot_paperlog` table).** A **silent, complete log of every GATE-CLEARED suggestion** the bot makes over the **5h→1min** pre-game window (whether or not the user bets it) — the 2-week dataset to review which suggestions/timing-windows actually win, separate from the user's real `bot_picks` and the killed `paper_bets`. **No forced leans** (filters `gates_cleared==True` — the gate is unchanged, this is a write-time filter). **Dedup = "log on bet CHANGE":** one row per (game, market_type) each time the suggested **(side, units)** changes (a flip Reds-ML→Reds-SPR or an upgrade 1u→3u lands a NEW row, old kept); unchanged-bet price drift is NOT a row (that's in `pm_snapshots`/`book_snapshots`). Logs ML/SPR/TOT + NRFI; `entry_price`=PMM maker bid (else fair). **Budgeted ~8s, stale-game-first ordering** cycles coverage across ticks (build_dossier per game is heavy). **Graded by `bot_picks_resolver._resolve_paperlog()`** — isolated pass after the bot_picks heartbeat, reusing the same ESPN-match + to-WIN + CLV helpers, so paperlog rows settle identically (each row's own `entry_price`/`line` snapshot grades+CLVs independently — the whole point: did the 5h suggestion beat the 90m one). **GOTCHAS:** `_grade` reads `entry_line` but the table column is `line` → aliased in the loop; `result_score` is stored as JSON text (the column is `text`, not jsonb like bot_picks).
 
