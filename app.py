@@ -2713,6 +2713,107 @@ def _fetch_espn_scoreboard(sport: str) -> list:
         return []
 
 
+# ───────────────────────── Kalshi (free, no-auth market data) ─────────────
+# Kalshi is a deep prediction-market exchange whose price (in cents = implied
+# probability) moves with the sharp number — like Polymarket, a free/keyless
+# "birdie" that the line moved. We read it ONLY as a signal source (the user
+# doesn't bet Kalshi). Market-data GET endpoints are public — no API key.
+#
+# This is step 1 of the PMM+Kalshi cross-confirm detector: get a working
+# Kalshi reader + verify the exact response shape in production (I can't reach
+# Kalshi from the build sandbox). /debug-kalshi dumps the raw first-market
+# object so we can lock the field names, then build the matcher + logger.
+#
+# Base URL has moved historically (trading-api -> elections -> external), so
+# we try candidates in order and report which one answered.
+_KALSHI_BASES = [
+    "https://api.elections.kalshi.com/trade-api/v2",
+    "https://external-api.kalshi.com/trade-api/v2",
+    "https://trading-api.kalshi.com/trade-api/v2",
+]
+# sport -> Kalshi series_ticker. MLB confirmed (KXMLBGAME); others TBD once
+# we can browse Kalshi live (NBA/NHL/NFL series tickers added later).
+_KALSHI_SERIES = {"mlb": "KXMLBGAME"}
+_KALSHI_CACHE: dict[str, tuple[float, dict]] = {}
+_KALSHI_TTL = 30  # seconds
+
+
+def _fetch_kalshi_markets(series_ticker: str, status: str = "open") -> dict:
+    """Fetch open markets for a Kalshi series (public, no auth). Defensive —
+    never raises. Returns {ok, base_used, http_status, count, markets:[...],
+    raw_sample, error}. `raw_sample` is the FULL first market object so we can
+    confirm the real field names (yes_bid/yes_ask/last_price/ticker/...) from
+    production via /debug-kalshi. Failures are NOT cached (so the next hit
+    retries fresh while we iterate)."""
+    import time
+    key = f"{series_ticker}:{status}"
+    now = time.time()
+    cached = _KALSHI_CACHE.get(key)
+    if cached and (now - cached[0]) < _KALSHI_TTL:
+        return cached[1]
+
+    out: dict = {"ok": False, "series_ticker": series_ticker,
+                 "base_used": None, "http_status": None,
+                 "count": 0, "markets": [], "raw_sample": None, "error": None}
+    headers = {"Accept": "application/json", "User-Agent": "kahla-house/1.0"}
+    params = {"series_ticker": series_ticker, "status": status, "limit": 200}
+    last_err = None
+    for base in _KALSHI_BASES:
+        try:
+            r = _http.get(f"{base}/markets", params=params,
+                          headers=headers, timeout=10)
+            out["base_used"] = base
+            out["http_status"] = r.status_code
+            if r.status_code != 200:
+                last_err = f"HTTP {r.status_code} @ {base}: {r.text[:160]}"
+                continue
+            data = r.json()
+            markets = data.get("markets") if isinstance(data, dict) else None
+            if markets is None:
+                last_err = (f"no 'markets' key @ {base}; top keys="
+                            + str(list(data.keys()) if isinstance(data, dict) else type(data).__name__))
+                continue
+            out["raw_sample"] = markets[0] if markets else None
+            parsed = []
+            for m in markets:
+                # Best-guess field names — VERIFY against raw_sample in prod.
+                parsed.append({
+                    "ticker":     m.get("ticker"),
+                    "title":      m.get("title") or m.get("yes_sub_title") or m.get("subtitle"),
+                    "yes_bid":    m.get("yes_bid"),
+                    "yes_ask":    m.get("yes_ask"),
+                    "last_price": m.get("last_price"),
+                    "volume":     m.get("volume"),
+                    "status":     m.get("status"),
+                    "close_time": m.get("close_time") or m.get("expected_expiration_time"),
+                })
+            out["ok"] = True
+            out["count"] = len(parsed)
+            out["markets"] = parsed
+            _KALSHI_CACHE[key] = (now, out)
+            return out
+        except Exception as e:
+            last_err = f"{type(e).__name__} @ {base}: {e}"
+            continue
+    out["error"] = last_err
+    return out
+
+
+@app.route("/debug-kalshi")
+def debug_kalshi():
+    """Verify the live Kalshi response shape. Public market data only (no
+    secrets), so no auth — hit it in a browser: /debug-kalshi?sport=mlb.
+    `raw_sample` shows the true field names so we can lock the parser, then
+    build the PMM+Kalshi cent-move detector on top. Temporary verify tool."""
+    sport = (request.args.get("sport") or "mlb").lower()
+    series = _KALSHI_SERIES.get(sport)
+    if not series:
+        return jsonify({"ok": False,
+                        "error": f"unknown sport '{sport}'",
+                        "known": list(_KALSHI_SERIES)}), 400
+    return jsonify(_fetch_kalshi_markets(series))
+
+
 def _merge_espn_scores(sport: str, events: list) -> list:
     """Attach a `score` field to each event whose teams + start time match
     an ESPN scoreboard entry. Score shape:
