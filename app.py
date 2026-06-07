@@ -2978,6 +2978,51 @@ def _book_signal(book: dict | None, edge_units: float = 1) -> dict | None:
             "why": why}
 
 
+# Best-execution routing pool — ONLY US-legal books the user can actually bet
+# (no Pinnacle/BetOnline/etc. offshore). When the engine says TAKE, we compare
+# the Polymarket fee-inclusive ask against each of these books' raw line and
+# route to the single cheapest venue — Polymarket included if it's still best.
+_ROUTE_BOOKS = ["DK", "FD", "MGM", "ESPN", "BET365", "FAN"]
+
+
+def _amer_implied(a) -> float | None:
+    """American odds -> implied probability (the price you actually pay)."""
+    try:
+        a = float(a)
+    except (TypeError, ValueError):
+        return None
+    if a == 0:
+        return None
+    return (100.0 / (a + 100.0)) if a > 0 else ((-a) / (-a + 100.0))
+
+
+def _best_book_ml(sb, market_id: str, side: str) -> dict | None:
+    """Cheapest routing-pool book moneyline for one side (lowest implied =
+    best price for the bettor), from the latest book_snapshots per book.
+    Returns {book, price, implied} or None."""
+    try:
+        rows = (sb.table("book_snapshots")
+                .select("book,price_american,captured_at")
+                .eq("market_id", market_id).eq("market_type", "moneyline")
+                .eq("side", side).in_("book", _ROUTE_BOOKS)
+                .order("captured_at", desc=True).limit(300).execute().data) or []
+    except Exception:
+        return None
+    seen, best = set(), None
+    for r in rows:
+        b = r["book"]
+        if b in seen:                 # first per book = latest (desc order)
+            continue
+        seen.add(b)
+        imp = _amer_implied(r.get("price_american"))
+        if imp is None:
+            continue
+        if best is None or imp < best["implied"]:
+            best = {"book": b, "price": int(r["price_american"]),
+                    "implied": round(imp * 100, 1)}
+    return best
+
+
 @app.route("/debug-orderbook")
 def debug_orderbook():
     """Probe the FULL depth ladder on both venues (read-only, public market
@@ -3057,11 +3102,15 @@ def debug_orderbook():
 @app.route("/api/handicapper/make-take")
 @bot_required
 def api_make_take():
-    """Live make-vs-take recommendation for one Polymarket side, read off its
-    order book. The card polls this for the picked side's slug so the chip
-    updates as the book moves. Returns the rec + the metrics (imbalance,
-    spread, best bid/ask, near-touch sizes) behind it."""
+    """Live make-vs-take + best-execution routing for one picked side. The
+    card polls this (slug + market_id + side + units) so the chip updates as
+    the book moves. MAKE -> rest a Polymarket maker at the bid (fee-free, the
+    best price). TAKE -> compare the Polymarket fee-inclusive ask against the
+    routing-pool sportsbooks and name the single cheapest venue (Polymarket
+    included if it still wins)."""
     slug = (request.args.get("slug") or "").strip()
+    market_id = (request.args.get("market_id") or "").strip()
+    side = (request.args.get("side") or "").strip().lower()
     if not slug:
         return jsonify({"ok": False, "error": "missing slug"}), 400
     try:
@@ -3076,7 +3125,19 @@ def api_make_take():
     sig = _book_signal(book, edge_units=units)
     if not sig:
         return jsonify({"ok": True, "available": False})
-    return jsonify({"ok": True, "available": True, **sig})
+
+    # TAKE routing: cheapest of {Polymarket ask+fee, each routing-pool book}.
+    take_route = {"venue": "PMM", "kind": "cents", "price": sig["take_eff"],
+                  "implied": round(float(sig["take_eff"]), 1)}
+    if sig["rec"] == "TAKE" and market_id and side in ("home", "away"):
+        sb = get_supabase()
+        bb = _best_book_ml(sb, market_id, side) if sb else None
+        if bb and bb["implied"] < take_route["implied"]:
+            take_route = {"venue": bb["book"], "kind": "american",
+                          "price": bb["price"], "implied": bb["implied"]}
+    return jsonify({"ok": True, "available": True,
+                    "rec": sig["rec"], "make_price": sig["make_price"],
+                    "take_route": take_route, **sig})
 
 
 # ───────────── PMM + Kalshi cent-logger (the cross-confirm memory) ─────────
