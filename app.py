@@ -3076,6 +3076,17 @@ def api_pm_snapshot():
     if not games:
         return jsonify({"ok": True, "games": 0, "reason": "no upcoming MLB in 12h"})
 
+    # Stale-first ordering — rotate the budgeted PMM coverage so the far-out
+    # games (>3h, the TRIGGER-relevant ones) aren't perpetually starved
+    # behind the soonest games. Never-seen + oldest-baselined go first.
+    try:
+        bl_rows = (sb.table("xconfirm_state").select("market_id,baseline_at")
+                   .in_("market_id", [g["id"] for g in games]).execute().data) or []
+        bl = {r["market_id"]: r.get("baseline_at") for r in bl_rows}
+        games.sort(key=lambda g: bl.get(g["id"]) or "")
+    except Exception:
+        pass
+
     # Kalshi: ONE bulk call for the whole slate (cheap).
     kal = _fetch_kalshi_markets("KXMLBGAME")
     kal_events = _kalshi_ml_index(kal.get("markets") or []) if kal.get("ok") else []
