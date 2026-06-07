@@ -444,6 +444,112 @@ def _write_heartbeat(sb, summary: dict) -> None:
         log.warning("heartbeat write failed: %s", e)
 
 
+# ───────────────────── Pick Bot paperlog grading ─────────────────────
+# The pickbot_paperlog table records EVERY gate-cleared suggestion the bot
+# made over the 5h->1min window (whether or not the user bet it). We grade
+# it with the EXACT same ESPN-match + to-WIN math as bot_picks, so the
+# 2-week review buckets line up. MLB-only. Each row carries its own
+# entry_price/line (a snapshot at suggestion time), so each grades + CLVs
+# independently — the whole point ("did the 5h suggestion beat the 90m one?").
+
+def _fetch_pending_paperlog(sb) -> list[dict]:
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        return (sb.table("pickbot_paperlog")
+                .select("id,market_id,sport,event_name,event_start,market_type,"
+                        "side,entry_price,line,units,clv_pp")
+                .eq("status", "pending")
+                .lt("event_start", now)
+                .order("event_start")
+                .limit(3000).execute().data) or []
+    except Exception as e:
+        log.error("paperlog pending fetch failed: %s", e)
+        return []
+
+
+def _update_paperlog(sb, row_id: int, status: str, pnl: float,
+                     result_score: dict, clv_pp: float | None = None) -> bool:
+    import json as _json
+    try:
+        payload = {
+            "status":       status,
+            "pnl_units":    pnl,
+            "result_score": _json.dumps(result_score) if result_score else None,
+            "settled_at":   datetime.now(timezone.utc).isoformat(),
+        }
+        if clv_pp is not None:
+            payload["clv_pp"] = clv_pp
+        sb.table("pickbot_paperlog").update(payload).eq("id", row_id).execute()
+        return True
+    except Exception as e:
+        log.warning("paperlog update failed for %s: %s", row_id, e)
+        return False
+
+
+def _resolve_paperlog(sb) -> dict:
+    """Grade pending pickbot_paperlog rows. Reuses the bot_picks helpers.
+    Isolated + best-effort — never crashes the bot_picks resolver."""
+    out = {"seen": 0, "won": 0, "lost": 0, "push": 0,
+           "unmatched": 0, "not_final": 0}
+    rows = _fetch_pending_paperlog(sb)
+    out["seen"] = len(rows)
+    if not rows:
+        return out
+    espn_cache: dict = {}
+    for bet in rows:
+        sport = bet.get("sport") or ""
+        if sport not in _ESPN_PATH or bet.get("entry_price") is None:
+            continue
+        bet["entry_line"] = bet.get("line")   # _grade/_compute_clv expect entry_line
+        date_key = _espn_date_key(bet.get("event_start") or "")
+        if not date_key:
+            out["unmatched"] += 1
+            continue
+        ck = (sport, date_key)
+        if ck not in espn_cache:
+            espn_cache[ck] = _fetch_espn(sport, date_key)
+        m = _match_espn(bet, espn_cache[ck])
+        if not m:
+            out["unmatched"] += 1
+            continue
+
+        if bet.get("market_type") == "nrfi":
+            status = _grade_nrfi(bet, m)
+            if status is None:
+                out["not_final"] += 1
+                continue
+            result = {"inn1_away": m.get("inn1_away"), "inn1_home": m.get("inn1_home")}
+            clv = None
+        else:
+            if m.get("state") != "post":
+                out["not_final"] += 1
+                continue
+            if m.get("home_score") is None or m.get("away_score") is None:
+                out["unmatched"] += 1
+                continue
+            status = _grade(bet, m["home_score"], m["away_score"])
+            if status is None:
+                out["unmatched"] += 1
+                continue
+            result = {"home": m["home_score"], "away": m["away_score"],
+                      "total": m["home_score"] + m["away_score"]}
+            try:
+                clv = _compute_clv(sb, bet)
+            except Exception:
+                clv = None
+
+        units = bet.get("units") or 1
+        pnl = _pnl_units(status, bet["entry_price"], units)
+        _update_paperlog(sb, bet["id"], status, pnl, result, clv)
+        if status == "won":
+            out["won"] += 1
+        elif status == "lost":
+            out["lost"] += 1
+        elif status == "push":
+            out["push"] += 1
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -581,6 +687,17 @@ def main(argv: list[str] | None = None) -> int:
                  won, lost, push, unmatched, not_final, unsupported)
         summary["took_ms"] = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
         _write_heartbeat(sb, summary)
+
+        # Grade the Pick Bot paperlog too — isolated so it can never crash
+        # the bot_picks resolver above (same ESPN data, reused helpers).
+        try:
+            pl = _resolve_paperlog(sb)
+            if pl["seen"]:
+                log.info("paperlog resolver: seen=%d won=%d lost=%d push=%d "
+                         "unmatched=%d not_final=%d", pl["seen"], pl["won"],
+                         pl["lost"], pl["push"], pl["unmatched"], pl["not_final"])
+        except Exception as e:
+            log.warning("paperlog resolver failed (bot_picks unaffected): %s", e)
         return 0
     except Exception as e:
         # Capture full traceback in the heartbeat so we can debug from
