@@ -753,10 +753,9 @@
     let _currentGames = [];
     let _verdictCache = new Map();
     let _verdictInFlight = new Set();
-    const VERDICT_WINDOW_MS = 2.5 * 60 * 60 * 1000; // 2.5h evaluator window — surfaces picks out to 150m.
-                                                    // 60-120m = prime (glow + size-up); 120-150m = 'early'
-                                                    // test window (chips at 1u, no glow). Cron polls 5-min
-                                                    // out to 2.5h (odds_api EVAL boundary) so these aren't stale.
+    const VERDICT_WINDOW_MS = 3 * 60 * 60 * 1000;   // 3h evaluator window — surfaces picks out to 180m, the
+                                                    // prime edge. 60-180m = prime (glow + size-up). The silent
+                                                    // server-side paperlog goes further (5h) for review data.
     const VERDICT_TTL_MS    = 5 * 60 * 1000;        // re-fetch stale verdicts
 
     firebase.auth().onAuthStateChanged(async user => {
@@ -900,7 +899,7 @@
     // prime glow/pill on the games-list row.
     function _isPrime(iso) {
         const diffMin = Math.round((new Date(iso) - new Date()) / 60_000);
-        return diffMin >= 60 && diffMin <= 120;
+        return diffMin >= 60 && diffMin <= 180;   // prime extended 2h -> 3h (June 2026)
     }
     function _fmtSettled(iso) {
         const d = new Date(iso);

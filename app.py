@@ -3533,9 +3533,11 @@ def _format_fill_alert(row, milestone, fill_pct):
 # matched to PRIME_CRON_SECRET, falling back to FILLS_CRON_SECRET so no
 # new secret is required. Telegram routes through _send_fill_telegram
 # (the Filled Bot creds already in Vercel env).
-_PRIME_LO_MIN       = 90    # window opens 90 min before first pitch
-_PRIME_HI_MIN       = 120   # window closes at 120 min (the 2h chip-pick cap)
-_PRIME_BATCH_HI_MIN = 150   # look 30 min past prime to pull a whole cluster into one alert
+# Fire the heads-up as games cross the TOP of the prime window (now 3h,
+# extended from 2h June 2026) — you want the full prime window to act.
+_PRIME_LO_MIN       = 150   # consider games 150+ min out for the entering-cluster query
+_PRIME_HI_MIN       = 180   # fire when the earliest fresh game is <= 180 min out (just entered prime / 3h)
+_PRIME_BATCH_HI_MIN = 210   # look 30 min past prime to pull a whole cluster into one alert
 _PRIME_QUIET_BEFORE = 7     # don't alert before 7am AZ (no overnight/early-morning pings)
 
 
@@ -3663,7 +3665,7 @@ def _build_prime_alert_msg(sport: str, games: list) -> str:
     plural = "game" if n == 1 else "games"
     lines = [f"🎯 *{n} {sport} {plural}* entering the prime betting window"]
     if when:
-        lines.append(when + "  (1.5–2h out)")
+        lines.append(when + "  (~3h to first pitch)")
     for g in games[:8]:
         lines.append(f"• {g.get('event_name', '?')}")
     if n > 8:
