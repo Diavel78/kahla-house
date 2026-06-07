@@ -2864,8 +2864,14 @@ def _fetch_kalshi_orderbook(ticker: str) -> dict:
 # Both venues expose a full ladder. Normalize each to a common per-side shape
 # {best_bid, best_ask, bids:[(cent,size)], asks:[(cent,size)]} for the side
 # you'd BUY, so the make/take math is venue-agnostic.
-_BOOK_NEAR_CENTS = 5   # levels within 5c of the touch count as "near" (ignore
-                       # the penny parking orders sitting at 1-2c / 97-99c)
+_BOOK_TOP_LVLS = 2     # Imbalance is read from JUST the best level (+ one
+                       # behind) — NOT a cent window. Far lottery bids parked
+                       # at 1c and liquidity sellers dumping at 99c reflect
+                       # zero pressure at the touch and would wildly distort a
+                       # depth sum. Only the size AT the touch matters: the
+                       # queue ahead of your maker (best bid) vs the supply
+                       # you'd take through (best ask). One-behind guards
+                       # against a thin/spoof top line; drop to 1 for purest.
 
 
 def _pmm_book(client, slug: str) -> dict | None:
@@ -2933,9 +2939,10 @@ def _book_signal(book: dict | None, edge_units: float = 1) -> dict | None:
         return None
     bb, ba = book["best_bid"], book["best_ask"]
     spread = ba - bb
-    near_bid = sum(q for c, q in book["bids"] if c >= bb - _BOOK_NEAR_CENTS)
-    near_ask = sum(q for c, q in book["asks"] if c <= ba + _BOOK_NEAR_CENTS)
-    imb = round(near_bid / near_ask, 2) if near_ask else None
+    # Top-of-book sizes only (best + one behind) — see _BOOK_TOP_LVLS.
+    top_bid = sum(q for _, q in book["bids"][:_BOOK_TOP_LVLS])
+    top_ask = sum(q for _, q in book["asks"][:_BOOK_TOP_LVLS])
+    imb = round(top_bid / top_ask, 2) if top_ask else None
 
     take, why = False, []
     if spread >= 5:
@@ -2956,7 +2963,7 @@ def _book_signal(book: dict | None, edge_units: float = 1) -> dict | None:
             "target": ba if take else bb,          # lift the ask / rest at bid
             "best_bid": bb, "best_ask": ba, "spread": spread,
             "imbalance": imb,
-            "near_bid_size": round(near_bid), "near_ask_size": round(near_ask),
+            "top_bid_size": round(top_bid), "top_ask_size": round(top_ask),
             "why": why}
 
 
