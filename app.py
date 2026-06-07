@@ -2829,6 +2829,243 @@ def debug_kalshi():
     return jsonify(_fetch_kalshi_markets(series))
 
 
+# ───────────── PMM + Kalshi cent-logger (the cross-confirm memory) ─────────
+# Step 2 of the detector: every ~1 min, record the free Polymarket + Kalshi
+# cent prices per side for our upcoming games into pm_snapshots (deduped on
+# change). This is both the detector's MEMORY (compare to last to catch a
+# >=1c move) and the VALIDATION dataset (prove the 1c-AND fires + measure how
+# many minutes these free feeds lead our paid PINN capture in book_snapshots).
+# Zero PINN cost. Read-only signal — we never trade Kalshi.
+
+# Our team full name -> Kalshi ticker code (the suffix after the last '-',
+# e.g. KXMLBGAME-...BOSNYY-BOS). Keyed by mascot (unique) so it works on any
+# city/name variant The Odds API sends.
+_MLB_MASCOT_TO_KALSHI = {
+    "diamondbacks": "AZ", "braves": "ATL", "orioles": "BAL", "red sox": "BOS",
+    "white sox": "CWS", "cubs": "CHC", "reds": "CIN", "guardians": "CLE",
+    "rockies": "COL", "tigers": "DET", "astros": "HOU", "royals": "KC",
+    "angels": "LAA", "dodgers": "LAD", "marlins": "MIA", "brewers": "MIL",
+    "twins": "MIN", "mets": "NYM", "yankees": "NYY", "athletics": "ATH",
+    "phillies": "PHI", "pirates": "PIT", "padres": "SD", "giants": "SF",
+    "mariners": "SEA", "cardinals": "STL", "rays": "TB", "rangers": "TEX",
+    "blue jays": "TOR", "nationals": "WSH",
+}
+_KALSHI_MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+                  "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+
+
+def _our_team_to_kalshi_code(name: str):
+    n = (name or "").lower()
+    for mascot, code in _MLB_MASCOT_TO_KALSHI.items():
+        if mascot in n:
+            return code
+    return None
+
+
+def _mid_cents(bid, ask, last):
+    """Mid of bid/ask in int cents; one side if only one quoted; else last."""
+    vals = [v for v in (bid, ask) if v is not None]
+    if len(vals) == 2:
+        return round((vals[0] + vals[1]) / 2)
+    if len(vals) == 1:
+        return vals[0]
+    return last
+
+
+def _kalshi_ml_index(markets: list) -> list:
+    """Group Kalshi market rows by event_ticker:
+    [{'date':'YYYY-MM-DD','codes':{CODE: cents|None}}]. CODE = ticker side
+    suffix; date parsed from the event ticker (the ET game date)."""
+    import re
+    events: dict = {}
+    for m in markets:
+        tk = m.get("ticker") or ""
+        et = m.get("event_ticker") or ""
+        if "-" not in tk or not et:
+            continue
+        code = tk.rsplit("-", 1)[1]
+        mo = re.match(r"KXMLBGAME-(\d{2})([A-Z]{3})(\d{2})", et)
+        if not mo:
+            continue
+        yy, mon, dd = mo.groups()
+        mm = _KALSHI_MONTHS.get(mon)
+        if not mm:
+            continue
+        date = f"20{yy}-{mm:02d}-{int(dd):02d}"
+        cents = _mid_cents(m.get("yes_bid_c"), m.get("yes_ask_c"), m.get("last_c"))
+        e = events.setdefault(et, {"date": date, "codes": {}})
+        if code not in e["codes"] or (e["codes"][code] is None and cents is not None):
+            e["codes"][code] = cents
+    return list(events.values())
+
+
+def _match_kalshi(events: list, away_code: str, home_code: str, our_date):
+    """Kalshi cents for our game: nearest-date event containing both codes.
+    Returns {'away': cents|None, 'home': cents|None} or {}."""
+    from datetime import date as _date
+    want = {away_code, home_code}
+    best, best_diff = None, 99
+    for e in events:
+        if not want.issubset(e["codes"].keys()):
+            continue
+        try:
+            diff = abs((_date.fromisoformat(e["date"]) - our_date).days)
+        except Exception:
+            continue
+        if diff <= 1 and diff < best_diff:
+            best, best_diff = e, diff
+    if not best:
+        return {}
+    return {"away": best["codes"].get(away_code),
+            "home": best["codes"].get(home_code)}
+
+
+def _pmm_ml_cents(pm, client, away, home, event_start, sport="MLB") -> dict:
+    """Polymarket moneyline mid in int cents per side, {} on any miss."""
+    if not pm or not client:
+        return {}
+    try:
+        data = pm.lookup(client, sport, away, home, event_start)
+    except Exception:
+        return {}
+    if not data:
+        return {}
+    out = {}
+    for row in (data.get("ml") or []):
+        side = row.get("side")
+        mid = (row.get("quote") or {}).get("mid")
+        if side in ("home", "away") and mid is not None:
+            try:
+                out[side] = round(float(mid) * 100)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def _pm_insert_changed(sb, rows, now) -> int:
+    """Insert (market_id, source, side, cents) rows, deduped: only when the
+    cent differs from the latest stored value for that key (book_snapshots
+    pattern). One row per key per tick."""
+    if not rows:
+        return 0
+    mids = list({r[0] for r in rows})
+    last: dict = {}
+    try:
+        recent = (sb.table("pm_snapshots")
+                  .select("market_id,source,side,cents,captured_at")
+                  .in_("market_id", mids)
+                  .gte("captured_at", (now - timedelta(hours=24)).isoformat())
+                  .order("captured_at", desc=True).limit(5000).execute().data) or []
+        for r in recent:
+            k = (r["market_id"], r["source"], r["side"])
+            if k not in last:           # first seen = latest (desc order)
+                last[k] = r["cents"]
+    except Exception:
+        pass
+    ins, seen = [], set()
+    for (mid, source, side, cents) in rows:
+        k = (mid, source, side)
+        if k in seen:
+            continue
+        seen.add(k)
+        if last.get(k) == cents:        # unchanged → skip
+            continue
+        ins.append({"market_id": mid, "source": source, "side": side,
+                    "cents": cents, "captured_at": now.isoformat()})
+    if ins:
+        try:
+            sb.table("pm_snapshots").insert(ins).execute()
+        except Exception:
+            return 0
+    return len(ins)
+
+
+@app.route("/api/pm-snapshot")
+def api_pm_snapshot():
+    """Cron-pinged ~1/min. Logs free PMM + Kalshi cents per side for upcoming
+    MLB games into pm_snapshots (deduped). Auth: ?key= matched to
+    PM_SNAPSHOT_SECRET or (fallback) FILLS_CRON_SECRET — no new secret."""
+    import time as _time
+    expected = (os.environ.get("PM_SNAPSHOT_SECRET")
+                or os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    provided = (request.args.get("key") or "").strip()
+    if not expected or not secrets.compare_digest(provided, expected):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+
+    now = datetime.now(timezone.utc)
+    try:
+        games = (sb.table("markets").select("id,event_name,event_start")
+                 .eq("sport", "MLB").eq("status", "active")
+                 .gte("event_start", now.isoformat())
+                 .lte("event_start", (now + timedelta(hours=12)).isoformat())
+                 .order("event_start").execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"markets: {e}"}), 500
+    if not games:
+        return jsonify({"ok": True, "games": 0, "reason": "no upcoming MLB in 12h"})
+
+    # Kalshi: ONE bulk call for the whole slate (cheap).
+    kal = _fetch_kalshi_markets("KXMLBGAME")
+    kal_events = _kalshi_ml_index(kal.get("markets") or []) if kal.get("ok") else []
+
+    # PMM client once; per-game lookups are the expensive part, so they run
+    # under a time budget (stay well under Vercel's 10s). The 5-min event
+    # cache makes subsequent ticks fast; un-budgeted games catch up next tick.
+    try:
+        import pmm_markets as _pm
+        _pmm_client = get_client()
+    except Exception:
+        _pm, _pmm_client = None, None
+    pmm_deadline = _time.time() + 7.0
+
+    rows, seen_names = [], set()
+    st = {"pmm_games": 0, "kalshi_games": 0, "pmm_skipped": 0}
+    for g in games:
+        name = g.get("event_name") or ""
+        if " @ " not in name or name in seen_names:
+            continue
+        seen_names.add(name)
+        away, home = [s.strip() for s in name.split(" @ ", 1)]
+        mid = g["id"]
+
+        # Kalshi (from the bulk fetch — no per-game network)
+        ac, hc = _our_team_to_kalshi_code(away), _our_team_to_kalshi_code(home)
+        kc = {}
+        if ac and hc:
+            try:
+                od = (datetime.fromisoformat(str(g["event_start"]).replace("Z", "+00:00"))
+                      .astimezone(ZoneInfo("America/New_York")).date())
+                kc = _match_kalshi(kal_events, ac, hc, od)
+            except Exception:
+                kc = {}
+        if kc.get("home") or kc.get("away"):
+            st["kalshi_games"] += 1
+
+        # PMM (budgeted)
+        pmm = {}
+        if _time.time() < pmm_deadline:
+            pmm = _pmm_ml_cents(_pm, _pmm_client, away, home, g["event_start"])
+            if pmm:
+                st["pmm_games"] += 1
+        else:
+            st["pmm_skipped"] += 1
+
+        for source, d in (("pmm", pmm), ("kalshi", kc)):
+            for side in ("home", "away"):
+                c = d.get(side)
+                if c is None or c <= 0 or c >= 100:   # no quote / degenerate
+                    continue
+                rows.append((mid, source, side, int(c)))
+
+    inserted = _pm_insert_changed(sb, rows, now)
+    return jsonify({"ok": True, "games": len(seen_names), "inserted": inserted,
+                    "kalshi_ok": kal.get("ok"), "kalshi_count": kal.get("count"),
+                    "kalshi_base": kal.get("base_used"), **st})
+
+
 def _merge_espn_scores(sport: str, events: list) -> list:
     """Attach a `score` field to each event whose teams + start time match
     an ESPN scoreboard entry. Score shape:

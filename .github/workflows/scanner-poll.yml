@@ -203,3 +203,22 @@ jobs:
           code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
             "https://www.thekahlahouse.com/api/handicapper/prime-alert?key=${KEY}" || echo "000")
           echo "prime-alert HTTP $code"
+
+      # Prediction-market cent-logger ping. /api/pm-snapshot records free
+      # Polymarket + Kalshi cents per side for upcoming MLB games into
+      # pm_snapshots (deduped) — the cross-confirm detector's memory + the
+      # data to validate the 1c-AND and measure the lead vs paid PINN. Free
+      # (no Odds-API hit). Reuses FILLS_CRON_SECRET; idempotent.
+      - name: Prediction-market — PMM+Kalshi cent snapshot ping
+        continue-on-error: true
+        env:
+          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
+        run: |
+          if [ -z "$FILLS_CRON_SECRET" ]; then
+            echo "FILLS_CRON_SECRET not set — skipping pm-snapshot ping (no-op)."
+            exit 0
+          fi
+          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
+          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
+            "https://www.thekahlahouse.com/api/pm-snapshot?key=${KEY}" || echo "000")
+          echo "pm-snapshot HTTP $code"
