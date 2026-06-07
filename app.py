@@ -2738,6 +2738,16 @@ _KALSHI_CACHE: dict[str, tuple[float, dict]] = {}
 _KALSHI_TTL = 30  # seconds
 
 
+def _kalshi_cents(v):
+    """Kalshi quotes prices as dollar STRINGS ('0.5100') — convert to the
+    integer cents (51) the 1c-move trigger works in. None on junk; note
+    '0.0000' -> 0 means no bid/ask, not a real 0c price (detector handles)."""
+    try:
+        return round(float(v) * 100)
+    except (TypeError, ValueError):
+        return None
+
+
 def _fetch_kalshi_markets(series_ticker: str, status: str = "open") -> dict:
     """Fetch open markets for a Kalshi series (public, no auth). Defensive —
     never raises. Returns {ok, base_used, http_status, count, markets:[...],
@@ -2776,16 +2786,21 @@ def _fetch_kalshi_markets(series_ticker: str, status: str = "open") -> dict:
             out["raw_sample"] = markets[0] if markets else None
             parsed = []
             for m in markets:
-                # Best-guess field names — VERIFY against raw_sample in prod.
+                # Verified shape (prod /debug-kalshi): each EVENT
+                # (event_ticker) has two market rows, one per team; `team`
+                # (= yes_sub_title) is the side this YES contract pays.
+                # Prices are dollar strings -> integer cents.
                 parsed.append({
-                    "ticker":     m.get("ticker"),
-                    "title":      m.get("title") or m.get("yes_sub_title") or m.get("subtitle"),
-                    "yes_bid":    m.get("yes_bid"),
-                    "yes_ask":    m.get("yes_ask"),
-                    "last_price": m.get("last_price"),
-                    "volume":     m.get("volume"),
-                    "status":     m.get("status"),
-                    "close_time": m.get("close_time") or m.get("expected_expiration_time"),
+                    "ticker":       m.get("ticker"),
+                    "event_ticker": m.get("event_ticker"),
+                    "title":        m.get("title"),
+                    "team":         m.get("yes_sub_title"),
+                    "yes_bid_c":    _kalshi_cents(m.get("yes_bid_dollars")),
+                    "yes_ask_c":    _kalshi_cents(m.get("yes_ask_dollars")),
+                    "last_c":       _kalshi_cents(m.get("last_price_dollars")),
+                    "volume":       m.get("volume_fp") or m.get("volume_24h_fp"),
+                    "status":       m.get("status"),
+                    "close_time":   m.get("close_time"),
                 })
             out["ok"] = True
             out["count"] = len(parsed)
