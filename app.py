@@ -3036,6 +3036,31 @@ def debug_orderbook():
     return jsonify(out)
 
 
+@app.route("/api/handicapper/make-take")
+@bot_required
+def api_make_take():
+    """Live make-vs-take recommendation for one Polymarket side, read off its
+    order book. The card polls this for the picked side's slug so the chip
+    updates as the book moves. Returns the rec + the metrics (imbalance,
+    spread, best bid/ask, near-touch sizes) behind it."""
+    slug = (request.args.get("slug") or "").strip()
+    if not slug:
+        return jsonify({"ok": False, "error": "missing slug"}), 400
+    try:
+        units = float(request.args.get("units") or 1)
+    except ValueError:
+        units = 1
+    try:
+        book = _pmm_book(get_client(), slug)
+    except Exception as e:
+        return jsonify({"ok": True, "available": False,
+                        "error": f"{type(e).__name__}: {e}"[:160]})
+    sig = _book_signal(book, edge_units=units)
+    if not sig:
+        return jsonify({"ok": True, "available": False})
+    return jsonify({"ok": True, "available": True, **sig})
+
+
 # ───────────── PMM + Kalshi cent-logger (the cross-confirm memory) ─────────
 # Step 2 of the detector: every ~1 min, record the free Polymarket + Kalshi
 # cent prices per side for our upcoming games into pm_snapshots (deduped on
