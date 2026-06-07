@@ -245,6 +245,14 @@
         .pick-chip.conflict { background: var(--surface-2); color: var(--text-secondary); border: 1px solid rgba(239,68,68,0.4); }
         @keyframes khPulse { 0%,100% { box-shadow: 0 0 0 2px rgba(168,85,247,0.55); } 50% { box-shadow: 0 0 0 4px rgba(168,85,247,0.18); } }
         .pick-line-note { font-size: 11px; color: var(--text-muted); font-style: italic; }
+        /* "do this, this way" — the bet chip is "do this", the make/take pill
+           riding next to it is "this way". Green MAKE = rest a Poly maker;
+           amber TAKE = cross now at the named venue. The full read stays on
+           Details. Grouped in .pick-chip-row so the pair wraps as a unit. */
+        .pick-chip-row { display: inline-flex; align-items: center; gap: 4px; }
+        .mt-pill { padding: 3px 7px; border-radius: 6px; font-size: 10px; font-weight: 700; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.02em; white-space: nowrap; }
+        .mt-pill.make { background: var(--green-dim); color: var(--green); border: 1px solid rgba(34,197,94,0.4); }
+        .mt-pill.take { background: var(--orange-dim); color: var(--orange); border: 1px solid rgba(249,115,22,0.4); }
         /* Color legend for the pick chips (admin/bot_access only). */
         .pick-legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 10px; font-size: 10px; color: var(--text-muted); }
         .pick-legend span { display: inline-flex; align-items: center; gap: 4px; }
@@ -1317,7 +1325,13 @@
                 } else if (ps.state === 'conflict') {
                     cls = 'conflict'; label = '⚠ ' + p._chip; click = `pickGame('${mid}')`; title = 'Opposite of a bet you logged — open Details';
                 }
-                return `<button class="pick-chip ${cls}" title="${_esc(title)}" onclick="${click}">${_esc(label)}</button>`;
+                // "this way" directive — riding the chip once the make/take
+                // verdict is in. Hidden once logged / on a conflict (moot).
+                const showMt = p._mtChip && ps.state !== 'logged' && ps.state !== 'conflict';
+                const mtPill = showMt
+                    ? `<span class="mt-pill ${p._mt.rec === 'MAKE' ? 'make' : 'take'}" title="how to enter — full read on Details">${_esc(p._mtChip)}</span>`
+                    : '';
+                return `<span class="pick-chip-row"><button class="pick-chip ${cls}" title="${_esc(title)}" onclick="${click}">${_esc(label)}</button>${mtPill}</span>`;
             }).join('');
         });
     }
@@ -1405,7 +1419,7 @@
                             const body = _suggestionToBody(s, mid, d);
                             return { market_type: s.market_type, side: s.side, units: Number(s.units) || 1,
                                      _chip: _pickChipLabel(s.market_type, s.side, body._line, body._price, s.units, d),
-                                     _body: body };
+                                     _slug: s.pmm_slug || null, _body: body };
                         });
                         // NRFI: actionable only when the model found a +EV side.
                         if (d.nrfi && d.nrfi.bet_side) {
@@ -1413,7 +1427,7 @@
                             const pb = (d.nrfi.polymarket || {})[side] || {};
                             const price = (pb.bid_american != null) ? pb.bid_american
                                 : (side === 'no' ? d.nrfi.nrfi_fair_american : d.nrfi.yrfi_fair_american);
-                            picks.push({ market_type: 'nrfi', side, units: 0.5,
+                            picks.push({ market_type: 'nrfi', side, units: 0.5, _slug: pb.slug || null,
                                 _chip: _pickChipLabel('nrfi', side, null, price, 0.5, d),
                                 _body: { market_id: mid, market_type: 'nrfi', side, book: 'PMM',
                                     price, line: null, units: 0.5, confidence: 'low',
@@ -1422,6 +1436,14 @@
                                     reasons: d.nrfi.reasons || [], query_text: d.query || null,
                                     allow_duplicate: true } });
                         }
+                        // "this way" — fetch the live make/take verdict per pick
+                        // with a Poly market and ride it on the chip. Populates
+                        // _makeTakeCache too, so oneTapLog enters at the rec.
+                        await Promise.all(picks.map(async p => {
+                            if (!p._slug) return;
+                            const j = await _fetchMakeTakeVerdict(p._slug, mid, p.market_type, p.side, p.units, d.starts_in_min);
+                            if (j) { p._mt = j; p._mtChip = _mtShort(j); }
+                        }));
                         _verdictCache.set(mid, { picks, fetchedAt: Date.now() });
                         _renderPickLines();
                     }
@@ -2277,6 +2299,36 @@
         FAN: 'Fanatics' };
 
     function _mtKey(mid, mt, side) { return `${mid}:${mt}:${side}`; }
+
+    // Fetch one make/take verdict (used by the games-list prefetch so the
+    // "this way" pill rides the chip). Caches in _makeTakeCache so a one-tap
+    // log enters at the recommended venue/price. Returns the JSON or null.
+    async function _fetchMakeTakeVerdict(slug, mid, mt, side, units, sim) {
+        if (!slug) return null;
+        const p = new URLSearchParams({ slug });
+        if (mid)  p.set('market_id', mid);
+        if (side) p.set('side', side);
+        if (units != null) p.set('units', units);
+        if (sim != null && sim !== '') p.set('starts_in_min', sim);
+        try {
+            const r = await authFetch('/api/handicapper/make-take?' + p.toString());
+            const j = await r.json();
+            if (!j || !j.ok || !j.available) return null;
+            if (mid) _makeTakeCache.set(_mtKey(mid, mt, side), j);
+            return j;
+        } catch (e) { return null; }
+    }
+
+    // Short directive for the game-card pill: "MAKE Polymarket 46¢" /
+    // "TAKE DraftKings +113". The full read lives on Details.
+    function _mtShort(j) {
+        if (!j || !j.available) return null;
+        if (j.rec === 'MAKE') return `MAKE Polymarket ${j.make_price}¢`;
+        const rt = j.take_route || {};
+        const venue = _BOOK_LABEL[rt.venue] || rt.venue || 'Polymarket';
+        const px = rt.kind === 'american' ? _fmtAmer(rt.price) : `${Math.round(rt.price)}¢`;
+        return `TAKE ${venue} ${px}`;
+    }
 
     function _loadAllMakeTake(root) {
         if (!_canBet) return;
