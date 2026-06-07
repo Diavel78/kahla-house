@@ -178,7 +178,7 @@ _DISCOVERY_SEC = 6 * 3600  # 6h
 # writes an odds_pull_requests row). Near window (<=3h) keeps tight blind
 # cadence (covers the 60-180min prime window). Non-trigger sports keep the
 # legacy 15/30-min far cadence. Add a sport here once its cent data flows.
-_TRIGGER_SPORTS = {"MLB"}
+_TRIGGER_SPORTS = {"MLB", "NBA", "NHL"}
 _PULL_REQ_FRESH_SEC = 600     # a pull-request is valid for 10 min
 _TRIGGER_MIN_GAP_SEC = 300    # per-sport 5-min cap between triggered pulls
 _NEAR_WINDOW_H = 3.0          # blind tight-cadence ceiling (= prime edge)

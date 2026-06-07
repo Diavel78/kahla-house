@@ -2733,7 +2733,12 @@ _KALSHI_BASES = [
 ]
 # sport -> Kalshi series_ticker. MLB confirmed (KXMLBGAME); others TBD once
 # we can browse Kalshi live (NBA/NHL/NFL series tickers added later).
-_KALSHI_SERIES = {"mlb": "KXMLBGAME"}
+# sport (UPPER, our markets.sport code) -> Kalshi per-game series ticker.
+# Confirmed live via /debug-kalshi. Add a sport here + a team map in
+# _TEAM_TO_KALSHI + to _PM_SPORTS / odds_api _TRIGGER_SPORTS to cover it.
+_KALSHI_SERIES = {"MLB": "KXMLBGAME", "NBA": "KXNBAGAME", "NHL": "KXNHLGAME"}
+# Sports the cent-logger + cross-confirm trigger cover (cent data flows).
+_PM_SPORTS = ["MLB", "NBA", "NHL"]
 _KALSHI_CACHE: dict[str, tuple[float, dict]] = {}
 _KALSHI_TTL = 30  # seconds
 
@@ -2824,7 +2829,7 @@ def debug_kalshi():
     # per-game series for new sports, e.g. KXNBAGAME); ?sport= uses the map.
     series = (request.args.get("series") or "").strip().upper()
     if not series:
-        sport = (request.args.get("sport") or "mlb").lower()
+        sport = (request.args.get("sport") or "mlb").upper()
         series = _KALSHI_SERIES.get(sport)
         if not series:
             return jsonify({"ok": False, "error": f"unknown sport '{sport}'",
@@ -2843,23 +2848,50 @@ def debug_kalshi():
 # Our team full name -> Kalshi ticker code (the suffix after the last '-',
 # e.g. KXMLBGAME-...BOSNYY-BOS). Keyed by mascot (unique) so it works on any
 # city/name variant The Odds API sends.
-_MLB_MASCOT_TO_KALSHI = {
-    "diamondbacks": "AZ", "braves": "ATL", "orioles": "BAL", "red sox": "BOS",
-    "white sox": "CWS", "cubs": "CHC", "reds": "CIN", "guardians": "CLE",
-    "rockies": "COL", "tigers": "DET", "astros": "HOU", "royals": "KC",
-    "angels": "LAA", "dodgers": "LAD", "marlins": "MIA", "brewers": "MIL",
-    "twins": "MIN", "mets": "NYM", "yankees": "NYY", "athletics": "ATH",
-    "phillies": "PHI", "pirates": "PIT", "padres": "SD", "giants": "SF",
-    "mariners": "SEA", "cardinals": "STL", "rays": "TB", "rangers": "TEX",
-    "blue jays": "TOR", "nationals": "WSH",
+# Per-sport mascot -> Kalshi ticker code (the suffix after the last '-').
+# Keyed by mascot (unique within a sport) so it works on any city/name
+# variant The Odds API sends. Confirmed via /debug-kalshi: MLB (all), NBA
+# (SAS/NYK), NHL (VGK/CAR); the rest are the standard sports tricodes —
+# a wrong code only fails THAT game's match (no trigger), which is safe.
+_TEAM_TO_KALSHI = {
+    "MLB": {
+        "diamondbacks": "AZ", "braves": "ATL", "orioles": "BAL", "red sox": "BOS",
+        "white sox": "CWS", "cubs": "CHC", "reds": "CIN", "guardians": "CLE",
+        "rockies": "COL", "tigers": "DET", "astros": "HOU", "royals": "KC",
+        "angels": "LAA", "dodgers": "LAD", "marlins": "MIA", "brewers": "MIL",
+        "twins": "MIN", "mets": "NYM", "yankees": "NYY", "athletics": "ATH",
+        "phillies": "PHI", "pirates": "PIT", "padres": "SD", "giants": "SF",
+        "mariners": "SEA", "cardinals": "STL", "rays": "TB", "rangers": "TEX",
+        "blue jays": "TOR", "nationals": "WSH",
+    },
+    "NBA": {
+        "hawks": "ATL", "celtics": "BOS", "nets": "BKN", "hornets": "CHA",
+        "bulls": "CHI", "cavaliers": "CLE", "mavericks": "DAL", "nuggets": "DEN",
+        "pistons": "DET", "warriors": "GSW", "rockets": "HOU", "pacers": "IND",
+        "clippers": "LAC", "lakers": "LAL", "grizzlies": "MEM", "heat": "MIA",
+        "bucks": "MIL", "timberwolves": "MIN", "pelicans": "NOP", "knicks": "NYK",
+        "thunder": "OKC", "magic": "ORL", "76ers": "PHI", "suns": "PHX",
+        "trail blazers": "POR", "blazers": "POR", "kings": "SAC", "spurs": "SAS",
+        "raptors": "TOR", "jazz": "UTA", "wizards": "WAS",
+    },
+    "NHL": {
+        "ducks": "ANA", "bruins": "BOS", "sabres": "BUF", "flames": "CGY",
+        "hurricanes": "CAR", "blackhawks": "CHI", "avalanche": "COL",
+        "blue jackets": "CBJ", "stars": "DAL", "red wings": "DET", "oilers": "EDM",
+        "panthers": "FLA", "kings": "LAK", "wild": "MIN", "canadiens": "MTL",
+        "predators": "NSH", "devils": "NJD", "islanders": "NYI", "rangers": "NYR",
+        "senators": "OTT", "flyers": "PHI", "penguins": "PIT", "sharks": "SJS",
+        "kraken": "SEA", "blues": "STL", "lightning": "TBL", "maple leafs": "TOR",
+        "canucks": "VAN", "golden knights": "VGK", "capitals": "WSH", "jets": "WPG",
+    },
 }
 _KALSHI_MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
                   "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
 
 
-def _our_team_to_kalshi_code(name: str):
+def _our_team_to_kalshi_code(sport: str, name: str):
     n = (name or "").lower()
-    for mascot, code in _MLB_MASCOT_TO_KALSHI.items():
+    for mascot, code in _TEAM_TO_KALSHI.get(sport, {}).items():
         if mascot in n:
             return code
     return None
@@ -2887,7 +2919,7 @@ def _kalshi_ml_index(markets: list) -> list:
         if "-" not in tk or not et:
             continue
         code = tk.rsplit("-", 1)[1]
-        mo = re.match(r"KXMLBGAME-(\d{2})([A-Z]{3})(\d{2})", et)
+        mo = re.match(r"KX[A-Z]+GAME-(\d{2})([A-Z]{3})(\d{2})", et)
         if not mo:
             continue
         yy, mon, dd = mo.groups()
@@ -3065,61 +3097,68 @@ def api_pm_snapshot():
         return jsonify({"ok": False, "error": "supabase unavailable"}), 503
 
     now = datetime.now(timezone.utc)
-    try:
-        games = (sb.table("markets").select("id,event_name,event_start")
-                 .eq("sport", "MLB").eq("status", "active")
-                 .gte("event_start", now.isoformat())
-                 .lte("event_start", (now + timedelta(hours=12)).isoformat())
-                 .order("event_start").execute().data) or []
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"markets: {e}"}), 500
-    if not games:
-        return jsonify({"ok": True, "games": 0, "reason": "no upcoming MLB in 12h"})
+    hi = (now + timedelta(hours=12)).isoformat()
 
-    # Stale-first ordering — rotate the budgeted PMM coverage so the far-out
-    # games (>3h, the TRIGGER-relevant ones) aren't perpetually starved
-    # behind the soonest games. Never-seen + oldest-baselined go first.
+    # Gather upcoming games across every cent-logged sport, tagged with sport.
+    all_games = []
+    for sp in _PM_SPORTS:
+        try:
+            rows_sp = (sb.table("markets").select("id,event_name,event_start")
+                       .eq("sport", sp).eq("status", "active")
+                       .gte("event_start", now.isoformat()).lte("event_start", hi)
+                       .order("event_start").execute().data) or []
+        except Exception:
+            rows_sp = []
+        seen = set()
+        for g in rows_sp:
+            n = g.get("event_name") or ""
+            if " @ " in n and n not in seen:        # dedup dup market rows
+                seen.add(n)
+                g["_sport"] = sp
+                all_games.append(g)
+    if not all_games:
+        return jsonify({"ok": True, "games": 0, "reason": "no upcoming games in 12h"})
+
+    # Stale-first ordering across all sports — rotate the budgeted PMM
+    # coverage so far-out (trigger-relevant) games aren't starved.
     try:
         bl_rows = (sb.table("xconfirm_state").select("market_id,baseline_at")
-                   .in_("market_id", [g["id"] for g in games]).execute().data) or []
+                   .in_("market_id", [g["id"] for g in all_games]).execute().data) or []
         bl = {r["market_id"]: r.get("baseline_at") for r in bl_rows}
-        games.sort(key=lambda g: bl.get(g["id"]) or "")
+        all_games.sort(key=lambda g: bl.get(g["id"]) or "")
     except Exception:
         pass
 
-    # Kalshi: ONE bulk call for the whole slate (cheap).
-    kal = _fetch_kalshi_markets("KXMLBGAME")
-    kal_events = _kalshi_ml_index(kal.get("markets") or []) if kal.get("ok") else []
+    # Kalshi: one bulk call per sport (cheap), indexed up front.
+    kal_idx, kal_meta = {}, {}
+    for sp in _PM_SPORTS:
+        kal = _fetch_kalshi_markets(_KALSHI_SERIES[sp])
+        kal_meta[sp] = {"ok": kal.get("ok"), "count": kal.get("count")}
+        kal_idx[sp] = _kalshi_ml_index(kal.get("markets") or []) if kal.get("ok") else []
 
-    # PMM client once; per-game lookups are the expensive part, so they run
-    # under a time budget (stay well under Vercel's 10s). The 5-min event
-    # cache makes subsequent ticks fast; un-budgeted games catch up next tick.
     try:
         import pmm_markets as _pm
         _pmm_client = get_client()
     except Exception:
         _pm, _pmm_client = None, None
-    pmm_deadline = _time.time() + 7.0
+    pmm_deadline = _time.time() + 7.5
 
-    rows, seen_names = [], set()
+    rows = []
     st = {"pmm_games": 0, "kalshi_games": 0, "pmm_skipped": 0}
     cur = {}   # market_id -> current home cents (both feeds) for the trigger
-    for g in games:
-        name = g.get("event_name") or ""
-        if " @ " not in name or name in seen_names:
-            continue
-        seen_names.add(name)
-        away, home = [s.strip() for s in name.split(" @ ", 1)]
+    for g in all_games:
+        sp = g["_sport"]
+        away, home = [s.strip() for s in g["event_name"].split(" @ ", 1)]
         mid = g["id"]
 
-        # Kalshi (from the bulk fetch — no per-game network)
-        ac, hc = _our_team_to_kalshi_code(away), _our_team_to_kalshi_code(home)
+        # Kalshi (from the per-sport bulk fetch — no per-game network)
+        ac, hc = _our_team_to_kalshi_code(sp, away), _our_team_to_kalshi_code(sp, home)
         kc = {}
         if ac and hc:
             try:
                 od = (datetime.fromisoformat(str(g["event_start"]).replace("Z", "+00:00"))
                       .astimezone(ZoneInfo("America/New_York")).date())
-                kc = _match_kalshi(kal_events, ac, hc, od)
+                kc = _match_kalshi(kal_idx.get(sp, []), ac, hc, od)
             except Exception:
                 kc = {}
         if kc.get("home") or kc.get("away"):
@@ -3128,7 +3167,7 @@ def api_pm_snapshot():
         # PMM (budgeted)
         pmm = {}
         if _time.time() < pmm_deadline:
-            pmm = _pmm_ml_cents(_pm, _pmm_client, away, home, g["event_start"])
+            pmm = _pmm_ml_cents(_pm, _pmm_client, away, home, g["event_start"], sport=sp)
             if pmm:
                 st["pmm_games"] += 1
         else:
@@ -3148,15 +3187,13 @@ def api_pm_snapshot():
                              - now).total_seconds() / 60)
             except Exception:
                 sim = None
-            cur[mid] = {"sport": "MLB", "pmm_home": int(pmm["home"]),
+            cur[mid] = {"sport": sp, "pmm_home": int(pmm["home"]),
                         "kalshi_home": int(kc["home"]), "starts_in_min": sim}
 
     inserted = _pm_insert_changed(sb, rows, now)
     xc = _xconfirm_detect(sb, cur, now)
-    return jsonify({"ok": True, "games": len(seen_names), "inserted": inserted,
-                    "kalshi_ok": kal.get("ok"), "kalshi_count": kal.get("count"),
-                    "kalshi_base": kal.get("base_used"),
-                    "xconfirm_triggered": xc["triggered"], **st})
+    return jsonify({"ok": True, "games": len(all_games), "inserted": inserted,
+                    "kalshi": kal_meta, "xconfirm_triggered": xc["triggered"], **st})
 
 
 @app.route("/api/handicapper/paperlog")
