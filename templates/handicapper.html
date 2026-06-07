@@ -82,19 +82,19 @@
         .page-header .meta { font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; margin-top: 4px; }
         .page-header .lede { font-size: 13px; color: var(--text-secondary); margin-top: 8px; max-width: 720px; line-height: 1.5; }
 
-        .stat-strip { display: flex; flex-direction: column; gap: 8px; padding: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 22px; }
-        .stat-tf { padding: 8px 0; border-bottom: 1px solid var(--border); }
-        .stat-tf:last-child { border-bottom: 0; padding-bottom: 0; }
-        .stat-tf:first-child { padding-top: 0; }
-        .stat-tf-head { font-size: 10px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); letter-spacing: 0.08em; font-weight: 700; margin-bottom: 6px; }
-        .stat-tf-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
-        .stat-cell { text-align: center; }
-        .stat-cell .label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
-        .stat-cell .value { font-size: 18px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
-        .stat-cell .value.muted { color: var(--text-muted); }
-        .stat-cell .value.pos { color: var(--green); }
-        .stat-cell .value.neg { color: var(--red); }
-        .stat-cell .value.zero { color: var(--text-secondary); }
+        /* Timeframe stat cards — same layout as the Analytics page
+           (Today / Yesterday / Last 7 / Last 30, label-value rows). */
+        .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 22px; }
+        .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+        .stat-card h3 { font-size: 11px; font-weight: 700; letter-spacing: 1.2px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; text-transform: uppercase; margin-bottom: 10px; }
+        .stat-row { display: flex; justify-content: space-between; font-size: 13px; padding: 3px 0; }
+        .stat-row .k { color: var(--text-secondary); }
+        .stat-row .v { font-family: 'JetBrains Mono', monospace; font-weight: 700; }
+        .stat-row .v.pos { color: var(--green); }
+        .stat-row .v.neg { color: var(--red); }
+        .stat-row .v.mut { color: var(--text-muted); }
+        .stat-card .empty { color: var(--text-muted); font-size: 13px; padding: 6px 0; }
+        @media (max-width: 640px) { .stat-grid { grid-template-columns: 1fr; } }
 
         .conf-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 22px; }
         .conf-card { padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
@@ -458,7 +458,6 @@
         .modal button.primary { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
 
         @media (max-width: 720px) {
-            .stat-tf-grid { grid-template-columns: repeat(2, 1fr); }
             .conf-strip { grid-template-columns: repeat(2, 1fr); }
             .market-grid { grid-template-columns: 1fr; }
             .teams-grid { grid-template-columns: 1fr; }
@@ -610,7 +609,7 @@
                  list is the first thing on the page. Overall P&L +
                  grading heartbeat, then the low/medium/high/whale
                  confidence-tier rollup, then pending + settled. -->
-            <div class="stat-strip" id="overallStats"></div>
+            <div class="stat-grid" id="overallStats"></div>
             <div class="conf-strip" id="confStrip"></div>
 
             <div class="section" id="pendingSection">
@@ -952,41 +951,32 @@
     }
 
     function _renderStats(s) {
-        const hr = s.hit_rate == null ? '—' : `${(s.hit_rate*100).toFixed(1)}%`;
-        // s.roi is u/pick (total pnl_units / graded count).
-        const roiVal = s.roi == null ? null : s.roi;
-        const roi = roiVal == null ? '—'
-            : `${roiVal >= 0 ? '+' : '-'}${Math.abs(roiVal).toFixed(2)}u`;
-        const pnlCls = s.pnl > 0 ? 'pos' : (s.pnl < 0 ? 'neg' : 'muted');
-        const roiCls = (roiVal == null) ? 'muted'
-            : (roiVal > 0 ? 'pos' : (roiVal < 0 ? 'neg' : 'muted'));
+        // One timeframe card body — label/value rows, same layout as the
+        // Analytics page (Record / Hit rate / Units / ROI/pick / Avg CLV).
+        if (!s || !s.graded) return '<div class="empty">No graded picks</div>';
+        const cls = v => v == null ? 'mut' : (v > 0 ? 'pos' : (v < 0 ? 'neg' : 'mut'));
+        const u   = v => v == null ? '—' : `${v >= 0 ? '+' : '-'}${Math.abs(Number(v)).toFixed(2)}u`;
+        const pct = v => v == null ? '—' : `${(v*100).toFixed(1)}%`;
+        // s.roi is u/pick; shown as a % to match Analytics' "ROI/pick".
+        const roi = s.roi == null ? '—' : `${s.roi >= 0 ? '+' : ''}${(s.roi*100).toFixed(1)}%`;
         // CLV (avg closing line value, pp) — the edge-proof metric.
-        // Positive average = consistently beating the close = +EV
-        // regardless of short-run W/L noise.
-        const clvVal = s.avg_clv_pp == null ? null : s.avg_clv_pp;
-        const clv = clvVal == null ? '—'
-            : `${clvVal >= 0 ? '+' : ''}${Number(clvVal).toFixed(2)}pp`;
-        const clvCls = (clvVal == null) ? 'muted'
-            : (clvVal > 0 ? 'pos' : (clvVal < 0 ? 'neg' : 'muted'));
+        const clv = s.avg_clv_pp == null ? '—'
+            : `${s.avg_clv_pp >= 0 ? '+' : ''}${Number(s.avg_clv_pp).toFixed(2)}pp`;
         return `
-            <div class="stat-cell"><div class="label">Graded</div><div class="value">${s.graded}</div></div>
-            <div class="stat-cell"><div class="label">Hit Rate</div><div class="value ${s.graded? '' : 'muted'}">${hr}</div></div>
-            <div class="stat-cell"><div class="label">P&L</div><div class="value ${pnlCls}">${_fmtPnl(s.pnl)}</div></div>
-            <div class="stat-cell"><div class="label">u/pick</div><div class="value ${roiCls}">${roi}</div></div>
-            <div class="stat-cell"><div class="label" title="Avg closing line value — beat the close = +EV">CLV</div><div class="value ${clvCls}">${clv}</div></div>
-        `;
+            <div class="stat-row"><span class="k">Record</span><span class="v">${s.won}-${s.lost}${s.push ? ('-'+s.push) : ''}</span></div>
+            <div class="stat-row"><span class="k">Hit rate</span><span class="v">${pct(s.hit_rate)}</span></div>
+            <div class="stat-row"><span class="k">Units</span><span class="v ${cls(s.pnl)}">${u(s.pnl)}</span></div>
+            <div class="stat-row"><span class="k">ROI/pick</span><span class="v ${cls(s.roi)}">${roi}</span></div>
+            <div class="stat-row"><span class="k" title="Avg closing line value — beat the close = +EV">Avg CLV</span><span class="v ${cls(s.avg_clv_pp)}">${clv}</span></div>`;
     }
 
-    function _renderStatStack(today, week, all) {
-        // Three labeled timeframes stacked. Each row is a mini stat-
-        // strip so the user can see momentum at a glance (today's
-        // 5-pick run, vs the 7d, vs the 30d baseline).
-        const block = (label, s) => `
-            <div class="stat-tf">
-                <div class="stat-tf-head">${label}</div>
-                <div class="stat-tf-grid">${_renderStats(s)}</div>
-            </div>`;
-        return block('TODAY', today) + block('LAST 7 DAYS', week) + block('LAST 30 DAYS', all);
+    function _renderStatStack(today, yesterday, week, all) {
+        // Four labeled timeframe cards (Today / Yesterday / Last 7 / Last
+        // 30) in a grid — same layout as the Analytics page. Stacks to one
+        // column on mobile via the .stat-grid media query.
+        const card = (label, s) => `<div class="stat-card"><h3>${label}</h3><div class="body">${_renderStats(s)}</div></div>`;
+        return card('Today', today) + card('Yesterday', yesterday)
+             + card('Last 7 days', week) + card('Last 30 days', all);
     }
 
     function _renderConfCard(name, s, units) {
@@ -2990,6 +2980,7 @@
 
             document.getElementById('overallStats').innerHTML = _renderStatStack(
                 data.stats_today || data.stats,
+                data.stats_yesterday || null,
                 data.stats_week  || data.stats,
                 data.stats_30d   || data.stats,
             );

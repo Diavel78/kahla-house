@@ -5330,6 +5330,8 @@ def api_handicapper():
     local_now = now.astimezone(ZoneInfo("America/Phoenix"))
     today_start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_start_iso = today_start_local.astimezone(timezone.utc).isoformat()
+    yesterday_start_iso = ((today_start_local - timedelta(days=1))
+                           .astimezone(timezone.utc).isoformat())
     cutoff_7d = (now - timedelta(days=7)).isoformat()
 
     cols = ("id,market_id,picked_at,asked_by,query_text,sport,event_name,event_start,"
@@ -5378,6 +5380,7 @@ def api_handicapper():
                 "clv_sum": 0.0, "clv_n": 0, "avg_clv_pp": None}
 
     overall_today  = _new_bucket()
+    overall_yesterday = _new_bucket()
     overall_week   = _new_bucket()
     overall_30d    = _new_bucket()
     by_conf: dict = {c: _new_bucket()
@@ -5424,6 +5427,8 @@ def api_handicapper():
             _add(overall_week)
         if event_start >= today_start_iso:
             _add(overall_today)
+        elif event_start >= yesterday_start_iso:
+            _add(overall_yesterday)
 
     def _finalize(s: dict) -> None:
         decided = s["won"] + s["lost"]
@@ -5435,7 +5440,8 @@ def api_handicapper():
             s["avg_clv_pp"] = round(s["clv_sum"] / s["clv_n"], 2)
         s["pnl"] = round(s["pnl"], 3)
 
-    for s in (overall_today, overall_week, overall_30d, *by_conf.values()):
+    for s in (overall_today, overall_yesterday, overall_week, overall_30d,
+              *by_conf.values()):
         _finalize(s)
 
     # Resolver heartbeat — last bot_picks_resolver run from the
@@ -5461,6 +5467,7 @@ def api_handicapper():
         "pending":      pending,
         "settled":      settled,            # today only (display)
         "stats_today":  overall_today,
+        "stats_yesterday": overall_yesterday,
         "stats_week":   overall_week,
         "stats_30d":    overall_30d,
         "stats":        overall_30d,        # back-compat alias = 30d
@@ -7021,8 +7028,10 @@ def api_handicapper_analytics():
     cutoff_30d = (now - timedelta(days=30)).isoformat()
     cutoff_7d = (now - timedelta(days=7)).isoformat()
     local_now = now.astimezone(ZoneInfo("America/Phoenix"))
-    today_start_iso = (local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-                       .astimezone(timezone.utc).isoformat())
+    _today_start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_iso = _today_start_local.astimezone(timezone.utc).isoformat()
+    yesterday_start_iso = ((_today_start_local - timedelta(days=1))
+                           .astimezone(timezone.utc).isoformat())
 
     cols = ("id,market_id,picked_at,asked_by,query_text,sport,event_name,event_start,"
             "market_type,side,entry_book,entry_price,entry_line,"
@@ -7074,7 +7083,7 @@ def api_handicapper_analytics():
             s["avg_clv_pp"] = round(s["clv_sum"] / s["clv_n"], 2)
         s["pnl"] = round(s["pnl"], 3)
 
-    g_today, g_week, g_30d = _bucket(), _bucket(), _bucket()
+    g_today, g_yesterday, g_week, g_30d = _bucket(), _bucket(), _bucket(), _bucket()
     per_user: dict = {}
     for r in settled_30d:
         st = r.get("status")
@@ -7098,6 +7107,8 @@ def api_handicapper_analytics():
             _add(g_week, st, pnl, clv)
         if es >= today_start_iso:
             _add(g_today, st, pnl, clv)
+        elif es >= yesterday_start_iso:
+            _add(g_yesterday, st, pnl, clv)
 
     # Pending counts per user.
     pending_count: dict = {}
@@ -7122,7 +7133,7 @@ def api_handicapper_analytics():
             })
     leaderboard.sort(key=lambda x: (x.get("pnl") or 0), reverse=True)
 
-    for s in (g_today, g_week, g_30d):
+    for s in (g_today, g_yesterday, g_week, g_30d):
         _finalize(s)
 
     # Attach asker name to every pending + today's-settled row for the UI.
@@ -7137,6 +7148,7 @@ def api_handicapper_analytics():
         "ok": True,
         "now_iso": now.isoformat(),
         "stats_today": g_today,
+        "stats_yesterday": g_yesterday,
         "stats_week": g_week,
         "stats_30d": g_30d,
         "leaderboard": leaderboard,
