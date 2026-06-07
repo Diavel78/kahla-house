@@ -2940,14 +2940,16 @@ def _pmm_taker_fee_cents(price_cents) -> float:
     return round(5.0 * p * (1.0 - p), 2)
 
 
-def _book_signal(book: dict | None, edge_units: float = 1) -> dict | None:
-    """Make-vs-take for BUYING this side, FEE-AWARE. A maker fills only if
-    SELLERS hit your bid and pays ZERO fee; a taker crosses to the ask AND
-    pays the taker fee, so taking costs `spread + fee` (~2c+ near 50/50 where
-    the fee peaks) — which eats most edges. So DEFAULT MAKE; only TAKE when the
-    book says your maker will very likely MISS (strongly bid-heavy = buyers
-    stacked, price running) and securing the bet beats that all-in cost. The
-    reported take price is the FEE-INCLUSIVE effective cost, not the lying ask."""
+def _book_signal(book: dict | None, edge_units: float = 1,
+                 starts_in_min: float | None = None) -> dict | None:
+    """Make-vs-take for BUYING this side, FEE- AND TIME-aware. A maker fills
+    only if SELLERS hit your bid (zero fee) and it needs TIME to happen; a
+    taker crosses to the ask + pays the fee (costs `spread + fee`, ~2c+ near
+    50/50) but is instant. So the call is "will my maker fill before I need
+    the bet?" — driven by the book (will sellers hit it?) AND the clock (is
+    there time?). DEFAULT MAKE; TAKE when the maker will likely MISS — a
+    strongly bid-heavy book OR the clock running out — and securing the bet
+    beats the all-in cost. Reported take price is FEE-INCLUSIVE, not the ask."""
     if not book or book.get("best_bid") is None or book.get("best_ask") is None:
         return None
     bb, ba = book["best_bid"], book["best_ask"]
@@ -2959,9 +2961,21 @@ def _book_signal(book: dict | None, edge_units: float = 1) -> dict | None:
     top_bid = sum(q for _, q in book["bids"][:_BOOK_TOP_LVLS])
     top_ask = sum(q for _, q in book["asks"][:_BOOK_TOP_LVLS])
     imb = round(top_bid / top_ask, 2) if top_ask else None
+    sim = starts_in_min
 
     take, why = False, []
-    if imb is not None and imb >= 3.0:
+    # Clock first — a maker needs TIME to fill; as tip nears, miss-risk
+    # dominates until a resting limit simply won't fill before the game.
+    if sim is not None and sim <= 30:
+        if imb is not None and imb <= 0.4:
+            why.append(f"{round(sim)}m to tip but ask-heavy ({imb}x) — sellers fill your maker fast, still make")
+        else:
+            take = True
+            why.append(f"{round(sim)}m to tip — a maker won't fill in time, take it in")
+    elif sim is not None and sim <= 60 and imb is not None and imb >= 2.0:
+        take = True
+        why.append(f"{round(sim)}m to tip + bid-heavy {imb}x — take before you miss it")
+    elif imb is not None and imb >= 3.0:
         take = True
         why.append(f"bid-heavy {imb}x — maker will miss; worth the {take_cost}c all-in")
     elif edge_units >= 5 and imb is not None and imb >= 2.0:
@@ -3118,11 +3132,15 @@ def api_make_take():
     except ValueError:
         units = 1
     try:
+        sim = float(request.args.get("starts_in_min"))
+    except (TypeError, ValueError):
+        sim = None
+    try:
         book = _pmm_book(get_client(), slug)
     except Exception as e:
         return jsonify({"ok": True, "available": False,
                         "error": f"{type(e).__name__}: {e}"[:160]})
-    sig = _book_signal(book, edge_units=units)
+    sig = _book_signal(book, edge_units=units, starts_in_min=sim)
     if not sig:
         return jsonify({"ok": True, "available": False})
 
