@@ -3020,9 +3020,9 @@ _XCONFIRM_MOVE = 1   # cents — both feeds must move >= this, same direction
 
 
 def _in_blackout_mt(now) -> bool:
-    """10pm–7am America/Phoenix = the odds-ingest blackout (user asleep)."""
+    """11pm–7am America/Phoenix = the odds-ingest blackout (user asleep)."""
     h = now.astimezone(ZoneInfo("America/Phoenix")).hour
-    return h >= 22 or h < 7
+    return h >= 23 or h < 7
 
 
 def _xconfirm_detect(sb, cur: dict, now) -> dict:

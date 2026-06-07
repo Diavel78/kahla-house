@@ -138,10 +138,10 @@ def _match_window_for(sport_code: str) -> timedelta:
 # All times are evaluated in the user's local TZ (America/Phoenix, no
 # DST). Phoenix is used everywhere else in the project for "today"
 # anchoring; keeping it consistent here means the blackout window is
-# 10pm-7am MT year-round.
+# 11pm-7am MT year-round.
 
 _LOCAL_TZ = ZoneInfo("America/Phoenix")
-_BLACKOUT_START_HOUR = 22  # 10pm local
+_BLACKOUT_START_HOUR = 23  # 11pm local
 _BLACKOUT_END_HOUR   = 7   # 7am local
 
 # (max_hours_to_game, cadence_minutes). Picked left-to-right; first
@@ -194,7 +194,7 @@ def _slack_for(cadence_min: int) -> int:
 
 
 def _in_overnight_blackout(now: datetime | None = None) -> bool:
-    """True if local time is in the 10pm-7am blackout window."""
+    """True if local time is in the 11pm-7am blackout window."""
     now = now or datetime.now(timezone.utc)
     local = now.astimezone(_LOCAL_TZ)
     hr = local.hour
@@ -264,7 +264,7 @@ def _should_fire(sport_code: str) -> tuple[bool, dict[str, Any]]:
     5-min to the 3h prime edge); FAR out (>3h) is **trigger-only** for
     `_TRIGGER_SPORTS` (pull when the free PMM+Kalshi feeds cross-confirm a
     move, per-sport 5-min cap) and legacy 15/30-min blind for the rest.
-    Blackout 10pm-7am MT, with one 3am snapshot per in-season sport."""
+    Blackout 11pm-7am MT, with one 3am snapshot per in-season sport."""
     now = datetime.now(timezone.utc)
     local = now.astimezone(_LOCAL_TZ)
 
@@ -278,7 +278,7 @@ def _should_fire(sport_code: str) -> tuple[bool, dict[str, Any]]:
             if last_ok is None or (now - last_ok).total_seconds() > 1800:
                 return True, {"status": "ok", "cadence_min": None,
                               "detail": "3am overnight snapshot"}
-        return False, {"status": "skipped:overnight", "detail": "10pm-7am MT"}
+        return False, {"status": "skipped:overnight", "detail": "11pm-7am MT"}
 
     nxt = db.nearest_upcoming_event(sport_code)
     if nxt is None:
