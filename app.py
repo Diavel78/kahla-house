@@ -2842,6 +2842,80 @@ def debug_kalshi():
     return jsonify(_fetch_kalshi_markets(series))
 
 
+def _fetch_kalshi_orderbook(ticker: str) -> dict:
+    """Full Kalshi order book (all bid levels, both sides) for one market.
+    Public, no auth. `GET /markets/{ticker}/orderbook`."""
+    headers = {"Accept": "application/json", "User-Agent": "kahla-house/1.0"}
+    last = None
+    for base in _KALSHI_BASES:
+        try:
+            r = _http.get(f"{base}/markets/{ticker}/orderbook",
+                          headers=headers, timeout=10)
+            if r.status_code != 200:
+                last = f"HTTP {r.status_code} @ {base}: {r.text[:140]}"
+                continue
+            return {"base_used": base, "data": r.json()}
+        except Exception as e:
+            last = f"{type(e).__name__} @ {base}: {e}"
+    return {"error": last}
+
+
+@app.route("/debug-orderbook")
+def debug_orderbook():
+    """Probe the FULL depth ladder on both venues (read-only, public market
+    data). Polymarket: introspects the live SDK (`dir`) to reveal whether a
+    depth method exists beyond top-of-book `bbo`, and tries candidate names.
+    Kalshi: fetches the orderbook directly. Pass ?slug=<pmm-market-slug> and
+    ?ticker=<kalshi-market-ticker> to probe specific markets; Kalshi auto-
+    picks a live MLB ticker if none given. Temporary discovery tool."""
+    out: dict = {"polymarket": {}, "kalshi": {}}
+
+    # ---- Polymarket: introspect the SDK + try to pull depth ----
+    try:
+        client = get_client()
+        out["polymarket"]["markets_methods"] = sorted(
+            m for m in dir(client.markets) if not m.startswith("_"))
+        out["polymarket"]["client_resources"] = sorted(
+            m for m in dir(client) if not m.startswith("_"))
+        slug = (request.args.get("slug") or "").strip()
+        if slug:
+            try:
+                out["polymarket"]["bbo"] = client.markets.bbo(slug)
+            except Exception as e:
+                out["polymarket"]["bbo_error"] = str(e)[:200]
+            # Dump the raw market so we can spot token-id fields (clobTokenIds /
+            # marketSides) for a direct CLOB /book fallback if the SDK has no
+            # depth method.
+            try:
+                m = client.markets.retrieve_by_slug(slug)
+                out["polymarket"]["market_keys"] = sorted(
+                    (m.keys() if isinstance(m, dict) else
+                     [a for a in dir(m) if not a.startswith("_")]))
+            except Exception as e:
+                out["polymarket"]["market_keys_error"] = str(e)[:200]
+            for name in ("orderbook", "order_book", "book", "depth",
+                         "get_order_book", "orderBook", "get_book"):
+                fn = getattr(client.markets, name, None)
+                if callable(fn):
+                    try:
+                        out["polymarket"][f"try_{name}"] = fn(slug)
+                    except Exception as e:
+                        out["polymarket"][f"try_{name}_error"] = str(e)[:200]
+    except Exception as e:
+        out["polymarket"]["error"] = f"{type(e).__name__}: {e}"[:200]
+
+    # ---- Kalshi: full orderbook (auto-pick a live MLB ticker if none) ----
+    ticker = (request.args.get("ticker") or "").strip()
+    if not ticker:
+        kal = _fetch_kalshi_markets("KXMLBGAME")
+        mk = kal.get("markets") or []
+        ticker = mk[0]["ticker"] if mk else None
+    out["kalshi"]["ticker"] = ticker
+    if ticker:
+        out["kalshi"]["orderbook"] = _fetch_kalshi_orderbook(ticker)
+    return jsonify(out)
+
+
 # ───────────── PMM + Kalshi cent-logger (the cross-confirm memory) ─────────
 # Step 2 of the detector: every ~1 min, record the free Polymarket + Kalshi
 # cent prices per side for our upcoming games into pm_snapshots (deduped on
