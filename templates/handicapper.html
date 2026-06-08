@@ -1441,7 +1441,8 @@
                         // _makeTakeCache too, so oneTapLog enters at the rec.
                         await Promise.all(picks.map(async p => {
                             if (!p._slug) return;
-                            const j = await _fetchMakeTakeVerdict(p._slug, mid, p.market_type, p.side, p.units, d.starts_in_min);
+                            const ln = (p._body && p._body._line != null) ? p._body._line : null;
+                            const j = await _fetchMakeTakeVerdict(p._slug, mid, p.market_type, p.side, p.units, d.starts_in_min, ln);
                             if (j) { p._mt = j; p._mtChip = _mtShort(j); }
                         }));
                         _verdictCache.set(mid, { picks, fetchedAt: Date.now() });
@@ -1945,7 +1946,8 @@
                         data-side="${_esc(s.side)}"
                         data-units="${s.units}"
                         data-sim="${d.starts_in_min != null ? d.starts_in_min : ''}"
-                        data-mt="${_esc(s.market_type)}">
+                        data-mt="${_esc(s.market_type)}"
+                        data-line="${(s.pmm_line != null ? s.pmm_line : (s.pin_line != null ? s.pin_line : ''))}">
                         <div class="mt-chip mt-loading"><span>checking book…</span></div>
                         <div class="mt-detail"></div>
                       </div>` : ''}
@@ -2303,11 +2305,13 @@
     // Fetch one make/take verdict (used by the games-list prefetch so the
     // "this way" pill rides the chip). Caches in _makeTakeCache so a one-tap
     // log enters at the recommended venue/price. Returns the JSON or null.
-    async function _fetchMakeTakeVerdict(slug, mid, mt, side, units, sim) {
+    async function _fetchMakeTakeVerdict(slug, mid, mt, side, units, sim, line) {
         if (!slug) return null;
         const p = new URLSearchParams({ slug });
         if (mid)  p.set('market_id', mid);
         if (side) p.set('side', side);
+        if (mt)   p.set('market_type', mt);
+        if (line != null) p.set('line', line);
         if (units != null) p.set('units', units);
         if (sim != null && sim !== '') p.set('starts_in_min', sim);
         try {
@@ -2346,6 +2350,8 @@
         const p = new URLSearchParams({ slug });
         if (mid)  p.set('market_id', mid);
         if (side) p.set('side', side);
+        if (mt)   p.set('market_type', mt);
+        const line = wrap.getAttribute('data-line'); if (line !== '' && line != null) p.set('line', line);
         const units = wrap.getAttribute('data-units'); if (units) p.set('units', units);
         const sim = wrap.getAttribute('data-sim');     if (sim !== '' && sim != null) p.set('starts_in_min', sim);
         try {

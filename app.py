@@ -3035,16 +3035,21 @@ def _amer_implied(a) -> float | None:
     return (100.0 / (a + 100.0)) if a > 0 else ((-a) / (-a + 100.0))
 
 
-def _best_book_ml(sb, market_id: str, side: str) -> dict | None:
-    """Cheapest routing-pool book moneyline for one side (lowest implied =
-    best price for the bettor), from the latest book_snapshots per book.
-    Returns {book, price, implied} or None."""
+def _best_book_for(sb, market_id: str, market_type: str, side: str,
+                   line: float | None = None) -> dict | None:
+    """Cheapest routing-pool book for ONE side (lowest implied = best price
+    for the bettor), from the latest book_snapshots per book. For spread/total
+    the comparison is restricted to the SAME line the user is taking on PMM —
+    a book offering a different number is a different bet, not a better price.
+    Returns {book, price, implied} or None. market_type: moneyline/spread/total."""
+    if market_type not in ("moneyline", "spread", "total"):
+        return None
     try:
         rows = (sb.table("book_snapshots")
-                .select("book,price_american,captured_at")
-                .eq("market_id", market_id).eq("market_type", "moneyline")
+                .select("book,price_american,line,captured_at")
+                .eq("market_id", market_id).eq("market_type", market_type)
                 .eq("side", side).in_("book", _ROUTE_BOOKS)
-                .order("captured_at", desc=True).limit(300).execute().data) or []
+                .order("captured_at", desc=True).limit(600).execute().data) or []
     except Exception:
         return None
     seen, best = set(), None
@@ -3052,13 +3057,24 @@ def _best_book_ml(sb, market_id: str, side: str) -> dict | None:
         b = r["book"]
         if b in seen:                 # first per book = latest (desc order)
             continue
-        seen.add(b)
+        seen.add(b)                   # this book's CURRENT line/price
+        # Spread/total: only the book's current row AT THE SAME LINE counts.
+        if line is not None and market_type in ("spread", "total"):
+            try:
+                if abs(float(r.get("line")) - float(line)) > 1e-6:
+                    continue          # book is on a different number now
+            except (TypeError, ValueError):
+                continue
         imp = _amer_implied(r.get("price_american"))
         if imp is None:
             continue
-        if best is None or imp < best["implied"]:
+        imp_pct = round(imp * 100, 1)
+        # Lower implied % = cheaper = better for the bettor. (Compare on the
+        # SAME scale — an earlier bug compared the 0-1 fraction against the
+        # stored 0-100 percent, so it always kept the last book, not the best.)
+        if best is None or imp_pct < best["implied"]:
             best = {"book": b, "price": int(r["price_american"]),
-                    "implied": round(imp * 100, 1)}
+                    "implied": imp_pct}
     return best
 
 
@@ -3142,14 +3158,16 @@ def debug_orderbook():
 @bot_required
 def api_make_take():
     """Live make-vs-take + best-execution routing for one picked side. The
-    card polls this (slug + market_id + side + units) so the chip updates as
-    the book moves. MAKE -> rest a Polymarket maker at the bid (fee-free, the
-    best price). TAKE -> compare the Polymarket fee-inclusive ask against the
-    routing-pool sportsbooks and name the single cheapest venue (Polymarket
+    card polls this (slug + market_id + side + market_type + line + units) so
+    the chip updates as the book moves. MAKE -> rest a Polymarket maker at the
+    bid (fee-free, the best price). TAKE -> compare the Polymarket fee-inclusive
+    ask against the routing-pool sportsbooks (ML/spread/total; spread+total
+    matched at the SAME line) and name the single cheapest venue (Polymarket
     included if it still wins)."""
     slug = (request.args.get("slug") or "").strip()
     market_id = (request.args.get("market_id") or "").strip()
     side = (request.args.get("side") or "").strip().lower()
+    market_type = (request.args.get("market_type") or "").strip().lower()
     if not slug:
         return jsonify({"ok": False, "error": "missing slug"}), 400
     try:
@@ -3161,6 +3179,10 @@ def api_make_take():
     except (TypeError, ValueError):
         sim = None
     try:
+        line = float(request.args.get("line"))
+    except (TypeError, ValueError):
+        line = None
+    try:
         book = _pmm_book(get_client(), slug)
     except Exception as e:
         return jsonify({"ok": True, "available": False,
@@ -3169,12 +3191,17 @@ def api_make_take():
     if not sig:
         return jsonify({"ok": True, "available": False})
 
-    # TAKE routing: cheapest of {Polymarket ask+fee, each routing-pool book}.
+    # TAKE routing: cheapest of {Polymarket ask+fee, each routing-pool book at
+    # the SAME line}. PMM's take_eff is fee-INCLUSIVE; the book american is its
+    # all-in (no separate taker fee), so comparing implied% is apples-to-apples
+    # — PMM only wins the chip if it's still cheapest AFTER its fee. Now spread
+    # + total too (same-line matched via `line`), not just moneyline.
     take_route = {"venue": "PMM", "kind": "cents", "price": sig["take_eff"],
                   "implied": round(float(sig["take_eff"]), 1)}
-    if sig["rec"] == "TAKE" and market_id and side in ("home", "away"):
+    if (sig["rec"] == "TAKE" and market_id
+            and market_type in ("moneyline", "spread", "total")):
         sb = get_supabase()
-        bb = _best_book_ml(sb, market_id, side) if sb else None
+        bb = _best_book_for(sb, market_id, market_type, side, line) if sb else None
         if bb and bb["implied"] < take_route["implied"]:
             take_route = {"venue": bb["book"], "kind": "american",
                           "price": bb["price"], "implied": bb["implied"]}
