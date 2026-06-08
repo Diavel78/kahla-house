@@ -2378,10 +2378,15 @@
     // and the engine's one-line "why". Quiet on the chip, verbose here.
     function _makeTakeDetail(j) {
         const bits = [];
+        const n = x => Number(x).toLocaleString();
         if (j.best_bid != null && j.best_ask != null)
             bits.push(`book ${j.best_bid}¢ / ${j.best_ask}¢ (spread ${j.spread}¢)`);
+        // Touch = the queue you'd sit behind at the bid vs supply at the ask
+        // (the fill-risk read). 2-level imbalance shown as secondary context.
+        if (j.queue_ahead != null && j.ask_touch != null)
+            bits.push(`touch ${j.best_bid}¢: ${n(j.queue_ahead)} ahead vs ${n(j.ask_touch)} offered${j.touch_imbalance != null ? ` (${j.touch_imbalance}×)` : ''}`);
         if (j.imbalance != null)
-            bits.push(`bid/ask ${j.imbalance}× (${j.top_bid_size} vs ${j.top_ask_size})`);
+            bits.push(`near-touch ${j.imbalance}× (${n(j.top_bid_size)} vs ${n(j.top_ask_size)})`);
         if (j.rec === 'TAKE') {
             if (j.take_fee != null) bits.push(`PMM take ${j.best_ask}¢ +${j.take_fee}¢ fee = ${j.take_eff}¢`);
         } else {

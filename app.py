@@ -2873,6 +2873,16 @@ _BOOK_TOP_LVLS = 2     # Imbalance is read from JUST the best level (+ one
                        # you'd take through (best ask). One-behind guards
                        # against a thin/spoof top line; drop to 1 for purest.
 
+# Queue-ahead (fill-risk) guard. A resting maker joins the BACK of the line
+# at the best bid — to fill, sellers must clear everything ahead of it. When
+# the best-bid wall dwarfs the best offer (lots of buyers, few sellers AT THE
+# TOUCH), price pressure is UP and a new maker very likely never fills — the
+# exact "the line keeps moving away from me" miss. This reads the LEVEL-1
+# touch only (not the 2-level sum, which a seller wall parked one level up can
+# dilute and hide). Buried touch ⇒ TAKE.
+_QUEUE_AHEAD_RATIO = 3.0    # best-bid size this many× the best-ask size
+_QUEUE_AHEAD_MIN   = 1000   # ...and at least this many contracts ahead (skip thin/spoof tops)
+
 
 def _pmm_book(client, slug: str) -> dict | None:
     """Polymarket markets.book(slug) -> normalized side book in cents.
@@ -2961,6 +2971,13 @@ def _book_signal(book: dict | None, edge_units: float = 1,
     top_bid = sum(q for _, q in book["bids"][:_BOOK_TOP_LVLS])
     top_ask = sum(q for _, q in book["asks"][:_BOOK_TOP_LVLS])
     imb = round(top_bid / top_ask, 2) if top_ask else None
+    # Level-1 touch: the queue you'd actually sit behind at the bid vs the
+    # supply offered at the ask. The 2-level `imb` can be diluted by a seller
+    # wall ONE level up (which doesn't help you fill at YOUR price) and hide a
+    # lopsided touch — so the fill-risk read is L1-only. See _QUEUE_AHEAD_*.
+    l1_bid = round(book["bids"][0][1]) if book["bids"] else 0
+    l1_ask = round(book["asks"][0][1]) if book["asks"] else 0
+    touch_imb = round(l1_bid / l1_ask, 2) if l1_ask else None
     sim = starts_in_min
 
     take, why = False, []
@@ -2972,6 +2989,13 @@ def _book_signal(book: dict | None, edge_units: float = 1,
         else:
             take = True
             why.append(f"{round(sim)}m to tip — a maker won't fill in time, take it in")
+    elif (touch_imb is not None and touch_imb >= _QUEUE_AHEAD_RATIO
+          and l1_bid >= _QUEUE_AHEAD_MIN):
+        # Queue-ahead miss: buried behind a bid wall with few sellers at the
+        # touch — your maker very likely never fills. Take it (even if the
+        # 2-level imbalance looks balanced because of a wall one level up).
+        take = True
+        why.append(f"{l1_bid:,} queued ahead at {bb}c vs {l1_ask:,} offered ({touch_imb}x) — a resting maker is buried and likely misses; take it")
     elif sim is not None and sim <= 60 and imb is not None and imb >= 2.0:
         take = True
         why.append(f"{round(sim)}m to tip + bid-heavy {imb}x — take before you miss it")
@@ -2989,6 +3013,7 @@ def _book_signal(book: dict | None, edge_units: float = 1,
             "target": take_eff if take else bb,    # fee-inclusive take / rest at bid
             "best_bid": bb, "best_ask": ba, "spread": spread, "imbalance": imb,
             "top_bid_size": round(top_bid), "top_ask_size": round(top_ask),
+            "touch_imbalance": touch_imb, "queue_ahead": l1_bid, "ask_touch": l1_ask,
             "why": why}
 
 
