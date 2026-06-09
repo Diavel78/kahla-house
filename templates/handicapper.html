@@ -1441,8 +1441,7 @@
                         // _makeTakeCache too, so oneTapLog enters at the rec.
                         await Promise.all(picks.map(async p => {
                             if (!p._slug) return;
-                            const ln = (p._body && p._body._line != null) ? p._body._line : null;
-                            const j = await _fetchMakeTakeVerdict(p._slug, mid, p.market_type, p.side, p.units, d.starts_in_min, ln);
+                            const j = await _fetchMakeTakeVerdict(p._slug, mid, p.market_type, p.side, p.units, d.starts_in_min);
                             if (j) { p._mt = j; p._mtChip = _mtShort(j); }
                         }));
                         _verdictCache.set(mid, { picks, fetchedAt: Date.now() });
@@ -1946,8 +1945,7 @@
                         data-side="${_esc(s.side)}"
                         data-units="${s.units}"
                         data-sim="${d.starts_in_min != null ? d.starts_in_min : ''}"
-                        data-mt="${_esc(s.market_type)}"
-                        data-line="${(s.pmm_line != null ? s.pmm_line : (s.pin_line != null ? s.pin_line : ''))}">
+                        data-mt="${_esc(s.market_type)}">
                         <div class="mt-chip mt-loading"><span>checking book…</span></div>
                         <div class="mt-detail"></div>
                       </div>` : ''}
@@ -2293,25 +2291,18 @@
     // vs the sportsbook pool). Driven by /api/handicapper/make-take, which
     // weighs top-of-book imbalance + the clock (near tip → take). The chip
     // is the directive; .mt-detail carries the full read. The latest result
-    // is cached per (mid:mt:side) so logging can set entry_price to follow
-    // the rec (make→bid, take→winning venue) — see _applyMakeTakeToBody.
+    // is cached per (mid:mt:side) so a one-tap log enters at the rec (make→bid,
+    // take→PMM fee-inclusive ask) — see _applyMakeTakeToBody. Polymarket-only.
     const _makeTakeCache = new Map();   // "mid:mt:side" -> make-take JSON
-    const _BOOK_LABEL = { PMM: 'Polymarket', DK: 'DraftKings', FD: 'FanDuel',
-        MGM: 'BetMGM', CAE: 'Caesars', ESPN: 'ESPN BET', BET365: 'Bet365',
-        FAN: 'Fanatics' };
 
     function _mtKey(mid, mt, side) { return `${mid}:${mt}:${side}`; }
 
     // Fetch one make/take verdict (used by the games-list prefetch so the
     // "this way" pill rides the chip). Caches in _makeTakeCache so a one-tap
-    // log enters at the recommended venue/price. Returns the JSON or null.
-    async function _fetchMakeTakeVerdict(slug, mid, mt, side, units, sim, line) {
+    // log enters at the rec. Returns the JSON or null.
+    async function _fetchMakeTakeVerdict(slug, mid, mt, side, units, sim) {
         if (!slug) return null;
         const p = new URLSearchParams({ slug });
-        if (mid)  p.set('market_id', mid);
-        if (side) p.set('side', side);
-        if (mt)   p.set('market_type', mt);
-        if (line != null) p.set('line', line);
         if (units != null) p.set('units', units);
         if (sim != null && sim !== '') p.set('starts_in_min', sim);
         try {
@@ -2323,15 +2314,13 @@
         } catch (e) { return null; }
     }
 
-    // Short directive for the game-card pill: "MAKE Polymarket 46¢" /
-    // "TAKE DraftKings +113". The full read lives on Details.
+    // Short directive for the game-card pill: "MAKE Polymarket 46¢" (rest at
+    // the bid) / "TAKE Polymarket 54¢" (cross at the fee-inclusive ask). The
+    // full read lives on Details. Polymarket-only — no sportsbook routing.
     function _mtShort(j) {
         if (!j || !j.available) return null;
         if (j.rec === 'MAKE') return `MAKE Polymarket ${j.make_price}¢`;
-        const rt = j.take_route || {};
-        const venue = _BOOK_LABEL[rt.venue] || rt.venue || 'Polymarket';
-        const px = rt.kind === 'american' ? _fmtAmer(rt.price) : `${Math.round(rt.price)}¢`;
-        return `TAKE ${venue} ${px}`;
+        return `TAKE Polymarket ${Math.round(j.take_eff)}¢`;
     }
 
     function _loadAllMakeTake(root) {
@@ -2348,10 +2337,6 @@
         const mt  = wrap.getAttribute('data-mt');
         const side = wrap.getAttribute('data-side');
         const p = new URLSearchParams({ slug });
-        if (mid)  p.set('market_id', mid);
-        if (side) p.set('side', side);
-        if (mt)   p.set('market_type', mt);
-        const line = wrap.getAttribute('data-line'); if (line !== '' && line != null) p.set('line', line);
         const units = wrap.getAttribute('data-units'); if (units) p.set('units', units);
         const sim = wrap.getAttribute('data-sim');     if (sim !== '' && sim != null) p.set('starts_in_min', sim);
         try {
@@ -2371,10 +2356,7 @@
             verdict = `<span class="mt-tag">MAKE</span> Polymarket ${j.make_price}¢`;
         } else {
             chip.className = 'mt-chip take';
-            const rt = j.take_route || {};
-            const venue = _BOOK_LABEL[rt.venue] || rt.venue || 'Polymarket';
-            const px = rt.kind === 'american' ? _fmtAmer(rt.price) : `${Math.round(rt.price)}¢`;
-            verdict = `<span class="mt-tag">TAKE</span> ${_esc(venue)} ${px}`;
+            verdict = `<span class="mt-tag">TAKE</span> Polymarket ${Math.round(j.take_eff)}¢`;
         }
         chip.innerHTML = verdict;
         if (detail) detail.innerHTML = _esc(_makeTakeDetail(j));
@@ -2404,40 +2386,27 @@
         return s;
     }
 
-    // Fold the latest make-take verdict into a log body so entry_price/
-    // entry_book follow the recommendation the user saw and (presumably)
-    // acted on: MAKE → rest at the Polymarket bid (american); TAKE → the
-    // winning venue's price (sportsbook american, or PMM fee-inclusive ask
-    // converted to american). The execution rec is stashed in signal_blob
+    // Fold the latest make-take verdict into a log body so entry_price follows
+    // the rec the user saw and (presumably) acted on — Polymarket-only:
+    // MAKE → rest at the bid (the bid-american default); TAKE → cross at the
+    // fee-inclusive ask (`take_eff` cents → american, so CLV/to-WIN carry the
+    // real fee cost). entry_book stays PMM. The rec is stashed in signal_blob
     // for the 2-week make-vs-take review.
     function _applyMakeTakeToBody(body) {
         if (!body || !body.market_id) return body;
         const j = _makeTakeCache.get(_mtKey(body.market_id, body.market_type, body.side));
         if (!j || !j.available) return body;
-        const exec = { rec: j.rec, slug: null };
+        const exec = { rec: j.rec, venue: 'PMM' };
         if (j.rec === 'TAKE') {
-            const rt = j.take_route || {};
-            exec.venue = rt.venue || 'PMM';
-            exec.kind = rt.kind || 'cents';
-            exec.implied = rt.implied ?? null;
-            if (rt.kind === 'american' && rt.price != null) {
-                body.book = rt.venue;
-                body.price = Math.round(rt.price);
-            } else {
-                // PMM take — log the fee-inclusive effective price as american.
-                body.book = 'PMM';
-                const amer = _centsToAmer(j.take_eff);
-                if (amer != null) body.price = amer;
-            }
-            exec.entry_price = body.price;
-            exec.entry_book = body.book;
+            body.book = 'PMM';
+            const amer = _centsToAmer(j.take_eff);
+            if (amer != null) body.price = amer;
+            exec.take_eff = j.take_eff;
         } else {
-            // MAKE — rest at the Polymarket bid. Keep the bid-american default
-            // entry_price; just record the make verdict.
-            exec.venue = 'PMM'; exec.kind = 'cents';
-            exec.make_cents = j.make_price;
-            exec.entry_price = body.price; exec.entry_book = body.book;
+            exec.make_cents = j.make_price;   // rest at the bid (default entry)
         }
+        exec.entry_price = body.price;
+        exec.entry_book = body.book;
         body._price = body.price;
         body.signal_blob = Object.assign({}, body.signal_blob, { execution: exec });
         return body;

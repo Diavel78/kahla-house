@@ -3017,65 +3017,11 @@ def _book_signal(book: dict | None, edge_units: float = 1,
             "why": why}
 
 
-# Best-execution routing pool — ONLY US-legal books the user can actually bet
-# (no Pinnacle/BetOnline/etc. offshore). When the engine says TAKE, we compare
-# the Polymarket fee-inclusive ask against each of these books' raw line and
-# route to the single cheapest venue — Polymarket included if it's still best.
-_ROUTE_BOOKS = ["DK", "FD", "MGM", "ESPN", "BET365", "FAN"]
-
-
-def _amer_implied(a) -> float | None:
-    """American odds -> implied probability (the price you actually pay)."""
-    try:
-        a = float(a)
-    except (TypeError, ValueError):
-        return None
-    if a == 0:
-        return None
-    return (100.0 / (a + 100.0)) if a > 0 else ((-a) / (-a + 100.0))
-
-
-def _best_book_for(sb, market_id: str, market_type: str, side: str,
-                   line: float | None = None) -> dict | None:
-    """Cheapest routing-pool book for ONE side (lowest implied = best price
-    for the bettor), from the latest book_snapshots per book. For spread/total
-    the comparison is restricted to the SAME line the user is taking on PMM —
-    a book offering a different number is a different bet, not a better price.
-    Returns {book, price, implied} or None. market_type: moneyline/spread/total."""
-    if market_type not in ("moneyline", "spread", "total"):
-        return None
-    try:
-        rows = (sb.table("book_snapshots")
-                .select("book,price_american,line,captured_at")
-                .eq("market_id", market_id).eq("market_type", market_type)
-                .eq("side", side).in_("book", _ROUTE_BOOKS)
-                .order("captured_at", desc=True).limit(600).execute().data) or []
-    except Exception:
-        return None
-    seen, best = set(), None
-    for r in rows:
-        b = r["book"]
-        if b in seen:                 # first per book = latest (desc order)
-            continue
-        seen.add(b)                   # this book's CURRENT line/price
-        # Spread/total: only the book's current row AT THE SAME LINE counts.
-        if line is not None and market_type in ("spread", "total"):
-            try:
-                if abs(float(r.get("line")) - float(line)) > 1e-6:
-                    continue          # book is on a different number now
-            except (TypeError, ValueError):
-                continue
-        imp = _amer_implied(r.get("price_american"))
-        if imp is None:
-            continue
-        imp_pct = round(imp * 100, 1)
-        # Lower implied % = cheaper = better for the bettor. (Compare on the
-        # SAME scale — an earlier bug compared the 0-1 fraction against the
-        # stored 0-100 percent, so it always kept the last book, not the best.)
-        if best is None or imp_pct < best["implied"]:
-            best = {"book": b, "price": int(r["price_american"]),
-                    "implied": imp_pct}
-    return best
+# Best-execution routing to sportsbooks was REMOVED June 2026 — the user is
+# Polymarket-exclusive and doesn't bet the US books, so TAKE always means
+# "cross on Polymarket" (the fee-inclusive ask). MAKE = rest at the bid. No
+# venue routing. (Full _best_book_for / _ROUTE_BOOKS routing is in git history
+# if it's ever wanted back.)
 
 
 @app.route("/debug-orderbook")
@@ -3157,17 +3103,12 @@ def debug_orderbook():
 @app.route("/api/handicapper/make-take")
 @bot_required
 def api_make_take():
-    """Live make-vs-take + best-execution routing for one picked side. The
-    card polls this (slug + market_id + side + market_type + line + units) so
-    the chip updates as the book moves. MAKE -> rest a Polymarket maker at the
-    bid (fee-free, the best price). TAKE -> compare the Polymarket fee-inclusive
-    ask against the routing-pool sportsbooks (ML/spread/total; spread+total
-    matched at the SAME line) and name the single cheapest venue (Polymarket
-    included if it still wins)."""
+    """Live make-vs-take for one picked side, POLYMARKET-ONLY. The card polls
+    this (slug + units + starts_in_min) so the chip updates as the book moves.
+    MAKE -> rest a Polymarket maker at the bid (fee-free, the best price).
+    TAKE -> cross on Polymarket at the fee-inclusive ask (`take_eff`). No
+    sportsbook routing — the user is Polymarket-exclusive."""
     slug = (request.args.get("slug") or "").strip()
-    market_id = (request.args.get("market_id") or "").strip()
-    side = (request.args.get("side") or "").strip().lower()
-    market_type = (request.args.get("market_type") or "").strip().lower()
     if not slug:
         return jsonify({"ok": False, "error": "missing slug"}), 400
     try:
@@ -3179,10 +3120,6 @@ def api_make_take():
     except (TypeError, ValueError):
         sim = None
     try:
-        line = float(request.args.get("line"))
-    except (TypeError, ValueError):
-        line = None
-    try:
         book = _pmm_book(get_client(), slug)
     except Exception as e:
         return jsonify({"ok": True, "available": False,
@@ -3190,24 +3127,8 @@ def api_make_take():
     sig = _book_signal(book, edge_units=units, starts_in_min=sim)
     if not sig:
         return jsonify({"ok": True, "available": False})
-
-    # TAKE routing: cheapest of {Polymarket ask+fee, each routing-pool book at
-    # the SAME line}. PMM's take_eff is fee-INCLUSIVE; the book american is its
-    # all-in (no separate taker fee), so comparing implied% is apples-to-apples
-    # — PMM only wins the chip if it's still cheapest AFTER its fee. Now spread
-    # + total too (same-line matched via `line`), not just moneyline.
-    take_route = {"venue": "PMM", "kind": "cents", "price": sig["take_eff"],
-                  "implied": round(float(sig["take_eff"]), 1)}
-    if (sig["rec"] == "TAKE" and market_id
-            and market_type in ("moneyline", "spread", "total")):
-        sb = get_supabase()
-        bb = _best_book_for(sb, market_id, market_type, side, line) if sb else None
-        if bb and bb["implied"] < take_route["implied"]:
-            take_route = {"venue": bb["book"], "kind": "american",
-                          "price": bb["price"], "implied": bb["implied"]}
     return jsonify({"ok": True, "available": True,
-                    "rec": sig["rec"], "make_price": sig["make_price"],
-                    "take_route": take_route, **sig})
+                    "rec": sig["rec"], "make_price": sig["make_price"], **sig})
 
 
 # ───────────── PMM + Kalshi cent-logger (the cross-confirm memory) ─────────
