@@ -3425,9 +3425,12 @@ def api_pm_snapshot():
     except Exception:
         pass
 
-    # Kalshi: one bulk call per sport (cheap), indexed up front.
+    # Kalshi: one bulk call per sport (cheap), indexed up front. Only for
+    # sports that actually have a game in the watch window — fetching the
+    # full KXNBAGAME/KXNHLGAME books on an empty slate is wasted CPU.
+    active_sports = {g["_sport"] for g in all_games}
     kal_idx, kal_meta = {}, {}
-    for sp in _PM_SPORTS:
+    for sp in active_sports:
         kal = _fetch_kalshi_markets(_KALSHI_SERIES[sp])
         kal_meta[sp] = {"ok": kal.get("ok"), "count": kal.get("count")}
         kal_idx[sp] = _kalshi_ml_index(kal.get("markets") or []) if kal.get("ok") else []
