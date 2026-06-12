@@ -2873,16 +2873,26 @@ _BOOK_TOP_LVLS = 2     # Imbalance is read from JUST the best level (+ one
                        # you'd take through (best ask). One-behind guards
                        # against a thin/spoof top line; drop to 1 for purest.
 
-# THE TAKE RULE (user-rebuilt June 2026): 30% more contracts BID than
-# OFFERED → ALWAYS TAKE, no clock/edge/size conditions. More buyers than
-# sellers at the top of the book = price pressure UP = a resting maker joins
-# the back of a queue that sellers aren't coming to clear. The old tree
-# (3.0x / 2.0x-with-clock / 1000-contract floor / 5u-edge special case) was
-# too conservative — it kept saying MAKE on books where the maker plainly
-# wasn't going to fill. Checked on BOTH the 2-level top-of-book sum AND the
-# L1 touch (a seller wall one level up dilutes the 2-level read and can hide
-# a buried touch); either crossing 1.3x fires.
-_TAKE_IMB = 1.3    # bid size ≥ this × ask size ⇒ TAKE
+# THE TAKE RULE (research-calibrated June 2026 — see the deep-research
+# session in chat history): ≥1.5× more contracts BID than OFFERED → TAKE,
+# no clock/edge conditions, PROVIDED the bid side carrying the signal clears
+# the size floor. More buyers than sellers at the top = price pressure UP =
+# a resting maker joins the back of a queue sellers aren't coming to clear
+# (queue-reactive fill intensities + back-of-queue adverse selection —
+# Huang/Lehalle/Rosenbaum 2015, Moallemi & Yuan 2016, Lehalle & Mounjid
+# 2017). History: original tree (3x/2x-with-clock/5u) was too conservative;
+# the user's flat 1.3× was the most aggressive trigger found anywhere in
+# academia or shipped practice — the practitioner cluster is 1.5-2.0×, and
+# every credible source pairs the ratio with a minimum-size gate (a 1.5×
+# read on a few-hundred-contract book is inside noise AND the cheapest book
+# state to spoof; thin books are the most manipulable — Gu et al. 2024).
+# Checked on BOTH the 2-level top-of-book sum AND the L1 touch (a seller
+# wall one level up dilutes the 2-level read and can hide a buried touch);
+# either crossing 1.5× WITH its bid size ≥ the floor fires.
+_TAKE_IMB = 1.5          # bid size ≥ this × ask size ⇒ TAKE
+_TAKE_MIN_QUEUE = 500    # ...and the firing read's bid size ≥ this many
+                         # contracts (thin-book noise/spoof gate; tune via
+                         # the signal_blob.book_imb validation dataset)
 
 
 def _pmm_book(client, slug: str) -> dict | None:
@@ -2957,15 +2967,27 @@ def _invert_book(book: dict | None) -> dict | None:
 
 
 def _pmm_taker_fee_cents(price_cents) -> float:
-    """Polymarket US TAKER fee per share, in cents. Empirically 5c · p·(1-p)
-    (p = price in dollars) — peaks at 1.25c/share at 50c, tapers to the wings.
-    Makers pay ZERO. Confirmed on live tickets: 54c -> $1.24/100sh, 47c ->
-    $1.25/100sh. The fee PEAKS at coin-flips, exactly where sharp action lives,
-    so taking a 50/50 is the most expensive case."""
+    """Polymarket US TAKER fee per share, in cents: 5c · p·(1-p) (p = price
+    in dollars) — peaks at 1.25c/share at 50c, tapers to the wings. Confirmed
+    on live tickets (54c -> $1.24/100sh, 47c -> $1.25/100sh) AND against the
+    published schedule (0.05·C·p·(1-p), effective Apr 2026). The fee PEAKS at
+    coin-flips, exactly where sharp action lives, so taking a 50/50 is the
+    most expensive case."""
     if price_cents is None:
         return 0.0
     p = max(0.0, min(1.0, price_cents / 100.0))
     return round(5.0 * p * (1.0 - p), 2)
+
+
+def _pmm_maker_rebate_cents(price_cents) -> float:
+    """Polymarket US MAKER rebate per share, in cents: +1.25c · p·(1-p),
+    credited at fill (max +0.31c at 50c). Makers don't just pay zero — they
+    get PAID (verified June 2026 vs docs.polymarket.us/fees: 0.0125·C·p·(1-p)).
+    Counted as a forgone-rebate term in the make-vs-take cost gap."""
+    if price_cents is None:
+        return 0.0
+    p = max(0.0, min(1.0, price_cents / 100.0))
+    return round(1.25 * p * (1.0 - p), 2)
 
 
 def _book_signal(book: dict | None, edge_units: float = 1,
@@ -2983,8 +3005,11 @@ def _book_signal(book: dict | None, edge_units: float = 1,
     bb, ba = book["best_bid"], book["best_ask"]
     spread = ba - bb
     fee = _pmm_taker_fee_cents(ba)
+    rebate = _pmm_maker_rebate_cents(bb)   # what a filled maker would EARN
     take_eff = round(ba + fee, 2)          # TRUE cost of taking (ask + fee)
-    take_cost = round(spread + fee, 2)     # take vs make, all-in
+    # take vs make all-in gap: spread + taker fee + the maker rebate you
+    # give up by not resting (~2.6c at 50/50 on a 1c book).
+    take_cost = round(spread + fee + rebate, 2)
     # Top-of-book sizes only (best + one behind) — see _BOOK_TOP_LVLS.
     top_bid = sum(q for _, q in book["bids"][:_BOOK_TOP_LVLS])
     top_ask = sum(q for _, q in book["asks"][:_BOOK_TOP_LVLS])
@@ -2999,12 +3024,14 @@ def _book_signal(book: dict | None, edge_units: float = 1,
     sim = starts_in_min
 
     take, why = False, []
-    # THE RULE — 30%+ more contracts bid than offered ⇒ ALWAYS TAKE
-    # (no clock/edge conditions; see _TAKE_IMB). Either book read fires.
-    if imb is not None and imb >= _TAKE_IMB:
+    # THE RULE — ≥1.5x more contracts bid than offered ⇒ TAKE, provided the
+    # firing read's bid size clears the thin-book floor (see _TAKE_IMB /
+    # _TAKE_MIN_QUEUE). Either book read fires.
+    if (imb is not None and imb >= _TAKE_IMB and top_bid >= _TAKE_MIN_QUEUE):
         take = True
         why.append(f"{round(top_bid):,} bid vs {round(top_ask):,} offered ({imb}x — {int(round((imb - 1) * 100))}% more buyers than sellers) — a maker won't fill; take it")
-    elif touch_imb is not None and touch_imb >= _TAKE_IMB:
+    elif (touch_imb is not None and touch_imb >= _TAKE_IMB
+          and l1_bid >= _TAKE_MIN_QUEUE):
         take = True
         why.append(f"touch {bb}c: {l1_bid:,} queued vs {l1_ask:,} offered ({touch_imb}x) — buried maker; take it")
     # Clock fallback — even on a balanced book, a maker needs TIME to fill;
@@ -3016,9 +3043,10 @@ def _book_signal(book: dict | None, edge_units: float = 1,
             take = True
             why.append(f"{round(sim)}m to tip — a maker won't fill in time, take it in")
     else:
-        why.append(f"rest the maker — taking costs {take_cost}c ({spread}c spread + {fee}c fee)")
+        why.append(f"rest the maker — taking costs {take_cost}c ({spread}c spread + {fee}c fee + {rebate}c forgone maker rebate)")
     return {"rec": "TAKE" if take else "MAKE",
             "make_price": bb, "take_price": ba, "take_fee": fee,
+            "make_rebate": rebate,
             "take_eff": take_eff, "take_cost": take_cost,
             "target": take_eff if take else bb,    # fee-inclusive take / rest at bid
             "best_bid": bb, "best_ask": ba, "spread": spread, "imbalance": imb,

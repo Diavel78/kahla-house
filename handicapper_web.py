@@ -1928,14 +1928,20 @@ EDGE_CAP_PP          = 6.0      # hard cap so a crude input can't blow up sizing
 KELLY_MED_PCT        = 2.0      # ¼-Kelly stake ≥ this %BR → 3u medium
 KELLY_HIGH_PCT       = 3.0      # ¼-Kelly stake ≥ this %BR → 5u high
 
-# Order-book pressure (June 2026, per user): heavy bids vs thin offers on
-# the picked side = demand the sellers aren't meeting = a leading indicator
-# the line is about to move. Same 1.3x threshold as the make/take TAKE rule
-# (app._TAKE_IMB); fed into edge_pp as a CAPPED confirmation nudge (like the
-# power model) so the untested signal can't blow up sizing. Recorded on every
-# gated pick (signal_blob.book_imb) so the paperlog review can validate it.
+# Order-book pressure (June 2026, per user; research-calibrated — see the
+# deep-research session): heavy bids vs thin offers on the picked side =
+# demand the sellers aren't meeting = a leading indicator the line is about
+# to move (Gould & Bonart 2016: strongest in large-tick regimes like a
+# 1c-tick binary). Fed into edge_pp as a CAPPED confirmation nudge — the
+# signal predicts the NEXT TICK (~1c ≈ 1pp), not the game outcome, so the
+# cap stays at 1pp. The size floor mirrors the make/take rule: a ratio on a
+# few-hundred-contract book is noise and the cheapest book state to spoof.
+# Recorded on every gated pick (signal_blob.book_imb) for the paperlog
+# review to validate.
 BOOK_PRESSURE_IMB    = 1.3      # bid/ask size ratio ≥ this → pressure nudge
 BOOK_PRESSURE_CAP_PP = 1.0      # max edge contribution (pp)
+BOOK_PRESSURE_MIN_Q  = 500      # bid-side contracts ≥ this or no nudge
+                                # (imb still recorded for the review)
 
 
 def _kelly_units(fair_prob, fair_american, edge_pp,
@@ -3184,7 +3190,10 @@ def _book_pressure(slug: str, synthetic: bool) -> tuple[float | None, float | No
     if not ratios:
         return None, None
     imb = round(max(ratios), 2)
-    if imb < BOOK_PRESSURE_IMB:
+    # Thin-book floor: no nudge unless the bid side carries real size
+    # (ratio on a tiny book is noise + the cheapest state to spoof). The
+    # imbalance is still returned so signal_blob records it for review.
+    if imb < BOOK_PRESSURE_IMB or max(l1b, t_b) < BOOK_PRESSURE_MIN_Q:
         return 0.0, imb
     # 1.3x → 0.4pp, +0.5pp per additional 1.0x of imbalance, capped at 1pp.
     return round(min(BOOK_PRESSURE_CAP_PP,
