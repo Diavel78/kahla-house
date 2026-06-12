@@ -3664,6 +3664,9 @@ def api_handicapper_paperlog():
                                 "book_imb": s.get("book_imb"),
                                 "book_pressure_pp": s.get("book_pressure_pp"),
                                 "sticky": bool(s.get("sticky")),
+                                "x_score": s.get("x_score"),
+                                "x_side": s.get("x_side"),
+                                "x_agree": s.get("x_agree"),
                                 "uses_pmm_projection": s.get("uses_pmm_projection")},
             })
         nrfi = d.get("nrfi") or {}

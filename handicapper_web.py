@@ -641,6 +641,146 @@ def _pin_history(sb, market_id: str) -> dict[tuple[str, str], list[dict]]:
     return out
 
 
+# ───────── Exchange-based sharp score (Odds-API retirement, June 2026) ─────
+# The PMM+Kalshi replacement for the PIN sharp score, built from
+# pm_snapshots cent history. Runs SIDE-BY-SIDE with the PIN score during
+# the cutover (subscription dies June 25): every market's movement block
+# carries x_side/x_score, every suggestion carries x_agree, and the
+# paperlog records both — so we can verify agreement on live games before
+# flipping the primary. Same recency weights + 18h window as PIN.
+#
+# Design differences from the PIN version (deliberate):
+# • Exchange cents ARE probability points; PIN's "cents" are American-odds
+#   cents (~4 American cents per prob point near even money). _X_PP_SCALE
+#   maps prob-point moves onto the same 0-10 score scale — a calibration
+#   constant the side-by-side data will tune.
+# • Exchanges quote MULTIPLE spread/total lines simultaneously, so there is
+#   no discrete "the line moved" event — line migration shows up as cent
+#   drift on the at-the-money line. The score therefore reads cents on the
+#   MAIN line (latest cents closest to 50) only; no line-vs-vig split.
+# • Kalshi ML cross-check: when Kalshi has its own read and it points the
+#   OTHER way, return no signal (mirrors the cross-confirm AND-gate; also
+#   absorbs the same-city PMM side-flip — a flipped feed disagrees, so we
+#   skip rather than score the wrong side. Gotcha #21 spirit.)
+
+_X_PP_SCALE = 4.0     # prob-points → PIN-cent-equivalent score units
+_X_MIN_PP   = 0.25    # weighted move below this (≈ score 1) → no signal
+
+
+def _pm_history(sb, market_id: str) -> dict:
+    """pm_snapshots rows for one game in the last 18h, grouped by
+    (source, market_type, side, line) and sorted ASC by captured_at."""
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(hours=_PIN_HISTORY_HOURS)).isoformat()
+    try:
+        rows = (sb.table("pm_snapshots")
+                .select("source,market_type,side,line,cents,captured_at")
+                .eq("market_id", market_id)
+                .gte("captured_at", cutoff)
+                .order("captured_at")
+                .limit(3000)
+                .execute().data) or []
+    except Exception:
+        return {}
+    out: dict = {}
+    for r in rows:
+        line = r.get("line")
+        try:
+            line = round(float(line), 2) if line is not None else None
+        except (TypeError, ValueError):
+            line = None
+        k = (r.get("source"), r.get("market_type") or "ml", r.get("side"), line)
+        out.setdefault(k, []).append(r)
+    return out
+
+
+def _x_main_series(hist: dict, mt: str, side: str) -> list[dict]:
+    """The side's MAIN-line series: among this side's PMM per-line series,
+    the one whose LATEST cents is closest to 50 (at-the-money). For ML
+    (line=None) there's exactly one series."""
+    best, best_d = [], 1e9
+    for (src, m, s, _line), snaps in hist.items():
+        if src != "pmm" or m != mt or s != side or len(snaps) < 2:
+            continue
+        d = abs((snaps[-1].get("cents") or 50) - 50)
+        if d < best_d:
+            best, best_d = snaps, d
+    return best
+
+
+def _xsharp_ml(hist: dict, now=None):
+    """(side, score, n_snaps) or None. Sharp side = side whose implied
+    prob ROSE (more favored = harder to bet), from PMM cents, with the
+    Kalshi same-direction veto."""
+    now = now or datetime.now(timezone.utc)
+    h = hist.get(("pmm", "ml", "home", None), [])
+    a = hist.get(("pmm", "ml", "away", None), [])
+    sig, n = None, 0
+    if len(h) >= 2:
+        sig, n = _weighted_signed_delta(h, "cents", now=now), len(h)
+    elif len(a) >= 2:   # complementary book — away up == home down
+        sig, n = -_weighted_signed_delta(a, "cents", now=now), len(a)
+    if sig is None or abs(sig) < _X_MIN_PP:
+        return None
+    kh = hist.get(("kalshi", "ml", "home", None), [])
+    if len(kh) >= 2:
+        kw = _weighted_signed_delta(kh, "cents", now=now)
+        if abs(kw) >= _X_MIN_PP and (kw > 0) != (sig > 0):
+            return None         # feeds disagree → no signal (skip, don't guess)
+    score = min(10, round(abs(sig) * _X_PP_SCALE))
+    if score < 1:
+        return None
+    return ("home" if sig > 0 else "away"), score, n
+
+
+def _xsharp_two_sided(hist: dict, mt: str, up_side: str, down_side: str,
+                      now=None):
+    """Shared SPR/TOT scorer: cents on the at-the-money line of the
+    reference side (home / over). Cents UP on the reference side = that
+    side more likely = sharp; DOWN = the other side."""
+    now = now or datetime.now(timezone.utc)
+    snaps = _x_main_series(hist, mt, up_side)
+    ref = up_side
+    if not snaps:
+        snaps, ref = _x_main_series(hist, mt, down_side), down_side
+        if not snaps:
+            return None
+    w = _weighted_signed_delta(snaps, "cents", now=now)
+    if ref == down_side:
+        w = -w                 # normalize to the up_side's perspective
+    if abs(w) < _X_MIN_PP:
+        return None
+    score = min(10, round(abs(w) * _X_PP_SCALE))
+    if score < 1:
+        return None
+    return (up_side if w > 0 else down_side), score, len(snaps)
+
+
+def _attach_xsharp(sb, market_id: str, odds: dict) -> None:
+    """Attach x_side/x_score/x_n onto each market's movement block (creating
+    the block when PIN had nothing — leans can then carry an x read too).
+    Silent-fail; never breaks the dossier."""
+    try:
+        hist = _pm_history(sb, market_id)
+        if not hist:
+            return
+        now = datetime.now(timezone.utc)
+        results = {
+            "moneyline": _xsharp_ml(hist, now),
+            "spread":    _xsharp_two_sided(hist, "spread", "home", "away", now),
+            "total":     _xsharp_two_sided(hist, "total", "over", "under", now),
+        }
+        for mt, r in results.items():
+            blk = odds.get(mt)
+            if not blk or not r:
+                continue
+            mv = blk.get("movement") or {}
+            mv["x_side"], mv["x_score"], mv["x_n"] = r
+            blk["movement"] = mv
+    except Exception:
+        pass
+
+
 # ──────────────────────── Live Odds API fetch ────────────────────────
 
 def _odds_api_key() -> str | None:
@@ -3364,6 +3504,12 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 "combined_score": round(cs, 4),
                 "gates_cleared":  gates_cleared,
                 "sticky":         sticky,
+                # Exchange-score shadow (cutover review): does the
+                # PMM+Kalshi read agree with the PIN read on this side?
+                "x_score":        mv.get("x_score"),
+                "x_side":         mv.get("x_side"),
+                "x_agree":        ((mv.get("x_side") == side)
+                                   if mv.get("x_side") else None),
                 "conflict_reason": conflict_reason,
                 "timing_window":  _timing_window(starts_in_min),
                 "prime_core":     _is_prime_core(starts_in_min),
@@ -3697,6 +3843,12 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         except Exception as e:
             log.warning("nrfi model failed: %s", e)
             nrfi = None
+
+    # Exchange-based sharp score — side-by-side with PIN during the
+    # Odds-API cutover (deadline June 25). Attached BEFORE _suggest_picks
+    # so every suggestion carries x_score/x_side/x_agree for the
+    # agreement review.
+    _attach_xsharp(sb, market["id"], odds)
 
     suggestions = _suggest_picks(odds, splits, power_rating,
                                  sport=sport, home=home,
