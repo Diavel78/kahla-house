@@ -2873,15 +2873,16 @@ _BOOK_TOP_LVLS = 2     # Imbalance is read from JUST the best level (+ one
                        # you'd take through (best ask). One-behind guards
                        # against a thin/spoof top line; drop to 1 for purest.
 
-# Queue-ahead (fill-risk) guard. A resting maker joins the BACK of the line
-# at the best bid — to fill, sellers must clear everything ahead of it. When
-# the best-bid wall dwarfs the best offer (lots of buyers, few sellers AT THE
-# TOUCH), price pressure is UP and a new maker very likely never fills — the
-# exact "the line keeps moving away from me" miss. This reads the LEVEL-1
-# touch only (not the 2-level sum, which a seller wall parked one level up can
-# dilute and hide). Buried touch ⇒ TAKE.
-_QUEUE_AHEAD_RATIO = 3.0    # best-bid size this many× the best-ask size
-_QUEUE_AHEAD_MIN   = 1000   # ...and at least this many contracts ahead (skip thin/spoof tops)
+# THE TAKE RULE (user-rebuilt June 2026): 30% more contracts BID than
+# OFFERED → ALWAYS TAKE, no clock/edge/size conditions. More buyers than
+# sellers at the top of the book = price pressure UP = a resting maker joins
+# the back of a queue that sellers aren't coming to clear. The old tree
+# (3.0x / 2.0x-with-clock / 1000-contract floor / 5u-edge special case) was
+# too conservative — it kept saying MAKE on books where the maker plainly
+# wasn't going to fill. Checked on BOTH the 2-level top-of-book sum AND the
+# L1 touch (a seller wall one level up dilutes the 2-level read and can hide
+# a buried touch); either crossing 1.3x fires.
+_TAKE_IMB = 1.3    # bid size ≥ this × ask size ⇒ TAKE
 
 
 def _pmm_book(client, slug: str) -> dict | None:
@@ -2958,8 +2959,8 @@ def _book_signal(book: dict | None, edge_units: float = 1,
     50/50) but is instant. So the call is "will my maker fill before I need
     the bet?" — driven by the book (will sellers hit it?) AND the clock (is
     there time?). DEFAULT MAKE; TAKE when the maker will likely MISS — a
-    strongly bid-heavy book OR the clock running out — and securing the bet
-    beats the all-in cost. Reported take price is FEE-INCLUSIVE, not the ask."""
+    bid-heavy book (≥ _TAKE_IMB on either read, unconditional) OR the clock
+    running out. Reported take price is FEE-INCLUSIVE, not the ask."""
     if not book or book.get("best_bid") is None or book.get("best_ask") is None:
         return None
     bb, ba = book["best_bid"], book["best_ask"]
@@ -2974,37 +2975,29 @@ def _book_signal(book: dict | None, edge_units: float = 1,
     # Level-1 touch: the queue you'd actually sit behind at the bid vs the
     # supply offered at the ask. The 2-level `imb` can be diluted by a seller
     # wall ONE level up (which doesn't help you fill at YOUR price) and hide a
-    # lopsided touch — so the fill-risk read is L1-only. See _QUEUE_AHEAD_*.
+    # lopsided touch — so the take rule checks BOTH reads. See _TAKE_IMB.
     l1_bid = round(book["bids"][0][1]) if book["bids"] else 0
     l1_ask = round(book["asks"][0][1]) if book["asks"] else 0
     touch_imb = round(l1_bid / l1_ask, 2) if l1_ask else None
     sim = starts_in_min
 
     take, why = False, []
-    # Clock first — a maker needs TIME to fill; as tip nears, miss-risk
-    # dominates until a resting limit simply won't fill before the game.
-    if sim is not None and sim <= 30:
+    # THE RULE — 30%+ more contracts bid than offered ⇒ ALWAYS TAKE
+    # (no clock/edge conditions; see _TAKE_IMB). Either book read fires.
+    if imb is not None and imb >= _TAKE_IMB:
+        take = True
+        why.append(f"{round(top_bid):,} bid vs {round(top_ask):,} offered ({imb}x — {int(round((imb - 1) * 100))}% more buyers than sellers) — a maker won't fill; take it")
+    elif touch_imb is not None and touch_imb >= _TAKE_IMB:
+        take = True
+        why.append(f"touch {bb}c: {l1_bid:,} queued vs {l1_ask:,} offered ({touch_imb}x) — buried maker; take it")
+    # Clock fallback — even on a balanced book, a maker needs TIME to fill;
+    # inside 30m a resting limit simply won't fill before the game.
+    elif sim is not None and sim <= 30:
         if imb is not None and imb <= 0.4:
             why.append(f"{round(sim)}m to tip but ask-heavy ({imb}x) — sellers fill your maker fast, still make")
         else:
             take = True
             why.append(f"{round(sim)}m to tip — a maker won't fill in time, take it in")
-    elif (touch_imb is not None and touch_imb >= _QUEUE_AHEAD_RATIO
-          and l1_bid >= _QUEUE_AHEAD_MIN):
-        # Queue-ahead miss: buried behind a bid wall with few sellers at the
-        # touch — your maker very likely never fills. Take it (even if the
-        # 2-level imbalance looks balanced because of a wall one level up).
-        take = True
-        why.append(f"{l1_bid:,} queued ahead at {bb}c vs {l1_ask:,} offered ({touch_imb}x) — a resting maker is buried and likely misses; take it")
-    elif sim is not None and sim <= 60 and imb is not None and imb >= 2.0:
-        take = True
-        why.append(f"{round(sim)}m to tip + bid-heavy {imb}x — take before you miss it")
-    elif imb is not None and imb >= 3.0:
-        take = True
-        why.append(f"bid-heavy {imb}x — maker will miss; worth the {take_cost}c all-in")
-    elif edge_units >= 5 and imb is not None and imb >= 2.0:
-        take = True
-        why.append(f"5u + bid-heavy {imb}x — don't risk missing a big edge")
     else:
         why.append(f"rest the maker — taking costs {take_cost}c ({spread}c spread + {fee}c fee)")
     return {"rec": "TAKE" if take else "MAKE",
@@ -3249,8 +3242,14 @@ def _match_kalshi(events: list, away_code: str, home_code: str, our_date):
             "home": best["codes"].get(home_code)}
 
 
-def _pmm_ml_cents(pm, client, away, home, event_start, sport="MLB") -> dict:
-    """Polymarket moneyline mid in int cents per side, {} on any miss."""
+def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
+    """Polymarket quotes for one game, all main markets, mids in int cents.
+    Returns {"ml": {side: cents}, "rows": [(market_type, side, line, cents)]}
+    or {} on any miss. ONE lookup() call — it already fetches + classifies
+    every market, so spread/total ride along at zero extra network cost.
+    The `ml` dict feeds the cross-confirm trigger (unchanged); `rows` is
+    the full per-line feed for pm_snapshots (the Odds-API-retirement
+    history: sharp score / board movement / CLV all read this)."""
     if not pm or not client:
         return {}
     try:
@@ -3259,48 +3258,72 @@ def _pmm_ml_cents(pm, client, away, home, event_start, sport="MLB") -> dict:
         return {}
     if not data:
         return {}
-    out = {}
-    for row in (data.get("ml") or []):
-        side = row.get("side")
-        mid = (row.get("quote") or {}).get("mid")
-        if side in ("home", "away") and mid is not None:
+    ml, rows = {}, []
+    for mt in ("ml", "spread", "total"):
+        for row in (data.get(mt) or []):
+            side = row.get("side")
+            mid = (row.get("quote") or {}).get("mid")
+            if not side or mid is None:
+                continue
             try:
-                out[side] = round(float(mid) * 100)
+                cents = round(float(mid) * 100)
             except (TypeError, ValueError):
-                pass
-    return out
+                continue
+            if cents <= 0 or cents >= 100:      # no quote / degenerate
+                continue
+            line = None
+            if mt != "ml" and row.get("line") is not None:
+                try:
+                    line = float(row["line"])
+                except (TypeError, ValueError):
+                    continue                     # spr/tot without a line is junk
+            rows.append((mt, side, line, cents))
+            if mt == "ml" and side in ("home", "away"):
+                ml[side] = cents
+    return {"ml": ml, "rows": rows}
 
 
 def _pm_insert_changed(sb, rows, now) -> int:
-    """Insert (market_id, source, side, cents) rows, deduped: only when the
-    cent differs from the latest stored value for that key (book_snapshots
-    pattern). One row per key per tick."""
+    """Insert (market_id, source, market_type, side, line, cents) rows,
+    deduped: only when the cent differs from the latest stored value for
+    that key (book_snapshots pattern). One row per key per tick. `line` is
+    part of the key — PMM offers several spread/total lines per game and
+    each is its own price series."""
     if not rows:
         return 0
+
+    def _lkey(v):
+        try:
+            return None if v is None else round(float(v), 2)
+        except (TypeError, ValueError):
+            return None
+
     mids = list({r[0] for r in rows})
     last: dict = {}
     try:
         recent = (sb.table("pm_snapshots")
-                  .select("market_id,source,side,cents,captured_at")
+                  .select("market_id,source,market_type,side,line,cents,captured_at")
                   .in_("market_id", mids)
                   .gte("captured_at", (now - timedelta(hours=24)).isoformat())
                   .order("captured_at", desc=True).limit(5000).execute().data) or []
         for r in recent:
-            k = (r["market_id"], r["source"], r["side"])
+            k = (r["market_id"], r["source"], r.get("market_type") or "ml",
+                 r["side"], _lkey(r.get("line")))
             if k not in last:           # first seen = latest (desc order)
                 last[k] = r["cents"]
     except Exception:
         pass
     ins, seen = [], set()
-    for (mid, source, side, cents) in rows:
-        k = (mid, source, side)
+    for (mid, source, mt, side, line, cents) in rows:
+        k = (mid, source, mt, side, _lkey(line))
         if k in seen:
             continue
         seen.add(k)
         if last.get(k) == cents:        # unchanged → skip
             continue
-        ins.append({"market_id": mid, "source": source, "side": side,
-                    "cents": cents, "captured_at": now.isoformat()})
+        ins.append({"market_id": mid, "source": source, "market_type": mt,
+                    "side": side, "line": line, "cents": cents,
+                    "captured_at": now.isoformat()})
     if ins:
         try:
             sb.table("pm_snapshots").insert(ins).execute()
@@ -3463,21 +3486,25 @@ def api_pm_snapshot():
         if kc.get("home") or kc.get("away"):
             st["kalshi_games"] += 1
 
-        # PMM (budgeted)
-        pmm = {}
+        # PMM (budgeted) — one lookup returns ML + spread + total quotes;
+        # all of them land in pm_snapshots (the post-Odds-API history).
+        pmm, pmm_rows = {}, []
         if _time.time() < pmm_deadline:
-            pmm = _pmm_ml_cents(_pm, _pmm_client, away, home, g["event_start"], sport=sp)
-            if pmm:
+            pq = _pmm_game_quotes(_pm, _pmm_client, away, home, g["event_start"], sport=sp)
+            if pq:
                 st["pmm_games"] += 1
+                pmm = pq.get("ml") or {}
+                pmm_rows = pq.get("rows") or []
         else:
             st["pmm_skipped"] += 1
 
-        for source, d in (("pmm", pmm), ("kalshi", kc)):
-            for side in ("home", "away"):
-                c = d.get(side)
-                if c is None or c <= 0 or c >= 100:   # no quote / degenerate
-                    continue
-                rows.append((mid, source, side, int(c)))
+        for (mt, p_side, p_line, c) in pmm_rows:
+            rows.append((mid, "pmm", mt, p_side, p_line, c))
+        for side in ("home", "away"):
+            c = kc.get(side)
+            if c is None or c <= 0 or c >= 100:       # no quote / degenerate
+                continue
+            rows.append((mid, "kalshi", "ml", side, None, int(c)))
 
         # Capture both feeds' HOME cents for the cross-confirm trigger.
         if (pmm.get("home") not in (None, 0)) and (kc.get("home") not in (None, 0)):
