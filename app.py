@@ -2939,6 +2939,23 @@ def _kalshi_book(ticker: str) -> dict | None:
             "best_ask": asks[0][0] if asks else None}
 
 
+def _invert_book(book: dict | None) -> dict | None:
+    """NO-side view of a binary YES book. A NO buyer is a YES seller, so the
+    NO bids are the YES asks at (100−c) and vice versa. Needed because PMM
+    has ONE market per line (the YES side); picks on the synthesized inverse
+    side (pmm `synthetic: true`) share the YES market's slug, and reading the
+    YES book unflipped computes make/take + imbalance for the WRONG side."""
+    if not book:
+        return None
+    bids = sorted([(100 - c, q) for c, q in (book.get("asks") or [])],
+                  key=lambda x: -x[0])
+    asks = sorted([(100 - c, q) for c, q in (book.get("bids") or [])],
+                  key=lambda x: x[0])
+    return {"bids": bids, "asks": asks,
+            "best_bid": bids[0][0] if bids else None,
+            "best_ask": asks[0][0] if asks else None}
+
+
 def _pmm_taker_fee_cents(price_cents) -> float:
     """Polymarket US TAKER fee per share, in cents. Empirically 5c · p·(1-p)
     (p = price in dollars) — peaks at 1.25c/share at 50c, tapers to the wings.
@@ -3112,11 +3129,16 @@ def api_make_take():
         sim = float(request.args.get("starts_in_min"))
     except (TypeError, ValueError):
         sim = None
+    # inverse=1 → the pick is the synthesized NO side of this market; flip
+    # the book so the rec is for the side the user is actually buying.
+    inverse = (request.args.get("inverse") or "") in ("1", "true", "yes")
     try:
         book = _pmm_book(get_client(), slug)
     except Exception as e:
         return jsonify({"ok": True, "available": False,
                         "error": f"{type(e).__name__}: {e}"[:160]})
+    if inverse:
+        book = _invert_book(book)
     sig = _book_signal(book, edge_units=units, starts_in_min=sim)
     if not sig:
         return jsonify({"ok": True, "available": False})
@@ -3611,6 +3633,8 @@ def api_handicapper_paperlog():
                 "signal_blob": {"combined_score": s.get("combined_score"),
                                 "model_edge_pp": s.get("model_edge_pp"),
                                 "splits_pp": s.get("splits_pp"),
+                                "book_imb": s.get("book_imb"),
+                                "book_pressure_pp": s.get("book_pressure_pp"),
                                 "uses_pmm_projection": s.get("uses_pmm_projection")},
             })
         nrfi = d.get("nrfi") or {}

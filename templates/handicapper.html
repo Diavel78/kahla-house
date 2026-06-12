@@ -1380,6 +1380,7 @@
                 sharp_score: s.sharp_score ?? null, edge_pp: s.edge_pp ?? null,
                 timing_window: s.timing_window ?? null, prime_core: s.prime_core ?? null,
                 late_capped: !!s.late_capped, size_capped: !!s.size_capped,
+                book_imb: s.book_imb ?? null, book_pressure_pp: s.book_pressure_pp ?? null,
                 conflict_reason: s.conflict_reason ?? null },
             allow_duplicate: true,
             _line: line, _price: price,
@@ -1419,7 +1420,7 @@
                             const body = _suggestionToBody(s, mid, d);
                             return { market_type: s.market_type, side: s.side, units: Number(s.units) || 1,
                                      _chip: _pickChipLabel(s.market_type, s.side, body._line, body._price, s.units, d),
-                                     _slug: s.pmm_slug || null, _body: body };
+                                     _slug: s.pmm_slug || null, _inv: !!s.pmm_synthetic, _body: body };
                         });
                         // NRFI: actionable only when the model found a +EV side.
                         if (d.nrfi && d.nrfi.bet_side) {
@@ -1441,7 +1442,7 @@
                         // _makeTakeCache too, so oneTapLog enters at the rec.
                         await Promise.all(picks.map(async p => {
                             if (!p._slug) return;
-                            const j = await _fetchMakeTakeVerdict(p._slug, mid, p.market_type, p.side, p.units, d.starts_in_min);
+                            const j = await _fetchMakeTakeVerdict(p._slug, mid, p.market_type, p.side, p.units, d.starts_in_min, p._inv);
                             if (j) { p._mt = j; p._mtChip = _mtShort(j); }
                         }));
                         _verdictCache.set(mid, { picks, fetchedAt: Date.now() });
@@ -1945,6 +1946,7 @@
                         data-side="${_esc(s.side)}"
                         data-units="${s.units}"
                         data-sim="${d.starts_in_min != null ? d.starts_in_min : ''}"
+                        data-inverse="${s.pmm_synthetic ? 1 : ''}"
                         data-mt="${_esc(s.market_type)}">
                         <div class="mt-chip mt-loading"><span>checking book…</span></div>
                         <div class="mt-detail"></div>
@@ -2300,11 +2302,12 @@
     // Fetch one make/take verdict (used by the games-list prefetch so the
     // "this way" pill rides the chip). Caches in _makeTakeCache so a one-tap
     // log enters at the rec. Returns the JSON or null.
-    async function _fetchMakeTakeVerdict(slug, mid, mt, side, units, sim) {
+    async function _fetchMakeTakeVerdict(slug, mid, mt, side, units, sim, inverse) {
         if (!slug) return null;
         const p = new URLSearchParams({ slug });
         if (units != null) p.set('units', units);
         if (sim != null && sim !== '') p.set('starts_in_min', sim);
+        if (inverse) p.set('inverse', '1');   // synthetic NO side — flip the book
         try {
             const r = await authFetch('/api/handicapper/make-take?' + p.toString());
             const j = await r.json();
@@ -2339,6 +2342,7 @@
         const p = new URLSearchParams({ slug });
         const units = wrap.getAttribute('data-units'); if (units) p.set('units', units);
         const sim = wrap.getAttribute('data-sim');     if (sim !== '' && sim != null) p.set('starts_in_min', sim);
+        if (wrap.getAttribute('data-inverse')) p.set('inverse', '1');  // synthetic NO side
         try {
             const r = await authFetch('/api/handicapper/make-take?' + p.toString());
             const j = await r.json();
@@ -2847,6 +2851,13 @@
                     lines.push(`Power model disagrees on ${sideName} — ${e.toFixed(1)}pp under PIN fair (caution)`);
                 }
             }
+        }
+
+        // 3b) Order-book pressure — heavy bids vs thin offers on this side
+        //     = demand sellers aren't meeting; leading indicator the line
+        //     is about to move toward the pick.
+        if (pick.book_imb != null && pick.book_imb >= 1.3) {
+            lines.push(`Order book: ${pick.book_imb}× more bid than offered on ${sideName} — buyers pressing, line likely moving this way`);
         }
 
         // 4) Polymarket entry target — only when it differs from PIN's
