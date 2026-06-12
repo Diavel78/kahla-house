@@ -1943,6 +1943,38 @@ BOOK_PRESSURE_CAP_PP = 1.0      # max edge contribution (pp)
 BOOK_PRESSURE_MIN_Q  = 500      # bid-side contracts ≥ this or no nudge
                                 # (imb still recorded for the review)
 
+# Sticky gate (June 2026 — fixes the "pick exists for 5 minutes" symptom).
+# After the June recency-weight trim, a genuine 5¢ PIN steam scores ~3.75
+# only while <15min old (5×0.75), then decays to ~2.5 (5×0.50) — below the
+# gate — so real picks flickered onto the page and vanished. Hysteresis:
+# enter at SHARP_SCORE_MIN (3), then a (market, side) that already cleared
+# today (pickbot_paperlog memory) STAYS a real pick while its score holds
+# ≥ STICKY_GATE_EXIT. The total-side veto still overrides. Sticky picks
+# re-size through Kelly (typically 1u) and carry sticky=True for review.
+STICKY_GATE_EXIT  = 1.5   # exit bar — below this even a sticky pick demotes
+STICKY_LOOKBACK_H = 12    # how far back the paperlog memory reaches
+
+
+def _sticky_keys(sb, market_id: str) -> set:
+    """(market_type, side) pairs that cleared the gate for this game within
+    the lookback — read from pickbot_paperlog (gate-cleared rows only).
+    Silent-fail → empty set (no hysteresis, never a broken dossier)."""
+    if sb is None or not market_id:
+        return set()
+    try:
+        since = (datetime.now(timezone.utc)
+                 - timedelta(hours=STICKY_LOOKBACK_H)).isoformat()
+        rows = (sb.table("pickbot_paperlog")
+                .select("market_type,side")
+                .eq("market_id", market_id)
+                .eq("gates_cleared", True)
+                .gte("logged_at", since)
+                .limit(100).execute().data) or []
+    except Exception:
+        return set()
+    return {(r.get("market_type"), r.get("side")) for r in rows
+            if r.get("market_type") and r.get("side")}
+
 
 def _kelly_units(fair_prob, fair_american, edge_pp,
                  gates_cleared) -> tuple[int, str, float]:
@@ -3203,7 +3235,8 @@ def _book_pressure(slug: str, synthetic: bool) -> tuple[float | None, float | No
 def _suggest_picks(odds: dict, splits: dict | None = None,
                    power: dict | None = None, *,
                    sport: str | None = None, home: str | None = None,
-                   starts_in_min=None) -> list[dict]:
+                   starts_in_min=None,
+                   sticky_keys: set | None = None) -> list[dict]:
     """Polymarket-execution picks. Returns a list — there can be more
     than one on a game. Behaviour:
 
@@ -3255,6 +3288,18 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
             cs = (SHARP_WEIGHT * (score_for_side / 10.0)
                   + SPLITS_WEIGHT * min(max(0.0, splits_pp) / 30.0, 1.0))
             gates_cleared = score_for_side >= SHARP_SCORE_MIN
+            # Sticky gate (hysteresis — the "5-minute pick" fix, June 2026).
+            # The recency-weighted score DECAYS as a move ages, so a real
+            # steam cleared the gate only while <15min fresh, then the pick
+            # demoted back to a lean and vanished from the page. Schmitt
+            # trigger: ENTER at SHARP_SCORE_MIN; once this (market, side)
+            # has cleared (paperlog memory, threaded in via sticky_keys),
+            # it STAYS a real pick while the score holds ≥ STICKY_GATE_EXIT.
+            sticky = False
+            if (not gates_cleared and sticky_keys
+                    and (mt, side) in sticky_keys
+                    and score_for_side >= STICKY_GATE_EXIT):
+                gates_cleared, sticky = True, True
 
             # Total-side veto — the OUR-NUMBER read can DEMOTE a total pick
             # to a forced lean when it disagrees with the side PIN movement
@@ -3318,6 +3363,7 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 "uses_pmm_projection": use_pmm,
                 "combined_score": round(cs, 4),
                 "gates_cleared":  gates_cleared,
+                "sticky":         sticky,
                 "conflict_reason": conflict_reason,
                 "timing_window":  _timing_window(starts_in_min),
                 "prime_core":     _is_prime_core(starts_in_min),
@@ -3654,7 +3700,8 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
 
     suggestions = _suggest_picks(odds, splits, power_rating,
                                  sport=sport, home=home,
-                                 starts_in_min=starts_in_min)
+                                 starts_in_min=starts_in_min,
+                                 sticky_keys=_sticky_keys(sb, market["id"]))
     # Keep the singular `suggestion` field as an alias for the top pick
     # so any caller still expecting it doesn't break. New code should
     # use `suggestions` (list) so multi-pick games render correctly.

@@ -243,6 +243,7 @@
         .pick-chip.logged  { background: var(--green); color: #04210f; }
         .pick-chip.upgrade { background: #a855f7; color: #fff; box-shadow: 0 0 0 2px rgba(168,85,247,0.55); animation: khPulse 1.6s ease-in-out infinite; }
         .pick-chip.conflict { background: var(--surface-2); color: var(--text-secondary); border: 1px solid rgba(239,68,68,0.4); }
+        .pick-chip.lean { background: rgba(245,158,11,0.08); color: #fbbf24; border: 1px dashed rgba(245,158,11,0.5); }
         @keyframes khPulse { 0%,100% { box-shadow: 0 0 0 2px rgba(168,85,247,0.55); } 50% { box-shadow: 0 0 0 4px rgba(168,85,247,0.18); } }
         .pick-line-note { font-size: 11px; color: var(--text-muted); font-style: italic; }
         /* "do this, this way" — the bet chip is "do this", the make/take pill
@@ -261,7 +262,7 @@
         .pick-legend .lg.u1 { background: var(--blue); }
         .pick-legend .lg.u3 { background: var(--orange); }
         .pick-legend .lg.u5 { background: var(--gold); }
-        .pick-legend .lg.lean { background: #3a4150; }
+        .pick-legend .lg.lean { background: rgba(245,158,11,0.15); border: 1px dashed rgba(245,158,11,0.5); }
         .pick-legend .lg.logged { background: var(--green); }
         .pick-legend .lg.upgrade { background: #a855f7; box-shadow: 0 0 0 1.5px rgba(168,85,247,0.5); }
         .games-empty { padding: 20px; text-align: center; font-size: 12px; color: var(--text-muted); }
@@ -1318,6 +1319,10 @@
                 let cls = _uClass(p.units), label = p._chip;
                 let click = _canLog ? `oneTapLog('${mid}',${i})` : `pickGame('${mid}')`;
                 let title = _canLog ? `Tap to log ${p._chip}` : `Tap for the full read`;
+                if (p._lean) {
+                    cls = 'lean'; label = 'lean · ' + p._chip;
+                    if (_canLog) title = 'No gated pick — tap to log the 1u lean';
+                }
                 if (ps.state === 'logged') {
                     cls = 'logged'; label = '✓ ' + p._chip; click = `pickGame('${mid}')`; title = 'Already logged — open Details';
                 } else if (ps.state === 'upgrade') {
@@ -1381,6 +1386,7 @@
                 timing_window: s.timing_window ?? null, prime_core: s.prime_core ?? null,
                 late_capped: !!s.late_capped, size_capped: !!s.size_capped,
                 book_imb: s.book_imb ?? null, book_pressure_pp: s.book_pressure_pp ?? null,
+                sticky: !!s.sticky, gates_cleared: !!s.gates_cleared,
                 conflict_reason: s.conflict_reason ?? null },
             allow_duplicate: true,
             _line: line, _price: price,
@@ -1422,6 +1428,20 @@
                                      _chip: _pickChipLabel(s.market_type, s.side, body._line, body._price, s.units, d),
                                      _slug: s.pmm_slug || null, _inv: !!s.pmm_synthetic, _body: body };
                         });
+                        // Always-give-a-pick (June 2026, per user): when nothing
+                        // gates, surface the TOP forced lean as a tappable 1u
+                        // chip instead of a dead "no pick" note — the bot always
+                        // has a lean when PIN data exists.
+                        if (!picks.length) {
+                            const lean = sugg.find(s => s && s.market_type && s.side && !s.conflict_reason);
+                            if (lean) {
+                                const body = _suggestionToBody(lean, mid, d);
+                                picks.push({ market_type: lean.market_type, side: lean.side,
+                                    units: Number(lean.units) || 1, _lean: true,
+                                    _chip: _pickChipLabel(lean.market_type, lean.side, body._line, body._price, lean.units, d),
+                                    _slug: lean.pmm_slug || null, _inv: !!lean.pmm_synthetic, _body: body });
+                            }
+                        }
                         // NRFI: actionable only when the model found a +EV side.
                         if (d.nrfi && d.nrfi.bet_side) {
                             const side = d.nrfi.bet_side;
@@ -1441,7 +1461,7 @@
                         // with a Poly market and ride it on the chip. Populates
                         // _makeTakeCache too, so oneTapLog enters at the rec.
                         await Promise.all(picks.map(async p => {
-                            if (!p._slug) return;
+                            if (!p._slug || p._lean) return;   // no book call for leans
                             const j = await _fetchMakeTakeVerdict(p._slug, mid, p.market_type, p.side, p.units, d.starts_in_min, p._inv);
                             if (j) { p._mt = j; p._mtChip = _mtShort(j); }
                         }));
