@@ -3123,6 +3123,111 @@ def _book_signal(book: dict | None, edge_units: float = 1,
             "why": why}
 
 
+# ── Kalshi US fee schedule (per contract, in cents) ──────────────────
+# Verified June 2026 against live order tickets: taker peaks 1.75c at 50/50
+# (0.07·p·(1−p)); maker is 1/4 of that (empirically 0.0176·p·(1−p), ~0.44c
+# at 50/50). Kalshi round-up-to-cent applies to the order TOTAL; for the
+# per-contract make-vs-take comparison the rate is what matters. Unlike
+# Polymarket (which PAYS makers a rebate), Kalshi CHARGES makers.
+def _kalshi_taker_fee_cents(price_cents) -> float:
+    if price_cents is None:
+        return 0.0
+    p = max(0.0, min(1.0, price_cents / 100.0))
+    return round(7.0 * p * (1.0 - p), 3)
+
+
+def _kalshi_maker_fee_cents(price_cents) -> float:
+    if price_cents is None:
+        return 0.0
+    p = max(0.0, min(1.0, price_cents / 100.0))
+    return round(1.76 * p * (1.0 - p), 3)
+
+
+def _kalshi_side_book(sport: str, away: str, home: str, side: str) -> dict | None:
+    """Live Kalshi top-of-book for the picked side of one game, or None.
+    ML only (the Kalshi reader is ML-only). Same {bids,asks,best_bid,
+    best_ask} shape as _pmm_book — bids = buyers of THIS side. Matches the
+    game by team codes in the event ticker + the side by the ticker suffix."""
+    series = _KALSHI_SERIES.get(sport)
+    if not series:
+        return None
+    picked = home if side == "home" else away
+    pc = _our_team_to_kalshi_code(sport, picked)
+    ac = _our_team_to_kalshi_code(sport, away)
+    hc = _our_team_to_kalshi_code(sport, home)
+    if not (pc and ac and hc):
+        return None
+    data = _fetch_kalshi_markets(series)
+    for m in (data.get("markets") or []):
+        tk = m.get("ticker") or ""
+        et = m.get("event_ticker") or ""
+        if "-" not in tk or tk.rsplit("-", 1)[1] != pc:
+            continue
+        if ac not in et or hc not in et:
+            continue
+        return _kalshi_book(tk)
+    return None
+
+
+def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
+                       units: float = 1, starts_in_min: float | None = None) -> dict | None:
+    """Best execution across {MAKE,TAKE} × {Polymarket, Kalshi} for BUYING
+    one side. Both venues' contracts pay $1 on the SAME outcome, so all-in
+    CENTS are directly comparable — pick the cheapest fillable option. MAKE
+    rests at the venue's bid (Polymarket EARNS a rebate, Kalshi pays a maker
+    fee); it's only fillable when the venue's TOP ROW isn't bid-heavy (else a
+    resting maker won't fill — sellers aren't coming) and the clock allows.
+    TAKE crosses at the ask + taker fee; always fills. Returns the chosen
+    option + all four for transparency, or None if neither book is usable."""
+    opts: list[dict] = []
+
+    def add(venue: str, book: dict | None, taker_fee, maker_adj):
+        if not book or book.get("best_bid") is None or book.get("best_ask") is None:
+            return
+        bb, ba = book["best_bid"], book["best_ask"]
+        l1b = round(book["bids"][0][1]) if book.get("bids") else 0
+        l1a = round(book["asks"][0][1]) if book.get("asks") else 0
+        timb = round(l1b / l1a, 2) if l1a else None
+        bid_heavy = (timb is not None and timb >= _TAKE_IMB)
+        ask_heavy = (timb is not None and timb <= round(1.0 / _TAKE_IMB, 2))
+        clock_ok = (starts_in_min is None or starts_in_min > 30 or ask_heavy)
+        # MAKE all-in = rest at bid ± maker adjustment (PMM −rebate, Kalshi +fee).
+        opts.append({"venue": venue, "rec": "MAKE",
+                     "all_in": round(bb + maker_adj(bb), 2),
+                     "fillable": (not bid_heavy) and clock_ok,
+                     "bid": bb, "ask": ba, "touch_imb": timb,
+                     "queue_ahead": l1b, "ask_touch": l1a})
+        # TAKE all-in = cross at ask + taker fee. Always fills.
+        opts.append({"venue": venue, "rec": "TAKE",
+                     "all_in": round(ba + taker_fee(ba), 2),
+                     "fillable": True,
+                     "bid": bb, "ask": ba, "touch_imb": timb,
+                     "queue_ahead": l1b, "ask_touch": l1a})
+
+    add("POLYMARKET", pmm_book, _pmm_taker_fee_cents,
+        lambda c: -_pmm_maker_rebate_cents(c))
+    add("KALSHI", kalshi_book, _kalshi_taker_fee_cents,
+        lambda c: _kalshi_maker_fee_cents(c))
+    if not opts:
+        return None
+    pool = [o for o in opts if o["fillable"]] or opts
+    best = min(pool, key=lambda o: o["all_in"])
+    vlabel = {"POLYMARKET": "Polymarket", "KALSHI": "Kalshi"}
+    runner = min((o for o in pool if o is not best), key=lambda o: o["all_in"], default=None)
+    why = (f"{best['rec'].lower()} {vlabel[best['venue']]} — {best['all_in']}c all-in"
+           + (f" vs {runner['all_in']}c next-best ({runner['rec'].lower()} "
+              f"{vlabel[runner['venue']]})" if runner else "")
+           + (f"; {vlabel[best['venue']]} touch {best['touch_imb']}x" if best['touch_imb'] is not None else ""))
+    return {
+        "rec": best["rec"], "venue": best["venue"], "venue_label": vlabel[best["venue"]],
+        "price": best["all_in"],
+        "best_bid": best["bid"], "best_ask": best["ask"],
+        "touch_imbalance": best["touch_imb"],
+        "queue_ahead": best["queue_ahead"], "ask_touch": best["ask_touch"],
+        "options": opts, "why": [why],
+    }
+
+
 # Best-execution routing to sportsbooks was REMOVED June 2026 — the user is
 # Polymarket-exclusive and doesn't bet the US books, so TAKE always means
 # "cross on Polymarket" (the fee-inclusive ask). MAKE = rest at the bid. No
@@ -3209,11 +3314,14 @@ def debug_orderbook():
 @app.route("/api/handicapper/make-take")
 @bot_required
 def api_make_take():
-    """Live make-vs-take for one picked side, POLYMARKET-ONLY. The card polls
-    this (slug + units + starts_in_min) so the chip updates as the book moves.
-    MAKE -> rest a Polymarket maker at the bid (fee-free, the best price).
-    TAKE -> cross on Polymarket at the fee-inclusive ask (`take_eff`). No
-    sportsbook routing — the user is Polymarket-exclusive."""
+    """Live best execution for one picked side across BOTH US venues:
+    {MAKE,TAKE} × {Polymarket, Kalshi}. The card polls this so the chip
+    updates as the books move. Params: slug (PMM market), units,
+    starts_in_min, inverse (synthetic NO side), and the game context
+    (sport, away, home, side, market_type) used to find the Kalshi market.
+    Kalshi is consulted for moneyline only (the reader is ML-only); for
+    spread/total or an unmatched game it's Polymarket-only. Returns the
+    cheapest fillable option (venue + MAKE/TAKE + all-in cents)."""
     slug = (request.args.get("slug") or "").strip()
     if not slug:
         return jsonify({"ok": False, "error": "missing slug"}), 400
@@ -3225,9 +3333,12 @@ def api_make_take():
         sim = float(request.args.get("starts_in_min"))
     except (TypeError, ValueError):
         sim = None
-    # inverse=1 → the pick is the synthesized NO side of this market; flip
-    # the book so the rec is for the side the user is actually buying.
     inverse = (request.args.get("inverse") or "") in ("1", "true", "yes")
+    sport = (request.args.get("sport") or "").strip().upper()
+    away = (request.args.get("away") or "").strip()
+    home = (request.args.get("home") or "").strip()
+    side = (request.args.get("side") or "").strip()
+    market_type = (request.args.get("market_type") or "").strip()
     try:
         book = _pmm_book(get_client(), slug)
     except Exception as e:
@@ -3235,11 +3346,61 @@ def api_make_take():
                         "error": f"{type(e).__name__}: {e}"[:160]})
     if inverse:
         book = _invert_book(book)
-    sig = _book_signal(book, edge_units=units, starts_in_min=sim)
+    # Kalshi only for moneyline (the reader is ML-only) on covered sports.
+    kbook = None
+    if market_type in ("moneyline", "ml") and sport and away and home and side in ("home", "away"):
+        try:
+            kbook = _kalshi_side_book(sport, away, home, side)
+        except Exception:
+            kbook = None
+    sig = _cross_book_signal(book, kbook, units=units, starts_in_min=sim)
     if not sig:
         return jsonify({"ok": True, "available": False})
     return jsonify({"ok": True, "available": True,
-                    "rec": sig["rec"], "make_price": sig["make_price"], **sig})
+                    "kalshi": bool(kbook), **sig})
+
+
+@app.route("/debug-crossbook")
+def debug_crossbook():
+    """PUBLIC verify of the 4-way make/take (Polymarket + Kalshi) for the
+    soonest upcoming game of a sport. Public market data only (no secrets).
+    ?sport=mlb&side=home — shows both side books + the cross verdict so the
+    cross-venue logic can be checked from Vercel (sandbox can't reach
+    Kalshi/PMM). Removable after verification."""
+    sport = (request.args.get("sport") or "MLB").upper()
+    side = (request.args.get("side") or "home").strip()
+    out: dict = {"sport": sport, "side": side}
+    try:
+        client = get_client()
+        sb = get_supabase()
+        g = ((sb.table("markets").select("event_name,event_start")
+              .eq("sport", sport).eq("status", "active")
+              .gte("event_start", datetime.now(timezone.utc).isoformat())
+              .order("event_start").limit(1).execute().data) or []) if sb else []
+        if not g or " @ " not in (g[0].get("event_name") or ""):
+            return jsonify({**out, "error": "no upcoming game"})
+        aw, hm = [s.strip() for s in g[0]["event_name"].split(" @ ", 1)]
+        out["game"] = {"away": aw, "home": hm, "start": g[0]["event_start"]}
+        import pmm_markets as _pm
+        data = _pm.lookup(client, sport, aw, hm, g[0]["event_start"])
+        ml = (data or {}).get("ml") or []
+        entry = next((e for e in ml if e.get("side") == side), None)
+        pbook = _pmm_book(client, entry["slug"]) if entry and entry.get("slug") else None
+        if entry and entry.get("synthetic") and pbook:
+            pbook = _invert_book(pbook)
+        kbook = _kalshi_side_book(sport, aw, hm, side)
+        out["pmm_book"] = None if not pbook else {
+            "best_bid": pbook["best_bid"], "best_ask": pbook["best_ask"],
+            "bids": pbook["bids"][:3], "asks": pbook["asks"][:3]}
+        out["kalshi_book"] = None if not kbook else {
+            "best_bid": kbook["best_bid"], "best_ask": kbook["best_ask"],
+            "bids": kbook["bids"][:3], "asks": kbook["asks"][:3]}
+        out["cross"] = _cross_book_signal(pbook, kbook)
+    except Exception as e:
+        import traceback
+        out["error"] = str(e)[:200]
+        out["trace"] = traceback.format_exc()[:1500]
+    return jsonify(out)
 
 
 # ───────────── PMM + Kalshi cent-logger (the cross-confirm memory) ─────────
