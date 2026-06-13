@@ -2068,21 +2068,6 @@ EDGE_CAP_PP          = 6.0      # hard cap so a crude input can't blow up sizing
 KELLY_MED_PCT        = 2.0      # ¼-Kelly stake ≥ this %BR → 3u medium
 KELLY_HIGH_PCT       = 3.0      # ¼-Kelly stake ≥ this %BR → 5u high
 
-# Order-book pressure (June 2026, per user; research-calibrated — see the
-# deep-research session): heavy bids vs thin offers on the picked side =
-# demand the sellers aren't meeting = a leading indicator the line is about
-# to move (Gould & Bonart 2016: strongest in large-tick regimes like a
-# 1c-tick binary). Fed into edge_pp as a CAPPED confirmation nudge — the
-# signal predicts the NEXT TICK (~1c ≈ 1pp), not the game outcome, so the
-# cap stays at 1pp. The size floor mirrors the make/take rule: a ratio on a
-# few-hundred-contract book is noise and the cheapest book state to spoof.
-# Recorded on every gated pick (signal_blob.book_imb) for the paperlog
-# review to validate.
-BOOK_PRESSURE_IMB    = 1.3      # bid/ask size ratio ≥ this → pressure nudge
-BOOK_PRESSURE_CAP_PP = 1.0      # max edge contribution (pp)
-BOOK_PRESSURE_MIN_Q  = 500      # bid-side contracts ≥ this or no nudge
-                                # (imb still recorded for the review)
-
 # Sticky gate (June 2026 — fixes the "pick exists for 5 minutes" symptom).
 # After the June recency-weight trim, a genuine 5¢ PIN steam scores ~3.75
 # only while <15min old (5×0.75), then decays to ~2.5 (5×0.50) — below the
@@ -3335,43 +3320,6 @@ def _splits_signal_pp(splits: dict | None, sharp_side: str | None,
         return 0.0
 
 
-def _book_pressure(slug: str, synthetic: bool) -> tuple[float | None, float | None]:
-    """(nudge_pp, imbalance) from the live PMM order book for one side.
-    Imbalance = max of the 2-level top-of-book ratio and the L1 touch ratio
-    (a seller wall one level up can dilute the 2-level read — same dual read
-    as the make/take TAKE rule). Synthetic (NO) sides share the YES market's
-    slug, so their ladder is INVERTED before reading. Late-imports app for
-    the book reader (established pattern, like _fetch_splits). Silent-fail →
-    (None, None); never breaks the dossier."""
-    if not slug:
-        return None, None
-    try:
-        import app as _app
-        book = _app._pmm_book(_app.get_client(), slug)
-        if synthetic:
-            book = _app._invert_book(book)
-    except Exception:
-        return None, None
-    if not book or not book.get("bids") or not book.get("asks"):
-        return None, None
-    l1b, l1a = book["bids"][0][1], book["asks"][0][1]
-    t_b = sum(q for _, q in book["bids"][:2])
-    t_a = sum(q for _, q in book["asks"][:2])
-    ratios = [r for r in ((l1b / l1a if l1a else None),
-                          (t_b / t_a if t_a else None)) if r is not None]
-    if not ratios:
-        return None, None
-    imb = round(max(ratios), 2)
-    # Thin-book floor: no nudge unless the bid side carries real size
-    # (ratio on a tiny book is noise + the cheapest state to spoof). The
-    # imbalance is still returned so signal_blob records it for review.
-    if imb < BOOK_PRESSURE_IMB or max(l1b, t_b) < BOOK_PRESSURE_MIN_Q:
-        return 0.0, imb
-    # 1.3x → 0.4pp, +0.5pp per additional 1.0x of imbalance, capped at 1pp.
-    return round(min(BOOK_PRESSURE_CAP_PP,
-                     0.4 + (imb - BOOK_PRESSURE_IMB) * 0.5), 2), imb
-
-
 def _suggest_picks(odds: dict, splits: dict | None = None,
                    power: dict | None = None, *,
                    sport: str | None = None, home: str | None = None,
@@ -3596,33 +3544,6 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
 
     # Stable order: ML/SPR first, then TOT.
     chosen.sort(key=lambda c: 0 if c["market_type"] != "total" else 1)
-
-    # Order-book pressure — fetched only for the FINAL gated picks (one
-    # HTTP call per pick, not per candidate) and folded into edge_pp as a
-    # capped confirmation nudge before re-sizing. Heavy bids vs thin offers
-    # on the picked side = demand sellers aren't meeting = the line is about
-    # to move toward it (per user, June 2026). Recorded (book_imb) even when
-    # below threshold so the paperlog review can validate the signal.
-    for c in chosen:
-        if not (c.get("gates_cleared") and c.get("pmm_slug")):
-            continue
-        pp, imb = _book_pressure(c["pmm_slug"], bool(c.get("pmm_synthetic")))
-        if imb is None:
-            continue
-        c["book_imb"] = imb
-        c["book_pressure_pp"] = pp
-        if pp and pp > 0:
-            c["edge_pp"] = round(min(c["edge_pp"] + pp, EDGE_CAP_PP), 2)
-            units, conf, kelly_pct = _kelly_units(
-                c.get("fair_prob"), c.get("fair_american"),
-                c.get("edge_pp"), c.get("gates_cleared"))
-            tw = c.get("timing_window")     # re-apply the prime-window cap
-            if tw is not None and tw != "prime" and units > 1:
-                units, conf = 1, "low"
-                c["size_capped"] = True
-                if tw == "late":
-                    c["late_capped"] = True
-            c["units"], c["confidence"], c["kelly_pct"] = units, conf, kelly_pct
     return chosen
 
 
