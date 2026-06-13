@@ -194,6 +194,7 @@
            sport's list — only the line-2 odds chips are bespoke. */
         .wc-hint { font-size: 12px; color: var(--text-muted); margin: -2px 0 12px; }
         .when.wc-live { color: var(--red); font-weight: 700; }
+        .when.wc-final { color: var(--text-muted); font-weight: 600; }
         .wc-odds-line { display: flex; flex-wrap: wrap; gap: 6px; }
         .wc-odd { font-size: 12px; color: var(--text-secondary); background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; white-space: nowrap; }
         .wc-odd b { color: var(--text); font-weight: 600; }
@@ -1303,9 +1304,19 @@
     }
 
     function _renderWcMatch(m) {
-        const whenStr = _wcWhen(m.start_time);
-        const when = whenStr
-            ? `<span class="when ${whenStr === 'LIVE' ? 'wc-live' : ''}">${_esc(whenStr)}</span>` : '';
+        // ESPN drives status/score; PMM drives odds. Live/finished matches
+        // show the score; pre-game shows kickoff time.
+        const score = (m.away_score != null && m.home_score != null)
+            ? `${_esc(m.away_score)}–${_esc(m.home_score)}` : '';
+        let when;
+        if (m.state === 'in') {
+            when = `<span class="when wc-live">${score ? score + ' · ' : ''}${_esc(m.detail || 'LIVE')}</span>`;
+        } else if (m.state === 'post' || m.completed) {
+            when = `<span class="when wc-final">${score ? 'FT ' + score : 'FT'}</span>`;
+        } else {
+            const whenStr = _wcWhen(m.start_time);
+            when = `<span class="when ${whenStr === 'LIVE' ? 'wc-live' : ''}">${_esc(whenStr)}</span>`;
+        }
         const odds = (m.results || []).map(r => {
             const pct = (r.prob != null) ? Math.round(r.prob * 100) : null;
             const amer = (r.american != null) ? ` <span class="wc-amer">${_fmtAmer(r.american)}</span>` : '';

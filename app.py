@@ -2716,6 +2716,87 @@ def _fetch_espn_scoreboard(sport: str) -> list:
         return []
 
 
+def _espn_scoreboard_raw(grp: str, league: str, dates: str | None = None) -> list:
+    """Fetch ANY ESPN scoreboard by group/league path (e.g. soccer/fifa.world,
+    mma/ufc) — generalizes _fetch_espn_scoreboard beyond the board's
+    _ESPN_PATH. `dates` is optional 'YYYYMMDD' or 'YYYYMMDD-YYYYMMDD'. 30s
+    cache per (path, dates). [] on error. No API key. This is the shared
+    reader for ESPN-as-schedule-spine work (World Cup tab, post-cutover
+    markets ingest)."""
+    import time
+    key = f"{grp}/{league}?{dates or ''}"
+    now = time.time()
+    cached = _ESPN_CACHE.get(key)
+    if cached and (now - cached[0]) < _ESPN_TTL:
+        return cached[1]
+    url = f"https://site.api.espn.com/apis/site/v2/sports/{grp}/{league}/scoreboard"
+    try:
+        r = _http.get(url, params=({"dates": dates} if dates else None), timeout=8)
+        if r.status_code != 200:
+            return []
+        events = (r.json() or {}).get("events", []) or []
+        _ESPN_CACHE[key] = (now, events)
+        return events
+    except Exception:
+        return []
+
+
+def _espn_soccer_match(ev: dict) -> dict | None:
+    """Parse one ESPN soccer scoreboard event → flat match dict:
+    {away, home, date, state, detail, completed, away_score, home_score}.
+    None on unexpected shape. (state ∈ pre / in / post.)"""
+    try:
+        comp = (ev.get("competitions") or [{}])[0]
+        home = away = None
+        hs = as_ = None
+        for c in (comp.get("competitors") or []):
+            t = c.get("team") or {}
+            name = (t.get("displayName") or t.get("name")
+                    or t.get("shortDisplayName") or "")
+            sc = c.get("score")
+            if c.get("homeAway") == "home":
+                home, hs = name, sc
+            elif c.get("homeAway") == "away":
+                away, as_ = name, sc
+        st = ((ev.get("status") or {}).get("type") or {})
+        return {
+            "away": away, "home": home,
+            "date": ev.get("date"),
+            "state": st.get("state"),                       # pre / in / post
+            "detail": st.get("shortDetail") or st.get("description") or "",
+            "completed": bool(st.get("completed")),
+            "away_score": as_, "home_score": hs,
+        }
+    except Exception:
+        return None
+
+
+# ESPN ↔ Polymarket World Cup country-name variants (keys are
+# pmm_markets._norm output — lowercase, accent-stripped, space-collapsed).
+# Both feeds get canonicalized through this so "South Korea"/"Korea
+# Republic", "Turkey"/"Turkiye", "Ivory Coast"/"Cote d'Ivoire" etc. match
+# on the same key. Tune from /debug-worldcup's `unmatched_espn` list.
+_WC_COUNTRY_ALIASES = {
+    "south korea": "korea", "korea republic": "korea", "republic of korea": "korea",
+    "turkey": "turkiye",
+    "ir iran": "iran",
+    "ivory coast": "cote d ivoire",
+    "cape verde": "cabo verde",
+    "czech republic": "czechia",
+    "dr congo": "congo dr", "democratic republic of the congo": "congo dr",
+    "congo democratic republic": "congo dr",
+    "usa": "united states", "us": "united states",
+    "bosnia and herzegovina": "bosnia herzegovina",
+}
+
+
+def _wc_country_key(name: str) -> str:
+    """Canonical country key for ESPN↔PMM World Cup matching."""
+    import pmm_markets as _pm
+    n = _pm._norm(name or "")
+    return _WC_COUNTRY_ALIASES.get(n, n)
+
+
 # ───────────────────────── Kalshi (free, no-auth market data) ─────────────
 # Kalshi is a deep prediction-market exchange whose price (in cents = implied
 # probability) moves with the sharp number — like Polymarket, a free/keyless
@@ -6934,36 +7015,126 @@ def api_handicapper_sport_counts():
     return jsonify({"ok": True, "counts": counts, "now_iso": now.isoformat()})
 
 
+def _build_worldcup(now=None):
+    """Shared World Cup builder. ESPN (soccer/fifa.world) is the SCHEDULE +
+    LIVE-SCORE spine; Polymarket supplies the 1-X-2 match-result odds,
+    matched onto ESPN events by canonical country name. Upcoming matches
+    PMM lists but ESPN's window doesn't yet cover are appended (odds only,
+    no score) so coverage never regresses below the PMM-only version.
+    Returns (matches, meta) — meta carries counts for diagnostics."""
+    now = now or datetime.now(timezone.utc)
+    # ESPN spine — a date range so we get the upcoming slate, not just today.
+    dates = f"{now:%Y%m%d}-{(now + timedelta(days=8)):%Y%m%d}"
+    espn_events = _espn_scoreboard_raw("soccer", "fifa.world", dates=dates)
+    espn_matches = [m for m in (_espn_soccer_match(e) for e in espn_events)
+                    if m and m.get("away") and m.get("home")]
+
+    # Polymarket odds (1-X-2), keyed by canonical country-name pair.
+    import pmm_markets as _pm
+    try:
+        pmm = _pm.list_world_cup(get_client()) or {"matches": []}
+    except Exception:
+        pmm = {"matches": []}
+    pmm_idx = {}
+    for pm in pmm.get("matches", []):
+        t1, t2 = _pm._wc_teams_from_title(pm.get("title") or "")
+        if t1 and t2:
+            pmm_idx[frozenset({_wc_country_key(t1), _wc_country_key(t2)})] = pm
+
+    out, used = [], set()
+    for m in espn_matches:
+        k = frozenset({_wc_country_key(m["away"]), _wc_country_key(m["home"])})
+        pm = pmm_idx.get(k)
+        if pm:
+            used.add(k)
+        out.append({
+            "title":      f"{m['away']} vs. {m['home']}",
+            "start_time": m["date"],
+            "state":      m["state"], "detail": m["detail"],
+            "away_score": m["away_score"], "home_score": m["home_score"],
+            "results":    (pm or {}).get("results", []),
+            "src":        "espn",
+        })
+    # Append PMM-listed upcoming matches ESPN's window didn't include
+    # (odds only). Drop ones that already kicked off >4h ago.
+    drop_before = now - timedelta(hours=4)
+    for k, pm in pmm_idx.items():
+        if k in used:
+            continue
+        st = pm.get("start_time")
+        try:
+            sdt = datetime.fromisoformat((st or "").replace("Z", "+00:00")) if st else None
+        except Exception:
+            sdt = None
+        if sdt is not None and sdt < drop_before:
+            continue
+        out.append({
+            "title":      pm.get("title"),
+            "start_time": st,
+            "state":      None, "detail": "",
+            "away_score": None, "home_score": None,
+            "results":    pm.get("results", []),
+            "src":        "pmm",
+        })
+    out.sort(key=lambda x: x.get("start_time") or "")
+    meta = {"espn_count": len(espn_matches),
+            "pmm_count": len(pmm.get("matches", [])),
+            "matched": len(used)}
+    return out, meta
+
+
 @app.route("/api/handicapper/worldcup")
 @bot_required
 def api_handicapper_worldcup():
-    """Read-only World Cup match list for the Pick Bot page. Pulls live
-    Polymarket match-result odds straight from PMM — NO PIN/Kalshi/Odds-
-    API, no markets table, nothing logged or graded. View-only.
+    """Read-only World Cup list for the Pick Bot page. ESPN is the
+    schedule + live-score spine (soccer/fifa.world); Polymarket supplies
+    the 1-X-2 odds matched on. Nothing logged or graded. View-only."""
+    now = datetime.now(timezone.utc)
+    matches, meta = _build_worldcup(now)
+    return jsonify({"ok": True, "fetched_iso": now.isoformat(),
+                    "matches": matches, **meta})
 
-    `?debug=1` adds the raw PMM diagnostic dump (tag tried, sample
-    titles, market type slugs) for tuning against the real schema.
-    """
-    debug = request.args.get("debug") in ("1", "true", "yes")
-    try:
-        client = get_client()
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"Polymarket unavailable: {e}"}), 503
+
+@app.route("/debug-worldcup")
+def debug_worldcup():
+    """PUBLIC ESPN↔PMM World Cup join diagnostic (no auth; public
+    scoreboard + market data, no secrets — same posture as /debug-kalshi).
+    Lets a session verify the fifa.world shape, ESPN team strings, the
+    date span ESPN returns, and the country-name match rate FROM VERCEL
+    (sandbox WebFetch is WAF-blocked). Tune _WC_COUNTRY_ALIASES from
+    `unmatched_espn`, then this route can be removed."""
+    now = datetime.now(timezone.utc)
+    dates = f"{now:%Y%m%d}-{(now + timedelta(days=8)):%Y%m%d}"
+    espn_events = _espn_scoreboard_raw("soccer", "fifa.world", dates=dates)
+    espn_matches = [m for m in (_espn_soccer_match(e) for e in espn_events)
+                    if m and m.get("away") and m.get("home")]
     import pmm_markets as _pm
-    diag = {} if debug else None
     try:
-        data = _pm.list_world_cup(client, diag=diag)
+        pmm = _pm.list_world_cup(get_client()) or {"matches": []}
     except Exception as e:
-        return jsonify({"ok": False, "error": f"World Cup lookup failed: {e}"}), 500
-    resp = {
-        "ok":          True,
-        "fetched_iso": datetime.now(timezone.utc).isoformat(),
-        "tag_used":    data.get("tag_used"),
-        "matches":     data.get("matches", []),
-    }
-    if debug:
-        resp["diag"] = diag
-    return jsonify(resp)
+        pmm = {"matches": [], "err": str(e)[:200]}
+    pmm_keys = {}
+    for pm in pmm.get("matches", []):
+        t1, t2 = _pm._wc_teams_from_title(pm.get("title") or "")
+        if t1 and t2:
+            pmm_keys[frozenset({_wc_country_key(t1), _wc_country_key(t2)})] = pm.get("title")
+    matched, unmatched = [], []
+    for m in espn_matches:
+        k = frozenset({_wc_country_key(m["away"]), _wc_country_key(m["home"])})
+        rec = {"espn": f"{m['away']} vs {m['home']}", "date": m["date"],
+               "state": m["state"], "score": f"{m['away_score']}-{m['home_score']}",
+               "pmm": pmm_keys.get(k)}
+        (matched if k in pmm_keys else unmatched).append(rec)
+    return jsonify({
+        "ok": True,
+        "espn_count": len(espn_matches),
+        "espn_dates": [m["date"] for m in espn_matches],
+        "espn_teams": sorted({t for m in espn_matches for t in (m["away"], m["home"])}),
+        "pmm_count": len(pmm.get("matches", [])),
+        "matched_count": len(matched),
+        "unmatched_espn": unmatched,
+        "sample_matched": matched[:6],
+    })
 
 
 # ─────────────── Polymarket position → bot_picks sync ───────────────
