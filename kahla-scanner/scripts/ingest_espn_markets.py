@@ -184,29 +184,56 @@ def _find_or_create(sport: str, g: dict, aliases: dict[str, str],
     return "create", new_id
 
 
-def ingest_sport(sport: str, days: int, commit: bool) -> dict:
+def ingest_sport(sport: str, days: int, commit: bool, prune: bool = False) -> dict:
     grp, league = _ESPN_SPORTS[sport]
     games = _espn_games(grp, league, days)
     if not games:
         log.info("%-9s no upcoming ESPN games", sport)
-        return {"sport": sport, "games": 0, "create": 0, "reuse": 0}
+        return {"sport": sport, "games": 0, "create": 0, "reuse": 0, "pruned": 0}
     try:
         aliases = db.list_team_aliases(sport)
     except Exception:
         aliases = {}
     existing = db.list_active_markets(sport)
     created = reused = 0
+    kept_ids: set[str] = set()
     for g in games:
-        action, _mid = _find_or_create(sport, g, aliases, existing, commit)
+        action, mid = _find_or_create(sport, g, aliases, existing, commit)
+        if mid:
+            kept_ids.add(mid)
         if action == "reuse":
             reused += 1
         else:
             created += 1
             log.info("  %s %-28s %s", "CREATE" if commit else "would-create",
                      f"{g['away']} @ {g['home']}", g["commence"].isoformat())
-    log.info("%-9s %2d games · %d %s · %d reused", sport, len(games), created,
-             "created" if commit else "would-create", reused)
-    return {"sport": sport, "games": len(games), "create": created, "reuse": reused}
+    # Prune: ESPN is authoritative, so deactivate active FUTURE markets in
+    # this sport that ESPN's scoreboard didn't account for — stale dupes,
+    # The Odds API's kickboxing-in-UFC bleed, nonsense pairings. Only when
+    # ESPN actually returned a slate (the `if not games` guard above) so a
+    # transient empty can't wipe the board; only future rows (never touch
+    # live/finished — the resolver + history need those). Matched/created
+    # rows are in kept_ids and survive (market_id preserved).
+    pruned = 0
+    if prune and commit:
+        now = datetime.now(timezone.utc)
+        for row in existing:
+            rid = row.get("id")
+            rstart = _parse_iso(row.get("event_start"))
+            if rid and rid not in kept_ids and rstart and rstart > now:
+                try:
+                    db.client().table("markets").update(
+                        {"status": "inactive"}).eq("id", rid).execute()
+                    pruned += 1
+                    log.info("  prune (not on ESPN) %-30s %s",
+                             row.get("event_name"), row.get("event_start"))
+                except Exception as e:
+                    log.warning("  prune failed %s: %s", rid, e)
+    log.info("%-9s %2d games · %d %s · %d reused%s", sport, len(games), created,
+             "created" if commit else "would-create", reused,
+             f" · {pruned} pruned" if prune else "")
+    return {"sport": sport, "games": len(games), "create": created,
+            "reuse": reused, "pruned": pruned}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -217,6 +244,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--days", type=int, default=8, help="lookahead window in days")
     ap.add_argument("--commit", action="store_true",
                     help="actually write rows (default: dry-run, prints only)")
+    ap.add_argument("--prune", action="store_true",
+                    help="deactivate active FUTURE markets ESPN didn't return "
+                         "for the sport (stale dupes / non-ESPN bleed). Needs "
+                         "--commit; only prunes sports where ESPN returned a slate.")
     args = ap.parse_args(argv)
 
     sports = [args.sport.upper()] if args.sport else list(_ESPN_SPORTS)
@@ -233,17 +264,17 @@ def main(argv: list[str] | None = None) -> int:
     if not args.commit:
         log.info("(dry-run — no rows written; pass --commit to insert)")
 
-    totals = {"games": 0, "create": 0, "reuse": 0}
+    totals = {"games": 0, "create": 0, "reuse": 0, "pruned": 0}
     for sport in sports:
         try:
-            r = ingest_sport(sport, args.days, args.commit)
+            r = ingest_sport(sport, args.days, args.commit, prune=args.prune)
             for k in totals:
-                totals[k] += r[k]
+                totals[k] += r.get(k, 0)
         except Exception as e:
             log.warning("%-9s ERROR: %s", sport, e)
-    log.info("TOTAL %d games · %d %s · %d reused", totals["games"],
+    log.info("TOTAL %d games · %d %s · %d reused · %d pruned", totals["games"],
              totals["create"], "created" if args.commit else "would-create",
-             totals["reuse"])
+             totals["reuse"], totals["pruned"])
     return 0
 
 
