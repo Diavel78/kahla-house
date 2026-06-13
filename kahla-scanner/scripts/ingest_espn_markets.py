@@ -119,28 +119,34 @@ def _espn_games(grp: str, league: str, days: int) -> list[dict]:
 
     games: list[dict] = []
     for ev in events:
-        try:
-            state = (((ev.get("status") or {}).get("type") or {}).get("state"))
-            if state and state != "pre":
-                continue  # only upcoming — skip in-progress / final
-            comp = (ev.get("competitions") or [{}])[0]
-            cs = comp.get("competitors") or []
-            home = away = None
-            for c in cs:
-                name = _competitor_name(grp, c)
-                if c.get("homeAway") == "home":
-                    home = name
-                elif c.get("homeAway") == "away":
-                    away = name
-            # MMA / any feed without home-away flags: take the two in order.
-            if not (home and away) and len(cs) == 2:
-                away = away or _competitor_name(grp, cs[0])
-                home = home or _competitor_name(grp, cs[1])
-            commence = _parse_iso(comp.get("date") or ev.get("date"))
-            if away and home and commence:
-                games.append({"away": away, "home": home, "commence": commence})
-        except Exception:
-            continue
+        ev_date = ev.get("date")
+        # Iterate ALL competitions, not just [0]. For team sports + soccer
+        # each event has one competition (the game). For MMA an event is a
+        # CARD and competitions[] is every bout — reading only [0] dropped
+        # all but the main event (the "UFC shows 2 fights" bug).
+        for comp in (ev.get("competitions") or []):
+            try:
+                st = (comp.get("status") or ev.get("status") or {})
+                state = ((st.get("type") or {}).get("state"))
+                if state and state != "pre":
+                    continue  # only upcoming — skip in-progress / final
+                cs = comp.get("competitors") or []
+                home = away = None
+                for c in cs:
+                    name = _competitor_name(grp, c)
+                    if c.get("homeAway") == "home":
+                        home = name
+                    elif c.get("homeAway") == "away":
+                        away = name
+                # MMA / any feed without home-away flags: take two in order.
+                if not (home and away) and len(cs) == 2:
+                    away = away or _competitor_name(grp, cs[0])
+                    home = home or _competitor_name(grp, cs[1])
+                commence = _parse_iso(comp.get("date") or ev_date)
+                if away and home and commence:
+                    games.append({"away": away, "home": home, "commence": commence})
+            except Exception:
+                continue
     return games
 
 
