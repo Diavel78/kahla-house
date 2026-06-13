@@ -6923,15 +6923,12 @@ def api_handicapper_sport_counts():
 @app.route("/api/handicapper/worldcup")
 @bot_required
 def api_handicapper_worldcup():
-    """Read-only World Cup viewer for the Pick Bot page. Pulls live
-    Polymarket markets (the outright Winner board + upcoming/live match
-    markets) straight from PMM — NO PIN/Kalshi/Odds-API, no markets
-    table, nothing logged or graded. View-only: "nice to see the World
-    Cup stuff before it's over."
+    """Read-only World Cup match list for the Pick Bot page. Pulls live
+    Polymarket match-result odds straight from PMM — NO PIN/Kalshi/Odds-
+    API, no markets table, nothing logged or graded. View-only.
 
     `?debug=1` adds the raw PMM diagnostic dump (tag tried, sample
-    titles, market-key shape) so the listing can be tuned against the
-    real Polymarket schema after deploy.
+    titles, market type slugs) for tuning against the real schema.
     """
     debug = request.args.get("debug") in ("1", "true", "yes")
     try:
@@ -6948,11 +6945,39 @@ def api_handicapper_worldcup():
         "ok":          True,
         "fetched_iso": datetime.now(timezone.utc).isoformat(),
         "tag_used":    data.get("tag_used"),
-        "events":      data.get("events", []),
+        "matches":     data.get("matches", []),
     }
     if debug:
         resp["diag"] = diag
     return jsonify(resp)
+
+
+@app.route("/debug-worldcup")
+def debug_worldcup():
+    """PUBLIC debug dump of the World Cup PMM shape — no auth, public
+    market data only, no secrets (same posture as /debug-kalshi). Lets a
+    Claude Code session self-diagnose the World Cup listing without
+    needing a Firebase token. Returns the tag tried, event titles, the
+    built matches, and the first match's raw market type slugs."""
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Polymarket unavailable: {e}"}), 503
+    import pmm_markets as _pm
+    diag: dict = {}
+    try:
+        data = _pm.list_world_cup(client, diag=diag)
+    except Exception as e:
+        import traceback
+        return jsonify({"ok": False, "error": str(e),
+                        "trace": traceback.format_exc()[:2000]}), 500
+    return jsonify({
+        "ok":       True,
+        "tag_used": data.get("tag_used"),
+        "n_matches": len(data.get("matches", [])),
+        "matches":  data.get("matches", []),
+        "diag":     diag,
+    })
 
 
 # ─────────────── Polymarket position → bot_picks sync ───────────────
