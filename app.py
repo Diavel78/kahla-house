@@ -2682,7 +2682,10 @@ _ESPN_PATH = {
     "nfl":   ("football",       "nfl"),
     "ncaab": ("basketball",     "mens-college-basketball"),
     "ncaaf": ("football",       "college-football"),
-    # ESPN doesn't have one consolidated MMA scoreboard endpoint — skip for now.
+    # Only the sports the Odds Board ingests. NOT an ESPN limitation:
+    # ESPN also has mma/ufc (used by bot_picks_resolver to auto-grade UFC
+    # ML) and soccer per-league (soccer/fifa.world = World Cup, usa.1 MLS,
+    # eng.1 EPL, …) — omitted here only because the board doesn't show them.
 }
 
 _ESPN_CACHE: dict[str, tuple[float, list]] = {}

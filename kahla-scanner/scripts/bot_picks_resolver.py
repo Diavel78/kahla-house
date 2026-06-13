@@ -15,8 +15,9 @@ leave the pending filter, re-running just re-attempts un-graded ones.
 CLI:
   python -m scripts.bot_picks_resolver
 
-UFC stays pending forever — ESPN has no consolidated MMA scoreboard.
-Manual resolution via SQL is fine for that low volume.
+UFC ML auto-grades via ESPN's mma/ufc scoreboard (winner tag) — see
+_ESPN_PATH below. Only method-of-victory (spread/total) props can't be
+graded there and stay pending for manual settle.
 """
 from __future__ import annotations
 
