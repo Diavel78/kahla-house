@@ -257,6 +257,14 @@
         .pick-chip.lean { background: rgba(245,158,11,0.08); color: #fbbf24; border: 1px dashed rgba(245,158,11,0.5); }
         @keyframes khPulse { 0%,100% { box-shadow: 0 0 0 2px rgba(168,85,247,0.55); } 50% { box-shadow: 0 0 0 4px rgba(168,85,247,0.18); } }
         .pick-line-note { font-size: 11px; color: var(--text-muted); font-style: italic; }
+        /* "do this, this way" — the bet chip is "do this", the make/take pill
+           riding next to it is "this way". Green MAKE = rest a Poly maker;
+           amber TAKE = cross now at the named venue. The full read stays on
+           Details. Grouped in .pick-chip-row so the pair wraps as a unit. */
+        .pick-chip-row { display: inline-flex; align-items: center; gap: 4px; }
+        .mt-pill { padding: 3px 7px; border-radius: 6px; font-size: 10px; font-weight: 700; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.02em; white-space: nowrap; }
+        .mt-pill.make { background: var(--green-dim); color: var(--green); border: 1px solid rgba(34,197,94,0.4); }
+        .mt-pill.take { background: var(--orange-dim); color: var(--orange); border: 1px solid rgba(249,115,22,0.4); }
         /* Color legend for the pick chips (admin/bot_access only). */
         .pick-legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 10px; font-size: 10px; color: var(--text-muted); }
         .pick-legend span { display: inline-flex; align-items: center; gap: 4px; }
@@ -345,6 +353,18 @@
         .suggestion-card .why li { padding: 3px 0 3px 16px; position: relative; }
         .suggestion-card .why li::before { content: '•'; position: absolute; left: 4px; color: var(--blue); font-weight: 700; }
         .suggestion-card.soft .why li::before { color: var(--orange); }
+        /* Make-vs-take execution chip — the directive verdict pill (green
+           MAKE = rest a maker, cheap+patient; amber TAKE = cross now, costs
+           the fee but secures the bet). Quiet headline; the full book read
+           (bid/ask/spread/fee/imbalance/why) sits in .mt-detail below it —
+           this dossier IS the details page, so the explanation lives here. */
+        .mt-wrap { margin-top: 10px; }
+        .mt-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 10px; font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; letter-spacing: 0.02em; }
+        .mt-chip .mt-tag { font-size: 10px; opacity: 0.7; letter-spacing: 0.08em; }
+        .mt-chip.make { background: var(--green-dim); color: var(--green); border: 1px solid rgba(34,197,94,0.4); }
+        .mt-chip.take { background: var(--orange-dim); color: var(--orange); border: 1px solid rgba(249,115,22,0.4); }
+        .mt-chip.mt-loading { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border); font-weight: 500; }
+        .mt-detail { margin-top: 6px; font-size: 11px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; line-height: 1.55; white-space: pre-line; }
         .suggestion-card .actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
         .suggestion-card button { padding: 8px 14px; border-radius: 8px; font-size: 12px; cursor: pointer; font-family: inherit; border: 1px solid var(--border-light); background: var(--surface-2); color: var(--text); }
         .suggestion-card button.primary { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
@@ -1415,7 +1435,13 @@
                 } else if (ps.state === 'conflict') {
                     cls = 'conflict'; label = '⚠ ' + p._chip; click = `pickGame('${mid}')`; title = 'Opposite of a bet you logged — open Details';
                 }
-                return `<button class="pick-chip ${cls}" title="${_esc(title)}" onclick="${click}">${_esc(label)}</button>`;
+                // "this way" directive — riding the chip once the make/take
+                // verdict is in. Hidden once logged / on a conflict (moot).
+                const showMt = p._mtChip && ps.state !== 'logged' && ps.state !== 'conflict';
+                const mtPill = showMt
+                    ? `<span class="mt-pill ${p._mt.rec === 'MAKE' ? 'make' : 'take'}" title="how to enter — full read on Details">${_esc(p._mtChip)}</span>`
+                    : '';
+                return `<span class="pick-chip-row"><button class="pick-chip ${cls}" title="${_esc(title)}" onclick="${click}">${_esc(label)}</button>${mtPill}</span>`;
             }).join('');
         });
     }
@@ -1535,6 +1561,14 @@
                                     reasons: d.nrfi.reasons || [], query_text: d.query || null,
                                     allow_duplicate: true } });
                         }
+                        // "this way" — fetch the live make/take verdict per pick
+                        // with a Poly market and ride it on the chip. Populates
+                        // _makeTakeCache too, so oneTapLog enters at the rec.
+                        await Promise.all(picks.map(async p => {
+                            if (!p._slug || p._lean) return;   // no book call for leans
+                            const j = await _fetchMakeTakeVerdict(p._slug, mid, p.market_type, p.side, p.units, d.starts_in_min, p._inv);
+                            if (j) { p._mt = j; p._mtChip = _mtShort(j); }
+                        }));
                         _verdictCache.set(mid, { picks, fetchedAt: Date.now() });
                         _renderPickLines();
                     }
@@ -1553,8 +1587,9 @@
         if (!p) return;
         // Safety: never one-tap the opposite/correlated side of a logged bet.
         if (_pickState(mid, p.market_type, p.side, p.units).state === 'conflict') { pickGame(mid); return; }
-        // Entry = the current line (the suggestion's live PMM price).
-        const body = Object.assign({}, p._body);
+        // Carry the make/take rec onto the entry if we have a live verdict
+        // (cached when the dossier was open for this game). No-op otherwise.
+        const body = _applyMakeTakeToBody(Object.assign({}, p._body));
         try {
             const r = await authFetch('/api/handicapper/pick', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2029,6 +2064,17 @@
                     </div>
                     ${(s.edge_pp != null && s.edge_pp > 0) ? `<div class="pick-kelly">est. edge +${Number(s.edge_pp).toFixed(1)}pp${s.kelly_pct ? ` · ¼-Kelly ${Number(s.kelly_pct).toFixed(1)}% BR` : ''} → ${s.units}u</div>` : ''}
                     <div class="pick-meta">${metaLine}</div>
+                    ${(s.pmm_slug && s.gates_cleared) ? `<div class="mt-wrap"
+                        data-slug="${_esc(s.pmm_slug)}"
+                        data-mid="${_esc(d.market_id || '')}"
+                        data-side="${_esc(s.side)}"
+                        data-units="${s.units}"
+                        data-sim="${d.starts_in_min != null ? d.starts_in_min : ''}"
+                        data-inverse="${s.pmm_synthetic ? 1 : ''}"
+                        data-mt="${_esc(s.market_type)}">
+                        <div class="mt-chip mt-loading"><span>checking book…</span></div>
+                        <div class="mt-detail"></div>
+                      </div>` : ''}
                     ${whyHtml}
                     ${softNote}
                     <div class="actions">
@@ -2361,9 +2407,146 @@
         }
 
         el.innerHTML = html;
+        _loadAllMakeTake(el);
     }
 
     // ── Make-vs-take execution chip ───────────────────────────────────
+    // Live order-book verdict per suggested side. MAKE = rest a maker on
+    // Polymarket at the bid (fee-free, the best price); TAKE = cross now —
+    // routed to the cheapest US-legal venue (Polymarket fee-inclusive ask
+    // vs the sportsbook pool). Driven by /api/handicapper/make-take, which
+    // weighs top-of-book imbalance + the clock (near tip → take). The chip
+    // is the directive; .mt-detail carries the full read. The latest result
+    // is cached per (mid:mt:side) so a one-tap log enters at the rec (make→bid,
+    // take→PMM fee-inclusive ask) — see _applyMakeTakeToBody. Polymarket-only.
+    const _makeTakeCache = new Map();   // "mid:mt:side" -> make-take JSON
+
+    function _mtKey(mid, mt, side) { return `${mid}:${mt}:${side}`; }
+
+    // Fetch one make/take verdict (used by the games-list prefetch so the
+    // "this way" pill rides the chip). Caches in _makeTakeCache so a one-tap
+    // log enters at the rec. Returns the JSON or null.
+    async function _fetchMakeTakeVerdict(slug, mid, mt, side, units, sim, inverse) {
+        if (!slug) return null;
+        const p = new URLSearchParams({ slug });
+        if (units != null) p.set('units', units);
+        if (sim != null && sim !== '') p.set('starts_in_min', sim);
+        if (inverse) p.set('inverse', '1');   // synthetic NO side — flip the book
+        try {
+            const r = await authFetch('/api/handicapper/make-take?' + p.toString());
+            const j = await r.json();
+            if (!j || !j.ok || !j.available) return null;
+            if (mid) _makeTakeCache.set(_mtKey(mid, mt, side), j);
+            return j;
+        } catch (e) { return null; }
+    }
+
+    // Short directive for the game-card pill: "MAKE Polymarket 46¢" (rest at
+    // the bid) / "TAKE Polymarket 54¢" (cross at the fee-inclusive ask). The
+    // full read lives on Details. Polymarket-only — no sportsbook routing.
+    function _mtShort(j) {
+        if (!j || !j.available) return null;
+        if (j.rec === 'MAKE') return `MAKE Polymarket ${j.make_price}¢`;
+        return `TAKE Polymarket ${Math.round(j.take_eff)}¢`;
+    }
+
+    function _loadAllMakeTake(root) {
+        if (!_canBet) return;
+        (root || document).querySelectorAll('.mt-wrap[data-slug]').forEach(_loadMakeTake);
+    }
+
+    async function _loadMakeTake(wrap) {
+        const slug = wrap.getAttribute('data-slug');
+        if (!slug) return;
+        const chip = wrap.querySelector('.mt-chip');
+        const detail = wrap.querySelector('.mt-detail');
+        const mid = wrap.getAttribute('data-mid');
+        const mt  = wrap.getAttribute('data-mt');
+        const side = wrap.getAttribute('data-side');
+        const p = new URLSearchParams({ slug });
+        const units = wrap.getAttribute('data-units'); if (units) p.set('units', units);
+        const sim = wrap.getAttribute('data-sim');     if (sim !== '' && sim != null) p.set('starts_in_min', sim);
+        if (wrap.getAttribute('data-inverse')) p.set('inverse', '1');  // synthetic NO side
+        try {
+            const r = await authFetch('/api/handicapper/make-take?' + p.toString());
+            const j = await r.json();
+            if (!j || !j.ok || !j.available) { wrap.style.display = 'none'; return; }
+            if (mid) _makeTakeCache.set(_mtKey(mid, mt, side), j);
+            _renderMakeTakeChip(chip, detail, j);
+        } catch (e) { wrap.style.display = 'none'; }
+    }
+
+    function _renderMakeTakeChip(chip, detail, j) {
+        if (!chip) return;
+        let verdict;
+        if (j.rec === 'MAKE') {
+            chip.className = 'mt-chip make';
+            verdict = `<span class="mt-tag">MAKE</span> Polymarket ${j.make_price}¢`;
+        } else {
+            chip.className = 'mt-chip take';
+            verdict = `<span class="mt-tag">TAKE</span> Polymarket ${Math.round(j.take_eff)}¢`;
+        }
+        chip.innerHTML = verdict;
+        if (detail) detail.innerHTML = _esc(_makeTakeDetail(j));
+    }
+
+    // The full read for the details page: book touch, spread, fee, imbalance,
+    // and the engine's one-line "why". Quiet on the chip, verbose here.
+    function _makeTakeDetail(j) {
+        const bits = [];
+        const n = x => Number(x).toLocaleString();
+        if (j.best_bid != null && j.best_ask != null)
+            bits.push(`book ${j.best_bid}¢ / ${j.best_ask}¢ (spread ${j.spread}¢)`);
+        // Touch = the queue you'd sit behind at the bid vs supply at the ask
+        // (the fill-risk read). 2-level imbalance shown as secondary context.
+        if (j.queue_ahead != null && j.ask_touch != null)
+            bits.push(`top row ${j.best_bid}¢: ${n(j.queue_ahead)} bid vs ${n(j.ask_touch)} offered${j.touch_imbalance != null ? ` (${j.touch_imbalance}×)` : ''}`);
+        if (j.rec === 'TAKE') {
+            if (j.take_fee != null) bits.push(`PMM take ${j.best_ask}¢ +${j.take_fee}¢ fee = ${j.take_eff}¢`);
+        } else {
+            if (j.take_cost != null) bits.push(`taking would cost ${j.take_cost}¢ all-in`);
+        }
+        let s = bits.join(' · ');
+        const why = (j.why || [])[0];
+        if (why) s += (s ? '\n' : '') + why;
+        return s;
+    }
+
+    // Fold the latest make-take verdict into a log body so entry_price follows
+    // the rec the user saw and (presumably) acted on — Polymarket-only:
+    // MAKE → rest at the bid (the bid-american default); TAKE → cross at the
+    // fee-inclusive ask (`take_eff` cents → american, so CLV/to-WIN carry the
+    // real fee cost). entry_book stays PMM. The rec is stashed in signal_blob
+    // for the 2-week make-vs-take review.
+    function _applyMakeTakeToBody(body) {
+        if (!body || !body.market_id) return body;
+        const j = _makeTakeCache.get(_mtKey(body.market_id, body.market_type, body.side));
+        if (!j || !j.available) return body;
+        const exec = { rec: j.rec, venue: 'PMM' };
+        if (j.rec === 'TAKE') {
+            body.book = 'PMM';
+            const amer = _centsToAmer(j.take_eff);
+            if (amer != null) body.price = amer;
+            exec.take_eff = j.take_eff;
+        } else {
+            exec.make_cents = j.make_price;   // rest at the bid (default entry)
+        }
+        exec.entry_price = body.price;
+        exec.entry_book = body.book;
+        body._price = body.price;
+        body.signal_blob = Object.assign({}, body.signal_blob, { execution: exec });
+        return body;
+    }
+
+    // Polymarket cents (fee-inclusive) -> American odds, for storing a TAKE's
+    // true entry in the same american form CLV / to-WIN math expects.
+    function _centsToAmer(cents) {
+        const p = Number(cents) / 100;
+        if (!(p > 0 && p < 1)) return null;
+        return (p >= 0.5) ? -Math.round((p / (1 - p)) * 100)
+                          :  Math.round(((1 - p) / p) * 100);
+    }
+
     function renderMarketCard(mt, blk, d, sugIndex) {
         // sugIndex: Map<"mt:side", suggestion_array_index>. Used to flag
         // bot-picked sides (visual highlight + "BOT" tag on the button
@@ -2792,13 +2975,6 @@
             }
         }
 
-        // 3b) Order-book pressure — heavy bids vs thin offers on this side
-        //     = demand sellers aren't meeting; leading indicator the line
-        //     is about to move toward the pick.
-        if (pick.book_imb != null && pick.book_imb >= 1.3) {
-            lines.push(`Order book: ${pick.book_imb}× more bid than offered on ${sideName} — buyers pressing, line likely moving this way`);
-        }
-
         // 4) Polymarket entry target — only when it differs from PIN's
         //    current price (otherwise it's trivial and just fills space).
         const pinSide = (blk.pin_current || {})[pick.side] || {};
@@ -2923,6 +3099,10 @@
             // flow from double-logs on a refresh / repeat ask.
             allow_duplicate: true,
         };
+        // If the make/take engine has a live verdict for this side, log the
+        // entry at the venue/price it recommended (make→bid, take→cheapest
+        // book) and stash the rec for the make-vs-take review.
+        _applyMakeTakeToBody(body);
         const submitBtn = document.getElementById('lmSubmit');
         submitBtn.disabled = true; submitBtn.textContent = 'Logging…';
         _lmStatus('info', 'POSTing to /api/handicapper/pick…');
