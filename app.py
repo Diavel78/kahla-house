@@ -7095,48 +7095,6 @@ def api_handicapper_worldcup():
                     "matches": matches, **meta})
 
 
-@app.route("/debug-worldcup")
-def debug_worldcup():
-    """PUBLIC ESPN↔PMM World Cup join diagnostic (no auth; public
-    scoreboard + market data, no secrets — same posture as /debug-kalshi).
-    Lets a session verify the fifa.world shape, ESPN team strings, the
-    date span ESPN returns, and the country-name match rate FROM VERCEL
-    (sandbox WebFetch is WAF-blocked). Tune _WC_COUNTRY_ALIASES from
-    `unmatched_espn`, then this route can be removed."""
-    now = datetime.now(timezone.utc)
-    dates = f"{now:%Y%m%d}-{(now + timedelta(days=8)):%Y%m%d}"
-    espn_events = _espn_scoreboard_raw("soccer", "fifa.world", dates=dates)
-    espn_matches = [m for m in (_espn_soccer_match(e) for e in espn_events)
-                    if m and m.get("away") and m.get("home")]
-    import pmm_markets as _pm
-    try:
-        pmm = _pm.list_world_cup(get_client()) or {"matches": []}
-    except Exception as e:
-        pmm = {"matches": [], "err": str(e)[:200]}
-    pmm_keys = {}
-    for pm in pmm.get("matches", []):
-        t1, t2 = _pm._wc_teams_from_title(pm.get("title") or "")
-        if t1 and t2:
-            pmm_keys[frozenset({_wc_country_key(t1), _wc_country_key(t2)})] = pm.get("title")
-    matched, unmatched = [], []
-    for m in espn_matches:
-        k = frozenset({_wc_country_key(m["away"]), _wc_country_key(m["home"])})
-        rec = {"espn": f"{m['away']} vs {m['home']}", "date": m["date"],
-               "state": m["state"], "score": f"{m['away_score']}-{m['home_score']}",
-               "pmm": pmm_keys.get(k)}
-        (matched if k in pmm_keys else unmatched).append(rec)
-    return jsonify({
-        "ok": True,
-        "espn_count": len(espn_matches),
-        "espn_dates": [m["date"] for m in espn_matches],
-        "espn_teams": sorted({t for m in espn_matches for t in (m["away"], m["home"])}),
-        "pmm_count": len(pmm.get("matches", [])),
-        "matched_count": len(matched),
-        "unmatched_espn": unmatched,
-        "sample_matched": matched[:6],
-    })
-
-
 # ─────────────── Polymarket position → bot_picks sync ───────────────
 # Goal: the user's real Polymarket positions become the source of truth
 # for "did I take this pick" + actual fill price + resolution. Two

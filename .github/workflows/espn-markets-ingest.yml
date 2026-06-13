@@ -1,0 +1,66 @@
+name: ESPN → markets ingest (cutover spine, DARK)
+
+# STAGED / DARK — manual only. This is the Odds-API-cutover schedule spine
+# (scripts/ingest_espn_markets.py): it creates `markets` rows from ESPN's
+# free scoreboard so the games list / pm-snapshot / dossier / resolver keep
+# working after The Odds API lapses (June 25 2026).
+#
+# It is NOT on a schedule on purpose. Running it --commit while
+# scrapers/odds_api.py still creates rows risks duplicate markets (gotcha
+# #30). Use it dry-run now to validate ESPN coverage per sport; flip to
+# --commit (and add a schedule) at cutover, AFTER odds_api is retired.
+#
+# Default run is DRY-RUN (writes nothing). Set commit=true to insert.
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY (only used when
+# committing). Free — ESPN scoreboard is public, no Odds API credits.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sport:
+        description: "Single sport code (MLB/NBA/NHL/NFL/CBB/NCAAF/WORLDCUP); blank = all"
+        required: false
+        default: ""
+      days:
+        description: "Lookahead window in days"
+        required: false
+        default: "8"
+      commit:
+        description: "Actually write rows? (false = dry-run, prints only)"
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: espn-markets-ingest
+  cancel-in-progress: true
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: kahla-scanner
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run ESPN→markets ingest
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          python -m scripts.ingest_espn_markets \
+            ${{ github.event.inputs.sport && format('--sport {0}', github.event.inputs.sport) || '' }} \
+            --days ${{ github.event.inputs.days || '8' }} \
+            ${{ github.event.inputs.commit == 'true' && '--commit' || '' }}
