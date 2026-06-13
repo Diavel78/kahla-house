@@ -2944,39 +2944,14 @@ def _fetch_kalshi_orderbook(ticker: str) -> dict:
     return {"error": last}
 
 
-# ───────────── Order-book depth readers + make/take signal ─────────────
+# ───────────── Order-book depth readers ─────────────
 # Both venues expose a full ladder. Normalize each to a common per-side shape
 # {best_bid, best_ask, bids:[(cent,size)], asks:[(cent,size)]} for the side
-# you'd BUY, so the make/take math is venue-agnostic.
-_BOOK_TOP_LVLS = 2     # Imbalance is read from JUST the best level (+ one
-                       # behind) — NOT a cent window. Far lottery bids parked
-                       # at 1c and liquidity sellers dumping at 99c reflect
-                       # zero pressure at the touch and would wildly distort a
-                       # depth sum. Only the size AT the touch matters: the
-                       # queue ahead of your maker (best bid) vs the supply
-                       # you'd take through (best ask). One-behind guards
-                       # against a thin/spoof top line; drop to 1 for purest.
-
-# THE TAKE RULE (research-calibrated June 2026 — see the deep-research
-# session in chat history): ≥1.5× more contracts BID than OFFERED → TAKE,
-# no clock/edge conditions, PROVIDED the bid side carrying the signal clears
-# the size floor. More buyers than sellers at the top = price pressure UP =
-# a resting maker joins the back of a queue sellers aren't coming to clear
-# (queue-reactive fill intensities + back-of-queue adverse selection —
-# Huang/Lehalle/Rosenbaum 2015, Moallemi & Yuan 2016, Lehalle & Mounjid
-# 2017). History: original tree (3x/2x-with-clock/5u) was too conservative;
-# the user's flat 1.3× was the most aggressive trigger found anywhere in
-# academia or shipped practice — the practitioner cluster is 1.5-2.0×, and
-# every credible source pairs the ratio with a minimum-size gate (a 1.5×
-# read on a few-hundred-contract book is inside noise AND the cheapest book
-# state to spoof; thin books are the most manipulable — Gu et al. 2024).
-# Checked on BOTH the 2-level top-of-book sum AND the L1 touch (a seller
-# wall one level up dilutes the 2-level read and can hide a buried touch);
-# either crossing 1.5× WITH its bid size ≥ the floor fires.
-_TAKE_IMB = 1.5          # bid size ≥ this × ask size ⇒ TAKE
-_TAKE_MIN_QUEUE = 500    # ...and the firing read's bid size ≥ this many
-                         # contracts (thin-book noise/spoof gate; tune via
-                         # the signal_blob.book_imb validation dataset)
+# you'd BUY. The make/take signal that read these was removed June 2026 —
+# Polymarket sports books are deep (1M+ contracts a tick), so the thin-book
+# imbalance/spoof/min-queue logic was solving a non-problem and mis-fired;
+# entries just use the current line now. (Git history has the old engine.)
+# These raw readers stay for /debug-orderbook + the cent snapshotter.
 
 
 def _pmm_book(client, slug: str) -> dict | None:
@@ -3033,117 +3008,9 @@ def _kalshi_book(ticker: str) -> dict | None:
             "best_ask": asks[0][0] if asks else None}
 
 
-def _invert_book(book: dict | None) -> dict | None:
-    """NO-side view of a binary YES book. A NO buyer is a YES seller, so the
-    NO bids are the YES asks at (100−c) and vice versa. Needed because PMM
-    has ONE market per line (the YES side); picks on the synthesized inverse
-    side (pmm `synthetic: true`) share the YES market's slug, and reading the
-    YES book unflipped computes make/take + imbalance for the WRONG side."""
-    if not book:
-        return None
-    bids = sorted([(100 - c, q) for c, q in (book.get("asks") or [])],
-                  key=lambda x: -x[0])
-    asks = sorted([(100 - c, q) for c, q in (book.get("bids") or [])],
-                  key=lambda x: x[0])
-    return {"bids": bids, "asks": asks,
-            "best_bid": bids[0][0] if bids else None,
-            "best_ask": asks[0][0] if asks else None}
-
-
-def _pmm_taker_fee_cents(price_cents) -> float:
-    """Polymarket US TAKER fee per share, in cents: 5c · p·(1-p) (p = price
-    in dollars) — peaks at 1.25c/share at 50c, tapers to the wings. Confirmed
-    on live tickets (54c -> $1.24/100sh, 47c -> $1.25/100sh) AND against the
-    published schedule (0.05·C·p·(1-p), effective Apr 2026). The fee PEAKS at
-    coin-flips, exactly where sharp action lives, so taking a 50/50 is the
-    most expensive case."""
-    if price_cents is None:
-        return 0.0
-    p = max(0.0, min(1.0, price_cents / 100.0))
-    return round(5.0 * p * (1.0 - p), 2)
-
-
-def _pmm_maker_rebate_cents(price_cents) -> float:
-    """Polymarket US MAKER rebate per share, in cents: +1.25c · p·(1-p),
-    credited at fill (max +0.31c at 50c). Makers don't just pay zero — they
-    get PAID (verified June 2026 vs docs.polymarket.us/fees: 0.0125·C·p·(1-p)).
-    Counted as a forgone-rebate term in the make-vs-take cost gap."""
-    if price_cents is None:
-        return 0.0
-    p = max(0.0, min(1.0, price_cents / 100.0))
-    return round(1.25 * p * (1.0 - p), 2)
-
-
-def _book_signal(book: dict | None, edge_units: float = 1,
-                 starts_in_min: float | None = None) -> dict | None:
-    """Make-vs-take for BUYING this side, FEE- AND TIME-aware. A maker fills
-    only if SELLERS hit your bid (zero fee) and it needs TIME to happen; a
-    taker crosses to the ask + pays the fee (costs `spread + fee`, ~2c+ near
-    50/50) but is instant. So the call is "will my maker fill before I need
-    the bet?" — driven by the book (will sellers hit it?) AND the clock (is
-    there time?). DEFAULT MAKE; TAKE when the maker will likely MISS — a
-    bid-heavy book (≥ _TAKE_IMB on either read, unconditional) OR the clock
-    running out. Reported take price is FEE-INCLUSIVE, not the ask."""
-    if not book or book.get("best_bid") is None or book.get("best_ask") is None:
-        return None
-    bb, ba = book["best_bid"], book["best_ask"]
-    spread = ba - bb
-    fee = _pmm_taker_fee_cents(ba)
-    rebate = _pmm_maker_rebate_cents(bb)   # what a filled maker would EARN
-    take_eff = round(ba + fee, 2)          # TRUE cost of taking (ask + fee)
-    # take vs make all-in gap: spread + taker fee + the maker rebate you
-    # give up by not resting (~2.6c at 50/50 on a 1c book).
-    take_cost = round(spread + fee + rebate, 2)
-    # Top-of-book sizes only (best + one behind) — see _BOOK_TOP_LVLS.
-    top_bid = sum(q for _, q in book["bids"][:_BOOK_TOP_LVLS])
-    top_ask = sum(q for _, q in book["asks"][:_BOOK_TOP_LVLS])
-    imb = round(top_bid / top_ask, 2) if top_ask else None
-    # Level-1 touch: the queue you'd actually sit behind at the bid vs the
-    # supply offered at the ask. The 2-level `imb` can be diluted by a seller
-    # wall ONE level up (which doesn't help you fill at YOUR price) and hide a
-    # lopsided touch — so the take rule checks BOTH reads. See _TAKE_IMB.
-    l1_bid = round(book["bids"][0][1]) if book["bids"] else 0
-    l1_ask = round(book["asks"][0][1]) if book["asks"] else 0
-    touch_imb = round(l1_bid / l1_ask, 2) if l1_ask else None
-    sim = starts_in_min
-
-    take, why = False, []
-    # THE RULE — ≥1.5x more contracts bid than offered ⇒ TAKE, provided the
-    # firing read's bid size clears the thin-book floor (see _TAKE_IMB /
-    # _TAKE_MIN_QUEUE). Either book read fires.
-    if (imb is not None and imb >= _TAKE_IMB and top_bid >= _TAKE_MIN_QUEUE):
-        take = True
-        why.append(f"{round(top_bid):,} bid vs {round(top_ask):,} offered ({imb}x — {int(round((imb - 1) * 100))}% more buyers than sellers) — a maker won't fill; take it")
-    elif (touch_imb is not None and touch_imb >= _TAKE_IMB
-          and l1_bid >= _TAKE_MIN_QUEUE):
-        take = True
-        why.append(f"touch {bb}c: {l1_bid:,} queued vs {l1_ask:,} offered ({touch_imb}x) — buried maker; take it")
-    # Clock fallback — even on a balanced book, a maker needs TIME to fill;
-    # inside 30m a resting limit simply won't fill before the game.
-    elif sim is not None and sim <= 30:
-        if imb is not None and imb <= 0.4:
-            why.append(f"{round(sim)}m to tip but ask-heavy ({imb}x) — sellers fill your maker fast, still make")
-        else:
-            take = True
-            why.append(f"{round(sim)}m to tip — a maker won't fill in time, take it in")
-    else:
-        why.append(f"rest the maker — taking costs {take_cost}c ({spread}c spread + {fee}c fee + {rebate}c forgone maker rebate)")
-    return {"rec": "TAKE" if take else "MAKE",
-            "make_price": bb, "take_price": ba, "take_fee": fee,
-            "make_rebate": rebate,
-            "take_eff": take_eff, "take_cost": take_cost,
-            "target": take_eff if take else bb,    # fee-inclusive take / rest at bid
-            "best_bid": bb, "best_ask": ba, "spread": spread, "imbalance": imb,
-            "top_bid_size": round(top_bid), "top_ask_size": round(top_ask),
-            "touch_imbalance": touch_imb, "queue_ahead": l1_bid, "ask_touch": l1_ask,
-            "why": why}
-
-
-# Best-execution routing to sportsbooks was REMOVED June 2026 — the user is
-# Polymarket-exclusive and doesn't bet the US books, so TAKE always means
-# "cross on Polymarket" (the fee-inclusive ask). MAKE = rest at the bid. No
-# venue routing. (Full _best_book_for / _ROUTE_BOOKS routing is in git history
-# if it's ever wanted back.)
+# make/take signal (_book_signal + fee/rebate + _invert_book) removed
+# June 2026 — Polymarket sports books are deep, so the thin-book imbalance
+# logic was a non-problem. Entries use the current line. Git history has it.
 
 
 @app.route("/debug-orderbook")
@@ -3202,7 +3069,6 @@ def debug_orderbook():
             out["polymarket"]["book_top5"] = None if not pb else {
                 "best_bid": pb["best_bid"], "best_ask": pb["best_ask"],
                 "bids": pb["bids"][:5], "asks": pb["asks"][:5]}
-            out["polymarket"]["make_take"] = _book_signal(pb)
     except Exception as e:
         out["polymarket"]["error"] = f"{type(e).__name__}: {e}"[:200]
 
@@ -3218,44 +3084,7 @@ def debug_orderbook():
         out["kalshi"]["book_top5"] = None if not kb else {
             "best_bid": kb["best_bid"], "best_ask": kb["best_ask"],
             "bids": kb["bids"][:5], "asks": kb["asks"][:5]}
-        out["kalshi"]["make_take"] = _book_signal(kb)
     return jsonify(out)
-
-
-@app.route("/api/handicapper/make-take")
-@bot_required
-def api_make_take():
-    """Live make-vs-take for one picked side, POLYMARKET-ONLY. The card polls
-    this (slug + units + starts_in_min) so the chip updates as the book moves.
-    MAKE -> rest a Polymarket maker at the bid (fee-free, the best price).
-    TAKE -> cross on Polymarket at the fee-inclusive ask (`take_eff`). No
-    sportsbook routing — the user is Polymarket-exclusive."""
-    slug = (request.args.get("slug") or "").strip()
-    if not slug:
-        return jsonify({"ok": False, "error": "missing slug"}), 400
-    try:
-        units = float(request.args.get("units") or 1)
-    except ValueError:
-        units = 1
-    try:
-        sim = float(request.args.get("starts_in_min"))
-    except (TypeError, ValueError):
-        sim = None
-    # inverse=1 → the pick is the synthesized NO side of this market; flip
-    # the book so the rec is for the side the user is actually buying.
-    inverse = (request.args.get("inverse") or "") in ("1", "true", "yes")
-    try:
-        book = _pmm_book(get_client(), slug)
-    except Exception as e:
-        return jsonify({"ok": True, "available": False,
-                        "error": f"{type(e).__name__}: {e}"[:160]})
-    if inverse:
-        book = _invert_book(book)
-    sig = _book_signal(book, edge_units=units, starts_in_min=sim)
-    if not sig:
-        return jsonify({"ok": True, "available": False})
-    return jsonify({"ok": True, "available": True,
-                    "rec": sig["rec"], "make_price": sig["make_price"], **sig})
 
 
 # ───────────── PMM + Kalshi cent-logger (the cross-confirm memory) ─────────
@@ -3745,8 +3574,6 @@ def api_handicapper_paperlog():
                 "signal_blob": {"combined_score": s.get("combined_score"),
                                 "model_edge_pp": s.get("model_edge_pp"),
                                 "splits_pp": s.get("splits_pp"),
-                                "book_imb": s.get("book_imb"),
-                                "book_pressure_pp": s.get("book_pressure_pp"),
                                 "sticky": bool(s.get("sticky")),
                                 "x_score": s.get("x_score"),
                                 "x_side": s.get("x_side"),
