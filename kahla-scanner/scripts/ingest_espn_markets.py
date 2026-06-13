@@ -194,7 +194,23 @@ def ingest_sport(sport: str, days: int, commit: bool, prune: bool = False) -> di
         aliases = db.list_team_aliases(sport)
     except Exception:
         aliases = {}
-    existing = db.list_active_markets(sport)
+    # Candidate set = the UPCOMING window only, NOT all-active. The markets
+    # table is never cleaned (gotcha #12), so list_active_markets(sport)
+    # returns hundreds of stale past games and gets truncated at PostgREST's
+    # 1000-row cap — which dropped the upcoming rows we need to match
+    # against and made the ingest mint a fresh dupe every tick. Windowing to
+    # [now-6h, now+days+2] keeps the set small + complete → idempotent.
+    now = datetime.now(timezone.utc)
+    win_lo = (now - timedelta(hours=6)).isoformat()
+    win_hi = (now + timedelta(days=days + 2)).isoformat()
+    try:
+        existing = (db.client().table("markets")
+                    .select("id,event_name,event_start,sport,status")
+                    .eq("status", "active").eq("sport", sport)
+                    .gte("event_start", win_lo).lte("event_start", win_hi)
+                    .order("event_start").limit(3000).execute().data) or []
+    except Exception:
+        existing = db.list_active_markets(sport)   # fallback
     created = reused = 0
     kept_ids: set[str] = set()
     for g in games:
