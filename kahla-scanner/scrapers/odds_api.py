@@ -557,6 +557,16 @@ def _find_or_create_market(
                 log.warning("event_start update failed for %s: %s",
                             row.get("id"), e)
         return row["id"]
+    # ESPN-spine cutover: when ESPN owns market creation (scanner-poll
+    # runs `ingest_espn_markets --commit` BEFORE this step with
+    # ESPN_MARKETS_SPINE=1), odds_api must NOT create rows — it only
+    # attaches snapshots to existing ESPN-created markets. This stops
+    # duplicate markets AND The Odds API's broad `mma_mixed_martial_arts`
+    # bucket (which includes GLORY kickboxing) from minting "UFC" rows.
+    # No match → skip this game's snapshots this tick (caller does
+    # `if not mid: continue`).
+    if os.environ.get("ESPN_MARKETS_SPINE"):
+        return None
     # No match — create a new markets row.
     m = Market(
         sport=g.sport,

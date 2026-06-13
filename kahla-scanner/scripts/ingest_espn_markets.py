@@ -212,12 +212,16 @@ def ingest_sport(sport: str, days: int, commit: bool) -> dict:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="ESPN → markets ingest (cutover spine)")
     ap.add_argument("--sport", help="single sport code (e.g. WORLDCUP); default all")
+    ap.add_argument("--exclude", default="",
+                    help="comma-list of sport codes to skip (e.g. WORLDCUP)")
     ap.add_argument("--days", type=int, default=8, help="lookahead window in days")
     ap.add_argument("--commit", action="store_true",
                     help="actually write rows (default: dry-run, prints only)")
     args = ap.parse_args(argv)
 
     sports = [args.sport.upper()] if args.sport else list(_ESPN_SPORTS)
+    skip = {s.strip().upper() for s in args.exclude.split(",") if s.strip()}
+    sports = [s for s in sports if s not in skip]
     bad = [s for s in sports if s not in _ESPN_SPORTS]
     if bad:
         log.error("unknown sport(s): %s (known: %s)", bad, list(_ESPN_SPORTS))
