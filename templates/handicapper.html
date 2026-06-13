@@ -1566,7 +1566,8 @@
                         // _makeTakeCache too, so oneTapLog enters at the rec.
                         await Promise.all(picks.map(async p => {
                             if (!p._slug || p._lean) return;   // no book call for leans
-                            const j = await _fetchMakeTakeVerdict(p._slug, mid, p.market_type, p.side, p.units, d.starts_in_min, p._inv);
+                            const j = await _fetchMakeTakeVerdict(p._slug, mid, p.market_type, p.side, p.units, d.starts_in_min, p._inv,
+                                { sport: d.sport, away: d.away, home: d.home });
                             if (j) { p._mt = j; p._mtChip = _mtShort(j); }
                         }));
                         _verdictCache.set(mid, { picks, fetchedAt: Date.now() });
@@ -2071,7 +2072,10 @@
                         data-units="${s.units}"
                         data-sim="${d.starts_in_min != null ? d.starts_in_min : ''}"
                         data-inverse="${s.pmm_synthetic ? 1 : ''}"
-                        data-mt="${_esc(s.market_type)}">
+                        data-mt="${_esc(s.market_type)}"
+                        data-sport="${_esc(d.sport || '')}"
+                        data-away="${_esc(d.away || '')}"
+                        data-home="${_esc(d.home || '')}">
                         <div class="mt-chip mt-loading"><span>checking book…</span></div>
                         <div class="mt-detail"></div>
                       </div>` : ''}
@@ -2425,13 +2429,19 @@
 
     // Fetch one make/take verdict (used by the games-list prefetch so the
     // "this way" pill rides the chip). Caches in _makeTakeCache so a one-tap
-    // log enters at the rec. Returns the JSON or null.
-    async function _fetchMakeTakeVerdict(slug, mid, mt, side, units, sim, inverse) {
+    // log enters at the rec. ctx = {sport, away, home} lets the backend
+    // consult Kalshi for moneyline. Returns the JSON or null.
+    async function _fetchMakeTakeVerdict(slug, mid, mt, side, units, sim, inverse, ctx) {
         if (!slug) return null;
         const p = new URLSearchParams({ slug });
         if (units != null) p.set('units', units);
         if (sim != null && sim !== '') p.set('starts_in_min', sim);
         if (inverse) p.set('inverse', '1');   // synthetic NO side — flip the book
+        if (mt) p.set('market_type', mt);
+        if (side) p.set('side', side);
+        if (ctx && ctx.sport) p.set('sport', ctx.sport);
+        if (ctx && ctx.away) p.set('away', ctx.away);
+        if (ctx && ctx.home) p.set('home', ctx.home);
         try {
             const r = await authFetch('/api/handicapper/make-take?' + p.toString());
             const j = await r.json();
@@ -2441,13 +2451,12 @@
         } catch (e) { return null; }
     }
 
-    // Short directive for the game-card pill: "MAKE Polymarket 46¢" (rest at
-    // the bid) / "TAKE Polymarket 54¢" (cross at the fee-inclusive ask). The
-    // full read lives on Details. Polymarket-only — no sportsbook routing.
+    // Short directive for the game-card pill: "MAKE Polymarket 46¢" / "TAKE
+    // Kalshi 49¢" — the cheapest fillable across BOTH venues. The full read
+    // (all four options) lives on Details.
     function _mtShort(j) {
-        if (!j || !j.available) return null;
-        if (j.rec === 'MAKE') return `MAKE Polymarket ${j.make_price}¢`;
-        return `TAKE Polymarket ${Math.round(j.take_eff)}¢`;
+        if (!j || !j.available || j.price == null) return null;
+        return `${j.rec} ${j.venue_label || 'Polymarket'} ${Math.round(j.price)}¢`;
     }
 
     function _loadAllMakeTake(root) {
@@ -2467,6 +2476,11 @@
         const units = wrap.getAttribute('data-units'); if (units) p.set('units', units);
         const sim = wrap.getAttribute('data-sim');     if (sim !== '' && sim != null) p.set('starts_in_min', sim);
         if (wrap.getAttribute('data-inverse')) p.set('inverse', '1');  // synthetic NO side
+        if (mt) p.set('market_type', mt);
+        if (side) p.set('side', side);
+        ['sport', 'away', 'home'].forEach(k => {
+            const v = wrap.getAttribute('data-' + k); if (v) p.set(k, v);
+        });
         try {
             const r = await authFetch('/api/handicapper/make-take?' + p.toString());
             const j = await r.json();
@@ -2478,63 +2492,46 @@
 
     function _renderMakeTakeChip(chip, detail, j) {
         if (!chip) return;
-        let verdict;
-        if (j.rec === 'MAKE') {
-            chip.className = 'mt-chip make';
-            verdict = `<span class="mt-tag">MAKE</span> Polymarket ${j.make_price}¢`;
-        } else {
-            chip.className = 'mt-chip take';
-            verdict = `<span class="mt-tag">TAKE</span> Polymarket ${Math.round(j.take_eff)}¢`;
-        }
-        chip.innerHTML = verdict;
+        chip.className = 'mt-chip ' + (j.rec === 'MAKE' ? 'make' : 'take');
+        chip.innerHTML = `<span class="mt-tag">${_esc(j.rec)}</span> ${_esc(j.venue_label || 'Polymarket')} ${Math.round(j.price)}¢`;
         if (detail) detail.innerHTML = _esc(_makeTakeDetail(j));
     }
 
-    // The full read for the details page: book touch, spread, fee, imbalance,
-    // and the engine's one-line "why". Quiet on the chip, verbose here.
+    // The full read for Details: the chosen venue/side's book + every one of
+    // the four options (MAKE/TAKE × Polymarket/Kalshi) all-in, so you can see
+    // why the cheapest fillable won. Quiet on the chip, verbose here.
     function _makeTakeDetail(j) {
         const bits = [];
         const n = x => Number(x).toLocaleString();
         if (j.best_bid != null && j.best_ask != null)
-            bits.push(`book ${j.best_bid}¢ / ${j.best_ask}¢ (spread ${j.spread}¢)`);
-        // Touch = the queue you'd sit behind at the bid vs supply at the ask
-        // (the fill-risk read). 2-level imbalance shown as secondary context.
-        if (j.queue_ahead != null && j.ask_touch != null)
-            bits.push(`top row ${j.best_bid}¢: ${n(j.queue_ahead)} bid vs ${n(j.ask_touch)} offered${j.touch_imbalance != null ? ` (${j.touch_imbalance}×)` : ''}`);
-        if (j.rec === 'TAKE') {
-            if (j.take_fee != null) bits.push(`PMM take ${j.best_ask}¢ +${j.take_fee}¢ fee = ${j.take_eff}¢`);
-        } else {
-            if (j.take_cost != null) bits.push(`taking would cost ${j.take_cost}¢ all-in`);
-        }
+            bits.push(`${_esc(j.venue_label || '')} top row ${j.best_bid}¢/${j.best_ask}¢`
+                + (j.queue_ahead != null && j.ask_touch != null
+                    ? `: ${n(j.queue_ahead)} bid vs ${n(j.ask_touch)} offered${j.touch_imbalance != null ? ` (${j.touch_imbalance}×)` : ''}` : ''));
+        (j.options || []).forEach(o => {
+            const lbl = ({POLYMARKET: 'Poly', KALSHI: 'Kalshi'})[o.venue] || o.venue;
+            bits.push(`${lbl} ${o.rec.toLowerCase()} ${Number(o.all_in).toFixed(1)}¢${o.fillable ? '' : ' (won’t fill)'}`);
+        });
         let s = bits.join(' · ');
         const why = (j.why || [])[0];
         if (why) s += (s ? '\n' : '') + why;
         return s;
     }
 
-    // Fold the latest make-take verdict into a log body so entry_price follows
-    // the rec the user saw and (presumably) acted on — Polymarket-only:
-    // MAKE → rest at the bid (the bid-american default); TAKE → cross at the
-    // fee-inclusive ask (`take_eff` cents → american, so CLV/to-WIN carry the
-    // real fee cost). entry_book stays PMM. The rec is stashed in signal_blob
-    // for the 2-week make-vs-take review.
+    // Fold the chosen execution into the log body so entry_price + entry_book
+    // follow the cheapest fillable venue/side the engine picked (all-in cents
+    // → american, so CLV/to-WIN carry the real fee/rebate). entry_book = the
+    // venue actually used (PMM or KALSHI). The full verdict + all four options
+    // are stashed in signal_blob.execution for the make-vs-take review.
     function _applyMakeTakeToBody(body) {
         if (!body || !body.market_id) return body;
         const j = _makeTakeCache.get(_mtKey(body.market_id, body.market_type, body.side));
-        if (!j || !j.available) return body;
-        const exec = { rec: j.rec, venue: 'PMM' };
-        if (j.rec === 'TAKE') {
-            body.book = 'PMM';
-            const amer = _centsToAmer(j.take_eff);
-            if (amer != null) body.price = amer;
-            exec.take_eff = j.take_eff;
-        } else {
-            exec.make_cents = j.make_price;   // rest at the bid (default entry)
-        }
-        exec.entry_price = body.price;
-        exec.entry_book = body.book;
-        body._price = body.price;
-        body.signal_blob = Object.assign({}, body.signal_blob, { execution: exec });
+        if (!j || !j.available || j.price == null) return body;
+        body.book = (j.venue === 'KALSHI') ? 'KALSHI' : 'PMM';
+        const amer = _centsToAmer(j.price);
+        if (amer != null) { body.price = amer; body._price = amer; }
+        body.signal_blob = Object.assign({}, body.signal_blob, {
+            execution: { rec: j.rec, venue: j.venue, price: j.price,
+                         entry_book: body.book, options: j.options || [] } });
         return body;
     }
 
