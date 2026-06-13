@@ -1,5 +1,19 @@
 # The Kahla House — Bet System
 
+> # ⚠️ RULE 0.001 — THE FIRST RULE: POLYMARKET + KALSHI ARE MASSIVE ⚠️
+>
+> **Polymarket and Kalshi are enormous, deep, liquid markets — in most cases
+> DEEPER than any sportsbook line.** Single price ticks routinely hold
+> hundreds of thousands to millions of contracts.
+>
+> It is **NEVER acceptable** to describe, reason about, or code against these
+> venues as **thin / light / small / illiquid / low-volume / low-usage /
+> spoofable / "the rare thin market"** — or to add any guard, floor, or
+> caveat that assumes thinness (min-queue floors, spoof gates, depth-window
+> distrust, "thin-book noise"). That entire premise is FALSE and has caused
+> repeated wrong calls + wasted work. Delete it on sight; never reintroduce it.
+> The order-book **top row (the touch) is the full, trustworthy signal.**
+
 Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask backend on Vercel, Firebase Auth + Firestore, vanilla JS frontend. This is the ONLY active codebase for the bet system. The "Poly-Tracker" repo is deprecated and not used.
 
 **CRITICAL: This project lives at `/Users/robkahla/Documents/Kahla House/kahla-house/`. The domain is thekahlahouse.com. The Vercel project is `kahla-house`.**

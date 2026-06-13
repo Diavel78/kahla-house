@@ -2950,29 +2950,20 @@ def _fetch_kalshi_orderbook(ticker: str) -> dict:
 # you'd BUY, so the make/take math is venue-agnostic. The decision reads the
 # TOP ROW ONLY (best bid size vs best ask size) — a 2-level/depth sum gets
 # fooled by a deep wall one tick off the touch (it took the Cardinals when
-# the touch was 4x ask-heavy). Polymarket sports books are deep; no thin
-# market to model with a depth window — the touch is the whole signal.
+# the touch was 4x ask-heavy). These books are massive (RULE 0.001), so the
+# touch ratio is the whole signal — no depth window, no size floor.
 
-# THE TAKE RULE (research-calibrated June 2026 — see the deep-research
-# session in chat history): ≥1.5× more contracts BID than OFFERED → TAKE,
-# no clock/edge conditions, PROVIDED the bid side carrying the signal clears
-# the size floor. More buyers than sellers at the top = price pressure UP =
-# a resting maker joins the back of a queue sellers aren't coming to clear
-# (queue-reactive fill intensities + back-of-queue adverse selection —
-# Huang/Lehalle/Rosenbaum 2015, Moallemi & Yuan 2016, Lehalle & Mounjid
-# 2017). History: original tree (3x/2x-with-clock/5u) was too conservative;
-# the user's flat 1.3× was the most aggressive trigger found anywhere in
-# academia or shipped practice — the practitioner cluster is 1.5-2.0×, and
-# every credible source pairs the ratio with a minimum-size gate (a 1.5×
-# read on a few-hundred-contract book is inside noise AND the cheapest book
-# state to spoof; thin books are the most manipulable — Gu et al. 2024).
-# Checked on BOTH the 2-level top-of-book sum AND the L1 touch (a seller
-# wall one level up dilutes the 2-level read and can hide a buried touch);
-# either crossing 1.5× WITH its bid size ≥ the floor fires.
+# THE TAKE RULE (research-calibrated June 2026): TAKE when the TOP ROW (the
+# touch) is ≥ 1.5× more contracts BID than OFFERED — more buyers than
+# sellers at the price = pressure UP = a resting maker joins the back of a
+# queue sellers aren't coming to clear (queue-reactive fill intensities +
+# back-of-queue adverse selection — Huang/Lehalle/Rosenbaum 2015, Moallemi
+# & Yuan 2016, Lehalle & Mounjid 2017). The practitioner cluster is 1.5-2.0×.
+# Read off the TOP ROW only — a 2-level/depth sum gets fooled by a wall one
+# tick off the touch (it took the Cardinals when the touch was 4× ask-heavy).
+# These books are massive (RULE 0.001) — no size floor, no spoof gate; the
+# touch ratio is the whole signal.
 _TAKE_IMB = 1.5          # top-row bid size ≥ this × top-row ask size ⇒ TAKE
-_TAKE_MIN_QUEUE = 500    # ...and the best-bid size ≥ this many contracts
-                         # (thin-book noise/spoof floor — moot on PMM's deep
-                         # sports books, kept for the rare thin market)
 
 
 def _pmm_book(client, slug: str) -> dict | None:
@@ -3102,10 +3093,11 @@ def _book_signal(book: dict | None, edge_units: float = 1,
 
     take, why = False, []
     # THE RULE (research-calibrated): TAKE when the TOP ROW is ≥ _TAKE_IMB
-    # (1.5x) more contracts BID than OFFERED — buyers stacked, sellers thin →
-    # price pressing up, a resting maker won't fill. Otherwise MAKE (rest at
-    # the bid; an ask-heavy or balanced touch means sellers come to you).
-    if (touch_imb is not None and touch_imb >= _TAKE_IMB and l1_bid >= _TAKE_MIN_QUEUE):
+    # (1.5x) more contracts BID than OFFERED — buyers stacked over sellers at
+    # the price → pressing up, a resting maker won't fill. Otherwise MAKE
+    # (rest at the bid; an ask-heavy or balanced touch means sellers come to
+    # you). No size floor — these books are massive (RULE 0.001).
+    if (touch_imb is not None and touch_imb >= _TAKE_IMB):
         take = True
         why.append(f"top row {bb}c: {l1_bid:,} bid vs {l1_ask:,} offered ({touch_imb}x — {int(round((touch_imb - 1) * 100))}% more buyers than sellers) — a maker won't fill; take it")
     # Clock fallback — even on a balanced book, a maker needs TIME to fill;
