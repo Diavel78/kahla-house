@@ -47,8 +47,13 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("ingest_espn_markets")
 
 # Our sport code → (ESPN sport group, ESPN league slug). Soccer is
-# per-competition; add leagues here as we cover them. UFC deliberately
-# omitted — see the module docstring (per-fight shape + ML-only grading).
+# per-competition; add leagues here as we cover them.
+#
+# UFC IS ingested (its SCHEDULE comes from ESPN's mma/ufc scoreboard — a
+# flat list of fights). Schedule ingest and grading are independent: ESPN
+# grades the winner/ML fine (the resolver already does), only
+# method-of-victory PROPS can't auto-grade and stay manual-settle. So we
+# get the upcoming fights here; props are unaffected.
 _ESPN_SPORTS: dict[str, tuple[str, str]] = {
     "MLB":      ("baseball",   "mlb"),
     "NBA":      ("basketball", "nba"),
@@ -56,14 +61,17 @@ _ESPN_SPORTS: dict[str, tuple[str, str]] = {
     "NFL":      ("football",   "nfl"),
     "CBB":      ("basketball", "mens-college-basketball"),
     "NCAAF":    ("football",   "college-football"),
+    "UFC":      ("mma",        "ufc"),
     "WORLDCUP": ("soccer",     "fifa.world"),
 }
 
 # Per-sport match window for the find-or-create dedup — mirror
-# odds_api._MATCH_WINDOW_BY_SPORT (30m MLB for doubleheader safety, wider
-# elsewhere). Kept local so this script stays importable on its own.
+# odds_api._MATCH_WINDOW_BY_SPORT (30m MLB for doubleheader safety, 6h UFC
+# for same-card fights, wider elsewhere). Kept local so this script stays
+# importable on its own.
 _MATCH_WINDOW: dict[str, timedelta] = {
     "MLB": timedelta(minutes=30),
+    "UFC": timedelta(hours=6),
 }
 _DEFAULT_WINDOW = timedelta(hours=12)
 
@@ -80,11 +88,23 @@ def _parse_iso(s: str | None) -> datetime | None:
         return None
 
 
+def _competitor_name(grp: str, c: dict) -> str:
+    """Display name for one ESPN competitor. MMA puts the fighter under
+    `athlete` (not `team`) — see bot_picks_resolver._ufc_match_espn."""
+    if grp == "mma":
+        return ((c.get("athlete") or {}).get("displayName")
+                or (c.get("team") or {}).get("displayName") or "")
+    t = c.get("team") or {}
+    return t.get("displayName") or t.get("name") or t.get("shortDisplayName") or ""
+
+
 def _espn_games(grp: str, league: str, days: int) -> list[dict]:
     """Fetch ESPN scoreboard for [today, today+days] and return upcoming
     games as {away, home, commence}. Live/finished games are skipped — a
-    schedule spine only needs pre-game rows (mirrors the games-list
-    window). Soccer + the core team sports share the competitors shape."""
+    schedule spine only needs pre-game rows. Team sports + soccer read
+    competitor.team; MMA reads competitor.athlete (one event = one fight),
+    falling back to competitor order when home/away isn't flagged (UFC
+    home/away is arbitrary)."""
     now = datetime.now(timezone.utc)
     dates = f"{now:%Y%m%d}-{(now + timedelta(days=days)):%Y%m%d}"
     url = f"https://site.api.espn.com/apis/site/v2/sports/{grp}/{league}/scoreboard"
@@ -104,16 +124,19 @@ def _espn_games(grp: str, league: str, days: int) -> list[dict]:
             if state and state != "pre":
                 continue  # only upcoming — skip in-progress / final
             comp = (ev.get("competitions") or [{}])[0]
+            cs = comp.get("competitors") or []
             home = away = None
-            for c in (comp.get("competitors") or []):
-                t = c.get("team") or {}
-                name = (t.get("displayName") or t.get("name")
-                        or t.get("shortDisplayName") or "")
+            for c in cs:
+                name = _competitor_name(grp, c)
                 if c.get("homeAway") == "home":
                     home = name
                 elif c.get("homeAway") == "away":
                     away = name
-            commence = _parse_iso(ev.get("date"))
+            # MMA / any feed without home-away flags: take the two in order.
+            if not (home and away) and len(cs) == 2:
+                away = away or _competitor_name(grp, cs[0])
+                home = home or _competitor_name(grp, cs[1])
+            commence = _parse_iso(comp.get("date") or ev.get("date"))
             if away and home and commence:
                 games.append({"away": away, "home": home, "commence": commence})
         except Exception:

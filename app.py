@@ -7012,6 +7012,16 @@ def api_handicapper_sport_counts():
     counts: dict[str, int] = {
         s: len(_dedup_games(gs, s)) for s, gs in by_sport.items()
     }
+    # World Cup gets a count badge + count-based ordering like every other
+    # sport (it's not in the markets table — sourced from _build_worldcup =
+    # ESPN fifa.world + PMM, so this equals what /api/handicapper/worldcup
+    # shows). Cache-backed; silent-skip on failure.
+    try:
+        wc_matches, _wc_meta = _build_worldcup(now)
+        if wc_matches:
+            counts["WORLDCUP"] = len(wc_matches)
+    except Exception:
+        pass
     return jsonify({"ok": True, "counts": counts, "now_iso": now.isoformat()})
 
 

@@ -1196,22 +1196,18 @@
             const tabsEl = document.getElementById('sportTabs');
             if (!tabsEl) return;
             const items = Array.from(tabsEl.querySelectorAll('.sport-tab'));
-            // Sort: World Cup pinned leftmost while the tournament tab is
-            // up (it has no sport-count); then more games first; ties
-            // stable by current DOM order.
+            // Sort: more games first; ties stable by current DOM order.
+            // World Cup is counted like any other sport (it has the most
+            // games during the tournament, so it naturally sits left).
             items.sort((a, b) => {
-                if (a.dataset.sport === 'WORLDCUP') return -1;
-                if (b.dataset.sport === 'WORLDCUP') return 1;
                 const ca = counts[a.dataset.sport] || 0;
                 const cb = counts[b.dataset.sport] || 0;
                 return cb - ca;
             });
-            // Update label with count badge: "MLB 15", "UFC", "NFL".
-            // World Cup keeps its globe label (not a counted sport).
+            // Update label with count badge: "MLB 15", "World Cup 40", "NFL".
             items.forEach(t => {
                 const sport = t.dataset.sport;
-                if (sport === 'WORLDCUP') { t.innerHTML = 'World Cup'; return; }
-                const label = ({CBB:'NCAAB'})[sport] || sport;
+                const label = ({CBB:'NCAAB', WORLDCUP:'World Cup'})[sport] || sport;
                 const c = counts[sport] || 0;
                 t.innerHTML = c > 0
                     ? `${label} <span class="tab-count">${c}</span>`
