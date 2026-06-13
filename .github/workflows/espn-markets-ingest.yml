@@ -30,6 +30,11 @@ on:
         type: boolean
         required: false
         default: false
+      prune:
+        description: "Deactivate active future markets ESPN didn't return (needs commit)"
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   group: espn-markets-ingest
@@ -63,4 +68,5 @@ jobs:
           python -m scripts.ingest_espn_markets \
             ${{ github.event.inputs.sport && format('--sport {0}', github.event.inputs.sport) || '' }} \
             --days ${{ github.event.inputs.days || '8' }} \
-            ${{ github.event.inputs.commit == 'true' && '--commit' || '' }}
+            ${{ github.event.inputs.commit == 'true' && '--commit' || '' }} \
+            ${{ github.event.inputs.prune == 'true' && '--prune' || '' }}
