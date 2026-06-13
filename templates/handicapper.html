@@ -189,6 +189,26 @@
         .sport-tab .tab-count { display: inline-block; margin-left: 4px; padding: 1px 6px; border-radius: 999px; background: var(--bg); color: var(--text-muted); font-size: 10px; font-weight: 600; }
         .sport-tab.active .tab-count { background: var(--blue); color: #fff; }
 
+        /* World Cup viewer (read-only Polymarket markets) */
+        .wc-hint { font-size: 12px; color: var(--text-muted); margin: -2px 0 12px; }
+        .wc-event { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; }
+        .wc-event-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 9px; }
+        .wc-event-title { font-weight: 600; font-size: 14px; color: var(--text); }
+        .wc-event-when { font-size: 11px; color: var(--text-muted); white-space: nowrap; flex-shrink: 0; }
+        .wc-event-when.live { color: var(--red); font-weight: 700; }
+        .wc-badge { font-size: 9px; text-transform: uppercase; letter-spacing: .04em; padding: 2px 7px; border-radius: 999px; margin-left: 8px; font-weight: 700; vertical-align: middle; }
+        .wc-badge.winner { background: var(--blue-dim); color: var(--blue); }
+        .wc-badge.match { background: rgba(46,160,90,.16); color: var(--green); }
+        .wc-badge.other { background: var(--bg); color: var(--text-muted); }
+        .wc-outcomes { display: flex; flex-direction: column; gap: 6px; }
+        .wc-row { display: grid; grid-template-columns: minmax(84px, 1.2fr) 3fr 38px 44px; align-items: center; gap: 10px; }
+        .wc-team { font-size: 13px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .wc-bar { height: 6px; background: var(--bg); border-radius: 999px; overflow: hidden; }
+        .wc-bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--blue), #6aa9ff); border-radius: 999px; }
+        .wc-prob { font-size: 12px; font-weight: 600; color: var(--text-secondary); font-variant-numeric: tabular-nums; text-align: right; }
+        .wc-amer { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; text-align: right; }
+        .wc-more { font-size: 11px; color: var(--text-muted); margin-top: 9px; }
+
         /* Game list */
         .games-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 22px; }
         .games-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
@@ -565,6 +585,7 @@
                 <button class="sport-tab" data-sport="NCAAF">NCAAF</button>
                 <button class="sport-tab" data-sport="CBB">NCAAB</button>
                 <button class="sport-tab" data-sport="UFC">UFC</button>
+                <button class="sport-tab" data-sport="WORLDCUP">🌍 World Cup</button>
             </div>
 
             <!-- Search (collapsed by default — game list is primary) -->
@@ -605,7 +626,7 @@
             </div>
 
             <!-- Game list (auto-populates per selected sport) -->
-            <div class="games-card">
+            <div class="games-card" id="gamesCard">
                 <div class="games-head">
                     <h3 id="gamesTitle">MLB — upcoming</h3>
                     <span class="count" id="gamesCount">…</span>
@@ -622,6 +643,19 @@
                 <ul class="games-list" id="gamesList">
                     <li class="games-empty">Loading…</li>
                 </ul>
+            </div>
+
+            <!-- World Cup viewer (read-only Polymarket markets; shown only
+                 when the World Cup tab is active) -->
+            <div class="games-card" id="wcSection" style="display:none">
+                <div class="games-head">
+                    <h3>🌍 World Cup — Polymarket</h3>
+                    <span class="count" id="wcCount">…</span>
+                </div>
+                <div class="wc-hint">Live Polymarket prices · view-only (no logging / tracking)</div>
+                <div id="wcBody">
+                    <div class="games-empty">Loading…</div>
+                </div>
             </div>
 
 
@@ -1171,15 +1205,21 @@
             const tabsEl = document.getElementById('sportTabs');
             if (!tabsEl) return;
             const items = Array.from(tabsEl.querySelectorAll('.sport-tab'));
-            // Sort: more games first; ties stable by current DOM order.
+            // Sort: World Cup pinned leftmost while the tournament tab is
+            // up (it has no sport-count); then more games first; ties
+            // stable by current DOM order.
             items.sort((a, b) => {
+                if (a.dataset.sport === 'WORLDCUP') return -1;
+                if (b.dataset.sport === 'WORLDCUP') return 1;
                 const ca = counts[a.dataset.sport] || 0;
                 const cb = counts[b.dataset.sport] || 0;
                 return cb - ca;
             });
             // Update label with count badge: "MLB 15", "UFC", "NFL".
+            // World Cup keeps its globe label (not a counted sport).
             items.forEach(t => {
                 const sport = t.dataset.sport;
+                if (sport === 'WORLDCUP') { t.innerHTML = '🌍 World Cup'; return; }
                 const label = ({CBB:'NCAAB'})[sport] || sport;
                 const c = counts[sport] || 0;
                 t.innerHTML = c > 0
@@ -1197,7 +1237,18 @@
         } catch { /* ignore — fall back to static order */ }
     }
 
+    // Toggle the standard per-sport game list vs the World Cup viewer.
+    function _applySportView() {
+        const wc = _activeSport === 'WORLDCUP';
+        const gc = document.getElementById('gamesCard');
+        const ws = document.getElementById('wcSection');
+        if (gc) gc.style.display = wc ? 'none' : '';
+        if (ws) ws.style.display = wc ? '' : 'none';
+    }
+
     async function loadGames() {
+        _applySportView();
+        if (_activeSport === 'WORLDCUP') { loadWorldCup(); return; }
         const list = document.getElementById('gamesList');
         const count = document.getElementById('gamesCount');
         const title = document.getElementById('gamesTitle');
@@ -1247,6 +1298,73 @@
             count.textContent = '0';
         }
     }
+
+    // ─── World Cup viewer (read-only Polymarket markets) ───
+    // Pulls live PMM markets from /api/handicapper/worldcup and renders
+    // the outright Winner board + upcoming/live match markets. No picks,
+    // no logging, no PIN/Kalshi — purely "see the World Cup stuff".
+    function _wcWhen(iso) {
+        if (!iso) return '';
+        const t = Date.parse(iso);
+        if (isNaN(t)) return '';
+        const diff = t - Date.now();
+        if (diff < 0 && diff > -4 * 3600 * 1000) return 'LIVE';
+        return new Date(t).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+    }
+
+    function _renderWcEvent(ev) {
+        const rows = (ev.markets || []).map(m => {
+            const pct = (m.prob != null) ? Math.round(m.prob * 100) : null;
+            const w = (pct != null) ? Math.max(2, Math.min(100, pct)) : 0;
+            const bar = `<span class="wc-bar">${pct != null ? `<i style="width:${w}%"></i>` : ''}</span>`;
+            return `<div class="wc-row">
+                <span class="wc-team" title="${_esc(m.question || m.label || '')}">${_esc(m.label || '—')}</span>
+                ${bar}
+                <span class="wc-prob">${pct != null ? pct + '%' : '—'}</span>
+                <span class="wc-amer">${m.american != null ? _fmtAmer(m.american) : ''}</span>
+            </div>`;
+        }).join('');
+        const whenStr = _wcWhen(ev.start_time);
+        const when = (ev.category === 'match' && whenStr)
+            ? `<span class="wc-event-when ${whenStr === 'LIVE' ? 'live' : ''}">${_esc(whenStr)}</span>` : '';
+        const hidden = (ev.markets_total || 0) - (ev.markets || []).length;
+        const more = hidden > 0
+            ? `<div class="wc-more">+${hidden} more outcome${hidden === 1 ? '' : 's'} on Polymarket</div>` : '';
+        return `<div class="wc-event">
+            <div class="wc-event-head">
+                <span class="wc-event-title">${_esc(ev.title || '')}<span class="wc-badge ${_esc(ev.category || 'other')}">${_esc(ev.category || 'other')}</span></span>
+                ${when}
+            </div>
+            <div class="wc-outcomes">${rows || '<div class="games-empty">No live prices.</div>'}</div>
+            ${more}
+        </div>`;
+    }
+
+    async function loadWorldCup() {
+        const body = document.getElementById('wcBody');
+        const count = document.getElementById('wcCount');
+        if (!body) return;
+        count.textContent = '…';
+        body.innerHTML = '<div class="games-empty">Loading World Cup markets…</div>';
+        try {
+            const r = await authFetch('/api/handicapper/worldcup');
+            const d = await r.json();
+            if (!d.ok) throw new Error(d.error || 'fetch failed');
+            const evs = d.events || [];
+            count.textContent = evs.length;
+            if (!evs.length) {
+                body.innerHTML = '<div class="games-empty">No World Cup markets available right now.</div>';
+                return;
+            }
+            body.innerHTML = evs.map(_renderWcEvent).join('');
+        } catch (e) {
+            body.innerHTML = `<div class="games-empty" style="color:var(--red)">Failed to load: ${_esc(String(e))}</div>`;
+            count.textContent = '0';
+        }
+    }
+    // Light refresh while the World Cup tab is open (backend caches 3 min,
+    // so this is cheap). Only fires when the tab is actually active.
+    setInterval(() => { if (_activeSport === 'WORLDCUP') loadWorldCup(); }, 90 * 1000);
 
     // Re-color already-rendered Pick buttons from the logged-pick set.
     // Handles the timing gap: the games list and the picks data load via

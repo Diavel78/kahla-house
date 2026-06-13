@@ -6920,6 +6920,41 @@ def api_handicapper_sport_counts():
     return jsonify({"ok": True, "counts": counts, "now_iso": now.isoformat()})
 
 
+@app.route("/api/handicapper/worldcup")
+@bot_required
+def api_handicapper_worldcup():
+    """Read-only World Cup viewer for the Pick Bot page. Pulls live
+    Polymarket markets (the outright Winner board + upcoming/live match
+    markets) straight from PMM — NO PIN/Kalshi/Odds-API, no markets
+    table, nothing logged or graded. View-only: "nice to see the World
+    Cup stuff before it's over."
+
+    `?debug=1` adds the raw PMM diagnostic dump (tag tried, sample
+    titles, market-key shape) so the listing can be tuned against the
+    real Polymarket schema after deploy.
+    """
+    debug = request.args.get("debug") in ("1", "true", "yes")
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Polymarket unavailable: {e}"}), 503
+    import pmm_markets as _pm
+    diag = {} if debug else None
+    try:
+        data = _pm.list_world_cup(client, diag=diag)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"World Cup lookup failed: {e}"}), 500
+    resp = {
+        "ok":          True,
+        "fetched_iso": datetime.now(timezone.utc).isoformat(),
+        "tag_used":    data.get("tag_used"),
+        "events":      data.get("events", []),
+    }
+    if debug:
+        resp["diag"] = diag
+    return jsonify(resp)
+
+
 # ─────────────── Polymarket position → bot_picks sync ───────────────
 # Goal: the user's real Polymarket positions become the source of truth
 # for "did I take this pick" + actual fill price + resolution. Two
