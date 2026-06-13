@@ -76,19 +76,11 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      # ESPN-spine cutover: ESPN's free scoreboard is the schedule/event
-      # source (creates the `markets` rows). Runs BEFORE odds_api so the
-      # rows exist when odds_api attaches snapshots. UFC comes from ESPN's
-      # UFC-scoped mma/ufc feed (no GLORY kickboxing, unlike The Odds API's
-      # broad mma bucket). WORLDCUP excluded — the World Cup tab sources
-      # ESPN+PMM directly and soccer isn't gradeable yet. continue-on-error
-      # so a transient ESPN blip never blocks the odds tick.
-      - name: ESPN → markets (schedule spine)
-        continue-on-error: true
-        env:
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python -m scripts.ingest_espn_markets --exclude WORLDCUP --commit
+      # ESPN-spine ingest DISABLED June 2026 — the ingest's find-or-create
+      # dedup was failing and it minted a fresh duplicate `markets` row every
+      # tick (hundreds per game). Re-enable only after the dedup is fixed +
+      # verified. Until then odds_api creates markets as before (no
+      # ESPN_MARKETS_SPINE flag below). See ingest_espn_markets.py.
 
       - name: Ingest odds (all sports)
         env:
@@ -96,10 +88,6 @@ jobs:
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           SPORTS_ENABLED:       NFL,NBA,MLB,NHL,CBB,NCAAF,UFC
-          # ESPN owns market CREATION now — odds_api is find-only (attaches
-          # snapshots to ESPN rows, never mints its own). Stops dupes +
-          # the kickboxing-in-UFC bleed. See odds_api._find_or_create_market.
-          ESPN_MARKETS_SPINE:   "1"
         run: python -m scrapers.odds_api
 
       # Handicapper Bot — pick resolver. Grades pending bot_picks rows
