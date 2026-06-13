@@ -828,35 +828,56 @@ def _wc_outcome_label(m: Any) -> str:
     return q or "—"
 
 
-def _wc_category(title: str) -> str:
-    """match (X vs Y) / winner (outright) / other (group winner, props)."""
+def _is_match_title(title: str) -> bool:
+    """A head-to-head match event ("Qatar vs. Switzerland"). The outright
+    Winner board, group-winner markets, and goalscorer props are NOT
+    matches and are excluded from the match list."""
     t = (title or "").lower()
-    if " vs " in t or " vs. " in t or " v " in t:
-        return "match"
-    if "winner" in t or "win the" in t or "to win the world cup" in t:
-        return "winner"
-    return "other"
+    return (" vs " in t) or (" vs. " in t) or (" v " in t)
 
 
-def list_world_cup(client, max_events: int = 28, max_outcomes: int = 24,
+def _wc_teams_from_title(title: str) -> tuple[str | None, str | None]:
+    """Split 'Qatar vs. Switzerland' → ('Qatar', 'Switzerland')."""
+    parts = re.split(r"\s+vs\.?\s+|\s+v\s+", title or "", maxsplit=1, flags=re.I)
+    if len(parts) == 2:
+        return parts[0].strip() or None, parts[1].strip() or None
+    return None, None
+
+
+def _order_three_way(results: list[dict], t1: str | None, t2: str | None) -> list[dict]:
+    """Order match-result outcomes as team1 / Draw / team2 (the familiar
+    1-X-2). Falls back to probability-desc if the teams can't be matched
+    to outcome labels."""
+    draw = [r for r in results if "draw" in (r.get("label") or "").lower()]
+
+    def _is(r, team):
+        return bool(team) and _name_match(r.get("label") or "", team)
+
+    r1 = [r for r in results if _is(r, t1) and not _is(r, t2)]
+    r2 = [r for r in results if _is(r, t2) and not _is(r, t1)]
+    ordered = r1[:1] + draw[:1] + r2[:1]
+    if len(ordered) < 2:   # team labels didn't resolve — show by prob
+        ordered = sorted(results, key=lambda r: (r.get("prob") is None, -(r.get("prob") or 0.0)))
+    return ordered[:3]
+
+
+def list_world_cup(client, max_events: int = 40,
                    time_budget_sec: float = 7.5,
                    diag: dict | None = None) -> dict:
-    """List live World Cup markets from Polymarket for the read-only
-    viewer. Returns:
+    """List live World Cup MATCHES from Polymarket for the read-only
+    viewer — match-result (moneyline 1-X-2) only, no totals / props /
+    outright board. Returns:
 
         {"tag_used": "fifa-world-cup",
-         "events": [
-            {"slug", "title", "start_time", "category",
-             "markets_total": 48,
-             "markets": [{"label","question","prob","american","bid","ask","slug"}]},
+         "matches": [
+            {"slug", "title", "start_time",
+             "results": [{"label","prob","american"}]},   # team1 / Draw / team2
             ...]}
 
-    Events are ordered upcoming/live matches first (by start time), then
-    the outright Winner board, then everything else; outcomes within an
-    event are sorted by implied probability descending. Silent-fail →
-    empty events list (the caller surfaces "no markets right now").
+    Matches are ordered by start time (upcoming + live, finished dropped).
+    Silent-fail → empty list (the caller surfaces "no matches right now").
     """
-    out: dict[str, Any] = {"tag_used": None, "events": []}
+    out: dict[str, Any] = {"tag_used": None, "matches": []}
     if not client:
         return out
 
@@ -903,36 +924,31 @@ def list_world_cup(client, max_events: int = 28, max_outcomes: int = 24,
     if not events:
         return out
 
-    # 2. Categorize + order. Drop finished matches (started > 4h ago and
-    #    not flagged closed — a stale event that never got marked closed).
+    # 2. Keep only head-to-head match events; drop finished ones (started
+    #    > 4h ago and never flagged closed). Order by kickoff.
     now = datetime.now(timezone.utc)
     enriched: list[dict] = []
     for ev in events:
         title = _mget(ev, "title") or ""
+        if not _is_match_title(title):
+            continue
         st = _mget(ev, "startTime") or _mget(ev, "start_time") or ""
         try:
             sdt = datetime.fromisoformat(st.replace("Z", "+00:00")) if st else None
         except Exception:
             sdt = None
-        cat = _wc_category(title)
-        if cat == "match" and sdt is not None and sdt < (now - timedelta(hours=4)):
-            continue   # match is over
-        enriched.append({"ev": ev, "title": title, "start": st, "sdt": sdt, "cat": cat})
+        if sdt is not None and sdt < (now - timedelta(hours=4)):
+            continue
+        t1, t2 = _wc_teams_from_title(title)
+        enriched.append({"ev": ev, "title": title, "start": st, "sdt": sdt, "t1": t1, "t2": t2})
 
-    cat_rank = {"match": 0, "winner": 1, "other": 2}
+    enriched.sort(key=lambda e: e["sdt"].timestamp() if e["sdt"] is not None else float("inf"))
 
-    def _key(e: dict):
-        primary = cat_rank.get(e["cat"], 2)
-        if e["cat"] == "match" and e["sdt"] is not None:
-            return (primary, e["sdt"].timestamp())
-        return (primary, float("inf"))
-
-    enriched.sort(key=_key)
-
-    # 3. Fetch markets per event (events.list returns an empty markets
-    #    array, so hit markets.list per slug) under a time budget so a
-    #    huge slate can't blow the Vercel 10s window.
-    result_events: list[dict] = []
+    # 3. Per match, fetch markets and keep ONLY the moneyline (match-
+    #    result) outcomes — the 1-X-2. Totals, team-totals and goalscorer
+    #    props are dropped. Time-budgeted so a big slate can't blow the
+    #    Vercel 10s window.
+    matches: list[dict] = []
     for e in enriched[:max_events]:
         if (time.time() - t0) > time_budget_sec:
             break
@@ -948,47 +964,41 @@ def list_world_cup(client, max_events: int = 28, max_outcomes: int = 24,
                 markets = []
                 if diag is not None:
                     diag.setdefault("errors", []).append(f"markets.list {slug}: {str(ex)[:140]}")
-        rows: list[dict] = []
+        results: list[dict] = []
         for m in markets:
             if _mget(m, "closed"):
                 continue
+            if (_mget(m, "sportsMarketTypeV2") or "") != "SPORTS_MARKET_TYPE_MONEYLINE":
+                continue   # match result only — no totals/spreads/props
             quote = _get_market_quote(_market_to_dict(m))
             if not quote:
                 continue
-            rows.append({
+            results.append({
                 "label":    _wc_outcome_label(m),
-                "question": (_mget(m, "question") or "")[:140],
                 "prob":     quote.get("mid"),
                 "american": quote.get("mid_american"),
-                "bid":      quote.get("bid"),
-                "ask":      quote.get("ask"),
-                "slug":     _mget(m, "slug"),
             })
-        rows.sort(key=lambda r: (r["prob"] is None, -(r["prob"] or 0.0)))
-        result_events.append({
-            "slug":          slug,
-            "title":         e["title"],
-            "start_time":    e["start"],
-            "category":      e["cat"],
-            "markets_total": len(rows),
-            "markets":       rows[:max_outcomes],
+        matches.append({
+            "slug":       slug,
+            "title":      e["title"],
+            "start_time": e["start"],
+            "results":    _order_three_way(results, e["t1"], e["t2"]),
         })
 
-    out["events"] = result_events
+    out["matches"] = matches
     if diag is not None:
-        diag["events_built"] = [
-            {"title": r["title"], "cat": r["category"], "n": r["markets_total"]}
-            for r in result_events[:30]
-        ]
-        # Raw market shape on the first event — ground truth for tuning
-        # _wc_outcome_label / categorization against the real PMM schema.
+        diag["matches_built"] = [{"title": m["title"], "n": len(m["results"])} for m in matches[:40]]
+        # Raw market shape on the first match — ground truth for confirming
+        # the moneyline type string + label fields against the real schema.
         if enriched:
-            first = enriched[0]["ev"]
-            fm = _mget(first, "markets") or []
-            diag["sample_market_keys"] = (
-                list(fm[0].keys()) if fm and isinstance(fm[0], dict) else None
-            )
-    if result_events:
+            fm = _mget(enriched[0]["ev"], "markets") or []
+            diag["sample_markets"] = [
+                {"q": (_mget(mm, "question") or "")[:70],
+                 "v1": _mget(mm, "sportsMarketType"),
+                 "v2": _mget(mm, "sportsMarketTypeV2")}
+                for mm in fm[:25]
+            ]
+    if matches:
         _WC_CACHE["t"] = time.time()
         _WC_CACHE["data"] = out
     return out
