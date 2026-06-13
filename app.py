@@ -6952,34 +6952,6 @@ def api_handicapper_worldcup():
     return jsonify(resp)
 
 
-@app.route("/debug-worldcup")
-def debug_worldcup():
-    """PUBLIC debug dump of the World Cup PMM shape — no auth, public
-    market data only, no secrets (same posture as /debug-kalshi). Lets a
-    Claude Code session self-diagnose the World Cup listing without
-    needing a Firebase token. Returns the tag tried, event titles, the
-    built matches, and the first match's raw market type slugs."""
-    try:
-        client = get_client()
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"Polymarket unavailable: {e}"}), 503
-    import pmm_markets as _pm
-    diag: dict = {}
-    try:
-        data = _pm.list_world_cup(client, diag=diag)
-    except Exception as e:
-        import traceback
-        return jsonify({"ok": False, "error": str(e),
-                        "trace": traceback.format_exc()[:2000]}), 500
-    return jsonify({
-        "ok":       True,
-        "tag_used": data.get("tag_used"),
-        "n_matches": len(data.get("matches", [])),
-        "matches":  data.get("matches", []),
-        "diag":     diag,
-    })
-
-
 # ─────────────── Polymarket position → bot_picks sync ───────────────
 # Goal: the user's real Polymarket positions become the source of truth
 # for "did I take this pick" + actual fill price + resolution. Two
