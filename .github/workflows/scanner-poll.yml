@@ -76,11 +76,21 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      # ESPN-spine ingest DISABLED June 2026 — the ingest's find-or-create
-      # dedup was failing and it minted a fresh duplicate `markets` row every
-      # tick (hundreds per game). Re-enable only after the dedup is fixed +
-      # verified. Until then odds_api creates markets as before (no
-      # ESPN_MARKETS_SPINE flag below). See ingest_espn_markets.py.
+      # ESPN-spine: ESPN's free scoreboard creates the `markets` rows; runs
+      # BEFORE odds_api so the rows exist when odds_api attaches snapshots.
+      # Dedup fixed June 2026 (windows the candidate set to upcoming games,
+      # not all-active — the prior all-active fetch got truncated at 1000 by
+      # the never-cleaned table and minted a dupe every tick). Verified
+      # idempotent: a commit run then a re-run shows 0 would-create.
+      # WORLDCUP excluded (the tab sources ESPN+PMM directly). UFC = ESPN's
+      # UFC-scoped mma/ufc (no GLORY kickboxing). continue-on-error so an
+      # ESPN blip never blocks the odds tick.
+      - name: ESPN → markets (schedule spine)
+        continue-on-error: true
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.ingest_espn_markets --exclude WORLDCUP --commit
 
       - name: Ingest odds (all sports)
         env:
@@ -88,6 +98,10 @@ jobs:
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           SPORTS_ENABLED:       NFL,NBA,MLB,NHL,CBB,NCAAF,UFC
+          # ESPN owns market CREATION — odds_api is find-only (attaches
+          # snapshots to existing ESPN rows, never mints its own). Also stops
+          # odds_api's own commence-drift dupes. See _find_or_create_market.
+          ESPN_MARKETS_SPINE:   "1"
         run: python -m scrapers.odds_api
 
       # Handicapper Bot — pick resolver. Grades pending bot_picks rows
