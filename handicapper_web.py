@@ -189,12 +189,12 @@ def _amer_to_cents(p: Any) -> float | None:
 #     < 0 → sharp UNDER. Line flat → fall back to vig direction.
 
 _RECENCY_WEIGHTS: tuple[tuple[float, float], ...] = (
-    (15,   1.00),
-    (60,   0.60),
-    (120,  0.35),
-    (360,  0.18),
-    (1080, 0.08),
-)
+    (15,   0.75),   # was 1.00 — trimmed June 2026: a 118-pick review showed
+    (60,   0.50),   # was 0.60   last-hour picks underperform, so the freshest
+    (120,  0.35),   #            ticks were over-trusted as "steam" when they're
+    (360,  0.18),   #            often retail noise. Kept mild (not gutted) so
+    (1080, 0.08),   #            genuine prime-window steam still scores enough
+)                   #            to size up. The pick-time cap is the precise lever.
 
 
 def _recency_weight(age_min: float) -> float:
@@ -587,6 +587,11 @@ def _attach_pmm_to_odds(odds: dict, pmm: dict, sport: str) -> None:
                 "slug":  entry.get("slug"),
                 "title": entry.get("title"),
                 "quote": entry.get("quote"),
+                # The synthesized NO side shares the YES market's slug —
+                # downstream book reads (make/take, book pressure) must
+                # flip the ladder for synthetic sides or they score the
+                # wrong side of the market.
+                "synthetic": bool(entry.get("synthetic")),
             }
             # Project PIN's devigged fair onto PMM's line. ML has no
             # line shift; just carry PIN fair through unchanged. SPR/TOT
@@ -634,6 +639,146 @@ def _pin_history(sb, market_id: str) -> dict[tuple[str, str], list[dict]]:
         key = (r["market_type"], r["side"])
         out.setdefault(key, []).append(r)
     return out
+
+
+# ───────── Exchange-based sharp score (Odds-API retirement, June 2026) ─────
+# The PMM+Kalshi replacement for the PIN sharp score, built from
+# pm_snapshots cent history. Runs SIDE-BY-SIDE with the PIN score during
+# the cutover (subscription dies June 25): every market's movement block
+# carries x_side/x_score, every suggestion carries x_agree, and the
+# paperlog records both — so we can verify agreement on live games before
+# flipping the primary. Same recency weights + 18h window as PIN.
+#
+# Design differences from the PIN version (deliberate):
+# • Exchange cents ARE probability points; PIN's "cents" are American-odds
+#   cents (~4 American cents per prob point near even money). _X_PP_SCALE
+#   maps prob-point moves onto the same 0-10 score scale — a calibration
+#   constant the side-by-side data will tune.
+# • Exchanges quote MULTIPLE spread/total lines simultaneously, so there is
+#   no discrete "the line moved" event — line migration shows up as cent
+#   drift on the at-the-money line. The score therefore reads cents on the
+#   MAIN line (latest cents closest to 50) only; no line-vs-vig split.
+# • Kalshi ML cross-check: when Kalshi has its own read and it points the
+#   OTHER way, return no signal (mirrors the cross-confirm AND-gate; also
+#   absorbs the same-city PMM side-flip — a flipped feed disagrees, so we
+#   skip rather than score the wrong side. Gotcha #21 spirit.)
+
+_X_PP_SCALE = 4.0     # prob-points → PIN-cent-equivalent score units
+_X_MIN_PP   = 0.25    # weighted move below this (≈ score 1) → no signal
+
+
+def _pm_history(sb, market_id: str) -> dict:
+    """pm_snapshots rows for one game in the last 18h, grouped by
+    (source, market_type, side, line) and sorted ASC by captured_at."""
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(hours=_PIN_HISTORY_HOURS)).isoformat()
+    try:
+        rows = (sb.table("pm_snapshots")
+                .select("source,market_type,side,line,cents,captured_at")
+                .eq("market_id", market_id)
+                .gte("captured_at", cutoff)
+                .order("captured_at")
+                .limit(3000)
+                .execute().data) or []
+    except Exception:
+        return {}
+    out: dict = {}
+    for r in rows:
+        line = r.get("line")
+        try:
+            line = round(float(line), 2) if line is not None else None
+        except (TypeError, ValueError):
+            line = None
+        k = (r.get("source"), r.get("market_type") or "ml", r.get("side"), line)
+        out.setdefault(k, []).append(r)
+    return out
+
+
+def _x_main_series(hist: dict, mt: str, side: str) -> list[dict]:
+    """The side's MAIN-line series: among this side's PMM per-line series,
+    the one whose LATEST cents is closest to 50 (at-the-money). For ML
+    (line=None) there's exactly one series."""
+    best, best_d = [], 1e9
+    for (src, m, s, _line), snaps in hist.items():
+        if src != "pmm" or m != mt or s != side or len(snaps) < 2:
+            continue
+        d = abs((snaps[-1].get("cents") or 50) - 50)
+        if d < best_d:
+            best, best_d = snaps, d
+    return best
+
+
+def _xsharp_ml(hist: dict, now=None):
+    """(side, score, n_snaps) or None. Sharp side = side whose implied
+    prob ROSE (more favored = harder to bet), from PMM cents, with the
+    Kalshi same-direction veto."""
+    now = now or datetime.now(timezone.utc)
+    h = hist.get(("pmm", "ml", "home", None), [])
+    a = hist.get(("pmm", "ml", "away", None), [])
+    sig, n = None, 0
+    if len(h) >= 2:
+        sig, n = _weighted_signed_delta(h, "cents", now=now), len(h)
+    elif len(a) >= 2:   # complementary book — away up == home down
+        sig, n = -_weighted_signed_delta(a, "cents", now=now), len(a)
+    if sig is None or abs(sig) < _X_MIN_PP:
+        return None
+    kh = hist.get(("kalshi", "ml", "home", None), [])
+    if len(kh) >= 2:
+        kw = _weighted_signed_delta(kh, "cents", now=now)
+        if abs(kw) >= _X_MIN_PP and (kw > 0) != (sig > 0):
+            return None         # feeds disagree → no signal (skip, don't guess)
+    score = min(10, round(abs(sig) * _X_PP_SCALE))
+    if score < 1:
+        return None
+    return ("home" if sig > 0 else "away"), score, n
+
+
+def _xsharp_two_sided(hist: dict, mt: str, up_side: str, down_side: str,
+                      now=None):
+    """Shared SPR/TOT scorer: cents on the at-the-money line of the
+    reference side (home / over). Cents UP on the reference side = that
+    side more likely = sharp; DOWN = the other side."""
+    now = now or datetime.now(timezone.utc)
+    snaps = _x_main_series(hist, mt, up_side)
+    ref = up_side
+    if not snaps:
+        snaps, ref = _x_main_series(hist, mt, down_side), down_side
+        if not snaps:
+            return None
+    w = _weighted_signed_delta(snaps, "cents", now=now)
+    if ref == down_side:
+        w = -w                 # normalize to the up_side's perspective
+    if abs(w) < _X_MIN_PP:
+        return None
+    score = min(10, round(abs(w) * _X_PP_SCALE))
+    if score < 1:
+        return None
+    return (up_side if w > 0 else down_side), score, len(snaps)
+
+
+def _attach_xsharp(sb, market_id: str, odds: dict) -> None:
+    """Attach x_side/x_score/x_n onto each market's movement block (creating
+    the block when PIN had nothing — leans can then carry an x read too).
+    Silent-fail; never breaks the dossier."""
+    try:
+        hist = _pm_history(sb, market_id)
+        if not hist:
+            return
+        now = datetime.now(timezone.utc)
+        results = {
+            "moneyline": _xsharp_ml(hist, now),
+            "spread":    _xsharp_two_sided(hist, "spread", "home", "away", now),
+            "total":     _xsharp_two_sided(hist, "total", "over", "under", now),
+        }
+        for mt, r in results.items():
+            blk = odds.get(mt)
+            if not blk or not r:
+                continue
+            mv = blk.get("movement") or {}
+            mv["x_side"], mv["x_score"], mv["x_n"] = r
+            blk["movement"] = mv
+    except Exception:
+        pass
 
 
 # ──────────────────────── Live Odds API fetch ────────────────────────
@@ -1764,6 +1909,100 @@ SPR_CHALK_FAIR_CAP = -150
 # exclusion block in `_suggest_picks`.
 ML_CHALK_FAIR_CAP = -140
 
+# ─── Total-side veto (the "Rockies under" fix, June 2026) ───
+# The TOT side is chosen purely from PIN line movement, so the bot will
+# happily follow PIN's total down into Coors and bet an under in the most
+# hitter-friendly park in baseball — the power model watches it happen but
+# (by design) only nudges SIZING, never the side. Over 118 graded picks
+# MLB unders went 13-17 (-0.17u) vs overs 10-6 (+1.86u), and EVERY Rockies
+# under lost (4-for-4, -5.84u). These two vetoes let the OUR-NUMBER read
+# DEMOTE a total pick to a forced lean (so it stops being a real
+# recommendation / one-tap chip) when it disagrees with the side:
+#   • Park veto (MLB) — independent of the model, from the static park-
+#     factor table. PF ≥ 104 (Coors 112, Fenway/GABP 104) kills unders;
+#     PF ≤ 96 (Petco/Oracle/T-Mobile) kills overs.
+#   • Model veto — our projected total disagrees by ≥ 1 run, but only when
+#     the model feeds sizing for the sport (we trust the number).
+_PARK_UNDER_VETO       = 104.0   # park factor ≥ this → don't recommend an under
+_PARK_OVER_VETO        = 96.0    # park factor ≤ this → don't recommend an over
+_TOTAL_MODEL_VETO_DIFF = 1.0     # runs of model-vs-line disagreement to veto the opposite side
+
+# ─── Timing window (the proven-edge fix, June 2026) ───
+# Picks made 1.5-2h before first pitch carried the entire edge (38 picks,
+# 68.4%, +27.06u) while last-hour picks were mush (51 picks, 52.9%,
+# +3.72u — and totals in that window were outright negative). The recency
+# weighting over-trusts last-15-min PIN twitches (retail pile-on, lineup-
+# reaction overshoots) as if they were clean sharp steam. We can't easily
+# retune that without global blast radius, so instead we CAP sizing on
+# last-hour picks: a < 1h-out pick never sizes above 1u no matter what
+# Kelly says. Picks keep their `timing_window` tag for the card badge +
+# future analysis (it lands in signal_blob when logged).
+LATE_WINDOW_MIN = 60                   # < 1h to first pitch → cap units at 1u (last-hour picks underperform)
+_PRIME_WINDOW   = (60, 180)            # 1-3h out = the betting window (size-up + glow). Extended 2h->3h June 2026
+                                       # on conviction (sharp money moves early — proven 3.5h on BOS); the paperlog
+                                       # dataset confirms or kills it after 2 weeks.
+_PRIME_CORE     = (90, 120)            # 90-120 = the PROVEN hammer (68.4%, +27u over 38) — tracked via prime_core.
+EVAL_WINDOW_MAX = 180                  # page evaluator/chips reach the prime edge (3h). PAPERLOG goes to 5h (app.py)
+                                       # for DATA only — not surfaced on the page. (legacy: was 150 'early' test)
+                                       # window (capped 1u, NOT prime sizing) — hypothesis: sharp money moves the
+                                       # line before the 2h mark, so picking earlier captures CLV. Measured via
+                                       # signal_blob.timing_window=='early' + clv_pp before any promotion to sizing.
+
+
+def _timing_window(starts_in_min) -> str | None:
+    """Classify a pick by minutes before first pitch:
+      late   (<60)      — capped to 1u, the mushy last-hour window (52.9%)
+      prime  (60-180)   — the betting window: green glow + size-up. Extended
+                          2h->3h June 2026 on conviction (early sharp money);
+                          the paperlog dataset will confirm or kill it.
+      far    (>180)     — beyond prime. Still PAPERLOGGED (out to 5h) for
+                          data, but never sized up or glowed.
+    The 60-90 / 90-120 split inside prime is preserved via `prime_core`
+    (the proven hammer); raw starts_in_min is logged for finer buckets."""
+    if starts_in_min is None:
+        return None
+    if starts_in_min < LATE_WINDOW_MIN:
+        return "late"
+    if starts_in_min <= _PRIME_WINDOW[1]:
+        return "prime"
+    return "far"
+
+
+def _is_prime_core(starts_in_min) -> bool | None:
+    """True when the pick is in the 90-120 HAMMER sub-bucket of prime.
+    Kept distinct from `timing_window` so the next review can still
+    compare the 60-90 half against the proven 90-120 core."""
+    if starts_in_min is None:
+        return None
+    return _PRIME_CORE[0] <= starts_in_min <= _PRIME_CORE[1]
+
+
+def _total_conflict_reason(sport: str | None, home: str | None,
+                           power: dict | None, side: str) -> str | None:
+    """Reason the OUR-NUMBER read materially disagrees with a TOTAL side
+    that PIN movement picked — else None. Used to veto an under/over down
+    to a forced lean. See the constants above for the rationale."""
+    if side not in ("over", "under"):
+        return None
+    # Park veto (MLB) — independent of the model, so it fires even on a v1
+    # season-stat fallback or an unmatched team. This is the Rockies guard.
+    if sport == "MLB" and home:
+        pf = _park_factor(home)
+        mascot = home.split()[-1] if home.split() else home
+        if side == "under" and pf >= _PARK_UNDER_VETO:
+            return f"{mascot} park factor {round(pf)} (hitter-friendly) — fading the under"
+        if side == "over" and pf <= _PARK_OVER_VETO:
+            return f"{mascot} park factor {round(pf)} (pitcher-friendly) — fading the over"
+    # Model-lean veto — only when the model feeds sizing for this sport
+    # (i.e. it cleared the backtest gate and we trust the projected total).
+    if power and power.get("feeds_sizing"):
+        lean = power.get("total_lean")
+        diff = _to_float(power.get("total_diff"))
+        if lean and lean != side and diff is not None and abs(diff) >= _TOTAL_MODEL_VETO_DIFF:
+            pt = power.get("proj_total")
+            return f"model projects {pt} ({lean} by {abs(diff):.1f}) — disagrees with the {side}"
+    return None
+
 
 # ──────────────────────────── Kelly sizing ────────────────────────────
 #
@@ -1828,6 +2067,53 @@ EDGE_CAP_PP          = 6.0      # hard cap so a crude input can't blow up sizing
 # exception, not the rule.
 KELLY_MED_PCT        = 2.0      # ¼-Kelly stake ≥ this %BR → 3u medium
 KELLY_HIGH_PCT       = 3.0      # ¼-Kelly stake ≥ this %BR → 5u high
+
+# Order-book pressure (June 2026, per user; research-calibrated — see the
+# deep-research session): heavy bids vs thin offers on the picked side =
+# demand the sellers aren't meeting = a leading indicator the line is about
+# to move (Gould & Bonart 2016: strongest in large-tick regimes like a
+# 1c-tick binary). Fed into edge_pp as a CAPPED confirmation nudge — the
+# signal predicts the NEXT TICK (~1c ≈ 1pp), not the game outcome, so the
+# cap stays at 1pp. The size floor mirrors the make/take rule: a ratio on a
+# few-hundred-contract book is noise and the cheapest book state to spoof.
+# Recorded on every gated pick (signal_blob.book_imb) for the paperlog
+# review to validate.
+BOOK_PRESSURE_IMB    = 1.3      # bid/ask size ratio ≥ this → pressure nudge
+BOOK_PRESSURE_CAP_PP = 1.0      # max edge contribution (pp)
+BOOK_PRESSURE_MIN_Q  = 500      # bid-side contracts ≥ this or no nudge
+                                # (imb still recorded for the review)
+
+# Sticky gate (June 2026 — fixes the "pick exists for 5 minutes" symptom).
+# After the June recency-weight trim, a genuine 5¢ PIN steam scores ~3.75
+# only while <15min old (5×0.75), then decays to ~2.5 (5×0.50) — below the
+# gate — so real picks flickered onto the page and vanished. Hysteresis:
+# enter at SHARP_SCORE_MIN (3), then a (market, side) that already cleared
+# today (pickbot_paperlog memory) STAYS a real pick while its score holds
+# ≥ STICKY_GATE_EXIT. The total-side veto still overrides. Sticky picks
+# re-size through Kelly (typically 1u) and carry sticky=True for review.
+STICKY_GATE_EXIT  = 1.5   # exit bar — below this even a sticky pick demotes
+STICKY_LOOKBACK_H = 12    # how far back the paperlog memory reaches
+
+
+def _sticky_keys(sb, market_id: str) -> set:
+    """(market_type, side) pairs that cleared the gate for this game within
+    the lookback — read from pickbot_paperlog (gate-cleared rows only).
+    Silent-fail → empty set (no hysteresis, never a broken dossier)."""
+    if sb is None or not market_id:
+        return set()
+    try:
+        since = (datetime.now(timezone.utc)
+                 - timedelta(hours=STICKY_LOOKBACK_H)).isoformat()
+        rows = (sb.table("pickbot_paperlog")
+                .select("market_type,side")
+                .eq("market_id", market_id)
+                .eq("gates_cleared", True)
+                .gte("logged_at", since)
+                .limit(100).execute().data) or []
+    except Exception:
+        return set()
+    return {(r.get("market_type"), r.get("side")) for r in rows
+            if r.get("market_type") and r.get("side")}
 
 
 def _kelly_units(fair_prob, fair_american, edge_pp,
@@ -3049,8 +3335,48 @@ def _splits_signal_pp(splits: dict | None, sharp_side: str | None,
         return 0.0
 
 
+def _book_pressure(slug: str, synthetic: bool) -> tuple[float | None, float | None]:
+    """(nudge_pp, imbalance) from the live PMM order book for one side.
+    Imbalance = max of the 2-level top-of-book ratio and the L1 touch ratio
+    (a seller wall one level up can dilute the 2-level read — same dual read
+    as the make/take TAKE rule). Synthetic (NO) sides share the YES market's
+    slug, so their ladder is INVERTED before reading. Late-imports app for
+    the book reader (established pattern, like _fetch_splits). Silent-fail →
+    (None, None); never breaks the dossier."""
+    if not slug:
+        return None, None
+    try:
+        import app as _app
+        book = _app._pmm_book(_app.get_client(), slug)
+        if synthetic:
+            book = _app._invert_book(book)
+    except Exception:
+        return None, None
+    if not book or not book.get("bids") or not book.get("asks"):
+        return None, None
+    l1b, l1a = book["bids"][0][1], book["asks"][0][1]
+    t_b = sum(q for _, q in book["bids"][:2])
+    t_a = sum(q for _, q in book["asks"][:2])
+    ratios = [r for r in ((l1b / l1a if l1a else None),
+                          (t_b / t_a if t_a else None)) if r is not None]
+    if not ratios:
+        return None, None
+    imb = round(max(ratios), 2)
+    # Thin-book floor: no nudge unless the bid side carries real size
+    # (ratio on a tiny book is noise + the cheapest state to spoof). The
+    # imbalance is still returned so signal_blob records it for review.
+    if imb < BOOK_PRESSURE_IMB or max(l1b, t_b) < BOOK_PRESSURE_MIN_Q:
+        return 0.0, imb
+    # 1.3x → 0.4pp, +0.5pp per additional 1.0x of imbalance, capped at 1pp.
+    return round(min(BOOK_PRESSURE_CAP_PP,
+                     0.4 + (imb - BOOK_PRESSURE_IMB) * 0.5), 2), imb
+
+
 def _suggest_picks(odds: dict, splits: dict | None = None,
-                   power: dict | None = None) -> list[dict]:
+                   power: dict | None = None, *,
+                   sport: str | None = None, home: str | None = None,
+                   starts_in_min=None,
+                   sticky_keys: set | None = None) -> list[dict]:
     """Polymarket-execution picks. Returns a list — there can be more
     than one on a game. Behaviour:
 
@@ -3102,6 +3428,29 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
             cs = (SHARP_WEIGHT * (score_for_side / 10.0)
                   + SPLITS_WEIGHT * min(max(0.0, splits_pp) / 30.0, 1.0))
             gates_cleared = score_for_side >= SHARP_SCORE_MIN
+            # Sticky gate (hysteresis — the "5-minute pick" fix, June 2026).
+            # The recency-weighted score DECAYS as a move ages, so a real
+            # steam cleared the gate only while <15min fresh, then the pick
+            # demoted back to a lean and vanished from the page. Schmitt
+            # trigger: ENTER at SHARP_SCORE_MIN; once this (market, side)
+            # has cleared (paperlog memory, threaded in via sticky_keys),
+            # it STAYS a real pick while the score holds ≥ STICKY_GATE_EXIT.
+            sticky = False
+            if (not gates_cleared and sticky_keys
+                    and (mt, side) in sticky_keys
+                    and score_for_side >= STICKY_GATE_EXIT):
+                gates_cleared, sticky = True, True
+
+            # Total-side veto — the OUR-NUMBER read can DEMOTE a total pick
+            # to a forced lean when it disagrees with the side PIN movement
+            # chose (hitter-park unders, model-projected total the other
+            # way). Stops the bot recommending Rockies/Coors unders. ML/SPR
+            # are untouched — the veto is totals-only.
+            conflict_reason = None
+            if mt == "total":
+                conflict_reason = _total_conflict_reason(sport, home, power, side)
+                if conflict_reason:
+                    gates_cleared = False
 
             # Provisional edge estimate (fair-prob pp) that drives Kelly
             # sizing + finally populates the edge_pp column. The sharp +
@@ -3150,9 +3499,20 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 "pmm_bid_american": pmm_quote.get("bid_american"),
                 "pmm_mid_american": pmm_quote.get("mid_american"),
                 "pmm_slug":       (pmm_block or {}).get("slug"),
+                "pmm_synthetic":  bool((pmm_block or {}).get("synthetic")),
                 "uses_pmm_projection": use_pmm,
                 "combined_score": round(cs, 4),
                 "gates_cleared":  gates_cleared,
+                "sticky":         sticky,
+                # Exchange-score shadow (cutover review): does the
+                # PMM+Kalshi read agree with the PIN read on this side?
+                "x_score":        mv.get("x_score"),
+                "x_side":         mv.get("x_side"),
+                "x_agree":        ((mv.get("x_side") == side)
+                                   if mv.get("x_side") else None),
+                "conflict_reason": conflict_reason,
+                "timing_window":  _timing_window(starts_in_min),
+                "prime_core":     _is_prime_core(starts_in_min),
             })
 
     if not candidates:
@@ -3183,6 +3543,18 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
         units, conf, kelly_pct = _kelly_units(
             c.get("fair_prob"), c.get("fair_american"),
             c.get("edge_pp"), c.get("gates_cleared"))
+        # Sizing concentrated in the PRIME window — only picks made 90-120
+        # min before first pitch can size past 1u. That 38-pick window
+        # carried +27u at 68.4%; 60-90 was modest (+3.9u), the last hour
+        # mush. So everything OUTSIDE prime with a known kickoff time is
+        # capped at 1u (caps DOWN only; unknown kickoff → no cap). `late`
+        # picks (<60m) keep the amber badge flag too.
+        tw = c.get("timing_window")
+        if tw is not None and tw != "prime" and units > 1:
+            units, conf = 1, "low"
+            c["size_capped"] = True
+            if tw == "late":
+                c["late_capped"] = True
         c["units"], c["confidence"], c["kelly_pct"] = units, conf, kelly_pct
         cur = by_market.get(c["market_type"])
         if (not cur) or ((c["gates_cleared"], c["combined_score"]) >
@@ -3224,6 +3596,33 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
 
     # Stable order: ML/SPR first, then TOT.
     chosen.sort(key=lambda c: 0 if c["market_type"] != "total" else 1)
+
+    # Order-book pressure — fetched only for the FINAL gated picks (one
+    # HTTP call per pick, not per candidate) and folded into edge_pp as a
+    # capped confirmation nudge before re-sizing. Heavy bids vs thin offers
+    # on the picked side = demand sellers aren't meeting = the line is about
+    # to move toward it (per user, June 2026). Recorded (book_imb) even when
+    # below threshold so the paperlog review can validate the signal.
+    for c in chosen:
+        if not (c.get("gates_cleared") and c.get("pmm_slug")):
+            continue
+        pp, imb = _book_pressure(c["pmm_slug"], bool(c.get("pmm_synthetic")))
+        if imb is None:
+            continue
+        c["book_imb"] = imb
+        c["book_pressure_pp"] = pp
+        if pp and pp > 0:
+            c["edge_pp"] = round(min(c["edge_pp"] + pp, EDGE_CAP_PP), 2)
+            units, conf, kelly_pct = _kelly_units(
+                c.get("fair_prob"), c.get("fair_american"),
+                c.get("edge_pp"), c.get("gates_cleared"))
+            tw = c.get("timing_window")     # re-apply the prime-window cap
+            if tw is not None and tw != "prime" and units > 1:
+                units, conf = 1, "low"
+                c["size_capped"] = True
+                if tw == "late":
+                    c["late_capped"] = True
+            c["units"], c["confidence"], c["kelly_pct"] = units, conf, kelly_pct
     return chosen
 
 
@@ -3445,7 +3844,16 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
             log.warning("nrfi model failed: %s", e)
             nrfi = None
 
-    suggestions = _suggest_picks(odds, splits, power_rating)
+    # Exchange-based sharp score — side-by-side with PIN during the
+    # Odds-API cutover (deadline June 25). Attached BEFORE _suggest_picks
+    # so every suggestion carries x_score/x_side/x_agree for the
+    # agreement review.
+    _attach_xsharp(sb, market["id"], odds)
+
+    suggestions = _suggest_picks(odds, splits, power_rating,
+                                 sport=sport, home=home,
+                                 starts_in_min=starts_in_min,
+                                 sticky_keys=_sticky_keys(sb, market["id"]))
     # Keep the singular `suggestion` field as an alias for the top pick
     # so any caller still expecting it doesn't break. New code should
     # use `suggestions` (list) so multi-pick games render correctly.

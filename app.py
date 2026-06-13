@@ -2713,6 +2713,1002 @@ def _fetch_espn_scoreboard(sport: str) -> list:
         return []
 
 
+# ───────────────────────── Kalshi (free, no-auth market data) ─────────────
+# Kalshi is a deep prediction-market exchange whose price (in cents = implied
+# probability) moves with the sharp number — like Polymarket, a free/keyless
+# "birdie" that the line moved. We read it ONLY as a signal source (the user
+# doesn't bet Kalshi). Market-data GET endpoints are public — no API key.
+#
+# This is step 1 of the PMM+Kalshi cross-confirm detector: get a working
+# Kalshi reader + verify the exact response shape in production (I can't reach
+# Kalshi from the build sandbox). /debug-kalshi dumps the raw first-market
+# object so we can lock the field names, then build the matcher + logger.
+#
+# Base URL has moved historically (trading-api -> elections -> external), so
+# we try candidates in order and report which one answered.
+_KALSHI_BASES = [
+    "https://api.elections.kalshi.com/trade-api/v2",
+    "https://external-api.kalshi.com/trade-api/v2",
+    "https://trading-api.kalshi.com/trade-api/v2",
+]
+# sport -> Kalshi series_ticker. MLB confirmed (KXMLBGAME); others TBD once
+# we can browse Kalshi live (NBA/NHL/NFL series tickers added later).
+# sport (UPPER, our markets.sport code) -> Kalshi per-game series ticker.
+# Confirmed live via /debug-kalshi. Add a sport here + a team map in
+# _TEAM_TO_KALSHI + to _PM_SPORTS / odds_api _TRIGGER_SPORTS to cover it.
+_KALSHI_SERIES = {"MLB": "KXMLBGAME", "NBA": "KXNBAGAME", "NHL": "KXNHLGAME"}
+# Sports the cent-logger + cross-confirm trigger cover (cent data flows).
+_PM_SPORTS = ["MLB", "NBA", "NHL"]
+# How far out the cross-confirm watcher tracks each sport. MLB is dense
+# (daily) so 12h is plenty; NBA/NHL playoff series are 2-3 days apart, so
+# we watch farther out to catch the early line movement on the next game
+# (few games, so the per-game PMM budget cost is negligible).
+_PM_WINDOW_H = {"MLB": 12, "NBA": 96, "NHL": 96}
+_KALSHI_CACHE: dict[str, tuple[float, dict]] = {}
+_KALSHI_TTL = 30  # seconds
+
+
+def _kalshi_cents(v):
+    """Kalshi quotes prices as dollar STRINGS ('0.5100') — convert to the
+    integer cents (51) the 1c-move trigger works in. None on junk; note
+    '0.0000' -> 0 means no bid/ask, not a real 0c price (detector handles)."""
+    try:
+        return round(float(v) * 100)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_kalshi_markets(series_ticker: str, status: str = "open") -> dict:
+    """Fetch open markets for a Kalshi series (public, no auth). Defensive —
+    never raises. Returns {ok, base_used, http_status, count, markets:[...],
+    raw_sample, error}. `raw_sample` is the FULL first market object so we can
+    confirm the real field names (yes_bid/yes_ask/last_price/ticker/...) from
+    production via /debug-kalshi. Failures are NOT cached (so the next hit
+    retries fresh while we iterate)."""
+    import time
+    key = f"{series_ticker}:{status}"
+    now = time.time()
+    cached = _KALSHI_CACHE.get(key)
+    if cached and (now - cached[0]) < _KALSHI_TTL:
+        return cached[1]
+
+    out: dict = {"ok": False, "series_ticker": series_ticker,
+                 "base_used": None, "http_status": None,
+                 "count": 0, "markets": [], "raw_sample": None, "error": None}
+    headers = {"Accept": "application/json", "User-Agent": "kahla-house/1.0"}
+    params = {"series_ticker": series_ticker, "status": status, "limit": 200}
+    last_err = None
+    for base in _KALSHI_BASES:
+        try:
+            r = _http.get(f"{base}/markets", params=params,
+                          headers=headers, timeout=10)
+            out["base_used"] = base
+            out["http_status"] = r.status_code
+            if r.status_code != 200:
+                last_err = f"HTTP {r.status_code} @ {base}: {r.text[:160]}"
+                continue
+            data = r.json()
+            markets = data.get("markets") if isinstance(data, dict) else None
+            if markets is None:
+                last_err = (f"no 'markets' key @ {base}; top keys="
+                            + str(list(data.keys()) if isinstance(data, dict) else type(data).__name__))
+                continue
+            out["raw_sample"] = markets[0] if markets else None
+            parsed = []
+            for m in markets:
+                # Verified shape (prod /debug-kalshi): each EVENT
+                # (event_ticker) has two market rows, one per team; `team`
+                # (= yes_sub_title) is the side this YES contract pays.
+                # Prices are dollar strings -> integer cents.
+                parsed.append({
+                    "ticker":       m.get("ticker"),
+                    "event_ticker": m.get("event_ticker"),
+                    "title":        m.get("title"),
+                    "team":         m.get("yes_sub_title"),
+                    "yes_bid_c":    _kalshi_cents(m.get("yes_bid_dollars")),
+                    "yes_ask_c":    _kalshi_cents(m.get("yes_ask_dollars")),
+                    "last_c":       _kalshi_cents(m.get("last_price_dollars")),
+                    "volume":       m.get("volume_fp") or m.get("volume_24h_fp"),
+                    "status":       m.get("status"),
+                    "close_time":   m.get("close_time"),
+                })
+            out["ok"] = True
+            out["count"] = len(parsed)
+            out["markets"] = parsed
+            _KALSHI_CACHE[key] = (now, out)
+            return out
+        except Exception as e:
+            last_err = f"{type(e).__name__} @ {base}: {e}"
+            continue
+    out["error"] = last_err
+    return out
+
+
+@app.route("/debug-kalshi")
+def debug_kalshi():
+    """Verify the live Kalshi response shape. Public market data only (no
+    secrets), so no auth — hit it in a browser: /debug-kalshi?sport=mlb.
+    `raw_sample` shows the true field names so we can lock the parser, then
+    build the PMM+Kalshi cent-move detector on top. Temporary verify tool."""
+    # ?series= probes a raw Kalshi series ticker directly (to discover the
+    # per-game series for new sports, e.g. KXNBAGAME); ?sport= uses the map.
+    series = (request.args.get("series") or "").strip().upper()
+    if not series:
+        sport = (request.args.get("sport") or "mlb").upper()
+        series = _KALSHI_SERIES.get(sport)
+        if not series:
+            return jsonify({"ok": False, "error": f"unknown sport '{sport}'",
+                            "known": list(_KALSHI_SERIES)}), 400
+    return jsonify(_fetch_kalshi_markets(series))
+
+
+def _fetch_kalshi_orderbook(ticker: str) -> dict:
+    """Full Kalshi order book (all bid levels, both sides) for one market.
+    Public, no auth. `GET /markets/{ticker}/orderbook`."""
+    headers = {"Accept": "application/json", "User-Agent": "kahla-house/1.0"}
+    last = None
+    for base in _KALSHI_BASES:
+        try:
+            r = _http.get(f"{base}/markets/{ticker}/orderbook",
+                          headers=headers, timeout=10)
+            if r.status_code != 200:
+                last = f"HTTP {r.status_code} @ {base}: {r.text[:140]}"
+                continue
+            return {"base_used": base, "data": r.json()}
+        except Exception as e:
+            last = f"{type(e).__name__} @ {base}: {e}"
+    return {"error": last}
+
+
+# ───────────── Order-book depth readers + make/take signal ─────────────
+# Both venues expose a full ladder. Normalize each to a common per-side shape
+# {best_bid, best_ask, bids:[(cent,size)], asks:[(cent,size)]} for the side
+# you'd BUY, so the make/take math is venue-agnostic.
+_BOOK_TOP_LVLS = 2     # Imbalance is read from JUST the best level (+ one
+                       # behind) — NOT a cent window. Far lottery bids parked
+                       # at 1c and liquidity sellers dumping at 99c reflect
+                       # zero pressure at the touch and would wildly distort a
+                       # depth sum. Only the size AT the touch matters: the
+                       # queue ahead of your maker (best bid) vs the supply
+                       # you'd take through (best ask). One-behind guards
+                       # against a thin/spoof top line; drop to 1 for purest.
+
+# THE TAKE RULE (research-calibrated June 2026 — see the deep-research
+# session in chat history): ≥1.5× more contracts BID than OFFERED → TAKE,
+# no clock/edge conditions, PROVIDED the bid side carrying the signal clears
+# the size floor. More buyers than sellers at the top = price pressure UP =
+# a resting maker joins the back of a queue sellers aren't coming to clear
+# (queue-reactive fill intensities + back-of-queue adverse selection —
+# Huang/Lehalle/Rosenbaum 2015, Moallemi & Yuan 2016, Lehalle & Mounjid
+# 2017). History: original tree (3x/2x-with-clock/5u) was too conservative;
+# the user's flat 1.3× was the most aggressive trigger found anywhere in
+# academia or shipped practice — the practitioner cluster is 1.5-2.0×, and
+# every credible source pairs the ratio with a minimum-size gate (a 1.5×
+# read on a few-hundred-contract book is inside noise AND the cheapest book
+# state to spoof; thin books are the most manipulable — Gu et al. 2024).
+# Checked on BOTH the 2-level top-of-book sum AND the L1 touch (a seller
+# wall one level up dilutes the 2-level read and can hide a buried touch);
+# either crossing 1.5× WITH its bid size ≥ the floor fires.
+_TAKE_IMB = 1.5          # bid size ≥ this × ask size ⇒ TAKE
+_TAKE_MIN_QUEUE = 500    # ...and the firing read's bid size ≥ this many
+                         # contracts (thin-book noise/spoof gate; tune via
+                         # the signal_blob.book_imb validation dataset)
+
+
+def _pmm_book(client, slug: str) -> dict | None:
+    """Polymarket markets.book(slug) -> normalized side book in cents.
+    bids = buyers of this side, asks (offers) = sellers of this side."""
+    try:
+        md = (client.markets.book(slug) or {}).get("marketData") or {}
+    except Exception:
+        return None
+
+    def lv(rows):
+        out = []
+        for r in (rows or []):
+            try:
+                c = round(float((r.get("px") or {}).get("value")) * 100)
+                q = float(r.get("qty"))
+                if 0 < c < 100 and q > 0:
+                    out.append((c, q))
+            except Exception:
+                pass
+        return out
+    bids = sorted(lv(md.get("bids")),   key=lambda x: -x[0])
+    asks = sorted(lv(md.get("offers")), key=lambda x:  x[0])
+    return {"bids": bids, "asks": asks,
+            "best_bid": bids[0][0] if bids else None,
+            "best_ask": asks[0][0] if asks else None}
+
+
+def _kalshi_book(ticker: str) -> dict | None:
+    """Kalshi orderbook for one side -> normalized book in cents. yes_dollars
+    = bids for this side; no_dollars = the other side's bids, which become
+    THIS side's asks at (100 - no_price)."""
+    ob = _fetch_kalshi_orderbook(ticker)
+    data = (ob.get("data") or {}).get("orderbook_fp") or {}
+    if not data:
+        return None
+
+    def cents(rows):
+        out = []
+        for pair in (rows or []):
+            try:
+                c = round(float(pair[0]) * 100)
+                q = float(pair[1])
+                if 0 < c < 100 and q > 0:
+                    out.append((c, q))
+            except Exception:
+                pass
+        return out
+    bids = sorted(cents(data.get("yes_dollars")), key=lambda x: -x[0])
+    asks = sorted([(100 - c, q) for c, q in cents(data.get("no_dollars"))],
+                  key=lambda x: x[0])
+    return {"bids": bids, "asks": asks,
+            "best_bid": bids[0][0] if bids else None,
+            "best_ask": asks[0][0] if asks else None}
+
+
+def _invert_book(book: dict | None) -> dict | None:
+    """NO-side view of a binary YES book. A NO buyer is a YES seller, so the
+    NO bids are the YES asks at (100−c) and vice versa. Needed because PMM
+    has ONE market per line (the YES side); picks on the synthesized inverse
+    side (pmm `synthetic: true`) share the YES market's slug, and reading the
+    YES book unflipped computes make/take + imbalance for the WRONG side."""
+    if not book:
+        return None
+    bids = sorted([(100 - c, q) for c, q in (book.get("asks") or [])],
+                  key=lambda x: -x[0])
+    asks = sorted([(100 - c, q) for c, q in (book.get("bids") or [])],
+                  key=lambda x: x[0])
+    return {"bids": bids, "asks": asks,
+            "best_bid": bids[0][0] if bids else None,
+            "best_ask": asks[0][0] if asks else None}
+
+
+def _pmm_taker_fee_cents(price_cents) -> float:
+    """Polymarket US TAKER fee per share, in cents: 5c · p·(1-p) (p = price
+    in dollars) — peaks at 1.25c/share at 50c, tapers to the wings. Confirmed
+    on live tickets (54c -> $1.24/100sh, 47c -> $1.25/100sh) AND against the
+    published schedule (0.05·C·p·(1-p), effective Apr 2026). The fee PEAKS at
+    coin-flips, exactly where sharp action lives, so taking a 50/50 is the
+    most expensive case."""
+    if price_cents is None:
+        return 0.0
+    p = max(0.0, min(1.0, price_cents / 100.0))
+    return round(5.0 * p * (1.0 - p), 2)
+
+
+def _pmm_maker_rebate_cents(price_cents) -> float:
+    """Polymarket US MAKER rebate per share, in cents: +1.25c · p·(1-p),
+    credited at fill (max +0.31c at 50c). Makers don't just pay zero — they
+    get PAID (verified June 2026 vs docs.polymarket.us/fees: 0.0125·C·p·(1-p)).
+    Counted as a forgone-rebate term in the make-vs-take cost gap."""
+    if price_cents is None:
+        return 0.0
+    p = max(0.0, min(1.0, price_cents / 100.0))
+    return round(1.25 * p * (1.0 - p), 2)
+
+
+def _book_signal(book: dict | None, edge_units: float = 1,
+                 starts_in_min: float | None = None) -> dict | None:
+    """Make-vs-take for BUYING this side, FEE- AND TIME-aware. A maker fills
+    only if SELLERS hit your bid (zero fee) and it needs TIME to happen; a
+    taker crosses to the ask + pays the fee (costs `spread + fee`, ~2c+ near
+    50/50) but is instant. So the call is "will my maker fill before I need
+    the bet?" — driven by the book (will sellers hit it?) AND the clock (is
+    there time?). DEFAULT MAKE; TAKE when the maker will likely MISS — a
+    bid-heavy book (≥ _TAKE_IMB on either read, unconditional) OR the clock
+    running out. Reported take price is FEE-INCLUSIVE, not the ask."""
+    if not book or book.get("best_bid") is None or book.get("best_ask") is None:
+        return None
+    bb, ba = book["best_bid"], book["best_ask"]
+    spread = ba - bb
+    fee = _pmm_taker_fee_cents(ba)
+    rebate = _pmm_maker_rebate_cents(bb)   # what a filled maker would EARN
+    take_eff = round(ba + fee, 2)          # TRUE cost of taking (ask + fee)
+    # take vs make all-in gap: spread + taker fee + the maker rebate you
+    # give up by not resting (~2.6c at 50/50 on a 1c book).
+    take_cost = round(spread + fee + rebate, 2)
+    # Top-of-book sizes only (best + one behind) — see _BOOK_TOP_LVLS.
+    top_bid = sum(q for _, q in book["bids"][:_BOOK_TOP_LVLS])
+    top_ask = sum(q for _, q in book["asks"][:_BOOK_TOP_LVLS])
+    imb = round(top_bid / top_ask, 2) if top_ask else None
+    # Level-1 touch: the queue you'd actually sit behind at the bid vs the
+    # supply offered at the ask. The 2-level `imb` can be diluted by a seller
+    # wall ONE level up (which doesn't help you fill at YOUR price) and hide a
+    # lopsided touch — so the take rule checks BOTH reads. See _TAKE_IMB.
+    l1_bid = round(book["bids"][0][1]) if book["bids"] else 0
+    l1_ask = round(book["asks"][0][1]) if book["asks"] else 0
+    touch_imb = round(l1_bid / l1_ask, 2) if l1_ask else None
+    sim = starts_in_min
+
+    take, why = False, []
+    # THE RULE — ≥1.5x more contracts bid than offered ⇒ TAKE, provided the
+    # firing read's bid size clears the thin-book floor (see _TAKE_IMB /
+    # _TAKE_MIN_QUEUE). Either book read fires.
+    if (imb is not None and imb >= _TAKE_IMB and top_bid >= _TAKE_MIN_QUEUE):
+        take = True
+        why.append(f"{round(top_bid):,} bid vs {round(top_ask):,} offered ({imb}x — {int(round((imb - 1) * 100))}% more buyers than sellers) — a maker won't fill; take it")
+    elif (touch_imb is not None and touch_imb >= _TAKE_IMB
+          and l1_bid >= _TAKE_MIN_QUEUE):
+        take = True
+        why.append(f"touch {bb}c: {l1_bid:,} queued vs {l1_ask:,} offered ({touch_imb}x) — buried maker; take it")
+    # Clock fallback — even on a balanced book, a maker needs TIME to fill;
+    # inside 30m a resting limit simply won't fill before the game.
+    elif sim is not None and sim <= 30:
+        if imb is not None and imb <= 0.4:
+            why.append(f"{round(sim)}m to tip but ask-heavy ({imb}x) — sellers fill your maker fast, still make")
+        else:
+            take = True
+            why.append(f"{round(sim)}m to tip — a maker won't fill in time, take it in")
+    else:
+        why.append(f"rest the maker — taking costs {take_cost}c ({spread}c spread + {fee}c fee + {rebate}c forgone maker rebate)")
+    return {"rec": "TAKE" if take else "MAKE",
+            "make_price": bb, "take_price": ba, "take_fee": fee,
+            "make_rebate": rebate,
+            "take_eff": take_eff, "take_cost": take_cost,
+            "target": take_eff if take else bb,    # fee-inclusive take / rest at bid
+            "best_bid": bb, "best_ask": ba, "spread": spread, "imbalance": imb,
+            "top_bid_size": round(top_bid), "top_ask_size": round(top_ask),
+            "touch_imbalance": touch_imb, "queue_ahead": l1_bid, "ask_touch": l1_ask,
+            "why": why}
+
+
+# Best-execution routing to sportsbooks was REMOVED June 2026 — the user is
+# Polymarket-exclusive and doesn't bet the US books, so TAKE always means
+# "cross on Polymarket" (the fee-inclusive ask). MAKE = rest at the bid. No
+# venue routing. (Full _best_book_for / _ROUTE_BOOKS routing is in git history
+# if it's ever wanted back.)
+
+
+@app.route("/debug-orderbook")
+def debug_orderbook():
+    """Probe the FULL depth ladder on both venues (read-only, public market
+    data). Polymarket: introspects the live SDK (`dir`) to reveal whether a
+    depth method exists beyond top-of-book `bbo`, and tries candidate names.
+    Kalshi: fetches the orderbook directly. Pass ?slug=<pmm-market-slug> and
+    ?ticker=<kalshi-market-ticker> to probe specific markets; Kalshi auto-
+    picks a live MLB ticker if none given. Temporary discovery tool."""
+    out: dict = {"polymarket": {}, "kalshi": {}}
+
+    # ---- Polymarket: introspect the SDK + try to pull depth ----
+    try:
+        client = get_client()
+        out["polymarket"]["markets_methods"] = sorted(
+            m for m in dir(client.markets) if not m.startswith("_"))
+        out["polymarket"]["client_resources"] = sorted(
+            m for m in dir(client) if not m.startswith("_"))
+        slug = (request.args.get("slug") or "").strip()
+        if not slug:
+            # Auto-find a live PMM market slug from the soonest MLB game so the
+            # book-method call below actually runs without needing a ?slug=.
+            try:
+                import pmm_markets as _pm
+                _sb = get_supabase()
+                g = ((_sb.table("markets").select("event_name,event_start")
+                      .eq("sport", "MLB").eq("status", "active")
+                      .gte("event_start", datetime.now(timezone.utc).isoformat())
+                      .order("event_start").limit(1).execute().data) or []) if _sb else []
+                if g and " @ " in (g[0].get("event_name") or ""):
+                    aw, hm = [s.strip() for s in g[0]["event_name"].split(" @ ", 1)]
+                    data = _pm.lookup(client, "MLB", aw, hm, g[0]["event_start"])
+                    ml = (data or {}).get("ml") or []
+                    slug = (ml[0].get("slug") if ml else "") or ""
+                    out["polymarket"]["auto_slug"] = slug
+            except Exception as e:
+                out["polymarket"]["auto_slug_error"] = str(e)[:200]
+        if slug:
+            try:
+                out["polymarket"]["bbo"] = client.markets.bbo(slug)
+            except Exception as e:
+                out["polymarket"]["bbo_error"] = str(e)[:200]
+            # Dump the raw market so we can spot token-id fields (clobTokenIds /
+            # marketSides) for a direct CLOB /book fallback if the SDK has no
+            # depth method.
+            try:
+                m = client.markets.retrieve_by_slug(slug)
+                out["polymarket"]["market_keys"] = sorted(
+                    (m.keys() if isinstance(m, dict) else
+                     [a for a in dir(m) if not a.startswith("_")]))
+            except Exception as e:
+                out["polymarket"]["market_keys_error"] = str(e)[:200]
+            # Normalized book + make/take signal (the real output).
+            pb = _pmm_book(client, slug)
+            out["polymarket"]["book_top5"] = None if not pb else {
+                "best_bid": pb["best_bid"], "best_ask": pb["best_ask"],
+                "bids": pb["bids"][:5], "asks": pb["asks"][:5]}
+            out["polymarket"]["make_take"] = _book_signal(pb)
+    except Exception as e:
+        out["polymarket"]["error"] = f"{type(e).__name__}: {e}"[:200]
+
+    # ---- Kalshi: full orderbook (auto-pick a live MLB ticker if none) ----
+    ticker = (request.args.get("ticker") or "").strip()
+    if not ticker:
+        kal = _fetch_kalshi_markets("KXMLBGAME")
+        mk = kal.get("markets") or []
+        ticker = mk[0]["ticker"] if mk else None
+    out["kalshi"]["ticker"] = ticker
+    if ticker:
+        kb = _kalshi_book(ticker)
+        out["kalshi"]["book_top5"] = None if not kb else {
+            "best_bid": kb["best_bid"], "best_ask": kb["best_ask"],
+            "bids": kb["bids"][:5], "asks": kb["asks"][:5]}
+        out["kalshi"]["make_take"] = _book_signal(kb)
+    return jsonify(out)
+
+
+@app.route("/api/handicapper/make-take")
+@bot_required
+def api_make_take():
+    """Live make-vs-take for one picked side, POLYMARKET-ONLY. The card polls
+    this (slug + units + starts_in_min) so the chip updates as the book moves.
+    MAKE -> rest a Polymarket maker at the bid (fee-free, the best price).
+    TAKE -> cross on Polymarket at the fee-inclusive ask (`take_eff`). No
+    sportsbook routing — the user is Polymarket-exclusive."""
+    slug = (request.args.get("slug") or "").strip()
+    if not slug:
+        return jsonify({"ok": False, "error": "missing slug"}), 400
+    try:
+        units = float(request.args.get("units") or 1)
+    except ValueError:
+        units = 1
+    try:
+        sim = float(request.args.get("starts_in_min"))
+    except (TypeError, ValueError):
+        sim = None
+    # inverse=1 → the pick is the synthesized NO side of this market; flip
+    # the book so the rec is for the side the user is actually buying.
+    inverse = (request.args.get("inverse") or "") in ("1", "true", "yes")
+    try:
+        book = _pmm_book(get_client(), slug)
+    except Exception as e:
+        return jsonify({"ok": True, "available": False,
+                        "error": f"{type(e).__name__}: {e}"[:160]})
+    if inverse:
+        book = _invert_book(book)
+    sig = _book_signal(book, edge_units=units, starts_in_min=sim)
+    if not sig:
+        return jsonify({"ok": True, "available": False})
+    return jsonify({"ok": True, "available": True,
+                    "rec": sig["rec"], "make_price": sig["make_price"], **sig})
+
+
+# ───────────── PMM + Kalshi cent-logger (the cross-confirm memory) ─────────
+# Step 2 of the detector: every ~1 min, record the free Polymarket + Kalshi
+# cent prices per side for our upcoming games into pm_snapshots (deduped on
+# change). This is both the detector's MEMORY (compare to last to catch a
+# >=1c move) and the VALIDATION dataset (prove the 1c-AND fires + measure how
+# many minutes these free feeds lead our paid PINN capture in book_snapshots).
+# Zero PINN cost. Read-only signal — we never trade Kalshi.
+
+# Our team full name -> Kalshi ticker code (the suffix after the last '-',
+# e.g. KXMLBGAME-...BOSNYY-BOS). Keyed by mascot (unique) so it works on any
+# city/name variant The Odds API sends.
+# Per-sport mascot -> Kalshi ticker code (the suffix after the last '-').
+# Keyed by mascot (unique within a sport) so it works on any city/name
+# variant The Odds API sends. Confirmed via /debug-kalshi: MLB (all), NBA
+# (SAS/NYK), NHL (VGK/CAR); the rest are the standard sports tricodes —
+# a wrong code only fails THAT game's match (no trigger), which is safe.
+_TEAM_TO_KALSHI = {
+    "MLB": {
+        "diamondbacks": "AZ", "braves": "ATL", "orioles": "BAL", "red sox": "BOS",
+        "white sox": "CWS", "cubs": "CHC", "reds": "CIN", "guardians": "CLE",
+        "rockies": "COL", "tigers": "DET", "astros": "HOU", "royals": "KC",
+        "angels": "LAA", "dodgers": "LAD", "marlins": "MIA", "brewers": "MIL",
+        "twins": "MIN", "mets": "NYM", "yankees": "NYY", "athletics": "ATH",
+        "phillies": "PHI", "pirates": "PIT", "padres": "SD", "giants": "SF",
+        "mariners": "SEA", "cardinals": "STL", "rays": "TB", "rangers": "TEX",
+        "blue jays": "TOR", "nationals": "WSH",
+    },
+    "NBA": {
+        "hawks": "ATL", "celtics": "BOS", "nets": "BKN", "hornets": "CHA",
+        "bulls": "CHI", "cavaliers": "CLE", "mavericks": "DAL", "nuggets": "DEN",
+        "pistons": "DET", "warriors": "GSW", "rockets": "HOU", "pacers": "IND",
+        "clippers": "LAC", "lakers": "LAL", "grizzlies": "MEM", "heat": "MIA",
+        "bucks": "MIL", "timberwolves": "MIN", "pelicans": "NOP", "knicks": "NYK",
+        "thunder": "OKC", "magic": "ORL", "76ers": "PHI", "suns": "PHX",
+        "trail blazers": "POR", "blazers": "POR", "kings": "SAC", "spurs": "SAS",
+        "raptors": "TOR", "jazz": "UTA", "wizards": "WAS",
+    },
+    "NHL": {
+        "ducks": "ANA", "bruins": "BOS", "sabres": "BUF", "flames": "CGY",
+        "hurricanes": "CAR", "blackhawks": "CHI", "avalanche": "COL",
+        "blue jackets": "CBJ", "stars": "DAL", "red wings": "DET", "oilers": "EDM",
+        "panthers": "FLA", "kings": "LAK", "wild": "MIN", "canadiens": "MTL",
+        "predators": "NSH", "devils": "NJD", "islanders": "NYI", "rangers": "NYR",
+        "senators": "OTT", "flyers": "PHI", "penguins": "PIT", "sharks": "SJS",
+        "kraken": "SEA", "blues": "STL", "lightning": "TBL", "maple leafs": "TOR",
+        "canucks": "VAN", "golden knights": "VGK", "capitals": "WSH", "jets": "WPG",
+    },
+}
+_KALSHI_MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+                  "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+
+
+def _our_team_to_kalshi_code(sport: str, name: str):
+    n = (name or "").lower()
+    for mascot, code in _TEAM_TO_KALSHI.get(sport, {}).items():
+        if mascot in n:
+            return code
+    return None
+
+
+def _mid_cents(bid, ask, last):
+    """Mid of bid/ask in int cents; one side if only one quoted; else last."""
+    vals = [v for v in (bid, ask) if v is not None]
+    if len(vals) == 2:
+        return round((vals[0] + vals[1]) / 2)
+    if len(vals) == 1:
+        return vals[0]
+    return last
+
+
+def _kalshi_ml_index(markets: list) -> list:
+    """Group Kalshi market rows by event_ticker:
+    [{'date':'YYYY-MM-DD','codes':{CODE: cents|None}}]. CODE = ticker side
+    suffix; date parsed from the event ticker (the ET game date)."""
+    import re
+    events: dict = {}
+    for m in markets:
+        tk = m.get("ticker") or ""
+        et = m.get("event_ticker") or ""
+        if "-" not in tk or not et:
+            continue
+        code = tk.rsplit("-", 1)[1]
+        mo = re.match(r"KX[A-Z]+GAME-(\d{2})([A-Z]{3})(\d{2})", et)
+        if not mo:
+            continue
+        yy, mon, dd = mo.groups()
+        mm = _KALSHI_MONTHS.get(mon)
+        if not mm:
+            continue
+        date = f"20{yy}-{mm:02d}-{int(dd):02d}"
+        cents = _mid_cents(m.get("yes_bid_c"), m.get("yes_ask_c"), m.get("last_c"))
+        e = events.setdefault(et, {"date": date, "codes": {}})
+        if code not in e["codes"] or (e["codes"][code] is None and cents is not None):
+            e["codes"][code] = cents
+    return list(events.values())
+
+
+def _match_kalshi(events: list, away_code: str, home_code: str, our_date):
+    """Kalshi cents for our game: nearest-date event containing both codes.
+    Returns {'away': cents|None, 'home': cents|None} or {}."""
+    from datetime import date as _date
+    want = {away_code, home_code}
+    best, best_diff = None, 99
+    for e in events:
+        if not want.issubset(e["codes"].keys()):
+            continue
+        try:
+            diff = abs((_date.fromisoformat(e["date"]) - our_date).days)
+        except Exception:
+            continue
+        if diff <= 1 and diff < best_diff:
+            best, best_diff = e, diff
+    if not best:
+        return {}
+    return {"away": best["codes"].get(away_code),
+            "home": best["codes"].get(home_code)}
+
+
+def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
+    """Polymarket quotes for one game, all main markets, mids in int cents.
+    Returns {"ml": {side: cents}, "rows": [(market_type, side, line, cents)]}
+    or {} on any miss. ONE lookup() call — it already fetches + classifies
+    every market, so spread/total ride along at zero extra network cost.
+    The `ml` dict feeds the cross-confirm trigger (unchanged); `rows` is
+    the full per-line feed for pm_snapshots (the Odds-API-retirement
+    history: sharp score / board movement / CLV all read this)."""
+    if not pm or not client:
+        return {}
+    try:
+        data = pm.lookup(client, sport, away, home, event_start)
+    except Exception:
+        return {}
+    if not data:
+        return {}
+    ml, rows = {}, []
+    for mt in ("ml", "spread", "total"):
+        for row in (data.get(mt) or []):
+            side = row.get("side")
+            mid = (row.get("quote") or {}).get("mid")
+            if not side or mid is None:
+                continue
+            try:
+                cents = round(float(mid) * 100)
+            except (TypeError, ValueError):
+                continue
+            if cents <= 0 or cents >= 100:      # no quote / degenerate
+                continue
+            line = None
+            if mt != "ml" and row.get("line") is not None:
+                try:
+                    line = float(row["line"])
+                except (TypeError, ValueError):
+                    continue                     # spr/tot without a line is junk
+            rows.append((mt, side, line, cents))
+            if mt == "ml" and side in ("home", "away"):
+                ml[side] = cents
+    return {"ml": ml, "rows": rows}
+
+
+def _pm_insert_changed(sb, rows, now) -> int:
+    """Insert (market_id, source, market_type, side, line, cents) rows,
+    deduped: only when the cent differs from the latest stored value for
+    that key (book_snapshots pattern). One row per key per tick. `line` is
+    part of the key — PMM offers several spread/total lines per game and
+    each is its own price series."""
+    if not rows:
+        return 0
+
+    def _lkey(v):
+        try:
+            return None if v is None else round(float(v), 2)
+        except (TypeError, ValueError):
+            return None
+
+    mids = list({r[0] for r in rows})
+    last: dict = {}
+    try:
+        recent = (sb.table("pm_snapshots")
+                  .select("market_id,source,market_type,side,line,cents,captured_at")
+                  .in_("market_id", mids)
+                  .gte("captured_at", (now - timedelta(hours=24)).isoformat())
+                  .order("captured_at", desc=True).limit(5000).execute().data) or []
+        for r in recent:
+            k = (r["market_id"], r["source"], r.get("market_type") or "ml",
+                 r["side"], _lkey(r.get("line")))
+            if k not in last:           # first seen = latest (desc order)
+                last[k] = r["cents"]
+    except Exception:
+        pass
+    ins, seen = [], set()
+    for (mid, source, mt, side, line, cents) in rows:
+        k = (mid, source, mt, side, _lkey(line))
+        if k in seen:
+            continue
+        seen.add(k)
+        if last.get(k) == cents:        # unchanged → skip
+            continue
+        ins.append({"market_id": mid, "source": source, "market_type": mt,
+                    "side": side, "line": line, "cents": cents,
+                    "captured_at": now.isoformat()})
+    if ins:
+        try:
+            sb.table("pm_snapshots").insert(ins).execute()
+        except Exception:
+            return 0
+    return len(ins)
+
+
+# ───────────── Cross-confirm trigger (PMM+Kalshi → on-demand PINN pull) ─────
+_XCONFIRM_MOVE = 1   # cents — both feeds must move >= this, same direction
+
+
+def _in_blackout_mt(now) -> bool:
+    """11pm–7am America/Phoenix = the odds-ingest blackout (user asleep)."""
+    h = now.astimezone(ZoneInfo("America/Phoenix")).hour
+    return h >= 23 or h < 7
+
+
+def _xconfirm_detect(sb, cur: dict, now) -> dict:
+    """`cur`: {market_id: {sport, pmm_home, kalshi_home, starts_in_min}}.
+    For each game, compare current HOME cents to the stored baseline; when
+    BOTH PMM and Kalshi have drifted >= _XCONFIRM_MOVE the SAME direction
+    (and the game is >60min out and we're not in blackout), write a per-sport
+    `odds_pull_requests` row + reset that game's baseline. Kalshi orientation
+    is trusted — a same-city PMM side-flip just makes the signs disagree, so
+    the AND doesn't fire (safe, no false trigger). The per-sport 5-min cap +
+    blackout are enforced cron-side when the request is consumed."""
+    out = {"triggered": [], "baselined": 0}
+    if not cur or _in_blackout_mt(now):
+        return out
+    mids = list(cur.keys())
+    base = {}
+    try:
+        rows = (sb.table("xconfirm_state").select("market_id,pmm_base,kalshi_base")
+                .in_("market_id", mids).execute().data) or []
+        for r in rows:
+            base[r["market_id"]] = (r.get("pmm_base"), r.get("kalshi_base"))
+    except Exception:
+        pass
+    upserts, trig = [], set()
+    for mid, c in cur.items():
+        ph, kh = c["pmm_home"], c["kalshi_home"]
+        b = base.get(mid)
+        if not b or b[0] is None or b[1] is None:           # first sight → baseline
+            upserts.append({"market_id": mid, "sport": c["sport"],
+                            "pmm_base": ph, "kalshi_base": kh,
+                            "baseline_at": now.isoformat(), "last_trigger_at": None})
+            continue
+        if (c.get("starts_in_min") or 0) <= 60:             # >60min rule
+            continue
+        pd, kd = ph - b[0], kh - b[1]
+        if abs(pd) >= _XCONFIRM_MOVE and abs(kd) >= _XCONFIRM_MOVE and (pd > 0) == (kd > 0):
+            trig.add(c["sport"])
+            upserts.append({"market_id": mid, "sport": c["sport"],
+                            "pmm_base": ph, "kalshi_base": kh,
+                            "baseline_at": now.isoformat(),
+                            "last_trigger_at": now.isoformat()})
+    out["baselined"] = len(upserts)
+    if upserts:
+        try:
+            sb.table("xconfirm_state").upsert(upserts).execute()
+        except Exception:
+            pass
+    for sp in trig:
+        try:
+            sb.table("odds_pull_requests").upsert({
+                "sport": sp, "requested_at": now.isoformat(),
+                "consumed_at": None, "reason": "xconfirm"}).execute()
+        except Exception:
+            pass
+    out["triggered"] = sorted(trig)
+    return out
+
+
+@app.route("/api/pm-snapshot")
+def api_pm_snapshot():
+    """Cron-pinged ~1/min. Logs free PMM + Kalshi cents per side for upcoming
+    MLB games into pm_snapshots (deduped). Auth: ?key= matched to
+    PM_SNAPSHOT_SECRET or (fallback) FILLS_CRON_SECRET — no new secret."""
+    import time as _time
+    expected = (os.environ.get("PM_SNAPSHOT_SECRET")
+                or os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    provided = (request.args.get("key") or "").strip()
+    if not expected or not secrets.compare_digest(provided, expected):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+
+    now = datetime.now(timezone.utc)
+
+    # Gather upcoming games across every cent-logged sport, tagged with sport.
+    # Per-sport watch window: MLB 12h, NBA/NHL out to 96h (catch playoff-gap
+    # early movement on the next Finals/Cup game).
+    all_games = []
+    for sp in _PM_SPORTS:
+        hi = (now + timedelta(hours=_PM_WINDOW_H.get(sp, 12))).isoformat()
+        try:
+            rows_sp = (sb.table("markets").select("id,event_name,event_start")
+                       .eq("sport", sp).eq("status", "active")
+                       .gte("event_start", now.isoformat()).lte("event_start", hi)
+                       .order("event_start").execute().data) or []
+        except Exception:
+            rows_sp = []
+        seen = set()
+        for g in rows_sp:
+            n = g.get("event_name") or ""
+            if " @ " in n and n not in seen:        # dedup dup market rows
+                seen.add(n)
+                g["_sport"] = sp
+                all_games.append(g)
+    if not all_games:
+        return jsonify({"ok": True, "games": 0, "reason": "no upcoming games in 12h"})
+
+    # Stale-first ordering across all sports — rotate the budgeted PMM
+    # coverage so far-out (trigger-relevant) games aren't starved.
+    try:
+        bl_rows = (sb.table("xconfirm_state").select("market_id,baseline_at")
+                   .in_("market_id", [g["id"] for g in all_games]).execute().data) or []
+        bl = {r["market_id"]: r.get("baseline_at") for r in bl_rows}
+        all_games.sort(key=lambda g: bl.get(g["id"]) or "")
+    except Exception:
+        pass
+
+    # Kalshi: one bulk call per sport (cheap), indexed up front. Only for
+    # sports that actually have a game in the watch window — fetching the
+    # full KXNBAGAME/KXNHLGAME books on an empty slate is wasted CPU.
+    active_sports = {g["_sport"] for g in all_games}
+    kal_idx, kal_meta = {}, {}
+    for sp in active_sports:
+        kal = _fetch_kalshi_markets(_KALSHI_SERIES[sp])
+        kal_meta[sp] = {"ok": kal.get("ok"), "count": kal.get("count")}
+        kal_idx[sp] = _kalshi_ml_index(kal.get("markets") or []) if kal.get("ok") else []
+
+    try:
+        import pmm_markets as _pm
+        _pmm_client = get_client()
+    except Exception:
+        _pm, _pmm_client = None, None
+    pmm_deadline = _time.time() + 7.5
+
+    rows = []
+    st = {"pmm_games": 0, "kalshi_games": 0, "pmm_skipped": 0}
+    cur = {}   # market_id -> current home cents (both feeds) for the trigger
+    for g in all_games:
+        sp = g["_sport"]
+        away, home = [s.strip() for s in g["event_name"].split(" @ ", 1)]
+        mid = g["id"]
+
+        # Kalshi (from the per-sport bulk fetch — no per-game network)
+        ac, hc = _our_team_to_kalshi_code(sp, away), _our_team_to_kalshi_code(sp, home)
+        kc = {}
+        if ac and hc:
+            try:
+                od = (datetime.fromisoformat(str(g["event_start"]).replace("Z", "+00:00"))
+                      .astimezone(ZoneInfo("America/New_York")).date())
+                kc = _match_kalshi(kal_idx.get(sp, []), ac, hc, od)
+            except Exception:
+                kc = {}
+        if kc.get("home") or kc.get("away"):
+            st["kalshi_games"] += 1
+
+        # PMM (budgeted) — one lookup returns ML + spread + total quotes;
+        # all of them land in pm_snapshots (the post-Odds-API history).
+        pmm, pmm_rows = {}, []
+        if _time.time() < pmm_deadline:
+            pq = _pmm_game_quotes(_pm, _pmm_client, away, home, g["event_start"], sport=sp)
+            if pq:
+                st["pmm_games"] += 1
+                pmm = pq.get("ml") or {}
+                pmm_rows = pq.get("rows") or []
+        else:
+            st["pmm_skipped"] += 1
+
+        for (mt, p_side, p_line, c) in pmm_rows:
+            rows.append((mid, "pmm", mt, p_side, p_line, c))
+        for side in ("home", "away"):
+            c = kc.get(side)
+            if c is None or c <= 0 or c >= 100:       # no quote / degenerate
+                continue
+            rows.append((mid, "kalshi", "ml", side, None, int(c)))
+
+        # Capture both feeds' HOME cents for the cross-confirm trigger.
+        if (pmm.get("home") not in (None, 0)) and (kc.get("home") not in (None, 0)):
+            try:
+                sim = round((datetime.fromisoformat(str(g["event_start"]).replace("Z", "+00:00"))
+                             - now).total_seconds() / 60)
+            except Exception:
+                sim = None
+            cur[mid] = {"sport": sp, "pmm_home": int(pmm["home"]),
+                        "kalshi_home": int(kc["home"]), "starts_in_min": sim}
+
+    inserted = _pm_insert_changed(sb, rows, now)
+    xc = _xconfirm_detect(sb, cur, now)
+    return jsonify({"ok": True, "games": len(all_games), "inserted": inserted,
+                    "kalshi": kal_meta, "xconfirm_triggered": xc["triggered"], **st})
+
+
+@app.route("/api/handicapper/paperlog")
+def api_handicapper_paperlog():
+    """Cron-pinged ~1/min. Auto-logs every GATE-CLEARED Pick Bot suggestion
+    for upcoming MLB games across the 5h->1min pre-game window into
+    pickbot_paperlog — one row per (game, market) each time the suggested
+    (side, units) CHANGES (a flip or a size up/down). The complete bot-
+    suggestion dataset for the 2-week review, separate from the user's real
+    bot_picks. No forced leans (gates_cleared only). Budgeted (~8s) so we
+    never exceed Vercel's 10s; stale-game-first ordering cycles coverage
+    across ticks. Auth: ?key= matched to PAPERLOG_SECRET or FILLS_CRON_SECRET."""
+    import time as _time
+    import handicapper_web
+    expected = (os.environ.get("PAPERLOG_SECRET")
+                or os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    provided = (request.args.get("key") or "").strip()
+    if not expected or not secrets.compare_digest(provided, expected):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+
+    now = datetime.now(timezone.utc)
+    lo = (now + timedelta(minutes=1)).isoformat()    # stop 1 min before tip
+    hi = (now + timedelta(hours=5)).isoformat()      # start 5h out
+    try:
+        raw = (sb.table("markets").select("id,event_name,event_start,sport")
+               .eq("sport", "MLB").eq("status", "active")
+               .gte("event_start", lo).lte("event_start", hi)
+               .order("event_start").execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"markets: {e}"}), 500
+    games, seen = [], set()           # dedup duplicate market rows (gotcha #30)
+    for g in raw:
+        n = g.get("event_name") or ""
+        if n and n not in seen:
+            seen.add(n)
+            games.append(g)
+    if not games:
+        return jsonify({"ok": True, "games": 0, "reason": "no upcoming MLB in 5h"})
+
+    # Recent paperlog → (a) last logged_at/game for stale-first ordering,
+    # (b) last (side,units) per (game,market) for the bet-change dedup.
+    mids = [g["id"] for g in games]
+    last_logged, last_bet = {}, {}
+    try:
+        recent = (sb.table("pickbot_paperlog")
+                  .select("market_id,market_type,side,units,logged_at")
+                  .in_("market_id", mids)
+                  .gte("logged_at", (now - timedelta(hours=6)).isoformat())
+                  .order("logged_at", desc=True).limit(5000).execute().data) or []
+        for r in recent:
+            last_logged.setdefault(r["market_id"], r["logged_at"])
+            last_bet.setdefault((r["market_id"], r["market_type"]),
+                                (r.get("side"), r.get("units")))
+    except Exception:
+        pass
+    games.sort(key=lambda g: last_logged.get(g["id"]) or "")   # never-logged first
+
+    deadline = _time.time() + 8.0
+    rows, processed, with_pick = [], 0, 0
+    for g in games:
+        if _time.time() >= deadline:
+            break
+        try:
+            d = handicapper_web.build_dossier(sb, None, None, market_id=g["id"])
+        except Exception:
+            continue
+        processed += 1
+        en, es, sp = d.get("event_name"), d.get("event_start_utc"), d.get("sport")
+        sim = d.get("starts_in_min")
+        tw = handicapper_web._timing_window(sim)
+        pc = handicapper_web._is_prime_core(sim)
+
+        bets = []
+        for s in (d.get("suggestions") or []):
+            if not (s.get("gates_cleared") and s.get("market_type") and s.get("side")):
+                continue
+            entry = s.get("pmm_bid_american")
+            if entry is None:
+                entry = s.get("fair_american")
+            bets.append({
+                "market_type": s["market_type"], "side": s["side"],
+                "units": s.get("units"), "confidence": s.get("confidence"),
+                "line": (s.get("pmm_line") if s.get("uses_pmm_projection") else s.get("pin_line")),
+                "entry_price": entry, "fair_american": s.get("fair_american"),
+                "sharp_score": s.get("sharp_score"), "edge_pp": s.get("edge_pp"),
+                "signal_blob": {"combined_score": s.get("combined_score"),
+                                "model_edge_pp": s.get("model_edge_pp"),
+                                "splits_pp": s.get("splits_pp"),
+                                "book_imb": s.get("book_imb"),
+                                "book_pressure_pp": s.get("book_pressure_pp"),
+                                "sticky": bool(s.get("sticky")),
+                                "x_score": s.get("x_score"),
+                                "x_side": s.get("x_side"),
+                                "x_agree": s.get("x_agree"),
+                                "uses_pmm_projection": s.get("uses_pmm_projection")},
+            })
+        nrfi = d.get("nrfi") or {}
+        if nrfi.get("gates_cleared") and nrfi.get("bet_side"):
+            bs = nrfi["bet_side"]
+            bets.append({
+                "market_type": "nrfi", "side": bs, "units": 0.5, "confidence": "low",
+                "line": None, "entry_price": nrfi.get("entry_price"),
+                "fair_american": (nrfi.get("nrfi_fair_american") if bs == "no"
+                                  else nrfi.get("yrfi_fair_american")),
+                "sharp_score": None, "edge_pp": nrfi.get("bet_edge_pp"),
+                "signal_blob": {"p_nrfi": nrfi.get("p_nrfi")},
+            })
+        if bets:
+            with_pick += 1
+        for b in bets:
+            k = (g["id"], b["market_type"])
+            if last_bet.get(k) == (b["side"], b["units"]):   # unchanged bet → skip
+                continue
+            last_bet[k] = (b["side"], b["units"])            # no dup within this tick
+            rows.append({
+                "market_id": g["id"], "event_name": en, "event_start": es, "sport": sp,
+                "market_type": b["market_type"], "side": b["side"], "line": b["line"],
+                "entry_price": b["entry_price"], "units": b["units"],
+                "confidence": b["confidence"], "timing_window": tw, "prime_core": pc,
+                "starts_in_min": (round(sim) if sim is not None else None),
+                "sharp_score": b["sharp_score"], "edge_pp": b["edge_pp"],
+                "fair_american": b["fair_american"], "gates_cleared": True,
+                "signal_blob": b["signal_blob"], "logged_at": now.isoformat(),
+            })
+    new_rows = 0
+    if rows:
+        try:
+            sb.table("pickbot_paperlog").insert(rows).execute()
+            new_rows = len(rows)
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"insert: {e}",
+                            "processed": processed}), 500
+    return jsonify({"ok": True, "games": len(games), "processed": processed,
+                    "with_pick": with_pick, "new_rows": new_rows})
+
+
 def _merge_espn_scores(sport: str, events: list) -> list:
     """Attach a `score` field to each event whose teams + start time match
     an ESPN scoreboard entry. Score shape:
@@ -3164,6 +4160,160 @@ def _format_fill_alert(row, milestone, fill_pct):
         lines.append(f"_{market}_")
     lines.append(f"*{pick}* · {side} @ {price}")
     lines.append(progress)
+    return "\n".join(lines)
+
+
+# ──────────────── Pick Bot prime-window alerts ────────────────
+# Telegram heads-up (via the Filled Bot) when a cluster of games crosses
+# into the PRIME betting window — 90-120 min before first pitch, the
+# 1.5-2h band where the bot's live picks demonstrably print (68.4%,
+# +27u over 38 picks in the 118-pick review). One BATCHED message per
+# sport ("5 MLB games entering the prime betting window"), NOT one per
+# game. Dedup via the `prime_alerts` table so each game pings once.
+#
+# Pinged every ~1 min by the scanner cron (a curl step alongside the
+# fill-alert ping — no new cron-job.org job). Auth: shared-secret ?key=
+# matched to PRIME_CRON_SECRET, falling back to FILLS_CRON_SECRET so no
+# new secret is required. Telegram routes through _send_fill_telegram
+# (the Filled Bot creds already in Vercel env).
+# Fire the heads-up as games cross the TOP of the prime window (now 3h,
+# extended from 2h June 2026) — you want the full prime window to act.
+_PRIME_LO_MIN       = 150   # consider games 150+ min out for the entering-cluster query
+_PRIME_HI_MIN       = 180   # fire when the earliest fresh game is <= 180 min out (just entered prime / 3h)
+_PRIME_BATCH_HI_MIN = 210   # look 30 min past prime to pull a whole cluster into one alert
+_PRIME_QUIET_BEFORE = 7     # don't alert before 7am AZ (no overnight/early-morning pings)
+
+
+def _fmt_az_time(dt: datetime) -> str:
+    """UTC datetime → 'h:MM AM' in Arizona time (no leading zero)."""
+    local = dt.astimezone(ZoneInfo("America/Phoenix"))
+    return local.strftime("%I:%M %p").lstrip("0")
+
+
+@app.route("/api/handicapper/prime-alert")
+def api_handicapper_prime_alert():
+    """Send a batched Telegram alert when games enter the prime betting
+    window (90-120 min pre-tip). One message per sport for the whole
+    cluster; deduped via `prime_alerts`. Returns a small JSON payload so
+    the cron-job history shows what fired."""
+    expected = (os.environ.get("PRIME_CRON_SECRET")
+                or os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    provided = (request.args.get("key") or "").strip()
+    if not expected or not secrets.compare_digest(provided, expected):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+
+    now = datetime.now(timezone.utc)
+    # Quiet hours — no pings before 7am Arizona time (a game would have to
+    # start ~9am for its prime window to land that early; none do).
+    if now.astimezone(ZoneInfo("America/Phoenix")).hour < _PRIME_QUIET_BEFORE:
+        return jsonify({"ok": True, "alerted": 0, "reason": "quiet hours"})
+
+    lo = (now + timedelta(minutes=_PRIME_LO_MIN)).isoformat()
+    hi = (now + timedelta(minutes=_PRIME_BATCH_HI_MIN)).isoformat()
+    prime_hi = now + timedelta(minutes=_PRIME_HI_MIN)
+
+    try:
+        rows = (sb.table("markets")
+                .select("id,sport,event_name,event_start")
+                .eq("status", "active")
+                .gte("event_start", lo)
+                .lte("event_start", hi)
+                .order("event_start")
+                .execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"markets query: {e}"}), 500
+    if not rows:
+        return jsonify({"ok": True, "alerted": 0, "reason": "no games in window"})
+
+    # Drop games we've already pinged (per-game dedup).
+    ids = [r["id"] for r in rows]
+    try:
+        ex = (sb.table("prime_alerts").select("market_id")
+              .in_("market_id", ids).execute().data) or []
+        already = {e["market_id"] for e in ex}
+    except Exception as e:
+        # Table missing/unreadable — bail rather than risk spamming.
+        return jsonify({"ok": False, "error": f"prime_alerts read: {e}"}), 500
+    fresh = [r for r in rows if r["id"] not in already]
+    if not fresh:
+        return jsonify({"ok": True, "alerted": 0, "reason": "all already alerted"})
+
+    # Group by sport; only fire a sport whose EARLIEST fresh game has
+    # actually entered prime (≤120 min out) — so we don't pre-fire a
+    # cluster that's still 2h+ away. Once fired, the whole batch (out to
+    # +150 min) is marked so the trailing games don't re-ping.
+    by_sport: dict[str, list] = {}
+    for r in fresh:
+        by_sport.setdefault(r["sport"], []).append(r)
+
+    sports_fired = 0
+    marked: list[dict] = []
+    for sport, games in by_sport.items():
+        games.sort(key=lambda g: g["event_start"])
+        try:
+            earliest = datetime.fromisoformat(
+                str(games[0]["event_start"]).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if earliest > prime_hi:
+            continue  # leading edge not in prime yet — wait for a later tick
+
+        if _send_fill_telegram(_build_prime_alert_msg(sport, games)):
+            sports_fired += 1
+            for g in games:
+                marked.append({"market_id": g["id"], "sport": sport,
+                               "event_start": g["event_start"],
+                               "alerted_at": now.isoformat()})
+
+    if marked:
+        try:
+            sb.table("prime_alerts").upsert(marked).execute()
+        except Exception as e:
+            # Send happened but the mark failed — next tick may re-ping.
+            # Rare; surfaced in the response for visibility.
+            return jsonify({"ok": False, "error": f"mark failed: {e}",
+                            "sports_fired": sports_fired}), 500
+
+    # Opportunistic cleanup — drop rows older than 2 days (markets long over).
+    try:
+        cutoff = (now - timedelta(days=2)).isoformat()
+        sb.table("prime_alerts").delete().lt("alerted_at", cutoff).execute()
+    except Exception:
+        pass
+
+    return jsonify({"ok": True, "sports_fired": sports_fired,
+                    "games_marked": len(marked)})
+
+
+def _build_prime_alert_msg(sport: str, games: list) -> str:
+    """Batched Telegram message body for one sport's prime-window cluster.
+    Markdown — matches the Filled Bot's other messages."""
+    n = len(games)
+    starts = []
+    for g in games:
+        try:
+            starts.append(datetime.fromisoformat(
+                str(g["event_start"]).replace("Z", "+00:00")))
+        except Exception:
+            pass
+    when = ""
+    if starts:
+        lo_t, hi_t = _fmt_az_time(min(starts)), _fmt_az_time(max(starts))
+        when = (f"🕐 First pitch {lo_t} AZ" if lo_t == hi_t
+                else f"🕐 First pitch {lo_t}–{hi_t} AZ")
+    plural = "game" if n == 1 else "games"
+    lines = [f"🎯 *{n} {sport} {plural}* entering the prime betting window"]
+    if when:
+        lines.append(when + "  (~3h to first pitch)")
+    for g in games[:8]:
+        lines.append(f"• {g.get('event_name', '?')}")
+    if n > 8:
+        lines.append(f"…and {n - 8} more")
+    lines.append("Make your picks → thekahlahouse.com/handicapper")
     return "\n".join(lines)
 
 
@@ -5178,6 +6328,8 @@ def api_handicapper():
     local_now = now.astimezone(ZoneInfo("America/Phoenix"))
     today_start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_start_iso = today_start_local.astimezone(timezone.utc).isoformat()
+    yesterday_start_iso = ((today_start_local - timedelta(days=1))
+                           .astimezone(timezone.utc).isoformat())
     cutoff_7d = (now - timedelta(days=7)).isoformat()
 
     cols = ("id,market_id,picked_at,asked_by,query_text,sport,event_name,event_start,"
@@ -5226,6 +6378,7 @@ def api_handicapper():
                 "clv_sum": 0.0, "clv_n": 0, "avg_clv_pp": None}
 
     overall_today  = _new_bucket()
+    overall_yesterday = _new_bucket()
     overall_week   = _new_bucket()
     overall_30d    = _new_bucket()
     by_conf: dict = {c: _new_bucket()
@@ -5272,6 +6425,8 @@ def api_handicapper():
             _add(overall_week)
         if event_start >= today_start_iso:
             _add(overall_today)
+        elif event_start >= yesterday_start_iso:
+            _add(overall_yesterday)
 
     def _finalize(s: dict) -> None:
         decided = s["won"] + s["lost"]
@@ -5283,7 +6438,8 @@ def api_handicapper():
             s["avg_clv_pp"] = round(s["clv_sum"] / s["clv_n"], 2)
         s["pnl"] = round(s["pnl"], 3)
 
-    for s in (overall_today, overall_week, overall_30d, *by_conf.values()):
+    for s in (overall_today, overall_yesterday, overall_week, overall_30d,
+              *by_conf.values()):
         _finalize(s)
 
     # Resolver heartbeat — last bot_picks_resolver run from the
@@ -5309,6 +6465,7 @@ def api_handicapper():
         "pending":      pending,
         "settled":      settled,            # today only (display)
         "stats_today":  overall_today,
+        "stats_yesterday": overall_yesterday,
         "stats_week":   overall_week,
         "stats_30d":    overall_30d,
         "stats":        overall_30d,        # back-compat alias = 30d
@@ -5575,7 +6732,7 @@ def api_handicapper_games():
     Auth: any approved user (viewers included). The list is just
     upcoming game metadata; no logged-pick data is exposed.
 
-    Window: events starting from now through the next 48h. Live/done
+    Window: events starting from now through the next 7 days. Live/done
     games (event_start already passed) are excluded — you can't make a
     pre-game pick on a game that's underway. Sorted by event_start.
 
@@ -5590,7 +6747,14 @@ def api_handicapper_games():
 
     now = datetime.now(timezone.utc)
     after  = now.isoformat()
-    before = (now + timedelta(hours=48)).isoformat()
+    # Flat 7-day window — show every upcoming game we have odds for. Display
+    # is decoupled from the pick/trigger windows: far games still render as
+    # "outside pick window" (no chips), they just appear on the list. In-
+    # season daily/playoff sports (MLB/NBA/NHL) only hold ~1-2 days in markets
+    # so they show in full; NFL's weekly gap is covered; and the window auto-
+    # caps the offseason sports whose full-season schedule is posted (NFL 155
+    # games / NCAAF 79, out to ~200 days) — only the next 7 days ever appear.
+    before = (now + timedelta(hours=168)).isoformat()
     try:
         rows = (sb.table("markets")
                 .select("id,sport,event_name,event_start,status")
@@ -5716,7 +6880,7 @@ def api_handicapper_sport_counts():
     """One-shot count of upcoming games per sport. Powers the
     /handicapper page's dynamic sport-tab ordering — sports with the
     most games go left, off-season sports drop to the right. Same
-    pre-game window as /api/handicapper/games (now through next 48h;
+    pre-game window as /api/handicapper/games (now through next 7 days;
     live/done games excluded).
 
     Returns: {ok: True, counts: {MLB: 15, NBA: 0, ...}}
@@ -5726,21 +6890,19 @@ def api_handicapper_sport_counts():
         return jsonify({"ok": False, "error": "Supabase not configured"}), 503
     now = datetime.now(timezone.utc)
     after  = now.isoformat()
-    before = (now + timedelta(hours=48)).isoformat()
+    before = (now + timedelta(hours=168)).isoformat()   # flat 7-day, matches /games
     try:
         rows = (sb.table("markets")
                 .select("id,sport,event_name,event_start")
                 .eq("status", "active")
                 .gte("event_start", after)
                 .lte("event_start", before)
-                .limit(2000).execute().data) or []
+                .limit(4000).execute().data) or []
     except Exception as e:
         return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
 
     # Group rows by sport, then run the same dedup as /api/handicapper/games
     # so the count matches what the user actually sees on the page.
-    # Without this, a duplicate Cavaliers @ Pistons inflates NBA's
-    # badge by 1 even though only one card renders.
     by_sport: dict[str, list[dict]] = {}
     for r in rows:
         s = (r.get("sport") or "").upper()
@@ -5756,6 +6918,41 @@ def api_handicapper_sport_counts():
         s: len(_dedup_games(gs, s)) for s, gs in by_sport.items()
     }
     return jsonify({"ok": True, "counts": counts, "now_iso": now.isoformat()})
+
+
+@app.route("/api/handicapper/worldcup")
+@bot_required
+def api_handicapper_worldcup():
+    """Read-only World Cup viewer for the Pick Bot page. Pulls live
+    Polymarket markets (the outright Winner board + upcoming/live match
+    markets) straight from PMM — NO PIN/Kalshi/Odds-API, no markets
+    table, nothing logged or graded. View-only: "nice to see the World
+    Cup stuff before it's over."
+
+    `?debug=1` adds the raw PMM diagnostic dump (tag tried, sample
+    titles, market-key shape) so the listing can be tuned against the
+    real Polymarket schema after deploy.
+    """
+    debug = request.args.get("debug") in ("1", "true", "yes")
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Polymarket unavailable: {e}"}), 503
+    import pmm_markets as _pm
+    diag = {} if debug else None
+    try:
+        data = _pm.list_world_cup(client, diag=diag)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"World Cup lookup failed: {e}"}), 500
+    resp = {
+        "ok":          True,
+        "fetched_iso": datetime.now(timezone.utc).isoformat(),
+        "tag_used":    data.get("tag_used"),
+        "events":      data.get("events", []),
+    }
+    if debug:
+        resp["diag"] = diag
+    return jsonify(resp)
 
 
 # ─────────────── Polymarket position → bot_picks sync ───────────────
@@ -6869,8 +8066,10 @@ def api_handicapper_analytics():
     cutoff_30d = (now - timedelta(days=30)).isoformat()
     cutoff_7d = (now - timedelta(days=7)).isoformat()
     local_now = now.astimezone(ZoneInfo("America/Phoenix"))
-    today_start_iso = (local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-                       .astimezone(timezone.utc).isoformat())
+    _today_start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_iso = _today_start_local.astimezone(timezone.utc).isoformat()
+    yesterday_start_iso = ((_today_start_local - timedelta(days=1))
+                           .astimezone(timezone.utc).isoformat())
 
     cols = ("id,market_id,picked_at,asked_by,query_text,sport,event_name,event_start,"
             "market_type,side,entry_book,entry_price,entry_line,"
@@ -6922,7 +8121,7 @@ def api_handicapper_analytics():
             s["avg_clv_pp"] = round(s["clv_sum"] / s["clv_n"], 2)
         s["pnl"] = round(s["pnl"], 3)
 
-    g_today, g_week, g_30d = _bucket(), _bucket(), _bucket()
+    g_today, g_yesterday, g_week, g_30d = _bucket(), _bucket(), _bucket(), _bucket()
     per_user: dict = {}
     for r in settled_30d:
         st = r.get("status")
@@ -6946,6 +8145,8 @@ def api_handicapper_analytics():
             _add(g_week, st, pnl, clv)
         if es >= today_start_iso:
             _add(g_today, st, pnl, clv)
+        elif es >= yesterday_start_iso:
+            _add(g_yesterday, st, pnl, clv)
 
     # Pending counts per user.
     pending_count: dict = {}
@@ -6970,7 +8171,7 @@ def api_handicapper_analytics():
             })
     leaderboard.sort(key=lambda x: (x.get("pnl") or 0), reverse=True)
 
-    for s in (g_today, g_week, g_30d):
+    for s in (g_today, g_yesterday, g_week, g_30d):
         _finalize(s)
 
     # Attach asker name to every pending + today's-settled row for the UI.
@@ -6985,6 +8186,7 @@ def api_handicapper_analytics():
         "ok": True,
         "now_iso": now.isoformat(),
         "stats_today": g_today,
+        "stats_yesterday": g_yesterday,
         "stats_week": g_week,
         "stats_30d": g_30d,
         "leaderboard": leaderboard,

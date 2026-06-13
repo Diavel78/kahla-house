@@ -57,11 +57,27 @@ _SPORT_TAG_SLUG: dict[str, str] = {
     "UFC":   "ufc",
 }
 
+# World Cup tag slugs to try, in order — for the read-only World Cup
+# viewer on the Pick Bot page (see list_world_cup below). PMM's exact
+# slug for the 2026 tournament is UNVERIFIED from our sandbox, so we try
+# the likely candidates and use the first that returns events. Same
+# defensive posture as the NRFI schema — the diag dump is ground truth.
+_WORLD_CUP_TAG_SLUGS: list[str] = [
+    "fifa-world-cup", "world-cup", "2026-fifa-world-cup",
+    "world-cup-2026", "soccer-world-cup", "soccer",
+]
+
 # Caches. Module-level so they survive across requests on a warm Vercel
 # container; cold start resets (acceptable — pays one extra event-search
 # round-trip per cold-start container, then caches build back up).
 _EVENT_CACHE: dict[str, tuple[float, dict | None]] = {}
 _EVENT_CACHE_TTL_SEC = 5 * 60
+
+# Whole-payload cache for the World Cup viewer (list_world_cup does many
+# event/market round-trips, so we don't want to rebuild it on every tab
+# view / poll). Module-level; cold start resets.
+_WC_CACHE: dict[str, Any] = {"t": 0.0, "data": None}
+_WC_CACHE_TTL_SEC = 3 * 60
 
 
 # ──────────────────────────── Math helpers ────────────────────────────
@@ -777,3 +793,202 @@ def best_line_for(pmm: dict | None, market_type: str, side: str,
         if best_diff is None or diff < best_diff:
             best, best_diff = e, diff
     return best
+
+
+# ──────────────────────────── World Cup viewer ────────────────────────────
+# Read-only listing of live World Cup markets straight from Polymarket —
+# outright Winner board + upcoming/live match markets — for the Pick Bot
+# page's World Cup tab. Deliberately bypasses ALL the PIN/Kalshi/Odds-API
+# machinery (no markets table, no devig, no sharp score, no logging): this
+# is pure "nice to see the World Cup stuff" display.
+
+def _mget(o: Any, k: str) -> Any:
+    """Field getter that works on either a dict or an SDK object."""
+    return o.get(k) if isinstance(o, dict) else getattr(o, k, None)
+
+
+def _wc_outcome_label(m: Any) -> str:
+    """Short label for one World Cup outcome — a country (outright board)
+    or a match side. Prefer the SDK's short/group title fields; fall back
+    to cleaning the question text."""
+    for k in ("groupItemTitle", "shortTitle", "outcome", "yesSubTitle", "title"):
+        v = _mget(m, k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    q = (_mget(m, "question") or "").strip()
+    # "Will Brazil win the 2026 FIFA World Cup?" → "Brazil"
+    mt = re.match(r"^will\s+(.+?)\s+win\b", q, re.I)
+    if mt:
+        return mt.group(1).strip()
+    # "France vs. Argentina: France" → trailing side after the colon
+    if ":" in q:
+        tail = q.rsplit(":", 1)[-1].strip()
+        if tail:
+            return tail
+    return q or "—"
+
+
+def _wc_category(title: str) -> str:
+    """match (X vs Y) / winner (outright) / other (group winner, props)."""
+    t = (title or "").lower()
+    if " vs " in t or " vs. " in t or " v " in t:
+        return "match"
+    if "winner" in t or "win the" in t or "to win the world cup" in t:
+        return "winner"
+    return "other"
+
+
+def list_world_cup(client, max_events: int = 28, max_outcomes: int = 24,
+                   time_budget_sec: float = 7.5,
+                   diag: dict | None = None) -> dict:
+    """List live World Cup markets from Polymarket for the read-only
+    viewer. Returns:
+
+        {"tag_used": "fifa-world-cup",
+         "events": [
+            {"slug", "title", "start_time", "category",
+             "markets_total": 48,
+             "markets": [{"label","question","prob","american","bid","ask","slug"}]},
+            ...]}
+
+    Events are ordered upcoming/live matches first (by start time), then
+    the outright Winner board, then everything else; outcomes within an
+    event are sorted by implied probability descending. Silent-fail →
+    empty events list (the caller surfaces "no markets right now").
+    """
+    out: dict[str, Any] = {"tag_used": None, "events": []}
+    if not client:
+        return out
+
+    # Whole-payload cache (skip when a diag dump is requested — debug
+    # wants a fresh round-trip).
+    if diag is None:
+        c = _WC_CACHE
+        if c.get("data") is not None and (time.time() - c.get("t", 0)) < _WC_CACHE_TTL_SEC:
+            return c["data"]
+
+    t0 = time.time()
+
+    # 1. Pull World Cup events by tag — first candidate slug that returns
+    #    events wins; accumulate a deduped union across param shapes.
+    events: list = []
+    seen: set = set()
+    tag_used = None
+    for slug in _WORLD_CUP_TAG_SLUGS:
+        for params in ({"tagSlug": slug, "closed": False, "limit": 100},
+                       {"tagSlug": slug, "closed": False, "relatedTags": True, "limit": 100}):
+            try:
+                resp = client.events.list(params)
+            except Exception as e:
+                if diag is not None:
+                    diag.setdefault("errors", []).append(f"events.list {slug}: {str(e)[:140]}")
+                continue
+            evs = resp.get("events") if isinstance(resp, dict) else getattr(resp, "events", None)
+            evs = evs or []
+            for ev in evs:
+                s = _mget(ev, "slug")
+                if s and s in seen:
+                    continue
+                if s:
+                    seen.add(s)
+                events.append(ev)
+            if evs and tag_used is None:
+                tag_used = slug
+        if events:
+            break
+    out["tag_used"] = tag_used
+    if diag is not None:
+        diag["events_returned"] = len(events)
+        diag["sample_titles"] = [(_mget(e, "title") or "") for e in events[:12]]
+    if not events:
+        return out
+
+    # 2. Categorize + order. Drop finished matches (started > 4h ago and
+    #    not flagged closed — a stale event that never got marked closed).
+    now = datetime.now(timezone.utc)
+    enriched: list[dict] = []
+    for ev in events:
+        title = _mget(ev, "title") or ""
+        st = _mget(ev, "startTime") or _mget(ev, "start_time") or ""
+        try:
+            sdt = datetime.fromisoformat(st.replace("Z", "+00:00")) if st else None
+        except Exception:
+            sdt = None
+        cat = _wc_category(title)
+        if cat == "match" and sdt is not None and sdt < (now - timedelta(hours=4)):
+            continue   # match is over
+        enriched.append({"ev": ev, "title": title, "start": st, "sdt": sdt, "cat": cat})
+
+    cat_rank = {"match": 0, "winner": 1, "other": 2}
+
+    def _key(e: dict):
+        primary = cat_rank.get(e["cat"], 2)
+        if e["cat"] == "match" and e["sdt"] is not None:
+            return (primary, e["sdt"].timestamp())
+        return (primary, float("inf"))
+
+    enriched.sort(key=_key)
+
+    # 3. Fetch markets per event (events.list returns an empty markets
+    #    array, so hit markets.list per slug) under a time budget so a
+    #    huge slate can't blow the Vercel 10s window.
+    result_events: list[dict] = []
+    for e in enriched[:max_events]:
+        if (time.time() - t0) > time_budget_sec:
+            break
+        ev = e["ev"]
+        slug = _mget(ev, "slug")
+        markets = _mget(ev, "markets") or []
+        if not markets and slug:
+            try:
+                mr = client.markets.list({"eventSlug": [slug], "closed": False, "limit": 100})
+                markets = (mr.get("markets") if isinstance(mr, dict)
+                           else getattr(mr, "markets", None)) or []
+            except Exception as ex:
+                markets = []
+                if diag is not None:
+                    diag.setdefault("errors", []).append(f"markets.list {slug}: {str(ex)[:140]}")
+        rows: list[dict] = []
+        for m in markets:
+            if _mget(m, "closed"):
+                continue
+            quote = _get_market_quote(_market_to_dict(m))
+            if not quote:
+                continue
+            rows.append({
+                "label":    _wc_outcome_label(m),
+                "question": (_mget(m, "question") or "")[:140],
+                "prob":     quote.get("mid"),
+                "american": quote.get("mid_american"),
+                "bid":      quote.get("bid"),
+                "ask":      quote.get("ask"),
+                "slug":     _mget(m, "slug"),
+            })
+        rows.sort(key=lambda r: (r["prob"] is None, -(r["prob"] or 0.0)))
+        result_events.append({
+            "slug":          slug,
+            "title":         e["title"],
+            "start_time":    e["start"],
+            "category":      e["cat"],
+            "markets_total": len(rows),
+            "markets":       rows[:max_outcomes],
+        })
+
+    out["events"] = result_events
+    if diag is not None:
+        diag["events_built"] = [
+            {"title": r["title"], "cat": r["category"], "n": r["markets_total"]}
+            for r in result_events[:30]
+        ]
+        # Raw market shape on the first event — ground truth for tuning
+        # _wc_outcome_label / categorization against the real PMM schema.
+        if enriched:
+            first = enriched[0]["ev"]
+            fm = _mget(first, "markets") or []
+            diag["sample_market_keys"] = (
+                list(fm[0].keys()) if fm and isinstance(fm[0], dict) else None
+            )
+    if result_events:
+        _WC_CACHE["t"] = time.time()
+        _WC_CACHE["data"] = out
+    return out

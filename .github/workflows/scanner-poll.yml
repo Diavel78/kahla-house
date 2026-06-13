@@ -84,54 +84,6 @@ jobs:
           SPORTS_ENABLED:       NFL,NBA,MLB,NHL,CBB,NCAAF,UFC
         run: python -m scrapers.odds_api
 
-      # Steam detection + paper-bet logging, NO Telegram. STEAM_SILENT=1
-      # short-circuits _telegram_send() so the alert pipeline runs end-
-      # to-end (detect + dedup + log paper_bets row) without spamming
-      # Telegram. The previous retirement removed this step entirely,
-      # which also killed steam paper-bet logging — it lived inside this
-      # script's success path. We want the picks, just not the pings.
-      # continue-on-error: a flaky run never blocks downstream pickers.
-      - name: Steam detection — paper-bet logging only (silent)
-        continue-on-error: true
-        env:
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          STEAM_SILENT:         "1"
-        run: python -m scripts.sharp_alerts
-
-      # Phase 4 — Early + Late EV paper-bet pickers. Both ride this
-      # same 30-min cron. Per-bot dedup means re-runs only fill new
-      # candidates as games walk into each bot's window:
-      #   early → games starting 12–18h out
-      #   late  → games starting 0–2h out
-      # continue-on-error so a flaky pick run never blocks the next
-      # ingest cycle.
-      - name: Paper bets — Early EV picker
-        continue-on-error: true
-        env:
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python -m scripts.paper_bets_picker --bot early
-
-      - name: Paper bets — Late EV picker
-        continue-on-error: true
-        env:
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python -m scripts.paper_bets_picker --bot late
-
-      # Phase 4 Stage 2 — paper-bet resolver. Grades pending bets whose
-      # event_start is more than 4h ago via ESPN final scores. Idempotent
-      # (graded rows leave the pending filter), cheap (small queries +
-      # in-memory ESPN cache per run), continue-on-error so a flaky ESPN
-      # response doesn't break the pipeline.
-      - name: Paper bets — Resolver
-        continue-on-error: true
-        env:
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python -m scripts.paper_bets_resolver
-
       # Handicapper Bot — pick resolver. Grades pending bot_picks rows
       # (from in-chat pick logging via scripts/handicapper_log_pick.py)
       # against ESPN final scores. Same pattern as paper_bets_resolver,
@@ -183,3 +135,91 @@ jobs:
           code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
             "https://www.thekahlahouse.com/api/polymarket/check-fills?key=${KEY}" || echo "000")
           echo "check-fills HTTP $code"
+
+      # Pick Bot prime-window alert ping. Same lightweight curl pattern —
+      # /api/handicapper/prime-alert fires a batched Telegram (via the
+      # Filled Bot) when a cluster of games enters the 90-120 min pre-tip
+      # window, deduped server-side via the prime_alerts table. Reuses
+      # FILLS_CRON_SECRET (the endpoint accepts it as a fallback), so no
+      # new secret is needed. Idempotent — double-pinging is harmless.
+      #
+      # CADENCE GATE (June 2026): every 5 min, not every tick. Vercel
+      # Fluid Active CPU is metered (the per-minute pings blew the Hobby
+      # tier's 4h/mo); the alert's batching window is 30 min wide, so a
+      # ≤4-min delivery delay is immaterial. Only check-fills keeps 1-min.
+      - name: Pick Bot — prime-window alert ping
+        continue-on-error: true
+        env:
+          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
+        run: |
+          M=$(date -u +%-M)
+          if [ $(( M % 5 )) -ne 0 ]; then
+            echo "minute $M — skipping prime-alert ping (5-min cadence)."
+            exit 0
+          fi
+          if [ -z "$FILLS_CRON_SECRET" ]; then
+            echo "FILLS_CRON_SECRET not set — skipping prime-window ping (no-op)."
+            exit 0
+          fi
+          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
+          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
+            "https://www.thekahlahouse.com/api/handicapper/prime-alert?key=${KEY}" || echo "000")
+          echo "prime-alert HTTP $code"
+
+      # Prediction-market cent-logger ping. /api/pm-snapshot records free
+      # Polymarket + Kalshi cents per side for upcoming MLB games into
+      # pm_snapshots (deduped) — the cross-confirm detector's memory + the
+      # data to validate the 1c-AND and measure the lead vs paid PINN. Free
+      # (no Odds-API hit). Reuses FILLS_CRON_SECRET; idempotent.
+      #
+      # CADENCE GATE (June 2026): every 2 min (Vercel Active CPU burn —
+      # this is ~7.5s of budgeted PMM lookups per tick). The free feeds
+      # lead PINN by ~4-7 min, so 2-min sampling keeps most of the
+      # cross-confirm trigger's latency edge at half the CPU.
+      - name: Prediction-market — PMM+Kalshi cent snapshot ping
+        continue-on-error: true
+        env:
+          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
+        run: |
+          M=$(date -u +%-M)
+          if [ $(( M % 2 )) -ne 0 ]; then
+            echo "minute $M — skipping pm-snapshot ping (2-min cadence)."
+            exit 0
+          fi
+          if [ -z "$FILLS_CRON_SECRET" ]; then
+            echo "FILLS_CRON_SECRET not set — skipping pm-snapshot ping (no-op)."
+            exit 0
+          fi
+          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
+          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
+            "https://www.thekahlahouse.com/api/pm-snapshot?key=${KEY}" || echo "000")
+          echo "pm-snapshot HTTP $code"
+
+      # Pick Bot paperlog ping. /api/handicapper/paperlog auto-logs every
+      # gate-cleared suggestion for upcoming MLB games (5h->1min window) into
+      # pickbot_paperlog — the complete bot-suggestion dataset for the 2-week
+      # review. Budgeted server-side so it stays under Vercel's 10s; stale-
+      # game-first cycles coverage across ticks. Reuses FILLS_CRON_SECRET.
+      #
+      # CADENCE GATE (June 2026): every 5 min. This is the single biggest
+      # Vercel Active CPU burner (~8s of build_dossier per tick, all day on
+      # an MLB slate). The dedup is on bet CHANGE, so 5-min sampling loses
+      # essentially nothing for the timing-window review dataset.
+      - name: Pick Bot — paperlog ping
+        continue-on-error: true
+        env:
+          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
+        run: |
+          M=$(date -u +%-M)
+          if [ $(( M % 5 )) -ne 0 ]; then
+            echo "minute $M — skipping paperlog ping (5-min cadence)."
+            exit 0
+          fi
+          if [ -z "$FILLS_CRON_SECRET" ]; then
+            echo "FILLS_CRON_SECRET not set — skipping paperlog ping (no-op)."
+            exit 0
+          fi
+          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
+          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
+            "https://www.thekahlahouse.com/api/handicapper/paperlog?key=${KEY}" || echo "000")
+          echo "paperlog HTTP $code"

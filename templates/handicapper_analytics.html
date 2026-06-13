@@ -30,7 +30,7 @@
         .lede{color:var(--text-muted);font-size:14px;margin:6px 0 22px}
         .section-title{font-size:11px;font-weight:700;letter-spacing:1.4px;text-transform:uppercase;color:var(--text-muted);font-family:'JetBrains Mono',monospace;margin:26px 0 12px}
         /* stat cards */
-        .stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+        .stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
         .stat-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px}
         .stat-card h3{font-size:11px;font-weight:700;letter-spacing:1.2px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;text-transform:uppercase;margin-bottom:10px}
         .stat-row{display:flex;justify-content:space-between;font-size:13px;padding:3px 0}
@@ -91,6 +91,7 @@
         <div class="section-title">Aggregate (all users)</div>
         <div class="stat-grid">
             <div class="stat-card" id="card-today"><h3>Today</h3><div class="body"></div></div>
+            <div class="stat-card" id="card-yesterday"><h3>Yesterday</h3><div class="body"></div></div>
             <div class="stat-card" id="card-week"><h3>Last 7 days</h3><div class="body"></div></div>
             <div class="stat-card" id="card-30d"><h3>Last 30 days</h3><div class="body"></div></div>
         </div>
@@ -269,9 +270,10 @@
         }
         document.getElementById('subtitle').textContent =
             `Global view across ${data.user_count||0} user${(data.user_count===1)?'':'s'} — the labeled dataset for model tuning.`;
-        statCard('card-today', data.stats_today);
-        statCard('card-week',  data.stats_week);
-        statCard('card-30d',   data.stats_30d);
+        statCard('card-today',     data.stats_today);
+        statCard('card-yesterday', data.stats_yesterday);
+        statCard('card-week',      data.stats_week);
+        statCard('card-30d',       data.stats_30d);
         renderLeaderboard(data.leaderboard);
 
         const pending = data.pending || [];

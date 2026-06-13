@@ -138,17 +138,26 @@ def _match_window_for(sport_code: str) -> timedelta:
 # All times are evaluated in the user's local TZ (America/Phoenix, no
 # DST). Phoenix is used everywhere else in the project for "today"
 # anchoring; keeping it consistent here means the blackout window is
-# 10pm-7am MT year-round.
+# 11pm-7am MT year-round.
 
 _LOCAL_TZ = ZoneInfo("America/Phoenix")
-_BLACKOUT_START_HOUR = 22  # 10pm local
+_BLACKOUT_START_HOUR = 23  # 11pm local
 _BLACKOUT_END_HOUR   = 7   # 7am local
 
 # (max_hours_to_game, cadence_minutes). Picked left-to-right; first
 # match wins. Trailing entry catches everything up to 18h.
+#
+# The 5-min bucket runs to 2.5h (not 2h) on purpose: the Pick Bot's
+# picker/evaluator surfaces picks out to 150 min (the 120-150 "early"
+# test window — sharp money often moves the line BEFORE the 2h mark, so
+# we want to catch it). Polling those games at the old 15-min cadence
+# would show stale lines and miss the very movement we're chasing, so
+# the 120-150 window gets the same 5-min freshness as the 60-120
+# betting window. Keep this boundary in sync with handicapper_web.py's
+# EVAL_WINDOW_MAX (150). Modest credit cost — well within headroom.
 _CADENCE_BUCKETS: list[tuple[float, int]] = [
     (0.5,  2),
-    (2.0,  5),
+    (2.5,  5),
     (6.0,  15),
     (18.0, 30),
 ]
@@ -163,6 +172,17 @@ _CADENCE_BUCKETS: list[tuple[float, int]] = [
 # (6 cr × ~4/day per dormant sport).
 _DISCOVERY_SEC = 6 * 3600  # 6h
 
+# Cross-confirm trigger (June 2026). For sports with PMM+Kalshi cent data,
+# we stop blind-polling FAR out (>3h) and instead pull only when Flask's
+# /api/pm-snapshot detects both free feeds moving >=1c same direction (it
+# writes an odds_pull_requests row). Near window (<=3h) keeps tight blind
+# cadence (covers the 60-180min prime window). Non-trigger sports keep the
+# legacy 15/30-min far cadence. Add a sport here once its cent data flows.
+_TRIGGER_SPORTS = {"MLB", "NBA", "NHL"}
+_PULL_REQ_FRESH_SEC = 600     # a pull-request is valid for 10 min
+_TRIGGER_MIN_GAP_SEC = 300    # per-sport 5-min cap between triggered pulls
+_NEAR_WINDOW_H = 3.0          # blind tight-cadence ceiling (= prime edge)
+
 
 def _slack_for(cadence_min: int) -> int:
     """Slack window in seconds so cron-job.org tick jitter doesn't make
@@ -174,7 +194,7 @@ def _slack_for(cadence_min: int) -> int:
 
 
 def _in_overnight_blackout(now: datetime | None = None) -> bool:
-    """True if local time is in the 10pm-7am blackout window."""
+    """True if local time is in the 11pm-7am blackout window."""
     now = now or datetime.now(timezone.utc)
     local = now.astimezone(_LOCAL_TZ)
     hr = local.hour
@@ -200,32 +220,68 @@ def _cadence_for_next_game(hours_to_game: float | None) -> int | None:
     return None  # >18h out
 
 
+def _parse_iso(s: str | None) -> datetime | None:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _pending_pull_request(sport_code: str, now: datetime) -> bool:
+    """True if a FRESH unconsumed cross-confirm pull-request exists for the
+    sport (written by Flask's /api/pm-snapshot when PMM+Kalshi co-moved)."""
+    try:
+        rows = (db.client().table("odds_pull_requests")
+                .select("requested_at,consumed_at").eq("sport", sport_code)
+                .limit(1).execute().data) or []
+    except Exception:
+        return False
+    if not rows:
+        return False
+    req = _parse_iso(rows[0].get("requested_at"))
+    con = _parse_iso(rows[0].get("consumed_at"))
+    if req is None or (now - req).total_seconds() > _PULL_REQ_FRESH_SEC:
+        return False               # none / stale
+    return con is None or con < req  # unconsumed
+
+
+def _consume_pull_request(sport_code: str, now: datetime) -> None:
+    try:
+        db.client().table("odds_pull_requests").update(
+            {"consumed_at": now.isoformat()}).eq("sport", sport_code).execute()
+    except Exception:
+        pass
+
+
 def _should_fire(sport_code: str) -> tuple[bool, dict[str, Any]]:
     """Decide whether to call The Odds API for `sport_code` on this tick.
+    Returns (fire?, meta) with the diagnostic fields logged to
+    odds_ingest_runs. NOT pure — consumes a pull-request on a trigger fire.
 
-    Returns (fire?, meta) where `meta` carries the diagnostic fields we
-    log to odds_ingest_runs regardless of outcome:
-        status        — 'ok' or 'skipped:<reason>' (final status set by caller on ok)
-        cadence_min   — chosen cadence (None when skipped)
-        next_game_h   — hours until nearest upcoming game (None when off-season)
-        detail        — free-form note
-
-    Pure function of (now, nearest event, last successful run); no
-    side effects.
-    """
-    if _in_overnight_blackout():
-        return False, {"status": "skipped:overnight", "detail": "10pm-7am MT"}
-
+    Cadence model (June 2026): tight blind polling <=3h (2-min terminal,
+    5-min to the 3h prime edge); FAR out (>3h) is **trigger-only** for
+    `_TRIGGER_SPORTS` (pull when the free PMM+Kalshi feeds cross-confirm a
+    move, per-sport 5-min cap) and legacy 15/30-min blind for the rest.
+    Blackout 11pm-7am MT, with one 3am snapshot per in-season sport."""
     now = datetime.now(timezone.utc)
+    local = now.astimezone(_LOCAL_TZ)
+
+    if _in_overnight_blackout(now):
+        # One overnight snapshot at ~3am MT so we see what lines did while
+        # asleep. One-shot: requires the last ok run >30min old (blackout
+        # means nothing pulled since ~9:55pm, so the first 3am tick fires
+        # and the rest skip on the fresh last-run).
+        if local.hour == 3 and db.nearest_upcoming_event(sport_code) is not None:
+            last_ok = db.last_ingest_run(sport_code, status="ok")
+            if last_ok is None or (now - last_ok).total_seconds() > 1800:
+                return True, {"status": "ok", "cadence_min": None,
+                              "detail": "3am overnight snapshot"}
+        return False, {"status": "skipped:overnight", "detail": "11pm-7am MT"}
+
     nxt = db.nearest_upcoming_event(sport_code)
     if nxt is None:
-        # Nothing upcoming in our DB. Don't skip forever — re-probe the API
-        # on the discovery cadence so a scheduling gap (or a new season)
-        # gets picked up instead of freezing the sport out (cold-start trap;
-        # this is what stranded NHL during the Stanley Cup Final). A poll
-        # that finds games re-seeds the DB and normal cadence resumes; a
-        # poll that finds nothing writes an 'ok' heartbeat, throttling the
-        # next probe by _DISCOVERY_SEC.
         last_ok = db.last_ingest_run(sport_code, status="ok")
         if last_ok is not None and (now - last_ok).total_seconds() < _DISCOVERY_SEC:
             wait_h = (_DISCOVERY_SEC - (now - last_ok).total_seconds()) / 3600.0
@@ -235,26 +291,44 @@ def _should_fire(sport_code: str) -> tuple[bool, dict[str, Any]]:
                       "detail": "discovery probe (no upcoming game in DB)"}
 
     hours_to = (nxt - now).total_seconds() / 3600.0
-    cadence = _cadence_for_next_game(hours_to)
-    if cadence is None:
-        return False, {"status": "skipped:cadence",
-                       "next_game_h": hours_to,
-                       "detail": f"nearest game in {hours_to:.1f}h (>18h cap)"}
-
+    if hours_to < 0:
+        return False, {"status": "skipped:cadence", "next_game_h": hours_to,
+                       "detail": "nearest event already started"}
     last = db.last_ingest_run(sport_code, status="ok")
-    if last is not None:
-        elapsed_sec = (now - last).total_seconds()
-        slack_sec = _slack_for(cadence)
-        target_sec = cadence * 60 - slack_sec
-        if elapsed_sec < target_sec:
-            return False, {
-                "status": "skipped:cadence",
-                "cadence_min": cadence,
-                "next_game_h": hours_to,
-                "detail": (f"last ok run {elapsed_sec:.0f}s ago, "
-                           f"need {target_sec:.0f}s for {cadence}m cadence"),
-            }
+    elapsed = (now - last).total_seconds() if last is not None else 1e9
 
+    # Near window (<=3h): tight blind cadence covering the prime window.
+    if hours_to <= _NEAR_WINDOW_H:
+        cadence = 2 if hours_to <= 0.5 else 5
+        target = cadence * 60 - _slack_for(cadence)
+        if elapsed < target:
+            return False, {"status": "skipped:cadence", "cadence_min": cadence,
+                           "next_game_h": hours_to,
+                           "detail": f"last ok {elapsed:.0f}s ago, need {target:.0f}s"}
+        return True, {"cadence_min": cadence, "next_game_h": hours_to}
+
+    # Far window (>3h).
+    if sport_code in _TRIGGER_SPORTS:
+        if elapsed >= _TRIGGER_MIN_GAP_SEC and _pending_pull_request(sport_code, now):
+            _consume_pull_request(sport_code, now)
+            return True, {"status": "ok", "cadence_min": None, "next_game_h": hours_to,
+                          "detail": "xconfirm trigger pull"}
+        return False, {"status": "skipped:cadence", "next_game_h": hours_to,
+                       "detail": f"far ({hours_to:.1f}h) — trigger-only, awaiting xconfirm"}
+
+    # Non-trigger sport: legacy blind far cadence (15/30 min).
+    if hours_to <= 6.0:
+        cadence = 15
+    elif hours_to <= 18.0:
+        cadence = 30
+    else:
+        return False, {"status": "skipped:cadence", "next_game_h": hours_to,
+                       "detail": f"nearest game in {hours_to:.1f}h (>18h cap)"}
+    target = cadence * 60 - _slack_for(cadence)
+    if elapsed < target:
+        return False, {"status": "skipped:cadence", "cadence_min": cadence,
+                       "next_game_h": hours_to,
+                       "detail": f"last ok {elapsed:.0f}s ago, need {target:.0f}s"}
     return True, {"cadence_min": cadence, "next_game_h": hours_to}
 
 
