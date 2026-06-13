@@ -4410,8 +4410,19 @@ def api_check_fills():
         elif team_name:
             pick = team_name
 
-        side_label = _INTENT_LABEL.get(
-            intent, intent.replace("ORDER_INTENT_", "").replace("_", " "))
+        # Side word: mirror the Polymarket app + the dashboard betslip —
+        # show the AFFIRMATIVE of the outcome you actually picked
+        # ("Switzerland -2.5 · Yes"), NOT the canonical BUY YES/NO from
+        # the order intent. On spread / "wins by N goals" markets the
+        # picked side is Polymarket's canonical NO, so the intent-based
+        # label (_INTENT_LABEL → "BUY NO") reads as the opposite of what
+        # you hold — the synthetic-side inversion. `outcome` already
+        # encodes the side you selected, and the _SHORT price flip above
+        # already gives THAT side's price, so a fill on it = you're on
+        # `pick` → "Yes". Only honor a literal yes/no when the market
+        # gives nothing else to name the side by.
+        _ro = outcome.strip().lower()
+        side_label = _ro.title() if _ro in ("yes", "no") else "Yes"
         order_created_at = _g("createTime") or _g("insertTime") or ""
 
         fill_pct = (cum_qty / qty * 100) if qty else 0
