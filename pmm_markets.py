@@ -807,25 +807,28 @@ def _mget(o: Any, k: str) -> Any:
     return o.get(k) if isinstance(o, dict) else getattr(o, k, None)
 
 
-def _wc_outcome_label(m: Any) -> str:
-    """Short label for one World Cup outcome — a country (outright board)
-    or a match side. Prefer the SDK's short/group title fields; fall back
-    to cleaning the question text."""
-    for k in ("groupItemTitle", "shortTitle", "outcome", "yesSubTitle", "title"):
+def _wc_result_label(m: Any, t1: str | None, t2: str | None) -> str:
+    """Label one soccer match-result (drawable_outcome) leg as a team name
+    or 'Draw'. PMM phrases these as 'Will Qatar win against Switzerland…'
+    (a team leg) and 'Will the World Cup match Qatar vs Switzerland … end
+    in a draw?' (the draw leg). Prefer the SDK's short outcome fields if
+    present; otherwise read the question."""
+    for k in ("groupItemTitle", "shortTitle", "yesSubTitle", "outcome"):
         v = _mget(m, k)
         if isinstance(v, str) and v.strip():
             return v.strip()
-    q = (_mget(m, "question") or "").strip()
-    # "Will Brazil win the 2026 FIFA World Cup?" → "Brazil"
-    mt = re.match(r"^will\s+(.+?)\s+win\b", q, re.I)
+    q = (_mget(m, "question") or "")
+    if "draw" in q.lower():
+        return "Draw"
+    # "Will Qatar win against Switzerland…" → the team that wins.
+    mt = re.match(r"^will\s+(?:the\s+)?(.+?)\s+win\b", q, re.I)
     if mt:
-        return mt.group(1).strip()
-    # "France vs. Argentina: France" → trailing side after the colon
-    if ":" in q:
-        tail = q.rsplit(":", 1)[-1].strip()
-        if tail:
-            return tail
-    return q or "—"
+        cand = mt.group(1).strip()
+        for t in (t1, t2):           # normalize to the clean title name
+            if t and _name_match(cand, t):
+                return t
+        return cand
+    return "Draw"   # drawable leg with no team-win and no 'draw' word
 
 
 def _is_match_title(title: str) -> bool:
@@ -968,13 +971,18 @@ def list_world_cup(client, max_events: int = 40,
         for m in markets:
             if _mget(m, "closed"):
                 continue
-            if (_mget(m, "sportsMarketTypeV2") or "") != "SPORTS_MARKET_TYPE_MONEYLINE":
-                continue   # match result only — no totals/spreads/props
+            v1 = (_mget(m, "sportsMarketType") or "").lower()
+            # Full-game match result only. Soccer's 3-way is
+            # 'drawable_outcome'; 2-way sports use 'moneyline'/'h2h'.
+            # Excludes first/second-half variants, spreads, totals,
+            # exact-score and goalscorer props (all separate type slugs).
+            if v1 not in ("drawable_outcome", "moneyline", "h2h"):
+                continue
             quote = _get_market_quote(_market_to_dict(m))
             if not quote:
                 continue
             results.append({
-                "label":    _wc_outcome_label(m),
+                "label":    _wc_result_label(m, e["t1"], e["t2"]),
                 "prob":     quote.get("mid"),
                 "american": quote.get("mid_american"),
             })
