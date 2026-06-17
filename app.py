@@ -6961,6 +6961,49 @@ def api_handicapper_dossier():
     return jsonify(dossier), code
 
 
+# Per-sport DISPLAY window for the Pick Bot games list (calendar days,
+# anchored to America/Phoenix). User decision (June 2026): show a tight
+# "today and tomorrow" (2 days) for the daily/event sports and the full
+# week for football (its schedule is weekly, so a 2-day window would show
+# almost nothing). NOTE: this is DISPLAY only — we still INGEST games into
+# `markets`/`pm_snapshots` as soon as they appear on Polymarket/ESPN so we
+# capture opening odds for the Pinnacle/Odds-API cutover; they just don't
+# render on the list until they enter this window.
+_GAMES_DISPLAY_DAYS = {"NFL": 7, "NCAAF": 7}
+_GAMES_DISPLAY_DAYS_DEFAULT = 2  # MLB, NBA, NCAAB, NHL, UFC, WORLDCUP/soccer
+
+
+def _display_window_end(sport: str, now: datetime) -> datetime:
+    """UTC cutoff for the games-list display: the END of the last included
+    Arizona calendar day. N = the sport's display-day count, so N=2 means
+    'today and tomorrow' (through end of tomorrow AZ), N=7 means the next
+    seven calendar days. Anchored to America/Phoenix (no DST) like the rest
+    of Pick Bot's day math."""
+    days = _GAMES_DISPLAY_DAYS.get((sport or "").upper(), _GAMES_DISPLAY_DAYS_DEFAULT)
+    az = ZoneInfo("America/Phoenix")
+    end_local = (now.astimezone(az) + timedelta(days=days)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    return end_local.astimezone(timezone.utc)
+
+
+def _wc_in_display_window(matches: list[dict], now: datetime) -> list[dict]:
+    """Trim World Cup matches to the same 2-day display window the other
+    sports use. Keeps anything that has already kicked off (live/today) and
+    drops far-future fixtures; matches without a parseable start_time are
+    kept (rare, never silently dropped)."""
+    end = _display_window_end("WORLDCUP", now)
+    out = []
+    for m in matches:
+        st = m.get("start_time")
+        try:
+            sdt = datetime.fromisoformat((st or "").replace("Z", "+00:00")) if st else None
+        except Exception:
+            sdt = None
+        if sdt is None or sdt <= end:
+            out.append(m)
+    return out
+
+
 @app.route("/api/handicapper/games")
 @bot_required
 def api_handicapper_games():
@@ -6970,9 +7013,11 @@ def api_handicapper_games():
     Auth: any approved user (viewers included). The list is just
     upcoming game metadata; no logged-pick data is exposed.
 
-    Window: events starting from now through the next 7 days. Live/done
-    games (event_start already passed) are excluded — you can't make a
-    pre-game pick on a game that's underway. Sorted by event_start.
+    Window: per-sport display window (see _display_window_end) — 2 calendar
+    days ("today and tomorrow") for MLB/NBA/NCAAB/NHL/UFC/soccer, 7 days for
+    football. Live/done games (event_start already passed) are excluded —
+    you can't make a pre-game pick on a game that's underway. Sorted by
+    event_start.
 
     Lightweight: only event_name + start time + ids. The dossier (with
     odds, splits, injuries) is fetched on click via /api/handicapper/dossier."""
@@ -6985,14 +7030,12 @@ def api_handicapper_games():
 
     now = datetime.now(timezone.utc)
     after  = now.isoformat()
-    # Flat 7-day window — show every upcoming game we have odds for. Display
-    # is decoupled from the pick/trigger windows: far games still render as
-    # "outside pick window" (no chips), they just appear on the list. In-
-    # season daily/playoff sports (MLB/NBA/NHL) only hold ~1-2 days in markets
-    # so they show in full; NFL's weekly gap is covered; and the window auto-
-    # caps the offseason sports whose full-season schedule is posted (NFL 155
-    # games / NCAAF 79, out to ~200 days) — only the next 7 days ever appear.
-    before = (now + timedelta(hours=168)).isoformat()
+    # Per-sport display window (see _display_window_end): 2 calendar days
+    # ("today and tomorrow") for MLB/NBA/NCAAB/NHL/UFC/soccer, 7 days for
+    # football. Display is decoupled from the pick/trigger windows AND from
+    # ingest — we still capture opening odds for games further out, they
+    # just don't render until they enter this window.
+    before = _display_window_end(sport, now).isoformat()
     try:
         rows = (sb.table("markets")
                 .select("id,sport,event_name,event_start,status")
@@ -7118,8 +7161,8 @@ def api_handicapper_sport_counts():
     """One-shot count of upcoming games per sport. Powers the
     /handicapper page's dynamic sport-tab ordering — sports with the
     most games go left, off-season sports drop to the right. Same
-    pre-game window as /api/handicapper/games (now through next 7 days;
-    live/done games excluded).
+    per-sport display window as /api/handicapper/games (2 days for most
+    sports, 7 for football; live/done games excluded).
 
     Returns: {ok: True, counts: {MLB: 15, NBA: 0, ...}}
     """
@@ -7128,7 +7171,10 @@ def api_handicapper_sport_counts():
         return jsonify({"ok": False, "error": "Supabase not configured"}), 503
     now = datetime.now(timezone.utc)
     after  = now.isoformat()
-    before = (now + timedelta(hours=168)).isoformat()   # flat 7-day, matches /games
+    # Fetch the widest window any sport uses (football = 7 days), then trim
+    # each sport to its own display window below so the badge count matches
+    # what /api/handicapper/games actually renders.
+    before = (now + timedelta(hours=168)).isoformat()
     try:
         rows = (sb.table("markets")
                 .select("id,sport,event_name,event_start")
@@ -7139,12 +7185,19 @@ def api_handicapper_sport_counts():
     except Exception as e:
         return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
 
-    # Group rows by sport, then run the same dedup as /api/handicapper/games
-    # so the count matches what the user actually sees on the page.
+    # Group rows by sport, dropping anything past that sport's display
+    # window, then run the same dedup as /api/handicapper/games so the count
+    # matches what the user actually sees on the page.
+    _win_end: dict[str, str] = {}
     by_sport: dict[str, list[dict]] = {}
     for r in rows:
         s = (r.get("sport") or "").upper()
         if not s:
+            continue
+        end_iso = _win_end.get(s)
+        if end_iso is None:
+            end_iso = _win_end[s] = _display_window_end(s, now).isoformat()
+        if (r.get("event_start") or "") > end_iso:
             continue
         by_sport.setdefault(s, []).append({
             "market_id":   r["id"],
@@ -7161,6 +7214,7 @@ def api_handicapper_sport_counts():
     # shows). Cache-backed; silent-skip on failure.
     try:
         wc_matches, _wc_meta = _build_worldcup(now)
+        wc_matches = _wc_in_display_window(wc_matches, now)
         if wc_matches:
             counts["WORLDCUP"] = len(wc_matches)
     except Exception:
@@ -7244,6 +7298,7 @@ def api_handicapper_worldcup():
     the 1-X-2 odds matched on. Nothing logged or graded. View-only."""
     now = datetime.now(timezone.utc)
     matches, meta = _build_worldcup(now)
+    matches = _wc_in_display_window(matches, now)
     return jsonify({"ok": True, "fetched_iso": now.isoformat(),
                     "matches": matches, **meta})
 
