@@ -1,4 +1,4 @@
-name: Pick Bot — Tune Prime Window
+name: Pick Bot — Weekly Tuners
 
 # Weekly auto-tuner for the Pick Bot's prime betting window. Grid-searches
 # pickbot_paperlog (settled, gate-cleared ML/SPR/TOT picks), optimizes mean
@@ -58,4 +58,16 @@ jobs:
         run: |
           python -m scripts.tune_prime_window \
             --lookback-days ${{ github.event.inputs.lookback_days || '30' }} \
+            ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+
+      # Sizing aggression (Kelly fraction). Dormant until ~2 weeks of
+      # new-scale settled picks exist (gates on event_start >= cutover);
+      # then nudges the Kelly fraction up/down as edge_pp proves (or fails)
+      # to predict ROI. Safe on thin data.
+      - name: Tune sizing (Kelly fraction)
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          python -m scripts.tune_sizing \
             ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
