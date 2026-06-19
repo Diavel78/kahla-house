@@ -92,17 +92,16 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python -m scripts.ingest_espn_markets --exclude WORLDCUP --commit
 
-      - name: Ingest odds (all sports)
-        env:
-          ODDS_API_KEY:         ${{ secrets.ODDS_API_KEY }}
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          SPORTS_ENABLED:       NFL,NBA,MLB,NHL,CBB,NCAAF,UFC
-          # ESPN owns market CREATION — odds_api is find-only (attaches
-          # snapshots to existing ESPN rows, never mints its own). Also stops
-          # odds_api's own commence-drift dupes. See _find_or_create_market.
-          ESPN_MARKETS_SPINE:   "1"
-        run: python -m scrapers.odds_api
+      # The Odds API / Pinnacle ingest was RETIRED June 2026 (hard cutover
+      # to the free PMM+Kalshi exchanges — the subscription was paid through
+      # June 25 but the pick engine, CLV, and fair anchor no longer depend on
+      # PIN, so there was no reason to keep burning credits). The exchange
+      # ingest is now the pm-snapshot ping in the `fill_ping` job below; ESPN
+      # (above) owns market creation. `book_snapshots` simply stops getting
+      # new rows — every PIN reader degrades to its exchange path or its warm
+      # fallback. The adaptive-cadence gate + odds_pull_requests trigger in
+      # scrapers/odds_api.py are now dead code (kept in git history); the
+      # /odds Board rebuild on pm_snapshots is the remaining fast-follow.
 
       # Handicapper Bot — pick resolver. Grades pending bot_picks rows
       # (from in-chat pick logging via scripts/handicapper_log_pick.py)

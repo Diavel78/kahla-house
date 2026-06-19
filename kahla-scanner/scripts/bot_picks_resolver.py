@@ -346,15 +346,87 @@ def _pin_close_pair(sb, market_id: str, market_type: str,
     return out if len(out) == 2 else None
 
 
+def _exch_close_pair(sb, market_id: str, market_type: str, line,
+                     before_iso: str) -> dict | None:
+    """Exchange closing line = the last pre-event_start pm_snapshots cents
+    on BOTH sides, devigged. Kalshi mid is the independent ML anchor; PMM
+    for SPR/TOT (Kalshi is ML-only). Mirrors handicapper_web._attach_exch_current.
+
+    NOTE the vocab map: bot_picks/book_snapshots use 'moneyline' while
+    pm_snapshots uses 'ml'. SPR/TOT match the bet's own line (else ATM).
+    """
+    pm_mt = "ml" if market_type == "moneyline" else market_type
+    sides = ("over", "under") if market_type == "total" else ("home", "away")
+    try:
+        rows = (sb.table("pm_snapshots")
+                .select("source,side,line,cents,captured_at")
+                .eq("market_id", market_id)
+                .eq("market_type", pm_mt)
+                .lte("captured_at", before_iso)
+                .order("captured_at", desc=True)
+                .limit(600)
+                .execute().data) or []
+    except Exception:
+        return None
+    seen: dict = {}
+    for r in rows:
+        ln = r.get("line")
+        try:
+            ln = round(float(ln), 2) if ln is not None else None
+        except (TypeError, ValueError):
+            ln = None
+        k = (r.get("source"), r.get("side"), ln)
+        if k not in seen:
+            try:
+                seen[k] = float(r.get("cents"))
+            except (TypeError, ValueError):
+                pass
+    if pm_mt == "ml":
+        for src in ("kalshi", "pmm"):
+            h = seen.get((src, "home", None))
+            a = seen.get((src, "away", None))
+            if h is not None and a is not None and (h + a) > 0:
+                return {"home": h / (h + a), "away": a / (h + a)}
+        return None
+    up, down = sides
+    cand_lines = {ln for (src, s, ln) in seen if src == "pmm" and s in sides}
+    want = None
+    if line is not None:
+        try:
+            want = round(float(line), 2)
+        except (TypeError, ValueError):
+            want = None
+    chosen = want if (want is not None and want in cand_lines) else None
+    if chosen is None:                      # ATM fallback (closest to 50)
+        best_d = 1e9
+        for ln in cand_lines:
+            cu = seen.get(("pmm", up, ln))
+            cd = seen.get(("pmm", down, ln))
+            ref = cu if cu is not None else cd
+            if ref is None:
+                continue
+            d = abs(ref - 50)
+            if d < best_d:
+                best_d, chosen = d, ln
+    if chosen is None:
+        return None
+    cu = seen.get(("pmm", up, chosen))
+    cd = seen.get(("pmm", down, chosen))
+    if cu is not None and cd is not None and (cu + cd) > 0:
+        return {up: cu / (cu + cd), down: cd / (cu + cd)}
+    return None
+
+
 def _compute_clv(sb, bet: dict) -> float | None:
     """Closing Line Value in percentage points for one pick.
 
     clv_pp = (closing_devig_prob_for_side − entry_implied_prob) × 100
 
-    PIN's closing line = its last snapshot before event_start, devigged
-    against the other side. Positive = the bot was early on the side the
-    line later moved toward (sharp). None when PIN has no closing pair or
-    the entry price is unreadable.
+    Closing line = the exchange (Kalshi/PMM) last pre-event_start devigged
+    mid (cutover, June 2026) — falls back to PIN's book_snapshots close
+    only while that feed is still warm. Positive = the bot was early on the
+    side the line later moved toward (sharp). None when neither source has
+    a closing pair or the entry price is unreadable.
     """
     market_id = bet.get("market_id")
     mt = bet.get("market_type")
@@ -364,7 +436,10 @@ def _compute_clv(sb, bet: dict) -> float | None:
     entry_prob = _amer_to_prob(bet.get("entry_price"))
     if entry_prob is None:
         return None
-    pair = _pin_close_pair(sb, market_id, mt, bet.get("event_start") or "")
+    before = bet.get("event_start") or ""
+    pair = _exch_close_pair(sb, market_id, mt, bet.get("entry_line"), before)
+    if not pair or side not in pair:
+        pair = _pin_close_pair(sb, market_id, mt, before)   # warm-feed fallback
     if not pair or side not in pair:
         return None
     total = sum(pair.values())
