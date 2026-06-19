@@ -663,7 +663,14 @@ def _pin_history(sb, market_id: str) -> dict[tuple[str, str], list[dict]]:
 #   absorbs the same-city PMM side-flip — a flipped feed disagrees, so we
 #   skip rather than score the wrong side. Gotcha #21 spirit.)
 
-_X_PP_SCALE = 4.0     # prob-points → PIN-cent-equivalent score units
+# _X_PP_SCALE: prob-points → 0-10 score units. Bumped 4.0→5.2 (June 2026,
+# cutover) to remove the systematic cold bias measured on the side-by-side
+# data: over 87 paired paperlog rows the exchange score averaged 3.18 vs
+# PIN's 4.10 (~0.92 cold), so a straight flip would have under-cleared the
+# gate. 4.0 × (4.10/3.18 ≈ 1.29) ≈ 5.2 recenters the exchange score onto
+# the scale the SHARP_SCORE_MIN gate was tuned for. Re-tune from the
+# `signal_blob.book_imb` / paperlog distribution as the dataset grows.
+_X_PP_SCALE = 5.2     # prob-points → 0-10 score units (bias-corrected)
 _X_MIN_PP   = 0.25    # weighted move below this (≈ score 1) → no signal
 
 
@@ -709,9 +716,18 @@ def _x_main_series(hist: dict, mt: str, side: str) -> list[dict]:
 
 
 def _xsharp_ml(hist: dict, now=None):
-    """(side, score, n_snaps) or None. Sharp side = side whose implied
-    prob ROSE (more favored = harder to bet), from PMM cents, with the
-    Kalshi same-direction veto."""
+    """(side, score, n_snaps, confirmed) or None. Sharp side = side whose
+    implied prob ROSE (more favored = harder to bet), from PMM cents.
+
+    Kalshi is the CONFIRMATION venue (ML-only — it's the one market both
+    exchanges quote):
+      • Kalshi disagrees in direction → return None (no signal; gotcha #21
+        spirit + absorbs the same-city PMM side-flip).
+      • Kalshi agrees → confirmed=True.
+      • Kalshi silent/flat → confirmed=False (PMM-only — an unconfirmed
+        signal; the caller demotes it to a lean, per the live finding that
+        one-venue moves win only ~3-of-9 vs the confirmed side's 6).
+    """
     now = now or datetime.now(timezone.utc)
     h = hist.get(("pmm", "ml", "home", None), [])
     a = hist.get(("pmm", "ml", "away", None), [])
@@ -722,15 +738,18 @@ def _xsharp_ml(hist: dict, now=None):
         sig, n = -_weighted_signed_delta(a, "cents", now=now), len(a)
     if sig is None or abs(sig) < _X_MIN_PP:
         return None
+    confirmed = False
     kh = hist.get(("kalshi", "ml", "home", None), [])
     if len(kh) >= 2:
         kw = _weighted_signed_delta(kh, "cents", now=now)
-        if abs(kw) >= _X_MIN_PP and (kw > 0) != (sig > 0):
-            return None         # feeds disagree → no signal (skip, don't guess)
+        if abs(kw) >= _X_MIN_PP:
+            if (kw > 0) != (sig > 0):
+                return None     # feeds disagree → no signal (skip, don't guess)
+            confirmed = True    # feeds agree → confirmed pick
     score = min(10, round(abs(sig) * _X_PP_SCALE))
     if score < 1:
         return None
-    return ("home" if sig > 0 else "away"), score, n
+    return ("home" if sig > 0 else "away"), score, n, confirmed
 
 
 def _xsharp_two_sided(hist: dict, mt: str, up_side: str, down_side: str,
@@ -775,8 +794,135 @@ def _attach_xsharp(sb, market_id: str, odds: dict) -> None:
             if not blk or not r:
                 continue
             mv = blk.get("movement") or {}
-            mv["x_side"], mv["x_score"], mv["x_n"] = r
+            mv["x_side"], mv["x_score"], mv["x_n"] = r[0], r[1], r[2]
+            # ML carries a confirmation flag (Kalshi agree). SPR/TOT have no
+            # second venue, so they're treated as confirmed (the gate is
+            # ML-only) — set True so the demotion never touches them.
+            mv["x_confirmed"] = (r[3] if len(r) > 3 else True)
             blk["movement"] = mv
+    except Exception:
+        pass
+
+
+# ───────── Exchange CURRENT fair anchor (Odds-API retirement) ─────────
+# The replacement for PIN's devigged fair as the Polymarket limit-order
+# target + edge base. Kalshi mid is the independent anchor where it quotes
+# (ML); PMM mid elsewhere (SPR/TOT — Kalshi is ML-only). Built from the
+# LATEST pm_snapshots cents per side, devigged. Attached as `exch_current`
+# alongside `pin_current` so _suggest_picks reads it as primary (PIN
+# falls back only while its feed is still warm).
+
+def _exch_latest(sb, market_id: str) -> dict:
+    """Latest pm_snapshots cents per (source, market_type, side, line) in
+    the last 6h. First row per key wins (rows come back newest-first)."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    try:
+        rows = (sb.table("pm_snapshots")
+                .select("source,market_type,side,line,cents,captured_at")
+                .eq("market_id", market_id)
+                .gte("captured_at", cutoff)
+                .order("captured_at", desc=True)
+                .limit(2000)
+                .execute().data) or []
+    except Exception:
+        return {}
+    out: dict = {}
+    for r in rows:
+        line = r.get("line")
+        try:
+            line = round(float(line), 2) if line is not None else None
+        except (TypeError, ValueError):
+            line = None
+        k = (r.get("source"), r.get("market_type") or "ml", r.get("side"), line)
+        if k not in out:
+            try:
+                out[k] = float(r.get("cents"))
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def _exch_block(prob: float | None, line, source: str) -> dict | None:
+    if prob is None:
+        return None
+    prob = min(max(prob, 0.01), 0.99)
+    return {
+        "price":         _prob_to_american(prob),
+        "line":          line,
+        "fair_prob":     round(prob, 4),
+        "fair_american": _prob_to_american(prob),
+        "source":        source,
+    }
+
+
+def _exch_ml_fair(latest: dict):
+    """(source, p_home, p_away) from the latest ML cents — Kalshi first
+    (the independent anchor), PMM fallback. Devigs the pair when both
+    sides exist; else uses the single side directly."""
+    for src in ("kalshi", "pmm"):
+        h = latest.get((src, "ml", "home", None))
+        a = latest.get((src, "ml", "away", None))
+        if h is not None and a is not None and (h + a) > 0:
+            ph = _devig_two_way(h / 100.0, a / 100.0)
+            return src, ph, 1.0 - ph
+        if h is not None:
+            return src, h / 100.0, 1.0 - h / 100.0
+        if a is not None:
+            return src, 1.0 - a / 100.0, a / 100.0
+    return None
+
+
+def _exch_two_sided_fair(latest: dict, mt: str, up: str, down: str):
+    """(line, p_up, p_down) for SPR/TOT from PMM's at-the-money line (the
+    line whose cents are closest to 50). Kalshi is ML-only, so PMM is the
+    anchor here. Devigs the pair at that line when both sides exist."""
+    lines = {ln for (src, m, s, ln) in latest
+             if src == "pmm" and m == mt and s in (up, down)}
+    best, best_d = None, 1e9
+    for ln in lines:
+        cu = latest.get(("pmm", mt, up, ln))
+        cd = latest.get(("pmm", mt, down, ln))
+        ref = cu if cu is not None else cd
+        if ref is None:
+            continue
+        d = abs(ref - 50)
+        if d < best_d:
+            best, best_d = (ln, cu, cd), d
+    if not best:
+        return None
+    ln, cu, cd = best
+    if cu is not None and cd is not None and (cu + cd) > 0:
+        pu = _devig_two_way(cu / 100.0, cd / 100.0)
+    elif cu is not None:
+        pu = cu / 100.0
+    else:
+        pu = 1.0 - cd / 100.0
+    return ln, pu, 1.0 - pu
+
+
+def _attach_exch_current(sb, market_id: str, odds: dict) -> None:
+    """Attach `exch_current` (Kalshi/PMM devigged fair) onto each odds
+    block. Silent-fail; never breaks the dossier."""
+    try:
+        latest = _exch_latest(sb, market_id)
+        if not latest:
+            return
+        ml = _exch_ml_fair(latest)
+        if ml and odds.get("moneyline"):
+            src, ph, pa = ml
+            odds["moneyline"]["exch_current"] = {
+                "home": _exch_block(ph, None, src),
+                "away": _exch_block(pa, None, src),
+            }
+        for mt, up, down in (("spread", "home", "away"),
+                             ("total", "over", "under")):
+            r = _exch_two_sided_fair(latest, mt, up, down)
+            if r and odds.get(mt):
+                ln, pu, pd = r
+                odds[mt]["exch_current"] = {
+                    up:   _exch_block(pu, ln, "pmm"),
+                    down: _exch_block(pd, ln, "pmm"),
+                }
     except Exception:
         pass
 
@@ -3360,22 +3506,42 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
     for mt in ("moneyline", "spread", "total"):
         blk = odds.get(mt) or {}
         mv = blk.get("movement") or {}
-        sharp_side  = mv.get("sharp_side")
-        sharp_score = mv.get("sharp_score") or 0
+        # PRIMARY = exchange sharp score (PMM cents + Kalshi confirm). The
+        # PIN recency-weighted score is retired with its feed (cutover,
+        # June 2026); `x_side`/`x_score` are now the headline signal.
+        sharp_side  = mv.get("x_side")
+        sharp_score = mv.get("x_score") or 0
+        x_confirmed = mv.get("x_confirmed")
         sides = ("over", "under") if mt == "total" else ("away", "home")
         for side in sides:
-            pin = (blk.get("pin_current") or {}).get(side) or {}
-            fair_prob     = pin.get("fair_prob")
-            fair_american = pin.get("fair_american")
+            # Fair anchor: exchange devigged mid (Kalshi/PMM) is primary;
+            # pin_current is a fallback only while its feed is still warm.
+            fair_src = ((blk.get("exch_current") or {}).get(side)
+                        or (blk.get("pin_current") or {}).get(side) or {})
+            fair_prob     = fair_src.get("fair_prob")
+            fair_american = fair_src.get("fair_american")
             # Need at minimum a fair line to call this a Polymarket target.
             if fair_prob is None or fair_american is None:
                 continue
+            pin = fair_src   # downstream reference fields read from here
 
             score_for_side = sharp_score if side == sharp_side else 0
             splits_pp = _splits_signal_pp(splits, sharp_side, mt) if score_for_side > 0 else 0.0
             cs = (SHARP_WEIGHT * (score_for_side / 10.0)
                   + SPLITS_WEIGHT * min(max(0.0, splits_pp) / 30.0, 1.0))
             gates_cleared = score_for_side >= SHARP_SCORE_MIN
+            # PMM+Kalshi confirmation gate (ML-only — the only market both
+            # exchanges quote). A moneyline move PMM shows but Kalshi
+            # doesn't confirm is mostly noise: on the live disagreement set
+            # the unconfirmed side won only ~3-of-9. So an unconfirmed ML
+            # signal stays visible but DEMOTES to a forced lean (1u) rather
+            # than a real pick. SPR/TOT have no second venue → x_confirmed
+            # is True for them, so this never fires there.
+            unconfirmed_ml = False
+            if (mt == "moneyline" and gates_cleared
+                    and score_for_side > 0 and not x_confirmed):
+                gates_cleared = False
+                unconfirmed_ml = True
             # Sticky gate (hysteresis — the "5-minute pick" fix, June 2026).
             # The recency-weighted score DECAYS as a move ages, so a real
             # steam cleared the gate only while <15min fresh, then the pick
@@ -3384,7 +3550,7 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
             # has cleared (paperlog memory, threaded in via sticky_keys),
             # it STAYS a real pick while the score holds ≥ STICKY_GATE_EXIT.
             sticky = False
-            if (not gates_cleared and sticky_keys
+            if (not gates_cleared and not unconfirmed_ml and sticky_keys
                     and (mt, side) in sticky_keys
                     and score_for_side >= STICKY_GATE_EXIT):
                 gates_cleared, sticky = True, True
@@ -3458,6 +3624,9 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 "x_side":         mv.get("x_side"),
                 "x_agree":        ((mv.get("x_side") == side)
                                    if mv.get("x_side") else None),
+                "x_confirmed":    bool(x_confirmed),
+                "unconfirmed_ml": unconfirmed_ml,
+                "fair_source":    fair_src.get("source"),
                 "conflict_reason": conflict_reason,
                 "timing_window":  _timing_window(starts_in_min),
                 "prime_core":     _is_prime_core(starts_in_min),
@@ -3770,6 +3939,10 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     # so every suggestion carries x_score/x_side/x_agree for the
     # agreement review.
     _attach_xsharp(sb, market["id"], odds)
+    # Exchange CURRENT fair anchor (Kalshi mid / PMM fallback) — the
+    # Polymarket target + edge base now that the PIN feed is cut. Attached
+    # before _suggest_picks so it reads exch_current as primary.
+    _attach_exch_current(sb, market["id"], odds)
 
     suggestions = _suggest_picks(odds, splits, power_rating,
                                  sport=sport, home=home,
