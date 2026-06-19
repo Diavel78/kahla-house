@@ -19,6 +19,7 @@ authoritative — it backs the live picker logic that's been running.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -2095,57 +2096,88 @@ EVAL_WINDOW_MAX = 180                  # page evaluator/chips reach the prime ed
                                        # signal_blob.timing_window=='early' + clv_pp before any promotion to sizing.
 
 
-# Runtime-tunable prime window. The weekly auto-tuner
-# (scripts/tune_prime_window.py) grid-searches the paperlog and writes the
-# best (lo, hi) to the `pickbot_tuning` singleton row; the dossier reads it
-# here. _PRIME_WINDOW is the fallback when the table is empty/unreachable.
-# THE HAND-SET (60,180) WAS THE WEAK LINK — live data showed prime flat
-# while far/late won, so the window itself is now data-driven.
-_PRIME_WINDOW_CACHE: dict = {"window": None, "at": 0.0}
+# Runtime-tunable prime window — now MULTI-ZONE. The weekly auto-tuner
+# (scripts/tune_prime_window.py) finds the winning minute-bands in the
+# paperlog and writes them as a list of [lo,hi] segments to the
+# `pickbot_tuning.zones` column; the dossier reads them here. Live data
+# showed the edge is BIMODAL (30-90 and 150-210 win, 90-120 is a losing
+# hole between them), which a single contiguous span can't express.
+# _PRIME_ZONES is the fallback when the table is empty/unreachable.
+_PRIME_ZONES = [(60, 180)]   # fallback (old single-span behaviour)
+_PRIME_WINDOW_CACHE: dict = {"zones": None, "at": 0.0}
 _PRIME_WINDOW_TTL = 300.0   # seconds
 
 
-def _load_prime_window(sb) -> tuple[int, int]:
-    """The tuned (lo, hi) prime window from `pickbot_tuning`, cached 5 min.
-    Falls back to the _PRIME_WINDOW constant. Silent-fail."""
+def _load_prime_zones(sb) -> list[tuple[int, int]]:
+    """The tuned prime ZONES from `pickbot_tuning`, cached 5 min. Reads the
+    `zones` jsonb list; falls back to [[prime_lo, prime_hi]] then to the
+    _PRIME_ZONES constant. Silent-fail."""
     now = time.time()
     c = _PRIME_WINDOW_CACHE
-    if c["window"] is not None and (now - c["at"]) < _PRIME_WINDOW_TTL:
-        return c["window"]
-    win = _PRIME_WINDOW
+    if c["zones"] is not None and (now - c["at"]) < _PRIME_WINDOW_TTL:
+        return c["zones"]
+    zones = _PRIME_ZONES
     try:
         rows = (sb.table("pickbot_tuning")
-                .select("prime_lo,prime_hi")
+                .select("prime_lo,prime_hi,zones")
                 .eq("id", 1)
                 .limit(1)
                 .execute().data) or []
         if rows:
-            lo, hi = rows[0].get("prime_lo"), rows[0].get("prime_hi")
-            if lo is not None and hi is not None and 0 <= lo < hi:
-                win = (int(lo), int(hi))
+            raw = rows[0].get("zones")
+            parsed = _parse_zones(raw)
+            if parsed:
+                zones = parsed
+            else:
+                lo, hi = rows[0].get("prime_lo"), rows[0].get("prime_hi")
+                if lo is not None and hi is not None and 0 <= lo < hi:
+                    zones = [(int(lo), int(hi))]
     except Exception:
         pass
-    c["window"], c["at"] = win, now
-    return win
+    c["zones"], c["at"] = zones, now
+    return zones
 
 
-def _timing_window(starts_in_min, window: tuple[int, int] | None = None) -> str | None:
-    """Classify a pick by minutes before first pitch, against the (tuned or
-    fallback) prime window (lo, hi):
-      late   (< lo)      — capped to 1u, the mushy last-hour window
-      prime  (lo..hi)    — the betting window: green glow + size-up
-      far    (> hi)      — beyond prime. Still PAPERLOGGED (out to 5h) for
-                           data, but never sized up or glowed.
-    The 90-120 hammer sub-bucket is preserved via `prime_core`; raw
-    starts_in_min is logged for finer buckets."""
+def _parse_zones(raw) -> list[tuple[int, int]] | None:
+    """Coerce the jsonb zones value into a clean, sorted list of (lo,hi)."""
+    if not raw:
+        return None
+    try:
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        out = []
+        for seg in raw:
+            lo, hi = int(seg[0]), int(seg[1])
+            if 0 <= lo < hi:
+                out.append((lo, hi))
+        return sorted(out) or None
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+
+
+def _timing_window(starts_in_min, zones: list[tuple[int, int]] | None = None) -> str | None:
+    """Classify a pick by minutes before first pitch against the (tuned or
+    fallback) prime ZONES:
+      prime  — inside ANY zone: green glow + size-up.
+      late   — before the earliest zone: capped to 1u (cold pre-game).
+      far    — after the latest zone: capped to 1u.
+      gap    — between two zones (e.g. the 90-120 hole): capped to 1u. We
+               still bet it if the sharp gate clears, just never size up.
+    Only `prime` sizes past 1u. The 90-120 hammer sub-bucket is preserved
+    via `prime_core`; raw starts_in_min is logged for finer buckets."""
     if starts_in_min is None:
         return None
-    lo, hi = window or _PRIME_WINDOW
-    if starts_in_min < lo:
+    zones = zones or _PRIME_ZONES
+    for lo, hi in zones:
+        if lo <= starts_in_min <= hi:
+            return "prime"
+    lo_min = min(z[0] for z in zones)
+    hi_max = max(z[1] for z in zones)
+    if starts_in_min < lo_min:
         return "late"
-    if starts_in_min <= hi:
-        return "prime"
-    return "far"
+    if starts_in_min > hi_max:
+        return "far"
+    return "gap"
 
 
 def _is_prime_core(starts_in_min) -> bool | None:
@@ -3505,7 +3537,7 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                    sport: str | None = None, home: str | None = None,
                    starts_in_min=None,
                    sticky_keys: set | None = None,
-                   prime_window: tuple[int, int] | None = None) -> list[dict]:
+                   prime_zones: list[tuple[int, int]] | None = None) -> list[dict]:
     """Polymarket-execution picks. Returns a list — there can be more
     than one on a game. Behaviour:
 
@@ -3663,7 +3695,7 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 "unconfirmed_ml": unconfirmed_ml,
                 "fair_source":    fair_src.get("source"),
                 "conflict_reason": conflict_reason,
-                "timing_window":  _timing_window(starts_in_min, prime_window),
+                "timing_window":  _timing_window(starts_in_min, prime_zones),
                 "prime_core":     _is_prime_core(starts_in_min),
             })
 
@@ -3983,7 +4015,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
                                  sport=sport, home=home,
                                  starts_in_min=starts_in_min,
                                  sticky_keys=_sticky_keys(sb, market["id"]),
-                                 prime_window=_load_prime_window(sb))
+                                 prime_zones=_load_prime_zones(sb))
     # Keep the singular `suggestion` field as an alias for the top pick
     # so any caller still expecting it doesn't break. New code should
     # use `suggestions` (list) so multi-pick games render correctly.

@@ -7086,12 +7086,21 @@ def api_handicapper_games():
     # the other way around). For MLB, keep both when they're >1h apart
     # — that's the doubleheader case (real, same teams same day).
     games = _dedup_games(games, sport)
+    # Prime ZONES (minute-bands the bot sizes up + glows green). Multi-zone
+    # since June 2026 (the edge is bimodal); surfaced so the page's row glow
+    # matches the server and follows the weekly tuner without hardcoding.
+    try:
+        import handicapper_web
+        prime_zones = [list(z) for z in handicapper_web._load_prime_zones(sb)]
+    except Exception:
+        prime_zones = [[60, 180]]
     return jsonify({
-        "ok":      True,
-        "sport":   sport,
-        "now_iso": now.isoformat(),
-        "count":   len(games),
-        "games":   games,
+        "ok":          True,
+        "sport":       sport,
+        "now_iso":     now.isoformat(),
+        "count":       len(games),
+        "games":       games,
+        "prime_zones": prime_zones,
     })
 
 

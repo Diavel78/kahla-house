@@ -799,9 +799,10 @@
     let _currentGames = [];
     let _verdictCache = new Map();
     let _verdictInFlight = new Set();
-    const VERDICT_WINDOW_MS = 3 * 60 * 60 * 1000;   // 3h evaluator window — surfaces picks out to 180m, the
-                                                    // prime edge. 60-180m = prime (glow + size-up). The silent
-                                                    // server-side paperlog goes further (5h) for review data.
+    const VERDICT_WINDOW_MS = 3.5 * 60 * 60 * 1000; // 3.5h evaluator window — covers the top of the upper prime
+                                                    // zone (currently 150-210m). Zones are tuned weekly server-
+                                                    // side; this just needs to reach the latest zone's hi. The
+                                                    // silent server-side paperlog goes further (5h) for review.
     const VERDICT_TTL_MS    = 5 * 60 * 1000;        // re-fetch stale verdicts
 
     firebase.auth().onAuthStateChanged(async user => {
@@ -938,14 +939,17 @@
         if (diffMin < 120) return 'tier-soon';
         return '';
     }
-    // PRIME betting window = 60-120 min to first pitch (matches the
-    // server's timing_window==='prime' + the window the bot sizes past
-    // 1u). The 90-120 hammer core is tracked server-side via prime_core;
-    // the glow covers the full 60-120 betting window. Drives the green
-    // prime glow/pill on the games-list row.
+    // PRIME betting ZONES — the minute-bands the bot sizes up + glows green.
+    // MULTI-ZONE since June 2026: live data showed the edge is bimodal
+    // (30-90 and 150-210 win, 90-120 is a losing hole between them). The
+    // zones are tuned weekly server-side and plumbed in via
+    // /api/handicapper/games (`prime_zones`), so the row glow matches the
+    // server's timing_window==='prime' and follows the tuner without
+    // hardcoding. Falls back to the old single span until the first fetch.
+    let _primeZones = [[60, 180]];
     function _isPrime(iso) {
         const diffMin = Math.round((new Date(iso) - new Date()) / 60_000);
-        return diffMin >= 60 && diffMin <= 180;   // prime extended 2h -> 3h (June 2026)
+        return _primeZones.some(([lo, hi]) => diffMin >= lo && diffMin <= hi);
     }
     function _fmtSettled(iso) {
         const d = new Date(iso);
@@ -1247,6 +1251,11 @@
             const r = await authFetch('/api/handicapper/games?sport=' + encodeURIComponent(_activeSport));
             const data = await r.json();
             if (!data.ok) throw new Error(data.error || 'fetch failed');
+            // Sync the prime zones from the server (tuned weekly) so the row
+            // glow + the 90-120 hole stay accurate without hardcoding.
+            if (Array.isArray(data.prime_zones) && data.prime_zones.length) {
+                _primeZones = data.prime_zones.map(z => [Number(z[0]), Number(z[1])]);
+            }
             // Pre-game only: drop any game that's already started. The API
             // window starts at now, but client/server clock skew (or a
             // game tipping off between fetch and render) can leak a live
@@ -2046,10 +2055,12 @@
                 // Timing badge — picks made 1-2h out are the betting
                 // window; last-hour picks get sized down to 1u.
                 const timingBadge = s.timing_window === 'prime'
-                    ? '<span class="time-badge prime" title="1-2h before first pitch — the betting window (60-120m: 63.9%, +31u). Sweet spot is the 90-120m core (68.4%, +27u).">PRIME WINDOW</span>'
+                    ? '<span class="time-badge prime" title="Inside a prime betting zone (data-driven, tuned weekly — currently 30-90m and 150-210m before first pitch). The bot sizes up + glows green here.">PRIME WINDOW</span>'
                     : (s.timing_window === 'late'
-                        ? `<span class="time-badge late" title="Under 1h to first pitch — last-hour picks underperform${s.late_capped ? '; sized down to 1u' : ''}">LATE${s.late_capped ? ' · capped 1u' : ''}</span>`
-                        : '');
+                        ? `<span class="time-badge late" title="Under the earliest prime zone — cold pre-game${s.late_capped ? '; sized down to 1u' : ''}">LATE${s.late_capped ? ' · capped 1u' : ''}</span>`
+                        : (s.timing_window === 'gap'
+                            ? '<span class="time-badge late" title="Between prime zones — the 90-120m hole (-0.32/unit on 222 picks). Still bet if the sharp gate clears, but never sized past 1u.">OFF-PEAK · capped 1u</span>'
+                            : ''));
                 // Veto note — the OUR-NUMBER read demoted this total to a
                 // lean because it disagrees with the side (e.g. a Coors
                 // under). Shown instead of the generic sharp-gate note.
