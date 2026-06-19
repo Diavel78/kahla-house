@@ -2095,21 +2095,55 @@ EVAL_WINDOW_MAX = 180                  # page evaluator/chips reach the prime ed
                                        # signal_blob.timing_window=='early' + clv_pp before any promotion to sizing.
 
 
-def _timing_window(starts_in_min) -> str | None:
-    """Classify a pick by minutes before first pitch:
-      late   (<60)      — capped to 1u, the mushy last-hour window (52.9%)
-      prime  (60-180)   — the betting window: green glow + size-up. Extended
-                          2h->3h June 2026 on conviction (early sharp money);
-                          the paperlog dataset will confirm or kill it.
-      far    (>180)     — beyond prime. Still PAPERLOGGED (out to 5h) for
-                          data, but never sized up or glowed.
-    The 60-90 / 90-120 split inside prime is preserved via `prime_core`
-    (the proven hammer); raw starts_in_min is logged for finer buckets."""
+# Runtime-tunable prime window. The weekly auto-tuner
+# (scripts/tune_prime_window.py) grid-searches the paperlog and writes the
+# best (lo, hi) to the `pickbot_tuning` singleton row; the dossier reads it
+# here. _PRIME_WINDOW is the fallback when the table is empty/unreachable.
+# THE HAND-SET (60,180) WAS THE WEAK LINK — live data showed prime flat
+# while far/late won, so the window itself is now data-driven.
+_PRIME_WINDOW_CACHE: dict = {"window": None, "at": 0.0}
+_PRIME_WINDOW_TTL = 300.0   # seconds
+
+
+def _load_prime_window(sb) -> tuple[int, int]:
+    """The tuned (lo, hi) prime window from `pickbot_tuning`, cached 5 min.
+    Falls back to the _PRIME_WINDOW constant. Silent-fail."""
+    now = time.time()
+    c = _PRIME_WINDOW_CACHE
+    if c["window"] is not None and (now - c["at"]) < _PRIME_WINDOW_TTL:
+        return c["window"]
+    win = _PRIME_WINDOW
+    try:
+        rows = (sb.table("pickbot_tuning")
+                .select("prime_lo,prime_hi")
+                .eq("id", 1)
+                .limit(1)
+                .execute().data) or []
+        if rows:
+            lo, hi = rows[0].get("prime_lo"), rows[0].get("prime_hi")
+            if lo is not None and hi is not None and 0 <= lo < hi:
+                win = (int(lo), int(hi))
+    except Exception:
+        pass
+    c["window"], c["at"] = win, now
+    return win
+
+
+def _timing_window(starts_in_min, window: tuple[int, int] | None = None) -> str | None:
+    """Classify a pick by minutes before first pitch, against the (tuned or
+    fallback) prime window (lo, hi):
+      late   (< lo)      — capped to 1u, the mushy last-hour window
+      prime  (lo..hi)    — the betting window: green glow + size-up
+      far    (> hi)      — beyond prime. Still PAPERLOGGED (out to 5h) for
+                           data, but never sized up or glowed.
+    The 90-120 hammer sub-bucket is preserved via `prime_core`; raw
+    starts_in_min is logged for finer buckets."""
     if starts_in_min is None:
         return None
-    if starts_in_min < LATE_WINDOW_MIN:
+    lo, hi = window or _PRIME_WINDOW
+    if starts_in_min < lo:
         return "late"
-    if starts_in_min <= _PRIME_WINDOW[1]:
+    if starts_in_min <= hi:
         return "prime"
     return "far"
 
@@ -3470,7 +3504,8 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                    power: dict | None = None, *,
                    sport: str | None = None, home: str | None = None,
                    starts_in_min=None,
-                   sticky_keys: set | None = None) -> list[dict]:
+                   sticky_keys: set | None = None,
+                   prime_window: tuple[int, int] | None = None) -> list[dict]:
     """Polymarket-execution picks. Returns a list — there can be more
     than one on a game. Behaviour:
 
@@ -3628,7 +3663,7 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 "unconfirmed_ml": unconfirmed_ml,
                 "fair_source":    fair_src.get("source"),
                 "conflict_reason": conflict_reason,
-                "timing_window":  _timing_window(starts_in_min),
+                "timing_window":  _timing_window(starts_in_min, prime_window),
                 "prime_core":     _is_prime_core(starts_in_min),
             })
 
@@ -3947,7 +3982,8 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     suggestions = _suggest_picks(odds, splits, power_rating,
                                  sport=sport, home=home,
                                  starts_in_min=starts_in_min,
-                                 sticky_keys=_sticky_keys(sb, market["id"]))
+                                 sticky_keys=_sticky_keys(sb, market["id"]),
+                                 prime_window=_load_prime_window(sb))
     # Keep the singular `suggestion` field as an alias for the top pick
     # so any caller still expecting it doesn't break. New code should
     # use `suggestions` (list) so multi-pick games render correctly.

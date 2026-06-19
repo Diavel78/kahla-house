@@ -1,0 +1,61 @@
+name: Pick Bot — Tune Prime Window
+
+# Weekly auto-tuner for the Pick Bot's prime betting window. Grid-searches
+# pickbot_paperlog (settled, gate-cleared ML/SPR/TOT picks), optimizes mean
+# per-pick unit-ROI with a CLV guardrail + stability rails, and writes the
+# best (lo, hi) to the pickbot_tuning singleton row that handicapper_web
+# reads at runtime. The hand-set (60,180) window underperformed live; this
+# lets the data define the real window. Safe by construction — leaves the
+# window untouched when there isn't enough data or nothing clears the
+# guardrail + improvement threshold.
+#
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY.
+# Free — reads Supabase only, no Odds API credits, no external paid calls.
+
+on:
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: "Days of paperlog history to tune over"
+        required: false
+        default: "30"
+      dry_run:
+        description: "Print the decision without writing (true/false)"
+        required: false
+        default: "false"
+  schedule:
+    # Mondays 12:00 UTC — fresh weekly window off the prior week's settled picks.
+    - cron: "0 12 * * 1"
+
+concurrency:
+  group: tune-prime-window
+  cancel-in-progress: true
+
+jobs:
+  tune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: kahla-scanner
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Tune prime window
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          python -m scripts.tune_prime_window \
+            --lookback-days ${{ github.event.inputs.lookback_days || '30' }} \
+            ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
