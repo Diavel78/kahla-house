@@ -570,6 +570,7 @@ def _attach_pmm_to_odds(odds: dict, pmm: dict, sport: str) -> None:
         if not pmm_key:
             continue
         pin_current = blk.get("pin_current") or {}
+        exch_current = blk.get("exch_current") or {}
         a, b = side_pairs[market_type]
         out: dict = {
             "event_slug":  pmm.get("event_slug"),
@@ -577,9 +578,18 @@ def _attach_pmm_to_odds(odds: dict, pmm: dict, sport: str) -> None:
         }
         for side in (a, b):
             pin_side = pin_current.get(side) or {}
-            pin_line = pin_side.get("line")
+            exch_side = exch_current.get(side) or {}
             pin_fair_prob = pin_side.get("fair_prob")
-            entry = pmm_markets.best_line_for(pmm, pmm_key, side, pin_line)
+            # Anchor the PMM line on the EXCHANGE at-the-money line
+            # (exch_current) — the venue-native main line — falling back to
+            # PIN's line only if no exchange anchor exists. Anchoring on the
+            # frozen PIN line is what pinned totals to the wrong number
+            # (e.g. 6.5 when PMM's balanced line is 7.5) post-cutover.
+            anchor_line = exch_side.get("line")
+            if anchor_line is None:
+                anchor_line = pin_side.get("line")
+            pin_line = anchor_line   # name kept for the projection call below
+            entry = pmm_markets.best_line_for(pmm, pmm_key, side, anchor_line)
             if not entry:
                 out[side] = None
                 continue
@@ -2314,14 +2324,20 @@ def _sticky_keys(sb, market_id: str) -> set:
 
 
 def _kelly_units(fair_prob, fair_american, edge_pp,
-                 gates_cleared) -> tuple[int, str, float]:
-    """(units, confidence, kelly_pct). Quarter-Kelly stake from the
-    signal-derived edge, snapped to the 1/3/5u tiers.
+                 gates_cleared, kelly_fraction: float | None = None) -> tuple[int, str, float]:
+    """(units, confidence, kelly_pct). Kelly stake from the signal-derived
+    edge, snapped to the 1/3/5u tiers.
+
+    The Kelly FRACTION (aggression) is runtime-tunable — `kelly_fraction`
+    overrides the KELLY_FRACTION constant when the sizing auto-tuner has
+    proven (on new-scale CLV) that higher-edge picks earn more, so it can
+    push from quarter-Kelly toward third-Kelly (more 3u/5u) — or back off.
 
     1u is the DEFAULT — both for forced leans (gate not cleared) AND for
-    real picks whose ¼-Kelly stake is ordinary. A real pick only steps up
+    real picks whose Kelly stake is ordinary. A real pick only steps up
     to 3u (≥ KELLY_MED_PCT) or 5u (≥ KELLY_HIGH_PCT) on a genuinely large
     stake. Real-pick-vs-lean is conveyed by `gates_cleared`, not units."""
+    frac = kelly_fraction if kelly_fraction is not None else KELLY_FRACTION
     if not gates_cleared:
         return 1, "low", 0.0
     # Gated pick but no usable edge estimate → standard 1u bet.
@@ -2336,12 +2352,40 @@ def _kelly_units(fair_prob, fair_american, edge_pp,
     if b <= 0:
         return 1, "low", 0.0
     f = true_p - (1.0 - true_p) / b      # full Kelly fraction
-    kelly_pct = max(0.0, f) * KELLY_FRACTION * 100.0
+    kelly_pct = max(0.0, f) * frac * 100.0
     if kelly_pct >= KELLY_HIGH_PCT:
         return 5, "high", round(kelly_pct, 2)
     if kelly_pct >= KELLY_MED_PCT:
         return 3, "medium", round(kelly_pct, 2)
     return 1, "low", round(kelly_pct, 2)
+
+
+# Runtime-tunable Kelly fraction (aggression dial), written by the weekly
+# sizing auto-tuner to `pickbot_tuning.kelly_fraction`. NULL → use the
+# KELLY_FRACTION constant (dormant). Bounded MIN/MAX in the tuner.
+_KELLY_FRAC_CACHE: dict = {"frac": None, "at": 0.0}
+
+
+def _load_kelly_fraction(sb) -> float:
+    """Tuned Kelly fraction from `pickbot_tuning`, cached 5 min. Falls back
+    to the KELLY_FRACTION constant when unset. Silent-fail."""
+    now = time.time()
+    c = _KELLY_FRAC_CACHE
+    if c["frac"] is not None and (now - c["at"]) < _PRIME_WINDOW_TTL:
+        return c["frac"]
+    frac = KELLY_FRACTION
+    try:
+        rows = (sb.table("pickbot_tuning")
+                .select("kelly_fraction").eq("id", 1).limit(1)
+                .execute().data) or []
+        if rows and rows[0].get("kelly_fraction") is not None:
+            v = float(rows[0]["kelly_fraction"])
+            if 0.05 <= v <= 0.6:
+                frac = v
+    except Exception:
+        pass
+    c["frac"], c["at"] = frac, now
+    return frac
 
 
 # ──────────────────────────── Power rating ────────────────────────────
@@ -3537,7 +3581,8 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                    sport: str | None = None, home: str | None = None,
                    starts_in_min=None,
                    sticky_keys: set | None = None,
-                   prime_zones: list[tuple[int, int]] | None = None) -> list[dict]:
+                   prime_zones: list[tuple[int, int]] | None = None,
+                   kelly_fraction: float | None = None) -> list[dict]:
     """Polymarket-execution picks. Returns a list — there can be more
     than one on a game. Behaviour:
 
@@ -3655,13 +3700,18 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
             # so we never display "PMM line + PIN fair" together
             # (inconsistent and misleading).
             pmm_block = (blk.get("polymarket") or {}).get(side)
-            pmm_proj = (pmm_block or {}).get("projected") or {}
             pmm_line = (pmm_block or {}).get("line")
             pmm_quote = (pmm_block or {}).get("quote") or {}
-            projected_american = pmm_proj.get("fair_american")
-            use_pmm = projected_american is not None
-            target_fair_american = projected_american if use_pmm else fair_american
-            target_line = pmm_line if use_pmm else pin.get("line")
+            # Post-cutover: the EXCHANGE devigged mid (exch_current) IS the
+            # Polymarket fair at the at-the-money line — no PIN push-rate
+            # projection. Target line + fair come straight from fair_src;
+            # the PMM quote (re-anchored to that line in _attach_pmm_to_odds)
+            # supplies the maker bid for entry. use_pmm now means "PMM quotes
+            # the target line" (consistency guard for the displayed pmm_line).
+            target_fair_american = fair_american
+            target_line = pin.get("line")
+            use_pmm = (pmm_line is not None and target_line is not None
+                       and abs(pmm_line - target_line) < 0.001)
 
             candidates.append({
                 "market_type":    mt,
@@ -3726,7 +3776,7 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
     for c in candidates:
         units, conf, kelly_pct = _kelly_units(
             c.get("fair_prob"), c.get("fair_american"),
-            c.get("edge_pp"), c.get("gates_cleared"))
+            c.get("edge_pp"), c.get("gates_cleared"), kelly_fraction)
         # Sizing concentrated in the PRIME window — only picks made 90-120
         # min before first pitch can size past 1u. That 38-pick window
         # carried +27u at 68.4%; 60-90 was modest (+3.9u), the last hour
@@ -3922,10 +3972,17 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         except Exception:
             pass
 
-    # Attach PMM market info onto each odds[market_type] block so the
-    # UI can render PMM line + bid/ask next to PIN fair, plus the
-    # PIN-derived fair projected onto PMM's line as the limit-order
-    # target. Skipped silently when no PMM data.
+    # Exchange CURRENT fair anchor (Kalshi mid / PMM fallback, devigged) —
+    # attached BEFORE the PMM quotes so the PMM line selection anchors on
+    # the exchange at-the-money line (not the dead PIN line). This is the
+    # cutover fix for "why is the total on 6.5 when PMM's main line is 7.5":
+    # PIN froze at 6.5, so anchoring PMM on it picked the wrong line.
+    _attach_exch_current(sb, market["id"], odds)
+
+    # Attach PMM market info onto each odds[market_type] block so the UI can
+    # render the PMM line + bid/ask next to the exchange fair, and supply
+    # the maker bid (entry price) at the at-the-money line. Skipped silently
+    # when no PMM data.
     if pmm_data:
         _attach_pmm_to_odds(odds, pmm_data, sport)
 
@@ -4006,16 +4063,15 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     # so every suggestion carries x_score/x_side/x_agree for the
     # agreement review.
     _attach_xsharp(sb, market["id"], odds)
-    # Exchange CURRENT fair anchor (Kalshi mid / PMM fallback) — the
-    # Polymarket target + edge base now that the PIN feed is cut. Attached
-    # before _suggest_picks so it reads exch_current as primary.
-    _attach_exch_current(sb, market["id"], odds)
+    # (exch_current already attached above, before _attach_pmm_to_odds, so
+    # the PMM line anchors on the exchange ATM line.)
 
     suggestions = _suggest_picks(odds, splits, power_rating,
                                  sport=sport, home=home,
                                  starts_in_min=starts_in_min,
                                  sticky_keys=_sticky_keys(sb, market["id"]),
-                                 prime_zones=_load_prime_zones(sb))
+                                 prime_zones=_load_prime_zones(sb),
+                                 kelly_fraction=_load_kelly_fraction(sb))
     # Keep the singular `suggestion` field as an alias for the top pick
     # so any caller still expecting it doesn't break. New code should
     # use `suggestions` (list) so multi-pick games render correctly.
