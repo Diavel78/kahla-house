@@ -200,6 +200,32 @@
         .wc-odd b { color: var(--text); font-weight: 600; }
         .wc-odd .wc-amer { color: var(--text-muted); }
 
+        /* World Cup 3-way dossier modal */
+        .wc-doss-head h3 { margin: 0 0 2px; font-size: 18px; }
+        .wc-doss-sub { color: var(--text-muted); font-size: 12px; margin-bottom: 12px; }
+        .wc-sug { border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
+        .wc-sug-real { background: rgba(46,160,67,0.12); border: 1px solid var(--green); }
+        .wc-sug-lean { background: var(--surface-2); border: 1px dashed var(--border-light); }
+        .wc-sug-head { font-weight: 700; font-size: 13px; }
+        .wc-sug-amer { color: var(--text-muted); font-weight: 500; margin-left: 6px; }
+        .wc-sug-reasons { margin: 6px 0 0; padding-left: 18px; color: var(--text-secondary); font-size: 12px; }
+        .wc-sharp { font-size: 12px; color: var(--text-secondary); margin-bottom: 12px; }
+        .wc-sharp-none { color: var(--text-muted); }
+        .wc-outs { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+        .wc-out { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+                  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; }
+        .wc-out-bot { background: rgba(46,160,67,0.10); border-color: var(--green); }
+        .wc-out-info b { font-size: 14px; }
+        .wc-out-fair { display: block; color: var(--text-muted); font-size: 12px; margin-top: 2px; }
+        .wc-botpick { font-size: 9px; font-weight: 700; color: var(--green); border: 1px solid var(--green); border-radius: 4px; padding: 1px 4px; margin-left: 4px; vertical-align: middle; }
+        .wc-log { flex-shrink: 0; }
+        .wc-research { background: var(--surface-2); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+        .wc-res-head { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+        .wc-res-row { font-size: 13px; color: var(--text-secondary); margin: 2px 0; }
+        .wc-res-row b { color: var(--text); margin-right: 6px; }
+        .wc-na { color: var(--text-muted); }
+        .wc-doss-actions { margin-top: 6px; }
+
         /* Game list */
         .games-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 22px; }
         .games-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
@@ -1327,10 +1353,14 @@
             const amer = (r.american != null) ? ` <span class="wc-amer">${_fmtAmer(r.american)}</span>` : '';
             return `<span class="wc-odd"><b>${_esc(r.label || '—')}</b>${pct != null ? ' ' + pct + '%' : ''}${amer}</span>`;
         }).join('');
+        const details = (m.market_id && _canBet)
+            ? `<button class="details-btn" onclick="openWcDossier('${_esc(m.market_id)}')">Details ›</button>`
+            : '';
         return `<li class="game-row">
             <div class="game-line1">
                 ${when}
                 <span class="matchup">${_esc(m.title || '')}</span>
+                ${details}
             </div>
             <div class="game-line2 wc-odds-line">${odds || '<span class="pick-line-note">odds unavailable</span>'}</div>
         </li>`;
@@ -1361,6 +1391,176 @@
     // Light refresh while the World Cup tab is open (backend caches 3 min,
     // so this is cheap). Only fires when the tab is actually active.
     setInterval(() => { if (_activeSport === 'WORLDCUP') loadWorldCup(); }, 90 * 1000);
+
+    // ─── World Cup 3-way (1-X-2) dossier modal + logging ───
+    // Reuses the shared #dossierOverlay/#dossier modal. NOT the 2-way
+    // renderDossier path — soccer is its own 3-outcome shape, so it renders
+    // its own HTML and POSTs moneyline picks with side home/draw/away.
+    let _wcDossier = null;
+    const _WC_TIER = { high: 't5', medium: 't3', low: '' };
+
+    async function openWcDossier(mid) {
+        if (!_canBet) return;
+        const host = document.getElementById('dossier');
+        host.innerHTML = '<div class="games-empty">Loading World Cup dossier…</div>';
+        openDossierModal();
+        try {
+            const r = await authFetch('/api/handicapper/worldcup-dossier?market_id=' + encodeURIComponent(mid));
+            const d = await r.json();
+            if (!d.ok) throw new Error(d.error || 'fetch failed');
+            _wcDossier = d;
+            host.innerHTML = _renderWcDossier(d);
+        } catch (e) {
+            host.innerHTML = `<div class="games-empty" style="color:var(--red)">Failed to load: ${_esc(String(e))}</div>`;
+        }
+    }
+
+    function _wcRow(d, side, label) {
+        const f = (d.fair || {})[side] || {};
+        const pct = f.fair_prob != null ? Math.round(f.fair_prob * 100) + '%' : '—';
+        const sug = d.suggestion;
+        const isBot = sug && sug.side === side && sug.gates_cleared;
+        const tag = isBot ? ' <span class="wc-botpick">BOT PICK</span>' : '';
+        return `<div class="wc-out ${isBot ? 'wc-out-bot' : ''}">
+            <div class="wc-out-info">
+                <b>${_esc(label)}</b>${tag}
+                <span class="wc-out-fair">${pct} · fair ${_fmtAmer(f.fair_american)}${f.cents != null ? ` · ${f.cents}¢` : ''}</span>
+            </div>
+            <button class="details-btn wc-log" onclick="logWcPick('${side}')">Log ${_esc(label)}</button>
+        </div>`;
+    }
+
+    function _renderWcDossier(d) {
+        const fav = d.fair ? '' : '<div class="pick-line-note">No exchange odds yet for this fixture.</div>';
+        const sug = d.suggestion;
+        const sugHtml = sug ? `
+            <div class="wc-sug ${sug.gates_cleared ? 'wc-sug-real' : 'wc-sug-lean'}">
+                <div class="wc-sug-head">${sug.gates_cleared ? 'SUGGESTION' : 'LEAN ONLY'} ·
+                    ${_esc(sug.side_label)} · ${sug.units}u
+                    <span class="wc-sug-amer">limit @ ${_fmtAmer(sug.pmm_bid_american)} (PMM bid)</span>
+                </div>
+                <ul class="wc-sug-reasons">${(sug.reasons || []).map(r => `<li>${_esc(r)}</li>`).join('')}</ul>
+            </div>` : '';
+        const sharp = d.sharp
+            ? `<div class="wc-sharp">Exchange steam: <b>${_esc(d.sharp.side)}</b> · sharp ${d.sharp.score}/10 (${d.sharp.n} snaps · PMM-only)</div>`
+            : '<div class="wc-sharp wc-sharp-none">No exchange movement signal yet (data still accruing).</div>';
+        const rs = d.research || {};
+        const _ctx = (c) => {
+            if (!c || (!c.form && !c.record && c.rank == null)) return '<span class="wc-na">—</span>';
+            const bits = [];
+            if (c.record) bits.push('rec ' + _esc(c.record));
+            if (c.form)   bits.push('form ' + _esc(c.form));
+            if (c.rank != null) bits.push('rank ' + _esc(c.rank));
+            return bits.join(' · ');
+        };
+        const research = (rs.home || rs.away) ? `
+            <div class="wc-research">
+                <div class="wc-res-head">ESPN form / record</div>
+                <div class="wc-res-row"><b>${_esc(d.away)}</b> ${_ctx(rs.away)}</div>
+                <div class="wc-res-row"><b>${_esc(d.home)}</b> ${_ctx(rs.home)}</div>
+            </div>` : '';
+        return `
+            <div class="wc-doss-head">
+                <h3>${_esc(d.event_name || '')}</h3>
+                <div class="wc-doss-sub">World Cup · 1-X-2 · ${_esc(_wcWhen(d.event_start) || '')}</div>
+            </div>
+            ${sugHtml}
+            ${sharp}
+            <div class="wc-outs">
+                ${d.fair ? _wcRow(d, 'home', d.home) : ''}
+                ${d.fair ? _wcRow(d, 'draw', 'Draw') : ''}
+                ${d.fair ? _wcRow(d, 'away', d.away) : ''}
+                ${fav}
+            </div>
+            ${research}
+            <div class="wc-doss-actions">
+                <button class="details-btn" onclick="_copyWcForClaude()">Copy for Claude</button>
+            </div>
+            <div class="pick-line-note" style="margin-top:8px">Soccer is PMM-only (no Kalshi confirm). Deep injury/lineup read: Copy for Claude → paste in chat.</div>`;
+    }
+
+    async function logWcPick(side) {
+        if (!_wcDossier || !_canBet) return;
+        const d = _wcDossier;
+        const f = (d.fair || {})[side];
+        if (!f) { _toast('No odds for that side', 'err'); return; }
+        const sug = d.suggestion;
+        const isSug = sug && sug.side === side;
+        const units = (isSug && sug.gates_cleared) ? sug.units : 1;
+        const conf  = (isSug && sug.gates_cleared) ? sug.confidence : 'low';
+        // Maker entry = current PMM bid for the side (American), like the
+        // other markets; fall back to the devigged fair if no live bid.
+        const price = (isSug && sug.pmm_bid_american != null) ? sug.pmm_bid_american : f.fair_american;
+        const label = { home: d.home, away: d.away, draw: 'Draw' }[side];
+        const body = {
+            market_id:   d.market_id,
+            market_type: 'moneyline',
+            side:        side,
+            book:        'PMM',
+            price:       price,
+            line:        null,
+            units:       units,
+            confidence:  conf,
+            fair_prob:   f.fair_prob ?? null,
+            edge_pp:     (isSug ? (sug.edge_pp ?? null) : null),
+            sharp_score: (isSug ? (sug.sharp_score ?? null) : (d.sharp ? d.sharp.score : null)),
+            reasons:     (isSug && sug.reasons) ? sug.reasons : [`World Cup 1-X-2 — ${label} @ ${_fmtAmer(price)} (PMM maker).`],
+            signal_blob: { wc: true, side: side,
+                           sharp_score: (d.sharp ? d.sharp.score : null),
+                           gates_cleared: !!(isSug && sug.gates_cleared) },
+            allow_duplicate: true,
+        };
+        try {
+            const r = await authFetch('/api/handicapper/pick', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const out = await r.json();
+            if (out && out.ok) {
+                _toast(`Logged ${label} ${units}u ✓`);
+                if (typeof loadData === 'function') loadData(false);
+            } else {
+                _toast('Log failed: ' + ((out && out.error) || r.status), 'err');
+            }
+        } catch (e) {
+            _toast('Log error: ' + String(e), 'err');
+        }
+    }
+
+    function _copyWcForClaude() {
+        if (!_wcDossier) return;
+        const d = _wcDossier;
+        const fairLine = ['home', 'draw', 'away'].map(s => {
+            const f = (d.fair || {})[s] || {};
+            const lbl = { home: d.home, away: d.away, draw: 'Draw' }[s];
+            return `  ${lbl}: ${f.fair_prob != null ? Math.round(f.fair_prob * 100) + '%' : '—'} (fair ${_fmtAmer(f.fair_american)}, ${f.cents != null ? f.cents + '¢' : '—'})`;
+        }).join('\n');
+        const rs = d.research || {};
+        const resLine = (side, name) => {
+            const c = rs[side] || {};
+            return `  ${name}: record ${c.record || '—'}, form ${c.form || '—'}, rank ${c.rank ?? '—'}`;
+        };
+        const txt =
+`World Cup — ${d.event_name}
+Kickoff: ${d.event_start}
+
+Exchange 1-X-2 fair (Polymarket, devigged — PMM-only, no Kalshi for soccer):
+${fairLine}
+
+Exchange steam: ${d.sharp ? `${d.sharp.side} (sharp ${d.sharp.score}/10, ${d.sharp.n} snaps)` : 'none yet'}
+
+ESPN form/record:
+${resLine('away', d.away)}
+${resLine('home', d.home)}
+
+Bot suggestion: ${d.suggestion ? `${d.suggestion.side_label} ${d.suggestion.units}u (${d.suggestion.gates_cleared ? 'real pick' : 'lean only'})` : 'none'}
+
+Please research current injuries, suspensions, probable lineups, and tactical
+matchup, then give a 1-X-2 read vs the exchange fair above.`;
+        navigator.clipboard.writeText(txt).then(
+            () => _toast('Copied for Claude ✓'),
+            () => _toast('Copy failed', 'err'));
+    }
 
     // Re-color already-rendered Pick buttons from the logged-pick set.
     // Handles the timing gap: the games list and the picks data load via
