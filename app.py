@@ -7308,8 +7308,51 @@ def api_handicapper_worldcup():
     now = datetime.now(timezone.utc)
     matches, meta = _build_worldcup(now)
     matches = _wc_in_display_window(matches, now)
+    _wc_attach_market_ids(matches)        # so the page can open the dossier + log
     return jsonify({"ok": True, "fetched_iso": now.isoformat(),
                     "matches": matches, **meta})
+
+
+def _wc_attach_market_ids(matches):
+    """Attach `market_id` (the WORLDCUP markets row created by the cent
+    logger) to each match by canonical country-pair key, so the page can open
+    the 3-way dossier + log picks. Silent-fail (market_id stays absent)."""
+    try:
+        import pmm_markets as _pm
+        sb = get_supabase()
+        rows = (sb.table("markets").select("id,event_name")
+                .eq("sport", "WORLDCUP").eq("status", "active")
+                .execute().data) or []
+        idx = {}
+        for r in rows:
+            en = r.get("event_name") or ""
+            if " @ " in en:
+                a, h = en.split(" @ ", 1)
+                idx[frozenset({_wc_country_key(a), _wc_country_key(h)})] = r["id"]
+        for mt in matches:
+            t1, t2 = _pm._wc_teams_from_title(mt.get("title") or "")
+            if t1 and t2:
+                mt["market_id"] = idx.get(
+                    frozenset({_wc_country_key(t1), _wc_country_key(t2)}))
+    except Exception:
+        pass
+
+
+@app.route("/api/handicapper/worldcup-dossier")
+@bot_required
+def api_handicapper_worldcup_dossier():
+    """3-way (1-X-2) dossier for one World Cup fixture — exchange devig fair +
+    cent-movement sharp read + ESPN form/record research + a suggestion + PMM
+    maker entry per side. @bot_required (the bot's READ, like /dossier).
+    market_id comes from /api/handicapper/worldcup."""
+    import handicapper_web
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+    mid = (request.args.get("market_id") or "").strip()
+    if not mid:
+        return jsonify({"ok": False, "error": "market_id required"}), 400
+    return jsonify(handicapper_web.build_worldcup_dossier(sb, mid))
 
 
 def _wc_ensure_market(sb, away, home, start_iso):
@@ -8333,6 +8376,10 @@ def api_handicapper_pick():
     if body["market_type"] == "nrfi":
         if body["side"] not in ("yes", "no"):
             return jsonify({"ok": False, "error": "nrfi side must be yes/no"}), 400
+    elif body["market_type"] == "moneyline":
+        # 'draw' is valid for 3-way (World Cup / soccer) moneyline only.
+        if body["side"] not in ("home", "away", "draw"):
+            return jsonify({"ok": False, "error": "bad side"}), 400
     elif body["side"] not in ("home", "away", "over", "under"):
         return jsonify({"ok": False, "error": "bad side"}), 400
     if body["confidence"] not in ("low", "medium", "high", "whale"):
