@@ -2588,8 +2588,11 @@ def _kelly_units(fair_prob, fair_american, edge_pp,
         return 1, "low", 0.0
     f = true_p - (1.0 - true_p) / b      # full Kelly fraction
     kelly_pct = max(0.0, f) * frac * 100.0
+    # 5u tier CAPPED to 3u (June 2026) — bankroll defense during a
+    # drawdown, NOT a model change. Keep the "high" label so analytics
+    # still flag near-cap reads; flip the 3 back to 5 to re-enable.
     if kelly_pct >= KELLY_HIGH_PCT:
-        return 5, "high", round(kelly_pct, 2)
+        return 3, "high", round(kelly_pct, 2)
     if kelly_pct >= KELLY_MED_PCT:
         return 3, "medium", round(kelly_pct, 2)
     return 1, "low", round(kelly_pct, 2)
@@ -3902,24 +3905,16 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                     and score_for_side >= STICKY_GATE_EXIT):
                 gates_cleared, sticky = True, True
 
-            # Totals never clear the gate on movement — STRUCTURAL, not a
-            # cutover/calibration wait. The total side is chosen purely from
-            # line/cent movement, which tells you where the TICKETS went, not
-            # where the RUNS are going. It bled on PIN (13-17) and bleeds the
-            # same on the exchanges (PMM agreed with PIN ~90% of the time, so
-            # the venue never mattered) — gated totals were the entire MLB
-            # drawdown (-6.65u/14) AND the only gated segment with negative
-            # CLV (no real edge). A total only earns a REAL pick from an
-            # independent total model disagreeing with the market — which
-            # doesn't exist yet (the power model only VETOES totals, never
-            # promotes one). Until it does, every total is a 1u lean: still
-            # shown, never green, never sized up. The conflict check is kept
-            # for the label/reason only. Re-enable promotion ONLY when a true
-            # total model proves it beats the close on CLV.
+            # Total-side veto — the OUR-NUMBER read can DEMOTE a total pick
+            # to a forced lean when it disagrees with the side movement
+            # chose (hitter-park unders, model-projected total the other
+            # way). Stops the bot recommending Rockies/Coors unders. ML/SPR
+            # are untouched — the veto is totals-only.
             conflict_reason = None
             if mt == "total":
                 conflict_reason = _total_conflict_reason(sport, home, power, side)
-                gates_cleared = False
+                if conflict_reason:
+                    gates_cleared = False
 
             # Provisional edge estimate (fair-prob pp) that drives Kelly
             # sizing + finally populates the edge_pp column. The sharp +
