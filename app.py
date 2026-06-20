@@ -6385,11 +6385,6 @@ def api_handicapper_live():
                                     if dk else _fetch_espn_scoreboard(sp))
             events = espn_cache[ckey]
         m = _live_match_espn(events, away, home, bet.get("event_start"))
-        app.logger.info(
-            "LIVE-DIAG %s %s @ %s | sp=%s dk=%s events=%d matched=%s state=%s started=%s",
-            bet.get("market_type"), away, home, sp,
-            (dk if pair else None), len(events), bool(m),
-            (m or {}).get("state"), started)
         matched_live = bool(m) and m.get("state") in ("in", "live", "post")
         if not (matched_live or started):
             continue
