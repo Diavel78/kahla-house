@@ -2385,6 +2385,24 @@ def api_book_club_availability_save():
 # API routes — Odds
 # ---------------------------------------------------------------------------
 
+# ESPN scoreboard config — sport → (group, league) + a small in-memory cache.
+# Shared by _fetch_espn_scoreboard (per-sport) and _espn_scoreboard_raw
+# (group/league passthrough — World Cup, MMA). NOTE: these constants were
+# accidentally swept up when the Odds Board's /api/odds route was removed
+# (June 2026); restored here — _build_worldcup / live tracker / pm-snapshot-wc
+# all depend on them, so losing them 500'd every ESPN-backed endpoint.
+_ESPN_PATH = {
+    "mlb":   ("baseball",       "mlb"),
+    "nba":   ("basketball",     "nba"),
+    "nhl":   ("hockey",         "nhl"),
+    "nfl":   ("football",       "nfl"),
+    "ncaab": ("basketball",     "mens-college-basketball"),
+    "ncaaf": ("football",       "college-football"),
+}
+_ESPN_CACHE: dict[str, tuple[float, list]] = {}
+_ESPN_TTL = 30  # seconds
+
+
 def _fetch_espn_scoreboard(sport: str) -> list:
     """Hit ESPN's free scoreboard API. Returns the events array, [] on error
     or unsupported sport. 30s in-memory cache. No API key required."""
