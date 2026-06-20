@@ -2219,12 +2219,18 @@ SPLITS_MIN_PP    = 10  # |money% − bets%| considered "material".
 SHARP_WEIGHT     = 0.7
 SPLITS_WEIGHT    = 0.3
 
-# Spread-only chalk filter. A SPR pick at -150 or worse is just a
-# leveraged ML — same directional bet at materially worse price/risk.
-# Drop SPR candidates this chalky and let the ML candidate (if it
-# qualifies) take its place. Doesn't apply to ML/TOT — heavy chalk
-# there has no better expression to switch to.
-SPR_CHALK_FAIR_CAP = -150
+# Spread-only price filter — SYMMETRIC. A SPR pick is only worth showing
+# when its fair sits in a reasonable band (-150 ≤ fair ≤ +150):
+#   • fair ≤ -150 (CHALK)    → a leveraged ML at a worse price/risk — drop,
+#     let the ML candidate take its place.
+#   • fair ≥ +150 (LONGSHOT) → a leveraged-dog runline (e.g. underdog -1.5
+#     at +192/+292) — an equally lame bet with no edge; drop it too. This is
+#     the long-standing "nothing over +150 shows" rule; only the chalk half
+#     had ever been coded, so longshot runlines were leaking through as
+#     forced leans (the Reds -1.5 +292 bug). Doesn't apply to ML (a +155 ML
+#     dog is a legit bet — the user bets them) or TOT (always ~±120).
+SPR_CHALK_FAIR_CAP    = -150
+SPR_LONGSHOT_FAIR_CAP =  150
 
 # When BOTH an ML and a SPR candidate exist on the same side, drop
 # the ML if its fair is at or below this cap. The leveraged SPR is
@@ -3936,13 +3942,18 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
     if not candidates:
         return []
 
-    # Drop heavily-juiced SPR — it's a worse-EV restatement of the ML
-    # bet on the same side. ML candidate (if any) takes its slot.
+    # Drop out-of-band SPR — SYMMETRIC (-150 ≤ fair ≤ +150). Too chalky
+    # (≤ -150) is a worse-EV leveraged ML; too longshot (≥ +150) is a
+    # leveraged-dog runline with no edge (the Reds -1.5 +292 lean). Either
+    # way the SPR isn't worth showing — the ML candidate (if any) takes its
+    # slot, and a chalk-flat game with only out-of-band SPR falls back to a
+    # sane ML/TOT lean instead of a longshot runline.
     candidates = [
         c for c in candidates
         if not (c["market_type"] == "spread"
                 and c.get("fair_american") is not None
-                and c["fair_american"] <= SPR_CHALK_FAIR_CAP)
+                and (c["fair_american"] <= SPR_CHALK_FAIR_CAP
+                     or c["fair_american"] >= SPR_LONGSHOT_FAIR_CAP))
     ]
     if not candidates:
         return []
