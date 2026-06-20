@@ -2535,7 +2535,8 @@ _KALSHI_BASES = [
 # sport (UPPER, our markets.sport code) -> Kalshi per-game series ticker.
 # Confirmed live via /debug-kalshi. Add a sport here + a team map in
 # _TEAM_TO_KALSHI + to _PM_SPORTS / odds_api _TRIGGER_SPORTS to cover it.
-_KALSHI_SERIES = {"MLB": "KXMLBGAME", "NBA": "KXNBAGAME", "NHL": "KXNHLGAME"}
+_KALSHI_SERIES = {"MLB": "KXMLBGAME", "NBA": "KXNBAGAME", "NHL": "KXNHLGAME",
+                  "WORLDCUP": "KXWCGAME"}
 # Sports the cent-logger + cross-confirm trigger cover (cent data flows).
 _PM_SPORTS = ["MLB", "NBA", "NHL"]
 # How far out the cross-confirm watcher tracks each sport. MLB is dense
@@ -3234,6 +3235,56 @@ def _match_kalshi(events: list, away_code: str, home_code: str, our_date):
         return {}
     return {"away": best["codes"].get(away_code),
             "home": best["codes"].get(home_code)}
+
+
+def _kalshi_wc_index(markets: list) -> list:
+    """Group Kalshi World Cup (KXWCGAME) markets by event_ticker into
+    [{'date','outcomes':{country_key|'draw': cents}}]. It's a 3-way market:
+    each event has THREE binary YES contracts — one per country + a tie.
+    Draw is the ticker '-TIE' suffix; team outcomes are keyed by canonical
+    country key (from yes_sub_title via _wc_country_key) so they match our
+    ESPN/PMM fixtures regardless of the name variant Kalshi prints."""
+    import re
+    events: dict = {}
+    for m in markets:
+        tk = (m.get("ticker") or "").upper()
+        et = m.get("event_ticker") or ""
+        if not et:
+            continue
+        date = None
+        mo = re.match(r"KXWCGAME-(\d{2})([A-Z]{3})(\d{2})", et)
+        if mo:
+            yy, mon, dd = mo.groups()
+            mm = _KALSHI_MONTHS.get(mon)
+            if mm:
+                date = f"20{yy}-{mm:02d}-{int(dd):02d}"
+        cents = _mid_cents(m.get("yes_bid_c"), m.get("yes_ask_c"), m.get("last_c"))
+        if tk.endswith("-TIE"):
+            outcome = "draw"
+        else:
+            team = m.get("team") or ""
+            if not team:
+                continue
+            outcome = _wc_country_key(team)
+        e = events.setdefault(et, {"date": date, "outcomes": {}})
+        if outcome not in e["outcomes"] or (
+                e["outcomes"][outcome] is None and cents is not None):
+            e["outcomes"][outcome] = cents
+    return list(events.values())
+
+
+def _match_kalshi_wc(events: list, away_key: str, home_key: str) -> dict:
+    """Kalshi cents for our WC fixture: the event whose two TEAM outcomes
+    match away/home country keys. Returns {'home','draw','away'} cents
+    (any may be None) or {} if no event carries both countries."""
+    want = {away_key, home_key}
+    for e in events:
+        teams = {k for k in e["outcomes"] if k != "draw"}
+        if want.issubset(teams):
+            return {"home": e["outcomes"].get(home_key),
+                    "draw": e["outcomes"].get("draw"),
+                    "away": e["outcomes"].get(away_key)}
+    return {}
 
 
 def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
@@ -6901,9 +6952,10 @@ def api_pm_snapshot_wc():
     clock the soccer sharp score will read (same dataset role pm-snapshot
     plays for MLB/NBA/NHL). Built on _build_worldcup (the proven ESPN+PMM
     reader) + _pm_insert_changed (dedup-on-cent-change). market_type='ml'
-    with three sides; line=NULL. Kalshi carries NO World Cup series, so PMM is
-    the sole feed — there's no cross-confirm second venue for soccer (it runs
-    PMM-only, like spreads/totals). Markets spine: each fixture gets a stable
+    with three sides; line=NULL. Kalshi DOES carry the World Cup
+    (series KXWCGAME, 3-way: country/country/-TIE) — so it logs as a second
+    cross-confirm venue alongside PMM (source='kalshi'), same role it plays
+    for MLB/NBA/NHL. Markets spine: each fixture gets a stable
     WORLDCUP markets row via _wc_ensure_market. Live/finished matches are
     skipped (pre-game history only). Auth: ?key= matched to PM_SNAPSHOT_SECRET
     or FILLS_CRON_SECRET (NOT Firebase)."""
@@ -6918,30 +6970,21 @@ def api_pm_snapshot_wc():
         return jsonify({"ok": False, "error": "supabase unavailable"}), 503
 
     now = datetime.now(timezone.utc)
-    # TEMP: discover the Kalshi World Cup game series + 3-way structure (the
-    # runtime reaches Kalshi; my sandbox 403s). Probe candidate game-series
-    # tickers + list events for soccer series; dump to kalshi_debug. Remove
-    # once wired.
-    try:
-        _res = _fetch_kalshi_markets("KXWCGAME")
-        _mkts = _res.get("markets") or []
-        _liq = [_m for _m in _mkts if _m.get("yes_bid_dollars") or _m.get("yes_ask_dollars")
-                or _m.get("no_bid_dollars") or _m.get("last_price_dollars")]
-        sb.table("kalshi_debug").insert({"info":
-            f"WCLIQ liquid={len(_liq)}/{len(_mkts)}"}).execute()
-        for _m in _liq[:10]:
-            sb.table("kalshi_debug").insert({"info":
-                f"WCL tkr={_m.get('ticker')} title={(_m.get('title') or '')[:46]} "
-                f"ysub={_m.get('yes_sub_title')} nsub={_m.get('no_sub_title')} "
-                f"ybid={_m.get('yes_bid_dollars')} yask={_m.get('yes_ask_dollars')} "
-                f"nbid={_m.get('no_bid_dollars')} last={_m.get('last_price_dollars')}"}).execute()
-    except Exception as _e:
-        sb.table("kalshi_debug").insert({"info": f"wcliq_err {str(_e)[:140]}"}).execute()
     matches, meta = _build_worldcup(now)
+
+    # Kalshi 1-X-2 confirm feed (KXWCGAME) — one bulk call, indexed by
+    # country pair. Soccer IS a cross-confirm sport now: Kalshi carries the
+    # World Cup, so it logs alongside PMM (same role it plays for MLB/NBA/NHL).
+    kalshi_wc = []
+    try:
+        kres = _fetch_kalshi_markets("KXWCGAME")
+        kalshi_wc = _kalshi_wc_index(kres.get("markets") or [])
+    except Exception:
+        kalshi_wc = []
 
     rows = []
     st = {"matches": 0, "no_odds": 0, "no_start": 0,
-          "live_or_done": 0, "unmapped_sides": 0}
+          "live_or_done": 0, "unmapped_sides": 0, "kalshi_matched": 0}
     for m in matches:
         results = m.get("results") or []
         if not results:                          # ESPN game with no PMM odds yet
@@ -6991,6 +7034,16 @@ def api_pm_snapshot_wc():
                 st["unmapped_sides"] += 1
                 continue
             rows.append((mid, "pmm", "ml", side, None, cents))
+
+        # Kalshi confirm row(s) for this fixture (matched by country pair).
+        kc = _match_kalshi_wc(kalshi_wc, ak, hk)
+        if kc:
+            st["kalshi_matched"] += 1
+            for side in ("home", "draw", "away"):
+                kcents = kc.get(side)
+                if kcents is None or kcents <= 0 or kcents >= 100:
+                    continue
+                rows.append((mid, "kalshi", "ml", side, None, kcents))
 
     inserted = _pm_insert_changed(sb, rows, now)
     return jsonify({"ok": True, "inserted": inserted, "wc_meta": meta, **st})

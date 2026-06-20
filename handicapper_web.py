@@ -1025,9 +1025,14 @@ def _wc_exch_fair(latest: dict):
 def _wc_sharp(sb, market_id: str, now=None):
     """3-way exchange sharp read from PMM cent movement (last 18h). Sharp
     side = the outcome whose cents ROSE the most (recency-weighted) = money
-    flowing in = harder to back. Returns (side, score 1-10, n) or None.
-    PMM-only — no Kalshi confirmation venue for soccer (built thin; matures
-    as the pm-snapshot-wc clock accrues history)."""
+    flowing in = harder to back. Returns (side, score 1-10, n, confirmed)
+    or None.
+
+    Kalshi IS the confirmation venue for soccer too (series KXWCGAME, same
+    1-X-2 sides) — mirrors _xsharp_ml: Kalshi disagrees on the picked side's
+    direction → no signal (None); Kalshi agrees → confirmed=True; Kalshi
+    silent/flat → confirmed=False (PMM-only, caller demotes to a lean).
+    Matures as the pm-snapshot-wc clock accrues both feeds' history."""
     now = now or datetime.now(timezone.utc)
     hist = _pm_history(sb, market_id)
     best_side, best_sig, best_n = None, 0.0, 0
@@ -1040,10 +1045,18 @@ def _wc_sharp(sb, market_id: str, now=None):
             best_side, best_sig, best_n = side, sig, len(snaps)
     if best_side is None or best_sig < _X_MIN_PP:
         return None
+    confirmed = False
+    ksnaps = hist.get(("kalshi", "ml", best_side, None), [])
+    if len(ksnaps) >= 2:
+        kw = _weighted_signed_delta(ksnaps, "cents", now=now)
+        if kw is not None and abs(kw) >= _X_MIN_PP:
+            if kw <= 0:
+                return None        # Kalshi moved the picked side DOWN → veto
+            confirmed = True       # both feeds agree → confirmed
     score = min(10, round(best_sig * _X_PP_SCALE))
     if score < 1:
         return None
-    return best_side, score, best_n
+    return best_side, score, best_n, confirmed
 
 
 def _wc_research(away: str, home: str) -> dict:
@@ -1108,10 +1121,12 @@ def build_worldcup_dossier(sb, market_id: str) -> dict:
 
     suggestion = None
     if fair:
-        sug_side, score = None, 0
+        sug_side, score, confirmed = None, 0, True
         if sharp:
-            sug_side, score, _n = sharp
-        gate = score >= SHARP_SCORE_MIN
+            sug_side, score, _n, confirmed = sharp
+        # Confirmed by Kalshi → real gated pick. Unconfirmed (PMM-only move,
+        # Kalshi silent) → demote to a lean (gate fails), like _xsharp_ml.
+        gate = score >= SHARP_SCORE_MIN and confirmed
         if sug_side is None:        # always-give-a-pick: lean the favorite
             sug_side = min(("home", "draw", "away"),
                            key=lambda s: -(fair[s]["fair_prob"] or 0))
@@ -1122,11 +1137,15 @@ def build_worldcup_dossier(sb, market_id: str) -> dict:
         entry_american = (_prob_to_american(entry_cents / 100.0)
                           if entry_cents else f["fair_american"])
         label = {"home": home, "away": away, "draw": "Draw"}[sug_side]
-        reasons = ([f"Exchange steam toward {label} (sharp {score}/10; PMM-only — "
-                    "no Kalshi confirmation for soccer)."]
-                   if gate else
-                   ["No exchange movement signal yet — 1u lean on the favorite; "
-                    "use the research read (Copy for Claude) to decide."])
+        if gate:
+            reasons = [f"Exchange steam toward {label} (sharp {score}/10; "
+                       "confirmed by Kalshi)."]
+        elif score >= SHARP_SCORE_MIN and not confirmed:
+            reasons = [f"PMM steam toward {label} (sharp {score}/10) but Kalshi "
+                       "hasn't confirmed — 1u lean until both feeds agree."]
+        else:
+            reasons = ["No exchange movement signal yet — 1u lean on the favorite; "
+                       "use the research read (Copy for Claude) to decide."]
         suggestion = {
             "side": sug_side, "side_label": label, "market_type": "moneyline",
             "fair_prob": f["fair_prob"], "fair_american": f["fair_american"],
@@ -1140,7 +1159,8 @@ def build_worldcup_dossier(sb, market_id: str) -> dict:
         "ok": True, "market_id": market_id, "sport": "WORLDCUP",
         "event_name": m.get("event_name"), "event_start": m.get("event_start"),
         "away": away, "home": home, "fair": fair,
-        "sharp": ({"side": sharp[0], "score": sharp[1], "n": sharp[2]} if sharp else None),
+        "sharp": ({"side": sharp[0], "score": sharp[1], "n": sharp[2],
+                   "confirmed": sharp[3]} if sharp else None),
         "research": research, "suggestion": suggestion,
     }
 
