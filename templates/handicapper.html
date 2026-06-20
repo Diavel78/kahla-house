@@ -915,7 +915,7 @@
         // Soften the lede to match the limited capability
         const lede = document.querySelector('.lede');
         if (lede) {
-            lede.textContent = "Click a game to see the bot's read: PIN sharp signal, retail edge per side, public splits, injuries, recent form. The bot tags its suggested pick on each game; you can browse but not log.";
+            lede.textContent = "Click a game to see the bot's read: exchange sharp signal, fair price per side, public splits, injuries, recent form. The bot tags its suggested pick on each game; you can browse but not log.";
         }
     }
 
@@ -2218,7 +2218,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                 const lineFrag = (displayLine == null) ? '' : ` ${_fmtPt(displayLine)}`;
                 const venueTag = usingPmm
                     ? '<span class="venue-tag pmm">Poly</span>'
-                    : '<span class="venue-tag pin">PIN line</span>';
+                    : '<span class="venue-tag pmm">Exchange</span>';
                 const cardCls = s.gates_cleared ? 'suggestion-card' : 'suggestion-card soft';
                 const headingText = s.gates_cleared
                     ? (multi
@@ -2233,12 +2233,9 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                 if (usingPmm) {
                     const askFrag = s.pmm_ask_american != null ? `Poly asking ${_fmtAmer(s.pmm_ask_american)}` : 'Poly (no current ask)';
                     const bidFrag = s.pmm_bid_american != null ? ` · bid ${_fmtAmer(s.pmm_bid_american)}` : '';
-                    const pinFrag = (s.pin_fair_american != null && s.pin_line != null)
-                        ? ` · PIN fair ${_fmtAmer(s.pin_fair_american)} @ ${_fmtPt(s.pin_line)}`
-                        : '';
-                    metaLine = `Limit-order at ${_fmtAmer(s.fair_american)} or better · ${askFrag}${bidFrag}${pinFrag}`;
+                    metaLine = `Limit-order at ${_fmtAmer(s.fair_american)} or better · ${askFrag}${bidFrag}`;
                 } else {
-                    const pinNow = (s.pin_current != null) ? ` · PIN now ${_fmtAmer(s.pin_current)}` : '';
+                    const pinNow = (s.pin_current != null) ? ` · Exchange ${_fmtAmer(s.pin_current)}` : '';
                     // Concise diag — only the bits useful when something
                     // breaks: error message + event count tried.
                     const pm = d.pmm_meta || {};
@@ -2316,7 +2313,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                 ? ` Try <button onclick="copyForClaude()" style="background:none;border:0;color:var(--blue);text-decoration:underline;cursor:pointer;font:inherit;padding:0">copying for Claude</button> or check back closer to start.`
                 : ' Check back closer to start.';
             html += `<div class="suggestion-pass">
-                <strong>No PIN data.</strong> Can't compute a devigged fair line for this game — no Polymarket target.${claudeHint}
+                <strong>No exchange data.</strong> Can't compute a devigged fair line for this game — no Polymarket/Kalshi target.${claudeHint}
                 ${liveDiag}
             </div>`;
         }
@@ -2450,7 +2447,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             const fairA = p.fair_away_american != null ? ` <span class="pr-fair">${_fmtAmer(p.fair_away_american)}</span>` : '';
             const fairH = p.fair_home_american != null ? ` <span class="pr-fair">${_fmtAmer(p.fair_home_american)}</span>` : '';
             const edgeFrag = (eHome != null || eAway != null)
-                ? `<div class="pr-line">vs PIN fair: <b>${_esc(d.away)}</b> ${eAway!=null?(eAway>=0?'+':'')+eAway.toFixed(1)+'pp':'—'} · <b>${_esc(d.home)}</b> ${eHome!=null?(eHome>=0?'+':'')+eHome.toFixed(1)+'pp':'—'}</div>`
+                ? `<div class="pr-line">vs exchange fair: <b>${_esc(d.away)}</b> ${eAway!=null?(eAway>=0?'+':'')+eAway.toFixed(1)+'pp':'—'} · <b>${_esc(d.home)}</b> ${eHome!=null?(eHome>=0?'+':'')+eHome.toFixed(1)+'pp':'—'}</div>`
                 : '';
             const totFrag = (p.total_line != null && p.proj_total != null)
                 ? `<div class="pr-line">Total: model <b>${p.proj_total}</b> vs line ${_fmtPt(p.total_line)} → leans <b>${(p.total_lean||'—').toUpperCase()}</b></div>`
@@ -2813,8 +2810,6 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                 const lineFrag = (ln != null) ? ` <span class="label">@${_fmtPt(ln)}</span>` : '';
                 const src = (xSnap.source === 'kalshi') ? 'KALSHI' : 'PMM';
                 rows += `<div class="row"><span class="label">${src} fair:</span> <span class="pin">${_fmtAmer(xSnap.fair_american)}</span>${lineFrag}</div>`;
-            } else if (pinSnap && pinSnap.fair_american != null) {
-                rows += `<div class="row"><span class="label" style="opacity:.6">PIN (frozen):</span> <span class="pin" style="opacity:.6">${_fmtAmer(pinSnap.fair_american)}</span></div>`;
             }
             if (!rows) rows = '<div style="font-size:11px;color:var(--text-muted)">no exchange data</div>';
 
@@ -3081,47 +3076,24 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         const sideName = pick.market_type === 'total'
             ? pick.side.toUpperCase()
             : (pick.side === 'home' ? d.home : d.away);
-        const sharpName = mv && mv.sharp_side
+        const sharpName = mv && mv.x_side
             ? (pick.market_type === 'total'
-                ? mv.sharp_side.toUpperCase()
-                : (mv.sharp_side === 'home' ? d.home : d.away))
+                ? mv.x_side.toUpperCase()
+                : (mv.x_side === 'home' ? d.home : d.away))
             : null;
-        const score = mv && mv.sharp_score != null ? mv.sharp_score : 0;
+        const score = mv && mv.x_score != null ? mv.x_score : 0;
 
-        // 1) Line movement — narrate per market type.
+        // 1) Movement — narrate the EXCHANGE (Polymarket + Kalshi) cent
+        // signal. PIN is retired (book_snapshots frozen post-cutover); the
+        // live sharp read is the exchange cent-movement score (x_score /
+        // x_side), so the bullet reflects THAT, never the dead PIN feed.
         if (mv) {
-            const oP = mv.opener_price, cP = mv.current_price;
-            const oL = mv.opener_line, cL = mv.current_line;
-            const sharpFrag = sharpName
-                ? ` — sharp side ${sharpName} (${score}/10)`
-                : ` — sharp ${score}/10`;
-            if (pick.market_type === 'moneyline') {
-                if (oP != null && cP != null && oP !== cP) {
-                    lines.push(`Line moved ${_fmtAmer(oP)} → ${_fmtAmer(cP)}${sharpFrag}`);
-                } else if (score === 0) {
-                    lines.push('PIN hasn\'t budged — flat market, no line signal');
-                }
+            if (score > 0) {
+                lines.push(sharpName
+                    ? `Exchange steam: ${sharpName} (sharp ${score}/10)`
+                    : `Exchange steam (sharp ${score}/10)`);
             } else {
-                // SPR / TOT — line is primary, vig is secondary.
-                // Tag the displayed prices with which side they're
-                // from, because for TOT the ref_side may be the
-                // OPPOSITE of sharp_side (vig moved on the side that
-                // got easier → other side sharp by elimination).
-                const lineChanged = (oL != null && cL != null && Math.abs(cL - oL) >= 0.01);
-                const refSide = mv && mv.ref_side;
-                let refTag = '';
-                if (refSide && pick.market_type === 'total') {
-                    refTag = ` [${refSide}]`;
-                }
-                if (lineChanged) {
-                    const label = pick.market_type === 'spread' ? 'Spread' : 'Total';
-                    lines.push(`${label} moved ${_fmtPt(oL)} → ${_fmtPt(cL)}${sharpFrag}`);
-                } else if (oP != null && cP != null && oP !== cP) {
-                    const lineAt = cL != null ? ` at ${_fmtPt(cL)}` : '';
-                    lines.push(`PIN${refTag}: ${_fmtAmer(oP)} → ${_fmtAmer(cP)}${lineAt}${sharpFrag}`);
-                } else if (score === 0) {
-                    lines.push('PIN line and vig flat — no movement signal');
-                }
+                lines.push('Exchange flat — no cent-movement signal');
             }
         }
 
