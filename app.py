@@ -6923,32 +6923,25 @@ def api_pm_snapshot_wc():
     # tickers + list events for soccer series; dump to kalshi_debug. Remove
     # once wired.
     try:
-        for _c in ("KXMENWORLDCUPGAME", "KXWORLDCUPGAME", "KXMENWORLDCUP",
-                   "KXWCGAME", "KXSOCCERGAME", "KXFIFAWORLDCUPGAME",
-                   "KXMENSWORLDCUPGAME", "KXWORLDCUP"):
-            _res = _fetch_kalshi_markets(_c)
-            if _res.get("count"):
+        from collections import defaultdict as _dd
+        _res = _fetch_kalshi_markets("KXWCGAME")
+        _mkts = _res.get("markets") or []
+        _byev = _dd(list)
+        for _m in _mkts:
+            _byev[_m.get("event_ticker")].append(_m)
+        sb.table("kalshi_debug").insert({"info":
+            f"WCSTRUCT events={len(_byev)} markets={len(_mkts)}"}).execute()
+        # dump every market for the first 3 events (full 3-way structure + prices)
+        for _ev_t, _ms in list(_byev.items())[:3]:
+            for _m in _ms:
                 sb.table("kalshi_debug").insert({"info":
-                    f"HIT {_c} count={_res['count']} sample={str(_res.get('raw_sample'))[:800]}"}).execute()
-            else:
-                sb.table("kalshi_debug").insert({"info":
-                    f"miss {_c} status={_res.get('http_status')} err={str(_res.get('error'))[:90]}"}).execute()
-        try:
-            _r = _http.get("https://api.elections.kalshi.com/trade-api/v2/events",
-                           params={"status": "open", "limit": 200},
-                           headers={"Accept": "application/json", "User-Agent": "kahla-house/1.0"},
-                           timeout=10)
-            _evs = (_r.json() or {}).get("events", []) if _r.status_code == 200 else []
-            _soc = sorted({e.get("series_ticker", "") for e in _evs
-                           if "world" in (e.get("title", "").lower())
-                           or "soccer" in (e.get("title", "").lower())
-                           or " vs " in (e.get("title", "").lower())})
-            sb.table("kalshi_debug").insert({"info":
-                f"EVENTS status={_r.status_code} n={len(_evs)} soccer_series={_soc[:25]}"}).execute()
-        except Exception as _e:
-            sb.table("kalshi_debug").insert({"info": f"events_err {str(_e)[:90]}"}).execute()
-    except Exception:
-        pass
+                    f"WCM {_ev_t} | tkr={_m.get('ticker')} yes={_m.get('yes_sub_title')} "
+                    f"no={_m.get('no_sub_title')} title={(_m.get('title') or '')[:50]} "
+                    f"ybid={_m.get('yes_bid_dollars')} yask={_m.get('yes_ask_dollars')} "
+                    f"nbid={_m.get('no_bid_dollars')} last={_m.get('last_price_dollars')} "
+                    f"occ={_m.get('occurrence_datetime')}"}).execute()
+    except Exception as _e:
+        sb.table("kalshi_debug").insert({"info": f"wcstruct_err {str(_e)[:140]}"}).execute()
     matches, meta = _build_worldcup(now)
 
     rows = []
