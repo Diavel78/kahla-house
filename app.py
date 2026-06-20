@@ -6923,25 +6923,20 @@ def api_pm_snapshot_wc():
     # tickers + list events for soccer series; dump to kalshi_debug. Remove
     # once wired.
     try:
-        from collections import defaultdict as _dd
         _res = _fetch_kalshi_markets("KXWCGAME")
         _mkts = _res.get("markets") or []
-        _byev = _dd(list)
-        for _m in _mkts:
-            _byev[_m.get("event_ticker")].append(_m)
+        _liq = [_m for _m in _mkts if _m.get("yes_bid_dollars") or _m.get("yes_ask_dollars")
+                or _m.get("no_bid_dollars") or _m.get("last_price_dollars")]
         sb.table("kalshi_debug").insert({"info":
-            f"WCSTRUCT events={len(_byev)} markets={len(_mkts)}"}).execute()
-        # dump every market for the first 3 events (full 3-way structure + prices)
-        for _ev_t, _ms in list(_byev.items())[:3]:
-            for _m in _ms:
-                sb.table("kalshi_debug").insert({"info":
-                    f"WCM {_ev_t} | tkr={_m.get('ticker')} yes={_m.get('yes_sub_title')} "
-                    f"no={_m.get('no_sub_title')} title={(_m.get('title') or '')[:50]} "
-                    f"ybid={_m.get('yes_bid_dollars')} yask={_m.get('yes_ask_dollars')} "
-                    f"nbid={_m.get('no_bid_dollars')} last={_m.get('last_price_dollars')} "
-                    f"occ={_m.get('occurrence_datetime')}"}).execute()
+            f"WCLIQ liquid={len(_liq)}/{len(_mkts)}"}).execute()
+        for _m in _liq[:10]:
+            sb.table("kalshi_debug").insert({"info":
+                f"WCL tkr={_m.get('ticker')} title={(_m.get('title') or '')[:46]} "
+                f"ysub={_m.get('yes_sub_title')} nsub={_m.get('no_sub_title')} "
+                f"ybid={_m.get('yes_bid_dollars')} yask={_m.get('yes_ask_dollars')} "
+                f"nbid={_m.get('no_bid_dollars')} last={_m.get('last_price_dollars')}"}).execute()
     except Exception as _e:
-        sb.table("kalshi_debug").insert({"info": f"wcstruct_err {str(_e)[:140]}"}).execute()
+        sb.table("kalshi_debug").insert({"info": f"wcliq_err {str(_e)[:140]}"}).execute()
     matches, meta = _build_worldcup(now)
 
     rows = []
