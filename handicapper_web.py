@@ -884,31 +884,65 @@ def _exch_ml_fair(latest: dict):
 
 
 def _exch_two_sided_fair(latest: dict, mt: str, up: str, down: str):
-    """(line, p_up, p_down) for SPR/TOT from PMM's at-the-money line (the
-    line whose cents are closest to 50). Kalshi is ML-only, so PMM is the
-    anchor here. Devigs the pair at that line when both sides exist."""
-    lines = {ln for (src, m, s, ln) in latest
-             if src == "pmm" and m == mt and s in (up, down)}
-    best, best_d = None, 1e9
-    for ln in lines:
-        cu = latest.get(("pmm", mt, up, ln))
-        cd = latest.get(("pmm", mt, down, ln))
-        ref = cu if cu is not None else cd
-        if ref is None:
-            continue
-        d = abs(ref - 50)
-        if d < best_d:
-            best, best_d = (ln, cu, cd), d
+    """((up_line, down_line), p_up, p_down) for SPR/TOT from PMM's at-the-money
+    line. Kalshi is ML-only, so PMM is the anchor.
+
+    The two sides relate to the line DIFFERENTLY by market, and getting this
+    wrong fabricates a phantom side:
+      • TOTAL  — over and under SHARE the line (over 8.5 / under 8.5). Pair at
+        the same L; both sides get line L.
+      • SPREAD — the sides are MIRROR lines (home -1.5 ↔ away +1.5). The devig
+        pair is home@L vs away@(-L), and EACH SIDE KEEPS ITS OWN LINE. The old
+        code paired both sides at one shared L and stamped the away side with
+        the HOME line — fabricating a 'Reds -1.5' runline that PMM never quoted
+        (the +292 phantom). Mirror-pairing fixes it: away keeps +1.5.
+    Devigs the pair when both exist; else the single side at its own line +
+    the complement (stamped on the correct mirror line)."""
+    if mt != "spread":
+        lines = {ln for (src, m, s, ln) in latest
+                 if src == "pmm" and m == mt and s in (up, down)}
+        best, best_d = None, 1e9
+        for ln in lines:
+            cu = latest.get(("pmm", mt, up, ln))
+            cd = latest.get(("pmm", mt, down, ln))
+            ref = cu if cu is not None else cd
+            if ref is None:
+                continue
+            d = abs(ref - 50)
+            if d < best_d:
+                best, best_d = (ln, ln, cu, cd), d
+    else:
+        # Normalize every spread row to the up-side (home) line: a home@L row
+        # is L; an away@A row maps to home line -A. Then home@HL pairs with
+        # away@(-HL).
+        home_lines = set()
+        for (src, m, s, ln) in latest:
+            if src != "pmm" or m != mt or ln is None:
+                continue
+            if s == up:
+                home_lines.add(ln)
+            elif s == down:
+                home_lines.add(-ln)
+        best, best_d = None, 1e9
+        for hl in home_lines:
+            cu = latest.get(("pmm", mt, up, hl))        # home @ hl
+            cd = latest.get(("pmm", mt, down, -hl))     # away @ -hl (mirror)
+            ref = cu if cu is not None else cd
+            if ref is None:
+                continue
+            d = abs(ref - 50)
+            if d < best_d:
+                best, best_d = (hl, -hl, cu, cd), d      # up_line=hl, down_line=-hl
     if not best:
         return None
-    ln, cu, cd = best
+    up_ln, dn_ln, cu, cd = best
     if cu is not None and cd is not None and (cu + cd) > 0:
         pu = _devig_two_way(cu / 100.0, cd / 100.0)
     elif cu is not None:
         pu = cu / 100.0
     else:
         pu = 1.0 - cd / 100.0
-    return ln, pu, 1.0 - pu
+    return (up_ln, dn_ln), pu, 1.0 - pu
 
 
 def _attach_exch_current(sb, market_id: str, odds: dict) -> None:
@@ -929,10 +963,12 @@ def _attach_exch_current(sb, market_id: str, odds: dict) -> None:
                              ("total", "over", "under")):
             r = _exch_two_sided_fair(latest, mt, up, down)
             if r and odds.get(mt):
-                ln, pu, pd = r
+                (up_ln, dn_ln), pu, pd = r
+                # Per-side lines: SPREAD sides are mirrors (home -1.5 / away
+                # +1.5), TOTAL sides share the line. Each side gets its OWN.
                 odds[mt]["exch_current"] = {
-                    up:   _exch_block(pu, ln, "pmm"),
-                    down: _exch_block(pd, ln, "pmm"),
+                    up:   _exch_block(pu, up_ln, "pmm"),
+                    down: _exch_block(pd, dn_ln, "pmm"),
                 }
     except Exception:
         pass
