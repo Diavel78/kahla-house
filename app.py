@@ -10,6 +10,10 @@ import re
 import json
 import secrets
 import functools
+import requests as _http  # module-level HTTP client — ESPN scoreboard + Kalshi
+                          # fetches use it. (Was accidentally dropped with the
+                          # Odds Board removal, which NameError'd every _http.get
+                          # → empty ESPN scores. Restored.)
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
