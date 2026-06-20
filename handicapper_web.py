@@ -824,14 +824,18 @@ def _attach_xsharp(sb, market_id: str, odds: dict) -> None:
 # falls back only while its feed is still warm).
 
 def _exch_latest(sb, market_id: str) -> dict:
-    """Latest pm_snapshots cents per (source, market_type, side, line) in
-    the last 6h. First row per key wins (rows come back newest-first)."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    """Latest pm_snapshots cents per (source, market_type, side, line). First
+    row per key wins (rows come back newest-first). NO time cutoff — pm_snapshots
+    is deduped-on-change, so a stable line's last row can be many hours/days old
+    yet is STILL the current price (same anchor logic as PIN — gotchas #10/#29).
+    A 6h window wrongly blanked the fair for quiet markets, most visibly World
+    Cup, whose 1-X-2 cents sit stable for hours pre-kickoff (the "Netherlands @
+    Sweden blank fair" bug: only a 07:37 snapshot existed, the price hadn't
+    moved, and 6h hid it). Scoped to one market_id + limit, so it stays small."""
     try:
         rows = (sb.table("pm_snapshots")
                 .select("source,market_type,side,line,cents,captured_at")
                 .eq("market_id", market_id)
-                .gte("captured_at", cutoff)
                 .order("captured_at", desc=True)
                 .limit(2000)
                 .execute().data) or []
