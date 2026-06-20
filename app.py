@@ -6365,9 +6365,26 @@ def api_handicapper_live():
             })
             continue
 
-        if sp not in espn_cache:
-            espn_cache[sp] = _fetch_espn_scoreboard(sp)
-        m = _live_match_espn(espn_cache[sp], away, home, bet.get("event_start"))
+        # ESPN score — fetch the game's SPECIFIC DATE (ET), like the resolver.
+        # ESPN's no-date scoreboard default is flaky (it drops games as the day
+        # rolls / once they finish), which blanked the live score while the PMM
+        # ring still rendered. Date-keyed fetch is reliable.
+        pair = _ESPN_PATH.get(sp)
+        events = []
+        if pair:
+            grp, league = pair
+            dk = None
+            if bdt:
+                try:
+                    dk = bdt.astimezone(ZoneInfo("America/New_York")).strftime("%Y%m%d")
+                except Exception:
+                    dk = None
+            ckey = (sp, dk)
+            if ckey not in espn_cache:
+                espn_cache[ckey] = (_espn_scoreboard_raw(grp, league, dates=dk)
+                                    if dk else _fetch_espn_scoreboard(sp))
+            events = espn_cache[ckey]
+        m = _live_match_espn(events, away, home, bet.get("event_start"))
         matched_live = bool(m) and m.get("state") in ("in", "live", "post")
         if not (matched_live or started):
             continue
