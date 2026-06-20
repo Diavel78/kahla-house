@@ -6269,6 +6269,7 @@ def api_handicapper_live():
     except Exception as e:
         return jsonify({"ok": False, "error": f"pending fetch: {e}"}), 500
 
+    now = datetime.now(timezone.utc)
     espn_cache: dict = {}
     pmm_cache: dict = {}
     client = None
@@ -6279,13 +6280,26 @@ def api_handicapper_live():
         if sp not in espn_cache:
             espn_cache[sp] = _fetch_espn_scoreboard(sp)
         m = _live_match_espn(espn_cache[sp], away, home, bet.get("event_start"))
-        if not m or m.get("state") not in ("in", "live", "post"):
-            continue   # only in-progress (or just-final, awaiting grade)
+        matched_live = bool(m) and m.get("state") in ("in", "live", "post")
+        # Resilient inclusion. ESPN sometimes lags flipping a game to "in"
+        # (or its first-pitch time differs from our stored start by >90min, so
+        # the match misses) — and then a game the user KNOWS is live would
+        # vanish from the tracker entirely. So also include a bet whose
+        # event_start has simply PASSED (0–5h ago): PMM live odds drive the
+        # gauge even with no ESPN match, and the score/state fill in once ESPN
+        # catches up. The 5h cap keeps long-finished (ungraded) bets out.
+        bdt = _parse_iso(bet.get("event_start") or "")
+        started = bool(bdt) and timedelta(0) <= (now - bdt) <= timedelta(hours=5)
+        if not (matched_live or started):
+            continue
 
-        # Win prob: decided (final / NRFI 1st done) → live Polymarket price
-        # → grey. Odds-only (works for every sport with no per-sport model).
-        win_prob = _live_decided_prob(bet, m)
-        prob_src = "decided" if win_prob is not None else None
+        # Win prob: decided (needs a real ESPN match) → live Polymarket price
+        # → grey. Odds-only (works for every sport, no per-sport model).
+        win_prob, prob_src = None, None
+        if m:
+            win_prob = _live_decided_prob(bet, m)
+            if win_prob is not None:
+                prob_src = "decided"
         if win_prob is None:
             if client is None:
                 try:
@@ -6308,9 +6322,9 @@ def api_handicapper_live():
             "units":         bet["units"],
             "entry_price":   bet["entry_price"],
             "entry_line":    bet.get("entry_line"),
-            "score":         m,
+            "score":         m or {},
             "win_prob":      win_prob,
-            "prob_src":      prob_src,   # decided | market | model
+            "prob_src":      prob_src,   # decided | market | None(grey)
         })
     return jsonify({"ok": True, "live": out})
 
