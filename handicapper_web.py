@@ -2588,11 +2588,8 @@ def _kelly_units(fair_prob, fair_american, edge_pp,
         return 1, "low", 0.0
     f = true_p - (1.0 - true_p) / b      # full Kelly fraction
     kelly_pct = max(0.0, f) * frac * 100.0
-    # 5u tier CAPPED to 3u (June 2026) — bankroll defense during a
-    # drawdown, NOT a model change. Keep the "high" label so analytics
-    # still flag near-cap reads; flip the 3 back to 5 to re-enable.
     if kelly_pct >= KELLY_HIGH_PCT:
-        return 3, "high", round(kelly_pct, 2)
+        return 5, "high", round(kelly_pct, 2)
     if kelly_pct >= KELLY_MED_PCT:
         return 3, "medium", round(kelly_pct, 2)
     return 1, "low", round(kelly_pct, 2)
@@ -4038,6 +4035,12 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
         units, conf, kelly_pct = _kelly_units(
             c.get("fair_prob"), c.get("fair_american"),
             c.get("edge_pp"), c.get("gates_cleared"), kelly_fraction)
+        # TOTALS capped at 3u (June 2026) — totals are the weak market
+        # (steam follows tickets, not runs), so cap their size while ML/SPR
+        # keep the full 5u tier. Bankroll defense, NOT a model change; flip
+        # this off to let totals reach 5u again.
+        if c.get("market_type") == "total" and units > 3:
+            units, conf = 3, "medium"
         # Sizing concentrated in the PRIME window — only picks made 90-120
         # min before first pitch can size past 1u. That 38-pick window
         # carried +27u at 68.4%; 60-90 was modest (+3.9u), the last hour
