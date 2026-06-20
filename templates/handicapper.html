@@ -2562,6 +2562,7 @@
         const sides = mt === 'total' ? ['over', 'under'] : ['away', 'home'];
         const labelOf = s => mt === 'total' ? s.toUpperCase() : (s === 'home' ? d.home : d.away);
         const pin = blk.pin_current || {};
+        const exch = blk.exch_current || {};
         const mv = blk.movement;
         const title = ({moneyline:'Moneyline', spread:'Spread', total:'Total'})[mt] || mt;
         const anyBotPicked = sides.some(s => sugIndex && sugIndex.has(`${mt}:${s}`));
@@ -2569,6 +2570,8 @@
         let blocks = '';
         for (const s of sides) {
             const pinSnap = pin[s];
+            const xSnap = exch[s];
+            const fairSnap = xSnap || pinSnap;   // exchange primary, frozen PIN fallback
             const sideName = labelOf(s);
             const sugIdx = sugIndex ? sugIndex.get(`${mt}:${s}`) : undefined;
             const isBotPick = sugIdx != null;
@@ -2593,34 +2596,23 @@
                 : `pickSideFromGrid('${mt}', '${s}')`;
             // View-only (bot_access) users see the same data + the BOT PICK
             // highlight, but no Log buttons — logging is admin-only.
-            const btn = (_canLog && pinSnap)
+            const btn = (_canLog && fairSnap)
                 ? `<button class="${btnClass}" onclick="${onclickAttr}">${btnLabel}</button>`
                 : '';
 
+            // Primary row = the EXCHANGE devigged fair (Kalshi mid for ML,
+            // PMM for SPR/TOT) — the live anchor since the PIN feed was cut.
+            // Frozen PIN shown only as a clearly-labelled fallback.
             let rows = '';
-            if (pinSnap) {
-                const ln = pinSnap.line;
+            if (xSnap && xSnap.fair_american != null) {
+                const ln = xSnap.line;
                 const lineFrag = (ln != null) ? ` <span class="label">@${_fmtPt(ln)}</span>` : '';
-                const fair = pinSnap.fair_american;
-                const fairFrag = fair != null ? ` <span class="label">fair ${_fmtAmer(fair)}</span>` : '';
-                // ALWAYS show where PIN opened when it moved — independent
-                // of whether the recency-weighted sharp score cleared any
-                // threshold. The score tells you HOW MUCH the move counts;
-                // this tells you the move happened at all. Renders as
-                // "(open -183)" or "(open 104 @6.5)" when price/line differ.
-                const opener = (blk.pin_opener || {})[s];
-                let openFrag = '';
-                if (opener && opener.price != null) {
-                    const lineMoved = opener.line != null && ln != null && Math.abs(opener.line - ln) > 0.001;
-                    const priceMoved = opener.price !== pinSnap.price;
-                    if (priceMoved || lineMoved) {
-                        const oLn = lineMoved ? ` @${_fmtPt(opener.line)}` : '';
-                        openFrag = ` <span class="pin-open">(open ${_fmtAmer(opener.price)}${oLn})</span>`;
-                    }
-                }
-                rows += `<div class="row"><span class="label">PIN:</span> <span class="pin">${_fmtAmer(pinSnap.price)}</span>${lineFrag}${fairFrag}${openFrag}</div>`;
+                const src = (xSnap.source === 'kalshi') ? 'KALSHI' : 'PMM';
+                rows += `<div class="row"><span class="label">${src} fair:</span> <span class="pin">${_fmtAmer(xSnap.fair_american)}</span>${lineFrag}</div>`;
+            } else if (pinSnap && pinSnap.fair_american != null) {
+                rows += `<div class="row"><span class="label" style="opacity:.6">PIN (frozen):</span> <span class="pin" style="opacity:.6">${_fmtAmer(pinSnap.fair_american)}</span></div>`;
             }
-            if (!rows) rows = '<div style="font-size:11px;color:var(--text-muted)">no PIN data</div>';
+            if (!rows) rows = '<div style="font-size:11px;color:var(--text-muted)">no exchange data</div>';
 
             // Poly row — shows actual Polymarket line + current bid/ask
             // + PIN-projected fair as the limit-order target. Only
@@ -2632,9 +2624,12 @@
                 const q = pmmBlock.quote || {};
                 const askFrag = (q.ask_american != null) ? ` ask <b>${_fmtAmer(q.ask_american)}</b>` : '';
                 const bidFrag = (q.bid_american != null) ? ` · bid ${_fmtAmer(q.bid_american)}` : '';
-                const proj = pmmBlock.projected || {};
-                const targetFrag = (proj.fair_american != null)
-                    ? ` · <span class="pmm-target">target ${_fmtAmer(proj.fair_american)}</span>`
+                // Target = the exchange devigged fair for this side (the
+                // Polymarket limit-order anchor), not the retired PIN
+                // push-rate projection.
+                const targetFair = (fairSnap && fairSnap.fair_american != null) ? fairSnap.fair_american : null;
+                const targetFrag = (targetFair != null)
+                    ? ` · <span class="pmm-target">target ${_fmtAmer(targetFair)}</span>`
                     : '';
                 pmmRow = `<div class="pmm-row"><span class="pmm-lbl">Poly</span>${lnFrag}${askFrag}${bidFrag}${targetFrag}</div>`;
             }
@@ -2653,24 +2648,27 @@
         // a side. The open→current movement itself now shows per-side
         // above (always visible), so this chip is just the "how much
         // does it count" annotation: which side and the weighted score.
+        // Sharp-score chip — now the EXCHANGE score (PMM cents + Kalshi
+        // confirm) that actually gates the pick, not the retired PIN one.
+        // ML shows whether Kalshi confirmed the move.
         let move = '';
-        if (mv && mv.sharp_score != null) {
-            move = `<div class="move"><span class="sharp">SHARP ${(mv.sharp_side || '').toUpperCase()} = ${mv.sharp_score}</span> <span class="move-note">recency-weighted</span></div>`;
-        } else if (sides.some(s => pin[s])) {
-            // PIN data exists but no recency-weighted sharp move cleared the
-            // floor — say so explicitly (same blue as the score) so a quiet
-            // market reads as "computed, no action" not "broken/missing".
+        if (mv && mv.x_score != null) {
+            const note = (mt === 'moneyline')
+                ? (mv.x_confirmed
+                    ? '<span class="move-note">PMM + Kalshi confirmed</span>'
+                    : '<span class="move-note" style="color:#f5a524">PMM only — unconfirmed</span>')
+                : '<span class="move-note">exchange</span>';
+            move = `<div class="move"><span class="sharp">SHARP ${(mv.x_side || '').toUpperCase()} = ${mv.x_score}</span> ${note}</div>`;
+        } else if (sides.some(s => exch[s] || pin[s])) {
             move = `<div class="move"><span class="sharp">No Sharp Action</span></div>`;
         }
 
         // Opener-age footer — shows WHEN PIN opened so an old move that
         // scores low is self-explanatory ("PIN opener captured 10h ago"
         // → the move is stale → low weight → low score).
+        // PIN opener-age footer removed — PIN is frozen post-cutover; the
+        // exchange source (KALSHI/PMM) is labelled inline on each row.
         let openerAge = '';
-        const anyOpener = sides.map(s => (blk.pin_opener || {})[s]).find(o => o && o.captured);
-        if (anyOpener && anyOpener.captured) {
-            openerAge = `<div class="opener-age">PIN opened ${_esc(_fmtAgo(anyOpener.captured))}</div>`;
-        }
 
         return `<div class="market-card"><h3>${title}${botTag}</h3>${blocks}${move}${openerAge}</div>`;
     }
@@ -2684,28 +2682,25 @@
     function pickSideFromGrid(mt, side) {
         if (!_lastDossier) return;
         const blk = (_lastDossier.odds || {})[mt] || {};
-        const pin = (blk.pin_current || {})[side];
-        if (!pin || pin.fair_american == null) {
-            alert('No PIN devig on this side — can\'t set a Polymarket target.');
+        // Anchor on the EXCHANGE devigged fair (Kalshi/PMM); fall back to the
+        // frozen PIN fair only if no exchange snap exists for this side.
+        const fairSnap = ((blk.exch_current || {})[side]) || ((blk.pin_current || {})[side]);
+        if (!fairSnap || fairSnap.fair_american == null) {
+            alert('No exchange fair on this side — can\'t set a Polymarket target.');
             return;
         }
-        // Prefer the PMM-projected fair + PMM line if PMM has a market
-        // for this side; falls back to PIN values. Logging at the PMM
-        // line + projected fair matches what the bot itself would
-        // recommend, so resolver grading is consistent.
+        // Maker entry = the PMM bid (where we rest/fill) at the exchange line,
+        // falling back to the exchange fair when there's no live bid. Drives
+        // CLV + profit. The line comes from the exchange ATM line.
         const pmm = ((blk.polymarket || {})[side]) || null;
-        const proj = (pmm && pmm.projected) || {};
         const pmmBid = (pmm && pmm.quote && pmm.quote.bid_american != null) ? pmm.quote.bid_american : null;
-        const useProj = proj.fair_american != null;
-        // Maker entry = the PMM bid (where we rest/fill), falling back to the
-        // projected/PIN fair when there's no live bid. Drives CLV + profit.
-        const entryPrice = (pmmBid != null) ? pmmBid : (useProj ? proj.fair_american : pin.fair_american);
-        const entryLine  = (useProj && pmm.line != null) ? pmm.line : pin.line;
-        const entryProb  = (useProj && proj.fair_prob != null) ? proj.fair_prob : pin.fair_prob;
+        const entryPrice = (pmmBid != null) ? pmmBid : fairSnap.fair_american;
+        const entryLine  = fairSnap.line;
+        const entryProb  = fairSnap.fair_prob;
         const sideName = mt === 'total' ? side.toUpperCase()
             : (side === 'home' ? _lastDossier.home : _lastDossier.away);
         const mv = blk.movement || {};
-        const isMvSide = mv.sharp_side === side;
+        const isMvSide = mv.x_side === side;
         _pendingPick = {
             market_id:   _lastDossier.market_id,
             market_type: mt,
@@ -2715,8 +2710,8 @@
             line:        entryLine,
             fair_prob:   entryProb,
             edge_pp:     null,
-            sharp_score: isMvSide ? (mv.sharp_score || 0) : 0,
-            label:       `${_shortMarket(mt)} ${sideName} @ ${pmmBid != null ? 'Poly bid' : (useProj ? 'Poly-projected fair' : 'PIN fair')} ${_fmtAmer(entryPrice)}${entryLine != null ? ' ' + _fmtPt(entryLine) : ''}`,
+            sharp_score: isMvSide ? (mv.x_score || 0) : 0,
+            label:       `${_shortMarket(mt)} ${sideName} @ ${pmmBid != null ? 'Poly bid' : 'exchange fair'} ${_fmtAmer(entryPrice)}${entryLine != null ? ' ' + _fmtPt(entryLine) : ''}`,
             seed_units:  1,
             seed_conf:   'low',
         };
