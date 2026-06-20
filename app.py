@@ -6247,6 +6247,57 @@ def _live_market_prob(bet: dict, away: str, home: str, client, pmm_cache: dict):
     return round(mid_prob, 4) if isinstance(mid_prob, (int, float)) else None
 
 
+def _live_wc_match(wc_matches, bet_away, bet_home):
+    """Find a World Cup fixture in _build_worldcup's output for the bet's
+    canonical (away @ home) pair. Returns the live ESPN score mapped to the
+    BET's orientation + the live PMM 1-X-2 `results`, or None. (The standard
+    ESPN/_ESPN_PATH live path has no soccer; this is the soccer equivalent.)"""
+    import pmm_markets as _pm
+    ak, hk = _wc_country_key(bet_away), _wc_country_key(bet_home)
+    for m in (wc_matches or []):
+        t1, t2 = _pm._wc_teams_from_title(m.get("title") or "")
+        if not (t1 and t2):
+            continue
+        k1, k2 = _wc_country_key(t1), _wc_country_key(t2)
+        if {k1, k2} != {ak, hk}:
+            continue
+        s1, s2 = m.get("away_score"), m.get("home_score")   # t1→s1, t2→s2
+        return {
+            "state":          m.get("state") or "",
+            "display_status": m.get("detail") or "",
+            "away_score":     s1 if k1 == ak else s2,
+            "home_score":     s1 if k1 == hk else s2,
+            "results":        m.get("results") or [],
+        }
+    return None
+
+
+def _live_wc_prob(wcm, bet_away, bet_home, side):
+    """Live win prob for a World Cup bet. Decided from the score once final
+    (3-way: 'draw' wins on a level score; home/away ML LOSES on a draw); else
+    the live PMM 1-X-2 implied prob for the side."""
+    a, h = wcm.get("away_score"), wcm.get("home_score")
+    if wcm.get("state") == "post" and a is not None and h is not None:
+        if side == "draw":
+            return 1.0 if a == h else 0.0
+        if side == "home":
+            return 1.0 if h > a else 0.0
+        if side == "away":
+            return 1.0 if a > h else 0.0
+    ak, hk = _wc_country_key(bet_away), _wc_country_key(bet_home)
+    for r in (wcm.get("results") or []):
+        prob = r.get("prob")
+        if prob is None:
+            continue
+        lbl = (r.get("label") or "")
+        lk = _wc_country_key(lbl)
+        if (side == "draw" and "draw" in lbl.lower()) \
+           or (side == "home" and lk == hk) \
+           or (side == "away" and lk == ak):
+            return round(min(max(float(prob), 0.0), 1.0), 4)
+    return None
+
+
 @app.route("/api/handicapper/live")
 @bot_required   # PER-USER: the CALLER'S OWN in-progress bets (asked_by==g.uid)
 def api_handicapper_live():
@@ -6272,24 +6323,52 @@ def api_handicapper_live():
     now = datetime.now(timezone.utc)
     espn_cache: dict = {}
     pmm_cache: dict = {}
+    wc_matches = None          # lazy — only built if a WORLDCUP bet exists
     client = None
     out = []
     for bet in pending:
         away, home = _live_split_event(bet.get("event_name") or "")
         sp = (bet.get("sport") or "").lower()
+        # Resilient inclusion. ESPN lags flipping a game to "in" (or its first
+        # pitch differs from our stored start by >90min, so the match misses) —
+        # a game the user KNOWS is live would then vanish. So also include any
+        # bet whose event_start has simply PASSED (0–5h ago). 5h cap keeps
+        # long-finished (ungraded) bets out.
+        bdt = _parse_iso(bet.get("event_start") or "")
+        started = bool(bdt) and timedelta(0) <= (now - bdt) <= timedelta(hours=5)
+
+        # World Cup / soccer: the standard pmm_markets.lookup has NO WC tag and
+        # NO 'draw' side, so it can't price soccer (the grey-ring bug). Use the
+        # World Cup reader (_build_worldcup) for BOTH the live ESPN score AND
+        # the live PMM 1-X-2 odds. Polymarket has live soccer markets.
+        if sp == "worldcup":
+            if wc_matches is None:
+                try:
+                    wc_matches, _ = _build_worldcup(now)
+                except Exception:
+                    wc_matches = []
+            m = _live_wc_match(wc_matches, away, home)
+            matched_live = bool(m) and m.get("state") in ("in", "live", "post")
+            if not (matched_live or started):
+                continue
+            win_prob = _live_wc_prob(m, away, home, bet.get("side")) if m else None
+            prob_src = ("decided" if (m and m.get("state") == "post"
+                                      and win_prob is not None)
+                        else ("market" if win_prob is not None else None))
+            out.append({
+                "id": bet["id"], "market_id": bet["market_id"],
+                "event_name": bet["event_name"], "away": away, "home": home,
+                "market_type": bet["market_type"], "side": bet["side"],
+                "units": bet["units"], "entry_price": bet["entry_price"],
+                "entry_line": bet.get("entry_line"),
+                "score": m or {}, "win_prob": win_prob, "prob_src": prob_src,
+            })
+            continue
+
         if sp not in espn_cache:
             espn_cache[sp] = _fetch_espn_scoreboard(sp)
         m = _live_match_espn(espn_cache[sp], away, home, bet.get("event_start"))
         matched_live = bool(m) and m.get("state") in ("in", "live", "post")
-        # Resilient inclusion. ESPN sometimes lags flipping a game to "in"
-        # (or its first-pitch time differs from our stored start by >90min, so
-        # the match misses) — and then a game the user KNOWS is live would
-        # vanish from the tracker entirely. So also include a bet whose
-        # event_start has simply PASSED (0–5h ago): PMM live odds drive the
-        # gauge even with no ESPN match, and the score/state fill in once ESPN
-        # catches up. The 5h cap keeps long-finished (ungraded) bets out.
-        bdt = _parse_iso(bet.get("event_start") or "")
-        started = bool(bdt) and timedelta(0) <= (now - bdt) <= timedelta(hours=5)
         if not (matched_live or started):
             continue
 
