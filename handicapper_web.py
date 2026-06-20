@@ -3902,16 +3902,24 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                     and score_for_side >= STICKY_GATE_EXIT):
                 gates_cleared, sticky = True, True
 
-            # Total-side veto — the OUR-NUMBER read can DEMOTE a total pick
-            # to a forced lean when it disagrees with the side PIN movement
-            # chose (hitter-park unders, model-projected total the other
-            # way). Stops the bot recommending Rockies/Coors unders. ML/SPR
-            # are untouched — the veto is totals-only.
+            # Totals never clear the gate on movement — STRUCTURAL, not a
+            # cutover/calibration wait. The total side is chosen purely from
+            # line/cent movement, which tells you where the TICKETS went, not
+            # where the RUNS are going. It bled on PIN (13-17) and bleeds the
+            # same on the exchanges (PMM agreed with PIN ~90% of the time, so
+            # the venue never mattered) — gated totals were the entire MLB
+            # drawdown (-6.65u/14) AND the only gated segment with negative
+            # CLV (no real edge). A total only earns a REAL pick from an
+            # independent total model disagreeing with the market — which
+            # doesn't exist yet (the power model only VETOES totals, never
+            # promotes one). Until it does, every total is a 1u lean: still
+            # shown, never green, never sized up. The conflict check is kept
+            # for the label/reason only. Re-enable promotion ONLY when a true
+            # total model proves it beats the close on CLV.
             conflict_reason = None
             if mt == "total":
                 conflict_reason = _total_conflict_reason(sport, home, power, side)
-                if conflict_reason:
-                    gates_cleared = False
+                gates_cleared = False
 
             # Provisional edge estimate (fair-prob pp) that drives Kelly
             # sizing + finally populates the edge_pp column. The sharp +
