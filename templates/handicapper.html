@@ -1072,9 +1072,7 @@
         const market = _shortMarket(r.market_type);
         const sideLabel = (r.market_type === 'nrfi')
             ? _nrfiSideLabel(r.side)
-            : (r.market_type === 'total')
-                ? (r.side || '').toUpperCase()
-                : (r.side === 'home' ? 'HOME' : 'AWAY');
+            : (r.side || '').toUpperCase();   // HOME / AWAY / DRAW / OVER / UNDER
         const lineFrag = (r.entry_line == null) ? '' : ` ${_fmtPt(r.entry_line)}`;
         const sigChips = [];
         sigChips.push(`<span class="chip units-${r.units}">${r.units}u</span>`);
@@ -1856,7 +1854,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         let side;
         if (r.market_type === 'nrfi') side = (r.side === 'no' ? 'NRFI' : 'YRFI');
         else if (r.market_type === 'total') side = (r.side === 'over' ? 'O' : 'U') + (r.entry_line != null ? _fmtPt(Math.abs(r.entry_line)) : '');
-        else { const t = ((r.side === 'home' ? r.home : r.away) || r.side).split(' ').pop(); side = t + (r.entry_line != null && r.market_type === 'spread' ? ' ' + _fmtPt(r.entry_line) : ''); }
+        else { const t = ((r.side === 'home' ? r.home : r.side === 'away' ? r.away : 'Draw') || r.side).split(' ').pop(); side = t + (r.entry_line != null && r.market_type === 'spread' ? ' ' + _fmtPt(r.entry_line) : ''); }
         const price = r.entry_price != null ? _fmtAmer(r.entry_price) : '';
         return `<b>${mkt} ${_esc(side)}</b> @ ${price} · ${_uStr(Number(r.units))}`;
     }
@@ -3337,9 +3335,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         const market = _shortMarket(r.market_type);
         const sideLabel = (r.market_type === 'nrfi')
             ? _nrfiSideLabel(r.side)
-            : (r.market_type === 'total')
-                ? (r.side || '').toUpperCase()
-                : (r.side === 'home' ? 'HOME' : 'AWAY');
+            : (r.side || '').toUpperCase();   // HOME / AWAY / DRAW / OVER / UNDER
         const ln = (r.entry_line == null) ? '' : ` ${_fmtPt(r.entry_line)}`;
         const units = (r.units != null) ? ` · ${r.units}u` : '';
         return { game, sub: `${market} · ${sideLabel}${ln}${units}` };
