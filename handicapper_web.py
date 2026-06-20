@@ -3869,6 +3869,23 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
             pmm_block = (blk.get("polymarket") or {}).get(side)
             pmm_line = (pmm_block or {}).get("line")
             pmm_quote = (pmm_block or {}).get("quote") or {}
+            # LINE-CONSISTENCY GUARD (post-cutover, June 2026). exch_current's
+            # devigged fair is at the at-the-money line; the PMM quote block can
+            # be attached at a DIFFERENT line (best_line_for was keyed off the
+            # now-dead PIN line, so post-cutover it can land on the wrong line).
+            # Using that quote's bid as the entry while the fair sits at another
+            # line produced the "Yankees +1.5 @ -285 entry on a -1.5/-100 fair"
+            # phantom — incoherent, AND it dodged the SPR chalk filter (which
+            # guards on the -100 fair). For SPR/TOT, only trust the PMM quote
+            # when its line matches the exchange-fair line; otherwise drop it so
+            # the entry falls back to the exchange fair at ITS own line. (ML has
+            # no line, so it's always coherent.) The White Sox over-8.5 case is
+            # untouched — there the PMM line already equals the fair line.
+            if mt != "moneyline":
+                _fl = pin.get("line")
+                if not (pmm_line is not None and _fl is not None
+                        and abs(float(pmm_line) - float(_fl)) < 0.001):
+                    pmm_block, pmm_line, pmm_quote = None, None, {}
             # Post-cutover: the EXCHANGE devigged mid (exch_current) IS the
             # Polymarket fair at the at-the-money line — no PIN push-rate
             # projection. Target line + fair come straight from fair_src;
@@ -4281,6 +4298,22 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         # label just won't show the "cron Nm ago" half.
         pass
 
+    # POST-CUTOVER (June 2026): PIN/Odds-API ingest is RETIRED — book_snapshots
+    # is frozen and odds_ingest_runs is dead, so pin_latest_captured / cron_last_run
+    # are stale by design (the alarming "cron 19h ago"). The LIVE freshness signal
+    # is now the exchange logger (pm_snapshots). exch_latest_captured = the most
+    # recent exchange cent row for this game; the UI shows this as the real
+    # "data Nm ago" instead of the dead PIN/cron heartbeat.
+    exch_latest_captured = None
+    try:
+        r = (sb.table("pm_snapshots").select("captured_at")
+             .eq("market_id", market["id"])
+             .order("captured_at", desc=True).limit(1).execute().data) or []
+        if r:
+            exch_latest_captured = r[0].get("captured_at")
+    except Exception:
+        pass
+
     return {
         "ok":              True,
         "query":           query or market["event_name"],
@@ -4315,9 +4348,10 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         "live_used":       live_used,
         "live_error":      live_error,
         "data_freshness":  {
-            "pin_latest_captured": pin_latest_captured,
-            "cron_last_run":       cron_last_run,
-            "source":              "live" if live_used else "cached",
+            "pin_latest_captured":  pin_latest_captured,
+            "cron_last_run":        cron_last_run,
+            "exch_latest_captured": exch_latest_captured,   # the live signal post-cutover
+            "source":               "live" if live_used else "cached",
         },
         "pmm_meta":        {
             "matched":     bool(pmm_data),

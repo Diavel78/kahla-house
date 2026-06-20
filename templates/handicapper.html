@@ -2040,12 +2040,11 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         // renderDossier() so the colors stay consistent.
         const el = document.getElementById('dossierFreshness');
         if (!el) return;
-        const pin = el.getAttribute('data-pin') || '';
-        const cron = el.getAttribute('data-cron') || '';
-        const parts = [];
-        if (pin)  parts.push(`<span title="${_esc(pin)}">PIN ${_esc(_fmtAgo(pin))}</span>`);
-        if (cron) parts.push(_cronFreshHtml(cron));
-        if (parts.length) el.innerHTML = '· ' + parts.join(' · ');
+        const exch = el.getAttribute('data-exch') || '';
+        if (!exch) return;
+        const ageMin = (Date.now() - Date.parse(exch)) / 60000;
+        const col = (ageMin > 10) ? 'var(--red)' : 'var(--text-muted)';
+        el.innerHTML = `<span title="${_esc(exch)}" style="color:${col}">exch ${_esc(_fmtAgo(exch))}</span>`;
     }
 
     function openDossierModal() {
@@ -2141,15 +2140,20 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         // Color the cron half red when it's > 10 min — that's the symptom
         // worth surfacing visually.
         const df = d.data_freshness || {};
-        const pinCaptured = df.pin_latest_captured;
-        const cronLast    = df.cron_last_run;
-        const pinFrag = pinCaptured
-            ? `<span title="${_esc(pinCaptured)}">PIN ${_esc(_fmtAgo(pinCaptured))}</span>`
-            : '';
-        const cronFrag = _cronFreshHtml(cronLast);
-        const inner = [pinFrag, cronFrag].filter(Boolean).join(' · ');
+        // Post-cutover (June 2026): PIN/Odds-API ingest is retired (book_snapshots
+        // frozen, odds_ingest_runs dead) — its "cron 19h ago" was alarming but
+        // meaningless. The LIVE freshness signal is the exchange logger
+        // (pm_snapshots, every ~2 min). Show "exch Nm ago"; red only when it's
+        // actually stale (> 10 min = a real symptom, since it logs every 2 min).
+        const exchCaptured = df.exch_latest_captured;
+        let inner = '';
+        if (exchCaptured) {
+            const ageMin = (Date.now() - Date.parse(exchCaptured)) / 60000;
+            const col = (ageMin > 10) ? 'var(--red)' : 'var(--text-muted)';
+            inner = `<span title="${_esc(exchCaptured)}" style="color:${col}">exch ${_esc(_fmtAgo(exchCaptured))}</span>`;
+        }
         const freshnessBadge = inner
-            ? `<span id="dossierFreshness" data-pin="${_esc(pinCaptured || '')}" data-cron="${_esc(cronLast || '')}" style="font-size:10px;font-family:JetBrains Mono,monospace;color:var(--text-muted);margin-left:8px;vertical-align:middle">${inner}</span>`
+            ? `<span id="dossierFreshness" data-exch="${_esc(exchCaptured || '')}" style="font-size:10px;font-family:JetBrains Mono,monospace;color:var(--text-muted);margin-left:8px;vertical-align:middle">${inner}</span>`
             : '';
 
         let html = `<div class="dossier-head">
