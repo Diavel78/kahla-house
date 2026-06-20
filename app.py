@@ -6385,6 +6385,20 @@ def api_handicapper_live():
                                     if dk else _fetch_espn_scoreboard(sp))
             events = espn_cache[ckey]
         m = _live_match_espn(events, away, home, bet.get("event_start"))
+        try:
+            _samp = []
+            for _g in (events or [])[:12]:
+                _comp = (_g.get("competitions") or [{}])[0]
+                _nm = "/".join(((c.get("team") or {}).get("displayName") or "?")
+                               for c in (_comp.get("competitors") or []))
+                _st = (((_comp.get("status") or {}).get("type") or {}).get("state"))
+                _samp.append(f"{_nm}={_st}")
+            sb.table("live_debug").insert({"info":
+                f"sp={sp} dk={dk if pair else None} ev={len(events)} "
+                f"our={away}|{home} matched={bool(m)} state={(m or {}).get('state')} "
+                f"|| " + " ; ".join(_samp)}).execute()
+        except Exception:
+            pass
         matched_live = bool(m) and m.get("state") in ("in", "live", "post")
         if not (matched_live or started):
             continue
