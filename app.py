@@ -6321,6 +6321,28 @@ def api_handicapper_live():
         return jsonify({"ok": False, "error": f"pending fetch: {e}"}), 500
 
     now = datetime.now(timezone.utc)
+    # TEMP one-shot: why does the MLB scoreboard come back empty? Test 4 fetch
+    # paths (status/event-count each) to isolate client vs params vs ESPN.
+    try:
+        import httpx as _hx
+        _base = "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard"
+        _et = now.astimezone(ZoneInfo("America/New_York")).strftime("%Y%m%d")
+        _d = {"et": _et}
+        for _lbl, _fn in (
+            ("httpx_date", lambda: _hx.get(_base, params={"dates": _et}, timeout=8)),
+            ("httpx_ua",   lambda: _hx.get(_base, params={"dates": _et}, timeout=8,
+                                           headers={"User-Agent": "Mozilla/5.0"})),
+            ("httpx_nd",   lambda: _hx.get(_base, timeout=8)),
+            ("_http_date", lambda: _http.get(_base, params={"dates": _et}, timeout=8)),
+        ):
+            try:
+                _r = _fn()
+                _d[_lbl] = f"{_r.status_code}/{len((_r.json() or {}).get('events', []))}"
+            except Exception as _e:
+                _d[_lbl] = "ERR:" + type(_e).__name__ + ":" + str(_e)[:60]
+        sb.table("live_debug").insert({"info": "ONESHOT " + str(_d)}).execute()
+    except Exception:
+        pass
     espn_cache: dict = {}
     pmm_cache: dict = {}
     wc_matches = None          # lazy — only built if a WORLDCUP bet exists
@@ -6385,20 +6407,6 @@ def api_handicapper_live():
                                     if dk else _fetch_espn_scoreboard(sp))
             events = espn_cache[ckey]
         m = _live_match_espn(events, away, home, bet.get("event_start"))
-        try:
-            _samp = []
-            for _g in (events or [])[:12]:
-                _comp = (_g.get("competitions") or [{}])[0]
-                _nm = "/".join(((c.get("team") or {}).get("displayName") or "?")
-                               for c in (_comp.get("competitors") or []))
-                _st = (((_comp.get("status") or {}).get("type") or {}).get("state"))
-                _samp.append(f"{_nm}={_st}")
-            sb.table("live_debug").insert({"info":
-                f"sp={sp} dk={dk if pair else None} ev={len(events)} "
-                f"our={away}|{home} matched={bool(m)} state={(m or {}).get('state')} "
-                f"|| " + " ; ".join(_samp)}).execute()
-        except Exception:
-            pass
         matched_live = bool(m) and m.get("state") in ("in", "live", "post")
         if not (matched_live or started):
             continue
