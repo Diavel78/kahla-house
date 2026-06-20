@@ -214,6 +214,34 @@ jobs:
             "https://www.thekahlahouse.com/api/pm-snapshot?key=${KEY}" || echo "000")
           echo "pm-snapshot HTTP $code"
 
+      # World Cup cent-logger ping. /api/pm-snapshot-wc records Polymarket
+      # 1-X-2 (home/draw/away) cents for upcoming World Cup matches into
+      # pm_snapshots — the 3-way exchange-history clock the soccer sharp score
+      # reads. PMM-only (Kalshi has no WC series). Reuses FILLS_CRON_SECRET;
+      # idempotent (dedup on cent change). Cheap (one cached PMM bulk call).
+      #
+      # CADENCE GATE: every 2 min on ODD minutes — offset from the pm-snapshot
+      # ping above (even minutes) so the two don't stack Vercel Active CPU on
+      # the same tick (gotcha #38).
+      - name: World Cup — PMM 1-X-2 cent snapshot ping
+        continue-on-error: true
+        env:
+          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
+        run: |
+          M=$(date -u +%-M)
+          if [ $(( M % 2 )) -ne 1 ]; then
+            echo "minute $M — skipping pm-snapshot-wc ping (2-min cadence, odd)."
+            exit 0
+          fi
+          if [ -z "$FILLS_CRON_SECRET" ]; then
+            echo "FILLS_CRON_SECRET not set — skipping pm-snapshot-wc ping (no-op)."
+            exit 0
+          fi
+          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
+          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
+            "https://www.thekahlahouse.com/api/pm-snapshot-wc?key=${KEY}" || echo "000")
+          echo "pm-snapshot-wc HTTP $code"
+
       # Pick Bot paperlog ping. /api/handicapper/paperlog auto-logs every
       # gate-cleared suggestion for upcoming MLB games (5h->1min window) into
       # pickbot_paperlog — the complete bot-suggestion dataset for the 2-week

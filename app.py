@@ -7312,6 +7312,112 @@ def api_handicapper_worldcup():
                     "matches": matches, **meta})
 
 
+def _wc_ensure_market(sb, away, home, start_iso):
+    """Select-or-insert a WORLDCUP markets row for one fixture. event_name is
+    canonical ('{away} @ {home}', away/home decided by sorted country key) so
+    the same match maps to ONE stable market_id no matter which feed (ESPN vs
+    PMM) named it first — no duplicate market rows across ticks. WORLDCUP is
+    excluded from the ESPN-markets ingest, so this is the sole creator of WC
+    market rows. Returns market_id or None (silent-fail). markets.id is
+    gen_random_uuid() so we don't pass one."""
+    ename = f"{away} @ {home}"
+    try:
+        ex = (sb.table("markets").select("id")
+              .eq("sport", "WORLDCUP").eq("event_name", ename)
+              .limit(1).execute().data) or []
+        if ex:
+            return ex[0]["id"]
+        ins = (sb.table("markets").insert(
+            {"sport": "WORLDCUP", "event_name": ename,
+             "event_start": start_iso, "status": "active"}).execute().data) or []
+        return ins[0]["id"] if ins else None
+    except Exception:
+        return None
+
+
+@app.route("/api/pm-snapshot-wc")
+def api_pm_snapshot_wc():
+    """Cron-pinged ~2/min. Logs Polymarket 1-X-2 (home/draw/away) cents for
+    UPCOMING World Cup matches into pm_snapshots — the 3-way exchange-history
+    clock the soccer sharp score will read (same dataset role pm-snapshot
+    plays for MLB/NBA/NHL). Built on _build_worldcup (the proven ESPN+PMM
+    reader) + _pm_insert_changed (dedup-on-cent-change). market_type='ml'
+    with three sides; line=NULL. Kalshi carries NO World Cup series, so PMM is
+    the sole feed — there's no cross-confirm second venue for soccer (it runs
+    PMM-only, like spreads/totals). Markets spine: each fixture gets a stable
+    WORLDCUP markets row via _wc_ensure_market. Live/finished matches are
+    skipped (pre-game history only). Auth: ?key= matched to PM_SNAPSHOT_SECRET
+    or FILLS_CRON_SECRET (NOT Firebase)."""
+    import pmm_markets as _pm
+    expected = (os.environ.get("PM_SNAPSHOT_SECRET")
+                or os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    provided = (request.args.get("key") or "").strip()
+    if not expected or not secrets.compare_digest(provided, expected):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+
+    now = datetime.now(timezone.utc)
+    matches, meta = _build_worldcup(now)
+
+    rows = []
+    st = {"matches": 0, "no_odds": 0, "no_start": 0,
+          "live_or_done": 0, "unmapped_sides": 0}
+    for m in matches:
+        results = m.get("results") or []
+        if not results:                          # ESPN game with no PMM odds yet
+            st["no_odds"] += 1
+            continue
+        si = m.get("start_time")
+        try:
+            sdt = datetime.fromisoformat((si or "").replace("Z", "+00:00")) if si else None
+        except Exception:
+            sdt = None
+        if sdt is None:
+            st["no_start"] += 1
+            continue
+        if sdt <= now:                           # pre-game only — no live/finished
+            st["live_or_done"] += 1
+            continue
+        t1, t2 = _pm._wc_teams_from_title(m.get("title") or "")
+        if not (t1 and t2):
+            continue
+        # Canonical orientation: away/home by sorted country key → one fixture
+        # is always the same market_id + the same side labels across ticks
+        # (WC venues are neutral, so home/away is just a stable label).
+        away, home = sorted([t1, t2], key=_wc_country_key)
+        ak, hk = _wc_country_key(away), _wc_country_key(home)
+        mid = _wc_ensure_market(sb, away, home, sdt.isoformat())
+        if not mid:
+            continue
+        st["matches"] += 1
+        for r in results:
+            label = (r.get("label") or "")
+            prob = r.get("prob")
+            try:
+                cents = int(round(float(prob) * 100)) if prob is not None else None
+            except (TypeError, ValueError):
+                cents = None
+            if cents is None or cents <= 0 or cents >= 100:   # no/degenerate quote
+                continue
+            ll = label.lower()
+            lk = _wc_country_key(label)
+            if "draw" in ll:
+                side = "draw"
+            elif lk == hk or _pm._name_match(label, home):
+                side = "home"
+            elif lk == ak or _pm._name_match(label, away):
+                side = "away"
+            else:
+                st["unmapped_sides"] += 1
+                continue
+            rows.append((mid, "pmm", "ml", side, None, cents))
+
+    inserted = _pm_insert_changed(sb, rows, now)
+    return jsonify({"ok": True, "inserted": inserted, "wc_meta": meta, **st})
+
+
 # ─────────────── Polymarket position → bot_picks sync ───────────────
 # Goal: the user's real Polymarket positions become the source of truth
 # for "did I take this pick" + actual fill price + resolution. Two
