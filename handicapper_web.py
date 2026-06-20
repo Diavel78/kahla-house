@@ -2219,18 +2219,20 @@ SPLITS_MIN_PP    = 10  # |money% − bets%| considered "material".
 SHARP_WEIGHT     = 0.7
 SPLITS_WEIGHT    = 0.3
 
-# Spread-only price filter — SYMMETRIC. A SPR pick is only worth showing
-# when its fair sits in a reasonable band (-150 ≤ fair ≤ +150):
-#   • fair ≤ -150 (CHALK)    → a leveraged ML at a worse price/risk — drop,
-#     let the ML candidate take its place.
-#   • fair ≥ +150 (LONGSHOT) → a leveraged-dog runline (e.g. underdog -1.5
-#     at +192/+292) — an equally lame bet with no edge; drop it too. This is
-#     the long-standing "nothing over +150 shows" rule; only the chalk half
-#     had ever been coded, so longshot runlines were leaking through as
-#     forced leans (the Reds -1.5 +292 bug). Doesn't apply to ML (a +155 ML
-#     dog is a legit bet — the user bets them) or TOT (always ~±120).
+# Spread-only price filter — SYMMETRIC band, aligned to Polymarket whole
+# cents. A SPR pick is only worth showing when its fair sits in the band
+# (-150 ≤ fair ≤ +186, i.e. 60¢ down to 35¢):
+#   • fair ≤ -150 (CHALK, > 60¢)    → a leveraged ML at a worse price/risk —
+#     drop, let the ML candidate take its place.
+#   • fair ≥ +186 (LONGSHOT, < 35¢) → a leveraged-dog runline (e.g. underdog
+#     -1.5 at +192/+292) — an equally lame bet with no edge; drop it too.
+#     This is the "nothing past the band shows" rule; only the chalk half had
+#     ever been coded, so longshot runlines leaked through as forced leans
+#     (the Reds -1.5 +292 bug). Doesn't apply to ML (a +155 ML dog is a legit
+#     bet the user takes) or TOT (always ~±120). Bounds are whole cents:
+#     -150 = 60¢, +186 = 35¢.
 SPR_CHALK_FAIR_CAP    = -150
-SPR_LONGSHOT_FAIR_CAP =  150
+SPR_LONGSHOT_FAIR_CAP =  186
 
 # When BOTH an ML and a SPR candidate exist on the same side, drop
 # the ML if its fair is at or below this cap. The leveraged SPR is
@@ -3942,9 +3944,10 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
     if not candidates:
         return []
 
-    # Drop out-of-band SPR — SYMMETRIC (-150 ≤ fair ≤ +150). Too chalky
-    # (≤ -150) is a worse-EV leveraged ML; too longshot (≥ +150) is a
-    # leveraged-dog runline with no edge (the Reds -1.5 +292 lean). Either
+    # Drop out-of-band SPR — band -150 ≤ fair ≤ +186 (60¢–35¢, Poly whole
+    # cents). Too chalky (≤ -150) is a worse-EV leveraged ML; too longshot
+    # (≥ +186) is a leveraged-dog runline with no edge (the Reds -1.5 +292
+    # lean). Either
     # way the SPR isn't worth showing — the ML candidate (if any) takes its
     # slot, and a chalk-flat game with only out-of-band SPR falls back to a
     # sane ML/TOT lean instead of a longshot runline.
