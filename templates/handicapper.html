@@ -1645,7 +1645,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                 // verdict is in. Hidden once logged / on a conflict (moot).
                 const showMt = p._mtChip && ps.state !== 'logged' && ps.state !== 'conflict';
                 const mtPill = showMt
-                    ? `<span class="mt-pill ${p._mt.rec === 'MAKE' ? 'make' : 'take'}" title="how to enter — full read on Details">${_esc(p._mtChip)}</span>`
+                    ? `<span class="mt-pill ${String(p._mt.rec).indexOf('MAKE') === 0 ? 'make' : 'take'}" title="how to enter — full read on Details">${_esc(p._mtChip)}</span>`
                     : '';
                 return `<span class="pick-chip-row"><button class="pick-chip ${cls}" title="${_esc(title)}" onclick="${click}">${_esc(label)}</button>${mtPill}</span>`;
             }).join('');
@@ -2663,9 +2663,13 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
     // Short directive for the game-card pill: "MAKE Polymarket 46¢" / "TAKE
     // Kalshi 49¢" — the cheapest fillable across BOTH venues. The full read
     // (all four options) lives on Details.
+    // Show the half-cent when there is one (MAKE+ rests at 47.5¢ — rounding
+    // it to 48 would tell you the wrong place to post).
+    function _mtCents(v) { return Number.isInteger(Number(v)) ? String(v) : Number(v).toFixed(1); }
+
     function _mtShort(j) {
         if (!j || !j.available || j.price == null) return null;
-        return `${j.rec} ${j.venue_label || 'Polymarket'} ${Math.round(j.price)}¢`;
+        return `${j.rec} ${j.venue_label || 'Polymarket'} ${_mtCents(j.price)}¢`;
     }
 
     function _loadAllMakeTake(root) {
@@ -2701,8 +2705,8 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
 
     function _renderMakeTakeChip(chip, detail, j) {
         if (!chip) return;
-        chip.className = 'mt-chip ' + (j.rec === 'MAKE' ? 'make' : 'take');
-        chip.innerHTML = `<span class="mt-tag">${_esc(j.rec)}</span> ${_esc(j.venue_label || 'Polymarket')} ${Math.round(j.price)}¢`;
+        chip.className = 'mt-chip ' + (String(j.rec).indexOf('MAKE') === 0 ? 'make' : 'take');
+        chip.innerHTML = `<span class="mt-tag">${_esc(j.rec)}</span> ${_esc(j.venue_label || 'Polymarket')} ${_mtCents(j.price)}¢`;
         if (detail) detail.innerHTML = _esc(_makeTakeDetail(j));
     }
 
@@ -2736,10 +2740,14 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         const j = _makeTakeCache.get(_mtKey(body.market_id, body.market_type, body.side));
         if (!j || !j.available || j.price == null) return body;
         body.book = (j.venue === 'KALSHI') ? 'KALSHI' : 'PMM';
-        const amer = _centsToAmer(j.price);
+        // Log the EFFECTIVE cost (all-in, fee/rebate baked in) so CLV + to-WIN
+        // are honest — not the directive post price the chip shows.
+        const eff = (j.entry_cents != null) ? j.entry_cents : j.price;
+        const amer = _centsToAmer(eff);
         if (amer != null) { body.price = amer; body._price = amer; }
         body.signal_blob = Object.assign({}, body.signal_blob, {
-            execution: { rec: j.rec, venue: j.venue, price: j.price,
+            execution: { rec: j.rec, venue: j.venue,
+                         post_price: j.price, entry_cents: eff,
                          entry_book: body.book, options: j.options || [] } });
         return body;
     }

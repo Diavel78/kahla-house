@@ -2694,7 +2694,11 @@ def _pmm_book(client, slug: str) -> dict | None:
         out = []
         for r in (rows or []):
             try:
-                c = round(float((r.get("px") or {}).get("value")) * 100)
+                # Polymarket now quotes HALF-CENT ticks — round to the nearest
+                # 0.5c (not 1c) so a 47.5c bid/ask is preserved, not collapsed
+                # onto 47/48. The half-cent is load-bearing for the maker
+                # queue-jump (MAKE+) in _cross_book_signal.
+                c = round(float((r.get("px") or {}).get("value")) * 200) / 2.0
                 q = float(r.get("qty"))
                 if 0 < c < 100 and q > 0:
                     out.append((c, q))
@@ -2896,8 +2900,10 @@ def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
     TAKE crosses at the ask + taker fee; always fills. Returns the chosen
     option + all four for transparency, or None if neither book is usable."""
     opts: list[dict] = []
+    inv_take = round(1.0 / _TAKE_IMB, 2)
 
-    def add(venue: str, book: dict | None, taker_fee, maker_adj):
+    def add(venue: str, book: dict | None, taker_fee, maker_adj,
+            half_cent: bool = False):
         if not book or book.get("best_bid") is None or book.get("best_ask") is None:
             return
         bb, ba = book["best_bid"], book["best_ask"]
@@ -2905,23 +2911,36 @@ def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
         l1a = round(book["asks"][0][1]) if book.get("asks") else 0
         timb = round(l1b / l1a, 2) if l1a else None
         bid_heavy = (timb is not None and timb >= _TAKE_IMB)
-        ask_heavy = (timb is not None and timb <= round(1.0 / _TAKE_IMB, 2))
-        clock_ok = (starts_in_min is None or starts_in_min > 30 or ask_heavy)
-        # MAKE all-in = rest at bid ± maker adjustment (PMM −rebate, Kalshi +fee).
-        opts.append({"venue": venue, "rec": "MAKE",
+        ask_heavy = (timb is not None and timb <= inv_take)
+        clock_ok = (starts_in_min is None or starts_in_min > 30)
+        base = {"bid": bb, "ask": ba, "touch_imb": timb,
+                "queue_ahead": l1b, "ask_touch": l1a}
+        # PLAIN MAKE — rest at the bid. A CONFIDENT fill only when there are
+        # more sellers than buyers at the touch (ask-heavy): sellers come to
+        # your bid. On a balanced/bid-heavy book a resting bid sits behind the
+        # queue and may never fill — that's what MAKE+ is for. Cost basis =
+        # bid ± maker adj (PMM EARNS a rebate, Kalshi PAYS a maker fee).
+        opts.append({**base, "venue": venue, "rec": "MAKE",
                      "all_in": round(bb + maker_adj(bb), 2),
-                     "fillable": (not bid_heavy) and clock_ok,
-                     "bid": bb, "ask": ba, "touch_imb": timb,
-                     "queue_ahead": l1b, "ask_touch": l1a})
-        # TAKE all-in = cross at ask + taker fee. Always fills.
-        opts.append({"venue": venue, "rec": "TAKE",
+                     "fillable": ask_heavy, "post_price": bb})
+        # MAKE+ (Polymarket half-cent queue jump). Rest at bid+0.5c → step in
+        # FRONT of the whole bid queue for half a cent → fill on the next
+        # sell, still as a maker (earns the rebate). Fillable whenever the
+        # touch isn't a blowout (bid_heavy → price gapping up past your
+        # half-cent, must take) and the clock allows; needs ≥1c spread room so
+        # bid+0.5 stays below the ask (else it's a cross = take).
+        if half_cent and (not bid_heavy) and clock_ok and (bb + 0.5) < ba:
+            hp = bb + 0.5
+            opts.append({**base, "venue": venue, "rec": "MAKE+",
+                         "all_in": round(hp + maker_adj(hp), 2),
+                         "fillable": True, "post_price": hp})
+        # TAKE — cross at ask + taker fee. Always fills.
+        opts.append({**base, "venue": venue, "rec": "TAKE",
                      "all_in": round(ba + taker_fee(ba), 2),
-                     "fillable": True,
-                     "bid": bb, "ask": ba, "touch_imb": timb,
-                     "queue_ahead": l1b, "ask_touch": l1a})
+                     "fillable": True})
 
     add("POLYMARKET", pmm_book, _pmm_taker_fee_cents,
-        lambda c: -_pmm_maker_rebate_cents(c))
+        lambda c: -_pmm_maker_rebate_cents(c), half_cent=True)
     add("KALSHI", kalshi_book, _kalshi_taker_fee_cents,
         lambda c: _kalshi_maker_fee_cents(c))
     if not opts:
@@ -2934,9 +2953,17 @@ def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
            + (f" vs {runner['all_in']}c next-best ({runner['rec'].lower()} "
               f"{vlabel[runner['venue']]})" if runner else "")
            + (f"; {vlabel[best['venue']]} touch {best['touch_imb']}x" if best['touch_imb'] is not None else ""))
+    # `price` is the ACTIONABLE directive shown on the chip: where to rest a
+    # maker (bid / bid+0.5) or the fee-inclusive cross for a take. `entry_cents`
+    # is the EFFECTIVE cost (all-in, fee/rebate baked in) the pick logs so CLV
+    # and to-WIN reflect the real edge — the two differ for a maker by the
+    # rebate.
+    directive = best.get("post_price")
+    if directive is None:
+        directive = best["all_in"]
     return {
         "rec": best["rec"], "venue": best["venue"], "venue_label": vlabel[best["venue"]],
-        "price": best["all_in"],
+        "price": directive, "entry_cents": best["all_in"],
         "best_bid": best["bid"], "best_ask": best["ask"],
         "touch_imbalance": best["touch_imb"],
         "queue_ahead": best["queue_ahead"], "ask_touch": best["ask_touch"],
