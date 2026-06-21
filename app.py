@@ -2642,82 +2642,6 @@ def debug_kalshi():
     return jsonify(_fetch_kalshi_markets(series))
 
 
-@app.route("/debug-kalshi-discover")
-def debug_kalshi_discover():
-    """TEMP discovery: find Kalshi's MLB spread (run-line) + total (run total)
-    series tickers + their line encoding. The ML series KXMLBGAME is known and
-    wired; SPR/TOT live under separate series we haven't locked. Lists Kalshi
-    series + probes candidate tickers, dumping to the kalshi_debug table (the
-    sandbox can't reach Kalshi — read the result via run_sql). Public market
-    data only, no secrets. Remove once the SPR/TOT readers are built."""
-    sb = get_supabase()
-    headers = {"Accept": "application/json", "User-Agent": "kahla-house/1.0"}
-    out: dict = {"series_hits": [], "probes": []}
-
-    def log(info: str):
-        try:
-            if sb:
-                sb.table("kalshi_debug").insert({"info": info[:480]}).execute()
-        except Exception:
-            pass
-
-    # 1) List series; collect baseball-ish tickers/titles. Try a few param
-    #    shapes since /series pagination/category support varies.
-    kws = ("MLB", "BASEBALL", "RUN", "TOTAL", "SPREAD", "HANDICAP")
-    got_list = False
-    for params in ({"limit": 1000}, {"category": "Sports", "limit": 1000},
-                   {"limit": 200}):
-        if got_list:
-            break
-        for base in _KALSHI_BASES:
-            try:
-                r = _http.get(f"{base}/series", params=params,
-                              headers=headers, timeout=12)
-            except Exception as e:
-                log(f"series ERR {type(e).__name__} {str(e)[:70]} @ {params}")
-                continue
-            if r.status_code != 200:
-                log(f"series HTTP {r.status_code} @ {params}: {r.text[:70]}")
-                continue
-            try:
-                data = r.json()
-            except Exception:
-                log(f"series badjson @ {params}")
-                continue
-            arr = data.get("series") if isinstance(data, dict) else None
-            if not arr:
-                log(f"series no-arr @ {params} keys="
-                    + str(list(data.keys()) if isinstance(data, dict) else type(data).__name__))
-                continue
-            hits = []
-            for s in arr:
-                tk = (s.get("ticker") or "").upper()
-                ti = (s.get("title") or "")
-                if (any(k in tk for k in kws) or "baseball" in ti.lower()
-                        or "mlb" in ti.lower()):
-                    hits.append(f"{tk} | {ti[:46]}")
-            log(f"series OK @ {params}: total={len(arr)} mlb_hits={len(hits)}")
-            for h in hits[:50]:
-                log(f"  S {h}")
-            out["series_hits"] = hits
-            got_list = True
-            break
-
-    # 2) Probe candidate SPR/TOT series tickers directly; dump a sample row's
-    #    ticker/title/subtitle so we can read the line encoding.
-    for cand in ("KXMLBTOTAL", "KXMLBRUNS", "KXMLBRUNSTOTAL", "KXMLBGAMETOTAL",
-                 "KXMLBSPREAD", "KXMLBRUNLINE", "KXMLBHANDICAP", "KXMLBML"):
-        res = _fetch_kalshi_markets(cand)
-        log(f"probe {cand}: ok={res.get('ok')} count={res.get('count')} "
-            f"http={res.get('http_status')}")
-        for m in (res.get("markets") or [])[:2]:
-            log(f"  {cand} tkr={m.get('ticker')} title={(m.get('title') or '')[:44]} "
-                f"sub={m.get('team')} bid={m.get('yes_bid_c')} ask={m.get('yes_ask_c')}")
-        out["probes"].append({"series": cand, "ok": res.get("ok"),
-                              "count": res.get("count")})
-    return jsonify(out)
-
-
 def _fetch_kalshi_orderbook(ticker: str) -> dict:
     """Full Kalshi order book (all bid levels, both sides) for one market.
     Public, no auth. `GET /markets/{ticker}/orderbook`."""
@@ -2965,6 +2889,77 @@ def _kalshi_side_book(sport: str, away: str, home: str, side: str) -> dict | Non
     return None
 
 
+# MLB run-total + run-line series — confirmed live via /debug-kalshi-discover
+# (June 2026). TOTAL (KXMLBTOTAL): YES = "Over (N-0.5) runs", ticker suffix
+# N = line + 0.5 (8.5 → 9); UNDER is the inverse side. SPREAD (KXMLBSPREAD)
+# is an alt-ladder: YES = "{team} wins by over (N-0.5) runs", suffix
+# {teamcode}{N} with N = margin + 0.5 — so the standard −1.5 run-line =
+# "wins by over 1.5" = suffix {fav}2; the +1.5 dog is the inverse of the
+# favorite's market. Same {YY}{MON}{DD}{HHMM}{AWAY}{HOME} event encoding +
+# team codes as KXMLBGAME.
+_KALSHI_LINE_SERIES = {"MLB": {"total": "KXMLBTOTAL", "spread": "KXMLBSPREAD"}}
+
+
+def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
+                      side: str, line) -> dict | None:
+    """Kalshi top-of-book for a TOTAL or SPREAD pick, or None. Same shape as
+    _pmm_book (bids = buyers of THIS side). Maps our (market_type, side, line)
+    onto Kalshi's YES contract (Over for totals; '{fav} wins by over X.5' for
+    spreads) and INVERTS the book for the synthesized side (under / run-line
+    dog). Currently MLB-only — the line series are MLB; add others to
+    _KALSHI_LINE_SERIES + confirm their suffix encoding before enabling."""
+    mt = ("total" if market_type in ("total", "tot")
+          else "spread" if market_type in ("spread", "spr") else None)
+    if mt is None or line is None:
+        return None
+    series = (_KALSHI_LINE_SERIES.get(sport) or {}).get(mt)
+    if not series:
+        return None
+    try:
+        L = float(line)
+    except (TypeError, ValueError):
+        return None
+    ac = _our_team_to_kalshi_code(sport, away)
+    hc = _our_team_to_kalshi_code(sport, home)
+    if not (ac and hc):
+        return None
+    mkts = (_fetch_kalshi_markets(series).get("markets") or [])
+
+    if mt == "total":
+        want = str(int(round(abs(L) + 0.5)))          # 8.5 → "9"
+        for m in mkts:
+            tk = m.get("ticker") or ""
+            et = m.get("event_ticker") or ""
+            if "-" not in tk or tk.rsplit("-", 1)[1] != want:
+                continue
+            if ac not in et or hc not in et:
+                continue
+            book = _kalshi_book(tk)
+            return book if side == "over" else _invert_book(book)   # YES = OVER
+        return None
+
+    # spread: the YES market is always the FAVORITE "wins by over (mag-0.5)".
+    n = int(round(abs(L) + 0.5))                       # 1.5 → 2
+    fav_is_picked = (L < 0)                            # negative line = laying runs
+    if fav_is_picked:
+        fav_code = _our_team_to_kalshi_code(sport, home if side == "home" else away)
+    else:
+        fav_code = ac if side == "home" else hc        # the OTHER team is the favorite
+    if not fav_code:
+        return None
+    want = f"{fav_code}{n}"
+    for m in mkts:
+        tk = m.get("ticker") or ""
+        et = m.get("event_ticker") or ""
+        if "-" not in tk or tk.rsplit("-", 1)[1] != want:
+            continue
+        if ac not in et or hc not in et:
+            continue
+        book = _kalshi_book(tk)
+        return book if fav_is_picked else _invert_book(book)
+    return None
+
+
 def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
                        units: float = 1, starts_in_min: float | None = None) -> dict | None:
     """Best execution across {MAKE,TAKE} × {Polymarket, Kalshi} for BUYING
@@ -3159,17 +3154,25 @@ def api_make_take():
     side = (request.args.get("side") or "").strip()
     market_type = (request.args.get("market_type") or "").strip()
     try:
+        line = float(request.args.get("line"))
+    except (TypeError, ValueError):
+        line = None
+    try:
         book = _pmm_book(get_client(), slug)
     except Exception as e:
         return jsonify({"ok": True, "available": False,
                         "error": f"{type(e).__name__}: {e}"[:160]})
     if inverse:
         book = _invert_book(book)
-    # Kalshi only for moneyline (the reader is ML-only) on covered sports.
+    # Kalshi cross-shopped on ALL main markets now (ML via the game series,
+    # TOTAL/SPREAD via the run-total/run-line series) on covered sports.
     kbook = None
-    if market_type in ("moneyline", "ml") and sport and away and home and side in ("home", "away"):
+    if sport and away and home:
         try:
-            kbook = _kalshi_side_book(sport, away, home, side)
+            if market_type in ("moneyline", "ml") and side in ("home", "away"):
+                kbook = _kalshi_side_book(sport, away, home, side)
+            elif market_type in ("total", "tot", "spread", "spr") and line is not None:
+                kbook = _kalshi_line_book(sport, away, home, market_type, side, line)
         except Exception:
             kbook = None
     sig = _cross_book_signal(book, kbook, units=units, starts_in_min=sim)
@@ -3181,14 +3184,18 @@ def api_make_take():
 
 @app.route("/debug-crossbook")
 def debug_crossbook():
-    """PUBLIC verify of the 4-way make/take (Polymarket + Kalshi) for the
-    soonest upcoming game of a sport. Public market data only (no secrets).
-    ?sport=mlb&side=home — shows both side books + the cross verdict so the
-    cross-venue logic can be checked from Vercel (sandbox can't reach
-    Kalshi/PMM). Removable after verification."""
+    """PUBLIC verify of the cross-venue make/take (Polymarket + Kalshi) for
+    the soonest upcoming game of a sport. Public market data only (no secrets).
+    ?sport=mlb&side=home&market_type=total — shows both side books + the cross
+    verdict so the cross-venue logic can be checked from Vercel (sandbox can't
+    reach Kalshi/PMM). market_type ml|total|spread (default ml); for total/
+    spread it uses the soonest game's PMM line for that side."""
     sport = (request.args.get("sport") or "MLB").upper()
     side = (request.args.get("side") or "home").strip()
-    out: dict = {"sport": sport, "side": side}
+    mt_raw = (request.args.get("market_type") or "ml").strip().lower()
+    mt = ("total" if mt_raw in ("total", "tot")
+          else "spread" if mt_raw in ("spread", "spr") else "ml")
+    out: dict = {"sport": sport, "side": side, "market_type": mt}
     try:
         client = get_client()
         sb = get_supabase()
@@ -3202,12 +3209,18 @@ def debug_crossbook():
         out["game"] = {"away": aw, "home": hm, "start": g[0]["event_start"]}
         import pmm_markets as _pm
         data = _pm.lookup(client, sport, aw, hm, g[0]["event_start"])
-        ml = (data or {}).get("ml") or []
-        entry = next((e for e in ml if e.get("side") == side), None)
+        pmm_key = {"ml": "ml", "total": "total", "spread": "spread"}[mt]
+        rows = (data or {}).get(pmm_key) or []
+        entry = next((e for e in rows if e.get("side") == side), None)
+        out["pmm_line"] = entry.get("line") if entry else None
         pbook = _pmm_book(client, entry["slug"]) if entry and entry.get("slug") else None
         if entry and entry.get("synthetic") and pbook:
             pbook = _invert_book(pbook)
-        kbook = _kalshi_side_book(sport, aw, hm, side)
+        if mt == "ml":
+            kbook = _kalshi_side_book(sport, aw, hm, side)
+        else:
+            kbook = _kalshi_line_book(sport, aw, hm, mt, side,
+                                      entry.get("line") if entry else None)
         out["pmm_book"] = None if not pbook else {
             "best_bid": pbook["best_bid"], "best_ask": pbook["best_ask"],
             "bids": pbook["bids"][:3], "asks": pbook["asks"][:3]}

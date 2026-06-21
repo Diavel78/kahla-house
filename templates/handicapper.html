@@ -1772,8 +1772,9 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                         // _makeTakeCache too, so oneTapLog enters at the rec.
                         await Promise.all(picks.map(async p => {
                             if (!p._slug || p._lean) return;   // no book call for leans
+                            const _ln = p._body ? (p._body.line != null ? p._body.line : p._body._line) : null;
                             const j = await _fetchMakeTakeVerdict(p._slug, mid, p.market_type, p.side, p.units, d.starts_in_min, p._inv,
-                                { sport: d.sport, away: d.away, home: d.home });
+                                { sport: d.sport, away: d.away, home: d.home }, _ln);
                             if (j) { p._mt = j; p._mtChip = _mtShort(j); }
                         }));
                         _verdictCache.set(mid, { picks, fetchedAt: Date.now() });
@@ -2282,6 +2283,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                         data-sim="${d.starts_in_min != null ? d.starts_in_min : ''}"
                         data-inverse="${s.pmm_synthetic ? 1 : ''}"
                         data-mt="${_esc(s.market_type)}"
+                        data-line="${s.line != null ? s.line : ''}"
                         data-sport="${_esc(d.sport || '')}"
                         data-away="${_esc(d.away || '')}"
                         data-home="${_esc(d.home || '')}">
@@ -2640,7 +2642,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
     // "this way" pill rides the chip). Caches in _makeTakeCache so a one-tap
     // log enters at the rec. ctx = {sport, away, home} lets the backend
     // consult Kalshi for moneyline. Returns the JSON or null.
-    async function _fetchMakeTakeVerdict(slug, mid, mt, side, units, sim, inverse, ctx) {
+    async function _fetchMakeTakeVerdict(slug, mid, mt, side, units, sim, inverse, ctx, line) {
         if (!slug) return null;
         const p = new URLSearchParams({ slug });
         if (units != null) p.set('units', units);
@@ -2648,6 +2650,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         if (inverse) p.set('inverse', '1');   // synthetic NO side — flip the book
         if (mt) p.set('market_type', mt);
         if (side) p.set('side', side);
+        if (line != null && line !== '') p.set('line', line);   // TOT/SPR Kalshi match
         if (ctx && ctx.sport) p.set('sport', ctx.sport);
         if (ctx && ctx.away) p.set('away', ctx.away);
         if (ctx && ctx.home) p.set('home', ctx.home);
@@ -2691,6 +2694,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         if (wrap.getAttribute('data-inverse')) p.set('inverse', '1');  // synthetic NO side
         if (mt) p.set('market_type', mt);
         if (side) p.set('side', side);
+        const ln = wrap.getAttribute('data-line'); if (ln !== '' && ln != null) p.set('line', ln);
         ['sport', 'away', 'home'].forEach(k => {
             const v = wrap.getAttribute('data-' + k); if (v) p.set(k, v);
         });
