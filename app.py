@@ -2642,6 +2642,82 @@ def debug_kalshi():
     return jsonify(_fetch_kalshi_markets(series))
 
 
+@app.route("/debug-kalshi-discover")
+def debug_kalshi_discover():
+    """TEMP discovery: find Kalshi's MLB spread (run-line) + total (run total)
+    series tickers + their line encoding. The ML series KXMLBGAME is known and
+    wired; SPR/TOT live under separate series we haven't locked. Lists Kalshi
+    series + probes candidate tickers, dumping to the kalshi_debug table (the
+    sandbox can't reach Kalshi — read the result via run_sql). Public market
+    data only, no secrets. Remove once the SPR/TOT readers are built."""
+    sb = get_supabase()
+    headers = {"Accept": "application/json", "User-Agent": "kahla-house/1.0"}
+    out: dict = {"series_hits": [], "probes": []}
+
+    def log(info: str):
+        try:
+            if sb:
+                sb.table("kalshi_debug").insert({"info": info[:480]}).execute()
+        except Exception:
+            pass
+
+    # 1) List series; collect baseball-ish tickers/titles. Try a few param
+    #    shapes since /series pagination/category support varies.
+    kws = ("MLB", "BASEBALL", "RUN", "TOTAL", "SPREAD", "HANDICAP")
+    got_list = False
+    for params in ({"limit": 1000}, {"category": "Sports", "limit": 1000},
+                   {"limit": 200}):
+        if got_list:
+            break
+        for base in _KALSHI_BASES:
+            try:
+                r = _http.get(f"{base}/series", params=params,
+                              headers=headers, timeout=12)
+            except Exception as e:
+                log(f"series ERR {type(e).__name__} {str(e)[:70]} @ {params}")
+                continue
+            if r.status_code != 200:
+                log(f"series HTTP {r.status_code} @ {params}: {r.text[:70]}")
+                continue
+            try:
+                data = r.json()
+            except Exception:
+                log(f"series badjson @ {params}")
+                continue
+            arr = data.get("series") if isinstance(data, dict) else None
+            if not arr:
+                log(f"series no-arr @ {params} keys="
+                    + str(list(data.keys()) if isinstance(data, dict) else type(data).__name__))
+                continue
+            hits = []
+            for s in arr:
+                tk = (s.get("ticker") or "").upper()
+                ti = (s.get("title") or "")
+                if (any(k in tk for k in kws) or "baseball" in ti.lower()
+                        or "mlb" in ti.lower()):
+                    hits.append(f"{tk} | {ti[:46]}")
+            log(f"series OK @ {params}: total={len(arr)} mlb_hits={len(hits)}")
+            for h in hits[:50]:
+                log(f"  S {h}")
+            out["series_hits"] = hits
+            got_list = True
+            break
+
+    # 2) Probe candidate SPR/TOT series tickers directly; dump a sample row's
+    #    ticker/title/subtitle so we can read the line encoding.
+    for cand in ("KXMLBTOTAL", "KXMLBRUNS", "KXMLBRUNSTOTAL", "KXMLBGAMETOTAL",
+                 "KXMLBSPREAD", "KXMLBRUNLINE", "KXMLBHANDICAP", "KXMLBML"):
+        res = _fetch_kalshi_markets(cand)
+        log(f"probe {cand}: ok={res.get('ok')} count={res.get('count')} "
+            f"http={res.get('http_status')}")
+        for m in (res.get("markets") or [])[:2]:
+            log(f"  {cand} tkr={m.get('ticker')} title={(m.get('title') or '')[:44]} "
+                f"sub={m.get('team')} bid={m.get('yes_bid_c')} ask={m.get('yes_ask_c')}")
+        out["probes"].append({"series": cand, "ok": res.get("ok"),
+                              "count": res.get("count")})
+    return jsonify(out)
+
+
 def _fetch_kalshi_orderbook(ticker: str) -> dict:
     """Full Kalshi order book (all bid levels, both sides) for one market.
     Public, no auth. `GET /markets/{ticker}/orderbook`."""
