@@ -6390,9 +6390,46 @@ def _live_decided_prob(bet: dict, m: dict):
 _PMM_LIVE_KEY = {"moneyline": "ml", "spread": "spread", "total": "total", "nrfi": "nrfi"}
 
 
+_LIVE_BOOK_TTL = 20  # seconds — fresh enough for a live ring; bounds book reads
+_LIVE_BOOK_CACHE: dict[tuple, tuple[float, float]] = {}   # (slug,inv) -> (ts, mid)
+
+
+def _live_book_mid(client, slug: str, synthetic: bool):
+    """Fresh live implied-prob (mid) for ONE PMM market via a single
+    lightweight order-book read (_pmm_book) — NOT the heavy event lookup.
+    This is the trick that lets the live ring refresh every 30s without the
+    cost of re-running event discovery: the slug comes from the 5-min-cached
+    lookup, but the QUOTE is read live here. Cached ~20s per (slug, side) so a
+    30s poll re-reads fresh while a faster poll can't run away. 0<mid<1 or None."""
+    if not slug or client is None:
+        return None
+    key = (slug, bool(synthetic))
+    now = time.time()
+    hit = _LIVE_BOOK_CACHE.get(key)
+    if hit and (now - hit[0]) < _LIVE_BOOK_TTL:
+        return hit[1]
+    try:
+        book = _pmm_book(client, slug)
+        if synthetic:
+            book = _invert_book(book)
+    except Exception:
+        book = None
+    if not book or book.get("best_bid") is None or book.get("best_ask") is None:
+        return None
+    mid = (book["best_bid"] + book["best_ask"]) / 200.0      # cents → prob, mid
+    if not (0.0 < mid < 1.0):
+        return None
+    mid = round(mid, 4)
+    _LIVE_BOOK_CACHE[key] = (now, mid)
+    return mid
+
+
 def _live_market_prob(bet: dict, away: str, home: str, client, pmm_cache: dict):
     """Current Polymarket implied probability for the bet's side (the live
-    'odds of winning'), or None when PMM has no live market for it."""
+    'odds of winning'), or None when PMM has no live market for it. The heavy
+    event lookup (which market is this?) is 5-min cached; the live QUOTE is a
+    fresh ~30s order-book read via _live_book_mid, so the ring tracks the live
+    price without re-running discovery every tick."""
     mid = bet.get("market_id")
     if mid not in pmm_cache:
         try:
@@ -6413,6 +6450,12 @@ def _live_market_prob(bet: dict, away: str, home: str, client, pmm_cache: dict):
         entry = pmm_markets.best_line_for(pmm, key, bet.get("side"), bet.get("entry_line"))
     except Exception:
         entry = None
+    # Fresh live mid from a single lightweight book read on the discovered slug.
+    if entry and entry.get("slug"):
+        fresh = _live_book_mid(client, entry["slug"], bool(entry.get("synthetic")))
+        if fresh is not None:
+            return fresh
+    # Fallback: the (up to 5-min) cached quote mid from the lookup payload.
     q = (entry or {}).get("quote") or {}
     mid_prob = q.get("mid")
     return round(mid_prob, 4) if isinstance(mid_prob, (int, float)) else None
