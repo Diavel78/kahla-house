@@ -6403,6 +6403,7 @@ def _live_book_mid(client, slug: str, synthetic: bool):
     30s poll re-reads fresh while a faster poll can't run away. 0<mid<1 or None."""
     if not slug or client is None:
         return None
+    import time
     key = (slug, bool(synthetic))
     now = time.time()
     hit = _LIVE_BOOK_CACHE.get(key)
