@@ -23,10 +23,13 @@ PER-BET-TYPE (June 2026): the markets do NOT share a hot zone (live data
 showed ML steams ~150-180m out, totals want ~30-60 + 180-210, NRFI lives
 far out), so step 1-4 run BOTH pooled (all markets → the `zones` column)
 AND per market_type (→ `zones_by_market`). A market only earns its own
-zones once it clears MIN_SAMPLE on its OWN rows; until then it's omitted
-and inherits the pooled zones at runtime
-(handicapper_web._load_prime_zones_by_market). NRFI is excluded from timing
-tuning entirely (not in TIMED_MARKETS) — its sizing is flat, not zone-gated.
+zones once it clears MIN_MARKET_SAMPLE on its OWN rows; until then it's
+omitted and inherits the pooled zones at runtime
+(handicapper_web._load_prime_zones_by_market). The pooled `zones` column is
+built from the SIDES only (ML/SPR/TOT); NRFI is tracked as its own market
+in zones_by_market (TUNED_MARKETS) but never pooled — its timing edge is the
+opposite shape. NRFI sizing is still flat 0.5u (not yet zone-gated); wiring
+its zone to sizing is a follow-up.
 
 Safe by construction: thin data, or no qualifying zone (pooled OR a given
 market), leaves that scope untouched / falling back to pooled.
@@ -50,7 +53,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 # ── bands + rails ────────────────────────────────────────────────────
 BIN_WIDTH       = 30      # minute band width
-MAX_MIN         = 360     # bands span 0..360; sim beyond is "far" (never prime)
+# Zones never form beyond this — it's the PRIME CEILING, not just a histogram
+# edge. Capped at 210 (3.5h) to match (a) the strategy thesis ("sharp money
+# moves early — proven ~3.5h out, never further") and (b) the frontend's
+# chip/eval window (~210min). Beyond it there are no chips and the data is
+# thin + mostly negative, so a lone barely-positive far band (e.g. the 270-300
+# +0.08/u blip flanked by -0.20 and -0.29 neighbours) was getting crowned
+# "prime" and lighting a green box on a 5-hours-out game that offered no
+# action. If you ever raise this, the frontend EVAL window must move with it
+# or the glow/chip mismatch returns.
+MAX_MIN         = 210     # bands span 0..210; sim beyond is "far" (never prime)
 MIN_BIN_SAMPLE  = 12      # picks in a band before it can be "good"
 ROI_FLOOR       = 0.0     # a band must beat this mean unit-ROI to be "good"
 MIN_ZONE_SAMPLE = 20      # total picks in a merged zone to keep it
