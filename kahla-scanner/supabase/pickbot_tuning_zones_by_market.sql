@@ -1,0 +1,17 @@
+-- Per-bet-type prime zones (June 2026).
+--
+-- The pooled `zones` column blended every market's timing edge into one
+-- set of windows. Live data (15d paperlog) showed the markets DON'T share
+-- a hot zone: ML's edge clusters ~150-180m out, totals want ~30-60 and
+-- 180-210, NRFI lives far out (>210). Pooling forced each market to "bet"
+-- partly in another market's dead zone. This column lets the tuner write a
+-- separate zone list per market_type.
+--
+-- Shape: jsonb object, e.g.
+--   {"moneyline": [[150,180]], "total": [[30,60],[180,210]], "spread": [[30,90]]}
+-- A market absent from the object falls back to the pooled `zones` at
+-- runtime (handicapper_web._load_prime_zones_by_market), so a market with
+-- too little sample keeps the blended behaviour until it earns its own.
+--
+-- Idempotent.
+alter table pickbot_tuning add column if not exists zones_by_market jsonb;

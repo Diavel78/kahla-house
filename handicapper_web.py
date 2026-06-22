@@ -2349,38 +2349,103 @@ EVAL_WINDOW_MAX = 180                  # page evaluator/chips reach the prime ed
 # hole between them), which a single contiguous span can't express.
 # _PRIME_ZONES is the fallback when the table is empty/unreachable.
 _PRIME_ZONES = [(60, 180)]   # fallback (old single-span behaviour)
-_PRIME_WINDOW_CACHE: dict = {"zones": None, "at": 0.0}
+# Per-bet-type prime zones (June 2026): the markets don't share a hot zone,
+# so the tuner writes a separate zone list per market_type to
+# `pickbot_tuning.zones_by_market`. A market absent from that map inherits
+# the pooled `zones` (the `_pooled` key here). Cache holds both.
+_PRIME_WINDOW_CACHE: dict = {"zones": None, "by_market": None, "at": 0.0}
 _PRIME_WINDOW_TTL = 300.0   # seconds
+_TIMED_MARKETS = ("moneyline", "spread", "total")
 
 
-def _load_prime_zones(sb) -> list[tuple[int, int]]:
-    """The tuned prime ZONES from `pickbot_tuning`, cached 5 min. Reads the
-    `zones` jsonb list; falls back to [[prime_lo, prime_hi]] then to the
-    _PRIME_ZONES constant. Silent-fail."""
+def _load_prime_tuning(sb) -> tuple[list[tuple[int, int]], dict]:
+    """Load BOTH the pooled prime zones and the per-market map from
+    `pickbot_tuning`, cached 5 min. Returns (pooled_zones, by_market) where
+    by_market is {market_type: [(lo,hi),…]} (markets without their own
+    tuned zones are simply absent → callers fall back to pooled).
+    Silent-fail to the _PRIME_ZONES constant."""
     now = time.time()
     c = _PRIME_WINDOW_CACHE
     if c["zones"] is not None and (now - c["at"]) < _PRIME_WINDOW_TTL:
-        return c["zones"]
+        return c["zones"], c["by_market"]
     zones = _PRIME_ZONES
+    by_market: dict = {}
     try:
         rows = (sb.table("pickbot_tuning")
-                .select("prime_lo,prime_hi,zones")
+                .select("prime_lo,prime_hi,zones,zones_by_market")
                 .eq("id", 1)
                 .limit(1)
                 .execute().data) or []
         if rows:
-            raw = rows[0].get("zones")
-            parsed = _parse_zones(raw)
+            parsed = _parse_zones(rows[0].get("zones"))
             if parsed:
                 zones = parsed
             else:
                 lo, hi = rows[0].get("prime_lo"), rows[0].get("prime_hi")
                 if lo is not None and hi is not None and 0 <= lo < hi:
                     zones = [(int(lo), int(hi))]
+            raw_bm = rows[0].get("zones_by_market")
+            if isinstance(raw_bm, str):
+                try:
+                    raw_bm = json.loads(raw_bm)
+                except (TypeError, ValueError):
+                    raw_bm = None
+            if isinstance(raw_bm, dict):
+                for mt, segs in raw_bm.items():
+                    p = _parse_zones(segs)
+                    if p:
+                        by_market[mt] = p
     except Exception:
         pass
-    c["zones"], c["at"] = zones, now
-    return zones
+    c["zones"], c["by_market"], c["at"] = zones, by_market, now
+    return zones, by_market
+
+
+def _load_prime_zones(sb) -> list[tuple[int, int]]:
+    """Back-compat: the pooled prime zones (drives the games-list row glow
+    as the UNION of all market zones — see _prime_zones_union)."""
+    return _load_prime_tuning(sb)[0]
+
+
+def _load_prime_zones_by_market(sb) -> dict:
+    """Per-market prime zones with a `_pooled` fallback key. Passed into
+    _suggest_picks so each candidate is timed against ITS market's zones."""
+    pooled, by_market = _load_prime_tuning(sb)
+    return {**by_market, "_pooled": pooled}
+
+
+def _market_zones(by_market: dict | None, market_type: str) -> list[tuple[int, int]]:
+    """Resolve the prime zones for one market_type from a by-market map,
+    falling back to the pooled set then the _PRIME_ZONES constant."""
+    if not by_market:
+        return _PRIME_ZONES
+    return by_market.get(market_type) or by_market.get("_pooled") or _PRIME_ZONES
+
+
+def _prime_zones_union(sb) -> list[tuple[int, int]]:
+    """Merged union of every market's zones (+ pooled) — drives the coarse
+    games-list ROW glow, which is per-game (one kickoff time) and so lights
+    when the game is prime for ANY bet type. Per-bet-type sizing/badges are
+    still resolved precisely server-side via _market_zones."""
+    pooled, by_market = _load_prime_tuning(sb)
+    segs = list(pooled)
+    for mt, z in by_market.items():
+        # NRFI's zone is tracked but its sizing isn't zone-gated yet, so it
+        # must not light the (size-up implying) row glow. Skip it until NRFI
+        # consumption is wired. Side markets (ML/SPR/TOT) do drive the glow.
+        if mt == "nrfi":
+            continue
+        segs.extend(z)
+    if not segs:
+        return _PRIME_ZONES
+    segs.sort()
+    merged = [list(segs[0])]
+    for lo, hi in segs[1:]:
+        if lo <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    return [(lo, hi) for lo, hi in merged]
 
 
 def _parse_zones(raw) -> list[tuple[int, int]] | None:
@@ -3817,6 +3882,7 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                    starts_in_min=None,
                    sticky_keys: set | None = None,
                    prime_zones: list[tuple[int, int]] | None = None,
+                   prime_zones_by_market: dict | None = None,
                    kelly_fraction: float | None = None) -> list[dict]:
     """Polymarket-execution picks. Returns a list — there can be more
     than one on a game. Behaviour:
@@ -3849,6 +3915,12 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
       gate cleared, ¼-Kelly ≥ 3.0%BR     → 5u high
     Whale (10u) stays disabled. See _kelly_units / EDGE_* constants.
     """
+    # Per-bet-type prime zones. Prefer the explicit by-market map; fall back
+    # to the legacy single prime_zones list (wrapped as the pooled default)
+    # so older callers still work.
+    _bm = prime_zones_by_market or (
+        {"_pooled": prime_zones} if prime_zones else None)
+
     candidates: list[dict] = []
     for mt in ("moneyline", "spread", "total"):
         blk = odds.get(mt) or {}
@@ -3997,7 +4069,12 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 "unconfirmed_ml": unconfirmed_ml,
                 "fair_source":    fair_src.get("source"),
                 "conflict_reason": conflict_reason,
-                "timing_window":  _timing_window(starts_in_min, prime_zones),
+                # Per-bet-type timing: each market is classified against ITS
+                # own tuned zones (markets without their own fall back to
+                # pooled). _bm is built once below from prime_zones_by_market
+                # or the legacy single prime_zones list.
+                "timing_window":  _timing_window(starts_in_min,
+                                                 _market_zones(_bm, mt)),
                 "prime_core":     _is_prime_core(starts_in_min),
             })
 
@@ -4334,7 +4411,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
                                  sport=sport, home=home,
                                  starts_in_min=starts_in_min,
                                  sticky_keys=_sticky_keys(sb, market["id"]),
-                                 prime_zones=_load_prime_zones(sb),
+                                 prime_zones_by_market=_load_prime_zones_by_market(sb),
                                  kelly_fraction=_load_kelly_fraction(sb))
     # Keep the singular `suggestion` field as an alias for the top pick
     # so any caller still expecting it doesn't break. New code should

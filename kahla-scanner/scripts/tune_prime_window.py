@@ -19,8 +19,17 @@ Method (per the user — units/ROI with a CLV guardrail):
      — a winning band that doesn't also beat the close is likely variance).
   4. Cap the zone count; keep the highest-ROI zones.
 
-Safe by construction: thin data, or no qualifying zone, leaves the current
-zones untouched.
+PER-BET-TYPE (June 2026): the markets do NOT share a hot zone (live data
+showed ML steams ~150-180m out, totals want ~30-60 + 180-210, NRFI lives
+far out), so step 1-4 run BOTH pooled (all markets → the `zones` column)
+AND per market_type (→ `zones_by_market`). A market only earns its own
+zones once it clears MIN_SAMPLE on its OWN rows; until then it's omitted
+and inherits the pooled zones at runtime
+(handicapper_web._load_prime_zones_by_market). NRFI is excluded from timing
+tuning entirely (not in TIMED_MARKETS) — its sizing is flat, not zone-gated.
+
+Safe by construction: thin data, or no qualifying zone (pooled OR a given
+market), leaves that scope untouched / falling back to pooled.
 
 Usage:
   python -m scripts.tune_prime_window            # tune + write
@@ -47,10 +56,26 @@ ROI_FLOOR       = 0.0     # a band must beat this mean unit-ROI to be "good"
 MIN_ZONE_SAMPLE = 20      # total picks in a merged zone to keep it
 MAX_ZONES       = 3       # keep at most this many zones (highest sum-ROI)
 CLV_TOL         = 0.50    # zone mean CLV may dip this far below the slate mean
-MIN_SAMPLE      = 25      # total usable rows before we tune at all
+MIN_SAMPLE      = 25      # total usable rows before we tune the POOLED zones at all
+# Per-bet-type floor (June 2026): a SINGLE market needs a much healthier
+# sample than the pooled 25 before it earns its OWN zones — splitting by
+# market divides the data, and acting on a thin per-market slice over-fits.
+# Set above the high-volume markets' current ~15-day counts (~125-155) so
+# nothing specializes until ~1 month of per-market sample has accrued; below
+# this a market is omitted and inherits the pooled zones at runtime. Raise/
+# lower this single knob to gate when per-market zones go live.
+MIN_MARKET_SAMPLE = 200
 LOOKBACK_DAYS_DEFAULT = 30
 DEFAULT_ZONES = [[60, 180]]
+# Pooled zones are built from the SIDES only — totals/ML/spread. NRFI's
+# timing edge is the opposite shape (it wins far-out, dead in the sides'
+# windows), so pooling it would pollute the shared fallback.
 TIMED_MARKETS = ("moneyline", "spread", "total")
+# Markets that earn their OWN per-bet-type zones. NRFI is included here
+# (tracking only for now — its sizing is still flat 0.5u, not zone-gated;
+# wiring NRFI's zone to sizing is a follow-up). NRFI has no CLV, so the CLV
+# guardrail self-disables on it (slate_clv is None → guardrail skipped).
+TUNED_MARKETS = ("moneyline", "spread", "total", "nrfi")
 
 
 def _fetch_rows(sb, lookback_days: int) -> list[dict]:
@@ -71,13 +96,14 @@ def _fetch_rows(sb, lookback_days: int) -> list[dict]:
 def _clean(rows: list[dict]) -> list[dict]:
     out = []
     for r in rows:
-        if r.get("market_type") not in TIMED_MARKETS:
+        mt = r.get("market_type")
+        if mt not in TUNED_MARKETS:
             continue
         sim, u, pnl = r.get("starts_in_min"), r.get("units"), r.get("pnl_units")
         if sim is None or u in (None, 0) or pnl is None:
             continue
         try:
-            out.append({"sim": int(sim), "roi": float(pnl) / float(u),
+            out.append({"sim": int(sim), "roi": float(pnl) / float(u), "mt": mt,
                         "clv": (float(r["clv_pp"]) if r.get("clv_pp") is not None else None)})
         except (TypeError, ValueError):
             continue
@@ -158,6 +184,16 @@ def _current_zones(sb) -> list[list[int]]:
     return DEFAULT_ZONES
 
 
+def _zones_for(rows: list[dict]) -> tuple[list[list[int]], list[dict]]:
+    """Detect zones for a row subset (pooled or one market). Returns
+    (zones as sorted [[lo,hi],…], zones_detail). Empty when no band/zone
+    qualifies — the caller treats that as 'keep current / fall back'."""
+    clvs = [r["clv"] for r in rows if r["clv"] is not None]
+    slate_clv = (sum(clvs) / len(clvs)) if clvs else None
+    detail = _detect_zones(_bands(rows), slate_clv)
+    return sorted([[z["lo"], z["hi"]] for z in detail]), detail
+
+
 def tune(sb, lookback_days: int, dry_run: bool) -> dict:
     cur = _current_zones(sb)
     rows = _clean(_fetch_rows(sb, lookback_days))
@@ -166,33 +202,78 @@ def tune(sb, lookback_days: int, dry_run: bool) -> dict:
         return {"changed": False, "reason": "insufficient_data",
                 "zones": cur, "rows": len(rows)}
 
-    clvs = [r["clv"] for r in rows if r["clv"] is not None]
-    slate_clv = (sum(clvs) / len(clvs)) if clvs else None
-    zones = _detect_zones(_bands(rows), slate_clv)
-    if not zones:
+    # Pooled zones — SIDES only (ML/SPR/TOT), excluding NRFI whose timing is
+    # the opposite shape. Kept as the back-compat `zones` column AND the
+    # per-market fallback for SIDE markets without their own sample.
+    pooled_rows = [r for r in rows if r["mt"] in TIMED_MARKETS]
+    new, pooled_detail = _zones_for(pooled_rows)
+    if not new:
         return {"changed": False, "reason": "no_qualifying_zone", "zones": cur}
 
-    new = sorted([[z["lo"], z["hi"]] for z in zones])
+    # Per-bet-type zones — each market only earns its own once it clears
+    # MIN_MARKET_SAMPLE on its OWN rows; otherwise it's omitted and inherits
+    # the pooled zones at runtime. The markets don't share a hot zone (ML
+    # steams ~150-180m out, totals ~30-60 + 180-210, NRFI far out), so pooling
+    # masked real per-market structure.
+    by_market: dict[str, list[list[int]]] = {}
+    by_market_detail: dict[str, dict] = {}
+    for mt in TUNED_MARKETS:
+        mrows = [r for r in rows if r["mt"] == mt]
+        if len(mrows) < MIN_MARKET_SAMPLE:
+            by_market_detail[mt] = {"n": len(mrows), "zones": None,
+                                    "reason": "below_market_floor"}
+            continue
+        mzones, mdetail = _zones_for(mrows)
+        if not mzones:
+            by_market_detail[mt] = {"n": len(mrows), "zones": None,
+                                    "reason": "no_qualifying_zone"}
+            continue
+        by_market[mt] = mzones
+        by_market_detail[mt] = {"n": len(mrows), "zones": mzones, "detail": mdetail}
+
+    clvs = [r["clv"] for r in rows if r["clv"] is not None]
+    slate_clv = (sum(clvs) / len(clvs)) if clvs else None
     basis = {
-        "metric": "two_zone_unit_roi_with_clv_guardrail",
+        "metric": "per_market_unit_roi_with_clv_guardrail",
         "lookback_days": lookback_days,
         "slate_clv": (round(slate_clv, 2) if slate_clv is not None else None),
-        "zones_detail": zones,
+        "zones_detail": pooled_detail,
+        "by_market": by_market_detail,
         "tuned_at": datetime.now(timezone.utc).isoformat(),
     }
-    changed = sorted(cur) != new
-    log.info("%s zones %s → %s", "CHANGE" if changed else "keep", cur, new)
+    prev_bm = _current_by_market(sb)
+    changed = (sorted(cur) != new) or (prev_bm != by_market)
+    log.info("%s pooled %s → %s | by_market %s",
+             "CHANGE" if changed else "keep", cur, new, by_market)
     if not dry_run:
-        _write(sb, new, basis, changed)
-    return {"changed": changed, "zones": new, "basis": basis}
+        _write(sb, new, by_market, basis, changed)
+    return {"changed": changed, "zones": new, "by_market": by_market, "basis": basis}
 
 
-def _write(sb, zones: list[list[int]], basis: dict, changed: bool) -> None:
+def _current_by_market(sb) -> dict[str, list[list[int]]]:
+    try:
+        rows = (sb.table("pickbot_tuning")
+                .select("zones_by_market").eq("id", 1).limit(1)
+                .execute().data) or []
+        if rows and rows[0].get("zones_by_market"):
+            z = rows[0]["zones_by_market"]
+            if isinstance(z, str):
+                z = json.loads(z)
+            return {k: [[int(a), int(b)] for a, b in v]
+                    for k, v in (z or {}).items() if v}
+    except Exception:
+        pass
+    return {}
+
+
+def _write(sb, zones: list[list[int]], by_market: dict[str, list[list[int]]],
+           basis: dict, changed: bool) -> None:
     lo = min(z[0] for z in zones)
     hi = max(z[1] for z in zones)
     try:
         sb.table("pickbot_tuning").upsert({
             "id": 1, "zones": zones,
+            "zones_by_market": by_market,        # {} → every market falls back to pooled
             "prime_lo": lo, "prime_hi": hi,      # envelope for back-compat readers
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "basis": {**basis, "action": "changed" if changed else "kept"},

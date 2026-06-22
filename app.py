@@ -6814,11 +6814,13 @@ def api_handicapper_games():
     # — that's the doubleheader case (real, same teams same day).
     games = _dedup_games(games, sport)
     # Prime ZONES (minute-bands the bot sizes up + glows green). Multi-zone
-    # since June 2026 (the edge is bimodal); surfaced so the page's row glow
-    # matches the server and follows the weekly tuner without hardcoding.
+    # since June 2026 (the edge is bimodal) AND per-bet-type — the row glow
+    # is per-GAME (one kickoff time), so it uses the UNION of every market's
+    # zones (lights when the game is prime for ANY bet type). The precise
+    # per-bet-type sizing/badge is resolved server-side in _suggest_picks.
     try:
         import handicapper_web
-        prime_zones = [list(z) for z in handicapper_web._load_prime_zones(sb)]
+        prime_zones = [list(z) for z in handicapper_web._prime_zones_union(sb)]
     except Exception:
         prime_zones = [[60, 180]]
     return jsonify({
