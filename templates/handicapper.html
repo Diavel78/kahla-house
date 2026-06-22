@@ -1002,6 +1002,30 @@
         if (!hot.length || !known.length || hot.length === known.length) return 'Prime';
         return 'Prime · ' + hot.join(', ');
     }
+    // Prime badge for a specific game ROW — names the bet type(s) actually
+    // recommended on that row whose kickoff is in THEIR market's prime window
+    // (e.g. a TOT pick at a prime time → "Prime · TOT"). NRFI is excluded
+    // (not zone-gated). Falls back to the bare/per-market text until the row's
+    // picks have been prefetched.
+    const _MT_LABEL = { moneyline: 'ML', spread: 'SPR', total: 'TOT' };
+    function _primeBadgeForRow(mid, iso) {
+        const v = _verdictCache.get(mid);
+        if (!v || !Array.isArray(v.picks)) return _primeBadgeText(iso);   // picks unknown yet
+        const diffMin = Math.round((new Date(iso) - new Date()) / 60_000);
+        const order = ['ML', 'SPR', 'TOT'];
+        const hot = new Set();
+        for (const p of v.picks) {
+            const lab = _MT_LABEL[p.market_type];
+            if (!lab) continue;                                           // skip nrfi
+            const zones = _primeZonesByMarket[lab];
+            const inWin = Array.isArray(zones)
+                ? zones.some(z => diffMin >= z[0] && diffMin <= z[1])
+                : _isPrime(iso);
+            if (inWin) hot.add(lab);
+        }
+        const labs = order.filter(l => hot.has(l));
+        return labs.length ? 'Prime · ' + labs.join(', ') : 'Prime';
+    }
     function _fmtSettled(iso) {
         const d = new Date(iso);
         const diffH = (Date.now() - d) / 3_600_000;
@@ -1332,7 +1356,7 @@
                 return `<li class="game-row ${_isPrime(g.event_start) ? 'prime' : ''}">
                     <div class="game-line1">
                         <span class="when ${_kickoffTier(g.event_start)}" data-start="${_esc(g.event_start)}">${_fmtKickoff(g.event_start)}</span>
-                        <span class="prime-tag">${_primeBadgeText(g.event_start)}</span>
+                        <span class="prime-tag">${_primeBadgeForRow(g.market_id, g.event_start)}</span>
                         <span class="matchup">${matchup}</span>
                         <button class="details-btn" onclick="pickGame('${g.market_id}')">Details ›</button>
                     </div>
@@ -1651,6 +1675,10 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                 el.innerHTML = `<span class="pick-line-note">lean only, outside pick window</span>`;
                 return;
             }
+            // Refresh this row's prime badge to name the bet type(s) prime here.
+            const _row = el.closest('.game-row');
+            const _tag = _row && _row.querySelector('.prime-tag');
+            if (_tag) _tag.textContent = _primeBadgeForRow(mid, el.getAttribute('data-start'));
             const v = _verdictCache.get(mid);
             if (!v) { el.innerHTML = `<span class="pick-line-note">evaluating…</span>`; return; }
             const picks = v.picks || [];
@@ -1976,7 +2004,9 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             if (row) {
                 row.classList.toggle('prime', _isPrime(iso));
                 const tag = row.querySelector('.prime-tag');
-                if (tag) tag.textContent = _primeBadgeText(iso);
+                const l2 = row.querySelector('.game-line2[data-mid]');
+                const mid = l2 && l2.getAttribute('data-mid');
+                if (tag) tag.textContent = mid ? _primeBadgeForRow(mid, iso) : _primeBadgeText(iso);
             }
         });
         if (removed) {
