@@ -63,9 +63,13 @@ BIN_WIDTH       = 30      # minute band width
 # action. If you ever raise this, the frontend EVAL window must move with it
 # or the glow/chip mismatch returns.
 MAX_MIN         = 210     # bands span 0..210; sim beyond is "far" (never prime)
-MIN_BIN_SAMPLE  = 12      # picks in a band before it can be "good"
+MIN_BIN_SAMPLE  = 8       # picks in a band before it can be "good" (relaxed
+                          # 12->8 June 2026 so a single market's thinner slice
+                          # forms its OWN zones instead of pooling — e.g. the
+                          # totals 180-210 band, n=9, its strongest)
 ROI_FLOOR       = 0.0     # a band must beat this mean unit-ROI to be "good"
-MIN_ZONE_SAMPLE = 20      # total picks in a merged zone to keep it
+MIN_ZONE_SAMPLE = 12      # total picks in a merged zone to keep it (relaxed
+                          # 20->12 to match — a per-market single-band zone)
 MAX_ZONES       = 3       # keep at most this many zones (highest sum-ROI)
 CLV_TOL         = 0.50    # zone mean CLV may dip this far below the slate mean
 MIN_SAMPLE      = 25      # total usable rows before we tune the POOLED zones at all
