@@ -69,14 +69,15 @@ MIN_ZONE_SAMPLE = 20      # total picks in a merged zone to keep it
 MAX_ZONES       = 3       # keep at most this many zones (highest sum-ROI)
 CLV_TOL         = 0.50    # zone mean CLV may dip this far below the slate mean
 MIN_SAMPLE      = 25      # total usable rows before we tune the POOLED zones at all
-# Per-bet-type floor (June 2026): a SINGLE market needs a much healthier
-# sample than the pooled 25 before it earns its OWN zones — splitting by
-# market divides the data, and acting on a thin per-market slice over-fits.
-# Set above the high-volume markets' current ~15-day counts (~125-155) so
-# nothing specializes until ~1 month of per-market sample has accrued; below
-# this a market is omitted and inherits the pooled zones at runtime. Raise/
-# lower this single knob to gate when per-market zones go live.
-MIN_MARKET_SAMPLE = 200
+# Per-bet-type floor: a SINGLE market needs a healthier sample than the
+# pooled 25 before it earns its OWN zones — splitting divides the data. Set
+# to 60 (June 2026, user call to ENGAGE per-market specialization rather than
+# keep holding): markets with ≥60 of their own rows attempt their own zones;
+# the zone-detection rails (MIN_BIN_SAMPLE/MIN_ZONE_SAMPLE/ROI_FLOOR) still
+# guard against thin-slice noise, so a market that clears the floor but has no
+# qualifying zone (e.g. totals — good bands too thin for MIN_ZONE_SAMPLE)
+# falls back to pooled anyway. Below the floor a market is omitted → pooled.
+MIN_MARKET_SAMPLE = 60
 LOOKBACK_DAYS_DEFAULT = 30
 DEFAULT_ZONES = [[60, 180]]
 # Pooled zones are built from the SIDES only — totals/ML/spread. NRFI's
