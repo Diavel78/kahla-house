@@ -6821,8 +6821,13 @@ def api_handicapper_games():
     try:
         import handicapper_web
         prime_zones = [list(z) for z in handicapper_web._prime_zones_union(sb)]
+        # Per-side-market zones (ML/SPR/TOT) so the row badge can NAME which
+        # markets are prime once they specialize; while pooled they're equal
+        # and the frontend renders a bare "PRIME".
+        prime_zones_by_market = handicapper_web._prime_zones_by_market_resolved(sb)
     except Exception:
         prime_zones = [[60, 180]]
+        prime_zones_by_market = {}
     return jsonify({
         "ok":          True,
         "sport":       sport,
@@ -6830,6 +6835,7 @@ def api_handicapper_games():
         "count":       len(games),
         "games":       games,
         "prime_zones": prime_zones,
+        "prime_zones_by_market": prime_zones_by_market,
     })
 
 

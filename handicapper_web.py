@@ -2448,6 +2448,24 @@ def _prime_zones_union(sb) -> list[tuple[int, int]]:
     return [(lo, hi) for lo, hi in merged]
 
 
+# Side markets that carry a prime label on the games-list row (NRFI excluded
+# — its sizing isn't zone-gated yet, so it must not imply a size-up window).
+_PRIME_LABEL_MARKETS = (("moneyline", "ML"), ("spread", "SPR"), ("total", "TOT"))
+
+
+def _prime_zones_by_market_resolved(sb) -> dict:
+    """Per-side-market RESOLVED prime zones for the games-list row badge —
+    each side market's OWN zones, falling back to pooled. Keyed by display
+    label (ML/SPR/TOT). Lets the row badge name WHICH markets are prime at a
+    kickoff once markets specialize; while they share the pooled zone (the
+    hold) all three are identical and the frontend collapses to a bare PRIME."""
+    pooled, by_market = _load_prime_tuning(sb)
+    out = {}
+    for mt, label in _PRIME_LABEL_MARKETS:
+        out[label] = [list(z) for z in _market_zones({**by_market, "_pooled": pooled}, mt)]
+    return out
+
+
 def _parse_zones(raw) -> list[tuple[int, int]] | None:
     """Coerce the jsonb zones value into a clean, sorted list of (lo,hi)."""
     if not raw:

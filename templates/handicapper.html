@@ -975,9 +975,32 @@
     // timing_window (resolved server-side against that market's own zones).
     // Falls back to the old single span until the first fetch.
     let _primeZones = [[60, 180]];
+    // Per-side-market zones (ML/SPR/TOT) from the server. While markets share
+    // the pooled zone (the hold) all three are identical → the badge stays a
+    // bare "Prime". Once a market specializes, the badge NAMES which markets
+    // are prime at this kickoff (e.g. "Prime · TOT").
+    let _primeZonesByMarket = {};
     function _isPrime(iso) {
         const diffMin = Math.round((new Date(iso) - new Date()) / 60_000);
         return _primeZones.some(([lo, hi]) => diffMin >= lo && diffMin <= hi);
+    }
+    // Which side markets are in their OWN prime zone at this kickoff.
+    function _primeMarketsFor(iso) {
+        const diffMin = Math.round((new Date(iso) - new Date()) / 60_000);
+        const out = [];
+        for (const [label, zones] of Object.entries(_primeZonesByMarket)) {
+            if (Array.isArray(zones) && zones.some(z => diffMin >= z[0] && diffMin <= z[1])) out.push(label);
+        }
+        return out;
+    }
+    // Badge text: bare "Prime" when every market agrees (or no per-market
+    // data), else "Prime · ML, TOT" naming just the markets actually prime.
+    function _primeBadgeText(iso) {
+        const order = ['ML', 'SPR', 'TOT'];
+        const known = order.filter(l => l in _primeZonesByMarket);
+        const hot = _primeMarketsFor(iso).sort((a, b) => order.indexOf(a) - order.indexOf(b));
+        if (!hot.length || !known.length || hot.length === known.length) return 'Prime';
+        return 'Prime · ' + hot.join(', ');
     }
     function _fmtSettled(iso) {
         const d = new Date(iso);
@@ -1282,6 +1305,12 @@
             if (Array.isArray(data.prime_zones) && data.prime_zones.length) {
                 _primeZones = data.prime_zones.map(z => [Number(z[0]), Number(z[1])]);
             }
+            if (data.prime_zones_by_market && typeof data.prime_zones_by_market === 'object') {
+                _primeZonesByMarket = {};
+                for (const [label, zones] of Object.entries(data.prime_zones_by_market)) {
+                    if (Array.isArray(zones)) _primeZonesByMarket[label] = zones.map(z => [Number(z[0]), Number(z[1])]);
+                }
+            }
             // Pre-game only: drop any game that's already started. The API
             // window starts at now, but client/server clock skew (or a
             // game tipping off between fetch and render) can leak a live
@@ -1303,7 +1332,7 @@
                 return `<li class="game-row ${_isPrime(g.event_start) ? 'prime' : ''}">
                     <div class="game-line1">
                         <span class="when ${_kickoffTier(g.event_start)}" data-start="${_esc(g.event_start)}">${_fmtKickoff(g.event_start)}</span>
-                        <span class="prime-tag">Prime</span>
+                        <span class="prime-tag">${_primeBadgeText(g.event_start)}</span>
                         <span class="matchup">${matchup}</span>
                         <button class="details-btn" onclick="pickGame('${g.market_id}')">Details ›</button>
                     </div>
@@ -1944,7 +1973,11 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             // Toggle the green prime glow as a game crosses into/out of
             // the 90-120 min window (no re-fetch — the pill follows via CSS).
             const row = el.closest('.game-row');
-            if (row) row.classList.toggle('prime', _isPrime(iso));
+            if (row) {
+                row.classList.toggle('prime', _isPrime(iso));
+                const tag = row.querySelector('.prime-tag');
+                if (tag) tag.textContent = _primeBadgeText(iso);
+            }
         });
         if (removed) {
             const list = document.getElementById('gamesList');
