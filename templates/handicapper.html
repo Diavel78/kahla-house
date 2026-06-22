@@ -1002,16 +1002,18 @@
         if (!hot.length || !known.length || hot.length === known.length) return 'Prime';
         return 'Prime · ' + hot.join(', ');
     }
-    // Prime badge for a specific game ROW — names the bet type(s) actually
-    // recommended on that row whose kickoff is in THEIR market's prime window
-    // (e.g. a TOT pick at a prime time → "Prime · TOT"). NRFI is excluded
-    // (not zone-gated). Falls back to the bare/per-market text until the row's
-    // picks have been prefetched.
     const _MT_LABEL = { moneyline: 'ML', spread: 'SPR', total: 'TOT' };
-    function _primeBadgeForRow(mid, iso) {
-        const v = _verdictCache.get(mid);
-        if (!v || !Array.isArray(v.picks)) return _primeBadgeText(iso);   // picks unknown yet
+    // Prime state for a game ROW, driven by the bet(s) ACTUALLY on the row:
+    // {on, text}. on = at least one of the row's side bets (ML/SPR/TOT, NRFI
+    // excluded — not zone-gated) is in ITS market's prime window; text names
+    // them ("Prime · TOT"). This is what makes the green glow AND the badge
+    // agree — a row whose only bet (e.g. TOT) is off-peak does NOT glow, even
+    // if a market it isn't betting (ML) happens to be prime at that minute.
+    // Until the row's picks are prefetched, fall back to the union glow.
+    function _rowPrime(mid, iso) {
         const diffMin = Math.round((new Date(iso) - new Date()) / 60_000);
+        const v = _verdictCache.get(mid);
+        if (!v || !Array.isArray(v.picks)) return { on: _isPrime(iso), text: 'Prime' };
         const order = ['ML', 'SPR', 'TOT'];
         const hot = new Set();
         for (const p of v.picks) {
@@ -1024,7 +1026,7 @@
             if (inWin) hot.add(lab);
         }
         const labs = order.filter(l => hot.has(l));
-        return labs.length ? 'Prime · ' + labs.join(', ') : 'Prime';
+        return { on: labs.length > 0, text: labs.length ? 'Prime · ' + labs.join(', ') : 'Prime' };
     }
     function _fmtSettled(iso) {
         const d = new Date(iso);
@@ -1353,10 +1355,11 @@
             }
             list.innerHTML = games.map(g => {
                 const matchup = g.away && g.home ? `${_esc(g.away)} @ ${_esc(g.home)}` : _esc(g.event_name);
-                return `<li class="game-row ${_isPrime(g.event_start) ? 'prime' : ''}">
+                const rp = _rowPrime(g.market_id, g.event_start);
+                return `<li class="game-row ${rp.on ? 'prime' : ''}">
                     <div class="game-line1">
                         <span class="when ${_kickoffTier(g.event_start)}" data-start="${_esc(g.event_start)}">${_fmtKickoff(g.event_start)}</span>
-                        <span class="prime-tag">${_primeBadgeForRow(g.market_id, g.event_start)}</span>
+                        <span class="prime-tag">${rp.text}</span>
                         <span class="matchup">${matchup}</span>
                         <button class="details-btn" onclick="pickGame('${g.market_id}')">Details ›</button>
                     </div>
@@ -1675,10 +1678,15 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                 el.innerHTML = `<span class="pick-line-note">lean only, outside pick window</span>`;
                 return;
             }
-            // Refresh this row's prime badge to name the bet type(s) prime here.
+            // Refresh this row's prime glow + badge now that picks are known,
+            // so both reflect the row's ACTUAL bets (not the union of markets).
             const _row = el.closest('.game-row');
-            const _tag = _row && _row.querySelector('.prime-tag');
-            if (_tag) _tag.textContent = _primeBadgeForRow(mid, el.getAttribute('data-start'));
+            if (_row) {
+                const _rp = _rowPrime(mid, el.getAttribute('data-start'));
+                _row.classList.toggle('prime', _rp.on);
+                const _tag = _row.querySelector('.prime-tag');
+                if (_tag) _tag.textContent = _rp.text;
+            }
             const v = _verdictCache.get(mid);
             if (!v) { el.innerHTML = `<span class="pick-line-note">evaluating…</span>`; return; }
             const picks = v.picks || [];
@@ -1998,15 +2006,16 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             }
             el.textContent = _fmtKickoff(iso);
             el.className = 'when ' + _kickoffTier(iso);
-            // Toggle the green prime glow as a game crosses into/out of
-            // the 90-120 min window (no re-fetch — the pill follows via CSS).
+            // Toggle the green prime glow + badge as a game crosses zone
+            // edges (no re-fetch — driven by the row's own bets).
             const row = el.closest('.game-row');
             if (row) {
-                row.classList.toggle('prime', _isPrime(iso));
-                const tag = row.querySelector('.prime-tag');
                 const l2 = row.querySelector('.game-line2[data-mid]');
                 const mid = l2 && l2.getAttribute('data-mid');
-                if (tag) tag.textContent = mid ? _primeBadgeForRow(mid, iso) : _primeBadgeText(iso);
+                const rp = mid ? _rowPrime(mid, iso) : { on: _isPrime(iso), text: _primeBadgeText(iso) };
+                row.classList.toggle('prime', rp.on);
+                const tag = row.querySelector('.prime-tag');
+                if (tag) tag.textContent = rp.text;
             }
         });
         if (removed) {
