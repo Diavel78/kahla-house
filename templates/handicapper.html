@@ -2416,7 +2416,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             const sharpTag = (sd != null && Math.abs(sd) >= 10)
                 ? `<span class="sharp-tag">SHARP ${sd > 0 ? d.home : d.away} +${Math.abs(sd).toFixed(0)}%</span>`
                 : '';
-            const _srcName = s => ({'vsin-circa':'Circa (VSiN)', 'vsin-draftkings':'DraftKings (VSiN)', 'action':'Action Network'}[s] || s);
+            const _srcName = s => ({'vsin-circa':'Circa handle · DK+Circa tickets', 'vsin-draftkings':'DraftKings (VSiN)', 'action':'Action Network'}[s] || s);
             const srcLabel = matched
                 ? sp.sources.map(_srcName).join(' + ')
                 : 'no match — see diagnostics below';
@@ -3181,10 +3181,10 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         }
 
         // 2) Public splits — ML only (splits don't carry to SPR/TOT).
-        // Money% (Action Network) is the sharp fingerprint; bets%
-        // (Covers / VegasInsider) is the square fingerprint. When both
-        // present, the divergence is the signal. When only bets% is
-        // available, fall back to a heavy/light public-side callout.
+        // money% = CIRCA HANDLE (sharp money — Circa doesn't limit, so real
+        // money lands there); bets% = BLENDED Circa+DK tickets (the public).
+        // The divergence (handle − tickets) is the signal: + = sharp money
+        // beyond the tickets, − = square tickets with no money (fade).
         const sp = d.splits;
         if (sp && pick.market_type === 'moneyline') {
             const mKey = pick.side === 'home' ? 'home_money' : 'away_money';

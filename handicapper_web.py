@@ -3894,15 +3894,19 @@ def _splits_signal_pp(splits: dict | None, sharp_side: str | None,
         return 0.0
 
 
-# ───────────── VSiN sharp-money splits (Circa + DraftKings) ─────────────
-# VSiN gives handle% (money) AND bets% (tickets) per side per market for the
-# sharp book (Circa) and the public book (DraftKings). The core signal: when
-# the SHARP MONEY (handle) is concentrated on the side opposite the bot's
-# pick, we'd be betting INTO sharp money — demote to a lean. Conservative
-# (only demotes, never invents/sizes-up) + captured for forward validation.
+# ───────────── VSiN sharp-money splits (Circa handle vs blended tickets) ────
+# The axis is HANDLE (money) vs BETS (tickets), NOT Circa-vs-DK. Circa doesn't
+# limit bettors, so real sharp money lands there → CIRCA HANDLE is the sharp
+# signal. DK limits everyone (sharps can't get down), so DK handle is NOT sharp
+# — we use DK only for its BET% (a bigger public-ticket sample). Public read =
+# BLENDED (Circa+DK) bet%. Signal per side = circa_handle% − blended_bet%:
+# big positive = money beyond the tickets (sharp) → follow; big negative =
+# tickets with no money behind them (square) → fade. NO Circa handle ⇒ no
+# sharp read at all (we never substitute DK handle — chasing DK "smart" money
+# is nonsense). Both books' raw handle+bets are still captured for validation.
 _VSIN_MT = {"moneyline": "ml", "spread": "spread", "total": "total"}
-_VSIN_OPP_HANDLE_MIN = 60   # opposite side holds ≥ this % of the money
-_VSIN_SHARP_GAP_MIN  = 8    # opp money exceeds opp tickets by ≥ this (sharp concentration, not just chalk)
+_VSIN_OPP_HANDLE_MIN = 60   # opposite side holds ≥ this % of the (Circa) money
+_VSIN_SHARP_GAP_MIN  = 8    # Circa money exceeds blended tickets by ≥ this (sharp concentration, not chalk)
 _VSIN_OPP = {"away": "home", "home": "away", "over": "under", "under": "over"}
 
 
@@ -3928,46 +3932,63 @@ def _vsin_for_game(sport: str, away: str, home: str) -> dict:
     return out
 
 
-def _vsin_handle_bets(vsin: dict, book: str, vmt: str, side: str):
-    """(handle, bets) for one book/market/side from a matched VSiN game."""
-    ev = (vsin.get("books") or {}).get(book)
+def _vsin_cell(vsin: dict | None, book: str, vmt: str, side: str, field: str):
+    """One value (handle|bets) for a book/market/side, or None."""
+    ev = ((vsin or {}).get("books") or {}).get(book)
     if not ev:
-        return None, None
+        return None
     blk = ev.get(vmt) or {}
     key = side if vmt != "total" else ("over" if side == "over" else "under")
-    return blk.get(f"{key}_handle"), blk.get(f"{key}_bets")
+    return blk.get(f"{key}_{field}")
+
+
+def _vsin_circa_handle(vsin, vmt, side):
+    """Circa handle% (the SHARP money) for a market/side. Circa only — DK
+    handle is never sharp (limited book), so it's never substituted."""
+    return _vsin_cell(vsin, "circa", vmt, side, "handle")
+
+
+def _vsin_blended_bets(vsin, vmt, side):
+    """Public ticket% = mean of Circa + DK bet% for a market/side (whichever
+    books report it). None if neither does."""
+    vals = [v for v in (_vsin_cell(vsin, "circa", vmt, side, "bets"),
+                        _vsin_cell(vsin, "draftkings", vmt, side, "bets"))
+            if v is not None]
+    return (sum(float(v) for v in vals) / len(vals)) if vals else None
 
 
 def _vsin_sharp_veto(vsin: dict | None, mt: str, side: str):
-    """If sharp money (handle) is concentrated on the OPPOSITE side, return
-    (reason, read); else (None, read). Prefers Circa (the sharp book), falls
-    back to DraftKings. `read` is a compact capture dict (logged regardless)."""
+    """If Circa sharp money (handle) is concentrated on the OPPOSITE side
+    BEYOND the public ticket share, return (reason, read); else (None, read).
+    Circa handle only — no DK-handle fallback. `read` is captured regardless."""
     vmt = _VSIN_MT.get(mt)
     if not vmt or not vsin or not vsin.get("matched"):
         return None, None
     opp = _VSIN_OPP.get(side)
-    for book in ("circa", "draftkings"):
-        our_h, our_b = _vsin_handle_bets(vsin, book, vmt, side)
-        opp_h, opp_b = _vsin_handle_bets(vsin, book, vmt, opp)
-        if opp_h is None:
-            continue
-        read = {"book": book, "side_handle": our_h, "side_bets": our_b,
-                "opp_handle": opp_h, "opp_bets": opp_b}
-        gap = (opp_h - opp_b) if (opp_h is not None and opp_b is not None) else None
-        if (opp_h >= _VSIN_OPP_HANDLE_MIN and gap is not None
-                and gap >= _VSIN_SHARP_GAP_MIN):
-            return (f"{book.title()} sharp money {opp_h}% on the other side "
-                    f"({opp_b}% of tickets) — would be betting into it"), read
-        return None, read          # first book with data decides (Circa wins)
-    return None, None
+    our_h = _vsin_circa_handle(vsin, vmt, side)
+    opp_h = _vsin_circa_handle(vsin, vmt, opp)
+    our_b = _vsin_blended_bets(vsin, vmt, side)
+    opp_b = _vsin_blended_bets(vsin, vmt, opp)
+    if opp_h is None and our_h is None and our_b is None and opp_b is None:
+        return None, None
+    read = {"sharp_book": "circa",
+            "side_handle": our_h, "side_bets": (round(our_b) if our_b is not None else None),
+            "opp_handle": opp_h, "opp_bets": (round(opp_b) if opp_b is not None else None)}
+    if opp_h is None:                       # no Circa handle = no sharp read = no veto
+        return None, read
+    gap = (opp_h - opp_b) if opp_b is not None else None
+    if (opp_h >= _VSIN_OPP_HANDLE_MIN and gap is not None
+            and gap >= _VSIN_SHARP_GAP_MIN):
+        return (f"Circa sharp money {opp_h}% on the other side "
+                f"(vs {round(opp_b)}% blended tickets) — would be betting into it"), read
+    return None, read
 
 
 def _vsin_to_ml_splits(vsin: dict | None) -> dict:
-    """ML-shaped splits dict from VSiN (Circa sharp preferred, DK fallback),
-    REPLACING Action Network. money% = VSiN handle% (the sharp fingerprint),
-    bets% = VSiN bets% (tickets). Feeds the dossier reason bullet AND
-    _splits_signal_pp scoring, so both now run on the sharp book instead of
-    Action's unreliable number."""
+    """ML-shaped splits dict (the dossier reason bullet + _splits_signal_pp
+    scoring), REPLACING Action Network. money% = CIRCA HANDLE (sharp money,
+    Circa only — never DK handle), bets% = BLENDED Circa+DK ticket%. No Circa
+    handle ⇒ no splits available (we do NOT fall back to DK as 'smart')."""
     base = {"away_money": None, "home_money": None,
             "away_bets": None, "home_bets": None,
             "sharp_diff": None, "book": None,
@@ -3978,21 +3999,27 @@ def _vsin_to_ml_splits(vsin: dict | None) -> dict:
     for book in ("circa", "draftkings"):
         ev = (vsin.get("books") or {}).get(book)
         ml = (ev or {}).get("ml") or {}
-        am, hm = ml.get("away_handle"), ml.get("home_handle")
-        ab, hb = ml.get("away_bets"), ml.get("home_bets")
-        matched = am is not None or hm is not None
         base["per_source"][f"vsin-{book}"] = {
-            "matched": matched, "events_returned": 1 if ev else 0,
+            "matched": (ml.get("away_handle") is not None or ml.get("home_handle") is not None),
+            "events_returned": 1 if ev else 0,
             "sample_games": ([f"{ev.get('away_team','?')} @ {ev.get('home_team','?')}"]
                              if ev else []),
         }
-        if matched and not base["sources"]:
-            base.update({
-                "away_money": am, "home_money": hm,
-                "away_bets": ab, "home_bets": hb,
-                "book": book, "sources": [f"vsin-{book}"],
-                "sharp_diff": (None if hm is None or hb is None else hm - hb),
-            })
+    # Sharp money = Circa handle ONLY. No Circa ⇒ no read.
+    a_h = _vsin_circa_handle(vsin, "ml", "away")
+    h_h = _vsin_circa_handle(vsin, "ml", "home")
+    if a_h is None and h_h is None:
+        return base
+    a_b = _vsin_blended_bets(vsin, "ml", "away")
+    h_b = _vsin_blended_bets(vsin, "ml", "home")
+    a_b = round(a_b) if a_b is not None else None
+    h_b = round(h_b) if h_b is not None else None
+    base.update({
+        "away_money": a_h, "home_money": h_h,   # Circa handle (sharp)
+        "away_bets": a_b, "home_bets": h_b,     # blended Circa+DK tickets (public)
+        "book": "circa", "sources": ["vsin-circa"],
+        "sharp_diff": (None if h_h is None or h_b is None else h_h - h_b),
+    })
     return base
 
 
