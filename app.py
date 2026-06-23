@@ -2738,6 +2738,109 @@ def debug_vsin():
     return jsonify({"ok": True, "results": [_probe_vsin_url(u) for u in candidates]})
 
 
+def _vsin_pct(s: str):
+    """Pull the integer percent out of a VSiN cell like '83% ▲' / '24% ▼'."""
+    import re as _re
+    m = _re.search(r"(\d+)\s*%", s or "")
+    return int(m.group(1)) if m else None
+
+
+def _vsin_num(s: str):
+    """Clean a VSiN line cell ('-1.5', '+104', '8.5') → stripped string."""
+    import re as _re
+    m = _re.search(r"[+-]?\d+(?:\.\d+)?", (s or "").replace("−", "-"))
+    return m.group(0) if m else None
+
+
+# VSiN sport → ?view= code (extend as we add sports). MLB confirmed live.
+_VSIN_VIEW = {"mlb": "mlb", "nba": "nba", "nhl": "nhl",
+              "nfl": "nfl", "ncaaf": "cfb", "ncaab": "cbb"}
+
+
+def _fetch_vsin_splits(sport: str = "mlb", book: str = "draftkings") -> dict:
+    """Scrape VSiN betting splits (server-rendered HTML, no auth) for one
+    book. Returns handle% (money) AND bets% (tickets) per side per market for
+    SPR/TOT/ML. book ∈ {draftkings, circa}. The SSR table carries the full
+    slate even behind VSiN's CSS paywall (it only clips visually)."""
+    from bs4 import BeautifulSoup as _BS
+    view = _VSIN_VIEW.get(sport.lower(), sport.lower())
+    url = f"https://data.vsin.com/{book}/betting-splits/?view={view}"
+    debug = {"url": url, "ok": False}
+    try:
+        r = _http.get(url, headers={
+            "User-Agent": _SPLITS_UA,
+            "Accept": "text/html,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.vsin.com/",
+        }, timeout=14)
+        debug["status"] = r.status_code
+        if r.status_code != 200:
+            debug["error"] = f"HTTP {r.status_code}"
+            return {"events": [], "debug": debug}
+        soup = _BS(r.text, "lxml")
+    except Exception as e:
+        debug["error"] = f"{type(e).__name__}: {e}"
+        return {"events": [], "debug": debug}
+
+    # The splits grid = the table with the most rows + % cells.
+    best, best_score = None, -1
+    for t in soup.find_all("table"):
+        rows = t.find_all("tr")
+        score = len(rows) + t.get_text(" ", strip=True).count("%") * 2
+        if score > best_score:
+            best, best_score = t, score
+    if best is None:
+        debug["error"] = "no table"
+        return {"events": [], "debug": debug}
+
+    # Collect valid team rows: [team, spr, spr_h, spr_b, tot, tot_h, tot_b, ml, ml_h, ml_b]
+    team_rows = []
+    for tr in best.find_all("tr"):
+        c = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
+        if len(c) < 11:
+            continue
+        team = c[1].strip()
+        # skip header / non-team rows (need a team name + a ML handle %)
+        if not team or _vsin_pct(c[9]) is None or "handle" in team.lower():
+            continue
+        team_rows.append({
+            "team": team,
+            "spr_line": _vsin_num(c[2]), "spr_h": _vsin_pct(c[3]), "spr_b": _vsin_pct(c[4]),
+            "tot_line": _vsin_num(c[5]), "tot_h": _vsin_pct(c[6]), "tot_b": _vsin_pct(c[7]),
+            "ml_line": _vsin_num(c[8]),  "ml_h": _vsin_pct(c[9]),  "ml_b": _vsin_pct(c[10]),
+        })
+
+    # Pair consecutive rows into games (away on top, home below).
+    events = []
+    for i in range(0, len(team_rows) - 1, 2):
+        a, h = team_rows[i], team_rows[i + 1]
+        events.append({
+            "book": book,
+            "away_team": a["team"], "home_team": h["team"],
+            "ml": {"away_line": a["ml_line"], "home_line": h["ml_line"],
+                   "away_handle": a["ml_h"], "away_bets": a["ml_b"],
+                   "home_handle": h["ml_h"], "home_bets": h["ml_b"]},
+            "spread": {"away_line": a["spr_line"], "home_line": h["spr_line"],
+                       "away_handle": a["spr_h"], "away_bets": a["spr_b"],
+                       "home_handle": h["spr_h"], "home_bets": h["spr_b"]},
+            "total": {"line": a["tot_line"],
+                      "over_handle": a["tot_h"], "over_bets": a["tot_b"],
+                      "under_handle": h["tot_h"], "under_bets": h["tot_b"]},
+        })
+    debug["ok"] = True
+    debug["n_events"] = len(events)
+    return {"events": events, "debug": debug}
+
+
+@app.route("/debug-vsin-parsed")
+def debug_vsin_parsed():
+    """View the PARSED VSiN splits (clean games) for a sport+book so we can
+    verify the parser on a phone. Public, read-only. ?sport=mlb&book=circa."""
+    sport = (request.args.get("sport") or "mlb").lower()
+    book = (request.args.get("book") or "draftkings").lower()
+    return jsonify(_fetch_vsin_splits(sport, book))
+
+
 def _fetch_kalshi_orderbook(ticker: str) -> dict:
     """Full Kalshi order book (all bid levels, both sides) for one market.
     Public, no auth. `GET /markets/{ticker}/orderbook`."""
