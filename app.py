@@ -2906,6 +2906,37 @@ def debug_pmm():
             sample.append({"title": e.get("title") or e.get("question") or e.get("slug"),
                            "tags": e.get("tags") or e.get("tagSlugs") or e.get("tag")})
     out["no_tag"] = {"result": res, "sample": sample}
+
+    # 3) FULL lookup — exactly what pm-snapshot calls (import pmm_markets +
+    # lookup + team-match + markets.list) on a real upcoming MLB game. This is
+    # the path that produces the PMM snapshot rows; if it fails/empties here,
+    # that's the silent gap. Import is inside the try so an import break shows.
+    try:
+        sb = get_supabase()
+        grow = (sb.table("markets").select("event_name,event_start")
+                .eq("sport", "MLB").eq("status", "active")
+                .gte("event_start", now.isoformat())
+                .order("event_start").limit(1).execute().data or [None])[0]
+        if not grow:
+            out["lookup"] = {"error": "no upcoming MLB game in markets"}
+        else:
+            away, home = [s.strip() for s in grow["event_name"].split(" @ ", 1)]
+            import pmm_markets as _pm
+            diag = {}
+            t2 = _t.time()
+            res2 = _pm.lookup(client, "MLB", away, home, grow["event_start"], diag=diag)
+            out["lookup"] = {
+                "game": grow["event_name"], "ms": round((_t.time() - t2) * 1000),
+                "res_keys": sorted((res2 or {}).keys()),
+                "has_ml": bool((res2 or {}).get("ml")),
+                "has_spread": bool((res2 or {}).get("spread")),
+                "has_total": bool((res2 or {}).get("total")),
+                "diag": diag,
+            }
+    except Exception as e:
+        import traceback
+        out["lookup"] = {"error": f"{type(e).__name__}: {str(e)[:300]}",
+                         "tb": traceback.format_exc()[-600:]}
     return jsonify(out)
 
 
