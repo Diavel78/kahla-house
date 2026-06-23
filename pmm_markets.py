@@ -479,20 +479,26 @@ def _market_to_dict(m: Any) -> dict:
 # sportsMarketTypeV2 → our market_type bucket. Field is directly on
 # each market in the API response (no regex on titles needed). Variants
 # like `baseball_team_first_five_total` are filed under SPORTS_MARKET_
-# TYPE_TOTAL too — we filter those out by checking the lowercase
-# sportsMarketType (v1) field against a primary-types allowlist.
+# TYPE_TOTAL too — we exclude those via a v1 BLOCKLIST (see below).
 _MARKET_TYPE_BUCKET: dict[str, str] = {
     "SPORTS_MARKET_TYPE_MONEYLINE": "ml",
     "SPORTS_MARKET_TYPE_SPREAD":    "spread",
     "SPORTS_MARKET_TYPE_TOTAL":     "total",
 }
-# Primary-type slugs we accept. Anything else under the same V2 bucket
-# is a prop variation (e.g. first-five-innings, first-inning, etc.).
-_PRIMARY_TYPE_SLUGS: set[str] = {
-    "moneyline", "h2h",
-    "spreads", "spread", "handicap",
-    "totals", "total", "over_under",
-}
+# v1 (sportsMarketType) substrings that mark a NON-full-game variant sharing
+# the same V2 bucket (first-five-innings, first-inning, halves, quarters,
+# periods, player props). We take everything in the V2 bucket EXCEPT these.
+# BLOCKLIST, not allowlist (June 2026 landmine): Polymarket renamed the v1
+# slugs from short 'spreads'/'totals'/'moneyline' to
+# 'baseball_team_full_game_spread' / '..._total', which silently broke the old
+# exact-match allowlist and zeroed ALL ml/spread/total PMM data (pm-snapshot +
+# live dossier). A blocklist survives their renames; only genuinely-new variant
+# names need adding here.
+_VARIANT_MARKERS: tuple[str, ...] = (
+    "first_five", "first_inning", "inning",
+    "first_half", "second_half", "_half",
+    "quarter", "period", "player",
+)
 
 
 def _classify_market(m: dict, away: str, home: str
@@ -504,9 +510,11 @@ def _classify_market(m: dict, away: str, home: str
       line:        float for spread/total, None for ml
       side:        "home" | "away" for ml/spread, "over" | "under" for total
 
-    Uses the real API schema (post-discovery May 2026):
+    Uses the real API schema (post-discovery May 2026; v1 slugs renamed by
+    Polymarket June 2026 → blocklist not allowlist):
       sportsMarketTypeV2: 'SPORTS_MARKET_TYPE_MONEYLINE' / '_SPREAD' / '_TOTAL'
-      sportsMarketType:   'moneyline' / 'spreads' / 'totals' / variants
+      sportsMarketType:   v1 slug, e.g. 'baseball_team_full_game_spread'
+                          (variants: '..._first_five_spread', player props)
       line:               numeric line (e.g. 4.5)
       question:           human-readable like "Spread: Baltimore Orioles (+4.5)"
                           → encodes which team is the YES side
@@ -516,9 +524,9 @@ def _classify_market(m: dict, away: str, home: str
     bucket = _MARKET_TYPE_BUCKET.get(v2)
     if not bucket:
         return None
-    # Skip prop variants (first-five, first-inning, etc.) — they live
-    # under the same V2 bucket but have non-primary V1 slugs.
-    if v1 not in _PRIMARY_TYPE_SLUGS:
+    # Skip sub-period / prop variants (first-five, first-inning, halves, etc.)
+    # — same V2 bucket, but not the full-game main line.
+    if any(mk in v1 for mk in _VARIANT_MARKERS):
         return None
 
     line = m.get("line")
