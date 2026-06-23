@@ -1533,17 +1533,22 @@ def _http_get(url: str, **kwargs) -> dict | None:
 
 def _team_match(home: str, away: str, ev_home: str, ev_away: str) -> bool:
     """Two-way substring match. Action uses 'Mariners', we have 'Seattle
-    Mariners'; both directions need to work. Also normalize diacritics
-    so 'Montréal Canadiens' matches 'Montreal Canadiens' — without
-    this, NHL splits silently fail every Montreal game."""
+    Mariners'; both directions need to work. Normalize diacritics so
+    'Montréal Canadiens' matches 'Montreal Canadiens', AND strip punctuation
+    so 'St. Louis Cardinals' matches 'St Louis Cardinals' (the period was
+    silently breaking every Cardinals game — substring containment failed
+    across the '.'). Punctuation→space can't create false MLB matches (no two
+    teams differ only by punctuation)."""
     if not (home and away and ev_home and ev_away):
         return False
     import unicodedata
+    import re
     def _norm(s: str) -> str:
-        # NFKD splits accented chars into base + combining mark; the
-        # mark has category "Mn" (Mark, nonspacing) which we drop.
-        return "".join(c for c in unicodedata.normalize("NFKD", s)
-                       if unicodedata.category(c) != "Mn").lower()
+        # NFKD splits accented chars into base + combining mark (category
+        # "Mn") which we drop; then punctuation → space, collapse whitespace.
+        s = "".join(c for c in unicodedata.normalize("NFKD", s)
+                    if unicodedata.category(c) != "Mn").lower()
+        return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", s)).strip()
     h, a = _norm(home), _norm(away)
     eh, ea = _norm(ev_home), _norm(ev_away)
     return ((h in eh or eh in h) and (a in ea or ea in a))
