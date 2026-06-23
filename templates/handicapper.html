@@ -2955,28 +2955,34 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         return `<div class="market-card"><h3>${title}${botTag}</h3>${blocks}${move}${_vsinMktLine(d, mt)}${openerAge}</div>`;
     }
 
-    // Per-market VSiN splits line — Circa handle (sharp money) / blended
-    // Circa+DK tickets (public), per side, for THIS market. Data's already in
-    // d.vsin (all of ml/spread/total) — this surfaces it per panel so the
-    // totals + spread splits show, not just ML. "" when no VSiN match.
-    function _vsinMktLine(d, mt) {
+    // Circa handle (sharp money) + blended Circa+DK tickets (public) for ONE
+    // market+side. {m: handle%, b: tickets%} or null when no VSiN match. The
+    // single source for both the per-panel line and the reason bullet.
+    function _vsinSide(d, mt, side) {
         const v = d && d.vsin;
-        if (!v || !v.matched || !v.books) return '';
+        if (!v || !v.matched || !v.books) return null;
         const key = (mt === 'moneyline') ? 'ml' : mt;
         const circa = (v.books.circa || {})[key];
         const dk = (v.books.draftkings || {})[key];
-        if (!circa && !dk) return '';
+        if (!circa && !dk) return null;
+        const h = circa ? circa[side + '_handle'] : null;
+        const bv = [circa ? circa[side + '_bets'] : null, dk ? dk[side + '_bets'] : null]
+            .filter(x => x != null);
+        const b = bv.length ? Math.round(bv.reduce((a, c) => a + c, 0) / bv.length) : null;
+        return { m: (h != null ? h : null), b: b };
+    }
+    // Per-market VSiN splits line for a market PANEL (both sides), baby font.
+    function _vsinMktLine(d, mt) {
         const sides = (mt === 'total')
             ? [['over', 'Over'], ['under', 'Under']]
             : [['away', (d.away || 'Away').split(' ').pop()],
                ['home', (d.home || 'Home').split(' ').pop()]];
-        const parts = sides.map(([s, lbl]) => {
-            const h = circa ? circa[s + '_handle'] : null;
-            const bv = [circa ? circa[s + '_bets'] : null, dk ? dk[s + '_bets'] : null]
-                .filter(x => x != null);
-            const b = bv.length ? Math.round(bv.reduce((a, c) => a + c, 0) / bv.length) : null;
-            return `<b>${_esc(lbl)}</b> ${h != null ? h + '%' : '—'}/${b != null ? b + '%' : '—'}`;
-        });
+        const parts = [];
+        for (const [s, lbl] of sides) {
+            const ss = _vsinSide(d, mt, s);
+            if (!ss) return '';
+            parts.push(`<b>${_esc(lbl)}</b> ${ss.m != null ? ss.m + '%' : '—'}/${ss.b != null ? ss.b + '%' : '—'}`);
+        }
         return `<div class="move"><span class="move-note">Circa $ / tickets: ${parts.join(' · ')}</span></div>`;
     }
 
@@ -3205,40 +3211,24 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             }
         }
 
-        // 2) Public splits — ML only (splits don't carry to SPR/TOT).
-        // money% = CIRCA HANDLE (sharp money — Circa doesn't limit, so real
-        // money lands there); bets% = BLENDED Circa+DK tickets (the public).
-        // The divergence (handle − tickets) is the signal: + = sharp money
-        // beyond the tickets, − = square tickets with no money (fade).
-        const sp = d.splits;
-        if (sp && pick.market_type === 'moneyline') {
-            const mKey = pick.side === 'home' ? 'home_money' : 'away_money';
-            const bKey = pick.side === 'home' ? 'home_bets'  : 'away_bets';
-            const m = sp[mKey], b = sp[bKey];
-            const srcLbl = (sp.sources && sp.sources.length > 1)
-                ? ` [${sp.sources.length} sources]` : '';
-            if (m != null && b != null) {
-                const diff = Math.round(m - b);
-                if (diff >= 10) {
-                    lines.push(`Public ${m}% money / ${b}% bets on ${sideName} — sharp money divergence (+${diff}pp)${srcLbl}`);
-                } else if (diff <= -10) {
-                    lines.push(`Public ${m}% money / ${b}% bets on ${sideName} — square money, fade signal (${Math.abs(diff)}pp)${srcLbl}`);
-                } else if (m >= 65) {
-                    lines.push(`Public heavy on ${sideName} (${m}% money / ${b}% bets)${srcLbl}`);
-                } else if (m <= 35) {
-                    lines.push(`Public light on ${sideName} (${m}% money / ${b}% bets) — contrarian side${srcLbl}`);
-                } else {
-                    lines.push(`Public split flat (${b}% bets / ${m}% money on ${sideName})${srcLbl}`);
-                }
-            } else if (b != null) {
-                // Bets% only — no money% means no sharp/square divergence read.
-                if (b >= 65) {
-                    lines.push(`Public heavy on ${sideName} (${b}% bets)${srcLbl} — money% unavailable`);
-                } else if (b <= 35) {
-                    lines.push(`Public light on ${sideName} (${b}% bets)${srcLbl} — contrarian side`);
-                } else {
-                    lines.push(`Public split roughly even (${b}% bets on ${sideName})${srcLbl}`);
-                }
+        // 2) Public splits — Circa handle (sharp money) vs blended Circa+DK
+        // tickets (public), for THIS pick's market+side. ALL markets now
+        // (symmetry — was ML-only): a TOT/SPR pick earns the same prominent
+        // divergence bullet as ML. + = sharp money beyond tickets; − = square
+        // tickets the money isn't backing (fade).
+        const ss = _vsinSide(d, pick.market_type, pick.side);
+        if (ss && ss.m != null && ss.b != null) {
+            const m = ss.m, b = ss.b, diff = Math.round(m - b);
+            if (diff >= 10) {
+                lines.push(`Circa ${m}% money / ${b}% tickets on ${sideName} — sharp money divergence (+${diff}pp)`);
+            } else if (diff <= -10) {
+                lines.push(`Circa ${m}% money / ${b}% tickets on ${sideName} — square money, fade signal (${Math.abs(diff)}pp)`);
+            } else if (m >= 65) {
+                lines.push(`Circa money heavy on ${sideName} (${m}% money / ${b}% tickets)`);
+            } else if (m <= 35) {
+                lines.push(`Circa money light on ${sideName} (${m}% money / ${b}% tickets) — contrarian side`);
+            } else {
+                lines.push(`Circa split flat (${b}% tickets / ${m}% money on ${sideName})`);
             }
         }
 
