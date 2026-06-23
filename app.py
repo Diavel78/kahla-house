@@ -2678,6 +2678,34 @@ def _probe_vsin_url(url: str) -> dict:
     apiish = sorted(u for u in urls if any(t in u.lower()
                     for t in ("api", "/json", "data.vsin", "/splits", "graphql", ".json")))[:25]
     out["api_like_urls"] = apiish
+    # Pull the splits TABLE structure so we can write the parser: find tables,
+    # pick the one that looks like the splits grid (most rows / has % cells),
+    # dump its header + first rows. CSS paywall clips visually but the rows are
+    # in the DOM, so a server parse sees them.
+    try:
+        from bs4 import BeautifulSoup as _BS
+        soup = _BS(body, "lxml")
+        tables = soup.find_all("table")
+        out["table_count"] = len(tables)
+        best, best_score = None, -1
+        for t in tables:
+            rows = t.find_all("tr")
+            txt = t.get_text(" ", strip=True)
+            score = len(rows) + txt.count("%") * 2
+            if score > best_score:
+                best, best_score = t, score
+        if best is not None:
+            rows = best.find_all("tr")
+            def _cells(tr):
+                return [c.get_text(" ", strip=True)[:40]
+                        for c in tr.find_all(["th", "td"])]
+            out["table"] = {
+                "n_rows": len(rows),
+                "header": _cells(rows[0]) if rows else [],
+                "sample_rows": [_cells(tr) for tr in rows[1:6]],
+            }
+    except Exception as e:
+        out["table_error"] = f"{type(e).__name__}: {e}"
     # If a JSON response, show top keys; if HTML, a small head snippet
     ct = (out["content_type"] or "").lower()
     if "json" in ct:
@@ -2703,12 +2731,9 @@ def debug_vsin():
             return jsonify({"ok": False, "error": "url must be absolute http(s)"}), 400
         return jsonify({"ok": True, "results": [_probe_vsin_url(one)]})
     candidates = [
+        "https://data.vsin.com/draftkings/betting-splits/?view=mlb",
+        "https://data.vsin.com/circa/betting-splits/?view=mlb",
         "https://data.vsin.com/betting-splits/?view=mlb",
-        "https://data.vsin.com/betting-splits/",
-        "https://data.vsin.com/betting-splits/?view=mlb&book=draftkings",
-        "https://data.vsin.com/betting-splits/?view=mlb&book=circa",
-        "https://www.vsin.com/betting-splits/",
-        "https://data.vsin.com/",
     ]
     return jsonify({"ok": True, "results": [_probe_vsin_url(u) for u in candidates]})
 
