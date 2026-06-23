@@ -2642,6 +2642,77 @@ def debug_kalshi():
     return jsonify(_fetch_kalshi_markets(series))
 
 
+def _probe_vsin_url(url: str) -> dict:
+    """Fetch one VSiN URL server-side (Vercel egress reaches it where the
+    build sandbox + a phone can't) and characterize the response so we can
+    find where Circa lines + DK splits actually live. No secrets, read-only."""
+    import re as _re
+    out = {"url": url}
+    try:
+        r = _http.get(url, headers={
+            "User-Agent": _SPLITS_UA,
+            "Accept": "text/html,application/json,application/xhtml+xml,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.vsin.com/",
+        }, timeout=14)
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+        return out
+    body = r.text or ""
+    low = body.lower()
+    out["status"] = r.status_code
+    out["content_type"] = r.headers.get("content-type")
+    out["length"] = len(body)
+    out["server"] = r.headers.get("server")
+    # Cloudflare / bot-challenge tells
+    out["looks_blocked"] = any(s in low for s in (
+        "just a moment", "cf-challenge", "cf-browser-verification",
+        "attention required", "access denied", "captcha"))
+    # Is the data embedded (SSR / JSON blob) or loaded by a separate call?
+    out["has_next_data"] = '__next_data__' in low or 'id="__next_data__"' in low
+    out["keyword_hits"] = {k: low.count(k) for k in
+        ("circa", "draftkings", "handle", "ticket", "percent", "%", "splits", "consensus")
+        if k in low}
+    # Any internal API / data URLs the page references (the real "endpoint")
+    urls = set(_re.findall(r'https?://[^\s"\'<>]+', body))
+    apiish = sorted(u for u in urls if any(t in u.lower()
+                    for t in ("api", "/json", "data.vsin", "/splits", "graphql", ".json")))[:25]
+    out["api_like_urls"] = apiish
+    # If a JSON response, show top keys; if HTML, a small head snippet
+    ct = (out["content_type"] or "").lower()
+    if "json" in ct:
+        try:
+            j = r.json()
+            out["json_top_keys"] = (sorted(j.keys())[:30] if isinstance(j, dict)
+                                    else f"list[{len(j)}]")
+        except Exception:
+            out["json_parse"] = "failed"
+    out["head_snippet"] = body[:600]
+    return out
+
+
+@app.route("/debug-vsin")
+def debug_vsin():
+    """Probe VSiN to find where Circa lines + DK splits live (HTML blob vs a
+    separate data call) and whether the Vercel runtime can even reach it.
+    Public, read-only, no secrets. ?url= probes one arbitrary URL; default
+    walks a candidate list. Temporary discovery tool."""
+    one = (request.args.get("url") or "").strip()
+    if one:
+        if not one.startswith("http"):
+            return jsonify({"ok": False, "error": "url must be absolute http(s)"}), 400
+        return jsonify({"ok": True, "results": [_probe_vsin_url(one)]})
+    candidates = [
+        "https://data.vsin.com/betting-splits/?view=mlb",
+        "https://data.vsin.com/betting-splits/",
+        "https://data.vsin.com/betting-splits/?view=mlb&book=draftkings",
+        "https://data.vsin.com/betting-splits/?view=mlb&book=circa",
+        "https://www.vsin.com/betting-splits/",
+        "https://data.vsin.com/",
+    ]
+    return jsonify({"ok": True, "results": [_probe_vsin_url(u) for u in candidates]})
+
+
 def _fetch_kalshi_orderbook(ticker: str) -> dict:
     """Full Kalshi order book (all bid levels, both sides) for one market.
     Public, no auth. `GET /markets/{ticker}/orderbook`."""
