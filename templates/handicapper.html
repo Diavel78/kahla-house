@@ -3219,16 +3219,23 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         const ss = _vsinSide(d, pick.market_type, pick.side);
         if (ss && ss.m != null && ss.b != null) {
             const m = ss.m, b = ss.b, diff = Math.round(m - b);
+            // Name the market + line so it's unambiguous WHICH Circa split this
+            // is — "Circa SPR ... on Miami Marlins -1.5", never a bare number
+            // that could be mistaken for the ML split.
+            const mLbl = _shortMarket(pick.market_type);   // ML / SPR / TOT
+            const lf = (pick.pin_line != null && pick.market_type !== 'moneyline')
+                ? ' ' + _fmtPt(pick.pin_line) : '';
+            const who = `${sideName}${lf}`;
             if (diff >= 10) {
-                lines.push(`Circa ${m}% money / ${b}% tickets on ${sideName} — sharp money divergence (+${diff}pp)`);
+                lines.push(`Circa ${mLbl}: ${m}% money / ${b}% tickets on ${who} — sharp money divergence (+${diff}pp)`);
             } else if (diff <= -10) {
-                lines.push(`Circa ${m}% money / ${b}% tickets on ${sideName} — square money, fade signal (${Math.abs(diff)}pp)`);
+                lines.push(`Circa ${mLbl}: ${m}% money / ${b}% tickets on ${who} — square money, fade signal (${Math.abs(diff)}pp)`);
             } else if (m >= 65) {
-                lines.push(`Circa money heavy on ${sideName} (${m}% money / ${b}% tickets)`);
+                lines.push(`Circa ${mLbl} money heavy on ${who} (${m}% money / ${b}% tickets)`);
             } else if (m <= 35) {
-                lines.push(`Circa money light on ${sideName} (${m}% money / ${b}% tickets) — contrarian side`);
+                lines.push(`Circa ${mLbl} money light on ${who} (${m}% money / ${b}% tickets) — contrarian side`);
             } else {
-                lines.push(`Circa split flat (${b}% tickets / ${m}% money on ${sideName})`);
+                lines.push(`Circa ${mLbl} split flat on ${who} (${b}% tickets / ${m}% money)`);
             }
         }
 
