@@ -2952,7 +2952,32 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         // exchange source (KALSHI/PMM) is labelled inline on each row.
         let openerAge = '';
 
-        return `<div class="market-card"><h3>${title}${botTag}</h3>${blocks}${move}${openerAge}</div>`;
+        return `<div class="market-card"><h3>${title}${botTag}</h3>${blocks}${move}${_vsinMktLine(d, mt)}${openerAge}</div>`;
+    }
+
+    // Per-market VSiN splits line — Circa handle (sharp money) / blended
+    // Circa+DK tickets (public), per side, for THIS market. Data's already in
+    // d.vsin (all of ml/spread/total) — this surfaces it per panel so the
+    // totals + spread splits show, not just ML. "" when no VSiN match.
+    function _vsinMktLine(d, mt) {
+        const v = d && d.vsin;
+        if (!v || !v.matched || !v.books) return '';
+        const key = (mt === 'moneyline') ? 'ml' : mt;
+        const circa = (v.books.circa || {})[key];
+        const dk = (v.books.draftkings || {})[key];
+        if (!circa && !dk) return '';
+        const sides = (mt === 'total')
+            ? [['over', 'Over'], ['under', 'Under']]
+            : [['away', (d.away || 'Away').split(' ').pop()],
+               ['home', (d.home || 'Home').split(' ').pop()]];
+        const parts = sides.map(([s, lbl]) => {
+            const h = circa ? circa[s + '_handle'] : null;
+            const bv = [circa ? circa[s + '_bets'] : null, dk ? dk[s + '_bets'] : null]
+                .filter(x => x != null);
+            const b = bv.length ? Math.round(bv.reduce((a, c) => a + c, 0) / bv.length) : null;
+            return `<b>${_esc(lbl)}</b> ${h != null ? h + '%' : '—'}/${b != null ? b + '%' : '—'}`;
+        });
+        return `<div class="move"><span class="move-note">Circa $ / tickets: ${parts.join(' · ')}</span></div>`;
     }
 
     // Seed an ad-hoc pick from a market panel side the bot didn't

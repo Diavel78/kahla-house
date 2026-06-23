@@ -3957,6 +3957,23 @@ def _vsin_blended_bets(vsin, vmt, side):
     return (sum(float(v) for v in vals) / len(vals)) if vals else None
 
 
+def _vsin_split_pp(vsin: dict | None, mt: str, side: str) -> float:
+    """Circa handle% − blended (Circa+DK) tickets% on (mt, side). Positive =
+    sharp money beyond the public ticket share on this side (the confirmation
+    signal). Works for ml/spread/total — VSiN exposes per-market handle+bets,
+    unlike Action (which was ML-only). 0.0 when no Circa data for the side."""
+    vmt = _VSIN_MT.get(mt)
+    if not vmt or not vsin or not vsin.get("matched"):
+        return 0.0
+    if side not in ("away", "home", "over", "under"):
+        return 0.0
+    h = _vsin_circa_handle(vsin, vmt, side)
+    b = _vsin_blended_bets(vsin, vmt, side)
+    if h is None or b is None:
+        return 0.0
+    return float(h) - float(b)
+
+
 def _vsin_sharp_veto(vsin: dict | None, mt: str, side: str):
     """If Circa sharp money (handle) is concentrated on the OPPOSITE side
     BEYOND the public ticket share, return (reason, read); else (None, read).
@@ -4093,7 +4110,12 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
             pin = fair_src   # downstream reference fields read from here
 
             score_for_side = sharp_score if side == sharp_side else 0
-            splits_pp = _splits_signal_pp(splits, sharp_side, mt) if score_for_side > 0 else 0.0
+            # Splits confirmation = Circa handle − blended tickets on the sharp
+            # side. Now per-market (ml/spread/total) via VSiN, not ML-only —
+            # so a total/spread move that Circa money confirms gets the bonus,
+            # not just ML. Still gated on exchange movement (confirmation, not
+            # a standalone trigger).
+            splits_pp = _vsin_split_pp(vsin, mt, sharp_side) if score_for_side > 0 else 0.0
             cs = (SHARP_WEIGHT * (score_for_side / 10.0)
                   + SPLITS_WEIGHT * min(max(0.0, splits_pp) / 30.0, 1.0))
             gates_cleared = score_for_side >= SHARP_SCORE_MIN
