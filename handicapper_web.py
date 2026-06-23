@@ -3894,6 +3894,74 @@ def _splits_signal_pp(splits: dict | None, sharp_side: str | None,
         return 0.0
 
 
+# ───────────── VSiN sharp-money splits (Circa + DraftKings) ─────────────
+# VSiN gives handle% (money) AND bets% (tickets) per side per market for the
+# sharp book (Circa) and the public book (DraftKings). The core signal: when
+# the SHARP MONEY (handle) is concentrated on the side opposite the bot's
+# pick, we'd be betting INTO sharp money — demote to a lean. Conservative
+# (only demotes, never invents/sizes-up) + captured for forward validation.
+_VSIN_MT = {"moneyline": "ml", "spread": "spread", "total": "total"}
+_VSIN_OPP_HANDLE_MIN = 60   # opposite side holds ≥ this % of the money
+_VSIN_SHARP_GAP_MIN  = 8    # opp money exceeds opp tickets by ≥ this (sharp concentration, not just chalk)
+_VSIN_OPP = {"away": "home", "home": "away", "over": "under", "under": "over"}
+
+
+def _vsin_for_game(sport: str, away: str, home: str) -> dict:
+    """Match this game to VSiN's slate for BOTH books. Late-imports app.py's
+    scraper (cached 15 min there). Returns {matched, books:{circa:ev, draftkings:ev}}
+    where each ev carries ml/spread/total handle+bets per side."""
+    out = {"matched": False, "books": {}}
+    try:
+        from app import _fetch_vsin_splits as _vf  # late import (circular-safe)
+    except Exception:
+        return out
+    for book in ("circa", "draftkings"):
+        try:
+            res = _vf(sport, book) or {}
+        except Exception:
+            continue
+        for e in res.get("events") or []:
+            if _team_match(home, away, e.get("home_team", ""), e.get("away_team", "")):
+                out["books"][book] = e
+                out["matched"] = True
+                break
+    return out
+
+
+def _vsin_handle_bets(vsin: dict, book: str, vmt: str, side: str):
+    """(handle, bets) for one book/market/side from a matched VSiN game."""
+    ev = (vsin.get("books") or {}).get(book)
+    if not ev:
+        return None, None
+    blk = ev.get(vmt) or {}
+    key = side if vmt != "total" else ("over" if side == "over" else "under")
+    return blk.get(f"{key}_handle"), blk.get(f"{key}_bets")
+
+
+def _vsin_sharp_veto(vsin: dict | None, mt: str, side: str):
+    """If sharp money (handle) is concentrated on the OPPOSITE side, return
+    (reason, read); else (None, read). Prefers Circa (the sharp book), falls
+    back to DraftKings. `read` is a compact capture dict (logged regardless)."""
+    vmt = _VSIN_MT.get(mt)
+    if not vmt or not vsin or not vsin.get("matched"):
+        return None, None
+    opp = _VSIN_OPP.get(side)
+    for book in ("circa", "draftkings"):
+        our_h, our_b = _vsin_handle_bets(vsin, book, vmt, side)
+        opp_h, opp_b = _vsin_handle_bets(vsin, book, vmt, opp)
+        if opp_h is None:
+            continue
+        read = {"book": book, "side_handle": our_h, "side_bets": our_b,
+                "opp_handle": opp_h, "opp_bets": opp_b}
+        gap = (opp_h - opp_b) if (opp_h is not None and opp_b is not None) else None
+        if (opp_h >= _VSIN_OPP_HANDLE_MIN and gap is not None
+                and gap >= _VSIN_SHARP_GAP_MIN):
+            return (f"{book.title()} sharp money {opp_h}% on the other side "
+                    f"({opp_b}% of tickets) — would be betting into it"), read
+        return None, read          # first book with data decides (Circa wins)
+    return None, None
+
+
 def _suggest_picks(odds: dict, splits: dict | None = None,
                    power: dict | None = None, *,
                    sport: str | None = None, home: str | None = None,
@@ -3901,6 +3969,7 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                    sticky_keys: set | None = None,
                    prime_zones: list[tuple[int, int]] | None = None,
                    prime_zones_by_market: dict | None = None,
+                   vsin: dict | None = None,
                    kelly_fraction: float | None = None) -> list[dict]:
     """Polymarket-execution picks. Returns a list — there can be more
     than one on a game. Behaviour:
@@ -4003,6 +4072,15 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 if conflict_reason:
                     gates_cleared = False
 
+            # VSiN sharp-money veto (Circa handle) — ALL markets. If the sharp
+            # money is piled on the opposite side, betting this side is fading
+            # into it → demote to a forced lean. Captured (vsin_read) on every
+            # candidate for forward validation regardless of whether it fired.
+            vsin_reason, vsin_read = _vsin_sharp_veto(vsin, mt, side)
+            if vsin_reason and gates_cleared:
+                gates_cleared = False
+                conflict_reason = conflict_reason or vsin_reason
+
             # Provisional edge estimate (fair-prob pp) that drives Kelly
             # sizing + finally populates the edge_pp column. The sharp +
             # splits terms only count on the side the sharp money points
@@ -4087,6 +4165,10 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 "unconfirmed_ml": unconfirmed_ml,
                 "fair_source":    fair_src.get("source"),
                 "conflict_reason": conflict_reason,
+                # VSiN sharp-money read (Circa/DK handle vs bets) — captured on
+                # every candidate; `vsin_veto` true when it demoted this side.
+                "vsin":           vsin_read,
+                "vsin_veto":      bool(vsin_reason),
                 # Per-bet-type timing: each market is classified against ITS
                 # own tuned zones (markets without their own fall back to
                 # pooled). _bm is built once below from prime_zones_by_market
@@ -4289,6 +4371,9 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     }
 
     splits = _fetch_splits(sport, away, home) if (away and home) else None
+    # VSiN sharp-money splits (Circa + DK handle/bets) — feeds the sharp-money
+    # veto in _suggest_picks AND is surfaced read-only on the dossier.
+    vsin = _vsin_for_game(sport, away, home) if (away and home) else None
 
     # Polymarket lookup — the user bets on Polymarket, so we want the
     # actual PMM line + current bid/ask alongside PIN's devigged fair.
@@ -4430,6 +4515,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
                                  starts_in_min=starts_in_min,
                                  sticky_keys=_sticky_keys(sb, market["id"]),
                                  prime_zones_by_market=_load_prime_zones_by_market(sb),
+                                 vsin=vsin,
                                  kelly_fraction=_load_kelly_fraction(sb))
     # Keep the singular `suggestion` field as an alias for the top pick
     # so any caller still expecting it doesn't break. New code should
@@ -4502,6 +4588,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         "venue":           espn_block.get("venue"),
         "odds":            odds,
         "splits":          splits,
+        "vsin":            vsin,
         "espn":            {
             "home":       espn_block.get("home"),
             "away":       espn_block.get("away"),

@@ -2763,7 +2763,13 @@ def _fetch_vsin_splits(sport: str = "mlb", book: str = "draftkings") -> dict:
     SPR/TOT/ML. book ∈ {draftkings, circa}. The SSR table carries the full
     slate even behind VSiN's CSS paywall (it only clips visually)."""
     from bs4 import BeautifulSoup as _BS
+    import time as _time
     view = _VSIN_VIEW.get(sport.lower(), sport.lower())
+    cache_key = f"vsin:{book}:{view}"
+    _now = _time.time()
+    _c = _cache.get(cache_key)
+    if _c and (_now - _c["ts"]) < 900:        # 15-min cache (slow-moving %s)
+        return _c["data"]
     url = f"https://data.vsin.com/{book}/betting-splits/?view={view}"
     debug = {"url": url, "ok": False}
     try:
@@ -2829,7 +2835,10 @@ def _fetch_vsin_splits(sport: str = "mlb", book: str = "draftkings") -> dict:
         })
     debug["ok"] = True
     debug["n_events"] = len(events)
-    return {"events": events, "debug": debug}
+    result = {"events": events, "debug": debug}
+    if events:                                 # cache successes only (like splits)
+        _cache[cache_key] = {"data": result, "ts": _now}
+    return result
 
 
 @app.route("/debug-vsin-parsed")
@@ -3975,6 +3984,8 @@ def api_handicapper_paperlog():
                                 "x_score": s.get("x_score"),
                                 "x_side": s.get("x_side"),
                                 "x_agree": s.get("x_agree"),
+                                "vsin": s.get("vsin"),
+                                "vsin_veto": bool(s.get("vsin_veto")),
                                 "uses_pmm_projection": s.get("uses_pmm_projection")},
             })
         nrfi = d.get("nrfi") or {}
