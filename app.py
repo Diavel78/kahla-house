@@ -2850,6 +2850,41 @@ def debug_vsin_parsed():
     return jsonify(_fetch_vsin_splits(sport, book))
 
 
+@app.route("/debug-pmm")
+def debug_pmm():
+    """Diagnose the Polymarket SDK path — does the authed client construct, and
+    does a minimal MARKET-DATA read (public-ish) work? Returns ONLY ok/timing/
+    exception text (no secrets). Public, read-only. This isolates whether the
+    outage is auth/client-construction vs the read endpoint vs a timeout."""
+    import time as _t
+    out = {"keys_present": bool(POLYMARKET_KEY_ID and POLYMARKET_SECRET_KEY)}
+    # 1) Client construction (this is where account-auth would fail).
+    t0 = _t.time()
+    try:
+        client = get_client()
+        out["get_client"] = {"ok": True, "ms": round((_t.time() - t0) * 1000)}
+    except Exception as e:
+        out["get_client"] = {"ok": False, "ms": round((_t.time() - t0) * 1000),
+                             "error": f"{type(e).__name__}: {str(e)[:300]}"}
+        return jsonify(out)
+    # 2) Minimal market-data read — the public events list. If THIS is what
+    # hangs/fails (not construction), it's the read endpoint, not auth.
+    for shape in ({"tagSlug": "baseball-mlb", "closed": False, "limit": 5},
+                  {"closed": False, "limit": 5}):
+        t1 = _t.time()
+        try:
+            resp = client.events.list(shape)
+            n = (len(resp) if isinstance(resp, list)
+                 else len((resp or {}).get("events") or (resp or {}).get("results") or []))
+            out["events_list"] = {"ok": True, "ms": round((_t.time() - t1) * 1000),
+                                  "count": n, "shape": shape}
+            break
+        except Exception as e:
+            out["events_list"] = {"ok": False, "ms": round((_t.time() - t1) * 1000),
+                                  "error": f"{type(e).__name__}: {str(e)[:400]}", "shape": shape}
+    return jsonify(out)
+
+
 def _fetch_kalshi_orderbook(ticker: str) -> dict:
     """Full Kalshi order book (all bid levels, both sides) for one market.
     Public, no auth. `GET /markets/{ticker}/orderbook`."""
