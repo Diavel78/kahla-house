@@ -3962,6 +3962,40 @@ def _vsin_sharp_veto(vsin: dict | None, mt: str, side: str):
     return None, None
 
 
+def _vsin_to_ml_splits(vsin: dict | None) -> dict:
+    """ML-shaped splits dict from VSiN (Circa sharp preferred, DK fallback),
+    REPLACING Action Network. money% = VSiN handle% (the sharp fingerprint),
+    bets% = VSiN bets% (tickets). Feeds the dossier reason bullet AND
+    _splits_signal_pp scoring, so both now run on the sharp book instead of
+    Action's unreliable number."""
+    base = {"away_money": None, "home_money": None,
+            "away_bets": None, "home_bets": None,
+            "sharp_diff": None, "book": None,
+            "sources": [], "sources_tried": ["vsin-circa", "vsin-draftkings"],
+            "per_source": {}}
+    if not vsin:
+        return base
+    for book in ("circa", "draftkings"):
+        ev = (vsin.get("books") or {}).get(book)
+        ml = (ev or {}).get("ml") or {}
+        am, hm = ml.get("away_handle"), ml.get("home_handle")
+        ab, hb = ml.get("away_bets"), ml.get("home_bets")
+        matched = am is not None or hm is not None
+        base["per_source"][f"vsin-{book}"] = {
+            "matched": matched, "events_returned": 1 if ev else 0,
+            "sample_games": ([f"{ev.get('away_team','?')} @ {ev.get('home_team','?')}"]
+                             if ev else []),
+        }
+        if matched and not base["sources"]:
+            base.update({
+                "away_money": am, "home_money": hm,
+                "away_bets": ab, "home_bets": hb,
+                "book": book, "sources": [f"vsin-{book}"],
+                "sharp_diff": (None if hm is None or hb is None else hm - hb),
+            })
+    return base
+
+
 def _suggest_picks(odds: dict, splits: dict | None = None,
                    power: dict | None = None, *,
                    sport: str | None = None, home: str | None = None,
@@ -4370,10 +4404,13 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
                                           latest, pin_op),
     }
 
-    splits = _fetch_splits(sport, away, home) if (away and home) else None
-    # VSiN sharp-money splits (Circa + DK handle/bets) — feeds the sharp-money
-    # veto in _suggest_picks AND is surfaced read-only on the dossier.
+    # VSiN sharp-money splits (Circa + DK handle/bets) — the SOLE splits
+    # source now (Action Network is retired for picks: unreliable, and it
+    # contradicted Circa on live games). `vsin` (full per-market) feeds the
+    # sharp-money veto; `splits` (ML-shaped, Circa-preferred) feeds the reason
+    # bullet + _splits_signal_pp, and is surfaced read-only on the dossier.
     vsin = _vsin_for_game(sport, away, home) if (away and home) else None
+    splits = _vsin_to_ml_splits(vsin)
 
     # Polymarket lookup — the user bets on Polymarket, so we want the
     # actual PMM line + current bid/ask alongside PIN's devigged fair.
