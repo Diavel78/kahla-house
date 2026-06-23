@@ -3912,9 +3912,11 @@ _VSIN_OPP = {"away": "home", "home": "away", "over": "under", "under": "over"}
 
 def _vsin_for_game(sport: str, away: str, home: str) -> dict:
     """Match this game to VSiN's slate for BOTH books. Late-imports app.py's
-    scraper (cached 15 min there). Returns {matched, books:{circa:ev, draftkings:ev}}
-    where each ev carries ml/spread/total handle+bets per side."""
-    out = {"matched": False, "books": {}}
+    scraper (cached 15 min there). Returns {matched, books:{circa:ev,...},
+    slate:{circa:[...],...}} — `slate` is the full list of games VSiN returned
+    per book (for the no-match diagnostic: lets us see WHAT VSiN had so a miss
+    self-explains as a name mismatch vs VSiN not carrying the game)."""
+    out = {"matched": False, "books": {}, "slate": {}}
     try:
         from app import _fetch_vsin_splits as _vf  # late import (circular-safe)
     except Exception:
@@ -3924,7 +3926,10 @@ def _vsin_for_game(sport: str, away: str, home: str) -> dict:
             res = _vf(sport, book) or {}
         except Exception:
             continue
-        for e in res.get("events") or []:
+        evs = res.get("events") or []
+        out["slate"][book] = [f"{e.get('away_team','?')} @ {e.get('home_team','?')}"
+                              for e in evs]
+        for e in evs:
             if _team_match(home, away, e.get("home_team", ""), e.get("away_team", "")):
                 out["books"][book] = e
                 out["matched"] = True
@@ -4016,11 +4021,16 @@ def _vsin_to_ml_splits(vsin: dict | None) -> dict:
     for book in ("circa", "draftkings"):
         ev = (vsin.get("books") or {}).get(book)
         ml = (ev or {}).get("ml") or {}
+        slate = (vsin.get("slate") or {}).get(book) or []
         base["per_source"][f"vsin-{book}"] = {
             "matched": (ml.get("away_handle") is not None or ml.get("home_handle") is not None),
-            "events_returned": 1 if ev else 0,
+            # Full slate size VSiN returned (NOT 0/1) — "0 games" was misleading
+            # on a name-mismatch where VSiN actually had a full board.
+            "events_returned": len(slate),
+            # On a match show the matched game; on a MISS show VSiN's actual
+            # slate so we can eyeball the name mismatch (or see the game's absent).
             "sample_games": ([f"{ev.get('away_team','?')} @ {ev.get('home_team','?')}"]
-                             if ev else []),
+                             if ev else slate[:8]),
         }
     # Sharp money = Circa handle ONLY. No Circa ⇒ no read.
     a_h = _vsin_circa_handle(vsin, "ml", "away")
