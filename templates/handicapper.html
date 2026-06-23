@@ -167,6 +167,8 @@
         .pick .expand-btn { background: none; border: 0; color: var(--text-muted); font-size: 11px; cursor: pointer; padding: 4px 0; margin-top: 6px; font-family: inherit; }
         .pick .expand-btn:hover { color: var(--text-secondary); }
         .pick .pick-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
+        .pick .edit-btn { background: none; border: 0; color: var(--text-muted); font-size: 11px; cursor: pointer; padding: 4px 8px; font-family: inherit; margin-left: auto; }
+        .pick .edit-btn:hover { color: var(--cyan); }
         .pick .delete-btn { background: none; border: 0; color: var(--text-muted); font-size: 11px; cursor: pointer; padding: 4px 0; font-family: inherit; margin-left: auto; }
         .pick .delete-btn:hover { color: var(--red); }
         .pick .settle-btn { background: var(--surface-2); border: 1px solid var(--border-light); color: var(--text-secondary); font-size: 11px; padding: 4px 10px; border-radius: 8px; cursor: pointer; font-family: inherit; font-weight: 600; }
@@ -1191,10 +1193,42 @@
                         <button class="settle-btn settle-lost" onclick="settlePick(${r.id}, 'lost', this)">✗ Lost</button>
                         <button class="settle-btn settle-push" onclick="settlePick(${r.id}, 'push', this)">= Push</button>
                     ` : ''}
+                    ${kind === 'pending' ? `<button class="edit-btn" onclick="editPick(${r.id}, ${Number(r.units) || 1}, this)">Edit</button>` : ''}
                     <button class="delete-btn" onclick="deletePick(${r.id}, this)">Delete</button>
                 </div>
             </li>
         `;
+    }
+
+    // Edit a pending pick's units (fix a wrong stake). Confidence re-derives
+    // server-side. Only pending picks are editable.
+    async function editPick(pickId, curUnits, btn) {
+        const raw = prompt('New units for this pick (0.25, 0.5, 1, 3, or 5):', curUnits);
+        if (raw === null) return;                       // cancelled
+        const u = parseFloat(raw);
+        if (![0.25, 0.5, 1, 3, 5].includes(u)) {
+            alert('Units must be one of: 0.25, 0.5, 1, 3, 5');
+            return;
+        }
+        if (u === Number(curUnits)) return;             // no change
+        btn.disabled = true; const old = btn.textContent; btn.textContent = 'Saving…';
+        try {
+            const r = await authFetch('/api/handicapper/pick/' + pickId + '/edit', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({units: u}),
+            });
+            const out = await r.json();
+            if (!out.ok) {
+                alert('Failed: ' + (out.error || 'unknown'));
+                btn.disabled = false; btn.textContent = old;
+                return;
+            }
+            loadData(false);                            // refresh chips + stats
+        } catch (e) {
+            alert('Request failed: ' + e);
+            btn.disabled = false; btn.textContent = old;
+        }
     }
 
     async function settlePick(pickId, status, btn) {

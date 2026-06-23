@@ -8546,6 +8546,53 @@ def api_handicapper_pick_delete(pick_id: int):
     return jsonify({"ok": True, "id": pick_id})
 
 
+@app.route("/api/handicapper/pick/<int:pick_id>/edit", methods=["POST"])
+@bot_required   # admin edits any pick; a bot_access user edits only their own (asked_by==g.uid)
+def api_handicapper_pick_edit(pick_id: int):
+    """Edit a PENDING pick's units (fix a fat-fingered stake). Body: {units}.
+    Confidence is re-derived from units so the tier label/colour stays
+    consistent. Auth mirrors DELETE (admin OR owner). Only pending picks —
+    a settled pick's pnl is already booked, so editing units there would
+    desync the stats; delete + re-log instead."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+
+    body = request.get_json(silent=True) or {}
+    # Allowed stakes (whale 10u disabled). Mirror the bot_picks CHECK set.
+    _ALLOWED_UNITS = {0.25, 0.5, 1.0, 3.0, 5.0}
+    try:
+        units = float(body.get("units"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "units required"}), 400
+    if units not in _ALLOWED_UNITS:
+        return jsonify({"ok": False, "error": "units must be 0.25, 0.5, 1, 3 or 5"}), 400
+
+    try:
+        row = (sb.table("bot_picks").select("id,asked_by,status")
+               .eq("id", pick_id).single().execute().data)
+    except Exception:
+        row = None
+    if not row:
+        return jsonify({"ok": False, "error": "pick not found"}), 404
+
+    is_admin = g.user_data.get("role") == "admin"
+    if not (is_admin or row.get("asked_by") == g.uid):
+        return jsonify({"ok": False, "error": "not your pick"}), 403
+    if row.get("status") != "pending":
+        return jsonify({"ok": False, "error": "can only edit a pending pick"}), 409
+
+    # Re-derive the confidence tier from units (1u→low, 3u→medium, 5u→high;
+    # sub-unit NRFI stakes stay low). Keeps the chip colour honest.
+    confidence = "low" if units <= 1.0 else ("medium" if units < 5.0 else "high")
+    try:
+        sb.table("bot_picks").update({"units": units, "confidence": confidence}) \
+            .eq("id", pick_id).execute()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"edit failed: {e}"}), 500
+    return jsonify({"ok": True, "id": pick_id, "units": units, "confidence": confidence})
+
+
 @app.route("/api/handicapper/pick/<int:pick_id>/settle", methods=["POST"])
 @admin_required   # MANUAL SETTLE IS ADMIN-ONLY. Non-admins rely on the auto-resolver for their grades; their un-gradeable picks (UFC method bets, postponed games) are settled by the admin from the global /handicapper-analytics page (admin can settle ANY user's row). This keeps users from mis-grading their own book while still giving every pick a path to resolution.
 def api_handicapper_pick_settle(pick_id: int):
