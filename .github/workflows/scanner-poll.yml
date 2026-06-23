@@ -191,20 +191,16 @@ jobs:
       # data to validate the 1c-AND and measure the lead vs paid PINN. Free
       # (no Odds-API hit). Reuses FILLS_CRON_SECRET; idempotent.
       #
-      # CADENCE GATE (June 2026): every 2 min (Vercel Active CPU burn —
-      # this is ~7.5s of budgeted PMM lookups per tick). The free feeds
-      # lead PINN by ~4-7 min, so 2-min sampling keeps most of the
-      # cross-confirm trigger's latency edge at half the CPU.
+      # CADENCE (June 2026): every 1 min. On the Pro plan the $20/cycle
+      # included credit covers infra usage, and this endpoint is I/O-light
+      # (Active CPU only bills compute, not the network wait on PMM/Kalshi),
+      # so 1-min sampling is cheap and maximizes the cross-confirm freshness +
+      # the lead vs paid PINN. (Was 2-min under Hobby's 4h cap — see gotcha #38.)
       - name: Prediction-market — PMM+Kalshi cent snapshot ping
         continue-on-error: true
         env:
           FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
         run: |
-          M=$(date -u +%-M)
-          if [ $(( M % 2 )) -ne 0 ]; then
-            echo "minute $M — skipping pm-snapshot ping (2-min cadence)."
-            exit 0
-          fi
           if [ -z "$FILLS_CRON_SECRET" ]; then
             echo "FILLS_CRON_SECRET not set — skipping pm-snapshot ping (no-op)."
             exit 0
@@ -220,19 +216,14 @@ jobs:
       # reads. PMM-only (Kalshi has no WC series). Reuses FILLS_CRON_SECRET;
       # idempotent (dedup on cent change). Cheap (one cached PMM bulk call).
       #
-      # CADENCE GATE: every 2 min on ODD minutes — offset from the pm-snapshot
-      # ping above (even minutes) so the two don't stack Vercel Active CPU on
-      # the same tick (gotcha #38).
+      # CADENCE (June 2026): every 1 min (Pro $20 credit covers it; I/O-light).
+      # Runs sequentially after the pm-snapshot curl in this same job, so the
+      # two never truly stack on Vercel — the offset is no longer needed.
       - name: World Cup — PMM 1-X-2 cent snapshot ping
         continue-on-error: true
         env:
           FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
         run: |
-          M=$(date -u +%-M)
-          if [ $(( M % 2 )) -ne 1 ]; then
-            echo "minute $M — skipping pm-snapshot-wc ping (2-min cadence, odd)."
-            exit 0
-          fi
           if [ -z "$FILLS_CRON_SECRET" ]; then
             echo "FILLS_CRON_SECRET not set — skipping pm-snapshot-wc ping (no-op)."
             exit 0
@@ -248,20 +239,16 @@ jobs:
       # review. Budgeted server-side so it stays under Vercel's 10s; stale-
       # game-first cycles coverage across ticks. Reuses FILLS_CRON_SECRET.
       #
-      # CADENCE GATE (June 2026): every 5 min. This is the single biggest
-      # Vercel Active CPU burner (~8s of build_dossier per tick, all day on
-      # an MLB slate). The dedup is on bet CHANGE, so 5-min sampling loses
-      # essentially nothing for the timing-window review dataset.
+      # CADENCE (June 2026): every 1 min. Biggest compute consumer (~8s of
+      # build_dossier per tick) — but that's the point now: on Pro the $20
+      # credit covers it, and 1-min coverage cycles the stale-first game
+      # rotation 5x faster, so the paperlog (incl. the VSiN-veto validation
+      # dataset) fills in far more completely. (Was 5-min under Hobby.)
       - name: Pick Bot — paperlog ping
         continue-on-error: true
         env:
           FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
         run: |
-          M=$(date -u +%-M)
-          if [ $(( M % 5 )) -ne 0 ]; then
-            echo "minute $M — skipping paperlog ping (5-min cadence)."
-            exit 0
-          fi
           if [ -z "$FILLS_CRON_SECRET" ]; then
             echo "FILLS_CRON_SECRET not set — skipping paperlog ping (no-op)."
             exit 0
