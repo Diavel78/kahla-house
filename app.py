@@ -2867,21 +2867,45 @@ def debug_pmm():
         out["get_client"] = {"ok": False, "ms": round((_t.time() - t0) * 1000),
                              "error": f"{type(e).__name__}: {str(e)[:300]}"}
         return jsonify(out)
-    # 2) Minimal market-data read — the public events list. If THIS is what
-    # hangs/fails (not construction), it's the read endpoint, not auth.
-    for shape in ({"tagSlug": "baseball-mlb", "closed": False, "limit": 5},
-                  {"closed": False, "limit": 5}):
+    # 2) Discovery: test the ACTUAL slugs (tagSlug='mlb' etc.) with the REAL
+    # query shape the lookup uses (tag + time window + relatedTags), plus a
+    # no-tag sample so we can see what events/tags Polymarket actually exposes
+    # right now (did the slug/taxonomy change?).
+    now = datetime.now(timezone.utc)
+    tmin = (now - timedelta(hours=12)).isoformat()
+    tmax = (now + timedelta(hours=24)).isoformat()
+
+    def _count(params):
         t1 = _t.time()
         try:
-            resp = client.events.list(shape)
-            n = (len(resp) if isinstance(resp, list)
-                 else len((resp or {}).get("events") or (resp or {}).get("results") or []))
-            out["events_list"] = {"ok": True, "ms": round((_t.time() - t1) * 1000),
-                                  "count": n, "shape": shape}
-            break
+            r = client.events.list(params)
+            evs = (r if isinstance(r, list)
+                   else (r or {}).get("events") or (r or {}).get("results") or [])
+            return {"count": len(evs), "ms": round((_t.time() - t1) * 1000)}, evs
         except Exception as e:
-            out["events_list"] = {"ok": False, "ms": round((_t.time() - t1) * 1000),
-                                  "error": f"{type(e).__name__}: {str(e)[:400]}", "shape": shape}
+            return {"error": f"{type(e).__name__}: {str(e)[:180]}",
+                    "ms": round((_t.time() - t1) * 1000)}, []
+
+    # Real shape (what lookup actually sends), a few sports to see if it's
+    # MLB-only or all sports.
+    out["real_shape"] = {}
+    for tg in ("mlb", "nba", "nfl", "soccer"):
+        res, _ = _count({"tagSlug": tg, "closed": False, "relatedTags": True,
+                         "startTimeMin": tmin, "startTimeMax": tmax, "limit": 50})
+        out["real_shape"][tg] = res
+    # Bare tag (no time window) — candidate MLB slugs.
+    out["bare_tag"] = {}
+    for tg in ("mlb", "baseball-mlb", "baseball", "sports"):
+        res, _ = _count({"tagSlug": tg, "closed": False, "limit": 10})
+        out["bare_tag"][tg] = res
+    # No-tag sample — what's actually live + how it's tagged.
+    res, evs = _count({"closed": False, "limit": 25})
+    sample = []
+    for e in evs[:10]:
+        if isinstance(e, dict):
+            sample.append({"title": e.get("title") or e.get("question") or e.get("slug"),
+                           "tags": e.get("tags") or e.get("tagSlugs") or e.get("tag")})
+    out["no_tag"] = {"result": res, "sample": sample}
     return jsonify(out)
 
 
