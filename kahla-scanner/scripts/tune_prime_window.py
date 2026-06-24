@@ -84,23 +84,23 @@ MIN_SAMPLE      = 25      # total usable rows before we tune the POOLED zones at
 MIN_MARKET_SAMPLE = 60
 LOOKBACK_DAYS_DEFAULT = 30
 DEFAULT_ZONES = [[60, 180]]
-# Pooled zones are built from the SIDES only — ML/spread. Totals were REMOVED
-# June 2026: O/U auto-suggestions are benched (TOTALS_SUGGESTIONS_ENABLED=False
-# in handicapper_web.py — the engine had no independent number, it just chased
-# the exchange total's movement and lost through every tweak). A benched bet
-# must not shape the prime window the live SIDE bets ride on, so totals are out
-# of both the pooled SIDE window AND their own per-market zone. NRFI's timing
-# edge is the opposite shape (it wins far-out, dead in the sides' windows), so
-# pooling it would pollute the shared fallback too. When totals are rebuilt on
-# a real run-total model (mlb_total_backtest.py is Phase 1) and re-enabled,
-# add "total" back to BOTH tuples.
+# Pooled zones are built from the SIDES only — ML/spread. Totals are OUT of the
+# pooled window: the old exchange-follow O/U engine is benched, and the new
+# model-driven TEST tier (handicapper_web TOTALS_TEST_MODE) is a flat-0.25u
+# experiment that must NOT shape the prime window the live SIDE bets ride on.
+# NRFI's timing edge is the opposite shape too (wins far-out, dead in the
+# sides' windows), so pooling it would pollute the shared fallback. When totals
+# are validated and re-enabled at full size, add "total" back here.
 TIMED_MARKETS = ("moneyline", "spread")
-# Markets that earn their OWN per-bet-type zones. NRFI is included here
-# (tracking only for now — its sizing is still flat 0.5u, not zone-gated;
-# wiring NRFI's zone to sizing is a follow-up). NRFI has no CLV, so the CLV
-# guardrail self-disables on it (slate_clv is None → guardrail skipped).
-# "total" intentionally absent — see TIMED_MARKETS note (O/U benched).
-TUNED_MARKETS = ("moneyline", "spread", "nrfi")
+# Markets that earn their OWN per-bet-type zones (TRACKING). NRFI and "total"
+# are both tracking-only for now — their sizing is flat (NRFI 0.5u, the test
+# O/U tier 0.25u), NOT zone-gated, and they don't drive the games-list row glow
+# (handicapper_web._prime_zones_union / _PRIME_LABEL_MARKETS exclude them). We
+# keep them here so the weekly tuner BUILDS their windows from the forward
+# paperlog (the totals window is exactly the thing the 2-week O/U test is meant
+# to surface). Neither has CLV → the CLV guardrail self-disables (slate_clv
+# None). Wiring totals'/NRFI's zone to sizing is the follow-up once each proves.
+TUNED_MARKETS = ("moneyline", "spread", "total", "nrfi")
 
 
 def _fetch_rows(sb, lookback_days: int) -> list[dict]:

@@ -2290,6 +2290,32 @@ SPLITS_WEIGHT    = 0.3
 # period. Flip True to re-enable. ML/SPR and NRFI are unaffected.
 TOTALS_SUGGESTIONS_ENABLED = False
 
+# TEST tier for O/U (June 2026) — instead of staying fully dark while the
+# run-total model proves out, MLB totals run a VISIBLE "test only" tier driven
+# by the MODEL (power.proj_total vs the live exchange line), NOT the old
+# exchange-follow logic. Phase-1 backtest showed the projection has real signal
+# (corr +0.27, 61% directional, beats baseline) but under-projects ~0.7 runs;
+# rather than wait, we deploy it at a tiny 0.25u flagged `test_only` so 2 weeks
+# of auto-paperlog + user clicks build the real prime window + calibration with
+# skin in the game. MLB-only (the model is pitcher-aware + was validated on
+# MLB); other sports' totals stay benched. Flip TOTALS_TEST_MODE off to go
+# dark again, or set TOTALS_SUGGESTIONS_ENABLED True once it's proven for full
+# size. A test total clears its gate only when the model disagrees with the
+# line by ≥ TEST_TOTAL_MIN_DIFF runs; the park veto (Coors etc.) still applies.
+TOTALS_TEST_MODE       = True
+TEST_TOTAL_UNITS       = 0.25    # flat test stake (units CHECK allows 0.25)
+TEST_TOTAL_MIN_DIFF    = 0.5     # model must beat the line by ≥ this many runs
+                                 # to clear the gate (else a forced lean)
+TEST_TOTAL_EDGE_PER_RUN = 2.0    # pp of (display-only) edge per run of gap
+# Bias re-center: the Phase-1 backtest (scripts/mlb_total_backtest) measured
+# the run-total projection running ~0.73 runs COLD (model mean 8.71 vs actual
+# 9.44) — the league RPG anchor is low for the 2026 run environment, and the
+# live proj_total shares that anchor family. Add this back before comparing to
+# the line so the test tier isn't systematically biased toward unders. RE-TUNE
+# from the 2-week test data (compare logged proj vs realized totals), or set 0
+# to test the raw projection.
+TEST_TOTAL_BIAS_RUNS   = 0.7
+
 # Spread-only price filter — SYMMETRIC band, aligned to Polymarket whole
 # cents. A SPR pick is only worth showing when its fair sits in the band
 # (-150 ≤ fair ≤ +186, i.e. 60¢ down to 35¢):
@@ -2441,10 +2467,11 @@ def _prime_zones_union(sb) -> list[tuple[int, int]]:
     pooled, by_market = _load_prime_tuning(sb)
     segs = list(pooled)
     for mt, z in by_market.items():
-        # NRFI's zone is tracked but its sizing isn't zone-gated yet, so it
-        # must not light the (size-up implying) row glow. Skip it until NRFI
-        # consumption is wired. Side markets (ML/SPR/TOT) do drive the glow.
-        if mt == "nrfi":
+        # NRFI and the test O/U tier are TRACKED but their sizing isn't
+        # zone-gated yet (flat 0.5u / 0.25u), so they must not light the
+        # (size-up implying) row glow. Skip them until their consumption is
+        # wired. ML/SPR drive the glow via the pooled zones above.
+        if mt in ("nrfi", "total"):
             continue
         segs.extend(z)
     if not segs:
@@ -4112,13 +4139,32 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
 
     candidates: list[dict] = []
     for mt in ("moneyline", "spread", "total"):
-        # Full-game O/U benched June 2026 — the totals engine has no
-        # independent number (just follows the exchange total), -10.8u/30d
-        # through every tweak. Off until the run-total model (mlb_total_backtest
-        # → handicapper_web projection) validates. Flip TOTALS_SUGGESTIONS_ENABLED
-        # back on then. ML/SPR/NRFI unaffected (NRFI is its own market_type).
-        if mt == "total" and not TOTALS_SUGGESTIONS_ENABLED:
+        # Full-game O/U: the old exchange-follow engine is benched (-10.8u/30d).
+        # MLB totals now run a model-driven TEST tier (test_total) — the side +
+        # gate come from power.proj_total vs the live line, sized 0.25u, flagged
+        # test_only (see TOTALS_TEST_MODE). Non-MLB totals stay fully dark until
+        # TOTALS_SUGGESTIONS_ENABLED. ML/SPR/NRFI unaffected.
+        test_total = (mt == "total" and sport == "MLB" and TOTALS_TEST_MODE)
+        if mt == "total" and not (TOTALS_SUGGESTIONS_ENABLED or test_total):
             continue
+        # Model side + gap for the test tier: project_total − live exchange line.
+        model_total_side = None
+        model_total_diff = None
+        if test_total:
+            _xc = (odds.get("total") or {}).get("exch_current") or {}
+            _pt = (power or {}).get("proj_total")
+            _tl = ((_xc.get("over") or {}).get("line")
+                   or (_xc.get("under") or {}).get("line"))
+            if _pt is not None and _tl is not None:
+                try:
+                    # Re-center the projection (backtest-measured cold bias)
+                    # before comparing to the line.
+                    model_total_diff = (float(_pt) + TEST_TOTAL_BIAS_RUNS) - float(_tl)
+                    model_total_side = ("over" if model_total_diff > 0.01
+                                        else "under" if model_total_diff < -0.01
+                                        else None)
+                except (TypeError, ValueError):
+                    model_total_diff = model_total_side = None
         blk = odds.get(mt) or {}
         mv = blk.get("movement") or {}
         # PRIMARY = exchange sharp score (PMM cents + Kalshi confirm). The
@@ -4140,7 +4186,15 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 continue
             pin = fair_src   # downstream reference fields read from here
 
+            # TEST totals: only the model's side is a candidate. No live line /
+            # no model opinion → no test pick for this game.
+            if test_total and (model_total_side is None or side != model_total_side):
+                continue
+
             score_for_side = sharp_score if side == sharp_side else 0
+            if test_total:
+                # Decouple from exchange movement — the model drives this tier.
+                score_for_side = 0
             # Splits confirmation = Circa handle − blended tickets on the sharp
             # side. Now per-market (ml/spread/total) via VSiN, not ML-only —
             # so a total/spread move that Circa money confirms gets the bonus,
@@ -4150,6 +4204,13 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
             cs = (SHARP_WEIGHT * (score_for_side / 10.0)
                   + SPLITS_WEIGHT * min(max(0.0, splits_pp) / 30.0, 1.0))
             gates_cleared = score_for_side >= SHARP_SCORE_MIN
+            if test_total:
+                # Model-driven gate: clears when the projection beats the line
+                # by ≥ TEST_TOTAL_MIN_DIFF runs. combined_score scales with the
+                # gap so the test total orders sensibly among candidates.
+                gap = abs(model_total_diff or 0.0)
+                gates_cleared = gap >= TEST_TOTAL_MIN_DIFF
+                cs = min(gap / 3.0, 1.0)
             # PMM+Kalshi confirmation gate (ML-only — the only market both
             # exchanges quote). A moneyline move PMM shows but Kalshi
             # doesn't confirm is mostly noise: on the live disagreement set
@@ -4182,7 +4243,25 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
             # are untouched — the veto is totals-only.
             conflict_reason = None
             if mt == "total":
-                conflict_reason = _total_conflict_reason(sport, home, power, side)
+                if test_total:
+                    # PARK veto ONLY for the test tier. The model-lean veto in
+                    # _total_conflict_reason compares against the frozen PIN
+                    # line, which can disagree with the LIVE line this side is
+                    # built on → false veto. Our side already IS the model's
+                    # side vs the live line, so the lean veto is redundant; the
+                    # park guard (Coors etc.) is the one independent check worth
+                    # keeping.
+                    if sport == "MLB" and home:
+                        _pf = _park_factor(home)
+                        _mas = home.split()[-1] if home.split() else home
+                        if side == "under" and _pf >= _PARK_UNDER_VETO:
+                            conflict_reason = (f"{_mas} park factor {round(_pf)} "
+                                               "(hitter-friendly) — fading the under")
+                        elif side == "over" and _pf <= _PARK_OVER_VETO:
+                            conflict_reason = (f"{_mas} park factor {round(_pf)} "
+                                               "(pitcher-friendly) — fading the over")
+                else:
+                    conflict_reason = _total_conflict_reason(sport, home, power, side)
                 if conflict_reason:
                     gates_cleared = False
 
@@ -4207,6 +4286,10 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 + model_edge,
                 EDGE_CAP_PP,
             ), 2)
+            if test_total:
+                # Edge from the model gap (display only — test stake is flat).
+                edge_pp = round(min(abs(model_total_diff or 0.0)
+                                    * TEST_TOTAL_EDGE_PER_RUN, EDGE_CAP_PP), 2)
 
             # PMM-projected fair: if a Polymarket market exists for
             # this side AND the push-rate projection is applicable
@@ -4254,6 +4337,11 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 "splits_pp":      round(splits_pp, 1),
                 "edge_pp":        edge_pp,
                 "model_edge_pp":  round(model_edge, 2),
+                # TEST O/U tier — model-driven (proj_total vs line), 0.25u.
+                "test_only":      bool(test_total),
+                "model_total_diff": (round(model_total_diff, 2)
+                                     if test_total and model_total_diff is not None
+                                     else None),
                 "fair_prob":      fair_prob,
                 "fair_american":  target_fair_american,   # PMM-projected when applicable
                 "pin_fair_american": fair_american,        # raw PIN fair at PIN's line, for reference
@@ -4332,6 +4420,11 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
         # this off to let totals reach 5u again.
         if c.get("market_type") == "total" and units > 3:
             units, conf = 3, "medium"
+        # TEST O/U tier — flat 0.25u regardless of Kelly/prime, so the 2-week
+        # validation logs a uniform tiny stake (we're measuring the model's
+        # directional edge, not sizing it yet). Overrides every cap below.
+        if c.get("test_only"):
+            units, conf = TEST_TOTAL_UNITS, "low"
         # Sizing concentrated in the PRIME window — only picks made 90-120
         # min before first pitch can size past 1u. That 38-pick window
         # carried +27u at 68.4%; 60-90 was modest (+3.9u), the last hour

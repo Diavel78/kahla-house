@@ -1799,6 +1799,8 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                 timing_window: s.timing_window ?? null, prime_core: s.prime_core ?? null,
                 late_capped: !!s.late_capped, size_capped: !!s.size_capped,
                 sticky: !!s.sticky, gates_cleared: !!s.gates_cleared,
+                test_only: !!s.test_only,
+                model_total_diff: s.model_total_diff ?? null,
                 conflict_reason: s.conflict_reason ?? null },
             allow_duplicate: true,
             _line: line, _price: price,
@@ -1836,8 +1838,10 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                         const sugg = d.suggestions || (d.suggestion ? [d.suggestion] : []);
                         const picks = sugg.filter(s => s && s.gates_cleared).map(s => {
                             const body = _suggestionToBody(s, mid, d);
+                            let chip = _pickChipLabel(s.market_type, s.side, body._line, body._price, s.units, d);
+                            if (s.test_only) chip = 'TEST · ' + chip;
                             return { market_type: s.market_type, side: s.side, units: Number(s.units) || 1,
-                                     _chip: _pickChipLabel(s.market_type, s.side, body._line, body._price, s.units, d),
+                                     _chip: chip, _test: !!s.test_only,
                                      _slug: s.pmm_slug || null, _inv: !!s.pmm_synthetic, _body: body };
                         });
                         // Always-give-a-pick (June 2026, per user): when nothing
@@ -2327,11 +2331,13 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                     ? '<span class="venue-tag pmm">Poly</span>'
                     : '<span class="venue-tag pmm">Exchange</span>';
                 const cardCls = s.gates_cleared ? 'suggestion-card' : 'suggestion-card soft';
-                const headingText = s.gates_cleared
-                    ? (multi
-                        ? `Bot Suggests — Pick ${i + 1} of ${suggestions.length}`
-                        : 'Bot Suggests — Polymarket Target')
-                    : 'Lean — would pass, but if forced';
+                const headingText = s.test_only
+                    ? 'O/U TEST — model pick (0.25u, validating)'
+                    : (s.gates_cleared
+                        ? (multi
+                            ? `Bot Suggests — Pick ${i + 1} of ${suggestions.length}`
+                            : 'Bot Suggests — Polymarket Target')
+                        : 'Lean — would pass, but if forced');
                 const headingCls = s.gates_cleared ? 'lbl' : 'lbl soft';
                 // Meta line:
                 //   PMM available → "PMM asking -110 · bid -118 · PIN was -107 @ 204"
@@ -2356,6 +2362,9 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                     }
                     metaLine = `Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow} <span style="color:var(--text-muted);font-size:10px">(no Poly match — projection skipped)</span>${dbg}`;
                 }
+                const testBadge = s.test_only
+                    ? `<span class="time-badge" style="background:#5b3a87;color:#e9d8ff" title="O/U TEST tier — the side comes from the run-total MODEL (projected total vs the line), NOT exchange movement. Logged at a flat 0.25u for a 2-week validation; not yet a full-size pick.">TEST${s.model_total_diff != null ? ` · model ${s.model_total_diff > 0 ? '+' : ''}${Number(s.model_total_diff).toFixed(1)}r vs line` : ''}</span>`
+                    : '';
                 const why = _buildReasons(s, d);
                 const whyHtml = why.length
                     ? `<ul class="why">${why.map(b => `<li>${_esc(b)}</li>`).join('')}</ul>`
@@ -2380,7 +2389,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                     <div class="pick-line">
                         ${market} · ${_esc(sideLabel)}${lineFrag} ${venueTag}
                         <span class="target">@ ${_fmtAmer(s.fair_american)}</span>
-                        <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>${timingBadge}${loggedBadge}
+                        <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>${testBadge}${timingBadge}${loggedBadge}
                     </div>
                     ${(s.edge_pp != null && s.edge_pp > 0) ? `<div class="pick-kelly">est. edge +${Number(s.edge_pp).toFixed(1)}pp${s.kelly_pct ? ` · ¼-Kelly ${Number(s.kelly_pct).toFixed(1)}% BR` : ''} → ${s.units}u</div>` : ''}
                     <div class="pick-meta">${metaLine}</div>
@@ -3218,6 +3227,21 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         // PIN devig target). Returns an ARRAY of bullet strings so the
         // suggestion card and the modal textarea can both consume it.
         if (!pick || !d) return [];
+        // TEST O/U tier — model-driven, no exchange/splits signal. Lead with
+        // the run-total projection vs the line (the actual basis for the pick).
+        if (pick.test_only) {
+            const out = [];
+            const sn = pick.side.toUpperCase();
+            const pr0 = d.power_rating || {};
+            if (pick.model_total_diff != null) {
+                out.push(`TEST tier — run-total model leans ${sn} by ${Math.abs(pick.model_total_diff).toFixed(1)} runs vs the line`);
+            }
+            if (pr0.proj_total != null && pr0.total_line != null) {
+                out.push(`Model projects ${pr0.proj_total} runs vs line ${_fmtPt(pr0.total_line)}${pr0.sp_adjusted ? ' (pitcher-adjusted)' : ''}`);
+            }
+            out.push('Validating O/U at 0.25u — logged for the 2-week window build, not yet full size');
+            return out.slice(0, 3);
+        }
         const lines = [];
         const blk = (d.odds || {})[pick.market_type] || {};
         const mv = blk.movement;

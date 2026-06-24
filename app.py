@@ -4076,6 +4076,10 @@ def api_handicapper_paperlog():
                                 "x_agree": s.get("x_agree"),
                                 "vsin": s.get("vsin"),
                                 "vsin_veto": bool(s.get("vsin_veto")),
+                                # TEST O/U tier — model-driven totals at 0.25u.
+                                # Tagged so the 2-week review can isolate them.
+                                "test_only": bool(s.get("test_only")),
+                                "model_total_diff": s.get("model_total_diff"),
                                 "uses_pmm_projection": s.get("uses_pmm_projection")},
             })
         nrfi = d.get("nrfi") or {}
