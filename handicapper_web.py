@@ -2283,6 +2283,12 @@ SHARP_SCORE_MIN  = 3   # Sharp signal threshold. Lowered 4→3 May 2026:
 SPLITS_MIN_PP    = 10  # |money% − bets%| considered "material".
 SHARP_WEIGHT     = 0.7
 SPLITS_WEIGHT    = 0.3
+# Full-game O/U auto-suggestions — BENCHED June 2026. The totals engine has no
+# independent number (it just follows the exchange total), and lost -10.8u/30d
+# through every tweak. Off until the run-total model (scripts/mlb_total_backtest
+# → a calibrated handicapper_web projection) clears its backtest + a shadow
+# period. Flip True to re-enable. ML/SPR and NRFI are unaffected.
+TOTALS_SUGGESTIONS_ENABLED = False
 
 # Spread-only price filter — SYMMETRIC band, aligned to Polymarket whole
 # cents. A SPR pick is only worth showing when its fair sits in the band
@@ -4103,6 +4109,13 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
 
     candidates: list[dict] = []
     for mt in ("moneyline", "spread", "total"):
+        # Full-game O/U benched June 2026 — the totals engine has no
+        # independent number (just follows the exchange total), -10.8u/30d
+        # through every tweak. Off until the run-total model (mlb_total_backtest
+        # → handicapper_web projection) validates. Flip TOTALS_SUGGESTIONS_ENABLED
+        # back on then. ML/SPR/NRFI unaffected (NRFI is its own market_type).
+        if mt == "total" and not TOTALS_SUGGESTIONS_ENABLED:
+            continue
         blk = odds.get(mt) or {}
         mv = blk.get("movement") or {}
         # PRIMARY = exchange sharp score (PMM cents + Kalshi confirm). The
