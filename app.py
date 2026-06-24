@@ -3981,6 +3981,142 @@ def api_pm_snapshot():
                     "kalshi": kal_meta, "xconfirm_triggered": xc["triggered"], **st})
 
 
+# ───────────── VSiN splits snapshot (Circa + DK handle/bets time series) ─────
+# Sports VSiN carries a betting-splits view for. CBB/CFB and NCAAB/NCAAF both
+# resolve (see _VSIN_VIEW + the lowercase default), so list both spellings.
+_VSIN_SNAP_SPORTS = {"MLB", "NBA", "NHL", "NFL", "NCAAF", "NCAAB", "CBB", "CFB"}
+# Watch window per sport — daily-grind sports need ~a day; weekly football
+# accrues splits over the week, so watch further out.
+_VSIN_SNAP_WINDOW_H = {"NFL": 80, "NCAAF": 80, "CFB": 80}
+
+
+def _vsin_rows_for_game(vsin: dict | None, mid: str) -> list[tuple]:
+    """Flatten a matched _vsin_for_game result into snapshot tuples
+    (market_id, book, market_type, side, line, handle_pct, bets_pct) for both
+    books × ML/SPR/TOT × both sides. Drops sides VSiN reported nothing for."""
+    out = []
+    books = (vsin or {}).get("books") or {}
+    for book in ("circa", "draftkings"):
+        ev = books.get(book)
+        if not ev:
+            continue
+        ml = ev.get("ml") or {}
+        for side in ("away", "home"):
+            out.append((mid, book, "ml", side, None,
+                        ml.get(f"{side}_handle"), ml.get(f"{side}_bets")))
+        sp = ev.get("spread") or {}
+        for side in ("away", "home"):
+            out.append((mid, book, "spread", side, sp.get(f"{side}_line"),
+                        sp.get(f"{side}_handle"), sp.get(f"{side}_bets")))
+        tt = ev.get("total") or {}
+        for side in ("over", "under"):
+            out.append((mid, book, "total", side, tt.get("line"),
+                        tt.get(f"{side}_handle"), tt.get(f"{side}_bets")))
+    return [r for r in out if not (r[5] is None and r[6] is None)]
+
+
+def _vsin_insert_changed(sb, rows, now) -> int:
+    """Insert (mid, book, market_type, side, line, handle, bets) rows, deduped:
+    only when (handle, bets) differs from the latest stored value for that key
+    (the pm_snapshots dedup-on-change pattern). One row per key per tick."""
+    if not rows:
+        return 0
+
+    def _lkey(v):
+        try:
+            return None if v is None else round(float(v), 2)
+        except (TypeError, ValueError):
+            return None
+
+    mids = list({r[0] for r in rows})
+    last: dict = {}
+    try:
+        recent = (sb.table("vsin_snapshots")
+                  .select("market_id,book,market_type,side,line,handle_pct,bets_pct,captured_at")
+                  .in_("market_id", mids)
+                  .gte("captured_at", (now - timedelta(hours=36)).isoformat())
+                  .order("captured_at", desc=True).limit(8000).execute().data) or []
+        for r in recent:
+            k = (r["market_id"], r["book"], r["market_type"], r["side"], _lkey(r.get("line")))
+            if k not in last:                 # first seen = latest (desc order)
+                last[k] = (r.get("handle_pct"), r.get("bets_pct"))
+    except Exception:
+        pass
+    ins, seen = [], set()
+    for (mid, book, mt, side, line, handle, bets) in rows:
+        k = (mid, book, mt, side, _lkey(line))
+        if k in seen:
+            continue
+        seen.add(k)
+        if last.get(k) == (handle, bets):     # unchanged → skip
+            continue
+        ins.append({"market_id": mid, "book": book, "market_type": mt,
+                    "side": side, "line": line, "handle_pct": handle,
+                    "bets_pct": bets, "captured_at": now.isoformat()})
+    if ins:
+        try:
+            sb.table("vsin_snapshots").insert(ins).execute()
+        except Exception:
+            return 0
+    return len(ins)
+
+
+@app.route("/api/vsin-snapshot")
+def api_vsin_snapshot():
+    """Cron-pinged ~every 15 min. Logs Circa + DraftKings handle%/bets% per
+    side per market (ML/SPR/TOT) for upcoming games into vsin_snapshots
+    (deduped on change). The sharp-money movement curve — feeds model tuning
+    (when does sharp money hit Circa?) + the resolver's per-pick closing stamp.
+    Auth: ?key= matched to VSIN_SNAPSHOT_SECRET or (fallback) FILLS_CRON_SECRET
+    — no new secret needed."""
+    expected = (os.environ.get("VSIN_SNAPSHOT_SECRET")
+                or os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    provided = (request.args.get("key") or "").strip()
+    if not expected or not secrets.compare_digest(provided, expected):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+
+    import handicapper_web
+    now = datetime.now(timezone.utc)
+    games = []
+    for sp in _VSIN_SNAP_SPORTS:
+        hi = (now + timedelta(hours=_VSIN_SNAP_WINDOW_H.get(sp, 24))).isoformat()
+        try:
+            rows_sp = (sb.table("markets").select("id,event_name,event_start,sport")
+                       .eq("sport", sp).eq("status", "active")
+                       .gte("event_start", now.isoformat()).lte("event_start", hi)
+                       .order("event_start").execute().data) or []
+        except Exception:
+            rows_sp = []
+        seen = set()
+        for g in rows_sp:
+            n = g.get("event_name") or ""
+            if " @ " in n and n not in seen:        # dedup dup market rows
+                seen.add(n)
+                games.append(g)
+    if not games:
+        return jsonify({"ok": True, "games": 0, "matched": 0, "inserted": 0})
+
+    rows, matched = [], 0
+    for g in games:
+        try:
+            away, home = [s.strip() for s in g["event_name"].split(" @ ", 1)]
+        except ValueError:
+            continue
+        try:
+            vsin = handicapper_web._vsin_for_game(g.get("sport") or "", away, home)
+        except Exception:
+            vsin = None
+        if vsin and vsin.get("matched"):
+            matched += 1
+            rows.extend(_vsin_rows_for_game(vsin, g["id"]))
+    inserted = _vsin_insert_changed(sb, rows, now)
+    return jsonify({"ok": True, "games": len(games), "matched": matched,
+                    "inserted": inserted})
+
+
 @app.route("/api/handicapper/paperlog")
 def api_handicapper_paperlog():
     """Cron-pinged ~1/min. Auto-logs every GATE-CLEARED Pick Bot suggestion

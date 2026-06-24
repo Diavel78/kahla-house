@@ -257,3 +257,31 @@ jobs:
           code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
             "https://www.thekahlahouse.com/api/handicapper/paperlog?key=${KEY}" || echo "000")
           echo "paperlog HTTP $code"
+
+      # VSiN splits snapshot ping. /api/vsin-snapshot logs Circa + DraftKings
+      # handle%/bets% per market (ML/SPR/TOT) for upcoming games into
+      # vsin_snapshots (deduped on change) — the sharp-money movement curve for
+      # model tuning (when does sharp money hit Circa?) + the resolver's
+      # per-pick closing stamp. Reuses FILLS_CRON_SECRET (endpoint fallback).
+      #
+      # CADENCE GATE: every 15 min. VSiN's scrape is 15-min server-cached and
+      # the %s move slowly, so finer ticks just re-log identical (deduped-away)
+      # numbers for no signal. Aligned to :00/:15/:30/:45.
+      - name: VSiN — splits snapshot ping
+        continue-on-error: true
+        env:
+          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
+        run: |
+          M=$(date -u +%-M)
+          if [ $(( M % 15 )) -ne 0 ]; then
+            echo "minute $M — skipping vsin-snapshot ping (15-min cadence)."
+            exit 0
+          fi
+          if [ -z "$FILLS_CRON_SECRET" ]; then
+            echo "FILLS_CRON_SECRET not set — skipping vsin-snapshot ping (no-op)."
+            exit 0
+          fi
+          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
+          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
+            "https://www.thekahlahouse.com/api/vsin-snapshot?key=${KEY}" || echo "000")
+          echo "vsin-snapshot HTTP $code"

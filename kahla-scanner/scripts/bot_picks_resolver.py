@@ -533,6 +533,51 @@ def _compute_clv(sb, bet: dict) -> float | None:
     return round((close_devig - entry_prob) * 100.0, 2)
 
 
+# Bot market_type → VSiN market_type. NRFI has no VSiN splits.
+_VSIN_MT_MAP = {"moneyline": "ml", "spread": "spread", "total": "total"}
+# Sports VSiN carries a splits view for — skip the closing lookup for the rest.
+_VSIN_RESOLVE_SPORTS = {"MLB", "NBA", "NHL", "NFL", "NCAAF", "NCAAB", "CBB", "CFB"}
+
+
+def _closing_vsin(sb, bet: dict) -> dict | None:
+    """Last pre-event_start VSiN read (Circa + DraftKings handle%/bets%, both
+    sides) for this pick's market, from vsin_snapshots. Paired with the
+    bet-time read (signal_blob.vsin) it shows whether sharp money hit Circa
+    late on the pick's side. None for NRFI / sports VSiN doesn't carry / no
+    snapshot data. Computed once at grade time (the close is fixed)."""
+    mid = bet.get("market_id")
+    vmt = _VSIN_MT_MAP.get(bet.get("market_type") or "")
+    before = bet.get("event_start") or ""
+    if not (mid and vmt and before):
+        return None
+    try:
+        rows = (sb.table("vsin_snapshots")
+                .select("book,side,line,handle_pct,bets_pct,captured_at")
+                .eq("market_id", mid).eq("market_type", vmt)
+                .lt("captured_at", before)
+                .order("captured_at", desc=True).limit(200).execute().data) or []
+    except Exception:
+        return None
+    if not rows:
+        return None
+    out: dict = {}
+    seen: set = set()
+    last_at = None
+    for r in rows:                      # desc → first per (book,side) is the close
+        k = (r["book"], r["side"])
+        if k in seen:
+            continue
+        seen.add(k)
+        out.setdefault(r["book"], {})[r["side"]] = {
+            "handle": r.get("handle_pct"), "bets": r.get("bets_pct"),
+            "line": r.get("line")}
+        last_at = last_at or r.get("captured_at")
+    if not out:
+        return None
+    out["captured_at"] = last_at
+    return out
+
+
 def _pnl_units(status: str, entry_price: int, units: int) -> float:
     """To-WIN sizing. The user bets to win N units, not to risk N units.
     So a win is always exactly +units, regardless of price. A loss is
@@ -561,7 +606,7 @@ def _fetch_pending(sb) -> list[dict]:
     try:
         return (sb.table("bot_picks")
                 .select("id,market_id,sport,event_name,event_start,market_type,"
-                        "side,entry_book,entry_price,entry_line,units,clv_pp")
+                        "side,entry_book,entry_price,entry_line,units,clv_pp,closing_vsin")
                 .eq("status", "pending")
                 .lt("event_start", cutoff)
                 .order("event_start")
@@ -573,7 +618,8 @@ def _fetch_pending(sb) -> list[dict]:
 
 
 def _update(sb, pick_id: int, status: str, pnl: float,
-            result_score: dict, clv_pp: float | None = None) -> bool:
+            result_score: dict, clv_pp: float | None = None,
+            closing_vsin: dict | None = None) -> bool:
     try:
         payload = {
             "status":       status,
@@ -586,6 +632,8 @@ def _update(sb, pick_id: int, status: str, pnl: float,
         # needs recomputing.
         if clv_pp is not None:
             payload["clv_pp"] = clv_pp
+        if closing_vsin is not None:
+            payload["closing_vsin"] = closing_vsin
         sb.table("bot_picks").update(payload).eq("id", pick_id).execute()
         return True
     except Exception as e:
@@ -617,7 +665,7 @@ def _fetch_pending_paperlog(sb) -> list[dict]:
     try:
         return (sb.table("pickbot_paperlog")
                 .select("id,market_id,sport,event_name,event_start,market_type,"
-                        "side,entry_price,line,units,clv_pp")
+                        "side,entry_price,line,units,clv_pp,closing_vsin")
                 .eq("status", "pending")
                 .lt("event_start", now)
                 .order("event_start")
@@ -628,7 +676,8 @@ def _fetch_pending_paperlog(sb) -> list[dict]:
 
 
 def _update_paperlog(sb, row_id: int, status: str, pnl: float,
-                     result_score: dict, clv_pp: float | None = None) -> bool:
+                     result_score: dict, clv_pp: float | None = None,
+                     closing_vsin: dict | None = None) -> bool:
     import json as _json
     try:
         payload = {
@@ -639,6 +688,8 @@ def _update_paperlog(sb, row_id: int, status: str, pnl: float,
         }
         if clv_pp is not None:
             payload["clv_pp"] = clv_pp
+        if closing_vsin is not None:
+            payload["closing_vsin"] = closing_vsin   # jsonb column (dict, not text)
         sb.table("pickbot_paperlog").update(payload).eq("id", row_id).execute()
         return True
     except Exception as e:
@@ -700,7 +751,13 @@ def _resolve_paperlog(sb) -> dict:
 
         units = bet.get("units") or 1
         pnl = _pnl_units(status, bet["entry_price"], units)
-        _update_paperlog(sb, bet["id"], status, pnl, result, clv)
+        cvsin = None
+        if bet.get("closing_vsin") is None and sport in _VSIN_RESOLVE_SPORTS:
+            try:
+                cvsin = _closing_vsin(sb, bet)
+            except Exception:
+                cvsin = None
+        _update_paperlog(sb, bet["id"], status, pnl, result, clv, cvsin)
         if status == "won":
             out["won"] += 1
         elif status == "lost":
@@ -829,7 +886,15 @@ def main(argv: list[str] | None = None) -> int:
                     clv = _compute_clv(sb, bet)
                 except Exception as e:
                     log.warning("clv compute failed for pick %s: %s", bet["id"], e)
-            if not _update(sb, bet["id"], status, pnl, result, clv):
+            # Closing VSiN read (Circa + DK handle/bets at the close) — the
+            # bet-vs-close sharp-money tuning signal. Best-effort, set once.
+            cvsin = None
+            if bet.get("closing_vsin") is None and sport in _VSIN_RESOLVE_SPORTS:
+                try:
+                    cvsin = _closing_vsin(sb, bet)
+                except Exception as e:
+                    log.warning("closing_vsin failed for pick %s: %s", bet["id"], e)
+            if not _update(sb, bet["id"], status, pnl, result, clv, cvsin):
                 continue
 
             if status == "won":  won  += 1
