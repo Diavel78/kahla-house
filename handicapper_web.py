@@ -2300,8 +2300,11 @@ TOTALS_SUGGESTIONS_ENABLED = False
 # skin in the game. MLB-only (the model is pitcher-aware + was validated on
 # MLB); other sports' totals stay benched. Flip TOTALS_TEST_MODE off to go
 # dark again, or set TOTALS_SUGGESTIONS_ENABLED True once it's proven for full
-# size. A test total clears its gate only when the model disagrees with the
-# line by ≥ TEST_TOTAL_MIN_DIFF runs; the park veto (Coors etc.) still applies.
+# size. A test total clears its gate only when the model's projection beats the
+# line by ≥ TEST_TOTAL_MIN_DIFF runs (projection above line → over, below →
+# under). NO external vetoes on this tier — park is already in proj_total via
+# _park_factor, so the test measures the model alone (VSiN/park recorded for
+# post-hoc slicing, never suppress a pick).
 TOTALS_TEST_MODE       = True
 TEST_TOTAL_UNITS       = 0.25    # flat test stake (units CHECK allows 0.25)
 TEST_TOTAL_MIN_DIFF    = 0.5     # model must beat the line by ≥ this many runs
@@ -4242,35 +4245,28 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
             # way). Stops the bot recommending Rockies/Coors unders. ML/SPR
             # are untouched — the veto is totals-only.
             conflict_reason = None
-            if mt == "total":
-                if test_total:
-                    # PARK veto ONLY for the test tier. The model-lean veto in
-                    # _total_conflict_reason compares against the frozen PIN
-                    # line, which can disagree with the LIVE line this side is
-                    # built on → false veto. Our side already IS the model's
-                    # side vs the live line, so the lean veto is redundant; the
-                    # park guard (Coors etc.) is the one independent check worth
-                    # keeping.
-                    if sport == "MLB" and home:
-                        _pf = _park_factor(home)
-                        _mas = home.split()[-1] if home.split() else home
-                        if side == "under" and _pf >= _PARK_UNDER_VETO:
-                            conflict_reason = (f"{_mas} park factor {round(_pf)} "
-                                               "(hitter-friendly) — fading the under")
-                        elif side == "over" and _pf <= _PARK_OVER_VETO:
-                            conflict_reason = (f"{_mas} park factor {round(_pf)} "
-                                               "(pitcher-friendly) — fading the over")
-                else:
-                    conflict_reason = _total_conflict_reason(sport, home, power, side)
+            # NO veto on the test tier. The point of the 0.25u O/U test is to
+            # measure THE MODEL ALONE, so nothing outside the model may suppress
+            # a pick. The park veto is redundant — _power_rating_v2 already
+            # scales proj_total by _park_factor, so a park-aware projection that
+            # STILL lands under the line in Coors is the model's real call;
+            # vetoing it would override my own park layer AND suppress the exact
+            # park-case picks the test needs to validate. The model-lean veto is
+            # moot too (the side already IS the model's side). VSiN is recorded
+            # below but not allowed to veto, so the 2-week sample is the pure
+            # model — we slice by park / VSiN agreement afterward.
+            if mt == "total" and not test_total:
+                conflict_reason = _total_conflict_reason(sport, home, power, side)
                 if conflict_reason:
                     gates_cleared = False
 
-            # VSiN sharp-money veto (Circa handle) — ALL markets. If the sharp
-            # money is piled on the opposite side, betting this side is fading
-            # into it → demote to a forced lean. Captured (vsin_read) on every
-            # candidate for forward validation regardless of whether it fired.
+            # VSiN sharp-money veto (Circa handle) — ALL markets EXCEPT the test
+            # totals tier. If the sharp money is piled on the opposite side,
+            # betting this side is fading into it → demote to a forced lean.
+            # Captured (vsin_read) on every candidate for forward validation
+            # regardless of whether it fired (test totals: recorded, not vetoed).
             vsin_reason, vsin_read = _vsin_sharp_veto(vsin, mt, side)
-            if vsin_reason and gates_cleared:
+            if vsin_reason and gates_cleared and not test_total:
                 gates_cleared = False
                 conflict_reason = conflict_reason or vsin_reason
 
