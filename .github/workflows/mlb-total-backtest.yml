@@ -1,0 +1,47 @@
+name: MLB Run-Total Model — Backtest
+
+# Manually-triggered Phase-1 calibration backtest of the full-game run-total
+# model. Pulls completed MLB games (MLB Stats API — free, no secrets),
+# projects total runs from starters + staff + team offense + park, and grades
+# the projection vs the ACTUAL total runs. Prints mean/bias, MAE/RMSE vs a
+# league-average baseline, Pearson correlation, a directional hit-rate, and a
+# calibration table to the run log — read it there.
+#
+# This validates the projection's predictive FORM, NOT betting edge (no lines
+# yet — that's Phase 2, grading vs historical totals lines from pm_snapshots).
+# See scripts/mlb_total_backtest.py for the leakage caveat. No writes, no
+# schedule, no secrets.
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Window in days ending yesterday"
+        required: false
+        default: "45"
+      season:
+        description: "Stats season (blank = current year)"
+        required: false
+        default: ""
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run run-total backtest
+        run: |
+          ARGS="--days ${{ github.event.inputs.days || '45' }}"
+          if [ -n "${{ github.event.inputs.season }}" ]; then ARGS="$ARGS --season ${{ github.event.inputs.season }}"; fi
+          python -m scripts.mlb_total_backtest $ARGS
