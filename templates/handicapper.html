@@ -1017,14 +1017,22 @@
         const v = _verdictCache.get(mid);
         if (!v || !Array.isArray(v.picks)) return { on: _isPrime(iso), text: 'Prime' };
         const order = ['ML', 'SPR', 'TOT'];
+        // Markets the prime system actually labels (server's _PRIME_LABEL_MARKETS
+        // = ML/SPR; TOT is benched during O/U testing). When we HAVE per-market
+        // data, a market missing from it is benched → NEVER prime (don't borrow
+        // the pooled zone — that's what lit a 0.25u test TOT as "PRIME · TOT").
+        // Only before the first fetch (no per-market data) do we fall back to the
+        // pooled _isPrime for everything.
+        const haveByMarket = Object.keys(_primeZonesByMarket).length > 0;
         const hot = new Set();
         for (const p of v.picks) {
             const lab = _MT_LABEL[p.market_type];
             if (!lab) continue;                                           // skip nrfi
             const zones = _primeZonesByMarket[lab];
-            const inWin = Array.isArray(zones)
-                ? zones.some(z => diffMin >= z[0] && diffMin <= z[1])
-                : _isPrime(iso);
+            let inWin;
+            if (Array.isArray(zones)) inWin = zones.some(z => diffMin >= z[0] && diffMin <= z[1]);
+            else if (haveByMarket)    inWin = false;                      // benched market → not prime
+            else                      inWin = _isPrime(iso);             // legacy pre-fetch fallback
             if (inWin) hot.add(lab);
         }
         const labs = order.filter(l => hot.has(l));

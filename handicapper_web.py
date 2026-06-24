@@ -4371,8 +4371,12 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 # own tuned zones (markets without their own fall back to
                 # pooled). _bm is built once below from prime_zones_by_market
                 # or the legacy single prime_zones list.
-                "timing_window":  _timing_window(starts_in_min,
-                                                 _market_zones(_bm, mt)),
+                # TEST O/U tier has NO timing window — totals are benched from
+                # the prime system (no tuned zones), so borrowing the pooled
+                # ML/SPR zones falsely badged a flat 0.25u test pick "PRIME".
+                # Test sizing is flat regardless of timing, so null = no badge.
+                "timing_window":  None if test_total else _timing_window(
+                                      starts_in_min, _market_zones(_bm, mt)),
                 "prime_core":     _is_prime_core(starts_in_min),
             })
 
