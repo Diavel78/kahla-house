@@ -3221,6 +3221,31 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         const entryLbl   = (s.pmm_bid_american != null) ? 'Poly bid' : 'Poly target';
         return `${market} · ${sideName}${lineFrag} @ ${_fmtAmer(makerEntry)} (${entryLbl})`;
     }
+    // Circa handle ($) vs blended Circa+DK tickets for THIS pick's market+side
+    // → one plain-English bullet, or null when VSiN has no match. Shared by the
+    // normal suggestion card AND the O/U TEST card so the Circa split shows on
+    // EVERY bet card (symmetry — the test tier used to short-circuit past it).
+    function _circaReasonBullet(pick, d) {
+        const ss = _vsinSide(d, pick.market_type, pick.side);
+        if (!ss || ss.m == null || ss.b == null) return null;
+        const m = ss.m, b = ss.b, diff = Math.round(m - b);
+        const mLbl = _shortMarket(pick.market_type);   // ML / SPR / TOT
+        // Name the market + line so it's unambiguous WHICH Circa split this is —
+        // "Circa SPR ... on Miami Marlins -1.5", never a bare number that could
+        // be mistaken for the ML split.
+        const sideName = pick.market_type === 'total'
+            ? pick.side.toUpperCase()
+            : (pick.side === 'home' ? d.home : d.away);
+        const lf = (pick.pin_line != null && pick.market_type !== 'moneyline')
+            ? ' ' + _fmtPt(pick.pin_line) : '';
+        const who = `${sideName}${lf}`;
+        if (diff >= 10)  return `Circa ${mLbl}: ${m}% money / ${b}% tickets on ${who} — sharp money divergence (+${diff}pp)`;
+        if (diff <= -10) return `Circa ${mLbl}: ${m}% money / ${b}% tickets on ${who} — square money, fade signal (${Math.abs(diff)}pp)`;
+        if (m >= 65)     return `Circa ${mLbl} money heavy on ${who} (${m}% money / ${b}% tickets)`;
+        if (m <= 35)     return `Circa ${mLbl} money light on ${who} (${m}% money / ${b}% tickets) — contrarian side`;
+        return `Circa ${mLbl} split flat on ${who} (${b}% tickets / ${m}% money)`;
+    }
+
     function _buildReasons(pick, d) {
         // 2-3 plain-English bullets explaining the pick. Grounded in
         // this market's actual signals (PIN line move, public splits,
@@ -3239,8 +3264,12 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             if (pr0.proj_total != null && pr0.total_line != null) {
                 out.push(`Model projects ${pr0.proj_total} runs vs line ${_fmtPt(pr0.total_line)}${pr0.sp_adjusted ? ' (pitcher-adjusted)' : ''}`);
             }
+            // Circa split on the picked side — same bullet every other card gets
+            // (symmetry; the test tier was the one surface missing it).
+            const czTest = _circaReasonBullet(pick, d);
+            if (czTest) out.push(czTest);
             out.push('Validating O/U at 0.25u — logged for the 2-week window build, not yet full size');
-            return out.slice(0, 3);
+            return out.slice(0, 4);
         }
         const lines = [];
         const blk = (d.odds || {})[pick.market_type] || {};
@@ -3274,28 +3303,8 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         // (symmetry — was ML-only): a TOT/SPR pick earns the same prominent
         // divergence bullet as ML. + = sharp money beyond tickets; − = square
         // tickets the money isn't backing (fade).
-        const ss = _vsinSide(d, pick.market_type, pick.side);
-        if (ss && ss.m != null && ss.b != null) {
-            const m = ss.m, b = ss.b, diff = Math.round(m - b);
-            // Name the market + line so it's unambiguous WHICH Circa split this
-            // is — "Circa SPR ... on Miami Marlins -1.5", never a bare number
-            // that could be mistaken for the ML split.
-            const mLbl = _shortMarket(pick.market_type);   // ML / SPR / TOT
-            const lf = (pick.pin_line != null && pick.market_type !== 'moneyline')
-                ? ' ' + _fmtPt(pick.pin_line) : '';
-            const who = `${sideName}${lf}`;
-            if (diff >= 10) {
-                lines.push(`Circa ${mLbl}: ${m}% money / ${b}% tickets on ${who} — sharp money divergence (+${diff}pp)`);
-            } else if (diff <= -10) {
-                lines.push(`Circa ${mLbl}: ${m}% money / ${b}% tickets on ${who} — square money, fade signal (${Math.abs(diff)}pp)`);
-            } else if (m >= 65) {
-                lines.push(`Circa ${mLbl} money heavy on ${who} (${m}% money / ${b}% tickets)`);
-            } else if (m <= 35) {
-                lines.push(`Circa ${mLbl} money light on ${who} (${m}% money / ${b}% tickets) — contrarian side`);
-            } else {
-                lines.push(`Circa ${mLbl} split flat on ${who} (${b}% tickets / ${m}% money)`);
-            }
-        }
+        const czMain = _circaReasonBullet(pick, d);
+        if (czMain) lines.push(czMain);
 
         // 3) Power-rating model — our independent number vs the market.
         //    Confirmation when it agrees with the side, caution when it
