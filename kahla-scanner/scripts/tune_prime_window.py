@@ -84,15 +84,23 @@ MIN_SAMPLE      = 25      # total usable rows before we tune the POOLED zones at
 MIN_MARKET_SAMPLE = 60
 LOOKBACK_DAYS_DEFAULT = 30
 DEFAULT_ZONES = [[60, 180]]
-# Pooled zones are built from the SIDES only — totals/ML/spread. NRFI's
-# timing edge is the opposite shape (it wins far-out, dead in the sides'
-# windows), so pooling it would pollute the shared fallback.
-TIMED_MARKETS = ("moneyline", "spread", "total")
+# Pooled zones are built from the SIDES only — ML/spread. Totals were REMOVED
+# June 2026: O/U auto-suggestions are benched (TOTALS_SUGGESTIONS_ENABLED=False
+# in handicapper_web.py — the engine had no independent number, it just chased
+# the exchange total's movement and lost through every tweak). A benched bet
+# must not shape the prime window the live SIDE bets ride on, so totals are out
+# of both the pooled SIDE window AND their own per-market zone. NRFI's timing
+# edge is the opposite shape (it wins far-out, dead in the sides' windows), so
+# pooling it would pollute the shared fallback too. When totals are rebuilt on
+# a real run-total model (mlb_total_backtest.py is Phase 1) and re-enabled,
+# add "total" back to BOTH tuples.
+TIMED_MARKETS = ("moneyline", "spread")
 # Markets that earn their OWN per-bet-type zones. NRFI is included here
 # (tracking only for now — its sizing is still flat 0.5u, not zone-gated;
 # wiring NRFI's zone to sizing is a follow-up). NRFI has no CLV, so the CLV
 # guardrail self-disables on it (slate_clv is None → guardrail skipped).
-TUNED_MARKETS = ("moneyline", "spread", "total", "nrfi")
+# "total" intentionally absent — see TIMED_MARKETS note (O/U benched).
+TUNED_MARKETS = ("moneyline", "spread", "nrfi")
 
 
 def _fetch_rows(sb, lookback_days: int) -> list[dict]:

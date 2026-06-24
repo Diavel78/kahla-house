@@ -2366,7 +2366,7 @@ _PRIME_ZONES = [(60, 180)]   # fallback (old single-span behaviour)
 # the pooled `zones` (the `_pooled` key here). Cache holds both.
 _PRIME_WINDOW_CACHE: dict = {"zones": None, "by_market": None, "at": 0.0}
 _PRIME_WINDOW_TTL = 300.0   # seconds
-_TIMED_MARKETS = ("moneyline", "spread", "total")
+_TIMED_MARKETS = ("moneyline", "spread")   # totals benched — see tuner TIMED_MARKETS
 
 
 def _load_prime_tuning(sb) -> tuple[list[tuple[int, int]], dict]:
@@ -2459,9 +2459,12 @@ def _prime_zones_union(sb) -> list[tuple[int, int]]:
     return [(lo, hi) for lo, hi in merged]
 
 
-# Side markets that carry a prime label on the games-list row (NRFI excluded
-# — its sizing isn't zone-gated yet, so it must not imply a size-up window).
-_PRIME_LABEL_MARKETS = (("moneyline", "ML"), ("spread", "SPR"), ("total", "TOT"))
+# Side markets that carry a prime label on the games-list row. NRFI excluded
+# (sizing not zone-gated yet → must not imply a size-up window). TOT removed
+# June 2026 — O/U auto-suggestions are benched (TOTALS_SUGGESTIONS_ENABLED),
+# so a totals PRIME badge would point at a bet the bot won't make. Re-add when
+# totals are rebuilt + re-enabled.
+_PRIME_LABEL_MARKETS = (("moneyline", "ML"), ("spread", "SPR"))
 
 
 def _prime_zones_by_market_resolved(sb) -> dict:
