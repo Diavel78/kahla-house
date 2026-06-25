@@ -133,6 +133,12 @@ body::after {
 .app-card.games-app::before { background: linear-gradient(90deg, var(--purple), var(--blue)); }
 .app-card.games-app:hover { border-color: rgba(168,85,247,0.3); box-shadow: 0 8px 40px rgba(168,85,247,0.08), 0 0 0 1px rgba(168,85,247,0.15); }
 .app-card.games-app .app-tag { background: var(--purple-dim); color: var(--purple); }
+.games-app:hover .arrow { color: var(--purple); }
+
+.app-card.grocery-app::before { background: linear-gradient(90deg, var(--green), #34d399); }
+.app-card.grocery-app:hover { border-color: rgba(34,197,94,0.3); box-shadow: 0 8px 40px rgba(34,197,94,0.08), 0 0 0 1px rgba(34,197,94,0.15); }
+.app-card.grocery-app .app-tag { background: var(--green-dim); color: var(--green); }
+.grocery-app:hover .arrow { color: var(--green); }
 
 .app-card.bookclub-app::before { background: linear-gradient(90deg, var(--cyan), var(--green)); }
 .app-card.bookclub-app:hover { border-color: rgba(6,182,212,0.3); box-shadow: 0 8px 40px rgba(6,182,212,0.08), 0 0 0 1px rgba(6,182,212,0.15); }
@@ -240,7 +246,7 @@ select.role-select option { background: var(--surface); }
         <div class="apps-grid" id="appsGrid"></div>
         <div class="admin-panel" id="adminPanel" style="display:none">
             <div class="admin-hdr"><h2>User Management</h2><span class="badge" id="pendingBadge" style="display:none">0 pending</span></div>
-            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>Pick Bot</th><th>Odds</th><th>Book Club</th><th>Club Mgr</th><th>Games</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
+            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>Pick Bot</th><th>Odds</th><th>Book Club</th><th>Club Mgr</th><th>Games</th><th>Grocery</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
         </div>
         <div class="footer">The Kahla House &middot; thekahlahouse.com</div>
     </div>
@@ -360,6 +366,7 @@ function renderAppCards() {
     const hasOdds = isAdmin || !!CUD.odds_access;
     const hasBookClub = isAdmin || !!CUD.book_club_access || !!CUD.book_club_manager;
     const hasGames = isAdmin || !!CUD.games_access;
+    const hasGrocery = isAdmin || !!CUD.grocery_access;
     let h = '';
     if (hasBot) {
         h += `<a href="/handicapper" class="app-card pickbot-app">
@@ -400,6 +407,15 @@ function renderAppCards() {
             <span class="arrow">&rarr;</span>
         </a>`;
     }
+    if (hasGrocery) {
+        h += `<a href="/grocery" class="app-card grocery-app">
+            <span class="app-icon">&#128722;</span>
+            <h2>Grocery List</h2>
+            <p>The family shopping list &mdash; add as you think of it, mark staples that auto-fill the next run, check off in the store, and push the whole list straight to your Walmart cart.</p>
+            <span class="app-tag">Shopping</span>
+            <span class="arrow">&rarr;</span>
+        </a>`;
+    }
     if (!h) {
         h = '<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text-muted)"><h3 style="color:var(--text-secondary);margin-bottom:8px">No Apps Assigned</h3><p>An administrator needs to grant you access.</p></div>';
     }
@@ -435,6 +451,7 @@ function loadAdminPanel() {
                 <td>${bookClubPill(u)}</td>
                 <td>${clubMgrPill(u)}</td>
                 <td>${gamesPill(u)}</td>
+                <td>${groceryPill(u)}</td>
                 <td>${!isMe && !u.approved
                     ? `<button class="btn btn-sm" style="background:var(--green);color:#fff;font-size:12px;margin-right:6px" onclick="approveUser('${u.id}','viewer')">Approve as Viewer</button><button class="btn btn-sm" style="background:var(--red-dim);color:#f87171;font-size:12px;margin-right:6px;border:1px solid rgba(239,68,68,.3)" onclick="approveUser('${u.id}','admin')">Approve as Admin</button><button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:12px" onclick="rejectUser('${u.id}','${E(u.displayName)}')">Reject</button>`
                     : isMe ? '<span style="color:var(--text-muted);font-size:12px">You</span>'
@@ -537,6 +554,24 @@ function gamesPill(u) {
 async function toggleGamesAccess(uid, on) {
     await db.collection('users').doc(uid).update({ games_access: on });
     toast('Games access ' + (on ? 'granted' : 'revoked'), 'success');
+}
+
+function groceryPill(u) {
+    // Admins always have implicit access — show as "ON" but uneditable.
+    if (u.role === 'admin') {
+        return `<span class="bot-pill on implicit" title="Admins always have Grocery access">ON</span>`;
+    }
+    // Pending / unapproved users can't have access — pill stays grey.
+    if (u.role === 'pending' || !u.approved) {
+        return `<span class="bot-pill implicit" title="Approve user first">OFF</span>`;
+    }
+    const on = !!u.grocery_access;
+    return `<span class="bot-pill ${on ? 'on' : ''}" onclick="toggleGroceryAccess('${u.id}',${on ? 'false' : 'true'})">${on ? 'ON' : 'OFF'}</span>`;
+}
+
+async function toggleGroceryAccess(uid, on) {
+    await db.collection('users').doc(uid).update({ grocery_access: on });
+    toast('Grocery access ' + (on ? 'granted' : 'revoked'), 'success');
 }
 
 async function approveUser(uid, role) {

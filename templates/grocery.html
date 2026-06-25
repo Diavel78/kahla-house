@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Grocery List · The Kahla House</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Grocery">
+<meta name="theme-color" content="#0d1411">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+<!-- Firebase Auth (compat mode) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script>
+const FC = {
+    apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
+    authDomain: "kahla-house.firebaseapp.com",
+    projectId: "kahla-house",
+    storageBucket: "kahla-house.firebasestorage.app",
+    messagingSenderId: "1029771942929",
+    appId: "1:1029771942929:web:76358096dbb868e375a5b0"
+};
+firebase.initializeApp(FC);
+</script>
+<style>
+:root{
+  --bg:#0d1411; --bg2:#111c17; --card:#13211b; --card2:#172a22;
+  --border:rgba(255,255,255,.08); --border2:rgba(255,255,255,.13);
+  --text:#eaf2ee; --text2:#aab8b1; --muted:#6f7f78;
+  --green:#22c55e; --green-soft:#34d399; --green-dim:rgba(34,197,94,.13);
+  --blue:#4a7cff; --amber:#f5b53d; --amber-dim:rgba(245,181,61,.14);
+  --red:#ef4444; --red-dim:rgba(239,68,68,.13);
+  --wm:#0071dc; --wm-soft:#ffc220;
+  --shadow:0 10px 40px rgba(0,0,0,.45);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0;overflow-x:hidden}
+body{background:
+   radial-gradient(1200px 600px at 80% -10%, rgba(34,197,94,.08), transparent 60%),
+   radial-gradient(900px 500px at -10% 10%, rgba(74,124,255,.05), transparent 55%),
+   var(--bg);
+  color:var(--text);font-family:'DM Sans',system-ui,sans-serif;min-height:100vh;
+  font-size:15px;line-height:1.45;-webkit-font-smoothing:antialiased}
+a{color:inherit}
+button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+input,select{font-family:inherit;font-size:16px}
+
+/* ---- auth gate ---- */
+#auth-gate{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+  background:var(--bg);z-index:100;flex-direction:column;gap:16px;color:var(--text2)}
+.spin{width:34px;height:34px;border:3px solid var(--border2);border-top-color:var(--green);
+  border-radius:50%;animation:sp .8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+
+/* ---- shell ---- */
+#app{display:none;max-width:760px;margin:0 auto;padding:0 14px 140px}
+.topbar{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:12px;
+  padding:14px 2px 12px;background:linear-gradient(180deg,var(--bg) 65%,transparent);
+  backdrop-filter:blur(6px)}
+.brand{display:flex;align-items:center;gap:11px;font-weight:700;font-size:19px;letter-spacing:-.02em}
+.brand .logo{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;
+  font-size:21px;background:linear-gradient(135deg,var(--green),var(--green-soft));
+  box-shadow:0 4px 16px rgba(34,197,94,.32)}
+.brand small{display:block;font-size:11.5px;font-weight:500;color:var(--muted);letter-spacing:0}
+.spacer{flex:1}
+.iconbtn{width:38px;height:38px;border-radius:11px;border:1px solid var(--border);
+  background:var(--card);display:grid;place-items:center;font-size:16px;color:var(--text2);transition:.15s}
+.iconbtn:hover{border-color:var(--border2);color:var(--text)}
+.avatar{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;
+  font-size:13px;font-weight:700;color:#fff;flex-shrink:0}
+
+/* ---- add bar ---- */
+.addwrap{position:relative;margin:4px 0 16px}
+.addbar{display:flex;align-items:center;gap:9px;background:var(--card);
+  border:1.5px solid var(--border2);border-radius:16px;padding:7px 7px 7px 15px;
+  box-shadow:var(--shadow);transition:.18s}
+.addbar:focus-within{border-color:var(--green);box-shadow:0 0 0 4px var(--green-dim),var(--shadow)}
+.addbar .ai{font-size:18px;opacity:.8}
+#addInput{flex:1;background:none;border:none;outline:none;color:var(--text);
+  font-size:16px;font-weight:500;min-width:0;padding:8px 0}
+#addInput::placeholder{color:var(--muted)}
+.qstep{display:flex;align-items:center;gap:2px;background:var(--bg2);border:1px solid var(--border);
+  border-radius:10px;padding:2px}
+.qstep button{width:28px;height:28px;border-radius:8px;font-size:17px;color:var(--text2);font-weight:600}
+.qstep button:active{background:var(--card2)}
+.qstep span{min-width:22px;text-align:center;font-weight:700;font-size:14px;font-variant-numeric:tabular-nums}
+.addgo{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,var(--green),var(--green-soft));
+  color:#04130a;font-size:22px;font-weight:700;display:grid;place-items:center;
+  box-shadow:0 4px 14px rgba(34,197,94,.3);transition:.12s}
+.addgo:active{transform:scale(.92)}
+.addgo:disabled{opacity:.4;box-shadow:none}
+.startoggle{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);
+  padding:3px 4px 7px 16px}
+.startoggle button{display:inline-flex;align-items:center;gap:5px;color:var(--muted);font-weight:600;
+  padding:3px 9px;border-radius:20px;border:1px solid transparent;transition:.15s;font-size:12.5px}
+.startoggle button.on{color:var(--amber);background:var(--amber-dim);border-color:rgba(245,181,61,.3)}
+/* suggestions */
+.sugg{position:absolute;left:0;right:0;top:calc(100% + 6px);background:var(--card2);
+  border:1px solid var(--border2);border-radius:14px;box-shadow:var(--shadow);z-index:25;
+  overflow:hidden;display:none}
+.sugg.show{display:block}
+.sugg .row{display:flex;align-items:center;gap:10px;padding:11px 14px;cursor:pointer;border-bottom:1px solid var(--border)}
+.sugg .row:last-child{border-bottom:none}
+.sugg .row:hover,.sugg .row.act{background:var(--green-dim)}
+.sugg .row .em{font-size:16px}
+.sugg .row .t{flex:1;font-weight:500}
+.sugg .row .tag{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:4px}
+
+/* ---- action chips ---- */
+.actions{display:flex;gap:8px;margin:0 0 18px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:7px;padding:9px 14px;border-radius:12px;
+  background:var(--card);border:1px solid var(--border);font-weight:600;font-size:13.5px;
+  color:var(--text2);transition:.15s}
+.chip:hover{border-color:var(--border2);color:var(--text)}
+.chip .em{font-size:15px}
+.chip.primary{background:linear-gradient(135deg,var(--wm),#0a5fb8);color:#fff;border-color:transparent;
+  box-shadow:0 4px 16px rgba(0,113,220,.32)}
+.chip.primary .em{filter:saturate(1.3)}
+.chip.primary:hover{color:#fff;filter:brightness(1.07)}
+.chip .cnt{font-size:11px;background:rgba(255,255,255,.22);padding:1px 7px;border-radius:10px;font-weight:700}
+.chip.ghost .cnt{background:var(--bg2)}
+
+/* ---- summary ---- */
+.summary{display:flex;align-items:baseline;gap:8px;margin:2px 4px 12px;color:var(--muted);font-size:13px}
+.summary b{color:var(--text);font-weight:700;font-size:14px}
+.progress{height:6px;border-radius:99px;background:var(--bg2);overflow:hidden;margin:0 4px 18px;border:1px solid var(--border)}
+.progress > i{display:block;height:100%;background:linear-gradient(90deg,var(--green),var(--green-soft));
+  border-radius:99px;transition:width .4s cubic-bezier(.4,0,.2,1);width:0}
+
+/* ---- groups + items ---- */
+.group{margin-bottom:18px}
+.ghead{display:flex;align-items:center;gap:9px;padding:2px 6px 9px;font-weight:700;font-size:13px;
+  letter-spacing:.02em;color:var(--text2);text-transform:uppercase}
+.ghead .em{font-size:17px}
+.ghead .gn{background:var(--bg2);color:var(--muted);font-size:11px;padding:1px 8px;border-radius:10px;font-weight:700}
+.glist{display:flex;flex-direction:column;gap:7px}
+
+.item{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--border);
+  border-radius:14px;padding:11px 13px;transition:.18s;position:relative;overflow:hidden}
+.item:active{transform:scale(.995)}
+.item.checked{opacity:.62;background:var(--bg2)}
+.item.flash{animation:flash .5s}
+@keyframes flash{0%{background:var(--green-dim)}100%{}}
+.check{width:26px;height:26px;border-radius:9px;border:2px solid var(--border2);flex-shrink:0;
+  display:grid;place-items:center;transition:.15s;color:transparent;font-size:15px;font-weight:800}
+.item.checked .check{background:var(--green);border-color:var(--green);color:#04130a}
+.itxt{flex:1;min-width:0}
+.iname{font-weight:600;font-size:15.5px;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item.checked .iname{text-decoration:line-through;text-decoration-color:var(--muted)}
+.imeta{display:flex;align-items:center;gap:7px;margin-top:2px;font-size:12px;color:var(--muted)}
+.imeta .qty{color:var(--green);font-weight:700;font-variant-numeric:tabular-nums}
+.imeta .who{display:inline-flex;align-items:center;gap:4px}
+.imeta .dot{width:5px;height:5px;border-radius:50%;background:var(--border2)}
+.imeta .note{font-style:italic}
+.iact{display:flex;align-items:center;gap:2px;flex-shrink:0}
+.iact button{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;font-size:15px;
+  color:var(--muted);transition:.13s}
+.iact button:hover{background:var(--card2);color:var(--text)}
+.iact .star.on{color:var(--amber)}
+.iact .wm{color:#3a8fe0}
+.miniav{width:19px;height:19px;border-radius:50%;display:grid;place-items:center;font-size:9.5px;font-weight:700;color:#fff}
+
+/* in-cart section */
+.cartsec{margin-top:24px}
+.cartbar{display:flex;align-items:center;gap:10px;width:100%;padding:11px 14px;border-radius:13px;
+  background:var(--bg2);border:1px solid var(--border);color:var(--text2);font-weight:600;font-size:13.5px}
+.cartbar .em{font-size:16px}
+.cartbar .ar{margin-left:auto;transition:.2s;color:var(--muted)}
+.cartbar.open .ar{transform:rotate(180deg)}
+.cartsec .glist{margin-top:8px}
+
+/* empty */
+.empty{text-align:center;padding:54px 20px;color:var(--muted)}
+.empty .big{font-size:54px;margin-bottom:12px;filter:grayscale(.2)}
+.empty h3{color:var(--text);margin:0 0 6px;font-size:18px}
+.empty p{margin:0;font-size:14px;max-width:300px;margin-inline:auto}
+
+/* ---- modal ---- */
+.scrim{position:fixed;inset:0;background:rgba(4,8,6,.62);backdrop-filter:blur(3px);z-index:50;
+  display:none;align-items:flex-end;justify-content:center}
+.scrim.show{display:flex}
+.sheet{width:100%;max-width:560px;background:var(--card);border:1px solid var(--border2);
+  border-bottom:none;border-radius:22px 22px 0 0;box-shadow:var(--shadow);
+  max-height:90vh;overflow-y:auto;animation:rise .26s cubic-bezier(.2,.8,.2,1)}
+@media(min-width:560px){.scrim{align-items:center}.sheet{border-radius:22px;border-bottom:1px solid var(--border2)}}
+@keyframes rise{from{transform:translateY(28px);opacity:.4}to{transform:none;opacity:1}}
+.sheet .grab{width:40px;height:4px;border-radius:99px;background:var(--border2);margin:10px auto 2px}
+.sheet h2{font-size:18px;margin:0;padding:8px 20px 4px;letter-spacing:-.02em}
+.sheet .sub{padding:0 20px;color:var(--muted);font-size:13px;margin:0 0 14px}
+.sbody{padding:6px 20px 20px}
+.field{margin-bottom:14px}
+.field label{display:block;font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px;text-transform:uppercase;letter-spacing:.03em}
+.field input[type=text],.field input[type=number],.field select,.field textarea{
+  width:100%;background:var(--bg2);border:1.5px solid var(--border);border-radius:11px;
+  padding:11px 13px;color:var(--text);outline:none;transition:.15s}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--green);background:var(--card2)}
+.field .hint{font-size:11.5px;color:var(--muted);margin-top:5px;line-height:1.4}
+.row2{display:flex;gap:12px}.row2 .field{flex:1}
+.btnrow{display:flex;gap:10px;margin-top:8px}
+.btn{flex:1;padding:13px;border-radius:12px;font-weight:700;font-size:15px;transition:.14s;text-align:center}
+.btn.go{background:linear-gradient(135deg,var(--green),var(--green-soft));color:#04130a;box-shadow:0 4px 14px rgba(34,197,94,.28)}
+.btn.go:active{transform:scale(.98)}
+.btn.gray{background:var(--card2);color:var(--text2);border:1px solid var(--border)}
+.btn.danger{background:var(--red-dim);color:#f87171;border:1px solid rgba(239,68,68,.3);flex:0 0 auto;padding:13px 18px}
+.btn.wm{background:linear-gradient(135deg,var(--wm),#0a5fb8);color:#fff;box-shadow:0 4px 14px rgba(0,113,220,.3)}
+
+/* manage staples */
+.slist{display:flex;flex-direction:column;gap:8px}
+.srow{display:flex;align-items:center;gap:11px;padding:10px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:12px}
+.srow .em{font-size:17px}
+.srow .sn{flex:1;font-weight:600}
+.srow .sq{font-size:12px;color:var(--green);font-weight:700}
+.srow button{width:32px;height:32px;border-radius:9px;color:var(--muted);display:grid;place-items:center}
+.srow button:hover{color:#f87171;background:var(--red-dim)}
+
+/* walmart modal */
+.wmgroup{margin-bottom:16px}
+.wmgroup .lbl{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;
+  color:var(--text2);margin:0 2px 8px;display:flex;align-items:center;gap:7px}
+.wmgroup .lbl .pct{margin-left:auto;font-size:11px;color:var(--muted)}
+.wmrow{display:flex;align-items:center;gap:10px;padding:9px 11px;background:var(--bg2);
+  border:1px solid var(--border);border-radius:11px;margin-bottom:7px}
+.wmrow .nm{flex:1;font-weight:500;font-size:14px}
+.wmrow .q{font-size:12px;color:var(--green);font-weight:700}
+.wmrow .ok{color:var(--green);font-size:16px}
+.wmrow input{width:118px;background:var(--card2);border:1px solid var(--border);border-radius:9px;
+  padding:7px 9px;color:var(--text);font-size:13px;font-size:16px}
+.wmrow a.find{font-size:12px;color:#3a8fe0;font-weight:600;white-space:nowrap}
+.wmnote{font-size:12.5px;color:var(--muted);background:var(--bg2);border:1px solid var(--border);
+  border-radius:11px;padding:11px 13px;line-height:1.5;margin-bottom:14px}
+.wmnote b{color:var(--text2)}
+
+/* toast */
+#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(20px);
+  background:var(--card2);border:1px solid var(--border2);color:var(--text);padding:12px 18px;
+  border-radius:13px;box-shadow:var(--shadow);font-weight:600;font-size:14px;z-index:80;
+  opacity:0;pointer-events:none;transition:.25s;display:flex;align-items:center;gap:9px;max-width:90vw}
+#toast.show{opacity:1;transform:translateX(-50%)}
+#toast.ok{border-color:rgba(34,197,94,.4)}
+#toast.err{border-color:rgba(239,68,68,.4)}
+</style>
+</head>
+<body>
+
+<div id="auth-gate"><div class="spin"></div><div>Loading your list…</div></div>
+
+<div id="app">
+  <div class="topbar">
+    <div class="brand">
+      <span class="logo">🛒</span>
+      <span>Grocery<small id="famLine">The Kahla House</small></span>
+    </div>
+    <span class="spacer"></span>
+    <a class="iconbtn" href="/" title="Home">⌂</a>
+    <button class="iconbtn" onclick="doLogout()" title="Sign out">⏻</button>
+    <div class="avatar" id="meAv">·</div>
+  </div>
+
+  <!-- add -->
+  <div class="addwrap">
+    <div class="addbar">
+      <span class="ai">✏️</span>
+      <input id="addInput" placeholder="Add an item…  (e.g. Bananas)" autocomplete="off"
+             oninput="onType()" onkeydown="onKey(event)">
+      <div class="qstep">
+        <button onclick="bumpQty(-1)" aria-label="less">−</button>
+        <span id="qtyVal">1</span>
+        <button onclick="bumpQty(1)" aria-label="more">+</button>
+      </div>
+      <button class="addgo" id="addGo" onclick="submitAdd()" aria-label="add" disabled>＋</button>
+    </div>
+    <div class="startoggle">
+      <span>Tap to also</span>
+      <button id="stapleBtn" onclick="toggleStapleNew()">⭐ save as staple</button>
+    </div>
+    <div class="sugg" id="sugg"></div>
+  </div>
+
+  <!-- actions -->
+  <div class="actions">
+    <button class="chip primary" onclick="openWalmart()"><span class="em">🛒</span> Send to Walmart <span class="cnt" id="wmCnt">0</span></button>
+    <button class="chip ghost" onclick="openStaples()"><span class="em">⭐</span> Staples <span class="cnt" id="stCnt">0</span></button>
+    <button class="chip ghost" onclick="newList()"><span class="em">♻️</span> New list</button>
+  </div>
+
+  <div class="summary" id="summary"></div>
+  <div class="progress"><i id="progBar"></i></div>
+
+  <div id="list"></div>
+</div>
+
+<!-- ITEM EDIT MODAL -->
+<div class="scrim" id="itemModal" onclick="if(event.target===this)closeItem()">
+  <div class="sheet">
+    <div class="grab"></div>
+    <h2 id="imTitle">Edit item</h2>
+    <p class="sub">Quantity feeds straight into your Walmart cart.</p>
+    <div class="sbody">
+      <div class="field"><label>Item</label><input type="text" id="imName"></div>
+      <div class="row2">
+        <div class="field"><label>Quantity</label><input type="number" id="imQty" min="1" value="1"></div>
+        <div class="field"><label>Aisle</label><select id="imCat"></select></div>
+      </div>
+      <div class="field"><label>Note (optional)</label><input type="text" id="imNote" placeholder="brand, size, ripeness…"></div>
+      <div class="field">
+        <label>Walmart item ID <span style="color:var(--muted);text-transform:none;font-weight:500">— for one-tap cart</span></label>
+        <div style="display:flex;gap:9px">
+          <input type="text" id="imWm" placeholder="paste ID or Walmart link" oninput="parseWmField()" style="flex:1">
+          <a class="btn wm" id="imFind" target="_blank" rel="noopener" style="flex:0 0 auto;padding:11px 14px;font-size:13px">Find ↗</a>
+        </div>
+        <div class="hint">On the Walmart product page, the ID is the number at the end of the URL. Paste the whole link — I'll grab it. Pin it once and a staple is one-tap forever.</div>
+      </div>
+      <label style="display:flex;align-items:center;gap:10px;padding:4px 0 14px;cursor:pointer">
+        <input type="checkbox" id="imStaple" style="width:20px;height:20px;accent-color:var(--amber)">
+        <span style="font-weight:600">⭐ Keep as a staple <span style="color:var(--muted);font-weight:500">— auto-adds to every new list</span></span>
+      </label>
+      <div class="btnrow">
+        <button class="btn danger" onclick="deleteFromModal()">Delete</button>
+        <button class="btn go" onclick="saveItem()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- STAPLES MODAL -->
+<div class="scrim" id="stapleModal" onclick="if(event.target===this)close('stapleModal')">
+  <div class="sheet">
+    <div class="grab"></div>
+    <h2>⭐ Staples</h2>
+    <p class="sub">The things you always buy. Every <b>New list</b> starts pre-loaded with these — remove what you don't need that week without losing the staple.</p>
+    <div class="sbody">
+      <div class="addbar" style="margin-bottom:14px;box-shadow:none">
+        <span class="ai">⭐</span>
+        <input id="stapleAdd" placeholder="Add a staple…" autocomplete="off" onkeydown="if(event.key==='Enter')addStaple()" style="flex:1;background:none;border:none;outline:none;color:var(--text);font-size:16px">
+        <button class="addgo" style="background:linear-gradient(135deg,var(--amber),#f59e0b)" onclick="addStaple()">＋</button>
+      </div>
+      <div class="slist" id="stapleList"></div>
+    </div>
+  </div>
+</div>
+
+<!-- WALMART MODAL -->
+<div class="scrim" id="walmartModal" onclick="if(event.target===this)close('walmartModal')">
+  <div class="sheet">
+    <div class="grab"></div>
+    <h2>🛒 Send to Walmart</h2>
+    <p class="sub">Loads your list straight into a Walmart cart in one tap — for every item that has an item ID.</p>
+    <div class="sbody" id="wmBody"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+/* ============================ auth ============================ */
+async function authFetch(url, options = {}) {
+  const user = firebase.auth().currentUser;
+  if (!user) { location.href = '/'; return null; }
+  const token = await user.getIdToken();
+  const headers = { ...(options.headers || {}), 'Authorization': 'Bearer ' + token };
+  if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+  return fetch(url, { ...options, headers });
+}
+function doLogout(){ firebase.auth().signOut().then(()=>location.href='/'); }
+
+let ME = {}, STATE = { items:[], staples:[], categories:[], walmart_configured:false };
+let _pollTimer = null;
+
+firebase.auth().onAuthStateChanged(async user => {
+  if (!user){ location.href='/'; return; }
+  try{
+    const token = await user.getIdToken();
+    const r = await fetch('/api/me', { headers:{ 'Authorization':'Bearer '+token } });
+    if(!r.ok){ location.href='/'; return; }
+    const me = await r.json();
+    if(!me.approved || (me.role!=='admin' && !me.grocery_access)){ location.href='/'; return; }
+    ME = me;
+    const nm = me.displayName || me.email || '?';
+    const av = document.getElementById('meAv');
+    av.textContent = initials(nm); av.style.background = colorFor(nm);
+  }catch(e){ location.href='/'; return; }
+  document.getElementById('auth-gate').style.display='none';
+  document.getElementById('app').style.display='';
+  await load();
+  _pollTimer = setInterval(()=>{ if(!modalOpen()) load(true); }, 9000);
+});
+
+/* ============================ helpers ============================ */
+function initials(n){ return (n||'?').trim().split(/\s+/).map(w=>w[0]).join('').toUpperCase().slice(0,2) || '?'; }
+function colorFor(n){ // stable per-name hue
+  let h=0; for(const c of (n||'')) h=(h*31+c.charCodeAt(0))%360;
+  return `hsl(${h} 55% 45%)`;
+}
+function esc(s){ return (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function modalOpen(){ return !!document.querySelector('.scrim.show'); }
+function toast(msg, kind='ok'){
+  const t=document.getElementById('toast');
+  t.textContent=msg; t.className='show '+kind;
+  clearTimeout(t._t); t._t=setTimeout(()=>t.className='',1900);
+}
+
+/* category emoji + auto-guess */
+const CAT_EMOJI = {
+  'Produce':'🥬','Meat & Seafood':'🥩','Dairy & Eggs':'🥚','Bakery':'🍞','Frozen':'🧊',
+  'Pantry':'🥫','Snacks':'🍿','Beverages':'🥤','Breakfast':'🥣','Deli':'🧀',
+  'Canned & Jarred':'🥫','Baking':'🧁','Condiments':'🧂','Household':'🧻',
+  'Personal Care':'🧴','Baby':'🍼','Pet':'🐾','Other':'🛒'
+};
+function catEmoji(c){ return CAT_EMOJI[c] || '🛒'; }
+const CAT_RULES = [
+  ['Produce', ['banana','apple','lettuce','tomato','onion','potato','carrot','spinach','avocado','pepper','broccoli','grape','berr','strawberr','blueberr','lemon','lime','orange','cucumber','celery','garlic','mushroom','kale','cilantro','herb','salad','fruit','veggie','zucchini','squash','corn','melon','peach','pear','mango','ginger']],
+  ['Meat & Seafood', ['chicken','beef','steak','pork','bacon','sausage','turkey','fish','salmon','shrimp','tilapia','ground','ribs','meat','seafood','cod','crab','lobster','brisket','wing','tenderloin']],
+  ['Dairy & Eggs', ['milk','egg','cheese','butter','yogurt','yoghurt','cream','creamer','half and half','cottage','mozzarella','cheddar','parmesan']],
+  ['Bakery', ['bread','bagel','bun','roll','tortilla','muffin','croissant','cake','donut','doughnut','pita','baguette','english muffin']],
+  ['Breakfast', ['cereal','oatmeal','oats','pancake','syrup','waffle','breakfast','granola']],
+  ['Frozen', ['frozen','ice cream','popsicle','pizza','fries','tater','nuggets','freezer']],
+  ['Condiments', ['ketchup','mustard','mayo','ranch','dressing','salsa','honey','jam','jelly','peanut butter','nutella','bbq','hot sauce','soy sauce','sriracha','relish']],
+  ['Baking', ['flour','sugar','baking soda','baking powder','vanilla','yeast','cocoa','chocolate chip','frosting','sprinkle','cake mix']],
+  ['Beverages', ['water','soda','juice','coffee','tea','beer','wine','gatorade','cola','sparkling','lemonade','energy drink','la croix','kombucha','seltzer']],
+  ['Snacks', ['chip','cracker','cookie','candy','popcorn','pretzel','nuts','granola bar','snack','trail mix','goldfish','fruit snack','jerky']],
+  ['Household', ['paper towel','toilet paper','trash bag','detergent','dish soap','cleaner','foil','ziploc','napkin','bleach','sponge','laundry','dryer sheet','swiffer','lightbulb','batter','glad','saran']],
+  ['Personal Care', ['shampoo','conditioner','body wash','soap','toothpaste','toothbrush','deodorant','lotion','razor','floss','mouthwash','q-tip','cotton','sunscreen','advil','tylenol','vitamin','tampon','pad ']],
+  ['Baby', ['diaper','wipes','formula','baby ']],
+  ['Pet', ['dog food','cat food','litter','dog treat','cat treat','pet ']],
+  ['Pantry', ['rice','pasta','bean','oil','vinegar','sauce','soup','broth','noodle','spaghetti','canned','can of','tuna','stock','quinoa','lentil','salt','pepper','spice','seasoning','mac and cheese','ramen','olive']]
+];
+function guessCat(name){
+  const n=(name||'').toLowerCase();
+  for(const [cat,kws] of CAT_RULES){ for(const k of kws){ if(n.includes(k)) return cat; } }
+  return 'Other';
+}
+
+/* parse a Walmart item id out of a pasted URL or raw string */
+function extractWmId(s){
+  s=(s||'').trim(); if(!s) return '';
+  // /ip/Name/12345678  or  ...?...itemId=12345678
+  let m = s.match(/\/ip\/[^/]*\/(\d{5,})/) || s.match(/itemId=(\d{5,})/i) || s.match(/(\d{6,})\b/);
+  return m ? m[1] : (/^\d{5,}$/.test(s) ? s : '');
+}
+function wmSearchUrl(name){ return 'https://www.walmart.com/search?q='+encodeURIComponent(name); }
+
+/* ============================ load + render ============================ */
+async function load(silent){
+  try{
+    const r = await authFetch('/api/grocery'); if(!r) return;
+    const j = await r.json();
+    if(!j.ok){ if(!silent) toast(j.error||'Load failed','err'); return; }
+    STATE = j;
+    if(!modalOpen()) render();
+    fillCatSelects();
+  }catch(e){ if(!silent) toast('Network error','err'); }
+}
+
+function fillCatSelects(){
+  const cats = STATE.categories||[];
+  ['imCat'].forEach(id=>{
+    const sel=document.getElementById(id); if(!sel||sel._filled) return;
+    sel.innerHTML = cats.map(c=>`<option value="${esc(c)}">${catEmoji(c)} ${esc(c)}</option>`).join('');
+    sel._filled=true;
+  });
+}
+
+function render(){
+  const items = STATE.items||[];
+  const active = items.filter(i=>!i.checked);
+  const done = items.filter(i=>i.checked);
+
+  // summary + progress
+  document.getElementById('summary').innerHTML =
+    `<b>${active.length}</b> to get` + (done.length?` · <b>${done.length}</b> in cart`:'') +
+    (items.length?'':' · list is empty');
+  const pct = items.length ? Math.round(done.length/items.length*100) : 0;
+  document.getElementById('progBar').style.width = pct+'%';
+  document.getElementById('wmCnt').textContent = active.filter(i=>i.walmart_id).length;
+  document.getElementById('stCnt').textContent = (STATE.staples||[]).length;
+
+  const list = document.getElementById('list');
+  if(!items.length){
+    list.innerHTML = `<div class="empty"><div class="big">🥑</div>
+      <h3>Fresh start</h3>
+      <p>Add something above, or hit <b>♻️ New list</b> to pull in your staples.</p></div>`;
+    return;
+  }
+
+  // group active by category, in the catalog's order
+  const order = (STATE.categories||[]);
+  const groups = {};
+  active.forEach(i=>{ (groups[i.category] ||= []).push(i); });
+  const cats = Object.keys(groups).sort((a,b)=>{
+    const ia=order.indexOf(a), ib=order.indexOf(b);
+    return (ia<0?99:ia)-(ib<0?99:ib) || a.localeCompare(b);
+  });
+
+  let h='';
+  cats.forEach(c=>{
+    h += `<div class="group"><div class="ghead"><span class="em">${catEmoji(c)}</span> ${esc(c)} <span class="gn">${groups[c].length}</span></div><div class="glist">`;
+    h += groups[c].map(itemRow).join('');
+    h += `</div></div>`;
+  });
+  list.innerHTML = h;
+
+  // in-cart collapsible
+  if(done.length){
+    const open = list._cartOpen;
+    let ch = `<div class="cartsec"><button class="cartbar ${open?'open':''}" onclick="toggleCart()"><span class="em">✅</span> In cart <span class="gn" style="background:var(--card);padding:1px 8px;border-radius:10px;font-size:11px">${done.length}</span><span class="ar">⌄</span></button>`;
+    if(open) ch += `<div class="glist">${done.map(itemRow).join('')}</div>`;
+    ch += `<div style="margin-top:10px;text-align:center"><button class="chip ghost" style="font-size:12.5px" onclick="clearChecked()">🗑 Clear ${done.length} from list</button></div></div>`;
+    list.insertAdjacentHTML('beforeend', ch);
+  }
+}
+function toggleCart(){ const l=document.getElementById('list'); l._cartOpen=!l._cartOpen; render(); }
+
+function itemRow(i){
+  const who = i.added_by_name && i.added_by_name!=='Staple'
+    ? `<span class="who"><span class="miniav" style="background:${colorFor(i.added_by_name)}">${initials(i.added_by_name)}</span></span>` : '';
+  const meta = [
+    i.qty>1?`<span class="qty">×${i.qty}</span>`:'',
+    i.staple?`<span title="staple">⭐</span>`:'',
+    i.note?`<span class="note">${esc(i.note)}</span>`:'',
+  ].filter(Boolean).join('<span class="dot"></span>');
+  return `<div class="item ${i.checked?'checked':''}" data-id="${i.id}">
+    <button class="check" onclick="toggleCheck('${i.id}')">✓</button>
+    <div class="itxt" onclick="openItem('${i.id}')">
+      <div class="iname">${esc(i.name)}</div>
+      ${(meta||who)?`<div class="imeta">${meta}${meta&&who?'<span class="dot"></span>':''}${who}</div>`:''}
+    </div>
+    <div class="iact">
+      <button class="star ${i.staple?'on':''}" onclick="toggleStar('${i.id}')" title="staple">${i.staple?'⭐':'☆'}</button>
+      <a class="wm" href="${wmSearchUrl(i.name)}" target="_blank" rel="noopener" title="Find on Walmart">🛒</a>
+      <button onclick="openItem('${i.id}')" title="edit">⋯</button>
+    </div>
+  </div>`;
+}
+
+/* ============================ add bar ============================ */
+let newQty=1, newStaple=false;
+function bumpQty(d){ newQty=Math.max(1,newQty+d); document.getElementById('qtyVal').textContent=newQty; }
+function toggleStapleNew(){ newStaple=!newStaple; document.getElementById('stapleBtn').classList.toggle('on',newStaple); }
+function onType(){
+  const v=document.getElementById('addInput').value.trim().toLowerCase();
+  document.getElementById('addGo').disabled = !v;
+  const box=document.getElementById('sugg');
+  if(v.length<1){ box.classList.remove('show'); return; }
+  // suggestions: staples + previously-added item names not already on list
+  const onList = new Set((STATE.items||[]).map(i=>i.name.toLowerCase()));
+  const pool=[];
+  (STATE.staples||[]).forEach(s=>pool.push({name:s.name,cat:s.category,tag:'⭐ staple'}));
+  const seen=new Set(pool.map(p=>p.name.toLowerCase()));
+  (STATE.items||[]).forEach(i=>{ const k=i.name.toLowerCase(); if(!seen.has(k)){ seen.add(k); pool.push({name:i.name,cat:i.category,tag:'recent'}); } });
+  const hits = pool.filter(p=>p.name.toLowerCase().includes(v) && !onList.has(p.name.toLowerCase())).slice(0,6);
+  if(!hits.length){ box.classList.remove('show'); return; }
+  box.innerHTML = hits.map((p,idx)=>`<div class="row" data-i="${idx}" onclick="pickSugg(${idx})">
+     <span class="em">${catEmoji(p.cat)}</span><span class="t">${esc(p.name)}</span><span class="tag">${p.tag}</span></div>`).join('');
+  box._hits=hits; box.classList.add('show'); box._sel=-1;
+}
+function pickSugg(idx){
+  const box=document.getElementById('sugg'); const h=(box._hits||[])[idx]; if(!h) return;
+  document.getElementById('addInput').value=h.name; box.classList.remove('show');
+  submitAdd();
+}
+function onKey(e){
+  const box=document.getElementById('sugg');
+  if(box.classList.contains('show') && box._hits){
+    if(e.key==='ArrowDown'){ e.preventDefault(); box._sel=Math.min((box._sel??-1)+1,box._hits.length-1); markSel(); return; }
+    if(e.key==='ArrowUp'){ e.preventDefault(); box._sel=Math.max((box._sel??0)-1,0); markSel(); return; }
+    if(e.key==='Enter' && box._sel>=0){ e.preventDefault(); pickSugg(box._sel); return; }
+  }
+  if(e.key==='Enter') submitAdd();
+  if(e.key==='Escape'){ box.classList.remove('show'); }
+}
+function markSel(){ const box=document.getElementById('sugg');
+  box.querySelectorAll('.row').forEach((r,i)=>r.classList.toggle('act',i===box._sel)); }
+
+async function submitAdd(){
+  const inp=document.getElementById('addInput'); const name=inp.value.trim();
+  if(!name) return;
+  document.getElementById('sugg').classList.remove('show');
+  const body={ name, qty:newQty, category:guessCat(name), staple:newStaple };
+  // optimistic
+  const tmp={ id:'tmp'+Date.now(), ...body, note:'', checked:false, walmart_id:'', added_by_name:ME.displayName||ME.email||'You' };
+  STATE.items.push(tmp); render();
+  inp.value=''; newQty=1; document.getElementById('qtyVal').textContent='1';
+  newStaple=false; document.getElementById('stapleBtn').classList.remove('on');
+  document.getElementById('addGo').disabled=true; inp.focus();
+  try{
+    const r=await authFetch('/api/grocery/item',{method:'POST',body:JSON.stringify(body)});
+    const j=await r.json();
+    if(!j.ok){ toast(j.error||'Add failed','err'); }
+  }catch(e){ toast('Network error','err'); }
+  load(true);
+}
+
+/* ============================ item actions ============================ */
+async function toggleCheck(id){
+  const it=STATE.items.find(i=>i.id===id); if(!it) return;
+  it.checked=!it.checked; render();
+  const el=document.querySelector(`.item[data-id="${id}"]`); if(el&&it.checked) el.classList.add('flash');
+  try{ await authFetch('/api/grocery/item/'+id,{method:'PATCH',body:JSON.stringify({checked:it.checked})}); }
+  catch(e){ toast('Network error','err'); }
+  load(true);
+}
+async function toggleStar(id){
+  const it=STATE.items.find(i=>i.id===id); if(!it) return;
+  it.staple=!it.staple; render();
+  toast(it.staple?'⭐ Saved as staple':'Removed from staples');
+  try{ await authFetch('/api/grocery/item/'+id,{method:'PATCH',body:JSON.stringify({staple:it.staple})}); }
+  catch(e){ toast('Network error','err'); }
+  load(true);
+}
+async function clearChecked(){
+  if(!confirm('Remove all checked-off items from the list?')) return;
+  try{ await authFetch('/api/grocery/clear-checked',{method:'POST'}); toast('Cleared'); }
+  catch(e){ toast('Network error','err'); }
+  load();
+}
+
+/* ---- item modal ---- */
+let _editId=null;
+function openItem(id){
+  const it=STATE.items.find(i=>i.id===id); if(!it) return;
+  _editId=id; fillCatSelects();
+  document.getElementById('imTitle').textContent=it.name;
+  document.getElementById('imName').value=it.name;
+  document.getElementById('imQty').value=it.qty;
+  document.getElementById('imCat').value=it.category;
+  document.getElementById('imNote').value=it.note||'';
+  document.getElementById('imWm').value=it.walmart_id||'';
+  document.getElementById('imStaple').checked=!!it.staple;
+  document.getElementById('imFind').href=wmSearchUrl(it.name);
+  open('itemModal');
+}
+function parseWmField(){
+  const f=document.getElementById('imWm'); const id=extractWmId(f.value);
+  if(id && id!==f.value) f.value=id;
+}
+async function saveItem(){
+  if(!_editId) return;
+  const body={
+    name:document.getElementById('imName').value.trim(),
+    qty:parseInt(document.getElementById('imQty').value)||1,
+    category:document.getElementById('imCat').value,
+    note:document.getElementById('imNote').value.trim(),
+    walmart_id:extractWmId(document.getElementById('imWm').value),
+    staple:document.getElementById('imStaple').checked,
+  };
+  if(!body.name){ toast('Name required','err'); return; }
+  closeItem();
+  try{ const r=await authFetch('/api/grocery/item/'+_editId,{method:'PATCH',body:JSON.stringify(body)});
+    const j=await r.json(); if(!j.ok) toast(j.error||'Save failed','err'); else toast('Saved'); }
+  catch(e){ toast('Network error','err'); }
+  load();
+}
+async function deleteFromModal(){
+  if(!_editId) return;
+  const id=_editId; closeItem();
+  try{ await authFetch('/api/grocery/item/'+id,{method:'DELETE'}); toast('Removed'); }
+  catch(e){ toast('Network error','err'); }
+  load();
+}
+function closeItem(){ close('itemModal'); _editId=null; }
+
+/* ============================ staples ============================ */
+function openStaples(){ renderStaples(); open('stapleModal'); }
+function renderStaples(){
+  const list=document.getElementById('stapleList');
+  const st=STATE.staples||[];
+  if(!st.length){ list.innerHTML=`<div style="text-align:center;color:var(--muted);padding:20px 0">No staples yet. Add the things you always buy — they'll fill every new list.</div>`; return; }
+  list.innerHTML = st.map(s=>`<div class="srow">
+      <span class="em">${catEmoji(s.category)}</span>
+      <span class="sn">${esc(s.name)}</span>
+      ${s.qty>1?`<span class="sq">×${s.qty}</span>`:''}
+      <button onclick="delStaple('${s.id}')" title="remove">✕</button>
+    </div>`).join('');
+}
+async function addStaple(){
+  const inp=document.getElementById('stapleAdd'); const name=inp.value.trim(); if(!name) return;
+  inp.value='';
+  // optimistic
+  STATE.staples.push({id:'tmp'+Date.now(),name,qty:1,category:guessCat(name)});
+  renderStaples();
+  try{ await authFetch('/api/grocery/staple',{method:'POST',body:JSON.stringify({name,category:guessCat(name)})}); }
+  catch(e){ toast('Network error','err'); }
+  await load(true); renderStaples();
+}
+async function delStaple(id){
+  STATE.staples=STATE.staples.filter(s=>s.id!==id); renderStaples();
+  try{ await authFetch('/api/grocery/staple/'+id,{method:'DELETE'}); }
+  catch(e){ toast('Network error','err'); }
+  await load(true); renderStaples();
+}
+
+/* ============================ new list ============================ */
+async function newList(){
+  const n=(STATE.staples||[]).length;
+  const msg = n ? `Start a new list? This clears the current ${STATE.items.length} item(s) and pre-loads your ${n} staple(s).`
+                : `Start a new list? This clears the current ${STATE.items.length} item(s).`;
+  if(STATE.items.length && !confirm(msg)) return;
+  try{ const r=await authFetch('/api/grocery/new-list',{method:'POST'}); const j=await r.json();
+    if(j.ok) toast(`Fresh list · ${j.seeded} staple(s) added`); else toast(j.error||'Failed','err'); }
+  catch(e){ toast('Network error','err'); }
+  load();
+}
+
+/* ============================ walmart ============================ */
+function walmartCartUrl(items){
+  const parts=items.filter(i=>i.walmart_id).map(i=>`${i.walmart_id}_${i.qty||1}`);
+  return parts.length ? 'https://www.walmart.com/sc/cart/addToCart?items='+parts.join(',') : null;
+}
+function openWalmart(){ renderWalmart(); open('walmartModal'); }
+function renderWalmart(){
+  const active=(STATE.items||[]).filter(i=>!i.checked);
+  const ready=active.filter(i=>i.walmart_id);
+  const need=active.filter(i=>!i.walmart_id);
+  const url=walmartCartUrl(ready);
+  let h='';
+
+  h += `<div class="wmnote">One tap loads every <b>matched</b> item into your Walmart cart. Items still need an <b>item ID</b> — pin one from the product page and a staple is matched forever.${STATE.walmart_configured?' Or hit <b>Auto-match</b> to let the server find them.':''}</div>`;
+
+  if(STATE.walmart_configured && need.length){
+    h += `<button class="btn wm" style="margin-bottom:14px" onclick="autoMatch()">✨ Auto-match ${need.length} item(s)</button>`;
+  }
+
+  if(ready.length){
+    h += `<div class="wmgroup"><div class="lbl">✅ Ready <span class="pct">${ready.length} item(s)</span></div>`;
+    h += ready.map(i=>`<div class="wmrow"><span class="nm">${esc(i.name)}</span>${i.qty>1?`<span class="q">×${i.qty}</span>`:''}<span class="ok">✓</span></div>`).join('');
+    h += `</div>`;
+  }
+  if(need.length){
+    h += `<div class="wmgroup"><div class="lbl">🔎 Needs an item ID <span class="pct">${need.length} item(s)</span></div>`;
+    h += need.map(i=>`<div class="wmrow">
+        <span class="nm">${esc(i.name)}</span>
+        <input placeholder="paste ID/link" onchange="pinWm('${i.id}',this.value)">
+        <a class="find" href="${wmSearchUrl(i.name)}" target="_blank" rel="noopener">Find ↗</a>
+      </div>`).join('');
+    h += `</div>`;
+  }
+  if(!active.length){ h += `<div style="text-align:center;color:var(--muted);padding:14px 0">Nothing to send — your list is empty.</div>`; }
+
+  h += `<div class="btnrow" style="margin-top:8px">
+      ${url?`<a class="btn wm" href="${url}" target="_blank" rel="noopener" onclick="setTimeout(()=>close('walmartModal'),200)">🛒 Open Walmart cart · ${ready.length}</a>`
+            :`<button class="btn gray" disabled style="opacity:.55">No matched items yet</button>`}
+    </div>`;
+  document.getElementById('wmBody').innerHTML=h;
+}
+async function pinWm(id,val){
+  const wid=extractWmId(val); if(!wid){ toast('Couldn\'t read an ID','err'); return; }
+  const it=STATE.items.find(i=>i.id===id); if(it) it.walmart_id=wid;
+  renderWalmart();
+  try{ await authFetch('/api/grocery/item/'+id,{method:'PATCH',body:JSON.stringify({walmart_id:wid})}); toast('Pinned ✓'); }
+  catch(e){ toast('Network error','err'); }
+  load(true);
+}
+async function autoMatch(){
+  toast('Matching…');
+  try{
+    const r=await authFetch('/api/grocery/walmart-resolve',{method:'POST'}); const j=await r.json();
+    if(!j.ok){ toast(j.error||'Failed','err'); return; }
+    if(!j.configured){ toast('Walmart API not configured','err'); return; }
+    toast(`Matched ${j.resolved} item(s)`);
+  }catch(e){ toast('Network error','err'); }
+  await load(); renderWalmart();
+}
+
+/* ============================ modal util ============================ */
+function open(id){ document.getElementById(id).classList.add('show'); document.body.style.overflow='hidden'; }
+function close(id){ document.getElementById(id).classList.remove('show'); document.body.style.overflow=''; if(!modalOpen()) render(); }
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ const m=document.querySelector('.scrim.show'); if(m) close(m.id); }});
+document.addEventListener('click',e=>{ // dismiss suggestions on outside click
+  if(!e.target.closest('.addwrap')) document.getElementById('sugg')?.classList.remove('show');
+});
+</script>
+</body>
+</html>

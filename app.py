@@ -170,6 +170,20 @@ def book_club_required(f):
     return wrapper
 
 
+def grocery_required(f):
+    """Require Firebase auth + grocery_access (admin always implicit).
+    Gates the family Grocery list page + its API. Independent of every other
+    capability — its own pill in User Management."""
+    @functools.wraps(f)
+    @firebase_auth_required
+    def wrapper(*args, **kwargs):
+        role = g.user_data.get("role")
+        if role != "admin" and not g.user_data.get("grocery_access"):
+            return jsonify({"ok": False, "error": "Grocery access required"}), 403
+        return f(*args, **kwargs)
+    return wrapper
+
+
 def odds_required(f):
     """Require Firebase auth + odds_access (admin always implicit).
     Gates the Odds Board page + its data endpoints. The `viewer` role no
@@ -896,6 +910,15 @@ def book_club_page():
     A separate, non-betting surface (shared reading list, ratings, meetings,
     and next-read voting). Server gate is @book_club_required on the API."""
     resp = make_response(render_template("book_club.html"))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
+@app.route("/grocery")
+def grocery_page():
+    """Family grocery list — admin + grocery_access gated (client-side via
+    /api/me; server gate is @grocery_required on the API)."""
+    resp = make_response(render_template("grocery.html"))
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
 
@@ -1729,6 +1752,7 @@ def api_me():
         "book_club_manager": bool(g.user_data.get("book_club_manager")) or role == "admin",
         "games_access": bool(g.user_data.get("games_access")) or role == "admin",
         "odds_access": bool(g.user_data.get("odds_access")) or role == "admin",
+        "grocery_access": bool(g.user_data.get("grocery_access")) or role == "admin",
     })
 
 
@@ -2383,6 +2407,462 @@ def api_book_club_availability_save():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     return jsonify({"ok": True, "saved": len(clean)})
+
+
+# ---------------------------------------------------------------------------
+# Grocery list (family shopping app) — schemaless Firestore, Admin SDK.
+# Two collections:
+#   grocery_items/{id}   — the CURRENT shared shopping list (transient per run)
+#   grocery_staples/{id} — the persistent staple catalog that re-seeds each
+#                          new list. Removing a staple-seeded item from the
+#                          current list does NOT remove the staple; it returns
+#                          on the next "Start new list". Un-star to stop it.
+# Walmart import: each item/staple can carry a `walmart_id`; the page builds a
+# single add-to-cart deep link from them (one tap loads the whole cart). An
+# optional, env-gated Walmart.io API resolver fills IDs from names — see
+# _walmart_search / /api/grocery/walmart-resolve.
+# ---------------------------------------------------------------------------
+
+_GROCERY_ITEMS = "grocery_items"
+_GROCERY_STAPLES = "grocery_staples"
+# Aisle/category vocabulary the UI groups by. Free-text is tolerated, but the
+# client offers these; "Other" is the catch-all.
+_GROCERY_CATEGORIES = [
+    "Produce", "Meat & Seafood", "Dairy & Eggs", "Bakery", "Frozen",
+    "Pantry", "Snacks", "Beverages", "Breakfast", "Deli", "Canned & Jarred",
+    "Baking", "Condiments", "Household", "Personal Care", "Baby", "Pet", "Other",
+]
+
+
+def _grocery_name():
+    return g.user_data.get("displayName") or g.user_data.get("email") or "Family"
+
+
+def _g_iso(ts):
+    """Firestore timestamp → ISO string (or None). Mirrors _bc_iso."""
+    try:
+        return ts.isoformat() if ts is not None and hasattr(ts, "isoformat") else None
+    except Exception:
+        return None
+
+
+def _g_int(v, default=1):
+    try:
+        n = int(float(v))
+        return n if n > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _g_cat(v):
+    c = (v or "").strip()
+    return c if c else "Other"
+
+
+def _serialize_grocery_item(doc_id, d):
+    return {
+        "id": doc_id,
+        "name": (d.get("name") or "").strip(),
+        "qty": _g_int(d.get("qty"), 1),
+        "category": _g_cat(d.get("category")),
+        "note": (d.get("note") or "").strip(),
+        "checked": bool(d.get("checked")),
+        "staple": bool(d.get("staple")),
+        "walmart_id": (d.get("walmart_id") or "").strip(),
+        "added_by": d.get("added_by") or "",
+        "added_by_name": d.get("added_by_name") or "",
+        "checked_by_name": d.get("checked_by_name") or "",
+        "created_at": _g_iso(d.get("created_at")),
+        "updated_at": _g_iso(d.get("updated_at")),
+    }
+
+
+def _serialize_grocery_staple(doc_id, d):
+    return {
+        "id": doc_id,
+        "name": (d.get("name") or "").strip(),
+        "qty": _g_int(d.get("qty"), 1),
+        "category": _g_cat(d.get("category")),
+        "walmart_id": (d.get("walmart_id") or "").strip(),
+        "added_by_name": d.get("added_by_name") or "",
+        "created_at": _g_iso(d.get("created_at")),
+    }
+
+
+def _staple_key(name):
+    return (name or "").strip().lower()
+
+
+def _upsert_staple(db, name, qty, category, walmart_id=""):
+    """Create-or-update a staple by case-insensitive name. Returns the doc id."""
+    key = _staple_key(name)
+    if not key:
+        return None
+    existing = None
+    for s in db.collection(_GROCERY_STAPLES).stream():
+        sd = s.to_dict() or {}
+        if _staple_key(sd.get("name")) == key:
+            existing = s
+            break
+    payload = {
+        "name": name.strip(),
+        "qty": _g_int(qty, 1),
+        "category": _g_cat(category),
+    }
+    if walmart_id:
+        payload["walmart_id"] = walmart_id.strip()
+    if existing:
+        db.collection(_GROCERY_STAPLES).document(existing.id).update(payload)
+        return existing.id
+    payload["added_by_name"] = _grocery_name()
+    payload["created_at"] = firestore.SERVER_TIMESTAMP
+    ref = db.collection(_GROCERY_STAPLES).document()
+    ref.set(payload)
+    return ref.id
+
+
+def _remove_staple_by_name(db, name):
+    key = _staple_key(name)
+    for s in db.collection(_GROCERY_STAPLES).stream():
+        sd = s.to_dict() or {}
+        if _staple_key(sd.get("name")) == key:
+            db.collection(_GROCERY_STAPLES).document(s.id).delete()
+
+
+@app.route("/api/grocery")
+@grocery_required
+def api_grocery_list():
+    """Current list + staple catalog + caller info, in one payload. The page
+    polls this every few seconds so the family sees each other's changes."""
+    db = get_db()
+    try:
+        items = [_serialize_grocery_item(d.id, d.to_dict() or {})
+                 for d in db.collection(_GROCERY_ITEMS).stream()]
+        staples = [_serialize_grocery_staple(d.id, d.to_dict() or {})
+                   for d in db.collection(_GROCERY_STAPLES).stream()]
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    items.sort(key=lambda i: (i["checked"], i["category"].lower(), i["name"].lower()))
+    staples.sort(key=lambda s: (s["category"].lower(), s["name"].lower()))
+    return jsonify({
+        "ok": True,
+        "items": items,
+        "staples": staples,
+        "categories": _GROCERY_CATEGORIES,
+        "walmart_configured": bool(_walmart_configured()),
+        "me": {"uid": g.uid, "name": _grocery_name(),
+               "is_admin": g.user_data.get("role") == "admin"},
+    })
+
+
+@app.route("/api/grocery/item", methods=["POST"])
+@grocery_required
+def api_grocery_add():
+    body = request.get_json(force=True, silent=True) or {}
+    name = (body.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "Name is required"}), 400
+    qty = _g_int(body.get("qty"), 1)
+    category = _g_cat(body.get("category"))
+    walmart_id = (body.get("walmart_id") or "").strip()
+    is_staple = bool(body.get("staple"))
+    doc = {
+        "name": name,
+        "qty": qty,
+        "category": category,
+        "note": (body.get("note") or "").strip(),
+        "checked": False,
+        "staple": is_staple,
+        "walmart_id": walmart_id,
+        "added_by": g.uid,
+        "added_by_name": _grocery_name(),
+        "checked_by_name": "",
+        "created_at": firestore.SERVER_TIMESTAMP,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }
+    db = get_db()
+    try:
+        ref = db.collection(_GROCERY_ITEMS).document()
+        ref.set(doc)
+        if is_staple:
+            _upsert_staple(db, name, qty, category, walmart_id)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "id": ref.id}), 201
+
+
+@app.route("/api/grocery/item/<item_id>", methods=["PATCH"])
+@grocery_required
+def api_grocery_update(item_id):
+    body = request.get_json(force=True, silent=True) or {}
+    db = get_db()
+    ref = db.collection(_GROCERY_ITEMS).document(item_id)
+    snap = ref.get()
+    if not snap.exists:
+        return jsonify({"ok": False, "error": "Item not found"}), 404
+    cur = snap.to_dict() or {}
+    patch = {"updated_at": firestore.SERVER_TIMESTAMP}
+    if "name" in body:
+        nm = (body.get("name") or "").strip()
+        if not nm:
+            return jsonify({"ok": False, "error": "Name cannot be empty"}), 400
+        patch["name"] = nm
+    if "qty" in body:
+        patch["qty"] = _g_int(body.get("qty"), 1)
+    if "category" in body:
+        patch["category"] = _g_cat(body.get("category"))
+    if "note" in body:
+        patch["note"] = (body.get("note") or "").strip()
+    if "walmart_id" in body:
+        patch["walmart_id"] = (body.get("walmart_id") or "").strip()
+    if "checked" in body:
+        patch["checked"] = bool(body.get("checked"))
+        patch["checked_by_name"] = _grocery_name() if body.get("checked") else ""
+    if "staple" in body:
+        patch["staple"] = bool(body.get("staple"))
+    try:
+        ref.update(patch)
+        # Keep the staple catalog in sync when an item's staple flag / details
+        # change, so re-seeding the next list reflects the latest.
+        name = patch.get("name", cur.get("name"))
+        qty = patch.get("qty", cur.get("qty"))
+        category = patch.get("category", cur.get("category"))
+        wid = patch.get("walmart_id", cur.get("walmart_id"))
+        if "staple" in body:
+            if body.get("staple"):
+                _upsert_staple(db, name, qty, category, wid or "")
+            else:
+                _remove_staple_by_name(db, name)
+        elif cur.get("staple"):
+            # Editing a still-staple item updates its catalog entry too.
+            _upsert_staple(db, name, qty, category, wid or "")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/grocery/item/<item_id>", methods=["DELETE"])
+@grocery_required
+def api_grocery_delete(item_id):
+    """Remove an item from the CURRENT list only. A staple-seeded item removed
+    here still returns on the next new list (the staple catalog is untouched)."""
+    db = get_db()
+    try:
+        db.collection(_GROCERY_ITEMS).document(item_id).delete()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/grocery/clear-checked", methods=["POST"])
+@grocery_required
+def api_grocery_clear_checked():
+    """Remove all checked-off (in-cart) items from the current list."""
+    db = get_db()
+    n = 0
+    try:
+        for d in db.collection(_GROCERY_ITEMS).stream():
+            if (d.to_dict() or {}).get("checked"):
+                db.collection(_GROCERY_ITEMS).document(d.id).delete()
+                n += 1
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "removed": n})
+
+
+@app.route("/api/grocery/new-list", methods=["POST"])
+@grocery_required
+def api_grocery_new_list():
+    """Start a fresh list: delete every current item, then seed one unchecked
+    item per staple. The clean slate everyone wants for the next shopping run,
+    pre-loaded with the recurring staples."""
+    db = get_db()
+    try:
+        for d in db.collection(_GROCERY_ITEMS).stream():
+            db.collection(_GROCERY_ITEMS).document(d.id).delete()
+        seeded = 0
+        for s in db.collection(_GROCERY_STAPLES).stream():
+            sd = s.to_dict() or {}
+            name = (sd.get("name") or "").strip()
+            if not name:
+                continue
+            db.collection(_GROCERY_ITEMS).document().set({
+                "name": name,
+                "qty": _g_int(sd.get("qty"), 1),
+                "category": _g_cat(sd.get("category")),
+                "note": "",
+                "checked": False,
+                "staple": True,
+                "walmart_id": (sd.get("walmart_id") or "").strip(),
+                "added_by": g.uid,
+                "added_by_name": "Staple",
+                "checked_by_name": "",
+                "created_at": firestore.SERVER_TIMESTAMP,
+                "updated_at": firestore.SERVER_TIMESTAMP,
+            })
+            seeded += 1
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "seeded": seeded})
+
+
+@app.route("/api/grocery/staple", methods=["POST"])
+@grocery_required
+def api_grocery_staple_add():
+    body = request.get_json(force=True, silent=True) or {}
+    name = (body.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "Name is required"}), 400
+    db = get_db()
+    try:
+        sid = _upsert_staple(db, name, body.get("qty"), body.get("category"),
+                             (body.get("walmart_id") or "").strip())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "id": sid}), 201
+
+
+@app.route("/api/grocery/staple/<staple_id>", methods=["PATCH"])
+@grocery_required
+def api_grocery_staple_update(staple_id):
+    body = request.get_json(force=True, silent=True) or {}
+    db = get_db()
+    ref = db.collection(_GROCERY_STAPLES).document(staple_id)
+    if not ref.get().exists:
+        return jsonify({"ok": False, "error": "Staple not found"}), 404
+    patch = {}
+    if "name" in body:
+        nm = (body.get("name") or "").strip()
+        if not nm:
+            return jsonify({"ok": False, "error": "Name cannot be empty"}), 400
+        patch["name"] = nm
+    if "qty" in body:
+        patch["qty"] = _g_int(body.get("qty"), 1)
+    if "category" in body:
+        patch["category"] = _g_cat(body.get("category"))
+    if "walmart_id" in body:
+        patch["walmart_id"] = (body.get("walmart_id") or "").strip()
+    if not patch:
+        return jsonify({"ok": True})
+    try:
+        ref.update(patch)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/grocery/staple/<staple_id>", methods=["DELETE"])
+@grocery_required
+def api_grocery_staple_delete(staple_id):
+    """Remove a staple from the catalog (it stops recurring on new lists).
+    Any matching item already on the current list is left in place."""
+    db = get_db()
+    try:
+        snap = db.collection(_GROCERY_STAPLES).document(staple_id).get()
+        name = (snap.to_dict() or {}).get("name") if snap.exists else None
+        db.collection(_GROCERY_STAPLES).document(staple_id).delete()
+        # Un-flag any matching current item so its star reflects reality.
+        if name:
+            key = _staple_key(name)
+            for d in db.collection(_GROCERY_ITEMS).stream():
+                dd = d.to_dict() or {}
+                if dd.get("staple") and _staple_key(dd.get("name")) == key:
+                    db.collection(_GROCERY_ITEMS).document(d.id).update({"staple": False})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+# --- Walmart import (env-gated "magic mode" name → item-ID resolver) ---------
+# The add-to-cart deep link itself needs no auth and is built client-side from
+# items that carry a `walmart_id`. This endpoint is the optional upgrade: if a
+# Walmart.io developer app is configured (WALMART_CONSUMER_ID + private key),
+# it resolves item names to Walmart item IDs server-side and persists them so a
+# staple becomes one-click forever. No creds → graceful {configured:false}.
+
+def _walmart_configured():
+    return bool(os.getenv("WALMART_CONSUMER_ID") and os.getenv("WALMART_PRIVATE_KEY"))
+
+
+def _walmart_sign(consumer_id, key_version, private_key_pem):
+    """Build Walmart.io auth headers (RSA-SHA256 over id\\ntimestamp\\nkeyVer\\n).
+    Lazy-imports cryptography; returns None on any failure so callers no-op."""
+    try:
+        import base64
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+        ts = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+        pem = private_key_pem.strip()
+        if "BEGIN" not in pem:
+            pem = "-----BEGIN PRIVATE KEY-----\n" + pem + "\n-----END PRIVATE KEY-----"
+        key = serialization.load_pem_private_key(pem.encode(), password=None)
+        data = f"{consumer_id}\n{ts}\n{key_version}\n".encode()
+        sig = key.sign(data, padding.PKCS1v15(), hashes.SHA256())
+        return {
+            "WM_CONSUMER.ID": consumer_id,
+            "WM_CONSUMER.INTIMESTAMP": ts,
+            "WM_SEC.KEY_VERSION": key_version,
+            "WM_SEC.AUTH_SIGNATURE": base64.b64encode(sig).decode(),
+        }
+    except Exception:
+        return None
+
+
+def _walmart_search(query):
+    """Return the best-match Walmart item ID for a search string, or None.
+    Uses the affiliate search API; silent-fails (network/creds/shape)."""
+    consumer_id = os.getenv("WALMART_CONSUMER_ID")
+    private_key = os.getenv("WALMART_PRIVATE_KEY")
+    key_version = os.getenv("WALMART_KEY_VERSION", "1")
+    if not (consumer_id and private_key and query):
+        return None
+    headers = _walmart_sign(consumer_id, key_version, private_key)
+    if not headers:
+        return None
+    headers["Accept"] = "application/json"
+    url = "https://developer.api.walmart.com/api-proxy/service/affil/product/v2/search"
+    try:
+        r = _http.get(url, headers=headers,
+                      params={"query": query, "numItems": 1}, timeout=8)
+        if r.status_code != 200:
+            return None
+        items = (r.json() or {}).get("items") or []
+        if not items:
+            return None
+        iid = items[0].get("itemId")
+        return str(iid) if iid else None
+    except Exception:
+        return None
+
+
+@app.route("/api/grocery/walmart-resolve", methods=["POST"])
+@grocery_required
+def api_grocery_walmart_resolve():
+    """Fill missing walmart_id on current (unchecked) items by name. No-op
+    when Walmart.io isn't configured. Persists resolved IDs onto items AND
+    their staple so they stick."""
+    if not _walmart_configured():
+        return jsonify({"ok": True, "configured": False, "resolved": 0})
+    db = get_db()
+    resolved = 0
+    try:
+        for d in db.collection(_GROCERY_ITEMS).stream():
+            it = d.to_dict() or {}
+            if it.get("checked") or (it.get("walmart_id") or "").strip():
+                continue
+            name = (it.get("name") or "").strip()
+            if not name:
+                continue
+            iid = _walmart_search(name)
+            if not iid:
+                continue
+            db.collection(_GROCERY_ITEMS).document(d.id).update({"walmart_id": iid})
+            if it.get("staple"):
+                _upsert_staple(db, name, it.get("qty"), it.get("category"), iid)
+            resolved += 1
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "configured": True, "resolved": resolved})
 
 
 # ---------------------------------------------------------------------------
