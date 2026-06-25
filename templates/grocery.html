@@ -328,10 +328,10 @@ input,select{font-family:inherit;font-size:16px}
 </div>
 
 <!-- STAPLES MODAL -->
-<div class="scrim" id="stapleModal" onclick="if(event.target===this)close('stapleModal')">
+<div class="scrim" id="stapleModal" onclick="if(event.target===this)closeModal('stapleModal')">
   <div class="sheet">
     <div class="grab"></div>
-    <button class="sheetx" onclick="close('stapleModal')" aria-label="Close">✕</button>
+    <button class="sheetx" onclick="closeModal('stapleModal')" aria-label="Close">✕</button>
     <h2>⭐ Staples</h2>
     <p class="sub">The things you always buy. Every <b>New list</b> starts pre-loaded with these — remove what you don't need that week without losing the staple.</p>
     <div class="sbody">
@@ -346,10 +346,10 @@ input,select{font-family:inherit;font-size:16px}
 </div>
 
 <!-- WALMART MODAL -->
-<div class="scrim" id="walmartModal" onclick="if(event.target===this)close('walmartModal')">
+<div class="scrim" id="walmartModal" onclick="if(event.target===this)closeModal('walmartModal')">
   <div class="sheet">
     <div class="grab"></div>
-    <button class="sheetx" onclick="close('walmartModal')" aria-label="Close">✕</button>
+    <button class="sheetx" onclick="closeModal('walmartModal')" aria-label="Close">✕</button>
     <h2>🛒 Send to Walmart</h2>
     <p class="sub">Loads your list straight into a Walmart cart in one tap — for every item that has an item ID.</p>
     <div class="sbody" id="wmBody"></div>
@@ -724,7 +724,7 @@ async function deleteFromModal(){
   catch(e){ toast('Network error','err'); }
   load();
 }
-function closeItem(){ close('itemModal'); _editId=null; }
+function closeItem(){ closeModal('itemModal'); _editId=null; }
 
 /* ============================ staples ============================ */
 function openStaples(){ renderStaples(); open('stapleModal'); }
@@ -809,7 +809,7 @@ function renderWalmart(){
   if(!active.length){ h += `<div style="text-align:center;color:var(--muted);padding:14px 0">Nothing to send — your list is empty.</div>`; }
 
   h += `<div class="btnrow" style="margin-top:8px">
-      ${url?`<a class="btn wm" href="${url}" target="_blank" rel="noopener" onclick="setTimeout(()=>close('walmartModal'),200)">🛒 Open Walmart cart · ${ready.length}</a>`
+      ${url?`<a class="btn wm" href="${url}" target="_blank" rel="noopener" onclick="setTimeout(()=>closeModal('walmartModal'),200)">🛒 Open Walmart cart · ${ready.length}</a>`
             :`<button class="btn gray" disabled style="opacity:.55">No matched items yet</button>`}
     </div>`;
   document.getElementById('wmBody').innerHTML=h;
@@ -835,8 +835,8 @@ async function autoMatch(){
 
 /* ============================ modal util ============================ */
 function open(id){ document.getElementById(id).classList.add('show'); document.body.style.overflow='hidden'; }
-function close(id){ document.getElementById(id).classList.remove('show'); document.body.style.overflow=''; if(!modalOpen()) render(); }
-document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ const m=document.querySelector('.scrim.show'); if(m) close(m.id); }});
+function closeModal(id){ document.getElementById(id).classList.remove('show'); document.body.style.overflow=''; if(!modalOpen()) render(); }
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ const m=document.querySelector('.scrim.show'); if(m) closeModal(m.id); }});
 document.addEventListener('click',e=>{ // dismiss suggestions on outside click
   if(!e.target.closest('.addwrap')) document.getElementById('sugg')?.classList.remove('show');
 });
