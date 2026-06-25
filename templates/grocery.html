@@ -676,6 +676,7 @@ function parseWmField(){
 }
 async function saveItem(){
   if(!_editId) return;
+  const id=_editId;            // capture BEFORE closeItem() nulls it
   const body={
     name:document.getElementById('imName').value.trim(),
     qty:parseInt(document.getElementById('imQty').value)||1,
@@ -686,8 +687,8 @@ async function saveItem(){
   };
   if(!body.name){ toast('Name required','err'); return; }
   closeItem();
-  try{ const r=await authFetch('/api/grocery/item/'+_editId,{method:'PATCH',body:JSON.stringify(body)});
-    const j=await r.json(); if(!j.ok) toast(j.error||'Save failed','err'); else toast('Saved'); }
+  try{ const r=await authFetch('/api/grocery/item/'+id,{method:'PATCH',body:JSON.stringify(body)});
+    const j=await r.json(); if(!j.ok) toast(j.error||'Save failed','err'); else toast('Saved ✓'); }
   catch(e){ toast('Network error','err'); }
   load();
 }
