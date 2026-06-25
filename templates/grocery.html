@@ -243,7 +243,7 @@ input,select{font-family:inherit;font-size:16px}
 </head>
 <body>
 
-<div id="auth-gate"><div class="spin"></div><div>Loading your list…</div></div>
+<div id="auth-gate"><div id="gateInner"><div class="spin"></div><div>Loading your list…</div></div></div>
 
 <div id="app">
   <div class="topbar">
@@ -367,24 +367,57 @@ function doLogout(){ firebase.auth().signOut().then(()=>location.href='/'); }
 let ME = {}, STATE = { items:[], staples:[], categories:[], walmart_configured:false };
 let _pollTimer = null;
 
-firebase.auth().onAuthStateChanged(async user => {
-  if (!user){ location.href='/'; return; }
-  try{
-    const token = await user.getIdToken();
-    const r = await fetch('/api/me', { headers:{ 'Authorization':'Bearer '+token } });
-    if(!r.ok){ location.href='/'; return; }
-    const me = await r.json();
-    if(!me.approved || (me.role!=='admin' && !me.grocery_access)){ location.href='/'; return; }
-    ME = me;
-    const nm = me.displayName || me.email || '?';
-    const av = document.getElementById('meAv');
-    av.textContent = initials(nm); av.style.background = colorFor(nm);
-  }catch(e){ location.href='/'; return; }
-  document.getElementById('auth-gate').style.display='none';
-  document.getElementById('app').style.display='';
-  await load();
-  _pollTimer = setInterval(()=>{ if(!modalOpen()) load(true); }, 9000);
-});
+let _ready = false;  // true once the app is shown OR we've intentionally left
+function gateMsg(html){
+  const inner = document.getElementById('gateInner');
+  const g = document.getElementById('auth-gate');
+  if (inner) inner.innerHTML = html;
+  if (g) g.style.display = 'flex';
+}
+function gateError(title, detail){
+  gateMsg(`<div style="text-align:center;max-width:320px;padding:0 24px">
+    <div style="font-size:36px;margin-bottom:12px">🛒</div>
+    <div style="font-size:17px;font-weight:700;color:var(--text);margin-bottom:6px">${title}</div>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:20px;line-height:1.5">${detail||''}</div>
+    <div style="display:flex;gap:10px;justify-content:center">
+      <button class="btn go" style="flex:0 0 auto;padding:11px 20px" onclick="location.reload()">Try again</button>
+      <a class="btn gray" style="flex:0 0 auto;padding:11px 20px;text-decoration:none" href="/">Home</a>
+    </div></div>`);
+}
+
+// Guard: the Firebase SDK must have loaded (a blocked/slow CDN would otherwise
+// throw here and leave a silent dark screen — the exact "blank page" symptom).
+if (typeof firebase === 'undefined' || !firebase || typeof firebase.auth !== 'function') {
+  gateError('Couldn’t finish loading', 'The app scripts didn’t load — usually a network blip. Tap Try again.');
+} else {
+  // Watchdog: never strand the user on a blank/spinner. If we haven't reached
+  // the list (or deliberately shown a message) within a few seconds, offer a retry.
+  setTimeout(() => { if (!_ready) gateError('Still loading…', 'This is taking longer than usual. Check your connection, then try again.'); }, 9000);
+
+  firebase.auth().onAuthStateChanged(async user => {
+    try {
+      if (!user) { _ready = true; location.href = '/'; return; }
+      const token = await user.getIdToken();
+      const r = await fetch('/api/me', { headers:{ 'Authorization':'Bearer '+token } });
+      if (!r.ok) throw new Error('Sign-in check failed (' + r.status + ')');
+      const me = await r.json();
+      if (!me.approved) { _ready = true; gateError('Account pending', 'An admin needs to approve your account first.'); return; }
+      if (me.role !== 'admin' && !me.grocery_access) { _ready = true; gateError('No Grocery access yet', 'Ask an admin to switch on your Grocery pill, then tap Try again.'); return; }
+      ME = me;
+      const nm = me.displayName || me.email || '?';
+      const av = document.getElementById('meAv');
+      av.textContent = initials(nm); av.style.background = colorFor(nm);
+      _ready = true;
+      document.getElementById('auth-gate').style.display = 'none';
+      document.getElementById('app').style.display = '';
+      await load();
+      _pollTimer = setInterval(() => { if (!modalOpen()) load(true); }, 9000);
+    } catch (e) {
+      _ready = true;
+      gateError('Couldn’t load your list', (e && e.message) || 'Unexpected error — tap Try again.');
+    }
+  });
+}
 
 /* ============================ helpers ============================ */
 function initials(n){ return (n||'?').trim().split(/\s+/).map(w=>w[0]).join('').toUpperCase().slice(0,2) || '?'; }
