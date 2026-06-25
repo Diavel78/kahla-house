@@ -2425,6 +2425,11 @@ def api_book_club_availability_save():
 
 _GROCERY_ITEMS = "grocery_items"
 _GROCERY_STAPLES = "grocery_staples"
+# Persistent name → Walmart item-ID memory (one doc, a {name_lower: id} map).
+# So once any item gets a walmart_id, typing that name again auto-fills it —
+# no need to star it as a staple. Survives list clears.
+_GROCERY_META = "grocery_meta"
+_KNOWN_IDS_DOC = "known_ids"
 # Aisle/category vocabulary the UI groups by. Free-text is tolerated, but the
 # client offers these; "Other" is the catch-all.
 _GROCERY_CATEGORIES = [
@@ -2493,6 +2498,39 @@ def _staple_key(name):
     return (name or "").strip().lower()
 
 
+def _known_ids(db):
+    """The persistent {name_lower: walmart_id} memory map (or {})."""
+    try:
+        snap = db.collection(_GROCERY_META).document(_KNOWN_IDS_DOC).get()
+        return (snap.to_dict() or {}) if snap.exists else {}
+    except Exception:
+        return {}
+
+
+def _remember_walmart_id(db, name, wid):
+    """Persist a name → Walmart item-ID mapping so the same item auto-fills its
+    ID on any future add. No-op when either is blank. Firestore map keys can't
+    contain '/' or '.', so sanitize the key (still matched the same way client-
+    side via _ki_key)."""
+    key = _ki_key(name)
+    wid = (wid or "").strip()
+    if not key or not wid:
+        return
+    try:
+        db.collection(_GROCERY_META).document(_KNOWN_IDS_DOC).set({key: wid}, merge=True)
+    except Exception:
+        pass
+
+
+def _ki_key(name):
+    # Firestore map keys: lowercase, collapse whitespace, drop '/' '.' '~' '*' '['
+    # ']' which are illegal in field paths. Mirrored by _kiKey() in grocery.html.
+    k = (name or "").strip().lower()
+    for ch in "/.~*[]":
+        k = k.replace(ch, " ")
+    return " ".join(k.split())
+
+
 def _upsert_staple(db, name, qty, category, walmart_id=""):
     """Create-or-update a staple by case-insensitive name. Returns the doc id."""
     key = _staple_key(name)
@@ -2548,6 +2586,7 @@ def api_grocery_list():
         "ok": True,
         "items": items,
         "staples": staples,
+        "known_ids": _known_ids(db),
         "categories": _GROCERY_CATEGORIES,
         "walmart_configured": bool(_walmart_configured()),
         "me": {"uid": g.uid, "name": _grocery_name(),
@@ -2586,6 +2625,8 @@ def api_grocery_add():
         ref.set(doc)
         if is_staple:
             _upsert_staple(db, name, qty, category, walmart_id)
+        if walmart_id:
+            _remember_walmart_id(db, name, walmart_id)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     return jsonify({"ok": True, "id": ref.id}), 201
@@ -2636,6 +2677,10 @@ def api_grocery_update(item_id):
         elif cur.get("staple"):
             # Editing a still-staple item updates its catalog entry too.
             _upsert_staple(db, name, qty, category, wid or "")
+        # Remember the Walmart id by name so future adds of this item auto-fill
+        # it (independent of staple status).
+        if "walmart_id" in body and patch.get("walmart_id"):
+            _remember_walmart_id(db, name, patch["walmart_id"])
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     return jsonify({"ok": True})
@@ -2859,6 +2904,7 @@ def api_grocery_walmart_resolve():
             db.collection(_GROCERY_ITEMS).document(d.id).update({"walmart_id": iid})
             if it.get("staple"):
                 _upsert_staple(db, name, it.get("qty"), it.get("category"), iid)
+            _remember_walmart_id(db, name, iid)
             resolved += 1
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

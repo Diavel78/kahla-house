@@ -612,13 +612,30 @@ function onKey(e){
 function markSel(){ const box=document.getElementById('sugg');
   box.querySelectorAll('.row').forEach((r,i)=>r.classList.toggle('act',i===box._sel)); }
 
+// Persistent name→Walmart-ID memory. _kiKey MUST mirror app.py:_ki_key so the
+// keys match.
+function _kiKey(name){
+  let k=(name||'').trim().toLowerCase();
+  for(const ch of '/.~*[]') k=k.split(ch).join(' ');
+  return k.split(/\s+/).filter(Boolean).join(' ');
+}
+function knownIdFor(name){
+  const k=_kiKey(name);
+  const m=(STATE.known_ids||{})[k];
+  if(m) return m;
+  // fallback: anything currently on the list / in staples with the same name
+  const hit=(STATE.staples||[]).concat(STATE.items||[]).find(x=>x.walmart_id && _kiKey(x.name)===k);
+  return hit ? hit.walmart_id : '';
+}
+
 async function submitAdd(){
   const inp=document.getElementById('addInput'); const name=inp.value.trim();
   if(!name) return;
   document.getElementById('sugg').classList.remove('show');
-  const body={ name, qty:newQty, category:guessCat(name), staple:newStaple };
+  const wid=knownIdFor(name);   // auto-fill a Walmart ID we've seen before
+  const body={ name, qty:newQty, category:guessCat(name), staple:newStaple, walmart_id:wid };
   // optimistic
-  const tmp={ id:'tmp'+Date.now(), ...body, note:'', checked:false, walmart_id:'', added_by_name:ME.displayName||ME.email||'You' };
+  const tmp={ id:'tmp'+Date.now(), ...body, note:'', checked:false, added_by_name:ME.displayName||ME.email||'You' };
   STATE.items.push(tmp); render();
   inp.value=''; newQty=1; document.getElementById('qtyVal').textContent='1';
   newStaple=false; document.getElementById('stapleBtn').classList.remove('on');
