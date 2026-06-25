@@ -368,7 +368,6 @@ let ME = {}, STATE = { items:[], staples:[], categories:[], walmart_configured:f
 let _pollTimer = null;
 
 let _ready = false;   // true once the app is shown OR we've intentionally left
-let _fired = false;   // true once onAuthStateChanged fires at least once
 let _step = 'starting';
 function setStep(t){ _step = t; const l = document.getElementById('gateLabel'); if (l) l.textContent = t; }
 function gateMsg(html){
@@ -394,45 +393,56 @@ function withTimeout(p, ms, label){
   return Promise.race([ p, new Promise((_, rej) => setTimeout(() => rej(new Error('Timed out at: ' + label)), ms)) ]);
 }
 
-// Guard: the Firebase SDK must have loaded (a blocked/slow CDN would otherwise
-// throw here and leave a silent dark screen — the exact "blank page" symptom).
-if (typeof firebase === 'undefined' || !firebase || typeof firebase.auth !== 'function') {
-  gateError('Couldn’t finish loading', 'The app scripts didn’t load — usually a network blip. Tap Try again.');
-} else {
-  setStep('Connecting…');
-  // If onAuthStateChanged never even fires, Firebase auth isn't initializing on
-  // this origin (often an authorized-domain mismatch, e.g. apex vs www).
-  setTimeout(() => { if (!_fired && !_ready) gateError('Sign-in didn’t start', 'Couldn’t reach Firebase auth on ' + location.host + '. Try opening the site from your home screen / the Home button below.'); }, 7000);
-  // Final catch-all watchdog — always offer a way out, naming the stuck step.
-  setTimeout(() => { if (!_ready) gateError('Still loading…', 'Stuck at: ' + _step + '. Check your connection, then tap Try again.'); }, 15000);
-
-  firebase.auth().onAuthStateChanged(async user => {
-    _fired = true;
-    try {
-      if (!user) { _ready = true; location.href = '/'; return; }
-      setStep('Checking your access…');
-      const token = await withTimeout(user.getIdToken(), 8000, 'sign-in token');
-      const r = await withTimeout(fetch('/api/me', { headers:{ 'Authorization':'Bearer '+token } }), 11000, '/api/me');
-      if (!r.ok) throw new Error('Sign-in check failed (' + r.status + ')');
-      const me = await r.json();
-      if (!me.approved) { _ready = true; gateError('Account pending', 'An admin needs to approve your account first.'); return; }
-      if (me.role !== 'admin' && !me.grocery_access) { _ready = true; gateError('No Grocery access yet', 'Ask an admin to switch on your Grocery pill, then tap Try again.'); return; }
-      ME = me;
-      const nm = me.displayName || me.email || '?';
-      const av = document.getElementById('meAv');
-      av.textContent = initials(nm); av.style.background = colorFor(nm);
-      setStep('Loading items…');
-      _ready = true;
-      document.getElementById('auth-gate').style.display = 'none';
-      document.getElementById('app').style.display = '';
-      await load();
-      _pollTimer = setInterval(() => { if (!modalOpen()) load(true); }, 9000);
-    } catch (e) {
-      _ready = true;
-      gateError('Couldn’t load your list', (e && e.message) || 'Unexpected error — tap Try again.');
+// Bulletproof boot: settle the initial auth state via Firebase's own
+// authStateReady() (generous budget for slow networks), shortcut through
+// currentUser when the session is already warm, and only show a retry on a
+// REAL failure — never a premature "didn't start" alarm. This mirrors how the
+// other pages just wait for auth, but bounded + diagnosable.
+async function boot(){
+  if (typeof firebase === 'undefined' || !firebase || typeof firebase.auth !== 'function') {
+    gateError('Couldn’t finish loading', 'The app scripts didn’t load — usually a network blip. Tap Try again.');
+    return;
+  }
+  const auth = firebase.auth();
+  try {
+    setStep('Signing you in…');
+    let user = auth.currentUser;
+    if (!user) {
+      if (typeof auth.authStateReady === 'function') {
+        await withTimeout(auth.authStateReady(), 25000, 'Firebase sign-in');
+        user = auth.currentUser;
+      } else {
+        user = await withTimeout(new Promise(res => {
+          const off = auth.onAuthStateChanged(u => { try { off(); } catch (_) {} res(u); });
+        }), 25000, 'Firebase sign-in');
+      }
     }
-  });
+    if (!user) { _ready = true; location.href = '/'; return; }
+    setStep('Checking your access…');
+    const token = await withTimeout(user.getIdToken(), 15000, 'sign-in token');
+    const r = await withTimeout(fetch('/api/me', { headers:{ 'Authorization':'Bearer '+token } }), 15000, '/api/me');
+    if (!r.ok) throw new Error('Sign-in check failed (' + r.status + ')');
+    const me = await r.json();
+    if (!me.approved) { _ready = true; gateError('Account pending', 'An admin needs to approve your account first.'); return; }
+    if (me.role !== 'admin' && !me.grocery_access) { _ready = true; gateError('No Grocery access yet', 'Ask an admin to switch on your Grocery pill, then tap Try again.'); return; }
+    ME = me;
+    const nm = me.displayName || me.email || '?';
+    const av = document.getElementById('meAv');
+    av.textContent = initials(nm); av.style.background = colorFor(nm);
+    setStep('Loading items…');
+    _ready = true;
+    document.getElementById('auth-gate').style.display = 'none';
+    document.getElementById('app').style.display = '';
+    await load();
+    _pollTimer = setInterval(() => { if (!modalOpen()) load(true); }, 9000);
+  } catch (e) {
+    _ready = true;
+    gateError('Couldn’t load your list', ((e && e.message) || 'Unexpected error') + ' — tap Try again.');
+  }
 }
+boot();
+// Once we're live, a sign-out / expired session bounces back home.
+try { firebase.auth().onAuthStateChanged(u => { if (!u && _ready) location.href = '/'; }); } catch (e) {}
 
 /* ============================ helpers ============================ */
 function initials(n){ return (n||'?').trim().split(/\s+/).map(w=>w[0]).join('').toUpperCase().slice(0,2) || '?'; }
