@@ -181,11 +181,16 @@ input,select{font-family:inherit;font-size:16px}
   display:none;align-items:flex-end;justify-content:center}
 .scrim.show{display:flex}
 .sheet{width:100%;max-width:560px;background:var(--card);border:1px solid var(--border2);
-  border-bottom:none;border-radius:22px 22px 0 0;box-shadow:var(--shadow);
+  border-bottom:none;border-radius:22px 22px 0 0;box-shadow:var(--shadow);position:relative;
   max-height:90vh;overflow-y:auto;animation:rise .26s cubic-bezier(.2,.8,.2,1)}
 @media(min-width:560px){.scrim{align-items:center}.sheet{border-radius:22px;border-bottom:1px solid var(--border2)}}
 @keyframes rise{from{transform:translateY(28px);opacity:.4}to{transform:none;opacity:1}}
 .sheet .grab{width:40px;height:4px;border-radius:99px;background:var(--border2);margin:10px auto 2px}
+.sheetx{position:absolute;top:12px;right:14px;width:36px;height:36px;border-radius:50%;
+  background:var(--card2);border:1px solid var(--border2);color:var(--text2);font-size:17px;line-height:1;
+  display:grid;place-items:center;z-index:6;transition:.15s}
+.sheetx:hover{color:var(--text);border-color:var(--text2)}
+.sheetx:active{transform:scale(.92)}
 .sheet h2{font-size:18px;margin:0;padding:8px 20px 4px;letter-spacing:-.02em}
 .sheet .sub{padding:0 20px;color:var(--muted);font-size:13px;margin:0 0 14px}
 .sbody{padding:6px 20px 20px}
@@ -292,6 +297,7 @@ input,select{font-family:inherit;font-size:16px}
 <div class="scrim" id="itemModal" onclick="if(event.target===this)closeItem()">
   <div class="sheet">
     <div class="grab"></div>
+    <button class="sheetx" onclick="closeItem()" aria-label="Close">✕</button>
     <h2 id="imTitle">Edit item</h2>
     <p class="sub">Quantity feeds straight into your Walmart cart.</p>
     <div class="sbody">
@@ -325,6 +331,7 @@ input,select{font-family:inherit;font-size:16px}
 <div class="scrim" id="stapleModal" onclick="if(event.target===this)close('stapleModal')">
   <div class="sheet">
     <div class="grab"></div>
+    <button class="sheetx" onclick="close('stapleModal')" aria-label="Close">✕</button>
     <h2>⭐ Staples</h2>
     <p class="sub">The things you always buy. Every <b>New list</b> starts pre-loaded with these — remove what you don't need that week without losing the staple.</p>
     <div class="sbody">
@@ -342,6 +349,7 @@ input,select{font-family:inherit;font-size:16px}
 <div class="scrim" id="walmartModal" onclick="if(event.target===this)close('walmartModal')">
   <div class="sheet">
     <div class="grab"></div>
+    <button class="sheetx" onclick="close('walmartModal')" aria-label="Close">✕</button>
     <h2>🛒 Send to Walmart</h2>
     <p class="sub">Loads your list straight into a Walmart cart in one tap — for every item that has an item ID.</p>
     <div class="sbody" id="wmBody"></div>
