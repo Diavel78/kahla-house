@@ -745,7 +745,12 @@ async function newList(){
 /* ============================ walmart ============================ */
 function walmartCartUrl(items){
   const parts=items.filter(i=>i.walmart_id).map(i=>`${i.walmart_id}_${i.qty||1}`);
-  return parts.length ? 'https://www.walmart.com/sc/cart/addToCart?items='+parts.join(',') : null;
+  // affil.walmart.com is the affiliate-native cart endpoint that resolves to a
+  // real Walmart cart without needing a publisher id in the URL (the
+  // www.walmart.com/sc/cart endpoint rejects items without one → "item not
+  // found"). NOTE: this is the GENERAL-MERCHANDISE add-to-cart — shipped items
+  // work; store-only fresh groceries may still 404 by Walmart's design.
+  return parts.length ? 'https://affil.walmart.com/cart/addToCart?items='+parts.join(',') : null;
 }
 function openWalmart(){ renderWalmart(); open('walmartModal'); }
 function renderWalmart(){
