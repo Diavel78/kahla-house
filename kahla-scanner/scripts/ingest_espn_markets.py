@@ -155,7 +155,7 @@ def _find_or_create(sport: str, g: dict, aliases: dict[str, str],
     """Reuse an existing active markets row if teams match within the
     sport window, else create one. Mirrors
     odds_api._find_or_create_market. Returns (action, market_id) where
-    action ∈ reuse/create/create-dry. `existing` is mutated to include
+    action ∈ reuse/retime/create/create-dry. `existing` is mutated to include
     newly-created rows so later games in the same run dedup against them."""
     window = _MATCH_WINDOW.get(sport, _DEFAULT_WINDOW)
     venue_key = matcher._teams_key(g["home"], g["away"], aliases)
@@ -169,6 +169,22 @@ def _find_or_create(sport: str, g: dict, aliases: dict[str, str],
         if matcher._teams_key(row_home, row_away, aliases) == venue_key or \
            matcher._fuzzy_teams_match(g["home"], g["away"], row_home, row_away,
                                       aliases) >= matcher.FUZZY_THRESHOLD:
+            # Reuse the existing row (UUID preserved), but CORRECT a drifted
+            # start in place — ESPN is authoritative on timing. odds_api used
+            # to do this every tick (gotcha #30); post-cutover the ESPN spine
+            # is the only writer, so a stale placeholder time (an old odds_api
+            # card-time that never got refreshed) would otherwise freeze the
+            # game in the past and drop it from the games list before it
+            # starts — the UFC "no upcoming games" regression.
+            if abs(row_start - g["commence"]) > timedelta(minutes=2):
+                if commit:
+                    try:
+                        db.update_market_start(row["id"], g["commence"])
+                    except Exception as e:
+                        log.warning("  retime failed %s: %s", row["id"], e)
+                # keep the candidate set fresh for later games in this run
+                row["event_start"] = g["commence"].isoformat()
+                return "retime", row["id"]
             return "reuse", row["id"]
     # No match — create.
     if not commit:
@@ -211,7 +227,7 @@ def ingest_sport(sport: str, days: int, commit: bool, prune: bool = False) -> di
                     .order("event_start").limit(3000).execute().data) or []
     except Exception:
         existing = db.list_active_markets(sport)   # fallback
-    created = reused = 0
+    created = reused = retimed = 0
     kept_ids: set[str] = set()
     for g in games:
         action, mid = _find_or_create(sport, g, aliases, existing, commit)
@@ -219,6 +235,11 @@ def ingest_sport(sport: str, days: int, commit: bool, prune: bool = False) -> di
             kept_ids.add(mid)
         if action == "reuse":
             reused += 1
+        elif action == "retime":
+            retimed += 1
+            reused += 1
+            log.info("  %s %-28s → %s", "RETIME" if commit else "would-retime",
+                     f"{g['away']} @ {g['home']}", g["commence"].isoformat())
         else:
             created += 1
             log.info("  %s %-28s %s", "CREATE" if commit else "would-create",
@@ -245,11 +266,12 @@ def ingest_sport(sport: str, days: int, commit: bool, prune: bool = False) -> di
                              row.get("event_name"), row.get("event_start"))
                 except Exception as e:
                     log.warning("  prune failed %s: %s", rid, e)
-    log.info("%-9s %2d games · %d %s · %d reused%s", sport, len(games), created,
+    log.info("%-9s %2d games · %d %s · %d reused%s%s", sport, len(games), created,
              "created" if commit else "would-create", reused,
+             f" · {retimed} retimed" if retimed else "",
              f" · {pruned} pruned" if prune else "")
     return {"sport": sport, "games": len(games), "create": created,
-            "reuse": reused, "pruned": pruned}
+            "reuse": reused, "retime": retimed, "pruned": pruned}
 
 
 def main(argv: list[str] | None = None) -> int:

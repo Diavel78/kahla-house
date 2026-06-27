@@ -39,6 +39,18 @@ def upsert_market(m: Market) -> dict[str, Any]:
     return (res.data or [{}])[0]
 
 
+def update_market_start(market_id: str, event_start: datetime) -> None:
+    """Correct an existing active market's event_start in place. Mirrors the
+    in-place retime odds_api did every tick (gotcha #30). Post-cutover the
+    ESPN spine is the ONLY market writer, so without this a stale placeholder
+    start (e.g. an old odds_api card-time) freezes the game in the past and it
+    drops out of the games list before it actually starts — the UFC
+    'no upcoming games' regression."""
+    client().table("markets").update(
+        {"event_start": event_start.isoformat()}
+    ).eq("id", market_id).execute()
+
+
 def list_active_markets(sport: str | None = None) -> list[dict[str, Any]]:
     q = client().table("markets").select("*").eq("status", "active")
     if sport:
