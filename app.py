@@ -7679,6 +7679,98 @@ def _display_window_end(sport: str, now: datetime) -> datetime:
     return end_local.astimezone(timezone.utc)
 
 
+# UFC fights run on imprecise block-times and a card spans hours, so a fight
+# ESPN still flags `pre` routinely has a nominal event_start already in the
+# PAST — the plain `event_start > now` filter used for every other sport then
+# wrongly hides it, emptying the UFC tab mid-card (the "what did you do to UFC"
+# regression). For UFC we widen the lower bound and let ESPN's live per-fight
+# state decide what's still pickable. Lookback = a full card's run.
+_UFC_LIVE_LOOKBACK_H = 8
+
+
+def _ufc_norm(s: str) -> str:
+    """Fighter-name normalization — mirrors bot_picks_resolver._norm."""
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def _ufc_espn_fight_states(now: datetime) -> list[dict]:
+    """Every UFC bout ESPN currently knows, as {n1, n2, state}. Iterates
+    events × competitions so it handles both ESPN MMA shapes (flat
+    one-event-per-fight AND card-with-many-competitions). state ∈ pre/in/post.
+    30s-cached via _espn_scoreboard_raw; [] on fetch error."""
+    dates = f"{now:%Y%m%d}-{(now + timedelta(days=8)):%Y%m%d}"
+    fights: list[dict] = []
+    for ev in _espn_scoreboard_raw("mma", "ufc", dates=dates):
+        for comp in (ev.get("competitions") or []):
+            cs = comp.get("competitors") or []
+            if len(cs) != 2:
+                continue
+            def _nm(c):
+                return _ufc_norm((c.get("athlete") or {}).get("displayName")
+                                 or (c.get("team") or {}).get("displayName") or "")
+            n1, n2 = _nm(cs[0]), _nm(cs[1])
+            if not (n1 and n2):
+                continue
+            state = ((comp.get("status") or {}).get("type") or {}).get("state") or ""
+            fights.append({"n1": n1, "n2": n2, "state": state})
+    return fights
+
+
+def _ufc_row_state(away: str, home: str, fights: list[dict]) -> str | None:
+    """ESPN live state for one market row's fight, matched by fighter name in
+    either orientation (UFC home/away is arbitrary) with a last-name-token
+    fallback. Mirrors bot_picks_resolver._ufc_match_espn's matching. None when
+    no ESPN bout matches (e.g. ESPN unreachable)."""
+    a, h = _ufc_norm(away), _ufc_norm(home)
+    if not (a and h):
+        return None
+    a_tok = [t for t in a.split() if len(t) >= 3]
+    h_tok = [t for t in h.split() if len(t) >= 3]
+
+    def hit(x: str, n: str, tok: list[str]) -> bool:
+        return (x in n or n in x) or any(t in n for t in tok)
+
+    for f in fights:
+        n1, n2 = f["n1"], f["n2"]
+        if (hit(a, n1, a_tok) and hit(h, n2, h_tok)) or \
+           (hit(a, n2, a_tok) and hit(h, n1, h_tok)):
+            return f["state"]
+    return None
+
+
+def _ufc_pickable_market_rows(sb, now: datetime) -> list[dict]:
+    """Active UFC `markets` rows still PICKABLE, by ESPN live state. A row is
+    kept when its nominal start is still in the future, OR when ESPN still
+    flags that fight `pre`. Fail-safe: if ESPN is unreachable (no fight
+    states), past-nominal rows are dropped — degrades to the old future-only
+    behavior rather than ever showing finished fights. Shared by the games
+    list + sport-counts so the badge matches the rendered list."""
+    before = _display_window_end("UFC", now).isoformat()
+    after = (now - timedelta(hours=_UFC_LIVE_LOOKBACK_H)).isoformat()
+    try:
+        rows = (sb.table("markets")
+                .select("id,sport,event_name,event_start,status")
+                .eq("status", "active").eq("sport", "UFC")
+                .gte("event_start", after).lte("event_start", before)
+                .order("event_start").limit(200).execute().data) or []
+    except Exception:
+        return []
+    fights = _ufc_espn_fight_states(now)
+    out: list[dict] = []
+    for m in rows:
+        sdt = _parse_iso(m.get("event_start") or "")
+        if sdt and sdt > now:
+            out.append(m)
+            continue
+        en = m.get("event_name") or ""
+        away, home = ("", "")
+        if " @ " in en:
+            away, home = [p.strip() for p in en.split(" @ ", 1)]
+        if _ufc_row_state(away, home, fights) == "pre":
+            out.append(m)
+    return out
+
+
 def _wc_in_display_window(matches: list[dict], now: datetime) -> list[dict]:
     """Trim World Cup matches to the same 2-day display window the other
     sports use. Keeps anything that has already kicked off (live/today) and
@@ -7729,17 +7821,23 @@ def api_handicapper_games():
     # ingest — we still capture opening odds for games further out, they
     # just don't render until they enter this window.
     before = _display_window_end(sport, now).isoformat()
-    try:
-        rows = (sb.table("markets")
-                .select("id,sport,event_name,event_start,status")
-                .eq("status", "active")
-                .eq("sport", sport)
-                .gte("event_start", after)
-                .lte("event_start", before)
-                .order("event_start")
-                .limit(200).execute().data) or []
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
+    if sport == "UFC":
+        # UFC nominal starts are block-times (a fight ESPN still calls `pre`
+        # often has a past nominal start); use ESPN live-state to decide what's
+        # still pickable instead of the strict future filter (see helper).
+        rows = _ufc_pickable_market_rows(sb, now)
+    else:
+        try:
+            rows = (sb.table("markets")
+                    .select("id,sport,event_name,event_start,status")
+                    .eq("status", "active")
+                    .eq("sport", sport)
+                    .gte("event_start", after)
+                    .lte("event_start", before)
+                    .order("event_start")
+                    .limit(200).execute().data) or []
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"Supabase: {e}"}), 500
 
     # Phantom-market filter removed. It was joining book_snapshots
     # rows for last 24h and dropping markets with no snapshot row in
@@ -7915,6 +8013,22 @@ def api_handicapper_sport_counts():
             "event_start": r.get("event_start"),
             "sport":       s,
         })
+    # UFC: the all-sports query above filters `event_start > now`, which hides
+    # block-time fights ESPN still flags `pre` (see _ufc_pickable_market_rows).
+    # Rebuild the UFC bucket from ESPN live-state so the tab badge matches the
+    # games list exactly.
+    try:
+        ufc_rows = _ufc_pickable_market_rows(sb, now)
+        by_sport["UFC"] = [{
+            "market_id":   m["id"],
+            "event_name":  m.get("event_name") or "",
+            "event_start": m.get("event_start"),
+            "sport":       "UFC",
+        } for m in ufc_rows]
+        if not by_sport["UFC"]:
+            by_sport.pop("UFC", None)
+    except Exception:
+        pass
     counts: dict[str, int] = {
         s: len(_dedup_games(gs, s)) for s, gs in by_sport.items()
     }
