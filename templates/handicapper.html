@@ -1786,7 +1786,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                 // Circa handle%/bets% sub-line (smaller, less prominent) when
                 // VSiN reported it for the picked side.
                 const sub = (p._circaH != null && p._circaB != null)
-                    ? `<span class="pc-sub" title="Circa handle% / bets%">${Math.round(p._circaH)}%/${Math.round(p._circaB)}%</span>`
+                    ? `<span class="pc-sub" title="Circa money% / blended tickets% — matches Details">${Math.round(p._circaH)}%/${Math.round(p._circaB)}%</span>`
                     : '';
                 chips.push(`<button class="pick-chip ${cls}" title="${_esc(title)}" onclick="${click}"><span class="pc-main">${_esc(label)}</span>${sub}</button>`);
             });
@@ -1893,12 +1893,13 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                         const picks = sugg.filter(s => s && s.gates_cleared).map(s => {
                             const body = _suggestionToBody(s, mid, d);
                             let chip = _pickChipLabel(s.market_type, s.side, body._line, body._price, s.units, d);
-                            // Circa handle%/bets% for the picked side (sub-line on
-                            // the chip). handle = sharp money, bets = ticket share.
+                            // Circa handle% / tickets% for the picked side (sub-line
+                            // on the chip). MATCHES the dossier breakdown: handle =
+                            // Circa sharp money, tickets = BLENDED Circa+DK ticket
+                            // share (side_bets), so the chip and Details agree.
                             const v = s.vsin || {};
                             const circaH = (v.side_handle != null) ? v.side_handle : null;
-                            const circaB = (v.side_bets_circa != null) ? v.side_bets_circa
-                                         : (v.side_bets != null ? v.side_bets : null);
+                            const circaB = (v.side_bets != null) ? v.side_bets : null;
                             return { market_type: s.market_type, side: s.side, units: Number(s.units) || 1,
                                      _chip: chip, _tw: s.timing_window || null,
                                      _circaH: circaH, _circaB: circaB,
@@ -3306,7 +3307,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             // (symmetry; the test tier was the one surface missing it).
             const czTest = _circaReasonBullet(pick, d);
             if (czTest) out.push(czTest);
-            out.push('Validating O/U at 0.25u — logged for the 2-week window build, not yet full size');
+            out.push('Model total — bet early (the edge fades as the market prices it); 1u, gate = model beats the line by ≥1 run');
             return out.slice(0, 4);
         }
         const lines = [];
