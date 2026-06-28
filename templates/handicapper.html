@@ -828,6 +828,14 @@
                                                     // side; this just needs to reach the latest zone's hi. The
                                                     // silent server-side paperlog goes further (5h) for review.
     const VERDICT_TTL_MS    = 5 * 60 * 1000;        // re-fetch stale verdicts
+    // MODEL bets (NRFI, model-driven TOT) are NOT steam bets — their edge is
+    // EARLY (you get the matchup price before the market sharpens it), the
+    // opposite of the ML/SPR steam window. Data (paperlog): NRFI ≥2h30m went
+    // 88-81 +8.88u while <2h30m was 17-20 +0.06u (dead); model-TOT lives at
+    // 3h+. So NRFI/TOT show only when EARLY (≥ this many min to first pitch),
+    // NOT on the tuned steam zones. Provisional — promote into the tuner once
+    // NRFI/TOT accrue their own zones.
+    const MODEL_BET_EARLY_MIN = 150;                // 2h30m+
 
     firebase.auth().onAuthStateChanged(async user => {
         if (!user) { window.location.href = '/'; return; }
@@ -1752,13 +1760,17 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             const game = (_currentGames || []).find(g => g.market_id === mid) || {};
             const chips = [];
             const renderedMt = new Set();
+            const diffMin = (Date.parse(startIso) - Date.now()) / 60000;
             picks.forEach((p, i) => {
                 const ps = _pickState(mid, p.market_type, p.side, p.units);
                 if (ps.state === 'conflict') return;   // never prompt the opposite side of a logged bet
                 const isLogged = (ps.state === 'logged' || ps.state === 'upgrade');
-                // Prime gate for NON-logged picks: ML/SPR/TOT by the server's
-                // per-market timing_window; NRFI by the pooled prime window.
-                const inPrime = (p.market_type === 'nrfi') ? _isPrime(startIso) : (p._tw === 'prime');
+                // Prime gate for NON-logged picks. MODEL bets (NRFI + TOT) →
+                // EARLY window (their edge is before the market sharpens, the
+                // opposite of steam). STEAM bets (ML/SPR) → the server's tuned
+                // per-market timing_window.
+                const isModelBet = (p.market_type === 'nrfi' || p.market_type === 'total');
+                const inPrime = isModelBet ? (diffMin >= MODEL_BET_EARLY_MIN) : (p._tw === 'prime');
                 if (!isLogged && !inPrime) return;     // hide non-prime, non-logged picks
                 let cls = _uClass(p.units), label = p._chip;
                 let click = _canLog ? `oneTapLog('${mid}',${i})` : `pickGame('${mid}')`;
