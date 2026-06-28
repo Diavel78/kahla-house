@@ -2294,13 +2294,11 @@ SPLITS_WEIGHT    = 0.3
 # through every tweak. Off until the run-total model (scripts/mlb_total_backtest
 # → a calibrated handicapper_web projection) clears its backtest + a shadow
 # period. Flip True to re-enable. ML/SPR and NRFI are unaffected.
-TOTALS_SUGGESTIONS_ENABLED = True   # June 2026: O/U promoted out of the test tier
-                                    # to real picks. Capped at 1u (SIZE_UP_MARKETS)
-                                    # and guarded by the total-side veto (park +
-                                    # model), so a bad total demotes to a lean
-                                    # rather than betting into Coors. Was off
-                                    # (-10.8u/30d when totals could size up); 1u +
-                                    # veto is the containment.
+TOTALS_SUGGESTIONS_ENABLED = False  # exchange-follow O/U engine stays OFF — it
+                                    # lost -10.8u/30d and the total-side veto that
+                                    # would guard it is SKIPPED in test mode (dead).
+                                    # Don't flip this on without a working veto +
+                                    # a totals engine that beats its backtest.
 
 # TEST tier for O/U (June 2026) — instead of staying fully dark while the
 # run-total model proves out, MLB totals run a VISIBLE "test only" tier driven
@@ -2317,10 +2315,11 @@ TOTALS_SUGGESTIONS_ENABLED = True   # June 2026: O/U promoted out of the test ti
 # under). NO external vetoes on this tier — park is already in proj_total via
 # _park_factor, so the test measures the model alone (VSiN/park recorded for
 # post-hoc slicing, never suppress a pick).
-TOTALS_TEST_MODE       = False   # June 2026: test tier retired — totals are now
-                                 # normal exchange-follow picks (sharp score, gate,
-                                 # veto, 1u). The model still feeds the total-side
-                                 # veto; flip back True to re-bench at 0.25u test.
+TOTALS_TEST_MODE       = True    # totals stay in the model-driven TEST tier
+                                 # (0.25u) — NOT the discredited exchange-follow
+                                 # engine. NOTE the veto (_total_conflict_reason)
+                                 # is SKIPPED on this tier by design, so it does
+                                 # NOT guard test totals — the model IS the guard.
 TEST_TOTAL_UNITS       = 0.25    # flat test stake (units CHECK allows 0.25)
 TEST_TOTAL_MIN_DIFF    = 0.5     # model must beat the line by ≥ this many runs
                                  # to clear the gate (else a forced lean)
@@ -2505,11 +2504,11 @@ def _prime_zones_union(sb) -> list[tuple[int, int]]:
 
 
 # Side markets that carry a prime label on the games-list row. NRFI excluded
-# (sizing not zone-gated yet → must not imply a size-up window). TOT re-added
-# June 2026 when O/U was promoted to real picks (TOTALS_SUGGESTIONS_ENABLED);
-# totals have no tuned zones of their own yet, so they fall back to the pooled
-# zone for timing/labels.
-_PRIME_LABEL_MARKETS = (("moneyline", "ML"), ("spread", "SPR"), ("total", "TOT"))
+# (sizing not zone-gated yet → must not imply a size-up window). TOT excluded —
+# O/U auto-suggestions are benched (TOTALS_SUGGESTIONS_ENABLED off), so a totals
+# PRIME badge would point at a bet the bot won't make. Re-add when totals are
+# rebuilt + re-enabled with a working veto.
+_PRIME_LABEL_MARKETS = (("moneyline", "ML"), ("spread", "SPR"))
 
 
 def _prime_zones_by_market_resolved(sb) -> dict:
