@@ -2667,6 +2667,24 @@ KELLY_HIGH_PCT       = 3.0      # ¼-Kelly stake ≥ this %BR → 5u high
 # the per-market sized-up PnL before doing so.
 SIZE_UP_MARKETS      = {"moneyline"}
 
+# Size-up must be EARNED BY SHARP STEAM (June 2026 — 365-pick review).
+# The bug: edge_pp drives Kelly sizing, but edge_pp pegs at its 6pp cap
+# from VSiN splits + the crude power model even when sharp_score is weak
+# — so sharp-light picks got sized to 5u (the Pirates 5u rode sharp=2.0,
+# edge pegged at 6.0, and lost -5.15u). Sized-up (3u+) PnL by sharp_score:
+#   sharp ≤3   4-5   -7.5u   (pure bleed — the sticky/decayed picks live here)
+#   sharp 4-5  13-14 +1.6u   (breakeven, +1.9 CLV — real but thin)
+#   sharp 6+   11-9  +14.1u  (the actual edge, +2.5 CLV)
+# So a pick can't size past 1u without genuine sharp: 3u needs sharp ≥
+# SHARP_FOR_3U, 5u needs sharp ≥ SHARP_FOR_5U; otherwise it caps at 1u no
+# matter what edge_pp/Kelly say. This also defuses the sticky-gate path —
+# a sticky pick survives on a DECAYED score (≥ STICKY_GATE_EXIT=1.5, which
+# is < SHARP_FOR_3U), so hysteresis keeps the chip stable for the UI but
+# can never justify sizing up. Same whale-tier lesson: size on sharp
+# steam, never on splits/model alone. Caps DOWN only.
+SHARP_FOR_3U         = 4.0      # sharp_score floor to allow a 3u pick
+SHARP_FOR_5U         = 6.0      # sharp_score floor to allow a 5u pick
+
 # Sticky gate (June 2026 — fixes the "pick exists for 5 minutes" symptom).
 # After the June recency-weight trim, a genuine 5¢ PIN steam scores ~3.75
 # only while <15min old (5×0.75), then decays to ~2.5 (5×0.50) — below the
@@ -4437,6 +4455,17 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
         # to re-enable. (Runs before the prime-window cap below; once 1u
         # here that cap's `units > 1` is a no-op.)
         if c.get("market_type") not in SIZE_UP_MARKETS and units > 1:
+            units, conf = 1, "low"
+            c["size_capped"] = True
+        # SHARP-GATED SIZING — size-up must be earned by sharp steam, not by
+        # edge_pp pegging at its cap from splits/model. See SHARP_FOR_3U/5U
+        # for the data. Caps DOWN only; a decayed sticky score (< SHARP_FOR_3U)
+        # can never reach 3u/5u here.
+        sharp_for_size = c.get("sharp_score") or 0
+        if units > 3 and sharp_for_size < SHARP_FOR_5U:
+            units, conf = 3, "medium"
+            c["size_capped"] = True
+        if units > 1 and sharp_for_size < SHARP_FOR_3U:
             units, conf = 1, "low"
             c["size_capped"] = True
         # TEST O/U tier — flat 0.25u regardless of Kelly/prime, so the 2-week
