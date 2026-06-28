@@ -650,11 +650,8 @@
                     <span class="count" id="gamesCount">…</span>
                 </div>
                 <div class="pick-legend" id="pickLegend">
-                    <span><i class="lg u05"></i>≤0.5u</span>
                     <span><i class="lg u1"></i>1u</span>
                     <span><i class="lg u3"></i>3u</span>
-                    <span><i class="lg u5"></i>5u</span>
-                    <span><i class="lg lean"></i>lean</span>
                     <span class="legend-log"><i class="lg logged"></i>logged</span>
                     <span class="legend-log"><i class="lg upgrade"></i>add / new</span>
                 </div>
@@ -1719,65 +1716,71 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                 return { state: 'conflict', logged: { mt: t, units: info.units, side: info.side } };
         return { state: 'new', logged: null };
     }
-    // Render the second line of every game row: the bot's recommended bets
-    // as one-tap log chips (color-tiered by stake), or a grey note. Rules:
-    //   • > 2.5h to start → grey "lean only, outside pick window" (no chips —
-    //     the bot's read isn't actionable that far out).
-    //   • ≤ 2.5h, verdict cached → one chip per recommended bet. Tap = log it
-    //     instantly at the recommended units (blind-follow). Logged / upgrade
-    //     / opposite-side (conflict) states recolor the chip. 120-150m picks
-    //     are capped at 1u ('early' test window) and don't glow.
-    //   • ≤ 2.5h, not yet evaluated → "evaluating…" until the prefetch lands.
+    // Minimal green chip for a pick the user has ALREADY logged but the bot
+    // isn't currently suggesting (so it's not in the verdict cache). No price
+    // — just the side + units — so "already picked" stays visible even after
+    // the game leaves the prime window.
+    function _loggedChipLabel(mt, side, units, game) {
+        const mkt = _shortMarket(mt);
+        let sideLbl;
+        if (mt === 'nrfi') sideLbl = (side === 'no' ? 'NRFI' : 'YRFI');
+        else if (mt === 'total') sideLbl = (side === 'over' ? 'O' : 'U');
+        else { const t = (side === 'home' ? game.home : game.away) || side; sideLbl = String(t).split(' ').pop(); }
+        return `${mkt} ${sideLbl} · ${_uStr(units)}`.replace(/\s+/g, ' ').trim();
+    }
+    // Render the second line of every game row. NEW behavior (June 2026, per
+    // user): show ONLY gate-cleared picks that are IN the prime window — no
+    // leans, no "outside window" notes, no make/take pills. A pick the user
+    // already logged stays visible (green "✓ already picked") regardless of
+    // the window, so they never lose sight of a bet they're on.
     function _renderPickLines() {
-        const now = Date.now();
         document.querySelectorAll('#gamesList .game-line2[data-mid]').forEach(el => {
             if (!_canBet) { el.innerHTML = ''; return; }   // viewers: no picks line
             const mid = el.getAttribute('data-mid');
-            const start = Date.parse(el.getAttribute('data-start'));
-            const dt = isNaN(start) ? null : (start - now);
-            if (dt == null || dt > VERDICT_WINDOW_MS) {
-                el.innerHTML = `<span class="pick-line-note">lean only, outside pick window</span>`;
-                return;
-            }
-            // Refresh this row's prime glow + badge now that picks are known,
-            // so both reflect the row's ACTUAL bets (not the union of markets).
+            const startIso = el.getAttribute('data-start');
+            // Refresh this row's prime glow + badge now that picks are known.
             const _row = el.closest('.game-row');
             if (_row) {
-                const _rp = _rowPrime(mid, el.getAttribute('data-start'));
+                const _rp = _rowPrime(mid, startIso);
                 _row.classList.toggle('prime', _rp.on);
                 const _tag = _row.querySelector('.prime-tag');
                 if (_tag) _tag.textContent = _rp.text;
             }
             const v = _verdictCache.get(mid);
-            if (!v) { el.innerHTML = `<span class="pick-line-note">evaluating…</span>`; return; }
-            const picks = v.picks || [];
-            if (!picks.length) { el.innerHTML = `<span class="pick-line-note">no pick — lean</span>`; return; }
-            el.innerHTML = picks.map((p, i) => {
+            const picks = (v && v.picks) || [];
+            const lp = _loggedPicks.get(mid);   // Map(market_type -> {units, side}), pending only
+            const game = (_currentGames || []).find(g => g.market_id === mid) || {};
+            const chips = [];
+            const renderedMt = new Set();
+            picks.forEach((p, i) => {
                 const ps = _pickState(mid, p.market_type, p.side, p.units);
-                // Default chip: tier-colored. Admins one-tap to log; view-only
-                // (bot_access) users can't log, so the chip opens Details.
+                if (ps.state === 'conflict') return;   // never prompt the opposite side of a logged bet
+                const isLogged = (ps.state === 'logged' || ps.state === 'upgrade');
+                // Prime gate for NON-logged picks: ML/SPR/TOT by the server's
+                // per-market timing_window; NRFI by the pooled prime window.
+                const inPrime = (p.market_type === 'nrfi') ? _isPrime(startIso) : (p._tw === 'prime');
+                if (!isLogged && !inPrime) return;     // hide non-prime, non-logged picks
                 let cls = _uClass(p.units), label = p._chip;
                 let click = _canLog ? `oneTapLog('${mid}',${i})` : `pickGame('${mid}')`;
                 let title = _canLog ? `Tap to log ${p._chip}` : `Tap for the full read`;
-                if (p._lean) {
-                    cls = 'lean'; label = 'lean · ' + p._chip;
-                    if (_canLog) title = 'No gated pick — tap to log the 1u lean';
-                }
                 if (ps.state === 'logged') {
                     cls = 'logged'; label = '✓ ' + p._chip; click = `pickGame('${mid}')`; title = 'Already logged — open Details';
                 } else if (ps.state === 'upgrade') {
                     cls = 'upgrade'; label = '↑ ' + p._chip; title = `Add up to ${_uStr(p.units)}`;
-                } else if (ps.state === 'conflict') {
-                    cls = 'conflict'; label = '⚠ ' + p._chip; click = `pickGame('${mid}')`; title = 'Opposite of a bet you logged — open Details';
                 }
-                // "this way" directive — riding the chip once the make/take
-                // verdict is in. Hidden once logged / on a conflict (moot).
-                const showMt = p._mtChip && ps.state !== 'logged' && ps.state !== 'conflict';
-                const mtPill = showMt
-                    ? `<span class="mt-pill ${String(p._mt.rec).indexOf('MAKE') === 0 ? 'make' : 'take'}" title="how to enter — full read on Details">${_esc(p._mtChip)}</span>`
-                    : '';
-                return `<span class="pick-chip-row"><button class="pick-chip ${cls}" title="${_esc(title)}" onclick="${click}">${_esc(label)}</button>${mtPill}</span>`;
-            }).join('');
+                renderedMt.add(p.market_type);
+                chips.push(`<button class="pick-chip ${cls}" title="${_esc(title)}" onclick="${click}">${_esc(label)}</button>`);
+            });
+            // Logged picks the bot isn't currently surfacing → keep the green
+            // "already picked" chip so the user stays oriented on their bets.
+            if (lp) {
+                lp.forEach((info, mt) => {
+                    if (renderedMt.has(mt)) return;
+                    const label = _loggedChipLabel(mt, info.side, info.units, game);
+                    chips.push(`<button class="pick-chip logged" title="Already logged — open Details" onclick="pickGame('${mid}')">✓ ${_esc(label)}</button>`);
+                });
+            }
+            el.innerHTML = chips.join('');
         });
     }
 
@@ -1863,53 +1866,35 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                     const d = await r.json();
                     if (d && d.ok) {
                         const sugg = d.suggestions || (d.suggestion ? [d.suggestion] : []);
+                        // Only REAL, gate-cleared picks — no forced leans (the
+                        // user asked to stop showing non-prime leans). Carry the
+                        // server-resolved timing_window so the display can show
+                        // ONLY prime-window picks. (make/take/book pills removed
+                        // from the cards per the declutter request.)
                         const picks = sugg.filter(s => s && s.gates_cleared).map(s => {
                             const body = _suggestionToBody(s, mid, d);
                             let chip = _pickChipLabel(s.market_type, s.side, body._line, body._price, s.units, d);
-                            if (s.test_only) chip = 'TEST · ' + chip;
                             return { market_type: s.market_type, side: s.side, units: Number(s.units) || 1,
-                                     _chip: chip, _test: !!s.test_only,
+                                     _chip: chip, _tw: s.timing_window || null,
                                      _slug: s.pmm_slug || null, _inv: !!s.pmm_synthetic, _body: body };
                         });
-                        // Always-give-a-pick (June 2026, per user): when nothing
-                        // gates, surface the TOP forced lean as a tappable 1u
-                        // chip instead of a dead "no pick" note — the bot always
-                        // has a lean when PIN data exists.
-                        if (!picks.length) {
-                            const lean = sugg.find(s => s && s.market_type && s.side && !s.conflict_reason);
-                            if (lean) {
-                                const body = _suggestionToBody(lean, mid, d);
-                                picks.push({ market_type: lean.market_type, side: lean.side,
-                                    units: Number(lean.units) || 1, _lean: true,
-                                    _chip: _pickChipLabel(lean.market_type, lean.side, body._line, body._price, lean.units, d),
-                                    _slug: lean.pmm_slug || null, _inv: !!lean.pmm_synthetic, _body: body });
-                            }
-                        }
                         // NRFI: actionable only when the model found a +EV side.
+                        // Sized 1u now (the 0.5u restriction was removed — NRFI
+                        // grades cleanly and runs +EV).
                         if (d.nrfi && d.nrfi.bet_side) {
                             const side = d.nrfi.bet_side;
                             const pb = (d.nrfi.polymarket || {})[side] || {};
                             const price = (pb.bid_american != null) ? pb.bid_american
                                 : (side === 'no' ? d.nrfi.nrfi_fair_american : d.nrfi.yrfi_fair_american);
-                            picks.push({ market_type: 'nrfi', side, units: 0.5, _slug: pb.slug || null,
-                                _chip: _pickChipLabel('nrfi', side, null, price, 0.5, d),
+                            picks.push({ market_type: 'nrfi', side, units: 1, _slug: pb.slug || null,
+                                _chip: _pickChipLabel('nrfi', side, null, price, 1, d),
                                 _body: { market_id: mid, market_type: 'nrfi', side, book: 'PMM',
-                                    price, line: null, units: 0.5, confidence: 'low',
+                                    price, line: null, units: 1, confidence: 'low',
                                     fair_prob: (side === 'no' ? d.nrfi.p_nrfi : d.nrfi.p_yrfi),
                                     edge_pp: (pb.edge_pp != null ? pb.edge_pp : null), sharp_score: null,
                                     reasons: d.nrfi.reasons || [], query_text: d.query || null,
                                     allow_duplicate: true } });
                         }
-                        // "this way" — fetch the live make/take verdict per pick
-                        // with a Poly market and ride it on the chip. Populates
-                        // _makeTakeCache too, so oneTapLog enters at the rec.
-                        await Promise.all(picks.map(async p => {
-                            if (!p._slug || p._lean) return;   // no book call for leans
-                            const _ln = p._body ? (p._body.line != null ? p._body.line : p._body._line) : null;
-                            const j = await _fetchMakeTakeVerdict(p._slug, mid, p.market_type, p.side, p.units, d.starts_in_min, p._inv,
-                                { sport: d.sport, away: d.away, home: d.home }, _ln);
-                            if (j) { p._mt = j; p._mtChip = _mtShort(j); }
-                        }));
                         _verdictCache.set(mid, { picks, fetchedAt: Date.now() });
                         _renderPickLines();
                     }
@@ -2646,7 +2631,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             let detFrag;
             if (n.bet_side) {
                 const lbl = n.bet_side === 'no' ? 'NRFI' : 'YRFI';
-                detFrag = `<div class="pr-line" style="color:var(--green);font-weight:600">▶ BET ${lbl} @ ${_fmtAmer(n.entry_price)} (Poly bid) · +${n.bet_edge_pp}pp edge · 0.5u</div>`;
+                detFrag = `<div class="pr-line" style="color:var(--green);font-weight:600">▶ BET ${lbl} @ ${_fmtAmer(n.entry_price)} (Poly bid) · +${n.bet_edge_pp}pp edge · 1u</div>`;
             } else if (n.pmm_matched) {
                 detFrag = `<div class="pr-line" style="color:var(--text-muted)">Pass — model fair within 3pp of Poly's price on both sides.</div>`;
             } else {
@@ -2661,7 +2646,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             const obpNote = (inp.home_obp_src === 'team' || inp.away_obp_src === 'team')
                 ? ` · top-of-order from team OBP (lineup not posted yet)` : ` · top-of-order from posted lineup`;
             // Buttons: the +EV side is the green BET action; the other
-            // side stays available for a manual log (also 0.5u).
+            // side stays available for a manual log (also 1u).
             const mkBtn = (side, lbl) => {
                 const isBet = n.bet_side === side;
                 return `<button class="${isBet ? 'bet' : ''}" onclick="logNrfi('${side}')">${isBet ? 'BET ' : 'Log '}${lbl}</button>`;
@@ -2673,7 +2658,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             html += `<div class="card">
                 <div class="card-head">
                     <h3>First inning — NRFI / YRFI</h3>
-                    <span class="ref-tag" title="Model fair from the opposing starters + top-of-order on-base + park + temp. P(NRFI)=q_top·q_bot. BET = our fair beats Polymarket's maker entry (bid) by ≥3pp. Flat 0.5u (71% over 21 graded picks).">OUR NUMBER vs POLY</span>
+                    <span class="ref-tag" title="Model fair from the opposing starters + top-of-order on-base + park + temp. P(NRFI)=q_top·q_bot. BET = our fair beats Polymarket's maker entry (bid) by ≥3pp. Flat 1u (graded off the 1st-inning linescore, runs +EV).">OUR NUMBER vs POLY</span>
                 </div>
                 <div class="pr-grid">
                     ${cell('no', 'NRFI (no run)', nrfiPct, n.nrfi_fair_american)}
@@ -3113,8 +3098,8 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         // Seed the log modal for an NRFI/YRFI pick. side: 'no' (NRFI) /
         // 'yes' (YRFI). Maker entry = Polymarket's BID for that side when
         // PMM has the market (where we rest the limit), else the model
-        // fair. Flat 0.5u. Resolver grades W/L off the 1st-inning
-        // linescore. No line.
+        // fair. Flat 1u (the 0.5u restriction was lifted June 2026 — NRFI
+        // grades cleanly off the 1st-inning linescore and runs +EV). No line.
         if (!_lastDossier || !_lastDossier.nrfi) return;
         const n = _lastDossier.nrfi;
         const prob = side === 'no' ? n.p_nrfi : n.p_yrfi;
@@ -3135,11 +3120,11 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             edge_pp:     edge,
             sharp_score: null,
             label:       `1st Inning · ${label} @ ${_fmtAmer(makerEntry)} (${entryLbl})`,
-            seed_units:  0.5,
+            seed_units:  1,
             seed_conf:   'low',
         };
         document.getElementById('lmSelection').value  = _pendingPick.label;
-        document.getElementById('lmUnits').value      = '0.5';
+        document.getElementById('lmUnits').value      = '1';
         document.getElementById('lmConfidence').value = 'low';
         document.getElementById('lmReasons').value    = (n.reasons || []).join('\n');
         document.getElementById('lmAnalysis').value   = '';

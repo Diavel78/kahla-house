@@ -1133,6 +1133,12 @@ def build_worldcup_dossier(sb, market_id: str) -> dict:
         f = fair[sug_side]
         edge_pp = round(score * _X_PP_SCALE, 2) if gate else 0.0
         units, conf, _k = _kelly_units(f["fair_prob"], f["fair_american"], edge_pp, gate)
+        # Global sizing policy (June 2026): top tier 3u (5u disabled), and
+        # size-up past 1u must be earned by real sharp steam (SHARP_FOR_3U).
+        if units > 3:
+            units, conf = 3, "medium"
+        if units > 1 and score < SHARP_FOR_3U:
+            units, conf = 1, "low"
         entry_cents = latest.get(("pmm", "ml", sug_side, None))
         entry_american = (_prob_to_american(entry_cents / 100.0)
                           if entry_cents else f["fair_american"])
@@ -2288,7 +2294,13 @@ SPLITS_WEIGHT    = 0.3
 # through every tweak. Off until the run-total model (scripts/mlb_total_backtest
 # → a calibrated handicapper_web projection) clears its backtest + a shadow
 # period. Flip True to re-enable. ML/SPR and NRFI are unaffected.
-TOTALS_SUGGESTIONS_ENABLED = False
+TOTALS_SUGGESTIONS_ENABLED = True   # June 2026: O/U promoted out of the test tier
+                                    # to real picks. Capped at 1u (SIZE_UP_MARKETS)
+                                    # and guarded by the total-side veto (park +
+                                    # model), so a bad total demotes to a lean
+                                    # rather than betting into Coors. Was off
+                                    # (-10.8u/30d when totals could size up); 1u +
+                                    # veto is the containment.
 
 # TEST tier for O/U (June 2026) — instead of staying fully dark while the
 # run-total model proves out, MLB totals run a VISIBLE "test only" tier driven
@@ -2305,7 +2317,10 @@ TOTALS_SUGGESTIONS_ENABLED = False
 # under). NO external vetoes on this tier — park is already in proj_total via
 # _park_factor, so the test measures the model alone (VSiN/park recorded for
 # post-hoc slicing, never suppress a pick).
-TOTALS_TEST_MODE       = True
+TOTALS_TEST_MODE       = False   # June 2026: test tier retired — totals are now
+                                 # normal exchange-follow picks (sharp score, gate,
+                                 # veto, 1u). The model still feeds the total-side
+                                 # veto; flip back True to re-bench at 0.25u test.
 TEST_TOTAL_UNITS       = 0.25    # flat test stake (units CHECK allows 0.25)
 TEST_TOTAL_MIN_DIFF    = 0.5     # model must beat the line by ≥ this many runs
                                  # to clear the gate (else a forced lean)
@@ -2490,11 +2505,11 @@ def _prime_zones_union(sb) -> list[tuple[int, int]]:
 
 
 # Side markets that carry a prime label on the games-list row. NRFI excluded
-# (sizing not zone-gated yet → must not imply a size-up window). TOT removed
-# June 2026 — O/U auto-suggestions are benched (TOTALS_SUGGESTIONS_ENABLED),
-# so a totals PRIME badge would point at a bet the bot won't make. Re-add when
-# totals are rebuilt + re-enabled.
-_PRIME_LABEL_MARKETS = (("moneyline", "ML"), ("spread", "SPR"))
+# (sizing not zone-gated yet → must not imply a size-up window). TOT re-added
+# June 2026 when O/U was promoted to real picks (TOTALS_SUGGESTIONS_ENABLED);
+# totals have no tuned zones of their own yet, so they fall back to the pooled
+# zone for timing/labels.
+_PRIME_LABEL_MARKETS = (("moneyline", "ML"), ("spread", "SPR"), ("total", "TOT"))
 
 
 def _prime_zones_by_market_resolved(sb) -> dict:
@@ -2683,7 +2698,7 @@ SIZE_UP_MARKETS      = {"moneyline"}
 # can never justify sizing up. Same whale-tier lesson: size on sharp
 # steam, never on splits/model alone. Caps DOWN only.
 SHARP_FOR_3U         = 4.0      # sharp_score floor to allow a 3u pick
-SHARP_FOR_5U         = 6.0      # sharp_score floor to allow a 5u pick
+SHARP_FOR_5U         = 6.0      # (unused — 5u tier disabled June 2026; top tier is 3u)
 
 # Sticky gate (June 2026 — fixes the "pick exists for 5 minutes" symptom).
 # After the June recency-weight trim, a genuine 5¢ PIN steam scores ~3.75
@@ -4447,6 +4462,12 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
         units, conf, kelly_pct = _kelly_units(
             c.get("fair_prob"), c.get("fair_american"),
             c.get("edge_pp"), c.get("gates_cleared"), kelly_fraction)
+        # TOP TIER IS NOW 3U (June 2026, user call) — 5u disabled. The 5u
+        # tier carried too much variance for the edge it captured; the
+        # user wants the ceiling at 3u. Clamp here so nothing downstream
+        # emits 5u; the sharp gate below still requires real steam for 3u.
+        if units > 3:
+            units, conf = 3, "medium"
         # SIZE-UP IS MONEYLINE-ONLY (June 2026 — 365-pick live review).
         # Sized-up SPR went 0-10 (-12.0u) and TOT 9-11 (-7.2u) while ML
         # went 19-12 (+27.4u): the Kelly signal is real for moneyline and
@@ -4457,14 +4478,11 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
         if c.get("market_type") not in SIZE_UP_MARKETS and units > 1:
             units, conf = 1, "low"
             c["size_capped"] = True
-        # SHARP-GATED SIZING — size-up must be earned by sharp steam, not by
-        # edge_pp pegging at its cap from splits/model. See SHARP_FOR_3U/5U
-        # for the data. Caps DOWN only; a decayed sticky score (< SHARP_FOR_3U)
-        # can never reach 3u/5u here.
+        # SHARP-GATED SIZING — size-up to 3u must be earned by sharp steam,
+        # not by edge_pp pegging at its cap from splits/model. See
+        # SHARP_FOR_3U for the data. Caps DOWN only; a decayed sticky score
+        # (< SHARP_FOR_3U) can never reach 3u here. (5u is already gone.)
         sharp_for_size = c.get("sharp_score") or 0
-        if units > 3 and sharp_for_size < SHARP_FOR_5U:
-            units, conf = 3, "medium"
-            c["size_capped"] = True
         if units > 1 and sharp_for_size < SHARP_FOR_3U:
             units, conf = 1, "low"
             c["size_capped"] = True

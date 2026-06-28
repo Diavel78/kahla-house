@@ -5287,9 +5287,22 @@ def api_handicapper_prime_alert():
     if now.astimezone(ZoneInfo("America/Phoenix")).hour < _PRIME_QUIET_BEFORE:
         return jsonify({"ok": True, "alerted": 0, "reason": "quiet hours"})
 
-    lo = (now + timedelta(minutes=_PRIME_LO_MIN)).isoformat()
-    hi = (now + timedelta(minutes=_PRIME_BATCH_HI_MIN)).isoformat()
-    prime_hi = now + timedelta(minutes=_PRIME_HI_MIN)
+    # Fire as games cross the OUTER edge of the (data-driven, multi-zone)
+    # prime window — the same zones the website uses, so the alert tracks
+    # the tuner instead of a hardcoded 3h. env_hi = the far edge of prime;
+    # alerting there gives the user the whole window to act. Falls back to
+    # the constants if the tuner row is unreadable.
+    try:
+        _zones = handicapper_web._load_prime_zones(sb) or []
+        env_hi = max((hi for _lo, hi in _zones), default=_PRIME_HI_MIN)
+    except Exception:
+        env_hi = _PRIME_HI_MIN
+    fire_min = int(env_hi)                 # fire when the earliest fresh game ≤ this
+    lo_min   = max(0, fire_min - 30)       # 60-min cluster straddling the edge
+    batch_hi = fire_min + 30
+    lo = (now + timedelta(minutes=lo_min)).isoformat()
+    hi = (now + timedelta(minutes=batch_hi)).isoformat()
+    prime_hi = now + timedelta(minutes=fire_min)
 
     try:
         rows = (sb.table("markets")
@@ -5377,13 +5390,24 @@ def _build_prime_alert_msg(sport: str, games: list) -> str:
             pass
     when = ""
     if starts:
+        # Sport-neutral — these clusters can be MLB/soccer/UFC, so "Starts",
+        # not "First pitch". Lead time is computed (was a stale hardcoded
+        # "~3h" that drifted when the prime window changed).
         lo_t, hi_t = _fmt_az_time(min(starts)), _fmt_az_time(max(starts))
-        when = (f"🕐 First pitch {lo_t} AZ" if lo_t == hi_t
-                else f"🕐 First pitch {lo_t}–{hi_t} AZ")
+        when = (f"🕐 Starts {lo_t} AZ" if lo_t == hi_t
+                else f"🕐 Starts {lo_t}–{hi_t} AZ")
+        try:
+            mins = int((min(starts) - datetime.now(timezone.utc)).total_seconds() // 60)
+            if mins > 0:
+                h, mm = divmod(mins, 60)
+                lead = (f"{h}h {mm}m" if h else f"{mm}m")
+                when += f"  (~{lead} out)"
+        except Exception:
+            pass
     plural = "game" if n == 1 else "games"
     lines = [f"🎯 *{n} {sport} {plural}* entering the prime betting window"]
     if when:
-        lines.append(when + "  (~3h to first pitch)")
+        lines.append(when)
     for g in games[:8]:
         lines.append(f"• {g.get('event_name', '?')}")
     if n > 8:
@@ -9178,6 +9202,44 @@ def pmm_sync_page():
     </script></body></html>''')
 
 
+# Bot market_type → VSiN market_type (NRFI has no VSiN splits). Mirrors
+# bot_picks_resolver._VSIN_MT_MAP — keep in sync.
+_BETTIME_VSIN_MT = {"moneyline": "ml", "spread": "spread", "total": "total"}
+
+
+def _bettime_vsin(sb, market_id, market_type):
+    """The CURRENT VSiN read (Circa + DraftKings handle%/bets%, both sides)
+    for this market at the moment a pick is logged, from vsin_snapshots.
+    Same shape as the resolver's closing_vsin ({book: {side: {handle, bets,
+    line}}, captured_at}); paired with that closing read it shows whether
+    sharp money hit Circa late on the pick's side. Returns None for NRFI /
+    sports VSiN doesn't carry / no snapshot. Best-effort — never raises."""
+    vmt = _BETTIME_VSIN_MT.get(market_type or "")
+    if not (market_id and vmt):
+        return None
+    try:
+        rows = (sb.table("vsin_snapshots")
+                .select("book,side,line,handle_pct,bets_pct,captured_at")
+                .eq("market_id", market_id).eq("market_type", vmt)
+                .order("captured_at", desc=True).limit(200).execute().data) or []
+    except Exception:
+        return None
+    out, seen, last_at = {}, set(), None
+    for r in rows:                      # desc → first per (book,side) is the latest
+        k = (r["book"], r["side"])
+        if k in seen:
+            continue
+        seen.add(k)
+        out.setdefault(r["book"], {})[r["side"]] = {
+            "handle": r.get("handle_pct"), "bets": r.get("bets_pct"),
+            "line": r.get("line")}
+        last_at = last_at or r.get("captured_at")
+    if not out:
+        return None
+    out["captured_at"] = last_at
+    return out
+
+
 @app.route("/api/handicapper/pick", methods=["POST"])
 @bot_required   # PER-USER: any bot_access user logs the bot's picks as their OWN bets (row stamped asked_by=g.uid). The dedup below is scoped to the caller so user B can still log a pick user A already logged.
 def api_handicapper_pick():
@@ -9284,6 +9346,20 @@ def api_handicapper_pick():
         "reasons":     body.get("reasons"),
         "signal_blob": body.get("signal_blob"),
     }
+    # Stamp the BET-TIME VSiN read (Circa + DK handle/bets, both sides) onto
+    # the pick so the % handle-vs-% bets signal is actually tracked per pick.
+    # Paired with the resolver's closing_vsin it answers "did sharp money hit
+    # Circa late on my side?" Best-effort; a miss never blocks the log.
+    try:
+        bt_vsin = _bettime_vsin(sb, body["market_id"], body["market_type"])
+        if bt_vsin:
+            sblob = row.get("signal_blob")
+            if not isinstance(sblob, dict):
+                sblob = {}
+            sblob["vsin"] = bt_vsin
+            row["signal_blob"] = sblob
+    except Exception:
+        pass
     try:
         res = sb.table("bot_picks").insert(row).execute()
     except Exception as e:
