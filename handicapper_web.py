@@ -4093,8 +4093,10 @@ def _vsin_sharp_veto(vsin: dict | None, mt: str, side: str):
     opp_b = _vsin_blended_bets(vsin, vmt, opp)
     if opp_h is None and our_h is None and our_b is None and opp_b is None:
         return None, None
+    circa_b = _vsin_cell(vsin, "circa", vmt, side, "bets")
     read = {"sharp_book": "circa",
             "side_handle": our_h, "side_bets": (round(our_b) if our_b is not None else None),
+            "side_bets_circa": (round(float(circa_b)) if circa_b is not None else None),
             "opp_handle": opp_h, "opp_bets": (round(opp_b) if opp_b is not None else None)}
     if opp_h is None:                       # no Circa handle = no sharp read = no veto
         return None, read
