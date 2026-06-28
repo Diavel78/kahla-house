@@ -1024,39 +1024,12 @@
         return 'Prime · ' + hot.join(', ');
     }
     const _MT_LABEL = { moneyline: 'ML', spread: 'SPR', total: 'TOT' };
-    // Prime state for a game ROW, driven by the bet(s) ACTUALLY on the row:
-    // {on, text}. on = at least one of the row's side bets (ML/SPR/TOT, NRFI
-    // excluded — not zone-gated) is in ITS market's prime window; text names
-    // them ("Prime · TOT"). This is what makes the green glow AND the badge
-    // agree — a row whose only bet (e.g. TOT) is off-peak does NOT glow, even
-    // if a market it isn't betting (ML) happens to be prime at that minute.
-    // Until the row's picks are prefetched, fall back to the union glow.
-    function _rowPrime(mid, iso) {
-        const diffMin = Math.round((new Date(iso) - new Date()) / 60_000);
-        const v = _verdictCache.get(mid);
-        if (!v || !Array.isArray(v.picks)) return { on: _isPrime(iso), text: 'Prime' };
-        const order = ['ML', 'SPR', 'TOT'];
-        // Markets the prime system actually labels (server's _PRIME_LABEL_MARKETS
-        // = ML/SPR; TOT is benched during O/U testing). When we HAVE per-market
-        // data, a market missing from it is benched → NEVER prime (don't borrow
-        // the pooled zone — that's what lit a 0.25u test TOT as "PRIME · TOT").
-        // Only before the first fetch (no per-market data) do we fall back to the
-        // pooled _isPrime for everything.
-        const haveByMarket = Object.keys(_primeZonesByMarket).length > 0;
-        const hot = new Set();
-        for (const p of v.picks) {
-            const lab = _MT_LABEL[p.market_type];
-            if (!lab) continue;                                           // skip nrfi
-            const zones = _primeZonesByMarket[lab];
-            let inWin;
-            if (Array.isArray(zones)) inWin = zones.some(z => diffMin >= z[0] && diffMin <= z[1]);
-            else if (haveByMarket)    inWin = false;                      // benched market → not prime
-            else                      inWin = _isPrime(iso);             // legacy pre-fetch fallback
-            if (inWin) hot.add(lab);
-        }
-        const labs = order.filter(l => hot.has(l));
-        return { on: labs.length > 0, text: labs.length ? 'Prime · ' + labs.join(', ') : 'Prime' };
-    }
+    // NOTE: the row glow/badge is now derived in _renderPickLines DIRECTLY from
+    // the chips it displays (a row glows iff it shows a non-logged, in-prime
+    // pick chip). The old _rowPrime() zone-guess was removed — it lit rows
+    // "PRIME" before their verdict evaluated (flicker) and disagreed with the
+    // chip display (e.g. "PRIME · TOT" with no chip, because TOT's row zone and
+    // its early-window chip gate differed).
     function _fmtSettled(iso) {
         const d = new Date(iso);
         const diffH = (Date.now() - d) / 3_600_000;
@@ -1423,11 +1396,13 @@
             }
             list.innerHTML = games.map(g => {
                 const matchup = g.away && g.home ? `${_esc(g.away)} @ ${_esc(g.home)}` : _esc(g.event_name);
-                const rp = _rowPrime(g.market_id, g.event_start);
-                return `<li class="game-row ${rp.on ? 'prime' : ''}">
+                // Render the row PRIME-NEUTRAL — _renderPickLines() (called right
+                // below) sets the glow/badge from the actual displayed chips, so a
+                // row never flashes "PRIME" before its verdict has evaluated.
+                return `<li class="game-row">
                     <div class="game-line1">
                         <span class="when ${_kickoffTierFor(g.event_start, _activeSport)}" data-start="${_esc(g.event_start)}">${_kickoffLabel(g.event_start, _activeSport)}</span>
-                        <span class="prime-tag">${rp.text}</span>
+                        <span class="prime-tag"></span>
                         <span class="matchup">${matchup}</span>
                         <button class="details-btn" onclick="pickGame('${g.market_id}')">Details ›</button>
                     </div>
@@ -1743,25 +1718,32 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
     // leans, no "outside window" notes, no make/take pills. A pick the user
     // already logged stays visible (green "✓ already picked") regardless of
     // the window, so they never lose sight of a bet they're on.
+    const _PRIME_LABEL_ORDER = ['ML', 'SPR', 'TOT', 'NRFI'];
     function _renderPickLines() {
+        const fetchWindowMin = VERDICT_WINDOW_MS / 60000;
         document.querySelectorAll('#gamesList .game-line2[data-mid]').forEach(el => {
-            if (!_canBet) { el.innerHTML = ''; return; }   // viewers: no picks line
+            const _row = el.closest('.game-row');
+            const _tag = _row && _row.querySelector('.prime-tag');
+            // Single source of truth: a row glows + shows "Prime · …" ONLY when it
+            // is actually DISPLAYING a non-logged, in-prime pick chip. Never a
+            // zone-guess before the verdict loads — that caused every row to flash
+            // "PRIME" on load and shut off as it evaluated.
+            const setPrime = (labelSet) => {
+                if (!_row) return;
+                const labs = _PRIME_LABEL_ORDER.filter(l => labelSet.has(l));
+                _row.classList.toggle('prime', labs.length > 0);
+                if (_tag) _tag.textContent = labs.length ? 'Prime · ' + labs.join(', ') : '';
+            };
+            if (!_canBet) { el.innerHTML = ''; setPrime(new Set()); return; }   // viewers: no picks line
             const mid = el.getAttribute('data-mid');
             const startIso = el.getAttribute('data-start');
-            // Refresh this row's prime glow + badge now that picks are known.
-            const _row = el.closest('.game-row');
-            if (_row) {
-                const _rp = _rowPrime(mid, startIso);
-                _row.classList.toggle('prime', _rp.on);
-                const _tag = _row.querySelector('.prime-tag');
-                if (_tag) _tag.textContent = _rp.text;
-            }
             const v = _verdictCache.get(mid);
             const picks = (v && v.picks) || [];
             const lp = _loggedPicks.get(mid);   // Map(market_type -> {units, side}), pending only
             const game = (_currentGames || []).find(g => g.market_id === mid) || {};
             const chips = [];
             const renderedMt = new Set();
+            const primeLabels = new Set();      // markets with a NON-logged in-prime chip → drives the glow
             const diffMin = (Date.parse(startIso) - Date.now()) / 60000;
             picks.forEach((p, i) => {
                 const ps = _pickState(mid, p.market_type, p.side, p.units);
@@ -1781,6 +1763,9 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                     cls = 'logged'; label = '✓ ' + p._chip; click = `pickGame('${mid}')`; title = 'Already logged — open Details';
                 } else if (ps.state === 'upgrade') {
                     cls = 'upgrade'; label = '↑ ' + p._chip; title = `Add up to ${_uStr(p.units)}`;
+                } else {
+                    // A fresh (non-logged) prime pick → this row is genuinely prime.
+                    primeLabels.add(_MT_LABEL[p.market_type] || (p.market_type === 'nrfi' ? 'NRFI' : ''));
                 }
                 renderedMt.add(p.market_type);
                 // Circa handle%/bets% sub-line (smaller, less prominent) when
@@ -1799,7 +1784,15 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                     chips.push(`<button class="pick-chip logged" title="Already logged — open Details" onclick="pickGame('${mid}')"><span class="pc-main">✓ ${_esc(label)}</span></button>`);
                 });
             }
-            el.innerHTML = chips.join('');
+            setPrime(primeLabels);
+            if (chips.length) {
+                el.innerHTML = chips.join('');
+            } else {
+                // No chips yet. Show "evaluating…" only while the verdict is still
+                // loading for an in-window game; otherwise leave it blank.
+                const loading = !v && diffMin <= fetchWindowMin && diffMin > -90;
+                el.innerHTML = loading ? '<span class="pick-line-note">evaluating…</span>' : '';
+            }
         });
     }
 
@@ -2085,17 +2078,8 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             }
             el.textContent = _kickoffLabel(iso, _activeSport);
             el.className = 'when ' + _kickoffTierFor(iso, _activeSport);
-            // Toggle the green prime glow + badge as a game crosses zone
-            // edges (no re-fetch — driven by the row's own bets).
-            const row = el.closest('.game-row');
-            if (row) {
-                const l2 = row.querySelector('.game-line2[data-mid]');
-                const mid = l2 && l2.getAttribute('data-mid');
-                const rp = mid ? _rowPrime(mid, iso) : { on: _isPrime(iso), text: _primeBadgeText(iso) };
-                row.classList.toggle('prime', rp.on);
-                const tag = row.querySelector('.prime-tag');
-                if (tag) tag.textContent = rp.text;
-            }
+            // (prime glow/badge is refreshed by _renderPickLines() below — the
+            // single source of truth, derived from the row's displayed chips.)
         });
         if (removed) {
             const list = document.getElementById('gamesList');
