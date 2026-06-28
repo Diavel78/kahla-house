@@ -2652,6 +2652,21 @@ EDGE_CAP_PP          = 6.0      # hard cap so a crude input can't blow up sizing
 KELLY_MED_PCT        = 2.0      # ¼-Kelly stake ≥ this %BR → 3u medium
 KELLY_HIGH_PCT       = 3.0      # ¼-Kelly stake ≥ this %BR → 5u high
 
+# Size-up is MONEYLINE-ONLY (June 2026 — from a 365-pick live review).
+# Sized-up (3u/5u) picks by market told a one-sided story:
+#   ML  19-12 (61%)  +27.4u   ← the size-up signal is real here
+#   TOT  9-11 (45%)   -7.2u   ← losing in BOTH eras
+#   SPR  0-10 ( 0%)  -12.0u   ← never won a sized-up spread, ever
+# The Kelly stake is predictive for moneyline but pure variance on
+# spreads (a leveraged restatement of the ML bet — same edge, more
+# variance) and totals (chosen off line movement alone; the total-side
+# veto already flags the leaks). Same failure mode that killed the whale
+# tier: a signal that's real for one market applied where it isn't. So
+# only ML earns 3u/5u; SPR + TOT cap at 1u. Bankroll defense, NOT a model
+# change — add markets back to SIZE_UP_MARKETS to re-enable, and re-check
+# the per-market sized-up PnL before doing so.
+SIZE_UP_MARKETS      = {"moneyline"}
+
 # Sticky gate (June 2026 — fixes the "pick exists for 5 minutes" symptom).
 # After the June recency-weight trim, a genuine 5¢ PIN steam scores ~3.75
 # only while <15min old (5×0.75), then decays to ~2.5 (5×0.50) — below the
@@ -4414,12 +4429,16 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
         units, conf, kelly_pct = _kelly_units(
             c.get("fair_prob"), c.get("fair_american"),
             c.get("edge_pp"), c.get("gates_cleared"), kelly_fraction)
-        # TOTALS capped at 3u (June 2026) — totals are the weak market
-        # (steam follows tickets, not runs), so cap their size while ML/SPR
-        # keep the full 5u tier. Bankroll defense, NOT a model change; flip
-        # this off to let totals reach 5u again.
-        if c.get("market_type") == "total" and units > 3:
-            units, conf = 3, "medium"
+        # SIZE-UP IS MONEYLINE-ONLY (June 2026 — 365-pick live review).
+        # Sized-up SPR went 0-10 (-12.0u) and TOT 9-11 (-7.2u) while ML
+        # went 19-12 (+27.4u): the Kelly signal is real for moneyline and
+        # pure variance on spreads/totals. So anything outside
+        # SIZE_UP_MARKETS caps at 1u. See the constant for the data + how
+        # to re-enable. (Runs before the prime-window cap below; once 1u
+        # here that cap's `units > 1` is a no-op.)
+        if c.get("market_type") not in SIZE_UP_MARKETS and units > 1:
+            units, conf = 1, "low"
+            c["size_capped"] = True
         # TEST O/U tier — flat 0.25u regardless of Kelly/prime, so the 2-week
         # validation logs a uniform tiny stake (we're measuring the model's
         # directional edge, not sizing it yet). Overrides every cap below.
