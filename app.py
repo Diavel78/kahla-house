@@ -4755,6 +4755,22 @@ def api_handicapper_paperlog():
                 "sharp_score": None, "edge_pp": nrfi.get("bet_edge_pp"),
                 "signal_blob": {"p_nrfi": nrfi.get("p_nrfi")},
             })
+        # SHADOW market-anchored spread (direction from exchange ML + run model).
+        # Logged at a flat 1u, flagged signal_blob.spread_model so the 2-week
+        # review can isolate it (filter signal_blob->>'spread_model'='true').
+        spm = d.get("spread_model") or {}
+        if spm.get("bet_side"):
+            bs = spm["bet_side"]
+            bets.append({
+                "market_type": "spread", "side": bs, "units": 1, "confidence": "low",
+                "line": spm.get("line"), "entry_price": spm.get("entry_price"),
+                "fair_american": spm.get("fair_american"),
+                "sharp_score": None, "edge_pp": spm.get("bet_edge_pp"),
+                "signal_blob": {"spread_model": True, "p_home_win": spm.get("p_home_win"),
+                                "proj_total": spm.get("proj_total"),
+                                "home_cover": spm.get("home_cover"),
+                                "away_cover": spm.get("away_cover")},
+            })
         if bets:
             with_pick += 1
         for b in bets:

@@ -2680,6 +2680,32 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             </div>`;
         }
 
+        // Market-anchored spread (SHADOW) — direction from the exchange ML win
+        // prob, margin from the run-total model. Reference card only; it's
+        // validating in the paperlog before it becomes a real pick.
+        if (d.spread_model && d.spread_model.home_cover != null) {
+            const sm = d.spread_model;
+            const hl = sm.home_line, al = sm.away_line;
+            const row = (sideLbl, line, cover, edge) => {
+                const eTxt = (edge == null) ? '' :
+                    `<span style="color:${edge >= 0 ? 'var(--green)' : 'var(--text-muted)'}">${edge >= 0 ? '+' : ''}${edge}pp</span>`;
+                return `<div class="pr-line"><b>${_esc(sideLbl)} ${_fmtPt(line)}</b> — model ${(cover*100).toFixed(0)}% cover ${eTxt ? '· edge ' + eTxt + ' vs market' : ''}</div>`;
+            };
+            const det = sm.bet_side
+                ? `<div class="pr-line" style="color:var(--green);font-weight:600">▶ shadow lean ${sm.bet_side === 'home' ? _esc((d.home||'home')) : _esc((d.away||'away'))} ${_fmtPt(sm.line)} · +${sm.bet_edge_pp}pp edge (validating — not yet a card pick)</div>`
+                : `<div class="pr-line" style="color:var(--text-muted)">No edge ≥ 4pp vs the market spread.</div>`;
+            html += `<div class="card">
+                <div class="card-head">
+                    <h3>Spread — market-anchored model</h3>
+                    <span class="ref-tag" title="Direction comes from the exchange ML win prob (the sharp signal); the run-total model supplies the margin shape. Cover prob read off a joint runs distribution. SHADOW — logged + validating before it bets.">DIRECTION × MARGIN · SHADOW</span>
+                </div>
+                ${row((d.away||'Away').split(' ').pop(), al, sm.away_cover, sm.away_edge_pp)}
+                ${row((d.home||'Home').split(' ').pop(), hl, sm.home_cover, sm.home_edge_pp)}
+                ${det}
+                <div class="wx-foot">ML win prob ${(sm.p_home_win*100).toFixed(0)}% home · proj total ${sm.proj_total} · λ ${sm.lambda_home}/${sm.lambda_away}</div>
+            </div>`;
+        }
+
         // Weather — outdoor MLB/NFL venues only (free Open-Meteo).
         // Reference context for the analyst; not auto-sized.
         if (d.weather) {

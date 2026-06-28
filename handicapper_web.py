@@ -2358,6 +2358,22 @@ TEST_TOTAL_BIAS_RUNS   = 0.7
 SPR_CHALK_FAIR_CAP    = -150
 SPR_LONGSHOT_FAIR_CAP =  186
 
+# ── Market-anchored spread model (June 2026 — "use the ML steam in the spread") ──
+# The exchange is the sharpest signal for WHO WINS (ML), but spreads ride that
+# same direction PLUS a margin dimension the winner-market doesn't price. So a
+# spread = market direction + model margin: anchor a joint (home runs, away runs)
+# distribution to the exchange ML win prob, let the run-environment model
+# (proj_total) supply the magnitude, and read the runline cover prob off it.
+# Runs are negative-binomial per team (MLB var/mean ≈ 2.1, overdispersed vs
+# Poisson). SHADOW first: computed + logged to pickbot_paperlog + shown on
+# Details, but NOT a user-facing card pick — validate ~2 weeks, then promote
+# (the totals playbook). MLB-only (the run model is MLB).
+SPREAD_MODEL_MODE        = True   # compute the market-anchored spread (shadow)
+SPREAD_MODEL_MIN_EDGE_PP = 4.0    # model cover prob must beat the exchange spread
+                                  # price by ≥ this (pp) to flag a shadow bet
+SPREAD_RUN_VAR_MEAN      = 2.1    # MLB team-runs variance/mean (NB overdispersion)
+SPREAD_RUN_NMAX          = 25     # run grid cap per team for the convolution
+
 # When BOTH an ML and a SPR candidate exist on the same side, drop
 # the ML if its fair is at or below this cap. The leveraged SPR is
 # the cleaner expression of a chalky directional bet at this price.
@@ -4150,6 +4166,111 @@ def _vsin_to_ml_splits(vsin: dict | None) -> dict:
     return base
 
 
+# ───────────── Market-anchored spread model (see SPREAD_MODEL_* above) ─────────────
+def _nb_run_pmf(mean: float, nmax: int = SPREAD_RUN_NMAX,
+                ratio: float = SPREAD_RUN_VAR_MEAN) -> list[float]:
+    """Negative-binomial pmf P(team scores 0..nmax runs) for the given mean and
+    variance/mean overdispersion (var = mean·ratio). ratio→1 is the Poisson
+    limit. Normalized over the grid."""
+    mean = max(mean, 0.05)
+    if ratio <= 1.0001:
+        pmf = [math.exp(-mean) * mean ** k / math.factorial(k) for k in range(nmax + 1)]
+    else:
+        r = mean / (ratio - 1.0)             # var = mean + mean^2/r = mean·ratio
+        p = r / (r + mean)
+        pmf = [math.exp(math.lgamma(k + r) - math.lgamma(r) - math.lgamma(k + 1)
+                        + r * math.log(p) + k * math.log(1 - p))
+               for k in range(nmax + 1)]
+    s = sum(pmf)
+    return [x / s for x in pmf] if s else pmf
+
+
+def _spread_winprob(lh: float, la: float) -> float:
+    """P(home wins) from two independent NB run distributions; ties split 50/50
+    (extra innings ≈ coinflip)."""
+    ph, pa = _nb_run_pmf(lh), _nb_run_pmf(la)
+    win = tie = 0.0
+    for h, phh in enumerate(ph):
+        for a, paa in enumerate(pa):
+            j = phh * paa
+            if h > a:    win += j
+            elif h == a: tie += j
+    return win + 0.5 * tie
+
+
+def _spread_cover_prob(p_home_win: float, total: float, home_line: float):
+    """Market-anchored runline cover prob. Solve λ_home+λ_away = total so that
+    P(home wins) == p_home_win (direction from the exchange ML), then read the
+    cover prob at `home_line` off the joint (margin shape from the run total).
+    Returns {home, away, lambda_home, lambda_away}."""
+    total = max(float(total), 1.0)
+    lo, hi = 0.1, total - 0.1
+    for _ in range(40):                       # bisection — winprob ↑ in λ_home
+        mid = (lo + hi) / 2.0
+        if _spread_winprob(mid, total - mid) < p_home_win:
+            lo = mid
+        else:
+            hi = mid
+    lh = (lo + hi) / 2.0
+    la = total - lh
+    ph, pa = _nb_run_pmf(lh), _nb_run_pmf(la)
+    thr = -float(home_line)                   # home covers iff (h-a) > thr
+    home_cover = sum(ph[h] * pa[a]
+                     for h in range(len(ph)) for a in range(len(pa))
+                     if (h - a) > thr)
+    return {"home": home_cover, "away": 1.0 - home_cover,
+            "lambda_home": round(lh, 2), "lambda_away": round(la, 2)}
+
+
+def _spread_model_block(odds: dict, power: dict | None, sport: str | None) -> dict | None:
+    """SHADOW market-anchored spread read for one game (MLB). Direction = the
+    exchange ML devigged win prob; magnitude = the model's proj_total. Returns
+    the per-side cover prob, the offered runline, the edge vs the exchange's own
+    spread price, and the +EV side (if any clears SPREAD_MODEL_MIN_EDGE_PP).
+    None when inputs are missing. Never raises (caller wraps too)."""
+    if sport != "MLB" or not power:
+        return None
+    ml = (odds.get("moneyline") or {}).get("exch_current") or {}
+    p_home = ((ml.get("home") or {}).get("fair_prob"))
+    proj_total = power.get("proj_total")
+    spr = (odds.get("spread") or {}).get("exch_current") or {}
+    home_blk = spr.get("home") or {}
+    home_line = home_blk.get("line")
+    if p_home is None or proj_total is None or home_line is None:
+        return None
+    try:
+        cover = _spread_cover_prob(float(p_home), float(proj_total), float(home_line))
+    except Exception:
+        return None
+    # Exchange's OWN devigged spread prob per side — the price we're calling
+    # mispriced. Edge = model cover prob − exchange spread prob.
+    mkt = {"home": (spr.get("home") or {}).get("fair_prob"),
+           "away": (spr.get("away") or {}).get("fair_prob")}
+    pmm = (odds.get("spread") or {}).get("polymarket") or {}
+    out = {"home_line": float(home_line), "away_line": -float(home_line),
+           "p_home_win": round(float(p_home), 4), "proj_total": round(float(proj_total), 2),
+           "lambda_home": cover["lambda_home"], "lambda_away": cover["lambda_away"]}
+    best_side, best_edge = None, None
+    for side in ("home", "away"):
+        cp = cover[side]
+        out[side + "_cover"] = round(cp, 4)
+        out[side + "_fair_american"] = _prob_to_american(cp)
+        edge = round((cp - float(mkt[side])) * 100, 2) if mkt.get(side) is not None else None
+        out[side + "_edge_pp"] = edge
+        # Maker entry = the PMM bid for that side (else the model fair).
+        bid = (((pmm.get(side) or {}).get("quote") or {}).get("bid_american"))
+        out[side + "_entry"] = bid if bid is not None else _prob_to_american(cp)
+        if edge is not None and edge >= SPREAD_MODEL_MIN_EDGE_PP and (best_edge is None or edge > best_edge):
+            best_side, best_edge = side, edge
+    if best_side:
+        out["bet_side"] = best_side
+        out["bet_edge_pp"] = best_edge
+        out["line"] = out[best_side + "_line"]
+        out["entry_price"] = out[best_side + "_entry"]
+        out["fair_american"] = out[best_side + "_fair_american"]
+    return out
+
+
 def _suggest_picks(odds: dict, splits: dict | None = None,
                    power: dict | None = None, *,
                    sport: str | None = None, home: str | None = None,
@@ -4808,6 +4929,16 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     # use `suggestions` (list) so multi-pick games render correctly.
     suggestion = suggestions[0] if suggestions else None
 
+    # SHADOW market-anchored spread read (direction from the exchange ML, margin
+    # from the run model) — see _spread_model_block. Logged to the paperlog +
+    # shown on Details for validation; NOT yet a card pick. Silent-fail.
+    spread_model = None
+    if SPREAD_MODEL_MODE:
+        try:
+            spread_model = _spread_model_block(odds, power_rating, sport)
+        except Exception as e:
+            log.warning("spread model failed: %s", e)
+
     # Data freshness — two distinct signals so the UI can tell apart
     # "PIN hasn't moved" from "cron is broken":
     #   • pin_latest_captured: timestamp of the most recent PIN snap row.
@@ -4886,6 +5017,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         "weather":         weather,
         "power_rating":    power_rating,
         "nrfi":            nrfi,
+        "spread_model":    spread_model,
         "suggestion":      suggestion,
         "suggestions":     suggestions,
         "alt_matches":     [
