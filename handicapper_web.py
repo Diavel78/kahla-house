@@ -2315,14 +2315,24 @@ TOTALS_SUGGESTIONS_ENABLED = False  # exchange-follow O/U engine stays OFF — i
 # under). NO external vetoes on this tier — park is already in proj_total via
 # _park_factor, so the test measures the model alone (VSiN/park recorded for
 # post-hoc slicing, never suppress a pick).
-TOTALS_TEST_MODE       = True    # totals stay in the model-driven TEST tier
-                                 # (0.25u) — NOT the discredited exchange-follow
-                                 # engine. NOTE the veto (_total_conflict_reason)
-                                 # is SKIPPED on this tier by design, so it does
-                                 # NOT guard test totals — the model IS the guard.
-TEST_TOTAL_UNITS       = 0.25    # flat test stake (units CHECK allows 0.25)
-TEST_TOTAL_MIN_DIFF    = 0.5     # model must beat the line by ≥ this many runs
-                                 # to clear the gate (else a forced lean)
+TOTALS_TEST_MODE       = True    # totals run the MODEL-DRIVEN tier (proj_total vs
+                                 # line), NOT the discredited exchange-follow
+                                 # engine (TOTALS_SUGGESTIONS_ENABLED, -10.8u/30d).
+                                 # PROMOTED June 2026 (user call) from the 0.25u
+                                 # test to REAL 1u picks after the paperlog showed
+                                 # the model's edge scales with conviction: gap
+                                 # ≥1.5 runs went 9-5 (+0.94u @0.25u) while the
+                                 # marginal 0.5-1.0 gap (the old gate floor) lost.
+                                 # So the gate moved 0.5→1.0 run and size 0.25u→1u.
+                                 # NO veto here (the model IS the guard — park is
+                                 # already inside proj_total via _park_factor; the
+                                 # separate _total_conflict_reason can't fire on a
+                                 # model-driven side anyway). MLB-only (the model
+                                 # is pitcher-aware + MLB-validated); 1u cap (totals
+                                 # excluded from SIZE_UP_MARKETS + flat sizing here).
+TEST_TOTAL_UNITS       = 1       # promoted to real 1u (was 0.25u test stake)
+TEST_TOTAL_MIN_DIFF    = 1.0     # model must beat the line by ≥ this many runs
+                                 # (raised 0.5→1.0 — the 0.5-1.0 gap picks lost)
 TEST_TOTAL_EDGE_PER_RUN = 2.0    # pp of (display-only) edge per run of gap
 # Bias re-center: the Phase-1 backtest (scripts/mlb_total_backtest) measured
 # the run-total projection running ~0.73 runs COLD (model mean 8.71 vs actual
@@ -2504,11 +2514,10 @@ def _prime_zones_union(sb) -> list[tuple[int, int]]:
 
 
 # Side markets that carry a prime label on the games-list row. NRFI excluded
-# (sizing not zone-gated yet → must not imply a size-up window). TOT excluded —
-# O/U auto-suggestions are benched (TOTALS_SUGGESTIONS_ENABLED off), so a totals
-# PRIME badge would point at a bet the bot won't make. Re-add when totals are
-# rebuilt + re-enabled with a working veto.
-_PRIME_LABEL_MARKETS = (("moneyline", "ML"), ("spread", "SPR"))
+# (sizing not zone-gated yet → must not imply a size-up window). TOT included —
+# model-driven totals are real 1u picks now (June 2026); they have no tuned zones
+# of their own yet, so they fall back to the pooled zone for timing/labels.
+_PRIME_LABEL_MARKETS = (("moneyline", "ML"), ("spread", "SPR"), ("total", "TOT"))
 
 
 def _prime_zones_by_market_resolved(sb) -> dict:
@@ -4417,12 +4426,12 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 # Per-bet-type timing: each market is classified against ITS
                 # own tuned zones (markets without their own fall back to
                 # pooled). _bm is built once below from prime_zones_by_market
-                # or the legacy single prime_zones list.
-                # TEST O/U tier has NO timing window — totals are benched from
-                # the prime system (no tuned zones), so borrowing the pooled
-                # ML/SPR zones falsely badged a flat 0.25u test pick "PRIME".
-                # Test sizing is flat regardless of timing, so null = no badge.
-                "timing_window":  None if test_total else _timing_window(
+                # or the legacy single prime_zones list. Totals have no tuned
+                # zones yet → pooled. (Model-driven totals are now REAL 1u picks,
+                # so they DO carry a timing_window and obey the prime-only games
+                # list, same as ML/SPR — the old null-for-test-tier special-case
+                # is gone now that they aren't a flat 0.25u test.)
+                "timing_window":  _timing_window(
                                       starts_in_min, _market_zones(_bm, mt)),
                 "prime_core":     _is_prime_core(starts_in_min),
             })
@@ -4485,9 +4494,11 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
         if units > 1 and sharp_for_size < SHARP_FOR_3U:
             units, conf = 1, "low"
             c["size_capped"] = True
-        # TEST O/U tier — flat 0.25u regardless of Kelly/prime, so the 2-week
-        # validation logs a uniform tiny stake (we're measuring the model's
-        # directional edge, not sizing it yet). Overrides every cap below.
+        # Model-driven totals — flat TEST_TOTAL_UNITS (now 1u, promoted June
+        # 2026 from the 0.25u test). Sizing is flat (the model has no Kelly/
+        # sharp signal to size on), so this overrides the caps above and lands
+        # at a clean 1u. Still capped at 1u (totals are excluded from
+        # SIZE_UP_MARKETS), and prime-only display still gates the card chip.
         if c.get("test_only"):
             units, conf = TEST_TOTAL_UNITS, "low"
         # Sizing concentrated in the PRIME window — only picks made 90-120
