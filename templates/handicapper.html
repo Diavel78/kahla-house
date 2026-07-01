@@ -374,9 +374,10 @@
         .suggestion-card .pick-line .time-badge.late  { background: var(--orange-dim); color: var(--orange); border: 1px solid rgba(249,115,22,0.35); }
         .suggestion-card .pick-line .venue-tag.pmm { background: rgba(168,85,247,0.18); color: #c084fc; border: 1px solid rgba(168,85,247,0.35); }
         .suggestion-card .pick-line .venue-tag.pin { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border); }
-        .market-card .pmm-row { font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 4px 8px; margin-top: 4px; background: rgba(168,85,247,0.06); border-left: 2px solid rgba(168,85,247,0.35); border-radius: 4px; color: var(--text); }
+        .market-card .pmm-row { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; padding: 5px 8px; margin-top: 4px; background: rgba(168,85,247,0.06); border-left: 2px solid rgba(168,85,247,0.35); border-radius: 4px; color: var(--text); }
         .market-card .pmm-row .pmm-lbl { color: #c084fc; font-weight: 700; letter-spacing: 0.04em; margin-right: 6px; }
-        .market-card .pmm-row .pmm-target { color: var(--green); font-weight: 600; }
+        .market-card .pmm-row .pmm-ln { color: var(--text-muted); }
+        .market-card .pmm-row b { color: var(--green); }
         .suggestion-card .pick-meta { font-size: 12px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; }
         .suggestion-card .pick-kelly { font-size: 11px; color: var(--gold); font-family: 'JetBrains Mono', monospace; margin: 4px 0 6px; }
         .suggestion-card .why { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); list-style: none; font-size: 13px; line-height: 1.55; color: var(--text); }
@@ -454,6 +455,11 @@
         .market-card .move { font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 6px 8px; background: var(--surface-2); border-radius: 6px; margin-top: 8px; }
         .market-card .move .sharp { color: var(--blue); font-weight: 700; }
         .market-card .move .move-note { color: var(--text-muted); font-size: 10px; margin-left: 6px; }
+        .market-card .vsin-line { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; padding: 7px 9px; margin-top: 8px; background: var(--surface-2); border-radius: 6px; color: var(--text); line-height: 1.5; }
+        .market-card .vsin-line .vsin-lbl { display: block; color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 3px; }
+        .market-card .vsin-line b { color: var(--text); font-weight: 700; }
+        .market-card .vsin-line .vsin-sep { color: var(--text-muted); }
+        .market-card .vsin-line .vsin-dot { color: var(--text-muted); margin: 0 8px; }
         .market-card .row .pin-open { color: var(--text-muted); font-size: 11px; }
         .market-card .opener-age { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); margin-top: 6px; }
 
@@ -2976,36 +2982,43 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                 ? `<button class="${btnClass}" onclick="${onclickAttr}">${btnLabel}</button>`
                 : '';
 
-            // Primary row = the EXCHANGE devigged fair (Kalshi mid for ML,
-            // PMM for SPR/TOT) — the live anchor since the PIN feed was cut.
-            // Frozen PIN shown only as a clearly-labelled fallback.
+            // Fair/price rows. Post-cutover the "fair" and the Poly price
+            // are usually the SAME number from the SAME venue (PMM), so
+            // showing a "PMM fair:" line AND a Poly row with a "target"
+            // was pure redundancy — nothing to compare against. Rule:
+            //   • Kalshi fair is an INDEPENDENT venue vs Poly → show it as
+            //     a real cross-check line ("Kalshi -163").
+            //   • PMM fair == the Poly row's own venue → don't repeat it.
+            // The Poly row leads with the BID (the maker entry you actually
+            // rest at) then the ask; the redundant "target" is gone.
             let rows = '';
-            if (xSnap && xSnap.fair_american != null) {
+            if (xSnap && xSnap.fair_american != null && xSnap.source === 'kalshi') {
                 const ln = xSnap.line;
                 const lineFrag = (ln != null) ? ` <span class="label">@${_fmtPt(ln)}</span>` : '';
-                const src = (xSnap.source === 'kalshi') ? 'KALSHI' : 'PMM';
-                rows += `<div class="row"><span class="label">${src} fair:</span> <span class="pin">${_fmtAmer(xSnap.fair_american)}</span>${lineFrag}</div>`;
+                rows += `<div class="row"><span class="label">Kalshi</span> <span class="pin">${_fmtAmer(xSnap.fair_american)}</span>${lineFrag}</div>`;
             }
-            if (!rows) rows = '<div style="font-size:11px;color:var(--text-muted)">no exchange data</div>';
 
-            // Poly row — shows actual Polymarket line + current bid/ask
-            // + PIN-projected fair as the limit-order target. Only
-            // rendered when Polymarket has a market for this side.
+            // Poly row — the actionable line + bid (maker entry) / ask (take).
             const pmmBlock = ((blk.polymarket || {})[s]) || null;
             let pmmRow = '';
             if (pmmBlock) {
-                const lnFrag = (pmmBlock.line != null) ? ` @${_fmtPt(pmmBlock.line)}` : '';
+                const lnFrag = (pmmBlock.line != null) ? ` <span class="pmm-ln">@${_fmtPt(pmmBlock.line)}</span>` : '';
                 const q = pmmBlock.quote || {};
-                const askFrag = (q.ask_american != null) ? ` ask <b>${_fmtAmer(q.ask_american)}</b>` : '';
-                const bidFrag = (q.bid_american != null) ? ` · bid ${_fmtAmer(q.bid_american)}` : '';
-                // Target = the exchange devigged fair for this side (the
-                // Polymarket limit-order anchor), not the retired PIN
-                // push-rate projection.
-                const targetFair = (fairSnap && fairSnap.fair_american != null) ? fairSnap.fair_american : null;
-                const targetFrag = (targetFair != null)
-                    ? ` · <span class="pmm-target">target ${_fmtAmer(targetFair)}</span>`
-                    : '';
-                pmmRow = `<div class="pmm-row"><span class="pmm-lbl">Poly</span>${lnFrag}${askFrag}${bidFrag}${targetFrag}</div>`;
+                const bidFrag = (q.bid_american != null) ? ` bid <b>${_fmtAmer(q.bid_american)}</b>` : '';
+                const askFrag = (q.ask_american != null) ? ` · ask ${_fmtAmer(q.ask_american)}` : '';
+                pmmRow = `<div class="pmm-row"><span class="pmm-lbl">Poly</span>${lnFrag}${bidFrag}${askFrag}</div>`;
+            } else if (xSnap && xSnap.fair_american != null) {
+                // PMM-sourced fair with no live quote block — still show the
+                // price (Poly's own number) rather than an empty side.
+                const ln = xSnap.line;
+                const lnFrag = (ln != null) ? ` <span class="pmm-ln">@${_fmtPt(ln)}</span>` : '';
+                pmmRow = `<div class="pmm-row"><span class="pmm-lbl">Poly</span>${lnFrag} <b>${_fmtAmer(xSnap.fair_american)}</b></div>`;
+            }
+
+            if (!rows && !pmmRow) {
+                rows = (pinSnap && pinSnap.fair_american != null)
+                    ? `<div class="row"><span class="label">PIN</span> <span class="pin">${_fmtAmer(pinSnap.fair_american)}</span></div>`
+                    : '<div style="font-size:11px;color:var(--text-muted)">no exchange data</div>';
             }
 
             const blockCls = 'side-block' + (isBotPick ? ' bot-picked' : '');
@@ -3073,9 +3086,9 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         for (const [s, lbl] of sides) {
             const ss = _vsinSide(d, mt, s);
             if (!ss) return '';
-            parts.push(`<b>${_esc(lbl)}</b> ${ss.m != null ? ss.m + '%' : '—'}/${ss.b != null ? ss.b + '%' : '—'}`);
+            parts.push(`<b>${_esc(lbl)}</b> ${ss.m != null ? ss.m + '%' : '—'} <span class="vsin-sep">/</span> ${ss.b != null ? ss.b + '%' : '—'}`);
         }
-        return `<div class="move"><span class="move-note">Circa $ / tickets: ${parts.join(' · ')}</span></div>`;
+        return `<div class="vsin-line"><span class="vsin-lbl">Circa money / tickets</span>${parts.join('<span class="vsin-dot">·</span>')}</div>`;
     }
 
     // Seed an ad-hoc pick from a market panel side the bot didn't
