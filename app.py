@@ -7812,8 +7812,13 @@ def api_handicapper_dossier():
 # `markets`/`pm_snapshots` as soon as they appear on Polymarket/ESPN so we
 # capture opening odds for the Pinnacle/Odds-API cutover; they just don't
 # render on the list until they enter this window.
-_GAMES_DISPLAY_DAYS = {"NFL": 7, "NCAAF": 7}
-_GAMES_DISPLAY_DAYS_DEFAULT = 2  # MLB, NBA, NCAAB, NHL, UFC, WORLDCUP/soccer
+# UFC is CARD-based, not daily — one Saturday card, sometimes with a skipped
+# week between cards, so a 2-day window left the tab empty for most of every
+# week (the July 2026 "nothing coming up for UFC" report: card 8 days out,
+# tab blank). 9 days = the next card is visible the morning after the last
+# one ends, even across a skipped week + late-night AZ main-event times.
+_GAMES_DISPLAY_DAYS = {"NFL": 7, "NCAAF": 7, "UFC": 9}
+_GAMES_DISPLAY_DAYS_DEFAULT = 2  # MLB, NBA, NCAAB, NHL, WORLDCUP/soccer
 
 
 def _display_window_end(sport: str, now: datetime) -> datetime:
@@ -8129,10 +8134,11 @@ def api_handicapper_sport_counts():
         return jsonify({"ok": False, "error": "Supabase not configured"}), 503
     now = datetime.now(timezone.utc)
     after  = now.isoformat()
-    # Fetch the widest window any sport uses (football = 7 days), then trim
+    # Fetch the widest window any sport uses (UFC = 9 days), then trim
     # each sport to its own display window below so the badge count matches
     # what /api/handicapper/games actually renders.
-    before = (now + timedelta(hours=168)).isoformat()
+    _widest_days = max([_GAMES_DISPLAY_DAYS_DEFAULT, *_GAMES_DISPLAY_DAYS.values()])
+    before = (now + timedelta(days=_widest_days + 1)).isoformat()
     try:
         rows = (sb.table("markets")
                 .select("id,sport,event_name,event_start")
