@@ -2651,7 +2651,13 @@ def _total_conflict_reason(sport: str | None, home: str | None,
 # for unit-based betting where 1u is the workhorse.
 KELLY_FRACTION       = 0.25     # quarter-Kelly — survives variance
 EDGE_PER_SHARP_POINT = 0.40     # pp of edge per point of sharp_score (≤4pp at 10)
-EDGE_PER_SPLITS_PP   = 0.10     # pp of edge per aligned money−bets pp (≤3pp at 30)
+# ZEROED July 2026 — Circa money-vs-tickets divergence backtested at NO edge
+# vs the exchange close on ML (−0.8 wins above close /96 at ≥8pp; +0.1/74 at
+# ≥15pp) and negative on spreads (−3.5/40), so it no longer buys Kelly stake.
+# splits_pp is still computed + recorded on every pick; restore a coefficient
+# only if forward per-pick data contradicts the backtest. (SPLITS_WEIGHT in
+# combined_score is untouched — it only tiebreaks side selection.)
+EDGE_PER_SPLITS_PP   = 0.0      # pp of edge per aligned money−bets pp (was 0.10)
 # The power rating is the bot's INDEPENDENT number. It feeds sizing as a
 # CAPPED confirmation nudge when it agrees with the sharp side — but ONLY
 # for sports where the walk-forward backtest showed real predictive signal
@@ -4507,17 +4513,18 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
             # Captured (vsin_read) on every candidate for forward validation
             # regardless of whether it fired (test totals: recorded, not vetoed).
             vsin_reason, vsin_read = _vsin_sharp_veto(vsin, mt, side)
-            # A pick the veto ALONE demoted (it would have cleared otherwise)
-            # is a "vetoed pick" — flagged so the paperlog shadow-logs it and
-            # the 2-week review can measure whether the veto saves money. This
-            # was previously invisible: demoted picks never hit the paperlog,
-            # so the veto was unfalsifiable (unlike test totals, where it's
-            # recorded-not-enforced and measured 15-15 / 0.0u — weak signal).
-            vsin_vetoed_pick = bool(vsin_reason and gates_cleared
-                                    and not test_total)
-            if vsin_vetoed_pick:
-                gates_cleared = False
-                conflict_reason = conflict_reason or vsin_reason
+            # WARN-ONLY (July 2026) — the veto no longer demotes. Backtested
+            # 9 days of vsin_snapshots (134 MLB games) against game outcomes
+            # vs the exchange close: betting the side OPPOSITE concentrated
+            # Circa money (the veto's exact protection) performed dead-even
+            # with the close (33-34, +0.0 wins above close over 67 games) —
+            # the veto protected against nothing while killing ~half the ML
+            # slate (a veto-triggering side exists on 54% of MLs). The read
+            # is kept as a card badge + recorded (signal_blob.vsin_veto) so
+            # real-pick results keep measuring it; re-enable only if that
+            # forward data contradicts the backtest. `vsin_vetoed_pick` is
+            # retained for the (now-dormant) shadow-log path.
+            vsin_vetoed_pick = False
 
             # Provisional edge estimate (fair-prob pp) that drives Kelly
             # sizing + finally populates the edge_pp column. The sharp +

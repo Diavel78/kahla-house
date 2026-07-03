@@ -2396,6 +2396,13 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                 const testBadge = s.test_only
                     ? `<span class="time-badge" style="background:#5b3a87;color:#e9d8ff" title="Model total — the side comes from the run-total MODEL (projected total vs the line), NOT exchange movement. Real 1u pick; gate = model beats the line by ≥1 run.">MODEL${s.model_total_diff != null ? ` · ${s.model_total_diff > 0 ? '+' : ''}${Number(s.model_total_diff).toFixed(1)}r vs line` : ''}</span>`
                     : '';
+                // Circa warn badge (July 2026 — replaces the retired veto):
+                // sharp money concentrated on the other side. Backtested at
+                // zero protective value, so it informs instead of demoting.
+                const v0 = s.vsin || {};
+                const circaWarn = (s.vsin_veto && s.gates_cleared)
+                    ? `<span class="time-badge late" title="Circa sharp money is concentrated on the other side (${v0.opp_handle != null ? v0.opp_handle + '% of the money' : 'majority handle'} vs ${v0.opp_bets != null ? v0.opp_bets + '% tickets' : 'fewer tickets'}). Backtested at no predictive value — informational only.">⚠ CIRCA AGAINST</span>`
+                    : '';
                 const why = _buildReasons(s, d);
                 const whyHtml = why.length
                     ? `<ul class="why">${why.map(b => `<li>${_esc(b)}</li>`).join('')}</ul>`
@@ -2422,7 +2429,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                     <div class="pick-line">
                         ${market} · ${_esc(sideLabel)}${lineFrag} ${venueTag}
                         <span class="target">@ ${_fmtAmer(s.fair_american)}</span>
-                        <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>${testBadge}${timingBadge}${loggedBadge}
+                        <span class="pick-units units-${s.units}">${s.units}u · ${s.confidence}</span>${testBadge}${timingBadge}${circaWarn}${loggedBadge}
                     </div>
                     ${(s.edge_pp != null && s.edge_pp > 0) ? `<div class="pick-kelly">est. edge +${Number(s.edge_pp).toFixed(1)}pp${s.kelly_pct ? ` · ¼-Kelly ${Number(s.kelly_pct).toFixed(1)}% BR` : ''} → ${s.units}u</div>` : ''}
                     <div class="pick-meta">${metaLine}</div>
