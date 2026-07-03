@@ -968,19 +968,21 @@
         return d.toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
     }
     function _kickoffTier(iso) {
-        // Color tier for the games-list timer — ramps green → yellow → red
-        // aligned to the TUNED PRIME WINDOW (July 2026, user call — the old
-        // fixed 1-2h/15-60m bands read grey at 2h when 2h was prime):
-        //   in a prime zone → green  (the betting window — matches the glow)
-        //   < 15m           → red+bold (imminent)
-        //   < 60m, not prime → yellow (getting close, window over/closing)
-        //   else            → grey   (far, default — no class)
-        const diffMin = Math.round((new Date(iso) - new Date()) / 60_000);
-        if (diffMin < 0)   return '';
-        if (diffMin < 15)  return 'tier-imminent';
-        if (_isPrime(iso)) return 'tier-close';
-        if (diffMin < 60)  return 'tier-soon';
-        return '';
+        // ONE RULE (July 2026, user call — the old green/yellow/red urgency
+        // bands predate prime windows and are DEAD): the clock is GREEN when
+        // the game is inside ANY betting window — steam (tuned zones) OR
+        // model (TOT/NRFI early window) — and grey otherwise. Matches the
+        // row glow exactly.
+        return _inAnyWindow(iso) ? 'tier-close' : '';
+    }
+    // Is this kickoff inside ANY betting window right now? Steam window =
+    // the tuner's union zones (ML/SPR, currently 30m-3h). Model window =
+    // the TOT/NRFI early band (2h30m out to the 3.5h evaluator edge).
+    function _inAnyWindow(iso) {
+        const diffMin = (new Date(iso) - new Date()) / 60_000;
+        if (diffMin < 0) return false;
+        if (_isPrime(iso)) return true;
+        return diffMin >= MODEL_BET_EARLY_MIN && diffMin <= VERDICT_WINDOW_MS / 60_000;
     }
     // UFC fights run on imprecise block-times, so a bout the server still
     // returns (ESPN flags it `pre`) can have a nominal start already in the
@@ -1042,9 +1044,13 @@
     function _applyRowPrime(row, iso) {
         if (!row) return;
         const tag = row.querySelector('.prime-tag');
-        const on = _canBet && _isPrime(iso);
+        const on = _canBet && _inAnyWindow(iso);
         row.classList.toggle('prime', on);
-        if (tag) tag.textContent = on ? _primeBadgeText(iso) : '';
+        // Badge: steam window → the tuner's per-market naming; model-only
+        // window (2h30m-3.5h, outside the steam zones) → name the model bets.
+        if (tag) tag.textContent = on
+            ? (_isPrime(iso) ? _primeBadgeText(iso) : 'Prime · TOT, NRFI')
+            : '';
     }
     function _fmtSettled(iso) {
         const d = new Date(iso);
@@ -1414,11 +1420,14 @@
                 const matchup = g.away && g.home ? `${_esc(g.away)} @ ${_esc(g.home)}` : _esc(g.event_name);
                 // Prime glow/badge is time-based (window membership), painted
                 // inline so it's correct on first render — no verdict wait.
-                const rowPrime = _canBet && _isPrime(g.event_start);
+                const rowPrime = _canBet && _inAnyWindow(g.event_start);
+                const rowBadge = rowPrime
+                    ? (_isPrime(g.event_start) ? _primeBadgeText(g.event_start) : 'Prime · TOT, NRFI')
+                    : '';
                 return `<li class="game-row${rowPrime ? ' prime' : ''}">
                     <div class="game-line1">
                         <span class="when ${_kickoffTierFor(g.event_start, _activeSport)}" data-start="${_esc(g.event_start)}">${_kickoffLabel(g.event_start, _activeSport)}</span>
-                        <span class="prime-tag">${rowPrime ? _esc(_primeBadgeText(g.event_start)) : ''}</span>
+                        <span class="prime-tag">${_esc(rowBadge)}</span>
                         <span class="matchup">${matchup}</span>
                         <button class="details-btn" onclick="pickGame('${g.market_id}')">Details ›</button>
                     </div>
