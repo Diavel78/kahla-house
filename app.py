@@ -3062,14 +3062,29 @@ _KALSHI_BASES = [
 # Confirmed live via /debug-kalshi. Add a sport here + a team map in
 # _TEAM_TO_KALSHI + to _PM_SPORTS / odds_api _TRIGGER_SPORTS to cover it.
 _KALSHI_SERIES = {"MLB": "KXMLBGAME", "NBA": "KXNBAGAME", "NHL": "KXNHLGAME",
-                  "WORLDCUP": "KXWCGAME"}
+                  "WORLDCUP": "KXWCGAME",
+                  # Football (added July 2026 ahead of the season). NFL is
+                  # believed KXNFLGAME / NCAAF KXNCAAFGAME — UNVERIFIED from
+                  # the sandbox (proxy blocks Kalshi); confirm the tickers +
+                  # side-suffix codes via /debug-kalshi?sport=nfl once live.
+                  # A wrong ticker just returns 0 markets (defensive fetch).
+                  "NFL": "KXNFLGAME", "NCAAF": "KXNCAAFGAME"}
 # Sports the cent-logger + cross-confirm trigger cover (cent data flows).
-_PM_SPORTS = ["MLB", "NBA", "NHL"]
+# NCAAF is PMM-ONLY (no _TEAM_TO_KALSHI map — school codes are unmappable
+# blind; the pm-snapshot loop skips the Kalshi bulk fetch for map-less
+# sports). Consequence: NCAAF ML picks stay unconfirmed→lean (no second
+# venue), but SPR/TOT — the sharp expression in college — gate normally.
+_PM_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF"]
 # How far out the cross-confirm watcher tracks each sport. MLB is dense
 # (daily) so 12h is plenty; NBA/NHL playoff series are 2-3 days apart, so
 # we watch farther out to catch the early line movement on the next game
 # (few games, so the per-game PMM budget cost is negligible).
-_PM_WINDOW_H = {"MLB": 12, "NBA": 96, "NHL": 96}
+# NFL is WEEKLY and its sharp money famously moves early in the week
+# (look-ahead lines) — watch the full 7 days so we capture the Sun→Wed
+# steam, not just game-day. NCAAF gets 72h (Wed→Sat covers most movement;
+# the Saturday slate is 60+ games, so a 7-day window would swamp the
+# budgeted PMM rotation — widen only with budget headroom data).
+_PM_WINDOW_H = {"MLB": 12, "NBA": 96, "NHL": 96, "NFL": 168, "NCAAF": 72}
 _KALSHI_CACHE: dict[str, tuple[float, dict]] = {}
 _KALSHI_TTL = 30  # seconds
 
@@ -4106,6 +4121,21 @@ _TEAM_TO_KALSHI = {
         "kraken": "SEA", "blues": "STL", "lightning": "TBL", "maple leafs": "TOR",
         "canucks": "VAN", "golden knights": "VGK", "capitals": "WSH", "jets": "WPG",
     },
+    # NFL — standard tricodes, best-effort until verified against live
+    # KXNFLGAME tickers via /debug-kalshi?sport=nfl (a wrong code just
+    # fails that game's match, per the NBA/NHL precedent). Most likely to
+    # differ: WAS (vs WSH), JAX (vs JAC), LV (vs LVR).
+    "NFL": {
+        "cardinals": "ARI", "falcons": "ATL", "ravens": "BAL", "bills": "BUF",
+        "panthers": "CAR", "bears": "CHI", "bengals": "CIN", "browns": "CLE",
+        "cowboys": "DAL", "broncos": "DEN", "lions": "DET", "packers": "GB",
+        "texans": "HOU", "colts": "IND", "jaguars": "JAX", "chiefs": "KC",
+        "chargers": "LAC", "rams": "LAR", "raiders": "LV", "dolphins": "MIA",
+        "vikings": "MIN", "patriots": "NE", "saints": "NO", "giants": "NYG",
+        "jets": "NYJ", "eagles": "PHI", "steelers": "PIT", "seahawks": "SEA",
+        "49ers": "SF", "buccaneers": "TB", "titans": "TEN", "commanders": "WAS",
+    },
+    # NCAAF intentionally absent — see _PM_SPORTS note (PMM-only sport).
 }
 _KALSHI_MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
                   "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
@@ -4386,8 +4416,8 @@ def _xconfirm_detect(sb, cur: dict, now) -> dict:
 @app.route("/api/pm-snapshot")
 def api_pm_snapshot():
     """Cron-pinged ~1/min. Logs free PMM + Kalshi cents per side for upcoming
-    MLB games into pm_snapshots (deduped). Auth: ?key= matched to
-    PM_SNAPSHOT_SECRET or (fallback) FILLS_CRON_SECRET — no new secret."""
+    games in every _PM_SPORTS sport into pm_snapshots (deduped). Auth: ?key=
+    matched to PM_SNAPSHOT_SECRET or (fallback) FILLS_CRON_SECRET."""
     import time as _time
     expected = (os.environ.get("PM_SNAPSHOT_SECRET")
                 or os.environ.get("FILLS_CRON_SECRET") or "").strip()
@@ -4421,7 +4451,8 @@ def api_pm_snapshot():
                 g["_sport"] = sp
                 all_games.append(g)
     if not all_games:
-        return jsonify({"ok": True, "games": 0, "reason": "no upcoming games in 12h"})
+        return jsonify({"ok": True, "games": 0,
+                        "reason": "no upcoming games in any watch window"})
 
     # Stale-first ordering across all sports — rotate the budgeted PMM
     # coverage so far-out (trigger-relevant) games aren't starved.
@@ -4432,13 +4463,36 @@ def api_pm_snapshot():
         all_games.sort(key=lambda g: bl.get(g["id"]) or "")
     except Exception:
         pass
+    # Near-game priority tier (July 2026, football prep): games starting
+    # within 6h jump the rotation queue (stable sort keeps stale-first
+    # order inside each tier). The football watch windows put a big far-out
+    # slate in view (16 NFL games all week, a 60-game NCAAF Saturday from
+    # Wednesday) — pure stale-first would let those rotate in-prime MLB/NFL
+    # games out to a many-minute refresh, and the prime-window engine
+    # (sharp score recency weights, one-tap chips) depends on fresh cents
+    # near tip. Far-out games only need enough cadence to catch slow steam.
+    near_cut = now + timedelta(hours=6)
+
+    def _near_tier(g):
+        try:
+            dt = datetime.fromisoformat(str(g["event_start"]).replace("Z", "+00:00"))
+            return 0 if dt <= near_cut else 1
+        except Exception:
+            return 0
+    all_games.sort(key=_near_tier)
 
     # Kalshi: one bulk call per sport (cheap), indexed up front. Only for
     # sports that actually have a game in the watch window — fetching the
     # full KXNBAGAME/KXNHLGAME books on an empty slate is wasted CPU.
+    # Sports with no _TEAM_TO_KALSHI map (NCAAF) skip the fetch entirely —
+    # no codes to match the tickers with, so the index would be dead weight.
     active_sports = {g["_sport"] for g in all_games}
     kal_idx, kal_meta = {}, {}
     for sp in active_sports:
+        if not _TEAM_TO_KALSHI.get(sp):
+            kal_meta[sp] = {"ok": None, "count": 0, "skipped": "no team map"}
+            kal_idx[sp] = []
+            continue
         kal = _fetch_kalshi_markets(_KALSHI_SERIES[sp])
         kal_meta[sp] = {"ok": kal.get("ok"), "count": kal.get("count")}
         kal_idx[sp] = _kalshi_ml_index(kal.get("markets") or []) if kal.get("ok") else []
@@ -4643,10 +4697,19 @@ def api_vsin_snapshot():
                     "inserted": inserted})
 
 
+# Sports the paperlog auto-logs suggestions for. Mirrors _PM_SPORTS (the
+# cent-logged sports — a sport with no pm_snapshots history has no exchange
+# sharp score / fair anchor, so its dossier can't produce gated suggestions
+# worth logging). Off-season sports are free: no games in the 5h window,
+# the query just returns nothing.
+_PAPERLOG_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF"]
+
+
 @app.route("/api/handicapper/paperlog")
 def api_handicapper_paperlog():
     """Cron-pinged ~1/min. Auto-logs every GATE-CLEARED Pick Bot suggestion
-    for upcoming MLB games across the 5h->1min pre-game window into
+    for upcoming games (every _PAPERLOG_SPORTS sport — was MLB-only until
+    the July 2026 football prep) across the 5h->1min pre-game window into
     pickbot_paperlog — one row per (game, market) each time the suggested
     (side, units) CHANGES (a flip or a size up/down). The complete bot-
     suggestion dataset for the 2-week review, separate from the user's real
@@ -4669,7 +4732,7 @@ def api_handicapper_paperlog():
     hi = (now + timedelta(hours=5)).isoformat()      # start 5h out
     try:
         raw = (sb.table("markets").select("id,event_name,event_start,sport")
-               .eq("sport", "MLB").eq("status", "active")
+               .in_("sport", _PAPERLOG_SPORTS).eq("status", "active")
                .gte("event_start", lo).lte("event_start", hi)
                .order("event_start").execute().data) or []
     except Exception as e:
@@ -4681,7 +4744,7 @@ def api_handicapper_paperlog():
             seen.add(n)
             games.append(g)
     if not games:
-        return jsonify({"ok": True, "games": 0, "reason": "no upcoming MLB in 5h"})
+        return jsonify({"ok": True, "games": 0, "reason": "no upcoming games in 5h"})
 
     # Recent paperlog → (a) last logged_at/game for stale-first ordering,
     # (b) last (side,units) per (game,market) for the bet-change dedup.
@@ -4714,6 +4777,8 @@ def api_handicapper_paperlog():
                 (r.get("side"), r.get("units")))
     except Exception:
         pass
+    # (dedup keys, stale-first ordering, and the dossier build below are all
+    # sport-agnostic — nothing else in this loop assumes MLB.)
     games.sort(key=lambda g: last_logged.get(g["id"]) or "")   # never-logged first
 
     deadline = _time.time() + 8.0

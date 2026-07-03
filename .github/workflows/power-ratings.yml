@@ -31,7 +31,9 @@ concurrency:
 jobs:
   rate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 30 min: a season backfill (days≈330) makes ~2000 sequential ESPN
+    # scoreboard calls and can pass 10 min. The daily days=2 run stays <1 min.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: kahla-scanner

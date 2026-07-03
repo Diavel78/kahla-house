@@ -31,8 +31,14 @@ _WINDOW_DAYS = {
     "MLB":   100,
     "NBA":   120,
     "CBB":   120,
-    "NFL":   200,    # weekly — need most of the season for enough games
-    "NCAAF": 200,
+    # Football is weekly AND has a 7-month gap between seasons, so the
+    # window must reach ALL of last season or early-season ratings solve
+    # from ~a dozen playoff games (a 200-day window in September only sees
+    # back to February). 365 keeps last season in view as a cold-start
+    # prior; the 40-day half-life decays it to near-nothing by midseason,
+    # so this never bleeds stale form into a mature season.
+    "NFL":   365,
+    "NCAAF": 365,
     "NHL":   120,
 }
 
