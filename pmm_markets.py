@@ -500,6 +500,35 @@ _VARIANT_MARKERS: tuple[str, ...] = (
     "quarter", "period", "player",
 )
 
+# ── World Cup match-result detection (same landmine, second casualty) ──
+# list_world_cup used an exact-match v1 allowlist ('drawable_outcome' /
+# 'moneyline' / 'h2h') — the June 2026 v1 rename silently failed EVERY WC
+# match-result market against it, which zeroed the World Cup cent logger +
+# markets spine from June 23 (discovered July 3: no WORLDCUP pm_snapshots
+# or new markets for the whole Round of 32). Substring markers + a V2
+# fallback survive renames; soccer variants are blocked first.
+_WC_RESULT_MARKERS: tuple[str, ...] = (
+    "drawable_outcome", "drawable", "moneyline", "h2h", "match_result",
+)
+_WC_VARIANT_MARKERS: tuple[str, ...] = (
+    "half", "quarter", "period", "player", "exact", "score",
+    "total", "spread", "handicap", "btts", "both_teams",
+    "corner", "card", "goalscorer", "clean_sheet",
+)
+
+
+def _wc_is_match_result(v1: str, v2: str) -> bool:
+    """True when a WC market is the FULL-GAME 1-X-2 match result. v1/v2
+    lowercase/uppercase slugs respectively. Variants (halves, totals,
+    exact score, props) are blocked by substring FIRST; then any result
+    marker in v1 accepts; else fall back to the V2 bucket (the 3-way
+    classifies as MONEYLINE, or a DRAWABLE variant if PMM adds one)."""
+    if any(t in v1 for t in _WC_VARIANT_MARKERS):
+        return False
+    if any(t in v1 for t in _WC_RESULT_MARKERS):
+        return True
+    return ("MONEYLINE" in v2) or ("DRAWABLE" in v2)
+
 
 def _classify_market(m: dict, away: str, home: str
                      ) -> tuple[str, float | None, str | None] | None:
@@ -980,11 +1009,14 @@ def list_world_cup(client, max_events: int = 40,
             if _mget(m, "closed"):
                 continue
             v1 = (_mget(m, "sportsMarketType") or "").lower()
-            # Full-game match result only. Soccer's 3-way is
-            # 'drawable_outcome'; 2-way sports use 'moneyline'/'h2h'.
-            # Excludes first/second-half variants, spreads, totals,
-            # exact-score and goalscorer props (all separate type slugs).
-            if v1 not in ("drawable_outcome", "moneyline", "h2h"):
+            v2 = (_mget(m, "sportsMarketTypeV2") or "").upper()
+            # Full-game match result only (1-X-2). Substring markers + V2
+            # fallback, NOT the old exact-match v1 allowlist — that
+            # allowlist is what silently killed the whole WC feed when
+            # Polymarket renamed the v1 slugs June 23 2026 (gotcha #39's
+            # second casualty; the main _classify_market got the blocklist
+            # fix, this path was missed).
+            if not _wc_is_match_result(v1, v2):
                 continue
             quote = _get_market_quote(_market_to_dict(m))
             if not quote:

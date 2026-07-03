@@ -213,7 +213,7 @@ jobs:
       # World Cup cent-logger ping. /api/pm-snapshot-wc records Polymarket
       # 1-X-2 (home/draw/away) cents for upcoming World Cup matches into
       # pm_snapshots — the 3-way exchange-history clock the soccer sharp score
-      # reads. PMM-only (Kalshi has no WC series). Reuses FILLS_CRON_SECRET;
+      # reads, plus Kalshi KXWCGAME as the confirm venue. Reuses FILLS_CRON_SECRET;
       # idempotent (dedup on cent change). Cheap (one cached PMM bulk call).
       #
       # CADENCE (June 2026): every 1 min (Pro $20 credit covers it; I/O-light).
