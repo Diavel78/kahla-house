@@ -283,6 +283,7 @@
         .pick-chip.u5  { background: var(--gold); color: #2a1f02; box-shadow: 0 0 0 2px rgba(250,204,21,0.30); }
         .pick-chip.logged  { background: var(--green); color: #04210f; }
         .pick-chip.upgrade { background: #a855f7; color: #fff; box-shadow: 0 0 0 2px rgba(168,85,247,0.55); animation: khPulse 1.6s ease-in-out infinite; }
+        .pick-chip.lean    { background: transparent; border: 1px dashed #56617d; color: #a8b4cd; }
         .pick-chip.conflict { background: var(--surface-2); color: var(--text-secondary); border: 1px solid rgba(239,68,68,0.4); }
         .pick-chip.lean { background: rgba(245,158,11,0.08); color: #fbbf24; border: 1px dashed rgba(245,158,11,0.5); }
         @keyframes khPulse { 0%,100% { box-shadow: 0 0 0 2px rgba(168,85,247,0.55); } 50% { box-shadow: 0 0 0 4px rgba(168,85,247,0.18); } }
@@ -660,6 +661,7 @@
                 <div class="pick-legend" id="pickLegend">
                     <span><i class="lg u1"></i>1u</span>
                     <span><i class="lg u3"></i>3u</span>
+                    <span><i class="lg" style="border:1px dashed #56617d;background:transparent"></i>½u lean</span>
                     <span class="legend-log"><i class="lg logged"></i>logged</span>
                     <span class="legend-log"><i class="lg upgrade"></i>add / new</span>
                 </div>
@@ -967,16 +969,17 @@
     }
     function _kickoffTier(iso) {
         // Color tier for the games-list timer — ramps green → yellow → red
-        // as kickoff approaches (normal traffic-light urgency):
-        //   ≥ 2h   → grey     (far, default — no class)
-        //   1-2h   → green    (first color: plenty of time)
-        //   15-60m → yellow   (getting close)
-        //   < 15m  → red+bold (imminent)
+        // aligned to the TUNED PRIME WINDOW (July 2026, user call — the old
+        // fixed 1-2h/15-60m bands read grey at 2h when 2h was prime):
+        //   in a prime zone → green  (the betting window — matches the glow)
+        //   < 15m           → red+bold (imminent)
+        //   < 60m, not prime → yellow (getting close, window over/closing)
+        //   else            → grey   (far, default — no class)
         const diffMin = Math.round((new Date(iso) - new Date()) / 60_000);
         if (diffMin < 0)   return '';
         if (diffMin < 15)  return 'tier-imminent';
-        if (diffMin < 60)  return 'tier-close';
-        if (diffMin < 120) return 'tier-soon';
+        if (_isPrime(iso)) return 'tier-close';
+        if (diffMin < 60)  return 'tier-soon';
         return '';
     }
     // UFC fights run on imprecise block-times, so a bout the server still
@@ -1030,12 +1033,19 @@
         return 'Prime · ' + hot.join(', ');
     }
     const _MT_LABEL = { moneyline: 'ML', spread: 'SPR', total: 'TOT' };
-    // NOTE: the row glow/badge is now derived in _renderPickLines DIRECTLY from
-    // the chips it displays (a row glows iff it shows a non-logged, in-prime
-    // pick chip). The old _rowPrime() zone-guess was removed — it lit rows
-    // "PRIME" before their verdict evaluated (flicker) and disagreed with the
-    // chip display (e.g. "PRIME · TOT" with no chip, because TOT's row zone and
-    // its early-window chip gate differed).
+    // Row glow/badge is TIME-BASED (July 2026, user call): a row highlights
+    // whenever its kickoff sits inside the tuned prime window (union zones),
+    // whether or not a pick chip is showing — "if it's in the prime window
+    // highlight the box; if you don't have a pick, fine." Deterministic from
+    // the zones, so no flash/flicker (the old complaint was about the
+    // verdict-async chip-derived glow, not window-based highlighting).
+    function _applyRowPrime(row, iso) {
+        if (!row) return;
+        const tag = row.querySelector('.prime-tag');
+        const on = _canBet && _isPrime(iso);
+        row.classList.toggle('prime', on);
+        if (tag) tag.textContent = on ? _primeBadgeText(iso) : '';
+    }
     function _fmtSettled(iso) {
         const d = new Date(iso);
         const diffH = (Date.now() - d) / 3_600_000;
@@ -1402,13 +1412,13 @@
             }
             list.innerHTML = games.map(g => {
                 const matchup = g.away && g.home ? `${_esc(g.away)} @ ${_esc(g.home)}` : _esc(g.event_name);
-                // Render the row PRIME-NEUTRAL — _renderPickLines() (called right
-                // below) sets the glow/badge from the actual displayed chips, so a
-                // row never flashes "PRIME" before its verdict has evaluated.
-                return `<li class="game-row">
+                // Prime glow/badge is time-based (window membership), painted
+                // inline so it's correct on first render — no verdict wait.
+                const rowPrime = _canBet && _isPrime(g.event_start);
+                return `<li class="game-row${rowPrime ? ' prime' : ''}">
                     <div class="game-line1">
                         <span class="when ${_kickoffTierFor(g.event_start, _activeSport)}" data-start="${_esc(g.event_start)}">${_kickoffLabel(g.event_start, _activeSport)}</span>
-                        <span class="prime-tag"></span>
+                        <span class="prime-tag">${rowPrime ? _esc(_primeBadgeText(g.event_start)) : ''}</span>
                         <span class="matchup">${matchup}</span>
                         <button class="details-btn" onclick="pickGame('${g.market_id}')">Details ›</button>
                     </div>
@@ -1729,18 +1739,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         const fetchWindowMin = VERDICT_WINDOW_MS / 60000;
         document.querySelectorAll('#gamesList .game-line2[data-mid]').forEach(el => {
             const _row = el.closest('.game-row');
-            const _tag = _row && _row.querySelector('.prime-tag');
-            // Single source of truth: a row glows + shows "Prime · …" ONLY when it
-            // is actually DISPLAYING a non-logged, in-prime pick chip. Never a
-            // zone-guess before the verdict loads — that caused every row to flash
-            // "PRIME" on load and shut off as it evaluated.
-            const setPrime = (labelSet) => {
-                if (!_row) return;
-                const labs = _PRIME_LABEL_ORDER.filter(l => labelSet.has(l));
-                _row.classList.toggle('prime', labs.length > 0);
-                if (_tag) _tag.textContent = labs.length ? 'Prime · ' + labs.join(', ') : '';
-            };
-            if (!_canBet) { el.innerHTML = ''; setPrime(new Set()); return; }   // viewers: no picks line
+            if (!_canBet) { el.innerHTML = ''; return; }   // viewers: no picks line
             const mid = el.getAttribute('data-mid');
             const startIso = el.getAttribute('data-start');
             const v = _verdictCache.get(mid);
@@ -1749,7 +1748,6 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             const game = (_currentGames || []).find(g => g.market_id === mid) || {};
             const chips = [];
             const renderedMt = new Set();
-            const primeLabels = new Set();      // markets with a NON-logged in-prime chip → drives the glow
             const diffMin = (Date.parse(startIso) - Date.now()) / 60000;
             picks.forEach((p, i) => {
                 const ps = _pickState(mid, p.market_type, p.side, p.units);
@@ -1762,16 +1760,15 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                 const isModelBet = (p.market_type === 'nrfi' || p.market_type === 'total');
                 const inPrime = isModelBet ? (diffMin >= MODEL_BET_EARLY_MIN) : (p._tw === 'prime');
                 if (!isLogged && !inPrime) return;     // hide non-prime, non-logged picks
-                let cls = _uClass(p.units), label = p._chip;
+                let cls = p._lean ? 'lean' : _uClass(p.units), label = p._chip;
                 let click = _canLog ? `oneTapLog('${mid}',${i})` : `pickGame('${mid}')`;
-                let title = _canLog ? `Tap to log ${p._chip}` : `Tap for the full read`;
+                let title = _canLog
+                    ? (p._lean ? `Lean — sharp gate not cleared. Tap to log ${p._chip}` : `Tap to log ${p._chip}`)
+                    : `Tap for the full read`;
                 if (ps.state === 'logged') {
                     cls = 'logged'; label = '✓ ' + p._chip; click = `pickGame('${mid}')`; title = 'Already logged — open Details';
                 } else if (ps.state === 'upgrade') {
                     cls = 'upgrade'; label = '↑ ' + p._chip; title = `Add up to ${_uStr(p.units)}`;
-                } else {
-                    // A fresh (non-logged) prime pick → this row is genuinely prime.
-                    primeLabels.add(_MT_LABEL[p.market_type] || (p.market_type === 'nrfi' ? 'NRFI' : ''));
                 }
                 renderedMt.add(p.market_type);
                 // Circa handle%/bets% sub-line (smaller, less prominent) when
@@ -1790,7 +1787,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                     chips.push(`<button class="pick-chip logged" title="Already logged — open Details" onclick="pickGame('${mid}')"><span class="pc-main">✓ ${_esc(label)}</span></button>`);
                 });
             }
-            setPrime(primeLabels);
+            _applyRowPrime(_row, startIso);
             if (chips.length) {
                 el.innerHTML = chips.join('');
             } else {
@@ -1889,9 +1886,13 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                         // server-resolved timing_window so the display can show
                         // ONLY prime-window picks. (make/take/book pills removed
                         // from the cards per the declutter request.)
-                        const picks = sugg.filter(s => s && s.gates_cleared).map(s => {
+                        // Gate-cleared picks AND forced leans (July 2026, user
+                        // call: "bring back the leans at 0.5u"). Leans render
+                        // as muted 0.5u chips, window-gated like real picks.
+                        const picks = sugg.filter(s => s && s.market_type && s.side).map(s => {
                             const body = _suggestionToBody(s, mid, d);
                             let chip = _pickChipLabel(s.market_type, s.side, body._line, body._price, s.units, d);
+                            if (!s.gates_cleared) chip = '~ ' + chip;
                             // Circa handle% / tickets% for the picked side (sub-line
                             // on the chip). MATCHES the dossier breakdown: handle =
                             // Circa sharp money, tickets = BLENDED Circa+DK ticket
@@ -1900,7 +1901,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                             const circaH = (v.side_handle != null) ? v.side_handle : null;
                             const circaB = (v.side_bets != null) ? v.side_bets : null;
                             return { market_type: s.market_type, side: s.side, units: Number(s.units) || 1,
-                                     _chip: chip, _tw: s.timing_window || null,
+                                     _chip: chip, _tw: s.timing_window || null, _lean: !s.gates_cleared,
                                      _circaH: circaH, _circaB: circaB,
                                      _slug: s.pmm_slug || null, _inv: !!s.pmm_synthetic, _body: body };
                         });
@@ -2084,8 +2085,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             }
             el.textContent = _kickoffLabel(iso, _activeSport);
             el.className = 'when ' + _kickoffTierFor(iso, _activeSport);
-            // (prime glow/badge is refreshed by _renderPickLines() below — the
-            // single source of truth, derived from the row's displayed chips.)
+            _applyRowPrime(el.closest('.game-row'), iso);   // window-based glow tracks the clock
         });
         if (removed) {
             const list = document.getElementById('gamesList');

@@ -2279,6 +2279,8 @@ def _mlb_pitcher_block(p: dict | None) -> dict:
 #   2. Public splits divergence (% money − % bets on the sharp side)
 # Combined score = how much the read agrees with itself. The
 # Polymarket entry target = PIN devigged American on the sharp side.
+LEAN_UNITS       = 0.5  # forced-lean (gate-not-cleared) stake — July 2026,
+                        # leans back on the games list as muted half-unit chips
 SHARP_SCORE_MIN  = 3   # Sharp signal threshold. Lowered 4→3 May 2026:
                        # at 4 the recency-weighted score left most of the
                        # slate as grey leans (you need fresh steam in the
@@ -4739,6 +4741,12 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
             c["size_capped"] = True
             if tw == "late":
                 c["late_capped"] = True
+        # Forced leans are HALF-UNIT (July 2026, user call — leans returned to
+        # the games list as muted 0.5u chips after the June declutter hid
+        # them). Runs last so no cap/override can lift a lean back to 1u.
+        # Schema allows 0.5 (migration 009); the paperlog still skips leans.
+        if not c.get("gates_cleared"):
+            units, conf = LEAN_UNITS, "low"
         c["units"], c["confidence"], c["kelly_pct"] = units, conf, kelly_pct
         cur = by_market.get(c["market_type"])
         if (not cur) or ((c["gates_cleared"], c["combined_score"]) >
