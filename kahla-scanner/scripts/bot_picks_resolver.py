@@ -304,11 +304,26 @@ def _wc_match_espn(bet: dict, espn_events: list[dict]) -> dict | None:
                 return None
 
         status = (comp.get("status") or {})
-        state = (status.get("type") or {}).get("state", "")
+        tp = status.get("type") or {}
+        state = tp.get("state", "")
+        # Knockout detector: did the match go PAST regulation? ESPN soccer
+        # periods are 1/2 = halves, 3/4 = extra time, 5 = shootout; the
+        # detail strings say "AET" / "FT-Pens". Either signal counts. This
+        # matters because the 1-X-2 market (with its bettable draw leg)
+        # resolves on the 90-MINUTE result — and ET only happens when
+        # regulation ended level, so went_extra ⇒ regulation result = DRAW.
+        period = status.get("period")
+        detail = f"{tp.get('detail', '')} {tp.get('shortDetail', '')}".lower()
+        try:
+            past_reg = bool(period and float(period) > 2)
+        except (TypeError, ValueError):
+            past_reg = False
+        went_extra = past_reg or bool(re.search(r"\baet\b|extra time|pen", detail))
         return {
             "state":      state,
             "home_score": _score(hs),
             "away_score": _score(as_),
+            "went_extra": went_extra,
             "inn1_home":  None, "inn1_away": None, "period": None,
         }
     return None
@@ -865,7 +880,17 @@ def main(argv: list[str] | None = None) -> int:
                 if m["home_score"] is None or m["away_score"] is None:
                     unmatched += 1
                     continue
-                status = _grade(bet, m["home_score"], m["away_score"])
+                if (sport == "WORLDCUP" and m.get("went_extra")
+                        and bet.get("market_type") == "moneyline"):
+                    # Knockout decided past regulation. The 3-way 1-X-2
+                    # market resolves on the 90-minute result, which was a
+                    # DRAW by definition (ET exists only because regulation
+                    # ended level). ESPN's final score includes the ET
+                    # goals, so _grade would wrongly credit the ET winner's
+                    # ML and fail the draw.
+                    status = "won" if bet.get("side") == "draw" else "lost"
+                else:
+                    status = _grade(bet, m["home_score"], m["away_score"])
                 if status is None:
                     unmatched += 1
                     continue
@@ -874,6 +899,10 @@ def main(argv: list[str] | None = None) -> int:
                     "away":  m["away_score"],
                     "total": m["home_score"] + m["away_score"],
                 }
+                if m.get("went_extra"):
+                    # Record that the stored score is the POST-regulation
+                    # score and the grade came from the regulation-draw rule.
+                    result["went_extra"] = True
             units = bet.get("units") or 1
             pnl = _pnl_units(status, bet["entry_price"], units)
             # Closing Line Value — compute once (skip if already set).

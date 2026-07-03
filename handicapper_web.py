@@ -684,6 +684,17 @@ def _pin_history(sb, market_id: str) -> dict[tuple[str, str], list[dict]]:
 _X_PP_SCALE = 5.2     # prob-points → 0-10 score units (bias-corrected)
 _X_MIN_PP   = 0.25    # weighted move below this (≈ score 1) → no signal
 
+# Sports where Kalshi actually quotes the ML alongside PMM (series ticker +
+# a _TEAM_TO_KALSHI map in app.py, so kalshi rows land in pm_snapshots).
+# Only there does "Kalshi didn't confirm" carry information — the 3-of-9
+# unconfirmed-ML finding was measured where Kalshi HAD a market and stayed
+# silent. For single-venue sports (UFC, NCAAF — no Kalshi map) the demotion
+# would fire on EVERY moneyline, i.e. the sport could never produce an ML
+# pick at all. There PMM steam gates alone; x_confirmed=False is still
+# recorded on every pick so the paperlog review can judge PMM-only ML
+# quality per sport before trusting it further.
+KALSHI_CONFIRM_SPORTS = {"MLB", "NBA", "NHL", "NFL"}
+
 
 def _pm_history(sb, market_id: str) -> dict:
     """pm_snapshots rows for one game in the last 18h, grouped by
@@ -4490,10 +4501,14 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
             # the unconfirmed side won only ~3-of-9. So an unconfirmed ML
             # signal stays visible but DEMOTES to a forced lean (1u) rather
             # than a real pick. SPR/TOT have no second venue → x_confirmed
-            # is True for them, so this never fires there.
+            # is True for them, so this never fires there. Scoped to
+            # KALSHI_CONFIRM_SPORTS: single-venue sports (UFC, NCAAF) have
+            # no Kalshi ML at all, so "unconfirmed" is structural, not
+            # evidence — their MLs gate on PMM steam alone.
             unconfirmed_ml = False
             if (mt == "moneyline" and gates_cleared
-                    and score_for_side > 0 and not x_confirmed):
+                    and score_for_side > 0 and not x_confirmed
+                    and sport in KALSHI_CONFIRM_SPORTS):
                 gates_cleared = False
                 unconfirmed_ml = True
             # Sticky gate (hysteresis — the "5-minute pick" fix, June 2026).

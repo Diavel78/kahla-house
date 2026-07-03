@@ -3068,13 +3068,20 @@ _KALSHI_SERIES = {"MLB": "KXMLBGAME", "NBA": "KXNBAGAME", "NHL": "KXNHLGAME",
                   # the sandbox (proxy blocks Kalshi); confirm the tickers +
                   # side-suffix codes via /debug-kalshi?sport=nfl once live.
                   # A wrong ticker just returns 0 markets (defensive fetch).
-                  "NFL": "KXNFLGAME", "NCAAF": "KXNCAAFGAME"}
+                  "NFL": "KXNFLGAME", "NCAAF": "KXNCAAFGAME",
+                  # UFC: PROBE-ONLY guess (July 2026) so /debug-kalshi?sport=ufc
+                  # can show whether/how Kalshi lists fights. NOT matched in the
+                  # snapshot loop (no _TEAM_TO_KALSHI entry — fighters need a
+                  # name-matched index like _kalshi_wc_index, built only after
+                  # the probe confirms the series + yes_sub_title shape).
+                  "UFC": "KXUFCFIGHT"}
 # Sports the cent-logger + cross-confirm trigger cover (cent data flows).
-# NCAAF is PMM-ONLY (no _TEAM_TO_KALSHI map — school codes are unmappable
-# blind; the pm-snapshot loop skips the Kalshi bulk fetch for map-less
-# sports). Consequence: NCAAF ML picks stay unconfirmed→lean (no second
-# venue), but SPR/TOT — the sharp expression in college — gate normally.
-_PM_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF"]
+# NCAAF and UFC are PMM-ONLY (no _TEAM_TO_KALSHI map — school codes are
+# unmappable blind, fighters aren't teams; the pm-snapshot loop skips the
+# Kalshi bulk fetch for map-less sports). Their MLs gate on PMM steam alone
+# — see handicapper_web.KALSHI_CONFIRM_SPORTS (the unconfirmed-ML demotion
+# only applies where a Kalshi confirm venue actually exists).
+_PM_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF", "UFC"]
 # How far out the cross-confirm watcher tracks each sport. MLB is dense
 # (daily) so 12h is plenty; NBA/NHL playoff series are 2-3 days apart, so
 # we watch farther out to catch the early line movement on the next game
@@ -3084,7 +3091,12 @@ _PM_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF"]
 # steam, not just game-day. NCAAF gets 72h (Wed→Sat covers most movement;
 # the Saturday slate is 60+ games, so a 7-day window would swamp the
 # budgeted PMM rotation — widen only with budget headroom data).
-_PM_WINDOW_H = {"MLB": 12, "NBA": 96, "NHL": 96, "NFL": 168, "NCAAF": 72}
+# UFC: cards are weekly Saturdays and fight lines move all week off camp
+# news/weigh-ins — 96h catches the Wed→Sat drift. NOTE the UFC block-time
+# quirk (gotcha in _ufc_pickable_market_rows) doesn't matter here: the
+# watcher only needs the nominal event_start to be in the future window.
+_PM_WINDOW_H = {"MLB": 12, "NBA": 96, "NHL": 96, "NFL": 168, "NCAAF": 72,
+                "UFC": 96}
 _KALSHI_CACHE: dict[str, tuple[float, dict]] = {}
 _KALSHI_TTL = 30  # seconds
 
@@ -4701,8 +4713,10 @@ def api_vsin_snapshot():
 # cent-logged sports — a sport with no pm_snapshots history has no exchange
 # sharp score / fair anchor, so its dossier can't produce gated suggestions
 # worth logging). Off-season sports are free: no games in the 5h window,
-# the query just returns nothing.
-_PAPERLOG_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF"]
+# the query just returns nothing. UFC caveat: the window keys off the
+# NOMINAL event_start (block-times), so a late-card fight stops logging at
+# its nominal time even while still 'pre' — acceptable, forward data accrues.
+_PAPERLOG_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF", "UFC"]
 
 
 @app.route("/api/handicapper/paperlog")
