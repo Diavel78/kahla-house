@@ -1760,6 +1760,12 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                 const isModelBet = (p.market_type === 'nrfi' || p.market_type === 'total');
                 const inPrime = isModelBet ? (diffMin >= MODEL_BET_EARLY_MIN) : (p._tw === 'prime');
                 if (!isLogged && !inPrime) return;     // hide non-prime, non-logged picks
+                // LEANS show ONLY inside the prime window (user call) — the
+                // model-bet early gate above has no upper bound, which let a
+                // total lean render at 3h+ on a non-glowing row. A lean is a
+                // "nothing better in the window" bet, so it obeys the same
+                // window as the row highlight.
+                if (p._lean && !isLogged && !_isPrime(startIso)) return;
                 let cls = p._lean ? 'lean' : _uClass(p.units), label = p._chip;
                 let click = _canLog ? `oneTapLog('${mid}',${i})` : `pickGame('${mid}')`;
                 let title = _canLog
