@@ -4122,6 +4122,69 @@ def _vsin_sharp_veto(vsin: dict | None, mt: str, side: str):
     return None, read
 
 
+# Circa MOVEMENT window: how far back the handle trajectory reads. Snapshots
+# only accrue ~24h pre-game (the vsin-snapshot cron's window), so 24h = the
+# full history for a game; `d3h` isolates the late move.
+_VSIN_MOVE_WINDOW_H = 24
+
+
+def _vsin_movement(sb, market_id: str) -> dict | None:
+    """Circa handle TRAJECTORY per (market, side) from vsin_snapshots — the
+    'when does sharp money hit Circa' curve the 15-min cron has been logging
+    since June 24. Per side: the earliest + latest Circa handle% in the window,
+    the full-window delta, and the last-3h delta (late money). Positive delta =
+    money ARRIVING on that side. Returns
+      {"ml": {"home": {"open":41,"now":68,"delta":27,"d3h":9,"n":12}, ...}, ...}
+    keyed by the vsin market codes (ml/spread/total), or None when no Circa
+    snapshots exist for this market. Recorded per pick (signal_blob
+    circa_move_pp) for the validation review — NOT a sizing input yet."""
+    if not market_id:
+        return None
+    try:
+        since = (datetime.now(timezone.utc)
+                 - timedelta(hours=_VSIN_MOVE_WINDOW_H)).isoformat()
+        rows = (sb.table("vsin_snapshots")
+                .select("market_type,side,handle_pct,captured_at")
+                .eq("market_id", market_id).eq("book", "circa")
+                .gte("captured_at", since)
+                .order("captured_at").limit(2000).execute().data) or []
+    except Exception:
+        return None
+    series: dict[tuple, list] = {}
+    for r in rows:
+        h = r.get("handle_pct")
+        if h is None:
+            continue
+        series.setdefault((r.get("market_type"), r.get("side")), []).append(
+            (r.get("captured_at") or "", int(h)))
+    if not series:
+        return None
+    cut3h = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+    out: dict = {}
+    for (mt, side), pts in series.items():
+        if not mt or not side:
+            continue
+        first_h, last_h = pts[0][1], pts[-1][1]
+        recent = [h for (ts, h) in pts if ts >= cut3h]
+        d3h = (pts[-1][1] - recent[0]) if len(recent) >= 2 else None
+        out.setdefault(mt, {})[side] = {
+            "open": first_h, "now": last_h,
+            "delta": last_h - first_h,
+            "d3h": d3h, "n": len(pts),
+        }
+    return out or None
+
+
+def _circa_move_pp(movement: dict | None, mt: str, side: str):
+    """Full-window Circa handle delta for a candidate's (market_type, side).
+    None when no trajectory exists (unmatched game / Circa silent)."""
+    vmt = _VSIN_MT.get(mt)
+    if not movement or not vmt:
+        return None
+    cell = (movement.get(vmt) or {}).get(side)
+    return cell.get("delta") if cell else None
+
+
 def _vsin_to_ml_splits(vsin: dict | None) -> dict:
     """ML-shaped splits dict (the dossier reason bullet + _splits_signal_pp
     scoring), REPLACING Action Network. money% = CIRCA HANDLE (sharp money,
@@ -4279,6 +4342,7 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                    prime_zones: list[tuple[int, int]] | None = None,
                    prime_zones_by_market: dict | None = None,
                    vsin: dict | None = None,
+                   vsin_movement: dict | None = None,
                    kelly_fraction: float | None = None) -> list[dict]:
     """Polymarket-execution picks. Returns a list — there can be more
     than one on a game. Behaviour:
@@ -4443,7 +4507,15 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
             # Captured (vsin_read) on every candidate for forward validation
             # regardless of whether it fired (test totals: recorded, not vetoed).
             vsin_reason, vsin_read = _vsin_sharp_veto(vsin, mt, side)
-            if vsin_reason and gates_cleared and not test_total:
+            # A pick the veto ALONE demoted (it would have cleared otherwise)
+            # is a "vetoed pick" — flagged so the paperlog shadow-logs it and
+            # the 2-week review can measure whether the veto saves money. This
+            # was previously invisible: demoted picks never hit the paperlog,
+            # so the veto was unfalsifiable (unlike test totals, where it's
+            # recorded-not-enforced and measured 15-15 / 0.0u — weak signal).
+            vsin_vetoed_pick = bool(vsin_reason and gates_cleared
+                                    and not test_total)
+            if vsin_vetoed_pick:
                 gates_cleared = False
                 conflict_reason = conflict_reason or vsin_reason
 
@@ -4544,6 +4616,11 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 # every candidate; `vsin_veto` true when it demoted this side.
                 "vsin":           vsin_read,
                 "vsin_veto":      bool(vsin_reason),
+                "vsin_vetoed_pick": vsin_vetoed_pick,
+                # Circa handle TRAJECTORY on this side (full-window delta from
+                # vsin_snapshots) — positive = money arriving. Recorded for the
+                # review; NOT a scoring/sizing input yet.
+                "circa_move_pp":  _circa_move_pp(vsin_movement, mt, side),
                 # Per-bet-type timing: each market is classified against ITS
                 # own tuned zones (markets without their own fall back to
                 # pooled). _bm is built once below from prime_zones_by_market
@@ -4675,6 +4752,23 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
 
     # Stable order: ML/SPR first, then TOT.
     chosen.sort(key=lambda c: 0 if c["market_type"] != "total" else 1)
+
+    # VSiN-vetoed picks that didn't survive selection ride along as extra
+    # entries (gates_cleared=False, so they render as leans on the dossier —
+    # the "why won't you pick this" answer — and NEVER as games-list chips).
+    # The paperlog shadow-logs them (signal_blob.vsin_vetoed_pick) so the
+    # veto finally gets a measurable counterfactual. At most one vetoed side
+    # per market (the veto needs ≥60% opposite handle, which only one side
+    # can hold); keep the best per market_type.
+    already = {id(c) for c in chosen}
+    best_veto: dict[str, dict] = {}
+    for c in candidates:
+        if not c.get("vsin_vetoed_pick") or id(c) in already:
+            continue
+        cur = best_veto.get(c["market_type"])
+        if not cur or c["combined_score"] > cur["combined_score"]:
+            best_veto[c["market_type"]] = c
+    chosen.extend(best_veto.values())
     return chosen
 
 
@@ -4917,12 +5011,21 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     # (exch_current already attached above, before _attach_pmm_to_odds, so
     # the PMM line anchors on the exchange ATM line.)
 
+    # Circa handle trajectory from vsin_snapshots (the movement curve the
+    # 15-min cron logs) — recorded on every candidate for the review + shown
+    # on the Details market panels. Silent-fail.
+    try:
+        vsin_movement = _vsin_movement(sb, market["id"])
+    except Exception:
+        vsin_movement = None
+
     suggestions = _suggest_picks(odds, splits, power_rating,
                                  sport=sport, home=home,
                                  starts_in_min=starts_in_min,
                                  sticky_keys=_sticky_keys(sb, market["id"]),
                                  prime_zones_by_market=_load_prime_zones_by_market(sb),
                                  vsin=vsin,
+                                 vsin_movement=vsin_movement,
                                  kelly_fraction=_load_kelly_fraction(sb))
     # Keep the singular `suggestion` field as an alias for the top pick
     # so any caller still expecting it doesn't break. New code should
@@ -5006,6 +5109,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         "odds":            odds,
         "splits":          splits,
         "vsin":            vsin,
+        "vsin_movement":   vsin_movement,
         "espn":            {
             "home":       espn_block.get("home"),
             "away":       espn_block.get("away"),

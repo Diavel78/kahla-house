@@ -107,7 +107,8 @@ def _fetch_rows(sb, lookback_days: int) -> list[dict]:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
     try:
         return (sb.table("pickbot_paperlog")
-                .select("starts_in_min,units,pnl_units,clv_pp,status,market_type,gates_cleared")
+                .select("starts_in_min,units,pnl_units,clv_pp,status,market_type,"
+                        "gates_cleared,signal_blob")
                 .gte("logged_at", cutoff)
                 .in_("status", ["won", "lost", "push"])
                 .eq("gates_cleared", True)
@@ -123,6 +124,14 @@ def _clean(rows: list[dict]) -> list[dict]:
     for r in rows:
         mt = r.get("market_type")
         if mt not in TUNED_MARKETS:
+            continue
+        # SHADOW tiers never tune the live zones: the market-anchored spread
+        # model (signal_blob.spread_model) is a validation experiment logged
+        # as gates_cleared=true spread rows — letting it in would tune the
+        # REAL steam-spread zones from a different engine's picks. (VSiN veto
+        # shadows are gates_cleared=false, already excluded by the fetch.)
+        blob = r.get("signal_blob") or {}
+        if blob.get("spread_model") in (True, "true"):
             continue
         sim, u, pnl = r.get("starts_in_min"), r.get("units"), r.get("pnl_units")
         if sim is None or u in (None, 0) or pnl is None:

@@ -4687,16 +4687,31 @@ def api_handicapper_paperlog():
     # (b) last (side,units) per (game,market) for the bet-change dedup.
     mids = [g["id"] for g in games]
     last_logged, last_bet = {}, {}
+    # Dedup key carries a VARIANT discriminator: '' (the real suggestion),
+    # 'model' (the shadow spread model), 'veto' (a VSiN-vetoed would-be pick).
+    # Without it, two writers sharing (market_id,'spread') — the steam spread
+    # on one side, the shadow model on the other — alternate the stored
+    # (side,units) so EVERY tick reads as a bet change and logs both rows
+    # forever (the June 28 flood: 239 rows/day, one game logged 15+ times,
+    # which inflated the shadow spread record to a fake 131-13).
+    def _variant(blob) -> str:
+        b = blob or {}
+        if b.get("spread_model") in (True, "true"):
+            return "model"
+        if b.get("vsin_vetoed_pick") in (True, "true"):
+            return "veto"
+        return ""
     try:
         recent = (sb.table("pickbot_paperlog")
-                  .select("market_id,market_type,side,units,logged_at")
+                  .select("market_id,market_type,side,units,logged_at,signal_blob")
                   .in_("market_id", mids)
                   .gte("logged_at", (now - timedelta(hours=6)).isoformat())
                   .order("logged_at", desc=True).limit(5000).execute().data) or []
         for r in recent:
             last_logged.setdefault(r["market_id"], r["logged_at"])
-            last_bet.setdefault((r["market_id"], r["market_type"]),
-                                (r.get("side"), r.get("units")))
+            last_bet.setdefault(
+                (r["market_id"], r["market_type"], _variant(r.get("signal_blob"))),
+                (r.get("side"), r.get("units")))
     except Exception:
         pass
     games.sort(key=lambda g: last_logged.get(g["id"]) or "")   # never-logged first
@@ -4718,7 +4733,13 @@ def api_handicapper_paperlog():
 
         bets = []
         for s in (d.get("suggestions") or []):
-            if not (s.get("gates_cleared") and s.get("market_type") and s.get("side")):
+            # Gate-cleared picks AND VSiN-vetoed would-be picks (shadow rows,
+            # gates_cleared=false + signal_blob.vsin_vetoed_pick) — the latter
+            # give the Circa veto a measurable counterfactual. Plain forced
+            # leans still never log.
+            if not (s.get("market_type") and s.get("side")):
+                continue
+            if not (s.get("gates_cleared") or s.get("vsin_vetoed_pick")):
                 continue
             entry = s.get("pmm_bid_american")
             if entry is None:
@@ -4729,6 +4750,7 @@ def api_handicapper_paperlog():
                 "line": (s.get("pmm_line") if s.get("uses_pmm_projection") else s.get("pin_line")),
                 "entry_price": entry, "fair_american": s.get("fair_american"),
                 "sharp_score": s.get("sharp_score"), "edge_pp": s.get("edge_pp"),
+                "gates_cleared": bool(s.get("gates_cleared")),
                 "signal_blob": {"combined_score": s.get("combined_score"),
                                 "model_edge_pp": s.get("model_edge_pp"),
                                 "splits_pp": s.get("splits_pp"),
@@ -4738,6 +4760,11 @@ def api_handicapper_paperlog():
                                 "x_agree": s.get("x_agree"),
                                 "vsin": s.get("vsin"),
                                 "vsin_veto": bool(s.get("vsin_veto")),
+                                "vsin_vetoed_pick": bool(s.get("vsin_vetoed_pick")),
+                                # Circa handle trajectory on this side at log
+                                # time (full-window Δpp from vsin_snapshots) —
+                                # the movement-curve signal under review.
+                                "circa_move_pp": s.get("circa_move_pp"),
                                 # TEST O/U tier — model-driven totals at 0.25u.
                                 # Tagged so the 2-week review can isolate them.
                                 "test_only": bool(s.get("test_only")),
@@ -4748,7 +4775,10 @@ def api_handicapper_paperlog():
         if nrfi.get("gates_cleared") and nrfi.get("bet_side"):
             bs = nrfi["bet_side"]
             bets.append({
-                "market_type": "nrfi", "side": bs, "units": 0.5, "confidence": "low",
+                # 1u — matches the LIVE NRFI sizing (promoted from 0.5u June
+                # 2026); the writer was stale at 0.5 so paperlog NRFI pnl
+                # understated the real bet by half.
+                "market_type": "nrfi", "side": bs, "units": 1, "confidence": "low",
                 "line": None, "entry_price": nrfi.get("entry_price"),
                 "fair_american": (nrfi.get("nrfi_fair_american") if bs == "no"
                                   else nrfi.get("yrfi_fair_american")),
@@ -4774,7 +4804,7 @@ def api_handicapper_paperlog():
         if bets:
             with_pick += 1
         for b in bets:
-            k = (g["id"], b["market_type"])
+            k = (g["id"], b["market_type"], _variant(b.get("signal_blob")))
             if last_bet.get(k) == (b["side"], b["units"]):   # unchanged bet → skip
                 continue
             last_bet[k] = (b["side"], b["units"])            # no dup within this tick
@@ -4785,7 +4815,8 @@ def api_handicapper_paperlog():
                 "confidence": b["confidence"], "timing_window": tw, "prime_core": pc,
                 "starts_in_min": (round(sim) if sim is not None else None),
                 "sharp_score": b["sharp_score"], "edge_pp": b["edge_pp"],
-                "fair_american": b["fair_american"], "gates_cleared": True,
+                "fair_american": b["fair_american"],
+                "gates_cleared": b.get("gates_cleared", True),
                 "signal_blob": b["signal_blob"], "logged_at": now.isoformat(),
             })
     new_rows = 0

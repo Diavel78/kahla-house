@@ -2366,7 +2366,9 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                     ? (multi
                         ? `Bot Suggests — Pick ${i + 1} of ${suggestions.length}`
                         : 'Bot Suggests — Polymarket Target')
-                    : 'Lean — would pass, but if forced';
+                    : (s.vsin_vetoed_pick
+                        ? 'Vetoed — Circa sharp money against'
+                        : 'Lean — would pass, but if forced');
                 const headingCls = s.gates_cleared ? 'lbl' : 'lbl soft';
                 // Meta line:
                 //   PMM available → "PMM asking -110 · bid -118 · PIN was -107 @ 204"
@@ -2410,7 +2412,9 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
                 // Veto note — the OUR-NUMBER read demoted this total to a
                 // lean because it disagrees with the side (e.g. a Coors
                 // under). Shown instead of the generic sharp-gate note.
-                const softNote = s.conflict_reason
+                const softNote = s.vsin_vetoed_pick
+                    ? `<div class="soft-note">Would be a real pick, but ${_esc(s.conflict_reason || 'Circa sharp money is concentrated on the other side')}.</div>`
+                    : s.conflict_reason
                     ? `<div class="soft-note">Demoted to a lean — ${_esc(s.conflict_reason)}. The model disagrees with this total; treat as 1u lean at most.</div>`
                     : (s.gates_cleared ? '' : `<div class="soft-note">Sharp gate not cleared (need sharp ≥ 3). Chalk-flat market; this is the best read available — treat as 1u lean only.</div>`);
                 html += `<div class="${cardCls}">
@@ -3076,6 +3080,19 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         const b = bv.length ? Math.round(bv.reduce((a, c) => a + c, 0) / bv.length) : null;
         return { m: (h != null ? h : null), b: b };
     }
+    // Circa handle MOVEMENT (from vsin_snapshots via d.vsin_movement) for one
+    // market+side: a small ↑N/↓N chip when the money moved ≥5pp over the
+    // logged window. Positive = money arriving on this side.
+    function _circaMoveFrag(d, mt, side) {
+        const mv = d && d.vsin_movement;
+        if (!mv) return '';
+        const key = (mt === 'moneyline') ? 'ml' : mt;
+        const cell = (mv[key] || {})[side];
+        if (!cell || cell.delta == null || Math.abs(cell.delta) < 5) return '';
+        const up = cell.delta > 0;
+        const col = up ? 'var(--green, #4caf50)' : 'var(--text-muted)';
+        return ` <span style="color:${col};font-weight:700" title="Circa money moved ${cell.open}% → ${cell.now}% over the logged window (${cell.n} snaps)">${up ? '↑' : '↓'}${Math.abs(cell.delta)}</span>`;
+    }
     // Per-market VSiN splits line for a market PANEL (both sides), baby font.
     function _vsinMktLine(d, mt) {
         const sides = (mt === 'total')
@@ -3086,7 +3103,7 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         for (const [s, lbl] of sides) {
             const ss = _vsinSide(d, mt, s);
             if (!ss) return '';
-            parts.push(`<b>${_esc(lbl)}</b> ${ss.m != null ? ss.m + '%' : '—'} <span class="vsin-sep">/</span> ${ss.b != null ? ss.b + '%' : '—'}`);
+            parts.push(`<b>${_esc(lbl)}</b> ${ss.m != null ? ss.m + '%' : '—'} <span class="vsin-sep">/</span> ${ss.b != null ? ss.b + '%' : '—'}${_circaMoveFrag(d, mt, s)}`);
         }
         return `<div class="vsin-line"><span class="vsin-lbl">Circa money / tickets</span>${parts.join('<span class="vsin-dot">·</span>')}</div>`;
     }
@@ -3301,11 +3318,22 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
         const lf = (pick.pin_line != null && pick.market_type !== 'moneyline')
             ? ' ' + _fmtPt(pick.pin_line) : '';
         const who = `${sideName}${lf}`;
-        if (diff >= 10)  return `Circa ${mLbl}: ${m}% money / ${b}% tickets on ${who} — sharp money divergence (+${diff}pp)`;
-        if (diff <= -10) return `Circa ${mLbl}: ${m}% money / ${b}% tickets on ${who} — square money, fade signal (${Math.abs(diff)}pp)`;
-        if (m >= 65)     return `Circa ${mLbl} money heavy on ${who} (${m}% money / ${b}% tickets)`;
-        if (m <= 35)     return `Circa ${mLbl} money light on ${who} (${m}% money / ${b}% tickets) — contrarian side`;
-        return `Circa ${mLbl} split flat on ${who} (${b}% tickets / ${m}% money)`;
+        // Movement suffix — the Circa handle TRAJECTORY (vsin_snapshots).
+        // "68% money" reads very differently when it was 40% this morning
+        // (money arriving = late sharp action) vs 70% (stale, already priced).
+        let moveFrag = '';
+        const mvKey = (pick.market_type === 'moneyline') ? 'ml' : pick.market_type;
+        const mvCell = ((d.vsin_movement || {})[mvKey] || {})[pick.side];
+        if (mvCell && mvCell.delta != null && Math.abs(mvCell.delta) >= 8) {
+            moveFrag = mvCell.delta > 0
+                ? ` — money ARRIVING (${mvCell.open}%→${mvCell.now}% today)`
+                : ` — money leaving (${mvCell.open}%→${mvCell.now}% today)`;
+        }
+        if (diff >= 10)  return `Circa ${mLbl}: ${m}% money / ${b}% tickets on ${who} — sharp money divergence (+${diff}pp)${moveFrag}`;
+        if (diff <= -10) return `Circa ${mLbl}: ${m}% money / ${b}% tickets on ${who} — square money, fade signal (${Math.abs(diff)}pp)${moveFrag}`;
+        if (m >= 65)     return `Circa ${mLbl} money heavy on ${who} (${m}% money / ${b}% tickets)${moveFrag}`;
+        if (m <= 35)     return `Circa ${mLbl} money light on ${who} (${m}% money / ${b}% tickets) — contrarian side${moveFrag}`;
+        return `Circa ${mLbl} split flat on ${who} (${b}% tickets / ${m}% money)${moveFrag}`;
     }
 
     function _buildReasons(pick, d) {
