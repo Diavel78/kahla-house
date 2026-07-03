@@ -8238,9 +8238,27 @@ def _build_worldcup(now=None):
         })
     # Append PMM-listed upcoming matches ESPN's window didn't include
     # (odds only). Drop ones that already kicked off >4h ago.
+    #
+    # ROSTER GATE (July 2026): the PMM World Cup tag also returns CLUB
+    # soccer events (UEFA qualifiers — "Sabah FK vs The New Saints" etc.).
+    # While the odds parse was dead (gotcha #39's WC casualty) they were
+    # invisible (skipped as no_odds); the moment odds parsed again they
+    # leaked bogus WORLDCUP markets. ESPN's fifa.world scoreboard is the
+    # tournament roster of record: only append a PMM-only fixture when
+    # BOTH its country keys appear somewhere in ESPN's current window
+    # (teams still alive in the tournament are always in it — they have
+    # a scheduled/live match; club teams never are).
+    roster = set()
+    for m in espn_matches:
+        roster.add(_wc_country_key(m["away"]))
+        roster.add(_wc_country_key(m["home"]))
     drop_before = now - timedelta(hours=4)
     for k, pm in pmm_idx.items():
         if k in used:
+            continue
+        if not roster or not k.issubset(roster):
+            # No roster (ESPN outage) → no appends at all: bogus markets
+            # are worse than a briefly thinner list.
             continue
         st = pm.get("start_time")
         try:
