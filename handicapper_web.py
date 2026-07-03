@@ -2683,7 +2683,13 @@ EDGE_PER_SPLITS_PP   = 0.0      # pp of edge per aligned money−bets pp (was 0.
 # NHL stays OFF: it has no pitcher layer, so the backtest DOES fairly
 # represent its live model, and it was weak. NBA stays ON (proven).
 MODEL_FEEDS_SIZING   = True
-MODEL_SIZING_SPORTS  = {"NBA", "MLB"}  # NBA backtest-proven; MLB pitcher-aware, CLV-pending
+# MLB REMOVED July 2026 — the live verdict came in: on 92 settled real ML
+# picks with a model read, model-DISAGREE picks (+24.5u, CLV 0.94) BEAT
+# model-agree (+13.6u, CLV 0.11). The pitcher-aware layer did not rescue the
+# noisy MLB team core for SIDES, so the confirmation nudge was sizing up the
+# WORSE picks. The MLB model still drives TOTALS (proj_total gate: +11.2u/81)
+# and the total-side veto — those paths don't read this set.
+MODEL_SIZING_SPORTS  = {"NBA"}  # NBA backtest-proven (66.6% vs 54.1%)
 MODEL_EDGE_WEIGHT    = 0.25     # fraction of (model_prob − PIN_fair) credited
 MODEL_EDGE_CAP_PP    = 1.5      # cap on the nudge — widen as CLV proves the model
 EDGE_CAP_PP          = 6.0      # hard cap so a crude input can't blow up sizing
@@ -3752,6 +3758,12 @@ NRFI_Q_SLOPE   = 2.0      # logistic sensitivity to xr — backtest-calibrated
 NRFI_TOP_BOOST = 1.10     # top-of-order OBP ≈ 10% above team OBP (fallback only)
 NRFI_LEAN_PP   = 4.0      # |our NRFI% − baseline NRFI%| ≥ this → model lean (context only)
 NRFI_EDGE_MIN_PP = 3.0    # our fair − PMM maker entry ≥ this (pp) → light the BET button
+# EDGE CLAMP (July 2026, 247 graded paperlog NRFI rows): the edge is REAL only
+# in the 3-6pp band — YRFI@3-6pp went +21.5u/151 while 6pp+ was flat on both
+# sides (yes +1.5/40, no −1.2/17). A claimed edge past 6pp means the model
+# disagrees with the market too much — and at that distance the MARKET is
+# right (same inverse pattern as the whale tier). Past the max → no bet.
+NRFI_EDGE_MAX_PP = 6.0
 
 
 def _nrfi_half_scoreless(xr: float) -> float:
@@ -3918,7 +3930,8 @@ def _nrfi_model(sport: str, pitchers: dict | None, away: str | None,
             continue
         edge = (our_prob[side] - blk["bid"]) * 100.0   # pp, vs maker entry
         blk["edge_pp"] = round(edge, 1)
-        if edge >= NRFI_EDGE_MIN_PP and (bet_edge_pp is None or edge > bet_edge_pp):
+        if (NRFI_EDGE_MIN_PP <= edge <= NRFI_EDGE_MAX_PP
+                and (bet_edge_pp is None or edge > bet_edge_pp)):
             bet_side = side
             bet_edge_pp = round(edge, 1)
             entry_price = blk.get("bid_american")
@@ -3938,9 +3951,17 @@ def _nrfi_model(sport: str, pitchers: dict | None, away: str | None,
             f"{_amer(pmm_block[bet_side].get('bid_american'))} "
             f"→ +{bet_edge_pp}pp edge (rest a maker limit at the bid)")
     elif pmm_matched:
-        reasons.append(
-            "No edge vs Polymarket — model fair within "
-            f"{NRFI_EDGE_MIN_PP}pp of PMM's price on both sides. Pass.")
+        _edges = [b.get("edge_pp") for b in pmm_block.values()
+                  if b.get("edge_pp") is not None]
+        if _edges and max(_edges) > NRFI_EDGE_MAX_PP:
+            reasons.append(
+                f"Model claims +{max(_edges)}pp vs Polymarket — past the "
+                f"{NRFI_EDGE_MAX_PP}pp trust clamp (edges that large graded "
+                "flat: the market is right, not the model). Pass.")
+        else:
+            reasons.append(
+                "No edge vs Polymarket — model fair within "
+                f"{NRFI_EDGE_MIN_PP}pp of PMM's price on both sides. Pass.")
     else:
         reasons.append(
             "No Polymarket 1st-inning market found — can't price an edge. "
