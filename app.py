@@ -2917,9 +2917,9 @@ def api_grocery_walmart_resolve():
 
 # ESPN scoreboard config — sport → (group, league) + a small in-memory cache.
 # Shared by _fetch_espn_scoreboard (per-sport) and _espn_scoreboard_raw
-# (group/league passthrough — World Cup, MMA). NOTE: these constants were
+# (group/league passthrough — MMA). NOTE: these constants were
 # accidentally swept up when the Odds Board's /api/odds route was removed
-# (June 2026); restored here — _build_worldcup / live tracker / pm-snapshot-wc
+# (June 2026); restored here — the live tracker + UFC readers
 # all depend on them, so losing them 500'd every ESPN-backed endpoint.
 _ESPN_PATH = {
     "mlb":   ("baseball",       "mlb"),
@@ -2958,11 +2958,11 @@ def _fetch_espn_scoreboard(sport: str) -> list:
 
 
 def _espn_scoreboard_raw(grp: str, league: str, dates: str | None = None) -> list:
-    """Fetch ANY ESPN scoreboard by group/league path (e.g. soccer/fifa.world,
+    """Fetch ANY ESPN scoreboard by group/league path (e.g.
     mma/ufc) — generalizes _fetch_espn_scoreboard beyond the board's
     _ESPN_PATH. `dates` is optional 'YYYYMMDD' or 'YYYYMMDD-YYYYMMDD'. 30s
     cache per (path, dates). [] on error. No API key. This is the shared
-    reader for ESPN-as-schedule-spine work (World Cup tab, post-cutover
+    reader for ESPN-as-schedule-spine work (UFC fight states, post-cutover
     markets ingest)."""
     import time
     key = f"{grp}/{league}?{dates or ''}"
@@ -2981,61 +2981,6 @@ def _espn_scoreboard_raw(grp: str, league: str, dates: str | None = None) -> lis
     except Exception:
         return []
 
-
-def _espn_soccer_match(ev: dict) -> dict | None:
-    """Parse one ESPN soccer scoreboard event → flat match dict:
-    {away, home, date, state, detail, completed, away_score, home_score}.
-    None on unexpected shape. (state ∈ pre / in / post.)"""
-    try:
-        comp = (ev.get("competitions") or [{}])[0]
-        home = away = None
-        hs = as_ = None
-        for c in (comp.get("competitors") or []):
-            t = c.get("team") or {}
-            name = (t.get("displayName") or t.get("name")
-                    or t.get("shortDisplayName") or "")
-            sc = c.get("score")
-            if c.get("homeAway") == "home":
-                home, hs = name, sc
-            elif c.get("homeAway") == "away":
-                away, as_ = name, sc
-        st = ((ev.get("status") or {}).get("type") or {})
-        return {
-            "away": away, "home": home,
-            "date": ev.get("date"),
-            "state": st.get("state"),                       # pre / in / post
-            "detail": st.get("shortDetail") or st.get("description") or "",
-            "completed": bool(st.get("completed")),
-            "away_score": as_, "home_score": hs,
-        }
-    except Exception:
-        return None
-
-
-# ESPN ↔ Polymarket World Cup country-name variants (keys are
-# pmm_markets._norm output — lowercase, accent-stripped, space-collapsed).
-# Both feeds get canonicalized through this so "South Korea"/"Korea
-# Republic", "Turkey"/"Turkiye", "Ivory Coast"/"Cote d'Ivoire" etc. match
-# on the same key. Tune from /debug-worldcup's `unmatched_espn` list.
-_WC_COUNTRY_ALIASES = {
-    "south korea": "korea", "korea republic": "korea", "republic of korea": "korea",
-    "turkey": "turkiye",
-    "ir iran": "iran",
-    "ivory coast": "cote d ivoire",
-    "cape verde": "cabo verde",
-    "czech republic": "czechia",
-    "dr congo": "congo dr", "democratic republic of the congo": "congo dr",
-    "congo democratic republic": "congo dr",
-    "usa": "united states", "us": "united states",
-    "bosnia and herzegovina": "bosnia herzegovina",
-}
-
-
-def _wc_country_key(name: str) -> str:
-    """Canonical country key for ESPN↔PMM World Cup matching."""
-    import pmm_markets as _pm
-    n = _pm._norm(name or "")
-    return _WC_COUNTRY_ALIASES.get(n, n)
 
 
 # ───────────────────────── Kalshi (free, no-auth market data) ─────────────
@@ -3062,7 +3007,6 @@ _KALSHI_BASES = [
 # Confirmed live via /debug-kalshi. Add a sport here + a team map in
 # _TEAM_TO_KALSHI + to _PM_SPORTS / odds_api _TRIGGER_SPORTS to cover it.
 _KALSHI_SERIES = {"MLB": "KXMLBGAME", "NBA": "KXNBAGAME", "NHL": "KXNHLGAME",
-                  "WORLDCUP": "KXWCGAME",
                   # Football (added July 2026 ahead of the season). NFL is
                   # believed KXNFLGAME / NCAAF KXNCAAFGAME — UNVERIFIED from
                   # the sandbox (proxy blocks Kalshi); confirm the tickers +
@@ -3072,7 +3016,7 @@ _KALSHI_SERIES = {"MLB": "KXMLBGAME", "NBA": "KXNBAGAME", "NHL": "KXNHLGAME",
                   # UFC: PROBE-ONLY guess (July 2026) so /debug-kalshi?sport=ufc
                   # can show whether/how Kalshi lists fights. NOT matched in the
                   # snapshot loop (no _TEAM_TO_KALSHI entry — fighters need a
-                  # name-matched index like _kalshi_wc_index, built only after
+                  # name-matched fighter index, built only after
                   # the probe confirms the series + yes_sub_title shape).
                   "UFC": "KXUFCFIGHT"}
 # Sports the cent-logger + cross-confirm trigger cover (cent data flows).
@@ -3566,7 +3510,7 @@ def debug_pmm():
     # Real shape (what lookup actually sends), a few sports to see if it's
     # MLB-only or all sports.
     out["real_shape"] = {}
-    for tg in ("mlb", "nba", "nfl", "soccer"):
+    for tg in ("mlb", "nba", "nfl", "nhl"):
         res, _ = _count({"tagSlug": tg, "closed": False, "relatedTags": True,
                          "startTimeMin": tmin, "startTimeMax": tmax, "limit": 50})
         out["real_shape"][tg] = res
@@ -4343,63 +4287,14 @@ def _match_kalshi(events: list, away_code: str, home_code: str, our_date):
             "home": best["codes"].get(home_code)}
 
 
-def _kalshi_wc_index(markets: list) -> list:
-    """Group Kalshi World Cup (KXWCGAME) markets by event_ticker into
-    [{'date','outcomes':{country_key|'draw': cents}}]. It's a 3-way market:
-    each event has THREE binary YES contracts — one per country + a tie.
-    Draw is the ticker '-TIE' suffix; team outcomes are keyed by canonical
-    country key (from yes_sub_title via _wc_country_key) so they match our
-    ESPN/PMM fixtures regardless of the name variant Kalshi prints."""
-    import re
-    events: dict = {}
-    for m in markets:
-        tk = (m.get("ticker") or "").upper()
-        et = m.get("event_ticker") or ""
-        if not et:
-            continue
-        date = None
-        mo = re.match(r"KXWCGAME-(\d{2})([A-Z]{3})(\d{2})", et)
-        if mo:
-            yy, mon, dd = mo.groups()
-            mm = _KALSHI_MONTHS.get(mon)
-            if mm:
-                date = f"20{yy}-{mm:02d}-{int(dd):02d}"
-        cents = _mid_cents(m.get("yes_bid_c"), m.get("yes_ask_c"), m.get("last_c"))
-        if tk.endswith("-TIE"):
-            outcome = "draw"
-        else:
-            team = m.get("team") or ""
-            if not team:
-                continue
-            outcome = _wc_country_key(team)
-        e = events.setdefault(et, {"date": date, "outcomes": {}})
-        if outcome not in e["outcomes"] or (
-                e["outcomes"][outcome] is None and cents is not None):
-            e["outcomes"][outcome] = cents
-    return list(events.values())
-
-
-def _match_kalshi_wc(events: list, away_key: str, home_key: str) -> dict:
-    """Kalshi cents for our WC fixture: the event whose two TEAM outcomes
-    match away/home country keys. Returns {'home','draw','away'} cents
-    (any may be None) or {} if no event carries both countries."""
-    want = {away_key, home_key}
-    for e in events:
-        teams = {k for k in e["outcomes"] if k != "draw"}
-        if want.issubset(teams):
-            return {"home": e["outcomes"].get(home_key),
-                    "draw": e["outcomes"].get("draw"),
-                    "away": e["outcomes"].get(away_key)}
-    return {}
-
 
 # ── Kalshi UFC (fighter markets — NAME-matched, no ticker-code map) ──
 # Fighters aren't teams: there's no stable 3-letter code map, so UFC
-# matching mirrors the World Cup index (outcome name from yes_sub_title)
-# with the resolver's last-name-token rule. Series ticker candidates are
+# outcomes are NAME-matched (from yes_sub_title / the market title) with
+# the resolver's last-name-token rule. Series ticker candidates are
 # tried in order (first returning open markets wins — same posture as
-# _KALSHI_BASES / _WORLD_CUP_TAG_SLUGS; a wrong guess returns 0 markets,
-# harmless). Verify/extend the list via /debug-kalshi-discover?q=ufc.
+# _KALSHI_BASES; a wrong guess returns 0 markets, harmless). Verify or
+# extend the list via /debug-kalshi-discover?q=ufc.
 _KALSHI_UFC_SERIES_CANDIDATES = ["KXUFCFIGHT", "KXUFC", "KXMMAFIGHT"]
 
 
@@ -7969,56 +7864,6 @@ def _live_market_prob(bet: dict, away: str, home: str, client, pmm_cache: dict):
     return round(mid_prob, 4) if isinstance(mid_prob, (int, float)) else None
 
 
-def _live_wc_match(wc_matches, bet_away, bet_home):
-    """Find a World Cup fixture in _build_worldcup's output for the bet's
-    canonical (away @ home) pair. Returns the live ESPN score mapped to the
-    BET's orientation + the live PMM 1-X-2 `results`, or None. (The standard
-    ESPN/_ESPN_PATH live path has no soccer; this is the soccer equivalent.)"""
-    import pmm_markets as _pm
-    ak, hk = _wc_country_key(bet_away), _wc_country_key(bet_home)
-    for m in (wc_matches or []):
-        t1, t2 = _pm._wc_teams_from_title(m.get("title") or "")
-        if not (t1 and t2):
-            continue
-        k1, k2 = _wc_country_key(t1), _wc_country_key(t2)
-        if {k1, k2} != {ak, hk}:
-            continue
-        s1, s2 = m.get("away_score"), m.get("home_score")   # t1→s1, t2→s2
-        return {
-            "state":          m.get("state") or "",
-            "display_status": m.get("detail") or "",
-            "away_score":     s1 if k1 == ak else s2,
-            "home_score":     s1 if k1 == hk else s2,
-            "results":        m.get("results") or [],
-        }
-    return None
-
-
-def _live_wc_prob(wcm, bet_away, bet_home, side):
-    """Live win prob for a World Cup bet. Decided from the score once final
-    (3-way: 'draw' wins on a level score; home/away ML LOSES on a draw); else
-    the live PMM 1-X-2 implied prob for the side."""
-    a, h = wcm.get("away_score"), wcm.get("home_score")
-    if wcm.get("state") == "post" and a is not None and h is not None:
-        if side == "draw":
-            return 1.0 if a == h else 0.0
-        if side == "home":
-            return 1.0 if h > a else 0.0
-        if side == "away":
-            return 1.0 if a > h else 0.0
-    ak, hk = _wc_country_key(bet_away), _wc_country_key(bet_home)
-    for r in (wcm.get("results") or []):
-        prob = r.get("prob")
-        if prob is None:
-            continue
-        lbl = (r.get("label") or "")
-        lk = _wc_country_key(lbl)
-        if (side == "draw" and "draw" in lbl.lower()) \
-           or (side == "home" and lk == hk) \
-           or (side == "away" and lk == ak):
-            return round(min(max(float(prob), 0.0), 1.0), 4)
-    return None
-
 
 @app.route("/api/handicapper/live")
 @bot_required   # PER-USER: the CALLER'S OWN in-progress bets (asked_by==g.uid)
@@ -8045,7 +7890,6 @@ def api_handicapper_live():
     now = datetime.now(timezone.utc)
     espn_cache: dict = {}
     pmm_cache: dict = {}
-    wc_matches = None          # lazy — only built if a WORLDCUP bet exists
     client = None
     out = []
     for bet in pending:
@@ -8059,33 +7903,6 @@ def api_handicapper_live():
         bdt = _parse_iso(bet.get("event_start") or "")
         started = bool(bdt) and timedelta(0) <= (now - bdt) <= timedelta(hours=5)
 
-        # World Cup / soccer: the standard pmm_markets.lookup has NO WC tag and
-        # NO 'draw' side, so it can't price soccer (the grey-ring bug). Use the
-        # World Cup reader (_build_worldcup) for BOTH the live ESPN score AND
-        # the live PMM 1-X-2 odds. Polymarket has live soccer markets.
-        if sp == "worldcup":
-            if wc_matches is None:
-                try:
-                    wc_matches, _ = _build_worldcup(now)
-                except Exception:
-                    wc_matches = []
-            m = _live_wc_match(wc_matches, away, home)
-            matched_live = bool(m) and m.get("state") in ("in", "live", "post")
-            if not (matched_live or started):
-                continue
-            win_prob = _live_wc_prob(m, away, home, bet.get("side")) if m else None
-            prob_src = ("decided" if (m and m.get("state") == "post"
-                                      and win_prob is not None)
-                        else ("market" if win_prob is not None else None))
-            out.append({
-                "id": bet["id"], "market_id": bet["market_id"],
-                "event_name": bet["event_name"], "away": away, "home": home,
-                "market_type": bet["market_type"], "side": bet["side"],
-                "units": bet["units"], "entry_price": bet["entry_price"],
-                "entry_line": bet.get("entry_line"),
-                "score": m or {}, "win_prob": win_prob, "prob_src": prob_src,
-            })
-            continue
 
         # ESPN score — fetch the game's SPECIFIC DATE (ET), like the resolver.
         # ESPN's no-date scoreboard default is flaky (it drops games as the day
@@ -8209,7 +8026,7 @@ def api_handicapper_dossier():
 # tab blank). 9 days = the next card is visible the morning after the last
 # one ends, even across a skipped week + late-night AZ main-event times.
 _GAMES_DISPLAY_DAYS = {"NFL": 7, "NCAAF": 7, "UFC": 9}
-_GAMES_DISPLAY_DAYS_DEFAULT = 2  # MLB, NBA, NCAAB, NHL, WORLDCUP/soccer
+_GAMES_DISPLAY_DAYS_DEFAULT = 2  # MLB, NBA, NCAAB, NHL
 
 
 def _display_window_end(sport: str, now: datetime) -> datetime:
@@ -8317,23 +8134,6 @@ def _ufc_pickable_market_rows(sb, now: datetime) -> list[dict]:
     return out
 
 
-def _wc_in_display_window(matches: list[dict], now: datetime) -> list[dict]:
-    """Trim World Cup matches to the same 2-day display window the other
-    sports use. Keeps anything that has already kicked off (live/today) and
-    drops far-future fixtures; matches without a parseable start_time are
-    kept (rare, never silently dropped)."""
-    end = _display_window_end("WORLDCUP", now)
-    out = []
-    for m in matches:
-        st = m.get("start_time")
-        try:
-            sdt = datetime.fromisoformat((st or "").replace("Z", "+00:00")) if st else None
-        except Exception:
-            sdt = None
-        if sdt is None or sdt <= end:
-            out.append(m)
-    return out
-
 
 @app.route("/api/handicapper/games")
 @bot_required
@@ -8345,8 +8145,8 @@ def api_handicapper_games():
     upcoming game metadata; no logged-pick data is exposed.
 
     Window: per-sport display window (see _display_window_end) — 2 calendar
-    days ("today and tomorrow") for MLB/NBA/NCAAB/NHL/UFC/soccer, 7 days for
-    football. Live/done games (event_start already passed) are excluded —
+    days ("today and tomorrow") for MLB/NBA/NCAAB/NHL, 7 days for
+    football, 9 for UFC. Live/done games (event_start already passed) are excluded —
     you can't make a pre-game pick on a game that's underway. Sorted by
     event_start.
 
@@ -8362,8 +8162,8 @@ def api_handicapper_games():
     now = datetime.now(timezone.utc)
     after  = now.isoformat()
     # Per-sport display window (see _display_window_end): 2 calendar days
-    # ("today and tomorrow") for MLB/NBA/NCAAB/NHL/UFC/soccer, 7 days for
-    # football. Display is decoupled from the pick/trigger windows AND from
+    # ("today and tomorrow") for MLB/NBA/NCAAB/NHL, 7 days for
+    # football, 9 for UFC. Display is decoupled from the pick/trigger windows AND from
     # ingest — we still capture opening odds for games further out, they
     # just don't render until they enter this window.
     before = _display_window_end(sport, now).isoformat()
@@ -8579,287 +8379,8 @@ def api_handicapper_sport_counts():
     counts: dict[str, int] = {
         s: len(_dedup_games(gs, s)) for s, gs in by_sport.items()
     }
-    # World Cup gets a count badge + count-based ordering like every other
-    # sport (it's not in the markets table — sourced from _build_worldcup =
-    # ESPN fifa.world + PMM, so this equals what /api/handicapper/worldcup
-    # shows). Cache-backed; silent-skip on failure.
-    try:
-        wc_matches, _wc_meta = _build_worldcup(now)
-        wc_matches = _wc_in_display_window(wc_matches, now)
-        if wc_matches:
-            counts["WORLDCUP"] = len(wc_matches)
-    except Exception:
-        pass
     return jsonify({"ok": True, "counts": counts, "now_iso": now.isoformat()})
 
-
-def _build_worldcup(now=None):
-    """Shared World Cup builder. ESPN (soccer/fifa.world) is the SCHEDULE +
-    LIVE-SCORE spine; Polymarket supplies the 1-X-2 match-result odds,
-    matched onto ESPN events by canonical country name. Upcoming matches
-    PMM lists but ESPN's window doesn't yet cover are appended (odds only,
-    no score) so coverage never regresses below the PMM-only version.
-    Returns (matches, meta) — meta carries counts for diagnostics."""
-    now = now or datetime.now(timezone.utc)
-    # ESPN spine — a date range so we get the upcoming slate, not just today.
-    dates = f"{now:%Y%m%d}-{(now + timedelta(days=8)):%Y%m%d}"
-    espn_events = _espn_scoreboard_raw("soccer", "fifa.world", dates=dates)
-    espn_matches = [m for m in (_espn_soccer_match(e) for e in espn_events)
-                    if m and m.get("away") and m.get("home")]
-
-    # Polymarket odds (1-X-2), keyed by canonical country-name pair.
-    import pmm_markets as _pm
-    try:
-        pmm = _pm.list_world_cup(get_client()) or {"matches": []}
-    except Exception:
-        pmm = {"matches": []}
-    pmm_idx = {}
-    for pm in pmm.get("matches", []):
-        t1, t2 = _pm._wc_teams_from_title(pm.get("title") or "")
-        if t1 and t2:
-            pmm_idx[frozenset({_wc_country_key(t1), _wc_country_key(t2)})] = pm
-
-    out, used = [], set()
-    for m in espn_matches:
-        k = frozenset({_wc_country_key(m["away"]), _wc_country_key(m["home"])})
-        pm = pmm_idx.get(k)
-        if pm:
-            used.add(k)
-        out.append({
-            "title":      f"{m['away']} vs. {m['home']}",
-            "start_time": m["date"],
-            "state":      m["state"], "detail": m["detail"],
-            "away_score": m["away_score"], "home_score": m["home_score"],
-            "results":    (pm or {}).get("results", []),
-            "src":        "espn",
-        })
-    # Append PMM-listed upcoming matches ESPN's window didn't include
-    # (odds only). Drop ones that already kicked off >4h ago.
-    #
-    # ROSTER GATE (July 2026): the PMM World Cup tag also returns CLUB
-    # soccer events (UEFA qualifiers — "Sabah FK vs The New Saints" etc.).
-    # While the odds parse was dead (gotcha #39's WC casualty) they were
-    # invisible (skipped as no_odds); the moment odds parsed again they
-    # leaked bogus WORLDCUP markets. ESPN's fifa.world scoreboard is the
-    # tournament roster of record: only append a PMM-only fixture when
-    # BOTH its country keys appear somewhere in ESPN's current window
-    # (teams still alive in the tournament are always in it — they have
-    # a scheduled/live match; club teams never are).
-    roster = set()
-    for m in espn_matches:
-        roster.add(_wc_country_key(m["away"]))
-        roster.add(_wc_country_key(m["home"]))
-    drop_before = now - timedelta(hours=4)
-    for k, pm in pmm_idx.items():
-        if k in used:
-            continue
-        if not roster or not k.issubset(roster):
-            # No roster (ESPN outage) → no appends at all: bogus markets
-            # are worse than a briefly thinner list.
-            continue
-        st = pm.get("start_time")
-        try:
-            sdt = datetime.fromisoformat((st or "").replace("Z", "+00:00")) if st else None
-        except Exception:
-            sdt = None
-        if sdt is not None and sdt < drop_before:
-            continue
-        out.append({
-            "title":      pm.get("title"),
-            "start_time": st,
-            "state":      None, "detail": "",
-            "away_score": None, "home_score": None,
-            "results":    pm.get("results", []),
-            "src":        "pmm",
-        })
-    out.sort(key=lambda x: x.get("start_time") or "")
-    meta = {"espn_count": len(espn_matches),
-            "pmm_count": len(pmm.get("matches", [])),
-            "matched": len(used)}
-    return out, meta
-
-
-@app.route("/api/handicapper/worldcup")
-@bot_required
-def api_handicapper_worldcup():
-    """Read-only World Cup list for the Pick Bot page. ESPN is the
-    schedule + live-score spine (soccer/fifa.world); Polymarket supplies
-    the 1-X-2 odds matched on. Nothing logged or graded. View-only."""
-    now = datetime.now(timezone.utc)
-    matches, meta = _build_worldcup(now)
-    matches = _wc_in_display_window(matches, now)
-    _wc_attach_market_ids(matches)        # so the page can open the dossier + log
-    return jsonify({"ok": True, "fetched_iso": now.isoformat(),
-                    "matches": matches, **meta})
-
-
-def _wc_attach_market_ids(matches):
-    """Attach `market_id` (the WORLDCUP markets row created by the cent
-    logger) to each match by canonical country-pair key, so the page can open
-    the 3-way dossier + log picks. Silent-fail (market_id stays absent)."""
-    try:
-        import pmm_markets as _pm
-        sb = get_supabase()
-        rows = (sb.table("markets").select("id,event_name")
-                .eq("sport", "WORLDCUP").eq("status", "active")
-                .execute().data) or []
-        idx = {}
-        for r in rows:
-            en = r.get("event_name") or ""
-            if " @ " in en:
-                a, h = en.split(" @ ", 1)
-                idx[frozenset({_wc_country_key(a), _wc_country_key(h)})] = r["id"]
-        for mt in matches:
-            t1, t2 = _pm._wc_teams_from_title(mt.get("title") or "")
-            if t1 and t2:
-                mt["market_id"] = idx.get(
-                    frozenset({_wc_country_key(t1), _wc_country_key(t2)}))
-    except Exception:
-        pass
-
-
-@app.route("/api/handicapper/worldcup-dossier")
-@bot_required
-def api_handicapper_worldcup_dossier():
-    """3-way (1-X-2) dossier for one World Cup fixture — exchange devig fair +
-    cent-movement sharp read + ESPN form/record research + a suggestion + PMM
-    maker entry per side. @bot_required (the bot's READ, like /dossier).
-    market_id comes from /api/handicapper/worldcup."""
-    import handicapper_web
-    sb = get_supabase()
-    if sb is None:
-        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
-    mid = (request.args.get("market_id") or "").strip()
-    if not mid:
-        return jsonify({"ok": False, "error": "market_id required"}), 400
-    return jsonify(handicapper_web.build_worldcup_dossier(sb, mid))
-
-
-def _wc_ensure_market(sb, away, home, start_iso):
-    """Select-or-insert a WORLDCUP markets row for one fixture. event_name is
-    canonical ('{away} @ {home}', away/home decided by sorted country key) so
-    the same match maps to ONE stable market_id no matter which feed (ESPN vs
-    PMM) named it first — no duplicate market rows across ticks. WORLDCUP is
-    excluded from the ESPN-markets ingest, so this is the sole creator of WC
-    market rows. Returns market_id or None (silent-fail). markets.id is
-    gen_random_uuid() so we don't pass one."""
-    ename = f"{away} @ {home}"
-    try:
-        ex = (sb.table("markets").select("id")
-              .eq("sport", "WORLDCUP").eq("event_name", ename)
-              .limit(1).execute().data) or []
-        if ex:
-            return ex[0]["id"]
-        ins = (sb.table("markets").insert(
-            {"sport": "WORLDCUP", "event_name": ename,
-             "event_start": start_iso, "status": "active"}).execute().data) or []
-        return ins[0]["id"] if ins else None
-    except Exception:
-        return None
-
-
-@app.route("/api/pm-snapshot-wc")
-def api_pm_snapshot_wc():
-    """Cron-pinged ~2/min. Logs Polymarket 1-X-2 (home/draw/away) cents for
-    UPCOMING World Cup matches into pm_snapshots — the 3-way exchange-history
-    clock the soccer sharp score will read (same dataset role pm-snapshot
-    plays for MLB/NBA/NHL). Built on _build_worldcup (the proven ESPN+PMM
-    reader) + _pm_insert_changed (dedup-on-cent-change). market_type='ml'
-    with three sides; line=NULL. Kalshi DOES carry the World Cup
-    (series KXWCGAME, 3-way: country/country/-TIE) — so it logs as a second
-    cross-confirm venue alongside PMM (source='kalshi'), same role it plays
-    for MLB/NBA/NHL. Markets spine: each fixture gets a stable
-    WORLDCUP markets row via _wc_ensure_market. Live/finished matches are
-    skipped (pre-game history only). Auth: ?key= matched to PM_SNAPSHOT_SECRET
-    or FILLS_CRON_SECRET (NOT Firebase)."""
-    import pmm_markets as _pm
-    expected = (os.environ.get("PM_SNAPSHOT_SECRET")
-                or os.environ.get("FILLS_CRON_SECRET") or "").strip()
-    provided = (request.args.get("key") or "").strip()
-    if not expected or not secrets.compare_digest(provided, expected):
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
-    sb = get_supabase()
-    if sb is None:
-        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
-
-    now = datetime.now(timezone.utc)
-    matches, meta = _build_worldcup(now)
-
-    # Kalshi 1-X-2 confirm feed (KXWCGAME) — one bulk call, indexed by
-    # country pair. Soccer IS a cross-confirm sport now: Kalshi carries the
-    # World Cup, so it logs alongside PMM (same role it plays for MLB/NBA/NHL).
-    kalshi_wc = []
-    try:
-        kres = _fetch_kalshi_markets("KXWCGAME")
-        kalshi_wc = _kalshi_wc_index(kres.get("markets") or [])
-    except Exception:
-        kalshi_wc = []
-
-    rows = []
-    st = {"matches": 0, "no_odds": 0, "no_start": 0,
-          "live_or_done": 0, "unmapped_sides": 0, "kalshi_matched": 0}
-    for m in matches:
-        results = m.get("results") or []
-        if not results:                          # ESPN game with no PMM odds yet
-            st["no_odds"] += 1
-            continue
-        si = m.get("start_time")
-        try:
-            sdt = datetime.fromisoformat((si or "").replace("Z", "+00:00")) if si else None
-        except Exception:
-            sdt = None
-        if sdt is None:
-            st["no_start"] += 1
-            continue
-        if sdt <= now:                           # pre-game only — no live/finished
-            st["live_or_done"] += 1
-            continue
-        t1, t2 = _pm._wc_teams_from_title(m.get("title") or "")
-        if not (t1 and t2):
-            continue
-        # Canonical orientation: away/home by sorted country key → one fixture
-        # is always the same market_id + the same side labels across ticks
-        # (WC venues are neutral, so home/away is just a stable label).
-        away, home = sorted([t1, t2], key=_wc_country_key)
-        ak, hk = _wc_country_key(away), _wc_country_key(home)
-        mid = _wc_ensure_market(sb, away, home, sdt.isoformat())
-        if not mid:
-            continue
-        st["matches"] += 1
-        for r in results:
-            label = (r.get("label") or "")
-            prob = r.get("prob")
-            try:
-                cents = int(round(float(prob) * 100)) if prob is not None else None
-            except (TypeError, ValueError):
-                cents = None
-            if cents is None or cents <= 0 or cents >= 100:   # no/degenerate quote
-                continue
-            ll = label.lower()
-            lk = _wc_country_key(label)
-            if "draw" in ll:
-                side = "draw"
-            elif lk == hk or _pm._name_match(label, home):
-                side = "home"
-            elif lk == ak or _pm._name_match(label, away):
-                side = "away"
-            else:
-                st["unmapped_sides"] += 1
-                continue
-            rows.append((mid, "pmm", "ml", side, None, cents))
-
-        # Kalshi confirm row(s) for this fixture (matched by country pair).
-        kc = _match_kalshi_wc(kalshi_wc, ak, hk)
-        if kc:
-            st["kalshi_matched"] += 1
-            for side in ("home", "draw", "away"):
-                kcents = kc.get(side)
-                if kcents is None or kcents <= 0 or kcents >= 100:
-                    continue
-                rows.append((mid, "kalshi", "ml", side, None, kcents))
-
-    inserted = _pm_insert_changed(sb, rows, now)
-    return jsonify({"ok": True, "inserted": inserted, "wc_meta": meta, **st})
 
 
 # ─────────────── Polymarket position → bot_picks sync ───────────────
@@ -9815,10 +9336,6 @@ def api_handicapper_pick():
     if body["market_type"] == "nrfi":
         if body["side"] not in ("yes", "no"):
             return jsonify({"ok": False, "error": "nrfi side must be yes/no"}), 400
-    elif body["market_type"] == "moneyline":
-        # 'draw' is valid for 3-way (World Cup / soccer) moneyline only.
-        if body["side"] not in ("home", "away", "draw"):
-            return jsonify({"ok": False, "error": "bad side"}), 400
     elif body["side"] not in ("home", "away", "over", "under"):
         return jsonify({"ok": False, "error": "bad side"}), 400
     if body["confidence"] not in ("low", "medium", "high", "whale"):

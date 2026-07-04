@@ -27,7 +27,7 @@ settle exactly as today.
 
 Usage:
   python -m scripts.ingest_espn_markets                 # dry-run, all sports
-  python -m scripts.ingest_espn_markets --sport WORLDCUP
+  python -m scripts.ingest_espn_markets --sport UFC
   python -m scripts.ingest_espn_markets --days 10 --commit
 """
 from __future__ import annotations
@@ -46,8 +46,7 @@ from storage.models import Market
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("ingest_espn_markets")
 
-# Our sport code → (ESPN sport group, ESPN league slug). Soccer is
-# per-competition; add leagues here as we cover them.
+# Our sport code → (ESPN sport group, ESPN league slug).
 #
 # UFC IS ingested (its SCHEDULE comes from ESPN's mma/ufc scoreboard — a
 # flat list of fights). Schedule ingest and grading are independent: ESPN
@@ -62,7 +61,6 @@ _ESPN_SPORTS: dict[str, tuple[str, str]] = {
     "CBB":      ("basketball", "mens-college-basketball"),
     "NCAAF":    ("football",   "college-football"),
     "UFC":      ("mma",        "ufc"),
-    "WORLDCUP": ("soccer",     "fifa.world"),
 }
 
 # Per-sport match window for the find-or-create dedup — mirror
@@ -276,9 +274,9 @@ def ingest_sport(sport: str, days: int, commit: bool, prune: bool = False) -> di
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="ESPN → markets ingest (cutover spine)")
-    ap.add_argument("--sport", help="single sport code (e.g. WORLDCUP); default all")
+    ap.add_argument("--sport", help="single sport code (e.g. UFC); default all")
     ap.add_argument("--exclude", default="",
-                    help="comma-list of sport codes to skip (e.g. WORLDCUP)")
+                    help="comma-list of sport codes to skip")
     ap.add_argument("--days", type=int, default=8, help="lookahead window in days")
     ap.add_argument("--commit", action="store_true",
                     help="actually write rows (default: dry-run, prints only)")

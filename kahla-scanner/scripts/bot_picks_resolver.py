@@ -52,29 +52,8 @@ _ESPN_PATH: dict[str, tuple[str, str]] = {
     # Spread / total method-of-victory bets stay pending — user can
     # settle them manually via the page button.
     "UFC":   ("mma",        "ufc"),
-    # World Cup: 3-way (1-X-2) moneyline. Graded via _wc_match_espn +
-    # _grade's soccer branch (a draw is a DECISIVE outcome, not a push).
-    "WORLDCUP": ("soccer",  "fifa.world"),
 }
 
-# ESPN ↔ Polymarket World Cup country-name variants (mirror of app.py's
-# _WC_COUNTRY_ALIASES — keys are _norm output). Both feeds canonicalize
-# through this so "Cape Verde"/"Cabo Verde", "South Korea"/"Korea Republic",
-# "Turkey"/"Turkiye" etc. grade on the same key.
-_WC_ALIASES = {
-    "south korea": "korea", "korea republic": "korea", "republic of korea": "korea",
-    "turkey": "turkiye", "ir iran": "iran", "ivory coast": "cote d ivoire",
-    "cape verde": "cabo verde", "czech republic": "czechia",
-    "dr congo": "congo dr", "democratic republic of the congo": "congo dr",
-    "congo democratic republic": "congo dr",
-    "usa": "united states", "us": "united states",
-    "bosnia and herzegovina": "bosnia herzegovina",
-}
-
-
-def _wc_key(s: str) -> str:
-    n = re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
-    return _WC_ALIASES.get(n, n)
 
 
 def _parse_iso(s: str) -> datetime | None:
@@ -259,75 +238,6 @@ def _match_espn(bet: dict, espn_events: list[dict]) -> dict | None:
     return None
 
 
-def _wc_match_espn(bet: dict, espn_events: list[dict]) -> dict | None:
-    """World Cup matcher. Matches our canonical 'away @ home' (country names)
-    to an ESPN fifa.world event by canonical country key in EITHER orientation
-    (WC home/away is arbitrary), then maps the scores back to OUR home/away so
-    _grade reads them correctly. 6h kickoff window. Returns the standard match
-    dict (no inning fields)."""
-    away, home = _split_event_name(bet.get("event_name") or "")
-    if not (away and home):
-        return None
-    ak, hk = _wc_key(away), _wc_key(home)
-    bet_start = _parse_iso(bet.get("event_start") or "")
-
-    for g in espn_events:
-        comp = (g.get("competitions") or [{}])[0]
-        cs = comp.get("competitors") or []
-        if len(cs) != 2:
-            continue
-
-        def _info(c):
-            t = c.get("team") or {}
-            return _wc_key(t.get("displayName") or t.get("name") or ""), c.get("score")
-        k0, s0 = _info(cs[0])
-        k1, s1 = _info(cs[1])
-        if not ({k0, k1} == {ak, hk}):
-            continue
-
-        comp_dt_s = comp.get("date") or g.get("date") or ""
-        comp_dt = _parse_iso(comp_dt_s) if comp_dt_s else None
-        if bet_start and comp_dt:
-            if abs((bet_start - comp_dt).total_seconds()) > 6 * 3600:
-                continue
-
-        # Map scores to OUR orientation by country key.
-        hs = s0 if k0 == hk else s1
-        as_ = s0 if k0 == ak else s1
-
-        def _score(v):
-            if v is None or v == "":
-                return None
-            try:
-                return int(v)
-            except (ValueError, TypeError):
-                return None
-
-        status = (comp.get("status") or {})
-        tp = status.get("type") or {}
-        state = tp.get("state", "")
-        # Knockout detector: did the match go PAST regulation? ESPN soccer
-        # periods are 1/2 = halves, 3/4 = extra time, 5 = shootout; the
-        # detail strings say "AET" / "FT-Pens". Either signal counts. This
-        # matters because the 1-X-2 market (with its bettable draw leg)
-        # resolves on the 90-MINUTE result — and ET only happens when
-        # regulation ended level, so went_extra ⇒ regulation result = DRAW.
-        period = status.get("period")
-        detail = f"{tp.get('detail', '')} {tp.get('shortDetail', '')}".lower()
-        try:
-            past_reg = bool(period and float(period) > 2)
-        except (TypeError, ValueError):
-            past_reg = False
-        went_extra = past_reg or bool(re.search(r"\baet\b|extra time|pen", detail))
-        return {
-            "state":      state,
-            "home_score": _score(hs),
-            "away_score": _score(as_),
-            "went_extra": went_extra,
-            "inn1_home":  None, "inn1_away": None, "period": None,
-        }
-    return None
-
 
 def _grade_nrfi(bet: dict, m: dict) -> str | None:
     """Grade an NRFI/YRFI pick from the first-inning linescore. Returns
@@ -358,14 +268,7 @@ def _grade(bet: dict, home_score: int, away_score: int) -> str | None:
     line = bet.get("entry_line")
 
     if mt == "moneyline":
-        # 3-way soccer (World Cup): a draw is a DECISIVE outcome — 'draw'
-        # wins on a level score, and a home/away ML LOSES on a draw (it is
-        # not a push, because the draw was a separately-bettable side).
-        if side == "draw":
-            return "won" if home_score == away_score else "lost"
         if home_score == away_score:
-            if bet.get("sport") == "WORLDCUP":
-                return "lost"
             return "push"
         winner = "home" if home_score > away_score else "away"
         return "won" if side == winner else "lost"
@@ -822,8 +725,6 @@ def main(argv: list[str] | None = None) -> int:
 
             if sport == "UFC":
                 m = _ufc_match_espn(bet, events)
-            elif sport == "WORLDCUP":
-                m = _wc_match_espn(bet, events)
             else:
                 m = _match_espn(bet, events)
             if not m:
@@ -880,16 +781,6 @@ def main(argv: list[str] | None = None) -> int:
                 if m["home_score"] is None or m["away_score"] is None:
                     unmatched += 1
                     continue
-                if (sport == "WORLDCUP" and m.get("went_extra")
-                        and bet.get("market_type") == "moneyline"):
-                    # Knockout decided past regulation. The 3-way 1-X-2
-                    # market resolves on the 90-minute result, which was a
-                    # DRAW by definition (ET exists only because regulation
-                    # ended level). ESPN's final score includes the ET
-                    # goals, so _grade would wrongly credit the ET winner's
-                    # ML and fail the draw.
-                    status = "won" if bet.get("side") == "draw" else "lost"
-                else:
                     status = _grade(bet, m["home_score"], m["away_score"])
                 if status is None:
                     unmatched += 1
@@ -899,18 +790,12 @@ def main(argv: list[str] | None = None) -> int:
                     "away":  m["away_score"],
                     "total": m["home_score"] + m["away_score"],
                 }
-                if m.get("went_extra"):
-                    # Record that the stored score is the POST-regulation
-                    # score and the grade came from the regulation-draw rule.
-                    result["went_extra"] = True
             units = bet.get("units") or 1
             pnl = _pnl_units(status, bet["entry_price"], units)
             # Closing Line Value — compute once (skip if already set).
             # Best-effort: a missing PIN closing pair just leaves it NULL.
             clv = None
-            # WORLDCUP is a 3-way market — _compute_clv's 2-way devig would
-            # be wrong, so soccer CLV stays NULL (no soccer closing pair).
-            if bet.get("clv_pp") is None and sport != "WORLDCUP":
+            if bet.get("clv_pp") is None:
                 try:
                     clv = _compute_clv(sb, bet)
                 except Exception as e:

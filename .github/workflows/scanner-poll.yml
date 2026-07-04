@@ -82,15 +82,14 @@ jobs:
       # not all-active — the prior all-active fetch got truncated at 1000 by
       # the never-cleaned table and minted a dupe every tick). Verified
       # idempotent: a commit run then a re-run shows 0 would-create.
-      # WORLDCUP excluded (the tab sources ESPN+PMM directly). UFC = ESPN's
-      # UFC-scoped mma/ufc (no GLORY kickboxing). continue-on-error so an
+      # UFC = ESPN's UFC-scoped mma/ufc (no GLORY kickboxing). continue-on-error so an
       # ESPN blip never blocks the odds tick.
       - name: ESPN → markets (schedule spine)
         continue-on-error: true
         env:
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python -m scripts.ingest_espn_markets --exclude WORLDCUP --commit
+        run: python -m scripts.ingest_espn_markets --commit
 
       # The Odds API / Pinnacle ingest was RETIRED June 2026 (hard cutover
       # to the free PMM+Kalshi exchanges — the subscription was paid through
@@ -210,28 +209,6 @@ jobs:
             "https://www.thekahlahouse.com/api/pm-snapshot?key=${KEY}" || echo "000")
           echo "pm-snapshot HTTP $code"
 
-      # World Cup cent-logger ping. /api/pm-snapshot-wc records Polymarket
-      # 1-X-2 (home/draw/away) cents for upcoming World Cup matches into
-      # pm_snapshots — the 3-way exchange-history clock the soccer sharp score
-      # reads, plus Kalshi KXWCGAME as the confirm venue. Reuses FILLS_CRON_SECRET;
-      # idempotent (dedup on cent change). Cheap (one cached PMM bulk call).
-      #
-      # CADENCE (June 2026): every 1 min (Pro $20 credit covers it; I/O-light).
-      # Runs sequentially after the pm-snapshot curl in this same job, so the
-      # two never truly stack on Vercel — the offset is no longer needed.
-      - name: World Cup — PMM 1-X-2 cent snapshot ping
-        continue-on-error: true
-        env:
-          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
-        run: |
-          if [ -z "$FILLS_CRON_SECRET" ]; then
-            echo "FILLS_CRON_SECRET not set — skipping pm-snapshot-wc ping (no-op)."
-            exit 0
-          fi
-          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
-          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
-            "https://www.thekahlahouse.com/api/pm-snapshot-wc?key=${KEY}" || echo "000")
-          echo "pm-snapshot-wc HTTP $code"
 
       # Pick Bot paperlog ping. /api/handicapper/paperlog auto-logs every
       # gate-cleared suggestion for upcoming MLB games (5h->1min window) into

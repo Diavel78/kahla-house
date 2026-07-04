@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       sport:
-        description: "Single sport code (MLB/NBA/NHL/NFL/CBB/NCAAF/WORLDCUP); blank = all"
+        description: "Single sport code (MLB/NBA/NHL/NFL/CBB/NCAAF/UFC); blank = all"
         required: false
         default: ""
       days:
