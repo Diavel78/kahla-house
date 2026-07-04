@@ -3,3 +3,4 @@ supabase>=2.7
 python-dotenv>=1.0
 pydantic>=2.7
 rapidfuzz>=3.9
+beautifulsoup4>=4.12

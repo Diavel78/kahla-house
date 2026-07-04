@@ -1,0 +1,65 @@
+name: UFC Stats — Ingest
+
+# Fight IQ Phase 1 data spine: scrape UFCStats.com (complete bout history
+# + per-fighter career stats) into Supabase ufc_fighters / ufc_fights.
+# Polite (~1 req/sec, identified UA); idempotent upserts, so every mode is
+# safe to re-run and the backfill resumes where it stopped.
+#
+# Modes (workflow_dispatch input):
+#   probe    — reachability + parse-sanity only, NO writes. Run this FIRST
+#              and read the log: the dev sandbox can't reach UFCStats, so
+#              this log is where the page shape gets verified.
+#   backfill — full history (~700 event pages + ~4k fighter pages ≈ 1h).
+#   delta    — new events since last run + fighters who just fought +
+#              up to 80 not-yet-scraped fighter pages. The weekly default.
+#
+# Weekly schedule: Monday 10:00 UTC — after Saturday cards settle and
+# UFCStats has updated career rates.
+#
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "probe | backfill | delta"
+        required: false
+        default: "delta"
+  schedule:
+    - cron: "0 10 * * 1"
+
+concurrency:
+  group: ufc-stats-ingest
+  cancel-in-progress: false   # never kill a backfill mid-run; it checkpoints
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run ingest
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          MODE="${{ github.event.inputs.mode || 'delta' }}"
+          echo "mode=$MODE"
+          case "$MODE" in
+            probe)
+              python -m scripts.ingest_ufc_stats --probe ;;
+            backfill)
+              python -m scripts.ingest_ufc_stats --events --fighters --commit ;;
+            delta|*)
+              python -m scripts.ingest_ufc_stats --events --fighters --commit --limit 80 ;;
+          esac
