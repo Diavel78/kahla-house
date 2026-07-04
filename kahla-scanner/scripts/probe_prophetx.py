@@ -68,6 +68,53 @@ def docs_mine(client: httpx.Client) -> None:
             print(f"  {u} failed: {e}")
 
 
+def docs_pages(client: httpx.Client) -> None:
+    """No sitemap — mine the docs ROOT for page hrefs, fetch those, grep
+    for base URLs / endpoint paths / auth hints (ReadMe SSRs page bodies)."""
+    try:
+        root = client.get("https://docs.prophetx.co", timeout=15).text
+    except Exception as e:
+        print(f"docs root failed: {e}")
+        return
+    slugs = sorted(set(re.findall(r'href="(/(?:docs|reference|page)/[a-z0-9-]+)"', root)))
+    print(f"\nDOCS page hrefs ({len(slugs)}):")
+    for sl in slugs[:50]:
+        print(f"  {sl}")
+    for sl in slugs[:12]:
+        try:
+            r = client.get("https://docs.prophetx.co" + sl, timeout=15)
+            hosts = sorted(set(re.findall(r"https://[a-z0-9.-]+\.(?:prophetx\.co|betprophet\.co)[a-z0-9./_{}-]*", r.text)))[:12]
+            paths = sorted(set(re.findall(r'["`](/(?:partner|v[0-9]|mm|api)[a-zA-Z0-9./_{}-]{3,70})["`]', r.text)))[:25]
+            auth = sorted(set(re.findall(r"(?i)(access[ _-]?key|secret[ _-]?key|x-api-key|bearer|hmac|signature)", r.text)))[:8]
+            if hosts or paths or auth:
+                print(f"\n--- {sl}\n  hosts: {hosts}\n  paths: {paths}\n  auth: {auth}")
+        except Exception as e:
+            print(f"  {sl} failed: {e}")
+
+
+def gateway_probe(client: httpx.Client) -> None:
+    """cash.api.prophetx.co answers. 401/403 on a path = path EXISTS and
+    wants auth; 404 = wrong path. Distinguishing those maps the surface."""
+    paths = [
+        "/partner/mm/get_tournaments",
+        "/partner/mm/get_sport_events",
+        "/partner/mm/get_markets",
+        "/partner/auth/login",
+        "/v1/mm/get_tournaments",
+        "/partner/get_tournaments",
+        "/api/v1/tournaments",
+        "/v1/events",
+        "/v1/markets",
+    ]
+    print("\nGATEWAY probe (cash.api.prophetx.co) — 401/403 means path exists:")
+    for pth in paths:
+        try:
+            r = client.get("https://cash.api.prophetx.co" + pth, timeout=12)
+            print(f"  {pth} → {r.status_code} · {r.text[:120]!r}")
+        except Exception as e:
+            print(f"  {pth} → ERROR {str(e)[:80]}")
+
+
 def main() -> int:
     client = httpx.Client(headers=UA)
     pages: dict[str, str] = {}
@@ -76,6 +123,8 @@ def main() -> int:
         if body:
             pages[url] = body
     docs_mine(client)
+    docs_pages(client)
+    gateway_probe(client)
 
     # Mine the homepage (and its JS bundles) for API hosts + endpoint paths.
     home = pages.get("https://prophetx.co") or pages.get("https://www.prophetx.co")
