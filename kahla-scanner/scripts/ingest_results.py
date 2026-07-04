@@ -62,6 +62,13 @@ def _fetch_scoreboard(sport: str, yyyymmdd: str) -> list[dict[str, Any]]:
 def _extract(sport: str, event: dict) -> dict | None:
     """Pull a finished game's final score into a game_results row, or None
     if the game isn't final / can't be parsed."""
+    # PRESEASON EXCLUDED (July 2026): ESPN season.type 1 = preseason.
+    # Exhibition results poison the ratings — starters barely play, so a
+    # good team "losing" August games docks its early-season rating for
+    # nothing (the NFL backfill pulled in 48 of them before this filter).
+    # Regular (2) + postseason (3) stay; missing field → keep (defensive).
+    if ((event.get("season") or {}).get("type")) == 1:
+        return None
     comp = (event.get("competitions") or [{}])[0]
     state = ((comp.get("status") or {}).get("type") or {}).get("state", "")
     if state != "post":
