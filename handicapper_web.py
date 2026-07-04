@@ -684,16 +684,16 @@ def _pin_history(sb, market_id: str) -> dict[tuple[str, str], list[dict]]:
 _X_PP_SCALE = 5.2     # prob-points → 0-10 score units (bias-corrected)
 _X_MIN_PP   = 0.25    # weighted move below this (≈ score 1) → no signal
 
-# Sports where Kalshi actually quotes the ML alongside PMM (series ticker +
-# a _TEAM_TO_KALSHI map in app.py, so kalshi rows land in pm_snapshots).
-# Only there does "Kalshi didn't confirm" carry information — the 3-of-9
-# unconfirmed-ML finding was measured where Kalshi HAD a market and stayed
-# silent. For single-venue sports (UFC, NCAAF — no Kalshi map) the demotion
-# would fire on EVERY moneyline, i.e. the sport could never produce an ML
-# pick at all. There PMM steam gates alone; x_confirmed=False is still
-# recorded on every pick so the paperlog review can judge PMM-only ML
-# quality per sport before trusting it further.
-KALSHI_CONFIRM_SPORTS = {"MLB", "NBA", "NHL", "NFL"}
+# NOTE (July 2026): the unconfirmed-ML demotion is DATA-DRIVEN per game,
+# not a per-sport allowlist. _xsharp_ml returns tri-state `confirmed`:
+# False only when Kalshi actually QUOTES the game (kalshi rows exist in
+# pm_snapshots) and stayed silent/flat — that's the 3-of-9 noise case.
+# None (Kalshi has no rows for the game at all — unlisted sport, or a
+# matcher miss) means "didn't confirm" carries no information, so no
+# demotion: UFC/NCAAF MLs gate on PMM steam alone, and any sport Kalshi
+# starts quoting gets the confirmation gate automatically the moment its
+# rows appear. A brief KALSHI_CONFIRM_SPORTS static set lived here for a
+# few hours before the tri-state replaced it.
 
 
 def _pm_history(sb, market_id: str) -> dict:
@@ -742,13 +742,19 @@ def _xsharp_ml(hist: dict, now=None):
     implied prob ROSE (more favored = harder to bet), from PMM cents.
 
     Kalshi is the CONFIRMATION venue (ML-only — it's the one market both
-    exchanges quote):
+    exchanges quote). TRI-STATE `confirmed` (July 2026 — data-driven, was a
+    bool + a static sport allowlist):
       • Kalshi disagrees in direction → return None (no signal; gotcha #21
         spirit + absorbs the same-city PMM side-flip).
       • Kalshi agrees → confirmed=True.
-      • Kalshi silent/flat → confirmed=False (PMM-only — an unconfirmed
-        signal; the caller demotes it to a lean, per the live finding that
-        one-venue moves win only ~3-of-9 vs the confirmed side's 6).
+      • Kalshi QUOTES the game but is silent/flat → confirmed=False
+        (a real unconfirmed signal; the caller demotes it to a lean, per
+        the live finding that one-venue moves win only ~3-of-9).
+      • Kalshi has NO rows for this game AT ALL → confirmed=None
+        (single-venue — Kalshi doesn't list it, or our matcher failed;
+        either way "didn't confirm" carries no information, so the caller
+        must NOT demote. This is what lets UFC/NCAAF MLs gate on PMM
+        steam alone without a per-sport allowlist).
     """
     now = now or datetime.now(timezone.utc)
     h = hist.get(("pmm", "ml", "home", None), [])
@@ -760,11 +766,18 @@ def _xsharp_ml(hist: dict, now=None):
         sig, n = -_weighted_signed_delta(a, "cents", now=now), len(a)
     if sig is None or abs(sig) < _X_MIN_PP:
         return None
-    confirmed = False
     kh = hist.get(("kalshi", "ml", "home", None), [])
-    if len(kh) >= 2:
-        kw = _weighted_signed_delta(kh, "cents", now=now)
-        if abs(kw) >= _X_MIN_PP:
+    ka = hist.get(("kalshi", "ml", "away", None), [])
+    if not kh and not ka:
+        confirmed = None        # single-venue: Kalshi has no read at all
+    else:
+        confirmed = False
+        kw = None
+        if len(kh) >= 2:
+            kw = _weighted_signed_delta(kh, "cents", now=now)
+        elif len(ka) >= 2:      # complementary — away up == home down
+            kw = -_weighted_signed_delta(ka, "cents", now=now)
+        if kw is not None and abs(kw) >= _X_MIN_PP:
             if (kw > 0) != (sig > 0):
                 return None     # feeds disagree → no signal (skip, don't guess)
             confirmed = True    # feeds agree → confirmed pick
@@ -4507,14 +4520,14 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
             # the unconfirmed side won only ~3-of-9. So an unconfirmed ML
             # signal stays visible but DEMOTES to a forced lean (1u) rather
             # than a real pick. SPR/TOT have no second venue → x_confirmed
-            # is True for them, so this never fires there. Scoped to
-            # KALSHI_CONFIRM_SPORTS: single-venue sports (UFC, NCAAF) have
-            # no Kalshi ML at all, so "unconfirmed" is structural, not
-            # evidence — their MLs gate on PMM steam alone.
+            # is True for them, so this never fires there. TRI-STATE:
+            # x_confirmed is None when Kalshi has NO rows for this game at
+            # all (single-venue — UFC/NCAAF, or a matcher miss) — that's
+            # structural absence, not evidence, so `is False` (never
+            # `not x_confirmed`) is load-bearing here.
             unconfirmed_ml = False
             if (mt == "moneyline" and gates_cleared
-                    and score_for_side > 0 and not x_confirmed
-                    and sport in KALSHI_CONFIRM_SPORTS):
+                    and score_for_side > 0 and x_confirmed is False):
                 gates_cleared = False
                 unconfirmed_ml = True
             # Sticky gate (hysteresis — the "5-minute pick" fix, June 2026).
@@ -4659,7 +4672,11 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 "x_side":         mv.get("x_side"),
                 "x_agree":        ((mv.get("x_side") == side)
                                    if mv.get("x_side") else None),
-                "x_confirmed":    bool(x_confirmed),
+                # Tri-state on purpose: True agree / False quoted-but-silent
+                # / null no-Kalshi-read — the paperlog review needs to tell
+                # PMM-only sports apart from genuinely unconfirmed moves.
+                "x_confirmed":    (None if x_confirmed is None
+                                   else bool(x_confirmed)),
                 "unconfirmed_ml": unconfirmed_ml,
                 "fair_source":    fair_src.get("source"),
                 "conflict_reason": conflict_reason,

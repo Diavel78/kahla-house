@@ -3195,6 +3195,63 @@ def debug_kalshi():
     return jsonify(_fetch_kalshi_markets(series))
 
 
+@app.route("/debug-kalshi-discover")
+def debug_kalshi_discover():
+    """Discover Kalshi series tickers from the OPEN events list (public
+    market data, no secrets) — the verify tool for wiring new sports
+    without guessing tickers blind from the sandbox. Examples:
+      /debug-kalshi-discover?q=ufc     → does Kalshi list fights, and as what?
+      /debug-kalshi-discover?q=total   → per-line series for other sports
+    Scans up to ~1200 open events via cursor pagination and aggregates
+    (series_ticker → event count + sample titles), filtered by ?q= against
+    ticker or titles. Once a real ticker is confirmed, probe its market
+    shape with /debug-kalshi?series=TICKER."""
+    q = (request.args.get("q") or "").strip().lower()
+    headers = {"Accept": "application/json", "User-Agent": "kahla-house/1.0"}
+    agg: dict = {}
+    base_used, err = None, None
+    for base in _KALSHI_BASES:
+        try:
+            cursor, pages = None, 0
+            while pages < 6:
+                params = {"status": "open", "limit": 200}
+                if cursor:
+                    params["cursor"] = cursor
+                r = _http.get(f"{base}/events", params=params,
+                              headers=headers, timeout=10)
+                if r.status_code != 200:
+                    err = f"HTTP {r.status_code} @ {base}: {r.text[:120]}"
+                    break
+                base_used = base
+                data = r.json() or {}
+                for ev in (data.get("events") or []):
+                    stk = ev.get("series_ticker") or ""
+                    if not stk:
+                        continue
+                    a = agg.setdefault(stk, {"events": 0, "sample_titles": []})
+                    a["events"] += 1
+                    if len(a["sample_titles"]) < 3:
+                        a["sample_titles"].append(ev.get("title") or "")
+                cursor = data.get("cursor")
+                pages += 1
+                if not cursor:
+                    break
+            if base_used:
+                break
+        except Exception as e:
+            err = f"{type(e).__name__}: {str(e)[:140]}"
+            continue
+    series = [{"series_ticker": k, **v} for k, v in agg.items()]
+    if q:
+        series = [s for s in series
+                  if q in s["series_ticker"].lower()
+                  or any(q in (t or "").lower() for t in s["sample_titles"])]
+    series.sort(key=lambda s: -s["events"])
+    return jsonify({"ok": bool(base_used), "base_used": base_used,
+                    "error": err, "series_count": len(series),
+                    "series": series[:100]})
+
+
 def _probe_vsin_url(url: str) -> dict:
     """Fetch one VSiN URL server-side (Vercel egress reaches it where the
     build sandbox + a phone can't) and characterize the response so we can
@@ -4269,6 +4326,171 @@ def _match_kalshi_wc(events: list, away_key: str, home_key: str) -> dict:
     return {}
 
 
+# ── Kalshi UFC (fighter markets — NAME-matched, no ticker-code map) ──
+# Fighters aren't teams: there's no stable 3-letter code map, so UFC
+# matching mirrors the World Cup index (outcome name from yes_sub_title)
+# with the resolver's last-name-token rule. Series ticker candidates are
+# tried in order (first returning open markets wins — same posture as
+# _KALSHI_BASES / _WORLD_CUP_TAG_SLUGS; a wrong guess returns 0 markets,
+# harmless). Verify/extend the list via /debug-kalshi-discover?q=ufc.
+_KALSHI_UFC_SERIES_CANDIDATES = ["KXUFCFIGHT", "KXUFC", "KXMMAFIGHT"]
+
+
+def _fetch_kalshi_first(candidates: list) -> dict:
+    """First candidate series that returns >0 open markets (each fetch is
+    defensive + 30s-cached). Returns the last attempt if none hit."""
+    out: dict = {}
+    for st in candidates:
+        out = _fetch_kalshi_markets(st)
+        if out.get("ok") and out.get("count"):
+            return out
+    return out
+
+
+def _ufc_kalshi_name_match(a: str, b: str) -> bool:
+    """Fighter-name match: LAST-name token containment in either direction
+    (the resolver's _ufc_match_espn posture — handles 'B. Susurkaev' vs
+    'Baysangur Susurkaev'; non-alphanumerics collapsed for diacritics)."""
+    import re as _re
+
+    def toks(s):
+        return [t for t in _re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).split()
+                if len(t) >= 3]
+    ta, tb = toks(a), toks(b)
+    if not ta or not tb:
+        return False
+    return ta[-1] in tb or tb[-1] in ta
+
+
+def _kalshi_ufc_index(markets: list) -> list:
+    """Group Kalshi UFC markets by event_ticker into
+    [{'date': 'YYYY-MM-DD'|None, 'names': {fighter: cents}}] — one YES
+    contract per fighter (team = yes_sub_title), like the team series.
+    Date from the generic -{YY}{MON}{DD} event-ticker segment when present;
+    None = accepted at match time (open cards rarely collide on names)."""
+    import re as _re
+    events: dict = {}
+    for m in markets:
+        et = m.get("event_ticker") or ""
+        name = m.get("team") or ""
+        if not et or not name:
+            continue
+        date = None
+        mo = _re.search(r"-(\d{2})([A-Z]{3})(\d{2})", et)
+        if mo:
+            yy, mon, dd = mo.groups()
+            mm = _KALSHI_MONTHS.get(mon)
+            if mm:
+                date = f"20{yy}-{mm:02d}-{int(dd):02d}"
+        cents = _mid_cents(m.get("yes_bid_c"), m.get("yes_ask_c"), m.get("last_c"))
+        e = events.setdefault(et, {"date": date, "names": {}})
+        if name not in e["names"] or (e["names"][name] is None and cents is not None):
+            e["names"][name] = cents
+    return list(events.values())
+
+
+def _match_kalshi_ufc(events: list, away: str, home: str, our_date) -> dict:
+    """Kalshi cents for our fight: the event whose outcome names match BOTH
+    fighters (either orientation), ±2 days when the event date is known
+    (UFC block-times drift; the card can cross midnight ET). Returns
+    {'away': cents|None, 'home': cents|None} or {}."""
+    from datetime import date as _date
+    for e in events:
+        if e.get("date") and our_date is not None:
+            try:
+                if abs((_date.fromisoformat(e["date"]) - our_date).days) > 2:
+                    continue
+            except Exception:
+                pass
+        got: dict = {}
+        for name, cents in e["names"].items():
+            if _ufc_kalshi_name_match(name, home):
+                got["home"] = cents
+            elif _ufc_kalshi_name_match(name, away):
+                got["away"] = cents
+        if "home" in got and "away" in got:
+            return got
+    return {}
+
+
+# ── Kalshi per-line series (totals / spreads) → pm_snapshots history ──
+# MLB suffix encodings VERIFIED June 2026 (the make-take cross-shop already
+# reads these live — see _KALSHI_LINE_SERIES):
+#   KXMLBTOTAL  — suffix N       = "Over (N-0.5) runs"        → (total, over, N-0.5)
+#   KXMLBSPREAD — suffix {FAV}{N} = "{FAV} wins by over N-0.5" → (spread, fav, -(N-0.5))
+# Event tickers share the {YY}{MON}{DD}{HHMM}{AWAY}{HOME} encoding, so a
+# game matches by event-key endswith(AWAY+HOME) + date. Only the REAL
+# quoted contracts are logged (Over / the favorite's line) — consumers
+# complement, we never synthesize. Other sports join _KALSHI_LINE_SERIES
+# only after their suffix encoding is confirmed via /debug-kalshi-discover.
+def _kalshi_line_events(markets: list) -> list:
+    """Group per-line markets by event_ticker:
+    [{'date', 'key', 'lines': {ticker_suffix: cents}}]."""
+    import re as _re
+    events: dict = {}
+    for m in markets:
+        tk = m.get("ticker") or ""
+        et = m.get("event_ticker") or ""
+        if "-" not in tk or not et:
+            continue
+        suffix = tk.rsplit("-", 1)[1]
+        date = None
+        mo = _re.search(r"-(\d{2})([A-Z]{3})(\d{2})", et)
+        if mo:
+            yy, mon, dd = mo.groups()
+            mm = _KALSHI_MONTHS.get(mon)
+            if mm:
+                date = f"20{yy}-{mm:02d}-{int(dd):02d}"
+        cents = _mid_cents(m.get("yes_bid_c"), m.get("yes_ask_c"), m.get("last_c"))
+        e = events.setdefault(et, {"date": date, "key": et.split("-", 1)[-1],
+                                   "lines": {}})
+        if suffix not in e["lines"] or (e["lines"][suffix] is None and cents is not None):
+            e["lines"][suffix] = cents
+    return list(events.values())
+
+
+def _match_kalshi_lines(tot_events, spr_events, ac, hc, our_date) -> list:
+    """(market_type, side, line, cents) rows for one game from the bulk
+    per-line indexes. Real quoted contracts only."""
+    import re as _re
+    from datetime import date as _date
+    rows: list = []
+
+    def _ev(events):
+        for e in (events or []):
+            if not (e.get("key") or "").endswith(f"{ac}{hc}"):
+                continue
+            if e.get("date") and our_date is not None:
+                try:
+                    if abs((_date.fromisoformat(e["date"]) - our_date).days) > 1:
+                        continue
+                except Exception:
+                    pass
+            return e
+        return None
+
+    te = _ev(tot_events)
+    if te:
+        for sfx, cents in te["lines"].items():
+            if cents is None or not sfx.isdigit():
+                continue
+            rows.append(("total", "over", int(sfx) - 0.5, cents))
+    se = _ev(spr_events)
+    if se:
+        for sfx, cents in se["lines"].items():
+            if cents is None:
+                continue
+            mo = _re.match(r"([A-Z]+?)(\d+)$", sfx)
+            if not mo:
+                continue
+            fav, n = mo.group(1), int(mo.group(2))
+            side = "home" if fav == hc else ("away" if fav == ac else None)
+            if side is None:
+                continue
+            rows.append(("spread", side, -(n - 0.5), cents))
+    return rows
+
+
 def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
     """Polymarket quotes for one game, all main markets, mids in int cents.
     Returns {"ml": {side: cents}, "rows": [(market_type, side, line, cents)]}
@@ -4499,8 +4721,18 @@ def api_pm_snapshot():
     # Sports with no _TEAM_TO_KALSHI map (NCAAF) skip the fetch entirely —
     # no codes to match the tickers with, so the index would be dead weight.
     active_sports = {g["_sport"] for g in all_games}
-    kal_idx, kal_meta = {}, {}
+    kal_idx, kal_meta, kal_ufc_idx = {}, {}, []
+    kal_lines: dict = {}   # sport -> (total_events, spread_events)
     for sp in active_sports:
+        if sp == "UFC":
+            # Fighter markets — no ticker-code map; NAME-matched index
+            # (see _kalshi_ufc_index). Candidate series tried in order.
+            kal = _fetch_kalshi_first(_KALSHI_UFC_SERIES_CANDIDATES)
+            kal_meta[sp] = {"ok": kal.get("ok"), "count": kal.get("count"),
+                            "series": kal.get("series_ticker")}
+            kal_ufc_idx = (_kalshi_ufc_index(kal.get("markets") or [])
+                           if kal.get("ok") else [])
+            continue
         if not _TEAM_TO_KALSHI.get(sp):
             kal_meta[sp] = {"ok": None, "count": 0, "skipped": "no team map"}
             kal_idx[sp] = []
@@ -4508,6 +4740,18 @@ def api_pm_snapshot():
         kal = _fetch_kalshi_markets(_KALSHI_SERIES[sp])
         kal_meta[sp] = {"ok": kal.get("ok"), "count": kal.get("count")}
         kal_idx[sp] = _kalshi_ml_index(kal.get("markets") or []) if kal.get("ok") else []
+        # Per-line series (totals/spreads) where the suffix encoding is
+        # VERIFIED (MLB today) — two extra bulk fetches, logged per game
+        # below as kalshi total/spread history (SPR/TOT cross-confirm +
+        # richer CLV close, mirroring what Kalshi ML already provides).
+        ls = _KALSHI_LINE_SERIES.get(sp) or {}
+        if ls:
+            tk = _fetch_kalshi_markets(ls["total"]) if ls.get("total") else {}
+            sk = _fetch_kalshi_markets(ls["spread"]) if ls.get("spread") else {}
+            kal_lines[sp] = (
+                _kalshi_line_events(tk.get("markets") or []) if tk.get("ok") else [],
+                _kalshi_line_events(sk.get("markets") or []) if sk.get("ok") else [],
+            )
 
     try:
         import pmm_markets as _pm
@@ -4524,16 +4768,31 @@ def api_pm_snapshot():
         away, home = [s.strip() for s in g["event_name"].split(" @ ", 1)]
         mid = g["id"]
 
-        # Kalshi (from the per-sport bulk fetch — no per-game network)
-        ac, hc = _our_team_to_kalshi_code(sp, away), _our_team_to_kalshi_code(sp, home)
-        kc = {}
-        if ac and hc:
+        # Kalshi (from the per-sport bulk fetches — no per-game network)
+        try:
+            od = (datetime.fromisoformat(str(g["event_start"]).replace("Z", "+00:00"))
+                  .astimezone(ZoneInfo("America/New_York")).date())
+        except Exception:
+            od = None
+        kc, kline_rows = {}, []
+        if sp == "UFC":
             try:
-                od = (datetime.fromisoformat(str(g["event_start"]).replace("Z", "+00:00"))
-                      .astimezone(ZoneInfo("America/New_York")).date())
-                kc = _match_kalshi(kal_idx.get(sp, []), ac, hc, od)
+                kc = _match_kalshi_ufc(kal_ufc_idx, away, home, od)
             except Exception:
                 kc = {}
+        else:
+            ac, hc = _our_team_to_kalshi_code(sp, away), _our_team_to_kalshi_code(sp, home)
+            if ac and hc and od is not None:
+                try:
+                    kc = _match_kalshi(kal_idx.get(sp, []), ac, hc, od)
+                except Exception:
+                    kc = {}
+                if sp in kal_lines:
+                    try:
+                        kline_rows = _match_kalshi_lines(
+                            kal_lines[sp][0], kal_lines[sp][1], ac, hc, od)
+                    except Exception:
+                        kline_rows = []
         if kc.get("home") or kc.get("away"):
             st["kalshi_games"] += 1
 
@@ -4556,6 +4815,10 @@ def api_pm_snapshot():
             if c is None or c <= 0 or c >= 100:       # no quote / degenerate
                 continue
             rows.append((mid, "kalshi", "ml", side, None, int(c)))
+        for (mt2, side2, line2, c2) in kline_rows:    # kalshi totals/spreads
+            if c2 is None or c2 <= 0 or c2 >= 100:
+                continue
+            rows.append((mid, "kalshi", mt2, side2, line2, int(c2)))
 
         # Capture both feeds' HOME cents for the cross-confirm trigger.
         if (pmm.get("home") not in (None, 0)) and (kc.get("home") not in (None, 0)):
