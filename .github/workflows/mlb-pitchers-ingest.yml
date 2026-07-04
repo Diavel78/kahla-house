@@ -1,0 +1,52 @@
+name: MLB Pitchers — Ingest
+
+# Diamond IQ Phase 1: per-game pitching logs (actual starter, IP/BF/ER/K/BB)
+# from the official MLB Stats API into mlb_pitcher_games.
+#   probe    — reachability + boxscore shape verification, no writes.
+#   backfill — 2025-03-01 → today (2025 season + 2026 to date, ~30 min).
+#   delta    — last 4 days (the daily in-season default).
+#
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "probe | backfill | delta"
+        required: false
+        default: "delta"
+  schedule:
+    - cron: "30 10 * * *"
+
+concurrency:
+  group: mlb-pitchers-ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run ingest
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          MODE="${{ github.event.inputs.mode || 'delta' }}"
+          echo "mode=$MODE"
+          case "$MODE" in
+            probe)    python -m scripts.ingest_mlb_pitchers --probe ;;
+            backfill) python -m scripts.ingest_mlb_pitchers --backfill --commit ;;
+            delta|*)  python -m scripts.ingest_mlb_pitchers --delta --commit ;;
+          esac
