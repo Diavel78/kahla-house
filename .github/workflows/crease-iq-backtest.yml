@@ -8,6 +8,11 @@ name: Crease IQ — Backtest
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "report | sweep"
+        required: false
+        default: "report"
 
 concurrency:
   group: crease-iq-backtest
@@ -33,4 +38,10 @@ jobs:
         env:
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python -m scripts.backtest_crease_iq
+        run: |
+          MODE="${{ github.event.inputs.mode || 'report' }}"
+          if [ "$MODE" = "sweep" ]; then
+            python -m scripts.backtest_crease_iq --sweep
+          else
+            python -m scripts.backtest_crease_iq
+          fi
