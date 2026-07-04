@@ -1663,30 +1663,28 @@
         await Promise.all([work(), work()]);   // 2 at a time
     }
 
-    // One-tap log a recommended bet straight from a line-2 chip (no modal).
-    async function oneTapLog(mid, idx) {
-        if (!_canLog) return;   // admin-only — logging is regression data
+    // Quick-bet chip on the games list. Was a true one-tap auto-log; as of
+    // July 2026 (user call, after logging real ProphetX fills) it opens the
+    // SAME log modal Details uses — pre-filled from the prefetched verdict
+    // body — so the optional ProphetX fill-odds field is available on quick
+    // bets too. submitLog() uses _pendingBody as the base for this path.
+    function oneTapLog(mid, idx) {
+        if (!_canLog) return;
         const v = _verdictCache.get(mid);
         const p = v && v.picks && v.picks[idx];
-        if (!p) return;
-        // Safety: never one-tap the opposite/correlated side of a logged bet.
+        if (!p || !p._body) return;
+        // Safety: never prompt the opposite/correlated side of a logged bet.
         if (_pickState(mid, p.market_type, p.side, p.units).state === 'conflict') { pickGame(mid); return; }
-        // Carry the make/take rec onto the entry if we have a live verdict
-        // (cached when the dossier was open for this game). No-op otherwise.
-        const body = _applyMakeTakeToBody(Object.assign({}, p._body));
-        try {
-            const r = await authFetch('/api/handicapper/pick', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
-            const out = r ? await r.json().catch(() => null) : null;
-            if (out && (out.ok || out.skipped)) {
-                _toast(out.skipped ? 'Already logged ✓' : `Logged ${p._chip} ✓`);
-                loadData(false);
-            } else {
-                _toast('Log failed' + (out && out.error ? ': ' + out.error : ''), 'err');
-            }
-        } catch (e) { _toast('Log failed', 'err'); }
+        _pendingBody = Object.assign({}, p._body);
+        _pendingPick = null;
+        document.getElementById('lmSelection').value  = p._chip || `${p.market_type} ${p.side}`;
+        document.getElementById('lmUnits').value      = String(p._body.units || p.units || 1);
+        document.getElementById('lmConfidence').value = p._body.confidence || 'low';
+        document.getElementById('lmReasons').value    = (p._body.reasons || []).join('\n');
+        document.getElementById('lmAnalysis').value   = '';
+        document.getElementById('lmPxPrice').value    = '';
+        _lmStatus(null, '');
+        document.getElementById('logModal').classList.add('show');
     }
 
     // ── Live tracker (admin only) ──────────────────────────────────────
@@ -1861,6 +1859,7 @@
     // ─── Dossier (web-side ask) ───
     let _lastDossier = null;
     let _pendingPick = null;
+    let _pendingBody = null;   // quick-bet path: prefetched verdict body as modal base
 
     // Auto-refresh: while the dossier modal is open, re-fetch the
     // dossier every 30s so the suggestion/odds reflect whatever the
@@ -2928,6 +2927,8 @@
             seed_units:  1,
             seed_conf:   'low',
         };
+        _pendingBody = null;   // never inherit a stale quick-bet base
+        document.getElementById('lmPxPrice').value    = '';
         document.getElementById('lmSelection').value  = _pendingPick.label;
         document.getElementById('lmUnits').value      = '1';
         document.getElementById('lmConfidence').value = 'low';
@@ -2966,6 +2967,8 @@
             seed_units:  1,
             seed_conf:   'low',
         };
+        _pendingBody = null;   // never inherit a stale quick-bet base
+        document.getElementById('lmPxPrice').value    = '';
         document.getElementById('lmSelection').value  = _pendingPick.label;
         document.getElementById('lmUnits').value      = '1';
         document.getElementById('lmConfidence').value = 'low';
@@ -3044,12 +3047,16 @@
         document.getElementById('lmConfidence').value = _pendingPick.seed_conf || 'medium';
         document.getElementById('lmReasons').value    = _buildReasons(_pendingPick, _lastDossier).join('\n');
         document.getElementById('lmAnalysis').value   = '';
+        document.getElementById('lmPxPrice').value    = '';
+        _pendingBody = null;   // dossier path — never inherit a quick-bet base
         _lmStatus(null, '');
         document.getElementById('logModal').classList.add('show');
     }
     function closeLog() {
         document.getElementById('logModal').classList.remove('show');
         _pendingPick = null;
+        _pendingBody = null;
+        const px = document.getElementById('lmPxPrice'); if (px) px.value = '';
     }
     // Transient confirmation toast (bottom-center). Used after logging a
     // pick so the dossier can stay open for the next bet.
@@ -3258,14 +3265,22 @@
 
     async function submitLog() {
         _lmStatus(null, '');
-        if (!_pendingPick) {
+        if (!_pendingPick && !_pendingBody) {
             _lmStatus('err', 'No pick selected — close the modal and try again.');
             return;
         }
         const reasons = (document.getElementById('lmReasons').value || '')
             .split('\n').map(r => r.trim()).filter(Boolean);
         const analysis = document.getElementById('lmAnalysis').value || '';
-        const body = {
+        // Quick-bet path: the prefetched verdict body IS the base (it already
+        // carries signal_blob/fair/edge from the verdict fetch) — the modal
+        // only overrides what the user can edit here.
+        const body = _pendingBody ? Object.assign({}, _pendingBody, {
+            units:       Number(document.getElementById('lmUnits').value),
+            confidence:  document.getElementById('lmConfidence').value,
+            analysis_md: analysis || null,
+            reasons:     reasons.length ? reasons : (_pendingBody.reasons || null),
+        }) : {
             market_id:   _pendingPick.market_id,
             market_type: _pendingPick.market_type,
             side:        _pendingPick.side,
