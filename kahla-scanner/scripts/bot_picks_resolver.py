@@ -781,7 +781,7 @@ def main(argv: list[str] | None = None) -> int:
                 if m["home_score"] is None or m["away_score"] is None:
                     unmatched += 1
                     continue
-                    status = _grade(bet, m["home_score"], m["away_score"])
+                status = _grade(bet, m["home_score"], m["away_score"])
                 if status is None:
                     unmatched += 1
                     continue
