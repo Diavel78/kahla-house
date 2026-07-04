@@ -9,10 +9,12 @@ Two outputs per bout:
   • WINNER: P(A beats B). A/B are NEUTRALLY ordered (min fighter id
     first) because ufc_fights lists the WINNER as fighter1 — predicting
     on table order would leak the label.
-  • ROUNDS: P(fight lasts > 2.5 rounds) for non-title bouts — the
-    flagship derivative market (the NRFI playbook). P(under) =
-    P(finish) x share-of-finishes-before-12:30, both from walk-forward
-    running counters.
+  • DURATION: P(finish) + the finish-TIMING curve (share of finishes
+    inside 2:30/7:30/12:30 — walk-forward counters), which together
+    price the whole derivative family: the ROUNDS ladder (over 0.5 /
+    1.5 / 2.5 — books post whichever is nearest 50/50 per fight) AND
+    the DISTANCE prop (P(distance) = 1 − P(finish); ~50.9% base rate,
+    the market's natural coin flip; Kalshi series KXUFCDISTANCE).
 
 LEAKAGE NOTES (deliberate, documented):
   • Elo, age, layoff, chin, finish-rates: as-of-date from the fights
@@ -47,9 +49,15 @@ STYLE_CAP       = 36.0
 
 WARMUP_FIGHTS   = 3       # both fighters need >= this many prior UFC bouts
 
-# ── Rounds model ──────────────────────────────────────────────────────
-ROUNDS_LINE_MIN = 12.5    # over/under 2.5 rounds == 12:30 of a 3-rounder
-FINISH_CLAMP    = (0.05, 0.95)
+# ── Duration models (rounds ladder + distance prop) ──────────────────
+# A rounds line of X.5 settles at the midpoint of round X+1, so the
+# elapsed-minute cuts are 2:30 / 7:30 / 12:30. Distance (3-rounders) =
+# the full 15:00. Graded on non-title bouts; ~5% of those are 5-round
+# main events (visible when they end R4/R5) — small, documented noise
+# until a bout_order/scheduled_rounds column exists.
+ROUND_CUTS   = {"0.5": 2.5, "1.5": 7.5, "2.5": 12.5}
+DISTANCE_MIN = 14.99
+FINISH_CLAMP = (0.05, 0.95)
 
 # Fitted by fit_scale()/fit_rounds() on the training window; these are
 # just fallbacks when no fit has run.
@@ -184,7 +192,8 @@ def replay(fights: list[dict], fighters: dict[str, dict],
     """
     state: dict[str, _F] = {}
     wc_fin = {}                    # wc -> [finished, total] running counters
-    fin_early = [0, 0]             # finishes <= 12.5min vs all finishes (non-title)
+    fin_cut = {k: 0 for k in ROUND_CUTS}   # finishes inside each cut (non-title)
+    fin_tot = 0                            # all non-title finishes
     recs: list[dict] = []
     since = _pdate(collect_since) if collect_since else None
 
@@ -221,16 +230,24 @@ def replay(fights: list[dict], fighters: dict[str, dict],
                 overall = tot_f / tot_n
             pf_a = (sa.finished_bouts / sa.bouts) if sa.bouts >= 3 else None
             pf_b = (sb.finished_bouts / sb.bouts) if sb.bouts >= 3 else None
-            cond = (fin_early[0] / fin_early[1]) if fin_early[1] >= 100 else None
+            conds = {k: (fin_cut[k] / fin_tot if fin_tot >= 100 else None)
+                     for k in ROUND_CUTS}
+            gradable = dur is not None and not title
             recs.append({
                 "date": when.isoformat(),
                 "d_core": d_core, "d_full": d_full,
                 "y": 1 if row.get("winner_id") == a_id else 0,
                 "title": title,
                 "wc_rate": wc_rate, "overall": overall,
-                "pf_a": pf_a, "pf_b": pf_b, "cond": cond,
-                "over_y": (1 if dur > ROUNDS_LINE_MIN else 0)
-                          if (dur is not None and not title) else None,
+                "pf_a": pf_a, "pf_b": pf_b, "conds": conds,
+                "over_y": {k: (1 if dur > cut else 0)
+                           for k, cut in ROUND_CUTS.items()} if gradable else None,
+                # distance graded only when the bout provably ran on a
+                # 3-round clock or ended early (R4/R5 bouts are 5-rounders
+                # with a different distance definition)
+                "dist_y": ((1 if dur >= DISTANCE_MIN else 0)
+                           if (gradable and (row.get("round") or 0) <= 3)
+                           else None),
             })
 
         # ── update state ──
@@ -262,10 +279,19 @@ def replay(fights: list[dict], fighters: dict[str, dict],
             if fin:
                 wf[0] += 1
                 if not title:
-                    fin_early[1] += 1
-                    if dur <= ROUNDS_LINE_MIN:
-                        fin_early[0] += 1
-    return state, recs
+                    fin_tot += 1
+                    for k, cut in ROUND_CUTS.items():
+                        if dur <= cut:
+                            fin_cut[k] += 1
+    aggs = {
+        "wc_rates": {k: round(v[0] / v[1], 4) for k, v in wc_fin.items()
+                     if v[1] >= 30},
+        "overall_finish": (round(sum(v[0] for v in wc_fin.values())
+                                 / max(1, sum(v[1] for v in wc_fin.values())), 4)),
+        "finish_conds": {k: (round(fin_cut[k] / fin_tot, 4) if fin_tot else None)
+                         for k in ROUND_CUTS},
+    }
+    return state, recs, aggs
 
 
 # ── calibration + evaluation ─────────────────────────────────────────
@@ -292,19 +318,29 @@ def p_finish(r: dict, beta: float) -> float | None:
     return max(FINISH_CLAMP[0], min(FINISH_CLAMP[1], p))
 
 
-def p_over(r: dict, beta: float) -> float | None:
-    """P(over 2.5 rounds) for a non-title bout."""
+def p_distance(r: dict, beta: float) -> float | None:
+    """P(the bout goes the distance) = 1 − P(finish). The purest
+    expression of the duration model (no timing term)."""
     pf = p_finish(r, beta)
-    if pf is None or r["cond"] is None:
+    return None if pf is None else 1.0 - pf
+
+
+def p_over(r: dict, beta: float, line: str = "2.5") -> float | None:
+    """P(over `line` rounds): 1 − P(finish) x P(finish inside the cut)."""
+    pf = p_finish(r, beta)
+    cond = (r.get("conds") or {}).get(line)
+    if pf is None or cond is None:
         return None
-    return 1.0 - pf * r["cond"]
+    return 1.0 - pf * cond
 
 
 def fit_beta(recs: list[dict], grid=(0.0, 0.25, 0.5, 0.75, 1.0)) -> float:
-    rr = [r for r in recs if r["over_y"] is not None]
+    """Beta fit on the DISTANCE prop — the duration model's purest,
+    largest-sample expression (every rounds line shares this beta)."""
+    rr = [r for r in recs if r.get("dist_y") is not None]
     best, best_b = DEFAULT_BETA, 1e9
     for beta in grid:
-        pts = [(p_over(r, beta), r["over_y"]) for r in rr]
+        pts = [(p_distance(r, beta), r["dist_y"]) for r in rr]
         pts = [(p, y) for p, y in pts if p is not None]
         if not pts:
             continue
@@ -334,23 +370,42 @@ def evaluate(recs: list[dict], scale: float, beta: float,
             b[1] += 1
         out["calibration"] = {k: {"win": round(v[0] / v[1], 3), "n": v[1]}
                               for k, v in sorted(buckets.items())}
-    rr = [r for r in recs if r["over_y"] is not None]
-    pts = [(p_over(r, beta), r["over_y"], r) for r in rr]
-    pts = [(p, y, r) for p, y, r in pts if p is not None]
-    if pts:
-        out["rounds_n"] = len(pts)
-        out["rounds_brier"] = sum((p - y) ** 2 for p, y, _ in pts) / len(pts)
-        # baseline: the walk-forward weight-class base rate alone (beta=0)
-        base_pts = [(p_over(r, 0.0), y) for _, y, r in pts]
-        out["rounds_brier_base"] = (sum((p - y) ** 2 for p, y in base_pts)
-                                    / len(base_pts))
-        out["rounds_over_rate"] = sum(y for _, y, _ in pts) / len(pts)
+    # Distance prop — the headline duration market.
+    dd = [(p_distance(r, beta), p_distance(r, 0.0), r["dist_y"])
+          for r in recs if r.get("dist_y") is not None]
+    dd = [(p, p0, y) for p, p0, y in dd if p is not None and p0 is not None]
+    if dd:
+        out["dist_n"] = len(dd)
+        out["dist_rate"] = sum(y for _, _, y in dd) / len(dd)
+        out["dist_brier"] = sum((p - y) ** 2 for p, _, y in dd) / len(dd)
+        out["dist_brier_base"] = sum((p0 - y) ** 2 for _, p0, y in dd) / len(dd)
+    # Rounds ladder — every line, each vs its beta=0 base-rate baseline.
+    out["rounds"] = {}
+    for line in ROUND_CUTS:
+        pts = [(p_over(r, beta, line), p_over(r, 0.0, line),
+                (r["over_y"] or {}).get(line))
+               for r in recs if r.get("over_y") is not None]
+        pts = [(p, p0, y) for p, p0, y in pts
+               if p is not None and p0 is not None and y is not None]
+        if not pts:
+            continue
+        out["rounds"][line] = {
+            "n": len(pts),
+            "over_rate": round(sum(y for _, _, y in pts) / len(pts), 3),
+            "brier": round(sum((p - y) ** 2 for p, _, y in pts) / len(pts), 4),
+            "brier_base": round(sum((p0 - y) ** 2 for _, p0, y in pts)
+                                / len(pts), 4),
+        }
     return out
 
 
 def snapshot(state: dict, fighters: dict[str, dict], scale: float,
-             beta: float, min_fights: int = 1) -> dict:
-    """Serializable model snapshot for the ufc_model table."""
+             beta: float, aggs: dict | None = None,
+             min_fights: int = 1) -> dict:
+    """Serializable model snapshot for the ufc_model table. `aggs`
+    (wc finish rates + finish-timing conds + overall rate from replay)
+    ships in the snapshot so Phase 3 can price the rounds ladder and
+    the distance prop live without re-running the replay."""
     ratings = {}
     for fid, f in state.items():
         if f.n < min_fights:
@@ -363,7 +418,8 @@ def snapshot(state: dict, fighters: dict[str, dict], scale: float,
                          if f.bouts >= 3 else None),
             "name": (fighters.get(fid) or {}).get("name"),
         }
-    return {"scale": scale, "beta": beta, "ratings": ratings}
+    return {"scale": scale, "beta": beta, "aggs": aggs or {},
+            "ratings": ratings}
 
 
 def load_from_db(sb, since: str = "2005-01-01"):

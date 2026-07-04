@@ -30,13 +30,13 @@ def main() -> int:
 
     sb = db.client()
     fights, fighters = M.load_from_db(sb)
-    state, recs = M.replay(fights, fighters, collect_since="2015-01-01")
+    state, recs, aggs = M.replay(fights, fighters, collect_since="2015-01-01")
     if len(recs) < 500:
         log.error("only %d graded records — refusing to fit on that", len(recs))
         return 2
     scale = M.fit_scale(recs, key="d_full")
     beta = M.fit_beta(recs)
-    snap = M.snapshot(state, fighters, scale, beta)
+    snap = M.snapshot(state, fighters, scale, beta, aggs=aggs)
     n_active = sum(1 for r in snap["ratings"].values()
                    if (r.get("last") or "") >= "2024-01-01")
     log.info("snapshot: %d rated fighters (%d active since 2024) · "
@@ -52,7 +52,7 @@ def main() -> int:
         log.info("dry-run — nothing written")
         return 0
     sb.table("ufc_model").insert({
-        "params": {"scale": scale, "beta": beta,
+        "params": {"scale": scale, "beta": beta, "aggs": aggs,
                    "n_fit_records": len(recs), "n_fights": len(fights)},
         "ratings": snap["ratings"],
     }).execute()

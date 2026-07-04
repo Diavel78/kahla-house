@@ -39,7 +39,7 @@ def main() -> int:
     print("=" * 64)
     print(f"{len(fights)} bouts · {len(fighters)} detailed fighters")
 
-    _, recs = M.replay(fights, fighters, collect_since=args.collect_since)
+    _, recs, _aggs = M.replay(fights, fighters, collect_since=args.collect_since)
     train = [r for r in recs if r["date"] < args.eval_since]
     test = [r for r in recs if r["date"] >= args.eval_since]
     print(f"graded records: {len(recs)} (train {len(train)}, eval {len(test)})")
@@ -57,12 +57,15 @@ def main() -> int:
               f" · n {ev['n']}  (coinflip Brier 0.2500)")
         for k, v in ev["calibration"].items():
             print(f"    {k}: win {v['win']:.1%} (n={v['n']})")
-        if "rounds_brier" in ev:
-            print(f"  rounds : Brier {ev['rounds_brier']:.4f} vs base-rate "
-                  f"{ev['rounds_brier_base']:.4f} · n {ev['rounds_n']} · "
-                  f"over-rate {ev['rounds_over_rate']:.3f}")
+        if "dist_brier" in ev:
+            print(f"  distance: Brier {ev['dist_brier']:.4f} vs base-rate "
+                  f"{ev['dist_brier_base']:.4f} · n {ev['dist_n']} · "
+                  f"dist-rate {ev['dist_rate']:.3f}")
+        for line, m in (ev.get("rounds") or {}).items():
+            print(f"  over {line}: Brier {m['brier']:.4f} vs base "
+                  f"{m['brier_base']:.4f} · n {m['n']} · over-rate {m['over_rate']}")
     print("\nRead: winner calibration buckets should rise monotonically;")
-    print("rounds Brier below the base-rate column = the flagship gate.")
+    print("distance/rounds Brier below the base-rate column = the flagship gate.")
     return 0
 
 
