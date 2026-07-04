@@ -43,24 +43,105 @@ log = logging.getLogger(__name__)
 
 BASE = "http://www.ufcstats.com"
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 kahla-house-research")
+       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 _SLEEP = 0.7          # politeness between requests
 _TRIES = 3
 
+# UFCStats fronts requests with a JavaScript proof-of-work challenge
+# (probe run 2 caught it: '<noscript>This site requires JavaScript' + the
+# SHA-256 round constants 0x428a2f98... in an inline script). Plain HTTP
+# can never pass it, so the Fetcher solves it ONCE in headless Chromium
+# (Playwright — installed by the workflow only, NOT in requirements.txt:
+# scanner-poll pip-installs that file every minute and must stay light),
+# copies the clearance cookie into httpx, and does the thousands of
+# follow-up fetches cheaply. If the cookie stops working it falls back to
+# fetching every page through the browser.
+_CHALLENGE_MARKERS = ("requires javascript", "0x428a2f98")
 
-def _get(client: httpx.Client, url: str) -> str | None:
-    """Polite GET with retries. Returns HTML text or None."""
-    for attempt in range(_TRIES):
+
+def _is_challenge(html: str) -> bool:
+    low = (html or "").lower()
+    return any(m in low for m in _CHALLENGE_MARKERS)
+
+
+class Fetcher:
+    """httpx-first fetcher with a headless-Chromium challenge solver."""
+
+    def __init__(self):
+        self.http = httpx.Client(headers={"User-Agent": _UA},
+                                 follow_redirects=True)
+        self._pw = self._browser = self._page = None
+        self.browser_only = False
+        self._challenged_after_cookies = 0
+
+    def _browser_get(self, url: str) -> str | None:
+        if self._page is None:
+            log.info("JS challenge detected — starting headless Chromium")
+            from playwright.sync_api import sync_playwright
+            self._pw = sync_playwright().start()
+            self._browser = self._pw.chromium.launch()
+            self._page = self._browser.new_page(user_agent=_UA)
+        page = self._page
         try:
-            r = client.get(url, timeout=20, follow_redirects=True)
-            if r.status_code == 200 and r.text:
-                time.sleep(_SLEEP)
-                return r.text
-            log.warning("HTTP %s %s (try %d)", r.status_code, url, attempt + 1)
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
         except Exception as e:
-            log.warning("GET %s failed (try %d): %s", url, attempt + 1, e)
-        time.sleep(1.5 * (attempt + 1))
-    return None
+            log.warning("browser goto %s failed: %s", url, e)
+            return None
+        html = ""
+        for _ in range(30):                 # PoW usually solves in 2-5s
+            html = page.content()
+            if not _is_challenge(html):
+                break
+            page.wait_for_timeout(1000)
+        try:                                # clearance cookie → cheap httpx
+            for c in self._browser.contexts[0].cookies():
+                self.http.cookies.set(c["name"], c["value"],
+                                      domain=c.get("domain") or "")
+        except Exception:
+            pass
+        return html or None
+
+    def get(self, url: str) -> str | None:
+        if not self.browser_only:
+            for attempt in range(_TRIES):
+                try:
+                    r = self.http.get(url, timeout=20)
+                    if r.status_code == 200 and r.text and not _is_challenge(r.text):
+                        time.sleep(_SLEEP)
+                        return r.text
+                    if r.status_code == 200 and _is_challenge(r.text):
+                        if self._page is not None:
+                            self._challenged_after_cookies += 1
+                            if self._challenged_after_cookies >= 2:
+                                log.info("clearance cookie not honored — "
+                                         "switching to browser-only fetches")
+                                self.browser_only = True
+                        break               # challenged → solve in browser
+                    log.warning("HTTP %s %s (try %d)", r.status_code, url,
+                                attempt + 1)
+                except Exception as e:
+                    log.warning("GET %s failed (try %d): %s", url, attempt + 1, e)
+                time.sleep(1.5 * (attempt + 1))
+        html = self._browser_get(url)
+        time.sleep(_SLEEP)
+        if html is None or _is_challenge(html):
+            log.warning("challenge unsolved for %s", url)
+            return None
+        return html
+
+    def close(self):
+        try:
+            if self._browser:
+                self._browser.close()
+            if self._pw:
+                self._pw.stop()
+        except Exception:
+            pass
+
+
+def _get(client, url: str) -> str | None:
+    """Back-compat shim — `client` is a Fetcher."""
+    return client.get(url)
 
 
 def _soup(html: str) -> BeautifulSoup:
@@ -403,7 +484,7 @@ def main() -> int:
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    client = httpx.Client(headers={"User-Agent": _UA})
+    client = Fetcher()
     if args.probe:
         return probe(client)
 

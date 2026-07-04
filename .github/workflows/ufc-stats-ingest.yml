@@ -48,6 +48,16 @@ jobs:
           cache-dependency-path: kahla-scanner/requirements.txt
       - name: Install deps
         run: pip install -r requirements.txt
+      # Playwright + Chromium: UFCStats fronts requests with a JS
+      # proof-of-work challenge, so the Fetcher solves it once in a
+      # headless browser and reuses the clearance cookie for the cheap
+      # httpx fetches. Installed HERE only — deliberately NOT in
+      # requirements.txt, which the 1-minute scanner-poll cron installs
+      # on every tick and must stay light.
+      - name: Install Playwright Chromium
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
       - name: Run ingest
         env:
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
