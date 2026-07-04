@@ -4440,6 +4440,15 @@ def _kalshi_ufc_index(markets: list) -> list:
     for m in markets:
         et = m.get("event_ticker") or ""
         name = m.get("team") or ""
+        if not name:
+            # KXUFCFIGHT titles are "Will {Fighter} win the X vs Y
+            # professional MMA fight scheduled for {date}?" (VERIFIED via
+            # the live /debug-kalshi-discover probe, July 2026). team
+            # (= yes_sub_title) is unverified on this series, so the title
+            # parse is the safety net either way.
+            mo_t = _re.match(r"(?i)\s*will\s+(.+?)\s+win\b", m.get("title") or "")
+            if mo_t:
+                name = mo_t.group(1).strip()
         if not et or not name:
             continue
         date = None
