@@ -180,7 +180,7 @@ def fit_params(preds: list[tuple[float, int]]) -> tuple[float, float]:
     (raw_margin_without_hfa, home_won) pairs."""
     best = (DEFAULT_HFA, DEFAULT_SCALE, 1e9)
     for hfa in [x / 100.0 for x in range(0, 41, 5)]:
-        for scale in [x / 100.0 for x in range(60, 201, 10)]:
+        for scale in [x / 100.0 for x in range(60, 301, 10)]:
             b = sum((margin_to_prob(m + hfa, scale) - y) ** 2
                     for m, y in preds) / max(len(preds), 1)
             if b < best[2]:

@@ -1,0 +1,36 @@
+name: Diamond IQ — Backtest
+
+# Diamond IQ Phase 2: walk-forward backtest of the pitcher-aware MLB model
+# over mlb_pitcher_games. Manual dispatch only — metrics print to the run
+# log (accuracy / Brier / calibration vs the dead 52.5% team core).
+#
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: diamond-iq-backtest
+  cancel-in-progress: true
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run backtest
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.backtest_diamond_iq
