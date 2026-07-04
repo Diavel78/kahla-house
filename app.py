@@ -3700,6 +3700,31 @@ def _pmm_maker_rebate_cents(price_cents) -> float:
     return round(1.25 * p * (1.0 - p), 2)
 
 
+def _prophetx_take_fee_cents(price_cents) -> float:
+    """ProphetX effective fee per contract, in cents: 2c · p·(1-p). Their
+    headline is "2% of net winnings per market" (win-only) — a 2% haircut on
+    the PROFIT works out to the same p·(1-p) fee curve as Polymarket's, just
+    a different coefficient (2 vs taker 5 vs maker -1.25). Max 0.5c at 50c.
+    No feed exists (API is application-gated) — this prices the MANUAL
+    cross-shop threshold shown in Details: the ProphetX board price at which
+    taking there beats the engine's best Poly/Kalshi option."""
+    if price_cents is None:
+        return 0.0
+    p = max(0.0, min(1.0, price_cents / 100.0))
+    return round(2.0 * p * (1.0 - p), 2)
+
+
+def _cents_to_american_py(cents) -> int | None:
+    """52.4c -> -110; 45c -> +122. None out of range."""
+    try:
+        p = float(cents) / 100.0
+    except (TypeError, ValueError):
+        return None
+    if not (0.0 < p < 1.0):
+        return None
+    return int(round(-p / (1 - p) * 100)) if p >= 0.5 else int(round((1 - p) / p * 100))
+
+
 def _book_signal(book: dict | None, edge_units: float = 1,
                  starts_in_min: float | None = None) -> dict | None:
     """Make-vs-take for BUYING this side, FEE- AND TIME-aware. A maker fills
@@ -3951,13 +3976,25 @@ def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
     directive = best.get("post_price")
     if directive is None:
         directive = best["all_in"]
+    # ProphetX MANUAL cross-shop threshold (no feed — the user checks their
+    # app): the raw ProphetX board price E at which E + 2·p(1-p) fee equals
+    # the winner's all-in cost. Two fixed-point passes converge to <0.01c.
+    px = None
+    target = best["all_in"]
+    if target is not None and 1.0 < target < 99.0:
+        e = target - _prophetx_take_fee_cents(target)
+        e = target - _prophetx_take_fee_cents(e)
+        amer = _cents_to_american_py(e)
+        if amer is not None:
+            px = {"beat_cents": round(e, 1), "beat_american": amer,
+                  "vs": f"{best['rec']} {vlabel[best['venue']]}"}
     return {
         "rec": best["rec"], "venue": best["venue"], "venue_label": vlabel[best["venue"]],
         "price": directive, "entry_cents": best["all_in"],
         "best_bid": best["bid"], "best_ask": best["ask"],
         "touch_imbalance": best["touch_imb"],
         "queue_ahead": best["queue_ahead"], "ask_touch": best["ask_touch"],
-        "options": opts, "why": [why],
+        "options": opts, "why": [why], "prophetx": px,
     }
 
 

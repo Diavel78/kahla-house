@@ -734,6 +734,10 @@
                 <label>Analysis (optional, markdown)</label>
                 <textarea id="lmAnalysis" placeholder="Full write-up …"></textarea>
             </div>
+            <div class="field">
+                <label>Filled on ProphetX instead? Enter YOUR fill odds (optional, e.g. -112)</label>
+                <input type="text" id="lmPxPrice" inputmode="numeric" placeholder="leave blank if Polymarket/Kalshi" />
+            </div>
             <div class="actions">
                 <button onclick="closeLog()">Cancel</button>
                 <button class="primary" id="lmSubmit" onclick="submitLog()">Log Pick</button>
@@ -2673,6 +2677,14 @@
         let s = bits.join(' · ');
         const why = (j.why || [])[0];
         if (why) s += (s ? '\n' : '') + why;
+        // ProphetX manual cross-shop: no feed, so this is a THRESHOLD the
+        // user checks against their app — their board better than this
+        // (2%-of-winnings fee already baked in) → take there instead.
+        if (j.prophetx && j.prophetx.beat_american != null) {
+            const a = j.prophetx.beat_american;
+            s += (s ? '\n' : '') + `ProphetX beats this at ${a > 0 ? '+' + a : a} or better `
+               + `(2% win fee incl.) — else ${j.rec} ${j.venue_label || 'Polymarket'}`;
+        }
         return s;
     }
 
@@ -3310,6 +3322,26 @@
         // entry at the venue/price it recommended (make→bid, take→cheapest
         // book) and stash the rec for the make-vs-take review.
         _applyMakeTakeToBody(body);
+        // MANUAL ProphetX fill overrides everything: the user crossed on
+        // their app at this price (the Details threshold said it beat the
+        // engine's option). Log the REAL fill + book so CLV/to-WIN are
+        // honest; effective cost adds their 2%-of-winnings fee (~2·p(1-p)¢).
+        const pxRaw = (document.getElementById('lmPxPrice').value || '').trim();
+        if (pxRaw) {
+            const pxAmer = parseInt(pxRaw.replace('+', ''), 10);
+            if (!isFinite(pxAmer) || Math.abs(pxAmer) < 100) {
+                _lmStatus('err', 'ProphetX odds must be American (e.g. -112 or 145).');
+                return;
+            }
+            const p = _amerToProb(pxAmer);
+            const effCents = p * 100 + 2 * p * (1 - p);   // fee-inclusive
+            const effAmer = _centsToAmer(effCents);
+            body.book = 'PROPHETX';
+            body.price = (effAmer != null) ? effAmer : pxAmer;
+            body.signal_blob = Object.assign({}, body.signal_blob, {
+                execution: { rec: 'TAKE', venue: 'PROPHETX', manual: true,
+                             fill_american: pxAmer, entry_cents: Math.round(effCents * 10) / 10 } });
+        }
         const submitBtn = document.getElementById('lmSubmit');
         submitBtn.disabled = true; submitBtn.textContent = 'Logging…';
         _lmStatus('info', 'POSTing to /api/handicapper/pick…');
