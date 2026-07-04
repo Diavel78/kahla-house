@@ -116,7 +116,17 @@ def gateway_probe(client: httpx.Client) -> None:
 
 
 def main() -> int:
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--url", default=None,
+                    help="fetch ONE url and print it whole (.md pages)")
+    args = ap.parse_args()
     client = httpx.Client(headers=UA)
+    if args.url:
+        r = client.get(args.url, timeout=20, follow_redirects=True)
+        print(f"##### {args.url} → {r.status_code} ({len(r.text)} bytes)")
+        print(r.text[:60000])
+        return 0
     pages: dict[str, str] = {}
     for url in CANDIDATES:
         body = peek(client, url)

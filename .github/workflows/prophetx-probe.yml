@@ -6,6 +6,11 @@ name: ProphetX — Probe
 
 on:
   workflow_dispatch:
+    inputs:
+      url:
+        description: "Optional: fetch ONE url and print it whole"
+        required: false
+        default: ""
 
 jobs:
   probe:
@@ -22,4 +27,10 @@ jobs:
       - name: Install httpx
         run: pip install httpx
       - name: Run probe
-        run: python -m scripts.probe_prophetx
+        run: |
+          URL="${{ github.event.inputs.url }}"
+          if [ -n "$URL" ]; then
+            python -m scripts.probe_prophetx --url "$URL"
+          else
+            python -m scripts.probe_prophetx
+          fi
