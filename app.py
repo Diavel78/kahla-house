@@ -3207,48 +3207,115 @@ def debug_kalshi_discover():
     ticker or titles. Once a real ticker is confirmed, probe its market
     shape with /debug-kalshi?series=TICKER."""
     q = (request.args.get("q") or "").strip().lower()
+    category = (request.args.get("category") or "").strip()
+    probe = [t.strip().upper()
+             for t in (request.args.get("probe") or "").split(",") if t.strip()]
     headers = {"Accept": "application/json", "User-Agent": "kahla-house/1.0"}
     agg: dict = {}
-    base_used, err = None, None
+    base_used, err, source = None, None, None
+    events_scanned = 0
+
+    # Path A — the SERIES LIST endpoint (no pagination lottery). Kalshi's
+    # /series takes a category filter; try the caller's, then likely sport
+    # spellings, then bare. First non-empty wins.
+    cats = ([category] if category
+            else ["Sports", "sports", "SPORTS", ""])
     for base in _KALSHI_BASES:
-        try:
-            cursor, pages = None, 0
-            while pages < 6:
-                params = {"status": "open", "limit": 200}
-                if cursor:
-                    params["cursor"] = cursor
-                r = _http.get(f"{base}/events", params=params,
+        for cat in cats:
+            try:
+                params = {"limit": 500}
+                if cat:
+                    params["category"] = cat
+                r = _http.get(f"{base}/series", params=params,
                               headers=headers, timeout=10)
                 if r.status_code != 200:
-                    err = f"HTTP {r.status_code} @ {base}: {r.text[:120]}"
-                    break
-                base_used = base
-                data = r.json() or {}
-                for ev in (data.get("events") or []):
-                    stk = ev.get("series_ticker") or ""
-                    if not stk:
+                    err = f"series HTTP {r.status_code} @ {base} cat={cat!r}"
+                    continue
+                sl = (r.json() or {}).get("series") or []
+                for sr in sl:
+                    tk = (sr.get("ticker") or "").upper()
+                    if not tk:
                         continue
-                    a = agg.setdefault(stk, {"events": 0, "sample_titles": []})
-                    a["events"] += 1
-                    if len(a["sample_titles"]) < 3:
-                        a["sample_titles"].append(ev.get("title") or "")
-                cursor = data.get("cursor")
-                pages += 1
-                if not cursor:
+                    a = agg.setdefault(tk, {"events": 0, "sample_titles": [],
+                                            "category": sr.get("category")})
+                    t = sr.get("title") or ""
+                    if t and t not in a["sample_titles"] and len(a["sample_titles"]) < 3:
+                        a["sample_titles"].append(t)
+                if sl:
+                    base_used, source = base, f"/series?category={cat or '(none)'}"
                     break
-            if base_used:
-                break
-        except Exception as e:
-            err = f"{type(e).__name__}: {str(e)[:140]}"
-            continue
+            except Exception as e:
+                err = f"series {type(e).__name__}: {str(e)[:120]}"
+                continue
+        if base_used:
+            break
+
+    # Path B — fall back to (or supplement with) the open-events scan when
+    # the series list gave nothing. More pages than v1; reports how many
+    # events were actually scanned so "no match" vs "scan came up empty"
+    # is distinguishable (the v1 response couldn't tell them apart).
+    if not agg:
+        for base in _KALSHI_BASES:
+            try:
+                cursor, pages = None, 0
+                while pages < 12:
+                    params = {"status": "open", "limit": 200}
+                    if cursor:
+                        params["cursor"] = cursor
+                    r = _http.get(f"{base}/events", params=params,
+                                  headers=headers, timeout=10)
+                    if r.status_code != 200:
+                        err = f"events HTTP {r.status_code} @ {base}"
+                        break
+                    base_used, source = base, "/events scan"
+                    data = r.json() or {}
+                    evs = data.get("events") or []
+                    events_scanned += len(evs)
+                    for ev in evs:
+                        stk = (ev.get("series_ticker") or "").upper()
+                        if not stk:
+                            continue
+                        a = agg.setdefault(stk, {"events": 0, "sample_titles": [],
+                                                 "category": None})
+                        a["events"] += 1
+                        if len(a["sample_titles"]) < 3:
+                            a["sample_titles"].append(ev.get("title") or "")
+                    cursor = data.get("cursor")
+                    pages += 1
+                    if not cursor:
+                        break
+                if base_used:
+                    break
+            except Exception as e:
+                err = f"events {type(e).__name__}: {str(e)[:120]}"
+                continue
+
+    # Direct probes — definitive per-ticker answer regardless of the
+    # discovery paths: ?probe=KXUFCFIGHT,KXUFC hits /markets for each.
+    # ?q=ufc with no explicit probe auto-probes the UFC candidates.
+    if not probe and "ufc" in q:
+        probe = list(_KALSHI_UFC_SERIES_CANDIDATES)
+    probes = {}
+    for t in probe[:6]:
+        pr = _fetch_kalshi_markets(t)
+        probes[t] = {"ok": pr.get("ok"), "open_markets": pr.get("count"),
+                     "sample": ((pr.get("raw_sample") or {}).get("title")
+                                if pr.get("raw_sample") else None)}
+
+    total_series = len(agg)
     series = [{"series_ticker": k, **v} for k, v in agg.items()]
     if q:
         series = [s for s in series
                   if q in s["series_ticker"].lower()
+                  or q in (s.get("category") or "").lower()
                   or any(q in (t or "").lower() for t in s["sample_titles"])]
-    series.sort(key=lambda s: -s["events"])
+    series.sort(key=lambda s: (-(s["events"] or 0), s["series_ticker"]))
     return jsonify({"ok": bool(base_used), "base_used": base_used,
-                    "error": err, "series_count": len(series),
+                    "source": source, "error": err,
+                    "total_series": total_series,
+                    "events_scanned": events_scanned,
+                    "probes": probes,
+                    "series_count": len(series),
                     "series": series[:100]})
 
 
