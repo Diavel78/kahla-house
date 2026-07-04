@@ -122,8 +122,31 @@ def main() -> int:
         body = peek(client, url)
         if body:
             pages[url] = body
-    docs_mine(client)
-    docs_pages(client)
+    # v4: pull the machine-readable docs index + the integration pages and
+    # print enough body to read the credential/auth story directly.
+    for u in ("https://docs.prophetx.co/llms.txt",
+              "https://docs.prophetx.co/docs/market-data-integration",
+              "https://docs.prophetx.co/docs/integration",
+              "https://isv-docs.prophetx.co/docs/getting-started"):
+        try:
+            r = client.get(u, timeout=15)
+            body = r.text
+            print(f"\n##### {u} → {r.status_code} ({len(body)} bytes)")
+            if "llms.txt" in u:
+                print(body[:4000])
+            else:
+                text = re.sub(r"<script[\s\S]*?</script>", " ", body)
+                text = re.sub(r"<[^>]+>", " ", text)
+                text = re.sub(r"\s+", " ", text)
+                for kw in ("access key", "secret", "credential", "token",
+                           "api key", "contact", "request access", "sign",
+                           "base url", "endpoint", "websocket", "wss"):
+                    for m in re.finditer(re.escape(kw), text, re.I):
+                        lo = max(0, m.start() - 120)
+                        print(f"  [{kw}] …{text[lo:m.end()+160]}…")
+                        break
+        except Exception as e:
+            print(f"  {u} failed: {e}")
     gateway_probe(client)
 
     # Mine the homepage (and its JS bundles) for API hosts + endpoint paths.
