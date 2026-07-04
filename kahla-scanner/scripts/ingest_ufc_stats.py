@@ -89,7 +89,13 @@ class Fetcher:
             return None
         html = ""
         for _ in range(30):                 # PoW usually solves in 2-5s
-            html = page.content()
+            try:
+                html = page.content()
+            except Exception:
+                # challenge auto-reload can race page.content() — wait out
+                # the navigation instead of dying on it
+                page.wait_for_timeout(1000)
+                continue
             if not _is_challenge(html):
                 break
             page.wait_for_timeout(1000)
@@ -122,12 +128,18 @@ class Fetcher:
                 except Exception as e:
                     log.warning("GET %s failed (try %d): %s", url, attempt + 1, e)
                 time.sleep(1.5 * (attempt + 1))
-        html = self._browser_get(url)
-        time.sleep(_SLEEP)
-        if html is None or _is_challenge(html):
-            log.warning("challenge unsolved for %s", url)
-            return None
-        return html
+        # Browser path gets ITS OWN retries — the first cold navigation
+        # (Chromium spin-up + PoW solve) is the flakiest fetch of the whole
+        # run, and backfill run 1 proved a single attempt silently loses
+        # the entire events phase.
+        for attempt in range(_TRIES):
+            html = self._browser_get(url)
+            time.sleep(_SLEEP)
+            if html is not None and not _is_challenge(html):
+                return html
+            log.warning("browser fetch unsolved for %s (try %d)", url, attempt + 1)
+            time.sleep(2.0 * (attempt + 1))
+        return None
 
     def close(self):
         try:
@@ -275,6 +287,13 @@ def parse_event_fights(html: str, ev: dict) -> list[dict]:
 
 def ingest_events(client, sb, commit: bool, limit: int) -> dict:
     events = fetch_completed_events(client)
+    if not events:                      # one more chance, then fail LOUD —
+        time.sleep(5)                   # backfill run 1 sailed past an empty
+        events = fetch_completed_events(client)   # index and did nothing
+    if not events:
+        log.error("events index came back EMPTY twice — aborting so the run "
+                  "flags red instead of silently skipping the events phase")
+        raise SystemExit(2)
     log.info("events index: %d completed events", len(events))
     have: set = set()
     try:
