@@ -1,0 +1,57 @@
+name: UFC Model — Compute + Backtest
+
+# Fight IQ Phase 2: the FightElo engine over the ufc_fights spine.
+#   compute  — full replay + calibration fit, writes one ufc_model
+#              snapshot row (what Flask reads in Phase 3). Weekly, Monday
+#              11:00 UTC — an hour after the stats delta lands.
+#   backtest — walk-forward evidence gate; metrics print to the run log.
+# Pure Python over Supabase — no scraping, no Playwright here.
+#
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "compute | backtest"
+        required: false
+        default: "backtest"
+      eval_since:
+        description: "backtest eval window start (YYYY-MM-DD)"
+        required: false
+        default: "2022-01-01"
+  schedule:
+    - cron: "0 11 * * 1"
+
+concurrency:
+  group: ufc-model
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          MODE="${{ github.event.inputs.mode || 'compute' }}"
+          echo "mode=$MODE"
+          if [ "$MODE" = "backtest" ]; then
+            python -m scripts.backtest_ufc_model --eval-since "${{ github.event.inputs.eval_since || '2022-01-01' }}"
+          else
+            python -m scripts.compute_ufc_model --commit
+          fi
