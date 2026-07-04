@@ -93,26 +93,37 @@ def docs_pages(client: httpx.Client) -> None:
 
 
 def gateway_probe(client: httpx.Client) -> None:
-    """cash.api.prophetx.co answers. 401/403 on a path = path EXISTS and
-    wants auth; 404 = wrong path. Distinguishing those maps the surface."""
+    """401/403 on a path = path EXISTS and wants auth; 404 = wrong path;
+    405 on GET = exists, POST-only. Maps the PARTICIPANT (regular-account
+    Trading API) surface alongside partner/affiliate, on both hosts."""
+    hosts = ["https://cash.api.prophetx.co",
+             "https://api-ss-sandbox.prophetexchange.com"]
     paths = [
-        "/partner/mm/get_tournaments",
-        "/partner/mm/get_sport_events",
-        "/partner/mm/get_markets",
+        "/participant/auth/login",
+        "/participant/mm/get_tournaments",
+        "/participant/mm/get_sport_events",
+        "/participant/mm/get_markets",
+        "/participant/get_tournaments",
         "/partner/auth/login",
-        "/v1/mm/get_tournaments",
-        "/partner/get_tournaments",
-        "/api/v1/tournaments",
-        "/v1/events",
-        "/v1/markets",
+        "/partner/mm/get_tournaments",
+        "/partner/affiliate/get_tournaments",
     ]
-    print("\nGATEWAY probe (cash.api.prophetx.co) — 401/403 means path exists:")
-    for pth in paths:
-        try:
-            r = client.get("https://cash.api.prophetx.co" + pth, timeout=12)
-            print(f"  {pth} → {r.status_code} · {r.text[:120]!r}")
-        except Exception as e:
-            print(f"  {pth} → ERROR {str(e)[:80]}")
+    for host in hosts:
+        print(f"\nGATEWAY probe ({host}) — 401/403=exists, 405=POST-only:")
+        for pth in paths:
+            try:
+                r = client.get(host + pth, timeout=12)
+                print(f"  GET  {pth} → {r.status_code} · {r.text[:110]!r}")
+            except Exception as e:
+                print(f"  GET  {pth} → ERROR {str(e)[:80]}")
+        # POST the login with empty body — the error shape reveals the
+        # expected fields (access_key/secret vs username/password).
+        for pth in ("/participant/auth/login", "/partner/auth/login"):
+            try:
+                r = client.post(host + pth, json={}, timeout=12)
+                print(f"  POST {pth} → {r.status_code} · {r.text[:160]!r}")
+            except Exception as e:
+                print(f"  POST {pth} → ERROR {str(e)[:80]}")
 
 
 def main() -> int:
