@@ -2702,7 +2702,13 @@ MODEL_FEEDS_SIZING   = True
 # noisy MLB team core for SIDES, so the confirmation nudge was sizing up the
 # WORSE picks. The MLB model still drives TOTALS (proj_total gate: +11.2u/81)
 # and the total-side veto — those paths don't read this set.
-MODEL_SIZING_SPORTS  = {"NBA"}  # NBA backtest-proven (66.6% vs 54.1%)
+# FOOTBALL ADDED July 2026 — walk-forward on the full 2025 season
+# (preseason excluded, warmup 60): NFL 66.5% vs 52.2% home baseline
+# (Brier 0.2171, n=203; 70+ bucket won 77.0%), NCAAF 71.2% vs 57.2%
+# (Brier 0.1935, n=517; 70+ bucket 80.4%) — both clear the same bar NBA
+# earned in on. Live CLV (signal_blob.model.agree) audits them in-season;
+# demote like MLB if model-agree underperforms.
+MODEL_SIZING_SPORTS  = {"NBA", "NFL", "NCAAF"}
 MODEL_EDGE_WEIGHT    = 0.25     # fraction of (model_prob − PIN_fair) credited
 MODEL_EDGE_CAP_PP    = 1.5      # cap on the nudge — widen as CLV proves the model
 EDGE_CAP_PP          = 6.0      # hard cap so a crude input can't blow up sizing
