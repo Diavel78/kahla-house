@@ -57,6 +57,17 @@ _SPORT_TAG_SLUG: dict[str, str] = {
     "UFC":   "ufc",
 }
 
+# Caches. Module-level so they survive across requests on a warm Vercel
+# container; cold start resets (acceptable — pays one extra event-search
+# round-trip per cold-start container, then caches build back up).
+# LANDMINE (July 2026): this is the GENERAL event-search cache used by
+# EVERY lookup() — it was accidentally deleted alongside the adjacent
+# _WC_CACHE in the soccer kill, which made every lookup raise NameError
+# pre-HTTP (silently caught → the whole PMM feed went dark: live-tracker
+# rings grey, dossier polymarket blocks empty, pm-snapshot logging no
+# PMM rows). Do not remove.
+_EVENT_CACHE: dict[str, tuple[float, dict | None]] = {}
+_EVENT_CACHE_TTL_SEC = 5 * 60
 
 
 # ──────────────────────────── Math helpers ────────────────────────────
