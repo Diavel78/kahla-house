@@ -603,6 +603,16 @@ _FI_HINTS = ("1st inning", "first inning", "1st-inning", "first-inning",
              "inning 1", "1st_inning", "first_inning")
 
 
+def _classify_ufc_distance(m: dict) -> str | None:
+    """UFC 'go the distance' prop sniff (Fight IQ P3) — lives outside the
+    ml/spread/total buckets, exactly like NRFI. YES = the fight reaches
+    the final bell. Question shape on PMM: 'Will X vs Y go the
+    distance?' — UNVERIFIED from the sandbox (same posture as the NRFI
+    schema); the diag.all_markets dump is ground truth if it misses."""
+    q = (m.get("question") or "").lower()
+    return "yes" if "go the distance" in q or "go to a decision" in q else None
+
+
 def _classify_first_inning(m: dict) -> tuple[str, float | None, str] | None:
     """Detect a game-level NRFI/YRFI market. Returns ('nrfi', None, side)
     where side is the YES outcome: 'yes' = a run scores in the 1st (YRFI),
@@ -730,6 +740,7 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
         "spread": [],
         "total":  [],
         "nrfi":   [],
+        "ufc_distance": [],
     }
     # Discovery diagnostic — dump EVERY market on the event (question +
     # type slugs + line + closed/active) so we can see exactly what PMM
@@ -752,8 +763,8 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
             continue
         result = _classify_market(m, away, home)
         if not result:
-            # Not a primary ml/spread/total — try the first-inning
-            # (NRFI/YRFI) sniff before giving up on this market.
+            # Not a primary ml/spread/total — try the derivative sniffs
+            # (NRFI first-inning; UFC distance) before giving up.
             fi = _classify_first_inning(m)
             if fi:
                 mt, line, side = fi
@@ -767,6 +778,19 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
                                     "title": m.get("question"),
                                     "quote": _inverse_quote(quote),
                                     "synthetic": True})
+                continue
+            ds = _classify_ufc_distance(m)
+            if ds:
+                quote = _get_market_quote(m) if with_bbo else None
+                out["ufc_distance"].append({"side": "yes", "line": None,
+                                            "slug": m.get("slug"),
+                                            "title": m.get("question"),
+                                            "quote": quote})
+                out["ufc_distance"].append({"side": "no", "line": None,
+                                            "slug": m.get("slug"),
+                                            "title": m.get("question"),
+                                            "quote": _inverse_quote(quote),
+                                            "synthetic": True})
             continue
         mt, line, side = result
         quote = _get_market_quote(m) if with_bbo else None

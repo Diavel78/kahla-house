@@ -5116,6 +5116,10 @@ def api_handicapper_paperlog():
             return "model"
         if b.get("vsin_vetoed_pick") in (True, "true"):
             return "veto"
+        if b.get("ufc_duration") in (True, "true"):
+            return "ufcdur"
+        if b.get("ufc_model_vetoed_pick") in (True, "true"):
+            return "ufcveto"
         return ""
     try:
         recent = (sb.table("pickbot_paperlog")
@@ -5157,7 +5161,8 @@ def api_handicapper_paperlog():
             # leans still never log.
             if not (s.get("market_type") and s.get("side")):
                 continue
-            if not (s.get("gates_cleared") or s.get("vsin_vetoed_pick")):
+            if not (s.get("gates_cleared") or s.get("vsin_vetoed_pick")
+                    or s.get("ufc_model_vetoed_pick")):
                 continue
             entry = s.get("pmm_bid_american")
             if entry is None:
@@ -5179,6 +5184,11 @@ def api_handicapper_paperlog():
                                 "vsin": s.get("vsin"),
                                 "vsin_veto": bool(s.get("vsin_veto")),
                                 "vsin_vetoed_pick": bool(s.get("vsin_vetoed_pick")),
+                                # Fight IQ (UFC ML): model P for this side,
+                                # agreement, and the veto counterfactual flag.
+                                "ufc_model_p": s.get("ufc_model_p"),
+                                "ufc_model_agree": s.get("ufc_model_agree"),
+                                "ufc_model_vetoed_pick": bool(s.get("ufc_model_vetoed_pick")),
                                 # Circa handle trajectory on this side at log
                                 # time (full-window Δpp from vsin_snapshots) —
                                 # the movement-curve signal under review.
@@ -5203,6 +5213,48 @@ def api_handicapper_paperlog():
                 "sharp_score": None, "edge_pp": nrfi.get("bet_edge_pp"),
                 "signal_blob": {"p_nrfi": nrfi.get("p_nrfi")},
             })
+        # SHADOW Fight IQ duration family (UFC): model-priced distance prop
+        # + rounds line vs PMM's actual markets, logged flat 1u flagged
+        # signal_blob.ufc_duration (variant 'ufcdur' — the dedup key MUST
+        # discriminate variants, see the June 28 flood landmine). Graded
+        # weekly from ufc_fights by scripts/grade_ufc_paperlog.py (the
+        # per-minute resolver only grades UFC ML).
+        um = d.get("ufc_model") or {}
+        udur = um.get("duration") or {}
+        if um.get("matched") and um.get("reliable"):
+            thr = getattr(handicapper_web, "UFC_DUR_EDGE_MIN_PP", 4.0)
+            dp = udur.get("distance_pmm") or {}
+            if dp.get("edge_pp") is not None and abs(dp["edge_pp"]) >= thr:
+                side = "yes" if dp["edge_pp"] > 0 else "no"
+                prob = dp["mid"] if side == "yes" else (1.0 - dp["mid"])
+                bets.append({
+                    "market_type": "distance", "side": side, "units": 1,
+                    "confidence": "low", "line": None,
+                    "entry_price": handicapper_web._prob_to_american(prob),
+                    "fair_american": handicapper_web._prob_to_american(
+                        udur["p_distance"] if side == "yes" else 1 - udur["p_distance"]),
+                    "sharp_score": None, "edge_pp": abs(dp["edge_pp"]),
+                    "gates_cleared": False,
+                    "signal_blob": {"ufc_duration": True, "kind": "distance",
+                                    "p_distance": udur.get("p_distance"),
+                                    "pmm_mid": dp.get("mid")},
+                })
+            rp = udur.get("rounds_pmm") or {}
+            if rp.get("edge_pp") is not None and abs(rp["edge_pp"]) >= thr:
+                side = "over" if rp["edge_pp"] > 0 else "under"
+                prob = rp["mid"] if side == "over" else (1.0 - rp["mid"])
+                bets.append({
+                    "market_type": "total", "side": side, "units": 1,
+                    "confidence": "low", "line": rp.get("line"),
+                    "entry_price": handicapper_web._prob_to_american(prob),
+                    "fair_american": handicapper_web._prob_to_american(
+                        rp["p_over"] if side == "over" else 1 - rp["p_over"]),
+                    "sharp_score": None, "edge_pp": abs(rp["edge_pp"]),
+                    "gates_cleared": False,
+                    "signal_blob": {"ufc_duration": True, "kind": "rounds",
+                                    "p_over": rp.get("p_over"),
+                                    "pmm_mid": rp.get("mid")},
+                })
         # SHADOW market-anchored spread (direction from exchange ML + run model).
         # Logged at a flat 1u, flagged signal_blob.spread_model so the 2-week
         # review can isolate it (filter signal_blob->>'spread_model'='true').

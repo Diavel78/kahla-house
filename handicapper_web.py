@@ -2626,6 +2626,214 @@ def _is_prime_core(starts_in_min) -> bool | None:
     return _PRIME_CORE[0] <= starts_in_min <= _PRIME_CORE[1]
 
 
+# ─────────────── Fight IQ — the UFC model (Phase 3 wiring) ───────────────
+# Reads the latest `ufc_model` snapshot (weekly compute in kahla-scanner —
+# _lib/ufc_model.py is the engine of record) and prices UFC dossiers:
+# winner P (FightElo + layers), the DISTANCE prop, and the rounds ladder
+# vs PMM's actual posted lines. REFERENCE-ONLY: never feeds Kelly sizing.
+# Its one power is VETO duty (the total-side-veto pattern): a gated UFC ML
+# steam pick whose side the model rates <= (1 - UFC_MODEL_VETO_P) demotes
+# to a forced lean. Backtest basis: walk-forward 2022+ the model's 70+
+# bucket won 81.2%, so a >=65% read against the steam is a real red flag.
+# Layer constants are MIRRORED from kahla-scanner/_lib/ufc_model.py — keep
+# in sync (Flask can't import the kahla-scanner subproject).
+UFC_MODEL_VETO_P    = 0.65   # model >= this on the OPPOSITE side → veto
+UFC_MODEL_MIN_N     = 5      # both fighters need >= N rated UFC bouts
+UFC_DUR_EDGE_MIN_PP = 4.0    # duration-family shadow-log edge threshold
+_UFC_AGE_KNEE, _UFC_AGE_PTS = 32.0, 12.0
+_UFC_CHIN_PTS = 25.0
+_UFC_LAYOFF_1, _UFC_LAYOFF_2 = 30.0, 60.0
+_UFC_REACH_PTS, _UFC_REACH_CAP = 1.5, 9.0
+_UFC_STANCE_PTS = 10.0
+_UFC_STYLE_PTS, _UFC_STYLE_CAP = 12.0, 36.0
+_UFC_SNAP_CACHE: dict = {}
+_UFC_SNAP_TTL = 600
+
+
+def _ufc_snapshot(sb) -> dict | None:
+    """Latest ufc_model row (10-min module cache)."""
+    now = time.time()
+    if _UFC_SNAP_CACHE.get("t", 0) > now - _UFC_SNAP_TTL:
+        return _UFC_SNAP_CACHE.get("data")
+    data = None
+    try:
+        rows = (sb.table("ufc_model").select("params,ratings,computed_at")
+                .order("computed_at", desc=True).limit(1).execute().data) or []
+        data = rows[0] if rows else None
+    except Exception as e:
+        log.warning("ufc_model snapshot read failed: %s", e)
+    _UFC_SNAP_CACHE.update({"t": now, "data": data})
+    return data
+
+
+def _ufc_name_toks(s: str) -> list[str]:
+    return [t for t in re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).split()
+            if len(t) >= 3]
+
+
+def _ufc_fighter_lookup(sb, name: str) -> dict | None:
+    """ufc_fighters row for a dossier fighter name — exact-insensitive
+    first, then unique last-name-token match (the resolver's posture)."""
+    toks = _ufc_name_toks(name)
+    if not toks:
+        return None
+    try:
+        rows = (sb.table("ufc_fighters")
+                .select("id,name,dob,reach_in,stance,td_avg,td_def")
+                .ilike("name", f"%{toks[-1]}%").limit(25).execute().data) or []
+    except Exception:
+        return None
+    exact = [r for r in rows
+             if _ufc_name_toks(r.get("name") or "") == toks]
+    if exact:
+        return exact[0]
+    last = [r for r in rows
+            if toks[-1] in _ufc_name_toks(r.get("name") or "")]
+    return last[0] if len(last) == 1 else None
+
+
+def _ufc_fighter_adj(rating: dict, frow: dict, when) -> tuple[float, list[str]]:
+    """Leakage-free live layers for one fighter (Elo points + notes)."""
+    pts, notes = 0.0, []
+    dob = frow.get("dob")
+    if dob and when:
+        try:
+            age = (when.date() - datetime.fromisoformat(str(dob)[:10]).date()).days / 365.25
+            if age > _UFC_AGE_KNEE:
+                d = _UFC_AGE_PTS * (age - _UFC_AGE_KNEE)
+                pts -= d
+                notes.append(f"age {age:.0f} (−{d:.0f})")
+        except Exception:
+            pass
+    ko2 = rating.get("ko2") or 0
+    if ko2:
+        pts -= _UFC_CHIN_PTS * ko2
+        notes.append(f"{ko2} KO loss{'es' if ko2 > 1 else ''} in last 2 (−{_UFC_CHIN_PTS * ko2:.0f})")
+    last = rating.get("last")
+    if last and when:
+        try:
+            gap = (when.date() - datetime.fromisoformat(last).date()).days
+            if gap >= 730:
+                pts -= _UFC_LAYOFF_2
+                notes.append(f"{gap // 365}yr layoff (−{_UFC_LAYOFF_2:.0f})")
+            elif gap >= 365:
+                pts -= _UFC_LAYOFF_1
+                notes.append(f"{gap // 30}mo layoff (−{_UFC_LAYOFF_1:.0f})")
+        except Exception:
+            pass
+    return pts, notes
+
+
+def _ufc_static_pair(fh: dict, fa: dict) -> float:
+    """Reach/stance/style points, home-positive. Mirrors the engine."""
+    pts = 0.0
+    rh, ra = fh.get("reach_in"), fa.get("reach_in")
+    if rh is not None and ra is not None:
+        pts += max(-_UFC_REACH_CAP, min(_UFC_REACH_CAP,
+                                        (float(rh) - float(ra)) * _UFC_REACH_PTS))
+    sh = (fh.get("stance") or "").lower()
+    sa = (fa.get("stance") or "").lower()
+    if sh.startswith("south") and sa.startswith("orth"):
+        pts += _UFC_STANCE_PTS
+    elif sa.startswith("south") and sh.startswith("orth"):
+        pts -= _UFC_STANCE_PTS
+
+    def _n(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    th, dh = _n(fh.get("td_avg")), _n(fh.get("td_def"))
+    ta, da = _n(fa.get("td_avg")), _n(fa.get("td_def"))
+    if None not in (th, dh, ta, da):
+        edge = th * (1.0 - da) - ta * (1.0 - dh)
+        pts += max(-_UFC_STYLE_CAP, min(_UFC_STYLE_CAP, _UFC_STYLE_PTS * edge))
+    return pts
+
+
+def _ufc_model_block(sb, away: str, home: str, event_start, odds: dict,
+                     pmm_data: dict | None) -> dict | None:
+    """The Fight IQ dossier block for one bout: winner P + the duration
+    family priced vs PMM's actual markets. None when the snapshot or
+    either fighter can't be matched (silent — never breaks the dossier)."""
+    snap = _ufc_snapshot(sb)
+    if not snap:
+        return None
+    params = snap.get("params") or {}
+    ratings = snap.get("ratings") or {}
+    scale = params.get("scale") or 300.0
+    beta = params.get("beta") or 0.5
+    aggs = params.get("aggs") or {}
+    fh = _ufc_fighter_lookup(sb, home)
+    fa = _ufc_fighter_lookup(sb, away)
+    if not fh or not fa:
+        return {"matched": False, "reason": "fighter not in UFCStats spine"}
+    rh, ra = ratings.get(fh["id"]), ratings.get(fa["id"])
+    if not rh or not ra:
+        return {"matched": False, "reason": "fighter not rated yet"}
+    when = event_start if isinstance(event_start, datetime) else None
+    if when is None and event_start:
+        try:
+            when = datetime.fromisoformat(str(event_start).replace("Z", "+00:00"))
+        except Exception:
+            when = None
+    adj_h, notes_h = _ufc_fighter_adj(rh, fh, when)
+    adj_a, notes_a = _ufc_fighter_adj(ra, fa, when)
+    d = (rh["elo"] + adj_h) - (ra["elo"] + adj_a) + _ufc_static_pair(fh, fa)
+    p_home = 1.0 / (1.0 + 10.0 ** (-d / scale))
+    reliable = (rh.get("n", 0) >= UFC_MODEL_MIN_N
+                and ra.get("n", 0) >= UFC_MODEL_MIN_N)
+
+    # Duration family: P(finish) from overall rate + fighter finish-rate
+    # deviation (weight class unknown at dossier level — documented v1
+    # approximation), then distance + any PMM-posted rounds line.
+    overall = (aggs.get("overall_finish") or 0.54)
+    conds = aggs.get("finish_conds") or {}
+    fr = [x for x in (rh.get("fin_rate"), ra.get("fin_rate")) if x is not None]
+    p_fin = overall + beta * ((sum(fr) / len(fr) - overall) if fr else 0.0)
+    p_fin = max(0.05, min(0.95, p_fin))
+    duration: dict = {"p_finish": round(p_fin, 3),
+                      "p_distance": round(1.0 - p_fin, 3)}
+    # PMM distance market (sniffed by pmm_markets._classify_ufc_distance)
+    for dm in ((pmm_data or {}).get("ufc_distance") or []):
+        if dm.get("side") != "yes" or not dm.get("quote"):
+            continue
+        mid = dm["quote"].get("mid")
+        if mid:
+            duration["distance_pmm"] = {
+                "slug": dm.get("slug"), "mid": round(float(mid), 3),
+                "edge_pp": round(((1.0 - p_fin) - float(mid)) * 100, 1),
+            }
+        break
+    # PMM rounds line — UFC "totals" on PMM ARE round-count O/U; the
+    # dossier's total block carries them per line. Price the over side at
+    # any line our timing curve covers (0.5/1.5/2.5; 5-round lines skip).
+    tot = (odds.get("total") or {}).get("polymarket") or {}
+    over_blk = tot.get("over") or {}
+    line = over_blk.get("line")
+    cond = conds.get(str(line)) if line is not None else None
+    if cond is not None and over_blk.get("quote"):
+        mid = over_blk["quote"].get("mid")
+        p_over = 1.0 - p_fin * cond
+        duration["rounds_pmm"] = {
+            "line": line, "p_over": round(p_over, 3),
+            "mid": (round(float(mid), 3) if mid else None),
+            "edge_pp": (round((p_over - float(mid)) * 100, 1) if mid else None),
+        }
+    return {
+        "matched": True, "reliable": reliable,
+        "scale": scale,
+        "home": {"name": fh.get("name"), "elo": rh["elo"], "n": rh.get("n"),
+                 "adj": round(adj_h, 1), "notes": notes_h},
+        "away": {"name": fa.get("name"), "elo": ra["elo"], "n": ra.get("n"),
+                 "adj": round(adj_a, 1), "notes": notes_a},
+        "p": {"home": round(p_home, 3), "away": round(1.0 - p_home, 3)},
+        "fair_american": {"home": _prob_to_american(p_home),
+                          "away": _prob_to_american(1.0 - p_home)},
+        "duration": duration,
+    }
+
+
 def _total_conflict_reason(sport: str | None, home: str | None,
                            power: dict | None, side: str) -> str | None:
     """Reason the OUR-NUMBER read materially disagrees with a TOTAL side
@@ -4402,6 +4610,7 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                    prime_zones_by_market: dict | None = None,
                    vsin: dict | None = None,
                    vsin_movement: dict | None = None,
+                   ufc_model: dict | None = None,
                    kelly_fraction: float | None = None) -> list[dict]:
     """Polymarket-execution picks. Returns a list — there can be more
     than one on a game. Behaviour:
@@ -4564,6 +4773,27 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 if conflict_reason:
                     gates_cleared = False
 
+            # Fight IQ winner veto (UFC ML only — the total-side-veto
+            # pattern applied to fights). The model is REFERENCE-ONLY for
+            # sizing, but a >= UFC_MODEL_VETO_P read AGAINST a steam pick
+            # demotes it to a forced lean — built for sentiment fights
+            # (the McGregor archetype: retail floods a name, PMM drifts,
+            # the model screams age+layoff+chin the other way). Recorded
+            # on every UFC ML candidate either way for the paperlog.
+            ufc_p_side = None
+            ufc_model_vetoed_pick = False
+            if (sport == "UFC" and mt == "moneyline" and ufc_model
+                    and ufc_model.get("matched")):
+                ufc_p_side = (ufc_model.get("p") or {}).get(side)
+                if (gates_cleared and ufc_model.get("reliable")
+                        and ufc_p_side is not None
+                        and ufc_p_side <= 1.0 - UFC_MODEL_VETO_P):
+                    gates_cleared = False
+                    ufc_model_vetoed_pick = True
+                    conflict_reason = (f"Fight IQ has the other corner "
+                                       f"{round((1 - ufc_p_side) * 100)}% "
+                                       f"— model-vs-steam veto")
+
             # VSiN sharp-money veto (Circa handle) — ALL markets EXCEPT the test
             # totals tier. If the sharp money is piled on the opposite side,
             # betting this side is fading into it → demote to a forced lean.
@@ -4685,6 +4915,12 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
                 "vsin":           vsin_read,
                 "vsin_veto":      bool(vsin_reason),
                 "vsin_vetoed_pick": vsin_vetoed_pick,
+                # Fight IQ (UFC ML): the model's P for THIS side + whether
+                # the winner veto fired — the paperlog's veto counterfactual.
+                "ufc_model_p":    ufc_p_side,
+                "ufc_model_agree": ((ufc_p_side >= 0.5)
+                                    if ufc_p_side is not None else None),
+                "ufc_model_vetoed_pick": ufc_model_vetoed_pick,
                 # Circa handle TRAJECTORY on this side (full-window delta from
                 # vsin_snapshots) — positive = money arriving. Recorded for the
                 # review; NOT a scoring/sizing input yet.
@@ -5077,6 +5313,17 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
             log.warning("nrfi model failed: %s", e)
             nrfi = None
 
+    # Fight IQ — the UFC model (winner P + duration family). Reference +
+    # veto duty only; never feeds sizing. Silent-fail.
+    ufc_model = None
+    if sport == "UFC":
+        try:
+            ufc_model = _ufc_model_block(sb, away, home, event_start, odds,
+                                         pmm_data)
+        except Exception as e:
+            log.warning("ufc model failed: %s", e)
+            ufc_model = None
+
     # Exchange-based sharp score — side-by-side with PIN during the
     # Odds-API cutover (deadline June 25). Attached BEFORE _suggest_picks
     # so every suggestion carries x_score/x_side/x_agree for the
@@ -5100,6 +5347,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
                                  prime_zones_by_market=_load_prime_zones_by_market(sb),
                                  vsin=vsin,
                                  vsin_movement=vsin_movement,
+                                 ufc_model=ufc_model,
                                  kelly_fraction=_load_kelly_fraction(sb))
     # Keep the singular `suggestion` field as an alias for the top pick
     # so any caller still expecting it doesn't break. New code should
@@ -5196,6 +5444,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         "power_rating":    power_rating,
         "nrfi":            nrfi,
         "spread_model":    spread_model,
+        "ufc_model":       ufc_model,
         "suggestion":      suggestion,
         "suggestions":     suggestions,
         "alt_matches":     [

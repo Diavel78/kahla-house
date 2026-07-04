@@ -2645,6 +2645,38 @@ matchup, then give a 1-X-2 read vs the exchange fair above.`;
             </div>`;
         }
 
+        // Fight IQ — the UFC model (winner P + duration family). Reference
+        // + veto duty only; the layers notes explain the read (age, layoff,
+        // recent KO losses). Duration prices vs PMM's ACTUAL posted markets.
+        if (d.ufc_model && d.ufc_model.matched) {
+            const u = d.ufc_model;
+            const dur = u.duration || {};
+            const noteFrag = (side, nm) => (u[side].notes && u[side].notes.length)
+                ? `<div class="pr-line">${_esc(nm)}: ${u[side].notes.map(_esc).join(' · ')}</div>` : '';
+            const distFrag = dur.distance_pmm
+                ? `<div class="pr-line">Distance: model <b>${(dur.p_distance*100).toFixed(0)}%</b> vs Poly ${(dur.distance_pmm.mid*100).toFixed(0)}¢ → edge <b>${dur.distance_pmm.edge_pp>=0?'+':''}${dur.distance_pmm.edge_pp}pp ${dur.distance_pmm.edge_pp>=0?'YES':'NO'}</b></div>`
+                : `<div class="pr-line">Distance: model <b>${(dur.p_distance*100).toFixed(0)}%</b> (no Poly market found)</div>`;
+            const rndFrag = (dur.rounds_pmm && dur.rounds_pmm.edge_pp != null)
+                ? `<div class="pr-line">Over ${_fmtPt(dur.rounds_pmm.line)} rounds: model <b>${(dur.rounds_pmm.p_over*100).toFixed(0)}%</b> vs Poly ${(dur.rounds_pmm.mid*100).toFixed(0)}¢ → edge <b>${dur.rounds_pmm.edge_pp>=0?'+':''}${dur.rounds_pmm.edge_pp}pp ${dur.rounds_pmm.edge_pp>=0?'OVER':'UNDER'}</b></div>`
+                : '';
+            html += `<div class="card">
+                <div class="card-head">
+                    <h3>Fight IQ</h3>
+                    <span class="ref-tag" title="FightElo + layers (age, layoff, chin, style) from the complete UFC history. Walk-forward: 61% winners (70%+ calls hit 81%), duration family beats base rates on every line. Reference + veto duty only — never sizes a bet.">OUR NUMBER</span>
+                </div>
+                <div class="pr-grid">
+                    <div class="pr-cell"><span class="pr-lbl">${_esc(u.away.name||d.away)}</span><span class="pr-val">${(u.p.away*100).toFixed(0)}% <span class="pr-fair">${_fmtAmer(u.fair_american.away)}</span></span></div>
+                    <div class="pr-cell"><span class="pr-lbl">${_esc(u.home.name||d.home)}</span><span class="pr-val">${(u.p.home*100).toFixed(0)}% <span class="pr-fair">${_fmtAmer(u.fair_american.home)}</span></span></div>
+                </div>
+                <div class="pr-line">FightElo: <b>${_esc(u.away.name||d.away)}</b> ${Math.round(u.away.elo)} (${u.away.n}f) · <b>${_esc(u.home.name||d.home)}</b> ${Math.round(u.home.elo)} (${u.home.n}f)</div>
+                ${noteFrag('away', u.away.name||d.away)}
+                ${noteFrag('home', u.home.name||d.home)}
+                ${distFrag}
+                ${rndFrag}
+                <div class="wx-foot">FightElo + age/layoff/chin/style layers${u.reliable ? '' : ' · thin history — veto disarmed'} · reference + veto only (never sizes)</div>
+            </div>`;
+        }
+
         // NRFI / YRFI — first-inning model (MLB only). We compute the
         // model fair, pull Polymarket's 1st-inning price, and the BET
         // determination is the edge of our fair vs PMM's maker entry

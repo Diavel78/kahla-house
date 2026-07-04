@@ -54,4 +54,8 @@ jobs:
             python -m scripts.backtest_ufc_model --eval-since "${{ github.event.inputs.eval_since || '2022-01-01' }}"
           else
             python -m scripts.compute_ufc_model --commit
+            # Grade last card's duration-family paperlog shadows from the
+            # freshly-ingested ufc_fights (the per-minute resolver only
+            # grades UFC moneylines).
+            python -m scripts.grade_ufc_paperlog --commit
           fi
