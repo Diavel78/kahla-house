@@ -106,36 +106,67 @@ def _num(s: str):
 
 # ───────────────────────── events + fights ─────────────────────────
 
-def fetch_completed_events(client) -> list[dict]:
-    """[{id, name, date}] newest-first from the completed-events index."""
+def fetch_completed_events(client, debug: bool = False) -> list[dict]:
+    """[{id, name, date}] newest-first from the completed-events index.
+
+    Anchored on the event-details LINKS, not row class names — the first
+    probe run proved the site answers 200 but my remembered classes parse
+    to zero, so the parser depends only on the one thing that can't change
+    without breaking the site itself: hrefs. Date comes from the enclosing
+    row's text ('July 04, 2026' pattern)."""
     html = _get(client, f"{BASE}/statistics/events/completed?page=all")
     if not html:
         return []
-    out = []
+    soup = _soup(html)
+    out, seen = [], set()
     today = datetime.now(timezone.utc).date().isoformat()
-    for tr in _soup(html).select("tr.b-statistics__table-row"):
-        a = tr.select_one("a[href*='event-details']")
-        d = tr.select_one("span.b-statistics__date")
-        if not a or not d:
+    for a in soup.select("a[href*='event-details']"):
+        eid = _tail_id(a.get("href"))
+        name = a.get_text(strip=True)
+        if not eid or not name or eid in seen:
             continue
-        date = _parse_date(d.get_text(strip=True))
+        tr = a.find_parent("tr")
+        ctx = tr.get_text(" ", strip=True) if tr else ""
+        m = re.search(r"([A-Z][a-z]+ \d{1,2}, \d{4})", ctx)
+        date = _parse_date(m.group(1)) if m else None
         if not date or date > today:      # index's top row can be the NEXT event
             continue
-        out.append({"id": _tail_id(a.get("href")),
-                    "name": a.get_text(strip=True), "date": date})
+        seen.add(eid)
+        out.append({"id": eid, "name": name, "date": date})
+    if debug and not out:
+        title = re.search(r"<title>(.*?)</title>", html, re.S)
+        links = soup.select("a[href*='event-details']")
+        print(f"  DEBUG: {len(html)} bytes; "
+              f"title={title.group(1).strip()[:80] if title else None}; "
+              f"<tr>={len(soup.select('tr'))}; event-links={len(links)}")
+        sample = (str(links[0].find_parent("tr"))[:500] if links
+                  else html[:500])
+        print(f"  DEBUG sample: {sample}")
     return out
 
 
 def parse_event_fights(html: str, ev: dict) -> list[dict]:
-    """Bout rows from one event page → ufc_fights rows."""
+    """Bout rows from one event page → ufc_fights rows. Class-independent:
+    rows are any <tr> carrying a fight-details data-link (or containing a
+    fight-details anchor); the result flag is read from the first cell's
+    text, not a flag-class element."""
     rows = []
-    for tr in _soup(html).select("tr.b-fight-details__table-row[data-link]"):
-        fid = _tail_id(tr.get("data-link"))
+    soup = _soup(html)
+    trs = soup.select("tr[data-link*='fight-details']")
+    if not trs:                    # fallback: rows containing the anchor
+        trs = [a.find_parent("tr") for a in soup.select("a[href*='fight-details']")]
+        trs = [t for t in dict.fromkeys(trs) if t is not None]
+    for tr in trs:
+        link = tr.get("data-link") or ""
+        if not link:
+            a = tr.select_one("a[href*='fight-details']")
+            link = a.get("href") if a else ""
+        fid = _tail_id(link)
         tds = tr.select("td")
         if not fid or len(tds) < 10:
             continue
-        flags = [i.get_text(strip=True).lower()
-                 for i in tds[0].select("i.b-flag__text")]
+        flags = [w for w in ("win", "draw", "nc")
+                 if re.search(rf"\b{w}\b", tds[0].get_text(" ", strip=True).lower())]
         fighters = [( _tail_id(a.get("href")), a.get_text(strip=True))
                     for a in tds[1].select("a[href*='fighter-details']")]
         if len(fighters) != 2:
@@ -210,7 +241,15 @@ def roster_sweep(client, sb, commit: bool) -> int:
         if not html:
             continue
         batch = []
-        for tr in _soup(html).select("tr.b-statistics__table-row"):
+        soup = _soup(html)
+        # Link-anchored row discovery (no class-name dependency): every row
+        # that contains a fighter-details anchor is a roster row.
+        seen_tr = []
+        for a in soup.select("a[href*='fighter-details']"):
+            tr = a.find_parent("tr")
+            if tr is not None and tr not in seen_tr:
+                seen_tr.append(tr)
+        for tr in seen_tr:
             links = tr.select("a[href*='fighter-details']")
             tds = tr.select("td")
             if not links or len(tds) < 10:
@@ -256,14 +295,14 @@ def parse_fighter_detail(html: str, fid: str) -> dict:
     name = soup.select_one("span.b-content__title-highlight")
     if name:
         row["name"] = name.get_text(strip=True)
-    rec = soup.select_one("span.b-content__title-record")
-    if rec:
-        m = re.search(r"(\d+)-(\d+)-(\d+)", rec.get_text())
-        if m:
-            row["wins"], row["losses"], row["draws"] = (int(m.group(1)),
-                                                        int(m.group(2)),
-                                                        int(m.group(3)))
-    for li in soup.select("li.b-list__box-list-item"):
+    # Record — class-independent: 'Record: W-L-D' appears once in the page.
+    m = re.search(r"Record:\s*(\d+)-(\d+)-(\d+)", soup.get_text(" ", strip=True))
+    if m:
+        row["wins"], row["losses"], row["draws"] = (int(m.group(1)),
+                                                    int(m.group(2)),
+                                                    int(m.group(3)))
+    lis = soup.select("li.b-list__box-list-item") or soup.select("li")
+    for li in lis:
         txt = li.get_text(" ", strip=True)
         if ":" not in txt:
             continue
@@ -324,7 +363,7 @@ def ingest_fighter_details(client, sb, commit: bool, limit: int,
 def probe(client) -> int:
     """Reachability + parse sanity. Prints samples; exits non-zero on a
     hard failure so the Action run flags red."""
-    events = fetch_completed_events(client)
+    events = fetch_completed_events(client, debug=True)
     print(f"PROBE events index: {len(events)} completed events")
     if not events:
         print("PROBE FAIL: events index unreachable or parsed to zero")
