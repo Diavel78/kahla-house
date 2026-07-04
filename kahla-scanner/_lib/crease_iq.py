@@ -69,9 +69,22 @@ class _Decayed:
 
 
 class CreaseState:
-    """Walk-forward rolling state over goalie-table game rows."""
+    """Walk-forward rolling state over goalie-table game rows.
 
-    def __init__(self):
+    Constants are overridable per instance so the backtest can sweep
+    them (selection happens on a train-internal split, never the eval
+    season)."""
+
+    def __init__(self, team_hl: float = TEAM_HL_DAYS,
+                 goalie_hl: float = GOALIE_HL_DAYS,
+                 goalie_prior: float = GOALIE_PRIOR_SHOTS,
+                 team_prior: float = TEAM_PRIOR_GAMES,
+                 min_games: int = MIN_TEAM_GAMES):
+        self.team_hl = team_hl
+        self.goalie_hl = goalie_hl
+        self.goalie_prior = goalie_prior
+        self.team_prior = team_prior
+        self.min_games = min_games
         self.team_sf: dict[str, _Decayed] = {}    # shots for / game
         self.team_sa: dict[str, _Decayed] = {}    # shots against / game
         self.team_sh: dict[str, _Decayed] = {}    # shooting% (per shot)
@@ -90,8 +103,8 @@ class CreaseState:
         return (m * w + lg_mean * prior_w) / (w + prior_w) if (w + prior_w) > 0 else lg_mean
 
     def league(self, d: date) -> tuple[float, float]:
-        _, shots = self.lg_shots.mean(d, TEAM_HL_DAYS)
-        _, sh = self.lg_sh.mean(d, TEAM_HL_DAYS)
+        _, shots = self.lg_shots.mean(d, self.team_hl)
+        _, sh = self.lg_sh.mean(d, self.team_hl)
         return (shots or 28.0), (sh or 0.095)
 
     def goalie_sv_pct(self, goalie_id: int | None, d: date, lg_sv: float) -> tuple[float, float]:
@@ -99,8 +112,8 @@ class CreaseState:
         acc = self.goalie_sv.get(goalie_id) if goalie_id else None
         if acc is None:
             return lg_sv, 0.0
-        w, m = acc.mean(d, GOALIE_HL_DAYS)
-        sv = (m * w + lg_sv * GOALIE_PRIOR_SHOTS) / (w + GOALIE_PRIOR_SHOTS)
+        w, m = acc.mean(d, self.goalie_hl)
+        sv = (m * w + lg_sv * self.goalie_prior) / (w + self.goalie_prior)
         return sv, w
 
     def project(self, home: str, away: str, d: date,
@@ -108,16 +121,16 @@ class CreaseState:
                 hfa: float = DEFAULT_HFA,
                 goalie_only: bool = False) -> dict | None:
         """Projected xG margin (home − away). None until both teams warm."""
-        if (self.team_games.get(home, 0) < MIN_TEAM_GAMES
-                or self.team_games.get(away, 0) < MIN_TEAM_GAMES):
+        if (self.team_games.get(home, 0) < self.min_games
+                or self.team_games.get(away, 0) < self.min_games):
             return None
         lg_shots, lg_sh = self.league(d)
         lg_sv = 1.0 - lg_sh
-        pw = TEAM_PRIOR_GAMES
-        sf_h = self._rate(self.team_sf, home, d, TEAM_HL_DAYS, lg_shots, pw)
-        sf_a = self._rate(self.team_sf, away, d, TEAM_HL_DAYS, lg_shots, pw)
-        sa_h = self._rate(self.team_sa, home, d, TEAM_HL_DAYS, lg_shots, pw)
-        sa_a = self._rate(self.team_sa, away, d, TEAM_HL_DAYS, lg_shots, pw)
+        pw = self.team_prior
+        sf_h = self._rate(self.team_sf, home, d, self.team_hl, lg_shots, pw)
+        sf_a = self._rate(self.team_sf, away, d, self.team_hl, lg_shots, pw)
+        sa_h = self._rate(self.team_sa, home, d, self.team_hl, lg_shots, pw)
+        sa_a = self._rate(self.team_sa, away, d, self.team_hl, lg_shots, pw)
         shots_h = lg_shots * (sf_h / lg_shots) * (sa_a / lg_shots)
         shots_a = lg_shots * (sf_a / lg_shots) * (sa_h / lg_shots)
         sv_a_goalie, gw_a = self.goalie_sv_pct(away_goalie, d, lg_sv)
@@ -126,9 +139,9 @@ class CreaseState:
             xg_h = shots_h * (1.0 - sv_a_goalie)
             xg_a = shots_a * (1.0 - sv_h_goalie)
         else:
-            sh_h = self._rate(self.team_sh, home, d, TEAM_HL_DAYS, lg_sh,
+            sh_h = self._rate(self.team_sh, home, d, self.team_hl, lg_sh,
                               pw * lg_shots)
-            sh_a = self._rate(self.team_sh, away, d, TEAM_HL_DAYS, lg_sh,
+            sh_a = self._rate(self.team_sh, away, d, self.team_hl, lg_sh,
                               pw * lg_shots)
             xg_h = shots_h * lg_sh * (sh_h / lg_sh) * ((1 - sv_a_goalie) / lg_sh)
             xg_a = shots_a * lg_sh * (sh_a / lg_sh) * ((1 - sv_h_goalie) / lg_sh)
@@ -144,18 +157,18 @@ class CreaseState:
             sf, sa, gf = r.get("sf"), r.get("sa"), r.get("gf")
             if sf is None or sa is None:
                 continue
-            self.team_sf.setdefault(team, _Decayed()).add(d, sf, 1.0, TEAM_HL_DAYS)
-            self.team_sa.setdefault(team, _Decayed()).add(d, sa, 1.0, TEAM_HL_DAYS)
+            self.team_sf.setdefault(team, _Decayed()).add(d, sf, 1.0, self.team_hl)
+            self.team_sa.setdefault(team, _Decayed()).add(d, sa, 1.0, self.team_hl)
             if gf is not None and sf > 0:
                 self.team_sh.setdefault(team, _Decayed()).add(
-                    d, gf / sf, sf, TEAM_HL_DAYS)
-                self.lg_sh.add(d, gf / sf, sf, TEAM_HL_DAYS)
-            self.lg_shots.add(d, sf, 1.0, TEAM_HL_DAYS)
+                    d, gf / sf, sf, self.team_hl)
+                self.lg_sh.add(d, gf / sf, sf, self.team_hl)
+            self.lg_shots.add(d, sf, 1.0, self.team_hl)
             self.team_games[team] = self.team_games.get(team, 0) + 1
             for gid, shots, saves in (r.get("goalies") or []):
                 if gid and shots and shots > 0 and saves is not None:
                     self.goalie_sv.setdefault(gid, _Decayed()).add(
-                        d, saves / shots, shots, GOALIE_HL_DAYS)
+                        d, saves / shots, shots, self.goalie_hl)
 
 
 def margin_to_prob(margin: float, scale: float = DEFAULT_SCALE) -> float:

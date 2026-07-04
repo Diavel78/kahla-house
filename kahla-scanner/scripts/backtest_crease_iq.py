@@ -17,9 +17,15 @@ plus a no-starter-knowledge variant (league-avg goalie) to isolate how
 much the goalie feed itself buys.
 
   python -m scripts.backtest_crease_iq            # full report
+  python -m scripts.backtest_crease_iq --sweep    # hyperparameter sweep;
+        # configs are SELECTED on a train-internal split (fit < 2025-03-01,
+        # select 2025-03..09) and only the winner is scored on the eval
+        # season — the eval never picks the config.
 """
 from __future__ import annotations
 
+import argparse
+import itertools
 import logging
 import sys
 from collections import defaultdict
@@ -97,18 +103,27 @@ def _team_update_rows(g: dict) -> dict[str, dict]:
     }
 
 
-def run(games: list[dict], goalie_only: bool, known_starter: bool) -> dict:
-    state = ci.CreaseState()
-    train, evald = [], []
+def collect(games: list[dict], goalie_only: bool, known_starter: bool,
+            **params) -> list[tuple]:
+    """Walk-forward (date, raw_margin, home_won) preds for every warm game."""
+    state = ci.CreaseState(**params)
+    preds = []
     for g in games:
         hg = g["teams"][g["home"]]["starter"] if known_starter else None
         ag = g["teams"][g["away"]]["starter"] if known_starter else None
         proj = state.project(g["home"], g["away"], g["date"], hg, ag,
                              hfa=0.0, goalie_only=goalie_only)
         if proj is not None:
-            rec = (proj["margin"], g["home_won"])
-            (evald if g["date"] >= EVAL_START else train).append(rec)
+            preds.append((g["date"], proj["margin"], g["home_won"]))
         state.update(g["date"], _team_update_rows(g))
+    return preds
+
+
+def run(games: list[dict], goalie_only: bool, known_starter: bool,
+        **params) -> dict:
+    preds = collect(games, goalie_only, known_starter, **params)
+    train = [(m, y) for d, m, y in preds if d < EVAL_START]
+    evald = [(m, y) for d, m, y in preds if d >= EVAL_START]
 
     hfa, scale = ci.fit_params(train) if train else (ci.DEFAULT_HFA,
                                                      ci.DEFAULT_SCALE)
@@ -135,7 +150,53 @@ def run(games: list[dict], goalie_only: bool, known_starter: bool) -> dict:
             "base_brier": base_brier, "calibration": cal}
 
 
+SELECT_START = date(2025, 3, 1)   # trainB: config-selection slice
+
+
+def sweep(games: list[dict]) -> None:
+    """Grid sweep. Fit hfa/scale on trainA (< SELECT_START), select the
+    config by Brier on trainB (SELECT_START..EVAL_START), then score ONLY
+    the winner on the eval season."""
+    grid = list(itertools.product(
+        [150.0, 300.0, 400.0, 600.0],      # goalie_prior shots
+        [90.0, 180.0, 365.0],              # goalie_hl days
+        [40.0, 60.0, 90.0],                # team_hl days
+        [True, False],                     # goalie_only
+    ))
+    scored = []
+    for gp, ghl, thl, gonly in grid:
+        preds = collect(games, gonly, True,
+                        goalie_prior=gp, goalie_hl=ghl, team_hl=thl)
+        tr_a = [(m, y) for d, m, y in preds if d < SELECT_START]
+        tr_b = [(m, y) for d, m, y in preds
+                if SELECT_START <= d < EVAL_START]
+        if len(tr_a) < 100 or len(tr_b) < 100:
+            continue
+        hfa, scale = ci.fit_params(tr_a)
+        brier_b = sum((ci.margin_to_prob(m + hfa, scale) - y) ** 2
+                      for m, y in tr_b) / len(tr_b)
+        scored.append((brier_b, gp, ghl, thl, gonly))
+    scored.sort()
+    print("\n=== SWEEP (selected on trainB Brier — eval untouched) ===")
+    for b, gp, ghl, thl, gonly in scored[:8]:
+        print(f"  trainB Brier {b:.4f} · prior={gp:.0f} goalie_hl={ghl:.0f} "
+              f"team_hl={thl:.0f} goalie_only={gonly}")
+    b, gp, ghl, thl, gonly = scored[0]
+    print(f"\nWINNER on eval season (scored once):")
+    r = run(games, gonly, True, goalie_prior=gp, goalie_hl=ghl, team_hl=thl)
+    print(f"  eval n={r['n']} · accuracy {r['acc']:.1%} vs home-base "
+          f"{r['home_base']:.1%} · Brier {r['brier']:.4f} vs base "
+          f"{r['base_brier']:.4f}")
+    print(f"  calibration: {r['calibration']}")
+    rc = run(games, gonly, False, goalie_prior=gp, goalie_hl=ghl, team_hl=thl)
+    print(f"  no-starter control at same config: {rc['acc']:.1%} / "
+          f"Brier {rc['brier']:.4f}")
+
+
 def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--sweep", action="store_true")
+    args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     sb = db.client()
     rows = load_rows(sb)
@@ -145,6 +206,10 @@ def main() -> int:
              games[-1]["date"] if games else "-")
     n_eval_season = sum(1 for g in games if g["date"] >= EVAL_START)
     log.info("eval season (>= %s): %d games", EVAL_START, n_eval_season)
+
+    if args.sweep:
+        sweep(games)
+        return 0
 
     variants = [
         ("FULL (shots + shooting + starter goalie)", False, True),
