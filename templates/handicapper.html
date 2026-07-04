@@ -735,8 +735,13 @@
                 <textarea id="lmAnalysis" placeholder="Full write-up …"></textarea>
             </div>
             <div class="field">
-                <label>Filled on ProphetX instead? Enter YOUR fill odds (optional, e.g. -112)</label>
-                <input type="text" id="lmPxPrice" inputmode="numeric" placeholder="leave blank if Polymarket/Kalshi" />
+                <label>Filled on ProphetX instead? Enter YOUR fill odds (optional)</label>
+                <div style="display:flex;gap:8px;align-items:stretch;">
+                    <button type="button" id="lmPxSign" onclick="_pxToggleSign()"
+                            style="width:48px;font-size:18px;font-weight:700;border-radius:8px;border:1px solid var(--border,#333);background:transparent;color:inherit;cursor:pointer;">&minus;</button>
+                    <input type="text" id="lmPxPrice" inputmode="numeric" style="flex:1"
+                           placeholder="e.g. 112 — tap &minus;/+ for the sign" />
+                </div>
             </div>
             <div class="actions">
                 <button onclick="closeLog()">Cancel</button>
@@ -1682,7 +1687,7 @@
         document.getElementById('lmConfidence').value = p._body.confidence || 'low';
         document.getElementById('lmReasons').value    = (p._body.reasons || []).join('\n');
         document.getElementById('lmAnalysis').value   = '';
-        document.getElementById('lmPxPrice').value    = '';
+        _pxReset();
         _lmStatus(null, '');
         document.getElementById('logModal').classList.add('show');
     }
@@ -2928,7 +2933,7 @@
             seed_conf:   'low',
         };
         _pendingBody = null;   // never inherit a stale quick-bet base
-        document.getElementById('lmPxPrice').value    = '';
+        _pxReset();
         document.getElementById('lmSelection').value  = _pendingPick.label;
         document.getElementById('lmUnits').value      = '1';
         document.getElementById('lmConfidence').value = 'low';
@@ -2968,7 +2973,7 @@
             seed_conf:   'low',
         };
         _pendingBody = null;   // never inherit a stale quick-bet base
-        document.getElementById('lmPxPrice').value    = '';
+        _pxReset();
         document.getElementById('lmSelection').value  = _pendingPick.label;
         document.getElementById('lmUnits').value      = '1';
         document.getElementById('lmConfidence').value = 'low';
@@ -3047,16 +3052,27 @@
         document.getElementById('lmConfidence').value = _pendingPick.seed_conf || 'medium';
         document.getElementById('lmReasons').value    = _buildReasons(_pendingPick, _lastDossier).join('\n');
         document.getElementById('lmAnalysis').value   = '';
-        document.getElementById('lmPxPrice').value    = '';
+        _pxReset();
         _pendingBody = null;   // dossier path — never inherit a quick-bet base
         _lmStatus(null, '');
         document.getElementById('logModal').classList.add('show');
+    }
+    // iOS numeric keypad has no minus key, so the ProphetX field carries a
+    // sign TOGGLE (defaults to minus — most fills are favorites). An explicit
+    // sign typed into the field still wins.
+    function _pxToggleSign() {
+        const b = document.getElementById('lmPxSign');
+        if (b) b.textContent = (b.textContent.trim() === '+') ? '\u2212' : '+';
+    }
+    function _pxReset() {
+        const px = document.getElementById('lmPxPrice'); if (px) px.value = '';
+        const b = document.getElementById('lmPxSign'); if (b) b.textContent = '\u2212';
     }
     function closeLog() {
         document.getElementById('logModal').classList.remove('show');
         _pendingPick = null;
         _pendingBody = null;
-        const px = document.getElementById('lmPxPrice'); if (px) px.value = '';
+        _pxReset();
     }
     // Transient confirmation toast (bottom-center). Used after logging a
     // pick so the dossier can stay open for the next bet.
@@ -3343,9 +3359,16 @@
         // honest; effective cost adds their 2%-of-winnings fee (~2·p(1-p)¢).
         const pxRaw = (document.getElementById('lmPxPrice').value || '').trim();
         if (pxRaw) {
-            const pxAmer = parseInt(pxRaw.replace('+', ''), 10);
+            let pxAmer = parseInt(pxRaw.replace(/[^\d+-]/g, '').replace('+', ''), 10);
+            // No explicit sign typed -> the -/+ toggle decides (iOS numeric
+            // keypad has no minus key).
+            if (isFinite(pxAmer) && !/[+\-\u2212]/.test(pxRaw)) {
+                const b = document.getElementById('lmPxSign');
+                if (b && b.textContent.trim() !== '+') pxAmer = -Math.abs(pxAmer);
+            }
+            if (pxRaw.indexOf('\u2212') >= 0) pxAmer = -Math.abs(pxAmer);
             if (!isFinite(pxAmer) || Math.abs(pxAmer) < 100) {
-                _lmStatus('err', 'ProphetX odds must be American (e.g. -112 or 145).');
+                _lmStatus('err', 'ProphetX odds must be American (e.g. 112 with the \u2212 toggle, or -112).');
                 return;
             }
             const p = _amerToProb(pxAmer);
