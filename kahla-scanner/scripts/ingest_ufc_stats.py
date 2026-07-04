@@ -429,8 +429,12 @@ def ingest_fighter_details(client, sb, commit: bool, limit: int,
     delta refreshes exactly who just fought."""
     todo: list[str] = []
     try:
+        # Explicit high limit — Supabase's DEFAULT row cap is 1,000, which
+        # silently truncated the 4,552-row null set on the first backfill
+        # and left ~1k fighters undetailed across two runs.
         rows = (sb.table("ufc_fighters").select("id")
-                .is_("detail_scraped_at", "null").execute().data) or []
+                .is_("detail_scraped_at", "null")
+                .limit(20000).execute().data) or []
         todo = [r["id"] for r in rows]
     except Exception as e:
         log.warning("detail todo query failed: %s", e)
