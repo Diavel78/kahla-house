@@ -2149,7 +2149,17 @@ TOTALS_SUGGESTIONS_ENABLED = False  # exchange-follow O/U engine stays OFF — i
 # under). NO external vetoes on this tier — park is already in proj_total via
 # _park_factor, so the test measures the model alone (VSiN/park recorded for
 # post-hoc slicing, never suppress a pick).
-TOTALS_TEST_MODE       = True    # totals run the MODEL-DRIVEN tier (proj_total vs
+TOTALS_TEST_MODE       = False   # ⚠ BLACKLISTED July 4 2026 (user order). The
+                                 # model-driven O/U tier is DEAD: lifetime real
+                                 # book 75-85 / −13.7u, last 30d 54-63 / −14.2u,
+                                 # avg CLV ≈ 0 (no edge vs the close), overs and
+                                 # unders bleeding equally. Do NOT re-enable —
+                                 # totals return only via a ground-up rebuild
+                                 # that clears the standing earn-in gates. The
+                                 # model's calls still shadow-log to the
+                                 # paperlog (variant 'totshadow' in app.py) for
+                                 # rebuild data + the fade-the-model read.
+                                 # (Was: totals ran the MODEL-DRIVEN tier — proj_total vs
                                  # line), NOT the discredited exchange-follow
                                  # engine (TOTALS_SUGGESTIONS_ENABLED, -10.8u/30d).
                                  # PROMOTED June 2026 (user call) from the 0.25u

@@ -5052,6 +5052,8 @@ def api_handicapper_paperlog():
             return "ufcdur"
         if b.get("ufc_model_vetoed_pick") in (True, "true"):
             return "ufcveto"
+        if b.get("total_blacklist_shadow") in (True, "true"):
+            return "totshadow"
         return ""
     try:
         recent = (sb.table("pickbot_paperlog")
@@ -5203,6 +5205,44 @@ def api_handicapper_paperlog():
                                 "home_cover": spm.get("home_cover"),
                                 "away_cover": spm.get("away_cover")},
             })
+        # SHADOW blacklisted totals model (July 2026): the live O/U surface
+        # is DARK (TOTALS_TEST_MODE=False — 75-85, −13.7u lifetime, CLV≈0)
+        # but the model's call keeps logging as a shadow so the rebuild has
+        # forward data AND the user's fade hypothesis ("just bet against
+        # it") is measurable. Mirrors the retired live gate exactly:
+        # (proj_total + bias) vs the exchange line, |gap| ≥ 1 run, MLB only.
+        # Variant 'totshadow' — the dedup key MUST discriminate variants
+        # (the June 28 flood landmine).
+        if sp == "MLB":
+            _pr = d.get("power_rating") or {}
+            _pt = _pr.get("proj_total")
+            _tot = (d.get("odds") or {}).get("total") or {}
+            _xc = _tot.get("exch_current") or {}
+            _tl = ((_xc.get("over") or {}).get("line")
+                   or (_xc.get("under") or {}).get("line"))
+            if _pt is not None and _tl is not None:
+                try:
+                    _bias = float(getattr(handicapper_web, "TEST_TOTAL_BIAS_RUNS", 0.0))
+                    _gap = (float(_pt) + _bias) - float(_tl)
+                except (TypeError, ValueError):
+                    _gap = None
+                if _gap is not None and abs(_gap) >= 1.0:
+                    _side = "over" if _gap > 0 else "under"
+                    _pm = (_tot.get("polymarket") or {}).get(_side) or {}
+                    _q = _pm.get("quote") or {}
+                    _entry = _q.get("bid_american")
+                    if _entry is not None:
+                        bets.append({
+                            "market_type": "total", "side": _side, "units": 1,
+                            "confidence": "low",
+                            "line": (_pm.get("line") if _pm.get("line") is not None else _tl),
+                            "entry_price": _entry, "fair_american": None,
+                            "sharp_score": None, "edge_pp": None,
+                            "gates_cleared": False,
+                            "signal_blob": {"total_blacklist_shadow": True,
+                                            "model_total_diff": round(_gap, 2),
+                                            "proj_total": _pt},
+                        })
         if bets:
             with_pick += 1
         for b in bets:
