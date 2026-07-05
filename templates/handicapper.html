@@ -250,7 +250,6 @@
         .game-line2 { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
         .pick-chip { padding: 6px 11px; border: 0; border-radius: 8px; font-size: 11px; font-weight: 600; cursor: pointer; font-family: inherit; color: #fff; display: inline-flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.2; }
         .pick-chip .pc-main { font-size: 12px; font-weight: 700; }
-        .pick-chip .pc-sub  { font-size: 9px; font-weight: 600; opacity: 0.72; margin-top: 1px; letter-spacing: 0.02em; }
         .pick-chip:hover { filter: brightness(1.1); }
         .pick-chip.u05 { background: #2b3a5e; color: #b9cdf2; }
         .pick-chip.u1  { background: var(--blue); color: #fff; }
@@ -1511,12 +1510,7 @@
                     cls = 'upgrade'; label = '↑ ' + p._chip; title = `Add up to ${_uStr(p.units)}`;
                 }
                 renderedMt.add(p.market_type);
-                // Circa handle%/bets% sub-line (smaller, less prominent) when
-                // VSiN reported it for the picked side.
-                const sub = (p._circaH != null && p._circaB != null)
-                    ? `<span class="pc-sub" title="Circa money% / blended tickets% — matches Details">${Math.round(p._circaH)}%/${Math.round(p._circaB)}%</span>`
-                    : '';
-                chips.push(`<button class="pick-chip ${cls}" title="${_esc(title)}" onclick="${click}"><span class="pc-main">${_esc(label)}</span>${sub}</button>`);
+                chips.push(`<button class="pick-chip ${cls}" title="${_esc(title)}" onclick="${click}"><span class="pc-main">${_esc(label)}</span></button>`);
             });
             // Logged picks the bot isn't currently surfacing → keep the green
             // "already picked" chip so the user stays oriented on their bets.
@@ -1539,8 +1533,12 @@
         });
     }
 
-    // Compact chip label for a recommended bet, e.g. "ML Reds +115 · 1u",
-    // "TOT O8.5 -107 · 1u", "1ST YRFI +108 · 0.5u". Team → last word (mascot).
+    // Compact chip label for a recommended bet, e.g. "ML Reds · 1u",
+    // "TOT O8.5 · 1u", "1ST YRFI · 0.5u". Team → last word (mascot).
+    // NO odds (July 2026 declutter, user: "the dashboard is kinda lying
+    // about the odds anyway" — the maker bid isn't the executable number;
+    // the log modal's execution line shows the real make/take price). The
+    // LINE stays for SPR/TOT — it's part of the bet, not a price.
     function _pickChipLabel(mt, side, line, price, units, d) {
         const mkt = _shortMarket(mt);
         let sideLbl;
@@ -1550,7 +1548,7 @@
         const lineFrag = (line != null && mt !== 'nrfi')
             ? (mt === 'total' ? _fmtPt(Math.abs(line)) : ' ' + _fmtPt(line)) : '';
         const sep = (mt === 'total') ? '' : ' ';
-        return `${mkt} ${sideLbl}${sep}${lineFrag} ${_fmtAmer(price)} · ${_uStr(units)}`.replace(/\s+/g, ' ').trim();
+        return `${mkt} ${sideLbl}${sep}${lineFrag} · ${_uStr(units)}`.replace(/\s+/g, ' ').trim();
     }
 
     // Build the /api/handicapper/pick POST body for a recommended bet so a
@@ -1633,16 +1631,8 @@
                             const body = _suggestionToBody(s, mid, d);
                             let chip = _pickChipLabel(s.market_type, s.side, body._line, body._price, s.units, d);
                             if (!s.gates_cleared) chip = '~ ' + chip;
-                            // Circa handle% / tickets% for the picked side (sub-line
-                            // on the chip). MATCHES the dossier breakdown: handle =
-                            // Circa sharp money, tickets = BLENDED Circa+DK ticket
-                            // share (side_bets), so the chip and Details agree.
-                            const v = s.vsin || {};
-                            const circaH = (v.side_handle != null) ? v.side_handle : null;
-                            const circaB = (v.side_bets != null) ? v.side_bets : null;
                             return { market_type: s.market_type, side: s.side, units: Number(s.units) || 1,
                                      _chip: chip, _tw: s.timing_window || null, _lean: !s.gates_cleared,
-                                     _circaH: circaH, _circaB: circaB,
                                      _slug: s.pmm_slug || null, _inv: !!s.pmm_synthetic, _body: body };
                         });
                         // NRFI: actionable only when the model found a +EV side.
