@@ -3110,6 +3110,16 @@
         const amer = _centsToAmer(j.price);
         let s = `${j.rec} ${j.venue_label || 'Polymarket'} at `
               + `${amer != null ? _fmtAmer(amer) : '?'} (${_mtCents(j.price)}¢)`;
+        // A TAKE quotes the fee-inclusive ask, which reads worse than the
+        // bid shown in the Selection label — say why in one line so the
+        // -125-vs--134 jump explains itself (user hit this on a steamed
+        // Nationals book, July 2026).
+        if (j.rec === 'TAKE' && j.best_bid != null) {
+            const bAmer = _centsToAmer(j.best_bid);
+            s += `\n(rest at ${bAmer != null ? _fmtAmer(bAmer) : j.best_bid + '¢'} won't fill`
+               + (j.touch_imbalance != null ? ` — bids ${j.touch_imbalance}× the sells` : '')
+               + `; take cost incl. fee)`;
+        }
         if (j.prophetx && j.prophetx.beat_american != null) {
             const a = j.prophetx.beat_american;
             s += `\nProphetX: ${a > 0 ? '+' + a : a} or better beats it (2% win fee incl.)`;
