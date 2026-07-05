@@ -3601,6 +3601,10 @@ def _fetch_kalshi_orderbook(ticker: str) -> dict:
 # These books are massive (RULE 0.001) — no size floor, no spoof gate; the
 # touch ratio is the whole signal.
 _TAKE_IMB = 1.5          # top-row bid size ≥ this × top-row ask size ⇒ TAKE
+# Kalshi only wins the make/take verdict when it beats Polymarket's best
+# option by MORE than this many cents all-in (user hates the Kalshi app —
+# it has to be genuinely better odds to be worth opening).
+_KALSHI_ROUTE_HURDLE_C = 0.1
 
 
 def _pmm_book(client, slug: str) -> dict | None:
@@ -4021,14 +4025,21 @@ def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
     if not opts:
         return None
     pool = [o for o in opts if o["fillable"]] or opts
-    # Tie-break toward Polymarket: the venues' take costs routinely land
-    # within a few hundredths (Kalshi's cheaper ask vs its steeper fee —
-    # live case: 48.74c vs 48.75c on the same bet, both apps quoting the
-    # identical $2.44). Within a tenth of a cent the user is better off on
-    # their main book (dashboard P&L, rebates, one venue) — don't route to
-    # Kalshi over rounding dust.
-    best = min(pool, key=lambda o: (round(o["all_in"], 1),
-                                    0 if o["venue"] == "POLYMARKET" else 1))
+    # Venue preference (user, July 2026): "I honestly HATE Kalshi — the
+    # only reason to ever open that app is if it has better odds." So
+    # Kalshi wins the verdict ONLY when its best option beats Polymarket's
+    # best by MORE than _KALSHI_ROUTE_HURDLE_C all-in; anything closer
+    # routes to Poly (main book, dashboard P&L, rebates). The venues' take
+    # costs routinely land a hundredth apart (live case: 48.74c vs 48.75c,
+    # both apps quoting the identical $2.44). Raise the hurdle if small
+    # gaps still aren't worth the app switch.
+    best = min(pool, key=lambda o: o["all_in"])
+    if best["venue"] != "POLYMARKET":
+        poly = [o for o in pool if o["venue"] == "POLYMARKET"]
+        if poly:
+            pbest = min(poly, key=lambda o: o["all_in"])
+            if pbest["all_in"] - best["all_in"] <= _KALSHI_ROUTE_HURDLE_C:
+                best = pbest
     vlabel = {"POLYMARKET": "Polymarket", "KALSHI": "Kalshi"}
     runner = min((o for o in pool if o is not best), key=lambda o: o["all_in"], default=None)
     why = (f"{best['rec'].lower()} {vlabel[best['venue']]} — {best['all_in']}c all-in"
