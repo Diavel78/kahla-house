@@ -4162,14 +4162,12 @@ def debug_orderbook():
 @app.route("/api/handicapper/make-take")
 @bot_required
 def api_make_take():
-    """Live best execution for one picked side across BOTH US venues:
-    {MAKE,TAKE} × {Polymarket, Kalshi}. The card polls this so the chip
-    updates as the books move. Params: slug (PMM market), units,
-    starts_in_min, inverse (synthetic NO side), and the game context
-    (sport, away, home, side, market_type) used to find the Kalshi market.
-    Kalshi is consulted for moneyline only (the reader is ML-only); for
-    spread/total or an unmatched game it's Polymarket-only. Returns the
-    cheapest fillable option (venue + MAKE/TAKE + all-in cents)."""
+    """Live best execution for one picked side: Polymarket {MAKE, MAKE+,
+    TAKE} + the ProphetX manual threshold. (Kalshi was a routed venue
+    June–July 2026; de-venued July 5 when the user pulled his funds — it
+    stays signal-only.) Params: slug (PMM market), units, starts_in_min,
+    inverse (synthetic NO side); the game-context params are accepted for
+    back-compat. Returns the cheapest fillable option + all options."""
     slug = (request.args.get("slug") or "").strip()
     if not slug:
         return jsonify({"ok": False, "error": "missing slug"}), 400
@@ -4198,23 +4196,14 @@ def api_make_take():
                         "error": f"{type(e).__name__}: {e}"[:160]})
     if inverse:
         book = _invert_book(book)
-    # Kalshi cross-shopped on ALL main markets now (ML via the game series,
-    # TOTAL/SPREAD via the run-total/run-line series) on covered sports.
-    # want_dt (approx game start from starts_in_min) disambiguates a SERIES —
-    # the same two teams have several Kalshi events on consecutive days, and
-    # team-code matching alone returns tonight's game for tomorrow's pick.
-    want_dt = (datetime.now(timezone.utc) + timedelta(minutes=sim)
-               if sim is not None else None)
+    # Kalshi is NOT a bettable venue (July 5 2026, user pulled his funds:
+    # "I hate Kalshi… we just go to Polymarket and show the X number").
+    # Execution = Polymarket {MAKE, MAKE+, TAKE} + the ProphetX manual
+    # threshold. Kalshi remains a SIGNAL everywhere else (cross-confirm,
+    # exchange sharp score, CLV close, fair anchor) — just never routed.
+    # The Kalshi book readers (_kalshi_side_book/_kalshi_line_book) stay
+    # for /debug-crossbook and in case the venue ever earns its way back.
     kbook = None
-    if sport and away and home:
-        try:
-            if market_type in ("moneyline", "ml") and side in ("home", "away"):
-                kbook = _kalshi_side_book(sport, away, home, side, want_dt=want_dt)
-            elif market_type in ("total", "tot", "spread", "spr") and line is not None:
-                kbook = _kalshi_line_book(sport, away, home, market_type, side, line,
-                                          want_dt=want_dt)
-        except Exception:
-            kbook = None
     sig = _cross_book_signal(book, kbook, units=units, starts_in_min=sim)
     if not sig:
         return jsonify({"ok": True, "available": False})
