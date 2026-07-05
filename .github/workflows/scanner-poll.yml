@@ -154,35 +154,9 @@ jobs:
             "https://www.thekahlahouse.com/api/polymarket/check-fills?key=${KEY}" || echo "000")
           echo "check-fills HTTP $code"
 
-      # Pick Bot prime-window alert ping. Same lightweight curl pattern —
-      # /api/handicapper/prime-alert fires a batched Telegram (via the
-      # Filled Bot) when a cluster of games enters the 90-120 min pre-tip
-      # window, deduped server-side via the prime_alerts table. Reuses
-      # FILLS_CRON_SECRET (the endpoint accepts it as a fallback), so no
-      # new secret is needed. Idempotent — double-pinging is harmless.
-      #
-      # CADENCE GATE (June 2026): every 5 min, not every tick. Vercel
-      # Fluid Active CPU is metered (the per-minute pings blew the Hobby
-      # tier's 4h/mo); the alert's batching window is 30 min wide, so a
-      # ≤4-min delivery delay is immaterial. Only check-fills keeps 1-min.
-      - name: Pick Bot — prime-window alert ping
-        continue-on-error: true
-        env:
-          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
-        run: |
-          M=$(date -u +%-M)
-          if [ $(( M % 5 )) -ne 0 ]; then
-            echo "minute $M — skipping prime-alert ping (5-min cadence)."
-            exit 0
-          fi
-          if [ -z "$FILLS_CRON_SECRET" ]; then
-            echo "FILLS_CRON_SECRET not set — skipping prime-window ping (no-op)."
-            exit 0
-          fi
-          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
-          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
-            "https://www.thekahlahouse.com/api/handicapper/prime-alert?key=${KEY}" || echo "000")
-          echo "prime-alert HTTP $code"
+      # (The prime-window alert ping was RETIRED July 2026 — replaced by
+      # the unlogged-BET alert, which rides the paperlog ping below inside
+      # /api/handicapper/paperlog. No separate curl. Spec in git history.)
 
       # Prediction-market cent-logger ping. /api/pm-snapshot records free
       # Polymarket + Kalshi cents per side for upcoming MLB games into

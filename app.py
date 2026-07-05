@@ -5102,9 +5102,13 @@ def api_handicapper_paperlog():
         return jsonify({"ok": True, "games": 0, "reason": "no upcoming games in 5h"})
 
     # Recent paperlog → (a) last logged_at/game for stale-first ordering,
-    # (b) last (side,units) per (game,market) for the bet-change dedup.
+    # (b) last (side,units) per (game,market) for the bet-change dedup,
+    # (c) the latest row per bet = the unlogged-bet alert's dedup marker
+    # carrier (signal_blob.bet_alerted — see _bet_alerts).
     mids = [g["id"] for g in games]
     last_logged, last_bet = {}, {}
+    recent: list = []
+    alert_cands: list = []
     # Dedup key carries a VARIANT discriminator: '' (the real suggestion),
     # 'model' (the shadow spread model), 'veto' (a VSiN-vetoed would-be pick).
     # Without it, two writers sharing (market_id,'spread') — the steam spread
@@ -5127,7 +5131,7 @@ def api_handicapper_paperlog():
         return ""
     try:
         recent = (sb.table("pickbot_paperlog")
-                  .select("market_id,market_type,side,units,logged_at,signal_blob")
+                  .select("id,market_id,market_type,side,units,logged_at,signal_blob")
                   .in_("market_id", mids)
                   .gte("logged_at", (now - timedelta(hours=6)).isoformat())
                   .order("logged_at", desc=True).limit(5000).execute().data) or []
@@ -5217,6 +5221,28 @@ def api_handicapper_paperlog():
                 "sharp_score": None, "edge_pp": nrfi.get("bet_edge_pp"),
                 "signal_blob": {"p_nrfi": nrfi.get("p_nrfi")},
             })
+        # Unlogged-bet alert candidates (July 2026 — replaced the prime-
+        # WINDOW alert, user call: ping on BETS, not windows). A candidate
+        # is a REAL recommended bet (gate-cleared — leans and shadows never
+        # alert) whose chip is showing RIGHT NOW: ML/SPR carry the CURRENT
+        # per-market timing_window from this tick's dossier; NRFI uses its
+        # early window (≥2h30m, the page's MODEL_BET_EARLY_MIN).
+        for s in (d.get("suggestions") or []):
+            if not (s.get("gates_cleared") and s.get("market_type")
+                    and s.get("side")):
+                continue
+            if s.get("timing_window") != "prime":
+                continue
+            alert_cands.append({
+                "market_id": g["id"], "market_type": s["market_type"],
+                "side": s["side"], "units": s.get("units"),
+                "event_name": en, "event_start": es, "sim": sim})
+        if (nrfi.get("gates_cleared") and nrfi.get("bet_side")
+                and sim is not None and sim >= 150):
+            alert_cands.append({
+                "market_id": g["id"], "market_type": "nrfi",
+                "side": nrfi["bet_side"], "units": 1,
+                "event_name": en, "event_start": es, "sim": sim})
         # SHADOW Fight IQ duration family (UFC): model-priced distance prop
         # + rounds line vs PMM's actual markets, logged flat 1u flagged
         # signal_blob.ufc_duration (variant 'ufcdur' — the dedup key MUST
@@ -5331,6 +5357,9 @@ def api_handicapper_paperlog():
                 "gates_cleared": b.get("gates_cleared", True),
                 "signal_blob": b["signal_blob"], "logged_at": now.isoformat(),
             })
+    # Alert pass runs BEFORE the insert so a brand-new bet's dedup marker
+    # can ride its own insert row (no read-back needed).
+    bets_alerted = _bet_alerts(sb, now, alert_cands, recent, rows)
     new_rows = 0
     if rows:
         try:
@@ -5339,65 +5368,164 @@ def api_handicapper_paperlog():
         except Exception as e:
             return jsonify({"ok": False, "error": f"insert: {e}",
                             "processed": processed}), 500
-    nrfi_alerted = _nrfi_find_alerts(sb, now)
     return jsonify({"ok": True, "games": len(games), "processed": processed,
                     "with_pick": with_pick, "new_rows": new_rows,
-                    "nrfi_alerted": nrfi_alerted})
+                    "bets_alerted": bets_alerted})
 
 
-def _nrfi_find_alerts(sb, now) -> int:
-    """Telegram ping (Filled Bot) for first-inning finds, so the user doesn't
-    have to catch the NRFI window (5h→2h30m before pitch) by staring at the
-    page. The paperlog just logged every gate-cleared NRFI bet; alert each
-    one ONCE while its bet window is still open (≥2h30m to pitch), deferring
-    dawn finds to civil hours (≥7am AZ — the prime-alert convention; a 5am
-    find on a 10am game still alerts at 7 with the window open until 7:35).
-    Dedup marker lives on the row itself (signal_blob.nrfi_alerted) — runs
-    every paperlog tick, no new table. Never breaks the paperlog response."""
+_ADMIN_UIDS_CACHE: dict = {"uids": None, "at": 0.0}
+
+
+def _admin_uids() -> set:
+    """Firestore uids with role=admin, cached 10 min. The Filled Bot's chat
+    is the admin's phone, so 'isn't logged' means THE ADMIN hasn't logged
+    it — another user's log must not suppress the admin's alert."""
+    if (_ADMIN_UIDS_CACHE["uids"] is not None
+            and _time.time() - _ADMIN_UIDS_CACHE["at"] < 600):
+        return _ADMIN_UIDS_CACHE["uids"]
+    uids: set = set()
     try:
-        az = now.astimezone(ZoneInfo("America/Phoenix"))
-        if az.hour < 7:
+        for u in get_db().collection("users").where("role", "==", "admin").stream():
+            uids.add(u.id)
+        _ADMIN_UIDS_CACHE.update(uids=uids, at=_time.time())
+    except Exception:
+        pass   # Firestore hiccup → empty set → no suppression this tick
+               # (better a redundant ping than a missed bet; the per-bet
+               # dedup marker bounds the damage to one message)
+    return uids
+
+
+def _is_shadow_blob(b) -> bool:
+    """True for paperlog shadow variants (spread model / veto counterfactuals
+    / UFC duration / totals blacklist) — mirrors the endpoint's _variant()
+    discriminators. Shadows never alert and never carry alert markers."""
+    b = b or {}
+    return any(b.get(k) in (True, "true") for k in
+               ("spread_model", "vsin_vetoed_pick", "ufc_duration",
+                "ufc_model_vetoed_pick", "total_blacklist_shadow"))
+
+
+def _alert_mkt_group(mt: str) -> str:
+    """ML and SPR are the same directional bet (the app never prompts both
+    sides of the pair) — a logged ML suppresses the SPR alert and vice
+    versa. Mirrors the frontend's _mktGroup."""
+    return "side" if mt in ("moneyline", "spread") else mt
+
+
+_BET_ALERT_COOLDOWN_S = 300   # user rule: never more than one message per 5 min
+
+
+def _bet_alerts(sb, now, cands, recent, pending_rows) -> int:
+    """Telegram (Filled Bot): 'there's a recommended bet showing that you
+    haven't logged — go check now or you'll miss it.' Replaced the prime-
+    WINDOW alert (July 2026, user call — fire on BETS, not windows). Rules:
+      - real gate-cleared bets only, in their display window NOW (cands
+        come from this tick's dossiers, so the window is current);
+      - suppressed when the ADMIN already has a pending bot_picks row on
+        the same market GROUP (ML/SPR = one directional bet);
+      - one ping per bet: marker signal_blob.bet_alerted (ISO stamp) on
+        the bet's LATEST real paperlog row — a side/units change inserts a
+        new row and earns a fresh alert;
+      - batched, max one MESSAGE per 5 min (cooldown read from the same
+        markers; throttled cands stay unmarked and retry next tick);
+      - quiet before 7am AZ (the old prime-alert convention).
+    Never raises — a broken alert must not break the paperlog."""
+    try:
+        if not cands:
             return 0
-        win_cut = (now + timedelta(minutes=150)).isoformat()
-        rows = (sb.table("pickbot_paperlog")
-                .select("id,event_name,event_start,side,entry_price,signal_blob")
-                .eq("market_type", "nrfi").eq("gates_cleared", True)
-                .eq("status", "pending")
-                .gte("event_start", win_cut)
-                .gte("logged_at", (now - timedelta(hours=6)).isoformat())
-                .execute().data) or []
-        due = [r for r in rows
-               if not ((r.get("signal_blob") or {}).get("nrfi_alerted"))]
+        if now.astimezone(ZoneInfo("America/Phoenix")).hour < 7:
+            return 0
+        # Latest REAL paperlog row per bet (the marker carrier) + the most
+        # recent alert stamp for the global cooldown. `recent` is newest-
+        # first; shadow rows are skipped so a shadow can't mask the marker.
+        latest: dict = {}
+        last_sent = None
+        for r in recent:
+            if _is_shadow_blob(r.get("signal_blob")):
+                continue
+            k = (r["market_id"], r["market_type"])
+            if k not in latest:
+                latest[k] = r
+            ts = (r.get("signal_blob") or {}).get("bet_alerted")
+            if ts and (last_sent is None or ts > last_sent):
+                last_sent = ts
+        if last_sent:
+            try:
+                dt = datetime.fromisoformat(str(last_sent).replace("Z", "+00:00"))
+                if (now - dt).total_seconds() < _BET_ALERT_COOLDOWN_S:
+                    return 0
+            except ValueError:
+                pass
+        # The admin's own pending picks → suppress by market group.
+        logged: set = set()
+        admins = _admin_uids()
+        try:
+            pk = (sb.table("bot_picks").select("market_id,market_type,asked_by")
+                  .in_("market_id", list({c["market_id"] for c in cands}))
+                  .eq("status", "pending").execute().data) or []
+            for p in pk:
+                if not admins or p.get("asked_by") in admins:
+                    logged.add((p["market_id"], _alert_mkt_group(p["market_type"])))
+        except Exception:
+            pass
+        due = []
+        for c in cands:
+            if (c["market_id"], _alert_mkt_group(c["market_type"])) in logged:
+                continue
+            lr = latest.get((c["market_id"], c["market_type"]))
+            if lr is not None and (lr.get("signal_blob") or {}).get("bet_alerted"):
+                continue
+            c["_marker_row"] = lr    # None → brand-new bet, mark its insert row
+            due.append(c)
         if not due:
             return 0
-        az_tz = ZoneInfo("America/Phoenix")
-        lines = ["🎯 First-inning find" + ("s" if len(due) > 1 else "")]
-        for r in due:
-            side = "YRFI" if r.get("side") == "yes" else "NRFI"
+
+        def _bet_label(c):
+            mt, side = c["market_type"], c["side"]
+            if mt == "nrfi":
+                return "YRFI" if side == "yes" else "NRFI"
+            lbl = {"moneyline": "ML", "spread": "SPR", "total": "TOT"}.get(mt, mt)
+            if mt == "total":
+                return f"{lbl} {'Over' if side == 'over' else 'Under'}"
+            en = c.get("event_name") or ""
+            team = side
+            if " @ " in en and side in ("home", "away"):
+                aw, hm = en.split(" @ ", 1)
+                team = (hm if side == "home" else aw).split()[-1]
+            return f"{lbl} {team}"
+
+        lines = [f"🔔 {len(due)} unlogged bot bet{'s' if len(due) > 1 else ''} — go check:"]
+        for c in due:
+            u = c.get("units")
+            u_s = f" · {u:g}u" if isinstance(u, (int, float)) else ""
+            when = ""
             try:
-                st = datetime.fromisoformat(
-                    (r["event_start"] or "").replace("Z", "+00:00"))
-                when = st.astimezone(az_tz).strftime("%-I:%M %p")
-                closes = (st - timedelta(minutes=150)).astimezone(az_tz).strftime("%-I:%M %p")
-                timing = f" · first pitch {when} AZ · window closes {closes}"
-            except Exception:
-                timing = ""
-            pr = r.get("entry_price")
-            try:
-                pr_s = f"{'+' if float(pr) > 0 else ''}{float(pr):g}"
-            except (TypeError, ValueError):
-                pr_s = "?"
-            lines.append(f"• {side} {r.get('event_name')} ({pr_s}){timing}")
-        if not _send_fill_telegram("\n".join(lines)):
-            return 0
-        for r in due:
-            blob = dict(r.get("signal_blob") or {})
-            blob["nrfi_alerted"] = True
-            try:
-                (sb.table("pickbot_paperlog").update({"signal_blob": blob})
-                 .eq("id", r["id"]).execute())
+                st = datetime.fromisoformat(str(c["event_start"]).replace("Z", "+00:00"))
+                when = f" · starts {_fmt_az_time(st)} AZ"
             except Exception:
                 pass
+            lines.append(f"• {_bet_label(c)} — {c.get('event_name', '?')}{u_s}{when}")
+        if not _send_fill_telegram("\n".join(lines)):
+            return 0
+        stamp = now.isoformat()
+        for c in due:
+            lr = c.get("_marker_row")
+            if lr is not None:
+                blob = dict(lr.get("signal_blob") or {})
+                blob["bet_alerted"] = stamp
+                try:
+                    (sb.table("pickbot_paperlog").update({"signal_blob": blob})
+                     .eq("id", lr["id"]).execute())
+                except Exception:
+                    pass
+            else:
+                for r in pending_rows:
+                    if (r["market_id"] == c["market_id"]
+                            and r["market_type"] == c["market_type"]
+                            and not _is_shadow_blob(r.get("signal_blob"))):
+                        r["signal_blob"] = {**(r.get("signal_blob") or {}),
+                                            "bet_alerted": stamp}
+                        break
         return len(due)
     except Exception:
         return 0
@@ -5857,182 +5985,20 @@ def _format_fill_alert(row, milestone, fill_pct):
     return "\n".join(lines)
 
 
-# ──────────────── Pick Bot prime-window alerts ────────────────
-# Telegram heads-up (via the Filled Bot) when a cluster of games crosses
-# into the PRIME betting window — 90-120 min before first pitch, the
-# 1.5-2h band where the bot's live picks demonstrably print (68.4%,
-# +27u over 38 picks in the 118-pick review). One BATCHED message per
-# sport ("5 MLB games entering the prime betting window"), NOT one per
-# game. Dedup via the `prime_alerts` table so each game pings once.
-#
-# Pinged every ~1 min by the scanner cron (a curl step alongside the
-# fill-alert ping — no new cron-job.org job). Auth: shared-secret ?key=
-# matched to PRIME_CRON_SECRET, falling back to FILLS_CRON_SECRET so no
-# new secret is required. Telegram routes through _send_fill_telegram
-# (the Filled Bot creds already in Vercel env).
-# Fire the heads-up as games cross the TOP of the prime window (now 3h,
-# extended from 2h June 2026) — you want the full prime window to act.
-_PRIME_LO_MIN       = 150   # consider games 150+ min out for the entering-cluster query
-_PRIME_HI_MIN       = 180   # fire when the earliest fresh game is <= 180 min out (just entered prime / 3h)
-_PRIME_BATCH_HI_MIN = 210   # look 30 min past prime to pull a whole cluster into one alert
-_PRIME_QUIET_BEFORE = 7     # don't alert before 7am AZ (no overnight/early-morning pings)
+# ──────────────── Pick Bot bet alerts ────────────────
+# The prime-WINDOW Telegram alert (/api/handicapper/prime-alert, batched
+# "N games entering the prime window" pings + the prime_alerts dedup
+# table) was RETIRED July 2026 — replaced by the unlogged-BET alert
+# (_bet_alerts, above, inside the paperlog tick): one Filled Bot message
+# (max 1 per 5 min) whenever a gate-cleared recommendation is showing
+# that the admin hasn't logged. Full window-alert spec in git history;
+# the prime_alerts table is orphaned (harmless, drop whenever).
 
 
 def _fmt_az_time(dt: datetime) -> str:
     """UTC datetime → 'h:MM AM' in Arizona time (no leading zero)."""
     local = dt.astimezone(ZoneInfo("America/Phoenix"))
     return local.strftime("%I:%M %p").lstrip("0")
-
-
-@app.route("/api/handicapper/prime-alert")
-def api_handicapper_prime_alert():
-    """Send a batched Telegram alert when games enter the prime betting
-    window (90-120 min pre-tip). One message per sport for the whole
-    cluster; deduped via `prime_alerts`. Returns a small JSON payload so
-    the cron-job history shows what fired."""
-    expected = (os.environ.get("PRIME_CRON_SECRET")
-                or os.environ.get("FILLS_CRON_SECRET") or "").strip()
-    provided = (request.args.get("key") or "").strip()
-    if not expected or not secrets.compare_digest(provided, expected):
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
-
-    sb = get_supabase()
-    if sb is None:
-        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
-
-    now = datetime.now(timezone.utc)
-    # Quiet hours — no pings before 7am Arizona time (a game would have to
-    # start ~9am for its prime window to land that early; none do).
-    if now.astimezone(ZoneInfo("America/Phoenix")).hour < _PRIME_QUIET_BEFORE:
-        return jsonify({"ok": True, "alerted": 0, "reason": "quiet hours"})
-
-    # Fire as games cross the OUTER edge of the (data-driven, multi-zone)
-    # prime window — the same zones the website uses, so the alert tracks
-    # the tuner instead of a hardcoded 3h. env_hi = the far edge of prime;
-    # alerting there gives the user the whole window to act. Falls back to
-    # the constants if the tuner row is unreadable.
-    try:
-        _zones = handicapper_web._load_prime_zones(sb) or []
-        env_hi = max((hi for _lo, hi in _zones), default=_PRIME_HI_MIN)
-    except Exception:
-        env_hi = _PRIME_HI_MIN
-    fire_min = int(env_hi)                 # fire when the earliest fresh game ≤ this
-    lo_min   = max(0, fire_min - 30)       # 60-min cluster straddling the edge
-    batch_hi = fire_min + 30
-    lo = (now + timedelta(minutes=lo_min)).isoformat()
-    hi = (now + timedelta(minutes=batch_hi)).isoformat()
-    prime_hi = now + timedelta(minutes=fire_min)
-
-    try:
-        rows = (sb.table("markets")
-                .select("id,sport,event_name,event_start")
-                .eq("status", "active")
-                .gte("event_start", lo)
-                .lte("event_start", hi)
-                .order("event_start")
-                .execute().data) or []
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"markets query: {e}"}), 500
-    if not rows:
-        return jsonify({"ok": True, "alerted": 0, "reason": "no games in window"})
-
-    # Drop games we've already pinged (per-game dedup).
-    ids = [r["id"] for r in rows]
-    try:
-        ex = (sb.table("prime_alerts").select("market_id")
-              .in_("market_id", ids).execute().data) or []
-        already = {e["market_id"] for e in ex}
-    except Exception as e:
-        # Table missing/unreadable — bail rather than risk spamming.
-        return jsonify({"ok": False, "error": f"prime_alerts read: {e}"}), 500
-    fresh = [r for r in rows if r["id"] not in already]
-    if not fresh:
-        return jsonify({"ok": True, "alerted": 0, "reason": "all already alerted"})
-
-    # Group by sport; only fire a sport whose EARLIEST fresh game has
-    # actually entered prime (≤120 min out) — so we don't pre-fire a
-    # cluster that's still 2h+ away. Once fired, the whole batch (out to
-    # +150 min) is marked so the trailing games don't re-ping.
-    by_sport: dict[str, list] = {}
-    for r in fresh:
-        by_sport.setdefault(r["sport"], []).append(r)
-
-    sports_fired = 0
-    marked: list[dict] = []
-    for sport, games in by_sport.items():
-        games.sort(key=lambda g: g["event_start"])
-        try:
-            earliest = datetime.fromisoformat(
-                str(games[0]["event_start"]).replace("Z", "+00:00"))
-        except Exception:
-            continue
-        if earliest > prime_hi:
-            continue  # leading edge not in prime yet — wait for a later tick
-
-        if _send_fill_telegram(_build_prime_alert_msg(sport, games)):
-            sports_fired += 1
-            for g in games:
-                marked.append({"market_id": g["id"], "sport": sport,
-                               "event_start": g["event_start"],
-                               "alerted_at": now.isoformat()})
-
-    if marked:
-        try:
-            sb.table("prime_alerts").upsert(marked).execute()
-        except Exception as e:
-            # Send happened but the mark failed — next tick may re-ping.
-            # Rare; surfaced in the response for visibility.
-            return jsonify({"ok": False, "error": f"mark failed: {e}",
-                            "sports_fired": sports_fired}), 500
-
-    # Opportunistic cleanup — drop rows older than 2 days (markets long over).
-    try:
-        cutoff = (now - timedelta(days=2)).isoformat()
-        sb.table("prime_alerts").delete().lt("alerted_at", cutoff).execute()
-    except Exception:
-        pass
-
-    return jsonify({"ok": True, "sports_fired": sports_fired,
-                    "games_marked": len(marked)})
-
-
-def _build_prime_alert_msg(sport: str, games: list) -> str:
-    """Batched Telegram message body for one sport's prime-window cluster.
-    Markdown — matches the Filled Bot's other messages."""
-    n = len(games)
-    starts = []
-    for g in games:
-        try:
-            starts.append(datetime.fromisoformat(
-                str(g["event_start"]).replace("Z", "+00:00")))
-        except Exception:
-            pass
-    when = ""
-    if starts:
-        # Sport-neutral — these clusters can be MLB/soccer/UFC, so "Starts",
-        # not "First pitch". Lead time is computed (was a stale hardcoded
-        # "~3h" that drifted when the prime window changed).
-        lo_t, hi_t = _fmt_az_time(min(starts)), _fmt_az_time(max(starts))
-        when = (f"🕐 Starts {lo_t} AZ" if lo_t == hi_t
-                else f"🕐 Starts {lo_t}–{hi_t} AZ")
-        try:
-            mins = int((min(starts) - datetime.now(timezone.utc)).total_seconds() // 60)
-            if mins > 0:
-                h, mm = divmod(mins, 60)
-                lead = (f"{h}h {mm}m" if h else f"{mm}m")
-                when += f"  (~{lead} out)"
-        except Exception:
-            pass
-    plural = "game" if n == 1 else "games"
-    lines = [f"🎯 *{n} {sport} {plural}* entering the prime betting window"]
-    if when:
-        lines.append(when)
-    for g in games[:8]:
-        lines.append(f"• {g.get('event_name', '?')}")
-    if n > 8:
-        lines.append(f"…and {n - 8} more")
-    lines.append("Make your picks → thekahlahouse.com/handicapper")
-    return "\n".join(lines)
 
 
 @app.route("/api/polymarket/check-fills")
