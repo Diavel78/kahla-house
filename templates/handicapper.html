@@ -808,10 +808,11 @@
     let _currentGames = [];
     let _verdictCache = new Map();
     let _verdictInFlight = new Set();
-    const VERDICT_WINDOW_MS = 3.5 * 60 * 60 * 1000; // 3.5h evaluator window — covers the top of the upper prime
-                                                    // zone (currently 150-210m). Zones are tuned weekly server-
-                                                    // side; this just needs to reach the latest zone's hi. The
-                                                    // silent server-side paperlog goes further (5h) for review.
+    const VERDICT_WINDOW_MS = 5 * 60 * 60 * 1000;   // 5h evaluator window — must reach the FULL model-bet early
+                                                    // window (NRFI shows ≥2h30m out with no upper bound), not just
+                                                    // the steam zones. At 3.5h this left NRFI a 60-min slit
+                                                    // (3h30m→2h30m) — on an early slate the user never saw one
+                                                    // (July 2026). Matches the server paperlog's 5h window.
     const VERDICT_TTL_MS    = 5 * 60 * 1000;        // re-fetch stale verdicts
     // MODEL bets (NRFI, model-driven TOT) are NOT steam bets — their edge is
     // EARLY (you get the matchup price before the market sharpens it), the
@@ -952,7 +953,7 @@
     }
     // Is this kickoff inside ANY betting window right now? Steam window =
     // the tuner's union zones (ML/SPR, currently 30m-3h). Model window =
-    // the TOT/NRFI early band (2h30m out to the 3.5h evaluator edge).
+    // the NRFI early band (2h30m out to the 5h evaluator edge).
     function _inAnyWindow(iso) {
         const diffMin = (new Date(iso) - new Date()) / 60_000;
         if (diffMin < 0) return false;
@@ -1022,9 +1023,11 @@
         const on = _canBet && _inAnyWindow(iso);
         row.classList.toggle('prime', on);
         // Badge: steam window → the tuner's per-market naming; model-only
-        // window (2h30m-3.5h, outside the steam zones) → name the model bets.
+        // window (2h30m-5h, outside the steam zones) → NRFI. (TOT is
+        // blacklisted July 2026 — naming it promised chips that can't
+        // exist.)
         if (tag) tag.textContent = on
-            ? (_isPrime(iso) ? _primeBadgeText(iso) : 'Prime · TOT, NRFI')
+            ? (_isPrime(iso) ? _primeBadgeText(iso) : 'Prime · NRFI')
             : '';
     }
     function _fmtSettled(iso) {
@@ -1386,7 +1389,7 @@
                 // inline so it's correct on first render — no verdict wait.
                 const rowPrime = _canBet && _inAnyWindow(g.event_start);
                 const rowBadge = rowPrime
-                    ? (_isPrime(g.event_start) ? _primeBadgeText(g.event_start) : 'Prime · TOT, NRFI')
+                    ? (_isPrime(g.event_start) ? _primeBadgeText(g.event_start) : 'Prime · NRFI')
                     : '';
                 return `<li class="game-row${rowPrime ? ' prime' : ''}">
                     <div class="game-line1">
