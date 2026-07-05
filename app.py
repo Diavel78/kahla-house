@@ -4021,7 +4021,14 @@ def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
     if not opts:
         return None
     pool = [o for o in opts if o["fillable"]] or opts
-    best = min(pool, key=lambda o: o["all_in"])
+    # Tie-break toward Polymarket: the venues' take costs routinely land
+    # within a few hundredths (Kalshi's cheaper ask vs its steeper fee —
+    # live case: 48.74c vs 48.75c on the same bet, both apps quoting the
+    # identical $2.44). Within a tenth of a cent the user is better off on
+    # their main book (dashboard P&L, rebates, one venue) — don't route to
+    # Kalshi over rounding dust.
+    best = min(pool, key=lambda o: (round(o["all_in"], 1),
+                                    0 if o["venue"] == "POLYMARKET" else 1))
     vlabel = {"POLYMARKET": "Polymarket", "KALSHI": "Kalshi"}
     runner = min((o for o in pool if o is not best), key=lambda o: o["all_in"], default=None)
     why = (f"{best['rec'].lower()} {vlabel[best['venue']]} — {best['all_in']}c all-in"
