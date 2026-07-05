@@ -704,6 +704,10 @@
                 <label>Selection</label>
                 <input type="text" id="lmSelection" readonly />
             </div>
+            <div class="field" id="lmExecWrap" style="display:none">
+                <label>Execution — Poly vs ProphetX</label>
+                <div id="lmExec" style="font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.6;white-space:pre-wrap;padding:8px 10px;border:1px solid var(--border,#2a2f3a);border-radius:8px;"></div>
+            </div>
             <div class="row2">
                 <div class="field">
                     <label>Units</label>
@@ -1649,7 +1653,8 @@
                             const pb = (d.nrfi.polymarket || {})[side] || {};
                             const price = (pb.bid_american != null) ? pb.bid_american
                                 : (side === 'no' ? d.nrfi.nrfi_fair_american : d.nrfi.yrfi_fair_american);
-                            picks.push({ market_type: 'nrfi', side, units: 1, _slug: pb.slug || null,
+                            picks.push({ market_type: 'nrfi', side, units: 1,
+                                _slug: pb.slug || null, _inv: !!pb.synthetic,
                                 _chip: _pickChipLabel('nrfi', side, null, price, 1, d),
                                 _body: { market_id: mid, market_type: 'nrfi', side, book: 'PMM',
                                     price, line: null, units: 1, confidence: 'low',
@@ -1690,6 +1695,14 @@
         _pxReset();
         _lmStatus(null, '');
         document.getElementById('logModal').classList.add('show');
+        // Execution line: game context from the list row + active sport.
+        const g = (_currentGames || []).find(x => x.market_id === mid) || {};
+        let sim = g.event_start ? Math.round((Date.parse(g.event_start) - Date.now()) / 60000) : null;
+        if (sim != null && !isFinite(sim)) sim = null;
+        _lmLoadExec(p._slug ? { slug: p._slug, mid, mt: p.market_type, side: p.side,
+            units: p._body.units || p.units || 1, sim,
+            inverse: !!p._inv, line: (p._body.line != null ? p._body.line : null),
+            ctx: { sport: _activeSport, away: g.away, home: g.home } } : null);
     }
 
     // ── Live tracker (admin only) ──────────────────────────────────────
@@ -2941,6 +2954,11 @@
         document.getElementById('lmAnalysis').value   = '';
         _lmStatus(null, '');
         document.getElementById('logModal').classList.add('show');
+        _lmLoadExec((pmm && pmm.slug) ? { slug: pmm.slug, mid: _lastDossier.market_id,
+            mt, side, units: 1,
+            sim: (_lastDossier.starts_in_min != null ? _lastDossier.starts_in_min : null),
+            inverse: !!pmm.synthetic, line: (entryLine != null ? entryLine : null),
+            ctx: { sport: _lastDossier.sport, away: _lastDossier.away, home: _lastDossier.home } } : null);
     }
 
     function logNrfi(side) {
@@ -2981,6 +2999,11 @@
         document.getElementById('lmAnalysis').value   = '';
         _lmStatus(null, '');
         document.getElementById('logModal').classList.add('show');
+        _lmLoadExec((pb && pb.slug) ? { slug: pb.slug, mid: _lastDossier.market_id,
+            mt: 'nrfi', side, units: 1,
+            sim: (_lastDossier.starts_in_min != null ? _lastDossier.starts_in_min : null),
+            inverse: !!pb.synthetic, line: null,
+            ctx: { sport: _lastDossier.sport, away: _lastDossier.away, home: _lastDossier.home } } : null);
     }
 
     function copyForClaude() {
@@ -3056,6 +3079,42 @@
         _pendingBody = null;   // dossier path — never inherit a quick-bet base
         _lmStatus(null, '');
         document.getElementById('logModal').classList.add('show');
+        const d = _lastDossier;
+        _lmLoadExec((s && s.pmm_slug) ? { slug: s.pmm_slug, mid: d.market_id,
+            mt: s.market_type, side: s.side, units: s.units,
+            sim: (d.starts_in_min != null ? d.starts_in_min : null),
+            inverse: !!s.pmm_synthetic, line: (s.line != null ? s.line : null),
+            ctx: { sport: d.sport, away: d.away, home: d.home } } : null);
+    }
+    // Execution line in the log modal (July 2026, user: "lay it out VERY
+    // simple — the engine's Poly make/take verdict + the ProphetX number
+    // that beats it"). One line each: where to bet on Poly (American +
+    // cents), and the ProphetX American-odds threshold (2% win fee baked
+    // in) to eyeball against their app before logging. Rides
+    // _fetchMakeTakeVerdict, which also CACHES the verdict — so submitLog's
+    // _applyMakeTakeToBody enters at the live rec for quick-bet logs too.
+    // Pass null to hide (manual/grid paths with no PMM slug).
+    let _lmExecSeq = 0;
+    async function _lmLoadExec(o) {
+        const wrap = document.getElementById('lmExecWrap');
+        const el = document.getElementById('lmExec');
+        if (!wrap || !el) return;
+        const seq = ++_lmExecSeq;
+        if (!o || !o.slug) { wrap.style.display = 'none'; el.textContent = ''; return; }
+        wrap.style.display = '';
+        el.textContent = 'checking books…';
+        const j = await _fetchMakeTakeVerdict(o.slug, o.mid, o.mt, o.side,
+            o.units, o.sim, o.inverse, o.ctx, o.line);
+        if (seq !== _lmExecSeq) return;   // superseded by a newer modal open
+        if (!j || j.price == null) { wrap.style.display = 'none'; el.textContent = ''; return; }
+        const amer = _centsToAmer(j.price);
+        let s = `${j.rec} ${j.venue_label || 'Polymarket'} at `
+              + `${amer != null ? _fmtAmer(amer) : '?'} (${_mtCents(j.price)}¢)`;
+        if (j.prophetx && j.prophetx.beat_american != null) {
+            const a = j.prophetx.beat_american;
+            s += `\nProphetX: ${a > 0 ? '+' + a : a} or better beats it (2% win fee incl.)`;
+        }
+        el.textContent = s;
     }
     // iOS numeric keypad has no minus key, so the ProphetX field carries a
     // sign TOGGLE (defaults to minus — most fills are favorites). An explicit
@@ -3073,6 +3132,7 @@
         _pendingPick = null;
         _pendingBody = null;
         _pxReset();
+        _lmLoadExec(null);   // hide + cancel any in-flight execution fetch
     }
     // Transient confirmation toast (bottom-center). Used after logging a
     // pick so the dossier can stay open for the next bet.

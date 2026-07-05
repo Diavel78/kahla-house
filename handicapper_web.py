@@ -3978,6 +3978,10 @@ def _nrfi_model(sport: str, pitchers: dict | None, away: str | None,
                     "ask_american": q.get("ask_american"),
                     "mid_american": q.get("mid_american"),
                     "slug": e.get("slug"),
+                    # NRFI's opposite side is synthesized off the one PMM
+                    # market (same slug) — book reads (make/take) must flip
+                    # the ladder for it, so carry the flag to the frontend.
+                    "synthetic": bool(e.get("synthetic")),
                 }
     bet_side = None
     bet_edge_pp = None
