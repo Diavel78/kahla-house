@@ -3807,11 +3807,59 @@ def _kalshi_maker_fee_cents(price_cents) -> float:
     return round(1.76 * p * (1.0 - p), 3)
 
 
-def _kalshi_side_book(sport: str, away: str, home: str, side: str) -> dict | None:
+def _kalshi_event_dt(event_ticker: str | None):
+    """UTC datetime parsed from a Kalshi event ticker's embedded ET
+    start ({YY}{MON}{DD}{HHMM}, e.g. -26JUN071335NYMATL); None if
+    unparseable."""
+    import re
+    mo = re.search(r"-(\d{2})([A-Z]{3})(\d{2})(\d{4})", event_ticker or "")
+    if not mo:
+        return None
+    yy, mon, dd, hhmm = mo.groups()
+    mm = _KALSHI_MONTHS.get(mon)
+    if not mm:
+        return None
+    try:
+        naive = datetime(2000 + int(yy), mm, int(dd), int(hhmm[:2]), int(hhmm[2:]))
+        return naive.replace(tzinfo=ZoneInfo("America/New_York")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _kalshi_nearest(cands: list, want_dt) -> dict | None:
+    """Pick the candidate market whose event ticker's embedded start is
+    nearest want_dt (must be within 12h). Team-code matching alone is
+    AMBIGUOUS during an MLB series — the same two teams play 3-4
+    consecutive days, so Kalshi lists several events with identical codes
+    and 'first match' returns TONIGHT's game for a dossier opened on
+    TOMORROW's (the +122-vs-+113 Mets phantom, July 2026). want_dt=None
+    keeps legacy first-match; no candidate within 12h → None (a wrong-day
+    book is worse than no book)."""
+    if not cands:
+        return None
+    if want_dt is None:
+        return cands[0]
+    best, best_s = None, None
+    for m in cands:
+        dt = _kalshi_event_dt(m.get("event_ticker"))
+        if dt is None:
+            continue
+        s = abs((dt - want_dt).total_seconds())
+        if best_s is None or s < best_s:
+            best, best_s = m, s
+    if best is None:
+        return cands[0]        # tickers unparseable (format change) — legacy
+    return best if best_s <= 12 * 3600 else None
+
+
+def _kalshi_side_book(sport: str, away: str, home: str, side: str,
+                      want_dt=None) -> dict | None:
     """Live Kalshi top-of-book for the picked side of one game, or None.
     ML only (the Kalshi reader is ML-only). Same {bids,asks,best_bid,
     best_ask} shape as _pmm_book — bids = buyers of THIS side. Matches the
-    game by team codes in the event ticker + the side by the ticker suffix."""
+    game by team codes in the event ticker + the side by the ticker suffix,
+    disambiguated to the event nearest want_dt (series play the same teams
+    on consecutive days — see _kalshi_nearest)."""
     series = _KALSHI_SERIES.get(sport)
     if not series:
         return None
@@ -3822,6 +3870,7 @@ def _kalshi_side_book(sport: str, away: str, home: str, side: str) -> dict | Non
     if not (pc and ac and hc):
         return None
     data = _fetch_kalshi_markets(series)
+    cands = []
     for m in (data.get("markets") or []):
         tk = m.get("ticker") or ""
         et = m.get("event_ticker") or ""
@@ -3829,8 +3878,9 @@ def _kalshi_side_book(sport: str, away: str, home: str, side: str) -> dict | Non
             continue
         if ac not in et or hc not in et:
             continue
-        return _kalshi_book(tk)
-    return None
+        cands.append(m)
+    m = _kalshi_nearest(cands, want_dt)
+    return _kalshi_book(m["ticker"]) if m else None
 
 
 # MLB run-total + run-line series — confirmed live via /debug-kalshi-discover
@@ -3845,7 +3895,7 @@ _KALSHI_LINE_SERIES = {"MLB": {"total": "KXMLBTOTAL", "spread": "KXMLBSPREAD"}}
 
 
 def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
-                      side: str, line) -> dict | None:
+                      side: str, line, want_dt=None) -> dict | None:
     """Kalshi top-of-book for a TOTAL or SPREAD pick, or None. Same shape as
     _pmm_book (bids = buyers of THIS side). Maps our (market_type, side, line)
     onto Kalshi's YES contract (Over for totals; '{fav} wins by over X.5' for
@@ -3871,6 +3921,7 @@ def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
 
     if mt == "total":
         want = str(int(round(abs(L) + 0.5)))          # 8.5 → "9"
+        cands = []
         for m in mkts:
             tk = m.get("ticker") or ""
             et = m.get("event_ticker") or ""
@@ -3878,9 +3929,12 @@ def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
                 continue
             if ac not in et or hc not in et:
                 continue
-            book = _kalshi_book(tk)
-            return book if side == "over" else _invert_book(book)   # YES = OVER
-        return None
+            cands.append(m)
+        m = _kalshi_nearest(cands, want_dt)
+        if not m:
+            return None
+        book = _kalshi_book(m["ticker"])
+        return book if side == "over" else _invert_book(book)   # YES = OVER
 
     # spread: the YES market is always the FAVORITE "wins by over (mag-0.5)".
     n = int(round(abs(L) + 0.5))                       # 1.5 → 2
@@ -3892,6 +3946,7 @@ def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
     if not fav_code:
         return None
     want = f"{fav_code}{n}"
+    cands = []
     for m in mkts:
         tk = m.get("ticker") or ""
         et = m.get("event_ticker") or ""
@@ -3899,9 +3954,12 @@ def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
             continue
         if ac not in et or hc not in et:
             continue
-        book = _kalshi_book(tk)
-        return book if fav_is_picked else _invert_book(book)
-    return None
+        cands.append(m)
+    m = _kalshi_nearest(cands, want_dt)
+    if not m:
+        return None
+    book = _kalshi_book(m["ticker"])
+    return book if fav_is_picked else _invert_book(book)
 
 
 def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
@@ -4122,13 +4180,19 @@ def api_make_take():
         book = _invert_book(book)
     # Kalshi cross-shopped on ALL main markets now (ML via the game series,
     # TOTAL/SPREAD via the run-total/run-line series) on covered sports.
+    # want_dt (approx game start from starts_in_min) disambiguates a SERIES —
+    # the same two teams have several Kalshi events on consecutive days, and
+    # team-code matching alone returns tonight's game for tomorrow's pick.
+    want_dt = (datetime.now(timezone.utc) + timedelta(minutes=sim)
+               if sim is not None else None)
     kbook = None
     if sport and away and home:
         try:
             if market_type in ("moneyline", "ml") and side in ("home", "away"):
-                kbook = _kalshi_side_book(sport, away, home, side)
+                kbook = _kalshi_side_book(sport, away, home, side, want_dt=want_dt)
             elif market_type in ("total", "tot", "spread", "spr") and line is not None:
-                kbook = _kalshi_line_book(sport, away, home, market_type, side, line)
+                kbook = _kalshi_line_book(sport, away, home, market_type, side, line,
+                                          want_dt=want_dt)
         except Exception:
             kbook = None
     sig = _cross_book_signal(book, kbook, units=units, starts_in_min=sim)
@@ -4172,11 +4236,17 @@ def debug_crossbook():
         pbook = _pmm_book(client, entry["slug"]) if entry and entry.get("slug") else None
         if entry and entry.get("synthetic") and pbook:
             pbook = _invert_book(pbook)
+        try:
+            _wdt = datetime.fromisoformat(
+                (g[0]["event_start"] or "").replace("Z", "+00:00"))
+        except Exception:
+            _wdt = None
         if mt == "ml":
-            kbook = _kalshi_side_book(sport, aw, hm, side)
+            kbook = _kalshi_side_book(sport, aw, hm, side, want_dt=_wdt)
         else:
             kbook = _kalshi_line_book(sport, aw, hm, mt, side,
-                                      entry.get("line") if entry else None)
+                                      entry.get("line") if entry else None,
+                                      want_dt=_wdt)
         out["pmm_book"] = None if not pbook else {
             "best_bid": pbook["best_bid"], "best_ask": pbook["best_ask"],
             "bids": pbook["bids"][:3], "asks": pbook["asks"][:3]}
