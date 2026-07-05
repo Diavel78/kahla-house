@@ -1703,6 +1703,53 @@
             units: p._body.units || p.units || 1, sim,
             inverse: !!p._inv, line: (p._body.line != null ? p._body.line : null),
             ctx: { sport: _activeSport, away: g.away, home: g.home } } : null);
+        _lmRefreshSeed(mid, p);
+    }
+
+    // The quick-bet modal seeds from the prefetched verdict cache, which can
+    // be several minutes stale (verdict TTL + the server's VSiN/splits
+    // caches) — the user caught an outdated Circa bullet in the reasons.
+    // After the modal opens, re-pull the dossier and quietly refresh the
+    // seeded body + reasons/selection for the SAME (market_type, side) the
+    // user tapped — never a different side; if that side's suggestion is
+    // gone from the fresh dossier, the cached seed stands. The reasons
+    // textarea only updates if the user hasn't edited it.
+    let _lmSeedSeq = 0;
+    async function _lmRefreshSeed(mid, p) {
+        const seq = ++_lmSeedSeq;
+        const seeded = ((p._body && p._body.reasons) || []).join('\n');
+        try {
+            const r = await authFetch('/api/handicapper/dossier?market_id=' + encodeURIComponent(mid));
+            const d = await r.json();
+            if (!d || !d.ok || seq !== _lmSeedSeq || !_pendingBody) return;
+            if (!document.getElementById('logModal').classList.contains('show')) return;
+            let body = null, lean = false;
+            if (p.market_type === 'nrfi') {
+                const n = d.nrfi || {};
+                if (n.bet_side !== p.side) return;
+                const pb = (n.polymarket || {})[p.side] || {};
+                const price = (pb.bid_american != null) ? pb.bid_american
+                    : (p.side === 'no' ? n.nrfi_fair_american : n.yrfi_fair_american);
+                body = { market_id: mid, market_type: 'nrfi', side: p.side, book: 'PMM',
+                    price, line: null, units: 1, confidence: 'low',
+                    fair_prob: (p.side === 'no' ? n.p_nrfi : n.p_yrfi),
+                    edge_pp: (pb.edge_pp != null ? pb.edge_pp : null), sharp_score: null,
+                    reasons: n.reasons || [], query_text: d.query || null,
+                    allow_duplicate: true, _line: null, _price: price };
+            } else {
+                const sugg = d.suggestions || (d.suggestion ? [d.suggestion] : []);
+                const s2 = sugg.find(x => x && x.market_type === p.market_type && x.side === p.side);
+                if (!s2) return;
+                body = _suggestionToBody(s2, mid, d);
+                lean = !s2.gates_cleared;
+            }
+            _pendingBody = Object.assign({}, body);
+            const ta = document.getElementById('lmReasons');
+            if (ta && ta.value === seeded) ta.value = (body.reasons || []).join('\n');
+            const sel = document.getElementById('lmSelection');
+            if (sel) sel.value = (lean ? '~ ' : '')
+                + _pickChipLabel(body.market_type, body.side, body._line, body._price, body.units, d);
+        } catch (e) { /* keep the cached seed */ }
     }
 
     // ── Live tracker (admin only) ──────────────────────────────────────
