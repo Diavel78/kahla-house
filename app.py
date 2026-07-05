@@ -5339,8 +5339,68 @@ def api_handicapper_paperlog():
         except Exception as e:
             return jsonify({"ok": False, "error": f"insert: {e}",
                             "processed": processed}), 500
+    nrfi_alerted = _nrfi_find_alerts(sb, now)
     return jsonify({"ok": True, "games": len(games), "processed": processed,
-                    "with_pick": with_pick, "new_rows": new_rows})
+                    "with_pick": with_pick, "new_rows": new_rows,
+                    "nrfi_alerted": nrfi_alerted})
+
+
+def _nrfi_find_alerts(sb, now) -> int:
+    """Telegram ping (Filled Bot) for first-inning finds, so the user doesn't
+    have to catch the NRFI window (5h→2h30m before pitch) by staring at the
+    page. The paperlog just logged every gate-cleared NRFI bet; alert each
+    one ONCE while its bet window is still open (≥2h30m to pitch), deferring
+    dawn finds to civil hours (≥7am AZ — the prime-alert convention; a 5am
+    find on a 10am game still alerts at 7 with the window open until 7:35).
+    Dedup marker lives on the row itself (signal_blob.nrfi_alerted) — runs
+    every paperlog tick, no new table. Never breaks the paperlog response."""
+    try:
+        az = now.astimezone(ZoneInfo("America/Phoenix"))
+        if az.hour < 7:
+            return 0
+        win_cut = (now + timedelta(minutes=150)).isoformat()
+        rows = (sb.table("pickbot_paperlog")
+                .select("id,event_name,event_start,side,entry_price,signal_blob")
+                .eq("market_type", "nrfi").eq("gates_cleared", True)
+                .eq("status", "pending")
+                .gte("event_start", win_cut)
+                .gte("logged_at", (now - timedelta(hours=6)).isoformat())
+                .execute().data) or []
+        due = [r for r in rows
+               if not ((r.get("signal_blob") or {}).get("nrfi_alerted"))]
+        if not due:
+            return 0
+        az_tz = ZoneInfo("America/Phoenix")
+        lines = ["🎯 First-inning find" + ("s" if len(due) > 1 else "")]
+        for r in due:
+            side = "YRFI" if r.get("side") == "yes" else "NRFI"
+            try:
+                st = datetime.fromisoformat(
+                    (r["event_start"] or "").replace("Z", "+00:00"))
+                when = st.astimezone(az_tz).strftime("%-I:%M %p")
+                closes = (st - timedelta(minutes=150)).astimezone(az_tz).strftime("%-I:%M %p")
+                timing = f" · first pitch {when} AZ · window closes {closes}"
+            except Exception:
+                timing = ""
+            pr = r.get("entry_price")
+            try:
+                pr_s = f"{'+' if float(pr) > 0 else ''}{float(pr):g}"
+            except (TypeError, ValueError):
+                pr_s = "?"
+            lines.append(f"• {side} {r.get('event_name')} ({pr_s}){timing}")
+        if not _send_fill_telegram("\n".join(lines)):
+            return 0
+        for r in due:
+            blob = dict(r.get("signal_blob") or {})
+            blob["nrfi_alerted"] = True
+            try:
+                (sb.table("pickbot_paperlog").update({"signal_blob": blob})
+                 .eq("id", r["id"]).execute())
+            except Exception:
+                pass
+        return len(due)
+    except Exception:
+        return 0
 
 
 def _merge_espn_scores(sport: str, events: list) -> list:
