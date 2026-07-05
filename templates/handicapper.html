@@ -1836,7 +1836,13 @@
             const s = r.score || {};
             const sc = (s.away_score != null && s.home_score != null) ? `${s.away_score}–${s.home_score}` : '–';
             const away = (r.away || '').split(' ').pop(), home = (r.home || '').split(' ').pop();
-            const status = _esc(s.display_status || (s.state === 'post' ? 'FINAL' : 'LIVE'));
+            // ESPN's human-readable status lags a few minutes at first pitch:
+            // state flips to "in" at the scheduled time but the string stays
+            // "7/5 - 3:30 PM EDT" until inning data flows. A date-looking
+            // status on a live game reads as a bug — show "starting…".
+            let stRaw = s.display_status || (s.state === 'post' ? 'FINAL' : 'LIVE');
+            if (s.state !== 'post' && /\d{1,2}\/\d{1,2}|[AP]M\s+E[DS]T/i.test(stRaw)) stRaw = 'starting…';
+            const status = _esc(stRaw);
             return `<div class="live-row" onclick="pickGame('${r.market_id}')" style="cursor:pointer">
                 ${_winGauge(r.win_prob, r.prob_src, r.entry_price)}
                 <div class="lv-mid">
