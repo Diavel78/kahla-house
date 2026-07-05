@@ -8,8 +8,10 @@ Firestore for data storage. First app: Bet System (odds board + P&L dashboard).
 import os
 import re
 import json
+import random as _random
 import secrets
 import functools
+import time as _time
 import requests as _http  # module-level HTTP client — ESPN scoreboard + Kalshi
                           # fetches use it. (Was accidentally dropped with the
                           # Odds Board removal, which NameError'd every _http.get
@@ -5106,7 +5108,7 @@ def api_handicapper_paperlog():
     # (c) the latest row per bet = the unlogged-bet alert's dedup marker
     # carrier (signal_blob.bet_alerted — see _bet_alerts).
     mids = [g["id"] for g in games]
-    last_logged, last_bet = {}, {}
+    last_bet = {}
     recent: list = []
     alert_cands: list = []
     # Dedup key carries a VARIANT discriminator: '' (the real suggestion),
@@ -5136,7 +5138,6 @@ def api_handicapper_paperlog():
                   .gte("logged_at", (now - timedelta(hours=6)).isoformat())
                   .order("logged_at", desc=True).limit(5000).execute().data) or []
         for r in recent:
-            last_logged.setdefault(r["market_id"], r["logged_at"])
             last_bet.setdefault(
                 (r["market_id"], r["market_type"], _variant(r.get("signal_blob"))),
                 (r.get("side"), r.get("units")))
@@ -5144,7 +5145,17 @@ def api_handicapper_paperlog():
         pass
     # (dedup keys, stale-first ordering, and the dossier build below are all
     # sport-agnostic — nothing else in this loop assumes MLB.)
-    games.sort(key=lambda g: last_logged.get(g["id"]) or "")   # never-logged first
+    # Rotation = RANDOM shuffle (July 2026 — fixed a starvation bug). The
+    # old "stale-first" sort keyed on last row INSERT time, but rows only
+    # insert on a bet CHANGE — so zero-bet games kept last_logged empty,
+    # sorted first EVERY tick, and monopolized the 8s budget, while the
+    # game that just logged a bet sorted dead-last and could starve for
+    # 30+ min (caught live: an unlogged-bet alert never fired because the
+    # Jays game never got re-evaluated after entering prime). A shuffle
+    # gives every game an equal shot each tick — with N in-window games
+    # and ~B dossiers per budget, expected evaluation gap ≈ N/B ticks
+    # (a couple of minutes), and NOTHING can starve.
+    _random.shuffle(games)
 
     deadline = _time.time() + 8.0
     rows, processed, with_pick = [], 0, 0
@@ -5360,6 +5371,10 @@ def api_handicapper_paperlog():
     # Alert pass runs BEFORE the insert so a brand-new bet's dedup marker
     # can ride its own insert row (no read-back needed).
     bets_alerted = _bet_alerts(sb, now, alert_cands, recent, rows)
+    # stdout → Vercel runtime logs: the alert pipeline's only observability
+    # (the JSON response is visible only in cron-job.org history).
+    print(f"paperlog: processed={processed} cands={len(alert_cands)} "
+          f"alerted={bets_alerted} new_rows={len(rows)}")
     new_rows = 0
     if rows:
         try:
