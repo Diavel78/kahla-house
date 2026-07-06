@@ -1277,30 +1277,50 @@
                         <button class="settle-btn settle-lost" onclick="settlePick(${r.id}, 'lost', this)">✗ Lost</button>
                         <button class="settle-btn settle-push" onclick="settlePick(${r.id}, 'push', this)">= Push</button>
                     ` : ''}
-                    ${kind === 'pending' ? `<button class="edit-btn" onclick="editPick(${r.id}, ${Number(r.units) || 1}, this)">Edit</button>` : ''}
+                    ${kind === 'pending' ? `<button class="edit-btn" onclick="editPick(${r.id}, ${Number(r.units) || 1}, this, ${r.entry_price != null ? Number(r.entry_price) : 'null'})">Edit</button>` : ''}
                     <button class="delete-btn" onclick="deletePick(${r.id}, this)">Delete</button>
                 </div>
             </li>
         `;
     }
 
-    // Edit a pending pick's units (fix a wrong stake). Confidence re-derives
-    // server-side. Only pending picks are editable.
-    async function editPick(pickId, curUnits, btn) {
-        const raw = prompt('New units for this pick (0.25, 0.5, 1, 3, or 5):', curUnits);
-        if (raw === null) return;                       // cancelled
-        const u = parseFloat(raw);
+    // Edit a pending pick's units and/or odds. Units fixes a wrong stake
+    // (confidence re-derives server-side); odds fixes the ENTRY PRICE —
+    // the logged maker bid isn't always the real fill (in-play fill, a
+    // re-rested limit) and CLV/to-WIN key off entry_price at grade time.
+    // Only pending picks are editable.
+    async function editPick(pickId, curUnits, btn, curPrice) {
+        const rawU = prompt('Units for this pick (0.25, 0.5, 1, 3, or 5):', curUnits);
+        if (rawU === null) return;                      // cancelled
+        const u = parseFloat(rawU);
         if (![0.25, 0.5, 1, 3, 5].includes(u)) {
             alert('Units must be one of: 0.25, 0.5, 1, 3, 5');
             return;
         }
-        if (u === Number(curUnits)) return;             // no change
+        const rawP = prompt('Entry odds (American, e.g. -115 or +140). OK keeps current:',
+                            curPrice != null ? String(curPrice) : '');
+        if (rawP === null) return;                      // cancelled
+        let price = null;
+        const t = (rawP || '').trim().replace('−', '-');
+        if (t !== '') {
+            price = parseInt(t, 10);
+            if (!isFinite(price) || Math.abs(price) < 100) {
+                alert('Odds must be American: -115 or +140 (three digits or more).');
+                return;
+            }
+        }
+        const unitsChanged = u !== Number(curUnits);
+        const priceChanged = price !== null && price !== Number(curPrice);
+        if (!unitsChanged && !priceChanged) return;     // nothing to do
+        const payload = {};
+        if (unitsChanged) payload.units = u;
+        if (priceChanged) payload.price = price;
         btn.disabled = true; const old = btn.textContent; btn.textContent = 'Saving…';
         try {
             const r = await authFetch('/api/handicapper/pick/' + pickId + '/edit', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({units: u}),
+                body: JSON.stringify(payload),
             });
             const out = await r.json();
             if (!out.ok) {
@@ -1594,8 +1614,14 @@
                 if (ps.state === 'logged') {
                     // Fill-aware (admin): amber until the Polymarket maker
                     // fills, green ✓ once filled, red ⚠ near tip.
+                    // Label = YOUR logged bet (side + units), NOT the bot's
+                    // current chip — sticky decay can re-size the suggestion
+                    // (3u → 1u) after you logged, which made a logged 3u bet
+                    // read "· 1u" (user caught it live on a Yankees ML).
                     const dec = _fillChipDecor(mid, p.market_type);
-                    cls = 'logged' + dec.cls; label = dec.mark + ' ' + p._chip; click = `pickGame('${mid}')`; title = dec.title;
+                    cls = 'logged' + dec.cls;
+                    label = dec.mark + ' ' + _loggedChipLabel(p.market_type, ps.logged.side, ps.logged.units, game);
+                    click = `pickGame('${mid}')`; title = dec.title;
                 } else if (ps.state === 'upgrade') {
                     cls = 'upgrade'; label = '↑ ' + p._chip; title = `Add up to ${_uStr(p.units)}`;
                 }
