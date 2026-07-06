@@ -3994,14 +3994,25 @@ def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
         clock_ok = (starts_in_min is None or starts_in_min > 30)
         base = {"bid": bb, "ask": ba, "touch_imb": timb,
                 "queue_ahead": l1b, "ask_touch": l1a}
-        # PLAIN MAKE — rest at the bid. A CONFIDENT fill only when there are
-        # more sellers than buyers at the touch (ask-heavy): sellers come to
-        # your bid. On a balanced/bid-heavy book a resting bid sits behind the
+        # PLAIN MAKE — rest at the bid. A CONFIDENT fill when there are more
+        # sellers than buyers at the touch (ask-heavy): sellers come to your
+        # bid. On a balanced/bid-heavy book a resting bid sits behind the
         # queue and may never fill — that's what MAKE+ is for. Cost basis =
         # bid ± maker adj (PMM EARNS a rebate, Kalshi PAYS a maker fee).
+        # HALF-CENT-BOOK exception (July 2026, user call — a 55k-ask-wall
+        # book printed TAKE because timb=0.69 missed the 0.67 ask-heavy
+        # cutoff by a whisker): when the spread is one tick (≤0.5¢) there
+        # is NO MAKE+ lane (bid+0.5 = ask = a cross), so the balanced zone
+        # MAKE+ covers falls to TAKE — paying the full taker fee for half
+        # a cent of priority. On a one-tick, ask-LEANING book (timb < 1.0)
+        # the rest at the bid IS the front of the queue → MAKE, while the
+        # clock guard still hands it to TAKE inside 30 min.
+        half_cent_make = (timb is not None and timb < 1.0
+                          and (ba - bb) <= 0.5 and clock_ok)
         opts.append({**base, "venue": venue, "rec": "MAKE",
                      "all_in": round(bb + maker_adj(bb), 2),
-                     "fillable": ask_heavy, "post_price": bb})
+                     "fillable": (ask_heavy or half_cent_make),
+                     "post_price": bb})
         # MAKE+ (Polymarket half-cent queue jump). Rest at bid+0.5c → step in
         # FRONT of the whole bid queue for half a cent → fill on the next
         # sell, still as a maker (earns the rebate). Fillable whenever the

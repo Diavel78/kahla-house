@@ -3162,9 +3162,14 @@
         // Nationals book, July 2026).
         if (j.rec === 'TAKE' && j.best_bid != null) {
             const bAmer = _centsToAmer(j.best_bid);
+            // Why the rest won't fill: buyers crowding the bid (imb ≥ 1) —
+            // or, post the half-cent-book fix, a TAKE on an ask-leaning
+            // book only happens on the clock (<30m to tip).
+            const why = (j.touch_imbalance != null && j.touch_imbalance >= 1)
+                ? ` — bids ${j.touch_imbalance}× the sells`
+                : ` — too close to start for a rest`;
             s += `\n(rest at ${bAmer != null ? _fmtAmer(bAmer) : j.best_bid + '¢'} won't fill`
-               + (j.touch_imbalance != null ? ` — bids ${j.touch_imbalance}× the sells` : '')
-               + `; take cost incl. fee)`;
+               + why + `; take cost incl. fee)`;
         }
         if (j.prophetx && j.prophetx.beat_american != null) {
             const a = j.prophetx.beat_american;
