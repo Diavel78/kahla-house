@@ -764,6 +764,65 @@
         </div>
     </div>
 
+    <!-- Edit-pick modal: fix units and/or the REAL entry odds. The user
+         types the BOARD price they saw (Poly book / ProphetX app) — venue
+         + make/take pick the fee curve and Save stores the fee-inclusive
+         effective entry, which is what CLV / to-WIN key off. -->
+    <div class="modal-bg" id="editModal">
+        <div class="modal">
+            <h3>Edit pick</h3>
+            <div class="field">
+                <label>Pick</label>
+                <input type="text" id="emSelection" readonly />
+            </div>
+            <div class="row2">
+                <div class="field">
+                    <label>Units</label>
+                    <select id="emUnits">
+                        <option value="0.25">0.25u</option>
+                        <option value="0.5">0.5u</option>
+                        <option value="1">1u</option>
+                        <option value="3">3u</option>
+                        <option value="5">5u</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label>Odds — as shown on the board</label>
+                    <div style="display:flex;gap:8px;align-items:stretch;">
+                        <button type="button" id="emSign" onclick="_emToggleSign()"
+                                style="width:48px;font-size:18px;font-weight:700;border-radius:8px;border:1px solid var(--border,#333);background:transparent;color:inherit;cursor:pointer;">&minus;</button>
+                        <input type="text" id="emPrice" inputmode="numeric" style="flex:1"
+                               oninput="_emPreview()" placeholder="e.g. 115" />
+                    </div>
+                </div>
+            </div>
+            <div class="row2">
+                <div class="field">
+                    <label>Venue</label>
+                    <select id="emVenue" onchange="_emPreview()">
+                        <option value="PMM">Polymarket</option>
+                        <option value="PROPHETX">ProphetX</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label>Make or take?</label>
+                    <select id="emRec" onchange="_emPreview()">
+                        <option value="MAKE">Make (rested limit)</option>
+                        <option value="TAKE">Take (crossed)</option>
+                    </select>
+                </div>
+            </div>
+            <div class="field">
+                <div id="emEff" style="font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.5;color:var(--text-muted);padding:8px 10px;border:1px solid var(--border,#2a2f3a);border-radius:8px;"></div>
+            </div>
+            <div class="actions">
+                <button onclick="closeEdit()">Cancel</button>
+                <button class="primary" id="emSave" onclick="submitEdit()">Save</button>
+            </div>
+            <div id="emStatus" style="margin-top:12px;padding:8px 10px;border-radius:6px;font-size:13px;font-family:monospace;display:none;white-space:pre-wrap;word-break:break-word;"></div>
+        </div>
+    </div>
+
     <script>
     async function authFetch(url, options = {}) {
         const user = firebase.auth().currentUser;
@@ -1284,54 +1343,128 @@
         `;
     }
 
-    // Edit a pending pick's units and/or odds. Units fixes a wrong stake
-    // (confidence re-derives server-side); odds fixes the ENTRY PRICE —
-    // the logged maker bid isn't always the real fill (in-play fill, a
-    // re-rested limit) and CLV/to-WIN key off entry_price at grade time.
-    // Only pending picks are editable.
-    async function editPick(pickId, curUnits, btn, curPrice) {
-        const rawU = prompt('Units for this pick (0.25, 0.5, 1, 3, or 5):', curUnits);
-        if (rawU === null) return;                      // cancelled
-        const u = parseFloat(rawU);
-        if (![0.25, 0.5, 1, 3, 5].includes(u)) {
-            alert('Units must be one of: 0.25, 0.5, 1, 3, 5');
-            return;
+    // ── Edit-pick modal ────────────────────────────────────────────────
+    // Fix units and/or the REAL entry odds on a pending pick. The user
+    // types the BOARD price they saw ("I just type in what I see, not the
+    // REAL odds") — venue (Poly/ProphetX) + make/take pick the fee curve
+    // and Save stores the fee-inclusive effective American, exactly like
+    // the log modal's paths do, so CLV/to-WIN stay honest:
+    //   Poly take  → +5·p(1−p)¢ taker fee
+    //   Poly make  → −1.25·p(1−p)¢ maker rebate
+    //   ProphetX   → +2·p(1−p)¢ (2%-of-winnings, applies make or take)
+    // Odds left BLANK = units-only edit (no price/venue change) — we never
+    // seed the box with the stored entry, which is already fee-inclusive
+    // and would double-apply fees on a blind re-save.
+    let _editCtx = null;
+    function editPick(pickId, curUnits, btn, curPrice) {
+        const row = (_lastPending || []).find(r => r.id === pickId) || null;
+        _editCtx = { id: pickId, units: Number(curUnits) || 1,
+                     price: (curPrice != null ? Number(curPrice) : null), row };
+        const lbl = row
+            ? `${row.event_name} — ${_shortMarket(row.market_type)} ${row.market_type === 'nrfi' ? _nrfiSideLabel(row.side) : (row.side || '').toUpperCase()}${row.entry_line != null ? ' ' + _fmtPt(row.entry_line) : ''}`
+            : `pick #${pickId}`;
+        document.getElementById('emSelection').value = lbl;
+        document.getElementById('emUnits').value = String(_editCtx.units);
+        const priceEl = document.getElementById('emPrice');
+        priceEl.value = '';
+        priceEl.placeholder = _editCtx.price != null
+            ? `now ${_fmtAmer(_editCtx.price)} — type board price to change`
+            : 'e.g. 115';
+        const book = (row && row.entry_book) || 'PMM';
+        document.getElementById('emVenue').value = (book === 'PROPHETX') ? 'PROPHETX' : 'PMM';
+        document.getElementById('emRec').value = (book === 'PROPHETX') ? 'TAKE' : 'MAKE';
+        document.getElementById('emSign').textContent =
+            (_editCtx.price != null && _editCtx.price > 0) ? '+' : '−';
+        _emStatus(null, '');
+        _emPreview();
+        document.getElementById('editModal').classList.add('show');
+    }
+    function closeEdit() {
+        document.getElementById('editModal').classList.remove('show');
+        _editCtx = null;
+    }
+    function _emToggleSign() {
+        const b = document.getElementById('emSign');
+        b.textContent = (b.textContent.trim() === '−') ? '+' : '−';
+        _emPreview();
+    }
+    // Parse the board odds. Same rules as the log modal's ProphetX field:
+    // digits + the −/+ toggle (iOS numeric keypad has no minus key); an
+    // explicit sign typed in the text wins.
+    function _emParseOdds() {
+        const raw = (document.getElementById('emPrice').value || '').trim();
+        if (!raw) return { empty: true };
+        let a = parseInt(raw.replace(/[^\d+-]/g, '').replace('+', ''), 10);
+        if (isFinite(a) && !/[+\-−]/.test(raw)) {
+            if (document.getElementById('emSign').textContent.trim() !== '+') a = -Math.abs(a);
         }
-        const rawP = prompt('Entry odds (American, e.g. -115 or +140). OK keeps current:',
-                            curPrice != null ? String(curPrice) : '');
-        if (rawP === null) return;                      // cancelled
-        let price = null;
-        const t = (rawP || '').trim().replace('−', '-');
-        if (t !== '') {
-            price = parseInt(t, 10);
-            if (!isFinite(price) || Math.abs(price) < 100) {
-                alert('Odds must be American: -115 or +140 (three digits or more).');
-                return;
-            }
-        }
-        const unitsChanged = u !== Number(curUnits);
-        const priceChanged = price !== null && price !== Number(curPrice);
-        if (!unitsChanged && !priceChanged) return;     // nothing to do
+        if (raw.indexOf('−') >= 0) a = -Math.abs(a);
+        if (!isFinite(a) || Math.abs(a) < 100) return { bad: true };
+        return { amer: a };
+    }
+    function _emEffective(amer, venue, rec) {
+        const p = _amerToProb(amer);
+        let cents = p * 100;
+        if (venue === 'PROPHETX') cents += 2 * p * (1 - p);
+        else cents += (rec === 'TAKE') ? 5 * p * (1 - p) : -1.25 * p * (1 - p);
+        return { cents: Math.round(cents * 10) / 10, amer: _centsToAmer(cents) };
+    }
+    function _emPreview() {
+        const el = document.getElementById('emEff');
+        if (!el) return;
+        const o = _emParseOdds();
+        if (o.empty) { el.textContent = 'Odds blank — only units will be saved.'; return; }
+        if (o.bad)   { el.textContent = 'Odds must be American: 3+ digits, sign via the −/+ toggle.'; return; }
+        const venue = document.getElementById('emVenue').value;
+        const rec = document.getElementById('emRec').value;
+        const eff = _emEffective(o.amer, venue, rec);
+        const feeLbl = (venue === 'PROPHETX') ? 'X 2% win fee'
+                     : (rec === 'TAKE' ? 'Poly taker fee' : 'Poly maker rebate');
+        el.textContent = `Board ${_fmtAmer(o.amer)} → logs as ${_fmtAmer(eff.amer)} effective (${feeLbl} baked in).`;
+    }
+    function _emStatus(kind, msg) {
+        const el = document.getElementById('emStatus');
+        if (!el) return;
+        el.style.display = msg ? 'block' : 'none';
+        el.textContent = msg || '';
+        const colors = { err: ['#3a1a1a', '#ff8b8b'], info: ['#1a2a3a', '#9bd1ff'] };
+        const [bg, fg] = colors[kind] || colors.info;
+        el.style.background = bg; el.style.color = fg;
+    }
+    async function submitEdit() {
+        if (!_editCtx) return;
+        const u = Number(document.getElementById('emUnits').value);
+        const o = _emParseOdds();
+        if (o.bad) { _emStatus('err', 'Odds must be American (e.g. 115 with the − toggle, or -115).'); return; }
         const payload = {};
-        if (unitsChanged) payload.units = u;
-        if (priceChanged) payload.price = price;
-        btn.disabled = true; const old = btn.textContent; btn.textContent = 'Saving…';
+        if (u !== _editCtx.units) payload.units = u;
+        if (o.amer != null) {
+            const venue = document.getElementById('emVenue').value;
+            const rec = document.getElementById('emRec').value;
+            const eff = _emEffective(o.amer, venue, rec);
+            payload.price = eff.amer;
+            payload.book = venue;   // PROPHETX also flips the fill tracker to manual/filled
+            payload.execution = { rec, venue, manual: true,
+                                  fill_american: o.amer, entry_cents: eff.cents };
+        }
+        if (!Object.keys(payload).length) { closeEdit(); return; }   // nothing changed
+        const btn = document.getElementById('emSave');
+        btn.disabled = true; btn.textContent = 'Saving…';
         try {
-            const r = await authFetch('/api/handicapper/pick/' + pickId + '/edit', {
+            const r = await authFetch('/api/handicapper/pick/' + _editCtx.id + '/edit', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(payload),
             });
             const out = await r.json();
-            if (!out.ok) {
-                alert('Failed: ' + (out.error || 'unknown'));
-                btn.disabled = false; btn.textContent = old;
-                return;
-            }
-            loadData(false);                            // refresh chips + stats
+            if (!out.ok) { _emStatus('err', 'Failed: ' + (out.error || 'unknown')); return; }
+            closeEdit();
+            _toast('Pick updated ✓');
+            loadData(false);                            // refresh chips + stats + fill state
         } catch (e) {
-            alert('Request failed: ' + e);
-            btn.disabled = false; btn.textContent = old;
+            _emStatus('err', 'Request failed: ' + e);
+        } finally {
+            btn.disabled = false; btn.textContent = 'Save';
         }
     }
 

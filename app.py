@@ -10221,16 +10221,23 @@ def api_handicapper_pick_delete(pick_id: int):
 @app.route("/api/handicapper/pick/<int:pick_id>/edit", methods=["POST"])
 @bot_required   # admin edits any pick; a bot_access user edits only their own (asked_by==g.uid)
 def api_handicapper_pick_edit(pick_id: int):
-    """Edit a PENDING pick's units and/or entry odds. Body: {units?, price?}
-    — at least one. Units fixes a fat-fingered stake (confidence re-derives
-    so the tier label/colour stays consistent). Price fixes the ENTRY ODDS
-    (July 2026, user ask): the logged maker bid isn't always the real fill
-    (in-play fills, a re-rested limit, a manual book) — editing it keeps
-    CLV + to-WIN honest, since both are computed from entry_price at grade
-    time (pending rows only, so nothing needs recomputing). Auth mirrors
-    DELETE (admin OR owner). Only pending picks — a settled pick's pnl is
-    already booked, so editing there would desync the stats; delete +
-    re-log instead."""
+    """Edit a PENDING pick's units / entry odds / venue. Body:
+    {units?, price?, book?, execution?} — at least one of units/price.
+
+    Units fixes a fat-fingered stake (confidence re-derives so the tier
+    label/colour stays consistent). Price fixes the ENTRY ODDS (July 2026,
+    user ask): the logged maker bid isn't always the real fill (in-play
+    fill, re-rested limit, manual ProphetX cross) — the frontend edit
+    modal takes the BOARD price the user saw plus venue + make/take, and
+    sends the fee-inclusive effective American here, so CLV + to-WIN stay
+    honest (both key off entry_price at grade time; pending rows only, so
+    nothing needs recomputing). `book` ('PMM'|'PROPHETX') moves the pick
+    between venues — PROPHETX also flips the fill tracker to 'manual'
+    (assumed filled) since it reads entry_book. `execution` (object)
+    replaces signal_blob.execution with the corrected rec for the
+    make-vs-take review. Auth mirrors DELETE (admin OR owner). Only
+    pending picks — a settled pick's pnl is already booked, so editing
+    there would desync the stats; delete + re-log instead."""
     sb = get_supabase()
     if sb is None:
         return jsonify({"ok": False, "error": "Supabase not configured"}), 503
@@ -10240,8 +10247,14 @@ def api_handicapper_pick_edit(pick_id: int):
     _ALLOWED_UNITS = {0.25, 0.5, 1.0, 3.0, 5.0}
     units = body.get("units")
     price = body.get("price")
+    book = body.get("book")
+    execution = body.get("execution")
     if units is None and price is None:
         return jsonify({"ok": False, "error": "pass units and/or price"}), 400
+    if book is not None and book not in ("PMM", "PROPHETX"):
+        return jsonify({"ok": False, "error": "book must be PMM or PROPHETX"}), 400
+    if execution is not None and not isinstance(execution, dict):
+        return jsonify({"ok": False, "error": "execution must be an object"}), 400
     if units is not None:
         try:
             units = float(units)
@@ -10258,7 +10271,7 @@ def api_handicapper_pick_edit(pick_id: int):
             return jsonify({"ok": False, "error": "price must be American odds (|price| ≥ 100)"}), 400
 
     try:
-        row = (sb.table("bot_picks").select("id,asked_by,status")
+        row = (sb.table("bot_picks").select("id,asked_by,status,signal_blob")
                .eq("id", pick_id).single().execute().data)
     except Exception:
         row = None
@@ -10281,11 +10294,22 @@ def api_handicapper_pick_edit(pick_id: int):
                                 else ("medium" if units < 5.0 else "high"))
     if price is not None:
         update["entry_price"] = price
+    if book is not None:
+        update["entry_book"] = book
+    if execution is not None:
+        # Merge, don't replace: signal_blob carries the pmm slug match key,
+        # model read, vsin stamp, etc. — only the execution rec is edited.
+        sblob = row.get("signal_blob")
+        if not isinstance(sblob, dict):
+            sblob = {}
+        sblob["execution"] = execution
+        update["signal_blob"] = sblob
     try:
         sb.table("bot_picks").update(update).eq("id", pick_id).execute()
     except Exception as e:
         return jsonify({"ok": False, "error": f"edit failed: {e}"}), 500
-    return jsonify({"ok": True, "id": pick_id, **update})
+    resp = {k: v for k, v in update.items() if k != "signal_blob"}
+    return jsonify({"ok": True, "id": pick_id, **resp})
 
 
 @app.route("/api/handicapper/pick/<int:pick_id>/settle", methods=["POST"])
