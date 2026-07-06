@@ -4218,8 +4218,27 @@ def api_make_take():
     sig = _cross_book_signal(book, kbook, units=units, starts_in_min=sim)
     if not sig:
         return jsonify({"ok": True, "available": False})
+    # Pinnacle reference (log-modal "am I getting a decent line?" check) —
+    # CACHE-ONLY read of the parlay-api slate; a modal open never spends
+    # credits (paid pulls stay tied to bot-bet moments in the paperlog).
+    pin = None
+    mt_norm = ("moneyline" if market_type in ("moneyline", "ml")
+               else "spread" if market_type in ("spread", "spr")
+               else "total" if market_type in ("total", "tot") else None)
+    if sport and away and home and side and mt_norm:
+        try:
+            events, age = _pin_slate_cached(
+                get_supabase(), sport, datetime.now(timezone.utc))
+            pick, opp = _pin_outcomes(events, away, home,
+                                      _PIN_MKT_KEY[mt_norm], side)
+            if pick and pick.get("price") is not None:
+                pin = {"price": pick.get("price"), "line": pick.get("point"),
+                       "opp_price": (opp or {}).get("price"),
+                       "age_min": (round(age) if age is not None else None)}
+        except Exception:
+            pin = None
     return jsonify({"ok": True, "available": True,
-                    "kalshi": bool(kbook), **sig})
+                    "kalshi": bool(kbook), "pin": pin, **sig})
 
 
 @app.route("/debug-crossbook")
@@ -5500,6 +5519,51 @@ def _pin_slate(sb, sport: str, now) -> list | None:
 _PIN_MKT_KEY = {"moneyline": "h2h", "spread": "spreads", "total": "totals"}
 
 
+def _pin_slate_cached(sb, sport: str, now):
+    """CACHE-ONLY read of the Pinnacle slate (any age) + age in minutes.
+    Modal opens / dossier views must NEVER spend credits — paid pulls stay
+    tied to bot-bet moments in _pin_slate. Returns (events, age_min)."""
+    row = _parlay_state_get(sb, f"pin:{sport}")
+    if not row:
+        return None, None
+    try:
+        age = (now - datetime.fromisoformat(
+            str(row["updated_at"]).replace("Z", "+00:00"))).total_seconds() / 60.0
+    except Exception:
+        age = None
+    return ((row.get("v") or {}).get("events")), age
+
+
+def _pin_outcomes(events, away: str, home: str, mkt_key: str, side: str):
+    """Match (game, market, side) in a TOA-shaped slate → (pick, opp)
+    outcomes, or (None, None). Team match = two-way substring containment."""
+    aw, hm = (away or "").strip().lower(), (home or "").strip().lower()
+    for e in (events or []):
+        ea = (e.get("away_team") or "").lower()
+        eh = (e.get("home_team") or "").lower()
+        if not ((ea in aw or aw in ea) and (eh in hm or hm in eh)):
+            continue
+        bm = next((b for b in (e.get("bookmakers") or [])
+                   if b.get("key") == "pinnacle"), None)
+        mkt = next((m for m in ((bm or {}).get("markets") or [])
+                    if m.get("key") == mkt_key), None)
+        outs = (mkt or {}).get("outcomes") or []
+        if len(outs) < 2:
+            return None, None
+        if mkt_key == "totals":
+            pick = next((o for o in outs
+                         if (o.get("name") or "").lower() == side), None)
+        else:
+            team = hm if side == "home" else aw
+            pick = next((o for o in outs
+                         if team in (o.get("name") or "").lower()
+                         or (o.get("name") or "").lower() in team), None)
+        if not pick:
+            return None, None
+        return pick, next((o for o in outs if o is not pick), None)
+    return None, None
+
+
 def _pin_stamp_rows(sb, rows: list, now) -> int:
     """Stamp signal_blob.pin = {price, line, opp_price, at} onto this tick's
     REAL gate-cleared main-market rows. Never raises; 0 on any failure."""
@@ -5518,35 +5582,12 @@ def _pin_stamp_rows(sb, rows: list, now) -> int:
             en = (r.get("event_name") or "")
             if " @ " not in en:
                 continue
-            away, home = [s.strip().lower() for s in en.split(" @ ", 1)]
-            ev = None
-            for e in slates[sp]:
-                ea = (e.get("away_team") or "").lower()
-                eh = (e.get("home_team") or "").lower()
-                if ((ea in away or away in ea) and (eh in home or home in eh)):
-                    ev = e
-                    break
-            if not ev:
-                continue
-            bm = next((b for b in (ev.get("bookmakers") or [])
-                       if b.get("key") == "pinnacle"), None)
-            mkt = next((m for m in ((bm or {}).get("markets") or [])
-                        if m.get("key") == _PIN_MKT_KEY[r["market_type"]]), None)
-            outs = (mkt or {}).get("outcomes") or []
-            if len(outs) < 2:
-                continue
-            side = r.get("side")
-            if r["market_type"] == "total":
-                pick = next((o for o in outs
-                             if (o.get("name") or "").lower() == side), None)
-            else:
-                team = (home if side == "home" else away)
-                pick = next((o for o in outs
-                             if team in (o.get("name") or "").lower()
-                             or (o.get("name") or "").lower() in team), None)
+            away, home = [s.strip() for s in en.split(" @ ", 1)]
+            pick, opp = _pin_outcomes(slates[sp], away, home,
+                                      _PIN_MKT_KEY[r["market_type"]],
+                                      r.get("side"))
             if not pick:
                 continue
-            opp = next((o for o in outs if o is not pick), None)
             r["signal_blob"] = {**(r.get("signal_blob") or {}),
                                 "pin": {"price": pick.get("price"),
                                         "line": pick.get("point"),

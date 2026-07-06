@@ -3175,6 +3175,16 @@
             const a = j.prophetx.beat_american;
             s += `\nProphetX: ${a > 0 ? '+' + a : a} or better beats it (2% win fee incl.)`;
         }
+        // Pinnacle reference (cached parlay-api slate, zero credits) — the
+        // sharp book's number next to the execution price: "am I getting a
+        // decent line?" Ages past 30m get flagged so a stale read is obvious.
+        if (j.pin && j.pin.price != null) {
+            const pl = (j.pin.line != null)
+                ? ` @ ${o.mt === 'spread' && j.pin.line > 0 ? '+' : ''}${j.pin.line}` : '';
+            const age = (j.pin.age_min != null && j.pin.age_min > 30)
+                ? ` · ${j.pin.age_min}m old` : '';
+            s += `\nPinnacle: ${_fmtAmer(j.pin.price)}${pl}${age}`;
+        }
         el.textContent = s;
     }
     // iOS numeric keypad has no minus key, so the ProphetX field carries a
