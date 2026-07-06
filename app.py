@@ -8370,6 +8370,358 @@ def api_handicapper_live():
     return jsonify({"ok": True, "live": out})
 
 
+# ──────────────── Pick Bot fill status (admin-only) ────────────────
+# "Did my Polymarket maker actually FILL?" — closes the loop between a
+# logged pick (intent: entry = the maker bid) and the real order on
+# Polymarket. Matches the admin's pending bot_picks against three
+# sources: (a) open SDK orders, (b) held positions, (c) the Filled
+# Bot's polymarket_fill_state ledger (terminal-FILLED rows, covers
+# orders that filled and left the SDK list before we polled).
+#
+# ADMIN-ONLY on purpose: the Polymarket SDK creds are the admin's
+# personal account. Other bot_access users have no linked account, so
+# their picks have nothing to match against — the page simply doesn't
+# fetch this for them.
+#
+# Statuses per pick:
+#   manual  — entry_book != PMM (e.g. PROPHETX manual fill: the user
+#             typed real odds from an app we have no API for) → assume
+#             filled the moment it's logged.
+#   resting — matching open maker order, zero fills yet.
+#   partial — matching open order, 0 < cum < qty (pct returned).
+#   filled  — order fully filled / position held / Filled Bot ledger
+#             shows the matched order terminal-FILLED.
+#   none    — SDK reachable but no matching order or position anywhere:
+#             the bet was never placed (or was canceled).
+#   unknown — SDK unreachable this tick; render nothing rather than a
+#             wrong "no order".
+#
+# `warn` (⚠ TAKE) = still unfilled with ≤30 min to tip — mirrors the
+# make/take engine's clock rule (a maker won't fill in time; cross).
+#
+# Matching: EXACT when the pick carries signal_blob.pmm.slug (stamped
+# at log time by the frontend since July 2026), with intent orientation
+# checked when the picked side was the synthetic (NO) side of the PMM
+# binary. Picks logged before the stamp fall back to a heuristic:
+# slug date + team names + market_type + side (+ line for SPR/TOT).
+# Heuristic misses show "none" — annoying but honest; new picks match
+# exactly.
+
+_FILL_STATUS_TTL = 30       # s — server cache; the page polls on its 60s loadData
+_FS_TAKE_WARN_MIN = 30      # unfilled + tip ≤30m → TAKE warning (make/take clock rule)
+
+
+def _fs_norm(s):
+    return re.sub(r"[^a-z0-9 ]+", "", (s or "").lower()).strip()
+
+
+def _fs_team_match(cand, team):
+    """Loose team-name equality: substring either way, or same mascot
+    (last token). PMM metadata says 'Baltimore Orioles' or a bare city
+    ('Oklahoma City'); our event_name carries the ESPN full name."""
+    c, t = _fs_norm(cand), _fs_norm(team)
+    if not c or not t:
+        return False
+    if c in t or t in c:
+        return True
+    return c.split()[-1] == t.split()[-1]
+
+
+def _fs_slug_date(*slugs):
+    for s in slugs:
+        m = re.search(r"(\d{4}-\d{2}-\d{2})", s or "")
+        if m:
+            return m.group(1)
+    return None
+
+
+def _fs_market_type(title, outcome):
+    """Infer our market_type from a PMM order/position's metadata."""
+    t = (title or "").lower()
+    o = (outcome or "").strip().lower()
+    if "inning" in t:
+        return "nrfi"
+    if o in ("over", "under"):
+        return "total"
+    if re.search(r"[+-]\s*\d", outcome or "") or t.startswith("spread"):
+        return "spread"
+    return "moneyline"
+
+
+def _fs_pick_matches(pick, cand):
+    """Does this order/position/ledger row look like THIS pick's bet?
+
+    cand: {slug, event_slug, title, outcome, team_name, intent}
+    """
+    blob = pick.get("signal_blob") or {}
+    pmm = blob.get("pmm") if isinstance(blob, dict) else None
+    cand_slug = cand.get("slug") or ""
+
+    # Exact path: the slug stamped at log time IS the market. Orders
+    # carry intent so we can also verify the side of the binary (a
+    # synthetic-NO pick is a *_SHORT order); positions/ledger rows
+    # without intent accept on slug alone — the conflict guard means
+    # the user never holds the opposite side of their own pick.
+    if isinstance(pmm, dict) and pmm.get("slug") and pmm["slug"] == cand_slug:
+        intent = cand.get("intent") or ""
+        if intent and intent.endswith("_SHORT") != bool(pmm.get("synthetic")):
+            return False    # the OTHER side of the same binary
+        return True
+    # A stamped pick whose slug differs still gets the heuristic below —
+    # the user may have rested on a different line's market than the
+    # one the verdict quoted.
+
+    mt = _fs_market_type(cand.get("title"), cand.get("outcome"))
+    if mt != pick.get("market_type"):
+        return False
+
+    # Game date: slugs embed YYYY-MM-DD; ±1 day absorbs ET/UTC drift.
+    d = _fs_slug_date(cand.get("slug"), cand.get("event_slug"))
+    ev_date = (pick.get("event_start") or "")[:10]
+    if d and ev_date:
+        try:
+            dd = abs((datetime.strptime(d, "%Y-%m-%d")
+                      - datetime.strptime(ev_date, "%Y-%m-%d")).days)
+        except ValueError:
+            dd = 0
+        if dd > 1:
+            return False
+
+    ev = pick.get("event_name") or ""
+    away, home = (ev.split(" @ ", 1) if " @ " in ev else ("", ""))
+    side = (pick.get("side") or "").lower()
+
+    def _slug_codes_hit():
+        """True/False when the slug carries team codes we can check
+        against event_name; None when the slug has no code pattern."""
+        cm = re.match(r"^(?:[a-z0-9]+-)?[a-z]+-([a-z]{2,4})-([a-z]{2,4})-\d{4}",
+                      cand.get("slug") or cand.get("event_slug") or "")
+        if not cm:
+            return None
+        evl = ev.lower()
+        frags = [_TEAM_CODE_MAP.get(cm.group(1)), _TEAM_CODE_MAP.get(cm.group(2))]
+        return any(f and f in evl for f in frags)
+
+    if mt in ("moneyline", "spread"):
+        team = home if side == "home" else away
+        # Spreads: outcome is just "-1.5"; team_name carries the team.
+        who = cand.get("team_name") or cand.get("outcome") or ""
+        if not _fs_team_match(who, team):
+            return False
+        if mt == "spread":
+            line = pick.get("entry_line")
+            m = re.search(r"([+-]?\d+\.?\d*)", cand.get("outcome") or "")
+            if line is not None and m:
+                try:
+                    if abs(float(m.group(1)) - float(line)) > 0.01:
+                        return False
+                except ValueError:
+                    pass
+        return True
+
+    if mt == "total":
+        if (cand.get("outcome") or "").strip().lower() != side:
+            return False
+        hit = _slug_codes_hit()
+        if hit is False:
+            return False
+        if hit is None:
+            # No slug codes to verify the game — require a team mention
+            # in the title, else too weak (an O8.5 on ANOTHER game the
+            # same night would false-match).
+            tl = (cand.get("title") or "").lower()
+            if not any(t and t.lower().split()[-1] in tl for t in (away, home)):
+                return False
+        # Line sanity when the slug carries one (-8pt5 suffix). Half a
+        # point of drift allowed — the user may rest a nearby line.
+        line = pick.get("entry_line")
+        lm = re.search(r"-(\d+)pt(\d+)$", cand.get("slug") or "")
+        if line is not None and lm:
+            try:
+                cl = float(f"{lm.group(1)}.{lm.group(2)}")
+                if abs(cl - abs(float(line))) > 0.51:
+                    return False
+            except ValueError:
+                pass
+        return True
+
+    if mt == "nrfi":
+        o = (cand.get("outcome") or "").strip().lower()
+        if o in ("yes", "no") and o != side:
+            return False
+        hit = _slug_codes_hit()
+        if hit is False:
+            return False
+        if hit is None:
+            tl = (cand.get("title") or "").lower()
+            if not any(t and t.lower().split()[-1] in tl for t in (away, home)):
+                return False
+        return True
+
+    return False
+
+
+def _fs_order_meta(md):
+    """Normalize a marketMetadata dict/model into the cand shape."""
+    if not isinstance(md, dict):
+        md = {k: getattr(md, k, None) for k in
+              ("slug", "title", "outcome", "eventSlug", "team")}
+    team = md.get("team") or {}
+    return {
+        "slug":       md.get("slug") or "",
+        "event_slug": md.get("eventSlug") or "",
+        "title":      md.get("title") or "",
+        "outcome":    md.get("outcome") or "",
+        "team_name":  (team.get("name", "") if isinstance(team, dict) else ""),
+    }
+
+
+@app.route("/api/handicapper/fill-status")
+@admin_required
+def api_handicapper_fill_status():
+    """Fill status per pending pick — see the block comment above."""
+    import time as _time
+    cache_key = f"fill_status:{g.uid}"
+    now_ts = _time.time()
+    cached = _cache.get(cache_key)
+    if cached and (now_ts - cached["ts"]) < _FILL_STATUS_TTL:
+        return jsonify(cached["data"])
+
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+    try:
+        pending = (sb.table("bot_picks")
+                   .select("id,market_id,market_type,side,entry_book,entry_line,"
+                           "event_name,event_start,sport,signal_blob")
+                   .eq("status", "pending").eq("asked_by", g.uid)
+                   .order("event_start", desc=False)
+                   .limit(200).execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"pending fetch: {e}"}), 500
+
+    now = datetime.now(timezone.utc)
+    pmm_picks = [p for p in pending
+                 if (p.get("entry_book") or "").upper() == "PMM"]
+
+    orders, positions, sdk_ok = [], [], False
+    client = None
+    if pmm_picks:
+        try:
+            client = get_client()
+            resp = client.orders.list()
+            raw = (resp.get("orders") if isinstance(resp, dict)
+                   else getattr(resp, "orders", []) or [])
+            sdk_ok = True
+            for o in raw:
+                def _g(key, default=None, _o=o):
+                    if isinstance(_o, dict):
+                        return _o.get(key, default)
+                    return getattr(_o, key, default)
+                if (_g("state") or "") not in _OPEN_ORDER_STATES:
+                    continue
+                intent = _g("intent") or ""
+                # Entry fills only — a SELL order is an exit, not the bet.
+                if intent.startswith("ORDER_INTENT_SELL_"):
+                    continue
+                cand = _fs_order_meta(_g("marketMetadata") or {})
+                cand["intent"] = intent
+                cand["qty"] = _safe_float(_g("quantity")) or 0
+                cand["cum"] = _safe_float(_g("cumQuantity")) or 0
+                orders.append(cand)
+        except Exception:
+            sdk_ok = False
+        if sdk_ok:
+            try:
+                for slug, pos in fetch_positions(client):
+                    if pos.get("expired"):
+                        continue
+                    net = _safe_float(pos.get("netPosition")) or 0
+                    if abs(net) < 0.01:
+                        continue
+                    cand = _fs_order_meta(pos.get("marketMetadata") or {})
+                    if not cand["slug"]:
+                        cand["slug"] = slug or ""
+                    cand["intent"] = ""
+                    positions.append(cand)
+            except Exception:
+                pass
+
+    # Filled Bot ledger: recently terminal-FILLED orders. Covers the gap
+    # where a maker filled and vanished from the SDK list (and isn't a
+    # position anymore because the game already resolved).
+    ledger_filled = []
+    if pmm_picks:
+        try:
+            cutoff = (now - timedelta(days=7)).isoformat()
+            rows = (sb.table("polymarket_fill_state")
+                    .select("slug,market_name,pick,intent,last_state,alerts_sent")
+                    .eq("terminal", True).gte("last_seen_at", cutoff)
+                    .limit(500).execute().data) or []
+            for r in rows:
+                sent = r.get("alerts_sent") or []
+                if (r.get("intent") or "").startswith("ORDER_INTENT_SELL_"):
+                    continue    # a filled SELL is an exit, not the entry
+                if r.get("last_state") == "ORDER_STATE_FILLED" or "100" in sent:
+                    ledger_filled.append({
+                        "slug":       r.get("slug") or "",
+                        "event_slug": "",
+                        "title":      r.get("market_name") or "",
+                        # `pick` is outcome-with-team-prefix — close enough
+                        # for the heuristic's team/side checks.
+                        "outcome":    r.get("pick") or "",
+                        "team_name":  "",
+                        "intent":     r.get("intent") or "",
+                    })
+        except Exception:
+            pass
+
+    fills = []
+    for p in pending:
+        book = (p.get("entry_book") or "").upper()
+        dt = _parse_iso(p.get("event_start") or "")
+        mins = ((dt - now).total_seconds() / 60.0) if dt else None
+        entry = {
+            "id":            p["id"],
+            "market_id":     p.get("market_id"),
+            "market_type":   p.get("market_type"),
+            "pct":           None,
+            "warn":          False,
+            "mins_to_start": (round(mins) if mins is not None else None),
+        }
+        if book != "PMM":
+            # Typed-in odds (ProphetX / manual book) — no API to poll;
+            # the user logged a REAL fill, so it's filled by definition.
+            entry["status"] = "manual"
+        else:
+            order = next((o for o in orders if _fs_pick_matches(p, o)), None)
+            if order is not None:
+                if order["qty"] and order["cum"] >= order["qty"]:
+                    entry["status"], entry["pct"] = "filled", 100.0
+                elif order["cum"] > 0:
+                    entry["status"] = "partial"
+                    entry["pct"] = (round(order["cum"] / order["qty"] * 100.0, 1)
+                                    if order["qty"] else None)
+                else:
+                    entry["status"], entry["pct"] = "resting", 0.0
+            elif any(_fs_pick_matches(p, c) for c in positions):
+                entry["status"], entry["pct"] = "filled", 100.0
+            elif any(_fs_pick_matches(p, c) for c in ledger_filled):
+                entry["status"], entry["pct"] = "filled", 100.0
+            elif sdk_ok:
+                entry["status"] = "none"
+            else:
+                entry["status"] = "unknown"
+            if (entry["status"] in ("resting", "partial", "none")
+                    and mins is not None and 0 < mins <= _FS_TAKE_WARN_MIN):
+                entry["warn"] = True
+        fills.append(entry)
+
+    result = {"ok": True, "fills": fills, "sdk_ok": sdk_ok}
+    _cache[cache_key] = {"data": result, "ts": now_ts}
+    return jsonify(result)
+
+
 @app.route("/api/handicapper/dossier")
 @bot_required
 def api_handicapper_dossier():
