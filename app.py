@@ -6527,6 +6527,32 @@ def api_check_fills():
             return jsonify({"ok": False, "error": f"db write: {e}",
                             "processed": processed, "alerts": alerts_fired}), 500
 
+    # ── Pick Bot entry-price auto-sync ────────────────────────────
+    # Explicit user request July 2026 (narrow exception to gotcha #26's
+    # "no Polymarket coupling"): when a tracked maker order has fills,
+    # restamp the ADMIN's matching pending pick's entry_price to the
+    # real fill (maker rebate baked in). Exact signal_blob.pmm.slug
+    # matches only; units NEVER touched. Runs here (every minute) so
+    # the pick corrects itself even with the page closed — the resolver
+    # can grade within minutes of game end and must see the true entry.
+    entry_synced = 0
+    try:
+        admins = _admin_uids()
+        if admins and upserts:
+            pend = (sb.table("bot_picks")
+                    .select("id,entry_price,entry_book,signal_blob")
+                    .eq("status", "pending").in_("asked_by", sorted(admins))
+                    .limit(200).execute().data) or []
+            by_slug = _fs_picks_by_slug(pend)
+            if by_slug:
+                cands = [{"slug": r.get("slug"), "intent": r.get("intent"),
+                          "price": r.get("price"),
+                          "cum": r.get("last_cum_quantity"),
+                          "qty": r.get("quantity")} for r in upserts]
+                entry_synced = _fs_auto_sync_entry(sb, by_slug, cands)
+    except Exception:
+        entry_synced = 0
+
     return jsonify({
         "ok": True,
         "processed": processed,
@@ -6534,6 +6560,7 @@ def api_check_fills():
         "skipped_historical": skipped_historical,
         "disappeared_filled": disappeared_filled,
         "disappeared_canceled": disappeared_canceled,
+        "entry_synced": entry_synced,
     })
 
 
@@ -8576,6 +8603,105 @@ def _fs_order_meta(md):
     }
 
 
+def _fs_auto_sync_entry(sb, picks_by_slug, cands):
+    """Auto-sync entry_price on FILLED (or partially filled) Polymarket
+    maker picks — the user asked for the loop to close itself: rest a
+    limit, it fills, the pick restamps to the REAL fill price (maker
+    rebate baked in) so CLV/to-WIN grade off what was actually paid.
+
+    picks_by_slug: {pmm_slug: pending pick row} — EXACT slug matches only
+    (signal_blob.pmm.slug, stamped at log time). The team/date heuristic
+    is deliberately excluded: a mis-match must never overwrite a good
+    entry.
+    cands: [{slug, intent, price (picked-side 0-1, already NO-flipped),
+             cum, qty}] — open orders / fill-state rows. Only cum>0 rows
+    sync (a resting order that hasn't filled isn't an entry yet; if the
+    user re-rests at a better price, the pick updates when THAT fills).
+
+    Never overwritten: manual edits (signal_blob.execution.manual — the
+    user's typed odds win) and TAKE entries (already logged at the
+    fee-inclusive take price by the make/take engine; a taker's fill IS
+    that price — restamping with a maker rebate would be wrong). SELLs
+    excluded (exits). Returns number of picks updated.
+
+    INVARIANT (user rule, July 2026): UNITS ARE NEVER TOUCHED. Only
+    entry_price syncs. Dollars-on-exchange can't be converted to the
+    user's unit sizing — a 0.5u pick stays 0.5u regardless of how many
+    contracts the order was for. (The retired pmm-sync's
+    _pmm_units_for_qty did exactly that conversion; do NOT resurrect
+    it here.)"""
+    updated = 0
+    for c in cands:
+        try:
+            cum = float(c.get("cum") or 0)
+        except (TypeError, ValueError):
+            cum = 0
+        if cum <= 0:
+            continue
+        pick = picks_by_slug.get(c.get("slug") or "")
+        if not pick:
+            continue
+        intent = c.get("intent") or ""
+        if intent.startswith("ORDER_INTENT_SELL_"):
+            continue
+        blob = pick.get("signal_blob") if isinstance(pick.get("signal_blob"), dict) else {}
+        pmm = blob.get("pmm") if isinstance(blob.get("pmm"), dict) else {}
+        # Side-of-binary check, same rule as _fs_pick_matches.
+        if intent and intent.endswith("_SHORT") != bool(pmm.get("synthetic")):
+            continue
+        ex = blob.get("execution") if isinstance(blob.get("execution"), dict) else {}
+        if ex.get("manual") or ex.get("rec") == "TAKE":
+            continue
+        p = c.get("price")
+        try:
+            p = float(p)
+        except (TypeError, ValueError):
+            continue
+        if not (0 < p < 1):
+            continue
+        # NOTE: _pmm_maker_rebate_cents takes the price in CENTS (0-100),
+        # not the 0-1 prob — passing p raw silently zeroes the rebate.
+        eff_cents = p * 100 - _pmm_maker_rebate_cents(p * 100)
+        amer = _prob_to_amer_py(eff_cents / 100.0)
+        if amer is None:
+            continue
+        try:
+            cur = int(pick.get("entry_price")) if pick.get("entry_price") is not None else None
+        except (TypeError, ValueError):
+            cur = None
+        if cur == int(amer):
+            continue
+        blob = dict(blob)
+        blob["execution"] = {"rec": "MAKE", "venue": "PMM", "auto_synced": True,
+                             "fill_american": _prob_to_amer_py(p),
+                             "entry_cents": round(eff_cents, 1)}
+        try:
+            sb.table("bot_picks").update(
+                {"entry_price": int(amer), "signal_blob": blob}
+            ).eq("id", pick["id"]).execute()
+            pick["entry_price"] = int(amer)
+            pick["signal_blob"] = blob
+            updated += 1
+        except Exception:
+            pass
+    return updated
+
+
+def _fs_picks_by_slug(pending_rows):
+    """{signal_blob.pmm.slug: row} for pending PMM picks that carry the
+    exact-match key. Rows without a stamped slug can't auto-sync."""
+    out = {}
+    for p in pending_rows:
+        if (p.get("entry_book") or "").upper() != "PMM":
+            continue
+        blob = p.get("signal_blob")
+        pmm = blob.get("pmm") if isinstance(blob, dict) else None
+        slug = pmm.get("slug") if isinstance(pmm, dict) else None
+        if slug:
+            out[slug] = p
+    return out
+
+
 @app.route("/api/handicapper/fill-status")
 @admin_required
 def api_handicapper_fill_status():
@@ -8593,7 +8719,7 @@ def api_handicapper_fill_status():
     try:
         pending = (sb.table("bot_picks")
                    .select("id,market_id,market_type,side,entry_book,entry_line,"
-                           "event_name,event_start,sport,signal_blob")
+                           "entry_price,event_name,event_start,sport,signal_blob")
                    .eq("status", "pending").eq("asked_by", g.uid)
                    .order("event_start", desc=False)
                    .limit(200).execute().data) or []
@@ -8628,6 +8754,13 @@ def api_handicapper_fill_status():
                 cand["intent"] = intent
                 cand["qty"] = _safe_float(_g("quantity")) or 0
                 cand["cum"] = _safe_float(_g("cumQuantity")) or 0
+                # Picked-side price for the auto-sync (same NO-flip as
+                # /api/my-orders — gotcha #7/#23).
+                raw_price = _safe_float(_g("price"))
+                cand["price"] = ((1 - raw_price)
+                                 if (raw_price is not None and 0 <= raw_price <= 1
+                                     and intent.endswith("_SHORT"))
+                                 else raw_price)
                 orders.append(cand)
         except Exception:
             sdk_ok = False
@@ -8655,7 +8788,8 @@ def api_handicapper_fill_status():
         try:
             cutoff = (now - timedelta(days=7)).isoformat()
             rows = (sb.table("polymarket_fill_state")
-                    .select("slug,market_name,pick,intent,last_state,alerts_sent")
+                    .select("slug,market_name,pick,intent,last_state,alerts_sent,"
+                            "price,quantity,last_cum_quantity")
                     .eq("terminal", True).gte("last_seen_at", cutoff)
                     .limit(500).execute().data) or []
             for r in rows:
@@ -8663,6 +8797,7 @@ def api_handicapper_fill_status():
                 if (r.get("intent") or "").startswith("ORDER_INTENT_SELL_"):
                     continue    # a filled SELL is an exit, not the entry
                 if r.get("last_state") == "ORDER_STATE_FILLED" or "100" in sent:
+                    qty = _safe_float(r.get("quantity")) or 0
                     ledger_filled.append({
                         "slug":       r.get("slug") or "",
                         "event_slug": "",
@@ -8672,9 +8807,25 @@ def api_handicapper_fill_status():
                         "outcome":    r.get("pick") or "",
                         "team_name":  "",
                         "intent":     r.get("intent") or "",
+                        # `price` was stored picked-side (already NO-flipped
+                        # by check-fills). A ledger row in this list is a
+                        # full fill — treat cum as the full qty.
+                        "price":      _safe_float(r.get("price")),
+                        "qty":        qty,
+                        "cum":        qty or (_safe_float(r.get("last_cum_quantity")) or 0),
                     })
         except Exception:
             pass
+
+    # Auto-sync entry_price on fills BEFORE reporting status (exact-slug
+    # picks only; units never touched — see _fs_auto_sync_entry).
+    entry_synced = 0
+    try:
+        by_slug = _fs_picks_by_slug(pmm_picks)
+        if by_slug:
+            entry_synced = _fs_auto_sync_entry(sb, by_slug, orders + ledger_filled)
+    except Exception:
+        entry_synced = 0
 
     fills = []
     for p in pending:
@@ -8717,7 +8868,8 @@ def api_handicapper_fill_status():
                 entry["warn"] = True
         fills.append(entry)
 
-    result = {"ok": True, "fills": fills, "sdk_ok": sdk_ok}
+    result = {"ok": True, "fills": fills, "sdk_ok": sdk_ok,
+              "entry_synced": entry_synced}
     _cache[cache_key] = {"data": result, "ts": now_ts}
     return jsonify(result)
 

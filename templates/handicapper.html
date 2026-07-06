@@ -764,10 +764,11 @@
         </div>
     </div>
 
-    <!-- Edit-pick modal: fix units and/or the REAL entry odds. The user
-         types the BOARD price they saw (Poly book / ProphetX app) — venue
-         + make/take pick the fee curve and Save stores the fee-inclusive
-         effective entry, which is what CLV / to-WIN key off. -->
+    <!-- Edit-pick modal: fix units and/or log a ProphetX fill. X-ONLY for
+         odds (user call, July 2026): Polymarket entries AUTO-SYNC to the
+         real fill price when the maker fills, so the only odds a human
+         ever needs to type are ProphetX board odds ("I just type in what
+         I see") — the 2% win fee is baked in on save. -->
     <div class="modal-bg" id="editModal">
         <div class="modal">
             <h3>Edit pick</h3>
@@ -787,29 +788,13 @@
                     </select>
                 </div>
                 <div class="field">
-                    <label>Odds — as shown on the board</label>
+                    <label>Filled on ProphetX? Your odds, as the app shows them</label>
                     <div style="display:flex;gap:8px;align-items:stretch;">
                         <button type="button" id="emSign" onclick="_emToggleSign()"
                                 style="width:48px;font-size:18px;font-weight:700;border-radius:8px;border:1px solid var(--border,#333);background:transparent;color:inherit;cursor:pointer;">&minus;</button>
                         <input type="text" id="emPrice" inputmode="numeric" style="flex:1"
                                oninput="_emPreview()" placeholder="e.g. 115" />
                     </div>
-                </div>
-            </div>
-            <div class="row2">
-                <div class="field">
-                    <label>Venue</label>
-                    <select id="emVenue" onchange="_emPreview()">
-                        <option value="PMM">Polymarket</option>
-                        <option value="PROPHETX">ProphetX</option>
-                    </select>
-                </div>
-                <div class="field">
-                    <label>Make or take?</label>
-                    <select id="emRec" onchange="_emPreview()">
-                        <option value="MAKE">Make (rested limit)</option>
-                        <option value="TAKE">Take (crossed)</option>
-                    </select>
                 </div>
             </div>
             <div class="field">
@@ -1344,17 +1329,17 @@
     }
 
     // ── Edit-pick modal ────────────────────────────────────────────────
-    // Fix units and/or the REAL entry odds on a pending pick. The user
-    // types the BOARD price they saw ("I just type in what I see, not the
-    // REAL odds") — venue (Poly/ProphetX) + make/take pick the fee curve
-    // and Save stores the fee-inclusive effective American, exactly like
-    // the log modal's paths do, so CLV/to-WIN stay honest:
-    //   Poly take  → +5·p(1−p)¢ taker fee
-    //   Poly make  → −1.25·p(1−p)¢ maker rebate
-    //   ProphetX   → +2·p(1−p)¢ (2%-of-winnings, applies make or take)
-    // Odds left BLANK = units-only edit (no price/venue change) — we never
-    // seed the box with the stored entry, which is already fee-inclusive
-    // and would double-apply fees on a blind re-save.
+    // Fix units and/or log a ProphetX fill on a pending pick. X-ONLY for
+    // odds (user call, July 2026): Polymarket entries AUTO-SYNC — when the
+    // maker fills, the check-fills cron / fill-status endpoint restamp
+    // entry_price to the real fill (rebate-adjusted) — so the only odds a
+    // human ever types here are ProphetX board odds ("I just type in what
+    // I see, not the REAL odds"); the 2% win fee (+2·p(1−p)¢) is baked in
+    // on save, same math as the log modal's X field. Typing odds also
+    // flips the pick's venue to PROPHETX (fill tracker → manual/filled).
+    // Odds left BLANK = units-only edit — we never seed the box with the
+    // stored entry, which is already fee-inclusive and would double-apply
+    // the fee on a blind re-save.
     let _editCtx = null;
     function editPick(pickId, curUnits, btn, curPrice) {
         const row = (_lastPending || []).find(r => r.id === pickId) || null;
@@ -1368,11 +1353,8 @@
         const priceEl = document.getElementById('emPrice');
         priceEl.value = '';
         priceEl.placeholder = _editCtx.price != null
-            ? `now ${_fmtAmer(_editCtx.price)} — type board price to change`
+            ? `now ${_fmtAmer(_editCtx.price)} — type X odds to move it`
             : 'e.g. 115';
-        const book = (row && row.entry_book) || 'PMM';
-        document.getElementById('emVenue').value = (book === 'PROPHETX') ? 'PROPHETX' : 'PMM';
-        document.getElementById('emRec').value = (book === 'PROPHETX') ? 'TAKE' : 'MAKE';
         document.getElementById('emSign').textContent =
             (_editCtx.price != null && _editCtx.price > 0) ? '+' : '−';
         _emStatus(null, '');
@@ -1402,25 +1384,23 @@
         if (!isFinite(a) || Math.abs(a) < 100) return { bad: true };
         return { amer: a };
     }
-    function _emEffective(amer, venue, rec) {
+    function _emEffective(amer) {
+        // ProphetX only: their 2%-of-net-winnings fee ≈ +2·p(1−p)¢ all-in.
         const p = _amerToProb(amer);
-        let cents = p * 100;
-        if (venue === 'PROPHETX') cents += 2 * p * (1 - p);
-        else cents += (rec === 'TAKE') ? 5 * p * (1 - p) : -1.25 * p * (1 - p);
+        const cents = p * 100 + 2 * p * (1 - p);
         return { cents: Math.round(cents * 10) / 10, amer: _centsToAmer(cents) };
     }
     function _emPreview() {
         const el = document.getElementById('emEff');
         if (!el) return;
         const o = _emParseOdds();
-        if (o.empty) { el.textContent = 'Odds blank — only units will be saved.'; return; }
+        if (o.empty) {
+            el.textContent = 'Odds blank — only units will be saved. (Polymarket fills auto-sync their own price.)';
+            return;
+        }
         if (o.bad)   { el.textContent = 'Odds must be American: 3+ digits, sign via the −/+ toggle.'; return; }
-        const venue = document.getElementById('emVenue').value;
-        const rec = document.getElementById('emRec').value;
-        const eff = _emEffective(o.amer, venue, rec);
-        const feeLbl = (venue === 'PROPHETX') ? 'X 2% win fee'
-                     : (rec === 'TAKE' ? 'Poly taker fee' : 'Poly maker rebate');
-        el.textContent = `Board ${_fmtAmer(o.amer)} → logs as ${_fmtAmer(eff.amer)} effective (${feeLbl} baked in).`;
+        const eff = _emEffective(o.amer);
+        el.textContent = `X board ${_fmtAmer(o.amer)} → logs as ${_fmtAmer(eff.amer)} effective (2% win fee) · venue → ProphetX.`;
     }
     function _emStatus(kind, msg) {
         const el = document.getElementById('emStatus');
@@ -1439,12 +1419,10 @@
         const payload = {};
         if (u !== _editCtx.units) payload.units = u;
         if (o.amer != null) {
-            const venue = document.getElementById('emVenue').value;
-            const rec = document.getElementById('emRec').value;
-            const eff = _emEffective(o.amer, venue, rec);
+            const eff = _emEffective(o.amer);
             payload.price = eff.amer;
-            payload.book = venue;   // PROPHETX also flips the fill tracker to manual/filled
-            payload.execution = { rec, venue, manual: true,
+            payload.book = 'PROPHETX';   // flips the fill tracker to manual/filled
+            payload.execution = { rec: 'TAKE', venue: 'PROPHETX', manual: true,
                                   fill_american: o.amer, entry_cents: eff.cents };
         }
         if (!Object.keys(payload).length) { closeEdit(); return; }   // nothing changed
