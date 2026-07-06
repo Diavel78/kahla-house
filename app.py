@@ -5386,6 +5386,9 @@ def api_handicapper_paperlog():
                 "gates_cleared": b.get("gates_cleared", True),
                 "signal_blob": b["signal_blob"], "logged_at": now.isoformat(),
             })
+    # Bet-time Pinnacle stamp (parlay-api.com) — runs BEFORE the insert so
+    # the stamp rides each new bet row. No-op without a key / over budget.
+    pin_stamped = _pin_stamp_rows(sb, rows, now)
     # Alert pass runs BEFORE the insert so a brand-new bet's dedup marker
     # can ride its own insert row (no read-back needed).
     bets_alerted = _bet_alerts(sb, now, alert_cands, recent, rows)
@@ -5403,7 +5406,156 @@ def api_handicapper_paperlog():
                             "processed": processed}), 500
     return jsonify({"ok": True, "games": len(games), "processed": processed,
                     "with_pick": with_pick, "new_rows": new_rows,
-                    "bets_alerted": bets_alerted})
+                    "bets_alerted": bets_alerted, "pin_stamped": pin_stamped})
+
+
+# ── Bet-time Pinnacle stamp (parlay-api.com — free tier, 1,000 credits/mo) ──
+# The June 2026 cutover made every bet exchange-signal-driven and dropped the
+# sharp book's contemporaneous opinion entirely. This stamps it back on: when
+# the paperlog logs a REAL gate-cleared bet, fetch Pinnacle's slate for that
+# sport (TOA-compatible API; `bookmakers=pinnacle` + 3 markets = ~3 credits
+# per pull, ONE pull covers every game) and stamp signal_blob.pin on the bet
+# row. Accrues the PIN-agree vs PIN-disagree review dimension (same
+# methodology that graded the MLB power model out of sizing). NOT a polling
+# feed — 1K credits/mo is a sniper budget; the sharp score stays exchange.
+_PARLAY_BASE = "https://parlay-api.com/v1"
+_PARLAY_SPORT_KEY = {"MLB": "baseball_mlb", "NBA": "basketball_nba",
+                     "NHL": "icehockey_nhl", "NFL": "americanfootball_nfl",
+                     "CBB": "basketball_ncaab", "NCAAF": "americanfootball_ncaaf"}
+_PARLAY_CACHE_MIN = 90        # slate cache TTL — DB-backed (cold-start safe)
+_PARLAY_BUDGET = 900          # hard stop inside the 1,000 free credits
+_PARLAY_CREDITS_PER_CALL = 3  # h2h,spreads,totals × pinnacle (1 region-equiv)
+
+
+def _parlay_state_get(sb, k):
+    try:
+        rows = (sb.table("parlay_state").select("v,updated_at")
+                .eq("k", k).limit(1).execute().data) or []
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def _parlay_state_put(sb, k, v, now):
+    try:
+        sb.table("parlay_state").upsert(
+            {"k": k, "v": v, "updated_at": now.isoformat()}).execute()
+    except Exception:
+        pass
+
+
+def _parlay_key(sb) -> str:
+    """env PARLAY_API_KEY wins; else the parlay_state 'api_key' row (user
+    chose DB storage over Vercel env — free-tier key, low stakes)."""
+    k = (os.environ.get("PARLAY_API_KEY") or "").strip()
+    if k:
+        return k
+    row = _parlay_state_get(sb, "api_key")
+    return ((row or {}).get("v") or {}).get("key") or ""
+
+
+def _pin_slate(sb, sport: str, now) -> list | None:
+    """Pinnacle game lines for one sport's whole slate, DB-cached 90 min,
+    hard monthly budget guard. Returns TOA-shaped events or None."""
+    sk = _PARLAY_SPORT_KEY.get(sport)
+    if not sk:
+        return None
+    cache = _parlay_state_get(sb, f"pin:{sport}")
+    if cache:
+        try:
+            age = (now - datetime.fromisoformat(
+                str(cache["updated_at"]).replace("Z", "+00:00"))).total_seconds()
+            if age < _PARLAY_CACHE_MIN * 60:
+                return (cache.get("v") or {}).get("events")
+        except Exception:
+            pass
+    key = _parlay_key(sb)
+    if not key:
+        return None
+    month_k = "usage:" + now.strftime("%Y-%m")
+    used = (((_parlay_state_get(sb, month_k) or {}).get("v") or {})
+            .get("credits") or 0)
+    if used + _PARLAY_CREDITS_PER_CALL > _PARLAY_BUDGET:
+        # Budget exhausted — serve the stale cache rather than nothing.
+        return ((cache or {}).get("v") or {}).get("events")
+    try:
+        r = _http.get(f"{_PARLAY_BASE}/sports/{sk}/odds",
+                      params={"apiKey": key, "bookmakers": "pinnacle",
+                              "markets": "h2h,spreads,totals",
+                              "oddsFormat": "american", "dateFormat": "iso"},
+                      timeout=6)
+        if r.status_code != 200:
+            return ((cache or {}).get("v") or {}).get("events")
+        events = r.json()
+        if not isinstance(events, list):
+            return ((cache or {}).get("v") or {}).get("events")
+    except Exception:
+        return ((cache or {}).get("v") or {}).get("events")
+    _parlay_state_put(sb, f"pin:{sport}", {"events": events}, now)
+    _parlay_state_put(sb, month_k,
+                      {"credits": used + _PARLAY_CREDITS_PER_CALL}, now)
+    return events
+
+
+_PIN_MKT_KEY = {"moneyline": "h2h", "spread": "spreads", "total": "totals"}
+
+
+def _pin_stamp_rows(sb, rows: list, now) -> int:
+    """Stamp signal_blob.pin = {price, line, opp_price, at} onto this tick's
+    REAL gate-cleared main-market rows. Never raises; 0 on any failure."""
+    try:
+        todo = [r for r in rows
+                if r.get("gates_cleared") and r["market_type"] in _PIN_MKT_KEY
+                and not _is_shadow_blob(r.get("signal_blob"))]
+        if not todo:
+            return 0
+        stamped = 0
+        slates: dict = {}
+        for r in todo:
+            sp = r.get("sport")
+            if sp not in slates:
+                slates[sp] = _pin_slate(sb, sp, now) or []
+            en = (r.get("event_name") or "")
+            if " @ " not in en:
+                continue
+            away, home = [s.strip().lower() for s in en.split(" @ ", 1)]
+            ev = None
+            for e in slates[sp]:
+                ea = (e.get("away_team") or "").lower()
+                eh = (e.get("home_team") or "").lower()
+                if ((ea in away or away in ea) and (eh in home or home in eh)):
+                    ev = e
+                    break
+            if not ev:
+                continue
+            bm = next((b for b in (ev.get("bookmakers") or [])
+                       if b.get("key") == "pinnacle"), None)
+            mkt = next((m for m in ((bm or {}).get("markets") or [])
+                        if m.get("key") == _PIN_MKT_KEY[r["market_type"]]), None)
+            outs = (mkt or {}).get("outcomes") or []
+            if len(outs) < 2:
+                continue
+            side = r.get("side")
+            if r["market_type"] == "total":
+                pick = next((o for o in outs
+                             if (o.get("name") or "").lower() == side), None)
+            else:
+                team = (home if side == "home" else away)
+                pick = next((o for o in outs
+                             if team in (o.get("name") or "").lower()
+                             or (o.get("name") or "").lower() in team), None)
+            if not pick:
+                continue
+            opp = next((o for o in outs if o is not pick), None)
+            r["signal_blob"] = {**(r.get("signal_blob") or {}),
+                                "pin": {"price": pick.get("price"),
+                                        "line": pick.get("point"),
+                                        "opp_price": (opp or {}).get("price"),
+                                        "at": now.isoformat()}}
+            stamped += 1
+        return stamped
+    except Exception:
+        return 0
 
 
 _ADMIN_UIDS_CACHE: dict = {"uids": None, "at": 0.0}
