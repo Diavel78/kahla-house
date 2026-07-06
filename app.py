@@ -3041,7 +3041,14 @@ _PM_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF", "UFC"]
 # news/weigh-ins — 96h catches the Wed→Sat drift. NOTE the UFC block-time
 # quirk (gotcha in _ufc_pickable_market_rows) doesn't matter here: the
 # watcher only needs the nominal event_start to be in the future window.
-_PM_WINDOW_H = {"MLB": 12, "NBA": 96, "NHL": 96, "NFL": 168, "NCAAF": 72,
+# MLB 12h→36h (July 2026, user caught it): Polymarket actively trades
+# next-day MLB the evening before (verified 15.5h out with visible
+# overnight drift), so a 12h window made our exchange "opener" really
+# "the price at T-12h" — every earlier move invisible to the sharp
+# score's baseline and the dossier fair anchor dark until noon. 36h
+# covers the whole listed-the-night-before slate; the snapshot loop's
+# budget + near-game (≤6h) priority tier keep in-prime freshness safe.
+_PM_WINDOW_H = {"MLB": 36, "NBA": 96, "NHL": 96, "NFL": 168, "NCAAF": 72,
                 "UFC": 96}
 _KALSHI_CACHE: dict[str, tuple[float, dict]] = {}
 _KALSHI_TTL = 30  # seconds
