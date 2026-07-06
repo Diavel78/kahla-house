@@ -64,12 +64,17 @@ _ESPN_SPORTS: dict[str, tuple[str, str]] = {
 }
 
 # Per-sport match window for the find-or-create dedup — mirror
-# odds_api._MATCH_WINDOW_BY_SPORT (30m MLB for doubleheader safety, 6h UFC
-# for same-card fights, wider elsewhere). Kept local so this script stays
-# importable on its own.
+# odds_api._MATCH_WINDOW_BY_SPORT (30m MLB for doubleheader safety, wider
+# elsewhere). Kept local so this script stays importable on its own.
+# UFC 6h→48h (July 2026, Kalshi per-fight times): a bout's stored start can
+# be an old ESPN BLOCK time while the incoming Kalshi occurrence time sits
+# hours later on the same card — a 6h window would miss the match and mint
+# a dupe. Same fighter PAIR never fights twice within 48h, so the wide
+# window is dupe-safe for UFC (the tight windows exist for MLB
+# doubleheaders, a team-sport problem).
 _MATCH_WINDOW: dict[str, timedelta] = {
     "MLB": timedelta(minutes=30),
-    "UFC": timedelta(hours=6),
+    "UFC": timedelta(hours=48),
 }
 _DEFAULT_WINDOW = timedelta(hours=12)
 
@@ -148,6 +153,87 @@ def _espn_games(grp: str, league: str, days: int) -> list[dict]:
     return games
 
 
+# ── Kalshi per-fight times (UFC) ────────────────────────────────────────
+# ESPN's mma/ufc scoreboard gives BLOCK times (a card's bouts share segment
+# starts), so UFC countdowns/prime windows ran hours off — "the only thing
+# missing is real UFC start times" (user, July 2026). Kalshi's UFC markets
+# carry a per-fight `occurrence_datetime` (verified live July 2026: bouts on
+# the same card 4h40m apart), free public API, no auth. ESPN stays
+# authoritative for WHICH bouts exist; Kalshi refines WHEN. The offset
+# constant exists because occurrence may be start-ish or settle-ish —
+# calibrate against a live card (compare actual walkout times) and adjust.
+_KALSHI_UFC_URL = ("https://api.elections.kalshi.com/trade-api/v2/markets"
+                   "?series_ticker=KXUFCFIGHT&status=open&limit=200")
+_KALSHI_OCC_OFFSET_MIN = 0
+
+
+def _kalshi_ufc_times() -> list[dict]:
+    """Per-fight expected times from Kalshi's open UFC markets, grouped by
+    event_ticker: [{"fighters": {name, name}, "when": datetime}]."""
+    try:
+        r = httpx.get(_KALSHI_UFC_URL, headers={"User-Agent": _UA}, timeout=15)
+        r.raise_for_status()
+        markets = (r.json() or {}).get("markets") or []
+    except Exception as e:
+        log.warning("  Kalshi UFC times fetch failed: %s", e)
+        return []
+    fights: dict[str, dict] = {}
+    for m in markets:
+        et = m.get("event_ticker")
+        when = _parse_iso(m.get("occurrence_datetime")
+                          or m.get("expected_expiration_time"))
+        f1 = m.get("yes_sub_title") or ""
+        if not (et and when and f1):
+            continue
+        e = fights.setdefault(et, {"fighters": set(), "when": when})
+        e["fighters"].add(f1)
+        if m.get("no_sub_title"):
+            e["fighters"].add(m["no_sub_title"])
+    return [f for f in fights.values() if len(f["fighters"]) == 2]
+
+
+def _name_tokens(s: str) -> list[str]:
+    import re
+    return [t for t in re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).split()
+            if len(t) >= 3]
+
+
+def _fighter_match(a: str, b: str) -> bool:
+    """Last-name-token containment either direction — the resolver's
+    _ufc_match_espn posture ('B. Susurkaev' vs 'Baysangur Susurkaev')."""
+    ta, tb = _name_tokens(a), _name_tokens(b)
+    if not ta or not tb:
+        return False
+    return ta[-1] in tb or tb[-1] in ta
+
+
+def _apply_kalshi_ufc_times(games: list[dict]) -> int:
+    """Override ESPN block times with Kalshi's per-fight occurrence times
+    for name-matched bouts. Sanity: only within ±30h of ESPN's date (a
+    postponed-fight Kalshi market must not drag a row across days)."""
+    fights = _kalshi_ufc_times()
+    if not fights:
+        return 0
+    n = 0
+    for g in games:
+        for f in fights:
+            f1, f2 = tuple(f["fighters"])
+            ok = ((_fighter_match(g["away"], f1) and _fighter_match(g["home"], f2))
+                  or (_fighter_match(g["away"], f2) and _fighter_match(g["home"], f1)))
+            if not ok:
+                continue
+            when = f["when"] + timedelta(minutes=_KALSHI_OCC_OFFSET_MIN)
+            if (abs(when - g["commence"]) <= timedelta(hours=30)
+                    and when != g["commence"]):
+                log.info("  KALSHI-TIME %-28s %s → %s",
+                         f"{g['away']} @ {g['home']}",
+                         g["commence"].isoformat(), when.isoformat())
+                g["commence"] = when
+                n += 1
+            break
+    return n
+
+
 def _find_or_create(sport: str, g: dict, aliases: dict[str, str],
                     existing: list[dict], commit: bool) -> tuple[str, str | None]:
     """Reuse an existing active markets row if teams match within the
@@ -204,6 +290,10 @@ def ingest_sport(sport: str, days: int, commit: bool, prune: bool = False) -> di
     if not games:
         log.info("%-9s no upcoming ESPN games", sport)
         return {"sport": sport, "games": 0, "create": 0, "reuse": 0, "pruned": 0}
+    if sport == "UFC":
+        kt = _apply_kalshi_ufc_times(games)
+        if kt:
+            log.info("  Kalshi per-fight times applied to %d/%d bouts", kt, len(games))
     try:
         aliases = db.list_team_aliases(sport)
     except Exception:
