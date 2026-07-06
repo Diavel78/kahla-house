@@ -164,7 +164,14 @@ def _espn_games(grp: str, league: str, days: int) -> list[dict]:
 # calibrate against a live card (compare actual walkout times) and adjust.
 _KALSHI_UFC_URL = ("https://api.elections.kalshi.com/trade-api/v2/markets"
                    "?series_ticker=KXUFCFIGHT&status=open&limit=200")
-_KALSHI_OCC_OFFSET_MIN = 0
+# −3h: Kalshi's occurrence_datetime is the EASTERN wall-clock schedule
+# stamped in a UTC−7 zone (user caught it on the Jul 11 card: raw values
+# put the main event at 4 AM ET; subtract 3h and the card reads exactly
+# like a textbook PPV — 7 PM ET early prelims, 1 AM ET main event, one
+# constant offset across all 13 bouts). Empirical — verify against the
+# actual walkout times on the next live card and retune if Kalshi fixes
+# their stamps (the tell would be every fight suddenly showing 3h early).
+_KALSHI_OCC_OFFSET_MIN = -180
 
 
 def _kalshi_ufc_times() -> list[dict]:
