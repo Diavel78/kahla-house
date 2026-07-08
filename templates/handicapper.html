@@ -851,6 +851,13 @@
     // already bet isn't mistaken for a new opportunity. Pending-only —
     // you can't add to a settled bet.
     let _loggedPicks = new Map();
+    // TRUE only after a successful loadData has rebuilt _loggedPicks. Until
+    // then the page does NOT know which bets are already logged, so chips
+    // must not offer one-tap logging — a failed/slow first loadData used to
+    // leave every chip looking "fresh" and three already-logged bets got
+    // re-logged in one 40s window (July 2026). Fail-safe: unknown ⇒ no log.
+    let _loggedPicksReady = false;
+    let _ldRetryQueued = false;
     // ── Polymarket fill tracking (ADMIN-ONLY) ──────────────────────────
     // Closes the loop between a logged pick (intent) and the real order:
     // the pending row + the green logged chip stay AMBER until the maker
@@ -1718,10 +1725,14 @@
                 // window as the row highlight.
                 if (p._lean && !isLogged && !_isPrime(startIso)) return;
                 let cls = p._lean ? 'lean' : _uClass(p.units), label = p._chip;
-                let click = _canLog ? `oneTapLog('${mid}',${i})` : `pickGame('${mid}')`;
-                let title = _canLog
+                // No one-tap logging until we KNOW which bets are already
+                // logged — an unsynced page must never offer a "fresh" chip
+                // on a bet the user is already on (the 3-dupes-in-40s bug).
+                const canTapLog = _canLog && _loggedPicksReady;
+                let click = canTapLog ? `oneTapLog('${mid}',${i})` : `pickGame('${mid}')`;
+                let title = canTapLog
                     ? (p._lean ? `Lean — sharp gate not cleared. Tap to log ${p._chip}` : `Tap to log ${p._chip}`)
-                    : `Tap for the full read`;
+                    : (_canLog ? `Syncing your logged bets — tap for details` : `Tap for the full read`);
                 if (ps.state === 'logged') {
                     // Fill-aware (admin): amber until the Polymarket maker
                     // fills, green ✓ once filled, red ⚠ near tip.
@@ -1902,6 +1913,10 @@
     // bets too. submitLog() uses _pendingBody as the base for this path.
     function oneTapLog(mid, idx) {
         if (!_canLog) return;
+        // Belt + suspenders with _renderPickLines' canTapLog: if the logged-
+        // bets sync hasn't succeeded yet we can't tell fresh from logged —
+        // open the dossier instead of the log modal.
+        if (!_loggedPicksReady) { pickGame(mid); return; }
         const v = _verdictCache.get(mid);
         const p = v && v.picks && v.picks[idx];
         if (!p || !p._body) return;
@@ -3985,6 +4000,7 @@
                 if (!prev || u > prev.units) m.set(r.market_type, { units: u, side: r.side });
                 _loggedPicks.set(r.market_id, m);
             });
+            _loggedPicksReady = true;
             _renderPickLines();
             document.getElementById('pendingCount').textContent = pending.length;
             document.getElementById('settledCount').textContent = settled.length;
@@ -4040,6 +4056,13 @@
         } catch (e) {
             status.textContent = 'Error';
             console.error('handicapper load failed', e);
+            // First load failed → the page doesn't know the user's logged
+            // bets and every chip is in the no-log safe state. Retry fast
+            // (5s) instead of waiting out the 60s interval.
+            if (!_loggedPicksReady && !_ldRetryQueued) {
+                _ldRetryQueued = true;
+                setTimeout(() => { _ldRetryQueued = false; loadData(false); }, 5000);
+            }
         }
     }
     </script>
