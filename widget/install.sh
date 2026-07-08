@@ -61,7 +61,15 @@ mkdir -p "$PLUG"
 echo "Plugin folder: $PLUG"
 
 # 3. The plugin itself ------------------------------------------------
-curl -fsSL -o "$PLUG/pickbot.60s.py" "$RAW/pickbot.60s.py"
+# Prefer the copy sitting next to this script (running from the cloned
+# repo) — raw.githubusercontent caches for minutes and rate-limits, so
+# only curl when running via the one-liner outside the repo.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
+if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/pickbot.60s.py" ]; then
+    cp "$SELF_DIR/pickbot.60s.py" "$PLUG/pickbot.60s.py"
+else
+    curl -fsSL -o "$PLUG/pickbot.60s.py" "$RAW/pickbot.60s.py"
+fi
 chmod +x "$PLUG/pickbot.60s.py"
 echo "Plugin installed ✓"
 
