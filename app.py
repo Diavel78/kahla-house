@@ -8321,15 +8321,24 @@ def api_handicapper_live():
     if sb is None:
         return jsonify({"ok": False, "error": "Supabase not configured"}), 503
     try:
-        pending = (sb.table("bot_picks")
-                   .select("id,market_id,sport,event_name,event_start,"
-                           "market_type,side,units,entry_price,entry_line")
-                   .eq("status", "pending")
-                   .eq("asked_by", g.uid)
-                   .order("event_start", desc=False)
-                   .limit(200).execute().data) or []
+        out = _live_rows(sb, g.uid)
     except Exception as e:
         return jsonify({"ok": False, "error": f"pending fetch: {e}"}), 500
+    return jsonify({"ok": True, "live": out})
+
+
+def _live_rows(sb, uid):
+    """The live-tracker core for one user's book — shared by
+    /api/handicapper/live (Firebase-auth page poll) and
+    /api/handicapper/ticker (shared-secret menu-bar widget feed).
+    Raises on the pending fetch failing; callers map that to a 500."""
+    pending = (sb.table("bot_picks")
+               .select("id,market_id,sport,event_name,event_start,"
+                       "market_type,side,units,entry_price,entry_line")
+               .eq("status", "pending")
+               .eq("asked_by", uid)
+               .order("event_start", desc=False)
+               .limit(200).execute().data) or []
 
     now = datetime.now(timezone.utc)
     espn_cache: dict = {}
@@ -8405,7 +8414,110 @@ def api_handicapper_live():
             "win_prob":      win_prob,
             "prob_src":      prob_src,   # decided | market | None(grey)
         })
-    return jsonify({"ok": True, "live": out})
+    return out
+
+
+@app.route("/api/handicapper/ticker")
+def api_handicapper_ticker():
+    """Menu-bar widget feed: the live projected book + today's settled
+    units in one tiny payload, so a macOS SwiftBar/xbar plugin (see
+    widget/) can show the Pick Bot without the website open.
+
+    Shared-secret auth (`?key=WIDGET_SECRET`, falling back to
+    FILLS_CRON_SECRET so it works with zero new env setup) — a menu-bar
+    curl can't do Firebase tokens, same posture as the cron endpoints.
+    Book = the admin's (`_admin_uids`; optional &uid= override). 30s
+    server cache keeps the widget's 60s poll basically free.
+
+    Returns: live.proj_units = Σ p·win_pnl + (1−p)·loss_pnl over priced
+    live bets (same to-WIN math as the page's #liveProj), live.rows for
+    the dropdown, today = settled record + units (event_start on today's
+    America/Phoenix day — the same bucketing as the stats card)."""
+    expected = (os.environ.get("WIDGET_SECRET")
+                or os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    provided = (request.args.get("key") or "").strip()
+    if not expected or not secrets.compare_digest(provided, expected):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+    uid = (request.args.get("uid") or "").strip()
+    if not uid:
+        admins = _admin_uids()
+        uid = sorted(admins)[0] if admins else None
+    if not uid:
+        return jsonify({"ok": False, "error": "no admin uid resolvable"}), 503
+
+    import time as _time
+    ck = f"ticker:{uid}"
+    hit = _cache.get(ck)
+    if hit and (_time.time() - hit["ts"]) < 30:
+        return jsonify(hit["data"])
+
+    try:
+        rows = _live_rows(sb, uid)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"live fetch: {e}"}), 500
+    proj, priced = 0.0, 0
+    slim = []
+    for r in rows:
+        p = r.get("win_prob")
+        u = float(r.get("units") or 0)
+        ep = r.get("entry_price")
+        if p is not None and ep is not None and u:
+            proj += (p * _pmm_pnl_units("won", ep, u)
+                     + (1 - p) * _pmm_pnl_units("lost", ep, u))
+            priced += 1
+        sc = r.get("score") or {}
+        slim.append({
+            "event": r.get("event_name"), "market_type": r.get("market_type"),
+            "side": r.get("side"), "units": u, "entry_price": ep,
+            "win_prob": p,
+            "score": {k: sc.get(k) for k in ("away_score", "home_score",
+                                             "display_status")
+                      if sc.get(k) is not None},
+        })
+
+    # Today's settled book — same AZ event_start bucketing as the page.
+    az = ZoneInfo("America/Phoenix")
+    d0 = datetime.now(az).replace(hour=0, minute=0, second=0, microsecond=0)
+    d1 = d0 + timedelta(days=1)
+    won = lost = push = 0
+    settled_units = 0.0
+    pending_total = 0
+    try:
+        srows = (sb.table("bot_picks").select("status,pnl_units")
+                 .eq("asked_by", uid)
+                 .gte("event_start", d0.astimezone(timezone.utc).isoformat())
+                 .lt("event_start", d1.astimezone(timezone.utc).isoformat())
+                 .limit(500).execute().data) or []
+        for r in srows:
+            st = r.get("status")
+            if st == "won":
+                won += 1
+            elif st == "lost":
+                lost += 1
+            elif st == "push":
+                push += 1
+            elif st == "pending":
+                pending_total += 1
+                continue
+            else:
+                continue
+            settled_units += float(r.get("pnl_units") or 0)
+    except Exception:
+        pass
+
+    data = {
+        "ok": True,
+        "live": {"proj_units": round(proj, 2), "n": len(slim),
+                 "priced": priced, "rows": slim},
+        "today": {"won": won, "lost": lost, "push": push,
+                  "pnl_units": round(settled_units, 2),
+                  "pending": pending_total},
+    }
+    _cache[ck] = {"data": data, "ts": _time.time()}
+    return jsonify(data)
 
 
 # ──────────────── Pick Bot fill status (admin-only) ────────────────
