@@ -16,10 +16,21 @@
 
 import json
 import os
+import subprocess
 import urllib.parse
-import urllib.request
 
 CONFIG_PATH = os.path.expanduser("~/.config/kahla/widget.env")
+
+
+def _http_get_json(url):
+    """Fetch via curl, not urllib — python.org installs commonly lack a CA
+    bundle (CERTIFICATE_VERIFY_FAILED on every HTTPS call), while macOS's
+    curl always trusts the system keychain."""
+    r = subprocess.run(["curl", "-fsSL", "--max-time", "15", url],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or f"curl exit {r.returncode}").strip())
+    return json.loads(r.stdout)
 
 
 def _load_config():
@@ -64,8 +75,7 @@ def main():
 
     url = f"{base}/api/handicapper/ticker?key={urllib.parse.quote(key)}"
     try:
-        with urllib.request.urlopen(url, timeout=15) as r:
-            data = json.loads(r.read().decode())
+        data = _http_get_json(url)
     except Exception as e:
         print("PB ⚠︎")
         print("---")
