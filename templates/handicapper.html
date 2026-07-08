@@ -858,6 +858,13 @@
     // re-logged in one 40s window (July 2026). Fail-safe: unknown ⇒ no log.
     let _loggedPicksReady = false;
     let _ldRetryQueued = false;
+    // When the logged-bets map was last successfully rebuilt. A suspended
+    // mobile tab resumes with _loggedPicksReady=true but HOURS-stale data
+    // (interval timers don't fire in the background), which re-broke the
+    // "chip offers a bet you're already on" hole one day after the ready
+    // gate shipped (Braves YRFI double-logged from a resumed phone tab).
+    let _loggedPicksAt = 0;
+    const _LP_FRESH_MS = 90_000;   // trust window before a tap re-syncs
     // ── Polymarket fill tracking (ADMIN-ONLY) ──────────────────────────
     // Closes the loop between a logged pick (intent) and the real order:
     // the pending row + the green logged chip stay AMBER until the maker
@@ -1001,6 +1008,17 @@
         // Tick the kickoff countdowns every minute so "57m" → "56m"
         // without re-fetching the games list.
         setInterval(_tickKickoffs, 60_000);
+        // Mobile tab resume: background tabs suspend the intervals above,
+        // so a re-opened page shows hours-stale chips/logged states until
+        // the next timer fires. Refresh immediately on becoming visible.
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState !== 'visible') return;
+            _tickKickoffs();
+            if (_canLog && Date.now() - _loggedPicksAt > 30_000) {
+                loadData(false);
+                loadLive();
+            }
+        });
     });
 
     // PER-USER rev: there is no longer a read-only tier — every bot_access
@@ -1911,17 +1929,27 @@
     // SAME log modal Details uses — pre-filled from the prefetched verdict
     // body — so the optional ProphetX fill-odds field is available on quick
     // bets too. submitLog() uses _pendingBody as the base for this path.
-    function oneTapLog(mid, idx) {
+    async function oneTapLog(mid, idx) {
         if (!_canLog) return;
         // Belt + suspenders with _renderPickLines' canTapLog: if the logged-
         // bets sync hasn't succeeded yet we can't tell fresh from logged —
         // open the dossier instead of the log modal.
         if (!_loggedPicksReady) { pickGame(mid); return; }
+        // Stale-tab guard: a resumed background tab has old _loggedPicks
+        // (its 60s timer was suspended), so a chip can look fresh on a bet
+        // logged since — re-sync before trusting the tap.
+        if (Date.now() - _loggedPicksAt > _LP_FRESH_MS) {
+            try { await loadData(false); } catch (e) {}
+            if (Date.now() - _loggedPicksAt > _LP_FRESH_MS) { pickGame(mid); return; }
+        }
         const v = _verdictCache.get(mid);
         const p = v && v.picks && v.picks[idx];
         if (!p || !p._body) return;
-        // Safety: never prompt the opposite/correlated side of a logged bet.
-        if (_pickState(mid, p.market_type, p.side, p.units).state === 'conflict') { pickGame(mid); return; }
+        // Safety: never prompt the opposite/correlated side of a logged bet
+        // — and with the freshly-synced state, never re-prompt a bet the
+        // user is already on (route to details like the green chip would).
+        const st = _pickState(mid, p.market_type, p.side, p.units).state;
+        if (st === 'conflict' || st === 'logged') { pickGame(mid); return; }
         _pendingBody = Object.assign({}, p._body);
         _pendingPick = null;
         document.getElementById('lmSelection').value  = p._chip || `${p.market_type} ${p.side}`;
@@ -1972,6 +2000,11 @@
                     fair_prob: (p.side === 'no' ? n.p_nrfi : n.p_yrfi),
                     edge_pp: (pb.edge_pp != null ? pb.edge_pp : null), sharp_score: null,
                     reasons: n.reasons || [], query_text: d.query || null,
+                    // Keep the fill-tracker match key — this refreshed body
+                    // REPLACES the chip's seeded one, and omitting the pmm
+                    // stamp here is what logged NRFI picks with pmm:null
+                    // (breaking exact fill matching + entry auto-sync).
+                    signal_blob: { pmm: { slug: pb.slug || null, synthetic: !!pb.synthetic } },
                     allow_duplicate: true, _line: null, _price: price };
             } else {
                 const sugg = d.suggestions || (d.suggestion ? [d.suggestion] : []);
@@ -3292,6 +3325,13 @@
         document.getElementById('lmReasons').value    = (n.reasons || []).join('\n');
         document.getElementById('lmAnalysis').value   = '';
         _lmStatus(null, '');
+        // The dossier card has no logged-state gate (unlike the chips) —
+        // warn in-modal when this game's first-inning bet is already
+        // pending so a re-log is a choice, not an accident.
+        const _st = _pickState(_lastDossier.market_id, 'nrfi', side, 1);
+        if (_st.state === 'logged' || _st.state === 'upgrade' || _st.state === 'conflict')
+            _lmStatus('warn', `Heads up — you already have ${_nrfiSideLabel(_st.logged.side)} `
+                + `${_uStr(_st.logged.units)} pending on this game. Logging again adds a second bet.`);
         document.getElementById('logModal').classList.add('show');
         _lmLoadExec((pb && pb.slug) ? { slug: pb.slug, mid: _lastDossier.market_id,
             mt: 'nrfi', side, units: 1,
@@ -4001,6 +4041,7 @@
                 _loggedPicks.set(r.market_id, m);
             });
             _loggedPicksReady = true;
+            _loggedPicksAt = Date.now();
             _renderPickLines();
             document.getElementById('pendingCount').textContent = pending.length;
             document.getElementById('settledCount').textContent = settled.length;

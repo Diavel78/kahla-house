@@ -8473,11 +8473,18 @@ def _fs_slug_date(*slugs):
     return None
 
 
-def _fs_market_type(title, outcome):
-    """Infer our market_type from a PMM order/position's metadata."""
+def _fs_market_type(title, outcome, slug=None):
+    """Infer our market_type from a PMM order/position's metadata.
+
+    LANDMINE (July 2026): PMM's marketMetadata title for a first-inning
+    market is just the GAME NAME ("New York Yankees vs. Tampa Bay Rays",
+    outcome "Yes") — no "inning" anywhere — so title sniffing alone
+    classified every YRFI order as a moneyline and the fill chip showed
+    a false "NO ORDER" on filled NRFI bets. The slug suffix (-yrfi /
+    -nrfi on the astatc- stat contracts) is the reliable marker."""
     t = (title or "").lower()
     o = (outcome or "").strip().lower()
-    if "inning" in t:
+    if re.search(r"-(?:yrfi|nrfi)$", (slug or "").lower()) or "inning" in t:
         return "nrfi"
     if o in ("over", "under"):
         return "total"
@@ -8509,7 +8516,8 @@ def _fs_pick_matches(pick, cand):
     # the user may have rested on a different line's market than the
     # one the verdict quoted.
 
-    mt = _fs_market_type(cand.get("title"), cand.get("outcome"))
+    mt = _fs_market_type(cand.get("title"), cand.get("outcome"),
+                         cand.get("slug"))
     if mt != pick.get("market_type"):
         return False
 
@@ -8584,9 +8592,24 @@ def _fs_pick_matches(pick, cand):
         return True
 
     if mt == "nrfi":
-        o = (cand.get("outcome") or "").strip().lower()
-        if o in ("yes", "no") and o != side:
-            return False
+        # Side of the binary: the slug suffix says what YES means on THIS
+        # market (-yrfi ⇒ YES = a 1st-inning run) and the order intent
+        # says which side was bought (LONG = YES, SHORT = NO). Metadata
+        # `outcome` reads "Yes" even on a SHORT order, so intent+suffix is
+        # the reliable check; fall back to outcome only without them.
+        sl = (cand.get("slug") or "").lower()
+        intent = cand.get("intent") or ""
+        sm = re.search(r"-(yrfi|nrfi)$", sl)
+        if intent and sm:
+            yes_means = "yes" if sm.group(1) == "yrfi" else "no"
+            eff = (("no" if yes_means == "yes" else "yes")
+                   if intent.endswith("_SHORT") else yes_means)
+            if eff != side:
+                return False
+        else:
+            o = (cand.get("outcome") or "").strip().lower()
+            if o in ("yes", "no") and o != side:
+                return False
         hit = _slug_codes_hit()
         if hit is False:
             return False
