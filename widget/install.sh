@@ -23,11 +23,22 @@ if [ ! -d "/Applications/SwiftBar.app" ]; then
         brew install --cask swiftbar
     else
         echo "Downloading SwiftBar…"
+        # Release assets are version-stamped (SwiftBar.v2.0.1.b536.zip) —
+        # no stable "latest" filename, so resolve it via the GitHub API.
+        DL="$(curl -fsSL https://api.github.com/repos/swiftbar/SwiftBar/releases/latest \
+              | sed -n 's/.*"browser_download_url": *"\([^"]*\.zip\)".*/\1/p' | head -1)"
+        if [ -z "$DL" ]; then
+            DL="https://github.com/swiftbar/SwiftBar/releases/download/v2.0.1/SwiftBar.v2.0.1.b536.zip"
+        fi
         TMP="$(mktemp -d)"
-        curl -fsSL -o "$TMP/SwiftBar.zip" \
-            "https://github.com/swiftbar/SwiftBar/releases/latest/download/SwiftBar.zip"
+        curl -fsSL -o "$TMP/SwiftBar.zip" "$DL"
         unzip -q "$TMP/SwiftBar.zip" -d "$TMP"
-        mv "$TMP/SwiftBar.app" /Applications/
+        APP="$(find "$TMP" -maxdepth 2 -name 'SwiftBar.app' | head -1)"
+        if [ -z "$APP" ]; then
+            echo "Couldn't find SwiftBar.app inside the download — aborting."
+            exit 1
+        fi
+        mv "$APP" /Applications/
         rm -rf "$TMP"
     fi
 else
