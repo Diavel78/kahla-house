@@ -6347,6 +6347,12 @@ def api_check_fills():
         is_terminal_now = state in _TERMINAL_ORDER_STATES
 
         new_milestones = []
+        # Maker/taker classification for the entry auto-sync: an order
+        # first seen ALREADY terminal-filled (created + filled between
+        # two 60s ticks, never observed resting) executed as a taker;
+        # anything we ever saw open rested = maker. Persisted so the
+        # fill-status ledger path can pick the right fee side later.
+        taker_fill = bool(prev.get("taker")) if prev else False
         if not prev:
             # First-sight order. Three sub-cases:
             #   1) Open + un-filled         → snapshot, no alert
@@ -6355,6 +6361,7 @@ def api_check_fills():
             if is_terminal_now and state == "ORDER_STATE_FILLED" \
                     and _is_fresh_terminal(order_created_at):
                 new_milestones = ["100"]
+                taker_fill = True
             elif is_terminal_now:
                 skipped_historical += 1
         else:
@@ -6380,6 +6387,7 @@ def api_check_fills():
             "order_created_at": order_created_at,
             "last_seen_at": now_iso,
             "terminal": is_terminal_now,
+            "taker": taker_fill,
         }
         # Deliberately omit first_seen_at — the DB default `now()`
         # handles initial INSERT, and omitting it from UPDATE preserves
@@ -6499,6 +6507,8 @@ def api_check_fills():
                 "order_created_at": row.get("order_created_at"),
                 "last_seen_at":  now_iso,
                 "terminal":      True,
+                # Tracked open before it vanished → it rested → maker.
+                "taker":         bool(row.get("taker")),
             }
 
             if match_idx is not None:
@@ -6548,7 +6558,8 @@ def api_check_fills():
                 cands = [{"slug": r.get("slug"), "intent": r.get("intent"),
                           "price": r.get("price"),
                           "cum": r.get("last_cum_quantity"),
-                          "qty": r.get("quantity")} for r in upserts]
+                          "qty": r.get("quantity"),
+                          "taker": r.get("taker")} for r in upserts]
                 entry_synced = _fs_auto_sync_entry(sb, by_slug, cands)
     except Exception:
         entry_synced = 0
@@ -8619,9 +8630,18 @@ def _fs_auto_sync_entry(sb, picks_by_slug, cands):
     user re-rests at a better price, the pick updates when THAT fills).
 
     Never overwritten: manual edits (signal_blob.execution.manual — the
-    user's typed odds win) and TAKE entries (already logged at the
-    fee-inclusive take price by the make/take engine; a taker's fill IS
-    that price — restamping with a maker rebate would be wrong). SELLs
+    user's typed odds win). TAKE-rec picks DO sync (July 2026 fix — the
+    old blanket skip assumed the user always takes at the engine's
+    quoted ask, but a rest-below-the-ask after a TAKE rec left the pick
+    stamped at a fee-inclusive price the user never paid: Royals ML
+    logged +126 off a 43c ask while the real order rested + filled at
+    40c = +152). The fill is the truth regardless of the rec. Fee side
+    comes from the cand's `taker` flag (check-fills stamps it: an order
+    first seen already-terminal-and-fresh filled between ticks = taker;
+    anything we ever tracked resting = maker): taker → fill + taker fee,
+    maker → fill − maker rebate. Missing flag defaults to maker (resting
+    is the user's normal behavior; worst-case fee mislabel is ~1.5c,
+    versus the multi-cent price error this sync exists to fix). SELLs
     excluded (exits). Returns number of picks updated.
 
     INVARIANT (user rule, July 2026): UNITS ARE NEVER TOUCHED. Only
@@ -8650,7 +8670,7 @@ def _fs_auto_sync_entry(sb, picks_by_slug, cands):
         if intent and intent.endswith("_SHORT") != bool(pmm.get("synthetic")):
             continue
         ex = blob.get("execution") if isinstance(blob.get("execution"), dict) else {}
-        if ex.get("manual") or ex.get("rec") == "TAKE":
+        if ex.get("manual"):
             continue
         p = c.get("price")
         try:
@@ -8659,9 +8679,13 @@ def _fs_auto_sync_entry(sb, picks_by_slug, cands):
             continue
         if not (0 < p < 1):
             continue
-        # NOTE: _pmm_maker_rebate_cents takes the price in CENTS (0-100),
-        # not the 0-1 prob — passing p raw silently zeroes the rebate.
-        eff_cents = p * 100 - _pmm_maker_rebate_cents(p * 100)
+        taker = bool(c.get("taker"))
+        # NOTE: the fee helpers take the price in CENTS (0-100), not the
+        # 0-1 prob — passing p raw silently zeroes the fee/rebate.
+        if taker:
+            eff_cents = p * 100 + _pmm_taker_fee_cents(p * 100)
+        else:
+            eff_cents = p * 100 - _pmm_maker_rebate_cents(p * 100)
         amer = _prob_to_amer_py(eff_cents / 100.0)
         if amer is None:
             continue
@@ -8672,9 +8696,17 @@ def _fs_auto_sync_entry(sb, picks_by_slug, cands):
         if cur == int(amer):
             continue
         blob = dict(blob)
-        blob["execution"] = {"rec": "MAKE", "venue": "PMM", "auto_synced": True,
-                             "fill_american": _prob_to_amer_py(p),
-                             "entry_cents": round(eff_cents, 1)}
+        new_ex = {"rec": ("TAKE" if taker else "MAKE"), "venue": "PMM",
+                  "auto_synced": True,
+                  "fill_american": _prob_to_amer_py(p),
+                  "entry_cents": round(eff_cents, 1)}
+        # Keep what the engine PLANNED (make-vs-take review compares
+        # plan vs actual execution) + its log-time book snapshot.
+        if ex.get("rec") and ex.get("rec") != new_ex["rec"]:
+            new_ex["planned_rec"] = ex.get("rec")
+        if ex.get("options"):
+            new_ex["options"] = ex.get("options")
+        blob["execution"] = new_ex
         try:
             sb.table("bot_picks").update(
                 {"entry_price": int(amer), "signal_blob": blob}
@@ -8789,7 +8821,7 @@ def api_handicapper_fill_status():
             cutoff = (now - timedelta(days=7)).isoformat()
             rows = (sb.table("polymarket_fill_state")
                     .select("slug,market_name,pick,intent,last_state,alerts_sent,"
-                            "price,quantity,last_cum_quantity")
+                            "price,quantity,last_cum_quantity,taker")
                     .eq("terminal", True).gte("last_seen_at", cutoff)
                     .limit(500).execute().data) or []
             for r in rows:
@@ -8813,6 +8845,9 @@ def api_handicapper_fill_status():
                         "price":      _safe_float(r.get("price")),
                         "qty":        qty,
                         "cum":        qty or (_safe_float(r.get("last_cum_quantity")) or 0),
+                        # Fee side for the auto-sync (null on pre-July-
+                        # 2026 rows → maker default, the common case).
+                        "taker":      r.get("taker"),
                     })
         except Exception:
             pass
