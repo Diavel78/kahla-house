@@ -1186,6 +1186,26 @@
         return d.toLocaleString([], {month:'short', day:'numeric'});
     }
     function _shortMarket(mt) { return ({moneyline:'ML', spread:'SPR', total:'TOT', nrfi:'1ST'})[mt] || mt; }
+    // Team → mascot last word ("Boston Red Sox" → "Sox"). When the OTHER
+    // team in the game ends in the SAME word (Red Sox @ White Sox — the
+    // "Sox are playing the Sox" bug), keep the last TWO words so the label
+    // stays unambiguous ("Red Sox" / "White Sox"). Pass the opponent
+    // whenever it's known.
+    function _shortTeam(name, other) {
+        const w = String(name || '').trim().split(/\s+/).filter(Boolean);
+        if (!w.length) return String(name || '');
+        const o = String(other || '').trim().split(/\s+/).filter(Boolean);
+        const clash = o.length && o[o.length - 1].toLowerCase() === w[w.length - 1].toLowerCase();
+        return (clash && w.length >= 2) ? w.slice(-2).join(' ') : w[w.length - 1];
+    }
+    // Log-modal Selection suffix: name the game for bets whose side label
+    // carries no team (NRFI/YRFI, totals) — without it the modal just says
+    // "YRFI" and the user has to remember which game they opened.
+    function _selGameFrag(mt, away, home) {
+        if (mt !== 'nrfi' && mt !== 'total') return '';
+        if (!away || !home) return '';
+        return ` — ${_shortTeam(away, home)} @ ${_shortTeam(home, away)}`;
+    }
     // NRFI uses yes/no sides → human labels NRFI (no run) / YRFI (run).
     function _nrfiSideLabel(side) { return side === 'no' ? 'NRFI' : side === 'yes' ? 'YRFI' : (side || '').toUpperCase(); }
     function _esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
@@ -1702,7 +1722,7 @@
         let sideLbl;
         if (mt === 'nrfi') sideLbl = (side === 'no' ? 'NRFI' : 'YRFI');
         else if (mt === 'total') sideLbl = (side === 'over' ? 'O' : 'U');
-        else { const t = (side === 'home' ? game.home : game.away) || side; sideLbl = String(t).split(' ').pop(); }
+        else sideLbl = _shortTeam((side === 'home' ? game.home : game.away) || side, side === 'home' ? game.away : game.home);
         return `${mkt} ${sideLbl} · ${_uStr(units)}`.replace(/\s+/g, ' ').trim();
     }
     // Render the second line of every game row. NEW behavior (June 2026, per
@@ -1801,7 +1821,7 @@
         let sideLbl;
         if (mt === 'nrfi') sideLbl = (side === 'no' ? 'NRFI' : 'YRFI');
         else if (mt === 'total') sideLbl = (side === 'over' ? 'O' : 'U');
-        else { const t = (side === 'home' ? d.home : d.away) || side; sideLbl = t.split(' ').pop(); }
+        else sideLbl = _shortTeam((side === 'home' ? d.home : d.away) || side, side === 'home' ? d.away : d.home);
         const lineFrag = (line != null && mt !== 'nrfi')
             ? (mt === 'total' ? _fmtPt(Math.abs(line)) : ' ' + _fmtPt(line)) : '';
         const sep = (mt === 'total') ? '' : ' ';
@@ -1952,7 +1972,9 @@
         if (st === 'conflict' || st === 'logged') { pickGame(mid); return; }
         _pendingBody = Object.assign({}, p._body);
         _pendingPick = null;
-        document.getElementById('lmSelection').value  = p._chip || `${p.market_type} ${p.side}`;
+        const g = (_currentGames || []).find(x => x.market_id === mid) || {};
+        document.getElementById('lmSelection').value  = (p._chip || `${p.market_type} ${p.side}`)
+            + _selGameFrag(p.market_type, g.away, g.home);
         document.getElementById('lmUnits').value      = String(p._body.units || p.units || 1);
         document.getElementById('lmConfidence').value = p._body.confidence || 'low';
         document.getElementById('lmReasons').value    = (p._body.reasons || []).join('\n');
@@ -1961,7 +1983,6 @@
         _lmStatus(null, '');
         document.getElementById('logModal').classList.add('show');
         // Execution line: game context from the list row + active sport.
-        const g = (_currentGames || []).find(x => x.market_id === mid) || {};
         let sim = g.event_start ? Math.round((Date.parse(g.event_start) - Date.now()) / 60000) : null;
         if (sim != null && !isFinite(sim)) sim = null;
         _lmLoadExec(p._slug ? { slug: p._slug, mid, mt: p.market_type, side: p.side,
@@ -2018,7 +2039,8 @@
             if (ta && ta.value === seeded) ta.value = (body.reasons || []).join('\n');
             const sel = document.getElementById('lmSelection');
             if (sel) sel.value = (lean ? '~ ' : '')
-                + _pickChipLabel(body.market_type, body.side, body._line, body._price, body.units, d);
+                + _pickChipLabel(body.market_type, body.side, body._line, body._price, body.units, d)
+                + _selGameFrag(body.market_type, d.away, d.home);
         } catch (e) { /* keep the cached seed */ }
     }
 
@@ -2064,7 +2086,7 @@
         let side;
         if (r.market_type === 'nrfi') side = (r.side === 'no' ? 'NRFI' : 'YRFI');
         else if (r.market_type === 'total') side = (r.side === 'over' ? 'O' : 'U') + (r.entry_line != null ? _fmtPt(Math.abs(r.entry_line)) : '');
-        else { const t = ((r.side === 'home' ? r.home : r.side === 'away' ? r.away : 'Draw') || r.side).split(' ').pop(); side = t + (r.entry_line != null && r.market_type === 'spread' ? ' ' + _fmtPt(r.entry_line) : ''); }
+        else { const t = _shortTeam((r.side === 'home' ? r.home : r.side === 'away' ? r.away : 'Draw') || r.side, r.side === 'home' ? r.away : r.side === 'away' ? r.home : null); side = t + (r.entry_line != null && r.market_type === 'spread' ? ' ' + _fmtPt(r.entry_line) : ''); }
         const price = r.entry_price != null ? _fmtAmer(r.entry_price) : '';
         return `<b>${mkt} ${_esc(side)}</b> @ ${price} · ${_uStr(Number(r.units))}`;
     }
@@ -2112,7 +2134,7 @@
         list.innerHTML = rows.map(r => {
             const s = r.score || {};
             const sc = (s.away_score != null && s.home_score != null) ? `${s.away_score}–${s.home_score}` : '–';
-            const away = (r.away || '').split(' ').pop(), home = (r.home || '').split(' ').pop();
+            const away = _shortTeam(r.away || '', r.home), home = _shortTeam(r.home || '', r.away);
             // ESPN's human-readable status lags a few minutes at first pitch:
             // state flips to "in" at the scheduled time but the string stays
             // "7/5 - 3:30 PM EDT" until inning data flows. A date-looking
@@ -2819,8 +2841,8 @@
                     <h3>Spread — market-anchored model</h3>
                     <span class="ref-tag" title="Direction comes from the exchange ML win prob (the sharp signal); the run-total model supplies the margin shape. Cover prob read off a joint runs distribution. SHADOW — logged + validating before it bets.">DIRECTION × MARGIN · SHADOW</span>
                 </div>
-                ${row((d.away||'Away').split(' ').pop(), al, sm.away_cover, sm.away_edge_pp)}
-                ${row((d.home||'Home').split(' ').pop(), hl, sm.home_cover, sm.home_edge_pp)}
+                ${row(_shortTeam(d.away||'Away', d.home), al, sm.away_cover, sm.away_edge_pp)}
+                ${row(_shortTeam(d.home||'Home', d.away), hl, sm.home_cover, sm.home_edge_pp)}
                 ${det}
                 <div class="wx-foot">ML win prob ${(sm.p_home_win*100).toFixed(0)}% home · proj total ${sm.proj_total} · λ ${sm.lambda_home}/${sm.lambda_away}</div>
             </div>`;
@@ -3215,8 +3237,8 @@
     function _vsinMktLine(d, mt) {
         const sides = (mt === 'total')
             ? [['over', 'Over'], ['under', 'Under']]
-            : [['away', (d.away || 'Away').split(' ').pop()],
-               ['home', (d.home || 'Home').split(' ').pop()]];
+            : [['away', _shortTeam(d.away || 'Away', d.home)],
+               ['home', _shortTeam(d.home || 'Home', d.away)]];
         const parts = [];
         for (const [s, lbl] of sides) {
             const ss = _vsinSide(d, mt, s);
@@ -3264,7 +3286,8 @@
             fair_prob:   entryProb,
             edge_pp:     null,
             sharp_score: isMvSide ? (mv.x_score || 0) : 0,
-            label:       `${_shortMarket(mt)} ${sideName} @ ${pmmBid != null ? 'Poly bid' : 'exchange fair'} ${_fmtAmer(entryPrice)}${entryLine != null ? ' ' + _fmtPt(entryLine) : ''}`,
+            label:       `${_shortMarket(mt)} ${sideName} @ ${pmmBid != null ? 'Poly bid' : 'exchange fair'} ${_fmtAmer(entryPrice)}${entryLine != null ? ' ' + _fmtPt(entryLine) : ''}`
+                         + _selGameFrag(mt, _lastDossier.away, _lastDossier.home),
             seed_units:  1,
             seed_conf:   'low',
             pmm_slug:      (pmm && pmm.slug) || null,   // fill-tracker match key
@@ -3311,7 +3334,8 @@
             fair_prob:   prob,
             edge_pp:     edge,
             sharp_score: null,
-            label:       `1st Inning · ${label} @ ${_fmtAmer(makerEntry)} (${entryLbl})`,
+            label:       `1st Inning · ${label} @ ${_fmtAmer(makerEntry)} (${entryLbl})`
+                         + _selGameFrag('nrfi', _lastDossier.away, _lastDossier.home),
             seed_units:  1,
             seed_conf:   'low',
             pmm_slug:      (pb && pb.slug) || null,     // fill-tracker match key
@@ -3520,7 +3544,8 @@
         // Show the maker entry we actually log (PMM bid), not the fair/ask.
         const makerEntry = (s.pmm_bid_american != null) ? s.pmm_bid_american : s.fair_american;
         const entryLbl   = (s.pmm_bid_american != null) ? 'Poly bid' : 'Poly target';
-        return `${market} · ${sideName}${lineFrag} @ ${_fmtAmer(makerEntry)} (${entryLbl})`;
+        return `${market} · ${sideName}${lineFrag} @ ${_fmtAmer(makerEntry)} (${entryLbl})`
+             + _selGameFrag(s.market_type, d.away, d.home);
     }
     // Circa handle ($) vs blended Circa+DK tickets for THIS pick's market+side
     // → one plain-English bullet, or null when VSiN has no match. Shared by the
