@@ -2845,8 +2845,12 @@
                 const edge = `${bet.edge_pp >= 0 ? '+' : ''}${bet.edge_pp}pp`;
                 return `<button class="${cls}" onclick="logUfcDur('${kind}','${bet.side}')" title="Log ${_esc(lbl)} 1u @ ${_fmtAmer(bet.entry_american)} — Fight IQ edge ${edge}. Stays pending for manual settle.">Log ${lbl} · 1u <span style="opacity:.65">${edge}</span></button>`;
             };
+            const _durHasMkt = dur.distance_pmm || (dur.rounds_pmm && dur.rounds_pmm.edge_pp != null);
             const _durBtns = (_canLog && (dur.distance_bet || dur.rounds_bet))
-                ? `<div class="nrfi-actions">${_durBtn(dur.distance_bet, 'distance')}${_durBtn(dur.rounds_bet, 'rounds')}</div>` : '';
+                ? `<div class="nrfi-actions">${_durBtn(dur.distance_bet, 'distance')}${_durBtn(dur.rounds_bet, 'rounds')}</div>`
+                : (_canLog && _durHasMkt
+                    ? `<div class="pr-line" style="color:var(--orange)">⚠ Duration betting paused — verifying Polymarket's YES/NO orientation before logging (a distance pick priced the wrong side). Read is reference-only for now.</div>`
+                    : '');
             html += `<div class="card">
                 <div class="card-head">
                     <h3>Fight IQ</h3>

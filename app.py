@@ -3543,24 +3543,38 @@ def debug_pmm():
     # that's the silent gap. Import is inside the try so an import break shows.
     try:
         sb = get_supabase()
-        grow = (sb.table("markets").select("event_name,event_start")
-                .eq("sport", "MLB").eq("status", "active")
-                .gte("event_start", now.isoformat())
-                .order("event_start").limit(1).execute().data or [None])[0]
+        # Optional ?sport=UFC&q=Riley probe (public, read-only) — run the FULL
+        # lookup on any sport/game so we can inspect a market's real shape
+        # (e.g. the UFC distance prop yes/no orientation). Defaults to MLB.
+        _sport = (request.args.get("sport") or "MLB").upper()
+        _q = request.args.get("q")
+        gq = (sb.table("markets").select("event_name,event_start")
+              .eq("sport", _sport).eq("status", "active")
+              .gte("event_start", (now - timedelta(hours=8)).isoformat())
+              .order("event_start"))
+        if _q:
+            gq = gq.ilike("event_name", f"%{_q}%")
+        grow = (gq.limit(1).execute().data or [None])[0]
         if not grow:
-            out["lookup"] = {"error": "no upcoming MLB game in markets"}
+            out["lookup"] = {"error": f"no upcoming {_sport} game"
+                             + (f" matching '{_q}'" if _q else "")}
         else:
             away, home = [s.strip() for s in grow["event_name"].split(" @ ", 1)]
             import pmm_markets as _pm
             diag = {}
             t2 = _t.time()
-            res2 = _pm.lookup(client, "MLB", away, home, grow["event_start"], diag=diag)
+            res2 = _pm.lookup(client, _sport, away, home, grow["event_start"], diag=diag)
             out["lookup"] = {
-                "game": grow["event_name"], "ms": round((_t.time() - t2) * 1000),
+                "game": grow["event_name"], "sport": _sport,
+                "ms": round((_t.time() - t2) * 1000),
                 "res_keys": sorted((res2 or {}).keys()),
                 "has_ml": bool((res2 or {}).get("ml")),
                 "has_spread": bool((res2 or {}).get("spread")),
                 "has_total": bool((res2 or {}).get("total")),
+                # UFC distance prop: dump each side's slug/title/quote so we can
+                # see whether the market's YES token is really "goes distance".
+                "ufc_distance": (res2 or {}).get("ufc_distance"),
+                "total_pmm": (((res2 or {}).get("total") or {}).get("polymarket")),
                 "diag": diag,
             }
     except Exception as e:
