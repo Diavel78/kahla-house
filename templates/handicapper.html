@@ -1771,7 +1771,7 @@
     // the game leaves the prime window.
     function _loggedChipLabel(mt, side, units, game) {
         if (mt === 'distance')
-            return `${side === 'yes' ? 'DIST' : 'FINISH'} · ${_uStr(units)}`;
+            return `${side === 'yes' ? 'GOES DIST' : 'FINISH (no dist)'} · ${_uStr(units)}`;
         const mkt = _shortMarket(mt);
         let sideLbl;
         if (mt === 'nrfi') sideLbl = (side === 'no' ? 'NRFI' : 'YRFI');
@@ -1878,7 +1878,7 @@
         // UFC Fight IQ duration family: distance prop (yes = goes distance,
         // no = finish) + round O/U (rides market_type 'total').
         if (mt === 'distance')
-            return `${side === 'yes' ? 'DIST' : 'FINISH'} · ${_uStr(units)}`;
+            return `${side === 'yes' ? 'GOES DIST' : 'FINISH (no dist)'} · ${_uStr(units)}`;
         if (mt === 'total' && isUfc)
             return `RDS ${side === 'over' ? 'O' : 'U'}${_fmtPt(Math.abs(line))} · ${_uStr(units)}`;
         const mkt = _shortMarket(mt);
