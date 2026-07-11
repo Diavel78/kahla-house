@@ -214,6 +214,16 @@ def _fighter_match(a: str, b: str) -> bool:
     return ta[-1] in tb or tb[-1] in ta
 
 
+def _ufc_pair_match(a1: str, h1: str, a2: str, h2: str) -> bool:
+    """Both fighters match by last-name token, either orientation. Needed in
+    _find_or_create because the generic fuzzy matcher misses first-name
+    spelling flips — ESPN renamed 'Zach Reese' → 'Zachary Reese' between
+    ticks and fuzz.ratio scored 87 vs the 88 threshold, minting a dupe row
+    (July 2026). Requiring BOTH last names keeps distinct bouts apart."""
+    return ((_fighter_match(a1, a2) and _fighter_match(h1, h2))
+            or (_fighter_match(a1, h2) and _fighter_match(h1, a2)))
+
+
 def _apply_kalshi_ufc_times(games: list[dict]) -> int:
     """Override ESPN block times with Kalshi's per-fight occurrence times
     for name-matched bouts. Sanity: only within ±30h of ESPN's date (a
@@ -259,7 +269,9 @@ def _find_or_create(sport: str, g: dict, aliases: dict[str, str],
             continue
         if matcher._teams_key(row_home, row_away, aliases) == venue_key or \
            matcher._fuzzy_teams_match(g["home"], g["away"], row_home, row_away,
-                                      aliases) >= matcher.FUZZY_THRESHOLD:
+                                      aliases) >= matcher.FUZZY_THRESHOLD or \
+           (sport == "UFC" and _ufc_pair_match(g["away"], g["home"],
+                                               row_away, row_home)):
             # Reuse the existing row (UUID preserved), but CORRECT a drifted
             # start in place — ESPN is authoritative on timing. odds_api used
             # to do this every tick (gotcha #30); post-cutover the ESPN spine
