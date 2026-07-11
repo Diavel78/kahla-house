@@ -10474,8 +10474,13 @@ def api_handicapper_pick():
         units_val = float(body["units"])
     except (TypeError, ValueError):
         units_val = None
-    if units_val not in (0.25, 0.5, 1, 3, 5, 10):
-        return jsonify({"ok": False, "error": "units must be 0.25/0.5/1/3/5/10"}), 400
+    # Any quarter-unit increment in (0, 10]. The upgrade flow logs a DELTA
+    # row (target − already-logged) at the current odds, so off-tier values
+    # like 2.5u (0.5u lean → 3u) or 2u (1u → 3u) are legitimate. Mirrors the
+    # bot_picks_units_check CHECK (migration 013).
+    if (units_val is None or not (0 < units_val <= 10)
+            or round(units_val * 4) != units_val * 4):
+        return jsonify({"ok": False, "error": "units must be a positive quarter-unit ≤ 10"}), 400
 
     line_val = body.get("line")
     if body["market_type"] in ("spread", "total"):
