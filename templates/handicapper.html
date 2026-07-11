@@ -1727,6 +1727,37 @@
                 return { state: 'conflict', logged: { mt: t, units: info.units, side: info.side } };
         return { state: 'new', logged: null };
     }
+    // Upgrade sizing: when the bot now wants MORE units on a bet you already
+    // logged, log only the DELTA (target − already-logged) at the current
+    // odds — not a full-size duplicate. e.g. 0.5u logged at +105, bot now
+    // wants 3u → add a 2.5u row at -100 (total exposure 3u across two maker
+    // fills at two prices). Returns null when it isn't an upgrade or the
+    // delta rounds to ≤0. Delta snaps to a quarter-unit (DB CHECK + schema).
+    function _upgradeDelta(mid, mt, side, targetUnits) {
+        const st = _pickState(mid, mt, side, targetUnits);
+        if (st.state !== 'upgrade' || !st.logged) return null;
+        const delta = Math.round((Number(targetUnits) - Number(st.logged.units)) * 4) / 4;
+        if (!(delta > 0)) return null;
+        return { delta, loggedUnits: Number(st.logged.units), targetUnits: Number(targetUnits) };
+    }
+    // Point the log modal's units <select> at an arbitrary quarter-unit
+    // value, injecting an <option> for it if the standard tiers don't cover
+    // it (delta upgrades produce off-tier values like 2.5u / 0.75u). Setting
+    // .value to a missing option silently yields "" → submitLog posts 0.
+    function _seedUnitsSelect(val) {
+        const sel = document.getElementById('lmUnits');
+        if (!sel) return;
+        // Drop any off-tier option injected on a previous open so the
+        // dropdown doesn't accumulate stale delta values across the session.
+        Array.from(sel.querySelectorAll('option[data-delta]')).forEach(o => o.remove());
+        const v = String(val);
+        if (!Array.from(sel.options).some(o => o.value === v)) {
+            const o = document.createElement('option');
+            o.value = v; o.textContent = _uStr(Number(val)); o.setAttribute('data-delta', '1');
+            sel.appendChild(o);
+        }
+        sel.value = v;
+    }
     // Minimal green chip for a pick the user has ALREADY logged but the bot
     // isn't currently suggesting (so it's not in the verdict cache). No price
     // — just the side + units — so "already picked" stays visible even after
@@ -1987,9 +2018,15 @@
         _pendingBody = Object.assign({}, p._body);
         _pendingPick = null;
         const g = (_currentGames || []).find(x => x.market_id === mid) || {};
+        // Upgrade tap: seed the DELTA (target − already-logged) at the live
+        // odds, not the full target — logging that adds a second row that
+        // tops you up to the target instead of double-betting.
+        const _target = Number(p._body.units || p.units || 1);
+        const _up = _upgradeDelta(mid, p.market_type, p.side, _target);
+        const _upNote = _up ? `  ↑ +${_uStr(_up.delta)} → ${_uStr(_up.targetUnits)}` : '';
         document.getElementById('lmSelection').value  = (p._chip || `${p.market_type} ${p.side}`)
-            + _selGameFrag(p.market_type, g.away, g.home);
-        document.getElementById('lmUnits').value      = String(p._body.units || p.units || 1);
+            + _selGameFrag(p.market_type, g.away, g.home) + _upNote;
+        _seedUnitsSelect(_up ? _up.delta : _target);
         document.getElementById('lmConfidence').value = p._body.confidence || 'low';
         document.getElementById('lmReasons').value    = (p._body.reasons || []).join('\n');
         document.getElementById('lmAnalysis').value   = '';
@@ -3444,8 +3481,15 @@
         } : _seedManual(_lastDossier);
         if (!_pendingPick) return;
 
-        document.getElementById('lmSelection').value = _pendingPick.label;
-        document.getElementById('lmUnits').value      = String(_pendingPick.seed_units || 1);
+        // Upgrade: seed the DELTA at live odds so "Add to 3u" tops up the
+        // existing 0.5u bet with a 2.5u row, instead of logging a full 3u
+        // duplicate. Non-upgrade paths seed the full recommended size.
+        const _upTarget = Number(_pendingPick.seed_units || 1);
+        const _up = _upgradeDelta(_pendingPick.market_id, _pendingPick.market_type,
+                                  _pendingPick.side, _upTarget);
+        document.getElementById('lmSelection').value = _pendingPick.label
+            + (_up ? `  ↑ +${_uStr(_up.delta)} → ${_uStr(_up.targetUnits)}` : '');
+        _seedUnitsSelect(_up ? _up.delta : _upTarget);
         document.getElementById('lmConfidence').value = _pendingPick.seed_conf || 'medium';
         document.getElementById('lmReasons').value    = _buildReasons(_pendingPick, _lastDossier).join('\n');
         document.getElementById('lmAnalysis').value   = '';
@@ -3481,27 +3525,43 @@
             o.units, o.sim, o.inverse, o.ctx, o.line);
         if (seq !== _lmExecSeq) return;   // superseded by a newer modal open
         if (!j || j.price == null) { wrap.style.display = 'none'; el.textContent = ''; return; }
-        const amer = _centsToAmer(j.price);
-        let s = `${j.rec} ${j.venue_label || 'Polymarket'} at `
-              + `${amer != null ? _fmtAmer(amer) : '?'} (${_mtCents(j.price)}¢)`;
-        // A TAKE quotes the fee-inclusive ask, which reads worse than the
-        // bid shown in the Selection label — say why in one line so the
-        // -125-vs--134 jump explains itself (user hit this on a steamed
-        // Nationals book, July 2026).
-        if (j.rec === 'TAKE' && j.best_bid != null) {
-            const bAmer = _centsToAmer(j.best_bid);
+        const amer = _centsToAmer(j.price);           // fee-inclusive all-in
+        const effLabel = `${amer != null ? _fmtAmer(amer) : '?'} (${_mtCents(j.price)}¢)`;
+        let s;
+        if (j.rec === 'TAKE' && j.best_ask != null) {
+            // LEAD with the RAW book ask — that's the number Polymarket's app
+            // actually shows and what you click. `j.price` is the fee-inclusive
+            // all-in cost (ask + taker fee), which reads worse and does NOT
+            // match the book, so it goes on its own line as your true cost.
+            // (User hit this: book +138, we showed +131 — looked wrong.)
+            const askAmer = _centsToAmer(j.best_ask);
+            s = `TAKE ${j.venue_label || 'Polymarket'} — book ask `
+              + `${askAmer != null ? _fmtAmer(askAmer) : '?'} (${_mtCents(j.best_ask)}¢)`;
+            s += `\n≈ ${effLabel} all-in after the take fee`;
             // Why the rest won't fill: buyers crowding the bid (imb ≥ 1) —
             // or, post the half-cent-book fix, a TAKE on an ask-leaning
             // book only happens on the clock (<30m to tip).
-            const why = (j.touch_imbalance != null && j.touch_imbalance >= 1)
-                ? ` — bids ${j.touch_imbalance}× the sells`
-                : ` — too close to start for a rest`;
-            s += `\n(rest at ${bAmer != null ? _fmtAmer(bAmer) : j.best_bid + '¢'} won't fill`
-               + why + `; take cost incl. fee)`;
-        }
-        if (j.prophetx && j.prophetx.beat_american != null) {
-            const a = j.prophetx.beat_american;
-            s += `\nProphetX: ${a > 0 ? '+' + a : a} or better beats it (2% win fee incl.)`;
+            if (j.best_bid != null) {
+                const bAmer = _centsToAmer(j.best_bid);
+                const why = (j.touch_imbalance != null && j.touch_imbalance >= 1)
+                    ? ` — bids ${j.touch_imbalance}× the sells`
+                    : ` — too close to start for a rest`;
+                s += `\n(rest at ${bAmer != null ? _fmtAmer(bAmer) : j.best_bid + '¢'} won't fill`
+                   + why + `)`;
+            }
+            if (j.prophetx && j.prophetx.beat_american != null) {
+                const a = j.prophetx.beat_american;
+                s += `\nProphetX: ${a > 0 ? '+' + a : a} or better beats the `
+                   + `${_mtCents(j.price)}¢ cost (2% win fee incl.)`;
+            }
+        } else {
+            // MAKE (or MAKE+): j.price IS the actionable raw post price (the
+            // bid / bid+0.5 you rest at) — matches the book, so show it plain.
+            s = `${j.rec} ${j.venue_label || 'Polymarket'} at ${effLabel}`;
+            if (j.prophetx && j.prophetx.beat_american != null) {
+                const a = j.prophetx.beat_american;
+                s += `\nProphetX: ${a > 0 ? '+' + a : a} or better beats it (2% win fee incl.)`;
+            }
         }
         // Pinnacle reference (cached parlay-api slate, zero credits) — the
         // sharp book's number next to the execution price: "am I getting a
@@ -4076,7 +4136,19 @@
                 const m = _loggedPicks.get(r.market_id) || new Map();
                 const u = Number(r.units) || 1;
                 const prev = m.get(r.market_type);
-                if (!prev || u > prev.units) m.set(r.market_type, { units: u, side: r.side });
+                if (!prev) {
+                    m.set(r.market_type, { units: u, side: r.side });
+                } else if (prev.side === r.side) {
+                    // SAME side, multiple pending rows — the upgrade flow logs
+                    // the DELTA as a second row (0.5u lean + a 2.5u upgrade at
+                    // the new odds), so SUM to the true total exposure. Storing
+                    // the max instead would leave the total reading 2.5u and
+                    // re-prompt "↑ upgrade to 3u" forever (over-betting).
+                    prev.units = Math.round((prev.units + u) * 100) / 100;
+                } else if (u > prev.units) {
+                    // Opposite side somehow logged (manual) — keep the larger.
+                    m.set(r.market_type, { units: u, side: r.side });
+                }
                 _loggedPicks.set(r.market_id, m);
             });
             _loggedPicksReady = true;
