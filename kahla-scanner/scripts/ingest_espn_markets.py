@@ -164,14 +164,19 @@ def _espn_games(grp: str, league: str, days: int) -> list[dict]:
 # calibrate against a live card (compare actual walkout times) and adjust.
 _KALSHI_UFC_URL = ("https://api.elections.kalshi.com/trade-api/v2/markets"
                    "?series_ticker=KXUFCFIGHT&status=open&limit=200")
-# −3h: Kalshi's occurrence_datetime is the EASTERN wall-clock schedule
-# stamped in a UTC−7 zone (user caught it on the Jul 11 card: raw values
-# put the main event at 4 AM ET; subtract 3h and the card reads exactly
-# like a textbook PPV — 7 PM ET early prelims, 1 AM ET main event, one
-# constant offset across all 13 bouts). Empirical — verify against the
-# actual walkout times on the next live card and retune if Kalshi fixes
-# their stamps (the tell would be every fight suddenly showing 3h early).
-_KALSHI_OCC_OFFSET_MIN = -180
+# −5h: Kalshi's occurrence_datetime runs a constant 5h AHEAD of the true
+# fight instant. RECALIBRATED on UFC 329 (Jul 11 2026, verified against the
+# published schedule — a numbered PPV, NOT a Fight Night): the opening bout
+# (Costa/Durden) carries occurrence 02:00Z, and early prelims for that card
+# actually open at 5:00 PM ET = 21:00Z → the raw stamp is exactly +5h. With
+# −300 the WHOLE 14-bout card lands on its real segments (early prelims
+# 5 PM ET, prelims 7 PM ET, main card 9 PM ET, McGregor/Holloway ~11 PM ET).
+# The earlier −180 was off by one segment: it assumed early prelims began at
+# 7 PM ET, but 7 PM ET is the PRELIMS slot — that mistake left every fight 2h
+# late (users saw already-live fights counting down "1h 25m away"). Empirical
+# — verify against actual walkout times on the next live card; if every fight
+# suddenly shows ~5h early, Kalshi fixed their stamps → set toward 0.
+_KALSHI_OCC_OFFSET_MIN = -300
 
 
 def _kalshi_ufc_times() -> list[dict]:
