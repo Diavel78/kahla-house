@@ -2465,14 +2465,14 @@ UFC_DUR_EDGE_MIN_PP = 4.0    # duration-family shadow-log edge threshold
 # where its edge clears this. These stay pending for manual settle (the
 # resolver leaves all UFC non-ML picks alone).
 UFC_DUR_PICK_MIN_PP = 2.0
-# SAFETY GATE (July 11 2026): the duration pick's PMM yes/no orientation is
-# unverified — a live Kamaka/Riley "goes the distance" pick priced at the
-# FINISH side (+133/43¢) while Poly had goes-distance at -194/68¢, i.e. the
-# side label + edge were inverted (_classify_ufc_distance assumes the market's
-# YES token = goes-distance, which broke here). Until the orientation is
-# verified against a real market dump, emit NO loggable duration picks — the
-# Fight IQ read (winner P + duration probabilities) still renders as reference.
-UFC_DUR_PICKS_LIVE = False
+# The distance prop's yes/no orientation was VERIFIED correct against the real
+# Polymarket market dump (/debug-pmm?sport=UFC): YES = goes the distance,
+# self-consistent on both a finish-heavy fight (Pimblett 37¢) and a
+# decision-leaning one (Kamaka/Riley 58¢). The earlier "inverted" scare was a
+# market-SELECTION bug (pmm_markets._classify_ufc_distance also matched Poly's
+# separate "go to a decision, draw, or no contest" market, so the model priced
+# against the wrong line) — fixed in _classify_ufc_distance. Picks re-enabled.
+UFC_DUR_PICKS_LIVE = True
 _UFC_AGE_KNEE, _UFC_AGE_PTS = 32.0, 12.0
 _UFC_CHIN_PTS = 25.0
 _UFC_LAYOFF_1, _UFC_LAYOFF_2 = 30.0, 60.0

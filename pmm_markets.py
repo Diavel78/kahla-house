@@ -570,8 +570,13 @@ def _classify_ufc_distance(m: dict) -> str | None:
     the final bell. Question shape on PMM: 'Will X vs Y go the
     distance?' — UNVERIFIED from the sandbox (same posture as the NRFI
     schema); the diag.all_markets dump is ground truth if it misses."""
+    # ONLY the true "go the distance" market. Polymarket ALSO lists a separate
+    # "Will X vs Y go to a decision, draw, or no contest?" market — a different
+    # line with a different price; matching it here put TWO markets in
+    # ufc_distance and the model priced against whichever came first (Kamaka/
+    # Riley: the decision market at mid 0.545 instead of go-the-distance 0.585).
     q = (m.get("question") or "").lower()
-    return "yes" if "go the distance" in q or "go to a decision" in q else None
+    return "yes" if "go the distance" in q else None
 
 
 def _classify_first_inning(m: dict) -> tuple[str, float | None, str] | None:
