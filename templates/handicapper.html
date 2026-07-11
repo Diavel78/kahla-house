@@ -2675,14 +2675,21 @@
         const sugIndex = new Map();
         suggestions.forEach((s, i) => sugIndex.set(`${s.market_type}:${s.side}`, i));
         html += '<div class="market-grid">';
-        for (const mt of ['moneyline', 'spread', 'total']) {
+        // UFC has no point spread or game total — PMM "spreads" are method
+        // props and the round O/U is the Fight IQ "Go the Distance" prop, not
+        // a market-grid total. Show ONLY moneyline so the fight page isn't
+        // padded with empty "no exchange data" SPREAD/TOTAL panels.
+        const _mktList = (d.sport === 'UFC') ? ['moneyline'] : ['moneyline', 'spread', 'total'];
+        for (const mt of _mktList) {
             html += renderMarketCard(mt, d.odds[mt] || {}, d, sugIndex);
         }
         html += '</div>';
 
         // Splits — always render the row so missing data is visible
-        // and per-source diagnostics surface when nothing matched.
-        if (d.splits) {
+        // and per-source diagnostics surface when nothing matched. Skipped
+        // for UFC: Action Network / VSiN have no MMA coverage, so the panel
+        // only ever showed a "no match" box full of unrelated MLB games.
+        if (d.splits && d.sport !== 'UFC') {
             const sp = d.splits;
             const matched = (sp.sources && sp.sources.length > 0);
             const sd = sp.sharp_diff;
