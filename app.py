@@ -8749,6 +8749,46 @@ def _fs_order_meta(md):
     }
 
 
+def _fs_outbid_info(client, order, book_cache):
+    """Is this resting maker still the top bid? Polymarket never tells you
+    you've been outbid (NoVig/ProphetX do), so read the market's live book
+    and compare the order's picked-side price to the current best bid. A
+    rest that's been jumped won't fill first — the user wants a ⚠ so they
+    can re-rest at the new touch or take the ask.
+
+    order: the matched open-order cand (slug, intent, picked-side price
+    0-1 — already NO-flipped). *_SHORT intents read the inverted book
+    (same flip as the make/take engine — a synthetic-side pick shares the
+    YES market's slug, and the YES book's bids are the wrong side).
+    book_cache: per-request {slug:side → book} so two picks on one market
+    cost one read; capped so a huge pending list can't blow the request
+    budget. Returns {} when still the touch / unreadable, else
+    {outbid, my_price_c, best_bid_c, best_ask_c, ahead_qty}."""
+    slug = order.get("slug") or ""
+    price = order.get("price")
+    if not slug or price is None:
+        return {}
+    side = "no" if (order.get("intent") or "").endswith("_SHORT") else "yes"
+    key = f"{slug}:{side}"
+    if key not in book_cache:
+        if len(book_cache) >= 8:      # request-budget cap (Vercel 10s)
+            return {}
+        book = _pmm_book(client, slug)
+        if side == "no":
+            book = _invert_book(book)
+        book_cache[key] = book
+    book = book_cache[key]
+    if not book or book.get("best_bid") is None:
+        return {}
+    my_c = round(float(price) * 200) / 2.0    # half-cent ticks, like _pmm_book
+    bb = book["best_bid"]
+    if bb <= my_c + 0.001:
+        return {}    # our own order IS (or shares) the touch — fine
+    ahead = sum(q for c, q in (book.get("bids") or []) if c > my_c + 0.001)
+    return {"outbid": True, "my_price_c": my_c, "best_bid_c": bb,
+            "best_ask_c": book.get("best_ask"), "ahead_qty": round(ahead)}
+
+
 def _fs_auto_sync_entry(sb, picks_by_slug, cands):
     """Auto-sync entry_price on FILLED (or partially filled) Polymarket
     maker picks — the user asked for the loop to close itself: rest a
@@ -8998,6 +9038,7 @@ def api_handicapper_fill_status():
         entry_synced = 0
 
     fills = []
+    _ob_books: dict = {}    # per-request book cache for the outbid check
     for p in pending:
         book = (p.get("entry_book") or "").upper()
         dt = _parse_iso(p.get("event_start") or "")
@@ -9025,6 +9066,15 @@ def api_handicapper_fill_status():
                                     if order["qty"] else None)
                 else:
                     entry["status"], entry["pct"] = "resting", 0.0
+                # Outbid check for a live (not fully filled) maker: is the
+                # rest still the top bid? Only pre-game — once it starts,
+                # the unfilled remainder is moot.
+                if (entry["status"] in ("resting", "partial")
+                        and (mins is None or mins > 0)):
+                    try:
+                        entry.update(_fs_outbid_info(client, order, _ob_books))
+                    except Exception:
+                        pass
             elif any(_fs_pick_matches(p, c) for c in positions):
                 entry["status"], entry["pct"] = "filled", 100.0
             elif any(_fs_pick_matches(p, c) for c in ledger_filled):

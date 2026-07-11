@@ -898,6 +898,16 @@
     }
     // Fill chip for a pending row. unknown (SDK unreachable) renders nothing
     // rather than a wrong "no order".
+    const _fmtCents = c => (c == null ? '?' : (c % 1 ? c.toFixed(1) : String(c)));
+    function _outbidTitle(f) {
+        let t = `Someone bid above your rest — bid is now ${_fmtCents(f.best_bid_c)}¢, `
+              + `yours sits at ${_fmtCents(f.my_price_c)}¢ and won't fill first.`;
+        if (f.ahead_qty) t += ` ${Number(f.ahead_qty).toLocaleString()} contracts ahead of you.`;
+        t += ` Re-rest at ${_fmtCents(f.best_bid_c)}¢+`;
+        if (f.best_ask_c != null) t += ` or take the ${_fmtCents(f.best_ask_c)}¢ ask`;
+        t += '.';
+        return t;
+    }
     function _fillChipHtml(f) {
         if (!f || !f.status || f.status === 'unknown') return '';
         let html = '';
@@ -911,6 +921,8 @@
             html = `<span class="chip fill wait" title="Maker order resting on the book — not filled yet">◌ RESTING</span>`;
         else if (f.status === 'none')
             html = `<span class="chip fill miss" title="No matching Polymarket order found — not placed yet (or canceled)?">⚠ NO ORDER</span>`;
+        if (f.outbid)
+            html += `<span class="chip fill take" title="${_esc(_outbidTitle(f))}">⚠ OUTBID ${_fmtCents(f.best_bid_c)}¢ &gt; ${_fmtCents(f.my_price_c)}¢</span>`;
         if (f.warn)
             html += `<span class="chip fill take" title="Unfilled with tip ≤30m — a maker won't fill in time. TAKE the ask or miss the bet.">⚠ TAKE NOW</span>`;
         return html;
@@ -927,6 +939,8 @@
         if (f.warn)
             return { cls: ' unfilled take', mark: '⚠',
                      title: 'Logged but NOT filled and tip is close — TAKE the ask or miss the bet' };
+        if (f.outbid)
+            return { cls: ' unfilled take', mark: '⚠', title: 'OUTBID — ' + _outbidTitle(f) };
         if (f.status === 'partial')
             return { cls: ' unfilled', mark: `◔ ${Math.round(f.pct || 0)}%`,
                      title: 'Logged — maker order partially filled' };
