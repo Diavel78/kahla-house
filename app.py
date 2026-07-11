@@ -10460,12 +10460,13 @@ def api_handicapper_pick():
     if missing:
         return jsonify({"ok": False, "error": f"missing: {missing}"}), 400
 
-    if body["market_type"] not in ("moneyline", "spread", "total", "nrfi"):
+    if body["market_type"] not in ("moneyline", "spread", "total", "nrfi", "distance"):
         return jsonify({"ok": False, "error": "bad market_type"}), 400
-    # NRFI/YRFI uses yes/no sides; everything else uses home/away/over/under.
-    if body["market_type"] == "nrfi":
+    # NRFI/YRFI + the UFC "distance" prop use yes/no sides; everything else
+    # uses home/away/over/under. (UFC round O/U rides market_type='total'.)
+    if body["market_type"] in ("nrfi", "distance"):
         if body["side"] not in ("yes", "no"):
-            return jsonify({"ok": False, "error": "nrfi side must be yes/no"}), 400
+            return jsonify({"ok": False, "error": f"{body['market_type']} side must be yes/no"}), 400
     elif body["side"] not in ("home", "away", "over", "under"):
         return jsonify({"ok": False, "error": "bad side"}), 400
     if body["confidence"] not in ("low", "medium", "high", "whale"):

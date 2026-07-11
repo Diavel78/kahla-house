@@ -2458,6 +2458,13 @@ def _is_prime_core(starts_in_min) -> bool | None:
 UFC_MODEL_VETO_P    = 0.65   # model >= this on the OPPOSITE side → veto
 UFC_MODEL_MIN_N     = 5      # both fighters need >= N rated UFC bouts
 UFC_DUR_EDGE_MIN_PP = 4.0    # duration-family shadow-log edge threshold
+# User-facing PICK threshold for the Fight IQ duration family (distance +
+# round O/U). Lower than the shadow-log gate on purpose: UFC is tiny-stake
+# entertainment (user's explicit call — "make picks, I'll manage the bank"),
+# so the model surfaces a real 1u pick on any PMM-priced duration market
+# where its edge clears this. These stay pending for manual settle (the
+# resolver leaves all UFC non-ML picks alone).
+UFC_DUR_PICK_MIN_PP = 2.0
 _UFC_AGE_KNEE, _UFC_AGE_PTS = 32.0, 12.0
 _UFC_CHIN_PTS = 25.0
 _UFC_LAYOFF_1, _UFC_LAYOFF_2 = 30.0, 60.0
@@ -2569,6 +2576,41 @@ def _ufc_static_pair(fh: dict, fa: dict) -> float:
     return pts
 
 
+def _ufc_dur_bet(kind, pos_side, neg_side, p_pos, edge_pp,
+                 yes_bid, yes_ask, slug, line):
+    """Turn a duration-family edge into a loggable pick. side = the +EV
+    side; maker entry = the bid for the PICKED side (synthetic NO/UNDER bid
+    = 1 − YES ask, mirroring pmm_markets._inverse_quote). `gates_cleared`
+    flags whether it clears the entertainment pick threshold — sub-threshold
+    bets are still returned so the Fight IQ card can always offer a tap."""
+    if edge_pp is None:
+        return None
+
+    def _f(x):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+    yb, ya = _f(yes_bid), _f(yes_ask)
+    side = pos_side if edge_pp > 0 else neg_side
+    if side == pos_side:
+        entry_prob = yb if yb is not None else ya
+    else:                                   # NO / UNDER — invert the YES book
+        entry_prob = (1.0 - ya) if ya is not None else (
+            (1.0 - yb) if yb is not None else None)
+    fair_prob = p_pos if side == pos_side else (1.0 - p_pos)
+    if entry_prob is None:
+        entry_prob = fair_prob
+    entry_prob = max(0.02, min(0.98, entry_prob))
+    return {
+        "kind": kind, "side": side, "units": 1, "line": line, "slug": slug,
+        "edge_pp": round(abs(edge_pp), 1),
+        "gates_cleared": abs(edge_pp) >= UFC_DUR_PICK_MIN_PP,
+        "entry_american": _prob_to_american(entry_prob),
+        "fair_american": _prob_to_american(max(0.02, min(0.98, fair_prob))),
+    }
+
+
 def _ufc_model_block(sb, away: str, home: str, event_start, odds: dict,
                      pmm_data: dict | None) -> dict | None:
     """The Fight IQ dossier block for one bout: winner P + the duration
@@ -2616,12 +2658,19 @@ def _ufc_model_block(sb, away: str, home: str, event_start, odds: dict,
     for dm in ((pmm_data or {}).get("ufc_distance") or []):
         if dm.get("side") != "yes" or not dm.get("quote"):
             continue
-        mid = dm["quote"].get("mid")
+        q = dm["quote"]
+        mid = q.get("mid")
         if mid:
+            edge = round(((1.0 - p_fin) - float(mid)) * 100, 1)
             duration["distance_pmm"] = {
                 "slug": dm.get("slug"), "mid": round(float(mid), 3),
-                "edge_pp": round(((1.0 - p_fin) - float(mid)) * 100, 1),
+                "bid": q.get("bid"), "ask": q.get("ask"), "edge_pp": edge,
             }
+            duration["distance_bet"] = _ufc_dur_bet(
+                kind="distance", pos_side="yes", neg_side="no",
+                p_pos=(1.0 - p_fin), edge_pp=edge,
+                yes_bid=q.get("bid"), yes_ask=q.get("ask"),
+                slug=dm.get("slug"), line=None)
         break
     # PMM rounds line — UFC "totals" on PMM ARE round-count O/U; the
     # dossier's total block carries them per line. Price the over side at
@@ -2631,13 +2680,21 @@ def _ufc_model_block(sb, away: str, home: str, event_start, odds: dict,
     line = over_blk.get("line")
     cond = conds.get(str(line)) if line is not None else None
     if cond is not None and over_blk.get("quote"):
-        mid = over_blk["quote"].get("mid")
+        q = over_blk["quote"]
+        mid = q.get("mid")
         p_over = 1.0 - p_fin * cond
+        edge = (round((p_over - float(mid)) * 100, 1) if mid else None)
         duration["rounds_pmm"] = {
             "line": line, "p_over": round(p_over, 3),
             "mid": (round(float(mid), 3) if mid else None),
-            "edge_pp": (round((p_over - float(mid)) * 100, 1) if mid else None),
+            "bid": q.get("bid"), "ask": q.get("ask"), "edge_pp": edge,
         }
+        if mid is not None:
+            duration["rounds_bet"] = _ufc_dur_bet(
+                kind="rounds", pos_side="over", neg_side="under",
+                p_pos=p_over, edge_pp=edge,
+                yes_bid=q.get("bid"), yes_ask=q.get("ask"),
+                slug=over_blk.get("slug"), line=line)
     return {
         "matched": True, "reliable": reliable,
         "scale": scale,
