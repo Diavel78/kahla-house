@@ -1121,6 +1121,13 @@
         const diffMin = (new Date(iso) - new Date()) / 60_000;
         if (diffMin < 0) return false;
         if (_isPrime(iso)) return true;
+        // The model-only early band (2h30m–5h) exists for MODEL bets, and the
+        // only live model bet is NRFI, which is MLB-only (TOT is blacklisted).
+        // Other sports (UFC, NBA, NHL, …) have NO model bet out here, so the
+        // steam window is the only thing that lights their rows — otherwise a
+        // UFC fight 3h out glowed green + read "PRIME · NRFI" for a baseball
+        // market it can never have.
+        if (_activeSport !== 'MLB') return false;
         return diffMin >= MODEL_BET_EARLY_MIN && diffMin <= VERDICT_WINDOW_MS / 60_000;
     }
     // UFC fights run on imprecise block-times, so a bout the server still
@@ -1190,7 +1197,7 @@
         // blacklisted July 2026 — naming it promised chips that can't
         // exist.)
         if (tag) tag.textContent = on
-            ? (_isPrime(iso) ? _primeBadgeText(iso) : 'Prime · NRFI')
+            ? (_isPrime(iso) ? _primeBadgeText(iso) : (_activeSport === 'MLB' ? 'Prime · NRFI' : 'Prime'))
             : '';
     }
     function _fmtSettled(iso) {
@@ -1663,7 +1670,7 @@
                 // inline so it's correct on first render — no verdict wait.
                 const rowPrime = _canBet && _inAnyWindow(g.event_start);
                 const rowBadge = rowPrime
-                    ? (_isPrime(g.event_start) ? _primeBadgeText(g.event_start) : 'Prime · NRFI')
+                    ? (_isPrime(g.event_start) ? _primeBadgeText(g.event_start) : (_activeSport === 'MLB' ? 'Prime · NRFI' : 'Prime'))
                     : '';
                 return `<li class="game-row${rowPrime ? ' prime' : ''}">
                     <div class="game-line1">
