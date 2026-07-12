@@ -748,12 +748,11 @@
                 <textarea id="lmAnalysis" placeholder="Full write-up …"></textarea>
             </div>
             <div class="field">
-                <label>Filled on ProphetX instead? Enter YOUR fill odds (optional)</label>
-                <div style="display:flex;gap:8px;align-items:stretch;">
-                    <button type="button" id="lmPxSign" onclick="_pxToggleSign()"
-                            style="width:48px;font-size:18px;font-weight:700;border-radius:8px;border:1px solid var(--border,#333);background:transparent;color:inherit;cursor:pointer;">&minus;</button>
-                    <input type="text" id="lmPxPrice" inputmode="numeric" style="flex:1"
-                           placeholder="e.g. 112 — tap &minus;/+ for the sign" />
+                <label>Filled on ProphetX instead? Enter your fill price in ¢ (optional)</label>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <input type="text" id="lmPxPrice" inputmode="decimal" style="flex:1"
+                           placeholder="e.g. 43.5 — the ¢ price your X app shows" />
+                    <span style="font-size:16px;font-weight:700;color:var(--text-muted)">¢</span>
                 </div>
             </div>
             <div class="actions">
@@ -788,12 +787,11 @@
                     </select>
                 </div>
                 <div class="field">
-                    <label>Filled on ProphetX? Your odds, as the app shows them</label>
-                    <div style="display:flex;gap:8px;align-items:stretch;">
-                        <button type="button" id="emSign" onclick="_emToggleSign()"
-                                style="width:48px;font-size:18px;font-weight:700;border-radius:8px;border:1px solid var(--border,#333);background:transparent;color:inherit;cursor:pointer;">&minus;</button>
-                        <input type="text" id="emPrice" inputmode="numeric" style="flex:1"
-                               oninput="_emPreview()" placeholder="e.g. 115" />
+                    <label>Filled on ProphetX? Your fill price in ¢, as the app shows it</label>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <input type="text" id="emPrice" inputmode="decimal" style="flex:1"
+                               oninput="_emPreview()" placeholder="e.g. 43.5" />
+                        <span style="font-size:16px;font-weight:700;color:var(--text-muted)">¢</span>
                     </div>
                 </div>
             </div>
@@ -1429,10 +1427,8 @@
         const priceEl = document.getElementById('emPrice');
         priceEl.value = '';
         priceEl.placeholder = _editCtx.price != null
-            ? `now ${_fmtAmer(_editCtx.price)} — type X odds to move it`
-            : 'e.g. 115';
-        document.getElementById('emSign').textContent =
-            (_editCtx.price != null && _editCtx.price > 0) ? '+' : '−';
+            ? `now ${_fmtEntryCents(_editCtx.price)} — type X price in ¢ to move it`
+            : 'e.g. 43.5';
         _emStatus(null, '');
         _emPreview();
         document.getElementById('editModal').classList.add('show');
@@ -1441,42 +1437,22 @@
         document.getElementById('editModal').classList.remove('show');
         _editCtx = null;
     }
-    function _emToggleSign() {
-        const b = document.getElementById('emSign');
-        b.textContent = (b.textContent.trim() === '−') ? '+' : '−';
-        _emPreview();
-    }
-    // Parse the board odds. Same rules as the log modal's ProphetX field:
-    // digits + the −/+ toggle (iOS numeric keypad has no minus key); an
-    // explicit sign typed in the text wins.
+    // Parse the ProphetX board price — in CENTS (implied probability), the
+    // number the X app shows. Same helper as the log modal's field.
     function _emParseOdds() {
-        const raw = (document.getElementById('emPrice').value || '').trim();
-        if (!raw) return { empty: true };
-        let a = parseInt(raw.replace(/[^\d+-]/g, '').replace('+', ''), 10);
-        if (isFinite(a) && !/[+\-−]/.test(raw)) {
-            if (document.getElementById('emSign').textContent.trim() !== '+') a = -Math.abs(a);
-        }
-        if (raw.indexOf('−') >= 0) a = -Math.abs(a);
-        if (!isFinite(a) || Math.abs(a) < 100) return { bad: true };
-        return { amer: a };
-    }
-    function _emEffective(amer) {
-        // ProphetX only: their 2%-of-net-winnings fee ≈ +2·p(1−p)¢ all-in.
-        const p = _amerToProb(amer);
-        const cents = p * 100 + 2 * p * (1 - p);
-        return { cents: Math.round(cents * 10) / 10, amer: _centsToAmer(cents) };
+        return _parseFillCents(document.getElementById('emPrice').value);
     }
     function _emPreview() {
         const el = document.getElementById('emEff');
         if (!el) return;
         const o = _emParseOdds();
         if (o.empty) {
-            el.textContent = 'Odds blank — only units will be saved. (Polymarket fills auto-sync their own price.)';
+            el.textContent = 'Blank — only units will be saved. (Polymarket fills auto-sync their own price.)';
             return;
         }
-        if (o.bad)   { el.textContent = 'Odds must be American: 3+ digits, sign via the −/+ toggle.'; return; }
-        const eff = _emEffective(o.amer);
-        el.textContent = `X board ${_fmtAmer(o.amer)} → logs as ${_fmtAmer(eff.amer)} effective (2% win fee) · venue → ProphetX.`;
+        if (o.bad)   { el.textContent = 'Fill price must be in cents (1–99), e.g. 43.5.'; return; }
+        const eff = _pxEffFromCents(o.cents);
+        el.textContent = `X board ${o.cents}¢ → logs as ${eff.cents}¢ effective (2% win fee) · venue → ProphetX.`;
     }
     function _emStatus(kind, msg) {
         const el = document.getElementById('emStatus');
@@ -1491,15 +1467,15 @@
         if (!_editCtx) return;
         const u = Number(document.getElementById('emUnits').value);
         const o = _emParseOdds();
-        if (o.bad) { _emStatus('err', 'Odds must be American (e.g. 115 with the − toggle, or -115).'); return; }
+        if (o.bad) { _emStatus('err', 'Fill price must be in cents (1–99), e.g. 43.5.'); return; }
         const payload = {};
         if (u !== _editCtx.units) payload.units = u;
-        if (o.amer != null) {
-            const eff = _emEffective(o.amer);
+        if (o.cents != null) {
+            const eff = _pxEffFromCents(o.cents);
             payload.price = eff.amer;
             payload.book = 'PROPHETX';   // flips the fill tracker to manual/filled
             payload.execution = { rec: 'TAKE', venue: 'PROPHETX', manual: true,
-                                  fill_american: o.amer, entry_cents: eff.cents };
+                                  fill_cents: o.cents, entry_cents: eff.cents };
         }
         if (!Object.keys(payload).length) { closeEdit(); return; }   // nothing changed
         const btn = document.getElementById('emSave');
@@ -3143,6 +3119,26 @@
         return Math.round(e * 10) / 10;
     }
 
+    // Fill-price entry is in CENTS (implied probability) — the number the
+    // exchange app shows (Poly/Kalshi/ProphetX all quote cents). Parse a plain
+    // cents value (1–99, half-cents ok); no sign, no American. Returns
+    // {empty}|{bad}|{cents}.
+    function _parseFillCents(raw) {
+        raw = (raw || '').trim();
+        if (!raw) return { empty: true };
+        const c = parseFloat(raw.replace(/[^\d.]/g, ''));
+        if (!isFinite(c) || !(c > 0 && c < 100)) return { bad: true };
+        return { cents: Math.round(c * 10) / 10 };
+    }
+    // ProphetX effective all-in from a board price in cents: adds their
+    // 2%-of-net-winnings fee (≈ 2·p(1−p)¢, win-only). Returns {cents, amer} —
+    // amer is stored so CLV/to-WIN stay in the same units the resolver expects.
+    function _pxEffFromCents(cents) {
+        const p = cents / 100;
+        const eff = cents + 2 * p * (1 - p);
+        return { cents: Math.round(eff * 10) / 10, amer: _centsToAmer(eff) };
+    }
+
     function _loadAllMakeTake(root) {
         if (!_canBet) return;
         (root || document).querySelectorAll('.mt-wrap[data-slug]').forEach(_loadMakeTake);
@@ -3718,16 +3714,9 @@
         }
         el.textContent = s;
     }
-    // iOS numeric keypad has no minus key, so the ProphetX field carries a
-    // sign TOGGLE (defaults to minus — most fills are favorites). An explicit
-    // sign typed into the field still wins.
-    function _pxToggleSign() {
-        const b = document.getElementById('lmPxSign');
-        if (b) b.textContent = (b.textContent.trim() === '+') ? '\u2212' : '+';
-    }
+    // ProphetX fill price is entered in cents (see the field) — no sign toggle.
     function _pxReset() {
         const px = document.getElementById('lmPxPrice'); if (px) px.value = '';
-        const b = document.getElementById('lmPxSign'); if (b) b.textContent = '\u2212';
     }
     function closeLog() {
         document.getElementById('logModal').classList.remove('show');
@@ -4028,28 +4017,18 @@
         // their app at this price (the Details threshold said it beat the
         // engine's option). Log the REAL fill + book so CLV/to-WIN are
         // honest; effective cost adds their 2%-of-winnings fee (~2·p(1-p)¢).
-        const pxRaw = (document.getElementById('lmPxPrice').value || '').trim();
-        if (pxRaw) {
-            let pxAmer = parseInt(pxRaw.replace(/[^\d+-]/g, '').replace('+', ''), 10);
-            // No explicit sign typed -> the -/+ toggle decides (iOS numeric
-            // keypad has no minus key).
-            if (isFinite(pxAmer) && !/[+\-\u2212]/.test(pxRaw)) {
-                const b = document.getElementById('lmPxSign');
-                if (b && b.textContent.trim() !== '+') pxAmer = -Math.abs(pxAmer);
-            }
-            if (pxRaw.indexOf('\u2212') >= 0) pxAmer = -Math.abs(pxAmer);
-            if (!isFinite(pxAmer) || Math.abs(pxAmer) < 100) {
-                _lmStatus('err', 'ProphetX odds must be American (e.g. 112 with the \u2212 toggle, or -112).');
-                return;
-            }
-            const p = _amerToProb(pxAmer);
-            const effCents = p * 100 + 2 * p * (1 - p);   // fee-inclusive
-            const effAmer = _centsToAmer(effCents);
+        const pxParsed = _parseFillCents(document.getElementById('lmPxPrice').value);
+        if (pxParsed.bad) {
+            _lmStatus('err', 'ProphetX fill price must be in cents (1\u201399), e.g. 43.5');
+            return;
+        }
+        if (pxParsed.cents != null) {
+            const eff = _pxEffFromCents(pxParsed.cents);   // + 2% win fee, all-in
             body.book = 'PROPHETX';
-            body.price = (effAmer != null) ? effAmer : pxAmer;
+            body.price = (eff.amer != null) ? eff.amer : _centsToAmer(pxParsed.cents);
             body.signal_blob = Object.assign({}, body.signal_blob, {
                 execution: { rec: 'TAKE', venue: 'PROPHETX', manual: true,
-                             fill_american: pxAmer, entry_cents: Math.round(effCents * 10) / 10 } });
+                             fill_cents: pxParsed.cents, entry_cents: eff.cents } });
         }
         const submitBtn = document.getElementById('lmSubmit');
         submitBtn.disabled = true; submitBtn.textContent = 'Logging…';
