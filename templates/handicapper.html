@@ -1075,6 +1075,16 @@
     }
 
     const _fmtAmer = p => (p == null ? '—' : (p > 0 ? `+${p}` : `${p}`));
+    // Prediction-market entry prices are quoted in CENTS = implied probability
+    // (a resting maker share at 41¢ costs 41¢, pays $1). We store American odds,
+    // so the log screen converts back to the venues' native unit: +144 → 41¢,
+    // -183 → 65¢. Poly / Kalshi / ProphetX are all cents-quoted makers, so the
+    // logged entry should read in cents, not American. Rounds to whole cents
+    // (American storage has already dropped sub-cent precision).
+    const _fmtEntryCents = p => {
+        const pr = _amerToProb(p);
+        return pr == null ? '—' : `${Math.round(pr * 100)}¢`;
+    };
     const _fmtPt   = v => (v == null ? '' : (v > 0 ? `+${v}` : `${v}`));
     function _fmtCompare(v, fmt) {
         if (v == null) return '—';
@@ -1375,7 +1385,7 @@
                 </div>
                 <div class="row2">
                     <span class="market"><span class="side-tag">${market} · ${sideLabel}${lineFrag}</span></span>
-                    <span class="entry">@ ${_esc(r.entry_book)} ${_fmtAmer(r.entry_price)}</span>
+                    <span class="entry">@ ${_esc(r.entry_book)} ${_fmtEntryCents(r.entry_price)}</span>
                 </div>
                 <div class="row3">
                     <span class="signals">${sigChips.join('')}</span>
@@ -2184,7 +2194,7 @@
         if (r.market_type === 'nrfi') side = (r.side === 'no' ? 'NRFI' : 'YRFI');
         else if (r.market_type === 'total') side = (r.side === 'over' ? 'O' : 'U') + (r.entry_line != null ? _fmtPt(Math.abs(r.entry_line)) : '');
         else { const t = _shortTeam((r.side === 'home' ? r.home : r.side === 'away' ? r.away : 'Draw') || r.side, r.side === 'home' ? r.away : r.side === 'away' ? r.home : null); side = t + (r.entry_line != null && r.market_type === 'spread' ? ' ' + _fmtPt(r.entry_line) : ''); }
-        const price = r.entry_price != null ? _fmtAmer(r.entry_price) : '';
+        const price = r.entry_price != null ? _fmtEntryCents(r.entry_price) : '';
         return `<b>${mkt} ${_esc(side)}</b> @ ${price} · ${_uStr(Number(r.units))}`;
     }
 
@@ -4112,7 +4122,7 @@
                     const oddsCls = (odds != null) ? (odds < 0 ? 'fav' : 'dog') : '';
                     html += `<div class="betslip-item">
                         <div class="betslip-market">${_esc(game)}<span class="bs-sub">${_esc(sub)}</span></div>
-                        <div class="betslip-odds ${oddsCls}">${_fmtAmer(odds)}</div>
+                        <div class="betslip-odds ${oddsCls}">${_fmtEntryCents(odds)}</div>
                     </div>`;
                 }
             }
@@ -4126,7 +4136,7 @@
                     const resultCls = (st === 'won') ? 'won' : (st === 'lost' ? 'lost' : 'push');
                     const resultLabel = st === 'won' ? 'W' : (st === 'lost' ? 'L' : 'PUSH');
                     const oddsCell = (odds != null)
-                        ? `<div class="betslip-odds ${oddsCls}" style="margin-right:8px">${_fmtAmer(odds)}</div>` : '';
+                        ? `<div class="betslip-odds ${oddsCls}" style="margin-right:8px">${_fmtEntryCents(odds)}</div>` : '';
                     html += `<div class="betslip-item">
                         <div class="betslip-market">${_esc(game)}<span class="bs-sub">${_esc(sub)} · ${_fmtPnl(r.pnl_units)}</span></div>
                         <div style="display:flex;align-items:center;gap:0">
