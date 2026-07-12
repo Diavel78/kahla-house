@@ -113,13 +113,13 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python -m scripts.bot_picks_resolver
 
-  # Polymarket Filled Bot — fill-alert ping. Redundant trigger for
-  # /api/polymarket/check-fills, which is normally hit every minute by a
-  # STANDALONE cron-job.org job that has silently auto-disabled itself more
-  # than once (cron-job.org kills jobs after repeated failures), killing
-  # fill alerts. Riding this already-alive workflow_dispatch trigger removes
-  # that single point of failure — the endpoint is idempotent (milestone-
-  # keyed dedup in polymarket_fill_state), so double-pinging is harmless.
+  # Flask ping job. (Named for its original job — the Polymarket
+  # fill-alert ping, RETIRED July 2026 with the Kalshi execution cutover:
+  # Kalshi notifies fills natively, so /api/polymarket/check-fills is
+  # gone. FILLS_CRON_SECRET survives as the shared secret for the pings
+  # below. The prime-window alert ping was retired earlier the same month
+  # — the unlogged-BET alert rides the paperlog ping inside
+  # /api/handicapper/paperlog.)
   #
   # SEPARATE PARALLEL JOB on purpose: the `poll` job runs longer than the
   # 60s cron cadence on a busy slate, so concurrency:cancel-in-progress
@@ -127,36 +127,19 @@ jobs:
   # executed (the early odds-ingest heartbeat landed, the trailing ping did
   # not). As its own job it runs concurrently and finishes in ~10s, well
   # inside the cancellation window, so it actually fires every tick. No
-  # checkout / Python needed — it's just a curl.
+  # checkout / Python needed — it's just curls.
+  #
+  # SECRET SANITIZE NOTE (do not drop): each step strips ALL whitespace
+  # from the secret before building the URL — GitHub secrets routinely
+  # carry a trailing newline from copy-paste, and curl then rejects the
+  # URL with an embedded control char ("curl (3): URL rejected: Malformed
+  # input"), so the request never sends and the ping silently dies
+  # (HTTP 000, no Vercel log). Same class of bug as the Telegram token
+  # (gotcha #22). Vercel's side already .strip()s its env.
   fill_ping:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Polymarket — fill-alert ping
-        continue-on-error: true
-        env:
-          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
-        run: |
-          if [ -z "$FILLS_CRON_SECRET" ]; then
-            echo "FILLS_CRON_SECRET not set — skipping fill-alert ping (no-op)."
-            exit 0
-          fi
-          # Strip ALL whitespace from the secret before building the URL —
-          # GitHub secrets routinely carry a trailing newline from copy-paste,
-          # and curl then rejects the URL with an embedded control char
-          # ("curl (3): URL rejected: Malformed input"), so the request never
-          # sends and the bot silently dies (HTTP 000, no Vercel log). Same
-          # class of bug as the Telegram token (gotcha #22). Vercel's side
-          # already .strip()s its env, so this makes the two keys match.
-          # DO NOT remove this sanitize — it's the whole reason this works.
-          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
-          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
-            "https://www.thekahlahouse.com/api/polymarket/check-fills?key=${KEY}" || echo "000")
-          echo "check-fills HTTP $code"
-
-      # (The prime-window alert ping was RETIRED July 2026 — replaced by
-      # the unlogged-BET alert, which rides the paperlog ping below inside
-      # /api/handicapper/paperlog. No separate curl. Spec in git history.)
 
       # Prediction-market cent-logger ping. /api/pm-snapshot records free
       # Polymarket + Kalshi cents per side for upcoming MLB games into

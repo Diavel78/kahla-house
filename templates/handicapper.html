@@ -141,15 +141,9 @@
         .pick .chip.kickoff { background: var(--bg); color: var(--text-secondary); border: 1px solid var(--border); }
         .pick .chip.clv.pos { background: var(--green-dim); color: #4ade80; }
         .pick .chip.clv.neg { background: var(--red-dim, rgba(248,113,113,0.12)); color: var(--red); }
-        /* Polymarket fill state on pending rows (admin-only). */
-        .pick .chip.fill.ok   { background: var(--green-dim); color: var(--green); font-weight: 700; }
-        .pick .chip.fill.wait { background: rgba(245,158,11,0.14); color: #fbbf24; }
-        .pick .chip.fill.miss { background: var(--red-dim); color: var(--red); }
-        .pick .chip.fill.take { background: var(--red); color: #fff; font-weight: 700; animation: khPulse 1.6s ease-in-out infinite; }
         .pick .chip.prov.bet-and-rec { background: var(--green-dim); color: var(--green); font-weight: 700; }
         .pick .chip.prov.bet-only    { background: var(--blue-dim);  color: var(--blue);  font-weight: 700; }
         .pick .chip.prov.rec-only    { background: var(--surface-2); color: var(--text-muted); }
-        .pick .chip.fill { background: var(--surface-2); color: var(--gold); font-family: 'JetBrains Mono', monospace; }
         .pick .chip.units-1  { background: rgba(255,255,255,0.04); color: var(--text-secondary); }
         .pick .chip.units-3  { background: var(--orange-dim); color: var(--orange); }
         .pick .chip.units-5  { background: var(--green-dim);  color: var(--green); }
@@ -265,17 +259,12 @@
         .pick-chip.lean    { background: transparent; border: 1px dashed #56617d; color: #a8b4cd; }
         .pick-chip.conflict { background: var(--surface-2); color: var(--text-secondary); border: 1px solid rgba(239,68,68,0.4); }
         .pick-chip.lean { background: rgba(245,158,11,0.08); color: #fbbf24; border: 1px dashed rgba(245,158,11,0.5); }
-        /* Fill tracking (admin): a logged chip stays AMBER until the
-           Polymarket maker actually fills, then flips to the normal green ✓.
-           Red pulse = still unfilled with tip ≤30m → TAKE or miss the bet. */
-        .pick-chip.logged.unfilled { background: rgba(245,158,11,0.18); color: #fbbf24; border: 1px solid rgba(245,158,11,0.55); }
-        .pick-chip.logged.unfilled.take { background: rgba(239,68,68,0.20); color: #f87171; border: 1px solid rgba(239,68,68,0.65); animation: khPulse 1.6s ease-in-out infinite; }
         @keyframes khPulse { 0%,100% { box-shadow: 0 0 0 2px rgba(168,85,247,0.55); } 50% { box-shadow: 0 0 0 4px rgba(168,85,247,0.18); } }
         .pick-line-note { font-size: 11px; color: var(--text-muted); font-style: italic; }
         /* "do this, this way" — the bet chip is "do this", the make/take pill
-           riding next to it is "this way". Green MAKE = rest a Poly maker;
-           amber TAKE = cross now at the named venue. The full read stays on
-           Details. Grouped in .pick-chip-row so the pair wraps as a unit. */
+           riding next to it is "this way". Green MAKE = rest a Kalshi maker;
+           amber TAKE = cross now. The full read stays on Details. Grouped in
+           .pick-chip-row so the pair wraps as a unit. */
         .pick-chip-row { display: inline-flex; align-items: center; gap: 4px; }
         .mt-pill { padding: 3px 7px; border-radius: 6px; font-size: 10px; font-weight: 700; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.02em; white-space: nowrap; }
         .mt-pill.make { background: var(--green-dim); color: var(--green); border: 1px solid rgba(34,197,94,0.4); }
@@ -714,7 +703,7 @@
                 <input type="text" id="lmSelection" readonly />
             </div>
             <div class="field" id="lmExecWrap" style="display:none">
-                <label>Make odds — Kalshi · Poly · ProphetX</label>
+                <label>Kalshi — where to bet</label>
                 <div id="lmExec" style="font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.6;white-space:pre-wrap;padding:8px 10px;border:1px solid var(--border,#2a2f3a);border-radius:8px;"></div>
             </div>
             <div class="row2">
@@ -747,14 +736,6 @@
                 <label>Analysis (optional, markdown)</label>
                 <textarea id="lmAnalysis" placeholder="Full write-up …"></textarea>
             </div>
-            <div class="field">
-                <label>Filled on ProphetX instead? Enter your fill price in ¢ (optional)</label>
-                <div style="display:flex;gap:8px;align-items:center;">
-                    <input type="text" id="lmPxPrice" inputmode="decimal" style="flex:1"
-                           placeholder="e.g. 43.5 — the ¢ price your X app shows" />
-                    <span style="font-size:16px;font-weight:700;color:var(--text-muted)">¢</span>
-                </div>
-            </div>
             <div class="actions">
                 <button onclick="closeLog()">Cancel</button>
                 <button class="primary" id="lmSubmit" onclick="submitLog()">Log Pick</button>
@@ -763,11 +744,11 @@
         </div>
     </div>
 
-    <!-- Edit-pick modal: fix units and/or log a ProphetX fill. X-ONLY for
-         odds (user call, July 2026): Polymarket entries AUTO-SYNC to the
-         real fill price when the maker fills, so the only odds a human
-         ever needs to type are ProphetX board odds ("I just type in what
-         I see") — the 2% win fee is baked in on save. -->
+    <!-- Edit-pick modal: fix units and/or the entry price. With the fill
+         auto-sync retired (Kalshi cutover, July 2026 — Pick Bot makes
+         picks, it doesn't track the user's orders), this is how a real
+         Kalshi fill that differs from the logged make price gets
+         corrected: type the fill in ¢ exactly as the app shows it. -->
     <div class="modal-bg" id="editModal">
         <div class="modal">
             <h3>Edit pick</h3>
@@ -787,10 +768,10 @@
                     </select>
                 </div>
                 <div class="field">
-                    <label>Filled on ProphetX? Your fill price in ¢, as the app shows it</label>
+                    <label>Real fill different? Your Kalshi fill in ¢</label>
                     <div style="display:flex;gap:8px;align-items:center;">
                         <input type="text" id="emPrice" inputmode="decimal" style="flex:1"
-                               oninput="_emPreview()" placeholder="e.g. 43.5" />
+                               oninput="_emPreview()" placeholder="e.g. 43" />
                         <span style="font-size:16px;font-weight:700;color:var(--text-muted)">¢</span>
                     </div>
                 </div>
@@ -863,90 +844,11 @@
     // gate shipped (Braves YRFI double-logged from a resumed phone tab).
     let _loggedPicksAt = 0;
     const _LP_FRESH_MS = 90_000;   // trust window before a tap re-syncs
-    // ── Polymarket fill tracking (ADMIN-ONLY) ──────────────────────────
-    // Closes the loop between a logged pick (intent) and the real order:
-    // the pending row + the green logged chip stay AMBER until the maker
-    // actually fills, flip to ✓ green when filled, and pulse a red TAKE
-    // warning when still unfilled ≤30m to tip. Non-PMM books (ProphetX
-    // manual odds) count as filled at log time — there's no API to poll.
-    // Fed by /api/handicapper/fill-status (admin_required — the SDK creds
-    // are the admin's own Polymarket account; other users have nothing to
-    // match against, so this whole surface no-ops for them).
-    let _fillStatus = new Map();   // pick_id -> fill entry
-    let _fillByMkt  = new Map();   // `${market_id}:${market_type}` -> fill entry
-    async function loadFillStatus() {
-        if (!_isAdmin) return;
-        try {
-            const r = await authFetch('/api/handicapper/fill-status');
-            const j = r ? await r.json() : null;
-            if (!j || !j.ok) return;
-            _fillStatus = new Map(); _fillByMkt = new Map();
-            (j.fills || []).forEach(f => {
-                _fillStatus.set(f.id, f);
-                if (f.market_id && f.market_type)
-                    _fillByMkt.set(f.market_id + ':' + f.market_type, f);
-            });
-            // Re-paint the two surfaces that show fill state.
-            if (_lastPending && _lastPending.length) {
-                document.getElementById('pendingList').innerHTML =
-                    _lastPending.map(x => _renderPick(x, 'pending')).join('');
-            }
-            _renderPickLines();
-        } catch (e) { /* fill status is decoration — never break the page */ }
-    }
-    // Fill chip for a pending row. unknown (SDK unreachable) renders nothing
-    // rather than a wrong "no order".
-    const _fmtCents = c => (c == null ? '?' : (c % 1 ? c.toFixed(1) : String(c)));
-    function _outbidTitle(f) {
-        let t = `Someone bid above your rest — bid is now ${_fmtCents(f.best_bid_c)}¢, `
-              + `yours sits at ${_fmtCents(f.my_price_c)}¢ and won't fill first.`;
-        if (f.ahead_qty) t += ` ${Number(f.ahead_qty).toLocaleString()} contracts ahead of you.`;
-        t += ` Re-rest at ${_fmtCents(f.best_bid_c)}¢+`;
-        if (f.best_ask_c != null) t += ` or take the ${_fmtCents(f.best_ask_c)}¢ ask`;
-        t += '.';
-        return t;
-    }
-    function _fillChipHtml(f) {
-        if (!f || !f.status || f.status === 'unknown') return '';
-        let html = '';
-        if (f.status === 'manual' || f.status === 'filled')
-            html = `<span class="chip fill ok" title="${f.status === 'manual'
-                ? 'Manual fill (odds typed in) — counted as filled'
-                : 'Polymarket order filled'}">✓ FILLED</span>`;
-        else if (f.status === 'partial')
-            html = `<span class="chip fill wait" title="Maker order partially filled">◔ ${Math.round(f.pct || 0)}% FILLED</span>`;
-        else if (f.status === 'resting')
-            html = `<span class="chip fill wait" title="Maker order resting on the book — not filled yet">◌ RESTING</span>`;
-        else if (f.status === 'none')
-            html = `<span class="chip fill miss" title="No matching Polymarket order found — not placed yet (or canceled)?">⚠ NO ORDER</span>`;
-        if (f.outbid)
-            html += `<span class="chip fill take" title="${_esc(_outbidTitle(f))}">⚠ OUTBID ${_fmtCents(f.best_bid_c)}¢ &gt; ${_fmtCents(f.my_price_c)}¢</span>`;
-        if (f.warn)
-            html += `<span class="chip fill take" title="Unfilled with tip ≤30m — a maker won't fill in time. TAKE the ask or miss the bet.">⚠ TAKE NOW</span>`;
-        return html;
-    }
-    // Decoration for a LOGGED games-list chip: amber ◌/◔ until the maker
-    // fills, green ✓ once filled, red ⚠ + pulse when unfilled near tip.
-    // Non-admins (and unknown status) keep the plain green ✓.
-    function _fillChipDecor(mid, mt) {
-        const f = _isAdmin ? _fillByMkt.get(mid + ':' + mt) : null;
-        if (!f || !f.status || f.status === 'unknown')
-            return { cls: '', mark: '✓', title: 'Already logged — open Details' };
-        if (f.status === 'filled' || f.status === 'manual')
-            return { cls: '', mark: '✓', title: 'Logged + FILLED on Polymarket' };
-        if (f.warn)
-            return { cls: ' unfilled take', mark: '⚠',
-                     title: 'Logged but NOT filled and tip is close — TAKE the ask or miss the bet' };
-        if (f.outbid)
-            return { cls: ' unfilled take', mark: '⚠', title: 'OUTBID — ' + _outbidTitle(f) };
-        if (f.status === 'partial')
-            return { cls: ' unfilled', mark: `◔ ${Math.round(f.pct || 0)}%`,
-                     title: 'Logged — maker order partially filled' };
-        return { cls: ' unfilled', mark: '◌',
-                 title: (f.status === 'none')
-                     ? 'Logged but no matching Polymarket order found — did you place it?'
-                     : 'Logged — maker order resting, not filled yet' };
-    }
+    // (Polymarket fill tracking — the fill-status fetch, pending-row fill
+    // chips, amber/green logged-chip states, outbid warnings — was RETIRED
+    // July 2026 with the Kalshi cutover: Kalshi notifies fills natively,
+    // and Pick Bot makes picks, it doesn't track the user's orders. A
+    // logged pick just shows the plain green ✓.)
     // Per-game bot VERDICT cache for the games list (admin/bot_access only).
     // {market_id: {picks:[{mt, units}], fetchedAt}} — `picks` is every
     // gate-cleared suggestion (+ NRFI bet side) with its recommended
@@ -1076,7 +978,7 @@
     // Prediction-market entry prices are quoted in CENTS = implied probability
     // (a resting maker share at 41¢ costs 41¢, pays $1). We store American odds,
     // so the log screen converts back to the venues' native unit: +144 → 41¢,
-    // -183 → 65¢. Poly / Kalshi / ProphetX are all cents-quoted makers, so the
+    // -183 → 65¢. Kalshi (and the exchanges generally) quote cents, so the
     // logged entry should read in cents, not American. Rounds to whole cents
     // (American storage has already dropped sub-cent precision).
     const _fmtEntryCents = p => {
@@ -1362,10 +1264,6 @@
                 </div>`;
         } else {
             sigChips.push(`<span class="chip kickoff">${_fmtKickoff(r.event_start)}</span>`);
-            // Polymarket fill state (admin-only — _fillStatus stays empty
-            // for everyone else): did the maker behind this pick fill?
-            const fc = _fillChipHtml(_fillStatus.get(r.id));
-            if (fc) sigChips.push(fc);
         }
 
         // Reason bullets + analysis stay in the DB (`reasons` /
@@ -1403,17 +1301,11 @@
     }
 
     // ── Edit-pick modal ────────────────────────────────────────────────
-    // Fix units and/or log a ProphetX fill on a pending pick. X-ONLY for
-    // odds (user call, July 2026): Polymarket entries AUTO-SYNC — when the
-    // maker fills, the check-fills cron / fill-status endpoint restamp
-    // entry_price to the real fill (rebate-adjusted) — so the only odds a
-    // human ever types here are ProphetX board odds ("I just type in what
-    // I see, not the REAL odds"); the 2% win fee (+2·p(1−p)¢) is baked in
-    // on save, same math as the log modal's X field. Typing odds also
-    // flips the pick's venue to PROPHETX (fill tracker → manual/filled).
-    // Odds left BLANK = units-only edit — we never seed the box with the
-    // stored entry, which is already fee-inclusive and would double-apply
-    // the fee on a blind re-save.
+    // Fix units and/or the entry price on a pending pick. With the fill
+    // auto-sync retired (Kalshi cutover July 2026), typing the REAL Kalshi
+    // fill in ¢ here is how a fill that differs from the logged make price
+    // gets corrected — Kalshi sports maker fee is $0, so the fill IS the
+    // effective entry (no fee math). Odds left BLANK = units-only edit.
     let _editCtx = null;
     function editPick(pickId, curUnits, btn, curPrice) {
         const row = (_lastPending || []).find(r => r.id === pickId) || null;
@@ -1427,8 +1319,8 @@
         const priceEl = document.getElementById('emPrice');
         priceEl.value = '';
         priceEl.placeholder = _editCtx.price != null
-            ? `now ${_fmtEntryCents(_editCtx.price)} — type X price in ¢ to move it`
-            : 'e.g. 43.5';
+            ? `now ${_fmtEntryCents(_editCtx.price)} — type your Kalshi fill in ¢ to move it`
+            : 'e.g. 43';
         _emStatus(null, '');
         _emPreview();
         document.getElementById('editModal').classList.add('show');
@@ -1437,8 +1329,8 @@
         document.getElementById('editModal').classList.remove('show');
         _editCtx = null;
     }
-    // Parse the ProphetX board price — in CENTS (implied probability), the
-    // number the X app shows. Same helper as the log modal's field.
+    // Parse the Kalshi fill price — in CENTS (implied probability), the
+    // number the app shows. Same helper as the log modal used.
     function _emParseOdds() {
         return _parseFillCents(document.getElementById('emPrice').value);
     }
@@ -1447,12 +1339,11 @@
         if (!el) return;
         const o = _emParseOdds();
         if (o.empty) {
-            el.textContent = 'Blank — only units will be saved. (Polymarket fills auto-sync their own price.)';
+            el.textContent = 'Blank — only units will be saved.';
             return;
         }
-        if (o.bad)   { el.textContent = 'Fill price must be in cents (1–99), e.g. 43.5.'; return; }
-        const eff = _pxEffFromCents(o.cents);
-        el.textContent = `X board ${o.cents}¢ → logs as ${eff.cents}¢ effective (2% win fee) · venue → ProphetX.`;
+        if (o.bad)   { el.textContent = 'Fill price must be in cents (1–99), e.g. 43.'; return; }
+        el.textContent = `Entry moves to ${o.cents}¢ (Kalshi maker fee is $0 — the fill is the effective entry).`;
     }
     function _emStatus(kind, msg) {
         const el = document.getElementById('emStatus');
@@ -1467,15 +1358,14 @@
         if (!_editCtx) return;
         const u = Number(document.getElementById('emUnits').value);
         const o = _emParseOdds();
-        if (o.bad) { _emStatus('err', 'Fill price must be in cents (1–99), e.g. 43.5.'); return; }
+        if (o.bad) { _emStatus('err', 'Fill price must be in cents (1–99), e.g. 43.'); return; }
         const payload = {};
         if (u !== _editCtx.units) payload.units = u;
         if (o.cents != null) {
-            const eff = _pxEffFromCents(o.cents);
-            payload.price = eff.amer;
-            payload.book = 'PROPHETX';   // flips the fill tracker to manual/filled
-            payload.execution = { rec: 'TAKE', venue: 'PROPHETX', manual: true,
-                                  fill_cents: o.cents, entry_cents: eff.cents };
+            payload.price = _centsToAmer(o.cents);
+            payload.book = 'KALSHI';
+            payload.execution = { venue: 'KALSHI', manual: true,
+                                  fill_cents: o.cents, entry_cents: o.cents };
         }
         if (!Object.keys(payload).length) { closeEdit(); return; }   // nothing changed
         const btn = document.getElementById('emSave');
@@ -1490,7 +1380,7 @@
             if (!out.ok) { _emStatus('err', 'Failed: ' + (out.error || 'unknown')); return; }
             closeEdit();
             _toast('Pick updated ✓');
-            loadData(false);                            // refresh chips + stats + fill state
+            loadData(false);                            // refresh chips + stats
         } catch (e) {
             _emStatus('err', 'Request failed: ' + e);
         } finally {
@@ -1815,16 +1705,13 @@
                     ? (p._lean ? `Lean — sharp gate not cleared. Tap to log ${p._chip}` : `Tap to log ${p._chip}`)
                     : (_canLog ? `Syncing your logged bets — tap for details` : `Tap for the full read`);
                 if (ps.state === 'logged') {
-                    // Fill-aware (admin): amber until the Polymarket maker
-                    // fills, green ✓ once filled, red ⚠ near tip.
                     // Label = YOUR logged bet (side + units), NOT the bot's
                     // current chip — sticky decay can re-size the suggestion
                     // (3u → 1u) after you logged, which made a logged 3u bet
                     // read "· 1u" (user caught it live on a Yankees ML).
-                    const dec = _fillChipDecor(mid, p.market_type);
-                    cls = 'logged' + dec.cls;
-                    label = dec.mark + ' ' + _loggedChipLabel(p.market_type, ps.logged.side, ps.logged.units, game);
-                    click = `pickGame('${mid}')`; title = dec.title;
+                    cls = 'logged';
+                    label = '✓ ' + _loggedChipLabel(p.market_type, ps.logged.side, ps.logged.units, game);
+                    click = `pickGame('${mid}')`; title = 'Already logged — open Details';
                 } else if (ps.state === 'upgrade') {
                     cls = 'upgrade'; label = '↑ ' + p._chip; title = `Add up to ${_uStr(p.units)}`;
                 }
@@ -1837,8 +1724,7 @@
                 lp.forEach((info, mt) => {
                     if (renderedMt.has(mt)) return;
                     const label = _loggedChipLabel(mt, info.side, info.units, game);
-                    const dec = _fillChipDecor(mid, mt);
-                    chips.push(`<button class="pick-chip logged${dec.cls}" title="${_esc(dec.title)}" onclick="pickGame('${mid}')"><span class="pc-main">${dec.mark} ${_esc(label)}</span></button>`);
+                    chips.push(`<button class="pick-chip logged" title="Already logged — open Details" onclick="pickGame('${mid}')"><span class="pc-main">✓ ${_esc(label)}</span></button>`);
                 });
             }
             _applyRowPrime(_row, startIso);
@@ -1895,7 +1781,7 @@
             }
         }
         return {
-            market_id: mid, market_type: s.market_type, side: s.side, book: 'PMM',
+            market_id: mid, market_type: s.market_type, side: s.side, book: 'KALSHI',
             price, line: (line != null ? line : null),
             units: s.units, confidence: s.confidence,
             fair_prob: s.fair_prob ?? null, edge_pp: s.edge_pp ?? null,
@@ -1911,10 +1797,7 @@
                 sticky: !!s.sticky, gates_cleared: !!s.gates_cleared,
                 test_only: !!s.test_only,
                 model_total_diff: s.model_total_diff ?? null,
-                conflict_reason: s.conflict_reason ?? null,
-                // PMM market identity — lets the fill tracker match this
-                // pick to the real Polymarket order by exact slug.
-                pmm: { slug: s.pmm_slug || null, synthetic: !!s.pmm_synthetic } },
+                conflict_reason: s.conflict_reason ?? null },
             allow_duplicate: true,
             _line: line, _price: price,
         };
@@ -1963,7 +1846,7 @@
                             if (!s.gates_cleared) chip = '~ ' + chip;
                             return { market_type: s.market_type, side: s.side, units: Number(s.units) || 1,
                                      _chip: chip, _tw: s.timing_window || null, _lean: !s.gates_cleared,
-                                     _slug: s.pmm_slug || null, _inv: !!s.pmm_synthetic, _body: body };
+                                     _body: body };
                         });
                         // NRFI: actionable only when the model found a +EV side.
                         // Sized 1u now (the 0.5u restriction was removed — NRFI
@@ -1974,14 +1857,12 @@
                             const price = (pb.bid_american != null) ? pb.bid_american
                                 : (side === 'no' ? d.nrfi.nrfi_fair_american : d.nrfi.yrfi_fair_american);
                             picks.push({ market_type: 'nrfi', side, units: 1,
-                                _slug: pb.slug || null, _inv: !!pb.synthetic,
                                 _chip: _pickChipLabel('nrfi', side, null, price, 1, d),
-                                _body: { market_id: mid, market_type: 'nrfi', side, book: 'PMM',
+                                _body: { market_id: mid, market_type: 'nrfi', side, book: 'KALSHI',
                                     price, line: null, units: 1, confidence: 'low',
                                     fair_prob: (side === 'no' ? d.nrfi.p_nrfi : d.nrfi.p_yrfi),
                                     edge_pp: (pb.edge_pp != null ? pb.edge_pp : null), sharp_score: null,
                                     reasons: d.nrfi.reasons || [], query_text: d.query || null,
-                                    signal_blob: { pmm: { slug: pb.slug || null, synthetic: !!pb.synthetic } },
                                     allow_duplicate: true } });
                         }
                         // UFC Fight IQ duration family — distance prop + round
@@ -1999,15 +1880,15 @@
                                     ? (bet.side === 'yes' ? 'goes the distance' : 'finish inside distance')
                                     : `${bet.side} ${_fmtPt(line)} rounds`;
                                 picks.push({ market_type: mt, side: bet.side, units: 1,
-                                    _slug: bet.slug || null, _inv: false, _ufc: true,
+                                    _ufc: true,
                                     _chip: _pickChipLabel(mt, bet.side, line, bet.entry_american, 1, d),
-                                    _body: { market_id: mid, market_type: mt, side: bet.side, book: 'PMM',
+                                    _body: { market_id: mid, market_type: mt, side: bet.side, book: 'KALSHI',
                                         price: bet.entry_american, line, units: 1, confidence: 'low',
                                         fair_prob: null, edge_pp: (bet.edge_pp != null ? bet.edge_pp : null),
                                         sharp_score: null,
                                         reasons: [`Fight IQ edge ${bet.edge_pp >= 0 ? '+' : ''}${bet.edge_pp}pp on ${desc}`],
                                         query_text: d.query || null,
-                                        signal_blob: { fight_iq: true, kind, pmm: { slug: bet.slug || null, synthetic: false } },
+                                        signal_blob: { fight_iq: true, kind },
                                         allow_duplicate: true } });
                             });
                         }
@@ -2022,10 +1903,9 @@
     }
 
     // Quick-bet chip on the games list. Was a true one-tap auto-log; as of
-    // July 2026 (user call, after logging real ProphetX fills) it opens the
-    // SAME log modal Details uses — pre-filled from the prefetched verdict
-    // body — so the optional ProphetX fill-odds field is available on quick
-    // bets too. submitLog() uses _pendingBody as the base for this path.
+    // July 2026 it opens the SAME log modal Details uses — pre-filled from
+    // the prefetched verdict body — so the Kalshi execution line is shown
+    // before every log. submitLog() uses _pendingBody as the base here.
     async function oneTapLog(mid, idx) {
         if (!_canLog) return;
         // Belt + suspenders with _renderPickLines' canTapLog: if the logged-
@@ -2062,16 +1942,15 @@
         document.getElementById('lmConfidence').value = p._body.confidence || 'low';
         document.getElementById('lmReasons').value    = (p._body.reasons || []).join('\n');
         document.getElementById('lmAnalysis').value   = '';
-        _pxReset();
         _lmStatus(null, '');
         document.getElementById('logModal').classList.add('show');
         // Execution line: game context from the list row + active sport.
         let sim = g.event_start ? Math.round((Date.parse(g.event_start) - Date.now()) / 60000) : null;
         if (sim != null && !isFinite(sim)) sim = null;
-        _lmLoadExec(p._slug ? { slug: p._slug, mid, mt: p.market_type, side: p.side,
+        _lmLoadExec({ mid, mt: p.market_type, side: p.side,
             units: p._body.units || p.units || 1, sim,
-            inverse: !!p._inv, line: (p._body.line != null ? p._body.line : null),
-            ctx: { sport: _activeSport, away: g.away, home: g.home } } : null);
+            line: (p._body.line != null ? p._body.line : null),
+            ctx: { sport: _activeSport, away: g.away, home: g.home } });
         _lmRefreshSeed(mid, p);
     }
 
@@ -2099,16 +1978,11 @@
                 const pb = (n.polymarket || {})[p.side] || {};
                 const price = (pb.bid_american != null) ? pb.bid_american
                     : (p.side === 'no' ? n.nrfi_fair_american : n.yrfi_fair_american);
-                body = { market_id: mid, market_type: 'nrfi', side: p.side, book: 'PMM',
+                body = { market_id: mid, market_type: 'nrfi', side: p.side, book: 'KALSHI',
                     price, line: null, units: 1, confidence: 'low',
                     fair_prob: (p.side === 'no' ? n.p_nrfi : n.p_yrfi),
                     edge_pp: (pb.edge_pp != null ? pb.edge_pp : null), sharp_score: null,
                     reasons: n.reasons || [], query_text: d.query || null,
-                    // Keep the fill-tracker match key — this refreshed body
-                    // REPLACES the chip's seeded one, and omitting the pmm
-                    // stamp here is what logged NRFI picks with pmm:null
-                    // (breaking exact fill matching + entry auto-sync).
-                    signal_blob: { pmm: { slug: pb.slug || null, synthetic: !!pb.synthetic } },
                     allow_duplicate: true, _line: null, _price: price };
             } else {
                 const sugg = d.suggestions || (d.suggestion ? [d.suggestion] : []);
@@ -2609,13 +2483,11 @@
                     </div>
                     ${(s.edge_pp != null && s.edge_pp > 0) ? `<div class="pick-kelly">est. edge +${Number(s.edge_pp).toFixed(1)}pp${s.kelly_pct ? ` · ¼-Kelly ${Number(s.kelly_pct).toFixed(1)}% BR` : ''} → ${s.units}u</div>` : ''}
                     <div class="pick-meta">${metaLine}</div>
-                    ${(s.pmm_slug && s.gates_cleared) ? `<div class="mt-wrap"
-                        data-slug="${_esc(s.pmm_slug)}"
+                    ${s.gates_cleared ? `<div class="mt-wrap"
                         data-mid="${_esc(d.market_id || '')}"
                         data-side="${_esc(s.side)}"
                         data-units="${s.units}"
                         data-sim="${d.starts_in_min != null ? d.starts_in_min : ''}"
-                        data-inverse="${s.pmm_synthetic ? 1 : ''}"
                         data-mt="${_esc(s.market_type)}"
                         data-line="${s.line != null ? s.line : ''}"
                         data-sport="${_esc(d.sport || '')}"
@@ -3042,34 +2914,33 @@
     }
 
     // ── Make-vs-take execution chip ───────────────────────────────────
-    // Live order-book verdict per suggested side. MAKE = rest a maker on
-    // Polymarket at the bid (fee-free, the best price); TAKE = cross now —
-    // routed to the cheapest US-legal venue (Polymarket fee-inclusive ask
-    // vs the sportsbook pool). Driven by /api/handicapper/make-take, which
-    // weighs top-of-book imbalance + the clock (near tip → take). The chip
-    // is the directive; .mt-detail carries the full read. The latest result
-    // is cached per (mid:mt:side) so a one-tap log enters at the rec (make→bid,
-    // take→PMM fee-inclusive ask) — see _applyMakeTakeToBody. Polymarket-only.
+    // Live Kalshi order-book verdict per suggested side (Kalshi is THE
+    // execution venue — July 2026 cutover; ProphetX is dead and the Poly
+    // leg is dormant server-side). MAKE = rest at the bid (sports maker
+    // fee $0); MAKE+ = rest at bid+1¢ (step in front of the queue); TAKE
+    // = cross at the fee-inclusive ask (7%·p(1−p), steep — avoid unless
+    // the book/clock say a maker won't fill). Driven by
+    // /api/handicapper/make-take, which weighs top-of-book imbalance +
+    // the clock. The chip is the directive; .mt-detail carries the full
+    // read. The latest result is cached per (mid:mt:side) so a log
+    // enters at the rec — see _applyMakeTakeToBody.
     const _makeTakeCache = new Map();   // "mid:mt:side" -> make-take JSON
 
     function _mtKey(mid, mt, side) { return `${mid}:${mt}:${side}`; }
 
-    // Fetch one make/take verdict (used by the games-list prefetch so the
-    // "this way" pill rides the chip). Caches in _makeTakeCache so a one-tap
-    // log enters at the rec. ctx = {sport, away, home} lets the backend
-    // consult Kalshi for moneyline. Returns the JSON or null.
-    async function _fetchMakeTakeVerdict(slug, mid, mt, side, units, sim, inverse, ctx, line) {
-        if (!slug) return null;
-        const p = new URLSearchParams({ slug });
+    // Fetch one make/take verdict. Caches in _makeTakeCache so a log
+    // enters at the rec. ctx = {sport, away, home} identifies the game for
+    // the Kalshi book lookup (required — no PMM slug involved anymore).
+    // Returns the JSON or null.
+    async function _fetchMakeTakeVerdict(mid, mt, side, units, sim, ctx, line) {
+        if (!ctx || !ctx.sport || !ctx.away || !ctx.home) return null;
+        const p = new URLSearchParams({
+            sport: ctx.sport, away: ctx.away, home: ctx.home });
         if (units != null) p.set('units', units);
         if (sim != null && sim !== '') p.set('starts_in_min', sim);
-        if (inverse) p.set('inverse', '1');   // synthetic NO side — flip the book
         if (mt) p.set('market_type', mt);
         if (side) p.set('side', side);
         if (line != null && line !== '') p.set('line', line);   // TOT/SPR Kalshi match
-        if (ctx && ctx.sport) p.set('sport', ctx.sport);
-        if (ctx && ctx.away) p.set('away', ctx.away);
-        if (ctx && ctx.home) p.set('home', ctx.home);
         try {
             const r = await authFetch('/api/handicapper/make-take?' + p.toString());
             const j = await r.json();
@@ -3079,23 +2950,17 @@
         } catch (e) { return null; }
     }
 
-    // Short directive for the game-card pill: "MAKE Polymarket 46¢" / "TAKE
-    // Kalshi 49¢" — the cheapest fillable across BOTH venues. The full read
-    // (all four options) lives on Details.
-    // Show the half-cent when there is one (MAKE+ rests at 47.5¢ — rounding
-    // it to 48 would tell you the wrong place to post).
+    // Short directive for the chip: "MAKE Kalshi 46¢" / "TAKE Kalshi 49¢".
     function _mtCents(v) { return Number.isInteger(Number(v)) ? String(v) : Number(v).toFixed(1); }
 
     function _mtShort(j) {
         if (!j || !j.available || j.price == null) return null;
-        return `${j.rec} ${j.venue_label || 'Polymarket'} ${_mtCents(j.price)}¢`;
+        return `${j.rec} ${j.venue_label || 'Kalshi'} ${_mtCents(j.price)}¢`;
     }
 
     // Raw make odds (the resting-bid price you'd post, in cents) per venue,
-    // sorted BEST-FIRST (lowest cents = cheapest entry = best odds). We do NOT
-    // fee-adjust the cross-venue comparison anymore: Polymarket's maker rebate
-    // is offset by Kalshi's balance interest, so the honest decision is the
-    // RAW resting-bid price. Returns [{venue, cents}] best-first.
+    // sorted BEST-FIRST (lowest cents = cheapest entry = best odds).
+    // Kalshi-only now, but kept venue-generic for the whiplash revert.
     function _rawMakes(j) {
         const byV = {};
         (j && j.options || []).forEach(o => {
@@ -3106,23 +2971,9 @@
                      .sort((a, b) => a.cents - b.cents);
     }
 
-    // ProphetX board price (cents) at which X's 2%-of-winnings fee-inclusive
-    // cost equals `targetCents` — i.e. the number your X app must beat to win
-    // the bet. X pays NO interest, so its fee IS a real cost and is counted
-    // here (2·p(1−p)¢); Poly/Kalshi makes are compared RAW. Two fixed-point
-    // passes converge to <0.1¢, same as the server helper.
-    function _prophetxBeat(targetCents) {
-        if (targetCents == null || !(targetCents > 1 && targetCents < 99)) return null;
-        const fee = c => { const p = c / 100; return 2 * p * (1 - p); };
-        let e = targetCents - fee(targetCents);
-        e = targetCents - fee(e);
-        return Math.round(e * 10) / 10;
-    }
-
     // Fill-price entry is in CENTS (implied probability) — the number the
-    // exchange app shows (Poly/Kalshi/ProphetX all quote cents). Parse a plain
-    // cents value (1–99, half-cents ok); no sign, no American. Returns
-    // {empty}|{bad}|{cents}.
+    // Kalshi app shows. Parse a plain cents value (1–99); no sign, no
+    // American. Returns {empty}|{bad}|{cents}.
     function _parseFillCents(raw) {
         raw = (raw || '').trim();
         if (!raw) return { empty: true };
@@ -3130,38 +2981,28 @@
         if (!isFinite(c) || !(c > 0 && c < 100)) return { bad: true };
         return { cents: Math.round(c * 10) / 10 };
     }
-    // ProphetX effective all-in from a board price in cents: adds their
-    // 2%-of-net-winnings fee (≈ 2·p(1−p)¢, win-only). Returns {cents, amer} —
-    // amer is stored so CLV/to-WIN stay in the same units the resolver expects.
-    function _pxEffFromCents(cents) {
-        const p = cents / 100;
-        const eff = cents + 2 * p * (1 - p);
-        return { cents: Math.round(eff * 10) / 10, amer: _centsToAmer(eff) };
-    }
 
     function _loadAllMakeTake(root) {
         if (!_canBet) return;
-        (root || document).querySelectorAll('.mt-wrap[data-slug]').forEach(_loadMakeTake);
+        (root || document).querySelectorAll('.mt-wrap[data-mid]').forEach(_loadMakeTake);
     }
 
     async function _loadMakeTake(wrap) {
-        const slug = wrap.getAttribute('data-slug');
-        if (!slug) return;
         const chip = wrap.querySelector('.mt-chip');
         const detail = wrap.querySelector('.mt-detail');
         const mid = wrap.getAttribute('data-mid');
         const mt  = wrap.getAttribute('data-mt');
         const side = wrap.getAttribute('data-side');
-        const p = new URLSearchParams({ slug });
+        const sport = wrap.getAttribute('data-sport');
+        const away = wrap.getAttribute('data-away');
+        const home = wrap.getAttribute('data-home');
+        if (!sport || !away || !home) { wrap.style.display = 'none'; return; }
+        const p = new URLSearchParams({ sport, away, home });
         const units = wrap.getAttribute('data-units'); if (units) p.set('units', units);
         const sim = wrap.getAttribute('data-sim');     if (sim !== '' && sim != null) p.set('starts_in_min', sim);
-        if (wrap.getAttribute('data-inverse')) p.set('inverse', '1');  // synthetic NO side
         if (mt) p.set('market_type', mt);
         if (side) p.set('side', side);
         const ln = wrap.getAttribute('data-line'); if (ln !== '' && ln != null) p.set('line', ln);
-        ['sport', 'away', 'home'].forEach(k => {
-            const v = wrap.getAttribute('data-' + k); if (v) p.set(k, v);
-        });
         try {
             const r = await authFetch('/api/handicapper/make-take?' + p.toString());
             const j = await r.json();
@@ -3174,13 +3015,13 @@
     function _renderMakeTakeChip(chip, detail, j) {
         if (!chip) return;
         chip.className = 'mt-chip ' + (String(j.rec).indexOf('MAKE') === 0 ? 'make' : 'take');
-        chip.innerHTML = `<span class="mt-tag">${_esc(j.rec)}</span> ${_esc(j.venue_label || 'Polymarket')} ${_mtCents(j.price)}¢`;
+        chip.innerHTML = `<span class="mt-tag">${_esc(j.rec)}</span> ${_esc(j.venue_label || 'Kalshi')} ${_mtCents(j.price)}¢`;
         if (detail) detail.innerHTML = _esc(_makeTakeDetail(j));
     }
 
-    // The full read for Details: the chosen venue/side's book + every one of
-    // the four options (MAKE/TAKE × Polymarket/Kalshi) all-in, so you can see
-    // why the cheapest fillable won. Quiet on the chip, verbose here.
+    // The full read for Details: the Kalshi book + every option (MAKE /
+    // MAKE+ / TAKE) all-in, so you can see why the cheapest fillable won.
+    // Quiet on the chip, verbose here.
     function _makeTakeDetail(j) {
         const bits = [];
         const n = x => Number(x).toLocaleString();
@@ -3195,40 +3036,29 @@
         let s = bits.join(' · ');
         const why = (j.why || [])[0];
         if (why) s += (s ? '\n' : '') + why;
-        // ProphetX manual cross-shop: no feed, so this is a THRESHOLD the
-        // user checks against their app — their board better than this
-        // (2%-of-winnings fee already baked in) → take there instead.
-        if (j.prophetx && j.prophetx.beat_american != null) {
-            const a = j.prophetx.beat_american;
-            s += (s ? '\n' : '') + `ProphetX beats this at ${a > 0 ? '+' + a : a} or better `
-               + `(2% win fee incl.) — else ${j.rec} ${j.venue_label || 'Polymarket'}`;
-        }
         return s;
     }
 
-    // Fold the chosen execution into the log body so entry_price + entry_book
-    // follow the BEST RAW MAKE across venues (lowest cents = best odds). The
-    // fee-adjusted all-in comparison is retired: Poly's maker rebate is offset
-    // by Kalshi's balance interest, so cross-venue routing is on raw resting-
-    // bid odds. Tie → Polymarket (main venue, dashboard P&L); Kalshi wins only
-    // when it's strictly cheaper. entry_price = the raw make (american, so
-    // CLV/to-WIN stay honest). signal_blob.execution keeps the full read.
+    // Fold the chosen execution into the log body: entry_book = KALSHI
+    // (the only execution venue — "the bet log is easy, it's Kalshi only"),
+    // entry_price = the best make (american, so CLV/to-WIN stay honest;
+    // Kalshi sports maker fee is $0 so the make IS the effective entry).
+    // No verdict cached (no Kalshi market) → the seeded dossier price
+    // stands, still logged as KALSHI. signal_blob.execution keeps the read.
     function _applyMakeTakeToBody(body) {
         if (!body || !body.market_id) return body;
+        body.book = 'KALSHI';
         const j = _makeTakeCache.get(_mtKey(body.market_id, body.market_type, body.side));
         if (!j || !j.available) return body;
         const makes = _rawMakes(j);            // [{venue, cents}], best-first
-        if (!makes.length) return body;        // no bid anywhere → keep seeded price
-        const best = makes[0];
-        const poly = makes.find(m => m.venue === 'POLYMARKET');
-        const chosen = (poly && poly.cents <= best.cents) ? poly : best;
-        body.book = (chosen.venue === 'KALSHI') ? 'KALSHI' : 'PMM';
+        if (!makes.length) return body;        // no bid → keep seeded price
+        const chosen = makes[0];
         const amer = _centsToAmer(chosen.cents);
         if (amer != null) { body.price = amer; body._price = amer; }
         body.signal_blob = Object.assign({}, body.signal_blob, {
-            execution: { rec: 'MAKE', venue: chosen.venue,
+            execution: { rec: 'MAKE', venue: 'KALSHI',
                          make_cents: chosen.cents, entry_cents: chosen.cents,
-                         entry_book: body.book, makes: makes,
+                         entry_book: 'KALSHI',
                          options: j.options || [] } });
         return body;
     }
@@ -3410,11 +3240,11 @@
     }
 
     // Seed an ad-hoc pick from a market panel side the bot didn't
-    // suggest. Pulls PIN devigged fair as the Polymarket target so the
-    // entry math matches what bot-suggested picks do (book='PMM',
-    // price=fair_american). Defaults to 1u/low — there's no bot signal
-    // to justify higher sizing on a side the bot rejected. User can
-    // bump units in the log modal if they have qualitative reasons.
+    // suggest. Pulls the exchange devigged fair as the target so the
+    // entry math matches what bot-suggested picks do (book='KALSHI',
+    // price=exchange bid/fair). Defaults to 1u/low — there's no bot
+    // signal to justify higher sizing on a side the bot rejected. User
+    // can bump units in the log modal if they have qualitative reasons.
     function pickSideFromGrid(mt, side) {
         if (!_lastDossier) return;
         const blk = (_lastDossier.odds || {})[mt] || {};
@@ -3441,21 +3271,18 @@
             market_id:   _lastDossier.market_id,
             market_type: mt,
             side:        side,
-            book:        'PMM',
+            book:        'KALSHI',
             price:       entryPrice,
             line:        entryLine,
             fair_prob:   entryProb,
             edge_pp:     null,
             sharp_score: isMvSide ? (mv.x_score || 0) : 0,
-            label:       `${_shortMarket(mt)} ${sideName} @ ${pmmBid != null ? 'Poly bid' : 'exchange fair'} ${_fmtAmer(entryPrice)}${entryLine != null ? ' ' + _fmtPt(entryLine) : ''}`
+            label:       `${_shortMarket(mt)} ${sideName} @ ${pmmBid != null ? 'exch bid' : 'exchange fair'} ${_fmtAmer(entryPrice)}${entryLine != null ? ' ' + _fmtPt(entryLine) : ''}`
                          + _selGameFrag(mt, _lastDossier.away, _lastDossier.home),
             seed_units:  1,
             seed_conf:   'low',
-            pmm_slug:      (pmm && pmm.slug) || null,   // fill-tracker match key
-            pmm_synthetic: !!(pmm && pmm.synthetic),
         };
         _pendingBody = null;   // never inherit a stale quick-bet base
-        _pxReset();
         document.getElementById('lmSelection').value  = _pendingPick.label;
         document.getElementById('lmUnits').value      = '1';
         document.getElementById('lmConfidence').value = 'low';
@@ -3463,11 +3290,11 @@
         document.getElementById('lmAnalysis').value   = '';
         _lmStatus(null, '');
         document.getElementById('logModal').classList.add('show');
-        _lmLoadExec((pmm && pmm.slug) ? { slug: pmm.slug, mid: _lastDossier.market_id,
+        _lmLoadExec({ mid: _lastDossier.market_id,
             mt, side, units: 1,
             sim: (_lastDossier.starts_in_min != null ? _lastDossier.starts_in_min : null),
-            inverse: !!pmm.synthetic, line: (entryLine != null ? entryLine : null),
-            ctx: { sport: _lastDossier.sport, away: _lastDossier.away, home: _lastDossier.home } } : null);
+            line: (entryLine != null ? entryLine : null),
+            ctx: { sport: _lastDossier.sport, away: _lastDossier.away, home: _lastDossier.home } });
     }
 
     function logNrfi(side) {
@@ -3489,7 +3316,7 @@
             market_id:   _lastDossier.market_id,
             market_type: 'nrfi',
             side:        side,
-            book:        'PMM',
+            book:        'KALSHI',
             price:       makerEntry,
             line:        null,
             fair_prob:   prob,
@@ -3499,11 +3326,8 @@
                          + _selGameFrag('nrfi', _lastDossier.away, _lastDossier.home),
             seed_units:  1,
             seed_conf:   'low',
-            pmm_slug:      (pb && pb.slug) || null,     // fill-tracker match key
-            pmm_synthetic: !!(pb && pb.synthetic),
         };
         _pendingBody = null;   // never inherit a stale quick-bet base
-        _pxReset();
         document.getElementById('lmSelection').value  = _pendingPick.label;
         document.getElementById('lmUnits').value      = '1';
         document.getElementById('lmConfidence').value = 'low';
@@ -3518,11 +3342,13 @@
             _lmStatus('warn', `Heads up — you already have ${_nrfiSideLabel(_st.logged.side)} `
                 + `${_uStr(_st.logged.units)} pending on this game. Logging again adds a second bet.`);
         document.getElementById('logModal').classList.add('show');
-        _lmLoadExec((pb && pb.slug) ? { slug: pb.slug, mid: _lastDossier.market_id,
+        // NRFI has no Kalshi market (first-inning is a PMM-only contract) —
+        // _lmLoadExec will render "No Kalshi market found for this bet."
+        _lmLoadExec({ mid: _lastDossier.market_id,
             mt: 'nrfi', side, units: 1,
             sim: (_lastDossier.starts_in_min != null ? _lastDossier.starts_in_min : null),
-            inverse: !!pb.synthetic, line: null,
-            ctx: { sport: _lastDossier.sport, away: _lastDossier.away, home: _lastDossier.home } } : null);
+            line: null,
+            ctx: { sport: _lastDossier.sport, away: _lastDossier.away, home: _lastDossier.home } });
     }
 
     // Fight IQ duration pick (UFC). kind: 'distance' (market_type 'distance',
@@ -3545,7 +3371,7 @@
             market_id:   _lastDossier.market_id,
             market_type: mt,
             side:        side,
-            book:        'PMM',
+            book:        'KALSHI',
             price:       bet.entry_american,
             line:        line,
             fair_prob:   null,
@@ -3555,11 +3381,8 @@
                          + _selGameFrag(mt, _lastDossier.away, _lastDossier.home),
             seed_units:  1,
             seed_conf:   'low',
-            pmm_slug:      bet.slug || null,
-            pmm_synthetic: false,
         };
         _pendingBody = null;
-        _pxReset();
         document.getElementById('lmSelection').value  = _pendingPick.label;
         document.getElementById('lmUnits').value      = '1';
         document.getElementById('lmConfidence').value = 'low';
@@ -3611,22 +3434,24 @@
                 return;
             }
         }
-        // Polymarket execution: entry_book = "PMM", entry_price = PIN
-        // devigged fair (the limit-order target). edge_pp omitted — we
-        // don't compute retail edges anymore.
+        // Kalshi execution: entry_book = "KALSHI". The seeded price is the
+        // exchange maker bid (the dossier's PMM quote — venues price within
+        // 2¢); _applyMakeTakeToBody overrides it with the LIVE Kalshi make
+        // at submit when the verdict is cached. edge_pp omitted — we don't
+        // compute retail edges anymore.
         _pendingPick = s ? {
             market_id:   _lastDossier.market_id,
             market_type: s.market_type,
             side:        s.side,
-            book:        'PMM',
-            // Maker entry: we rest a limit on the PMM bid and fill there, so
+            book:        'KALSHI',
+            // Maker entry: we rest a limit at the bid and fill there, so
             // log the BID as the entry — that's our real maker price, better
             // than the fair/ask, and it's what CLV + to-win profit key off.
-            // Falls back to the projected fair when PMM has no live bid.
+            // Falls back to the projected fair when there's no live bid.
             price:       (s.pmm_bid_american != null ? s.pmm_bid_american : s.fair_american),
-            // Use PMM line when projection available, else PIN line.
-            // Matches the entry_price (s.fair_american), which is
-            // already PMM-projected when PMM has a market.
+            // Use the exchange line when available, else PIN line. Matches
+            // the entry_price, which is already exchange-projected when the
+            // exchange has a market.
             line:        (s.pmm_line != null ? s.pmm_line : s.pin_line),
             fair_prob:   s.fair_prob,
             edge_pp:     s.edge_pp ?? null,
@@ -3634,8 +3459,6 @@
             label:       _suggestLabel(s, _lastDossier),
             seed_units:  s.units,
             seed_conf:   s.confidence,
-            pmm_slug:      s.pmm_slug || null,          // fill-tracker match key
-            pmm_synthetic: !!s.pmm_synthetic,
         } : _seedManual(_lastDossier);
         if (!_pendingPick) return;
 
@@ -3651,58 +3474,45 @@
         document.getElementById('lmConfidence').value = _pendingPick.seed_conf || 'medium';
         document.getElementById('lmReasons').value    = _buildReasons(_pendingPick, _lastDossier).join('\n');
         document.getElementById('lmAnalysis').value   = '';
-        _pxReset();
         _pendingBody = null;   // dossier path — never inherit a quick-bet base
         _lmStatus(null, '');
         document.getElementById('logModal').classList.add('show');
         const d = _lastDossier;
-        _lmLoadExec((s && s.pmm_slug) ? { slug: s.pmm_slug, mid: d.market_id,
+        _lmLoadExec(s ? { mid: d.market_id,
             mt: s.market_type, side: s.side, units: s.units,
             sim: (d.starts_in_min != null ? d.starts_in_min : null),
-            inverse: !!s.pmm_synthetic, line: (s.line != null ? s.line : null),
+            line: (s.line != null ? s.line : null),
             ctx: { sport: d.sport, away: d.away, home: d.home } } : null);
     }
-    // Execution line in the log modal (July 2026, user: "lay it out VERY
-    // simple — the engine's Poly make/take verdict + the ProphetX number
-    // that beats it"). One line each: where to bet on Poly (American +
-    // cents), and the ProphetX American-odds threshold (2% win fee baked
-    // in) to eyeball against their app before logging. Rides
+    // Execution line in the log modal: the Kalshi verdict — where to rest
+    // the maker (or the fee-inclusive take when the book/clock say a maker
+    // won't fill) + the Pinnacle reference line. Rides
     // _fetchMakeTakeVerdict, which also CACHES the verdict — so submitLog's
     // _applyMakeTakeToBody enters at the live rec for quick-bet logs too.
-    // Pass null to hide (manual/grid paths with no PMM slug).
+    // Pass null to hide. "No Kalshi market" renders as text (not hidden) —
+    // if Kalshi doesn't list it, there's nothing to execute and the user
+    // should know before logging.
     let _lmExecSeq = 0;
     async function _lmLoadExec(o) {
         const wrap = document.getElementById('lmExecWrap');
         const el = document.getElementById('lmExec');
         if (!wrap || !el) return;
         const seq = ++_lmExecSeq;
-        if (!o || !o.slug) { wrap.style.display = 'none'; el.textContent = ''; return; }
+        if (!o || !o.ctx || !o.ctx.sport) { wrap.style.display = 'none'; el.textContent = ''; return; }
         wrap.style.display = '';
-        el.textContent = 'checking books…';
-        const j = await _fetchMakeTakeVerdict(o.slug, o.mid, o.mt, o.side,
-            o.units, o.sim, o.inverse, o.ctx, o.line);
+        el.textContent = 'checking book…';
+        const j = await _fetchMakeTakeVerdict(o.mid, o.mt, o.side,
+            o.units, o.sim, o.ctx, o.line);
         if (seq !== _lmExecSeq) return;   // superseded by a newer modal open
-        if (!j || j.price == null) { wrap.style.display = 'none'; el.textContent = ''; return; }
-        const lbl = { POLYMARKET: 'Poly', KALSHI: 'Kalshi' };
-        // Raw make odds, best (cheapest cents) FIRST. No fee adjustment on the
-        // cross-venue compare — Poly's maker rebate is offset by Kalshi's
-        // balance interest, so the honest number is the raw resting bid.
-        const makes = _rawMakes(j);
-        let s;
-        if (makes.length) {
-            s = makes.map(m => `${lbl[m.venue] || m.venue} ${_mtCents(m.cents)}¢`).join(' · ');
-        } else {
-            // No bid on any venue — fall back to the engine's directive cents
-            // so the panel isn't blank.
-            s = `${j.venue_label || 'Polymarket'} ${_mtCents(j.price)}¢`;
+        if (!j || j.price == null) {
+            el.textContent = 'No Kalshi market found for this bet.';
+            return;
         }
-        // ProphetX beats the exchanges when its fee-inclusive cost clears the
-        // BEST (cheapest) raw make. X pays no interest, so its 2% win fee is a
-        // real cost and IS counted; the exchange makes are compared raw.
-        const target = makes.length ? makes[0].cents : null;
-        const px = _prophetxBeat(target);
-        if (px != null)
-            s += `\nProphetX ${_mtCents(px)}¢ or better beats ${makes.length > 1 ? 'both' : 'it'} (2% win fee incl.)`;
+        let s = `${j.rec} at ${_mtCents(j.price)}¢`
+            + (j.best_bid != null && j.best_ask != null
+                ? ` · book ${_mtCents(j.best_bid)}¢/${_mtCents(j.best_ask)}¢` : '');
+        const why = (j.why || [])[0];
+        if (why) s += `\n${why}`;
         // Pinnacle reference (cached parlay-api slate, zero credits) — the
         // sharp book's number: "am I getting a decent line?" Ages past 30m flagged.
         if (j.pin && j.pin.price != null) {
@@ -3714,15 +3524,10 @@
         }
         el.textContent = s;
     }
-    // ProphetX fill price is entered in cents (see the field) — no sign toggle.
-    function _pxReset() {
-        const px = document.getElementById('lmPxPrice'); if (px) px.value = '';
-    }
     function closeLog() {
         document.getElementById('logModal').classList.remove('show');
         _pendingPick = null;
         _pendingBody = null;
-        _pxReset();
         _lmLoadExec(null);   // hide + cancel any in-flight execution fetch
     }
     // Transient confirmation toast (bottom-center). Used after logging a
@@ -3901,13 +3706,13 @@
             market_id:   d.market_id,
             market_type: 'moneyline',
             side:        choice.side,
-            book:        'PMM',
+            book:        'KALSHI',
             price:       (pmmBid != null ? pmmBid : choice.pin.fair_american),
             line:        null,
             fair_prob:   choice.pin.fair_prob,
             edge_pp:     null,
             sharp_score: (ml.movement || {}).sharp_score,
-            label:       `ML · ${sideName} @ ${_fmtAmer(choice.pin.fair_american)} (Poly target)`,
+            label:       `ML · ${sideName} @ ${_fmtAmer(choice.pin.fair_american)} (exchange target)`,
             seed_units:  1,
             seed_conf:   'medium',
         };
@@ -4001,35 +3806,12 @@
             // flow from double-logs on a refresh / repeat ask.
             allow_duplicate: true,
         };
-        // Stamp the PMM market slug so the fill tracker can match this pick
-        // to the real Polymarket order EXACTLY (picks without it fall back
-        // to a team/date/market heuristic server-side).
-        if (_pendingPick && _pendingPick.pmm_slug) {
-            body.signal_blob = Object.assign({}, body.signal_blob, {
-                pmm: { slug: _pendingPick.pmm_slug,
-                       synthetic: !!_pendingPick.pmm_synthetic } });
-        }
-        // If the make/take engine has a live verdict for this side, log the
-        // entry at the venue/price it recommended (make→bid, take→cheapest
-        // book) and stash the rec for the make-vs-take review.
+        // Venue = KALSHI on every log ("the bet log is easy, it's Kalshi
+        // only"); when the make/take engine has a live Kalshi verdict for
+        // this side, the entry price becomes the live make and the rec is
+        // stashed for the execution review. A real fill that lands at a
+        // different price gets corrected via the Edit modal.
         _applyMakeTakeToBody(body);
-        // MANUAL ProphetX fill overrides everything: the user crossed on
-        // their app at this price (the Details threshold said it beat the
-        // engine's option). Log the REAL fill + book so CLV/to-WIN are
-        // honest; effective cost adds their 2%-of-winnings fee (~2·p(1-p)¢).
-        const pxParsed = _parseFillCents(document.getElementById('lmPxPrice').value);
-        if (pxParsed.bad) {
-            _lmStatus('err', 'ProphetX fill price must be in cents (1\u201399), e.g. 43.5');
-            return;
-        }
-        if (pxParsed.cents != null) {
-            const eff = _pxEffFromCents(pxParsed.cents);   // + 2% win fee, all-in
-            body.book = 'PROPHETX';
-            body.price = (eff.amer != null) ? eff.amer : _centsToAmer(pxParsed.cents);
-            body.signal_blob = Object.assign({}, body.signal_blob, {
-                execution: { rec: 'TAKE', venue: 'PROPHETX', manual: true,
-                             fill_cents: pxParsed.cents, entry_cents: eff.cents } });
-        }
         const submitBtn = document.getElementById('lmSubmit');
         submitBtn.disabled = true; submitBtn.textContent = 'Logging…';
         _lmStatus('info', 'POSTing to /api/handicapper/pick…');
@@ -4324,9 +4106,6 @@
                 `updated ${new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}`
                 + graded;
             status.textContent = 'Live';
-            // Fire-and-forget: overlay Polymarket fill state onto the rows
-            // just rendered (admin no-op → instant return for everyone else).
-            loadFillStatus();
         } catch (e) {
             status.textContent = 'Error';
             console.error('handicapper load failed', e);

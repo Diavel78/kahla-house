@@ -1,6 +1,29 @@
 # Kalshi Sports Execution Lane — Migration Spec
 
-> Status: **SPEC ONLY — not approved, not started.** Written July 12 2026 after a
+> Status: **BUILT July 12 2026 — same day, with user amendments.** The user
+> approved with three changes to the plan below (read the spec for the
+> economics/receipts; read this header for what actually shipped):
+>
+> 1. **ProphetX is DEAD** ("the experiment is dead, I don't use the book
+>    anymore") — all its code was removed, not kept as a cross-shop.
+> 2. **No fill tracking at all.** Phase 2 (fill sync, status chips, entry
+>    auto-sync, outbid port) was CANCELED, and the existing Polymarket fill
+>    tracker (Filled Bot detection, /api/handicapper/fill-status, auto-sync)
+>    was retired rather than ported — Kalshi notifies fills natively, and
+>    "Pick Bot makes picks, it doesn't track my bets." Entry corrections are
+>    manual via the page's Edit modal (Kalshi fill in ¢).
+> 3. **No `KALSHI_EXECUTION` flag and no Phase 0 authed-API probe.** The bet
+>    log is Kalshi-only unconditionally (`entry_book='KALSHI'`, make/take
+>    verdict reads the Kalshi book only); execution stays manual in the
+>    Kalshi app, so no trading-API creds are needed. The whiplash revert
+>    path is the dormant Poly leg of `_cross_book_signal` + the dormant
+>    `_pmm_book` reader, not a flag.
+>
+> Kalshi sports maker fee was re-verified $0 at build time (the code's
+> `_kalshi_maker_fee_cents` returns 0 with the drift warning). Original spec
+> below, unchanged, for the economics record.
+
+> Original status: **SPEC ONLY — not approved, not started.** Written July 12 2026 after a
 > live fee/mechanics investigation of Kalshi (perps + sports tickets, real
 > receipts). This doc is self-contained: a fresh session should be able to build
 > from it without the original conversation. The decision to migrate is the

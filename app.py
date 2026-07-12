@@ -3622,10 +3622,6 @@ def _fetch_kalshi_orderbook(ticker: str) -> dict:
 # These books are massive (RULE 0.001) — no size floor, no spoof gate; the
 # touch ratio is the whole signal.
 _TAKE_IMB = 1.5          # top-row bid size ≥ this × top-row ask size ⇒ TAKE
-# Kalshi only wins the make/take verdict when it beats Polymarket's best
-# option by MORE than this many cents all-in (user hates the Kalshi app —
-# it has to be genuinely better odds to be worth opening).
-_KALSHI_ROUTE_HURDLE_C = 0.1
 
 
 def _pmm_book(client, slug: str) -> dict | None:
@@ -3727,20 +3723,6 @@ def _pmm_maker_rebate_cents(price_cents) -> float:
     return round(1.25 * p * (1.0 - p), 2)
 
 
-def _prophetx_take_fee_cents(price_cents) -> float:
-    """ProphetX effective fee per contract, in cents: 2c · p·(1-p). Their
-    headline is "2% of net winnings per market" (win-only) — a 2% haircut on
-    the PROFIT works out to the same p·(1-p) fee curve as Polymarket's, just
-    a different coefficient (2 vs taker 5 vs maker -1.25). Max 0.5c at 50c.
-    No feed exists (API is application-gated) — this prices the MANUAL
-    cross-shop threshold shown in Details: the ProphetX board price at which
-    taking there beats the engine's best Poly/Kalshi option."""
-    if price_cents is None:
-        return 0.0
-    p = max(0.0, min(1.0, price_cents / 100.0))
-    return round(2.0 * p * (1.0 - p), 2)
-
-
 def _cents_to_american_py(cents) -> int | None:
     """52.4c -> -110; 45c -> +122. None out of range."""
     try:
@@ -3815,11 +3797,12 @@ def _book_signal(book: dict | None, edge_units: float = 1,
 
 
 # ── Kalshi US fee schedule (per contract, in cents) ──────────────────
-# Verified June 2026 against live order tickets: taker peaks 1.75c at 50/50
-# (0.07·p·(1−p)); maker is 1/4 of that (empirically 0.0176·p·(1−p), ~0.44c
-# at 50/50). Kalshi round-up-to-cent applies to the order TOTAL; for the
-# per-contract make-vs-take comparison the rate is what matters. Unlike
-# Polymarket (which PAYS makers a rebate), Kalshi CHARGES makers.
+# Receipt-verified July 12 2026 on the user's own SPORTS tickets: taker
+# 0.07·p·(1−p) per contract, rounded UP on the order TOTAL ($0.09 on
+# 5@54c); SPORTS MAKER IS $0 (5-share YES 53c + NO 47c resting tickets
+# showed no fee line). The July 7 2026 schedule added maker fees (25% of
+# taker) to SOME non-sports series — if a new sports series ever shows a
+# maker fee on a 1-lot test ticket, put the 25% term back here.
 def _kalshi_taker_fee_cents(price_cents) -> float:
     if price_cents is None:
         return 0.0
@@ -3828,10 +3811,7 @@ def _kalshi_taker_fee_cents(price_cents) -> float:
 
 
 def _kalshi_maker_fee_cents(price_cents) -> float:
-    if price_cents is None:
-        return 0.0
-    p = max(0.0, min(1.0, price_cents / 100.0))
-    return round(1.76 * p * (1.0 - p), 3)
+    return 0.0
 
 
 def _kalshi_event_dt(event_ticker: str | None):
@@ -3991,19 +3971,23 @@ def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
 
 def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
                        units: float = 1, starts_in_min: float | None = None) -> dict | None:
-    """Best execution across {MAKE,TAKE} × {Polymarket, Kalshi} for BUYING
-    one side. Both venues' contracts pay $1 on the SAME outcome, so all-in
-    CENTS are directly comparable — pick the cheapest fillable option. MAKE
-    rests at the venue's bid (Polymarket EARNS a rebate, Kalshi pays a maker
-    fee); it's only fillable when the venue's TOP ROW isn't bid-heavy (else a
-    resting maker won't fill — sellers aren't coming) and the clock allows.
-    TAKE crosses at the ask + taker fee; always fills. Returns the chosen
-    option + all four for transparency, or None if neither book is usable."""
+    """Best execution among {MAKE, MAKE+, TAKE} for BUYING one side.
+    KALSHI IS THE EXECUTION VENUE (July 2026, user: "I'm moving to 100%
+    Kalshi") — the live path passes kalshi_book only. The pmm leg is kept
+    wired-but-dormant for the whiplash revert (Kalshi has been venued,
+    de-venued, and re-venued before): pass a pmm_book and both venues get
+    compared again. All-in CENTS: MAKE rests at the bid (Kalshi sports
+    maker = $0, receipt-verified July 12 2026); it's only fillable when
+    the TOP ROW isn't bid-heavy (else sellers aren't coming to your rest)
+    and the clock allows. MAKE+ steps one tick in FRONT of the bid queue
+    (Kalshi tick = 1c, Poly 0.5c). TAKE crosses at ask + taker fee
+    (Kalshi 7·p(1−p)c — steep, ~1.75c at 50/50); always fills. Returns
+    the cheapest fillable option + every option for transparency, or
+    None if no book is usable."""
     opts: list[dict] = []
     inv_take = round(1.0 / _TAKE_IMB, 2)
 
-    def add(venue: str, book: dict | None, taker_fee, maker_adj,
-            half_cent: bool = False):
+    def add(venue: str, book: dict | None, taker_fee, maker_adj, tick: float):
         if not book or book.get("best_bid") is None or book.get("best_ask") is None:
             return
         bb, ba = book["best_bid"], book["best_ask"]
@@ -4018,30 +4002,28 @@ def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
         # PLAIN MAKE — rest at the bid. A CONFIDENT fill when there are more
         # sellers than buyers at the touch (ask-heavy): sellers come to your
         # bid. On a balanced/bid-heavy book a resting bid sits behind the
-        # queue and may never fill — that's what MAKE+ is for. Cost basis =
-        # bid ± maker adj (PMM EARNS a rebate, Kalshi PAYS a maker fee).
-        # HALF-CENT-BOOK exception (July 2026, user call — a 55k-ask-wall
+        # queue and may never fill — that's what MAKE+ is for.
+        # ONE-TICK-BOOK exception (July 2026, user call — a 55k-ask-wall
         # book printed TAKE because timb=0.69 missed the 0.67 ask-heavy
-        # cutoff by a whisker): when the spread is one tick (≤0.5¢) there
-        # is NO MAKE+ lane (bid+0.5 = ask = a cross), so the balanced zone
-        # MAKE+ covers falls to TAKE — paying the full taker fee for half
-        # a cent of priority. On a one-tick, ask-LEANING book (timb < 1.0)
-        # the rest at the bid IS the front of the queue → MAKE, while the
-        # clock guard still hands it to TAKE inside 30 min.
-        half_cent_make = (timb is not None and timb < 1.0
-                          and (ba - bb) <= 0.5 and clock_ok)
+        # cutoff by a whisker): when the spread is one tick there is NO
+        # MAKE+ lane (bid+tick = ask = a cross), so the balanced zone MAKE+
+        # covers falls to TAKE — paying the full taker fee for one tick of
+        # priority. On a one-tick, ask-LEANING book (timb < 1.0) the rest
+        # at the bid IS the front of the queue → MAKE, while the clock
+        # guard still hands it to TAKE inside 30 min.
+        one_tick_make = (timb is not None and timb < 1.0
+                         and (ba - bb) <= tick and clock_ok)
         opts.append({**base, "venue": venue, "rec": "MAKE",
                      "all_in": round(bb + maker_adj(bb), 2),
-                     "fillable": (ask_heavy or half_cent_make),
+                     "fillable": (ask_heavy or one_tick_make),
                      "post_price": bb})
-        # MAKE+ (Polymarket half-cent queue jump). Rest at bid+0.5c → step in
-        # FRONT of the whole bid queue for half a cent → fill on the next
-        # sell, still as a maker (earns the rebate). Fillable whenever the
-        # touch isn't a blowout (bid_heavy → price gapping up past your
-        # half-cent, must take) and the clock allows; needs ≥1c spread room so
-        # bid+0.5 stays below the ask (else it's a cross = take).
-        if half_cent and (not bid_heavy) and clock_ok and (bb + 0.5) < ba:
-            hp = bb + 0.5
+        # MAKE+ (one-tick queue jump). Rest at bid+tick → step in FRONT of
+        # the whole bid queue → fill on the next sell, still as a maker.
+        # Fillable whenever the touch isn't a blowout (bid_heavy → price
+        # gapping up past your tick, must take) and the clock allows; needs
+        # spread room so bid+tick stays below the ask (else it's a cross).
+        if (not bid_heavy) and clock_ok and (bb + tick) < ba:
+            hp = bb + tick
             opts.append({**base, "venue": venue, "rec": "MAKE+",
                          "all_in": round(hp + maker_adj(hp), 2),
                          "fillable": True, "post_price": hp})
@@ -4050,28 +4032,14 @@ def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
                      "all_in": round(ba + taker_fee(ba), 2),
                      "fillable": True})
 
-    add("POLYMARKET", pmm_book, _pmm_taker_fee_cents,
-        lambda c: -_pmm_maker_rebate_cents(c), half_cent=True)
     add("KALSHI", kalshi_book, _kalshi_taker_fee_cents,
-        lambda c: _kalshi_maker_fee_cents(c))
+        lambda c: _kalshi_maker_fee_cents(c), tick=1.0)
+    add("POLYMARKET", pmm_book, _pmm_taker_fee_cents,
+        lambda c: -_pmm_maker_rebate_cents(c), tick=0.5)
     if not opts:
         return None
     pool = [o for o in opts if o["fillable"]] or opts
-    # Venue preference (user, July 2026): "I honestly HATE Kalshi — the
-    # only reason to ever open that app is if it has better odds." So
-    # Kalshi wins the verdict ONLY when its best option beats Polymarket's
-    # best by MORE than _KALSHI_ROUTE_HURDLE_C all-in; anything closer
-    # routes to Poly (main book, dashboard P&L, rebates). The venues' take
-    # costs routinely land a hundredth apart (live case: 48.74c vs 48.75c,
-    # both apps quoting the identical $2.44). Raise the hurdle if small
-    # gaps still aren't worth the app switch.
     best = min(pool, key=lambda o: o["all_in"])
-    if best["venue"] != "POLYMARKET":
-        poly = [o for o in pool if o["venue"] == "POLYMARKET"]
-        if poly:
-            pbest = min(poly, key=lambda o: o["all_in"])
-            if pbest["all_in"] - best["all_in"] <= _KALSHI_ROUTE_HURDLE_C:
-                best = pbest
     vlabel = {"POLYMARKET": "Polymarket", "KALSHI": "Kalshi"}
     runner = min((o for o in pool if o is not best), key=lambda o: o["all_in"], default=None)
     why = (f"{best['rec'].lower()} {vlabel[best['venue']]} — {best['all_in']}c all-in"
@@ -4079,32 +4047,20 @@ def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
               f"{vlabel[runner['venue']]})" if runner else "")
            + (f"; {vlabel[best['venue']]} touch {best['touch_imb']}x" if best['touch_imb'] is not None else ""))
     # `price` is the ACTIONABLE directive shown on the chip: where to rest a
-    # maker (bid / bid+0.5) or the fee-inclusive cross for a take. `entry_cents`
-    # is the EFFECTIVE cost (all-in, fee/rebate baked in) the pick logs so CLV
-    # and to-WIN reflect the real edge — the two differ for a maker by the
-    # rebate.
+    # maker (bid / bid+tick) or the fee-inclusive cross for a take.
+    # `entry_cents` is the EFFECTIVE cost (all-in, fee baked in) the pick
+    # logs so CLV and to-WIN reflect the real edge — on Kalshi sports the
+    # two are equal for a maker (maker fee $0) and differ for a take.
     directive = best.get("post_price")
     if directive is None:
         directive = best["all_in"]
-    # ProphetX MANUAL cross-shop threshold (no feed — the user checks their
-    # app): the raw ProphetX board price E at which E + 2·p(1-p) fee equals
-    # the winner's all-in cost. Two fixed-point passes converge to <0.01c.
-    px = None
-    target = best["all_in"]
-    if target is not None and 1.0 < target < 99.0:
-        e = target - _prophetx_take_fee_cents(target)
-        e = target - _prophetx_take_fee_cents(e)
-        amer = _cents_to_american_py(e)
-        if amer is not None:
-            px = {"beat_cents": round(e, 1), "beat_american": amer,
-                  "vs": f"{best['rec']} {vlabel[best['venue']]}"}
     return {
         "rec": best["rec"], "venue": best["venue"], "venue_label": vlabel[best["venue"]],
         "price": directive, "entry_cents": best["all_in"],
         "best_bid": best["bid"], "best_ask": best["ask"],
         "touch_imbalance": best["touch_imb"],
         "queue_ahead": best["queue_ahead"], "ask_touch": best["ask_touch"],
-        "options": opts, "why": [why], "prophetx": px,
+        "options": opts, "why": [why],
     }
 
 
@@ -4194,19 +4150,17 @@ def debug_orderbook():
 @app.route("/api/handicapper/make-take")
 @bot_required
 def api_make_take():
-    """Live best execution for one picked side, line-shopped across venues:
-    {MAKE, MAKE+, TAKE} × {Polymarket, Kalshi} + the ProphetX manual
-    threshold. Returns the cheapest fillable option (auto-log target) plus
-    every option so the card can SHOW each venue's make odds. (Kalshi was
-    de-venued July 5 2026, then re-enabled as a compared venue July 2026 —
-    reads are free, so it costs nothing to show its number and route to it
-    when it genuinely beats Poly.) Params: slug (PMM market), units,
-    starts_in_min (also used to reconstruct the event time for Kalshi
-    series-matching), inverse (synthetic NO side, PMM book only), and
-    sport/away/home/side/market_type/line for the Kalshi book lookup."""
-    slug = (request.args.get("slug") or "").strip()
-    if not slug:
-        return jsonify({"ok": False, "error": "missing slug"}), 400
+    """Live best execution for one picked side on KALSHI — the sole
+    execution venue (July 2026, user: "I'm moving to 100% Kalshi";
+    ProphetX is dead, the Poly leg is dormant). Returns the cheapest
+    fillable of {MAKE, MAKE+, TAKE} on the Kalshi book, or
+    available:false when Kalshi doesn't list the market (unmapped sport /
+    non-MLB line market) — no Kalshi market means there's nothing to
+    execute. Params: units, starts_in_min (also reconstructs the event
+    time for Kalshi series-matching), and sport/away/home/side/
+    market_type/line for the book lookup. `slug` + `inverse` (the old
+    PMM-book params) are accepted and ignored — the Kalshi readers own
+    side orientation (two real rows per game, no synthetic inversion)."""
     try:
         units = float(request.args.get("units") or 1)
     except ValueError:
@@ -4215,7 +4169,6 @@ def api_make_take():
         sim = float(request.args.get("starts_in_min"))
     except (TypeError, ValueError):
         sim = None
-    inverse = (request.args.get("inverse") or "") in ("1", "true", "yes")
     sport = (request.args.get("sport") or "").strip().upper()
     away = (request.args.get("away") or "").strip()
     home = (request.args.get("home") or "").strip()
@@ -4225,24 +4178,9 @@ def api_make_take():
         line = float(request.args.get("line"))
     except (TypeError, ValueError):
         line = None
-    try:
-        book = _pmm_book(get_client(), slug)
-    except Exception as e:
-        return jsonify({"ok": True, "available": False,
-                        "error": f"{type(e).__name__}: {e}"[:160]})
-    if inverse:
-        book = _invert_book(book)
-    # Kalshi is BACK as a COMPARED execution venue (user rev, July 2026:
-    # "show me make odds on Kalshi and Polymarket … auto log at the best
-    # odds available"). Kalshi reads are FREE (public API, no funds needed),
-    # so _cross_book_signal now weighs {MAKE,MAKE+,TAKE} × {Polymarket,
-    # Kalshi} and returns the cheapest fillable — with a small Poly bias
-    # (_KALSHI_ROUTE_HURDLE_C) for near-ties so a hundredth-of-a-cent gap
-    # doesn't force an app switch. The ProphetX manual threshold rides on
-    # top. Kalshi's book match needs the event time to disambiguate a team's
-    # series game — reconstruct it from starts_in_min (now + sim), so no
-    # extra request param is needed. The readers own side/inversion, so the
-    # synthetic-NO `inverse` flag (a PMM-only concern) is not passed to them.
+    # Kalshi's book match needs the event time to disambiguate a team's
+    # series game — reconstructed from starts_in_min (now + sim), so no
+    # extra request param is needed.
     kbook = None
     if sport and away and home and side:
         want_dt = (datetime.now(timezone.utc) + timedelta(minutes=sim)
@@ -4255,9 +4193,10 @@ def api_make_take():
                                           side, line, want_dt=want_dt)
         except Exception:
             kbook = None
-    sig = _cross_book_signal(book, kbook, units=units, starts_in_min=sim)
+    sig = _cross_book_signal(None, kbook, units=units, starts_in_min=sim)
     if not sig:
-        return jsonify({"ok": True, "available": False})
+        return jsonify({"ok": True, "available": False,
+                        "reason": "no kalshi market"})
     # Pinnacle reference (log-modal "am I getting a decent line?" check) —
     # CACHE-ONLY read of the parlay-api slate; a modal open never spends
     # credits (paid pulls stay tied to bot-bet moments in the paperlog).
@@ -6093,71 +6032,22 @@ def api_my_orders():
 
 
 # ---------------------------------------------------------------------------
-# Polymarket fill alerts — Telegram notification when an order on
-# Polymarket fills. The US Polymarket app has no native fill
-# notifications (only the international web app does), so we poll the
-# SDK every minute via cron-job.org pinging /api/polymarket/check-fills
-# and diff cum_quantity against polymarket_fill_state in Supabase.
-#
-# Auth: shared-secret ?key= matched to FILLS_CRON_SECRET env var. Cron
-# services can't carry Firebase tokens; the secret is the gate.
-#
-# Milestones tracked per order (25 / 50 / 75 / 100). Only the highest
-# milestone newly crossed in any single tick fires a Telegram message —
-# a market order that fills 0 → 100% in one tick sends one alert, not
-# four. The alerts_sent jsonb array on each row prevents re-firing.
-#
-# First-sight safety:
-#   • Fresh open order   → snapshot only, no alert (placement isn't a fill)
-#   • Fresh terminal old → snapshot terminal=true, no alert (historical)
-#   • Fresh terminal new → fire "100" alert (instant fill between ticks).
-#     "New" = createTime within FILL_FRESH_TERMINAL_SECONDS.
+# "Filled Bot" Telegram sender. The bot's original job — Polymarket fill
+# detection (/api/polymarket/check-fills, milestone diffs against
+# polymarket_fill_state, the disappeared-order forensics) — was RETIRED
+# July 2026 with the Kalshi execution cutover: Kalshi has NATIVE fill
+# notifications, so there's nothing to poll. The bot token survives for
+# ONE remaining feature: the unlogged-BET alert (_bet_alerts, rides the
+# paperlog tick). polymarket_fill_state is orphaned (harmless, drop
+# whenever); full detection spec in git history pre-July-12-2026.
 # ---------------------------------------------------------------------------
-
-# SDK order states that mean "this order will never fill more". Once we
-# see a row in one of these, mark terminal so the next cron tick can
-# fast-skip it.
-_TERMINAL_ORDER_STATES = {
-    "ORDER_STATE_FILLED",
-    "ORDER_STATE_CANCELED",
-    "ORDER_STATE_EXPIRED",
-    "ORDER_STATE_REJECTED",
-}
-
-# Fill-progress milestones. (key, threshold_pct). "100" has an extra
-# gate (requires FILLED state OR pct >= 100) handled in
-# _crossed_fill_milestones — partials can hover at 99.7% for a while
-# without us calling them "filled".
-_FILL_MILESTONES = (("25", 25.0), ("50", 50.0), ("75", 75.0), ("100", 100.0))
-
-# An order we've never seen before that's ALREADY in a terminal state
-# is either (a) historical, or (b) a brand-new market order that filled
-# instantly between cron ticks. We use createTime to tell them apart:
-# fresh terminal = real instant fill (fire 100 alert); old terminal =
-# historical (snapshot, skip). 10 min covers a typical 1-min cron with
-# generous tolerance for cron-job.org occasional misses.
-_FILL_FRESH_TERMINAL_SECONDS = 600
-
-
-def _fmt_pmm_price(p):
-    """Polymarket prices are 0-1 probabilities. Render as $0.42."""
-    if p is None:
-        return "?"
-    try:
-        return f"${float(p):.2f}"
-    except (TypeError, ValueError):
-        return "?"
 
 
 def _send_fill_telegram(text):
-    """POST to Telegram sendMessage via the "Filled Bot" — a dedicated
-    Telegram bot for Polymarket fill notifications. No-op (False) when
-    FILLED_BOT_TOKEN / FILLED_BOT_CHAT_ID aren't set in Vercel env.
-    Stdlib urllib so we don't add a new dep just for this.
-
-    Distinct from the retired "sharp alerts" Telegram bot — the user
-    explicitly asked for a separate bot so fill messages are clearly
-    labeled in their Telegram client."""
+    """POST to Telegram sendMessage via the "Filled Bot". No-op (False)
+    when FILLED_BOT_TOKEN / FILLED_BOT_CHAT_ID aren't set in Vercel env.
+    Stdlib urllib so we don't add a new dep just for this. Sole caller
+    post-cutover: _bet_alerts (the unlogged-bet ping)."""
     import urllib.request
     import urllib.error
     token = (os.environ.get("FILLED_BOT_TOKEN") or "").strip()
@@ -6180,77 +6070,6 @@ def _send_fill_telegram(text):
         return False
 
 
-def _crossed_fill_milestones(prev_pct, curr_pct, curr_state, already_sent):
-    """Return list of milestone keys newly crossed this tick (in
-    ascending threshold order). A milestone fires once per (order,
-    milestone) — already_sent is the persisted jsonb list."""
-    out = []
-    for key, threshold in _FILL_MILESTONES:
-        if key in already_sent:
-            continue
-        if key == "100":
-            crossed = (curr_state == "ORDER_STATE_FILLED") or curr_pct >= 100
-        else:
-            crossed = curr_pct >= threshold
-        if crossed:
-            out.append(key)
-    return out
-
-
-def _is_fresh_terminal(order_created_at):
-    """True iff the order's createTime is within the last
-    _FILL_FRESH_TERMINAL_SECONDS. Used to decide whether a first-sight
-    already-terminal order is a real instant fill (fire alert) or just
-    history (snapshot, skip). Returns False on parse failure — safer to
-    skip than spam."""
-    if not order_created_at:
-        return False
-    try:
-        # SDK returns ISO 8601; tolerate both "Z" and "+00:00".
-        s = order_created_at.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - dt).total_seconds() <= _FILL_FRESH_TERMINAL_SECONDS
-    except (ValueError, AttributeError):
-        return False
-
-
-def _format_fill_alert(row, milestone, fill_pct):
-    """Build the Telegram message for a fill milestone.
-
-    Visually distinguishes buys vs sells via emoji + verb in the header:
-      buys  → ✅ FILLED  /  📈 25% FILLED
-      sells → 💰 SOLD    /  📤 25% SOLD
-    so the user can tell at a glance whether a notification is about
-    entering or exiting a position without having to read the side label."""
-    pick = row.get("pick") or row.get("market_name") or "(unknown)"
-    market = row.get("market_name") or ""
-    price = _fmt_pmm_price(row.get("price"))
-    side = row.get("side_label") or ""
-    qty = row.get("quantity") or 0
-    cum = row.get("last_cum_quantity") or 0
-
-    is_sell = (row.get("intent") or "").startswith("ORDER_INTENT_SELL_")
-    verb = "SOLD" if is_sell else "FILLED"
-    full_emoji = "💰" if is_sell else "✅"
-    partial_emoji = "📤" if is_sell else "📈"
-
-    if milestone == "100":
-        header = f"{full_emoji} *{verb}*"
-        progress = f"{int(cum)}/{int(qty)} shares"
-    else:
-        header = f"{partial_emoji} *{milestone}% {verb}*"
-        progress = f"{int(cum)}/{int(qty)} shares ({fill_pct:.0f}%)"
-
-    lines = [header]
-    if market and market != pick:
-        lines.append(f"_{market}_")
-    lines.append(f"*{pick}* · {side} @ {price}")
-    lines.append(progress)
-    return "\n".join(lines)
-
-
 # ──────────────── Pick Bot bet alerts ────────────────
 # The prime-WINDOW Telegram alert (/api/handicapper/prime-alert, batched
 # "N games entering the prime window" pings + the prime_alerts dedup
@@ -6265,347 +6084,6 @@ def _fmt_az_time(dt: datetime) -> str:
     """UTC datetime → 'h:MM AM' in Arizona time (no leading zero)."""
     local = dt.astimezone(ZoneInfo("America/Phoenix"))
     return local.strftime("%I:%M %p").lstrip("0")
-
-
-@app.route("/api/polymarket/check-fills")
-def api_check_fills():
-    """Polymarket order fill detector. Pulled every ~1 min by
-    cron-job.org. Diffs current SDK orders against
-    polymarket_fill_state, sends Telegram per milestone crossed,
-    persists new state. Returns a small JSON payload that shows up in
-    cron-job.org's response history for live debugging."""
-    expected = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
-    provided = (request.args.get("key") or "").strip()
-    if not expected or not secrets.compare_digest(provided, expected):
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
-
-    sb = get_supabase()
-    if sb is None:
-        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
-
-    # Pull orders from Polymarket. Failure = bail with no state mutation;
-    # the next tick will retry cleanly. Don't half-update state.
-    try:
-        client = get_client()
-        resp = client.orders.list()
-        raw = resp.get("orders") if isinstance(resp, dict) else getattr(resp, "orders", []) or []
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"sdk: {e}"}), 502
-
-    order_ids = []
-    for o in raw:
-        oid = (o.get("id") if isinstance(o, dict) else getattr(o, "id", None))
-        if oid:
-            order_ids.append(oid)
-    seen_order_ids = set(order_ids)
-
-    state_map = {}
-    if order_ids:
-        try:
-            rows = (sb.table("polymarket_fill_state")
-                      .select("*").in_("order_id", order_ids).execute().data) or []
-            for r in rows:
-                state_map[r["order_id"]] = r
-        except Exception as e:
-            return jsonify({"ok": False, "error": f"db read: {e}"}), 500
-
-    processed = 0
-    alerts_fired = 0
-    skipped_historical = 0
-    upserts = []
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    for o in raw:
-        def _g(key, default=None, _o=o):
-            if isinstance(_o, dict): return _o.get(key, default)
-            return getattr(_o, key, default)
-
-        oid = _g("id") or ""
-        if not oid:
-            continue
-
-        state = _g("state") or ""
-        prev = state_map.get(oid)
-        # Fast-skip orders we already marked terminal — saves rebuilding
-        # rows for every long-dead order the SDK still returns.
-        if prev and prev.get("terminal"):
-            continue
-
-        qty = _safe_float(_g("quantity")) or 0
-        cum_qty = _safe_float(_g("cumQuantity")) or 0
-        raw_price = _safe_float(_g("price"))
-        intent = _g("intent") or ""
-        # Same NO-side price flip as /api/my-orders — display what the
-        # user actually paid for their picked outcome, not the
-        # YES-canonical complement.
-        needs_flip = intent.endswith("_SHORT")
-        if raw_price is not None and 0 <= raw_price <= 1 and needs_flip:
-            price = 1 - raw_price
-        else:
-            price = raw_price
-
-        md = _g("marketMetadata") or {}
-        if not isinstance(md, dict):
-            md = {k: getattr(md, k, None) for k in
-                  ("slug", "title", "outcome", "eventSlug", "team")}
-        slug = md.get("slug") or ""
-        title = md.get("title") or ""
-        outcome = md.get("outcome") or ""
-        team = md.get("team") or {}
-        team_name = team.get("name", "") if isinstance(team, dict) else ""
-
-        pick = outcome
-        if team_name and outcome and re.search(r"[0-9]", outcome):
-            pick = f"{team_name} {outcome}"
-        elif team_name:
-            pick = team_name
-
-        # Side word: mirror the Polymarket app + the dashboard betslip —
-        # show the AFFIRMATIVE of the outcome you actually picked
-        # ("Switzerland -2.5 · Yes"), NOT the canonical BUY YES/NO from
-        # the order intent. On spread / "wins by N goals" markets the
-        # picked side is Polymarket's canonical NO, so the intent-based
-        # label (_INTENT_LABEL → "BUY NO") reads as the opposite of what
-        # you hold — the synthetic-side inversion. `outcome` already
-        # encodes the side you selected, and the _SHORT price flip above
-        # already gives THAT side's price, so a fill on it = you're on
-        # `pick` → "Yes". Only honor a literal yes/no when the market
-        # gives nothing else to name the side by.
-        _ro = outcome.strip().lower()
-        side_label = _ro.title() if _ro in ("yes", "no") else "Yes"
-        order_created_at = _g("createTime") or _g("insertTime") or ""
-
-        fill_pct = (cum_qty / qty * 100) if qty else 0
-        already_sent = (prev or {}).get("alerts_sent") or []
-        is_terminal_now = state in _TERMINAL_ORDER_STATES
-
-        new_milestones = []
-        # Maker/taker classification for the entry auto-sync: an order
-        # first seen ALREADY terminal-filled (created + filled between
-        # two 60s ticks, never observed resting) executed as a taker;
-        # anything we ever saw open rested = maker. Persisted so the
-        # fill-status ledger path can pick the right fee side later.
-        taker_fill = bool(prev.get("taker")) if prev else False
-        if not prev:
-            # First-sight order. Three sub-cases:
-            #   1) Open + un-filled         → snapshot, no alert
-            #   2) Terminal + recent create → fired between ticks, ALERT
-            #   3) Terminal + old create    → historical, snapshot only
-            if is_terminal_now and state == "ORDER_STATE_FILLED" \
-                    and _is_fresh_terminal(order_created_at):
-                new_milestones = ["100"]
-                taker_fill = True
-            elif is_terminal_now:
-                skipped_historical += 1
-        else:
-            prev_pct = ((prev.get("last_cum_quantity") or 0) / qty * 100) if qty else 0
-            new_milestones = _crossed_fill_milestones(
-                prev_pct=prev_pct, curr_pct=fill_pct,
-                curr_state=state, already_sent=already_sent)
-
-        new_alerts = list(already_sent) + [m for m in new_milestones if m not in already_sent]
-
-        row_snapshot = {
-            "order_id": oid,
-            "market_name": title,
-            "pick": pick,
-            "slug": slug,
-            "intent": intent,
-            "side_label": side_label,
-            "quantity": qty,
-            "price": price,
-            "last_cum_quantity": cum_qty,
-            "last_state": state,
-            "alerts_sent": new_alerts,
-            "order_created_at": order_created_at,
-            "last_seen_at": now_iso,
-            "terminal": is_terminal_now,
-            "taker": taker_fill,
-        }
-        # Deliberately omit first_seen_at — the DB default `now()`
-        # handles initial INSERT, and omitting it from UPDATE preserves
-        # the original value across upserts.
-
-        if new_milestones:
-            top = new_milestones[-1]  # highest threshold crossed this tick
-            msg = _format_fill_alert(row_snapshot, top, fill_pct)
-            if _send_fill_telegram(msg):
-                alerts_fired += 1
-            # Even if Telegram send returned False, mark all crossed
-            # milestones as sent. A Telegram outage shouldn't queue up
-            # alerts that flood when the bot recovers — sharp_alerts.py
-            # treats Telegram as best-effort for the same reason.
-
-        upserts.append(row_snapshot)
-        processed += 1
-
-    # ── Disappeared-order detector ────────────────────────────────
-    # Polymarket SDK's orders.list() returns ONLY currently-open orders;
-    # once an order fills (or is canceled / expired) it vanishes from
-    # the list entirely. So my milestone-diff loop above can never fire
-    # a 100% alert for a fully-filled order — by the time it's filled,
-    # we don't see it anymore. To detect full fills we:
-    #
-    #   1. Query state table for rows we know are still non-terminal.
-    #   2. Any non-terminal row whose order_id isn't in this tick's SDK
-    #      response is "disappeared" → it either filled or was canceled.
-    #   3. Cross-reference recent ACTIVITY_TYPE_TRADE entries against
-    #      each disappeared order's marketSlug. A matching trade in the
-    #      last ~30 min implies the order filled. No match implies the
-    #      user canceled it (no alert — user knows they canceled).
-    #
-    # First-tick-with-no-prior-state still snapshots open orders; the
-    # disappearance path only fires once we have history to compare
-    # against (i.e. starting on the SECOND cron tick after a deploy).
-    disappeared_filled = 0
-    disappeared_canceled = 0
-    try:
-        known_active = (sb.table("polymarket_fill_state")
-                          .select("*").eq("terminal", False).execute().data) or []
-    except Exception:
-        known_active = []
-
-    disappeared = [r for r in known_active if r["order_id"] not in seen_order_ids]
-
-    if disappeared:
-        # One activities page (most-recent first) is more than enough for
-        # any realistic per-user trade volume between two cron ticks.
-        # Additionally, only accept trades that happened in the last 3
-        # minutes — otherwise old historical trades on the same slug
-        # (e.g. a buy earlier today) can be falsely matched to a brand-
-        # new sell order that just disappeared, firing a spurious SOLD
-        # alert. 3 min absorbs cron jitter while keeping the window
-        # tight enough that only the actual triggering trade matches.
-        recent_trades = []
-        trade_cutoff = datetime.now(timezone.utc) - timedelta(minutes=3)
-        try:
-            act_resp = client.portfolio.activities(params={"limit": 100})
-            for act in act_resp.get("activities", []):
-                if act.get("type") != "ACTIVITY_TYPE_TRADE":
-                    continue
-                # SDK returns trade detail nested under "trade" key —
-                # NOT under "ACTIVITY_TYPE_TRADE" as the activity type
-                # string would suggest. Verified empirically.
-                detail = act.get("trade")
-                if not isinstance(detail, dict):
-                    # Defensive fallback for any future shape drift.
-                    for k, v in act.items():
-                        if k != "type" and isinstance(v, dict):
-                            detail = v
-                            break
-                if not isinstance(detail, dict) or not detail.get("marketSlug"):
-                    continue
-                t_str = detail.get("updateTime") or detail.get("timestamp") or ""
-                if not t_str:
-                    continue
-                try:
-                    t_dt = datetime.fromisoformat(t_str.replace("Z", "+00:00"))
-                    if t_dt.tzinfo is None:
-                        t_dt = t_dt.replace(tzinfo=timezone.utc)
-                except (ValueError, AttributeError):
-                    continue
-                if t_dt < trade_cutoff:
-                    # Activities are most-recent-first — once we see
-                    # one older than the cutoff, the rest are too.
-                    break
-                recent_trades.append(detail)
-        except Exception:
-            recent_trades = []
-
-        for row in disappeared:
-            slug = row.get("slug") or ""
-            qty = _safe_float(row.get("quantity")) or 0
-
-            # Consume the first matching trade so two simultaneous orders
-            # on the same market don't both match the same trade.
-            match_idx = None
-            for i, t in enumerate(recent_trades):
-                if t.get("marketSlug") == slug:
-                    match_idx = i
-                    break
-
-            sent = list(row.get("alerts_sent") or [])
-            row_snapshot = {
-                "order_id":      row["order_id"],
-                "market_name":   row.get("market_name"),
-                "pick":          row.get("pick"),
-                "slug":          row.get("slug"),
-                "intent":        row.get("intent"),
-                "side_label":    row.get("side_label"),
-                "quantity":      qty,
-                "price":         row.get("price"),
-                "last_cum_quantity": row.get("last_cum_quantity") or 0,
-                "last_state":    row.get("last_state"),
-                "alerts_sent":   sent,
-                "order_created_at": row.get("order_created_at"),
-                "last_seen_at":  now_iso,
-                "terminal":      True,
-                # Tracked open before it vanished → it rested → maker.
-                "taker":         bool(row.get("taker")),
-            }
-
-            if match_idx is not None:
-                recent_trades.pop(match_idx)
-                disappeared_filled += 1
-                # Fire 100% alert if we haven't already. Update the
-                # snapshot to reflect the full fill in the message body.
-                if "100" not in sent:
-                    row_snapshot["last_cum_quantity"] = qty
-                    row_snapshot["last_state"] = "ORDER_STATE_FILLED"
-                    row_snapshot["alerts_sent"] = sent + ["100"]
-                    msg = _format_fill_alert(row_snapshot, "100", 100.0)
-                    if _send_fill_telegram(msg):
-                        alerts_fired += 1
-            else:
-                disappeared_canceled += 1
-            # Either way, mark terminal so we stop scanning this row.
-
-            upserts.append(row_snapshot)
-
-    if upserts:
-        try:
-            (sb.table("polymarket_fill_state")
-               .upsert(upserts, on_conflict="order_id").execute())
-        except Exception as e:
-            return jsonify({"ok": False, "error": f"db write: {e}",
-                            "processed": processed, "alerts": alerts_fired}), 500
-
-    # ── Pick Bot entry-price auto-sync ────────────────────────────
-    # Explicit user request July 2026 (narrow exception to gotcha #26's
-    # "no Polymarket coupling"): when a tracked maker order has fills,
-    # restamp the ADMIN's matching pending pick's entry_price to the
-    # real fill (maker rebate baked in). Exact signal_blob.pmm.slug
-    # matches only; units NEVER touched. Runs here (every minute) so
-    # the pick corrects itself even with the page closed — the resolver
-    # can grade within minutes of game end and must see the true entry.
-    entry_synced = 0
-    try:
-        admins = _admin_uids()
-        if admins and upserts:
-            pend = (sb.table("bot_picks")
-                    .select("id,entry_price,entry_book,signal_blob")
-                    .eq("status", "pending").in_("asked_by", sorted(admins))
-                    .limit(200).execute().data) or []
-            by_slug = _fs_picks_by_slug(pend)
-            if by_slug:
-                cands = [{"slug": r.get("slug"), "intent": r.get("intent"),
-                          "price": r.get("price"),
-                          "cum": r.get("last_cum_quantity"),
-                          "qty": r.get("quantity"),
-                          "taker": r.get("taker")} for r in upserts]
-                entry_synced = _fs_auto_sync_entry(sb, by_slug, cands)
-    except Exception:
-        entry_synced = 0
-
-    return jsonify({
-        "ok": True,
-        "processed": processed,
-        "alerts_fired": alerts_fired,
-        "skipped_historical": skipped_historical,
-        "disappeared_filled": disappeared_filled,
-        "disappeared_canceled": disappeared_canceled,
-        "entry_synced": entry_synced,
-    })
 
 
 # ---------------------------------------------------------------------------
@@ -8553,578 +8031,11 @@ def api_handicapper_ticker():
     return jsonify(data)
 
 
-# ──────────────── Pick Bot fill status (admin-only) ────────────────
-# "Did my Polymarket maker actually FILL?" — closes the loop between a
-# logged pick (intent: entry = the maker bid) and the real order on
-# Polymarket. Matches the admin's pending bot_picks against three
-# sources: (a) open SDK orders, (b) held positions, (c) the Filled
-# Bot's polymarket_fill_state ledger (terminal-FILLED rows, covers
-# orders that filled and left the SDK list before we polled).
-#
-# ADMIN-ONLY on purpose: the Polymarket SDK creds are the admin's
-# personal account. Other bot_access users have no linked account, so
-# their picks have nothing to match against — the page simply doesn't
-# fetch this for them.
-#
-# Statuses per pick:
-#   manual  — entry_book != PMM (e.g. PROPHETX manual fill: the user
-#             typed real odds from an app we have no API for) → assume
-#             filled the moment it's logged.
-#   resting — matching open maker order, zero fills yet.
-#   partial — matching open order, 0 < cum < qty (pct returned).
-#   filled  — order fully filled / position held / Filled Bot ledger
-#             shows the matched order terminal-FILLED.
-#   none    — SDK reachable but no matching order or position anywhere:
-#             the bet was never placed (or was canceled).
-#   unknown — SDK unreachable this tick; render nothing rather than a
-#             wrong "no order".
-#
-# `warn` (⚠ TAKE) = still unfilled with ≤30 min to tip — mirrors the
-# make/take engine's clock rule (a maker won't fill in time; cross).
-#
-# Matching: EXACT when the pick carries signal_blob.pmm.slug (stamped
-# at log time by the frontend since July 2026), with intent orientation
-# checked when the picked side was the synthetic (NO) side of the PMM
-# binary. Picks logged before the stamp fall back to a heuristic:
-# slug date + team names + market_type + side (+ line for SPR/TOT).
-# Heuristic misses show "none" — annoying but honest; new picks match
-# exactly.
-
-_FILL_STATUS_TTL = 30       # s — server cache; the page polls on its 60s loadData
-_FS_TAKE_WARN_MIN = 30      # unfilled + tip ≤30m → TAKE warning (make/take clock rule)
-
-
-def _fs_norm(s):
-    return re.sub(r"[^a-z0-9 ]+", "", (s or "").lower()).strip()
-
-
-def _fs_team_match(cand, team):
-    """Loose team-name equality: substring either way, or same mascot
-    (last token). PMM metadata says 'Baltimore Orioles' or a bare city
-    ('Oklahoma City'); our event_name carries the ESPN full name."""
-    c, t = _fs_norm(cand), _fs_norm(team)
-    if not c or not t:
-        return False
-    if c in t or t in c:
-        return True
-    return c.split()[-1] == t.split()[-1]
-
-
-def _fs_slug_date(*slugs):
-    for s in slugs:
-        m = re.search(r"(\d{4}-\d{2}-\d{2})", s or "")
-        if m:
-            return m.group(1)
-    return None
-
-
-def _fs_market_type(title, outcome, slug=None):
-    """Infer our market_type from a PMM order/position's metadata.
-
-    LANDMINE (July 2026): PMM's marketMetadata title for a first-inning
-    market is just the GAME NAME ("New York Yankees vs. Tampa Bay Rays",
-    outcome "Yes") — no "inning" anywhere — so title sniffing alone
-    classified every YRFI order as a moneyline and the fill chip showed
-    a false "NO ORDER" on filled NRFI bets. The slug suffix (-yrfi /
-    -nrfi on the astatc- stat contracts) is the reliable marker."""
-    t = (title or "").lower()
-    o = (outcome or "").strip().lower()
-    if re.search(r"-(?:yrfi|nrfi)$", (slug or "").lower()) or "inning" in t:
-        return "nrfi"
-    if o in ("over", "under"):
-        return "total"
-    if re.search(r"[+-]\s*\d", outcome or "") or t.startswith("spread"):
-        return "spread"
-    return "moneyline"
-
-
-def _fs_pick_matches(pick, cand):
-    """Does this order/position/ledger row look like THIS pick's bet?
-
-    cand: {slug, event_slug, title, outcome, team_name, intent}
-    """
-    blob = pick.get("signal_blob") or {}
-    pmm = blob.get("pmm") if isinstance(blob, dict) else None
-    cand_slug = cand.get("slug") or ""
-
-    # Exact path: the slug stamped at log time IS the market. Orders
-    # carry intent so we can also verify the side of the binary (a
-    # synthetic-NO pick is a *_SHORT order); positions/ledger rows
-    # without intent accept on slug alone — the conflict guard means
-    # the user never holds the opposite side of their own pick.
-    if isinstance(pmm, dict) and pmm.get("slug") and pmm["slug"] == cand_slug:
-        intent = cand.get("intent") or ""
-        if intent and intent.endswith("_SHORT") != bool(pmm.get("synthetic")):
-            return False    # the OTHER side of the same binary
-        return True
-    # A stamped pick whose slug differs still gets the heuristic below —
-    # the user may have rested on a different line's market than the
-    # one the verdict quoted.
-
-    mt = _fs_market_type(cand.get("title"), cand.get("outcome"),
-                         cand.get("slug"))
-    if mt != pick.get("market_type"):
-        return False
-
-    # Game date: slugs embed YYYY-MM-DD; ±1 day absorbs ET/UTC drift.
-    d = _fs_slug_date(cand.get("slug"), cand.get("event_slug"))
-    ev_date = (pick.get("event_start") or "")[:10]
-    if d and ev_date:
-        try:
-            dd = abs((datetime.strptime(d, "%Y-%m-%d")
-                      - datetime.strptime(ev_date, "%Y-%m-%d")).days)
-        except ValueError:
-            dd = 0
-        if dd > 1:
-            return False
-
-    ev = pick.get("event_name") or ""
-    away, home = (ev.split(" @ ", 1) if " @ " in ev else ("", ""))
-    side = (pick.get("side") or "").lower()
-
-    def _slug_codes_hit():
-        """True/False when the slug carries team codes we can check
-        against event_name; None when the slug has no code pattern."""
-        cm = re.match(r"^(?:[a-z0-9]+-)?[a-z]+-([a-z]{2,4})-([a-z]{2,4})-\d{4}",
-                      cand.get("slug") or cand.get("event_slug") or "")
-        if not cm:
-            return None
-        evl = ev.lower()
-        frags = [_TEAM_CODE_MAP.get(cm.group(1)), _TEAM_CODE_MAP.get(cm.group(2))]
-        return any(f and f in evl for f in frags)
-
-    if mt in ("moneyline", "spread"):
-        team = home if side == "home" else away
-        # Spreads: outcome is just "-1.5"; team_name carries the team.
-        who = cand.get("team_name") or cand.get("outcome") or ""
-        if not _fs_team_match(who, team):
-            return False
-        if mt == "spread":
-            line = pick.get("entry_line")
-            m = re.search(r"([+-]?\d+\.?\d*)", cand.get("outcome") or "")
-            if line is not None and m:
-                try:
-                    if abs(float(m.group(1)) - float(line)) > 0.01:
-                        return False
-                except ValueError:
-                    pass
-        return True
-
-    if mt == "total":
-        if (cand.get("outcome") or "").strip().lower() != side:
-            return False
-        hit = _slug_codes_hit()
-        if hit is False:
-            return False
-        if hit is None:
-            # No slug codes to verify the game — require a team mention
-            # in the title, else too weak (an O8.5 on ANOTHER game the
-            # same night would false-match).
-            tl = (cand.get("title") or "").lower()
-            if not any(t and t.lower().split()[-1] in tl for t in (away, home)):
-                return False
-        # Line sanity when the slug carries one (-8pt5 suffix). Half a
-        # point of drift allowed — the user may rest a nearby line.
-        line = pick.get("entry_line")
-        lm = re.search(r"-(\d+)pt(\d+)$", cand.get("slug") or "")
-        if line is not None and lm:
-            try:
-                cl = float(f"{lm.group(1)}.{lm.group(2)}")
-                if abs(cl - abs(float(line))) > 0.51:
-                    return False
-            except ValueError:
-                pass
-        return True
-
-    if mt == "nrfi":
-        # Side of the binary: the slug suffix says what YES means on THIS
-        # market (-yrfi ⇒ YES = a 1st-inning run) and the order intent
-        # says which side was bought (LONG = YES, SHORT = NO). Metadata
-        # `outcome` reads "Yes" even on a SHORT order, so intent+suffix is
-        # the reliable check; fall back to outcome only without them.
-        sl = (cand.get("slug") or "").lower()
-        intent = cand.get("intent") or ""
-        sm = re.search(r"-(yrfi|nrfi)$", sl)
-        if intent and sm:
-            yes_means = "yes" if sm.group(1) == "yrfi" else "no"
-            eff = (("no" if yes_means == "yes" else "yes")
-                   if intent.endswith("_SHORT") else yes_means)
-            if eff != side:
-                return False
-        else:
-            o = (cand.get("outcome") or "").strip().lower()
-            if o in ("yes", "no") and o != side:
-                return False
-        hit = _slug_codes_hit()
-        if hit is False:
-            return False
-        if hit is None:
-            tl = (cand.get("title") or "").lower()
-            if not any(t and t.lower().split()[-1] in tl for t in (away, home)):
-                return False
-        return True
-
-    return False
-
-
-def _fs_order_meta(md):
-    """Normalize a marketMetadata dict/model into the cand shape."""
-    if not isinstance(md, dict):
-        md = {k: getattr(md, k, None) for k in
-              ("slug", "title", "outcome", "eventSlug", "team")}
-    team = md.get("team") or {}
-    return {
-        "slug":       md.get("slug") or "",
-        "event_slug": md.get("eventSlug") or "",
-        "title":      md.get("title") or "",
-        "outcome":    md.get("outcome") or "",
-        "team_name":  (team.get("name", "") if isinstance(team, dict) else ""),
-    }
-
-
-def _fs_outbid_info(client, order, book_cache):
-    """Is this resting maker still the top bid? Polymarket never tells you
-    you've been outbid (NoVig/ProphetX do), so read the market's live book
-    and compare the order's picked-side price to the current best bid. A
-    rest that's been jumped won't fill first — the user wants a ⚠ so they
-    can re-rest at the new touch or take the ask.
-
-    order: the matched open-order cand (slug, intent, picked-side price
-    0-1 — already NO-flipped). *_SHORT intents read the inverted book
-    (same flip as the make/take engine — a synthetic-side pick shares the
-    YES market's slug, and the YES book's bids are the wrong side).
-    book_cache: per-request {slug:side → book} so two picks on one market
-    cost one read; capped so a huge pending list can't blow the request
-    budget. Returns {} when still the touch / unreadable, else
-    {outbid, my_price_c, best_bid_c, best_ask_c, ahead_qty}."""
-    slug = order.get("slug") or ""
-    price = order.get("price")
-    if not slug or price is None:
-        return {}
-    side = "no" if (order.get("intent") or "").endswith("_SHORT") else "yes"
-    key = f"{slug}:{side}"
-    if key not in book_cache:
-        if len(book_cache) >= 8:      # request-budget cap (Vercel 10s)
-            return {}
-        book = _pmm_book(client, slug)
-        if side == "no":
-            book = _invert_book(book)
-        book_cache[key] = book
-    book = book_cache[key]
-    if not book or book.get("best_bid") is None:
-        return {}
-    my_c = round(float(price) * 200) / 2.0    # half-cent ticks, like _pmm_book
-    bb = book["best_bid"]
-    if bb <= my_c + 0.001:
-        return {}    # our own order IS (or shares) the touch — fine
-    ahead = sum(q for c, q in (book.get("bids") or []) if c > my_c + 0.001)
-    return {"outbid": True, "my_price_c": my_c, "best_bid_c": bb,
-            "best_ask_c": book.get("best_ask"), "ahead_qty": round(ahead)}
-
-
-def _fs_auto_sync_entry(sb, picks_by_slug, cands):
-    """Auto-sync entry_price on FILLED (or partially filled) Polymarket
-    maker picks — the user asked for the loop to close itself: rest a
-    limit, it fills, the pick restamps to the REAL fill price (maker
-    rebate baked in) so CLV/to-WIN grade off what was actually paid.
-
-    picks_by_slug: {pmm_slug: pending pick row} — EXACT slug matches only
-    (signal_blob.pmm.slug, stamped at log time). The team/date heuristic
-    is deliberately excluded: a mis-match must never overwrite a good
-    entry.
-    cands: [{slug, intent, price (picked-side 0-1, already NO-flipped),
-             cum, qty}] — open orders / fill-state rows. Only cum>0 rows
-    sync (a resting order that hasn't filled isn't an entry yet; if the
-    user re-rests at a better price, the pick updates when THAT fills).
-
-    Never overwritten: manual edits (signal_blob.execution.manual — the
-    user's typed odds win). TAKE-rec picks DO sync (July 2026 fix — the
-    old blanket skip assumed the user always takes at the engine's
-    quoted ask, but a rest-below-the-ask after a TAKE rec left the pick
-    stamped at a fee-inclusive price the user never paid: Royals ML
-    logged +126 off a 43c ask while the real order rested + filled at
-    40c = +152). The fill is the truth regardless of the rec. Fee side
-    comes from the cand's `taker` flag (check-fills stamps it: an order
-    first seen already-terminal-and-fresh filled between ticks = taker;
-    anything we ever tracked resting = maker): taker → fill + taker fee,
-    maker → fill − maker rebate. Missing flag defaults to maker (resting
-    is the user's normal behavior; worst-case fee mislabel is ~1.5c,
-    versus the multi-cent price error this sync exists to fix). SELLs
-    excluded (exits). Returns number of picks updated.
-
-    INVARIANT (user rule, July 2026): UNITS ARE NEVER TOUCHED. Only
-    entry_price syncs. Dollars-on-exchange can't be converted to the
-    user's unit sizing — a 0.5u pick stays 0.5u regardless of how many
-    contracts the order was for. (The retired pmm-sync's
-    _pmm_units_for_qty did exactly that conversion; do NOT resurrect
-    it here.)"""
-    updated = 0
-    for c in cands:
-        try:
-            cum = float(c.get("cum") or 0)
-        except (TypeError, ValueError):
-            cum = 0
-        if cum <= 0:
-            continue
-        pick = picks_by_slug.get(c.get("slug") or "")
-        if not pick:
-            continue
-        intent = c.get("intent") or ""
-        if intent.startswith("ORDER_INTENT_SELL_"):
-            continue
-        blob = pick.get("signal_blob") if isinstance(pick.get("signal_blob"), dict) else {}
-        pmm = blob.get("pmm") if isinstance(blob.get("pmm"), dict) else {}
-        # Side-of-binary check, same rule as _fs_pick_matches.
-        if intent and intent.endswith("_SHORT") != bool(pmm.get("synthetic")):
-            continue
-        ex = blob.get("execution") if isinstance(blob.get("execution"), dict) else {}
-        if ex.get("manual"):
-            continue
-        p = c.get("price")
-        try:
-            p = float(p)
-        except (TypeError, ValueError):
-            continue
-        if not (0 < p < 1):
-            continue
-        taker = bool(c.get("taker"))
-        # NOTE: the fee helpers take the price in CENTS (0-100), not the
-        # 0-1 prob — passing p raw silently zeroes the fee/rebate.
-        if taker:
-            eff_cents = p * 100 + _pmm_taker_fee_cents(p * 100)
-        else:
-            eff_cents = p * 100 - _pmm_maker_rebate_cents(p * 100)
-        amer = _prob_to_amer_py(eff_cents / 100.0)
-        if amer is None:
-            continue
-        try:
-            cur = int(pick.get("entry_price")) if pick.get("entry_price") is not None else None
-        except (TypeError, ValueError):
-            cur = None
-        if cur == int(amer):
-            continue
-        blob = dict(blob)
-        new_ex = {"rec": ("TAKE" if taker else "MAKE"), "venue": "PMM",
-                  "auto_synced": True,
-                  "fill_american": _prob_to_amer_py(p),
-                  "entry_cents": round(eff_cents, 1)}
-        # Keep what the engine PLANNED (make-vs-take review compares
-        # plan vs actual execution) + its log-time book snapshot.
-        if ex.get("rec") and ex.get("rec") != new_ex["rec"]:
-            new_ex["planned_rec"] = ex.get("rec")
-        if ex.get("options"):
-            new_ex["options"] = ex.get("options")
-        blob["execution"] = new_ex
-        try:
-            sb.table("bot_picks").update(
-                {"entry_price": int(amer), "signal_blob": blob}
-            ).eq("id", pick["id"]).execute()
-            pick["entry_price"] = int(amer)
-            pick["signal_blob"] = blob
-            updated += 1
-        except Exception:
-            pass
-    return updated
-
-
-def _fs_picks_by_slug(pending_rows):
-    """{signal_blob.pmm.slug: row} for pending PMM picks that carry the
-    exact-match key. Rows without a stamped slug can't auto-sync."""
-    out = {}
-    for p in pending_rows:
-        if (p.get("entry_book") or "").upper() != "PMM":
-            continue
-        blob = p.get("signal_blob")
-        pmm = blob.get("pmm") if isinstance(blob, dict) else None
-        slug = pmm.get("slug") if isinstance(pmm, dict) else None
-        if slug:
-            out[slug] = p
-    return out
-
-
-@app.route("/api/handicapper/fill-status")
-@admin_required
-def api_handicapper_fill_status():
-    """Fill status per pending pick — see the block comment above."""
-    import time as _time
-    cache_key = f"fill_status:{g.uid}"
-    now_ts = _time.time()
-    cached = _cache.get(cache_key)
-    if cached and (now_ts - cached["ts"]) < _FILL_STATUS_TTL:
-        return jsonify(cached["data"])
-
-    sb = get_supabase()
-    if sb is None:
-        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
-    try:
-        pending = (sb.table("bot_picks")
-                   .select("id,market_id,market_type,side,entry_book,entry_line,"
-                           "entry_price,event_name,event_start,sport,signal_blob")
-                   .eq("status", "pending").eq("asked_by", g.uid)
-                   .order("event_start", desc=False)
-                   .limit(200).execute().data) or []
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"pending fetch: {e}"}), 500
-
-    now = datetime.now(timezone.utc)
-    pmm_picks = [p for p in pending
-                 if (p.get("entry_book") or "").upper() == "PMM"]
-
-    orders, positions, sdk_ok = [], [], False
-    client = None
-    if pmm_picks:
-        try:
-            client = get_client()
-            resp = client.orders.list()
-            raw = (resp.get("orders") if isinstance(resp, dict)
-                   else getattr(resp, "orders", []) or [])
-            sdk_ok = True
-            for o in raw:
-                def _g(key, default=None, _o=o):
-                    if isinstance(_o, dict):
-                        return _o.get(key, default)
-                    return getattr(_o, key, default)
-                if (_g("state") or "") not in _OPEN_ORDER_STATES:
-                    continue
-                intent = _g("intent") or ""
-                # Entry fills only — a SELL order is an exit, not the bet.
-                if intent.startswith("ORDER_INTENT_SELL_"):
-                    continue
-                cand = _fs_order_meta(_g("marketMetadata") or {})
-                cand["intent"] = intent
-                cand["qty"] = _safe_float(_g("quantity")) or 0
-                cand["cum"] = _safe_float(_g("cumQuantity")) or 0
-                # Picked-side price for the auto-sync (same NO-flip as
-                # /api/my-orders — gotcha #7/#23).
-                raw_price = _safe_float(_g("price"))
-                cand["price"] = ((1 - raw_price)
-                                 if (raw_price is not None and 0 <= raw_price <= 1
-                                     and intent.endswith("_SHORT"))
-                                 else raw_price)
-                orders.append(cand)
-        except Exception:
-            sdk_ok = False
-        if sdk_ok:
-            try:
-                for slug, pos in fetch_positions(client):
-                    if pos.get("expired"):
-                        continue
-                    net = _safe_float(pos.get("netPosition")) or 0
-                    if abs(net) < 0.01:
-                        continue
-                    cand = _fs_order_meta(pos.get("marketMetadata") or {})
-                    if not cand["slug"]:
-                        cand["slug"] = slug or ""
-                    cand["intent"] = ""
-                    positions.append(cand)
-            except Exception:
-                pass
-
-    # Filled Bot ledger: recently terminal-FILLED orders. Covers the gap
-    # where a maker filled and vanished from the SDK list (and isn't a
-    # position anymore because the game already resolved).
-    ledger_filled = []
-    if pmm_picks:
-        try:
-            cutoff = (now - timedelta(days=7)).isoformat()
-            rows = (sb.table("polymarket_fill_state")
-                    .select("slug,market_name,pick,intent,last_state,alerts_sent,"
-                            "price,quantity,last_cum_quantity,taker")
-                    .eq("terminal", True).gte("last_seen_at", cutoff)
-                    .limit(500).execute().data) or []
-            for r in rows:
-                sent = r.get("alerts_sent") or []
-                if (r.get("intent") or "").startswith("ORDER_INTENT_SELL_"):
-                    continue    # a filled SELL is an exit, not the entry
-                if r.get("last_state") == "ORDER_STATE_FILLED" or "100" in sent:
-                    qty = _safe_float(r.get("quantity")) or 0
-                    ledger_filled.append({
-                        "slug":       r.get("slug") or "",
-                        "event_slug": "",
-                        "title":      r.get("market_name") or "",
-                        # `pick` is outcome-with-team-prefix — close enough
-                        # for the heuristic's team/side checks.
-                        "outcome":    r.get("pick") or "",
-                        "team_name":  "",
-                        "intent":     r.get("intent") or "",
-                        # `price` was stored picked-side (already NO-flipped
-                        # by check-fills). A ledger row in this list is a
-                        # full fill — treat cum as the full qty.
-                        "price":      _safe_float(r.get("price")),
-                        "qty":        qty,
-                        "cum":        qty or (_safe_float(r.get("last_cum_quantity")) or 0),
-                        # Fee side for the auto-sync (null on pre-July-
-                        # 2026 rows → maker default, the common case).
-                        "taker":      r.get("taker"),
-                    })
-        except Exception:
-            pass
-
-    # Auto-sync entry_price on fills BEFORE reporting status (exact-slug
-    # picks only; units never touched — see _fs_auto_sync_entry).
-    entry_synced = 0
-    try:
-        by_slug = _fs_picks_by_slug(pmm_picks)
-        if by_slug:
-            entry_synced = _fs_auto_sync_entry(sb, by_slug, orders + ledger_filled)
-    except Exception:
-        entry_synced = 0
-
-    fills = []
-    _ob_books: dict = {}    # per-request book cache for the outbid check
-    for p in pending:
-        book = (p.get("entry_book") or "").upper()
-        dt = _parse_iso(p.get("event_start") or "")
-        mins = ((dt - now).total_seconds() / 60.0) if dt else None
-        entry = {
-            "id":            p["id"],
-            "market_id":     p.get("market_id"),
-            "market_type":   p.get("market_type"),
-            "pct":           None,
-            "warn":          False,
-            "mins_to_start": (round(mins) if mins is not None else None),
-        }
-        if book != "PMM":
-            # Typed-in odds (ProphetX / manual book) — no API to poll;
-            # the user logged a REAL fill, so it's filled by definition.
-            entry["status"] = "manual"
-        else:
-            order = next((o for o in orders if _fs_pick_matches(p, o)), None)
-            if order is not None:
-                if order["qty"] and order["cum"] >= order["qty"]:
-                    entry["status"], entry["pct"] = "filled", 100.0
-                elif order["cum"] > 0:
-                    entry["status"] = "partial"
-                    entry["pct"] = (round(order["cum"] / order["qty"] * 100.0, 1)
-                                    if order["qty"] else None)
-                else:
-                    entry["status"], entry["pct"] = "resting", 0.0
-                # Outbid check for a live (not fully filled) maker: is the
-                # rest still the top bid? Only pre-game — once it starts,
-                # the unfilled remainder is moot.
-                if (entry["status"] in ("resting", "partial")
-                        and (mins is None or mins > 0)):
-                    try:
-                        entry.update(_fs_outbid_info(client, order, _ob_books))
-                    except Exception:
-                        pass
-            elif any(_fs_pick_matches(p, c) for c in positions):
-                entry["status"], entry["pct"] = "filled", 100.0
-            elif any(_fs_pick_matches(p, c) for c in ledger_filled):
-                entry["status"], entry["pct"] = "filled", 100.0
-            elif sdk_ok:
-                entry["status"] = "none"
-            else:
-                entry["status"] = "unknown"
-            if (entry["status"] in ("resting", "partial", "none")
-                    and mins is not None and 0 < mins <= _FS_TAKE_WARN_MIN):
-                entry["warn"] = True
-        fills.append(entry)
-
-    result = {"ok": True, "fills": fills, "sdk_ok": sdk_ok,
-              "entry_synced": entry_synced}
-    _cache[cache_key] = {"data": result, "ts": now_ts}
-    return jsonify(result)
+# (The Pick Bot fill tracker — /api/handicapper/fill-status, the _fs_*
+# matchers, entry auto-sync, outbid detection — was RETIRED July 2026 with
+# the Kalshi execution cutover: Kalshi notifies fills natively and the
+# user's call was "Pick Bot makes picks, it doesn't track my bets". Full
+# spec in git history pre-July-12-2026.)
 
 
 @app.route("/api/handicapper/dossier")
@@ -10643,23 +9554,23 @@ def api_handicapper_pick_delete(pick_id: int):
 @app.route("/api/handicapper/pick/<int:pick_id>/edit", methods=["POST"])
 @bot_required   # admin edits any pick; a bot_access user edits only their own (asked_by==g.uid)
 def api_handicapper_pick_edit(pick_id: int):
-    """Edit a PENDING pick's units / entry odds / venue. Body:
+    """Edit a PENDING pick's units / entry odds. Body:
     {units?, price?, book?, execution?} — at least one of units/price.
 
     Units fixes a fat-fingered stake (confidence re-derives so the tier
-    label/colour stays consistent). Price fixes the ENTRY ODDS (July 2026,
-    user ask): the logged maker bid isn't always the real fill (in-play
-    fill, re-rested limit, manual ProphetX cross) — the frontend edit
-    modal takes the BOARD price the user saw plus venue + make/take, and
-    sends the fee-inclusive effective American here, so CLV + to-WIN stay
-    honest (both key off entry_price at grade time; pending rows only, so
-    nothing needs recomputing). `book` ('PMM'|'PROPHETX') moves the pick
-    between venues — PROPHETX also flips the fill tracker to 'manual'
-    (assumed filled) since it reads entry_book. `execution` (object)
-    replaces signal_blob.execution with the corrected rec for the
-    make-vs-take review. Auth mirrors DELETE (admin OR owner). Only
-    pending picks — a settled pick's pnl is already booked, so editing
-    there would desync the stats; delete + re-log instead."""
+    label/colour stays consistent). Price fixes the ENTRY ODDS: with the
+    fill auto-sync retired (Kalshi cutover, July 2026 — Pick Bot no
+    longer tracks the user's orders), the edit modal is how a real fill
+    that differs from the logged make price gets corrected — the user
+    types the Kalshi fill in ¢ and the frontend sends the American here,
+    so CLV + to-WIN stay honest (both key off entry_price at grade time;
+    pending rows only, so nothing needs recomputing). `book`
+    ('KALSHI'|'PMM' — PMM legacy rows only) relabels the venue.
+    `execution` (object) replaces signal_blob.execution with the
+    corrected rec for the execution review. Auth mirrors DELETE (admin
+    OR owner). Only pending picks — a settled pick's pnl is already
+    booked, so editing there would desync the stats; delete + re-log
+    instead."""
     sb = get_supabase()
     if sb is None:
         return jsonify({"ok": False, "error": "Supabase not configured"}), 503
@@ -10673,8 +9584,8 @@ def api_handicapper_pick_edit(pick_id: int):
     execution = body.get("execution")
     if units is None and price is None:
         return jsonify({"ok": False, "error": "pass units and/or price"}), 400
-    if book is not None and book not in ("PMM", "PROPHETX"):
-        return jsonify({"ok": False, "error": "book must be PMM or PROPHETX"}), 400
+    if book is not None and book not in ("KALSHI", "PMM"):
+        return jsonify({"ok": False, "error": "book must be KALSHI or PMM"}), 400
     if execution is not None and not isinstance(execution, dict):
         return jsonify({"ok": False, "error": "execution must be an object"}), 400
     if units is not None:
@@ -10719,8 +9630,8 @@ def api_handicapper_pick_edit(pick_id: int):
     if book is not None:
         update["entry_book"] = book
     if execution is not None:
-        # Merge, don't replace: signal_blob carries the pmm slug match key,
-        # model read, vsin stamp, etc. — only the execution rec is edited.
+        # Merge, don't replace: signal_blob carries the model read, vsin
+        # stamp, etc. — only the execution rec is edited.
         sblob = row.get("signal_blob")
         if not isinstance(sblob, dict):
             sblob = {}

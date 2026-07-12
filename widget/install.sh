@@ -81,8 +81,8 @@ fi
 if [ -z "$KEY" ]; then
     echo ""
     echo "Paste your ticker secret. It's the FILLS_CRON_SECRET value —"
-    echo "easiest source: cron-job.org → the check-fills job → the URL's"
-    echo "?key=THIS-PART  (or Vercel → kahla-house → Settings → Env Vars)."
+    echo "source: Vercel → kahla-house → Settings → Env Vars (or GitHub"
+    echo "repo secrets / any fill_ping curl URL's ?key=THIS-PART)."
     read -r -p "Secret: " KEY
     mkdir -p "$CFG_DIR"
     printf 'KAHLA_TICKER_KEY=%s\n' "$KEY" > "$CFG"
