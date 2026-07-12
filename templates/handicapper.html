@@ -714,7 +714,7 @@
                 <input type="text" id="lmSelection" readonly />
             </div>
             <div class="field" id="lmExecWrap" style="display:none">
-                <label>Execution — Poly vs ProphetX</label>
+                <label>Make odds — Kalshi · Poly · ProphetX</label>
                 <div id="lmExec" style="font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.6;white-space:pre-wrap;padding:8px 10px;border:1px solid var(--border,#2a2f3a);border-radius:8px;"></div>
             </div>
             <div class="row2">
@@ -3115,23 +3115,32 @@
         return `${j.rec} ${j.venue_label || 'Polymarket'} ${_mtCents(j.price)}¢`;
     }
 
-    // Per-venue MAKE odds (the resting-bid price you'd post, in cents) pulled
-    // out of the options list — this is the "show me make odds on Kalshi and
-    // Polymarket" line. Poly / Kalshi / ProphetX are all cents-quoted makers,
-    // so the log screen reads their make price in ¢, side by side.
-    function _venueMakes(j) {
+    // Raw make odds (the resting-bid price you'd post, in cents) per venue,
+    // sorted BEST-FIRST (lowest cents = cheapest entry = best odds). We do NOT
+    // fee-adjust the cross-venue comparison anymore: Polymarket's maker rebate
+    // is offset by Kalshi's balance interest, so the honest decision is the
+    // RAW resting-bid price. Returns [{venue, cents}] best-first.
+    function _rawMakes(j) {
         const byV = {};
         (j && j.options || []).forEach(o => {
             if (o.rec !== 'MAKE' || o.post_price == null) return;   // plain rest-at-bid
             if (byV[o.venue] == null) byV[o.venue] = o.post_price;
         });
-        const lbl = { POLYMARKET: 'Poly', KALSHI: 'Kalshi' };
-        const out = Object.keys(byV).map(v => `${lbl[v] || v} ${_mtCents(byV[v])}¢`);
-        // ProphetX has no live book — append its computed cross-shop cents so
-        // all three venues line up (the number your X app must beat).
-        if (j && j.prophetx && j.prophetx.beat_cents != null)
-            out.push(`X ~${_mtCents(j.prophetx.beat_cents)}¢`);
-        return out;
+        return Object.keys(byV).map(v => ({ venue: v, cents: byV[v] }))
+                     .sort((a, b) => a.cents - b.cents);
+    }
+
+    // ProphetX board price (cents) at which X's 2%-of-winnings fee-inclusive
+    // cost equals `targetCents` — i.e. the number your X app must beat to win
+    // the bet. X pays NO interest, so its fee IS a real cost and is counted
+    // here (2·p(1−p)¢); Poly/Kalshi makes are compared RAW. Two fixed-point
+    // passes converge to <0.1¢, same as the server helper.
+    function _prophetxBeat(targetCents) {
+        if (targetCents == null || !(targetCents > 1 && targetCents < 99)) return null;
+        const fee = c => { const p = c / 100; return 2 * p * (1 - p); };
+        let e = targetCents - fee(targetCents);
+        e = targetCents - fee(e);
+        return Math.round(e * 10) / 10;
     }
 
     function _loadAllMakeTake(root) {
@@ -3202,24 +3211,29 @@
     }
 
     // Fold the chosen execution into the log body so entry_price + entry_book
-    // follow the cheapest fillable venue/side the engine picked (all-in cents
-    // → american, so CLV/to-WIN carry the real fee/rebate). entry_book = the
-    // venue actually used (PMM or KALSHI). The full verdict + all four options
-    // are stashed in signal_blob.execution for the make-vs-take review.
+    // follow the BEST RAW MAKE across venues (lowest cents = best odds). The
+    // fee-adjusted all-in comparison is retired: Poly's maker rebate is offset
+    // by Kalshi's balance interest, so cross-venue routing is on raw resting-
+    // bid odds. Tie → Polymarket (main venue, dashboard P&L); Kalshi wins only
+    // when it's strictly cheaper. entry_price = the raw make (american, so
+    // CLV/to-WIN stay honest). signal_blob.execution keeps the full read.
     function _applyMakeTakeToBody(body) {
         if (!body || !body.market_id) return body;
         const j = _makeTakeCache.get(_mtKey(body.market_id, body.market_type, body.side));
-        if (!j || !j.available || j.price == null) return body;
-        body.book = (j.venue === 'KALSHI') ? 'KALSHI' : 'PMM';
-        // Log the EFFECTIVE cost (all-in, fee/rebate baked in) so CLV + to-WIN
-        // are honest — not the directive post price the chip shows.
-        const eff = (j.entry_cents != null) ? j.entry_cents : j.price;
-        const amer = _centsToAmer(eff);
+        if (!j || !j.available) return body;
+        const makes = _rawMakes(j);            // [{venue, cents}], best-first
+        if (!makes.length) return body;        // no bid anywhere → keep seeded price
+        const best = makes[0];
+        const poly = makes.find(m => m.venue === 'POLYMARKET');
+        const chosen = (poly && poly.cents <= best.cents) ? poly : best;
+        body.book = (chosen.venue === 'KALSHI') ? 'KALSHI' : 'PMM';
+        const amer = _centsToAmer(chosen.cents);
         if (amer != null) { body.price = amer; body._price = amer; }
         body.signal_blob = Object.assign({}, body.signal_blob, {
-            execution: { rec: j.rec, venue: j.venue,
-                         post_price: j.price, entry_cents: eff,
-                         entry_book: body.book, options: j.options || [] } });
+            execution: { rec: 'MAKE', venue: chosen.venue,
+                         make_cents: chosen.cents, entry_cents: chosen.cents,
+                         entry_book: body.book, makes: makes,
+                         options: j.options || [] } });
         return body;
     }
 
@@ -3673,47 +3687,28 @@
             o.units, o.sim, o.inverse, o.ctx, o.line);
         if (seq !== _lmExecSeq) return;   // superseded by a newer modal open
         if (!j || j.price == null) { wrap.style.display = 'none'; el.textContent = ''; return; }
-        const amer = _centsToAmer(j.price);           // fee-inclusive all-in
-        const effLabel = `${amer != null ? _fmtAmer(amer) : '?'} (${_mtCents(j.price)}¢)`;
+        const lbl = { POLYMARKET: 'Poly', KALSHI: 'Kalshi' };
+        // Raw make odds, best (cheapest cents) FIRST. No fee adjustment on the
+        // cross-venue compare — Poly's maker rebate is offset by Kalshi's
+        // balance interest, so the honest number is the raw resting bid.
+        const makes = _rawMakes(j);
         let s;
-        if (j.rec === 'TAKE' && j.best_ask != null) {
-            // LEAD with the RAW book ask — that's the number Polymarket's app
-            // actually shows and what you click. `j.price` is the fee-inclusive
-            // all-in cost (ask + taker fee), which reads worse and does NOT
-            // match the book, so it goes on its own line as your true cost.
-            // (User hit this: book +138, we showed +131 — looked wrong.)
-            const askAmer = _centsToAmer(j.best_ask);
-            s = `TAKE ${j.venue_label || 'Polymarket'} — book ask `
-              + `${askAmer != null ? _fmtAmer(askAmer) : '?'} (${_mtCents(j.best_ask)}¢)`;
-            s += `\n≈ ${effLabel} all-in after the take fee`;
-            // Why the rest won't fill: buyers crowding the bid (imb ≥ 1) —
-            // or, post the half-cent-book fix, a TAKE on an ask-leaning
-            // book only happens on the clock (<30m to tip).
-            if (j.best_bid != null) {
-                const bAmer = _centsToAmer(j.best_bid);
-                const why = (j.touch_imbalance != null && j.touch_imbalance >= 1)
-                    ? ` — bids ${j.touch_imbalance}× the sells`
-                    : ` — too close to start for a rest`;
-                s += `\n(rest at ${bAmer != null ? _fmtAmer(bAmer) : j.best_bid + '¢'} won't fill`
-                   + why + `)`;
-            }
-            if (j.prophetx && j.prophetx.beat_american != null) {
-                const a = j.prophetx.beat_american;
-                s += `\nProphetX: ${a > 0 ? '+' + a : a} or better beats the `
-                   + `${_mtCents(j.price)}¢ cost (2% win fee incl.)`;
-            }
+        if (makes.length) {
+            s = makes.map(m => `${lbl[m.venue] || m.venue} ${_mtCents(m.cents)}¢`).join(' · ');
         } else {
-            // MAKE (or MAKE+): j.price IS the actionable raw post price (the
-            // bid / bid+0.5 you rest at) — matches the book, so show it plain.
-            s = `${j.rec} ${j.venue_label || 'Polymarket'} at ${effLabel}`;
-            if (j.prophetx && j.prophetx.beat_american != null) {
-                const a = j.prophetx.beat_american;
-                s += `\nProphetX: ${a > 0 ? '+' + a : a} or better beats it (2% win fee incl.)`;
-            }
+            // No bid on any venue — fall back to the engine's directive cents
+            // so the panel isn't blank.
+            s = `${j.venue_label || 'Polymarket'} ${_mtCents(j.price)}¢`;
         }
+        // ProphetX beats the exchanges when its fee-inclusive cost clears the
+        // BEST (cheapest) raw make. X pays no interest, so its 2% win fee is a
+        // real cost and IS counted; the exchange makes are compared raw.
+        const target = makes.length ? makes[0].cents : null;
+        const px = _prophetxBeat(target);
+        if (px != null)
+            s += `\nProphetX ${_mtCents(px)}¢ or better beats ${makes.length > 1 ? 'both' : 'it'} (2% win fee incl.)`;
         // Pinnacle reference (cached parlay-api slate, zero credits) — the
-        // sharp book's number next to the execution price: "am I getting a
-        // decent line?" Ages past 30m get flagged so a stale read is obvious.
+        // sharp book's number: "am I getting a decent line?" Ages past 30m flagged.
         if (j.pin && j.pin.price != null) {
             const pl = (j.pin.line != null)
                 ? ` @ ${o.mt === 'spread' && j.pin.line > 0 ? '+' : ''}${j.pin.line}` : '';
@@ -3721,10 +3716,6 @@
                 ? ` · ${j.pin.age_min}m old` : '';
             s += `\nPinnacle: ${_fmtAmer(j.pin.price)}${pl}${age}`;
         }
-        // Make odds side-by-side (Poly · Kalshi · X) — logging auto-captures
-        // the best of the readable exchanges; this shows what each is quoting.
-        const makes = _venueMakes(j);
-        if (makes.length > 1) s += `\nMake odds — ${makes.join(' · ')}`;
         el.textContent = s;
     }
     // iOS numeric keypad has no minus key, so the ProphetX field carries a
