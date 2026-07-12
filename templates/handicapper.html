@@ -3115,6 +3115,25 @@
         return `${j.rec} ${j.venue_label || 'Polymarket'} ${_mtCents(j.price)}¢`;
     }
 
+    // Per-venue MAKE odds (the resting-bid price you'd post, in cents) pulled
+    // out of the options list — this is the "show me make odds on Kalshi and
+    // Polymarket" line. Poly / Kalshi / ProphetX are all cents-quoted makers,
+    // so the log screen reads their make price in ¢, side by side.
+    function _venueMakes(j) {
+        const byV = {};
+        (j && j.options || []).forEach(o => {
+            if (o.rec !== 'MAKE' || o.post_price == null) return;   // plain rest-at-bid
+            if (byV[o.venue] == null) byV[o.venue] = o.post_price;
+        });
+        const lbl = { POLYMARKET: 'Poly', KALSHI: 'Kalshi' };
+        const out = Object.keys(byV).map(v => `${lbl[v] || v} ${_mtCents(byV[v])}¢`);
+        // ProphetX has no live book — append its computed cross-shop cents so
+        // all three venues line up (the number your X app must beat).
+        if (j && j.prophetx && j.prophetx.beat_cents != null)
+            out.push(`X ~${_mtCents(j.prophetx.beat_cents)}¢`);
+        return out;
+    }
+
     function _loadAllMakeTake(root) {
         if (!_canBet) return;
         (root || document).querySelectorAll('.mt-wrap[data-slug]').forEach(_loadMakeTake);
@@ -3702,6 +3721,10 @@
                 ? ` · ${j.pin.age_min}m old` : '';
             s += `\nPinnacle: ${_fmtAmer(j.pin.price)}${pl}${age}`;
         }
+        // Make odds side-by-side (Poly · Kalshi · X) — logging auto-captures
+        // the best of the readable exchanges; this shows what each is quoting.
+        const makes = _venueMakes(j);
+        if (makes.length > 1) s += `\nMake odds — ${makes.join(' · ')}`;
         el.textContent = s;
     }
     // iOS numeric keypad has no minus key, so the ProphetX field carries a
