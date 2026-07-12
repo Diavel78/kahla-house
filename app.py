@@ -3543,24 +3543,38 @@ def debug_pmm():
     # that's the silent gap. Import is inside the try so an import break shows.
     try:
         sb = get_supabase()
-        grow = (sb.table("markets").select("event_name,event_start")
-                .eq("sport", "MLB").eq("status", "active")
-                .gte("event_start", now.isoformat())
-                .order("event_start").limit(1).execute().data or [None])[0]
+        # Optional ?sport=UFC&q=Riley probe (public, read-only) — run the FULL
+        # lookup on any sport/game so we can inspect a market's real shape
+        # (e.g. the UFC distance prop yes/no orientation). Defaults to MLB.
+        _sport = (request.args.get("sport") or "MLB").upper()
+        _q = request.args.get("q")
+        gq = (sb.table("markets").select("event_name,event_start")
+              .eq("sport", _sport).eq("status", "active")
+              .gte("event_start", (now - timedelta(hours=8)).isoformat())
+              .order("event_start"))
+        if _q:
+            gq = gq.ilike("event_name", f"%{_q}%")
+        grow = (gq.limit(1).execute().data or [None])[0]
         if not grow:
-            out["lookup"] = {"error": "no upcoming MLB game in markets"}
+            out["lookup"] = {"error": f"no upcoming {_sport} game"
+                             + (f" matching '{_q}'" if _q else "")}
         else:
             away, home = [s.strip() for s in grow["event_name"].split(" @ ", 1)]
             import pmm_markets as _pm
             diag = {}
             t2 = _t.time()
-            res2 = _pm.lookup(client, "MLB", away, home, grow["event_start"], diag=diag)
+            res2 = _pm.lookup(client, _sport, away, home, grow["event_start"], diag=diag)
             out["lookup"] = {
-                "game": grow["event_name"], "ms": round((_t.time() - t2) * 1000),
+                "game": grow["event_name"], "sport": _sport,
+                "ms": round((_t.time() - t2) * 1000),
                 "res_keys": sorted((res2 or {}).keys()),
                 "has_ml": bool((res2 or {}).get("ml")),
                 "has_spread": bool((res2 or {}).get("spread")),
                 "has_total": bool((res2 or {}).get("total")),
+                # UFC distance prop: dump each side's slug/title/quote so we can
+                # see whether the market's YES token is really "goes distance".
+                "ufc_distance": (res2 or {}).get("ufc_distance"),
+                "total_pmm": (((res2 or {}).get("total") or {}).get("polymarket")),
                 "diag": diag,
             }
     except Exception as e:
@@ -9190,8 +9204,19 @@ def _ufc_espn_fight_states(now: datetime) -> list[dict]:
     """Every UFC bout ESPN currently knows, as {n1, n2, state}. Iterates
     events × competitions so it handles both ESPN MMA shapes (flat
     one-event-per-fight AND card-with-many-competitions). state ∈ pre/in/post.
-    30s-cached via _espn_scoreboard_raw; [] on fetch error."""
-    dates = f"{now:%Y%m%d}-{(now + timedelta(days=8)):%Y%m%d}"
+    30s-cached via _espn_scoreboard_raw; [] on fetch error.
+
+    LANDMINE: the date window must start a DAY BEHIND `now`, not at `now`.
+    ESPN dates a card by its US-local date, and UFC block-time nominal starts
+    push the main event's `event_start` past UTC midnight — so once the clock
+    rolls past 00:00 UTC, a card that began "tonight" (dated the prior UTC day
+    on ESPN) fell entirely outside a `{now}..` window. ESPN then returned zero
+    fights and the _ufc_pickable_market_rows fail-safe dropped every
+    past-nominal bout on the LIVE card mid-event (the "main event card vanished
+    at midnight" bug). Look back a full day (comfortably past the 8h lookback +
+    any US-date offset) so the running card stays matched."""
+    lo = now - timedelta(days=1)
+    dates = f"{lo:%Y%m%d}-{(now + timedelta(days=8)):%Y%m%d}"
     fights: list[dict] = []
     for ev in _espn_scoreboard_raw("mma", "ufc", dates=dates):
         for comp in (ev.get("competitions") or []):
@@ -10460,12 +10485,13 @@ def api_handicapper_pick():
     if missing:
         return jsonify({"ok": False, "error": f"missing: {missing}"}), 400
 
-    if body["market_type"] not in ("moneyline", "spread", "total", "nrfi"):
+    if body["market_type"] not in ("moneyline", "spread", "total", "nrfi", "distance"):
         return jsonify({"ok": False, "error": "bad market_type"}), 400
-    # NRFI/YRFI uses yes/no sides; everything else uses home/away/over/under.
-    if body["market_type"] == "nrfi":
+    # NRFI/YRFI + the UFC "distance" prop use yes/no sides; everything else
+    # uses home/away/over/under. (UFC round O/U rides market_type='total'.)
+    if body["market_type"] in ("nrfi", "distance"):
         if body["side"] not in ("yes", "no"):
-            return jsonify({"ok": False, "error": "nrfi side must be yes/no"}), 400
+            return jsonify({"ok": False, "error": f"{body['market_type']} side must be yes/no"}), 400
     elif body["side"] not in ("home", "away", "over", "under"):
         return jsonify({"ok": False, "error": "bad side"}), 400
     if body["confidence"] not in ("low", "medium", "high", "whale"):
@@ -10474,8 +10500,13 @@ def api_handicapper_pick():
         units_val = float(body["units"])
     except (TypeError, ValueError):
         units_val = None
-    if units_val not in (0.25, 0.5, 1, 3, 5, 10):
-        return jsonify({"ok": False, "error": "units must be 0.25/0.5/1/3/5/10"}), 400
+    # Any quarter-unit increment in (0, 10]. The upgrade flow logs a DELTA
+    # row (target − already-logged) at the current odds, so off-tier values
+    # like 2.5u (0.5u lean → 3u) or 2u (1u → 3u) are legitimate. Mirrors the
+    # bot_picks_units_check CHECK (migration 013).
+    if (units_val is None or not (0 < units_val <= 10)
+            or round(units_val * 4) != units_val * 4):
+        return jsonify({"ok": False, "error": "units must be a positive quarter-unit ≤ 10"}), 400
 
     line_val = body.get("line")
     if body["market_type"] in ("spread", "total"):

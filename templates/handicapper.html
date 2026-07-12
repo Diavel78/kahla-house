@@ -1121,6 +1121,13 @@
         const diffMin = (new Date(iso) - new Date()) / 60_000;
         if (diffMin < 0) return false;
         if (_isPrime(iso)) return true;
+        // The model-only early band (2h30m–5h) exists for MODEL bets, and the
+        // only live model bet is NRFI, which is MLB-only (TOT is blacklisted).
+        // Other sports (UFC, NBA, NHL, …) have NO model bet out here, so the
+        // steam window is the only thing that lights their rows — otherwise a
+        // UFC fight 3h out glowed green + read "PRIME · NRFI" for a baseball
+        // market it can never have.
+        if (_activeSport !== 'MLB') return false;
         return diffMin >= MODEL_BET_EARLY_MIN && diffMin <= VERDICT_WINDOW_MS / 60_000;
     }
     // UFC fights run on imprecise block-times, so a bout the server still
@@ -1190,7 +1197,7 @@
         // blacklisted July 2026 — naming it promised chips that can't
         // exist.)
         if (tag) tag.textContent = on
-            ? (_isPrime(iso) ? _primeBadgeText(iso) : 'Prime · NRFI')
+            ? (_isPrime(iso) ? _primeBadgeText(iso) : (_activeSport === 'MLB' ? 'Prime · NRFI' : 'Prime'))
             : '';
     }
     function _fmtSettled(iso) {
@@ -1199,7 +1206,7 @@
         if (diffH < 24) return `${Math.round(diffH)}h ago`;
         return d.toLocaleString([], {month:'short', day:'numeric'});
     }
-    function _shortMarket(mt) { return ({moneyline:'ML', spread:'SPR', total:'TOT', nrfi:'1ST'})[mt] || mt; }
+    function _shortMarket(mt) { return ({moneyline:'ML', spread:'SPR', total:'TOT', nrfi:'1ST', distance:'DIST'})[mt] || mt; }
     // Team → mascot last word ("Boston Red Sox" → "Sox"). When the OTHER
     // team in the game ends in the SAME word (Red Sox @ White Sox — the
     // "Sox are playing the Sox" bug), keep the last TWO words so the label
@@ -1663,7 +1670,7 @@
                 // inline so it's correct on first render — no verdict wait.
                 const rowPrime = _canBet && _inAnyWindow(g.event_start);
                 const rowBadge = rowPrime
-                    ? (_isPrime(g.event_start) ? _primeBadgeText(g.event_start) : 'Prime · NRFI')
+                    ? (_isPrime(g.event_start) ? _primeBadgeText(g.event_start) : (_activeSport === 'MLB' ? 'Prime · NRFI' : 'Prime'))
                     : '';
                 return `<li class="game-row${rowPrime ? ' prime' : ''}">
                     <div class="game-line1">
@@ -1727,11 +1734,44 @@
                 return { state: 'conflict', logged: { mt: t, units: info.units, side: info.side } };
         return { state: 'new', logged: null };
     }
+    // Upgrade sizing: when the bot now wants MORE units on a bet you already
+    // logged, log only the DELTA (target − already-logged) at the current
+    // odds — not a full-size duplicate. e.g. 0.5u logged at +105, bot now
+    // wants 3u → add a 2.5u row at -100 (total exposure 3u across two maker
+    // fills at two prices). Returns null when it isn't an upgrade or the
+    // delta rounds to ≤0. Delta snaps to a quarter-unit (DB CHECK + schema).
+    function _upgradeDelta(mid, mt, side, targetUnits) {
+        const st = _pickState(mid, mt, side, targetUnits);
+        if (st.state !== 'upgrade' || !st.logged) return null;
+        const delta = Math.round((Number(targetUnits) - Number(st.logged.units)) * 4) / 4;
+        if (!(delta > 0)) return null;
+        return { delta, loggedUnits: Number(st.logged.units), targetUnits: Number(targetUnits) };
+    }
+    // Point the log modal's units <select> at an arbitrary quarter-unit
+    // value, injecting an <option> for it if the standard tiers don't cover
+    // it (delta upgrades produce off-tier values like 2.5u / 0.75u). Setting
+    // .value to a missing option silently yields "" → submitLog posts 0.
+    function _seedUnitsSelect(val) {
+        const sel = document.getElementById('lmUnits');
+        if (!sel) return;
+        // Drop any off-tier option injected on a previous open so the
+        // dropdown doesn't accumulate stale delta values across the session.
+        Array.from(sel.querySelectorAll('option[data-delta]')).forEach(o => o.remove());
+        const v = String(val);
+        if (!Array.from(sel.options).some(o => o.value === v)) {
+            const o = document.createElement('option');
+            o.value = v; o.textContent = _uStr(Number(val)); o.setAttribute('data-delta', '1');
+            sel.appendChild(o);
+        }
+        sel.value = v;
+    }
     // Minimal green chip for a pick the user has ALREADY logged but the bot
     // isn't currently suggesting (so it's not in the verdict cache). No price
     // — just the side + units — so "already picked" stays visible even after
     // the game leaves the prime window.
     function _loggedChipLabel(mt, side, units, game) {
+        if (mt === 'distance')
+            return `${side === 'yes' ? 'GOES DIST' : 'FINISH (no dist)'} · ${_uStr(units)}`;
         const mkt = _shortMarket(mt);
         let sideLbl;
         if (mt === 'nrfi') sideLbl = (side === 'no' ? 'NRFI' : 'YRFI');
@@ -1767,8 +1807,11 @@
                 // EARLY window (their edge is before the market sharpens, the
                 // opposite of steam). STEAM bets (ML/SPR) → the server's tuned
                 // per-market timing_window.
+                // UFC Fight IQ duration picks aren't steam bets and have no
+                // tuned window — show them whenever the fight is upcoming.
                 const isModelBet = (p.market_type === 'nrfi' || p.market_type === 'total');
-                const inPrime = isModelBet ? (diffMin >= MODEL_BET_EARLY_MIN) : (p._tw === 'prime');
+                const inPrime = p._ufc ? (diffMin > -5)
+                    : (isModelBet ? (diffMin >= MODEL_BET_EARLY_MIN) : (p._tw === 'prime'));
                 if (!isLogged && !inPrime) return;     // hide non-prime, non-logged picks
                 // LEANS show ONLY inside the prime window (user call) — the
                 // model-bet early gate above has no upper bound, which let a
@@ -1831,6 +1874,13 @@
     // the log modal's execution line shows the real make/take price). The
     // LINE stays for SPR/TOT — it's part of the bet, not a price.
     function _pickChipLabel(mt, side, line, price, units, d) {
+        const isUfc = d && d.sport === 'UFC';
+        // UFC Fight IQ duration family: distance prop (yes = goes distance,
+        // no = finish) + round O/U (rides market_type 'total').
+        if (mt === 'distance')
+            return `${side === 'yes' ? 'GOES DIST' : 'FINISH (no dist)'} · ${_uStr(units)}`;
+        if (mt === 'total' && isUfc)
+            return `RDS ${side === 'over' ? 'O' : 'U'}${_fmtPt(Math.abs(line))} · ${_uStr(units)}`;
         const mkt = _shortMarket(mt);
         let sideLbl;
         if (mt === 'nrfi') sideLbl = (side === 'no' ? 'NRFI' : 'YRFI');
@@ -1948,6 +1998,33 @@
                                     signal_blob: { pmm: { slug: pb.slug || null, synthetic: !!pb.synthetic } },
                                     allow_duplicate: true } });
                         }
+                        // UFC Fight IQ duration family — distance prop + round
+                        // O/U priced vs Poly's actual markets. Tiny-stake
+                        // entertainment picks (user call); shown whenever the
+                        // fight is upcoming (no steam-window gate, `_ufc`), and
+                        // logged to bot_picks for manual settle.
+                        const _udur = (d.ufc_model && d.ufc_model.matched && d.ufc_model.duration) || null;
+                        if (_udur) {
+                            [['distance', _udur.distance_bet], ['rounds', _udur.rounds_bet]].forEach(([kind, bet]) => {
+                                if (!bet || !bet.gates_cleared) return;
+                                const mt = (kind === 'distance') ? 'distance' : 'total';
+                                const line = (bet.line != null ? bet.line : null);
+                                const desc = (kind === 'distance')
+                                    ? (bet.side === 'yes' ? 'goes the distance' : 'finish inside distance')
+                                    : `${bet.side} ${_fmtPt(line)} rounds`;
+                                picks.push({ market_type: mt, side: bet.side, units: 1,
+                                    _slug: bet.slug || null, _inv: false, _ufc: true,
+                                    _chip: _pickChipLabel(mt, bet.side, line, bet.entry_american, 1, d),
+                                    _body: { market_id: mid, market_type: mt, side: bet.side, book: 'PMM',
+                                        price: bet.entry_american, line, units: 1, confidence: 'low',
+                                        fair_prob: null, edge_pp: (bet.edge_pp != null ? bet.edge_pp : null),
+                                        sharp_score: null,
+                                        reasons: [`Fight IQ edge ${bet.edge_pp >= 0 ? '+' : ''}${bet.edge_pp}pp on ${desc}`],
+                                        query_text: d.query || null,
+                                        signal_blob: { fight_iq: true, kind, pmm: { slug: bet.slug || null, synthetic: false } },
+                                        allow_duplicate: true } });
+                            });
+                        }
                         _verdictCache.set(mid, { picks, fetchedAt: Date.now() });
                         _renderPickLines();
                     }
@@ -1987,9 +2064,15 @@
         _pendingBody = Object.assign({}, p._body);
         _pendingPick = null;
         const g = (_currentGames || []).find(x => x.market_id === mid) || {};
+        // Upgrade tap: seed the DELTA (target − already-logged) at the live
+        // odds, not the full target — logging that adds a second row that
+        // tops you up to the target instead of double-betting.
+        const _target = Number(p._body.units || p.units || 1);
+        const _up = _upgradeDelta(mid, p.market_type, p.side, _target);
+        const _upNote = _up ? `  ↑ +${_uStr(_up.delta)} → ${_uStr(_up.targetUnits)}` : '';
         document.getElementById('lmSelection').value  = (p._chip || `${p.market_type} ${p.side}`)
-            + _selGameFrag(p.market_type, g.away, g.home);
-        document.getElementById('lmUnits').value      = String(p._body.units || p.units || 1);
+            + _selGameFrag(p.market_type, g.away, g.home) + _upNote;
+        _seedUnitsSelect(_up ? _up.delta : _target);
         document.getElementById('lmConfidence').value = p._body.confidence || 'low';
         document.getElementById('lmReasons').value    = (p._body.reasons || []).join('\n');
         document.getElementById('lmAnalysis').value   = '';
@@ -2592,14 +2675,21 @@
         const sugIndex = new Map();
         suggestions.forEach((s, i) => sugIndex.set(`${s.market_type}:${s.side}`, i));
         html += '<div class="market-grid">';
-        for (const mt of ['moneyline', 'spread', 'total']) {
+        // UFC has no point spread or game total — PMM "spreads" are method
+        // props and the round O/U is the Fight IQ "Go the Distance" prop, not
+        // a market-grid total. Show ONLY moneyline so the fight page isn't
+        // padded with empty "no exchange data" SPREAD/TOTAL panels.
+        const _mktList = (d.sport === 'UFC') ? ['moneyline'] : ['moneyline', 'spread', 'total'];
+        for (const mt of _mktList) {
             html += renderMarketCard(mt, d.odds[mt] || {}, d, sugIndex);
         }
         html += '</div>';
 
         // Splits — always render the row so missing data is visible
-        // and per-source diagnostics surface when nothing matched.
-        if (d.splits) {
+        // and per-source diagnostics surface when nothing matched. Skipped
+        // for UFC: Action Network / VSiN have no MMA coverage, so the panel
+        // only ever showed a "no match" box full of unrelated MLB games.
+        if (d.splits && d.sport !== 'UFC') {
             const sp = d.splits;
             const matched = (sp.sources && sp.sources.length > 0);
             const sd = sp.sharp_diff;
@@ -2751,10 +2841,27 @@
             const rndFrag = (dur.rounds_pmm && dur.rounds_pmm.edge_pp != null)
                 ? `<div class="pr-line">Over ${_fmtPt(dur.rounds_pmm.line)} rounds: model <b>${(dur.rounds_pmm.p_over*100).toFixed(0)}%</b> vs Poly ${(dur.rounds_pmm.mid*100).toFixed(0)}¢ → edge <b>${dur.rounds_pmm.edge_pp>=0?'+':''}${dur.rounds_pmm.edge_pp}pp ${dur.rounds_pmm.edge_pp>=0?'OVER':'UNDER'}</b></div>`
                 : '';
+            // One-tap log buttons for the duration family (tiny-stake
+            // entertainment picks — user call). The +EV side lights green.
+            const _durBtn = (bet, kind) => {
+                if (!bet || !_canLog) return '';
+                const lbl = (kind === 'distance')
+                    ? (bet.side === 'yes' ? 'Goes the distance' : 'Finish (no distance)')
+                    : (bet.side === 'over' ? `Over ${_fmtPt(bet.line)} rds` : `Under ${_fmtPt(bet.line)} rds`);
+                const cls = bet.gates_cleared ? 'bet' : '';
+                const edge = `${bet.edge_pp >= 0 ? '+' : ''}${bet.edge_pp}pp`;
+                return `<button class="${cls}" onclick="logUfcDur('${kind}','${bet.side}')" title="Log ${_esc(lbl)} 1u @ ${_fmtAmer(bet.entry_american)} — Fight IQ edge ${edge}. Stays pending for manual settle.">Log ${lbl} · 1u <span style="opacity:.65">${edge}</span></button>`;
+            };
+            const _durHasMkt = dur.distance_pmm || (dur.rounds_pmm && dur.rounds_pmm.edge_pp != null);
+            const _durBtns = (_canLog && (dur.distance_bet || dur.rounds_bet))
+                ? `<div class="nrfi-actions">${_durBtn(dur.distance_bet, 'distance')}${_durBtn(dur.rounds_bet, 'rounds')}</div>`
+                : (_canLog && _durHasMkt
+                    ? `<div class="pr-line" style="color:var(--orange)">⚠ Duration betting paused — verifying Polymarket's YES/NO orientation before logging (a distance pick priced the wrong side). Read is reference-only for now.</div>`
+                    : '');
             html += `<div class="card">
                 <div class="card-head">
                     <h3>Fight IQ</h3>
-                    <span class="ref-tag" title="FightElo + layers (age, layoff, chin, style) from the complete UFC history. Walk-forward: 61% winners (70%+ calls hit 81%), duration family beats base rates on every line. Reference + veto duty only — never sizes a bet.">OUR NUMBER</span>
+                    <span class="ref-tag" title="FightElo + layers (age, layoff, chin, style) from the complete UFC history. Walk-forward: 61% winners (70%+ calls hit 81%), duration family beats base rates on every line. Duration picks are tiny-stake; winner P is veto/reference only.">OUR NUMBER · MAKES DURATION PICKS</span>
                 </div>
                 <div class="pr-grid">
                     <div class="pr-cell"><span class="pr-lbl">${_esc(u.away.name||d.away)}</span><span class="pr-val">${(u.p.away*100).toFixed(0)}% <span class="pr-fair">${_fmtAmer(u.fair_american.away)}</span></span></div>
@@ -2765,7 +2872,8 @@
                 ${noteFrag('home', u.home.name||d.home)}
                 ${distFrag}
                 ${rndFrag}
-                <div class="wx-foot">FightElo + age/layoff/chin/style layers${u.reliable ? '' : ' · thin history — veto disarmed'} · reference + veto only (never sizes)</div>
+                ${_durBtns}
+                <div class="wx-foot">FightElo + age/layoff/chin/style layers${u.reliable ? '' : ' · thin history — veto disarmed'} · winner P = veto/reference · duration = tiny-stake picks (manual settle)</div>
             </div>`;
         }
 
@@ -3378,6 +3486,54 @@
             ctx: { sport: _lastDossier.sport, away: _lastDossier.away, home: _lastDossier.home } } : null);
     }
 
+    // Fight IQ duration pick (UFC). kind: 'distance' (market_type 'distance',
+    // side yes/no) | 'rounds' (rides market_type 'total', side over/under,
+    // line = round number). Maker entry = the model block's computed entry
+    // (Poly bid for the picked side). Flat 1u, low confidence, tiny-stake
+    // entertainment. Stays pending for manual settle (resolver skips UFC
+    // non-ML). Mirrors logNrfi.
+    function logUfcDur(kind, side) {
+        if (!_lastDossier || !_lastDossier.ufc_model) return;
+        const dur = (_lastDossier.ufc_model.duration) || {};
+        const bet = (kind === 'distance') ? dur.distance_bet : dur.rounds_bet;
+        if (!bet) return;
+        const mt = (kind === 'distance') ? 'distance' : 'total';
+        const line = (bet.line != null ? bet.line : null);
+        const sideLbl = (kind === 'distance')
+            ? (side === 'yes' ? 'Goes the distance' : 'Finish (no distance)')
+            : (side === 'over' ? `Over ${_fmtPt(line)} rounds` : `Under ${_fmtPt(line)} rounds`);
+        _pendingPick = {
+            market_id:   _lastDossier.market_id,
+            market_type: mt,
+            side:        side,
+            book:        'PMM',
+            price:       bet.entry_american,
+            line:        line,
+            fair_prob:   null,
+            edge_pp:     (bet.edge_pp != null ? bet.edge_pp : null),
+            sharp_score: null,
+            label:       `Fight IQ · ${sideLbl} @ ${_fmtAmer(bet.entry_american)}`
+                         + _selGameFrag(mt, _lastDossier.away, _lastDossier.home),
+            seed_units:  1,
+            seed_conf:   'low',
+            pmm_slug:      bet.slug || null,
+            pmm_synthetic: false,
+        };
+        _pendingBody = null;
+        _pxReset();
+        document.getElementById('lmSelection').value  = _pendingPick.label;
+        document.getElementById('lmUnits').value      = '1';
+        document.getElementById('lmConfidence').value = 'low';
+        document.getElementById('lmReasons').value    =
+            `Fight IQ model edge ${bet.edge_pp >= 0 ? '+' : ''}${bet.edge_pp}pp on ${sideLbl.toLowerCase()}`;
+        document.getElementById('lmAnalysis').value   = '';
+        _lmStatus('warn', 'UFC duration pick — grades manually (the auto-resolver only does UFC winners). Settle it from the pending list after the fight.');
+        const _st = _pickState(_lastDossier.market_id, mt, side, 1);
+        if (_st.state === 'logged' || _st.state === 'upgrade')
+            _lmStatus('warn', `You already have this pending on this fight — logging again adds a second bet.`);
+        document.getElementById('logModal').classList.add('show');
+    }
+
     function copyForClaude() {
         if (!_lastDossier) return;
         // Strip the suggestion + alt_matches — Claude will derive its own.
@@ -3444,8 +3600,15 @@
         } : _seedManual(_lastDossier);
         if (!_pendingPick) return;
 
-        document.getElementById('lmSelection').value = _pendingPick.label;
-        document.getElementById('lmUnits').value      = String(_pendingPick.seed_units || 1);
+        // Upgrade: seed the DELTA at live odds so "Add to 3u" tops up the
+        // existing 0.5u bet with a 2.5u row, instead of logging a full 3u
+        // duplicate. Non-upgrade paths seed the full recommended size.
+        const _upTarget = Number(_pendingPick.seed_units || 1);
+        const _up = _upgradeDelta(_pendingPick.market_id, _pendingPick.market_type,
+                                  _pendingPick.side, _upTarget);
+        document.getElementById('lmSelection').value = _pendingPick.label
+            + (_up ? `  ↑ +${_uStr(_up.delta)} → ${_uStr(_up.targetUnits)}` : '');
+        _seedUnitsSelect(_up ? _up.delta : _upTarget);
         document.getElementById('lmConfidence').value = _pendingPick.seed_conf || 'medium';
         document.getElementById('lmReasons').value    = _buildReasons(_pendingPick, _lastDossier).join('\n');
         document.getElementById('lmAnalysis').value   = '';
@@ -3481,27 +3644,43 @@
             o.units, o.sim, o.inverse, o.ctx, o.line);
         if (seq !== _lmExecSeq) return;   // superseded by a newer modal open
         if (!j || j.price == null) { wrap.style.display = 'none'; el.textContent = ''; return; }
-        const amer = _centsToAmer(j.price);
-        let s = `${j.rec} ${j.venue_label || 'Polymarket'} at `
-              + `${amer != null ? _fmtAmer(amer) : '?'} (${_mtCents(j.price)}¢)`;
-        // A TAKE quotes the fee-inclusive ask, which reads worse than the
-        // bid shown in the Selection label — say why in one line so the
-        // -125-vs--134 jump explains itself (user hit this on a steamed
-        // Nationals book, July 2026).
-        if (j.rec === 'TAKE' && j.best_bid != null) {
-            const bAmer = _centsToAmer(j.best_bid);
+        const amer = _centsToAmer(j.price);           // fee-inclusive all-in
+        const effLabel = `${amer != null ? _fmtAmer(amer) : '?'} (${_mtCents(j.price)}¢)`;
+        let s;
+        if (j.rec === 'TAKE' && j.best_ask != null) {
+            // LEAD with the RAW book ask — that's the number Polymarket's app
+            // actually shows and what you click. `j.price` is the fee-inclusive
+            // all-in cost (ask + taker fee), which reads worse and does NOT
+            // match the book, so it goes on its own line as your true cost.
+            // (User hit this: book +138, we showed +131 — looked wrong.)
+            const askAmer = _centsToAmer(j.best_ask);
+            s = `TAKE ${j.venue_label || 'Polymarket'} — book ask `
+              + `${askAmer != null ? _fmtAmer(askAmer) : '?'} (${_mtCents(j.best_ask)}¢)`;
+            s += `\n≈ ${effLabel} all-in after the take fee`;
             // Why the rest won't fill: buyers crowding the bid (imb ≥ 1) —
             // or, post the half-cent-book fix, a TAKE on an ask-leaning
             // book only happens on the clock (<30m to tip).
-            const why = (j.touch_imbalance != null && j.touch_imbalance >= 1)
-                ? ` — bids ${j.touch_imbalance}× the sells`
-                : ` — too close to start for a rest`;
-            s += `\n(rest at ${bAmer != null ? _fmtAmer(bAmer) : j.best_bid + '¢'} won't fill`
-               + why + `; take cost incl. fee)`;
-        }
-        if (j.prophetx && j.prophetx.beat_american != null) {
-            const a = j.prophetx.beat_american;
-            s += `\nProphetX: ${a > 0 ? '+' + a : a} or better beats it (2% win fee incl.)`;
+            if (j.best_bid != null) {
+                const bAmer = _centsToAmer(j.best_bid);
+                const why = (j.touch_imbalance != null && j.touch_imbalance >= 1)
+                    ? ` — bids ${j.touch_imbalance}× the sells`
+                    : ` — too close to start for a rest`;
+                s += `\n(rest at ${bAmer != null ? _fmtAmer(bAmer) : j.best_bid + '¢'} won't fill`
+                   + why + `)`;
+            }
+            if (j.prophetx && j.prophetx.beat_american != null) {
+                const a = j.prophetx.beat_american;
+                s += `\nProphetX: ${a > 0 ? '+' + a : a} or better beats the `
+                   + `${_mtCents(j.price)}¢ cost (2% win fee incl.)`;
+            }
+        } else {
+            // MAKE (or MAKE+): j.price IS the actionable raw post price (the
+            // bid / bid+0.5 you rest at) — matches the book, so show it plain.
+            s = `${j.rec} ${j.venue_label || 'Polymarket'} at ${effLabel}`;
+            if (j.prophetx && j.prophetx.beat_american != null) {
+                const a = j.prophetx.beat_american;
+                s += `\nProphetX: ${a > 0 ? '+' + a : a} or better beats it (2% win fee incl.)`;
+            }
         }
         // Pinnacle reference (cached parlay-api slate, zero credits) — the
         // sharp book's number next to the execution price: "am I getting a
@@ -4076,7 +4255,19 @@
                 const m = _loggedPicks.get(r.market_id) || new Map();
                 const u = Number(r.units) || 1;
                 const prev = m.get(r.market_type);
-                if (!prev || u > prev.units) m.set(r.market_type, { units: u, side: r.side });
+                if (!prev) {
+                    m.set(r.market_type, { units: u, side: r.side });
+                } else if (prev.side === r.side) {
+                    // SAME side, multiple pending rows — the upgrade flow logs
+                    // the DELTA as a second row (0.5u lean + a 2.5u upgrade at
+                    // the new odds), so SUM to the true total exposure. Storing
+                    // the max instead would leave the total reading 2.5u and
+                    // re-prompt "↑ upgrade to 3u" forever (over-betting).
+                    prev.units = Math.round((prev.units + u) * 100) / 100;
+                } else if (u > prev.units) {
+                    // Opposite side somehow logged (manual) — keep the larger.
+                    m.set(r.market_type, { units: u, side: r.side });
+                }
                 _loggedPicks.set(r.market_id, m);
             });
             _loggedPicksReady = true;
