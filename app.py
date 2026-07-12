@@ -9204,8 +9204,19 @@ def _ufc_espn_fight_states(now: datetime) -> list[dict]:
     """Every UFC bout ESPN currently knows, as {n1, n2, state}. Iterates
     events × competitions so it handles both ESPN MMA shapes (flat
     one-event-per-fight AND card-with-many-competitions). state ∈ pre/in/post.
-    30s-cached via _espn_scoreboard_raw; [] on fetch error."""
-    dates = f"{now:%Y%m%d}-{(now + timedelta(days=8)):%Y%m%d}"
+    30s-cached via _espn_scoreboard_raw; [] on fetch error.
+
+    LANDMINE: the date window must start a DAY BEHIND `now`, not at `now`.
+    ESPN dates a card by its US-local date, and UFC block-time nominal starts
+    push the main event's `event_start` past UTC midnight — so once the clock
+    rolls past 00:00 UTC, a card that began "tonight" (dated the prior UTC day
+    on ESPN) fell entirely outside a `{now}..` window. ESPN then returned zero
+    fights and the _ufc_pickable_market_rows fail-safe dropped every
+    past-nominal bout on the LIVE card mid-event (the "main event card vanished
+    at midnight" bug). Look back a full day (comfortably past the 8h lookback +
+    any US-date offset) so the running card stays matched."""
+    lo = now - timedelta(days=1)
+    dates = f"{lo:%Y%m%d}-{(now + timedelta(days=8)):%Y%m%d}"
     fights: list[dict] = []
     for ev in _espn_scoreboard_raw("mma", "ufc", dates=dates):
         for comp in (ev.get("competitions") or []):
