@@ -2822,9 +2822,16 @@
                 const pmmFrag = pb
                     ? `<div class="pr-sub">exch bid ${_fmtAmer(pb.bid_american)} · ask ${_fmtAmer(pb.ask_american)}${pb.edge_pp != null ? ` · <b style="color:${pb.edge_pp >= 0 ? 'var(--green)' : 'var(--red)'}">${pb.edge_pp >= 0 ? '+' : ''}${pb.edge_pp}pp</b>` : ''}</div>`
                     : `<div class="pr-sub" style="color:var(--text-muted)">no exchange price</div>`;
+                // Live Kalshi book for this side — async via _loadKalshiQuotes.
+                const kq = `<div class="pr-sub kq" data-mid="${_esc(d.market_id || '')}"
+                    data-mt="nrfi" data-side="${side}" data-line=""
+                    data-sim="${d.starts_in_min != null ? d.starts_in_min : ''}"
+                    data-sport="${_esc(d.sport || '')}" data-away="${_esc(d.away || '')}"
+                    data-home="${_esc(d.home || '')}"><span style="color:#a78bfa">Kalshi</span> <span class="kq-val" style="color:var(--text-muted)">checking…</span></div>`;
                 return `<div class="pr-cell" style="${isBet ? 'outline:1px solid var(--green);border-radius:8px' : ''}">
                     <span class="pr-lbl">${lbl}${isBet ? ' ✓' : ''}</span>
                     <span class="pr-val">${pct}% <span class="pr-fair">${_fmtAmer(fairA)}</span></span>
+                    ${kq}
                     ${pmmFrag}
                 </div>`;
             };
@@ -2981,6 +2988,7 @@
 
         el.innerHTML = html;
         _loadAllMakeTake(el);
+        _loadKalshiQuotes(el);
     }
 
     // ── Make-vs-take execution chip ───────────────────────────────────
@@ -3055,6 +3063,44 @@
     function _loadAllMakeTake(root) {
         if (!_canBet) return;
         (root || document).querySelectorAll('.mt-wrap[data-mid]').forEach(_loadMakeTake);
+    }
+
+    // Live Kalshi book per market-grid side (+ NRFI cells) — Kalshi is the
+    // execution venue, so its actual bid/ask belongs on the card, not just
+    // the PMM reference quote. Throttled 2-concurrent; each verdict also
+    // lands in _makeTakeCache, so a pick logged from this dossier enters
+    // at the real Kalshi make. Reader miss → the row hides (the exch
+    // reference below it still shows; the miss is a coverage gap, not a
+    // missing market — RULE 0.001).
+    async function _loadKalshiQuotes(root) {
+        if (!_canBet) return;
+        const queue = Array.from((root || document).querySelectorAll('.kq[data-mid]'));
+        const work = async () => {
+            while (queue.length) {
+                const el = queue.shift();
+                const mid = el.getAttribute('data-mid');
+                const mt = el.getAttribute('data-mt');
+                const side = el.getAttribute('data-side');
+                const lnRaw = el.getAttribute('data-line');
+                const ln = (lnRaw === '' || lnRaw == null) ? null : lnRaw;
+                const simRaw = el.getAttribute('data-sim');
+                const sim = (simRaw === '' || simRaw == null) ? null : Number(simRaw);
+                const ctx = { sport: el.getAttribute('data-sport'),
+                              away: el.getAttribute('data-away'),
+                              home: el.getAttribute('data-home') };
+                const j = await _fetchMakeTakeVerdict(mid, mt, side, 1, sim, ctx, ln);
+                const v = el.querySelector('.kq-val');
+                if (!v) continue;
+                if (!j || j.best_bid == null) { el.style.display = 'none'; continue; }
+                const bidA = _centsToAmer(j.best_bid);
+                const askA = _centsToAmer(j.best_ask);
+                v.style.color = '';
+                v.innerHTML = `book <b>${_mtCents(j.best_bid)}¢</b>/${_mtCents(j.best_ask)}¢`
+                    + (bidA != null ? ` <span style="color:var(--text-muted)">(${_fmtAmer(bidA)}${askA != null ? ' / ' + _fmtAmer(askA) : ''})</span>` : '')
+                    + (j.rec ? ` · <b>${_esc(j.rec)}</b>` : '');
+            }
+        };
+        await Promise.all([work(), work()]);
     }
 
     async function _loadMakeTake(wrap) {
@@ -3226,10 +3272,25 @@
                     : '<div style="font-size:11px;color:var(--text-muted)">no exchange data</div>';
             }
 
+            // LIVE Kalshi book row — the EXECUTION venue's actual bid/ask,
+            // filled in async by _loadKalshiQuotes (one order-book read per
+            // side via the make/take endpoint; the verdict also lands in
+            // _makeTakeCache so a log from this dossier enters at the real
+            // Kalshi make). Sits ABOVE the exch reference row: Kalshi is
+            // where the bet happens, PMM is the model's price reference.
+            const sideLn = (pmmBlock && pmmBlock.line != null) ? pmmBlock.line
+                : (xSnap && xSnap.line != null ? xSnap.line : '');
+            const kqRow = `<div class="pmm-row kq" data-mid="${_esc(d.market_id || '')}"
+                data-mt="${_esc(mt)}" data-side="${_esc(s)}" data-line="${sideLn}"
+                data-sim="${d.starts_in_min != null ? d.starts_in_min : ''}"
+                data-sport="${_esc(d.sport || '')}" data-away="${_esc(d.away || '')}"
+                data-home="${_esc(d.home || '')}"><span class="pmm-lbl" style="color:#a78bfa">Kalshi</span> <span class="kq-val" style="color:var(--text-muted)">checking book…</span></div>`;
+
             const blockCls = 'side-block' + (isBotPick ? ' bot-picked' : '');
             blocks += `<div class="${blockCls}">
                 <div class="side-head"><span class="name">${_esc(sideName)}</span>${btn}</div>
                 ${rows}
+                ${kqRow}
                 ${pmmRow}
             </div>`;
         }
