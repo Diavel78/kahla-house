@@ -3048,8 +3048,12 @@ _PM_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF", "UFC"]
 # score's baseline and the dossier fair anchor dark until noon. 36h
 # covers the whole listed-the-night-before slate; the snapshot loop's
 # budget + near-game (≤6h) priority tier keep in-prime freshness safe.
+# UFC 96h→168h (July 2026, All-Star-break find): a Saturday card sat
+# invisible until Tuesday while its lines drifted off camp news /
+# weigh-ins — the very drift the early window exists to capture. UFC is
+# a weekly card sport like NFL; watch it the full week.
 _PM_WINDOW_H = {"MLB": 36, "NBA": 96, "NHL": 96, "NFL": 168, "NCAAF": 72,
-                "UFC": 96}
+                "UFC": 168}
 _KALSHI_CACHE: dict[str, tuple[float, dict]] = {}
 _KALSHI_TTL = 30  # seconds
 
