@@ -4468,6 +4468,51 @@ def api_kalshi_probe():
                          "KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY, redeploy, "
                          "re-hit this probe.")
         return jsonify(out)
+    # ?debug=1 — signature-format matrix: sign GET /portfolio/balance four
+    # plausible ways and report which one Kalshi accepts. One tap answers
+    # "is our message format wrong, or does the key not match the key id".
+    if (request.args.get("debug") or "") in ("1", "true", "yes"):
+        import base64
+        import time as _t
+        from urllib.parse import urlparse
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+        try:
+            key = serialization.load_pem_private_key(
+                pem.replace("\\n", "\n").encode(), password=None)
+            base = _KALSHI_BASES[0]
+            variants = {
+                "prefix+ms+digest_salt":   (True, True, "digest"),   # current signer
+                "noprefix+ms+digest_salt": (False, True, "digest"),
+                "prefix+ms+max_salt":      (True, True, "max"),
+                "prefix+sec+digest_salt":  (True, False, "digest"),
+            }
+            out["sig_variants"] = {}
+            for name, (with_prefix, ms, saltk) in variants.items():
+                ts = str(int(_t.time() * (1000 if ms else 1)))
+                spath = ((urlparse(base).path if with_prefix else "")
+                         + "/portfolio/balance")
+                salt = (padding.PSS.DIGEST_LENGTH if saltk == "digest"
+                        else padding.PSS.MAX_LENGTH)
+                sig = base64.b64encode(key.sign(
+                    (ts + "GET" + spath).encode(),
+                    padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                                salt_length=salt),
+                    hashes.SHA256())).decode()
+                try:
+                    r = _http.get(base + "/portfolio/balance", headers={
+                        "Accept": "application/json",
+                        "User-Agent": "kahla-house/1.0",
+                        "KALSHI-ACCESS-KEY": kid,
+                        "KALSHI-ACCESS-TIMESTAMP": ts,
+                        "KALSHI-ACCESS-SIGNATURE": sig}, timeout=10)
+                    out["sig_variants"][name] = {
+                        "status": r.status_code, "body": (r.text or "")[:140]}
+                except Exception as e:
+                    out["sig_variants"][name] = {
+                        "error": f"{type(e).__name__}: {str(e)[:100]}"}
+        except Exception as e:
+            out["sig_variants"] = {"error": f"{type(e).__name__}: {str(e)[:140]}"}
     bal = _kalshi_authed_get("/portfolio/balance")
     out["balance"] = {"ok": bal.get("ok"), "status": bal.get("status"),
                       "error": bal.get("error"), "data": bal.get("data"),
@@ -8048,7 +8093,7 @@ def debug_kalshi_probe_page():
         if (!u) { document.getElementById("out").textContent = "Not logged in. Go to / first, sign in, come back."; return; }
         try {
             const t = await u.getIdToken();
-            const r = await fetch("/api/kalshi/probe", {headers:{"Authorization":"Bearer "+t}});
+            const r = await fetch("/api/kalshi/probe" + location.search, {headers:{"Authorization":"Bearer "+t}});
             const d = await r.json();
             document.getElementById("out").textContent = JSON.stringify(d, null, 2);
         } catch (e) {
