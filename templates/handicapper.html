@@ -2479,13 +2479,13 @@
                 const displayLine = usingPmm && s.pmm_line != null ? s.pmm_line : s.pin_line;
                 const lineFrag = (displayLine == null) ? '' : ` ${_fmtPt(displayLine)}`;
                 const venueTag = usingPmm
-                    ? '<span class="venue-tag pmm">Poly</span>'
-                    : '<span class="venue-tag pmm">Exchange</span>';
+                    ? '<span class="venue-tag pmm">exch</span>'
+                    : '<span class="venue-tag pmm">exch</span>';
                 const cardCls = s.gates_cleared ? 'suggestion-card' : 'suggestion-card soft';
                 const headingText = s.gates_cleared
                     ? (multi
                         ? `Bot Suggests — Pick ${i + 1} of ${suggestions.length}`
-                        : 'Bot Suggests — Polymarket Target')
+                        : 'Bot Suggests — Exchange Target')
                     : (s.vsin_vetoed_pick
                         ? 'Vetoed — Circa sharp money against'
                         : 'Lean — would pass, but if forced');
@@ -2495,7 +2495,7 @@
                 //   No PMM        → "PIN now -107 (no PMM market found)"
                 let metaLine = '';
                 if (usingPmm) {
-                    const askFrag = s.pmm_ask_american != null ? `Poly asking ${_fmtAmer(s.pmm_ask_american)}` : 'Poly (no current ask)';
+                    const askFrag = s.pmm_ask_american != null ? `exch asking ${_fmtAmer(s.pmm_ask_american)}` : 'exch (no current ask)';
                     const bidFrag = s.pmm_bid_american != null ? ` · bid ${_fmtAmer(s.pmm_bid_american)}` : '';
                     metaLine = `Limit-order at ${_fmtAmer(s.fair_american)} or better · ${askFrag}${bidFrag}`;
                 } else {
@@ -2509,9 +2509,9 @@
                         const evtCount = dg.events_returned != null ? ` (searched ${dg.events_returned})` : '';
                         const titles = (dg.sample_event_titles || []).filter(Boolean).slice(0, 3).join(' · ');
                         const sawFrag = titles ? `<div style="color:var(--text-muted);font-size:10px">saw: ${_esc(titles)}</div>` : '';
-                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:2px">Poly: ${_esc(String(pm.error).slice(0, 120))}${evtCount}</div>${sawFrag}`;
+                        dbg = `<div style="color:var(--text-muted);font-size:10px;margin-top:2px">exch: ${_esc(String(pm.error).slice(0, 120))}${evtCount}</div>${sawFrag}`;
                     }
-                    metaLine = `Limit-order on Polymarket at ${_fmtAmer(s.fair_american)} or better${pinNow} <span style="color:var(--text-muted);font-size:10px">(no Poly match — projection skipped)</span>${dbg}`;
+                    metaLine = `Limit-order at ${_fmtAmer(s.fair_american)} or better${pinNow} <span style="color:var(--text-muted);font-size:10px">(no exch match — projection skipped)</span>${dbg}`;
                 }
                 const testBadge = s.test_only
                     ? `<span class="time-badge" style="background:#5b3a87;color:#e9d8ff" title="Model total — the side comes from the run-total MODEL (projected total vs the line), NOT exchange movement. Real 1u pick; gate = model beats the line by ≥1 run.">MODEL${s.model_total_diff != null ? ` · ${s.model_total_diff > 0 ? '+' : ''}${Number(s.model_total_diff).toFixed(1)}r vs line` : ''}</span>`
@@ -2764,10 +2764,10 @@
             const noteFrag = (side, nm) => (u[side].notes && u[side].notes.length)
                 ? `<div class="pr-line">${_esc(nm)}: ${u[side].notes.map(_esc).join(' · ')}</div>` : '';
             const distFrag = dur.distance_pmm
-                ? `<div class="pr-line">Distance: model <b>${(dur.p_distance*100).toFixed(0)}%</b> vs Poly ${(dur.distance_pmm.mid*100).toFixed(0)}¢ → edge <b>${dur.distance_pmm.edge_pp>=0?'+':''}${dur.distance_pmm.edge_pp}pp ${dur.distance_pmm.edge_pp>=0?'YES':'NO'}</b></div>`
-                : `<div class="pr-line">Distance: model <b>${(dur.p_distance*100).toFixed(0)}%</b> (no Poly market found)</div>`;
+                ? `<div class="pr-line">Distance: model <b>${(dur.p_distance*100).toFixed(0)}%</b> vs exch ${(dur.distance_pmm.mid*100).toFixed(0)}¢ → edge <b>${dur.distance_pmm.edge_pp>=0?'+':''}${dur.distance_pmm.edge_pp}pp ${dur.distance_pmm.edge_pp>=0?'YES':'NO'}</b></div>`
+                : `<div class="pr-line">Distance: model <b>${(dur.p_distance*100).toFixed(0)}%</b> (no exchange market found)</div>`;
             const rndFrag = (dur.rounds_pmm && dur.rounds_pmm.edge_pp != null)
-                ? `<div class="pr-line">Over ${_fmtPt(dur.rounds_pmm.line)} rounds: model <b>${(dur.rounds_pmm.p_over*100).toFixed(0)}%</b> vs Poly ${(dur.rounds_pmm.mid*100).toFixed(0)}¢ → edge <b>${dur.rounds_pmm.edge_pp>=0?'+':''}${dur.rounds_pmm.edge_pp}pp ${dur.rounds_pmm.edge_pp>=0?'OVER':'UNDER'}</b></div>`
+                ? `<div class="pr-line">Over ${_fmtPt(dur.rounds_pmm.line)} rounds: model <b>${(dur.rounds_pmm.p_over*100).toFixed(0)}%</b> vs exch ${(dur.rounds_pmm.mid*100).toFixed(0)}¢ → edge <b>${dur.rounds_pmm.edge_pp>=0?'+':''}${dur.rounds_pmm.edge_pp}pp ${dur.rounds_pmm.edge_pp>=0?'OVER':'UNDER'}</b></div>`
                 : '';
             // One-tap log buttons for the duration family (tiny-stake
             // entertainment picks — user call). The +EV side lights green.
@@ -2784,7 +2784,7 @@
             const _durBtns = (_canLog && (dur.distance_bet || dur.rounds_bet))
                 ? `<div class="nrfi-actions">${_durBtn(dur.distance_bet, 'distance')}${_durBtn(dur.rounds_bet, 'rounds')}</div>`
                 : (_canLog && _durHasMkt
-                    ? `<div class="pr-line" style="color:var(--orange)">⚠ Duration betting paused — verifying Polymarket's YES/NO orientation before logging (a distance pick priced the wrong side). Read is reference-only for now.</div>`
+                    ? `<div class="pr-line" style="color:var(--orange)">⚠ Duration betting paused — verifying the exchange market's YES/NO orientation before logging (a distance pick priced the wrong side). Read is reference-only for now.</div>`
                     : '');
             html += `<div class="card">
                 <div class="card-head">
@@ -2820,8 +2820,8 @@
                 const pb = pmm[side];
                 const isBet = n.bet_side === side;
                 const pmmFrag = pb
-                    ? `<div class="pr-sub">Poly bid ${_fmtAmer(pb.bid_american)} · ask ${_fmtAmer(pb.ask_american)}${pb.edge_pp != null ? ` · <b style="color:${pb.edge_pp >= 0 ? 'var(--green)' : 'var(--red)'}">${pb.edge_pp >= 0 ? '+' : ''}${pb.edge_pp}pp</b>` : ''}</div>`
-                    : `<div class="pr-sub" style="color:var(--text-muted)">no Poly price</div>`;
+                    ? `<div class="pr-sub">exch bid ${_fmtAmer(pb.bid_american)} · ask ${_fmtAmer(pb.ask_american)}${pb.edge_pp != null ? ` · <b style="color:${pb.edge_pp >= 0 ? 'var(--green)' : 'var(--red)'}">${pb.edge_pp >= 0 ? '+' : ''}${pb.edge_pp}pp</b>` : ''}</div>`
+                    : `<div class="pr-sub" style="color:var(--text-muted)">no exchange price</div>`;
                 return `<div class="pr-cell" style="${isBet ? 'outline:1px solid var(--green);border-radius:8px' : ''}">
                     <span class="pr-lbl">${lbl}${isBet ? ' ✓' : ''}</span>
                     <span class="pr-val">${pct}% <span class="pr-fair">${_fmtAmer(fairA)}</span></span>
@@ -2832,11 +2832,11 @@
             let detFrag;
             if (n.bet_side) {
                 const lbl = n.bet_side === 'no' ? 'NRFI' : 'YRFI';
-                detFrag = `<div class="pr-line" style="color:var(--green);font-weight:600">▶ BET ${lbl} @ ${_fmtAmer(n.entry_price)} (Poly bid) · +${n.bet_edge_pp}pp edge · 1u</div>`;
+                detFrag = `<div class="pr-line" style="color:var(--green);font-weight:600">▶ BET ${lbl} @ ${_fmtAmer(n.entry_price)} (exch bid) · +${n.bet_edge_pp}pp edge · 1u</div>`;
             } else if (n.pmm_matched) {
-                detFrag = `<div class="pr-line" style="color:var(--text-muted)">Pass — model fair within 3pp of Poly's price on both sides.</div>`;
+                detFrag = `<div class="pr-line" style="color:var(--text-muted)">Pass — model fair within 3pp of the exchange price on both sides.</div>`;
             } else {
-                detFrag = `<div class="pr-line" style="color:var(--orange)">No Polymarket 1st-inning market found — can't price an edge (see "Copy for Claude" → pmm_meta to confirm Poly's offerings).</div>`;
+                detFrag = `<div class="pr-line" style="color:var(--orange)">No exchange 1st-inning market found — can't price an edge (see "Copy for Claude" → pmm_meta to confirm the offerings).</div>`;
             }
             const whyHtml = (n.reasons || []).length
                 ? `<ul class="why" style="margin-top:10px">${n.reasons.map(b => `<li>${_esc(b)}</li>`).join('')}</ul>`
@@ -2859,7 +2859,7 @@
             html += `<div class="card">
                 <div class="card-head">
                     <h3>First inning — NRFI / YRFI</h3>
-                    <span class="ref-tag" title="Model fair from the opposing starters + top-of-order on-base + park + temp. P(NRFI)=q_top·q_bot. BET = our fair beats Polymarket's maker entry (bid) by ≥3pp. Flat 1u (graded off the 1st-inning linescore, runs +EV).">OUR NUMBER vs POLY</span>
+                    <span class="ref-tag" title="Model fair from the opposing starters + top-of-order on-base + park + temp. P(NRFI)=q_top·q_bot. BET = our fair beats the exchange maker entry (bid) by ≥3pp. Flat 1u (graded off the 1st-inning linescore, runs +EV).">OUR NUMBER vs EXCH</span>
                 </div>
                 <div class="pr-grid">
                     ${cell('no', 'NRFI (no run)', nrfiPct, n.nrfi_fair_american)}
@@ -3211,13 +3211,13 @@
                 const q = pmmBlock.quote || {};
                 const bidFrag = (q.bid_american != null) ? ` bid <b>${_fmtAmer(q.bid_american)}</b>` : '';
                 const askFrag = (q.ask_american != null) ? ` · ask ${_fmtAmer(q.ask_american)}` : '';
-                pmmRow = `<div class="pmm-row"><span class="pmm-lbl">Poly</span>${lnFrag}${bidFrag}${askFrag}</div>`;
+                pmmRow = `<div class="pmm-row"><span class="pmm-lbl">exch</span>${lnFrag}${bidFrag}${askFrag}</div>`;
             } else if (xSnap && xSnap.fair_american != null) {
                 // PMM-sourced fair with no live quote block — still show the
                 // price (Poly's own number) rather than an empty side.
                 const ln = xSnap.line;
                 const lnFrag = (ln != null) ? ` <span class="pmm-ln">@${_fmtPt(ln)}</span>` : '';
-                pmmRow = `<div class="pmm-row"><span class="pmm-lbl">Poly</span>${lnFrag} <b>${_fmtAmer(xSnap.fair_american)}</b></div>`;
+                pmmRow = `<div class="pmm-row"><span class="pmm-lbl">exch</span>${lnFrag} <b>${_fmtAmer(xSnap.fair_american)}</b></div>`;
             }
 
             if (!rows && !pmmRow) {
@@ -3322,7 +3322,7 @@
         // frozen PIN fair only if no exchange snap exists for this side.
         const fairSnap = ((blk.exch_current || {})[side]) || ((blk.pin_current || {})[side]);
         if (!fairSnap || fairSnap.fair_american == null) {
-            alert('No exchange fair on this side — can\'t set a Polymarket target.');
+            alert('No exchange fair on this side — can\'t set an entry target.');
             return;
         }
         // Maker entry = the PMM bid (where we rest/fill) at the exchange line,
@@ -3378,7 +3378,7 @@
         const fair = side === 'no' ? n.nrfi_fair_american : n.yrfi_fair_american;
         const pb = (n.polymarket || {})[side];
         const makerEntry = (pb && pb.bid_american != null) ? pb.bid_american : fair;
-        const entryLbl = (pb && pb.bid_american != null) ? 'Poly bid' : 'model fair';
+        const entryLbl = (pb && pb.bid_american != null) ? 'exch bid' : 'model fair';
         const edge = (pb && pb.edge_pp != null) ? pb.edge_pp : null;
         const label = _nrfiSideLabel(side);
         _pendingPick = {
@@ -3620,7 +3620,7 @@
         const lineFrag = (s.pin_line == null) ? '' : ` ${_fmtPt(s.pin_line)}`;
         // Show the maker entry we actually log (PMM bid), not the fair/ask.
         const makerEntry = (s.pmm_bid_american != null) ? s.pmm_bid_american : s.fair_american;
-        const entryLbl   = (s.pmm_bid_american != null) ? 'Poly bid' : 'Poly target';
+        const entryLbl   = (s.pmm_bid_american != null) ? 'exch bid' : 'exch target';
         return `${market} · ${sideName}${lineFrag} @ ${_fmtAmer(makerEntry)} (${entryLbl})`
              + _selGameFrag(s.market_type, d.away, d.home);
     }
@@ -3747,7 +3747,7 @@
             const pinNow = pinSide.price;
             if (pinNow == null || pinNow !== pinSide.fair_american) {
                 const pinFrag = pinNow != null ? `, PIN now ${_fmtAmer(pinNow)}` : '';
-                lines.push(`Polymarket target ${_fmtAmer(pinSide.fair_american)} — devigged fair${pinFrag}`);
+                lines.push(`Exchange target ${_fmtAmer(pinSide.fair_american)} — devigged fair${pinFrag}`);
             }
         }
 
