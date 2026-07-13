@@ -8007,6 +8007,33 @@ def api_debug_snap():
     return jsonify(out)
 
 
+@app.route("/debug-kalshi-probe")
+def debug_kalshi_probe_page():
+    """Auth'd browser-friendly wrapper for /api/kalshi/probe (which needs
+    the Firebase Bearer token a bare phone tap can't send — gotcha #36's
+    pattern). Sign in on / first, then open this page."""
+    return ('''<!DOCTYPE html><html><head>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>firebase.initializeApp({apiKey:"AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",authDomain:"kahla-house.firebaseapp.com",projectId:"kahla-house"});</script>
+    </head><body style="background:#0b0e13;color:#e2e8f0;font-family:monospace;padding:16px;font-size:12px">
+    <h2 style="color:#f59e0b">Kalshi authed-reader probe</h2>
+    <pre id="out" style="white-space:pre-wrap;word-break:break-word">Loading...</pre>
+    <script>
+    firebase.auth().onAuthStateChanged(async u => {
+        if (!u) { document.getElementById("out").textContent = "Not logged in. Go to / first, sign in, come back."; return; }
+        try {
+            const t = await u.getIdToken();
+            const r = await fetch("/api/kalshi/probe", {headers:{"Authorization":"Bearer "+t}});
+            const d = await r.json();
+            document.getElementById("out").textContent = JSON.stringify(d, null, 2);
+        } catch (e) {
+            document.getElementById("out").textContent = "ERROR: " + e.message;
+        }
+    });
+    </script></body></html>''')
+
+
 @app.route("/debug-snap")
 def debug_snap_page():
     """Auth'd browser-friendly wrapper for /api/debug-snap."""
