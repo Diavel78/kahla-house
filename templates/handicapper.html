@@ -141,6 +141,11 @@
         .pick .chip.kickoff { background: var(--bg); color: var(--text-secondary); border: 1px solid var(--border); }
         .pick .chip.clv.pos { background: var(--green-dim); color: #4ade80; }
         .pick .chip.clv.neg { background: var(--red-dim, rgba(248,113,113,0.12)); color: var(--red); }
+        /* Kalshi fill state on pending rows (admin-only). */
+        .pick .chip.fill.ok   { background: var(--green-dim); color: var(--green); font-weight: 700; }
+        .pick .chip.fill.wait { background: rgba(245,158,11,0.14); color: #fbbf24; }
+        .pick .chip.fill.miss { background: var(--red-dim); color: var(--red); }
+        .pick .chip.fill.take { background: var(--red); color: #fff; font-weight: 700; animation: khPulse 1.6s ease-in-out infinite; }
         .pick .chip.prov.bet-and-rec { background: var(--green-dim); color: var(--green); font-weight: 700; }
         .pick .chip.prov.bet-only    { background: var(--blue-dim);  color: var(--blue);  font-weight: 700; }
         .pick .chip.prov.rec-only    { background: var(--surface-2); color: var(--text-muted); }
@@ -259,6 +264,11 @@
         .pick-chip.lean    { background: transparent; border: 1px dashed #56617d; color: #a8b4cd; }
         .pick-chip.conflict { background: var(--surface-2); color: var(--text-secondary); border: 1px solid rgba(239,68,68,0.4); }
         .pick-chip.lean { background: rgba(245,158,11,0.08); color: #fbbf24; border: 1px dashed rgba(245,158,11,0.5); }
+        /* Kalshi fill highlight (admin): a logged chip stays AMBER until the
+           maker order actually fills, then flips to the normal green ✓.
+           Red pulse = still unfilled with tip ≤30m → TAKE or miss the bet. */
+        .pick-chip.logged.unfilled { background: rgba(245,158,11,0.18); color: #fbbf24; border: 1px solid rgba(245,158,11,0.55); }
+        .pick-chip.logged.unfilled.take { background: rgba(239,68,68,0.20); color: #f87171; border: 1px solid rgba(239,68,68,0.65); animation: khPulse 1.6s ease-in-out infinite; }
         @keyframes khPulse { 0%,100% { box-shadow: 0 0 0 2px rgba(168,85,247,0.55); } 50% { box-shadow: 0 0 0 4px rgba(168,85,247,0.18); } }
         .pick-line-note { font-size: 11px; color: var(--text-muted); font-style: italic; }
         /* "do this, this way" — the bet chip is "do this", the make/take pill
@@ -844,11 +854,90 @@
     // gate shipped (Braves YRFI double-logged from a resumed phone tab).
     let _loggedPicksAt = 0;
     const _LP_FRESH_MS = 90_000;   // trust window before a tap re-syncs
-    // (Polymarket fill tracking — the fill-status fetch, pending-row fill
-    // chips, amber/green logged-chip states, outbid warnings — was RETIRED
-    // July 2026 with the Kalshi cutover: Kalshi notifies fills natively,
-    // and Pick Bot makes picks, it doesn't track the user's orders. A
-    // logged pick just shows the plain green ✓.)
+    // ── Kalshi fill highlight (ADMIN-ONLY) ─────────────────────────────
+    // "Did my Kalshi maker actually FILL?" — rebuilt on the Kalshi
+    // portfolio API the same day the Polymarket tracker was retired (the
+    // user's Kalshi API key predates this repo — the old dashboard era).
+    // The pending row + the green logged chip stay AMBER until the order
+    // fills, flip to ✓ green when filled, and pulse a red TAKE warning
+    // when still unfilled ≤30m to tip; ⚠ OUTBID when the rest has been
+    // jumped. Fed by /api/handicapper/fill-status (admin_required — the
+    // creds are the admin's own Kalshi account; configured:false = quiet
+    // no-op for everyone, including an admin who hasn't added the env
+    // vars yet). STATUS ONLY — nothing writes back to the pick.
+    let _fillStatus = new Map();   // pick_id -> fill entry
+    let _fillByMkt  = new Map();   // `${market_id}:${market_type}` -> fill entry
+    async function loadFillStatus() {
+        if (!_isAdmin) return;
+        try {
+            const r = await authFetch('/api/handicapper/fill-status');
+            const j = r ? await r.json() : null;
+            if (!j || !j.ok || j.configured === false) return;
+            _fillStatus = new Map(); _fillByMkt = new Map();
+            (j.fills || []).forEach(f => {
+                _fillStatus.set(f.id, f);
+                if (f.market_id && f.market_type)
+                    _fillByMkt.set(f.market_id + ':' + f.market_type, f);
+            });
+            // Re-paint the two surfaces that show fill state.
+            if (_lastPending && _lastPending.length) {
+                document.getElementById('pendingList').innerHTML =
+                    _lastPending.map(x => _renderPick(x, 'pending')).join('');
+            }
+            _renderPickLines();
+        } catch (e) { /* fill status is decoration — never break the page */ }
+    }
+    const _fmtCents = c => (c == null ? '?' : (c % 1 ? c.toFixed(1) : String(c)));
+    function _outbidTitle(f) {
+        let t = `Someone bid above your rest — bid is now ${_fmtCents(f.best_bid_c)}¢, `
+              + `yours sits at ${_fmtCents(f.my_price_c)}¢ and won't fill first.`;
+        if (f.ahead_qty) t += ` ${Number(f.ahead_qty).toLocaleString()} contracts ahead of you.`;
+        t += ` Re-rest at ${_fmtCents(f.best_bid_c)}¢+`;
+        if (f.best_ask_c != null) t += ` or take the ${_fmtCents(f.best_ask_c)}¢ ask`;
+        t += '.';
+        return t;
+    }
+    // Fill chip for a pending row. unknown (API unreachable / market not
+    // resolved) renders nothing rather than a wrong "no order".
+    function _fillChipHtml(f) {
+        if (!f || !f.status || f.status === 'unknown') return '';
+        let html = '';
+        if (f.status === 'filled')
+            html = `<span class="chip fill ok" title="Kalshi order filled">✓ FILLED</span>`;
+        else if (f.status === 'partial')
+            html = `<span class="chip fill wait" title="Kalshi maker order partially filled">◔ ${Math.round(f.pct || 0)}% FILLED</span>`;
+        else if (f.status === 'resting')
+            html = `<span class="chip fill wait" title="Maker order resting on the Kalshi book — not filled yet">◌ RESTING</span>`;
+        else if (f.status === 'none')
+            html = `<span class="chip fill miss" title="No matching Kalshi order or position — not placed yet (or canceled)?">⚠ NO ORDER</span>`;
+        if (f.outbid)
+            html += `<span class="chip fill take" title="${_esc(_outbidTitle(f))}">⚠ OUTBID ${_fmtCents(f.best_bid_c)}¢ &gt; ${_fmtCents(f.my_price_c)}¢</span>`;
+        if (f.warn)
+            html += `<span class="chip fill take" title="Unfilled with tip ≤30m — a maker won't fill in time. TAKE the ask or miss the bet.">⚠ TAKE NOW</span>`;
+        return html;
+    }
+    // Decoration for a LOGGED games-list chip: amber ◌/◔ until the Kalshi
+    // order fills, green ✓ once filled, red ⚠ + pulse when unfilled near
+    // tip. Non-admins (and unknown status) keep the plain green ✓.
+    function _fillChipDecor(mid, mt) {
+        const f = _isAdmin ? _fillByMkt.get(mid + ':' + mt) : null;
+        if (!f || !f.status || f.status === 'unknown')
+            return { cls: '', mark: '✓', title: 'Already logged — open Details' };
+        if (f.status === 'filled')
+            return { cls: '', mark: '✓', title: 'Logged + FILLED on Kalshi' };
+        if (f.warn)
+            return { cls: ' unfilled take', mark: '⚠',
+                     title: 'Logged but NOT filled and tip is close — TAKE the ask or miss the bet' };
+        if (f.outbid)
+            return { cls: ' unfilled take', mark: '⚠', title: 'OUTBID — ' + _outbidTitle(f) };
+        if (f.status === 'partial')
+            return { cls: ' unfilled', mark: `◔ ${Math.round(f.pct || 0)}%`,
+                     title: 'Logged — Kalshi maker order partially filled' };
+        return { cls: ' unfilled', mark: '◌',
+                 title: (f.status === 'none')
+                     ? 'Logged but no matching Kalshi order found — did you place it?'
+                     : 'Logged — maker order resting on Kalshi, not filled yet' };
+    }
     // Per-game bot VERDICT cache for the games list (admin/bot_access only).
     // {market_id: {picks:[{mt, units}], fetchedAt}} — `picks` is every
     // gate-cleared suggestion (+ NRFI bet side) with its recommended
@@ -1264,6 +1353,10 @@
                 </div>`;
         } else {
             sigChips.push(`<span class="chip kickoff">${_fmtKickoff(r.event_start)}</span>`);
+            // Kalshi fill state (admin-only — _fillStatus stays empty for
+            // everyone else): did the maker behind this pick fill?
+            const fc = _fillChipHtml(_fillStatus.get(r.id));
+            if (fc) sigChips.push(fc);
         }
 
         // Reason bullets + analysis stay in the DB (`reasons` /
@@ -1705,13 +1798,16 @@
                     ? (p._lean ? `Lean — sharp gate not cleared. Tap to log ${p._chip}` : `Tap to log ${p._chip}`)
                     : (_canLog ? `Syncing your logged bets — tap for details` : `Tap for the full read`);
                 if (ps.state === 'logged') {
+                    // Fill-aware (admin): amber until the Kalshi maker
+                    // fills, green ✓ once filled, red ⚠ near tip.
                     // Label = YOUR logged bet (side + units), NOT the bot's
                     // current chip — sticky decay can re-size the suggestion
                     // (3u → 1u) after you logged, which made a logged 3u bet
                     // read "· 1u" (user caught it live on a Yankees ML).
-                    cls = 'logged';
-                    label = '✓ ' + _loggedChipLabel(p.market_type, ps.logged.side, ps.logged.units, game);
-                    click = `pickGame('${mid}')`; title = 'Already logged — open Details';
+                    const dec = _fillChipDecor(mid, p.market_type);
+                    cls = 'logged' + dec.cls;
+                    label = dec.mark + ' ' + _loggedChipLabel(p.market_type, ps.logged.side, ps.logged.units, game);
+                    click = `pickGame('${mid}')`; title = dec.title;
                 } else if (ps.state === 'upgrade') {
                     cls = 'upgrade'; label = '↑ ' + p._chip; title = `Add up to ${_uStr(p.units)}`;
                 }
@@ -1724,7 +1820,8 @@
                 lp.forEach((info, mt) => {
                     if (renderedMt.has(mt)) return;
                     const label = _loggedChipLabel(mt, info.side, info.units, game);
-                    chips.push(`<button class="pick-chip logged" title="Already logged — open Details" onclick="pickGame('${mid}')"><span class="pc-main">✓ ${_esc(label)}</span></button>`);
+                    const dec = _fillChipDecor(mid, mt);
+                    chips.push(`<button class="pick-chip logged${dec.cls}" title="${_esc(dec.title)}" onclick="pickGame('${mid}')"><span class="pc-main">${dec.mark} ${_esc(label)}</span></button>`);
                 });
             }
             _applyRowPrime(_row, startIso);
@@ -4066,6 +4163,9 @@
                 `updated ${new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}`
                 + graded;
             status.textContent = 'Live';
+            // Fire-and-forget: overlay Kalshi fill state onto the rows just
+            // rendered (no-creds/non-admin → instant no-op).
+            loadFillStatus();
         } catch (e) {
             status.textContent = 'Error';
             console.error('handicapper load failed', e);

@@ -3867,14 +3867,50 @@ def _kalshi_nearest(cands: list, want_dt) -> dict | None:
     return best if best_s <= 12 * 3600 else None
 
 
-def _kalshi_side_book(sport: str, away: str, home: str, side: str,
-                      want_dt=None) -> dict | None:
-    """Live Kalshi top-of-book for the picked side of one game, or None.
-    ML only (the Kalshi reader is ML-only). Same {bids,asks,best_bid,
-    best_ask} shape as _pmm_book — bids = buyers of THIS side. Matches the
-    game by team codes in the event ticker + the side by the ticker suffix,
-    disambiguated to the event nearest want_dt (series play the same teams
-    on consecutive days — see _kalshi_nearest)."""
+# ── Kalshi market IDENTITY resolver ──────────────────────────────────
+# One shared answer to "which exact Kalshi market (and which side of its
+# binary) is OUR pick?" — {'ticker', 'buy': 'yes'|'no'} ('no' = we're on
+# the synthesized/inverse side: under, run-line dog, NRFI on a YRFI
+# market, …). Consumed by the book readers (make/take), the fill tracker
+# (match my resting orders/positions), and the live rings — one
+# resolution, everywhere, so they can never disagree about which market
+# a bet lives on.
+
+def _kalshi_market_for(sport: str, away: str, home: str, market_type: str,
+                       side: str, line=None, want_dt=None) -> dict | None:
+    try:
+        mt = (market_type or "").lower()
+        if mt in ("moneyline", "ml"):
+            return _kmf_ml(sport, away, home, side, want_dt)
+        if mt == "nrfi":
+            return _kmf_nrfi(away, home, side, want_dt)
+        if mt == "distance":
+            return _kmf_ufc("distance", away, home, side, None, want_dt)
+        if mt in ("total", "tot") and (sport or "").upper() == "UFC":
+            # UFC 'totals' are round-count O/U — the KXUFCROUNDS ladder.
+            return _kmf_ufc("rounds", away, home, side, line, want_dt)
+        if mt in ("total", "tot", "spread", "spr"):
+            return _kmf_line(sport, away, home, mt, side, line, want_dt)
+    except Exception:
+        return None
+    return None
+
+
+def _kalshi_book_for(ref: dict | None) -> dict | None:
+    """Top-of-book for a resolved market ref, oriented to OUR side."""
+    if not ref:
+        return None
+    book = _kalshi_book(ref["ticker"])
+    if not book:
+        return None
+    return book if ref.get("buy") != "no" else _invert_book(book)
+
+
+def _kmf_ml(sport: str, away: str, home: str, side: str, want_dt=None) -> dict | None:
+    """ML resolver: Kalshi lists one real market per TEAM, so our pick is
+    always that team's YES side. Matches by team codes in the event ticker
+    + the side by the ticker suffix, disambiguated to the event nearest
+    want_dt (series play the same teams on consecutive days)."""
     series = _KALSHI_SERIES.get(sport)
     if not series:
         return None
@@ -3895,7 +3931,15 @@ def _kalshi_side_book(sport: str, away: str, home: str, side: str,
             continue
         cands.append(m)
     m = _kalshi_nearest(cands, want_dt)
-    return _kalshi_book(m["ticker"]) if m else None
+    return {"ticker": m["ticker"], "buy": "yes"} if m else None
+
+
+def _kalshi_side_book(sport: str, away: str, home: str, side: str,
+                      want_dt=None) -> dict | None:
+    """Live Kalshi top-of-book for the picked ML side of one game, or None.
+    Same {bids,asks,best_bid,best_ask} shape as _pmm_book — bids = buyers
+    of THIS side."""
+    return _kalshi_book_for(_kmf_ml(sport, away, home, side, want_dt))
 
 
 # MLB run-total + run-line series — confirmed live via /debug-kalshi-discover
@@ -3996,16 +4040,15 @@ def _kalshi_line_series_cands(sport: str, mt: str) -> list:
     return cands
 
 
-def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
-                      side: str, line, want_dt=None) -> dict | None:
-    """Kalshi top-of-book for a TOTAL or SPREAD pick, or None. Same shape as
-    _pmm_book (bids = buyers of THIS side). Maps our (market_type, side, line)
-    onto Kalshi's YES contract (Over for totals; '{fav} wins by over X.5' for
-    spreads) and INVERTS the book for the synthesized side (under / run-line
-    dog). Tries every candidate series (verified + discovered) first-hit-wins;
-    the suffix scheme is the MLB-verified one (total suffix = line+0.5;
-    spread suffix = {FAV}{margin+0.5}) — a sport with a different encoding
-    just misses (⇒ no book), never mis-selects a far line."""
+def _kmf_line(sport: str, away: str, home: str, market_type: str,
+              side: str, line, want_dt=None) -> dict | None:
+    """TOTAL/SPREAD resolver. Maps our (market_type, side, line) onto
+    Kalshi's YES contract (Over for totals; '{fav} wins by over X.5' for
+    spreads); the synthesized side (under / run-line dog) buys NO. Tries
+    every candidate series (verified + discovered) first-hit-wins; the
+    suffix scheme is the MLB-verified one (total suffix = line+0.5; spread
+    suffix = {FAV}{margin+0.5}) — a sport with a different encoding just
+    misses (⇒ no match), never mis-selects a far line."""
     mt = ("total" if market_type in ("total", "tot")
           else "spread" if market_type in ("spread", "spr") else None)
     if mt is None or line is None:
@@ -4021,6 +4064,7 @@ def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
 
     if mt == "total":
         want = str(int(round(abs(L) + 0.5)))          # 8.5 → "9"
+        buy = "yes" if side == "over" else "no"       # YES = OVER
     else:
         # spread: the YES market is always the FAVORITE "wins by over (mag-0.5)".
         n = int(round(abs(L) + 0.5))                   # 1.5 → 2
@@ -4032,6 +4076,7 @@ def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
         if not fav_code:
             return None
         want = f"{fav_code}{n}"
+        buy = "yes" if fav_is_picked else "no"
 
     for series in _kalshi_line_series_cands(sport, mt):
         mkts = (_fetch_kalshi_markets(series).get("markets") or [])
@@ -4045,15 +4090,17 @@ def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
                 continue
             cands.append(m)
         m = _kalshi_nearest(cands, want_dt)
-        if not m:
-            continue
-        book = _kalshi_book(m["ticker"])
-        if not book:
-            continue
-        if mt == "total":
-            return book if side == "over" else _invert_book(book)   # YES = OVER
-        return book if fav_is_picked else _invert_book(book)
+        if m:
+            return {"ticker": m["ticker"], "buy": buy}
     return None
+
+
+def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
+                      side: str, line, want_dt=None) -> dict | None:
+    """Kalshi top-of-book for a TOTAL or SPREAD pick, or None. Same shape
+    as _pmm_book (bids = buyers of THIS side)."""
+    return _kalshi_book_for(
+        _kmf_line(sport, away, home, market_type, side, line, want_dt))
 
 
 # First-inning (NRFI/YRFI) series name is UNVERIFIED — the static guesses
@@ -4066,13 +4113,13 @@ _KALSHI_NRFI_SERIES_CANDIDATES = [
 ]
 
 
-def _kalshi_nrfi_book(away: str, home: str, side: str, want_dt=None) -> dict | None:
-    """Kalshi top-of-book for a first-inning (NRFI/YRFI) pick, or None.
-    side: 'yes' = YRFI (a run scores), 'no' = NRFI. Matches the game by
-    team codes in the event ticker (standard encoding), then sniffs the
-    market title for YES orientation: a 'no run(s)/scoreless' phrasing
-    means YES = NRFI, anything else means YES = YRFI (Kalshi convention:
-    YES = the thing happens)."""
+def _kmf_nrfi(away: str, home: str, side: str, want_dt=None) -> dict | None:
+    """First-inning (NRFI/YRFI) resolver. side: 'yes' = YRFI (a run
+    scores), 'no' = NRFI. Matches the game by team codes in the event
+    ticker (standard encoding), then sniffs the market title for YES
+    orientation: a 'no run(s)/scoreless' phrasing means YES = NRFI,
+    anything else means YES = YRFI (Kalshi convention: YES = the thing
+    happens)."""
     import re as _re
     ac = _our_team_to_kalshi_code("MLB", away)
     hc = _our_team_to_kalshi_code("MLB", home)
@@ -4090,13 +4137,16 @@ def _kalshi_nrfi_book(away: str, home: str, side: str, want_dt=None) -> dict | N
         m = _kalshi_nearest(rows, want_dt)
         if not m:
             continue
-        book = _kalshi_book(m["ticker"])
-        if not book:
-            continue
         title = (m.get("title") or "").lower()
         yes_is_yrfi = not _re.search(r"\bno\s+runs?\b|scoreless", title)
-        return book if ((side == "yes") == yes_is_yrfi) else _invert_book(book)
+        return {"ticker": m["ticker"],
+                "buy": "yes" if ((side == "yes") == yes_is_yrfi) else "no"}
     return None
+
+
+def _kalshi_nrfi_book(away: str, home: str, side: str, want_dt=None) -> dict | None:
+    """Kalshi top-of-book for a first-inning (NRFI/YRFI) pick, or None."""
+    return _kalshi_book_for(_kmf_nrfi(away, home, side, want_dt))
 
 
 # UFC duration props — series names REAL (seen on the live July 4 2026
@@ -4110,9 +4160,9 @@ _KALSHI_UFC_DUR_SERIES = {"distance": ["KXUFCDISTANCE"],
                           "rounds": ["KXUFCROUNDS"]}
 
 
-def _kalshi_ufc_prop_book(kind: str, away: str, home: str, side: str,
-                          line=None, want_dt=None) -> dict | None:
-    """Kalshi top-of-book for a UFC duration pick, or None.
+def _kmf_ufc(kind: str, away: str, home: str, side: str,
+             line=None, want_dt=None) -> dict | None:
+    """UFC duration resolver.
     kind 'distance': side 'yes' = goes the distance / 'no' = finish.
     kind 'rounds': side 'over'/'under' at `line` (round number, X.5)."""
     import re as _re
@@ -4172,18 +4222,345 @@ def _kalshi_ufc_prop_book(kind: str, away: str, home: str, side: str,
                 continue
         else:
             sel = rows[0]      # distance: one market per fight
-        book = _kalshi_book(sel["ticker"])
-        if not book:
-            continue
         title = (sel.get("title") or "").lower()
         if kind == "distance":
             # YES = goes the distance unless the title is phrased as a finish.
             yes_is_dist = not _re.search(r"finish|not\s+go|inside the distance", title)
-            return book if ((side == "yes") == yes_is_dist) else _invert_book(book)
-        # rounds: YES = over ("last more than X.5 rounds") unless phrased under.
-        yes_is_over = not _re.search(r"less than|under|fewer", title)
-        return book if ((side == "over") == yes_is_over) else _invert_book(book)
+            buy = "yes" if ((side == "yes") == yes_is_dist) else "no"
+        else:
+            # rounds: YES = over ("last more than X.5 rounds") unless phrased under.
+            yes_is_over = not _re.search(r"less than|under|fewer", title)
+            buy = "yes" if ((side == "over") == yes_is_over) else "no"
+        return {"ticker": sel["ticker"], "buy": buy}
     return None
+
+
+def _kalshi_ufc_prop_book(kind: str, away: str, home: str, side: str,
+                          line=None, want_dt=None) -> dict | None:
+    """Kalshi top-of-book for a UFC duration pick, or None."""
+    return _kalshi_book_for(_kmf_ufc(kind, away, home, side, line, want_dt))
+
+
+# ── Kalshi AUTHED portfolio reader (the admin's own orders/positions) ──
+# Auth: API key pair from Kalshi account settings — key id + RSA private
+# key (PEM). Headers: KALSHI-ACCESS-KEY / -TIMESTAMP / -SIGNATURE =
+# base64(RSA-PSS-SHA256 over `timestamp_ms + METHOD + path`), path
+# INCLUDING the /trade-api/v2 prefix, EXCLUDING the query string. Env
+# names scan a candidate list (the canonical pair first, then legacy
+# spellings a prior wiring might have used) — /api/kalshi/probe reports
+# which names were found without echoing values. Everything here is
+# defensive + no-op without creds (the RESEND_API_KEY posture): a
+# missing key must never break a page.
+_KALSHI_KEY_ID_ENVS = ("KALSHI_API_KEY_ID", "KALSHI_ACCESS_KEY",
+                       "KALSHI_KEY_ID", "KALSHI_API_KEY")
+_KALSHI_PK_ENVS = ("KALSHI_PRIVATE_KEY", "KALSHI_API_PRIVATE_KEY",
+                   "KALSHI_RSA_PRIVATE_KEY")
+
+
+def _kalshi_creds():
+    """(key_id, pem, key_id_env, pem_env) — Nones when unset."""
+    kid = pem = kid_env = pem_env = None
+    for k in _KALSHI_KEY_ID_ENVS:
+        v = (os.environ.get(k) or "").strip()
+        if v:
+            kid, kid_env = v, k
+            break
+    for k in _KALSHI_PK_ENVS:
+        v = os.environ.get(k) or ""
+        if v.strip():
+            pem, pem_env = v, k
+            break
+    return kid, pem, kid_env, pem_env
+
+
+def _kalshi_sign(pem: str, msg: str) -> str:
+    """base64(RSA-PSS-SHA256(msg)). Vercel env vars often store PEMs with
+    literal \\n — normalized here."""
+    import base64
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    raw = pem.replace("\\n", "\n").encode()
+    key = serialization.load_pem_private_key(raw, password=None)
+    sig = key.sign(
+        msg.encode(),
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.DIGEST_LENGTH),
+        hashes.SHA256())
+    return base64.b64encode(sig).decode()
+
+
+def _kalshi_authed_get(path: str, params: dict | None = None) -> dict:
+    """Signed GET against the Kalshi trading API. `path` is relative to the
+    versioned base (e.g. '/portfolio/orders'). Returns {ok, configured,
+    status?, data?|error?, base?}. 401/403 short-circuits (same creds fail
+    on every base); other failures try the next base."""
+    kid, pem, _, _ = _kalshi_creds()
+    if not (kid and pem):
+        return {"ok": False, "configured": False, "error": "no creds"}
+    import time as _t
+    from urllib.parse import urlparse
+    last = None
+    for base in _KALSHI_BASES:
+        ts = str(int(_t.time() * 1000))
+        try:
+            sig = _kalshi_sign(pem, ts + "GET" + urlparse(base).path + path)
+        except Exception as e:
+            return {"ok": False, "configured": True,
+                    "error": f"key load/sign: {type(e).__name__}: {str(e)[:120]}"}
+        headers = {"Accept": "application/json",
+                   "User-Agent": "kahla-house/1.0",
+                   "KALSHI-ACCESS-KEY": kid,
+                   "KALSHI-ACCESS-TIMESTAMP": ts,
+                   "KALSHI-ACCESS-SIGNATURE": sig}
+        try:
+            r = _http.get(base + path, params=params or {},
+                          headers=headers, timeout=10)
+            if r.status_code == 200:
+                return {"ok": True, "configured": True, "status": 200,
+                        "data": r.json() or {}, "base": base}
+            last = f"HTTP {r.status_code} @ {base}: {(r.text or '')[:160]}"
+            if r.status_code in (401, 403):
+                return {"ok": False, "configured": True,
+                        "status": r.status_code, "error": last}
+        except Exception as e:
+            last = f"{type(e).__name__} @ {base}: {str(e)[:120]}"
+    return {"ok": False, "configured": True, "error": last}
+
+
+def _kalshi_cents_val(v, invert: bool = False):
+    """Coerce an order/position price field to cents (0-100). Kalshi
+    portfolio payloads use integer cents; tolerate 0-1 dollar floats too.
+    invert=True complements (a NO-side read of a yes_price)."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    if 0 < v < 1:
+        v *= 100.0
+    if not (0 < v < 100):
+        return None
+    return round(100.0 - v, 2) if invert else round(v, 2)
+
+
+def _kalshi_my_orders() -> dict:
+    """The admin's open BUY orders. Field names (ticker / side / action /
+    status / yes_price / initial_count / remaining_count) are the v2
+    portfolio shapes — VERIFY once via /api/kalshi/probe; unknown statuses
+    are kept (better a stray row than a silent miss)."""
+    res = _kalshi_authed_get("/portfolio/orders", params={"status": "resting"})
+    if not res.get("ok") and res.get("configured"):
+        res = _kalshi_authed_get("/portfolio/orders")   # rev without ?status
+    if not res.get("ok"):
+        return res
+    out = []
+    for o in ((res.get("data") or {}).get("orders") or []):
+        if (o.get("action") or "buy").lower() != "buy":
+            continue
+        st = (o.get("status") or "").lower()
+        if st in ("executed", "filled", "canceled", "cancelled", "expired"):
+            continue
+        out.append(o)
+    return {"ok": True, "configured": True, "orders": out}
+
+
+def _kalshi_my_positions() -> dict:
+    """The admin's open positions. v2 nests under market_positions;
+    `position` is a signed contract count (+ = long YES, − = long NO —
+    VERIFY via probe)."""
+    res = _kalshi_authed_get("/portfolio/positions")
+    if not res.get("ok"):
+        return res
+    d = res.get("data") or {}
+    return {"ok": True, "configured": True,
+            "positions": d.get("market_positions") or d.get("positions") or []}
+
+
+@app.route("/api/kalshi/probe")
+@admin_required
+def api_kalshi_probe():
+    """Phase-0 verify for the authed Kalshi reader: which env names are
+    set (values never echoed), whether the RSA signing is accepted, and
+    the RAW first order/position shapes so the field names the fill
+    tracker assumes can be confirmed against reality. Safe to hit any
+    time; read-only."""
+    kid, pem, kid_env, pem_env = _kalshi_creds()
+    out: dict = {"ok": True, "configured": bool(kid and pem),
+                 "key_id_env": kid_env, "private_key_env": pem_env,
+                 "env_candidates": {"key_id": list(_KALSHI_KEY_ID_ENVS),
+                                    "private_key": list(_KALSHI_PK_ENVS)}}
+    if not out["configured"]:
+        out["how_to"] = ("Kalshi app/site → account settings → API keys → "
+                         "create key; put the key id + the downloaded RSA "
+                         "private key (PEM) into Vercel env as "
+                         "KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY, redeploy, "
+                         "re-hit this probe.")
+        return jsonify(out)
+    bal = _kalshi_authed_get("/portfolio/balance")
+    out["balance"] = {"ok": bal.get("ok"), "status": bal.get("status"),
+                      "error": bal.get("error"), "data": bal.get("data"),
+                      "base": bal.get("base")}
+    om = _kalshi_authed_get("/portfolio/orders")
+    out["orders"] = {"ok": om.get("ok"), "error": om.get("error")}
+    if om.get("ok"):
+        rows = (om.get("data") or {}).get("orders") or []
+        out["orders"].update(count=len(rows),
+                             first_raw=(rows[0] if rows else None))
+    pos = _kalshi_authed_get("/portfolio/positions")
+    out["positions"] = {"ok": pos.get("ok"), "error": pos.get("error")}
+    if pos.get("ok"):
+        d = pos.get("data") or {}
+        rows = d.get("market_positions") or d.get("positions") or []
+        out["positions"].update(count=len(rows),
+                                first_raw=(rows[0] if rows else None),
+                                top_keys=sorted(d.keys()))
+    return jsonify(out)
+
+
+# ── Pick Bot fill status — KALSHI edition (July 12 2026) ─────────────
+# "Did my Kalshi maker actually FILL?" Rebuilt the same day the
+# Polymarket tracker was retired, once it was established the user's
+# Kalshi API key is reusable (the old Poly-Tracker-era dashboard had
+# Kalshi wired). MUCH simpler than the Poly version: Kalshi's portfolio
+# API returns orders + positions directly (no disappeared-order
+# forensics), markets are per-side real tickers (no synthetic-slug
+# matching), and the pick→market resolution is the SAME
+# _kalshi_market_for the make/take verdict uses — the tracker and the
+# engine cannot disagree about which market a bet lives on. STATUS ONLY:
+# no entry auto-sync, no writes ("Pick Bot makes picks, it doesn't
+# track my bets") — a divergent real fill is corrected by hand via the
+# Edit modal.
+_FILL_STATUS_TTL = 30       # s — server cache; the page polls on its 60s loadData
+_FS_TAKE_WARN_MIN = 30      # unfilled + tip ≤30m → TAKE warning (make/take clock rule)
+
+
+@app.route("/api/handicapper/fill-status")
+@admin_required
+def api_handicapper_fill_status():
+    """Kalshi fill state per pending pick — see the block comment above.
+    Admin-only: the API creds are the admin's personal Kalshi account.
+    configured:false (quiet frontend no-op) without creds. Statuses:
+    resting / partial (pct) / filled / none / unknown, + warn (unfilled
+    ≤30m to tip) + outbid (my resting price vs the public book's best
+    bid, our-side oriented)."""
+    import time as _time
+    cache_key = f"fill_status:{g.uid}"
+    now_ts = _time.time()
+    cached = _cache.get(cache_key)
+    if cached and (now_ts - cached["ts"]) < _FILL_STATUS_TTL:
+        return jsonify(cached["data"])
+
+    kid, pem, _, _ = _kalshi_creds()
+    if not (kid and pem):
+        return jsonify({"ok": True, "configured": False, "fills": []})
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+    try:
+        pending = (sb.table("bot_picks")
+                   .select("id,market_id,market_type,side,entry_book,entry_line,"
+                           "entry_price,event_name,event_start,sport")
+                   .eq("status", "pending").eq("asked_by", g.uid)
+                   .order("event_start", desc=False)
+                   .limit(100).execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"pending fetch: {e}"}), 500
+
+    om = _kalshi_my_orders()
+    pm = _kalshi_my_positions()
+    api_ok = bool(om.get("ok"))
+    orders = om.get("orders") or []
+    positions = pm.get("positions") or [] if pm.get("ok") else []
+    now = datetime.now(timezone.utc)
+
+    fills = []
+    for p in pending:
+        dt = _parse_iso(p.get("event_start") or "")
+        mins = ((dt - now).total_seconds() / 60.0) if dt else None
+        entry = {"id": p["id"], "market_id": p.get("market_id"),
+                 "market_type": p.get("market_type"), "pct": None,
+                 "warn": False,
+                 "mins_to_start": (round(mins) if mins is not None else None)}
+        ev = p.get("event_name") or ""
+        away, home = (ev.split(" @ ", 1) if " @ " in ev else ("", ""))
+        ref = (_kalshi_market_for(p.get("sport"), away, home,
+                                  p.get("market_type"), p.get("side"),
+                                  line=p.get("entry_line"), want_dt=dt)
+               if api_ok else None)
+        if not api_ok or ref is None:
+            # API unreachable, or the resolver couldn't place the bet on a
+            # Kalshi market (reader gap / market already closed) — render
+            # nothing rather than a wrong "no order".
+            entry["status"] = "unknown"
+            fills.append(entry)
+            continue
+        tk, buy = ref["ticker"], ref.get("buy") or "yes"
+        my_orders = [o for o in orders
+                     if (o.get("ticker") or "") == tk
+                     and (o.get("side") or "yes").lower() == buy]
+
+        def _cnt(o, k):
+            try:
+                return float(o.get(k) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        pos_qty = 0.0
+        for q in positions:
+            if (q.get("ticker") or "") != tk:
+                continue
+            try:
+                v = float(q.get("position") or 0)
+            except (TypeError, ValueError):
+                v = 0.0
+            if buy == "yes" and v > 0:
+                pos_qty = v
+            elif buy == "no" and v < 0:
+                pos_qty = -v
+        init = sum(_cnt(o, "initial_count") for o in my_orders)
+        rem = sum(_cnt(o, "remaining_count") for o in my_orders)
+        part = max(0.0, init - rem) or pos_qty
+
+        if my_orders and rem > 0:
+            if part > 0:
+                entry["status"] = "partial"
+                tot = init or (pos_qty + rem)
+                entry["pct"] = round(part / tot * 100.0, 1) if tot else None
+            else:
+                entry["status"], entry["pct"] = "resting", 0.0
+            # Outbid check (pre-game only): is my rest still the touch?
+            if mins is None or mins > 0:
+                try:
+                    book = _kalshi_book_for(ref)
+                    myp = None
+                    for o in my_orders:
+                        c = (_kalshi_cents_val(o.get(f"{buy}_price"))
+                             or _kalshi_cents_val(o.get("price"))
+                             or (_kalshi_cents_val(o.get("yes_price"), invert=True)
+                                 if buy == "no" else None))
+                        if c is not None:
+                            myp = c if myp is None else max(myp, c)
+                    if (book and myp is not None
+                            and book.get("best_bid") is not None
+                            and book["best_bid"] > myp + 0.001):
+                        entry.update(outbid=True, my_price_c=myp,
+                                     best_bid_c=book["best_bid"],
+                                     best_ask_c=book.get("best_ask"),
+                                     ahead_qty=round(sum(
+                                         q for c, q in (book.get("bids") or [])
+                                         if c > myp + 0.001)))
+                except Exception:
+                    pass
+        elif pos_qty > 0 or my_orders:
+            entry["status"], entry["pct"] = "filled", 100.0
+        else:
+            entry["status"] = "none"
+        if (entry["status"] in ("resting", "partial", "none")
+                and mins is not None and 0 < mins <= _FS_TAKE_WARN_MIN):
+            entry["warn"] = True
+        fills.append(entry)
+
+    result = {"ok": True, "configured": True, "api_ok": api_ok, "fills": fills}
+    _cache[cache_key] = {"data": result, "ts": now_ts}
+    return jsonify(result)
 
 
 def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
@@ -8015,9 +8392,43 @@ def _live_book_mid(client, slug: str, synthetic: bool):
     return mid
 
 
+_KALSHI_LIVE_CACHE: dict[str, tuple[float, float]] = {}   # "ticker:buy" -> (ts, mid)
+
+
+def _kalshi_live_mid(bet: dict, away: str, home: str):
+    """Current KALSHI implied probability (book mid, our-side oriented)
+    for the bet's side — the live ring's PRIMARY source since the July 12
+    2026 cutover (the venue the user actually holds the bet on). Resolves
+    the market via the shared _kalshi_market_for (30s-cached series
+    fetches), reads the live book, caches the mid ~20s per market+side.
+    0<mid<1 or None (→ PMM fallback)."""
+    import time as _t
+    ev_dt = _parse_iso(bet.get("event_start") or "")
+    ref = _kalshi_market_for(bet.get("sport"), away, home,
+                             bet.get("market_type"), bet.get("side"),
+                             line=bet.get("entry_line"), want_dt=ev_dt)
+    if not ref:
+        return None
+    key = f"{ref['ticker']}:{ref.get('buy') or 'yes'}"
+    now = _t.time()
+    hit = _KALSHI_LIVE_CACHE.get(key)
+    if hit and (now - hit[0]) < _LIVE_BOOK_TTL:
+        return hit[1]
+    book = _kalshi_book_for(ref)
+    if not book or book.get("best_bid") is None or book.get("best_ask") is None:
+        return None
+    mid = (book["best_bid"] + book["best_ask"]) / 200.0      # cents → prob, mid
+    if not (0.0 < mid < 1.0):
+        return None
+    mid = round(mid, 4)
+    _KALSHI_LIVE_CACHE[key] = (now, mid)
+    return mid
+
+
 def _live_market_prob(bet: dict, away: str, home: str, client, pmm_cache: dict):
     """Current Polymarket implied probability for the bet's side (the live
-    'odds of winning'), or None when PMM has no live market for it. The heavy
+    'odds of winning'), or None when PMM has no live market for it — the
+    FALLBACK behind _kalshi_live_mid since the Kalshi cutover. The heavy
     event lookup (which market is this?) is 5-min cached; the live QUOTE is a
     fresh ~30s order-book read via _live_book_mid, so the ring tracks the live
     price without re-running discovery every tick."""
@@ -8125,13 +8536,22 @@ def _live_rows(sb, uid):
         if not (matched_live or started):
             continue
 
-        # Win prob: decided (needs a real ESPN match) → live Polymarket price
-        # → grey. Odds-only (works for every sport, no per-sport model).
+        # Win prob: decided (needs a real ESPN match) → live KALSHI mid
+        # (the venue the bet actually lives on — July 12 2026 cutover) →
+        # live Polymarket price (fallback) → grey. Odds-only (works for
+        # every sport, no per-sport model).
         win_prob, prob_src = None, None
         if m:
             win_prob = _live_decided_prob(bet, m)
             if win_prob is not None:
                 prob_src = "decided"
+        if win_prob is None:
+            try:
+                win_prob = _kalshi_live_mid(bet, away, home)
+            except Exception:
+                win_prob = None
+            if win_prob is not None:
+                prob_src = "kalshi"
         if win_prob is None:
             if client is None:
                 try:
@@ -8264,11 +8684,12 @@ def api_handicapper_ticker():
     return jsonify(data)
 
 
-# (The Pick Bot fill tracker — /api/handicapper/fill-status, the _fs_*
-# matchers, entry auto-sync, outbid detection — was RETIRED July 2026 with
-# the Kalshi execution cutover: Kalshi notifies fills natively and the
-# user's call was "Pick Bot makes picks, it doesn't track my bets". Full
-# spec in git history pre-July-12-2026.)
+# (The POLYMARKET fill tracker — the old /api/handicapper/fill-status,
+# _fs_* matchers, entry auto-sync — was RETIRED July 2026 with the Kalshi
+# execution cutover; full spec in git history pre-July-12-2026. A KALSHI
+# edition of fill STATUS (no auto-sync, no writes) was rebuilt the same
+# day on the authed portfolio API — see api_handicapper_fill_status up
+# near the Kalshi readers.)
 
 
 @app.route("/api/handicapper/dossier")
