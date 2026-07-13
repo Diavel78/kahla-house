@@ -3245,9 +3245,17 @@ def debug_kalshi_discover():
 
     # Direct probes — definitive per-ticker answer regardless of the
     # discovery paths: ?probe=KXUFCFIGHT,KXUFC hits /markets for each.
-    # ?q=ufc with no explicit probe auto-probes the UFC candidates.
+    # Common queries auto-probe the execution readers' candidate lists so
+    # verifying new coverage is one URL visit.
     if not probe and "ufc" in q:
-        probe = list(_KALSHI_UFC_SERIES_CANDIDATES)
+        probe = (list(_KALSHI_UFC_SERIES_CANDIDATES)
+                 + _KALSHI_UFC_DUR_SERIES["distance"]
+                 + _KALSHI_UFC_DUR_SERIES["rounds"])
+    if not probe and ("inning" in q or "nrfi" in q or "yrfi" in q):
+        probe = list(_KALSHI_NRFI_SERIES_CANDIDATES)
+    if not probe and q in ("total", "spread"):
+        probe = [t for s in _KALSHI_LINE_SERIES_X.values()
+                 for t in (s.get(q) or [])]
     probes = {}
     for t in probe[:6]:
         pr = _fetch_kalshi_markets(t)
@@ -3900,6 +3908,93 @@ def _kalshi_side_book(sport: str, away: str, home: str, side: str,
 # team codes as KXMLBGAME.
 _KALSHI_LINE_SERIES = {"MLB": {"total": "KXMLBTOTAL", "spread": "KXMLBSPREAD"}}
 
+# ── Execution-reader coverage (RULE 0.001 corollary) ─────────────────
+# Kalshi lists a market for essentially EVERYTHING we bet — so a
+# "no kalshi market" verdict must mean the READER failed to find it,
+# never "Kalshi doesn't have it". The execution readers therefore go
+# LOOKING: hand-named candidate series first (fast, 30s-cached market
+# fetches; a wrong guess returns 0 markets, harmless), then a runtime
+# search of Kalshi's own /series catalog (6h-cached). The VERIFIED map
+# above stays MLB-only because it also feeds the pm_snapshots LOGGER —
+# an unverified suffix parse there would pollute the closing dataset;
+# the execution reads below are fail-safe (miss ⇒ no book ⇒ the seeded
+# exchange price stands). Candidates follow the confirmed KX{LEAGUE}
+# naming (KXMLBTOTAL/KXMLBSPREAD verified live June 2026); confirm any
+# new hit's suffix encoding via /debug-kalshi-discover before promoting
+# it into the verified logger map.
+_KALSHI_LINE_SERIES_X = {
+    "MLB": {"total": ["KXMLBTOTAL"], "spread": ["KXMLBSPREAD"]},   # verified
+    "NBA": {"total": ["KXNBATOTAL"], "spread": ["KXNBASPREAD"]},
+    "NHL": {"total": ["KXNHLTOTAL"], "spread": ["KXNHLSPREAD"]},
+    "NFL": {"total": ["KXNFLTOTAL"], "spread": ["KXNFLSPREAD"]},
+}
+
+_KALSHI_SERIES_LIST_CACHE: dict = {"ts": 0.0, "series": []}
+
+
+def _kalshi_series_list() -> list:
+    """Kalshi /series catalog [{ticker,title,category}], 6h-cached. The
+    runtime discovery layer behind the execution readers — same endpoint
+    /debug-kalshi-discover parses. Empty list on failure (readers then
+    run on their static candidates only)."""
+    import time as _t
+    now = _t.time()
+    if (_KALSHI_SERIES_LIST_CACHE["series"]
+            and now - _KALSHI_SERIES_LIST_CACHE["ts"] < 6 * 3600):
+        return _KALSHI_SERIES_LIST_CACHE["series"]
+    headers = {"Accept": "application/json", "User-Agent": "kahla-house/1.0"}
+    out: list = []
+    for base in _KALSHI_BASES:
+        for cat in ("Sports", ""):
+            try:
+                params = {"limit": 500}
+                if cat:
+                    params["category"] = cat
+                r = _http.get(f"{base}/series", params=params,
+                              headers=headers, timeout=10)
+                if r.status_code != 200:
+                    continue
+                for sr in ((r.json() or {}).get("series") or []):
+                    tk = (sr.get("ticker") or "").upper()
+                    if tk:
+                        out.append({"ticker": tk,
+                                    "title": (sr.get("title") or "").upper(),
+                                    "category": (sr.get("category") or "")})
+                if out:
+                    break
+            except Exception:
+                continue
+        if out:
+            break
+    if out:
+        _KALSHI_SERIES_LIST_CACHE.update(ts=now, series=out)
+    return out or _KALSHI_SERIES_LIST_CACHE["series"]
+
+
+def _kalshi_find_series(tag: str, want_re: str, limit: int = 3) -> list:
+    """Series tickers whose ticker contains `tag` AND whose ticker+title
+    matches `want_re` — the runtime 'go find it in Kalshi's catalog'
+    fallback for the execution readers."""
+    import re as _re
+    hits = []
+    for s in _kalshi_series_list():
+        if tag in s["ticker"] and _re.search(want_re, s["ticker"] + " " + s["title"]):
+            hits.append(s["ticker"])
+            if len(hits) >= limit:
+                break
+    return hits
+
+
+def _kalshi_line_series_cands(sport: str, mt: str) -> list:
+    """Candidate series for a (sport, total|spread) execution read: the
+    static KX{LEAGUE} names first, then catalog discovery."""
+    cands = list((_KALSHI_LINE_SERIES_X.get(sport) or {}).get(mt) or [])
+    want = r"TOTAL|POINTS|RUNS|GOALS" if mt == "total" else r"SPREAD|MARGIN|WINS BY"
+    for t in _kalshi_find_series(sport, want):
+        if t not in cands:
+            cands.append(t)
+    return cands
+
 
 def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
                       side: str, line, want_dt=None) -> dict | None:
@@ -3907,14 +4002,13 @@ def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
     _pmm_book (bids = buyers of THIS side). Maps our (market_type, side, line)
     onto Kalshi's YES contract (Over for totals; '{fav} wins by over X.5' for
     spreads) and INVERTS the book for the synthesized side (under / run-line
-    dog). Currently MLB-only — the line series are MLB; add others to
-    _KALSHI_LINE_SERIES + confirm their suffix encoding before enabling."""
+    dog). Tries every candidate series (verified + discovered) first-hit-wins;
+    the suffix scheme is the MLB-verified one (total suffix = line+0.5;
+    spread suffix = {FAV}{margin+0.5}) — a sport with a different encoding
+    just misses (⇒ no book), never mis-selects a far line."""
     mt = ("total" if market_type in ("total", "tot")
           else "spread" if market_type in ("spread", "spr") else None)
     if mt is None or line is None:
-        return None
-    series = (_KALSHI_LINE_SERIES.get(sport) or {}).get(mt)
-    if not series:
         return None
     try:
         L = float(line)
@@ -3924,10 +4018,23 @@ def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
     hc = _our_team_to_kalshi_code(sport, home)
     if not (ac and hc):
         return None
-    mkts = (_fetch_kalshi_markets(series).get("markets") or [])
 
     if mt == "total":
         want = str(int(round(abs(L) + 0.5)))          # 8.5 → "9"
+    else:
+        # spread: the YES market is always the FAVORITE "wins by over (mag-0.5)".
+        n = int(round(abs(L) + 0.5))                   # 1.5 → 2
+        fav_is_picked = (L < 0)                        # negative line = laying runs
+        if fav_is_picked:
+            fav_code = _our_team_to_kalshi_code(sport, home if side == "home" else away)
+        else:
+            fav_code = ac if side == "home" else hc    # the OTHER team is the favorite
+        if not fav_code:
+            return None
+        want = f"{fav_code}{n}"
+
+    for series in _kalshi_line_series_cands(sport, mt):
+        mkts = (_fetch_kalshi_markets(series).get("markets") or [])
         cands = []
         for m in mkts:
             tk = m.get("ticker") or ""
@@ -3939,34 +4046,144 @@ def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
             cands.append(m)
         m = _kalshi_nearest(cands, want_dt)
         if not m:
-            return None
+            continue
         book = _kalshi_book(m["ticker"])
-        return book if side == "over" else _invert_book(book)   # YES = OVER
+        if not book:
+            continue
+        if mt == "total":
+            return book if side == "over" else _invert_book(book)   # YES = OVER
+        return book if fav_is_picked else _invert_book(book)
+    return None
 
-    # spread: the YES market is always the FAVORITE "wins by over (mag-0.5)".
-    n = int(round(abs(L) + 0.5))                       # 1.5 → 2
-    fav_is_picked = (L < 0)                            # negative line = laying runs
-    if fav_is_picked:
-        fav_code = _our_team_to_kalshi_code(sport, home if side == "home" else away)
-    else:
-        fav_code = ac if side == "home" else hc        # the OTHER team is the favorite
-    if not fav_code:
+
+# First-inning (NRFI/YRFI) series name is UNVERIFIED — the static guesses
+# cost nothing (0 open markets = skip) and the catalog search self-heals
+# whatever Kalshi actually calls it. Confirm via
+# /debug-kalshi-discover?q=inning, then pin the real ticker first in this
+# list.
+_KALSHI_NRFI_SERIES_CANDIDATES = [
+    "KXMLBYRFI", "KXMLBNRFI", "KXMLB1STINNING", "KXMLBFIRSTINNING",
+]
+
+
+def _kalshi_nrfi_book(away: str, home: str, side: str, want_dt=None) -> dict | None:
+    """Kalshi top-of-book for a first-inning (NRFI/YRFI) pick, or None.
+    side: 'yes' = YRFI (a run scores), 'no' = NRFI. Matches the game by
+    team codes in the event ticker (standard encoding), then sniffs the
+    market title for YES orientation: a 'no run(s)/scoreless' phrasing
+    means YES = NRFI, anything else means YES = YRFI (Kalshi convention:
+    YES = the thing happens)."""
+    import re as _re
+    ac = _our_team_to_kalshi_code("MLB", away)
+    hc = _our_team_to_kalshi_code("MLB", home)
+    if not (ac and hc):
         return None
-    want = f"{fav_code}{n}"
-    cands = []
-    for m in mkts:
-        tk = m.get("ticker") or ""
-        et = m.get("event_ticker") or ""
-        if "-" not in tk or tk.rsplit("-", 1)[1] != want:
+    cands = list(_KALSHI_NRFI_SERIES_CANDIDATES)
+    for t in _kalshi_find_series("MLB", r"1ST INNING|FIRST INNING|YRFI|NRFI"):
+        if t not in cands:
+            cands.append(t)
+    for series in cands:
+        mkts = (_fetch_kalshi_markets(series).get("markets") or [])
+        rows = [m for m in mkts
+                if ac in (m.get("event_ticker") or "")
+                and hc in (m.get("event_ticker") or "")]
+        m = _kalshi_nearest(rows, want_dt)
+        if not m:
             continue
-        if ac not in et or hc not in et:
+        book = _kalshi_book(m["ticker"])
+        if not book:
             continue
-        cands.append(m)
-    m = _kalshi_nearest(cands, want_dt)
-    if not m:
+        title = (m.get("title") or "").lower()
+        yes_is_yrfi = not _re.search(r"\bno\s+runs?\b|scoreless", title)
+        return book if ((side == "yes") == yes_is_yrfi) else _invert_book(book)
+    return None
+
+
+# UFC duration props — series names REAL (seen on the live July 4 2026
+# /debug-kalshi-discover probe alongside KXUFCFIGHT): KXUFCDISTANCE
+# (goes-the-distance) + KXUFCROUNDS (round-count O/U ladder). Market
+# title/suffix shapes unverified — matching is by fighter LAST-NAME
+# tokens in the title (fighters aren't teams, no code map) and the
+# orientation/line are sniffed from the title, so a shape drift just
+# misses (⇒ no book).
+_KALSHI_UFC_DUR_SERIES = {"distance": ["KXUFCDISTANCE"],
+                          "rounds": ["KXUFCROUNDS"]}
+
+
+def _kalshi_ufc_prop_book(kind: str, away: str, home: str, side: str,
+                          line=None, want_dt=None) -> dict | None:
+    """Kalshi top-of-book for a UFC duration pick, or None.
+    kind 'distance': side 'yes' = goes the distance / 'no' = finish.
+    kind 'rounds': side 'over'/'under' at `line` (round number, X.5)."""
+    import re as _re
+
+    def last_tok(s):
+        ts = [t for t in _re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).split()
+              if len(t) >= 3]
+        return ts[-1] if ts else ""
+    la, lh = last_tok(away), last_tok(home)
+    if not la or not lh:
         return None
-    book = _kalshi_book(m["ticker"])
-    return book if fav_is_picked else _invert_book(book)
+    cands = list(_KALSHI_UFC_DUR_SERIES.get(kind) or [])
+    want_re = r"DISTANCE" if kind == "distance" else r"ROUNDS?"
+    for t in _kalshi_find_series("UFC", want_re):
+        if t not in cands:
+            cands.append(t)
+    want_date = want_dt.date() if want_dt is not None else None
+    for series in cands:
+        mkts = (_fetch_kalshi_markets(series).get("markets") or [])
+        rows = []
+        for m in mkts:
+            hay = " " + _re.sub(r"[^a-z0-9]+", " ",
+                                ((m.get("title") or "") + " "
+                                 + (m.get("event_ticker") or "")).lower()) + " "
+            if f" {la} " not in hay or f" {lh} " not in hay:
+                continue
+            # ±2-day date filter when the event ticker carries a date
+            # (UFC block-times drift; cards cross midnight ET).
+            if want_date is not None:
+                mo = _re.search(r"-(\d{2})([A-Z]{3})(\d{2})",
+                                m.get("event_ticker") or "")
+                if mo:
+                    mm = _KALSHI_MONTHS.get(mo.group(2))
+                    if mm:
+                        try:
+                            from datetime import date as _date
+                            d = _date(2000 + int(mo.group(1)), mm, int(mo.group(3)))
+                            if abs((d - want_date).days) > 2:
+                                continue
+                        except ValueError:
+                            pass
+            rows.append(m)
+        if not rows:
+            continue
+        if kind == "rounds":
+            if line is None:
+                continue
+            want = abs(float(line))
+            sel = None
+            for m in rows:
+                mo = _re.search(r"(\d+(?:\.5)?)\s*rounds?",
+                                (m.get("title") or "").lower())
+                if mo and abs(float(mo.group(1)) - want) < 0.26:
+                    sel = m
+                    break
+            if sel is None:
+                continue
+        else:
+            sel = rows[0]      # distance: one market per fight
+        book = _kalshi_book(sel["ticker"])
+        if not book:
+            continue
+        title = (sel.get("title") or "").lower()
+        if kind == "distance":
+            # YES = goes the distance unless the title is phrased as a finish.
+            yes_is_dist = not _re.search(r"finish|not\s+go|inside the distance", title)
+            return book if ((side == "yes") == yes_is_dist) else _invert_book(book)
+        # rounds: YES = over ("last more than X.5 rounds") unless phrased under.
+        yes_is_over = not _re.search(r"less than|under|fewer", title)
+        return book if ((side == "over") == yes_is_over) else _invert_book(book)
+    return None
 
 
 def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
@@ -4154,13 +4371,15 @@ def api_make_take():
     execution venue (July 2026, user: "I'm moving to 100% Kalshi";
     ProphetX is dead, the Poly leg is dormant). Returns the cheapest
     fillable of {MAKE, MAKE+, TAKE} on the Kalshi book, or
-    available:false when Kalshi doesn't list the market (unmapped sport /
-    non-MLB line market) — no Kalshi market means there's nothing to
-    execute. Params: units, starts_in_min (also reconstructs the event
-    time for Kalshi series-matching), and sport/away/home/side/
-    market_type/line for the book lookup. `slug` + `inverse` (the old
-    PMM-book params) are accepted and ignored — the Kalshi readers own
-    side orientation (two real rows per game, no synthetic inversion)."""
+    available:false when the READER couldn't match a Kalshi market —
+    per RULE 0.001 Kalshi lists essentially everything, so treat that
+    as a coverage gap to fix via /debug-kalshi-discover, not "Kalshi
+    doesn't have it". Params: units, starts_in_min (also reconstructs
+    the event time for Kalshi series-matching), and sport/away/home/
+    side/market_type/line for the book lookup. `slug` + `inverse` (the
+    old PMM-book params) are accepted and ignored — the Kalshi readers
+    own side orientation (two real rows per game, no synthetic
+    inversion)."""
     try:
         units = float(request.args.get("units") or 1)
     except ValueError:
@@ -4180,7 +4399,10 @@ def api_make_take():
         line = None
     # Kalshi's book match needs the event time to disambiguate a team's
     # series game — reconstructed from starts_in_min (now + sim), so no
-    # extra request param is needed.
+    # extra request param is needed. EVERY bet type the bot emits routes
+    # to a reader — Kalshi lists a market for essentially everything
+    # (RULE 0.001 corollary), so an unroutable type would be a reader
+    # gap, not a missing market.
     kbook = None
     if sport and away and home and side:
         want_dt = (datetime.now(timezone.utc) + timedelta(minutes=sim)
@@ -4188,6 +4410,16 @@ def api_make_take():
         try:
             if market_type in ("moneyline", "ml"):
                 kbook = _kalshi_side_book(sport, away, home, side, want_dt=want_dt)
+            elif market_type == "nrfi":
+                kbook = _kalshi_nrfi_book(away, home, side, want_dt=want_dt)
+            elif market_type == "distance":
+                kbook = _kalshi_ufc_prop_book("distance", away, home, side,
+                                              want_dt=want_dt)
+            elif market_type in ("total", "tot") and sport == "UFC":
+                # UFC 'totals' are round-count O/U — the KXUFCROUNDS ladder,
+                # not a team line series.
+                kbook = _kalshi_ufc_prop_book("rounds", away, home, side,
+                                              line=line, want_dt=want_dt)
             elif market_type in ("spread", "spr", "total", "tot"):
                 kbook = _kalshi_line_book(sport, away, home, market_type,
                                           side, line, want_dt=want_dt)
@@ -4196,7 +4428,8 @@ def api_make_take():
     sig = _cross_book_signal(None, kbook, units=units, starts_in_min=sim)
     if not sig:
         return jsonify({"ok": True, "available": False,
-                        "reason": "no kalshi market"})
+                        "reason": "kalshi market not matched (reader gap "
+                                  "— confirm via /debug-kalshi-discover)"})
     # Pinnacle reference (log-modal "am I getting a decent line?" check) —
     # CACHE-ONLY read of the parlay-api slate; a modal open never spends
     # credits (paid pulls stay tied to bot-bet moments in the paperlog).

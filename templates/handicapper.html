@@ -3312,8 +3312,6 @@
             _lmStatus('warn', `Heads up — you already have ${_nrfiSideLabel(_st.logged.side)} `
                 + `${_uStr(_st.logged.units)} pending on this game. Logging again adds a second bet.`);
         document.getElementById('logModal').classList.add('show');
-        // NRFI has no Kalshi market (first-inning is a PMM-only contract) —
-        // _lmLoadExec will render "No Kalshi market found for this bet."
         _lmLoadExec({ mid: _lastDossier.market_id,
             mt: 'nrfi', side, units: 1,
             sim: (_lastDossier.starts_in_min != null ? _lastDossier.starts_in_min : null),
@@ -3473,7 +3471,10 @@
             o.units, o.sim, o.ctx, o.line);
         if (seq !== _lmExecSeq) return;   // superseded by a newer modal open
         if (!j || j.price == null) {
-            el.textContent = 'No Kalshi market found for this bet.';
+            // Kalshi lists essentially everything (RULE 0.001) — a miss here
+            // means the READER couldn't match the market, not that it doesn't
+            // exist. The log proceeds at the seeded exchange price.
+            el.textContent = 'Couldn’t match the Kalshi market (reader gap — logs at exchange price).';
             return;
         }
         let s = `${j.rec} at ${_mtCents(j.price)}¢`
