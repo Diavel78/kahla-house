@@ -3881,6 +3881,8 @@ def _kalshi_market_for(sport: str, away: str, home: str, market_type: str,
     try:
         mt = (market_type or "").lower()
         if mt in ("moneyline", "ml"):
+            if (sport or "").upper() == "UFC":
+                return _kmf_ufc_ml(away, home, side, want_dt)
             return _kmf_ml(sport, away, home, side, want_dt)
         if mt == "nrfi":
             return _kmf_nrfi(away, home, side, want_dt)
@@ -4160,6 +4162,50 @@ _KALSHI_UFC_DUR_SERIES = {"distance": ["KXUFCDISTANCE"],
                           "rounds": ["KXUFCROUNDS"]}
 
 
+def _kmf_ufc_ml(away: str, home: str, side: str, want_dt=None) -> dict | None:
+    """UFC MONEYLINE resolver — fighters aren't teams (no ticker-code map,
+    so the generic _kmf_ml can never match a fight): the picked fighter's
+    KXUFCFIGHT market is found by NAME — its YES name (team/yes_sub_title,
+    else parsed from the verified 'Will {F} win …' title) matches the
+    picked fighter AND the title mentions the opponent's last token (the
+    title carries 'X vs Y', and the opponent check stops a rematch-week
+    same-fighter collision), ±2d on the event-ticker date. buy is always
+    'yes' — Kalshi lists one real market per fighter."""
+    import re as _re
+    picked = home if side == "home" else away
+    other = away if side == "home" else home
+    ot = [t for t in _re.sub(r"[^a-z0-9]+", " ", (other or "").lower()).split()
+          if len(t) >= 2]
+    olast = ot[-1] if ot else ""
+    data = _fetch_kalshi_first(_KALSHI_UFC_SERIES_CANDIDATES)
+    want_date = want_dt.date() if want_dt is not None else None
+    for m in (data.get("markets") or []):
+        name = m.get("team") or ""
+        if not name:
+            mo_t = _re.match(r"(?i)\s*will\s+(.+?)\s+win\b", m.get("title") or "")
+            if mo_t:
+                name = mo_t.group(1).strip()
+        if not name or not _ufc_kalshi_name_match(name, picked):
+            continue
+        hay = " " + _re.sub(r"[^a-z0-9]+", " ", (m.get("title") or "").lower()) + " "
+        if olast and f" {olast} " not in hay:
+            continue
+        if want_date is not None:
+            mo = _re.search(r"-(\d{2})([A-Z]{3})(\d{2})", m.get("event_ticker") or "")
+            if mo:
+                mm2 = _KALSHI_MONTHS.get(mo.group(2))
+                if mm2:
+                    try:
+                        from datetime import date as _date
+                        d = _date(2000 + int(mo.group(1)), mm2, int(mo.group(3)))
+                        if abs((d - want_date).days) > 2:
+                            continue
+                    except ValueError:
+                        pass
+        return {"ticker": m["ticker"], "buy": "yes"}
+    return None
+
+
 def _kmf_ufc(kind: str, away: str, home: str, side: str,
              line=None, want_dt=None) -> dict | None:
     """UFC duration resolver.
@@ -4168,8 +4214,11 @@ def _kmf_ufc(kind: str, away: str, home: str, side: str,
     import re as _re
 
     def last_tok(s):
+        # ≥2, not ≥3 — two-letter last names are real ('Ko'; see the
+        # _ufc_kalshi_name_match landmine). Padded exact-token containment
+        # below keeps 'ko' from matching inside other words.
         ts = [t for t in _re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).split()
-              if len(t) >= 3]
+              if len(t) >= 2]
         return ts[-1] if ts else ""
     la, lh = last_tok(away), last_tok(home)
     if not la or not lh:
@@ -5047,12 +5096,20 @@ def _fetch_kalshi_first(candidates: list) -> dict:
 def _ufc_kalshi_name_match(a: str, b: str) -> bool:
     """Fighter-name match: LAST-name token containment in either direction
     (the resolver's _ufc_match_espn posture — handles 'B. Susurkaev' vs
-    'Baysangur Susurkaev'; non-alphanumerics collapsed for diacritics)."""
+    'Baysangur Susurkaev'; non-alphanumerics collapsed for diacritics).
+    LANDMINE (July 2026, the Lebosnoyani-vs-Ko miss): the token filter is
+    ≥2, NOT ≥3 — real last names are two letters ('Seokhyeon Ko', 'Petr
+    Yan' is 3 but 'Ko'/'Oh'/'An' aren't), and dropping them blinded every
+    Kalshi UFC match for those fighters (Kalshi also romanizes
+    differently — 'Seok Hyun Ko' — so the LAST token is the only stable
+    join key). ≥2 keeps 1-char initials ('B.') out; the containment check
+    is exact-token membership, and callers require BOTH fighters to match
+    within one event, so short tokens can't false-positive alone."""
     import re as _re
 
     def toks(s):
         return [t for t in _re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).split()
-                if len(t) >= 3]
+                if len(t) >= 2]
     ta, tb = toks(a), toks(b)
     if not ta or not tb:
         return False
