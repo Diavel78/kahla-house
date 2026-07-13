@@ -3805,12 +3805,14 @@ def _book_signal(book: dict | None, edge_units: float = 1,
 
 
 # ── Kalshi US fee schedule (per contract, in cents) ──────────────────
-# Receipt-verified July 12 2026 on the user's own SPORTS tickets: taker
-# 0.07·p·(1−p) per contract, rounded UP on the order TOTAL ($0.09 on
-# 5@54c); SPORTS MAKER IS $0 (5-share YES 53c + NO 47c resting tickets
-# showed no fee line). The July 7 2026 schedule added maker fees (25% of
-# taker) to SOME non-sports series — if a new sports series ever shows a
-# maker fee on a 1-lot test ticket, put the 25% term back here.
+# Taker 0.07·p·(1−p) per contract, rounded UP on the order TOTAL
+# (receipt: $0.09 on 5@54c). MAKER = 25% OF TAKER (1.75·p·(1−p)c) —
+# PROVEN on the user's own EXECUTED order via /api/kalshi/probe July 12
+# 2026: 3 contracts filled maker at 32c on KXMLBGAME →
+# maker_fees_dollars 0.0115 = 3 × 0.3808c rounded up. That contradicts
+# the same-day "$0 maker" read off resting-ticket PREVIEWS (previews
+# don't show maker fees; fills charge them) — the July 7 2026 schedule's
+# maker fee IS live on sports. Trust fills, not previews.
 def _kalshi_taker_fee_cents(price_cents) -> float:
     if price_cents is None:
         return 0.0
@@ -3819,7 +3821,10 @@ def _kalshi_taker_fee_cents(price_cents) -> float:
 
 
 def _kalshi_maker_fee_cents(price_cents) -> float:
-    return 0.0
+    if price_cents is None:
+        return 0.0
+    p = max(0.0, min(1.0, price_cents / 100.0))
+    return round(1.75 * p * (1.0 - p), 3)
 
 
 def _kalshi_event_dt(event_ticker: str | None):
@@ -4616,11 +4621,16 @@ def api_handicapper_fill_status():
                      if (o.get("ticker") or "") == tk
                      and (o.get("side") or "yes").lower() == buy]
 
+        # Counts are `*_fp` STRING decimals in the real payload
+        # ("initial_count_fp": "3.00") — probe-verified July 12 2026;
+        # plain int keys kept as fallback for shape drift.
         def _cnt(o, k):
-            try:
-                return float(o.get(k) or 0)
-            except (TypeError, ValueError):
-                return 0.0
+            for kk in (k + "_fp", k):
+                try:
+                    return float(o.get(kk))
+                except (TypeError, ValueError):
+                    continue
+            return 0.0
         pos_qty = 0.0
         for q in positions:
             if (q.get("ticker") or "") != tk:
@@ -4650,9 +4660,14 @@ def api_handicapper_fill_status():
                     book = _kalshi_book_for(ref)
                     myp = None
                     for o in my_orders:
-                        c = (_kalshi_cents_val(o.get(f"{buy}_price"))
+                        # Prices are `*_price_dollars` STRING dollars in the
+                        # real payload ("yes_price_dollars": "0.3200") —
+                        # probe-verified; int-cents keys kept as fallback.
+                        c = (_kalshi_cents_val(o.get(f"{buy}_price_dollars"))
+                             or _kalshi_cents_val(o.get(f"{buy}_price"))
                              or _kalshi_cents_val(o.get("price"))
-                             or (_kalshi_cents_val(o.get("yes_price"), invert=True)
+                             or (_kalshi_cents_val(o.get("yes_price_dollars"), invert=True)
+                                 or _kalshi_cents_val(o.get("yes_price"), invert=True)
                                  if buy == "no" else None))
                         if c is not None:
                             myp = c if myp is None else max(myp, c)
@@ -4688,11 +4703,12 @@ def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
     Kalshi") — the live path passes kalshi_book only. The pmm leg is kept
     wired-but-dormant for the whiplash revert (Kalshi has been venued,
     de-venued, and re-venued before): pass a pmm_book and both venues get
-    compared again. All-in CENTS: MAKE rests at the bid (Kalshi sports
-    maker = $0, receipt-verified July 12 2026); it's only fillable when
-    the TOP ROW isn't bid-heavy (else sellers aren't coming to your rest)
-    and the clock allows. MAKE+ steps one tick in FRONT of the bid queue
-    (Kalshi tick = 1c, Poly 0.5c). TAKE crosses at ask + taker fee
+    compared again. All-in CENTS: MAKE rests at the bid + Kalshi's maker
+    fee (1.75·p(1−p)c = 25% of taker — proven on the user's own executed
+    order July 12 2026, see _kalshi_maker_fee_cents); it's only fillable
+    when the TOP ROW isn't bid-heavy (else sellers aren't coming to your
+    rest) and the clock allows. MAKE+ steps one tick in FRONT of the bid
+    queue (Kalshi tick = 1c, Poly 0.5c). TAKE crosses at ask + taker fee
     (Kalshi 7·p(1−p)c — steep, ~1.75c at 50/50); always fills. Returns
     the cheapest fillable option + every option for transparency, or
     None if no book is usable."""
@@ -4760,9 +4776,9 @@ def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
            + (f"; {vlabel[best['venue']]} touch {best['touch_imb']}x" if best['touch_imb'] is not None else ""))
     # `price` is the ACTIONABLE directive shown on the chip: where to rest a
     # maker (bid / bid+tick) or the fee-inclusive cross for a take.
-    # `entry_cents` is the EFFECTIVE cost (all-in, fee baked in) the pick
-    # logs so CLV and to-WIN reflect the real edge — on Kalshi sports the
-    # two are equal for a maker (maker fee $0) and differ for a take.
+    # `entry_cents` is the EFFECTIVE cost (all-in, fee baked in) — for a
+    # Kalshi maker that's bid + ~0.44c at 50/50 (the 25%-of-taker maker
+    # fee), for a take ask + the full 7·p(1−p)c.
     directive = best.get("post_price")
     if directive is None:
         directive = best["all_in"]

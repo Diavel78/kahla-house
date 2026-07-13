@@ -1397,7 +1397,8 @@
     // Fix units and/or the entry price on a pending pick. With the fill
     // auto-sync retired (Kalshi cutover July 2026), typing the REAL Kalshi
     // fill in ¢ here is how a fill that differs from the logged make price
-    // gets corrected — Kalshi sports maker fee is $0, so the fill IS the
+    // gets corrected — the fill in ¢ is what you type (Kalshi's small
+    // maker fee, 25% of taker, rides outside the price), so the fill is
     // effective entry (no fee math). Odds left BLANK = units-only edit.
     let _editCtx = null;
     function editPick(pickId, curUnits, btn, curPrice) {
@@ -1436,7 +1437,7 @@
             return;
         }
         if (o.bad)   { el.textContent = 'Fill price must be in cents (1–99), e.g. 43.'; return; }
-        el.textContent = `Entry moves to ${o.cents}¢ (Kalshi maker fee is $0 — the fill is the effective entry).`;
+        el.textContent = `Entry moves to ${o.cents}¢ (your Kalshi fill price — logged as-is).`;
     }
     function _emStatus(kind, msg) {
         const el = document.getElementById('emStatus');
@@ -3111,7 +3112,7 @@
     // Fold the chosen execution into the log body: entry_book = KALSHI
     // (the only execution venue — "the bet log is easy, it's Kalshi only"),
     // entry_price = the best make (american, so CLV/to-WIN stay honest;
-    // Kalshi sports maker fee is $0 so the make IS the effective entry).
+    // the sub-cent Kalshi maker fee rides outside the logged price).
     // No verdict cached (no Kalshi market) → the seeded dossier price
     // stands, still logged as KALSHI. signal_blob.execution keeps the read.
     function _applyMakeTakeToBody(body) {
