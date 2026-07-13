@@ -4306,20 +4306,44 @@ _KALSHI_PK_ENVS = ("KALSHI_PRIVATE_KEY", "KALSHI_API_PRIVATE_KEY",
                    "KALSHI_RSA_PRIVATE_KEY")
 
 
+_KALSHI_CRED_CACHE: dict = {"ts": 0.0, "kid": None, "pem": None}
+
+
 def _kalshi_creds():
-    """(key_id, pem, key_id_env, pem_env) — Nones when unset."""
-    kid = pem = kid_env = pem_env = None
+    """(key_id, pem, key_id_source, pem_source) — Nones when unset. Env
+    vars first; falls back to the Supabase `kalshi_state` row (id=1) —
+    the parlay_state.api_key precedent, so the key can live in the DB
+    instead of Vercel env if the user prefers. DB read cached 5 min."""
+    kid = pem = kid_src = pem_src = None
     for k in _KALSHI_KEY_ID_ENVS:
         v = (os.environ.get(k) or "").strip()
         if v:
-            kid, kid_env = v, k
+            kid, kid_src = v, k
             break
     for k in _KALSHI_PK_ENVS:
         v = os.environ.get(k) or ""
         if v.strip():
-            pem, pem_env = v, k
+            pem, pem_src = v, k
             break
-    return kid, pem, kid_env, pem_env
+    if kid and pem:
+        return kid, pem, kid_src, pem_src
+    import time as _t
+    now = _t.time()
+    if now - _KALSHI_CRED_CACHE["ts"] > 300:
+        _KALSHI_CRED_CACHE["ts"] = now   # even on failure — don't hammer
+        try:
+            sb = get_supabase()
+            row = (sb.table("kalshi_state").select("key_id,private_key")
+                   .eq("id", 1).single().execute().data) if sb else None
+            _KALSHI_CRED_CACHE["kid"] = ((row or {}).get("key_id") or "").strip() or None
+            _KALSHI_CRED_CACHE["pem"] = (row or {}).get("private_key") or None
+        except Exception:
+            pass
+    if kid is None and _KALSHI_CRED_CACHE["kid"]:
+        kid, kid_src = _KALSHI_CRED_CACHE["kid"], "db:kalshi_state"
+    if pem is None and _KALSHI_CRED_CACHE["pem"]:
+        pem, pem_src = _KALSHI_CRED_CACHE["pem"], "db:kalshi_state"
+    return kid, pem, kid_src, pem_src
 
 
 def _kalshi_sign(pem: str, msg: str) -> str:
