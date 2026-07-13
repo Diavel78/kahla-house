@@ -1700,7 +1700,7 @@
                 // logged — an unsynced page must never offer a "fresh" chip
                 // on a bet the user is already on (the 3-dupes-in-40s bug).
                 const canTapLog = _canLog && _loggedPicksReady;
-                let click = canTapLog ? `oneTapLog('${mid}',${i})` : `pickGame('${mid}')`;
+                let click = canTapLog ? `oneTapLog('${mid}',${i},this)` : `pickGame('${mid}')`;
                 let title = canTapLog
                     ? (p._lean ? `Lean — sharp gate not cleared. Tap to log ${p._chip}` : `Tap to log ${p._chip}`)
                     : (_canLog ? `Syncing your logged bets — tap for details` : `Tap for the full read`);
@@ -1902,15 +1902,20 @@
         await Promise.all([work(), work()]);   // 2 at a time
     }
 
-    // Quick-bet chip on the games list. Was a true one-tap auto-log; as of
-    // July 2026 it opens the SAME log modal Details uses — pre-filled from
-    // the prefetched verdict body — so the Kalshi execution line is shown
-    // before every log. submitLog() uses _pendingBody as the base here.
-    async function oneTapLog(mid, idx) {
+    // Quick-bet chip on the games list — TRUE one-tap again (July 12 2026,
+    // Kalshi cutover: "log bet just LOGS the bet, no popup"). The modal
+    // detour existed only for the ProphetX fill-odds field, which is dead.
+    // Tap → fetch the live Kalshi make/take verdict (so the recorded entry
+    // is the real Kalshi resting bid — that's what CLV tracks) → POST →
+    // toast. Falls back to the prefetched exchange price when Kalshi has
+    // no market or the verdict fetch fails; the dossier's Log buttons keep
+    // the modal (that's where reasons/units get edited).
+    const _oneTapInFlight = new Set();
+    async function oneTapLog(mid, idx, btn) {
         if (!_canLog) return;
         // Belt + suspenders with _renderPickLines' canTapLog: if the logged-
         // bets sync hasn't succeeded yet we can't tell fresh from logged —
-        // open the dossier instead of the log modal.
+        // open the dossier instead of logging blind.
         if (!_loggedPicksReady) { pickGame(mid); return; }
         // Stale-tab guard: a resumed background tab has old _loggedPicks
         // (its 60s timer was suspended), so a chip can look fresh on a bet
@@ -1922,83 +1927,51 @@
         const v = _verdictCache.get(mid);
         const p = v && v.picks && v.picks[idx];
         if (!p || !p._body) return;
-        // Safety: never prompt the opposite/correlated side of a logged bet
-        // — and with the freshly-synced state, never re-prompt a bet the
-        // user is already on (route to details like the green chip would).
+        // Safety: never log the opposite/correlated side of a logged bet —
+        // and with the freshly-synced state, never re-log a bet the user is
+        // already on (route to details like the green chip would).
         const st = _pickState(mid, p.market_type, p.side, p.units).state;
         if (st === 'conflict' || st === 'logged') { pickGame(mid); return; }
-        _pendingBody = Object.assign({}, p._body);
-        _pendingPick = null;
-        const g = (_currentGames || []).find(x => x.market_id === mid) || {};
-        // Upgrade tap: seed the DELTA (target − already-logged) at the live
-        // odds, not the full target — logging that adds a second row that
-        // tops you up to the target instead of double-betting.
-        const _target = Number(p._body.units || p.units || 1);
-        const _up = _upgradeDelta(mid, p.market_type, p.side, _target);
-        const _upNote = _up ? `  ↑ +${_uStr(_up.delta)} → ${_uStr(_up.targetUnits)}` : '';
-        document.getElementById('lmSelection').value  = (p._chip || `${p.market_type} ${p.side}`)
-            + _selGameFrag(p.market_type, g.away, g.home) + _upNote;
-        _seedUnitsSelect(_up ? _up.delta : _target);
-        document.getElementById('lmConfidence').value = p._body.confidence || 'low';
-        document.getElementById('lmReasons').value    = (p._body.reasons || []).join('\n');
-        document.getElementById('lmAnalysis').value   = '';
-        _lmStatus(null, '');
-        document.getElementById('logModal').classList.add('show');
-        // Execution line: game context from the list row + active sport.
-        let sim = g.event_start ? Math.round((Date.parse(g.event_start) - Date.now()) / 60000) : null;
-        if (sim != null && !isFinite(sim)) sim = null;
-        _lmLoadExec({ mid, mt: p.market_type, side: p.side,
-            units: p._body.units || p.units || 1, sim,
-            line: (p._body.line != null ? p._body.line : null),
-            ctx: { sport: _activeSport, away: g.away, home: g.home } });
-        _lmRefreshSeed(mid, p);
-    }
-
-    // The quick-bet modal seeds from the prefetched verdict cache, which can
-    // be several minutes stale (verdict TTL + the server's VSiN/splits
-    // caches) — the user caught an outdated Circa bullet in the reasons.
-    // After the modal opens, re-pull the dossier and quietly refresh the
-    // seeded body + reasons/selection for the SAME (market_type, side) the
-    // user tapped — never a different side; if that side's suggestion is
-    // gone from the fresh dossier, the cached seed stands. The reasons
-    // textarea only updates if the user hasn't edited it.
-    let _lmSeedSeq = 0;
-    async function _lmRefreshSeed(mid, p) {
-        const seq = ++_lmSeedSeq;
-        const seeded = ((p._body && p._body.reasons) || []).join('\n');
+        // Double-tap guard: one in-flight log per bet, ever more important
+        // now that there's no modal between tap and POST.
+        const tapKey = `${mid}:${p.market_type}:${p.side}`;
+        if (_oneTapInFlight.has(tapKey)) return;
+        _oneTapInFlight.add(tapKey);
+        if (btn) { btn.disabled = true; btn.style.opacity = '0.55'; }
         try {
-            const r = await authFetch('/api/handicapper/dossier?market_id=' + encodeURIComponent(mid));
-            const d = await r.json();
-            if (!d || !d.ok || seq !== _lmSeedSeq || !_pendingBody) return;
-            if (!document.getElementById('logModal').classList.contains('show')) return;
-            let body = null, lean = false;
-            if (p.market_type === 'nrfi') {
-                const n = d.nrfi || {};
-                if (n.bet_side !== p.side) return;
-                const pb = (n.polymarket || {})[p.side] || {};
-                const price = (pb.bid_american != null) ? pb.bid_american
-                    : (p.side === 'no' ? n.nrfi_fair_american : n.yrfi_fair_american);
-                body = { market_id: mid, market_type: 'nrfi', side: p.side, book: 'KALSHI',
-                    price, line: null, units: 1, confidence: 'low',
-                    fair_prob: (p.side === 'no' ? n.p_nrfi : n.p_yrfi),
-                    edge_pp: (pb.edge_pp != null ? pb.edge_pp : null), sharp_score: null,
-                    reasons: n.reasons || [], query_text: d.query || null,
-                    allow_duplicate: true, _line: null, _price: price };
+            const body = Object.assign({}, p._body);
+            // Upgrade tap: log the DELTA (target − already-logged) so the
+            // second row tops you up instead of double-betting.
+            const _target = Number(body.units || p.units || 1);
+            const _up = _upgradeDelta(mid, p.market_type, p.side, _target);
+            if (_up) body.units = _up.delta;
+            // Live Kalshi verdict → the entry becomes the real resting bid.
+            const g = (_currentGames || []).find(x => x.market_id === mid) || {};
+            let sim = g.event_start ? Math.round((Date.parse(g.event_start) - Date.now()) / 60000) : null;
+            if (sim != null && !isFinite(sim)) sim = null;
+            await _fetchMakeTakeVerdict(mid, p.market_type, p.side, body.units, sim,
+                { sport: _activeSport, away: g.away, home: g.home },
+                (body.line != null ? body.line : null));
+            _applyMakeTakeToBody(body);   // KALSHI stamp + live make when cached
+            const r = await authFetch('/api/handicapper/pick', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const out = r ? await r.json() : null;
+            if (out && (out.ok || out.skipped)) {
+                _toast(out.skipped ? 'Already logged ✓'
+                    : `Logged ✓ ${p._chip || ''}${_up ? ` (+${_uStr(_up.delta)} → ${_uStr(_up.targetUnits)})` : ''}`);
+                loadData(false);   // repaint chips green + refresh stats
             } else {
-                const sugg = d.suggestions || (d.suggestion ? [d.suggestion] : []);
-                const s2 = sugg.find(x => x && x.market_type === p.market_type && x.side === p.side);
-                if (!s2) return;
-                body = _suggestionToBody(s2, mid, d);
-                lean = !s2.gates_cleared;
+                _toast('Log failed: ' + ((out && out.error) || (r && r.status) || 'network'));
             }
-            _pendingBody = Object.assign({}, body);
-            const ta = document.getElementById('lmReasons');
-            if (ta && ta.value === seeded) ta.value = (body.reasons || []).join('\n');
-            const sel = document.getElementById('lmSelection');
-            if (sel) sel.value = (lean ? '~ ' : '')
-                + _pickChipLabel(body.market_type, body.side, body._line, body._price, body.units, d)
-                + _selGameFrag(body.market_type, d.away, d.home);
-        } catch (e) { /* keep the cached seed */ }
+        } catch (e) {
+            _toast('Log failed: ' + (e && e.message ? e.message : e));
+        } finally {
+            _oneTapInFlight.delete(tapKey);
+            if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+        }
     }
 
     // ── Live tracker (admin only) ──────────────────────────────────────
@@ -2179,7 +2152,6 @@
     // ─── Dossier (web-side ask) ───
     let _lastDossier = null;
     let _pendingPick = null;
-    let _pendingBody = null;   // quick-bet path: prefetched verdict body as modal base
 
     // Auto-refresh: while the dossier modal is open, re-fetch the
     // dossier every 30s so the suggestion/odds reflect whatever the
@@ -3282,7 +3254,6 @@
             seed_units:  1,
             seed_conf:   'low',
         };
-        _pendingBody = null;   // never inherit a stale quick-bet base
         document.getElementById('lmSelection').value  = _pendingPick.label;
         document.getElementById('lmUnits').value      = '1';
         document.getElementById('lmConfidence').value = 'low';
@@ -3327,7 +3298,6 @@
             seed_units:  1,
             seed_conf:   'low',
         };
-        _pendingBody = null;   // never inherit a stale quick-bet base
         document.getElementById('lmSelection').value  = _pendingPick.label;
         document.getElementById('lmUnits').value      = '1';
         document.getElementById('lmConfidence').value = 'low';
@@ -3382,7 +3352,6 @@
             seed_units:  1,
             seed_conf:   'low',
         };
-        _pendingBody = null;
         document.getElementById('lmSelection').value  = _pendingPick.label;
         document.getElementById('lmUnits').value      = '1';
         document.getElementById('lmConfidence').value = 'low';
@@ -3474,7 +3443,6 @@
         document.getElementById('lmConfidence').value = _pendingPick.seed_conf || 'medium';
         document.getElementById('lmReasons').value    = _buildReasons(_pendingPick, _lastDossier).join('\n');
         document.getElementById('lmAnalysis').value   = '';
-        _pendingBody = null;   // dossier path — never inherit a quick-bet base
         _lmStatus(null, '');
         document.getElementById('logModal').classList.add('show');
         const d = _lastDossier;
@@ -3527,7 +3495,6 @@
     function closeLog() {
         document.getElementById('logModal').classList.remove('show');
         _pendingPick = null;
-        _pendingBody = null;
         _lmLoadExec(null);   // hide + cancel any in-flight execution fetch
     }
     // Transient confirmation toast (bottom-center). Used after logging a
@@ -3738,22 +3705,14 @@
 
     async function submitLog() {
         _lmStatus(null, '');
-        if (!_pendingPick && !_pendingBody) {
+        if (!_pendingPick) {
             _lmStatus('err', 'No pick selected — close the modal and try again.');
             return;
         }
         const reasons = (document.getElementById('lmReasons').value || '')
             .split('\n').map(r => r.trim()).filter(Boolean);
         const analysis = document.getElementById('lmAnalysis').value || '';
-        // Quick-bet path: the prefetched verdict body IS the base (it already
-        // carries signal_blob/fair/edge from the verdict fetch) — the modal
-        // only overrides what the user can edit here.
-        const body = _pendingBody ? Object.assign({}, _pendingBody, {
-            units:       Number(document.getElementById('lmUnits').value),
-            confidence:  document.getElementById('lmConfidence').value,
-            analysis_md: analysis || null,
-            reasons:     reasons.length ? reasons : (_pendingBody.reasons || null),
-        }) : {
+        const body = {
             market_id:   _pendingPick.market_id,
             market_type: _pendingPick.market_type,
             side:        _pendingPick.side,
