@@ -1895,7 +1895,13 @@
                 sticky: !!s.sticky, gates_cleared: !!s.gates_cleared,
                 test_only: !!s.test_only,
                 model_total_diff: s.model_total_diff ?? null,
-                conflict_reason: s.conflict_reason ?? null },
+                conflict_reason: s.conflict_reason ?? null,
+                // Fight IQ read on UFC MLs (null elsewhere) — real picks
+                // must carry the model's opinion or the model-agree review
+                // can't include real money (first-card review gap).
+                ufc_model_p: s.ufc_model_p ?? null,
+                ufc_model_agree: s.ufc_model_agree ?? null,
+                ufc_model_vetoed_pick: !!s.ufc_model_vetoed_pick },
             allow_duplicate: true,
             _line: line, _price: price,
         };
@@ -1986,7 +1992,8 @@
                                         sharp_score: null,
                                         reasons: [`Fight IQ edge ${bet.edge_pp >= 0 ? '+' : ''}${bet.edge_pp}pp on ${desc}`],
                                         query_text: d.query || null,
-                                        signal_blob: { fight_iq: true, kind },
+                                        signal_blob: { fight_iq: true, kind,
+                                            dur_edge_pp: (bet.edge_pp != null ? bet.edge_pp : null) },
                                         allow_duplicate: true } });
                             });
                         }
@@ -2778,7 +2785,14 @@
                     : (bet.side === 'over' ? `Over ${_fmtPt(bet.line)} rds` : `Under ${_fmtPt(bet.line)} rds`);
                 const cls = bet.gates_cleared ? 'bet' : '';
                 const edge = `${bet.edge_pp >= 0 ? '+' : ''}${bet.edge_pp}pp`;
-                return `<button class="${cls}" onclick="logUfcDur('${kind}','${bet.side}')" title="Log ${_esc(lbl)} 1u @ ${_fmtAmer(bet.entry_american)} — Fight IQ edge ${edge}. Stays pending for manual settle.">Log ${lbl} · 1u <span style="opacity:.65">${edge}</span></button>`;
+                // >8pp claimed edge = the market's right, not the model
+                // (first-card review: the >15pp "edges" went 0-for-3).
+                // Still tappable, but demoted + labeled.
+                const capNote = bet.edge_capped ? ' · ⚠ edge capped' : '';
+                const capTitle = bet.edge_capped
+                    ? ' EDGE CAPPED: claimed edges past 8pp graded 0-for-3 on the first card — at this distance the market is right, not the model.'
+                    : '';
+                return `<button class="${cls}" onclick="logUfcDur('${kind}','${bet.side}')" title="Log ${_esc(lbl)} 1u @ ${_fmtAmer(bet.entry_american)} — Fight IQ edge ${edge}.${capTitle} Stays pending for manual settle.">Log ${lbl} · 1u <span style="opacity:.65">${edge}${capNote}</span></button>`;
             };
             const _durHasMkt = dur.distance_pmm || (dur.rounds_pmm && dur.rounds_pmm.edge_pp != null);
             const _durBtns = (_canLog && (dur.distance_bet || dur.rounds_bet))
@@ -3508,6 +3522,9 @@
                          + _selGameFrag(mt, _lastDossier.away, _lastDossier.home),
             seed_units:  1,
             seed_conf:   'low',
+            signal_extra: { fight_iq: true, kind,
+                            dur_edge_pp: (bet.edge_pp != null ? bet.edge_pp : null),
+                            edge_capped: !!bet.edge_capped },
         };
         document.getElementById('lmSelection').value  = _pendingPick.label;
         document.getElementById('lmUnits').value      = '1';
@@ -3585,6 +3602,13 @@
             label:       _suggestLabel(s, _lastDossier),
             seed_units:  s.units,
             seed_conf:   s.confidence,
+            // Fight IQ read (UFC MLs) — merged into signal_blob at submit
+            // so real picks carry the model's opinion for the review.
+            signal_extra: (s.ufc_model_p != null || s.ufc_model_vetoed_pick)
+                ? { ufc_model_p: s.ufc_model_p ?? null,
+                    ufc_model_agree: s.ufc_model_agree ?? null,
+                    ufc_model_vetoed_pick: !!s.ufc_model_vetoed_pick }
+                : null,
         } : _seedManual(_lastDossier);
         if (!_pendingPick) return;
 
@@ -3925,6 +3949,12 @@
             // flow from double-logs on a refresh / repeat ask.
             allow_duplicate: true,
         };
+        // Model/context stamps the seed carried (Fight IQ read on UFC MLs,
+        // duration-pick kind+edge) — merged so the review can bucket real
+        // picks by model agreement.
+        if (_pendingPick && _pendingPick.signal_extra) {
+            body.signal_blob = Object.assign({}, body.signal_blob, _pendingPick.signal_extra);
+        }
         // Venue = KALSHI on every log ("the bet log is easy, it's Kalshi
         // only"); when the make/take engine has a live Kalshi verdict for
         // this side, the entry price becomes the live make and the rec is

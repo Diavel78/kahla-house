@@ -2465,6 +2465,14 @@ UFC_DUR_EDGE_MIN_PP = 4.0    # duration-family shadow-log edge threshold
 # where its edge clears this. These stay pending for manual settle (the
 # resolver leaves all UFC non-ML picks alone).
 UFC_DUR_PICK_MIN_PP = 2.0
+# EDGE CAP (July 13 2026, first-card review): claimed edges past this are
+# the MARKET being right, not the model — the card's >15pp "edges" (Green
+# distance +953 @28pp, Holloway +426 @22pp, Sandhagen +217 @19.4pp) went
+# 0-for-3. THIRD independent appearance of the same lesson (NRFI's 3-6pp
+# clamp, Diamond totals out-extreming the market). Capped picks demote to
+# a non-cleared card tap (no chip, no alert); the paperlog shadows keep
+# logging uncapped ≥4pp so the cap stays measurable (the NRFI playbook).
+UFC_DUR_PICK_MAX_PP = 8.0
 # The distance prop's yes/no orientation was VERIFIED correct against the real
 # Polymarket market dump (/debug-pmm?sport=UFC): YES = goes the distance,
 # self-consistent on both a finish-heavy fight (Pimblett 37¢) and a
@@ -2613,7 +2621,9 @@ def _ufc_dur_bet(kind, pos_side, neg_side, p_pos, edge_pp,
     return {
         "kind": kind, "side": side, "units": 1, "line": line, "slug": slug,
         "edge_pp": round(abs(edge_pp), 1),
-        "gates_cleared": abs(edge_pp) >= UFC_DUR_PICK_MIN_PP,
+        "gates_cleared": (UFC_DUR_PICK_MIN_PP <= abs(edge_pp)
+                          <= UFC_DUR_PICK_MAX_PP),
+        "edge_capped": abs(edge_pp) > UFC_DUR_PICK_MAX_PP,
         "entry_american": _prob_to_american(entry_prob),
         "fair_american": _prob_to_american(max(0.02, min(0.98, fair_prob))),
     }

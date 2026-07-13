@@ -1,13 +1,16 @@
-"""Grade Fight IQ duration-family paperlog shadows from ufc_fights.
+"""Grade ALL pending UFC paperlog rows from ufc_fights.
 
-The per-minute resolver grades UFC MONEYLINE only (ESPN winner boolean).
-The duration shadows (signal_blob.ufc_duration: the distance prop +
-rounds lines) need the fight's round + time — which the weekly UFCStats
-ingest delivers to `ufc_fights`. This runs right after it in the
-ufc-model workflow: match each pending shadow to its bout by fighter
-last-name tokens (either orientation, ±2 days), compute the duration,
-grade, and stamp to-WIN pnl. Weekly latency is fine for a shadow
-dataset that only feeds the promotion review.
+Covers the whole UFC paperlog (July 13 2026 rev — was duration-only):
+  - MONEYLINE rows — the per-minute resolver grades UFC ML only in
+    bot_picks; the paperlog's UFC MLs had NO grader and silently piled
+    up pending (found during the first-card review, graded by hand).
+    Winner = fighter1 in ufc_fights (ingest orientation); draw → push.
+  - Duration family (distance prop + rounds lines) — needs the fight's
+    round + time, which the weekly UFCStats ingest delivers.
+Runs right after the ingest in the ufc-model workflow: match each
+pending row to its bout by fighter last-name tokens (either
+orientation, ±2 days), grade, stamp to-WIN pnl. Weekly latency is fine
+for a dataset that only feeds the model review.
 
   python -m scripts.grade_ufc_paperlog            # dry-run
   python -m scripts.grade_ufc_paperlog --commit
@@ -30,8 +33,12 @@ DISTANCE_5R = 24.99
 
 
 def _toks(s: str) -> list[str]:
+    # >=2, not >=3 — two-letter last names are real ('Seokhyeon Ko'), and
+    # the LAST token is the only stable join key across ESPN vs UFCStats
+    # romanizations ('Seok Hyun Ko'). Same landmine as app.py's
+    # _ufc_kalshi_name_match (fixed July 2026); 1-char initials stay out.
     return [t for t in re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).split()
-            if len(t) >= 3]
+            if len(t) >= 2]
 
 
 def _name_match(a: str, b: str) -> bool:
@@ -99,12 +106,11 @@ def main() -> int:
                 .select("id,event_name,event_start,market_type,side,line,"
                         "entry_price,units,signal_blob")
                 .eq("sport", "UFC").eq("status", "pending")
-                .eq("signal_blob->>ufc_duration", "true")
                 .limit(2000).execute().data) or []
     except Exception as e:
         log.error("paperlog query failed: %s", e)
         return 2
-    log.info("%d pending UFC duration shadows", len(rows))
+    log.info("%d pending UFC paperlog rows", len(rows))
     graded = skipped = 0
     for r in rows:
         name = r.get("event_name") or ""
@@ -115,30 +121,44 @@ def main() -> int:
         if not bout or bout.get("result") == "nc":
             skipped += 1
             continue
-        dur = _duration_min(bout.get("round"), bout.get("fight_time"))
-        if dur is None:
-            skipped += 1
-            continue
-        five_r = (bout.get("round") or 0) > 3
         mt, side = r.get("market_type"), r.get("side")
-        if mt == "distance":
-            went = dur >= (DISTANCE_5R if five_r else DISTANCE_3R)
-            won = (side == "yes") == went
-        elif mt == "total" and r.get("line") is not None:
-            cut = int(float(r["line"])) * 5 + 2.5
-            over = dur > cut
-            won = (side == "over") == over
+        if mt == "moneyline":
+            # Winner = fighter1 (ufc_fights ingest orientation). Draw → push.
+            if bout.get("result") == "draw":
+                status = "push"
+            else:
+                picked = home if side == "home" else away
+                status = ("won" if _name_match(bout.get("fighter1_name") or "",
+                                               picked) else "lost")
+            note = f"winner {bout.get('fighter1_name')}"
+            result = json.dumps({"winner": bout.get("fighter1_name"),
+                                 "round": bout.get("round"),
+                                 "method": bout.get("method")})
         else:
-            skipped += 1
-            continue
-        status = "won" if won else "lost"
+            dur = _duration_min(bout.get("round"), bout.get("fight_time"))
+            if dur is None:
+                skipped += 1
+                continue
+            five_r = (bout.get("round") or 0) > 3
+            if mt == "distance":
+                went = dur >= (DISTANCE_5R if five_r else DISTANCE_3R)
+                won = (side == "yes") == went
+            elif mt == "total" and r.get("line") is not None:
+                cut = int(float(r["line"])) * 5 + 2.5
+                over = dur > cut
+                won = (side == "over") == over
+            else:
+                skipped += 1
+                continue
+            status = "won" if won else "lost"
+            note = f"{dur:.2f}min"
+            result = json.dumps({"duration_min": round(dur, 2),
+                                 "round": bout.get("round"),
+                                 "method": bout.get("method")})
         pnl = _pnl_units(status, r.get("entry_price"), r.get("units"))
-        result = json.dumps({"duration_min": round(dur, 2),
-                             "round": bout.get("round"),
-                             "method": bout.get("method")})
         graded += 1
-        log.info("  %s %s/%s %s -> %s (%.2fmin) pnl %+0.2f",
-                 name, mt, side, r.get("line"), status.upper(), dur, pnl)
+        log.info("  %s %s/%s %s -> %s (%s) pnl %+0.2f",
+                 name, mt, side, r.get("line"), status.upper(), note, pnl)
         if args.commit:
             sb.table("pickbot_paperlog").update({
                 "status": status, "pnl_units": pnl,
