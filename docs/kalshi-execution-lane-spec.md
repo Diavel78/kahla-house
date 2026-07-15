@@ -43,12 +43,17 @@ account receipts — not from docs.
 | Polymarket | **EARNS rebate** `1.25¢·p(1−p)`/contract (~0.31¢ @50¢) | `5¢·p(1−p)` (~1.25¢ @50¢) | rebates paid on fill |
 | Kalshi | **$0** (verified: 5-share YES 53¢ + NO 47¢ resting tickets showed no fee) | `7%·p·(1−p)·contracts`, rounded UP per order (verified: $0.09 on 5@54¢) | taker ~40% worse than Poly |
 
-- Kalshi **perps** (separate exchange, separate schedule): maker 5 bps of
-  leveraged notional, taker ~8-78 bps observed (receipts inconsistent with the
-  published 12 bps tier-0 — app may quote worse; never take). Funding settles
-  12 AM / 8 AM / 4 PM ET; **BTC funding measured ≈ $0** (two settlement windows,
-  no ledger entries) → no harvestable funding yield at present. Perps are the
-  user's manual entertainment; **no bot models perps direction** (decided).
+- Kalshi **perps** (separate exchange, separate schedule) — fee model
+  CALIBRATED FROM FILLS July 14 2026 (matched controlled maker/taker pair,
+  6x, $600/$300 notional): **maker = 5 bps of leveraged notional** ($0.30 on
+  $600), **retail-app taker = ~80 bps** ($2.37 on $300 — the published 12 bps
+  tier-0 does NOT apply to app orders), and **the order ticket's Fee line
+  always quotes the taker worst case even for an order that will rest** —
+  trust fills, never ticket quotes. Never take (16x the maker rate). Funding
+  settles 12 AM / 8 AM / 4 PM ET; BTC funding measured ≈ 0-to-pennies (first
+  ledger entry Jul 13: −$0.03 deducted from a LONG — longs pay shorts, normal
+  retail skew, but no harvestable yield at retail size). Perps are the user's
+  manual entertainment; **no bot models perps direction** (decided).
 - Kalshi pays **3.25% APY** on cash + open positions once monthly avg portfolio
   > $250. Polymarket pays 0 on USDC.
 - User's June 2026 Polymarket volume (from `polymarket_fill_state`): **$704.59
