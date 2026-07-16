@@ -6002,7 +6002,11 @@ def api_handicapper_paperlog():
                 "fair_american": (nrfi.get("nrfi_fair_american") if bs == "no"
                                   else nrfi.get("yrfi_fair_american")),
                 "sharp_score": None, "edge_pp": nrfi.get("bet_edge_pp"),
-                "signal_blob": {"p_nrfi": nrfi.get("p_nrfi")},
+                # nrfi_price_src: which venue priced the edge ('polymarket'
+                # primary / 'kalshi' fallback, July 2026) — lets the review
+                # bucket Kalshi-priced NRFI bets separately.
+                "signal_blob": {"p_nrfi": nrfi.get("p_nrfi"),
+                                "nrfi_price_src": nrfi.get("price_src")},
             })
         # Unlogged-bet alert candidates (July 2026 — replaced the prime-
         # WINDOW alert, user call: ping on BETS, not windows). A candidate

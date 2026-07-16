@@ -2820,21 +2820,23 @@
         }
 
         // NRFI / YRFI — first-inning model (MLB only). We compute the
-        // model fair, pull Polymarket's 1st-inning price, and the BET
-        // determination is the edge of our fair vs PMM's maker entry
-        // (bid). The +EV side's button lights up green; flat 0.5u.
-        // No PMM market → model fair shown for reference, no lit button.
+        // model fair, pull the exchange 1st-inning price (PMM primary,
+        // Kalshi book fallback — server-side in _nrfi_model), and the BET
+        // determination is the edge of our fair vs the maker entry (bid).
+        // The +EV side's button lights up green; flat 1u.
+        // Neither venue has it → model fair shown for reference, no lit button.
         if (d.nrfi) {
             const n = d.nrfi;
             const pmm = n.polymarket || {};
             const nrfiPct = (n.p_nrfi * 100).toFixed(0);
             const yrfiPct = (n.p_yrfi * 100).toFixed(0);
-            // Per-side cell: model fair + (when present) PMM bid/ask + edge.
+            // Per-side cell: model fair + (when present) exch bid/ask + edge.
             const cell = (side, lbl, pct, fairA) => {
                 const pb = pmm[side];
                 const isBet = n.bet_side === side;
+                const exLbl = (pb && pb.src === 'kalshi') ? 'Kalshi (edge basis)' : 'exch';
                 const pmmFrag = pb
-                    ? `<div class="pr-sub">exch bid ${_fmtAmer(pb.bid_american)} · ask ${_fmtAmer(pb.ask_american)}${pb.edge_pp != null ? ` · <b style="color:${pb.edge_pp >= 0 ? 'var(--green)' : 'var(--red)'}">${pb.edge_pp >= 0 ? '+' : ''}${pb.edge_pp}pp</b>` : ''}</div>`
+                    ? `<div class="pr-sub">${exLbl} bid ${_fmtAmer(pb.bid_american)} · ask ${_fmtAmer(pb.ask_american)}${pb.edge_pp != null ? ` · <b style="color:${pb.edge_pp >= 0 ? 'var(--green)' : 'var(--red)'}">${pb.edge_pp >= 0 ? '+' : ''}${pb.edge_pp}pp</b>` : ''}</div>`
                     : `<div class="pr-sub" style="color:var(--text-muted)">no exchange price</div>`;
                 // Live Kalshi book for this side — async via _loadKalshiQuotes.
                 const kq = `<div class="pr-sub kq" data-mid="${_esc(d.market_id || '')}"
@@ -2853,11 +2855,12 @@
             let detFrag;
             if (n.bet_side) {
                 const lbl = n.bet_side === 'no' ? 'NRFI' : 'YRFI';
-                detFrag = `<div class="pr-line" style="color:var(--green);font-weight:600">▶ BET ${lbl} @ ${_fmtAmer(n.entry_price)} (exch bid) · +${n.bet_edge_pp}pp edge · 1u</div>`;
+                const srcLbl = n.price_src === 'kalshi' ? 'Kalshi bid' : 'exch bid';
+                detFrag = `<div class="pr-line" style="color:var(--green);font-weight:600">▶ BET ${lbl} @ ${_fmtAmer(n.entry_price)} (${srcLbl}) · +${n.bet_edge_pp}pp edge · 1u</div>`;
             } else if (n.pmm_matched) {
-                detFrag = `<div class="pr-line" style="color:var(--text-muted)">Pass — model fair within 3pp of the exchange price on both sides.</div>`;
+                detFrag = `<div class="pr-line" style="color:var(--text-muted)">Pass — model fair within 3pp of the ${n.price_src === 'kalshi' ? 'Kalshi' : 'exchange'} price on both sides.</div>`;
             } else {
-                detFrag = `<div class="pr-line" style="color:var(--orange)">No exchange 1st-inning market found — can't price an edge (see "Copy for Claude" → pmm_meta to confirm the offerings).</div>`;
+                detFrag = `<div class="pr-line" style="color:var(--orange)">No 1st-inning market found on Polymarket or Kalshi — can't price an edge (see "Copy for Claude" → pmm_meta; a live Kalshi chip above with this line showing = reader gap, check /debug-kalshi-discover?q=inning).</div>`;
             }
             const whyHtml = (n.reasons || []).length
                 ? `<ul class="why" style="margin-top:10px">${n.reasons.map(b => `<li>${_esc(b)}</li>`).join('')}</ul>`
@@ -3453,7 +3456,8 @@
         const fair = side === 'no' ? n.nrfi_fair_american : n.yrfi_fair_american;
         const pb = (n.polymarket || {})[side];
         const makerEntry = (pb && pb.bid_american != null) ? pb.bid_american : fair;
-        const entryLbl = (pb && pb.bid_american != null) ? 'exch bid' : 'model fair';
+        const entryLbl = (pb && pb.bid_american != null)
+            ? (pb.src === 'kalshi' ? 'Kalshi bid' : 'exch bid') : 'model fair';
         const edge = (pb && pb.edge_pp != null) ? pb.edge_pp : null;
         const label = _nrfiSideLabel(side);
         _pendingPick = {

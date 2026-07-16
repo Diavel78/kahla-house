@@ -3958,16 +3958,22 @@ def _nrfi_lineup_top_obp(box: dict | None, side: str) -> float | None:
 
 def _nrfi_model(sport: str, pitchers: dict | None, away: str | None,
                 home: str | None, game_pk, weather: dict | None,
-                pmm_nrfi: list | None = None) -> dict | None:
+                pmm_nrfi: list | None = None, want_dt=None) -> dict | None:
     """First-inning NRFI/YRFI model. MLB only; None otherwise or when we
     can't build a usable input set. Silent-fail throughout — never raises
     into the dossier. See the section header for the math + rationale.
 
     `pmm_nrfi` is the Polymarket first-inning market entries (from
     pmm_markets.lookup) when PMM lists one. We compute the model fair,
-    then — if PMM has a price — the EDGE vs PMM's maker entry (bid) per
-    side and flag the +EV side as the bet. No PMM market → model fair +
-    lean only, no bet flag (the determination NEEDS a price to shop)."""
+    then — if a price exists — the EDGE vs the maker entry (bid) per
+    side and flag the +EV side as the bet. When PMM has no 1st-inning
+    market, fall back to the KALSHI NRFI top-of-book (the execution
+    venue since the July 2026 cutover — the make/take chip on the card
+    reads the same book, so the two surfaces can't disagree about
+    whether an exchange price exists). Only when BOTH venues miss →
+    model fair + lean only, no bet flag (the determination NEEDS a
+    price to shop). `want_dt` = event start (disambiguates the Kalshi
+    event on doubleheader days)."""
     if sport != "MLB" or not (away and home):
         return None
     season = datetime.now(timezone.utc).year
@@ -4057,7 +4063,43 @@ def _nrfi_model(sport: str, pitchers: dict | None, away: str | None,
                     # market (same slug) — book reads (make/take) must flip
                     # the ladder for it, so carry the flag to the frontend.
                     "synthetic": bool(e.get("synthetic")),
+                    "src": "polymarket",
                 }
+    price_src = "polymarket" if pmm_block else None
+    if not pmm_block:
+        # Kalshi fallback — PMM doesn't always list the 1st-inning market
+        # (or _classify_first_inning misses its question shape) while
+        # Kalshi runs a full NRFI book; pre-fix the card said "no exchange
+        # 1st-inning market" directly under a live Kalshi quote. Late
+        # import (circular-safe — the _fetch_splits precedent). One
+        # orderbook fetch: the 'no' side oriented by _kalshi_nrfi_book,
+        # 'yes' synthesized via inversion. Kalshi cents ARE prob points.
+        try:
+            from app import _kalshi_nrfi_book as _knb, _invert_book as _inv  # late import
+            bno = _knb(away, home, "no", want_dt=want_dt)
+            for side, bk in (("no", bno), ("yes", _inv(bno))):
+                if not bk:
+                    continue
+                bid_c, ask_c = bk.get("best_bid"), bk.get("best_ask")
+                if bid_c is None and ask_c is None:
+                    continue
+                bid = bid_c / 100.0 if bid_c is not None else None
+                ask = ask_c / 100.0 if ask_c is not None else None
+                mid = ((bid + ask) / 2.0 if (bid is not None and ask is not None)
+                       else (bid if bid is not None else ask))
+                pmm_block[side] = {
+                    "bid": bid, "ask": ask, "mid": mid,
+                    "bid_american": _prob_to_american(bid),
+                    "ask_american": _prob_to_american(ask),
+                    "mid_american": _prob_to_american(mid),
+                    "slug": None,
+                    "synthetic": side == "yes",
+                    "src": "kalshi",
+                }
+            if pmm_block:
+                price_src = "kalshi"
+        except Exception as e:
+            log.warning("nrfi kalshi fallback failed: %s", e)
     bet_side = None
     bet_edge_pp = None
     entry_price = None
@@ -4080,11 +4122,12 @@ def _nrfi_model(sport: str, pitchers: dict | None, away: str | None,
     # Plain-English reasons (mirror the suggestion-card bullet style).
     reasons: list[str] = []
     _amer = lambda a: ("+" + str(a)) if (a is not None and a > 0) else (str(a) if a is not None else "?")
+    venue_lbl = "Kalshi" if price_src == "kalshi" else "Polymarket"
     if pmm_matched and bet_side:
         side_lbl = "NRFI" if bet_side == "no" else "YRFI"
         reasons.append(
             f"BET {side_lbl} — model fair "
-            f"{round(our_prob[bet_side]*100)}% vs Polymarket bid "
+            f"{round(our_prob[bet_side]*100)}% vs {venue_lbl} bid "
             f"{_amer(pmm_block[bet_side].get('bid_american'))} "
             f"→ +{bet_edge_pp}pp edge (rest a maker limit at the bid)")
     elif pmm_matched:
@@ -4092,17 +4135,18 @@ def _nrfi_model(sport: str, pitchers: dict | None, away: str | None,
                   if b.get("edge_pp") is not None]
         if _edges and max(_edges) > NRFI_EDGE_MAX_PP:
             reasons.append(
-                f"Model claims +{max(_edges)}pp vs Polymarket — past the "
+                f"Model claims +{max(_edges)}pp vs {venue_lbl} — past the "
                 f"{NRFI_EDGE_MAX_PP}pp trust clamp (edges that large graded "
                 "flat: the market is right, not the model). Pass.")
         else:
             reasons.append(
-                "No edge vs Polymarket — model fair within "
-                f"{NRFI_EDGE_MIN_PP}pp of PMM's price on both sides. Pass.")
+                f"No edge vs {venue_lbl} — model fair within "
+                f"{NRFI_EDGE_MIN_PP}pp of its price on both sides. Pass.")
     else:
         reasons.append(
-            "No Polymarket 1st-inning market found — can't price an edge. "
-            "Model fair shown for reference; shop a book price beating it.")
+            "No 1st-inning market found on Polymarket OR Kalshi — can't "
+            "price an edge. Model fair shown for reference; shop a book "
+            "price beating it.")
     sp_bits = []
     if home_p and home_p.get("name"):
         sp_bits.append(f"{home_p['name']} {home_sp_used:.2f} RA9")
@@ -4134,8 +4178,12 @@ def _nrfi_model(sport: str, pitchers: dict | None, away: str | None,
         "lean":                lean,             # model vs baseline: 'no'/'yes'/None (context)
         "diff_vs_baseline_pp": round(diff_pp, 1),
         "baseline_nrfi":       round(baseline_nrfi, 4),
-        # Polymarket-driven bet determination (the actionable signal).
+        # Exchange-driven bet determination (the actionable signal).
+        # Block name stays "polymarket" for frontend/paperlog back-compat;
+        # each side carries `src` and the top level `price_src` says which
+        # venue priced it (PMM primary, Kalshi fallback).
         "polymarket":          pmm_block or None,   # {no:{...}, yes:{...}} with edge_pp per side
+        "price_src":           price_src,           # 'polymarket' / 'kalshi' / None
         "pmm_matched":         pmm_matched,
         "bet_side":            bet_side,            # 'no'(NRFI)/'yes'(YRFI)/None
         "bet_edge_pp":         bet_edge_pp,
@@ -5205,7 +5253,8 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         try:
             nrfi = _nrfi_model(sport, (mlb_extra or {}).get("probable_pitchers"),
                                away, home, _pp.get("game_pk"), weather,
-                               pmm_nrfi=(pmm_data or {}).get("nrfi"))
+                               pmm_nrfi=(pmm_data or {}).get("nrfi"),
+                               want_dt=bet_dt)
         except Exception as e:
             log.warning("nrfi model failed: %s", e)
             nrfi = None
