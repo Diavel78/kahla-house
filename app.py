@@ -4462,6 +4462,57 @@ def _kalshi_my_positions() -> dict:
             "positions": d.get("market_positions") or d.get("positions") or []}
 
 
+def _kalshi_my_fills() -> dict:
+    """The admin's recent FILLS — the canonical per-execution record
+    (ticker / side / action / count / price / is_taker). Feeds the fill
+    tracker's entry auto-sync: the qty-weighted avg fill price per
+    (ticker, side) is what the user ACTUALLY paid, vs the resting bid the
+    pick was logged at. Shape defensively read (_fp string decimals /
+    *_price_dollars strings / int cents all tolerated — the July 12 probe
+    pattern); an unreachable endpoint just disables the sync, never the
+    status chips."""
+    res = _kalshi_authed_get("/portfolio/fills", params={"limit": 200})
+    if not res.get("ok"):
+        return res
+    d = res.get("data") or {}
+    return {"ok": True, "configured": True,
+            "fills": d.get("fills") or d.get("data") or []}
+
+
+def _kalshi_fill_avg(fills: list, ticker: str, buy: str):
+    """Qty-weighted avg BUY fill price in cents for our side of one
+    market, or (None, 0) when no fills match. `buy` = 'yes'/'no'."""
+    tot_q = 0.0
+    tot_pq = 0.0
+    for f in fills:
+        if (f.get("ticker") or "") != ticker:
+            continue
+        if (f.get("action") or "buy").lower() != "buy":
+            continue
+        if (f.get("side") or "yes").lower() != buy:
+            continue
+        q = None
+        for k in ("count_fp", "count", "quantity_fp", "quantity"):
+            try:
+                q = float(f.get(k))
+                break
+            except (TypeError, ValueError):
+                continue
+        if not q or q <= 0:
+            continue
+        c = (_kalshi_cents_val(f.get(f"{buy}_price_dollars"))
+             or _kalshi_cents_val(f.get(f"{buy}_price"))
+             or _kalshi_cents_val(f.get("price_dollars"))
+             or _kalshi_cents_val(f.get("price")))
+        if c is None:
+            continue
+        tot_q += q
+        tot_pq += q * c
+    return ((tot_pq / tot_q) if tot_q else None), tot_q
+
+
+
+
 @app.route("/api/kalshi/probe")
 @admin_required
 def api_kalshi_probe():
@@ -4557,10 +4608,15 @@ def api_kalshi_probe():
 # forensics), markets are per-side real tickers (no synthetic-slug
 # matching), and the pick→market resolution is the SAME
 # _kalshi_market_for the make/take verdict uses — the tracker and the
-# engine cannot disagree about which market a bet lives on. STATUS ONLY:
-# no entry auto-sync, no writes ("Pick Bot makes picks, it doesn't
-# track my bets") — a divergent real fill is corrected by hand via the
-# Edit modal.
+# engine cannot disagree about which market a bet lives on.
+# ENTRY AUTO-SYNC (restored July 16 2026, user: "on polymarket, you auto
+# updated the bid to my bid when the fill happened"): when the matched
+# market shows a real fill, the pick's entry_price is updated to the
+# qty-weighted avg fill from /portfolio/fills — PRICE ONLY, cents →
+# American, no fee math; UNITS ARE NEVER TOUCHED (user rule, dollars ≠
+# units), entry_line untouched. Fills endpoint unreachable → status
+# chips still work, sync quietly skips (Edit modal remains the manual
+# override).
 _FILL_STATUS_TTL = 30       # s — server cache; the page polls on its 60s loadData
 _FS_TAKE_WARN_MIN = 30      # unfilled + tip ≤30m → TAKE warning (make/take clock rule)
 
@@ -4599,9 +4655,11 @@ def api_handicapper_fill_status():
 
     om = _kalshi_my_orders()
     pm = _kalshi_my_positions()
+    fm = _kalshi_my_fills()
     api_ok = bool(om.get("ok"))
     orders = om.get("orders") or []
     positions = pm.get("positions") or [] if pm.get("ok") else []
+    my_fills = fm.get("fills") or [] if fm.get("ok") else []
     now = datetime.now(timezone.utc)
 
     fills = []
@@ -4644,14 +4702,29 @@ def api_handicapper_fill_status():
         for q in positions:
             if (q.get("ticker") or "") != tk:
                 continue
-            try:
-                v = float(q.get("position") or 0)
-            except (TypeError, ValueError):
-                v = 0.0
+            # `position` rides the same *_fp STRING-decimal convention as
+            # the order counts ("position_fp": "3.00") — the July 12 probe
+            # verified counts/prices but had NO open positions, so the
+            # plain-int read silently returned 0 on the first real filled
+            # bet and the chip said "⚠ NO ORDER" on a filled position
+            # (July 16, the Mets@Phillies bet). Read fp-first like _cnt.
+            v = 0.0
+            for kk in ("position_fp", "position", "quantity_fp", "quantity"):
+                try:
+                    v = float(q.get(kk))
+                    break
+                except (TypeError, ValueError):
+                    continue
             if buy == "yes" and v > 0:
                 pos_qty = v
             elif buy == "no" and v < 0:
                 pos_qty = -v
+        # Fills are the ground truth for BOTH the filled quantity (robust
+        # to the unverified position-sign convention) and the REAL avg
+        # entry price (the auto-sync below).
+        fill_avg_c, fill_qty = _kalshi_fill_avg(my_fills, tk, buy)
+        if fill_qty > pos_qty:
+            pos_qty = fill_qty
         init = sum(_cnt(o, "initial_count") for o in my_orders)
         rem = sum(_cnt(o, "remaining_count") for o in my_orders)
         part = max(0.0, init - rem) or pos_qty
@@ -4698,6 +4771,29 @@ def api_handicapper_fill_status():
         if (entry["status"] in ("resting", "partial", "none")
                 and mins is not None and 0 < mins <= _FS_TAKE_WARN_MIN):
             entry["warn"] = True
+        # ── Entry auto-sync (the restored Polymarket behavior) ──
+        # Real fills exist for this bet → the pick's entry becomes the
+        # qty-weighted avg fill price. Price ONLY (cents → American, no
+        # fees); units/line never touched. ≥0.5¢ divergence gate so a
+        # same-price fill doesn't churn writes every 30s tick.
+        if (fill_avg_c is not None and fill_qty > 0
+                and entry["status"] in ("filled", "partial")):
+            new_amer = _prob_to_amer_py(fill_avg_c / 100.0)
+            cur_amer = p.get("entry_price")
+            cur_prob = _amer_to_prob_py(cur_amer)
+            cur_c = cur_prob * 100.0 if cur_prob is not None else None
+            entry["fill_avg_c"] = round(fill_avg_c, 2)
+            if (new_amer is not None
+                    and (cur_c is None or abs(fill_avg_c - cur_c) >= 0.5)
+                    and new_amer != cur_amer):
+                try:
+                    sb.table("bot_picks").update(
+                        {"entry_price": new_amer}).eq("id", p["id"]).execute()
+                    entry["synced_price"] = new_amer
+                    print(f"fill-sync pick {p['id']} entry {cur_amer} -> "
+                          f"{new_amer} (avg fill {fill_avg_c:.1f}c)")
+                except Exception as e:
+                    print(f"fill-sync failed pick {p['id']}: {e}")
         fills.append(entry)
 
     result = {"ok": True, "configured": True, "api_ok": api_ok, "fills": fills}
