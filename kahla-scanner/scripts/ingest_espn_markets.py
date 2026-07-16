@@ -256,27 +256,56 @@ def _apply_kalshi_ufc_times(games: list[dict]) -> int:
     return n
 
 
+def _et_date(dt: datetime):
+    """US/Eastern calendar date — the 'same game day' key for the
+    reschedule pass (a 7:05pm→6:05pm ET move stays the same ET date)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return dt.astimezone(ZoneInfo("America/New_York")).date()
+    except Exception:
+        return dt.date()
+
+
 def _find_or_create(sport: str, g: dict, aliases: dict[str, str],
-                    existing: list[dict], commit: bool) -> tuple[str, str | None]:
+                    existing: list[dict], commit: bool,
+                    pair_counts: dict | None = None) -> tuple[str, str | None]:
     """Reuse an existing active markets row if teams match within the
     sport window, else create one. Mirrors
     odds_api._find_or_create_market. Returns (action, market_id) where
     action ∈ reuse/retime/create/create-dry. `existing` is mutated to include
-    newly-created rows so later games in the same run dedup against them."""
+    newly-created rows so later games in the same run dedup against them.
+    `pair_counts` (from ingest_sport) = ESPN slate count per
+    (venue_key, ET date) — powers the reschedule pass below."""
     window = _MATCH_WINDOW.get(sport, _DEFAULT_WINDOW)
     venue_key = matcher._teams_key(g["home"], g["away"], aliases)
+
+    def _pair_match(row) -> bool:
+        row_away, row_home = matcher._split_event_name(row.get("event_name", ""))
+        if not (row_home and row_away):
+            return False
+        return (matcher._teams_key(row_home, row_away, aliases) == venue_key
+                or matcher._fuzzy_teams_match(g["home"], g["away"], row_home,
+                                              row_away, aliases) >= matcher.FUZZY_THRESHOLD
+                or (sport == "UFC" and _ufc_pair_match(g["away"], g["home"],
+                                                       row_away, row_home)))
+
+    def _retime(row, row_start) -> tuple[str, str | None]:
+        if abs(row_start - g["commence"]) > timedelta(minutes=2):
+            if commit:
+                try:
+                    db.update_market_start(row["id"], g["commence"])
+                except Exception as e:
+                    log.warning("  retime failed %s: %s", row["id"], e)
+            # keep the candidate set fresh for later games in this run
+            row["event_start"] = g["commence"].isoformat()
+            return "retime", row["id"]
+        return "reuse", row["id"]
+
     for row in existing:
         row_start = _parse_iso(row.get("event_start"))
         if row_start is None or abs(row_start - g["commence"]) > window:
             continue
-        row_away, row_home = matcher._split_event_name(row.get("event_name", ""))
-        if not (row_home and row_away):
-            continue
-        if matcher._teams_key(row_home, row_away, aliases) == venue_key or \
-           matcher._fuzzy_teams_match(g["home"], g["away"], row_home, row_away,
-                                      aliases) >= matcher.FUZZY_THRESHOLD or \
-           (sport == "UFC" and _ufc_pair_match(g["away"], g["home"],
-                                               row_away, row_home)):
+        if _pair_match(row):
             # Reuse the existing row (UUID preserved), but CORRECT a drifted
             # start in place — ESPN is authoritative on timing. odds_api used
             # to do this every tick (gotcha #30); post-cutover the ESPN spine
@@ -284,16 +313,28 @@ def _find_or_create(sport: str, g: dict, aliases: dict[str, str],
             # card-time that never got refreshed) would otherwise freeze the
             # game in the past and drop it from the games list before it
             # starts — the UFC "no upcoming games" regression.
-            if abs(row_start - g["commence"]) > timedelta(minutes=2):
-                if commit:
-                    try:
-                        db.update_market_start(row["id"], g["commence"])
-                    except Exception as e:
-                        log.warning("  retime failed %s: %s", row["id"], e)
-                # keep the candidate set fresh for later games in this run
-                row["event_start"] = g["commence"].isoformat()
-                return "retime", row["id"]
-            return "reuse", row["id"]
+            return _retime(row, row_start)
+    # Reschedule pass (July 2026 — the Mets@Phillies dup): a start moved
+    # by MORE than the window (7:05→6:05 ET, 60min > MLB's 30min DH-safety
+    # window) minted a same-day duplicate row; _dedup_games then surfaced
+    # the STALE time, the live game sat in "upcoming" at "27m to start",
+    # and a bet got one-tapped IN-PLAY. If ESPN lists exactly ONE game for
+    # this pair on this ET date AND we hold exactly ONE same-pair active
+    # row on that date, it's the same game rescheduled — retime it.
+    # Doubleheaders are safe: ESPN lists 2 games for the pair → count != 1
+    # → strict-window behavior only, day/night stay separate rows.
+    if pair_counts and pair_counts.get((venue_key, _et_date(g["commence"]))) == 1:
+        same_day = []
+        for row in existing:
+            row_start = _parse_iso(row.get("event_start"))
+            if (row_start is not None
+                    and _et_date(row_start) == _et_date(g["commence"])
+                    and _pair_match(row)):
+                same_day.append((row, row_start))
+        if len(same_day) == 1:
+            log.info("  RESCHED %-28s %s → %s", f"{g['away']} @ {g['home']}",
+                     same_day[0][1].isoformat(), g["commence"].isoformat())
+            return _retime(*same_day[0])
     # No match — create.
     if not commit:
         return "create-dry", None
@@ -339,10 +380,19 @@ def ingest_sport(sport: str, days: int, commit: bool, prune: bool = False) -> di
                     .order("event_start").limit(3000).execute().data) or []
     except Exception:
         existing = db.list_active_markets(sport)   # fallback
+    # ESPN slate count per (pair, ET date) — a doubleheader detector for
+    # the reschedule pass in _find_or_create (count==1 ⇒ a same-day
+    # same-pair row is the SAME game, safe to retime past the window).
+    pair_counts: dict = {}
+    for g in games:
+        k = (matcher._teams_key(g["home"], g["away"], aliases),
+             _et_date(g["commence"]))
+        pair_counts[k] = pair_counts.get(k, 0) + 1
     created = reused = retimed = 0
     kept_ids: set[str] = set()
     for g in games:
-        action, mid = _find_or_create(sport, g, aliases, existing, commit)
+        action, mid = _find_or_create(sport, g, aliases, existing, commit,
+                                      pair_counts=pair_counts)
         if mid:
             kept_ids.add(mid)
         if action == "reuse":
