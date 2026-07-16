@@ -4596,6 +4596,14 @@ def api_kalshi_probe():
         out["positions"].update(count=len(rows),
                                 first_raw=(rows[0] if rows else None),
                                 top_keys=sorted(d.keys()))
+    fl = _kalshi_authed_get("/portfolio/fills", params={"limit": 5})
+    out["fills"] = {"ok": fl.get("ok"), "error": fl.get("error")}
+    if fl.get("ok"):
+        d = fl.get("data") or {}
+        rows = d.get("fills") or d.get("data") or []
+        out["fills"].update(count=len(rows),
+                            first_raw=(rows[0] if rows else None),
+                            top_keys=sorted(d.keys()))
     return jsonify(out)
 
 
