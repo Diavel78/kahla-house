@@ -3586,7 +3586,12 @@ def debug_pmm():
                 # UFC distance prop: dump each side's slug/title/quote so we can
                 # see whether the market's YES token is really "goes distance".
                 "ufc_distance": (res2 or {}).get("ufc_distance"),
-                "total_pmm": (((res2 or {}).get("total") or {}).get("polymarket")),
+                # lookup() buckets are LISTS of entries — report the derivative
+                # buckets directly (the old dict-shaped "total_pmm" read crashed
+                # the probe the moment totals matched again, July 2026).
+                "event_slug": (res2 or {}).get("event_slug"),
+                "nrfi_entries": (res2 or {}).get("nrfi"),
+                "total_count": len((res2 or {}).get("total") or []),
                 "diag": diag,
             }
     except Exception as e:
