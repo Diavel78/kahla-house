@@ -135,6 +135,17 @@ def _team_mention_pos(q_norm: str, team: str) -> int:
         p = q_norm.find(cand)
         if p >= 0 and (best < 0 or p < best):
             best = p
+    # Tricode as a whole TOKEN ('nym', 'phi') — PMM's July 2026 abbreviated
+    # format. ≥3 chars only ('ny' as a token is too collision-prone);
+    # token-bounded so 'phi' never fires inside 'philadelphia' (harmless
+    # there anyway — the city variant already matched earlier).
+    padded = " " + q_norm + " "
+    for code in _team_code_cands(team):
+        if len(code) < 3:
+            continue
+        p = padded.find(f" {code} ")
+        if p >= 0 and (best < 0 or p < best):
+            best = p
     return best
 
 
@@ -180,18 +191,133 @@ def _city_tokens(team_name: str) -> str:
 
 
 
-def _match_event_to_game(events: list, away: str, home: str) -> Any | None:
+def _team_code_cands(team: str, sport: str | None = None) -> set[str]:
+    """Candidate 2-4 letter tricodes for a team, lowercase — 'New York
+    Mets' → {'nym','ny','new'}, 'Philadelphia Phillies' → {'phi','pp',...}.
+    Needed since PMM's July 2026 schema deploy retitled near-term events
+    to tricodes ('NYM vs PHI') and slugs ('mlb-nym-phi-2026-07-16').
+    Primary source: app.py's _TEAM_TO_KALSHI (standard tricodes, verified
+    live by the Kalshi matcher; late import — circular-safe, and a miss
+    just means heuristics only). Heuristic initial/prefix patterns cover
+    unmapped teams; a wrong candidate can only fail to match (Pass 0
+    requires BOTH teams' codes in their slots), never mis-match."""
+    cands: set[str] = set()
+    if sport:
+        try:
+            from app import _TEAM_TO_KALSHI as _K   # late import
+            tn = _norm(team)
+            for mascot, code in (_K.get(sport.upper()) or {}).items():
+                if mascot in tn:
+                    cands.add(code.lower())
+                    break
+        except Exception:
+            pass
+    parts = _norm(team).split()
+    if parts:
+        cands.add("".join(p[0] for p in parts))          # nym / gsw / sas
+        cands.add(parts[0][:3])                          # phi / bos / tor
+        if len(parts) >= 2:
+            cands.add("".join(p[0] for p in parts[:-1]))  # ny / la / tb
+            if len(parts) >= 3:
+                cands.add(parts[0][:2] + parts[1][0])     # okc
+    return {c for c in cands if 2 <= len(c) <= 4}
+
+
+# PMM game-event slug: '{league}-{away}-{home}-{YYYY-MM-DD}' (observed live
+# July 2026: 'mlb-nym-phi-2026-07-18'). The date is the US/Eastern game date.
+_PMM_SLUG_RE = re.compile(r"^[a-z0-9]+-([a-z0-9]{2,4})-([a-z0-9]{2,4})-(\d{4}-\d{2}-\d{2})(?:-\d+)?$")
+
+
+def _ev_get(ev, name, default=None):
+    return ev.get(name, default) if isinstance(ev, dict) else getattr(ev, name, default)
+
+
+def _bet_et_date(bet_dt: datetime | None):
+    """Our event_start (UTC) → US/Eastern calendar date (PMM's slug-date
+    convention — a 23:00Z start is a 7pm ET game, same ET date)."""
+    if bet_dt is None:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        return bet_dt.astimezone(ZoneInfo("America/New_York")).date()
+    except Exception:
+        return bet_dt.date()
+
+
+def _ev_date_ok(ev, bet_dt: datetime | None) -> bool:
+    """Date guard: reject an event that provably belongs to a DIFFERENT
+    calendar day than our game. THE July 2026 landmine this kills: PMM
+    lists a whole series days ahead, so name-only matching grabbed the
+    same teams' SATURDAY event for a WEDNESDAY game (sparse markets →
+    'no totals/NRFI on Polymarket', and worse, the wrong game's prices
+    logged into pm_snapshots). Slug date preferred (exact ET-date match);
+    startTime as fallback (±14h). Events with NO extractable date pass —
+    guard on evidence, never on absence."""
+    if bet_dt is None:
+        return True
+    mo = _PMM_SLUG_RE.match(str(_ev_get(ev, "slug") or ""))
+    if mo:
+        et = _bet_et_date(bet_dt)
+        if et is not None:
+            try:
+                return datetime.strptime(mo.group(3), "%Y-%m-%d").date() == et
+            except ValueError:
+                pass
+    st = _ev_get(ev, "startTime")
+    if st:
+        try:
+            sdt = datetime.fromisoformat(str(st).replace("Z", "+00:00"))
+            if sdt.tzinfo is None:
+                sdt = sdt.replace(tzinfo=timezone.utc)
+            return abs((sdt - bet_dt).total_seconds()) <= 14 * 3600
+        except Exception:
+            pass
+    return True
+
+
+def _match_event_to_game(events: list, away: str, home: str,
+                         sport: str | None = None,
+                         bet_dt: datetime | None = None) -> Any | None:
     """Walk a list of PMM events looking for one referring to the
     away vs home game. Tries progressively looser matches:
+      0. Slug/title tricodes + exact date ('mlb-nym-phi-2026-07-16',
+         'NYM vs PHI') — PMM's post-July-2026 format for near-term events
       1. Title contains BOTH full team names
       2. Title contains BOTH team last-tokens (e.g., 'orioles' + 'rays')
+      2.5. Title contains both city/region tokens
       3. Any market within the event has team.name matching one of
          our teams AND title mentions the other
-    Returns the matched event (untouched SDK object) or None."""
+    EVERY pass is date-guarded when bet_dt is known (see _ev_date_ok) —
+    a series-mate event on another day can never match, whatever its
+    title format. Returns the matched event (untouched SDK object) or None."""
     away_last = _last_token(away)
     home_last = _last_token(home)
+    # Pass 0: tricode slug/title + date. The slug encodes away/home ORDER
+    # (MLB league ordering 'away' — 'mlb-nym-phi' = NYM @ PHI) but we
+    # accept the swapped orientation too (PMM orders some leagues home-
+    # first); requiring BOTH codes keeps it unambiguous either way.
+    a_cands = _team_code_cands(away, sport)
+    h_cands = _team_code_cands(home, sport)
+    if a_cands and h_cands:
+        for ev in events:
+            if not _ev_date_ok(ev, bet_dt):
+                continue
+            mo = _PMM_SLUG_RE.match(str(_ev_get(ev, "slug") or ""))
+            codes = None
+            if mo:
+                codes = {mo.group(1), mo.group(2)}
+            else:
+                toks = set(_norm(_ev_get(ev, "title") or "").split())
+                codes = {t for t in toks if 2 <= len(t) <= 4}
+            if (codes and any(c in a_cands for c in codes)
+                    and any(c in h_cands for c in codes)
+                    # one shared token can't satisfy both teams
+                    and len(codes & (a_cands | h_cands)) >= 2):
+                return ev
     for ev in events:
-        title = ev.get("title") if isinstance(ev, dict) else getattr(ev, "title", "")
+        if not _ev_date_ok(ev, bet_dt):
+            continue
+        title = _ev_get(ev, "title") or ""
         # Pass 1: full team names
         if _name_match(title, away) and _name_match(title, home):
             return ev
@@ -206,14 +332,17 @@ def _match_event_to_game(events: list, away: str, home: str) -> Any | None:
     home_city = _city_tokens(home)
     if away_city and home_city:
         for ev in events:
-            title = ev.get("title") if isinstance(ev, dict) else getattr(ev, "title", "")
+            if not _ev_date_ok(ev, bet_dt):
+                continue
+            title = _ev_get(ev, "title") or ""
             t_norm = _norm(title)
             if away_city in t_norm and home_city in t_norm:
                 return ev
     for ev in events:
-        markets = ev.get("markets") if isinstance(ev, dict) else getattr(ev, "markets", [])
-        markets = markets or []
-        title = ev.get("title") if isinstance(ev, dict) else getattr(ev, "title", "")
+        if not _ev_date_ok(ev, bet_dt):
+            continue
+        markets = _ev_get(ev, "markets") or []
+        title = _ev_get(ev, "title") or ""
         for m in markets:
             team = m.get("team") if isinstance(m, dict) else getattr(m, "team", None)
             tname = None
@@ -307,7 +436,7 @@ def _search_event(client, sport: str, away: str, home: str,
             if slug:
                 seen_slugs.add(slug)
             events.append(ev)
-        m = _match_event_to_game(events, away, home)
+        m = _match_event_to_game(events, away, home, sport=sport, bet_dt=bet_dt)
         if m is not None:
             matched = m
             used_attempt = i
@@ -390,7 +519,8 @@ def _search_event(client, sport: str, away: str, home: str,
             if isinstance(sresp, dict):
                 search_events = sresp.get("events") or sresp.get("results") or []
             if search_events:
-                matched = _match_event_to_game(search_events, away, home)
+                matched = _match_event_to_game(search_events, away, home,
+                                               sport=sport, bet_dt=bet_dt)
                 # search result event likely lacks `markets` — refetch by slug
                 if matched is not None:
                     slug = matched.get("slug") if isinstance(matched, dict) else getattr(matched, "slug", None)
