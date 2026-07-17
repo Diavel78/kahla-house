@@ -8548,12 +8548,33 @@ def _live_split_event(name: str):
 def _live_match_espn(events: list, away: str, home: str, event_start_iso: str):
     """Match a bot_pick's game to an ESPN scoreboard entry. Returns a score
     dict {state, away_score, home_score, period, clock, display_status,
-    inn1_away, inn1_home} or None. Team substring + ±90 min, same pattern
-    as the resolver / _merge_espn_scores."""
+    inn1_away, inn1_home, event_dt} or None. Team substring + ±90 min.
+
+    DOUBLEHEADER-SAFE: a DH returns TWO ESPN games with the same teams on the
+    same day (~3-6h apart). The old 'first team-match within ±90min' return
+    could bind to the wrong one, so we now collect ALL team matches and pick
+    the one whose start is CLOSEST to the bet's event_start (mirrors the
+    _mlb_probables DH fix, gotcha #30). `event_dt` (the matched game's real
+    UTC start) is returned so the live-price lookups anchor to the SAME game
+    the score came from — never a sibling DH game's pregame price."""
     if not (away and home):
         return None
     an, hn = away.lower(), home.lower()
     bet_dt = _parse_iso(event_start_iso) if event_start_iso else None
+
+    def _int(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    def _inn1(c):
+        ls = c.get("linescores") or []
+        if not ls:
+            return None
+        return _int((ls[0] or {}).get("value"))
+
+    cands = []   # (delta_seconds, score_dict)
     for g in events:
         comp = (g.get("competitions") or [{}])[0]
         cs = comp.get("competitors") or []
@@ -8568,24 +8589,13 @@ def _live_match_espn(events: list, away: str, home: str, event_start_iso: str):
         if not ((hn in h_name or h_name in hn) and (an in a_name or a_name in an)):
             continue
         comp_dt = _parse_iso(comp.get("date") or g.get("date") or "")
-        if bet_dt and comp_dt and abs((bet_dt - comp_dt).total_seconds()) > 90 * 60:
+        delta = (abs((bet_dt - comp_dt).total_seconds())
+                 if bet_dt and comp_dt else None)
+        if delta is not None and delta > 90 * 60:
             continue
         status = comp.get("status") or {}
         type_ = status.get("type") or {}
-
-        def _int(v):
-            try:
-                return int(v)
-            except (TypeError, ValueError):
-                return None
-
-        def _inn1(c):
-            ls = c.get("linescores") or []
-            if not ls:
-                return None
-            return _int((ls[0] or {}).get("value"))
-
-        return {
+        cands.append((delta if delta is not None else float("inf"), {
             "state":          type_.get("state", ""),
             "display_status": type_.get("shortDetail") or type_.get("description") or "",
             "period":         status.get("period"),
@@ -8594,8 +8604,13 @@ def _live_match_espn(events: list, away: str, home: str, event_start_iso: str):
             "home_score":     _int(h.get("score")),
             "inn1_away":      _inn1(a),
             "inn1_home":      _inn1(h),
-        }
-    return None
+            "event_dt":       comp_dt,
+        }))
+    if not cands:
+        return None
+    # Closest start to the bet wins the doubleheader tie-break.
+    cands.sort(key=lambda t: t[0])
+    return cands[0][1]
 
 
 def _live_decided_prob(bet: dict, m: dict):
@@ -8680,21 +8695,42 @@ def _live_book_mid(client, slug: str, synthetic: bool):
 
 _KALSHI_LIVE_CACHE: dict[str, tuple[float, float]] = {}   # "ticker:buy" -> (ts, mid)
 
+# Doubleheader guard: the two games of an MLB DH are ~3-6h apart, so a
+# resolved Kalshi market whose embedded start is > this from the game the
+# score matched is the SIBLING game (still pregame) — reject it rather than
+# quote its ~50¢ as this bet's live win%. 2.5h cleanly excludes a DH sibling
+# while allowing generous start-time drift for the correct game. (Skipped for
+# UFC, which has no doubleheaders and a systematic Kalshi time skew.)
+_LIVE_SAME_GAME_MAX_GAP_S = 2.5 * 3600
 
-def _kalshi_live_mid(bet: dict, away: str, home: str):
+
+def _kalshi_live_mid(bet: dict, away: str, home: str, anchor_dt=None):
     """Current KALSHI implied probability (book mid, our-side oriented)
     for the bet's side — the live ring's PRIMARY source since the July 12
     2026 cutover (the venue the user actually holds the bet on). Resolves
     the market via the shared _kalshi_market_for (30s-cached series
     fetches), reads the live book, caches the mid ~20s per market+side.
-    0<mid<1 or None (→ PMM fallback)."""
+    0<mid<1 or None (→ PMM fallback).
+
+    `anchor_dt` = the real UTC start of the game whose SCORE we're showing
+    (from the ESPN match). When given, we (a) resolve nearest to it instead
+    of the possibly-stale bet.event_start, and (b) REJECT a resolved market
+    whose own embedded game-time is a different game — the doubleheader
+    desync that quoted the nightcap's pregame ~49¢ over a 0-10 blowout."""
     import time as _t
-    ev_dt = _parse_iso(bet.get("event_start") or "")
+    ev_dt = anchor_dt or _parse_iso(bet.get("event_start") or "")
     ref = _kalshi_market_for(bet.get("sport"), away, home,
                              bet.get("market_type"), bet.get("side"),
                              line=bet.get("entry_line"), want_dt=ev_dt)
     if not ref:
         return None
+    # Same-game guard: the resolved market must be the game the score came
+    # from, not its DH sibling. The market ticker embeds the ET start, so
+    # compare it to the anchor.
+    if anchor_dt is not None and (bet.get("sport") or "").upper() != "UFC":
+        mkt_dt = _kalshi_event_dt(ref.get("ticker"))
+        if mkt_dt is not None and abs((mkt_dt - anchor_dt).total_seconds()) > _LIVE_SAME_GAME_MAX_GAP_S:
+            return None
     key = f"{ref['ticker']}:{ref.get('buy') or 'yes'}"
     now = _t.time()
     hit = _KALSHI_LIVE_CACHE.get(key)
@@ -8711,20 +8747,26 @@ def _kalshi_live_mid(bet: dict, away: str, home: str):
     return mid
 
 
-def _live_market_prob(bet: dict, away: str, home: str, client, pmm_cache: dict):
+def _live_market_prob(bet: dict, away: str, home: str, client, pmm_cache: dict,
+                      anchor_dt=None):
     """Current Polymarket implied probability for the bet's side (the live
     'odds of winning'), or None when PMM has no live market for it — the
     FALLBACK behind _kalshi_live_mid since the Kalshi cutover. The heavy
     event lookup (which market is this?) is 5-min cached; the live QUOTE is a
     fresh ~30s order-book read via _live_book_mid, so the ring tracks the live
-    price without re-running discovery every tick."""
+    price without re-running discovery every tick.
+
+    `anchor_dt` = the matched game's real start; used as the lookup's time
+    hint so PMM anchors to the SAME game the score came from (doubleheader
+    safety), rather than the possibly-stale stored event_start."""
     mid = bet.get("market_id")
     if mid not in pmm_cache:
         try:
             import pmm_markets
+            event_iso = (anchor_dt.isoformat() if anchor_dt
+                         else (bet.get("event_start") or ""))
             pmm_cache[mid] = pmm_markets.lookup(
-                client, bet.get("sport") or "", away, home,
-                bet.get("event_start") or "")
+                client, bet.get("sport") or "", away, home, event_iso)
         except Exception:
             pmm_cache[mid] = None
     pmm = pmm_cache.get(mid)
@@ -8827,13 +8869,18 @@ def _live_rows(sb, uid):
         # live Polymarket price (fallback) → grey. Odds-only (works for
         # every sport, no per-sport model).
         win_prob, prob_src = None, None
+        # Anchor the live-price lookups to the SAME game the score matched
+        # (its real ESPN start) — not the possibly-stale/ambiguous stored
+        # event_start — so a doubleheader can't quote the sibling game's
+        # pregame price against this game's live score.
+        anchor_dt = (m.get("event_dt") if m else None) or bdt
         if m:
             win_prob = _live_decided_prob(bet, m)
             if win_prob is not None:
                 prob_src = "decided"
         if win_prob is None:
             try:
-                win_prob = _kalshi_live_mid(bet, away, home)
+                win_prob = _kalshi_live_mid(bet, away, home, anchor_dt=anchor_dt)
             except Exception:
                 win_prob = None
             if win_prob is not None:
@@ -8845,7 +8892,8 @@ def _live_rows(sb, uid):
                 except Exception:
                     client = None
             if client is not None:
-                win_prob = _live_market_prob(bet, away, home, client, pmm_cache)
+                win_prob = _live_market_prob(bet, away, home, client, pmm_cache,
+                                             anchor_dt=anchor_dt)
                 if win_prob is not None:
                     prob_src = "market"
 
