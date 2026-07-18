@@ -192,6 +192,31 @@ jobs:
             "https://www.thekahlahouse.com/api/handicapper/paperlog?key=${KEY}" || echo "000")
           echo "paperlog HTTP $code"
 
+      # Kalshi auto-log ping. /api/handicapper/kalshi-autolog reads the admin's
+      # filled Kalshi positions and auto-creates the matching 1u bot_pick (ML /
+      # NRFI) so bets get logged + green-tagged even when the admin NEVER opens
+      # the site — Kalshi is the book of record. Reuses FILLS_CRON_SECRET.
+      # CADENCE GATE: every 2 min (fills get picked up within ~2 min; the read
+      # is I/O-light — a Kalshi portfolio pull + a few small DB queries).
+      - name: Pick Bot — Kalshi auto-log ping
+        continue-on-error: true
+        env:
+          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
+        run: |
+          M=$(date -u +%-M)
+          if [ $(( M % 2 )) -ne 0 ]; then
+            echo "off-cadence minute ($M) — skipping kalshi-autolog ping."
+            exit 0
+          fi
+          if [ -z "$FILLS_CRON_SECRET" ]; then
+            echo "FILLS_CRON_SECRET not set — skipping kalshi-autolog ping (no-op)."
+            exit 0
+          fi
+          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
+          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
+            "https://www.thekahlahouse.com/api/handicapper/kalshi-autolog?key=${KEY}" || echo "000")
+          echo "kalshi-autolog HTTP $code"
+
       # VSiN splits snapshot ping. /api/vsin-snapshot logs Circa + DraftKings
       # handle%/bets% per market (ML/SPR/TOT) for upcoming games into
       # vsin_snapshots (deduped on change) — the sharp-money movement curve for

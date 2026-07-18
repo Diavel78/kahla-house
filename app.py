@@ -4511,6 +4511,190 @@ def _kalshi_fill_avg(fills: list, ticker: str, buy: str):
     return ((tot_pq / tot_q) if tot_q else None), tot_q
 
 
+# ── Kalshi auto-log ("if it's on Kalshi, I bet it") ──────────────────
+# The user bets exclusively on Kalshi, so KALSHI IS THE BOOK OF RECORD —
+# rather than hand-logging every pick on the site, we READ the admin's
+# filled Kalshi positions and auto-create the matching bot_pick (which the
+# games list then tags green via the existing _loggedPicks machinery). The
+# Pick Bot is a PICKER now, not a tracker you feed by hand — this closes the
+# whole class of "logged but didn't bet / bet but forgot to log" errors.
+#
+# v1 covers SIDE-ONLY markets — ML (every sport) + NRFI — because they
+# reverse-match with ZERO line decoding: we reproduce each held ticker from
+# the TESTED forward resolver (_kalshi_market_for) and match on EXACT ticker
+# equality, so a doubleheader can't cross games (each game's ticker is unique
+# on date+time+teams) and a wrong line can't be logged. Totals / spreads /
+# UFC props stay MANUAL until a real ticker's line-encoding is verified.
+#
+# Auto-logged bets are ALWAYS 1u (user rule: dollars≠units — nothing
+# automatic sizes from contract count; bump the row up by hand). Entry price
+# = the real qty-weighted fill avg (cents→American, no fee math).
+_KALSHI_PREFIX_SPORT = {tk: sp for sp, tk in _KALSHI_SERIES.items()}
+
+
+def _kalshi_owner_uid() -> str | None:
+    """The uid the Kalshi account belongs to — auto-logged picks file under
+    it. Explicit env override (KALSHI_OWNER_UID), else the SOLE admin, else
+    None (never guess across multiple admins — a wrong owner books the bet
+    under the wrong user)."""
+    u = (os.environ.get("KALSHI_OWNER_UID") or "").strip()
+    if u:
+        return u
+    admins = _admin_uids()
+    return next(iter(admins)) if len(admins) == 1 else None
+
+
+def _kalshi_held_positions(positions: list, fills: list) -> list:
+    """(ticker, buy, avg_cents) per currently-HELD Kalshi position. buy =
+    'yes'/'no' from the signed position count; avg from the matching fills."""
+    held = []
+    for q in positions or []:
+        tk = q.get("ticker") or ""
+        if not tk:
+            continue
+        v = None
+        for kk in ("position_fp", "position", "quantity_fp", "quantity"):
+            try:
+                v = float(q.get(kk)); break
+            except (TypeError, ValueError):
+                continue
+        if not v:
+            continue
+        buy = "yes" if v > 0 else "no"
+        avg_c, _fq = _kalshi_fill_avg(fills, tk, buy)
+        held.append((tk, buy, avg_c))
+    return held
+
+
+def _kalshi_autolog(sb, owner_uid, positions=None, fills=None) -> dict:
+    """Reconcile the admin's Kalshi holdings into bot_picks: any held ML/NRFI
+    position we can uniquely place on a game that ISN'T already a pick for
+    owner_uid gets a fresh 1u pending row (entry = real fill avg). Idempotent
+    and skip-on-ambiguity — it never manufactures a wrong bet. Returns a
+    summary dict."""
+    out = {"held": 0, "created": 0, "exists": 0, "unmatched": 0, "unsupported": 0}
+    if sb is None or not owner_uid:
+        return out
+    kid, pem, _, _ = _kalshi_creds()
+    if not (kid and pem):
+        return out
+    if positions is None:
+        pm = _kalshi_my_positions()
+        positions = pm.get("positions") or [] if pm.get("ok") else []
+    if fills is None:
+        fm = _kalshi_my_fills()
+        fills = fm.get("fills") or [] if fm.get("ok") else []
+    held = _kalshi_held_positions(positions, fills)
+    out["held"] = len(held)
+    for tk, buy, avg_c in held:
+        prefix = tk.split("-", 1)[0]
+        sport = _KALSHI_PREFIX_SPORT.get(prefix)
+        is_nrfi = prefix in _KALSHI_NRFI_SERIES_CANDIDATES
+        if is_nrfi:
+            sport = "MLB"
+        if not sport:
+            out["unsupported"] += 1          # totals/spreads/props — v1 skips
+            continue
+        ev_dt = _kalshi_event_dt(tk)
+        if ev_dt is None:
+            out["unsupported"] += 1
+            continue
+        combos = [("moneyline", "home"), ("moneyline", "away")]
+        if sport == "MLB":
+            combos += [("nrfi", "yes"), ("nrfi", "no")]
+        w = 48 if sport == "UFC" else 4
+        lo = (ev_dt - timedelta(hours=w)).isoformat()
+        hi = (ev_dt + timedelta(hours=w)).isoformat()
+        try:
+            markets = (sb.table("markets")
+                       .select("id,sport,event_name,event_start")
+                       .eq("sport", sport)
+                       .gte("event_start", lo).lte("event_start", hi)
+                       .limit(50).execute().data) or []
+        except Exception:
+            markets = []
+        matches = []
+        for mk in markets:
+            ev = mk.get("event_name") or ""
+            if " @ " not in ev:
+                continue
+            away, home = ev.split(" @ ", 1)
+            for mt, side in combos:
+                try:
+                    ref = _kalshi_market_for(sport, away, home, mt, side,
+                                             line=None, want_dt=ev_dt)
+                except Exception:
+                    ref = None
+                if (ref and (ref.get("ticker") or "") == tk
+                        and (ref.get("buy") or "yes") == buy):
+                    matches.append((mk, mt, side))
+        # Require a UNIQUE (game, market, side) that reproduces this exact
+        # ticker — 0 or >1 means we can't be sure, so skip (retry next tick).
+        uniq = {(m["id"], mt, side) for m, mt, side in matches}
+        if len(uniq) != 1:
+            out["unmatched"] += 1
+            continue
+        mk, mt, side = matches[0]
+        try:
+            existing = (sb.table("bot_picks").select("id")
+                        .eq("market_id", mk["id"]).eq("market_type", mt)
+                        .eq("side", side).eq("asked_by", owner_uid)
+                        .limit(1).execute().data) or []
+        except Exception:
+            existing = []
+        if existing:
+            out["exists"] += 1              # already on record → green already
+            continue
+        price = _cents_to_american_py(avg_c) if avg_c is not None else None
+        if price is None:
+            # A held position without a readable fill price — don't create a
+            # row the resolver can't grade; retry when fills populate.
+            out["unmatched"] += 1
+            continue
+        row = {
+            "asked_by":    owner_uid,
+            "query_text":  "auto-logged from Kalshi",
+            "market_id":   mk["id"],
+            "sport":       mk["sport"],
+            "event_name":  mk["event_name"],
+            "event_start": mk["event_start"],
+            "market_type": mt,
+            "side":        side,
+            "entry_book":  "KALSHI",
+            "entry_price": price,           # real qty-weighted fill avg
+            "entry_line":  None,            # ML / NRFI carry no line
+            "units":       1,               # user rule: always 1u, dollars≠units
+            "confidence":  "low",
+            "signal_blob": {"source": "kalshi_autolog", "kalshi_ticker": tk},
+        }
+        try:
+            sb.table("bot_picks").insert(row).execute()
+            out["created"] += 1
+            app.logger.info("KALSHI-AUTOLOG created %s %s/%s 1u @ %s (%s)",
+                            mk["event_name"], mt, side, price, tk)
+        except Exception as e:
+            app.logger.warning("KALSHI-AUTOLOG insert failed %s: %s", tk, e)
+    return out
+
+
+@app.route("/api/handicapper/kalshi-autolog")
+def api_kalshi_autolog():
+    """Cron-pinged reconcile so Kalshi bets get logged even when the admin
+    NEVER opens the site (the whole point). Shared-secret like the other cron
+    endpoints; files picks under the Kalshi owner uid."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    sb = get_supabase()
+    owner = _kalshi_owner_uid()
+    if not owner:
+        return jsonify({"ok": True, "skipped": "no owner uid"}), 200
+    try:
+        summary = _kalshi_autolog(sb, owner)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, **summary})
 
 
 @app.route("/api/kalshi/probe")
@@ -4669,6 +4853,15 @@ def api_handicapper_fill_status():
     positions = pm.get("positions") or [] if pm.get("ok") else []
     my_fills = fm.get("fills") or [] if fm.get("ok") else []
     now = datetime.now(timezone.utc)
+
+    # Auto-log: reconcile the caller's Kalshi holdings into bot_picks (reusing
+    # the positions/fills just fetched). Kalshi is the book of record — a bet
+    # that's on Kalshi gets a 1u pick + green tag without hand-logging.
+    # Best-effort; a failure never breaks the fill-status chips.
+    try:
+        _kalshi_autolog(sb, g.uid, positions=positions, fills=my_fills)
+    except Exception:
+        pass
 
     fills = []
     for p in pending:
