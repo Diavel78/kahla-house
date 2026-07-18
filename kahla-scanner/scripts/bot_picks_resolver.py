@@ -198,7 +198,8 @@ def _match_espn(bet: dict, espn_events: list[dict]) -> dict | None:
                 continue
 
         status = (comp.get("status") or {})
-        state = (status.get("type") or {}).get("state", "")
+        stype = status.get("type") or {}
+        state = stype.get("state", "")
 
         def _score(c):
             v = c.get("score")
@@ -229,6 +230,13 @@ def _match_espn(bet: dict, espn_events: list[dict]) -> dict | None:
 
         return {
             "state":      state,
+            # A game is only FINAL when ESPN flags it completed. Postponed /
+            # suspended / canceled games report state='post' with
+            # completed=false and a STATUS_POSTPONED name (and a phantom 0-0
+            # score) — grading that as a 0-0 tie PUSHES and wrongly voids a
+            # bet the sportsbook keeps alive for the makeup game.
+            "completed":  bool(stype.get("completed")),
+            "status_name": stype.get("name") or "",
             "home_score": _score(h),
             "away_score": _score(a),
             "inn1_home":  _inn1(h),
@@ -653,6 +661,11 @@ def _resolve_paperlog(sb) -> dict:
             if m.get("state") != "post":
                 out["not_final"] += 1
                 continue
+            # Postponed/suspended/canceled report post+not-completed with a
+            # phantom 0-0 — don't grade (would push-void a live bet).
+            if not m.get("completed", True):
+                out["not_final"] += 1
+                continue
             if m.get("home_score") is None or m.get("away_score") is None:
                 out["unmatched"] += 1
                 continue
@@ -755,6 +768,16 @@ def main(argv: list[str] | None = None) -> int:
 
             if m["state"] != "post":
                 not_final += 1
+                continue
+
+            # Postponed / suspended / canceled: state='post' but not
+            # completed. The book keeps the bet ALIVE for the makeup game, so
+            # we must NOT settle it (a phantom 0-0 would push and void it).
+            # Stay pending; the makeup result (or manual settle) grades it.
+            if sport != "UFC" and not m.get("completed", True):
+                not_final += 1
+                log.info("SKIP postponed/uncompleted bot_pick %s (%s) — staying pending",
+                         bet.get("event_name"), m.get("status_name") or "not-completed")
                 continue
 
             # UFC: only ML grading is supported (winner boolean from

@@ -8597,6 +8597,9 @@ def _live_match_espn(events: list, away: str, home: str, event_start_iso: str):
         type_ = status.get("type") or {}
         cands.append((delta if delta is not None else float("inf"), {
             "state":          type_.get("state", ""),
+            # completed=false on a state='post' game = postponed/suspended/
+            # canceled (phantom 0-0) — must NOT read as a decided push.
+            "completed":      bool(type_.get("completed")),
             "display_status": type_.get("shortDetail") or type_.get("description") or "",
             "period":         status.get("period"),
             "clock":          status.get("displayClock") or "",
@@ -8621,7 +8624,10 @@ def _live_decided_prob(bet: dict, m: dict):
     mt, side = bet.get("market_type"), bet.get("side")
     a, h = m.get("away_score"), m.get("home_score")
     line = bet.get("entry_line")
-    final = m.get("state") == "post"
+    # FINAL requires ESPN's completed flag — a postponed/suspended game is
+    # state='post' with completed=false and a phantom 0-0 that must not read
+    # as a decided push (the bet is alive for the makeup).
+    final = m.get("state") == "post" and m.get("completed", True)
 
     if mt == "nrfi":
         a1, h1 = m.get("inn1_away"), m.get("inn1_home")
