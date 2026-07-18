@@ -4519,12 +4519,14 @@ def _kalshi_fill_avg(fills: list, ticker: str, buy: str):
 # Pick Bot is a PICKER now, not a tracker you feed by hand — this closes the
 # whole class of "logged but didn't bet / bet but forgot to log" errors.
 #
-# v1 covers SIDE-ONLY markets — ML (every sport) + NRFI — because they
-# reverse-match with ZERO line decoding: we reproduce each held ticker from
-# the TESTED forward resolver (_kalshi_market_for) and match on EXACT ticker
-# equality, so a doubleheader can't cross games (each game's ticker is unique
-# on date+time+teams) and a wrong line can't be logged. Totals / spreads /
-# UFC props stay MANUAL until a real ticker's line-encoding is verified.
+# Coverage: ML (every sport) + NRFI + MLB TOTAL/SPREAD. All reverse-match by
+# reproducing each held ticker from the TESTED forward resolver
+# (_kalshi_market_for / _kmf_line) and matching on EXACT ticker equality — so
+# a doubleheader can't cross games (each ticker is unique on date+time+teams)
+# and a wrong line can't be logged (only the true (side,line) reproduces the
+# suffix). Line markets decode the line from the ticker suffix (MLB-verified:
+# total N → line N-0.5; spread {FAV}N → margin N-0.5). UFC props + non-MLB
+# line markets stay MANUAL until their suffix encoding is verified.
 #
 # Auto-logged bets are ALWAYS 1u (user rule: dollars≠units — nothing
 # automatic sizes from contract count; bump the row up by hand). Entry price
@@ -4613,8 +4615,9 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> d
     """Reconcile the admin's Kalshi book into bot_picks. An INTENDED bet =
     a resting BUY order (not filled yet → the pick shows YELLOW) OR a held
     position (filled → GREEN, via the existing fill-status coloring). Any
-    intended ML/NRFI bet we can UNIQUELY place on a game that isn't already a
-    pick for owner_uid gets a fresh 1u pending row. Also removes an
+    intended ML / NRFI / MLB spread / MLB total bet we can UNIQUELY place on a
+    game that isn't already a pick for owner_uid gets a fresh 1u pending row
+    (line markets decode the line from the ticker suffix). Also removes an
     auto-logged pick whose resting order was CANCELED before fill (never
     filled, game not started, no longer resting) so a scratched bet doesn't
     linger. Idempotent, skip-on-ambiguity — never manufactures a wrong bet."""
@@ -4652,19 +4655,35 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> d
 
     for (tk, buy), cents in intended.items():
         prefix = tk.split("-", 1)[0]
+        suffix = tk.rsplit("-", 1)[1] if "-" in tk else ""
         sport = _KALSHI_PREFIX_SPORT.get(prefix)
-        if prefix in _KALSHI_NRFI_SERIES_CANDIDATES:
+        combos = None                        # list of (market_type, side, line)
+        if sport:                            # a GAME series → moneyline
+            combos = [("moneyline", "home", None), ("moneyline", "away", None)]
+            if sport == "MLB":
+                combos += [("nrfi", "yes", None), ("nrfi", "no", None)]
+        elif prefix in _KALSHI_NRFI_SERIES_CANDIDATES:
+            sport, combos = "MLB", [("nrfi", "yes", None), ("nrfi", "no", None)]
+        elif prefix == "KXMLBTOTAL":         # suffix N → line N-0.5 (YES=Over)
             sport = "MLB"
-        if not sport:
-            out["unsupported"] += 1          # totals/spreads/props — v1 skips
+            mm = re.search(r"(\d+)$", suffix)
+            if mm:
+                ln = int(mm.group(1)) - 0.5
+                combos = [("total", "over", ln), ("total", "under", ln)]
+        elif prefix == "KXMLBSPREAD":        # suffix {FAV}N → margin N-0.5
+            sport = "MLB"
+            mm = re.search(r"(\d+)$", suffix)
+            if mm:
+                mag = int(mm.group(1)) - 0.5
+                combos = [("spread", "home", -mag), ("spread", "home", mag),
+                          ("spread", "away", -mag), ("spread", "away", mag)]
+        if not (sport and combos):
+            out["unsupported"] += 1          # unknown series / no line decode
             continue
         ev_dt = _kalshi_event_dt(tk)
         if ev_dt is None:
             out["unsupported"] += 1
             continue
-        combos = [("moneyline", "home"), ("moneyline", "away")]
-        if sport == "MLB":
-            combos += [("nrfi", "yes"), ("nrfi", "no")]
         w = 48 if sport == "UFC" else 4
         lo = (ev_dt - timedelta(hours=w)).isoformat()
         hi = (ev_dt + timedelta(hours=w)).isoformat()
@@ -4682,22 +4701,22 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> d
             if " @ " not in ev:
                 continue
             away, home = ev.split(" @ ", 1)
-            for mt, side in combos:
+            for mt, side, line in combos:
                 try:
                     ref = _kalshi_market_for(sport, away, home, mt, side,
-                                             line=None, want_dt=ev_dt)
+                                             line=line, want_dt=ev_dt)
                 except Exception:
                     ref = None
                 if (ref and (ref.get("ticker") or "") == tk
                         and (ref.get("buy") or "yes") == buy):
-                    matches.append((mk, mt, side))
+                    matches.append((mk, mt, side, line))
         # Require a UNIQUE (game, market, side) that reproduces this exact
         # ticker — 0 or >1 means we can't be sure, so skip (retry next tick).
-        uniq = {(m["id"], mt, side) for m, mt, side in matches}
+        uniq = {(m["id"], mt, side) for m, mt, side, line in matches}
         if len(uniq) != 1:
             out["unmatched"] += 1
             continue
-        mk, mt, side = matches[0]
+        mk, mt, side, line = matches[0]
         # Postponed carryover: an OPEN Kalshi position on a game whose start is
         # well in the past never settled — it was postponed and made up as a
         # DH. Attribute the bet to GAME 1 of the makeup (user's rule) so it
@@ -4739,7 +4758,7 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> d
             "side":        side,
             "entry_book":  "KALSHI",
             "entry_price": price,           # resting bid, or fill avg once filled
-            "entry_line":  None,            # ML / NRFI carry no line
+            "entry_line":  line,            # signed line for spread/total; None for ML/NRFI
             "units":       1,               # user rule: always 1u, dollars≠units
             "confidence":  "low",
             "signal_blob": {"source": "kalshi_autolog", "kalshi_ticker": tk},
