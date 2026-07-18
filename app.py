@@ -4732,14 +4732,29 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> d
                                 mk["id"], mu["id"])
                 mk = mu
         try:
-            existing = (sb.table("bot_picks").select("id")
+            existing = (sb.table("bot_picks").select("id,signal_blob")
                         .eq("market_id", mk["id"]).eq("market_type", mt)
                         .eq("side", side).eq("asked_by", owner_uid)
                         .limit(1).execute().data) or []
         except Exception:
             existing = []
         if existing:
-            out["exists"] += 1              # already on record (fill-status colors it)
+            out["exists"] += 1              # already on record
+            # Stamp the REAL Kalshi ticker onto the existing pick so the fill
+            # tracker matches the position by its true exchange identity —
+            # not a ticker re-derived from the (possibly makeup-remapped)
+            # market, which mismatches a postponed-carryover position and
+            # falsely shows "⚠ no order" on a bet that's actually filled.
+            ex = existing[0]
+            b = ex.get("signal_blob") if isinstance(ex.get("signal_blob"), dict) else {}
+            b = b or {}
+            if b.get("kalshi_ticker") != tk or b.get("kalshi_buy") != buy:
+                nb = {**b, "kalshi_ticker": tk, "kalshi_buy": buy}
+                try:
+                    sb.table("bot_picks").update({"signal_blob": nb}).eq("id", ex["id"]).execute()
+                    out["stamped"] = out.get("stamped", 0) + 1
+                except Exception:
+                    pass
             continue
         price = _cents_to_american_py(cents) if cents is not None else None
         if price is None:
@@ -4761,7 +4776,8 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> d
             "entry_line":  line,            # signed line for spread/total; None for ML/NRFI
             "units":       1,               # user rule: always 1u, dollars≠units
             "confidence":  "low",
-            "signal_blob": {"source": "kalshi_autolog", "kalshi_ticker": tk},
+            "signal_blob": {"source": "kalshi_autolog", "kalshi_ticker": tk,
+                            "kalshi_buy": buy},
         }
         try:
             sb.table("bot_picks").insert(row).execute()
@@ -4967,7 +4983,7 @@ def api_handicapper_fill_status():
     try:
         pending = (sb.table("bot_picks")
                    .select("id,market_id,market_type,side,entry_book,entry_line,"
-                           "entry_price,event_name,event_start,sport")
+                           "entry_price,event_name,event_start,sport,signal_blob")
                    .eq("status", "pending").eq("asked_by", g.uid)
                    .order("event_start", desc=False)
                    .limit(100).execute().data) or []
@@ -5003,10 +5019,20 @@ def api_handicapper_fill_status():
                  "mins_to_start": (round(mins) if mins is not None else None)}
         ev = p.get("event_name") or ""
         away, home = (ev.split(" @ ", 1) if " @ " in ev else ("", ""))
-        ref = (_kalshi_market_for(p.get("sport"), away, home,
-                                  p.get("market_type"), p.get("side"),
-                                  line=p.get("entry_line"), want_dt=dt)
-               if api_ok else None)
+        # Prefer the REAL Kalshi ticker stored on the pick (by the auto-log,
+        # from the actual held position) — it's the bet's true exchange
+        # identity, so a postponed-carryover / makeup-remapped pick matches
+        # its position instead of a ticker re-derived from the wrong game.
+        pblob = p.get("signal_blob") if isinstance(p.get("signal_blob"), dict) else {}
+        stored_tk = (pblob or {}).get("kalshi_ticker")
+        if not api_ok:
+            ref = None
+        elif stored_tk:
+            ref = {"ticker": stored_tk, "buy": (pblob or {}).get("kalshi_buy") or "yes"}
+        else:
+            ref = _kalshi_market_for(p.get("sport"), away, home,
+                                     p.get("market_type"), p.get("side"),
+                                     line=p.get("entry_line"), want_dt=dt)
         if not api_ok or ref is None:
             # API unreachable, or the resolver couldn't place the bet on a
             # Kalshi market (reader gap / market already closed) — render
@@ -9047,19 +9073,26 @@ def _kalshi_live_mid(bet: dict, away: str, home: str, anchor_dt=None):
     whose own embedded game-time is a different game — the doubleheader
     desync that quoted the nightcap's pregame ~49¢ over a 0-10 blowout."""
     import time as _t
-    ev_dt = anchor_dt or _parse_iso(bet.get("event_start") or "")
-    ref = _kalshi_market_for(bet.get("sport"), away, home,
-                             bet.get("market_type"), bet.get("side"),
-                             line=bet.get("entry_line"), want_dt=ev_dt)
-    if not ref:
-        return None
-    # Same-game guard: the resolved market must be the game the score came
-    # from, not its DH sibling. The market ticker embeds the ET start, so
-    # compare it to the anchor.
-    if anchor_dt is not None and (bet.get("sport") or "").upper() != "UFC":
-        mkt_dt = _kalshi_event_dt(ref.get("ticker"))
-        if mkt_dt is not None and abs((mkt_dt - anchor_dt).total_seconds()) > _LIVE_SAME_GAME_MAX_GAP_S:
+    # Prefer the REAL Kalshi ticker stored on the pick (the actual market the
+    # bet lives on) — exact identity, so no re-resolution / DH guard needed.
+    blob = bet.get("signal_blob") if isinstance(bet.get("signal_blob"), dict) else {}
+    stored_tk = (blob or {}).get("kalshi_ticker")
+    if stored_tk:
+        ref = {"ticker": stored_tk, "buy": (blob or {}).get("kalshi_buy") or "yes"}
+    else:
+        ev_dt = anchor_dt or _parse_iso(bet.get("event_start") or "")
+        ref = _kalshi_market_for(bet.get("sport"), away, home,
+                                 bet.get("market_type"), bet.get("side"),
+                                 line=bet.get("entry_line"), want_dt=ev_dt)
+        if not ref:
             return None
+        # Same-game guard: the resolved market must be the game the score came
+        # from, not its DH sibling. The market ticker embeds the ET start, so
+        # compare it to the anchor.
+        if anchor_dt is not None and (bet.get("sport") or "").upper() != "UFC":
+            mkt_dt = _kalshi_event_dt(ref.get("ticker"))
+            if mkt_dt is not None and abs((mkt_dt - anchor_dt).total_seconds()) > _LIVE_SAME_GAME_MAX_GAP_S:
+                return None
     key = f"{ref['ticker']}:{ref.get('buy') or 'yes'}"
     now = _t.time()
     hit = _KALSHI_LIVE_CACHE.get(key)
@@ -9146,7 +9179,7 @@ def _live_rows(sb, uid):
     Raises on the pending fetch failing; callers map that to a 500."""
     pending = (sb.table("bot_picks")
                .select("id,market_id,sport,event_name,event_start,"
-                       "market_type,side,units,entry_price,entry_line")
+                       "market_type,side,units,entry_price,entry_line,signal_blob")
                .eq("status", "pending")
                .eq("asked_by", uid)
                .order("event_start", desc=False)
