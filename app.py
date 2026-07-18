@@ -4566,13 +4566,30 @@ def _kalshi_held_positions(positions: list, fills: list) -> list:
     return held
 
 
-def _kalshi_autolog(sb, owner_uid, positions=None, fills=None) -> dict:
-    """Reconcile the admin's Kalshi holdings into bot_picks: any held ML/NRFI
-    position we can uniquely place on a game that ISN'T already a pick for
-    owner_uid gets a fresh 1u pending row (entry = real fill avg). Idempotent
-    and skip-on-ambiguity — it never manufactures a wrong bet. Returns a
-    summary dict."""
-    out = {"held": 0, "created": 0, "exists": 0, "unmatched": 0, "unsupported": 0}
+def _kalshi_order_price_cents(o: dict, buy: str):
+    """Resting price (cents) of a Kalshi buy order for our side — the bid we
+    rested, which is what we log as entry (maker convention: rest the bid,
+    log the bid). Same field tolerance as the fill/outbid readers."""
+    return (_kalshi_cents_val(o.get(f"{buy}_price_dollars"))
+            or _kalshi_cents_val(o.get(f"{buy}_price"))
+            or _kalshi_cents_val(o.get("price_dollars"))
+            or _kalshi_cents_val(o.get("price"))
+            or (_kalshi_cents_val(o.get("yes_price_dollars"), invert=True)
+                or _kalshi_cents_val(o.get("yes_price"), invert=True)
+                if buy == "no" else None))
+
+
+def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> dict:
+    """Reconcile the admin's Kalshi book into bot_picks. An INTENDED bet =
+    a resting BUY order (not filled yet → the pick shows YELLOW) OR a held
+    position (filled → GREEN, via the existing fill-status coloring). Any
+    intended ML/NRFI bet we can UNIQUELY place on a game that isn't already a
+    pick for owner_uid gets a fresh 1u pending row. Also removes an
+    auto-logged pick whose resting order was CANCELED before fill (never
+    filled, game not started, no longer resting) so a scratched bet doesn't
+    linger. Idempotent, skip-on-ambiguity — never manufactures a wrong bet."""
+    out = {"intended": 0, "created": 0, "exists": 0, "unmatched": 0,
+           "unsupported": 0, "removed": 0}
     if sb is None or not owner_uid:
         return out
     kid, pem, _, _ = _kalshi_creds()
@@ -4584,13 +4601,28 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None) -> dict:
     if fills is None:
         fm = _kalshi_my_fills()
         fills = fm.get("fills") or [] if fm.get("ok") else []
-    held = _kalshi_held_positions(positions, fills)
-    out["held"] = len(held)
-    for tk, buy, avg_c in held:
+    if orders is None:
+        om = _kalshi_my_orders()
+        orders = om.get("orders") or [] if om.get("ok") else []
+
+    # INTENDED bets keyed (ticker, buy) → entry cents. Resting orders give the
+    # bid; a filled position (fill avg) overrides it as the truer entry.
+    intended: dict = {}
+    for o in orders:
+        tk = o.get("ticker") or ""
+        if not tk:
+            continue
+        buy = (o.get("side") or "yes").lower()
+        intended[(tk, buy)] = _kalshi_order_price_cents(o, buy)
+    for tk, buy, avg_c in _kalshi_held_positions(positions, fills):
+        if avg_c is not None or (tk, buy) not in intended:
+            intended[(tk, buy)] = avg_c
+    out["intended"] = len(intended)
+
+    for (tk, buy), cents in intended.items():
         prefix = tk.split("-", 1)[0]
         sport = _KALSHI_PREFIX_SPORT.get(prefix)
-        is_nrfi = prefix in _KALSHI_NRFI_SERIES_CANDIDATES
-        if is_nrfi:
+        if prefix in _KALSHI_NRFI_SERIES_CANDIDATES:
             sport = "MLB"
         if not sport:
             out["unsupported"] += 1          # totals/spreads/props — v1 skips
@@ -4643,12 +4675,12 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None) -> dict:
         except Exception:
             existing = []
         if existing:
-            out["exists"] += 1              # already on record → green already
+            out["exists"] += 1              # already on record (fill-status colors it)
             continue
-        price = _cents_to_american_py(avg_c) if avg_c is not None else None
+        price = _cents_to_american_py(cents) if cents is not None else None
         if price is None:
-            # A held position without a readable fill price — don't create a
-            # row the resolver can't grade; retry when fills populate.
+            # No readable price (order/fill shape) — don't create a row the
+            # resolver can't grade; retry next tick when the price is readable.
             out["unmatched"] += 1
             continue
         row = {
@@ -4661,7 +4693,7 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None) -> dict:
             "market_type": mt,
             "side":        side,
             "entry_book":  "KALSHI",
-            "entry_price": price,           # real qty-weighted fill avg
+            "entry_price": price,           # resting bid, or fill avg once filled
             "entry_line":  None,            # ML / NRFI carry no line
             "units":       1,               # user rule: always 1u, dollars≠units
             "confidence":  "low",
@@ -4674,6 +4706,40 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None) -> dict:
                             mk["event_name"], mt, side, price, tk)
         except Exception as e:
             app.logger.warning("KALSHI-AUTOLOG insert failed %s: %s", tk, e)
+
+    # Cleanup: an auto-logged pick whose resting order was CANCELED before it
+    # ever filled (no longer intended, no fills, game not started) is a
+    # scratched bet — remove it so the yellow chip doesn't linger for a bet
+    # that isn't real. Only touches auto-logged rows; manual logs are never
+    # deleted.
+    held_tickers = {tk for (tk, _b) in intended.keys()}
+    try:
+        autos = (sb.table("bot_picks")
+                 .select("id,event_start,signal_blob")
+                 .eq("asked_by", owner_uid).eq("status", "pending")
+                 .eq("query_text", "auto-logged from Kalshi")
+                 .limit(300).execute().data) or []
+    except Exception:
+        autos = []
+    now_dt = datetime.now(timezone.utc)
+    for a in autos:
+        blob = a.get("signal_blob") or {}
+        tk = blob.get("kalshi_ticker")
+        if not tk or tk in held_tickers:
+            continue                        # still resting or filled → keep
+        est = _parse_iso(a.get("event_start") or "")
+        if not est or est <= now_dt:
+            continue                        # game started → real bet, let it grade
+        _, qy = _kalshi_fill_avg(fills, tk, "yes")
+        _, qn = _kalshi_fill_avg(fills, tk, "no")
+        if (qy or 0) + (qn or 0) > 0:
+            continue                        # it filled at some point → keep
+        try:
+            sb.table("bot_picks").delete().eq("id", a["id"]).execute()
+            out["removed"] += 1
+            app.logger.info("KALSHI-AUTOLOG removed canceled bet %s (%s)", a["id"], tk)
+        except Exception:
+            pass
     return out
 
 
@@ -4859,7 +4925,8 @@ def api_handicapper_fill_status():
     # that's on Kalshi gets a 1u pick + green tag without hand-logging.
     # Best-effort; a failure never breaks the fill-status chips.
     try:
-        _kalshi_autolog(sb, g.uid, positions=positions, fills=my_fills)
+        _kalshi_autolog(sb, g.uid, positions=positions, fills=my_fills,
+                        orders=orders)
     except Exception:
         pass
 
