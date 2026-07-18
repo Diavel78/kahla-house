@@ -4125,6 +4125,10 @@ def _kalshi_line_book(sport: str, away: str, home: str, market_type: str,
 # /debug-kalshi-discover?q=inning, then pin the real ticker first in this
 # list.
 _KALSHI_NRFI_SERIES_CANDIDATES = [
+    # VERIFIED live July 18 2026 (a real resting YRFI order): the series is
+    # KXMLBRFI ("Run First Inning"), ticker KXMLBRFI-{YYMONDDHHMM}{AWAY}{HOME},
+    # title "{Away} vs {Home}: First Inning Run" (YES = a run scores = YRFI).
+    "KXMLBRFI",
     "KXMLBYRFI", "KXMLBNRFI", "KXMLB1STINNING", "KXMLBFIRSTINNING",
 ]
 
