@@ -4662,8 +4662,6 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> d
             combos = [("moneyline", "home", None), ("moneyline", "away", None)]
             if sport == "MLB":
                 combos += [("nrfi", "yes", None), ("nrfi", "no", None)]
-        elif prefix in _KALSHI_NRFI_SERIES_CANDIDATES:
-            sport, combos = "MLB", [("nrfi", "yes", None), ("nrfi", "no", None)]
         elif prefix == "KXMLBTOTAL":         # suffix N → line N-0.5 (YES=Over)
             sport = "MLB"
             mm = re.search(r"(\d+)$", suffix)
@@ -4677,8 +4675,16 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> d
                 mag = int(mm.group(1)) - 0.5
                 combos = [("spread", "home", -mag), ("spread", "home", mag),
                           ("spread", "away", -mag), ("spread", "away", mag)]
+        elif prefix.startswith("KXMLB"):     # any other MLB series → first-inning
+            # NRFI/YRFI ("First Inning Run") + future first-inning variants,
+            # under whatever ticker Kalshi uses. _kmf_nrfi discovers the real
+            # series at runtime and reproduces the EXACT ticker, so a
+            # non-first-inning MLB market simply won't match (safe).
+            sport, combos = "MLB", [("nrfi", "yes", None), ("nrfi", "no", None)]
         if not (sport and combos):
             out["unsupported"] += 1          # unknown series / no line decode
+            if tk:
+                app.logger.info("KALSHI-AUTOLOG unsupported ticker %s", tk)
             continue
         ev_dt = _kalshi_event_dt(tk)
         if ev_dt is None:
