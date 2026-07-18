@@ -4579,6 +4579,36 @@ def _kalshi_order_price_cents(o: dict, buy: str):
                 if buy == "no" else None))
 
 
+def _kalshi_makeup_market(sb, sport: str, event_name: str, postponed_start: str):
+    """A postponed game is made up as a DOUBLEHEADER; per the user's rule the
+    makeup is GAME 1 (the earliest game) of the makeup day. Return the earliest
+    ET calendar day AFTER `postponed_start` where these exact teams play ≥2
+    games, and that day's EARLIEST market. None if no such DH day exists —
+    then we DON'T remap (a lone later game is a regular game, not a makeup)."""
+    try:
+        rows = (sb.table("markets")
+                .select("id,event_name,event_start,sport,status")
+                .eq("sport", sport).eq("event_name", event_name)
+                .eq("status", "active")
+                .gt("event_start", postponed_start)
+                .order("event_start", desc=False)
+                .limit(30).execute().data) or []
+    except Exception:
+        return None
+    by_day: dict = {}
+    for r in rows:
+        dt = _parse_iso(r.get("event_start") or "")
+        if not dt:
+            continue
+        day = dt.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+        by_day.setdefault(day, []).append((dt, r))
+    for day in sorted(by_day.keys()):
+        games = sorted(by_day[day], key=lambda t: t[0])
+        if len(games) >= 2:              # a doubleheader → the makeup day
+            return games[0][1]           # game 1 = earliest that day
+    return None
+
+
 def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> dict:
     """Reconcile the admin's Kalshi book into bot_picks. An INTENDED bet =
     a resting BUY order (not filled yet → the pick shows YELLOW) OR a held
@@ -4618,6 +4648,7 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> d
         if avg_c is not None or (tk, buy) not in intended:
             intended[(tk, buy)] = avg_c
     out["intended"] = len(intended)
+    now_dt = datetime.now(timezone.utc)
 
     for (tk, buy), cents in intended.items():
         prefix = tk.split("-", 1)[0]
@@ -4667,6 +4698,20 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> d
             out["unmatched"] += 1
             continue
         mk, mt, side = matches[0]
+        # Postponed carryover: an OPEN Kalshi position on a game whose start is
+        # well in the past never settled — it was postponed and made up as a
+        # DH. Attribute the bet to GAME 1 of the makeup (user's rule) so it
+        # logs + grades on the LIVE game, not the dead original ticker. The
+        # >12h guard means an in-progress game (or a same-day DH sibling, only
+        # ~6h out) is never remapped.
+        mk_start = _parse_iso(mk.get("event_start") or "")
+        if mk_start and (now_dt - mk_start) > timedelta(hours=12):
+            mu = _kalshi_makeup_market(sb, sport, mk.get("event_name") or "",
+                                       mk["event_start"])
+            if mu:
+                app.logger.info("KALSHI-AUTOLOG postponed %s -> makeup game 1 %s",
+                                mk["id"], mu["id"])
+                mk = mu
         try:
             existing = (sb.table("bot_picks").select("id")
                         .eq("market_id", mk["id"]).eq("market_type", mt)
@@ -4721,7 +4766,6 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> d
                  .limit(300).execute().data) or []
     except Exception:
         autos = []
-    now_dt = datetime.now(timezone.utc)
     for a in autos:
         blob = a.get("signal_blob") or {}
         tk = blob.get("kalshi_ticker")
