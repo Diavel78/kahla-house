@@ -4747,7 +4747,10 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> d
                         .eq("side", side).eq("asked_by", owner_uid)
                         .limit(1).execute().data) or []
         except Exception:
-            existing = []
+            # Dedup check failed — SKIP creating (retry next tick) rather than
+            # risk a duplicate on a transient DB hiccup.
+            out["unmatched"] += 1
+            continue
         if existing:
             out["exists"] += 1              # already on record
             # Stamp the REAL Kalshi ticker onto the existing pick so the fill
@@ -4829,6 +4832,31 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> d
             app.logger.info("KALSHI-AUTOLOG removed canceled bet %s (%s)", a["id"], tk)
         except Exception:
             pass
+
+    # Self-healing dedup: one Kalshi position = one row. If two pending picks
+    # for this owner land on the same (market, market_type, side) — a dup
+    # slipped past the create-time check (race / transient error) — keep the
+    # EARLIEST (lowest id) and delete the rest, so the book converges to match
+    # Kalshi without manual cleanup.
+    try:
+        allp = (sb.table("bot_picks")
+                .select("id,market_id,market_type,side")
+                .eq("asked_by", owner_uid).eq("status", "pending")
+                .order("id", desc=False).limit(500).execute().data) or []
+    except Exception:
+        allp = []
+    seen = set()
+    for p in allp:
+        k = (p.get("market_id"), p.get("market_type"), p.get("side"))
+        if k in seen:
+            try:
+                sb.table("bot_picks").delete().eq("id", p["id"]).execute()
+                out["deduped"] = out.get("deduped", 0) + 1
+                app.logger.info("KALSHI-AUTOLOG deduped pick %s %s", p["id"], k)
+            except Exception:
+                pass
+        else:
+            seen.add(k)
     return out
 
 
