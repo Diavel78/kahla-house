@@ -5080,7 +5080,7 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
             continue
         mk, mt, side, line, synth = cands[0]
         try:
-            existing = (sb.table("bot_picks").select("id,signal_blob")
+            existing = (sb.table("bot_picks").select("id,signal_blob,entry_price")
                         .eq("market_id", mk["id"]).eq("market_type", mt)
                         .eq("side", side).eq("asked_by", owner_uid)
                         .limit(1).execute().data) or []
@@ -5097,12 +5097,39 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
             # tell a confirmed never-filled pick (False) from an old pre-flag
             # pick (missing → left alone) — and the latch protects a filled-
             # then-settled bet.
+            is_filled = slug in filled_slugs
             nb = {**b, "pmm_slug": slug, "pmm_synthetic": synth,
-                  "filled": bool(b.get("filled")) or (slug in filled_slugs)}
+                  "filled": bool(b.get("filled")) or is_filled}
+            upd = {}
             if nb != b:
+                upd["signal_blob"] = nb
+            # ENTRY SELF-CORRECT (July 2026 — "you logged your line, not what I
+            # got it at"): once the bet is HELD, `prob` is the position's avg
+            # fill (cost/qty for our side), which is the TRUE entry — not the
+            # resting-bid the pick may have been created at. Sync entry_price to
+            # it here, in the cron autolog, so the logged line matches the real
+            # fill even when the fill-status page is never opened (that poll's
+            # _pmm_fill_entry auto-sync was the ONLY corrector before, so a
+            # bid-created bet stayed at the bid on a live game). PRICE ONLY —
+            # units/entry_line never touched (dollars ≠ units); same ≥0.5¢
+            # divergence gate as the live tracker.
+            if is_filled and prob is not None and 0 < prob < 1:
+                new_amer = _prob_to_amer_py(prob)
+                cur_amer = ex.get("entry_price")
+                cur_prob = _amer_to_prob_py(cur_amer)
+                cur_c = (cur_prob * 100.0) if cur_prob is not None else None
+                if (new_amer is not None and new_amer != cur_amer
+                        and (cur_c is None or abs(prob * 100.0 - cur_c) >= 0.5)):
+                    upd["entry_price"] = new_amer
+            if upd:
                 try:
-                    (sb.table("bot_picks").update({"signal_blob": nb})
+                    (sb.table("bot_picks").update(upd)
                      .eq("id", ex["id"]).execute())
+                    if "entry_price" in upd:
+                        out["synced"] = out.get("synced", 0) + 1
+                        app.logger.info(
+                            "PMM-AUTOLOG synced entry %s -> %s (%s)",
+                            ex.get("entry_price"), upd["entry_price"], slug)
                 except Exception:
                     pass
             continue
