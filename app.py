@@ -4970,10 +4970,45 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
         if avg is not None:
             intended[(slug, net < 0)] = avg     # fill avg overrides order bid
     out["intended"] = len(intended)
-    if not intended:
-        return out                              # nothing on Poly → no work
-    want_slugs = {s for (s, _y) in intended}
     now_dt = datetime.now(timezone.utc)
+
+    # Removal (your rule: "not on Poly or Kalshi = not my bet"). A pmm_autolog
+    # pick no longer backed by a resting order OR a held position — canceled or
+    # never-filled — is not a bet, so remove it. Runs even when `intended` is
+    # empty (you canceled everything → clear the phantoms). Guards mirror the
+    # Kalshi autolog: (a) ONLY when BOTH Poly reads SUCCEEDED (orders/positions
+    # not None) — a failed read must never look like "nothing on Poly" and wipe
+    # the book; (b) PRE-GAME only — a started game is left for the resolver (a
+    # filled bet's position vanishes once the market settles, so post-start we
+    # can't tell never-filled from filled-and-settled). Only auto-logged rows.
+    if orders is not None and positions is not None:
+        backed = {o["slug"] for o in orders if o.get("slug")}
+        backed |= set(positions.keys())
+        try:
+            autos = (sb.table("bot_picks")
+                     .select("id,event_start,signal_blob")
+                     .eq("asked_by", owner_uid).eq("status", "pending")
+                     .eq("query_text", "auto-logged from Polymarket")
+                     .limit(300).execute().data) or []
+        except Exception:
+            autos = []
+        for a in autos:
+            slug = (a.get("signal_blob") or {}).get("pmm_slug")
+            if not slug or slug in backed:
+                continue                        # still resting or held → keep
+            est = _parse_iso(a.get("event_start") or "")
+            if not est or est <= now_dt:
+                continue                        # started → let the resolver grade
+            try:
+                sb.table("bot_picks").delete().eq("id", a["id"]).execute()
+                out["removed"] = out.get("removed", 0) + 1
+                app.logger.info("PMM-AUTOLOG removed unbacked %s (%s)", a["id"], slug)
+            except Exception:
+                pass
+
+    if not intended:
+        return out                              # nothing new to log
+    want_slugs = {s for (s, _y) in intended}
     lo = (now_dt - timedelta(hours=12)).isoformat()   # −12h → catch live bets
     hi = (now_dt + timedelta(hours=48)).isoformat()
     try:
@@ -5247,10 +5282,12 @@ def _pmm_open_orders_raw(client) -> list | None:
     return out
 
 
-def _pmm_positions_raw(client) -> dict:
+def _pmm_positions_raw(client) -> dict | None:
     """{slug: {net, qty, avg_price}} of live Poly positions. net>0 = YES held,
     net<0 = NO held; avg_price = cost/qty = the held side's own entry price
-    (no YES-flip — cost is already what was paid for the held side)."""
+    (no YES-flip — cost is already what was paid for the held side). Returns
+    None on a READ FAILURE (vs {} for read-OK-empty) so the autolog removal
+    never treats a failed read as "no positions" and wipes real bets."""
     out: dict = {}
     try:
         for slug, pos in fetch_positions(client):
@@ -5264,7 +5301,7 @@ def _pmm_positions_raw(client) -> dict:
             out[slug] = {"net": net, "qty": qty,
                          "avg_price": ((cost / qty) if (cost and qty > 0) else None)}
     except Exception:
-        pass
+        return None                              # read failed → not "no positions"
     return out
 
 
