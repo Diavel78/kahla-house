@@ -5271,7 +5271,7 @@ def api_kalshi_probe():
 # chips still work, sync quietly skips (Edit modal remains the manual
 # override).
 _FILL_STATUS_TTL = 30       # s — server cache; the page polls on its 60s loadData
-_FS_TAKE_WARN_MIN = 5       # unfilled + tip ≤5m → TAKE warning (user: "5 minute take warning")
+_FS_TAKE_WARN_MIN = 7       # unfilled + tip ≤7m → TAKE warning (widened from 5m — user: "5 is too short")
 
 
 # ───────────── Polymarket fill tracker (dual-venue, July 2026 revert) ─────────

@@ -915,7 +915,7 @@
         if (f.outbid)
             html += `<span class="chip fill take" title="${_esc(_outbidTitle(f))}">⚠ OUTBID ${_fmtCents(f.best_bid_c)}¢ &gt; ${_fmtCents(f.my_price_c)}¢</span>`;
         if (f.warn)
-            html += `<span class="chip fill take" title="Unfilled with tip ≤5m — a maker won't fill in time. TAKE the ask or miss the bet.">⚠ TAKE NOW</span>`;
+            html += `<span class="chip fill take" title="Unfilled with tip ≤7m — a maker won't fill in time. TAKE the ask or miss the bet.">⚠ TAKE NOW</span>`;
         return html;
     }
     // Decoration for a LOGGED games-list chip: amber ◌/◔ until the Kalshi
