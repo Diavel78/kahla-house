@@ -5215,18 +5215,21 @@ _FS_TAKE_WARN_MIN = 5       # unfilled + tip ≤5m → TAKE warning (user: "5 mi
 # bet. Same status vocabulary as Kalshi: resting / partial(pct) / filled / none
 # / unknown, + warn + outbid, + entry auto-sync from the real fill.
 
-def _pmm_open_orders_raw(client) -> list:
+def _pmm_open_orders_raw(client) -> list | None:
     """Working Poly CLOB orders normalized for fill matching:
     [{slug, intent, state, qty, cum, leaves, price_yes}]. price_yes is the
     SDK's canonical YES-probability price — orient to our side at match time
-    (BUY_SHORT / synthetic → 1−price_yes). Empty list on any SDK error."""
+    (BUY_SHORT / synthetic → 1−price_yes). Returns None on a READ FAILURE
+    (SDK error / Poly maintenance) — distinct from [] (read OK, no orders) —
+    so callers can degrade a resting bet to 'unknown' instead of a false 'no
+    order' (and a false TAKE-NOW warning) while Poly is dark."""
     out: list = []
     try:
         resp = client.orders.list()
         raw = (resp.get("orders") if isinstance(resp, dict)
                else getattr(resp, "orders", [])) or []
     except Exception:
-        return out
+        return None                              # read failed → not "no orders"
     for o in raw:
         def _g(k, d=None):
             return o.get(k, d) if isinstance(o, dict) else getattr(o, k, d)
