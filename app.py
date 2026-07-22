@@ -4615,16 +4615,17 @@ def _kalshi_makeup_market(sb, sport: str, event_name: str, postponed_start: str)
     return None
 
 
-def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> dict:
+def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None,
+                    api_ok=None) -> dict:
     """Reconcile the admin's Kalshi book into bot_picks. An INTENDED bet =
     a resting BUY order (not filled yet → the pick shows YELLOW) OR a held
     position (filled → GREEN, via the existing fill-status coloring). Any
     intended ML / NRFI / MLB spread / MLB total bet we can UNIQUELY place on a
     game that isn't already a pick for owner_uid gets a fresh 1u pending row
-    (line markets decode the line from the ticker suffix). Also removes an
-    auto-logged pick whose resting order was CANCELED before fill (never
-    filled, game not started, no longer resting) so a scratched bet doesn't
-    linger. Idempotent, skip-on-ambiguity — never manufactures a wrong bet."""
+    (line markets decode the line from the ticker suffix). Also REMOVES an
+    auto-logged pick no longer open on Kalshi — canceled OR sold — for a
+    not-yet-started game (guarded so a failed read never wipes the book).
+    Idempotent, skip-on-ambiguity — never manufactures a wrong bet."""
     out = {"intended": 0, "created": 0, "exists": 0, "unmatched": 0,
            "unsupported": 0, "removed": 0}
     if sb is None or not owner_uid:
@@ -4632,15 +4633,23 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> d
     kid, pem, _, _ = _kalshi_creds()
     if not (kid and pem):
         return out
+    # Track whether the Kalshi reads SUCCEEDED — the removal cleanup deletes
+    # picks whose position is GONE, so a FAILED read (empty result) must never
+    # be mistaken for "everything sold" and wipe the whole book.
+    pos_ok = ord_ok = True
     if positions is None:
         pm = _kalshi_my_positions()
-        positions = pm.get("positions") or [] if pm.get("ok") else []
+        pos_ok = pm.get("ok") is True
+        positions = pm.get("positions") or [] if pos_ok else []
     if fills is None:
         fm = _kalshi_my_fills()
         fills = fm.get("fills") or [] if fm.get("ok") else []
     if orders is None:
         om = _kalshi_my_orders()
-        orders = om.get("orders") or [] if om.get("ok") else []
+        ord_ok = om.get("ok") is True
+        orders = om.get("orders") or [] if ord_ok else []
+    if api_ok is None:
+        api_ok = pos_ok and ord_ok
 
     # INTENDED bets keyed (ticker, buy) → entry cents. Resting orders give the
     # bid; a filled position (fill avg) overrides it as the truer entry.
@@ -4800,38 +4809,37 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None) -> d
         except Exception as e:
             app.logger.warning("KALSHI-AUTOLOG insert failed %s: %s", tk, e)
 
-    # Cleanup: an auto-logged pick whose resting order was CANCELED before it
-    # ever filled (no longer intended, no fills, game not started) is a
-    # scratched bet — remove it so the yellow chip doesn't linger for a bet
-    # that isn't real. Only touches auto-logged rows; manual logs are never
-    # deleted.
-    held_tickers = {tk for (tk, _b) in intended.keys()}
-    try:
-        autos = (sb.table("bot_picks")
-                 .select("id,event_start,signal_blob")
-                 .eq("asked_by", owner_uid).eq("status", "pending")
-                 .eq("query_text", "auto-logged from Kalshi")
-                 .limit(300).execute().data) or []
-    except Exception:
-        autos = []
-    for a in autos:
-        blob = a.get("signal_blob") or {}
-        tk = blob.get("kalshi_ticker")
-        if not tk or tk in held_tickers:
-            continue                        # still resting or filled → keep
-        est = _parse_iso(a.get("event_start") or "")
-        if not est or est <= now_dt:
-            continue                        # game started → real bet, let it grade
-        _, qy = _kalshi_fill_avg(fills, tk, "yes")
-        _, qn = _kalshi_fill_avg(fills, tk, "no")
-        if (qy or 0) + (qn or 0) > 0:
-            continue                        # it filled at some point → keep
+    # Removal: an auto-logged pick that's no longer OPEN on Kalshi (no
+    # position AND no resting order) is no longer a bet — CANCELED or SOLD —
+    # so remove it. Guards: (a) only when the Kalshi read SUCCEEDED (never
+    # delete on a failed/empty read — that would wipe the whole book); (b)
+    # only when the game HASN'T started (a started/finished game is left for
+    # the resolver to grade, which also sidesteps sold-mid-game vs settled
+    # ambiguity). Only auto-logged rows; manual logs are never touched.
+    if api_ok:
+        held_tickers = {tk for (tk, _b) in intended.keys()}
         try:
-            sb.table("bot_picks").delete().eq("id", a["id"]).execute()
-            out["removed"] += 1
-            app.logger.info("KALSHI-AUTOLOG removed canceled bet %s (%s)", a["id"], tk)
+            autos = (sb.table("bot_picks")
+                     .select("id,event_start,signal_blob")
+                     .eq("asked_by", owner_uid).eq("status", "pending")
+                     .eq("query_text", "auto-logged from Kalshi")
+                     .limit(300).execute().data) or []
         except Exception:
-            pass
+            autos = []
+        for a in autos:
+            blob = a.get("signal_blob") or {}
+            tk = blob.get("kalshi_ticker")
+            if not tk or tk in held_tickers:
+                continue                    # still resting or held → keep
+            est = _parse_iso(a.get("event_start") or "")
+            if not est or est <= now_dt:
+                continue                    # started → let the resolver grade it
+            try:
+                sb.table("bot_picks").delete().eq("id", a["id"]).execute()
+                out["removed"] += 1
+                app.logger.info("KALSHI-AUTOLOG removed closed bet %s (%s)", a["id"], tk)
+            except Exception:
+                pass
 
     # Self-healing dedup: one Kalshi position = one row. If two pending picks
     # for this owner land on the same (market, market_type, side) — a dup
@@ -5043,7 +5051,8 @@ def api_handicapper_fill_status():
     # Best-effort; a failure never breaks the fill-status chips.
     try:
         _kalshi_autolog(sb, g.uid, positions=positions, fills=my_fills,
-                        orders=orders)
+                        orders=orders,
+                        api_ok=bool(om.get("ok") and pm.get("ok")))
     except Exception:
         pass
 
