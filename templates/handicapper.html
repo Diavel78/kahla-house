@@ -713,7 +713,7 @@
                 <input type="text" id="lmSelection" readonly />
             </div>
             <div class="field" id="lmExecWrap" style="display:none">
-                <label>Kalshi — where to bet</label>
+                <label>Where to bet</label>
                 <div id="lmExec" style="font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.6;white-space:pre-wrap;padding:8px 10px;border:1px solid var(--border,#2a2f3a);border-radius:8px;"></div>
             </div>
             <div class="row2">
@@ -778,7 +778,7 @@
                     </select>
                 </div>
                 <div class="field">
-                    <label>Real fill different? Your Kalshi fill in ¢</label>
+                    <label>Real fill different? Your fill in ¢</label>
                     <div style="display:flex;gap:8px;align-items:center;">
                         <input type="text" id="emPrice" inputmode="decimal" style="flex:1"
                                oninput="_emPreview()" placeholder="e.g. 43" />
@@ -899,21 +899,23 @@
     }
     // Fill chip for a pending row. unknown (API unreachable / market not
     // resolved) renders nothing rather than a wrong "no order".
+    function _fillVenue(f) { return (f && f.venue === 'POLYMARKET') ? 'Polymarket' : 'Kalshi'; }
     function _fillChipHtml(f) {
         if (!f || !f.status || f.status === 'unknown') return '';
+        const V = _fillVenue(f);
         let html = '';
         if (f.status === 'filled')
-            html = `<span class="chip fill ok" title="Kalshi order filled">✓ FILLED</span>`;
+            html = `<span class="chip fill ok" title="${V} order filled">✓ FILLED</span>`;
         else if (f.status === 'partial')
-            html = `<span class="chip fill wait" title="Kalshi maker order partially filled">◔ ${Math.round(f.pct || 0)}% FILLED</span>`;
+            html = `<span class="chip fill wait" title="${V} maker order partially filled">◔ ${Math.round(f.pct || 0)}% FILLED</span>`;
         else if (f.status === 'resting')
-            html = `<span class="chip fill wait" title="Maker order resting on the Kalshi book — not filled yet">◌ RESTING</span>`;
+            html = `<span class="chip fill wait" title="Maker order resting on the ${V} book — not filled yet">◌ RESTING</span>`;
         else if (f.status === 'none')
-            html = `<span class="chip fill miss" title="No matching Kalshi order or position — not placed yet (or canceled)?">⚠ NO ORDER</span>`;
+            html = `<span class="chip fill miss" title="No matching ${V} order or position — not placed yet (or canceled)?">⚠ NO ORDER</span>`;
         if (f.outbid)
             html += `<span class="chip fill take" title="${_esc(_outbidTitle(f))}">⚠ OUTBID ${_fmtCents(f.best_bid_c)}¢ &gt; ${_fmtCents(f.my_price_c)}¢</span>`;
         if (f.warn)
-            html += `<span class="chip fill take" title="Unfilled with tip ≤30m — a maker won't fill in time. TAKE the ask or miss the bet.">⚠ TAKE NOW</span>`;
+            html += `<span class="chip fill take" title="Unfilled with tip ≤5m — a maker won't fill in time. TAKE the ask or miss the bet.">⚠ TAKE NOW</span>`;
         return html;
     }
     // Decoration for a LOGGED games-list chip: amber ◌/◔ until the Kalshi
@@ -923,8 +925,9 @@
         const f = _isAdmin ? _fillByMkt.get(mid + ':' + mt) : null;
         if (!f || !f.status || f.status === 'unknown')
             return { cls: '', mark: '✓', title: 'Already logged — open Details' };
+        const V = _fillVenue(f);
         if (f.status === 'filled')
-            return { cls: '', mark: '✓', title: 'Logged + FILLED on Kalshi' };
+            return { cls: '', mark: '✓', title: 'Logged + FILLED on ' + V };
         if (f.warn)
             return { cls: ' unfilled take', mark: '⚠',
                      title: 'Logged but NOT filled and tip is close — TAKE the ask or miss the bet' };
@@ -932,11 +935,11 @@
             return { cls: ' unfilled take', mark: '⚠', title: 'OUTBID — ' + _outbidTitle(f) };
         if (f.status === 'partial')
             return { cls: ' unfilled', mark: `◔ ${Math.round(f.pct || 0)}%`,
-                     title: 'Logged — Kalshi maker order partially filled' };
+                     title: 'Logged — ' + V + ' maker order partially filled' };
         return { cls: ' unfilled', mark: '◌',
                  title: (f.status === 'none')
-                     ? 'Logged but no matching Kalshi order found — did you place it?'
-                     : 'Logged — maker order resting on Kalshi, not filled yet' };
+                     ? 'Logged but no matching ' + V + ' order found — did you place it?'
+                     : 'Logged — maker order resting on ' + V + ', not filled yet' };
     }
     // Per-game bot VERDICT cache for the games list (admin/bot_access only).
     // {market_id: {picks:[{mt, units}], fetchedAt}} — `picks` is every
@@ -1413,7 +1416,7 @@
         const priceEl = document.getElementById('emPrice');
         priceEl.value = '';
         priceEl.placeholder = _editCtx.price != null
-            ? `now ${_fmtEntryCents(_editCtx.price)} — type your Kalshi fill in ¢ to move it`
+            ? `now ${_fmtEntryCents(_editCtx.price)} — type your fill in ¢ to move it`
             : 'e.g. 43';
         _emStatus(null, '');
         _emPreview();
@@ -1437,7 +1440,7 @@
             return;
         }
         if (o.bad)   { el.textContent = 'Fill price must be in cents (1–99), e.g. 43.'; return; }
-        el.textContent = `Entry moves to ${o.cents}¢ (your Kalshi fill price — logged as-is).`;
+        el.textContent = `Entry moves to ${o.cents}¢ (your fill price — logged as-is).`;
     }
     function _emStatus(kind, msg) {
         const el = document.getElementById('emStatus');
@@ -1456,9 +1459,13 @@
         const payload = {};
         if (u !== _editCtx.units) payload.units = u;
         if (o.cents != null) {
+            // Manual fill correction — keep the pick's EXISTING venue (dual-
+            // venue: a bet lives on whichever venue won the make/take), only
+            // move the entry price. Default Polymarket if the row has no book.
+            const bk = (_editCtx.row && _editCtx.row.entry_book) || 'POLYMARKET';
             payload.price = _centsToAmer(o.cents);
-            payload.book = 'KALSHI';
-            payload.execution = { venue: 'KALSHI', manual: true,
+            payload.book = bk;
+            payload.execution = { venue: bk, manual: true,
                                   fill_cents: o.cents, entry_cents: o.cents };
         }
         if (!Object.keys(payload).length) { closeEdit(); return; }   // nothing changed
@@ -1879,7 +1886,7 @@
             }
         }
         return {
-            market_id: mid, market_type: s.market_type, side: s.side, book: 'KALSHI',
+            market_id: mid, market_type: s.market_type, side: s.side, book: 'POLYMARKET',
             price, line: (line != null ? line : null),
             units: s.units, confidence: s.confidence,
             fair_prob: s.fair_prob ?? null, edge_pp: s.edge_pp ?? null,
@@ -1962,7 +1969,7 @@
                                 : (side === 'no' ? d.nrfi.nrfi_fair_american : d.nrfi.yrfi_fair_american);
                             picks.push({ market_type: 'nrfi', side, units: 1,
                                 _chip: _pickChipLabel('nrfi', side, null, price, 1, d),
-                                _body: { market_id: mid, market_type: 'nrfi', side, book: 'KALSHI',
+                                _body: { market_id: mid, market_type: 'nrfi', side, book: 'POLYMARKET',
                                     price, line: null, units: 1, confidence: 'low',
                                     fair_prob: (side === 'no' ? d.nrfi.p_nrfi : d.nrfi.p_yrfi),
                                     edge_pp: (pb.edge_pp != null ? pb.edge_pp : null), sharp_score: null,
@@ -1986,7 +1993,7 @@
                                 picks.push({ market_type: mt, side: bet.side, units: 1,
                                     _ufc: true,
                                     _chip: _pickChipLabel(mt, bet.side, line, bet.entry_american, 1, d),
-                                    _body: { market_id: mid, market_type: mt, side: bet.side, book: 'KALSHI',
+                                    _body: { market_id: mid, market_type: mt, side: bet.side, book: 'POLYMARKET',
                                         price: bet.entry_american, line, units: 1, confidence: 'low',
                                         fair_prob: null, edge_pp: (bet.edge_pp != null ? bet.edge_pp : null),
                                         sharp_score: null,
@@ -3172,26 +3179,30 @@
         return s;
     }
 
-    // Fold the chosen execution into the log body: entry_book = KALSHI
-    // (the only execution venue — "the bet log is easy, it's Kalshi only"),
-    // entry_price = the best make (american, so CLV/to-WIN stay honest;
-    // the sub-cent Kalshi maker fee rides outside the logged price).
-    // No verdict cached (no Kalshi market) → the seeded dossier price
-    // stands, still logged as KALSHI. signal_blob.execution keeps the read.
+    // Fold the chosen execution into the log body (DUAL-VENUE, July 2026
+    // revert): entry_book = the venue that WON the make/take (the cheapest
+    // resting bid across Polymarket + Kalshi — _rawMakes is best-first over
+    // both), so the log records where you actually bet. entry_price = that
+    // venue's best make (american, so CLV/to-WIN stay honest; the sub-cent
+    // maker fee/rebate rides outside the logged price). No verdict cached →
+    // default Polymarket (the seeded dossier price IS the PMM quote/fair).
+    // signal_blob.execution keeps the full cross-venue read.
     function _applyMakeTakeToBody(body) {
         if (!body || !body.market_id) return body;
-        body.book = 'KALSHI';
+        body.book = 'POLYMARKET';              // seeded price = PMM quote/fair
         const j = _makeTakeCache.get(_mtKey(body.market_id, body.market_type, body.side));
         if (!j || !j.available) return body;
-        const makes = _rawMakes(j);            // [{venue, cents}], best-first
-        if (!makes.length) return body;        // no bid → keep seeded price
-        const chosen = makes[0];
+        const makes = _rawMakes(j);            // [{venue, cents}], best-first across BOTH venues
+        if (!makes.length) return body;        // no bid → keep seeded Poly price
+        const chosen = makes[0];               // cheapest resting bid → its venue wins
+        const venue = ({POLYMARKET:'POLYMARKET', KALSHI:'KALSHI'}[chosen.venue] || 'POLYMARKET');
+        body.book = venue;
         const amer = _centsToAmer(chosen.cents);
         if (amer != null) { body.price = amer; body._price = amer; }
         body.signal_blob = Object.assign({}, body.signal_blob, {
-            execution: { rec: 'MAKE', venue: 'KALSHI',
+            execution: { rec: 'MAKE', venue: venue,
                          make_cents: chosen.cents, entry_cents: chosen.cents,
-                         entry_book: 'KALSHI',
+                         entry_book: venue,
                          options: j.options || [] } });
         return body;
     }
@@ -3419,7 +3430,7 @@
             market_id:   _lastDossier.market_id,
             market_type: mt,
             side:        side,
-            book:        'KALSHI',
+            book:        'POLYMARKET',
             price:       entryPrice,
             line:        entryLine,
             fair_prob:   entryProb,
@@ -3464,7 +3475,7 @@
             market_id:   _lastDossier.market_id,
             market_type: 'nrfi',
             side:        side,
-            book:        'KALSHI',
+            book:        'POLYMARKET',
             price:       makerEntry,
             line:        null,
             fair_prob:   prob,
@@ -3516,7 +3527,7 @@
             market_id:   _lastDossier.market_id,
             market_type: mt,
             side:        side,
-            book:        'KALSHI',
+            book:        'POLYMARKET',
             price:       bet.entry_american,
             line:        line,
             fair_prob:   null,
@@ -3590,7 +3601,7 @@
             market_id:   _lastDossier.market_id,
             market_type: s.market_type,
             side:        s.side,
-            book:        'KALSHI',
+            book:        'POLYMARKET',
             // Maker entry: we rest a limit at the bid and fill there, so
             // log the BID as the entry — that's our real maker price, better
             // than the fair/ask, and it's what CLV + to-win profit key off.
@@ -3658,13 +3669,14 @@
             o.units, o.sim, o.ctx, o.line);
         if (seq !== _lmExecSeq) return;   // superseded by a newer modal open
         if (!j || j.price == null) {
-            // Kalshi lists essentially everything (RULE 0.001) — a miss here
-            // means the READER couldn't match the market, not that it doesn't
-            // exist. The log proceeds at the seeded exchange price.
-            el.textContent = 'Couldn’t match the Kalshi market (reader gap — logs at exchange price).';
+            // Both venues list essentially everything (RULE 0.001) — a miss
+            // here means neither READER matched the market, not that it
+            // doesn't exist. The log proceeds at the seeded exchange price.
+            el.textContent = 'Couldn’t match either venue’s market (reader gap — logs at exchange price).';
             return;
         }
-        let s = `${j.rec} at ${_mtCents(j.price)}¢`
+        // DUAL-VENUE: lead with the winning venue so it says WHERE to bet.
+        let s = `${j.rec} ${j.venue_label || ''} at ${_mtCents(j.price)}¢`.replace('  ', ' ')
             + (j.best_bid != null && j.best_ask != null
                 ? ` · book ${_mtCents(j.best_bid)}¢/${_mtCents(j.best_ask)}¢` : '');
         const why = (j.why || [])[0];
@@ -3861,7 +3873,7 @@
             market_id:   d.market_id,
             market_type: 'moneyline',
             side:        choice.side,
-            book:        'KALSHI',
+            book:        'POLYMARKET',
             price:       (pmmBid != null ? pmmBid : choice.pin.fair_american),
             line:        null,
             fair_prob:   choice.pin.fair_prob,
@@ -3959,11 +3971,10 @@
         if (_pendingPick && _pendingPick.signal_extra) {
             body.signal_blob = Object.assign({}, body.signal_blob, _pendingPick.signal_extra);
         }
-        // Venue = KALSHI on every log ("the bet log is easy, it's Kalshi
-        // only"); when the make/take engine has a live Kalshi verdict for
-        // this side, the entry price becomes the live make and the rec is
-        // stashed for the execution review. A real fill that lands at a
-        // different price gets corrected via the Edit modal.
+        // Venue is set by the make/take verdict (DUAL-VENUE): whichever of
+        // Polymarket / Kalshi has the cheaper resting bid wins entry_book +
+        // entry_price; no live verdict → Polymarket (the seeded PMM price).
+        // A real fill at a different price gets corrected via the Edit modal.
         _applyMakeTakeToBody(body);
         const submitBtn = document.getElementById('lmSubmit');
         submitBtn.disabled = true; submitBtn.textContent = 'Logging…';

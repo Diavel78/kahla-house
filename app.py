@@ -3716,6 +3716,58 @@ def _invert_book(book: dict | None) -> dict | None:
             "best_ask": asks[0][0] if asks else None}
 
 
+def _pmm_side_entry(client, sport: str, away: str, home: str, side: str,
+                    market_type: str, line: float | None = None,
+                    event_start_iso: str | None = None) -> dict | None:
+    """The Polymarket market ENTRY ({slug, side, line, synthetic, quote, …})
+    for ONE picked side — the shared resolver behind `_pmm_side_book` (the
+    make/take book) AND the Poly fill tracker (needs the slug + synthetic
+    flag to match orders/positions). `pmm_markets.lookup` is 5-min cached.
+    Nearest-line match for spread/total. Returns None on any miss."""
+    key = ("ml" if market_type in ("moneyline", "ml")
+           else "spread" if market_type in ("spread", "spr")
+           else "total" if market_type in ("total", "tot")
+           else "nrfi" if market_type == "nrfi"
+           else "ufc_distance" if market_type == "distance"
+           else None)
+    if key is None or not (sport and away and home and side):
+        return None
+    try:
+        import pmm_markets as _pm
+        data = _pm.lookup(client, sport, away, home, event_start_iso)
+    except Exception:
+        return None
+    rows = (data or {}).get(key) or []
+    entry = None
+    if key in ("spread", "total") and line is not None:
+        cand = [e for e in rows if e.get("side") == side]
+        entry = (min(cand, key=lambda e: abs((e.get("line") or 0) - line))
+                 if cand else None)
+    if entry is None:
+        entry = next((e for e in rows if e.get("side") == side), None)
+    return entry
+
+
+def _pmm_side_book(client, sport: str, away: str, home: str, side: str,
+                   market_type: str, line: float | None = None,
+                   event_start_iso: str | None = None) -> dict | None:
+    """Polymarket order book for ONE picked side — the Poly analog of the
+    Kalshi `_kalshi_*_book` readers, so `_cross_book_signal` can compare
+    both venues (dual-venue best-execution, July 2026 revert). Resolves the
+    side entry via `_pmm_side_entry` → `_pmm_book(slug)`, inverted for a
+    synthetic side. Returns None on any miss (unlisted market / no slug /
+    SDK error) — a miss is a coverage/reader gap, never a claim the venue
+    is thin (RULE 0.001)."""
+    entry = _pmm_side_entry(client, sport, away, home, side, market_type,
+                            line=line, event_start_iso=event_start_iso)
+    if not entry or not entry.get("slug"):
+        return None
+    pbook = _pmm_book(client, entry["slug"])
+    if entry.get("synthetic") and pbook:
+        pbook = _invert_book(pbook)
+    return pbook
+
+
 def _pmm_taker_fee_cents(price_cents) -> float:
     """Polymarket US TAKER fee per share, in cents: 5c · p·(1-p) (p = price
     in dollars) — peaks at 1.25c/share at 50c, tapers to the wings. Confirmed
@@ -5001,18 +5053,176 @@ def api_kalshi_probe():
 # chips still work, sync quietly skips (Edit modal remains the manual
 # override).
 _FILL_STATUS_TTL = 30       # s — server cache; the page polls on its 60s loadData
-_FS_TAKE_WARN_MIN = 30      # unfilled + tip ≤30m → TAKE warning (make/take clock rule)
+_FS_TAKE_WARN_MIN = 5       # unfilled + tip ≤5m → TAKE warning (user: "5 minute take warning")
+
+
+# ───────────── Polymarket fill tracker (dual-venue, July 2026 revert) ─────────
+# The Poly analog of the Kalshi per-pick fill block below. A bet logged with
+# entry_book=POLYMARKET is tracked against the admin's Polymarket CLOB orders +
+# positions (the SAME proven reads /api/my-orders + /api/my-bets use), so the
+# fill chips + 5-min take-warning work wherever the make/take engine routed the
+# bet. Same status vocabulary as Kalshi: resting / partial(pct) / filled / none
+# / unknown, + warn + outbid, + entry auto-sync from the real fill.
+
+def _pmm_open_orders_raw(client) -> list:
+    """Working Poly CLOB orders normalized for fill matching:
+    [{slug, intent, state, qty, cum, leaves, price_yes}]. price_yes is the
+    SDK's canonical YES-probability price — orient to our side at match time
+    (BUY_SHORT / synthetic → 1−price_yes). Empty list on any SDK error."""
+    out: list = []
+    try:
+        resp = client.orders.list()
+        raw = (resp.get("orders") if isinstance(resp, dict)
+               else getattr(resp, "orders", [])) or []
+    except Exception:
+        return out
+    for o in raw:
+        def _g(k, d=None):
+            return o.get(k, d) if isinstance(o, dict) else getattr(o, k, d)
+        state = _g("state") or ""
+        if state not in _OPEN_ORDER_STATES:
+            continue
+        md = _g("marketMetadata") or {}
+        slug = ((md.get("slug") if isinstance(md, dict)
+                 else getattr(md, "slug", None)) or "")
+        out.append({"slug": slug, "intent": _g("intent") or "", "state": state,
+                    "qty": _safe_float(_g("quantity")) or 0.0,
+                    "cum": _safe_float(_g("cumQuantity")) or 0.0,
+                    "leaves": _safe_float(_g("leavesQuantity")) or 0.0,
+                    "price_yes": _safe_float(_g("price"))})
+    return out
+
+
+def _pmm_positions_raw(client) -> dict:
+    """{slug: {net, qty, avg_price}} of live Poly positions. net>0 = YES held,
+    net<0 = NO held; avg_price = cost/qty = the held side's own entry price
+    (no YES-flip — cost is already what was paid for the held side)."""
+    out: dict = {}
+    try:
+        for slug, pos in fetch_positions(client):
+            if pos.get("expired"):
+                continue
+            net = _safe_float(pos.get("netPosition")) or 0.0
+            if abs(net) < 0.01:
+                continue
+            cost = _safe_float(pos.get("cost"))
+            qty = abs(net)
+            out[slug] = {"net": net, "qty": qty,
+                         "avg_price": ((cost / qty) if (cost and qty > 0) else None)}
+    except Exception:
+        pass
+    return out
+
+
+def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict) -> dict:
+    """Fill state for ONE pending Polymarket-executed pick — mirrors the Kalshi
+    per-pick block (resting/partial/filled/none/unknown + warn + outbid + entry
+    auto-sync). Matches by the pick's resolved Poly market slug; our side =
+    BUY_LONG (YES) unless the entry is synthetic (BUY_SHORT / NO)."""
+    dt = _parse_iso(p.get("event_start") or "")
+    mins = ((dt - now).total_seconds() / 60.0) if dt else None
+    entry = {"id": p["id"], "market_id": p.get("market_id"),
+             "market_type": p.get("market_type"), "pct": None, "warn": False,
+             "venue": "POLYMARKET",
+             "mins_to_start": (round(mins) if mins is not None else None)}
+    ev = p.get("event_name") or ""
+    away, home = (ev.split(" @ ", 1) if " @ " in ev else ("", ""))
+    pblob = p.get("signal_blob") if isinstance(p.get("signal_blob"), dict) else {}
+    execb = pblob.get("execution") if isinstance(pblob.get("execution"), dict) else {}
+    slug = pblob.get("pmm_slug") or execb.get("pmm_slug")
+    synthetic = bool(execb.get("pmm_synthetic"))
+    if not slug:
+        se = _pmm_side_entry(client, p.get("sport"), away, home, p.get("side"),
+                             p.get("market_type"), line=p.get("entry_line"),
+                             event_start_iso=(dt.isoformat() if dt else None))
+        if se and se.get("slug"):
+            slug, synthetic = se["slug"], bool(se.get("synthetic"))
+    if not slug:
+        entry["status"] = "unknown"          # reader gap → no wrong "no order"
+        return entry
+    want_intent = "ORDER_INTENT_BUY_SHORT" if synthetic else "ORDER_INTENT_BUY_LONG"
+    my_orders = [o for o in orders
+                 if o["slug"] == slug and o["intent"] == want_intent]
+    init = sum(o["qty"] for o in my_orders)
+    cum = sum(o["cum"] for o in my_orders)
+    rem = sum(o["leaves"] for o in my_orders)
+    pos = positions.get(slug) or {}
+    pos_net = pos.get("net") or 0.0
+    have_pos = (pos_net < 0 if synthetic else pos_net > 0)
+    pos_qty = pos.get("qty", 0.0) if have_pos else 0.0
+
+    if my_orders and rem > 0:
+        if cum > 0:
+            entry["status"] = "partial"
+            tot = init or (cum + rem)
+            entry["pct"] = round(cum / tot * 100.0, 1) if tot else None
+        else:
+            entry["status"], entry["pct"] = "resting", 0.0
+        if mins is None or mins > 0:                 # outbid (pre-game only)
+            try:
+                book = _pmm_book(client, slug)
+                if synthetic and book:
+                    book = _invert_book(book)
+                myp = None
+                for o in my_orders:
+                    py = o.get("price_yes")
+                    if py is None:
+                        continue
+                    c = round((1 - py if synthetic else py) * 100.0)
+                    myp = c if myp is None else max(myp, c)
+                if (book and myp is not None
+                        and book.get("best_bid") is not None
+                        and book["best_bid"] > myp + 0.001):
+                    entry.update(outbid=True, my_price_c=myp,
+                                 best_bid_c=book["best_bid"],
+                                 best_ask_c=book.get("best_ask"),
+                                 ahead_qty=round(sum(
+                                     q for c, q in (book.get("bids") or [])
+                                     if c > myp + 0.001)))
+            except Exception:
+                pass
+    elif pos_qty > 0 or (my_orders and rem <= 0):
+        entry["status"], entry["pct"] = "filled", 100.0
+    else:
+        entry["status"] = "none"
+    if (entry["status"] in ("resting", "partial", "none")
+            and mins is not None and 0 < mins <= _FS_TAKE_WARN_MIN):
+        entry["warn"] = True
+    # Entry auto-sync — the held position's avg price becomes the pick's entry
+    # (PRICE ONLY; units/line never touched). ≥0.5¢ divergence gate.
+    if have_pos and pos.get("avg_price") and entry["status"] in ("filled", "partial"):
+        fill_c = pos["avg_price"] * 100.0
+        new_amer = _prob_to_amer_py(pos["avg_price"])
+        cur_amer = p.get("entry_price")
+        cur_prob = _amer_to_prob_py(cur_amer)
+        cur_c = cur_prob * 100.0 if cur_prob is not None else None
+        entry["fill_avg_c"] = round(fill_c, 2)
+        if (new_amer is not None
+                and (cur_c is None or abs(fill_c - cur_c) >= 0.5)
+                and new_amer != cur_amer):
+            try:
+                get_supabase().table("bot_picks").update(
+                    {"entry_price": new_amer}).eq("id", p["id"]).execute()
+                entry["synced_price"] = new_amer
+                print(f"pmm fill-sync pick {p['id']} entry {cur_amer} -> "
+                      f"{new_amer} (avg fill {fill_c:.1f}c)")
+            except Exception as e:
+                print(f"pmm fill-sync failed pick {p['id']}: {e}")
+    return entry
 
 
 @app.route("/api/handicapper/fill-status")
 @admin_required
 def api_handicapper_fill_status():
-    """Kalshi fill state per pending pick — see the block comment above.
-    Admin-only: the API creds are the admin's personal Kalshi account.
-    configured:false (quiet frontend no-op) without creds. Statuses:
+    """DUAL-VENUE fill state per pending pick (July 2026 revert): each pick
+    is tracked on the venue its make/take verdict routed it to — Kalshi picks
+    via the caller's Kalshi account, Polymarket picks via `_pmm_fill_entry`
+    against the caller's Poly CLOB orders/positions. Admin-only (both venues'
+    creds are the admin's personal accounts). configured:false (quiet no-op)
+    only when neither venue is trackable. Statuses (same on both venues):
     resting / partial (pct) / filled / none / unknown, + warn (unfilled
-    ≤30m to tip) + outbid (my resting price vs the public book's best
-    bid, our-side oriented)."""
+    ≤5m to tip) + outbid (my resting price vs the public book's best bid,
+    our-side oriented). Each row carries `venue`."""
     import time as _time
     cache_key = f"fill_status:{g.uid}"
     now_ts = _time.time()
@@ -5020,9 +5230,6 @@ def api_handicapper_fill_status():
     if cached and (now_ts - cached["ts"]) < _FILL_STATUS_TTL:
         return jsonify(cached["data"])
 
-    kid, pem, _, _ = _kalshi_creds()
-    if not (kid and pem):
-        return jsonify({"ok": True, "configured": False, "fills": []})
     sb = get_supabase()
     if sb is None:
         return jsonify({"ok": False, "error": "Supabase not configured"}), 503
@@ -5036,33 +5243,71 @@ def api_handicapper_fill_status():
     except Exception as e:
         return jsonify({"ok": False, "error": f"pending fetch: {e}"}), 500
 
-    om = _kalshi_my_orders()
-    pm = _kalshi_my_positions()
-    fm = _kalshi_my_fills()
-    api_ok = bool(om.get("ok"))
-    orders = om.get("orders") or []
-    positions = pm.get("positions") or [] if pm.get("ok") else []
-    my_fills = fm.get("fills") or [] if fm.get("ok") else []
+    # DUAL-VENUE dispatch (July 2026 revert): each pending pick is tracked on
+    # the venue its make/take verdict routed it to (entry_book).
+    def _is_poly(p):
+        return (p.get("entry_book") or "").upper() in ("POLYMARKET", "PMM")
+    has_kalshi = any(not _is_poly(p) for p in pending)
+    has_poly = any(_is_poly(p) for p in pending)
+
+    kid, pem, _, _ = _kalshi_creds()
+    kalshi_configured = bool(kid and pem)
+    # configured:false (quiet frontend no-op) only when NEITHER venue can be
+    # tracked — no Kalshi creds AND no Poly-executed pick pending.
+    if not (kalshi_configured or has_poly):
+        result = {"ok": True, "configured": False, "fills": []}
+        _cache[cache_key] = {"data": result, "ts": now_ts}
+        return jsonify(result)
     now = datetime.now(timezone.utc)
 
-    # Auto-log: reconcile the caller's Kalshi holdings into bot_picks (reusing
-    # the positions/fills just fetched). Kalshi is the book of record — a bet
-    # that's on Kalshi gets a 1u pick + green tag without hand-logging.
-    # Best-effort; a failure never breaks the fill-status chips.
-    try:
-        _kalshi_autolog(sb, g.uid, positions=positions, fills=my_fills,
-                        orders=orders,
-                        api_ok=bool(om.get("ok") and pm.get("ok")))
-    except Exception:
-        pass
+    # ── Kalshi venue data (only when a Kalshi-executed pick is pending) ──
+    api_ok = False
+    orders, positions, my_fills = [], [], []
+    if kalshi_configured and has_kalshi:
+        om = _kalshi_my_orders()
+        pm = _kalshi_my_positions()
+        fm = _kalshi_my_fills()
+        api_ok = bool(om.get("ok"))
+        orders = om.get("orders") or []
+        positions = pm.get("positions") or [] if pm.get("ok") else []
+        my_fills = fm.get("fills") or [] if fm.get("ok") else []
+        # Auto-log: reconcile the caller's Kalshi holdings into bot_picks.
+        # Best-effort; a failure never breaks the fill-status chips.
+        try:
+            _kalshi_autolog(sb, g.uid, positions=positions, fills=my_fills,
+                            orders=orders,
+                            api_ok=bool(om.get("ok") and pm.get("ok")))
+        except Exception:
+            pass
+
+    # ── Polymarket venue data (only when a Poly-executed pick is pending) ──
+    poly_client = poly_orders = poly_positions = None
+    if has_poly:
+        try:
+            poly_client = get_client()
+            poly_orders = _pmm_open_orders_raw(poly_client)
+            poly_positions = _pmm_positions_raw(poly_client)
+        except Exception:
+            poly_client = poly_orders = poly_positions = None
 
     fills = []
     for p in pending:
+        # Poly-executed pick → the Poly tracker; everything else → Kalshi.
+        if _is_poly(p):
+            if poly_orders is None:
+                fills.append({"id": p["id"], "market_id": p.get("market_id"),
+                              "market_type": p.get("market_type"),
+                              "status": "unknown", "pct": None, "warn": False,
+                              "venue": "POLYMARKET", "mins_to_start": None})
+            else:
+                fills.append(_pmm_fill_entry(poly_client, p, now,
+                                             poly_orders, poly_positions or {}))
+            continue
         dt = _parse_iso(p.get("event_start") or "")
         mins = ((dt - now).total_seconds() / 60.0) if dt else None
         entry = {"id": p["id"], "market_id": p.get("market_id"),
                  "market_type": p.get("market_type"), "pct": None,
-                 "warn": False,
+                 "warn": False, "venue": "KALSHI",
                  "mins_to_start": (round(mins) if mins is not None else None)}
         ev = p.get("event_name") or ""
         away, home = (ev.split(" @ ", 1) if " @ " in ev else ("", ""))
@@ -5387,19 +5632,19 @@ def debug_orderbook():
 @app.route("/api/handicapper/make-take")
 @bot_required
 def api_make_take():
-    """Live best execution for one picked side on KALSHI — the sole
-    execution venue (July 2026, user: "I'm moving to 100% Kalshi";
-    ProphetX is dead, the Poly leg is dormant). Returns the cheapest
-    fillable of {MAKE, MAKE+, TAKE} on the Kalshi book, or
-    available:false when the READER couldn't match a Kalshi market —
-    per RULE 0.001 Kalshi lists essentially everything, so treat that
-    as a coverage gap to fix via /debug-kalshi-discover, not "Kalshi
-    doesn't have it". Params: units, starts_in_min (also reconstructs
-    the event time for Kalshi series-matching), and sport/away/home/
-    side/market_type/line for the book lookup. `slug` + `inverse` (the
-    old PMM-book params) are accepted and ignored — the Kalshi readers
-    own side orientation (two real rows per game, no synthetic
-    inversion)."""
+    """Live best execution for one picked side across BOTH venues —
+    Polymarket AND Kalshi (dual-venue best-execution, July 2026 revert:
+    user is take-heavy and Poly's taker is ~40% cheaper + pays a maker
+    rebate, so the engine routes each bet to the cheaper fillable venue
+    while Kalshi's coverage stays as the other candidate). Builds each
+    venue's side book, then returns the cheapest fillable of {MAKE,
+    MAKE+, TAKE} across the two (see _cross_book_signal). available:false
+    only when NEITHER venue's reader matched — per RULE 0.001 both venues
+    list essentially everything, so that's a reader gap to fix (via
+    /debug-crossbook / /debug-kalshi-discover), never "the venue doesn't
+    have it". Params: units, starts_in_min (also reconstructs the event
+    time for Kalshi series-matching + the Poly lookup window), and
+    sport/away/home/side/market_type/line for both book lookups."""
     try:
         units = float(request.args.get("units") or 1)
     except ValueError:
@@ -5445,11 +5690,23 @@ def api_make_take():
                                           side, line, want_dt=want_dt)
         except Exception:
             kbook = None
-    sig = _cross_book_signal(None, kbook, units=units, starts_in_min=sim)
+    # Polymarket side book (the re-enabled leg) — same game identity, its
+    # own reader. Poly lookup is 5-min cached (the dossier warms it), so
+    # the marginal cost here is the top-of-book CLOB read.
+    pbook = None
+    if sport and away and home and side:
+        try:
+            pbook = _pmm_side_book(
+                get_client(), sport, away, home, side, market_type, line=line,
+                event_start_iso=(want_dt.isoformat() if want_dt else None))
+        except Exception:
+            pbook = None
+    sig = _cross_book_signal(pbook, kbook, units=units, starts_in_min=sim)
     if not sig:
         return jsonify({"ok": True, "available": False,
-                        "reason": "kalshi market not matched (reader gap "
-                                  "— confirm via /debug-kalshi-discover)"})
+                        "reason": "no book on either venue (reader gap — "
+                                  "confirm via /debug-crossbook / "
+                                  "/debug-kalshi-discover)"})
     # Pinnacle reference (log-modal "am I getting a decent line?" check) —
     # CACHE-ONLY read of the parlay-api slate; a modal open never spends
     # credits (paid pulls stay tied to bot-bet moments in the paperlog).
@@ -5470,7 +5727,8 @@ def api_make_take():
         except Exception:
             pin = None
     return jsonify({"ok": True, "available": True,
-                    "kalshi": bool(kbook), "pin": pin, **sig})
+                    "kalshi": bool(kbook), "polymarket": bool(pbook),
+                    "pin": pin, **sig})
 
 
 @app.route("/debug-crossbook")
@@ -9225,8 +9483,8 @@ def _live_rows(sb, uid):
     /api/handicapper/ticker (shared-secret menu-bar widget feed).
     Raises on the pending fetch failing; callers map that to a 500."""
     pending = (sb.table("bot_picks")
-               .select("id,market_id,sport,event_name,event_start,"
-                       "market_type,side,units,entry_price,entry_line,signal_blob")
+               .select("id,market_id,sport,event_name,event_start,market_type,"
+                       "side,units,entry_price,entry_line,entry_book,signal_blob")
                .eq("status", "pending")
                .eq("asked_by", uid)
                .order("event_start", desc=False)
@@ -9273,10 +9531,11 @@ def _live_rows(sb, uid):
         if not (matched_live or started):
             continue
 
-        # Win prob: decided (needs a real ESPN match) → live KALSHI mid
-        # (the venue the bet actually lives on — July 12 2026 cutover) →
-        # live Polymarket price (fallback) → grey. Odds-only (works for
-        # every sport, no per-sport model).
+        # Win prob: decided (needs a real ESPN match) → the bet's OWN venue's
+        # live mid (dual-venue, July 2026 revert) → the other venue → grey.
+        # Both venues price within ~2¢, so either mid is a fine live-win%
+        # proxy; matching the bet's venue just keeps it honest. Odds-only
+        # (works for every sport, no per-sport model).
         win_prob, prob_src = None, None
         # Anchor the live-price lookups to the SAME game the score matched
         # (its real ESPN start) — not the possibly-stale/ambiguous stored
@@ -9288,23 +9547,31 @@ def _live_rows(sb, uid):
             if win_prob is not None:
                 prob_src = "decided"
         if win_prob is None:
-            try:
-                win_prob = _kalshi_live_mid(bet, away, home, anchor_dt=anchor_dt)
-            except Exception:
-                win_prob = None
-            if win_prob is not None:
-                prob_src = "kalshi"
-        if win_prob is None:
-            if client is None:
+            def _kal():
                 try:
-                    client = get_client()
+                    return _kalshi_live_mid(bet, away, home, anchor_dt=anchor_dt)
                 except Exception:
-                    client = None
-            if client is not None:
-                win_prob = _live_market_prob(bet, away, home, client, pmm_cache,
-                                             anchor_dt=anchor_dt)
-                if win_prob is not None:
-                    prob_src = "market"
+                    return None
+
+            def _poly():
+                nonlocal client
+                if client is None:
+                    try:
+                        client = get_client()
+                    except Exception:
+                        client = None
+                if client is None:
+                    return None
+                return _live_market_prob(bet, away, home, client, pmm_cache,
+                                         anchor_dt=anchor_dt)
+            is_poly = (bet.get("entry_book") or "").upper() in ("POLYMARKET", "PMM")
+            order = ([("market", _poly), ("kalshi", _kal)] if is_poly
+                     else [("kalshi", _kal), ("market", _poly)])
+            for _src, _fn in order:
+                v = _fn()
+                if v is not None:
+                    win_prob, prob_src = v, _src
+                    break
 
         out.append({
             "id":            bet["id"],
