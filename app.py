@@ -4920,11 +4920,136 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None,
     return out
 
 
+def _pmm_autolog(sb, owner_uid, client=None, orders=None) -> dict:
+    """Reconcile the admin's resting POLYMARKET orders into bot_picks — the
+    Poly analog of `_kalshi_autolog` (dual-venue, July 2026 revert). A resting
+    BUY order that UNIQUELY reproduces one of our (game, market_type, side)
+    Poly-market slugs becomes a fresh 1u POLYMARKET pending pick (entry = the
+    resting bid), so a bet placed on Poly shows in the Pick Bot without hand-
+    logging — exactly like Kalshi's book-of-record autolog. Matching is by
+    SLUG: build the forward slug→(market,mt,side) index from our upcoming
+    games via `pmm_markets.lookup` (only when there ARE resting orders, so
+    it's a no-op most ticks), then match each order's slug + BUY_LONG/SHORT
+    (YES vs synthetic NO). Create-only for v1 (no removal — a canceled Poly
+    order leaves a pick to delete by hand; safer than a removal bug wiping the
+    book). Idempotent, skip-on-ambiguity — never manufactures a wrong bet."""
+    out = {"intended": 0, "created": 0, "exists": 0, "unmatched": 0}
+    if sb is None or not owner_uid:
+        return out
+    try:
+        if client is None:
+            client = get_client()
+        if orders is None:
+            orders = _pmm_open_orders_raw(client)
+    except Exception:
+        return out
+    buys = [o for o in (orders or [])
+            if o.get("slug") and (o.get("intent") or "").startswith("ORDER_INTENT_BUY")]
+    out["intended"] = len(buys)
+    if not buys:
+        return out                              # no resting orders → no work
+    order_slugs = {o["slug"] for o in buys}
+    now_dt = datetime.now(timezone.utc)
+    hi = (now_dt + timedelta(hours=48)).isoformat()
+    try:
+        markets = (sb.table("markets")
+                   .select("id,sport,event_name,event_start")
+                   .in_("sport", list(_PM_SPORTS)).eq("status", "active")
+                   .gte("event_start", now_dt.isoformat()).lte("event_start", hi)
+                   .limit(150).execute().data) or []
+    except Exception:
+        markets = []
+    try:
+        import pmm_markets as _pm
+    except Exception:
+        return out
+    # slug → list of (market, market_type, side, line, synthetic). Both the
+    # YES entry (non-synthetic) and its synthesized NO share a slug, so a slug
+    # carries both sides — the order's intent picks which.
+    slug_index: dict = {}
+    for mk in markets:
+        ev = mk.get("event_name") or ""
+        if " @ " not in ev:
+            continue
+        away, home = [s.strip() for s in ev.split(" @ ", 1)]
+        try:
+            data = _pm.lookup(client, mk["sport"], away, home,
+                              mk.get("event_start"))
+        except Exception:
+            continue
+        for key, mt in (("ml", "moneyline"), ("spread", "spread"),
+                        ("total", "total"), ("nrfi", "nrfi")):
+            for e in (data or {}).get(key) or []:
+                slug = e.get("slug")
+                if slug and slug in order_slugs:
+                    slug_index.setdefault(slug, []).append(
+                        (mk, mt, e.get("side"), e.get("line"),
+                         bool(e.get("synthetic"))))
+    for o in buys:
+        cands = slug_index.get(o["slug"]) or []
+        want_syn = (o.get("intent") or "").endswith("_SHORT")
+        cands = [c for c in cands if c[4] == want_syn]
+        uniq = {(c[0]["id"], c[1], c[2]) for c in cands}
+        if len(uniq) != 1:
+            out["unmatched"] += 1                # 0 or ambiguous → skip
+            continue
+        mk, mt, side, line, synth = cands[0]
+        try:
+            existing = (sb.table("bot_picks").select("id,signal_blob")
+                        .eq("market_id", mk["id"]).eq("market_type", mt)
+                        .eq("side", side).eq("asked_by", owner_uid)
+                        .limit(1).execute().data) or []
+        except Exception:
+            out["unmatched"] += 1                # dedup check failed → retry
+            continue
+        if existing:
+            out["exists"] += 1
+            ex = existing[0]
+            b = ex.get("signal_blob") if isinstance(ex.get("signal_blob"), dict) else {}
+            b = b or {}
+            if b.get("pmm_slug") != o["slug"]:
+                try:
+                    (sb.table("bot_picks").update(
+                        {"signal_blob": {**b, "pmm_slug": o["slug"],
+                                         "pmm_synthetic": synth}})
+                     .eq("id", ex["id"]).execute())
+                except Exception:
+                    pass
+            continue
+        py = o.get("price_yes")
+        our_prob = ((1 - py) if (synth and py is not None) else py)
+        price = (_prob_to_amer_py(our_prob)
+                 if (our_prob is not None and 0 < our_prob < 1) else None)
+        if price is None:
+            out["unmatched"] += 1
+            continue
+        row = {
+            "asked_by":    owner_uid,
+            "query_text":  "auto-logged from Polymarket",
+            "market_id":   mk["id"], "sport": mk["sport"],
+            "event_name":  mk["event_name"], "event_start": mk["event_start"],
+            "market_type": mt, "side": side,
+            "entry_book":  "POLYMARKET", "entry_price": price,
+            "entry_line":  line, "units": 1, "confidence": "low",
+            "signal_blob": {"source": "pmm_autolog", "pmm_slug": o["slug"],
+                            "pmm_synthetic": synth},
+        }
+        try:
+            sb.table("bot_picks").insert(row).execute()
+            out["created"] += 1
+            app.logger.info("PMM-AUTOLOG created %s %s/%s 1u @ %s (%s)",
+                            mk["event_name"], mt, side, price, o["slug"])
+        except Exception as e:
+            app.logger.warning("PMM-AUTOLOG insert failed %s: %s", o["slug"], e)
+    return out
+
+
 @app.route("/api/handicapper/kalshi-autolog")
 def api_kalshi_autolog():
-    """Cron-pinged reconcile so Kalshi bets get logged even when the admin
-    NEVER opens the site (the whole point). Shared-secret like the other cron
-    endpoints; files picks under the Kalshi owner uid."""
+    """Cron-pinged reconcile so exchange bets get logged even when the admin
+    NEVER opens the site (the whole point). DUAL-VENUE (July 2026): runs BOTH
+    the Kalshi autolog AND the Polymarket autolog under the same owner uid.
+    Shared-secret like the other cron endpoints."""
     key = request.args.get("key", "")
     want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
     if not want or key != want:
@@ -4937,6 +5062,10 @@ def api_kalshi_autolog():
         summary = _kalshi_autolog(sb, owner)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+    try:
+        summary["pmm"] = _pmm_autolog(sb, owner)
+    except Exception as e:
+        summary["pmm_error"] = str(e)[:200]
     return jsonify({"ok": True, **summary})
 
 
@@ -5271,6 +5400,13 @@ def _compute_fill_status(sb, uid: str) -> dict:
             poly_client = get_client()
             poly_orders = _pmm_open_orders_raw(poly_client)
             poly_positions = _pmm_positions_raw(poly_client)
+            # Book-of-record: log any resting Poly order not yet a pick (the
+            # COLD start — first-ever Poly pick — is the cron autolog; this is
+            # the fast reconcile while the page is open). Mirrors Kalshi.
+            try:
+                _pmm_autolog(sb, uid, client=poly_client, orders=poly_orders)
+            except Exception:
+                pass
         except Exception:
             poly_client = poly_orders = poly_positions = None
 
