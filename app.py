@@ -5211,37 +5211,23 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict) -> dict
     return entry
 
 
-@app.route("/api/handicapper/fill-status")
-@admin_required
-def api_handicapper_fill_status():
-    """DUAL-VENUE fill state per pending pick (July 2026 revert): each pick
-    is tracked on the venue its make/take verdict routed it to — Kalshi picks
-    via the caller's Kalshi account, Polymarket picks via `_pmm_fill_entry`
-    against the caller's Poly CLOB orders/positions. Admin-only (both venues'
-    creds are the admin's personal accounts). configured:false (quiet no-op)
-    only when neither venue is trackable. Statuses (same on both venues):
-    resting / partial (pct) / filled / none / unknown, + warn (unfilled
-    ≤5m to tip) + outbid (my resting price vs the public book's best bid,
-    our-side oriented). Each row carries `venue`."""
-    import time as _time
-    cache_key = f"fill_status:{g.uid}"
-    now_ts = _time.time()
-    cached = _cache.get(cache_key)
-    if cached and (now_ts - cached["ts"]) < _FILL_STATUS_TTL:
-        return jsonify(cached["data"])
-
-    sb = get_supabase()
-    if sb is None:
-        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
-    try:
-        pending = (sb.table("bot_picks")
-                   .select("id,market_id,market_type,side,entry_book,entry_line,"
-                           "entry_price,event_name,event_start,sport,signal_blob")
-                   .eq("status", "pending").eq("asked_by", g.uid)
-                   .order("event_start", desc=False)
-                   .limit(100).execute().data) or []
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"pending fetch: {e}"}), 500
+def _compute_fill_status(sb, uid: str) -> dict:
+    """DUAL-VENUE fill state for one user's pending picks (July 2026 revert):
+    each pick is tracked on the venue its make/take verdict routed it to —
+    Kalshi picks via the user's Kalshi account, Polymarket picks via
+    `_pmm_fill_entry` against the Poly CLOB orders/positions. Returns
+    {ok, configured, api_ok, fills[]}; configured:false when neither venue is
+    trackable. Statuses (same on both venues): resting / partial (pct) /
+    filled / none / unknown, + warn (unfilled ≤5m to tip) + outbid; each row
+    carries `venue`. SHARED by the /api/handicapper/fill-status page poll AND
+    the cron take-warning alert, so both see identical fill state. May raise
+    on a DB error (callers handle)."""
+    pending = (sb.table("bot_picks")
+               .select("id,market_id,market_type,side,entry_book,entry_line,"
+                       "entry_price,event_name,event_start,sport,signal_blob")
+               .eq("status", "pending").eq("asked_by", uid)
+               .order("event_start", desc=False)
+               .limit(100).execute().data) or []
 
     # DUAL-VENUE dispatch (July 2026 revert): each pending pick is tracked on
     # the venue its make/take verdict routed it to (entry_book).
@@ -5255,9 +5241,7 @@ def api_handicapper_fill_status():
     # configured:false (quiet frontend no-op) only when NEITHER venue can be
     # tracked — no Kalshi creds AND no Poly-executed pick pending.
     if not (kalshi_configured or has_poly):
-        result = {"ok": True, "configured": False, "fills": []}
-        _cache[cache_key] = {"data": result, "ts": now_ts}
-        return jsonify(result)
+        return {"ok": True, "configured": False, "fills": []}
     now = datetime.now(timezone.utc)
 
     # ── Kalshi venue data (only when a Kalshi-executed pick is pending) ──
@@ -5445,9 +5429,31 @@ def api_handicapper_fill_status():
                     print(f"fill-sync failed pick {p['id']}: {e}")
         fills.append(entry)
 
-    result = {"ok": True, "configured": True, "api_ok": api_ok, "fills": fills}
-    _cache[cache_key] = {"data": result, "ts": now_ts}
-    return jsonify(result)
+    return {"ok": True, "configured": True, "api_ok": api_ok, "fills": fills}
+
+
+@app.route("/api/handicapper/fill-status")
+@admin_required
+def api_handicapper_fill_status():
+    """DUAL-VENUE fill state per pending pick — thin cached wrapper over
+    _compute_fill_status for the caller (admin: their own venue accounts).
+    configured:false (quiet frontend no-op) when neither venue is trackable;
+    each row carries its `venue`, status, warn (≤5m to tip), and outbid."""
+    import time as _time
+    cache_key = f"fill_status:{g.uid}"
+    now_ts = _time.time()
+    cached = _cache.get(cache_key)
+    if cached and (now_ts - cached["ts"]) < _FILL_STATUS_TTL:
+        return jsonify(cached["data"])
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+    try:
+        res = _compute_fill_status(sb, g.uid)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"fill-status: {e}"}), 500
+    _cache[cache_key] = {"data": res, "ts": now_ts}
+    return jsonify(res)
 
 
 def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
@@ -6913,10 +6919,14 @@ def api_handicapper_paperlog():
     # Alert pass runs BEFORE the insert so a brand-new bet's dedup marker
     # can ride its own insert row (no read-back needed).
     bets_alerted = _bet_alerts(sb, now, alert_cands, recent, rows)
+    # 5-minute TAKE warning (dual-venue) — a PUSH for a bet unfilled ≤5m to
+    # tip (the on-page ⚠ TAKE NOW chip only shows when the page is open).
+    # Independent of the bet cands above: it reads live fill state directly.
+    take_warned = _take_warn_alerts(sb, now)
     # stdout → Vercel runtime logs: the alert pipeline's only observability
     # (the JSON response is visible only in cron-job.org history).
     print(f"paperlog: processed={processed} cands={len(alert_cands)} "
-          f"alerted={bets_alerted} new_rows={len(rows)}")
+          f"alerted={bets_alerted} take_warned={take_warned} new_rows={len(rows)}")
     new_rows = 0
     if rows:
         try:
@@ -7564,6 +7574,98 @@ def api_my_orders():
 # paperlog tick). polymarket_fill_state is orphaned (harmless, drop
 # whenever); full detection spec in git history pre-July-12-2026.
 # ---------------------------------------------------------------------------
+
+
+def _take_warn_line(f: dict, r: dict) -> str:
+    """One bullet for the batched take-warning message."""
+    ev = r.get("event_name") or ""
+    mt = (r.get("market_type") or "").upper()
+    side = (r.get("side") or "").upper()
+    u = r.get("units")
+    mins = f.get("mins_to_start")
+    venue = "Polymarket" if f.get("venue") == "POLYMARKET" else "Kalshi"
+    when = f"{mins}m" if mins is not None else "soon"
+    tail = ""
+    if f.get("outbid") and f.get("best_ask_c") is not None:
+        tail = f" — cross the {round(f['best_ask_c'])}¢ ask"
+    return f"• {ev} — {mt} {side} {u}u · {venue} · tip {when}{tail}"
+
+
+def _take_warn_alerts(sb, now) -> int:
+    """Telegram (Filled Bot): the 5-MINUTE TAKE WARNING as a PUSH — 'a bet is
+    unfilled with ≤5 min to tip, TAKE it now or miss it.' The on-page ⚠ TAKE
+    NOW chip only shows when the page is open; this reaches the phone. Rides
+    the paperlog cron tick. For each admin: a cheap near-tip pre-check, then
+    reuse `_compute_fill_status` (identical fill logic to the page) → picks
+    with warn=True → ONE batched message, one ping per bet (marker
+    signal_blob.take_warned, stamped only on a successful send so a Telegram
+    failure retries next tick). No quiet-hours gate — a warn only fires ≤5m
+    to a real tip, so it's inherently well-timed. Never raises."""
+    sent = 0
+    try:
+        admins = _admin_uids()
+        if not admins:
+            return 0
+        horizon = (now + timedelta(minutes=_FS_TAKE_WARN_MIN + 1)).isoformat()
+        for uid in admins:
+            # Near-tip pre-check — skip the (venue-API-hitting) fill compute
+            # entirely unless this admin has a pick within the warn window.
+            try:
+                near = (sb.table("bot_picks").select("id")
+                        .eq("status", "pending").eq("asked_by", uid)
+                        .gte("event_start", now.isoformat())
+                        .lte("event_start", horizon)
+                        .limit(1).execute().data) or []
+            except Exception:
+                near = []
+            if not near:
+                continue
+            try:
+                res = _compute_fill_status(sb, uid)
+            except Exception:
+                continue
+            if not res.get("configured"):
+                continue
+            warns = [f for f in (res.get("fills") or []) if f.get("warn")]
+            if not warns:
+                continue
+            ids = [f["id"] for f in warns]
+            try:
+                rows = (sb.table("bot_picks")
+                        .select("id,event_name,market_type,side,units,"
+                                "entry_price,signal_blob")
+                        .in_("id", ids).execute().data) or []
+            except Exception:
+                continue
+            byid = {r["id"]: r for r in rows}
+            fresh = []
+            for f in warns:
+                r = byid.get(f["id"])
+                if not r:
+                    continue
+                blob = (r.get("signal_blob")
+                        if isinstance(r.get("signal_blob"), dict) else {})
+                if blob.get("take_warned"):
+                    continue                      # already pinged this bet
+                fresh.append((f, r, blob))
+            if not fresh:
+                continue
+            lines = ["⚠️ TAKE NOW — unfilled, tip is close:"]
+            lines += [_take_warn_line(f, r) for f, r, _b in fresh]
+            if _send_fill_telegram("\n".join(lines)):
+                sent += 1
+                stamp = now.isoformat()
+                for _f, r, blob in fresh:
+                    try:
+                        nb = dict(blob)
+                        nb["take_warned"] = stamp
+                        (sb.table("bot_picks").update({"signal_blob": nb})
+                         .eq("id", r["id"]).execute())
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return sent
 
 
 def _send_fill_telegram(text):
