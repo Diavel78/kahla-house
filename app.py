@@ -4712,9 +4712,11 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None,
             continue
         buy = (o.get("side") or "yes").lower()
         intended[(tk, buy)] = _kalshi_order_price_cents(o, buy)
+    filled_tickers: set = set()                 # tickers with a HELD position = filled
     for tk, buy, avg_c in _kalshi_held_positions(positions, fills):
         if avg_c is not None or (tk, buy) not in intended:
             intended[(tk, buy)] = avg_c
+        filled_tickers.add(tk)
     out["intended"] = len(intended)
     now_dt = datetime.now(timezone.utc)
 
@@ -4822,8 +4824,9 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None,
             ex = existing[0]
             b = ex.get("signal_blob") if isinstance(ex.get("signal_blob"), dict) else {}
             b = b or {}
-            if b.get("kalshi_ticker") != tk or b.get("kalshi_buy") != buy:
-                nb = {**b, "kalshi_ticker": tk, "kalshi_buy": buy}
+            nb = {**b, "kalshi_ticker": tk, "kalshi_buy": buy,
+                  "filled": bool(b.get("filled")) or (tk in filled_tickers)}
+            if nb != b:
                 try:
                     sb.table("bot_picks").update({"signal_blob": nb}).eq("id", ex["id"]).execute()
                     out["stamped"] = out.get("stamped", 0) + 1
@@ -4851,7 +4854,7 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None,
             "units":       1,               # user rule: always 1u, dollars≠units
             "confidence":  "low",
             "signal_blob": {"source": "kalshi_autolog", "kalshi_ticker": tk,
-                            "kalshi_buy": buy},
+                            "kalshi_buy": buy, "filled": tk in filled_tickers},
         }
         try:
             sb.table("bot_picks").insert(row).execute()
@@ -4861,13 +4864,18 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None,
         except Exception as e:
             app.logger.warning("KALSHI-AUTOLOG insert failed %s: %s", tk, e)
 
-    # Removal: an auto-logged pick that's no longer OPEN on Kalshi (no
-    # position AND no resting order) is no longer a bet — CANCELED or SOLD —
-    # so remove it. Guards: (a) only when the Kalshi read SUCCEEDED (never
-    # delete on a failed/empty read — that would wipe the whole book); (b)
-    # only when the game HASN'T started (a started/finished game is left for
-    # the resolver to grade, which also sidesteps sold-mid-game vs settled
-    # ambiguity). Only auto-logged rows; manual logs are never touched.
+    # Removal — FILL-BASED, NOT time-based (your rule: "if it fills it counts,
+    # if it doesn't it doesn't; never kill a bet because I *guessed* the start
+    # time"). Remove an auto-logged pick ONLY when it has NO resting order AND
+    # NO held position AND has NEVER filled. The `filled` flag (latched the
+    # moment a position is ever seen) is the memory: a bet that filled then
+    # settled keeps its flag and is left for the resolver; a never-filled
+    # canceled order is dropped so it can't grade as a phantom W/L (the #975
+    # bug). No clock here — a resting order is "held" until it fills, so a
+    # late-filling bet is never touched, and Kalshi cancels an unfilled order
+    # at game start, which is hours before the resolver grades at game end.
+    # Guard: only when the Kalshi read SUCCEEDED (never delete on a failed
+    # read — that would wipe the book). Only auto-logged rows.
     if api_ok:
         held_tickers = {tk for (tk, _b) in intended.keys()}
         try:
@@ -4883,13 +4891,12 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None,
             tk = blob.get("kalshi_ticker")
             if not tk or tk in held_tickers:
                 continue                    # still resting or held → keep
-            est = _parse_iso(a.get("event_start") or "")
-            if not est or est <= now_dt:
-                continue                    # started → let the resolver grade it
+            if blob.get("filled") is not False:
+                continue                    # filled OR no flag (old pick) → keep
             try:
                 sb.table("bot_picks").delete().eq("id", a["id"]).execute()
                 out["removed"] += 1
-                app.logger.info("KALSHI-AUTOLOG removed closed bet %s (%s)", a["id"], tk)
+                app.logger.info("KALSHI-AUTOLOG removed never-filled %s (%s)", a["id"], tk)
             except Exception:
                 pass
 
@@ -4962,6 +4969,7 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
         prob = ((1 - py) if (syn and py is not None) else py)
         if prob is not None:
             intended.setdefault((slug, syn), prob)
+    filled_slugs: set = set()                   # slugs with a HELD position = filled
     for slug, pos in (positions or {}).items():
         net = pos.get("net") or 0.0
         if abs(net) < 0.01:
@@ -4969,18 +4977,22 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
         avg = pos.get("avg_price")
         if avg is not None:
             intended[(slug, net < 0)] = avg     # fill avg overrides order bid
+        filled_slugs.add(slug)
     out["intended"] = len(intended)
     now_dt = datetime.now(timezone.utc)
 
-    # Removal (your rule: "not on Poly or Kalshi = not my bet"). A pmm_autolog
-    # pick no longer backed by a resting order OR a held position — canceled or
-    # never-filled — is not a bet, so remove it. Runs even when `intended` is
-    # empty (you canceled everything → clear the phantoms). Guards mirror the
-    # Kalshi autolog: (a) ONLY when BOTH Poly reads SUCCEEDED (orders/positions
-    # not None) — a failed read must never look like "nothing on Poly" and wipe
-    # the book; (b) PRE-GAME only — a started game is left for the resolver (a
-    # filled bet's position vanishes once the market settles, so post-start we
-    # can't tell never-filled from filled-and-settled). Only auto-logged rows.
+    # Removal — FILL-BASED, NOT time-based (your rule: "if it fills it counts,
+    # if it doesn't it doesn't; never kill a bet because I *guessed* the start
+    # time"). A pmm_autolog pick is removed ONLY when it has NO resting order
+    # AND NO held position AND has NEVER filled. The `filled` flag (stamped the
+    # moment a position is ever seen — below) is the memory: a bet that filled
+    # then settled keeps its flag and is left for the resolver; a never-filled
+    # canceled order is dropped so it can't grade as a phantom W/L. A late start
+    # can't kill it (no clock here), and if a dropped resting order later fills,
+    # the position path re-creates it. Runs even when `intended` is empty (you
+    # canceled everything → clear the phantoms). Guard: ONLY when BOTH Poly
+    # reads SUCCEEDED (orders/positions not None) — a failed read must never
+    # look like "nothing on Poly" and wipe the book. Only auto-logged rows.
     if orders is not None and positions is not None:
         backed = {o["slug"] for o in orders if o.get("slug")}
         backed |= set(positions.keys())
@@ -4993,16 +5005,16 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
         except Exception:
             autos = []
         for a in autos:
-            slug = (a.get("signal_blob") or {}).get("pmm_slug")
+            blob = a.get("signal_blob") or {}
+            slug = blob.get("pmm_slug")
             if not slug or slug in backed:
                 continue                        # still resting or held → keep
-            est = _parse_iso(a.get("event_start") or "")
-            if not est or est <= now_dt:
-                continue                        # started → let the resolver grade
+            if blob.get("filled") is not False:
+                continue                        # filled OR no flag (old pick) → keep
             try:
                 sb.table("bot_picks").delete().eq("id", a["id"]).execute()
                 out["removed"] = out.get("removed", 0) + 1
-                app.logger.info("PMM-AUTOLOG removed unbacked %s (%s)", a["id"], slug)
+                app.logger.info("PMM-AUTOLOG removed never-filled %s (%s)", a["id"], slug)
             except Exception:
                 pass
 
@@ -5066,11 +5078,16 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
             ex = existing[0]
             b = ex.get("signal_blob") if isinstance(ex.get("signal_blob"), dict) else {}
             b = b or {}
-            if b.get("pmm_slug") != slug:
+            # Stamp the slug + an EXPLICIT `filled` flag, latched True once a
+            # position ever exists. The explicit True/False lets the removal
+            # tell a confirmed never-filled pick (False) from an old pre-flag
+            # pick (missing → left alone) — and the latch protects a filled-
+            # then-settled bet.
+            nb = {**b, "pmm_slug": slug, "pmm_synthetic": synth,
+                  "filled": bool(b.get("filled")) or (slug in filled_slugs)}
+            if nb != b:
                 try:
-                    (sb.table("bot_picks").update(
-                        {"signal_blob": {**b, "pmm_slug": slug,
-                                         "pmm_synthetic": synth}})
+                    (sb.table("bot_picks").update({"signal_blob": nb})
                      .eq("id", ex["id"]).execute())
                 except Exception:
                     pass
@@ -5089,7 +5106,8 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
             "entry_book":  "POLYMARKET", "entry_price": price,
             "entry_line":  line, "units": 1, "confidence": "low",
             "signal_blob": {"source": "pmm_autolog", "pmm_slug": slug,
-                            "pmm_synthetic": synth},
+                            "pmm_synthetic": synth,
+                            "filled": slug in filled_slugs},
         }
         try:
             sb.table("bot_picks").insert(row).execute()
