@@ -5362,17 +5362,23 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict) -> dict
                     py = o.get("price_yes")
                     if py is None:
                         continue
-                    c = round((1 - py if synthetic else py) * 100.0)
+                    # HALF-CENT rounding to MATCH _pmm_book (which preserves
+                    # 0.5¢ ticks). Whole-cent rounding here made your own 53.5¢
+                    # resting bid — the best bid on the book — read as 53¢ and
+                    # "outbid" itself. Require the book's best bid to beat you
+                    # by ≥0.25¢ (real +0.5¢ tick) so a tie / your own order
+                    # never flags.
+                    c = round((1 - py if synthetic else py) * 200.0) / 2.0
                     myp = c if myp is None else max(myp, c)
                 if (book and myp is not None
                         and book.get("best_bid") is not None
-                        and book["best_bid"] > myp + 0.001):
+                        and book["best_bid"] > myp + 0.25):
                     entry.update(outbid=True, my_price_c=myp,
                                  best_bid_c=book["best_bid"],
                                  best_ask_c=book.get("best_ask"),
                                  ahead_qty=round(sum(
                                      q for c, q in (book.get("bids") or [])
-                                     if c > myp + 0.001)))
+                                     if c > myp + 0.25)))
             except Exception:
                 pass
     elif pos_qty > 0 or (my_orders and rem <= 0):
