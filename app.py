@@ -4638,11 +4638,14 @@ def _kalshi_order_price_cents(o: dict, buy: str):
 
 
 def _kalshi_makeup_market(sb, sport: str, event_name: str, postponed_start: str):
-    """A postponed game is made up as a DOUBLEHEADER; per the user's rule the
-    makeup is GAME 1 (the earliest game) of the makeup day. Return the earliest
-    ET calendar day AFTER `postponed_start` where these exact teams play ≥2
-    games, and that day's EARLIEST market. None if no such DH day exists —
-    then we DON'T remap (a lone later game is a regular game, not a makeup)."""
+    """A postponed game is made up as part of a DOUBLEHEADER. Return the makeup
+    game — the DH game whose ET TIME-OF-DAY is CLOSEST to the postponed game's
+    original ET time (a makeup keeps its original slot: a 7pm postponement is
+    made up as the ~7pm nightcap, NOT the added afternoon game). The old rule
+    hardcoded "game 1 = earliest," which graded a live nightcap bet against the
+    already-final afternoon game (the July 2026 Pirates/Yankees disaster). Scans
+    the earliest ET day after `postponed_start` where these exact teams play ≥2
+    games; None if no DH day (a lone later game is regular, not a makeup)."""
     try:
         rows = (sb.table("markets")
                 .select("id,event_name,event_start,sport,status")
@@ -4653,17 +4656,28 @@ def _kalshi_makeup_market(sb, sport: str, event_name: str, postponed_start: str)
                 .limit(30).execute().data) or []
     except Exception:
         return None
+    et = ZoneInfo("America/New_York")
+    post_dt = _parse_iso(postponed_start or "")
+    post_tod = None
+    if post_dt:
+        p = post_dt.astimezone(et)
+        post_tod = p.hour * 60 + p.minute       # minutes-of-day ET
     by_day: dict = {}
     for r in rows:
         dt = _parse_iso(r.get("event_start") or "")
         if not dt:
             continue
-        day = dt.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+        day = dt.astimezone(et).date().isoformat()
         by_day.setdefault(day, []).append((dt, r))
     for day in sorted(by_day.keys()):
         games = sorted(by_day[day], key=lambda t: t[0])
         if len(games) >= 2:              # a doubleheader → the makeup day
-            return games[0][1]           # game 1 = earliest that day
+            if post_tod is None:
+                return games[0][1]       # no ticker time → earliest (legacy)
+            def _tod_gap(t):
+                g = t[0].astimezone(et)
+                return abs((g.hour * 60 + g.minute) - post_tod)
+            return min(games, key=_tod_gap)[1]   # nearest ET time-of-day slot
     return None
 
 
