@@ -4920,19 +4920,21 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None,
     return out
 
 
-def _pmm_autolog(sb, owner_uid, client=None, orders=None) -> dict:
-    """Reconcile the admin's resting POLYMARKET orders into bot_picks — the
-    Poly analog of `_kalshi_autolog` (dual-venue, July 2026 revert). A resting
-    BUY order that UNIQUELY reproduces one of our (game, market_type, side)
-    Poly-market slugs becomes a fresh 1u POLYMARKET pending pick (entry = the
-    resting bid), so a bet placed on Poly shows in the Pick Bot without hand-
-    logging — exactly like Kalshi's book-of-record autolog. Matching is by
-    SLUG: build the forward slug→(market,mt,side) index from our upcoming
-    games via `pmm_markets.lookup` (only when there ARE resting orders, so
-    it's a no-op most ticks), then match each order's slug + BUY_LONG/SHORT
-    (YES vs synthetic NO). Create-only for v1 (no removal — a canceled Poly
-    order leaves a pick to delete by hand; safer than a removal bug wiping the
-    book). Idempotent, skip-on-ambiguity — never manufactures a wrong bet."""
+def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dict:
+    """Reconcile the admin's POLYMARKET book into bot_picks — the Poly analog
+    of `_kalshi_autolog` (dual-venue, July 2026 revert). USER RULE: "I bet on
+    Poly or Kalshi, you log them — if I bet it, I want it to show, full stop."
+    So an INTENDED bet = a resting BUY order (the bid) OR a held position (the
+    fill avg — a filled bet has NO resting order left, and its game may already
+    be LIVE). Each intended bet that UNIQUELY reproduces one of our (game,
+    market_type, side) Poly-market slugs becomes a 1u POLYMARKET pick (entry =
+    bid, overridden by the fill avg once held; `signal_blob.pmm_slug` stamped
+    for the fill tracker). Matching is by SLUG via a forward
+    `pmm_markets.lookup` index over games from −12h to +48h (so a live/just-
+    filled bet still matches — NOT upcoming-only). Built only when there ARE
+    intended bets (no-op most ticks). Create-only for v1 (no removal — a
+    canceled order leaves a pick to delete by hand; safer than a removal bug).
+    Idempotent, skip-on-ambiguity — never manufactures a wrong bet."""
     out = {"intended": 0, "created": 0, "exists": 0, "unmatched": 0}
     if sb is None or not owner_uid:
         return out
@@ -4941,31 +4943,54 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None) -> dict:
             client = get_client()
         if orders is None:
             orders = _pmm_open_orders_raw(client)
+        if positions is None:
+            positions = _pmm_positions_raw(client)
     except Exception:
         return out
-    buys = [o for o in (orders or [])
-            if o.get("slug") and (o.get("intent") or "").startswith("ORDER_INTENT_BUY")]
-    out["intended"] = len(buys)
-    if not buys:
-        return out                              # no resting orders → no work
-    order_slugs = {o["slug"] for o in buys}
+    # Intended bets keyed (slug, synthetic) → our-side entry probability (0-1).
+    # Resting orders give the bid; a held position (fill avg) OVERRIDES it as
+    # the truer entry. synthetic = our side is the market's NO (BUY_SHORT, or a
+    # net<0 position).
+    intended: dict = {}
+    for o in (orders or []):
+        slug = o.get("slug")
+        intent = o.get("intent") or ""
+        if not slug or not intent.startswith("ORDER_INTENT_BUY"):
+            continue
+        syn = intent.endswith("_SHORT")
+        py = o.get("price_yes")
+        prob = ((1 - py) if (syn and py is not None) else py)
+        if prob is not None:
+            intended.setdefault((slug, syn), prob)
+    for slug, pos in (positions or {}).items():
+        net = pos.get("net") or 0.0
+        if abs(net) < 0.01:
+            continue
+        avg = pos.get("avg_price")
+        if avg is not None:
+            intended[(slug, net < 0)] = avg     # fill avg overrides order bid
+    out["intended"] = len(intended)
+    if not intended:
+        return out                              # nothing on Poly → no work
+    want_slugs = {s for (s, _y) in intended}
     now_dt = datetime.now(timezone.utc)
+    lo = (now_dt - timedelta(hours=12)).isoformat()   # −12h → catch live bets
     hi = (now_dt + timedelta(hours=48)).isoformat()
     try:
         markets = (sb.table("markets")
                    .select("id,sport,event_name,event_start")
                    .in_("sport", list(_PM_SPORTS)).eq("status", "active")
-                   .gte("event_start", now_dt.isoformat()).lte("event_start", hi)
-                   .limit(150).execute().data) or []
+                   .gte("event_start", lo).lte("event_start", hi)
+                   .limit(200).execute().data) or []
     except Exception:
         markets = []
     try:
         import pmm_markets as _pm
     except Exception:
         return out
-    # slug → list of (market, market_type, side, line, synthetic). Both the
-    # YES entry (non-synthetic) and its synthesized NO share a slug, so a slug
-    # carries both sides — the order's intent picks which.
+    # slug → list of (market, market_type, side, line, synthetic). A slug's
+    # YES entry (non-synthetic) and synthesized NO share the slug, so it
+    # carries both sides — the bet's synthetic flag picks which.
     slug_index: dict = {}
     for mk in markets:
         ev = mk.get("event_name") or ""
@@ -4978,17 +5003,16 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None) -> dict:
         except Exception:
             continue
         for key, mt in (("ml", "moneyline"), ("spread", "spread"),
-                        ("total", "total"), ("nrfi", "nrfi")):
+                        ("total", "total"), ("nrfi", "nrfi"),
+                        ("ufc_distance", "distance")):
             for e in (data or {}).get(key) or []:
                 slug = e.get("slug")
-                if slug and slug in order_slugs:
+                if slug and slug in want_slugs:
                     slug_index.setdefault(slug, []).append(
                         (mk, mt, e.get("side"), e.get("line"),
                          bool(e.get("synthetic"))))
-    for o in buys:
-        cands = slug_index.get(o["slug"]) or []
-        want_syn = (o.get("intent") or "").endswith("_SHORT")
-        cands = [c for c in cands if c[4] == want_syn]
+    for (slug, syn), prob in intended.items():
+        cands = [c for c in (slug_index.get(slug) or []) if c[4] == syn]
         uniq = {(c[0]["id"], c[1], c[2]) for c in cands}
         if len(uniq) != 1:
             out["unmatched"] += 1                # 0 or ambiguous → skip
@@ -5007,19 +5031,17 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None) -> dict:
             ex = existing[0]
             b = ex.get("signal_blob") if isinstance(ex.get("signal_blob"), dict) else {}
             b = b or {}
-            if b.get("pmm_slug") != o["slug"]:
+            if b.get("pmm_slug") != slug:
                 try:
                     (sb.table("bot_picks").update(
-                        {"signal_blob": {**b, "pmm_slug": o["slug"],
+                        {"signal_blob": {**b, "pmm_slug": slug,
                                          "pmm_synthetic": synth}})
                      .eq("id", ex["id"]).execute())
                 except Exception:
                     pass
             continue
-        py = o.get("price_yes")
-        our_prob = ((1 - py) if (synth and py is not None) else py)
-        price = (_prob_to_amer_py(our_prob)
-                 if (our_prob is not None and 0 < our_prob < 1) else None)
+        price = (_prob_to_amer_py(prob)
+                 if (prob is not None and 0 < prob < 1) else None)
         if price is None:
             out["unmatched"] += 1
             continue
@@ -5031,16 +5053,16 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None) -> dict:
             "market_type": mt, "side": side,
             "entry_book":  "POLYMARKET", "entry_price": price,
             "entry_line":  line, "units": 1, "confidence": "low",
-            "signal_blob": {"source": "pmm_autolog", "pmm_slug": o["slug"],
+            "signal_blob": {"source": "pmm_autolog", "pmm_slug": slug,
                             "pmm_synthetic": synth},
         }
         try:
             sb.table("bot_picks").insert(row).execute()
             out["created"] += 1
             app.logger.info("PMM-AUTOLOG created %s %s/%s 1u @ %s (%s)",
-                            mk["event_name"], mt, side, price, o["slug"])
+                            mk["event_name"], mt, side, price, slug)
         except Exception as e:
-            app.logger.warning("PMM-AUTOLOG insert failed %s: %s", o["slug"], e)
+            app.logger.warning("PMM-AUTOLOG insert failed %s: %s", slug, e)
     return out
 
 
@@ -5400,11 +5422,12 @@ def _compute_fill_status(sb, uid: str) -> dict:
             poly_client = get_client()
             poly_orders = _pmm_open_orders_raw(poly_client)
             poly_positions = _pmm_positions_raw(poly_client)
-            # Book-of-record: log any resting Poly order not yet a pick (the
-            # COLD start — first-ever Poly pick — is the cron autolog; this is
-            # the fast reconcile while the page is open). Mirrors Kalshi.
+            # Book-of-record: log any resting order OR held position not yet a
+            # pick (the COLD start — first-ever Poly pick — is the cron
+            # autolog; this is the fast reconcile while the page is open).
             try:
-                _pmm_autolog(sb, uid, client=poly_client, orders=poly_orders)
+                _pmm_autolog(sb, uid, client=poly_client, orders=poly_orders,
+                             positions=poly_positions)
             except Exception:
                 pass
         except Exception:
