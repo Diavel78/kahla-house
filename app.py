@@ -7851,7 +7851,15 @@ def _take_warn_alerts(sb, now) -> int:
     to a real tip, so it's inherently well-timed. Never raises."""
     sent = 0
     try:
-        admins = _admin_uids()
+        # Whose bets to warn on. Include the KALSHI/Poly OWNER uid (the proven
+        # resolver the autolog uses — KALSHI_OWNER_UID env, else the sole
+        # admin) as well as _admin_uids(), so a flaky Firestore role query
+        # can't silently leave the warn with an empty set (the "never fired"
+        # bug). The Filled Bot's chat is the owner's phone.
+        admins = set(_admin_uids())
+        _owner = _kalshi_owner_uid()
+        if _owner:
+            admins.add(_owner)
         if not admins:
             return 0
         horizon = (now + timedelta(minutes=_FS_TAKE_WARN_MIN + 1)).isoformat()
