@@ -5281,7 +5281,10 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict) -> dict
     pblob = p.get("signal_blob") if isinstance(p.get("signal_blob"), dict) else {}
     execb = pblob.get("execution") if isinstance(pblob.get("execution"), dict) else {}
     slug = pblob.get("pmm_slug") or execb.get("pmm_slug")
-    synthetic = bool(execb.get("pmm_synthetic"))
+    # `pmm_synthetic` is stamped top-level by the autolog and under `execution`
+    # by the frontend stamp — read both, else an autologged NO/dog side reads
+    # as the wrong side.
+    synthetic = bool(pblob.get("pmm_synthetic") or execb.get("pmm_synthetic"))
     if not slug:
         se = _pmm_side_entry(client, p.get("sport"), away, home, p.get("side"),
                              p.get("market_type"), line=p.get("entry_line"),
@@ -5409,7 +5412,7 @@ def _compute_fill_status(sb, uid: str) -> dict:
         # Auto-log: reconcile the caller's Kalshi holdings into bot_picks.
         # Best-effort; a failure never breaks the fill-status chips.
         try:
-            _kalshi_autolog(sb, g.uid, positions=positions, fills=my_fills,
+            _kalshi_autolog(sb, uid, positions=positions, fills=my_fills,
                             orders=orders,
                             api_ok=bool(om.get("ok") and pm.get("ok")))
         except Exception:
@@ -5443,8 +5446,16 @@ def _compute_fill_status(sb, uid: str) -> dict:
                               "status": "unknown", "pct": None, "warn": False,
                               "venue": "POLYMARKET", "mins_to_start": None})
             else:
-                fills.append(_pmm_fill_entry(poly_client, p, now,
-                                             poly_orders, poly_positions or {}))
+                try:
+                    fills.append(_pmm_fill_entry(poly_client, p, now,
+                                                 poly_orders, poly_positions or {}))
+                except Exception:
+                    # One bad pick must never crash the whole compute (which
+                    # would also kill the cron take-warning). Degrade to unknown.
+                    fills.append({"id": p["id"], "market_id": p.get("market_id"),
+                                  "market_type": p.get("market_type"),
+                                  "status": "unknown", "pct": None, "warn": False,
+                                  "venue": "POLYMARKET", "mins_to_start": None})
             continue
         dt = _parse_iso(p.get("event_start") or "")
         mins = ((dt - now).total_seconds() / 60.0) if dt else None
