@@ -3511,6 +3511,85 @@ def debug_dk_nrfi():
             "Referer": "https://sportsbook.draftkings.com/leagues/baseball/mlb"}
     out: dict = {"candidates": []}
     cat = (request.args.get("cat") or "").strip()
+    src = (request.args.get("src") or "dk").strip().lower()
+
+    if src == "bovada":
+        # Bovada's public coupon JSON (historically tolerant of DC IPs).
+        # Dump per-event market descriptions containing 'inning'.
+        url = ("https://www.bovada.lv/services/sports/event/coupon/events/A/"
+               "description/baseball/mlb?marketFilterId=def&preMatchOnly=true&lang=en")
+        ent = {"url": url}
+        try:
+            r = _http.get(url, headers={**hdrs, "Referer": "https://www.bovada.lv/"},
+                          timeout=8)
+            ent["status"] = r.status_code
+            ent["content_type"] = r.headers.get("content-type", "")[:60]
+            if r.status_code == 200 and "json" in ent["content_type"]:
+                j = r.json()
+                evs = (j[0].get("events") if isinstance(j, list) and j else []) or []
+                ent["event_count"] = len(evs)
+                sample = []
+                for ev in evs[:3]:
+                    mkts = []
+                    for dg in (ev.get("displayGroups") or []):
+                        for m in (dg.get("markets") or []):
+                            desc = (m.get("description") or "")
+                            per = (m.get("period") or {}).get("description") or ""
+                            if "inning" in (desc + " " + per).lower():
+                                mkts.append({
+                                    "desc": desc, "period": per,
+                                    "outcomes": [
+                                        {"desc": o.get("description"),
+                                         "american": (o.get("price") or {}).get("american"),
+                                         "handicap": (o.get("price") or {}).get("handicap")}
+                                        for o in (m.get("outcomes") or [])[:4]]})
+                    sample.append({"event": ev.get("description"),
+                                   "start": ev.get("startTime"),
+                                   "inning_markets": mkts})
+                ent["sample"] = sample
+            else:
+                ent["body_head"] = (r.text or "")[:200]
+        except Exception as e:
+            ent["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+        out["candidates"].append(ent)
+        return jsonify(out)
+
+    if src == "action":
+        # Action Network (already reachable from Vercel — the splits scraper's
+        # host). Does their event payload carry 1st-inning/NRFI markets?
+        url = ("https://api.actionnetwork.com/web/v2/scoreboard/mlb"
+               "?period=game")
+        a_hdrs = {"User-Agent": hdrs["User-Agent"],
+                  "Origin": "https://www.actionnetwork.com",
+                  "Referer": "https://www.actionnetwork.com/"}
+        ent = {"url": url}
+        try:
+            r = _http.get(url, headers=a_hdrs, timeout=8)
+            ent["status"] = r.status_code
+            if r.status_code == 200:
+                j = r.json()
+                games = j.get("games") or []
+                ent["game_count"] = len(games)
+                if games:
+                    g0 = games[0]
+                    ent["game_keys"] = sorted(g0.keys())[:30]
+                    # Any key/value mentioning innings? Cheap structural sniff.
+                    blob = json.dumps(g0)[:200000].lower()
+                    ent["mentions_inning"] = blob.count("inning")
+                    ent["mentions_nrfi"] = blob.count("nrfi")
+                    gid = g0.get("id")
+                    if gid and cat == "drill":
+                        r2 = _http.get(f"https://api.actionnetwork.com/web/v2/"
+                                       f"markets/event/{gid}", headers=a_hdrs,
+                                       timeout=8)
+                        ent["markets_status"] = r2.status_code
+                        if r2.status_code == 200:
+                            ent["markets_head"] = r2.text[:1500]
+        except Exception as e:
+            ent["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+        out["candidates"].append(ent)
+        return jsonify(out)
+
     bases = [
         "https://sportsbook.draftkings.com/sites/US-SB/api/v5/eventgroups/84240",
         "https://sportsbook-nash.draftkings.com/sites/US-SB/api/v5/eventgroups/84240",
