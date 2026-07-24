@@ -438,7 +438,7 @@ All silent — never breaks the dossier. Cascading fallbacks:
 
 ### Caches
 
-- Event search results: 5 min per `(sport, normalized away/home, date)` key. Only SUCCESSFUL matches are cached (caching a miss would freeze "no match" for the TTL and kill iteration when tuning matching). Module-level dict in `pmm_markets.py` — survives across requests on a warm Vercel container, cold start resets.
+- Event search results: 5 min per `(sport, normalized away/home, ET date)` key. **The date MUST be the US/Eastern game date (PMM's slug convention), NOT UTC — LANDMINE (July 24 2026, the SEA@TEX YRFI no-chip bug):** a 7:05pm Central start is 00:05 UTC the next day, so with a UTC-date key tonight's game and TOMORROW's game of the same series shared one key; the `_pmm_autolog` slug-index loop looks both market rows up seconds apart, the second cache-hit the first game's event (bypassing `_ev_date_ok`, which runs only inside the search), the YRFI slug indexed under both market ids, and the autolog's uniq check skipped it as ambiguous — the resting Poly order never became a pick. Only SUCCESSFUL matches are cached (caching a miss would freeze "no match" for the TTL and kill iteration when tuning matching). Module-level dict in `pmm_markets.py` — survives across requests on a warm Vercel container, cold start resets.
 - No BBO cache — quotes are read inline from the markets.list response (embedded `bestBidQuote`/`bestAskQuote`), so there's nothing separate to cache.
 
 ### PMM API schema gotchas
