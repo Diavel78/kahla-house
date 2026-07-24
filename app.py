@@ -3633,6 +3633,14 @@ def debug_dk_nrfi():
     cat = (request.args.get("cat") or "").strip()
     src = (request.args.get("src") or "dk").strip().lower()
 
+    if src == "quote":
+        # Verify the production reader end-to-end:
+        # ?src=quote&away=Seattle Mariners&home=Texas Rangers&start=<iso>
+        q = _bovada_nrfi_quote((request.args.get("away") or "").strip(),
+                               (request.args.get("home") or "").strip(),
+                               (request.args.get("start") or "").strip() or None)
+        return jsonify({"quote": q})
+
     if src == "bovada":
         # Bovada's public coupon JSON (historically tolerant of DC IPs).
         # Dump per-event market descriptions containing 'inning'.
