@@ -3545,8 +3545,42 @@ def debug_dk_nrfi():
                                         for o in (m.get("outcomes") or [])[:4]]})
                     sample.append({"event": ev.get("description"),
                                    "start": ev.get("startTime"),
+                                   "link": ev.get("link"),
                                    "inning_markets": mkts})
                 ent["sample"] = sample
+                # Drill: the coupon list only carries main markets — props
+                # (incl. 1st-inning) live on the per-event detail endpoint.
+                if cat == "drill" and evs and evs[0].get("link"):
+                    du = ("https://www.bovada.lv/services/sports/event/v2/"
+                          f"events/A/description{evs[0]['link']}?lang=en")
+                    ent["drill_url"] = du
+                    r2 = _http.get(du, headers={**hdrs,
+                                   "Referer": "https://www.bovada.lv/"},
+                                   timeout=8)
+                    ent["drill_status"] = r2.status_code
+                    if r2.status_code == 200:
+                        j2 = r2.json()
+                        ev2 = ((j2[0].get("events") or [{}])[0]
+                               if isinstance(j2, list) and j2 else {})
+                        groups = []
+                        inning = []
+                        for dg in (ev2.get("displayGroups") or []):
+                            groups.append(dg.get("description"))
+                            for m in (dg.get("markets") or []):
+                                desc = (m.get("description") or "")
+                                per = (m.get("period") or {}).get("description") or ""
+                                if "inning" in (desc + " " + per).lower():
+                                    inning.append({
+                                        "group": dg.get("description"),
+                                        "desc": desc, "period": per,
+                                        "outcomes": [
+                                            {"desc": o.get("description"),
+                                             "american": (o.get("price") or {}).get("american"),
+                                             "handicap": (o.get("price") or {}).get("handicap")}
+                                            for o in (m.get("outcomes") or [])[:4]]})
+                        ent["drill_event"] = ev2.get("description")
+                        ent["drill_groups"] = groups
+                        ent["drill_inning_markets"] = inning[:12]
             else:
                 ent["body_head"] = (r.text or "")[:200]
         except Exception as e:
