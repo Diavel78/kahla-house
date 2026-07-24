@@ -3492,6 +3492,126 @@ def debug_vsin_parsed():
     return jsonify(_fetch_vsin_splits(sport, book))
 
 
+# ───────────── Bovada 1st-inning (NRFI/YRFI) book line ─────────────
+# The ONLY free sportsbook feed for the 1st-inning market (July 2026 hunt):
+# no odds API carries it (ParlayAPI + The Odds API stop at 1st-5-innings,
+# verified) and DraftKings' Akamai hard-403s Vercel IPs. Bovada's public
+# event JSON answers from Vercel with no auth and lists a dedicated
+# "1st Inning" group: "Will there be a run scored in the 1st Inning"
+# Yes/No — that IS YRFI/NRFI. Reference/fallback book for the model's
+# early bets (maker orders on Poly don't always fill); also stamped into
+# the paperlog so the exchange-vs-book LAG is measurable per game.
+# Discovery surface: /debug-dk-nrfi?src=bovada&cat=drill.
+_BOVADA_HDRS = {
+    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/126.0.0.0 Safari/537.36"),
+    "Accept": "application/json",
+    "Referer": "https://www.bovada.lv/",
+}
+_bovada_cache: dict = {}
+
+
+def _bovada_json(url: str, ttl: int):
+    """Cached GET → parsed JSON (None on any failure — silent, like every
+    other free-source reader). Module cache; cold start resets."""
+    now = _time.time()
+    hit = _bovada_cache.get(url)
+    if hit and (now - hit[0]) < ttl:
+        return hit[1]
+    try:
+        r = _http.get(url, headers=_BOVADA_HDRS, timeout=6)
+        if r.status_code != 200 or "json" not in (r.headers.get("content-type") or ""):
+            return None
+        j = r.json()
+    except Exception:
+        return None
+    _bovada_cache[url] = (now, j)
+    return j
+
+
+def _amer_from_bovada(s) -> int | None:
+    """Bovada price strings: '-115' → -115, 'EVEN' → +100."""
+    if s is None:
+        return None
+    t = str(s).strip().upper()
+    if t == "EVEN":
+        return 100
+    try:
+        return int(t)
+    except ValueError:
+        return None
+
+
+def _bovada_nrfi_quote(away: str, home: str,
+                       event_start_iso: str | None = None) -> dict | None:
+    """Bovada's 1st-inning run-scored quote for one game:
+    {book:'BOVADA', yes:-115, no:-115, captured_at} (yes = YRFI). None on
+    any miss. Coupon list cached 10 min; per-event detail cached 5 min.
+    Event match = two-way name containment per team + NEAREST startTime to
+    our event_start (the coupon lists the whole series — tomorrow's game and
+    doubleheaders included — so 'first name match' would grab the wrong one,
+    the same class of bug as the PMM ET-date cache landmine)."""
+    if not (away and home):
+        return None
+    coupon = _bovada_json(
+        "https://www.bovada.lv/services/sports/event/coupon/events/A/"
+        "description/baseball/mlb?marketFilterId=def&preMatchOnly=true&lang=en",
+        ttl=600)
+    evs = (coupon[0].get("events") if isinstance(coupon, list) and coupon else []) or []
+    want_ms = None
+    if event_start_iso:
+        try:
+            want_ms = datetime.fromisoformat(
+                event_start_iso.replace("Z", "+00:00")).timestamp() * 1000
+        except Exception:
+            want_ms = None
+    a, h = away.lower(), home.lower()
+
+    def _names_ok(desc: str) -> bool:
+        d = (desc or "").lower()
+        if " @ " not in d:
+            return False
+        da, dh = d.split(" @ ", 1)
+        return ((a in da or da in a) and (h in dh or dh in h))
+
+    cands = [ev for ev in evs if _names_ok(ev.get("description") or "")]
+    if not cands:
+        return None
+    if want_ms is not None:
+        cands.sort(key=lambda ev: abs((ev.get("startTime") or 0) - want_ms))
+        # A "match" more than 12h from our start is a different game of the
+        # series — a wrong-game price is worse than no price.
+        if abs((cands[0].get("startTime") or 0) - want_ms) > 12 * 3600 * 1000:
+            return None
+    link = cands[0].get("link")
+    if not link:
+        return None
+    detail = _bovada_json(
+        f"https://www.bovada.lv/services/sports/event/v2/events/A/"
+        f"description{link}?lang=en", ttl=300)
+    ev2 = ((detail[0].get("events") or [{}])[0]
+           if isinstance(detail, list) and detail else {})
+    for dg in (ev2.get("displayGroups") or []):
+        for m in (dg.get("markets") or []):
+            desc = (m.get("description") or "").lower()
+            per = ((m.get("period") or {}).get("description") or "").lower()
+            if "run scored" not in desc or "1st inning" not in (desc + " " + per):
+                continue
+            yes = no = None
+            for o in (m.get("outcomes") or []):
+                lbl = (o.get("description") or "").strip().lower()
+                amer = _amer_from_bovada((o.get("price") or {}).get("american"))
+                if lbl == "yes":
+                    yes = amer
+                elif lbl == "no":
+                    no = amer
+            if yes is not None and no is not None:
+                return {"book": "BOVADA", "yes": yes, "no": no,
+                        "captured_at": datetime.now(timezone.utc).isoformat()}
+    return None
+
+
 @app.route("/debug-dk-nrfi")
 def debug_dk_nrfi():
     """DISCOVERY probe for DraftKings' public sportsbook JSON (the $0 path to
@@ -7270,8 +7390,12 @@ def api_handicapper_paperlog():
                 # nrfi_price_src: which venue priced the edge ('polymarket'
                 # primary / 'kalshi' fallback, July 2026) — lets the review
                 # bucket Kalshi-priced NRFI bets separately.
+                # book_nrfi: Bovada's contemporaneous 1st-inning quote — the
+                # exchange-vs-sportsbook LAG dataset (how stale is the book
+                # when the model bets early?). None when Bovada missed.
                 "signal_blob": {"p_nrfi": nrfi.get("p_nrfi"),
-                                "nrfi_price_src": nrfi.get("price_src")},
+                                "nrfi_price_src": nrfi.get("price_src"),
+                                "book_nrfi": nrfi.get("book")},
             })
         # Unlogged-bet alert candidates (July 2026 — replaced the prime-
         # WINDOW alert, user call: ping on BETS, not windows). A candidate

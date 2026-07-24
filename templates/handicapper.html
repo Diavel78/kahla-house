@@ -2869,6 +2869,13 @@
             } else {
                 detFrag = `<div class="pr-line" style="color:var(--orange)">No 1st-inning market found on Polymarket or Kalshi — can't price an edge (see "Copy for Claude" → pmm_meta; a live Kalshi chip above with this line showing = reader gap, check /debug-kalshi-discover?q=inning).</div>`;
             }
+            // Bovada book line — the retail fallback when the Poly maker
+            // won't fill (the only free sportsbook 1st-inning quote).
+            const bkFrag = (n.book && n.book.yes != null && n.book.no != null)
+                ? `<div class="pr-line" title="Bovada's 1st-inning 'run scored' market — the sportsbook fallback when your Polymarket maker order isn't filling. Compare to the model fair above.">
+                       <span style="color:#f59e0b;font-weight:600">Bovada book:</span>
+                       YRFI ${_fmtAmer(n.book.yes)} · NRFI ${_fmtAmer(n.book.no)}</div>`
+                : '';
             const whyHtml = (n.reasons || []).length
                 ? `<ul class="why" style="margin-top:10px">${n.reasons.map(b => `<li>${_esc(b)}</li>`).join('')}</ul>`
                 : '';
@@ -2897,6 +2904,7 @@
                     ${cell('yes', 'YRFI (run scores)', yrfiPct, n.yrfi_fair_american)}
                 </div>
                 ${detFrag}
+                ${bkFrag}
                 ${whyHtml}
                 <div class="wx-foot">scoreless halves: away ${(n.q_top*100).toFixed(0)}% · home ${(n.q_bot*100).toFixed(0)}%${obpNote}${spNote} · v1 — calibrating via backtest</div>
                 ${btns}

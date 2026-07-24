@@ -4166,7 +4166,21 @@ def _nrfi_model(sport: str, pitchers: dict | None, away: str | None,
         + ("lean NRFI" if lean == "no" else "lean YRFI" if lean == "yes"
            else "no edge vs baseline"))
 
+    # Bovada book line — the ONLY free sportsbook 1st-inning quote (July 2026
+    # hunt: no odds API carries the market, DK blocks Vercel IPs). Reference/
+    # fallback for when the Poly maker won't fill, and the exchange-vs-book
+    # lag datapoint (stamped into the paperlog). Late import (app owns the
+    # reader — same pattern as _kalshi_nrfi_book above), silent-fail.
+    book_q = None
+    try:
+        from app import _bovada_nrfi_quote as _bq
+        book_q = _bq(away, home,
+                     want_dt.isoformat() if want_dt is not None else None)
+    except Exception:
+        book_q = None
+
     return {
+        "book":                book_q,           # {'book':'BOVADA','yes','no',...} or None
         "p_nrfi":              round(p_nrfi, 4),
         "p_yrfi":              round(p_yrfi, 4),
         "nrfi_fair_american":  _prob_to_american(p_nrfi),
