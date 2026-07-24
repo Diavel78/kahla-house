@@ -3640,6 +3640,24 @@ def _fetch_kalshi_orderbook(ticker: str) -> dict:
 # touch ratio is the whole signal.
 _TAKE_IMB = 1.5          # top-row bid size ≥ this × top-row ask size ⇒ TAKE
 
+# ── Execution venue switch (July 24 2026 — user: "back to betting
+# exclusively on Polymarket... push Kalshi back to dormant on everything
+# outside the pick bot model") ──
+# False = Kalshi is DORMANT for EXECUTION: no Kalshi book in the make/take
+# verdict (entry_book is always POLYMARKET), no Kalshi autolog (no picks
+# created from / removed by Kalshi holdings), no Kalshi portfolio reads in
+# the fill tracker (3 authed API calls per poll — the reason the dashboard's
+# resting/filled refresh got slow under dual-venue; a leftover KALSHI-book
+# pending pick just shows fill 'unknown' and still grades via the resolver).
+# Kalshi stays FULLY ALIVE as the Pick Bot SIGNAL: pm_snapshots cross-confirm
+# logger, the x_confirmed ML gate, the exch_current fair anchor, the CLV
+# exchange close, the NRFI price fallback, UFC bout times, /debug-kalshi*.
+# VENUE HISTORY (design for whiplash): Kalshi routed Jun–Jul 2026 → de-venued
+# Jul 5 → sole venue Jul 12 → dual best-execution ~Jul 20 → POLY-ONLY Jul 24
+# (this flag). Flip to True and the dual best-execution engine is back —
+# every Kalshi reader below is kept wired.
+KALSHI_EXECUTION = False
+
 
 def _pmm_book(client, slug: str) -> dict | None:
     """Polymarket markets.book(slug) -> normalized side book in cents.
@@ -5174,10 +5192,17 @@ def api_kalshi_autolog():
     owner = _kalshi_owner_uid()
     if not owner:
         return jsonify({"ok": True, "skipped": "no owner uid"}), 200
-    try:
-        summary = _kalshi_autolog(sb, owner)
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+    # Kalshi autolog DORMANT under KALSHI_EXECUTION=False (Poly-only
+    # execution, July 24 2026) — no picks created from / removed by Kalshi
+    # holdings. The Polymarket autolog is the live book-of-record.
+    summary: dict = {}
+    if KALSHI_EXECUTION:
+        try:
+            summary = _kalshi_autolog(sb, owner)
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+    else:
+        summary["kalshi"] = "dormant"
     try:
         summary["pmm"] = _pmm_autolog(sb, owner)
     except Exception as e:
@@ -5496,9 +5521,13 @@ def _compute_fill_status(sb, uid: str) -> dict:
     has_poly = any(_is_poly(p) for p in pending)
 
     kid, pem, _, _ = _kalshi_creds()
-    kalshi_configured = bool(kid and pem)
+    # Kalshi tracking rides KALSHI_EXECUTION (Poly-only, July 24 2026): the
+    # 3 authed portfolio reads per poll were the dual-venue slowness the user
+    # flagged. Dormant → a leftover KALSHI-book pending pick degrades to
+    # fill 'unknown' (renders nothing, still grades via the resolver).
+    kalshi_configured = bool(kid and pem) and KALSHI_EXECUTION
     # configured:false (quiet frontend no-op) only when NEITHER venue can be
-    # tracked — no Kalshi creds AND no Poly-executed pick pending.
+    # tracked — no (enabled) Kalshi creds AND no Poly-executed pick pending.
     if not (kalshi_configured or has_poly):
         return {"ok": True, "configured": False, "fills": []}
     now = datetime.now(timezone.utc)
@@ -5950,9 +5979,13 @@ def api_make_take():
     # (RULE 0.001 corollary), so an unroutable type would be a reader
     # gap, not a missing market.
     kbook = None
+    want_dt = None
     if sport and away and home and side:
         want_dt = (datetime.now(timezone.utc) + timedelta(minutes=sim)
                    if sim is not None else None)
+    # Kalshi leg DORMANT under KALSHI_EXECUTION=False (Poly-only execution,
+    # July 24 2026) — readers kept wired; flip the flag and it compares again.
+    if KALSHI_EXECUTION and sport and away and home and side:
         try:
             if market_type in ("moneyline", "ml"):
                 kbook = _kalshi_side_book(sport, away, home, side, want_dt=want_dt)
