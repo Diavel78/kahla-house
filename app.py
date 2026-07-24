@@ -3519,7 +3519,7 @@ def debug_dk_nrfi():
         url = f"{base}/categories/{cat}?format=json" if cat else f"{base}?format=json"
         ent: dict = {"url": url}
         try:
-            r = requests.get(url, headers=hdrs, timeout=8)
+            r = _http.get(url, headers=hdrs, timeout=8)
             ent["status"] = r.status_code
             ent["content_type"] = r.headers.get("content-type", "")[:60]
             if r.status_code == 200 and "json" in ent["content_type"]:
