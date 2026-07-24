@@ -3492,6 +3492,81 @@ def debug_vsin_parsed():
     return jsonify(_fetch_vsin_splits(sport, book))
 
 
+@app.route("/debug-dk-nrfi")
+def debug_dk_nrfi():
+    """DISCOVERY probe for DraftKings' public sportsbook JSON (the $0 path to
+    a retail-book NRFI/YRFI line — no odds API carries 1st-inning: ParlayAPI
+    and The Odds API both stop at 1st-5-innings, verified July 2026). Same
+    posture as the Action Network scraper: public JSON the site's own UI
+    calls, browser-ish headers, iterate via this debug surface because the
+    sandbox can't reach DK — only Vercel can. Tries the known endpoint
+    shapes and returns status + a TRIMMED structure (category ids/names,
+    'inning' ones flagged) — never the multi-MB dump. ?cat=<id> drills into
+    one category (subcategories + first offer labels/outcomes) so the parser
+    can be written against the real shape. Public market data, no secrets."""
+    hdrs = {"User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/126.0.0.0 Safari/537.36"),
+            "Accept": "application/json",
+            "Referer": "https://sportsbook.draftkings.com/leagues/baseball/mlb"}
+    out: dict = {"candidates": []}
+    cat = (request.args.get("cat") or "").strip()
+    bases = [
+        "https://sportsbook.draftkings.com/sites/US-SB/api/v5/eventgroups/84240",
+        "https://sportsbook-nash.draftkings.com/sites/US-SB/api/v5/eventgroups/84240",
+    ]
+    for base in bases:
+        url = f"{base}/categories/{cat}?format=json" if cat else f"{base}?format=json"
+        ent: dict = {"url": url}
+        try:
+            r = requests.get(url, headers=hdrs, timeout=8)
+            ent["status"] = r.status_code
+            ent["content_type"] = r.headers.get("content-type", "")[:60]
+            if r.status_code == 200 and "json" in ent["content_type"]:
+                j = r.json()
+                ent["top_keys"] = list(j.keys())[:10]
+                eg = j.get("eventGroup") or {}
+                if eg:
+                    cats = [{"id": c.get("offerCategoryId"), "name": c.get("name")}
+                            for c in (eg.get("offerCategories") or [])]
+                    ent["event_count"] = len(eg.get("events") or [])
+                    ent["categories"] = cats
+                    ent["inning_categories"] = [
+                        c for c in cats if "inning" in (c.get("name") or "").lower()]
+                    if cat:
+                        # Drill: dump subcategory names + a few trimmed offers.
+                        subs = []
+                        for c in (eg.get("offerCategories") or []):
+                            for d in (c.get("offerSubcategoryDescriptors") or []):
+                                sc = {"subcategoryId": d.get("subcategoryId"),
+                                      "name": d.get("name")}
+                                offers = (((d.get("offerSubcategory") or {})
+                                           .get("offers")) or [])
+                                sample = []
+                                for row in offers[:2]:
+                                    for o in (row or [])[:2]:
+                                        sample.append({
+                                            "label": o.get("label"),
+                                            "outcomes": [
+                                                {"label": x.get("label"),
+                                                 "oddsAmerican": x.get("oddsAmerican"),
+                                                 "line": x.get("line")}
+                                                for x in (o.get("outcomes") or [])[:4]]})
+                                if sample:
+                                    sc["sample_offers"] = sample
+                                subs.append(sc)
+                        ent["subcategories"] = subs
+            else:
+                ent["body_head"] = (r.text or "")[:200]
+        except Exception as e:
+            ent["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+        out["candidates"].append(ent)
+        # First working host answers — same-shaped mirror adds nothing.
+        if ent.get("status") == 200 and "json" in ent.get("content_type", ""):
+            break
+    return jsonify(out)
+
+
 @app.route("/debug-pmm")
 def debug_pmm():
     """Diagnose the Polymarket SDK path — does the authed client construct, and
