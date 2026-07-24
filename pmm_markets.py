@@ -386,7 +386,17 @@ def _search_event(client, sport: str, away: str, home: str,
     # match anyway, so over-fetching is cheap.
     win_min = (bet_dt - timedelta(hours=12)).isoformat()
     win_max = (bet_dt + timedelta(hours=12)).isoformat()
-    cache_key = f"{sport}:{_norm(away)}:{_norm(home)}:{bet_dt.date().isoformat()}"
+    # Cache key dates the game in ET (PMM's slug-date convention), NOT UTC.
+    # LANDMINE (July 24 2026, the SEA@TEX YRFI no-chip bug): a 7:05pm Central
+    # start is 00:05 UTC the NEXT day, so tonight's game and TOMORROW's game
+    # of the same series shared one UTC-date key — the second lookup in the
+    # same request (the _pmm_autolog slug-index loop walks both market rows
+    # seconds apart) cache-hit the FIRST game's event, bypassing _ev_date_ok
+    # (the guard runs in the search, never on a cache hit). The YRFI slug then
+    # indexed under BOTH market ids → autolog's uniq check read it as
+    # ambiguous → the resting Poly order never became a pick.
+    cache_key = (f"{sport}:{_norm(away)}:{_norm(home)}:"
+                 f"{(_bet_et_date(bet_dt) or bet_dt.date()).isoformat()}")
     cached = _EVENT_CACHE.get(cache_key)
     if cached and (time.time() - cached[0]) < _EVENT_CACHE_TTL_SEC:
         if diag is not None:
