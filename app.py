@@ -6856,7 +6856,12 @@ def _pm_insert_changed(sb, rows, now) -> int:
 # score (handicapper_web._RECENCY_WEIGHTS). Cents ARE prob points here, no
 # scale constant needed: gate at 3 weighted cents ≈ the main gate's feel.
 _PROP_RECENCY = ((15, 0.75), (60, 0.50), (120, 0.35), (360, 0.18), (1080, 0.08))
-_PROP_SUGGEST_MIN = 3.0   # weighted cents to clear the suggestion gate
+_PROP_SUGGEST_MIN = 3.0   # weighted cents to ENTER the suggestion gate
+_PROP_SUGGEST_EXIT = 2.0  # hysteresis floor — a cleared prop STAYS cleared
+                          # until its score decays below this (the sticky-gate
+                          # pattern; kills the badge/card flicker when scores
+                          # hover at the gate and recency weights decay them
+                          # across consecutive ticks — July 26 SEA@TEX 3▲→0)
 _PROP_CENTS_LO, _PROP_CENTS_HI = 4, 96   # don't suggest near-resolved longshots
 
 
@@ -6918,6 +6923,7 @@ def _prop_update_suggestions(sb, prop_rows, now) -> int:
         return 0
     mids = list({r[0] for r in prop_rows})
     hist: dict = {}
+    prev_cleared: set = set()
     try:
         rows = (sb.table("prop_snapshots")
                 .select("market_id,venue,prop_key,cents,captured_at")
@@ -6928,6 +6934,13 @@ def _prop_update_suggestions(sb, prop_rows, now) -> int:
             hist.setdefault((r["market_id"], r["venue"], r["prop_key"]), []).append(r)
     except Exception:
         return 0
+    try:
+        prows = (sb.table("prop_suggestions").select("market_id,prop_key,side,cleared")
+                 .in_("market_id", mids).eq("cleared", True)
+                 .limit(4000).execute().data) or []
+        prev_cleared = {(r["market_id"], r["prop_key"], r.get("side")) for r in prows}
+    except Exception:
+        pass
     ups = []
     for (mid, venue, key, q, ptype, line, cents) in prop_rows:
         snaps = hist.get((mid, venue, key)) or []
@@ -6941,7 +6954,11 @@ def _prop_update_suggestions(sb, prop_rows, now) -> int:
                 continue
         score = round(abs(wsum), 2)
         side = "yes" if wsum > 0 else ("no" if wsum < 0 else None)
-        cleared = (score >= _PROP_SUGGEST_MIN and side is not None
+        # Schmitt trigger: ENTER at _PROP_SUGGEST_MIN, EXIT below
+        # _PROP_SUGGEST_EXIT (same side only) — a mover doesn't flicker off
+        # the moment recency decay shaves it under the entry gate.
+        gate = _PROP_SUGGEST_EXIT if (mid, key, side) in prev_cleared else _PROP_SUGGEST_MIN
+        cleared = (score >= gate and side is not None
                    and _PROP_CENTS_LO <= cents <= _PROP_CENTS_HI)
         ups.append({"market_id": mid, "prop_key": key, "venue": venue,
                     "question": q, "prop_type": ptype, "line": line,
@@ -7091,26 +7108,52 @@ def _trade_match_index(all_games) -> list[dict]:
 
 def _match_poly_trade(t: dict, idx: list[dict]):
     """Match one tape row to one of our games. Pass 1: BOTH mascot tokens in
-    the row's text. Pass 2: BOTH tricodes as slug tokens. Tie-break multiple
-    candidates (same series, today+tomorrow both in window) by the ET date in
-    the event slug, else the earliest upcoming game."""
+    the row's text. Pass 2: BOTH tricodes as slug tokens. THREE guards from
+    the July 26 SEA@TEX incident (in-play trades from TODAY's game landed on
+    TOMORROW's row at 88-99¢):
+      1. The event-slug DATE is a VETO, not a tie-break — a candidate whose
+         ET game date contradicts the slug's date is dropped even when it's
+         the only candidate (the trade belongs to a game we don't index).
+      2. Parlay markets ("LAA/SF AND SEA/TEX") span games — skipped.
+      3. Candidates across DIFFERENT matchups with no date to disambiguate
+         → ambiguous, skip (never guess a game for a multi-game market)."""
+    title = t.get("title") or ""
+    if " AND " in title:                      # parlay/combined market
+        return None
     text = " ".join([t.get("event_slug") or "", t.get("slug") or "",
-                     t.get("title") or ""]).lower()
+                     title]).lower()
     slug_toks = set(re.split(r"[^a-z0-9]+", (t.get("event_slug") or "").lower()))
+    m = re.search(r"\d{4}-\d{2}-\d{2}", t.get("event_slug") or "")
+    slug_date = m.group(0) if m else None
     cands = []
     for g in idx:
         if (g["away_tok"] and g["home_tok"]
                 and g["away_tok"] in text and g["home_tok"] in text):
-            cands.append(g)
+            pass
         elif (g["away_code"] and g["home_code"]
                 and g["away_code"] in slug_toks and g["home_code"] in slug_toks):
-            cands.append(g)
+            pass
+        else:
+            continue
+        # Date veto: slug says which ET day this market's game is.
+        if slug_date and g["et_date"] and g["et_date"] != slug_date:
+            continue
+        cands.append(g)
     if not cands:
         return None
+    if len({(g["away_tok"], g["home_tok"]) for g in cands}) > 1:
+        return None                           # spans different matchups
     if len(cands) > 1:
-        dated = [g for g in cands
-                 if g["et_date"] and g["et_date"] in (t.get("event_slug") or "")]
-        cands = dated or sorted(cands, key=lambda g: str(g.get("event_start") or ""))
+        # Same series, multiple dates in window, no slug date to pick —
+        # prefer the game nearest the TRADE time (live/today over tomorrow).
+        def _gap(g):
+            try:
+                ge = datetime.fromisoformat(str(g["event_start"]).replace("Z", "+00:00"))
+                tt = datetime.fromisoformat(str(t.get("traded_at")).replace("Z", "+00:00"))
+                return abs((ge - tt).total_seconds())
+            except Exception:
+                return float("inf")
+        cands.sort(key=_gap)
     return cands[0]
 
 
@@ -7122,9 +7165,28 @@ def _poly_trades_ingest(sb, all_games, now, diag: dict | None = None) -> dict:
     try:
         rows = _fetch_poly_trades(diag=diag)
         out["fetched"] = len(rows)
-        if not rows or not all_games:
+        if not rows:
             return out
-        idx = _trade_match_index(all_games)
+        # The upcoming-games index PLUS recently-started games (July 26
+        # SEA@TEX lesson): once a game tips off it leaves `all_games`, so
+        # its in-play trades had only the series-mate (tomorrow's row) to
+        # match. With the live game in the index — and the slug-date veto —
+        # in-play flow attaches to the game it belongs to.
+        live_games = []
+        try:
+            lo = (now - timedelta(hours=7)).isoformat()
+            lrows = (sb.table("markets").select("id,sport,event_name,event_start")
+                     .in_("sport", list(_PM_SPORTS)).eq("status", "active")
+                     .gte("event_start", lo).lt("event_start", now.isoformat())
+                     .limit(120).execute().data) or []
+            for g in lrows:
+                g["_sport"] = g.get("sport")
+                live_games.append(g)
+        except Exception:
+            pass
+        if not all_games and not live_games:
+            return out
+        idx = _trade_match_index(list(all_games) + live_games)
         matched = []
         for t in rows:
             g = _match_poly_trade(t, idx)
