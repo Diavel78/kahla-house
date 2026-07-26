@@ -300,6 +300,7 @@
         .prop-q { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
         .prop-move { font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 700; white-space: nowrap; }
         .prop-move.pos { color: var(--green); }
+        .prop-move.sell { color: var(--red); }
         .prop-log { padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-2);
                     color: var(--text-secondary); font-size: 10px; cursor: pointer; white-space: nowrap; }
         .prop-log.sug { background: var(--green-dim); color: var(--green); border-color: rgba(34,197,94,0.4); font-weight: 700; }
@@ -2941,6 +2942,35 @@
             </div>
             <div id="propsBody"><div class="pr-line" style="color:var(--text-muted)">Loading prop board…</div></div>
         </div>`;
+
+        // Big Trades — the Polymarket whale tape on this game ($500+ taker
+        // fills off the GLOBAL polymarket.com book, polled by the cron —
+        // poly_trades). Order-flow reference signal, not a scoring input.
+        if ((d.big_trades || []).length) {
+            const _ago = iso => {
+                const m = Math.round((Date.now() - Date.parse(iso)) / 60000);
+                if (isNaN(m)) return '';
+                return m < 1 ? 'now' : m < 60 ? `${m}m ago` : `${(m / 60).toFixed(m < 600 ? 1 : 0)}h ago`;
+            };
+            const _usd = v => (v >= 1000 ? `$${(v / 1000).toFixed(1)}k` : `$${Math.round(v)}`);
+            const tRows = d.big_trades.map(t => {
+                const buy = (t.side || '') === 'BUY';
+                const who = t.trader || (t.wallet ? `…${String(t.wallet).slice(-6)}` : '');
+                const oc = t.outcome ? ` · ${_esc(t.outcome)}` : '';
+                return `<div class="prop-row">
+                    <span class="prop-move ${buy ? 'pos' : 'sell'}">${buy ? '▲ BUY' : '▼ SELL'} ${_usd(Number(t.notional_usd) || 0)}</span>
+                    <span class="prop-q" title="${_esc(t.title || '')}">${_esc(t.title || '')}${oc} @ ${Math.round(t.price_cents)}¢</span>
+                    <span style="color:var(--text-muted);font-size:10px;white-space:nowrap">${_esc(who)} · ${_ago(t.traded_at)}</span>
+                </div>`;
+            }).join('');
+            html += `<div class="card">
+                <div class="card-head">
+                    <h3>Big Trades</h3>
+                    <span class="ref-tag" title="The biggest taker fills (≥$500) on this game's Polymarket markets over the last 24h — the global book's order-flow tape. Who's hammering a side before the price moves. Reference only; the movement engine stays the scoring signal.">WHALE TAPE · REFERENCE</span>
+                </div>
+                ${tRows}
+            </div>`;
+        }
 
         // Market-anchored spread (SHADOW) — direction from the exchange ML win
         // prob, margin from the run-total model. Reference card only; it's

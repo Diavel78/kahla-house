@@ -4,6 +4,8 @@ Run nightly via .github/workflows/snapshot-cleanup.yml. Covers:
   - book_snapshots  (frozen PIN history — still drained per the cutover plan)
   - prop_snapshots  (props pipeline cent history — the movement engine only
                      reads the last 18-24h, so 15d is generous headroom)
+  - poly_trades     (whale trade tape — the dossier card reads 24h; reviews
+                     join by market_id+time within the same window class)
 pm_snapshots is deliberately NOT here — it's the exchange history the CLV
 close + sharp score read across a game's whole life; keep it.
 
@@ -24,7 +26,7 @@ from storage import supabase_client as db
 log = logging.getLogger(__name__)
 
 DEFAULT_DAYS = 15
-TABLES = ("book_snapshots", "prop_snapshots")
+TABLES = ("book_snapshots", "prop_snapshots", "poly_trades")
 # Chunk size on the loop. PostgREST DELETE has no LIMIT clause, so we use a
 # rolling captured_at upper bound to walk through old data without timing
 # out a huge first-run delete.

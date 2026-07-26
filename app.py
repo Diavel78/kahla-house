@@ -6955,6 +6955,261 @@ def _prop_update_suggestions(sb, prop_rows, now) -> int:
     return sum(1 for u in ups if u["cleared"])
 
 
+# ───────────── Polymarket trade tape (whale / order-flow, July 2026) ─────────
+# The cron-friendly answer to enviodev/track-poly-trades (user call: "the
+# trades API version is the better path"): ONE poll of Polymarket's public
+# data-API trade tape per pm-snapshot tick, big taker fills only, matched to
+# OUR upcoming games by team names/tricodes → poly_trades. This is the GLOBAL
+# polymarket.com book's tape — an order-flow SIGNAL (who's hammering a side
+# before the price moves), NOT a record of the user's own US-exchange orders.
+# Earn-in: recorded + shown (dossier Big Trades card), not a scoring input;
+# reviews join poly_trades → pickbot_paperlog on (market_id, time).
+# API shape is UNVERIFIED from the sandbox — the reader tries several param
+# shapes and tolerant field names; /debug-poly-trades dumps ground truth.
+_TRADE_TAPE_URL = "https://data-api.polymarket.com/trades"
+_TRADE_MIN_USD = 500          # big-trade floor (notional = size × price)
+_TRADE_TAPE_LIMIT = 500
+_TRADE_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+
+
+def _tt_get(row: dict, *names, default=None):
+    """Tolerant field getter — the tape's exact schema is probe-verified,
+    so accept the camel/snake variants we might see."""
+    for n in names:
+        v = row.get(n)
+        if v is not None:
+            return v
+    return default
+
+
+def _fetch_poly_trades(diag: dict | None = None) -> list[dict]:
+    """Pull the newest big taker fills off the public tape. Tries param
+    shapes in order (server-side CASH filter first, then unfiltered with a
+    client-side floor). Returns normalized rows; [] on any failure."""
+    shapes = [
+        {"limit": _TRADE_TAPE_LIMIT, "takerOnly": "true",
+         "filterType": "CASH", "filterAmount": _TRADE_MIN_USD},
+        {"limit": _TRADE_TAPE_LIMIT, "takerOnly": "true"},
+        {"limit": _TRADE_TAPE_LIMIT},
+    ]
+    for params in shapes:
+        try:
+            r = _http.get(_TRADE_TAPE_URL, params=params, timeout=6,
+                          headers={"Accept": "application/json",
+                                   "User-Agent": _TRADE_UA})
+            if diag is not None:
+                diag.setdefault("attempts", []).append(
+                    {"params": params, "status": r.status_code,
+                     "bytes": len(r.content or b"")})
+            if r.status_code != 200:
+                continue
+            j = r.json()
+            raw = j if isinstance(j, list) else (
+                (j.get("data") or j.get("trades") or []) if isinstance(j, dict) else [])
+            if not isinstance(raw, list) or not raw:
+                continue
+            if diag is not None:
+                diag["sample_raw"] = raw[:2]
+            out = []
+            for t in raw:
+                if not isinstance(t, dict):
+                    continue
+                try:
+                    price = float(_tt_get(t, "price", "avgPrice", default=0) or 0)
+                    size = float(_tt_get(t, "size", "amount", "shares", default=0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if not (0 < price < 1) or size <= 0:
+                    continue
+                notional = price * size
+                if notional < _TRADE_MIN_USD:
+                    continue
+                ts = _tt_get(t, "timestamp", "matchTime", "ts", "time")
+                traded_at = None
+                try:
+                    tsf = float(ts)
+                    if tsf > 1e12:          # ms epoch
+                        tsf /= 1000.0
+                    traded_at = datetime.fromtimestamp(tsf, tz=timezone.utc).isoformat()
+                except (TypeError, ValueError):
+                    if isinstance(ts, str) and ts:
+                        traded_at = ts
+                out.append({
+                    "title":      _tt_get(t, "title", "question", default="") or "",
+                    "slug":       _tt_get(t, "slug", "marketSlug", default="") or "",
+                    "event_slug": _tt_get(t, "eventSlug", "event_slug", default="") or "",
+                    "outcome":    _tt_get(t, "outcome", "outcomeName"),
+                    "side":       (_tt_get(t, "side", default="") or "").upper() or None,
+                    "price_cents": round(price * 100, 2),
+                    "size":       round(size, 2),
+                    "notional_usd": round(notional, 2),
+                    "wallet":     _tt_get(t, "proxyWallet", "proxy_wallet", "user", "maker"),
+                    "trader":     _tt_get(t, "name", "pseudonym", "profileName"),
+                    "tx_hash":    _tt_get(t, "transactionHash", "tx_hash", "txHash"),
+                    "traded_at":  traded_at,
+                    "_asset":     str(_tt_get(t, "asset", "assetId", "tokenId", default="")),
+                })
+            if out:
+                if diag is not None:
+                    diag["normalized_sample"] = out[:5]
+                return out
+        except Exception as e:
+            if diag is not None:
+                diag.setdefault("errors", []).append(str(e)[:200])
+    return []
+
+
+def _trade_match_index(all_games) -> list[dict]:
+    """Matchable shape per upcoming game: mascot last-tokens + Kalshi-style
+    tricodes + the ET game date (the PMM slug convention)."""
+    idx = []
+    for g in all_games:
+        ev = g.get("event_name") or ""
+        if " @ " not in ev:
+            continue
+        away, home = [s.strip() for s in ev.split(" @ ", 1)]
+        sp = g.get("_sport") or g.get("sport") or ""
+
+        def _tok(name):
+            w = [x for x in re.split(r"[^a-z0-9]+", name.lower()) if x]
+            return w[-1] if w else ""
+        try:
+            et_date = (datetime.fromisoformat(str(g["event_start"]).replace("Z", "+00:00"))
+                       .astimezone(ZoneInfo("America/New_York")).date().isoformat())
+        except Exception:
+            et_date = None
+        idx.append({
+            "market_id": g["id"], "sport": sp, "event_start": g.get("event_start"),
+            "away_tok": _tok(away), "home_tok": _tok(home),
+            "away_code": (_our_team_to_kalshi_code(sp, away) or "").lower(),
+            "home_code": (_our_team_to_kalshi_code(sp, home) or "").lower(),
+            "et_date": et_date,
+        })
+    return idx
+
+
+def _match_poly_trade(t: dict, idx: list[dict]):
+    """Match one tape row to one of our games. Pass 1: BOTH mascot tokens in
+    the row's text. Pass 2: BOTH tricodes as slug tokens. Tie-break multiple
+    candidates (same series, today+tomorrow both in window) by the ET date in
+    the event slug, else the earliest upcoming game."""
+    text = " ".join([t.get("event_slug") or "", t.get("slug") or "",
+                     t.get("title") or ""]).lower()
+    slug_toks = set(re.split(r"[^a-z0-9]+", (t.get("event_slug") or "").lower()))
+    cands = []
+    for g in idx:
+        if (g["away_tok"] and g["home_tok"]
+                and g["away_tok"] in text and g["home_tok"] in text):
+            cands.append(g)
+        elif (g["away_code"] and g["home_code"]
+                and g["away_code"] in slug_toks and g["home_code"] in slug_toks):
+            cands.append(g)
+    if not cands:
+        return None
+    if len(cands) > 1:
+        dated = [g for g in cands
+                 if g["et_date"] and g["et_date"] in (t.get("event_slug") or "")]
+        cands = dated or sorted(cands, key=lambda g: str(g.get("event_start") or ""))
+    return cands[0]
+
+
+def _poly_trades_ingest(sb, all_games, now, diag: dict | None = None) -> dict:
+    """One tape poll → match → insert-new-only (unique trade_key dedup).
+    Returns {fetched, matched, inserted}. Never raises."""
+    import hashlib
+    out = {"fetched": 0, "matched": 0, "inserted": 0}
+    try:
+        rows = _fetch_poly_trades(diag=diag)
+        out["fetched"] = len(rows)
+        if not rows or not all_games:
+            return out
+        idx = _trade_match_index(all_games)
+        matched = []
+        for t in rows:
+            g = _match_poly_trade(t, idx)
+            if not g:
+                if diag is not None and len(diag.setdefault("unmatched_sample", [])) < 10:
+                    diag["unmatched_sample"].append(
+                        (t.get("title") or t.get("event_slug") or "")[:80])
+                continue
+            key = hashlib.sha1("|".join([
+                str(t.get("tx_hash") or ""), t.get("_asset") or "",
+                str(t.get("wallet") or ""), str(t.get("side") or ""),
+                str(t.get("size") or ""), str(t.get("price_cents") or ""),
+                str(t.get("traded_at") or "")]).encode()).hexdigest()
+            matched.append({
+                "trade_key": key, "market_id": g["market_id"], "sport": g["sport"],
+                "title": (t.get("title") or "")[:300], "slug": t.get("slug"),
+                "event_slug": t.get("event_slug"), "outcome": t.get("outcome"),
+                "side": t.get("side"), "price_cents": t.get("price_cents"),
+                "size": t.get("size"), "notional_usd": t.get("notional_usd"),
+                "wallet": t.get("wallet"), "trader": t.get("trader"),
+                "tx_hash": t.get("tx_hash"), "traded_at": t.get("traded_at"),
+                "captured_at": now.isoformat(),
+            })
+        out["matched"] = len(matched)
+        if not matched:
+            return out
+        keys = [m["trade_key"] for m in matched]
+        try:
+            have = {r["trade_key"] for r in
+                    ((sb.table("poly_trades").select("trade_key")
+                      .in_("trade_key", keys).execute().data) or [])}
+        except Exception:
+            have = set()
+        fresh = [m for m in matched if m["trade_key"] not in have]
+        if fresh:
+            try:
+                sb.table("poly_trades").insert(fresh).execute()
+                out["inserted"] = len(fresh)
+            except Exception:
+                # Unique-key race with a concurrent tick → retry rows
+                # individually so one dup can't sink the batch.
+                ok = 0
+                for m in fresh:
+                    try:
+                        sb.table("poly_trades").insert(m).execute()
+                        ok += 1
+                    except Exception:
+                        pass
+                out["inserted"] = ok
+    except Exception as e:
+        if diag is not None:
+            diag.setdefault("errors", []).append(f"ingest: {str(e)[:200]}")
+    return out
+
+
+@app.route("/debug-poly-trades")
+def debug_poly_trades():
+    """Probe for the trade-tape reader (public tape data, no secrets):
+    raw API attempt results + normalized samples + match diagnostics
+    against the current upcoming-games window. Ground truth for tuning
+    _fetch_poly_trades/_match_poly_trade — the sandbox can't reach the
+    tape host, only Vercel can (the Bovada/DK probe pattern)."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+    now = datetime.now(timezone.utc)
+    all_games = []
+    for sp in _PM_SPORTS:
+        hi = (now + timedelta(hours=48)).isoformat()
+        try:
+            rows_sp = (sb.table("markets").select("id,event_name,event_start")
+                       .eq("sport", sp).eq("status", "active")
+                       .gte("event_start", now.isoformat()).lte("event_start", hi)
+                       .limit(100).execute().data) or []
+        except Exception:
+            rows_sp = []
+        for g in rows_sp:
+            g["_sport"] = sp
+            all_games.append(g)
+    diag: dict = {}
+    res = _poly_trades_ingest(sb, all_games, now, diag=diag)
+    return jsonify({"ok": True, "games_in_window": len(all_games),
+                    "ingest": res, "diag": diag})
+
+
 # ───────────── Cross-confirm trigger (PMM+Kalshi → on-demand PINN pull) ─────
 _XCONFIRM_MOVE = 1   # cents — both feeds must move >= this, same direction
 
@@ -7211,9 +7466,13 @@ def api_pm_snapshot():
     inserted = _pm_insert_changed(sb, rows, now)
     props_inserted = _prop_insert_changed(sb, prop_rows, now)
     props_cleared = _prop_update_suggestions(sb, prop_rows, now)
+    # Trade tape (whale flow) — ONE poll of the public tape, matched against
+    # the same upcoming-games index this tick already built. ~1-2s of I/O.
+    tt = _poly_trades_ingest(sb, all_games, now)
     xc = _xconfirm_detect(sb, cur, now)
     return jsonify({"ok": True, "games": len(all_games), "inserted": inserted,
                     "props_inserted": props_inserted, "props_cleared": props_cleared,
+                    "trades": tt,
                     "kalshi": kal_meta, "xconfirm_triggered": xc["triggered"], **st})
 
 
