@@ -7687,10 +7687,14 @@ def api_handicapper_paperlog():
     # tip (the on-page ⚠ TAKE NOW chip only shows when the page is open).
     # Independent of the bet cands above: it reads live fill state directly.
     take_warned = _take_warn_alerts(sb, now)
+    # OUTBID push (every 2nd minute) — the red chip's Telegram twin: a
+    # resting maker order lost the touch, re-bid or take.
+    outbid_warned = _outbid_alerts(sb, now)
     # stdout → Vercel runtime logs: the alert pipeline's only observability
     # (the JSON response is visible only in cron-job.org history).
     print(f"paperlog: processed={processed} cands={len(alert_cands)} "
-          f"alerted={bets_alerted} take_warned={take_warned} new_rows={len(rows)}")
+          f"alerted={bets_alerted} take_warned={take_warned} "
+          f"outbid_warned={outbid_warned} new_rows={len(rows)}")
     new_rows = 0
     if rows:
         try:
@@ -8440,11 +8444,126 @@ def _take_warn_alerts(sb, now) -> int:
     return sent
 
 
+def _outbid_line(f: dict, r: dict) -> str:
+    """One bullet for the batched OUTBID message: the game + the warning."""
+    ev = r.get("event_name") or ""
+    mt = (r.get("market_type") or "").upper()
+    side = (r.get("side") or "").upper()
+    u = r.get("units")
+    venue = "Polymarket" if f.get("venue") == "POLYMARKET" else "Kalshi"
+    myp = f.get("my_price_c")
+    bb = f.get("best_bid_c")
+    ahead = f.get("ahead_qty")
+    px = ""
+    if myp is not None and bb is not None:
+        px = f" · you {round(myp)}¢, book {round(bb)}¢"
+        if ahead:
+            px += f" (~{int(ahead):,} ahead)"
+    mins = f.get("mins_to_start")
+    when = f" · tip {mins}m" if mins is not None else ""
+    return f"• {ev} — {mt} {side} {u}u · {venue}{px}{when}"
+
+
+_OUTBID_TICK_MOD = 2   # run the (venue-API-hitting) check every 2nd minute
+
+
+def _outbid_alerts(sb, now) -> int:
+    """Telegram (Filled Bot): the OUTBID warning as a PUSH (July 2026, user:
+    "I love the red chip when outbid, but sending a notification on telegram
+    needs to happen"). The on-page red outbid chip only shows when the page
+    is open; this reaches the phone: someone bid ABOVE your resting maker
+    order, so it won't fill — re-bid or take. Rides the paperlog tick,
+    throttled to every _OUTBID_TICK_MOD minutes (it reuses
+    _compute_fill_status, which hits the venue APIs). Re-alert policy: one
+    ping per bid LEVEL — marker signal_blob.outbid_warned stores the public
+    best bid we warned about; a HIGHER best bid re-pings (they outbid you
+    again), the same level never re-pings. Quiet 11pm-7am AZ (the ingest
+    blackout — overnight books drift and the user is asleep). Stamped only
+    on a successful send so a Telegram failure retries. Never raises."""
+    sent = 0
+    try:
+        if now.minute % _OUTBID_TICK_MOD:
+            return 0
+        if _in_blackout_mt(now):
+            return 0
+        admins = set(_admin_uids())
+        _owner = _kalshi_owner_uid()
+        if _owner:
+            admins.add(_owner)
+        if not admins:
+            return 0
+        for uid in admins:
+            # Pre-check: any pending pre-game pick at all? (The outbid check
+            # only applies to resting pre-game orders.)
+            try:
+                near = (sb.table("bot_picks").select("id")
+                        .eq("status", "pending").eq("asked_by", uid)
+                        .gte("event_start", now.isoformat())
+                        .limit(1).execute().data) or []
+            except Exception:
+                near = []
+            if not near:
+                continue
+            try:
+                res = _compute_fill_status(sb, uid)
+            except Exception:
+                continue
+            if not res.get("configured"):
+                continue
+            hits = [f for f in (res.get("fills") or []) if f.get("outbid")]
+            if not hits:
+                continue
+            ids = [f["id"] for f in hits]
+            try:
+                rows = (sb.table("bot_picks")
+                        .select("id,event_name,market_type,side,units,signal_blob")
+                        .in_("id", ids).execute().data) or []
+            except Exception:
+                continue
+            byid = {r["id"]: r for r in rows}
+            fresh = []
+            for f in hits:
+                r = byid.get(f["id"])
+                if not r:
+                    continue
+                blob = (r.get("signal_blob")
+                        if isinstance(r.get("signal_blob"), dict) else {})
+                prev = blob.get("outbid_warned") or {}
+                prev_bb = prev.get("best_bid_c") if isinstance(prev, dict) else None
+                cur_bb = f.get("best_bid_c")
+                # Already warned at this bid level (or higher) → skip. A
+                # higher public bid than last warned = a NEW outbid → ping.
+                if (prev_bb is not None and cur_bb is not None
+                        and cur_bb <= prev_bb + 0.25):
+                    continue
+                fresh.append((f, r, blob))
+            if not fresh:
+                continue
+            lines = ["🔴 OUTBID — your resting bid is no longer the touch:"]
+            lines += [_outbid_line(f, r) for f, r, _b in fresh]
+            lines.append("Re-bid to reclaim the touch, or cross the ask.")
+            if _send_fill_telegram("\n".join(lines)):
+                sent += 1
+                for f, r, blob in fresh:
+                    try:
+                        nb = dict(blob)
+                        nb["outbid_warned"] = {"at": now.isoformat(),
+                                               "best_bid_c": f.get("best_bid_c")}
+                        (sb.table("bot_picks").update({"signal_blob": nb})
+                         .eq("id", r["id"]).execute())
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return sent
+
+
 def _send_fill_telegram(text):
     """POST to Telegram sendMessage via the "Filled Bot". No-op (False)
     when FILLED_BOT_TOKEN / FILLED_BOT_CHAT_ID aren't set in Vercel env.
-    Stdlib urllib so we don't add a new dep just for this. Sole caller
-    post-cutover: _bet_alerts (the unlogged-bet ping)."""
+    Stdlib urllib so we don't add a new dep just for this. Callers (all on
+    the paperlog tick): _bet_alerts (unlogged-bet ping), _take_warn_alerts
+    (≤5m-to-tip TAKE push), _outbid_alerts (resting bid lost the touch)."""
     import urllib.request
     import urllib.error
     token = (os.environ.get("FILLED_BOT_TOKEN") or "").strip()
