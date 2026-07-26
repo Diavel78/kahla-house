@@ -727,6 +727,13 @@ def main(argv: list[str] | None = None) -> int:
             if sport not in _ESPN_PATH:
                 unsupported += 1
                 continue
+            # Generic exchange PROPS (props pipeline, July 2026) can't be
+            # graded from the ESPN scoreboard — they stay pending for
+            # manual settle (same posture as UFC method bets). Explicit
+            # skip so they don't inflate the `unmatched` count.
+            if bet.get("market_type") == "prop":
+                unsupported += 1
+                continue
             date_key = _espn_date_key(bet.get("event_start") or "")
             if not date_key:
                 unmatched += 1

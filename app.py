@@ -6774,7 +6774,23 @@ def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
             rows.append((mt, side, line, cents))
             if mt == "ml" and side in ("home", "away"):
                 ml[side] = cents
-    return {"ml": ml, "rows": rows}
+    # PROPS ride the same lookup() (July 2026 props pipeline) — every
+    # non-main market with a live quote, shaped for prop_snapshots:
+    # (prop_key, question, prop_type, line, yes-mid cents).
+    prop_rows = []
+    for p in (data.get("props") or []):
+        mid_q = (p.get("quote") or {}).get("mid")
+        if mid_q is None or not p.get("key"):
+            continue
+        try:
+            cents = round(float(mid_q) * 100)
+        except (TypeError, ValueError):
+            continue
+        if cents <= 0 or cents >= 100:
+            continue
+        prop_rows.append((p["key"], p.get("question"), p.get("type"),
+                          p.get("line"), cents))
+    return {"ml": ml, "rows": rows, "props": prop_rows}
 
 
 def _pm_insert_changed(sb, rows, now) -> int:
@@ -6824,6 +6840,119 @@ def _pm_insert_changed(sb, rows, now) -> int:
         except Exception:
             return 0
     return len(ins)
+
+
+# ───────────── Prop bets pipeline (July 2026) ────────────────────────────────
+# "Markets move the same, we can log the same" (user). Props are priced order
+# books exactly like the main lines, so the SAME movement engine applies:
+# prop_snapshots is the cent history (deduped on change), prop_suggestions is
+# the current per-prop movement verdict. Both are written on the pm-snapshot
+# tick — the props ride the lookup() call that already runs per game, so
+# ingestion costs zero extra network. v1 is Polymarket-only; the venue column
+# exists so Kalshi prop series can slot in once their tickers are verified
+# via /debug-kalshi-discover (no schema change needed).
+
+# Recency weights for prop movement — same buckets as the main-market sharp
+# score (handicapper_web._RECENCY_WEIGHTS). Cents ARE prob points here, no
+# scale constant needed: gate at 3 weighted cents ≈ the main gate's feel.
+_PROP_RECENCY = ((15, 0.75), (60, 0.50), (120, 0.35), (360, 0.18), (1080, 0.08))
+_PROP_SUGGEST_MIN = 3.0   # weighted cents to clear the suggestion gate
+_PROP_CENTS_LO, _PROP_CENTS_HI = 4, 96   # don't suggest near-resolved longshots
+
+
+def _prop_recency_weight(age_min: float) -> float:
+    for cap, w in _PROP_RECENCY:
+        if age_min <= cap:
+            return w
+    return 0.0
+
+
+def _prop_insert_changed(sb, rows, now) -> int:
+    """Insert (market_id, venue, prop_key, question, prop_type, line, cents)
+    prop_snapshots rows, deduped on cent change per (market_id, venue,
+    prop_key) — the pm_snapshots pattern. prop_key (the PMM slug) is unique
+    per market, so the line is informational, not part of the key."""
+    if not rows:
+        return 0
+    mids = list({r[0] for r in rows})
+    last: dict = {}
+    try:
+        recent = (sb.table("prop_snapshots")
+                  .select("market_id,venue,prop_key,cents,captured_at")
+                  .in_("market_id", mids)
+                  .gte("captured_at", (now - timedelta(hours=24)).isoformat())
+                  .order("captured_at", desc=True).limit(8000).execute().data) or []
+        for r in recent:
+            k = (r["market_id"], r["venue"], r["prop_key"])
+            if k not in last:               # first seen = latest (desc order)
+                last[k] = r["cents"]
+    except Exception:
+        pass
+    ins, seen = [], set()
+    for (mid, venue, key, q, ptype, line, cents) in rows:
+        k = (mid, venue, key)
+        if k in seen:
+            continue
+        seen.add(k)
+        if last.get(k) == cents:            # unchanged → skip
+            continue
+        ins.append({"market_id": mid, "venue": venue, "prop_key": key,
+                    "question": q, "prop_type": ptype, "line": line,
+                    "cents": cents, "captured_at": now.isoformat()})
+    if ins:
+        try:
+            sb.table("prop_snapshots").insert(ins).execute()
+        except Exception:
+            return 0
+    return len(ins)
+
+
+def _prop_update_suggestions(sb, prop_rows, now) -> int:
+    """Recompute the movement verdict for every prop captured THIS tick and
+    upsert prop_suggestions. Movement = recency-weighted signed sum of
+    consecutive cent deltas over the last 18h (the main-market sharp-score
+    shape). Side follows the harder-=-sharp rule: YES price rising = money
+    arriving on YES → suggest 'yes'; falling → 'no'. `cleared` = weighted
+    move ≥ _PROP_SUGGEST_MIN and the current price isn't near-resolved."""
+    if not prop_rows:
+        return 0
+    mids = list({r[0] for r in prop_rows})
+    hist: dict = {}
+    try:
+        rows = (sb.table("prop_snapshots")
+                .select("market_id,venue,prop_key,cents,captured_at")
+                .in_("market_id", mids)
+                .gte("captured_at", (now - timedelta(hours=18)).isoformat())
+                .order("captured_at", desc=False).limit(8000).execute().data) or []
+        for r in rows:
+            hist.setdefault((r["market_id"], r["venue"], r["prop_key"]), []).append(r)
+    except Exception:
+        return 0
+    ups = []
+    for (mid, venue, key, q, ptype, line, cents) in prop_rows:
+        snaps = hist.get((mid, venue, key)) or []
+        wsum = 0.0
+        for a, b in zip(snaps, snaps[1:]):
+            try:
+                t = datetime.fromisoformat(str(b["captured_at"]).replace("Z", "+00:00"))
+                age_min = max(0.0, (now - t).total_seconds() / 60.0)
+                wsum += (b["cents"] - a["cents"]) * _prop_recency_weight(age_min)
+            except Exception:
+                continue
+        score = round(abs(wsum), 2)
+        side = "yes" if wsum > 0 else ("no" if wsum < 0 else None)
+        cleared = (score >= _PROP_SUGGEST_MIN and side is not None
+                   and _PROP_CENTS_LO <= cents <= _PROP_CENTS_HI)
+        ups.append({"market_id": mid, "prop_key": key, "venue": venue,
+                    "question": q, "prop_type": ptype, "line": line,
+                    "side": side, "score": score, "cleared": cleared,
+                    "cents": cents, "updated_at": now.isoformat()})
+    if ups:
+        try:
+            sb.table("prop_suggestions").upsert(ups).execute()
+        except Exception:
+            return 0
+    return sum(1 for u in ups if u["cleared"])
 
 
 # ───────────── Cross-confirm trigger (PMM+Kalshi → on-demand PINN pull) ─────
@@ -7006,6 +7135,7 @@ def api_pm_snapshot():
     pmm_deadline = _time.time() + 7.5
 
     rows = []
+    prop_rows = []   # props pipeline — (mid, venue, key, q, type, line, cents)
     st = {"pmm_games": 0, "kalshi_games": 0, "pmm_skipped": 0}
     cur = {}   # market_id -> current home cents (both feeds) for the trigger
     for g in all_games:
@@ -7041,8 +7171,9 @@ def api_pm_snapshot():
         if kc.get("home") or kc.get("away"):
             st["kalshi_games"] += 1
 
-        # PMM (budgeted) — one lookup returns ML + spread + total quotes;
-        # all of them land in pm_snapshots (the post-Odds-API history).
+        # PMM (budgeted) — one lookup returns ML + spread + total quotes
+        # AND every prop; main lines land in pm_snapshots, props in
+        # prop_snapshots (the props pipeline, July 2026).
         pmm, pmm_rows = {}, []
         if _time.time() < pmm_deadline:
             pq = _pmm_game_quotes(_pm, _pmm_client, away, home, g["event_start"], sport=sp)
@@ -7050,6 +7181,8 @@ def api_pm_snapshot():
                 st["pmm_games"] += 1
                 pmm = pq.get("ml") or {}
                 pmm_rows = pq.get("rows") or []
+                for (pk, pq_, pt, pl, pc) in (pq.get("props") or []):
+                    prop_rows.append((mid, "polymarket", pk, pq_, pt, pl, pc))
         else:
             st["pmm_skipped"] += 1
 
@@ -7076,8 +7209,11 @@ def api_pm_snapshot():
                         "kalshi_home": int(kc["home"]), "starts_in_min": sim}
 
     inserted = _pm_insert_changed(sb, rows, now)
+    props_inserted = _prop_insert_changed(sb, prop_rows, now)
+    props_cleared = _prop_update_suggestions(sb, prop_rows, now)
     xc = _xconfirm_detect(sb, cur, now)
     return jsonify({"ok": True, "games": len(all_games), "inserted": inserted,
+                    "props_inserted": props_inserted, "props_cleared": props_cleared,
                     "kalshi": kal_meta, "xconfirm_triggered": xc["triggered"], **st})
 
 
@@ -10488,6 +10624,85 @@ def api_handicapper_dossier():
     return jsonify(dossier), code
 
 
+@app.route("/api/handicapper/props")
+@bot_required
+def api_handicapper_props():
+    """Live prop board for one game (props pipeline, July 2026).
+
+    Returns every prop Polymarket lists on the game's event (same
+    lookup() the dossier uses — the 5-min event cache keeps repeat hits
+    cheap) merged with the cron-computed movement verdicts from
+    prop_suggestions. Shape per prop:
+      {key, question, type, line, quote:{bid,ask,mid,*_american},
+       yes_bid_american, no_bid_american,
+       suggestion:{side, score, cleared, updated_at} | null}
+    `suggested` = the cleared subset, score-desc — the "Prop Bets X" list.
+    Like the dossier, this is the bot's READ (no per-user data)."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+    market_id = (request.args.get("market_id") or "").strip()
+    if not market_id:
+        return jsonify({"ok": False, "error": "missing market_id"}), 400
+    try:
+        m = (sb.table("markets").select("id,sport,event_name,event_start")
+             .eq("id", market_id).single().execute().data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"market lookup: {e}"}), 404
+    if not m or " @ " not in (m.get("event_name") or ""):
+        return jsonify({"ok": False, "error": "market not found"}), 404
+    away, home = [s.strip() for s in m["event_name"].split(" @ ", 1)]
+
+    live_props = []
+    try:
+        import pmm_markets as _pm
+        client = get_client()
+        data = _pm.lookup(client, m["sport"], away, home, m["event_start"])
+        live_props = (data or {}).get("props") or []
+    except Exception:
+        live_props = []
+
+    sugg: dict = {}
+    try:
+        srows = (sb.table("prop_suggestions")
+                 .select("prop_key,venue,side,score,cleared,updated_at,cents")
+                 .eq("market_id", market_id).limit(500).execute().data) or []
+        for r in srows:
+            sugg[r["prop_key"]] = r
+    except Exception:
+        pass
+
+    from pmm_markets import _inverse_quote as _pm_inv
+    props = []
+    for p in live_props:
+        qu = p.get("quote") or None
+        inv = _pm_inv(qu) if qu else None
+        s = sugg.get(p.get("key"))
+        props.append({
+            "key":      p.get("key"),
+            "question": p.get("question"),
+            "type":     p.get("type"),
+            "line":     p.get("line"),
+            "quote":    qu,
+            "yes_bid_american": (qu or {}).get("bid_american"),
+            "no_bid_american":  (inv or {}).get("bid_american"),
+            "suggestion": ({"side": s.get("side"), "score": s.get("score"),
+                            "cleared": bool(s.get("cleared")),
+                            "updated_at": s.get("updated_at")} if s else None),
+        })
+    # Cleared movers first (score desc), then the rest alphabetically —
+    # a stable, scannable board.
+    props.sort(key=lambda p: (
+        0 if (p["suggestion"] or {}).get("cleared") else 1,
+        -float((p["suggestion"] or {}).get("score") or 0),
+        (p["question"] or "").lower()))
+    suggested = [p for p in props if (p["suggestion"] or {}).get("cleared")]
+    return jsonify({"ok": True, "market_id": market_id,
+                    "event_name": m["event_name"], "sport": m["sport"],
+                    "count": len(props), "suggested_count": len(suggested),
+                    "props": props})
+
+
 # Per-sport DISPLAY window for the Pick Bot games list (calendar days,
 # anchored to America/Phoenix). User decision (June 2026): show a tight
 # "today and tomorrow" (2 days) for the daily/event sports and the full
@@ -10710,6 +10925,26 @@ def api_handicapper_games():
     # the other way around). For MLB, keep both when they're >1h apart
     # — that's the doubleheader case (real, same teams same day).
     games = _dedup_games(games, sport)
+    # "Prop Bets X" badge (props pipeline, July 2026): X = movement-CLEARED
+    # prop suggestions per game, freshness-bounded so a dead feed ages the
+    # badge out instead of showing stale counts. One batch query for the
+    # whole list. Best-effort — a miss just renders no badges.
+    try:
+        fresh_cut = (now - timedelta(hours=6)).isoformat()
+        prows = (sb.table("prop_suggestions").select("market_id")
+                 .in_("market_id", [gm["market_id"] for gm in games])
+                 .eq("cleared", True)
+                 .gte("updated_at", fresh_cut)
+                 .limit(2000).execute().data) or []
+        pcnt: dict = {}
+        for pr in prows:
+            pcnt[pr["market_id"]] = pcnt.get(pr["market_id"], 0) + 1
+        for gm in games:
+            n = pcnt.get(gm["market_id"], 0)
+            if n:
+                gm["prop_bets"] = n
+    except Exception:
+        pass
     # Prime ZONES (minute-bands the bot sizes up + glows green). Multi-zone
     # since June 2026 (the edge is bimodal) AND per-bet-type — the row glow
     # is per-GAME (one kickoff time), so it uses the UNION of every market's
@@ -11817,11 +12052,14 @@ def api_handicapper_pick():
     if missing:
         return jsonify({"ok": False, "error": f"missing: {missing}"}), 400
 
-    if body["market_type"] not in ("moneyline", "spread", "total", "nrfi", "distance"):
+    if body["market_type"] not in ("moneyline", "spread", "total", "nrfi", "distance", "prop"):
         return jsonify({"ok": False, "error": "bad market_type"}), 400
-    # NRFI/YRFI + the UFC "distance" prop use yes/no sides; everything else
-    # uses home/away/over/under. (UFC round O/U rides market_type='total'.)
-    if body["market_type"] in ("nrfi", "distance"):
+    # NRFI/YRFI, the UFC "distance" prop, and generic exchange PROPS use
+    # yes/no sides; everything else uses home/away/over/under. (UFC round
+    # O/U rides market_type='total'.) A prop's identity travels in
+    # signal_blob.prop + query_text — the 7-day dedup can't tell two props
+    # on the same game apart, so prop logs must send allow_duplicate.
+    if body["market_type"] in ("nrfi", "distance", "prop"):
         if body["side"] not in ("yes", "no"):
             return jsonify({"ok": False, "error": f"{body['market_type']} side must be yes/no"}), 400
     elif body["side"] not in ("home", "away", "over", "under"):

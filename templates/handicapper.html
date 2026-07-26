@@ -261,9 +261,7 @@
         .pick-chip.u5  { background: var(--gold); color: #2a1f02; box-shadow: 0 0 0 2px rgba(250,204,21,0.30); }
         .pick-chip.logged  { background: var(--green); color: #04210f; }
         .pick-chip.upgrade { background: #a855f7; color: #fff; box-shadow: 0 0 0 2px rgba(168,85,247,0.55); animation: khPulse 1.6s ease-in-out infinite; }
-        .pick-chip.lean    { background: transparent; border: 1px dashed #56617d; color: #a8b4cd; }
         .pick-chip.conflict { background: var(--surface-2); color: var(--text-secondary); border: 1px solid rgba(239,68,68,0.4); }
-        .pick-chip.lean { background: rgba(245,158,11,0.08); color: #fbbf24; border: 1px dashed rgba(245,158,11,0.5); }
         /* Kalshi fill highlight (admin): a logged chip stays AMBER until the
            maker order actually fills, then flips to the normal green ✓.
            Red pulse = still unfilled with tip ≤30m → TAKE or miss the bet. */
@@ -287,10 +285,24 @@
         .pick-legend .lg.u1 { background: var(--blue); }
         .pick-legend .lg.u3 { background: var(--orange); }
         .pick-legend .lg.u5 { background: var(--gold); }
-        .pick-legend .lg.lean { background: rgba(245,158,11,0.15); border: 1px dashed rgba(245,158,11,0.5); }
         .pick-legend .lg.logged { background: var(--green); }
         .pick-legend .lg.upgrade { background: #a855f7; box-shadow: 0 0 0 1.5px rgba(168,85,247,0.5); }
         .games-empty { padding: 20px; text-align: center; font-size: 12px; color: var(--text-muted); }
+        /* "Prop Bets X" badge on a game row (props pipeline, July 2026). */
+        .prop-badge { padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700;
+                      background: rgba(56,189,248,0.14); color: #38bdf8; border: 1px solid rgba(56,189,248,0.45);
+                      white-space: nowrap; cursor: pointer; flex-shrink: 0; }
+        .prop-badge:hover { background: rgba(56,189,248,0.25); }
+        /* Prop board rows (dossier Prop Bets card). */
+        .prop-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+        .prop-row:last-child { border-bottom: 0; }
+        .prop-q { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+        .prop-move { font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 700; white-space: nowrap; }
+        .prop-move.pos { color: var(--green); }
+        .prop-log { padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-2);
+                    color: var(--text-secondary); font-size: 10px; cursor: pointer; white-space: nowrap; }
+        .prop-log.sug { background: var(--green-dim); color: var(--green); border-color: rgba(34,197,94,0.4); font-weight: 700; }
+        .props-toggle { margin-top: 8px; background: none; border: 0; color: var(--blue); font-size: 11px; cursor: pointer; padding: 0; text-decoration: underline; }
         /* Live tracker — compact rows: win-% gauge + score + your bet. */
         .live-card .games-head h3 { color: var(--red); }
         .live-proj { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 700; margin-left: 6px; }
@@ -643,7 +655,6 @@
                 <div class="pick-legend" id="pickLegend">
                     <span><i class="lg u1"></i>1u</span>
                     <span><i class="lg u3"></i>3u</span>
-                    <span><i class="lg" style="border:1px dashed #56617d;background:transparent"></i>½u lean</span>
                     <span class="legend-log"><i class="lg logged"></i>logged</span>
                     <span class="legend-log"><i class="lg upgrade"></i>add / new</span>
                 </div>
@@ -1208,7 +1219,7 @@
         if (diffH < 24) return `${Math.round(diffH)}h ago`;
         return d.toLocaleString([], {month:'short', day:'numeric'});
     }
-    function _shortMarket(mt) { return ({moneyline:'ML', spread:'SPR', total:'TOT', nrfi:'1ST', distance:'DIST'})[mt] || mt; }
+    function _shortMarket(mt) { return ({moneyline:'ML', spread:'SPR', total:'TOT', nrfi:'1ST', distance:'DIST', prop:'PROP'})[mt] || mt; }
     // Team → mascot last word ("Boston Red Sox" → "Sox"). When the OTHER
     // team in the game ends in the SAME word (Red Sox @ White Sox — the
     // "Sox are playing the Sox" bug), keep the last TWO words so the label
@@ -1316,6 +1327,10 @@
 
     function _renderPick(r, kind) {
         const market = _shortMarket(r.market_type);
+        // Prop picks: the market_type/side pair says nothing ("PROP · YES")
+        // — the prop QUESTION is the bet, carried in query_text at log time.
+        const propQ = (r.market_type === 'prop' && r.query_text)
+            ? ` — ${_esc(String(r.query_text).slice(0, 60))}` : '';
         const sideLabel = (r.market_type === 'nrfi')
             ? _nrfiSideLabel(r.side)
             : (r.side || '').toUpperCase();   // HOME / AWAY / DRAW / OVER / UNDER
@@ -1376,7 +1391,7 @@
                     <span class="sport-badge">${_esc(r.sport)}</span>
                 </div>
                 <div class="row2">
-                    <span class="market"><span class="side-tag">${market} · ${sideLabel}${lineFrag}</span></span>
+                    <span class="market"><span class="side-tag">${market} · ${sideLabel}${lineFrag}</span>${propQ}</span>
                     <span class="entry">@ ${_esc(r.entry_book)} ${_fmtEntryCents(r.entry_price)}</span>
                 </div>
                 <div class="row3">
@@ -1649,11 +1664,18 @@
                 const rowBadge = rowPrime
                     ? (_isPrime(g.event_start) ? _primeBadgeText(g.event_start) : (_activeSport === 'MLB' ? 'Prime · NRFI' : 'Prime'))
                     : '';
+                // "Prop Bets X" badge (props pipeline, July 2026): X =
+                // movement-cleared prop suggestions on the game's exchange
+                // prop board. Tapping it opens the dossier (the Prop Bets
+                // card lives there).
+                const propBadge = (_canBet && g.prop_bets > 0)
+                    ? `<span class="prop-badge" title="${g.prop_bets} prop market${g.prop_bets === 1 ? '' : 's'} with sharp movement — tap for the prop board" onclick="pickGame('${g.market_id}')">Prop Bets ${g.prop_bets}</span>`
+                    : '';
                 return `<li class="game-row${rowPrime ? ' prime' : ''}">
                     <div class="game-line1">
                         <span class="when ${_kickoffTierFor(g.event_start, _activeSport)}" data-start="${_esc(g.event_start)}">${_kickoffLabel(g.event_start, _activeSport)}</span>
                         <span class="prime-tag">${_esc(rowBadge)}</span>
-                        <span class="matchup">${matchup}</span>
+                        <span class="matchup">${matchup}</span>${propBadge}
                         <button class="details-btn" onclick="pickGame('${g.market_id}')">Details ›</button>
                     </div>
                     <div class="game-line2" data-mid="${_esc(g.market_id)}" data-start="${_esc(g.event_start)}"></div>
@@ -1790,20 +1812,14 @@
                 const inPrime = p._ufc ? (diffMin > -5)
                     : (isModelBet ? (diffMin >= MODEL_BET_EARLY_MIN) : (p._tw === 'prime'));
                 if (!isLogged && !inPrime) return;     // hide non-prime, non-logged picks
-                // LEANS show ONLY inside the prime window (user call) — the
-                // model-bet early gate above has no upper bound, which let a
-                // total lean render at 3h+ on a non-glowing row. A lean is a
-                // "nothing better in the window" bet, so it obeys the same
-                // window as the row highlight.
-                if (p._lean && !isLogged && !_isPrime(startIso)) return;
-                let cls = p._lean ? 'lean' : _uClass(p.units), label = p._chip;
+                let cls = _uClass(p.units), label = p._chip;
                 // No one-tap logging until we KNOW which bets are already
                 // logged — an unsynced page must never offer a "fresh" chip
                 // on a bet the user is already on (the 3-dupes-in-40s bug).
                 const canTapLog = _canLog && _loggedPicksReady;
                 let click = canTapLog ? `oneTapLog('${mid}',${i},this)` : `pickGame('${mid}')`;
                 let title = canTapLog
-                    ? (p._lean ? `Lean — sharp gate not cleared. Tap to log ${p._chip}` : `Tap to log ${p._chip}`)
+                    ? `Tap to log ${p._chip}`
                     : (_canLog ? `Syncing your logged bets — tap for details` : `Tap for the full read`);
                 if (ps.state === 'logged') {
                     // Fill-aware (admin): amber until the Kalshi maker
@@ -1943,20 +1959,16 @@
                     const d = await r.json();
                     if (d && d.ok) {
                         const sugg = d.suggestions || (d.suggestion ? [d.suggestion] : []);
-                        // Only REAL, gate-cleared picks — no forced leans (the
-                        // user asked to stop showing non-prime leans). Carry the
-                        // server-resolved timing_window so the display can show
-                        // ONLY prime-window picks. (make/take/book pills removed
-                        // from the cards per the declutter request.)
-                        // Gate-cleared picks AND forced leans (July 2026, user
-                        // call: "bring back the leans at 0.5u"). Leans render
-                        // as muted 0.5u chips, window-gated like real picks.
-                        const picks = sugg.filter(s => s && s.market_type && s.side).map(s => {
+                        // Only REAL, gate-cleared picks — leans are DEAD on this
+                        // page (July 26 2026, user: "Kill leans on the dashboard,
+                        // just show bets"; the brief bring-back-at-0.5u era went
+                        // 5-6 −0.15u). Carry the server-resolved timing_window so
+                        // the display shows ONLY prime-window picks.
+                        const picks = sugg.filter(s => s && s.market_type && s.side && s.gates_cleared).map(s => {
                             const body = _suggestionToBody(s, mid, d);
-                            let chip = _pickChipLabel(s.market_type, s.side, body._line, body._price, s.units, d);
-                            if (!s.gates_cleared) chip = '~ ' + chip;
+                            const chip = _pickChipLabel(s.market_type, s.side, body._line, body._price, s.units, d);
                             return { market_type: s.market_type, side: s.side, units: Number(s.units) || 1,
-                                     _chip: chip, _tw: s.timing_window || null, _lean: !s.gates_cleared,
+                                     _chip: chip, _tw: s.timing_window || null,
                                      _body: body };
                         });
                         // NRFI: actionable only when the model found a +EV side.
@@ -2447,10 +2459,17 @@
         // recommend a play across two non-correlated markets (e.g.
         // SPR + TOT). ML/SPR are mutually excluded server-side.
         const suggestions = d.suggestions || (d.suggestion ? [d.suggestion] : []);
-        if (suggestions.length) {
-            const multi = suggestions.length > 1;
+        // Leans are DEAD (July 26 2026, user: "just show bets") — only
+        // gate-cleared suggestions render as cards. openLog(false, i)
+        // indexes into d.suggestions, so the ORIGINAL index is kept.
+        const clearedCount = suggestions.filter(s => s && s.gates_cleared).length;
+        if (suggestions.length && clearedCount) {
+            const multi = clearedCount > 1;
+            let cardNo = 0;
             for (let i = 0; i < suggestions.length; i++) {
                 const s = suggestions[i];
+                if (!s || !s.gates_cleared) continue;
+                cardNo++;
                 const market = _shortMarket(s.market_type);
                 const sideLabel = s.market_type === 'total'
                     ? s.side.toUpperCase()
@@ -2495,15 +2514,11 @@
                 const venueTag = usingPmm
                     ? '<span class="venue-tag pmm">exch</span>'
                     : '<span class="venue-tag pmm">exch</span>';
-                const cardCls = s.gates_cleared ? 'suggestion-card' : 'suggestion-card soft';
-                const headingText = s.gates_cleared
-                    ? (multi
-                        ? `Bot Suggests — Pick ${i + 1} of ${suggestions.length}`
-                        : 'Bot Suggests — Exchange Target')
-                    : (s.vsin_vetoed_pick
-                        ? 'Vetoed — Circa sharp money against'
-                        : 'Lean — would pass, but if forced');
-                const headingCls = s.gates_cleared ? 'lbl' : 'lbl soft';
+                const cardCls = 'suggestion-card';
+                const headingText = multi
+                    ? `Bot Suggests — Pick ${cardNo} of ${clearedCount}`
+                    : 'Bot Suggests — Exchange Target';
+                const headingCls = 'lbl';
                 // Meta line:
                 //   PMM available → "PMM asking -110 · bid -118 · PIN was -107 @ 204"
                 //   No PMM        → "PIN now -107 (no PMM market found)"
@@ -2550,14 +2565,9 @@
                         : (s.timing_window === 'gap'
                             ? '<span class="time-badge late" title="Between this bet type\'s prime zones (the dead window for this market). Still bet if the sharp gate clears, but never sized past 1u.">OFF-PEAK · capped 1u</span>'
                             : ''));
-                // Veto note — the OUR-NUMBER read demoted this total to a
-                // lean because it disagrees with the side (e.g. a Coors
-                // under). Shown instead of the generic sharp-gate note.
-                const softNote = s.vsin_vetoed_pick
-                    ? `<div class="soft-note">Would be a real pick, but ${_esc(s.conflict_reason || 'Circa sharp money is concentrated on the other side')}.</div>`
-                    : s.conflict_reason
-                    ? `<div class="soft-note">Demoted to a lean — ${_esc(s.conflict_reason)}. The model disagrees with this total; treat as 1u lean at most.</div>`
-                    : (s.gates_cleared ? '' : `<div class="soft-note">Sharp gate not cleared (need sharp ≥ 3). Chalk-flat market; this is the best read available — treat as 1u lean only.</div>`);
+                // Lean/veto soft-notes are gone with the lean cards — only
+                // gate-cleared picks reach this point.
+                const softNote = '';
                 html += `<div class="${cardCls}">
                     <div class="${headingCls}">${_esc(headingText)}</div>
                     <div class="pick-line">
@@ -2588,6 +2598,14 @@
                     </div>
                 </div>`;
             }
+        } else if (suggestions.length) {
+            // Suggestions exist but none cleared the gate — the bot passes.
+            // No lean card, no forced 1u (user: "just show bets"); the
+            // markets grid below still lets you log any side yourself.
+            html += `<div class="suggestion-pass">
+                <strong>No bet.</strong> Nothing clears the sharp gate on this game right now.
+                ${_canBet ? ' The markets below are still loggable if you like a side.' : ''}
+            </div>`;
         } else {
             // Full live_error here (no 60-char truncation like the
             // badge) so the user can see WHICH events the Odds API
@@ -2911,6 +2929,17 @@
             </div>`;
         }
 
+        // Prop Bets board (props pipeline, July 2026) — loads async from
+        // /api/handicapper/props after the dossier renders (the prop list
+        // is a separate live PMM read; don't block the dossier on it).
+        html += `<div class="card" id="propsCard">
+            <div class="card-head">
+                <h3>Prop Bets</h3>
+                <span class="ref-tag" title="Every prop market the exchanges list on this game (player props, first-five, quarters/halves …), scored by the SAME movement engine as the main lines: money arriving on a side = the price moving toward it. Suggested = recency-weighted move ≥ 3¢. Props are manual-settle for now.">EXCH PROPS · MOVEMENT</span>
+            </div>
+            <div id="propsBody"><div class="pr-line" style="color:var(--text-muted)">Loading prop board…</div></div>
+        </div>`;
+
         // Market-anchored spread (SHADOW) — direction from the exchange ML win
         // prob, margin from the run-total model. Reference card only; it's
         // validating in the paperlog before it becomes a real pick.
@@ -3021,6 +3050,137 @@
         el.innerHTML = html;
         _loadAllMakeTake(el);
         _loadKalshiQuotes(el);
+        _loadProps(d.market_id);
+    }
+
+    // ── Prop Bets board (props pipeline, July 2026) ───────────────────
+    // "Markets move the same, we can log the same": every non-main
+    // exchange market on the game, scored by the movement engine
+    // (prop_suggestions, cron-computed). Suggested movers render on top
+    // with a green Log button; the full board hides behind a toggle.
+    let _lastProps = [];
+    let _propsExpanded = false;
+    let _propsMid = null;
+
+    async function _loadProps(mid) {
+        const body = document.getElementById('propsBody');
+        if (!body || !mid) return;
+        // Keep the expanded state across the dossier's 30s auto-refresh;
+        // reset it only when a different game opens.
+        if (mid !== _propsMid) { _propsExpanded = false; _propsMid = mid; }
+        const seq = ++_propsSeq;   // guard: a stale fetch must never repaint
+        try {
+            const r = await authFetch('/api/handicapper/props?market_id=' + encodeURIComponent(mid));
+            const j = r ? await r.json() : null;
+            if (seq !== _propsSeq) return;
+            if (!j || !j.ok) throw new Error((j && j.error) || 'fetch failed');
+            _lastProps = j.props || [];
+            _renderProps();
+        } catch (e) {
+            if (seq === _propsSeq && document.getElementById('propsBody'))
+                document.getElementById('propsBody').innerHTML =
+                    `<div class="pr-line" style="color:var(--text-muted)">No prop board for this game (${_esc(String(e.message || e)).slice(0, 80)}).</div>`;
+        }
+    }
+    let _propsSeq = 0;
+
+    function _propRowHtml(p, i) {
+        const s = p.suggestion || {};
+        const sug = !!s.cleared;
+        const lineFrag = (p.line != null) ? ` (${_fmtPt(p.line)})` : '';
+        const mid = (p.quote && p.quote.mid != null) ? `${Math.round(p.quote.mid * 100)}¢` : '—';
+        const move = sug
+            ? `<span class="prop-move pos" title="Recency-weighted cent movement — money arriving on ${s.side === 'yes' ? 'YES' : 'NO'}">▲ ${s.side === 'yes' ? 'YES' : 'NO'} · ${Number(s.score).toFixed(1)}</span>`
+            : '';
+        const btn = (side, lbl, cls) => {
+            const price = side === 'yes' ? p.yes_bid_american : p.no_bid_american;
+            if (price == null) return '';
+            return `<button class="prop-log ${cls}" onclick="logProp(${i}, '${side}')">${lbl} ${_fmtAmer(price)}</button>`;
+        };
+        const btns = !_canLog ? ''
+            : sug ? btn(s.side, `Log ${s.side === 'yes' ? 'YES' : 'NO'}`, 'sug')
+            : (btn('yes', 'Yes', '') + ' ' + btn('no', 'No', ''));
+        return `<div class="prop-row">
+            <span class="prop-q" title="${_esc(p.question || '')}">${_esc(p.question || p.key || '')}${lineFrag}</span>
+            <span style="color:var(--text-muted);font-size:10px;white-space:nowrap">${mid}</span>
+            ${move}
+            ${btns}
+        </div>`;
+    }
+
+    function _renderProps() {
+        const body = document.getElementById('propsBody');
+        if (!body) return;
+        if (!_lastProps.length) {
+            body.innerHTML = '<div class="pr-line" style="color:var(--text-muted)">The exchanges list no prop markets on this game yet.</div>';
+            return;
+        }
+        const sug = [], rest = [];
+        _lastProps.forEach((p, i) => (((p.suggestion || {}).cleared) ? sug : rest).push(i));
+        let out = '';
+        if (sug.length) {
+            out += `<div class="pr-line" style="color:var(--green);font-weight:600">▶ ${sug.length} prop${sug.length === 1 ? '' : 's'} with sharp movement</div>`;
+            out += sug.map(i => _propRowHtml(_lastProps[i], i)).join('');
+        } else {
+            out += '<div class="pr-line" style="color:var(--text-muted)">No prop movement clears the gate right now.</div>';
+        }
+        if (rest.length) {
+            out += _propsExpanded
+                ? rest.map(i => _propRowHtml(_lastProps[i], i)).join('')
+                : '';
+            out += `<button class="props-toggle" onclick="_togglePropsAll()">${_propsExpanded ? 'Hide' : 'Show all'} ${rest.length} prop market${rest.length === 1 ? '' : 's'}</button>`;
+        }
+        body.innerHTML = out;
+    }
+
+    function _togglePropsAll() { _propsExpanded = !_propsExpanded; _renderProps(); }
+
+    function logProp(idx, side) {
+        // Seed the log modal for a prop pick. Entry = the maker BID for
+        // the chosen side (yes bid, or the inverted no bid) — the same
+        // rest-the-bid convention as every other market. Flat 1u default;
+        // manual settle (the resolver can't grade props from ESPN).
+        const p = _lastProps[idx];
+        if (!p || !_lastDossier) return;
+        const price = side === 'yes' ? p.yes_bid_american : p.no_bid_american;
+        if (price == null) { _toast('No live quote on that side'); return; }
+        const s = p.suggestion || {};
+        const qShort = String(p.question || p.key || '').slice(0, 90);
+        _pendingPick = {
+            market_id:   _lastDossier.market_id,
+            market_type: 'prop',
+            side,
+            book:        'POLYMARKET',
+            price,
+            line:        (p.line != null ? p.line : null),
+            fair_prob:   null,
+            edge_pp:     null,
+            sharp_score: (s.cleared ? Number(s.score) : null),
+            label:       `PROP · ${side.toUpperCase()} @ ${_fmtAmer(price)} — ${qShort}`,
+            seed_units:  1,
+            seed_conf:   'low',
+            query_text:  p.question || p.key,
+            signal_extra: { source: 'prop_board',
+                            prop: { key: p.key, q: p.question, venue: 'polymarket',
+                                    type: p.type || null, line: (p.line != null ? p.line : null),
+                                    move_score: (s.score != null ? Number(s.score) : null),
+                                    move_side: s.side || null, suggested: !!s.cleared } },
+        };
+        document.getElementById('lmSelection').value  = _pendingPick.label;
+        document.getElementById('lmUnits').value      = '1';
+        document.getElementById('lmConfidence').value = 'low';
+        document.getElementById('lmReasons').value    = s.cleared
+            ? `Prop movement: money arriving on ${String(s.side || '').toUpperCase()} (weighted move ${Number(s.score).toFixed(1)}¢)`
+            : '';
+        document.getElementById('lmAnalysis').value   = '';
+        _lmStatus(null, '');
+        // No make/take verdict for props (the engine covers main markets
+        // only) — hide the execution line so a previous bet's read can't
+        // linger. Bump the seq so an in-flight fetch can't repaint it.
+        _lmExecSeq++;
+        const _ew = document.getElementById('lmExecWrap');
+        if (_ew) _ew.style.display = 'none';
+        document.getElementById('logModal').classList.add('show');
     }
 
     // ── Make-vs-take execution chip ───────────────────────────────────
@@ -3934,7 +4094,9 @@
             sharp_score: _pendingPick.sharp_score ?? null,
             analysis_md: analysis || null,
             reasons:     reasons.length ? reasons : null,
-            query_text:  (_lastDossier && _lastDossier.query) || null,
+            // Props override query_text with the prop QUESTION — it's how
+            // the pending list knows which prop the row is.
+            query_text:  _pendingPick.query_text || (_lastDossier && _lastDossier.query) || null,
             // Capture the power model's read on this side so we can later
             // bucket CLV by whether the model agreed (the 2-week MLB
             // pitcher-aware validation). `agree`/`edge_pp` are the keys
