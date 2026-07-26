@@ -293,6 +293,7 @@
                       background: rgba(56,189,248,0.14); color: #38bdf8; border: 1px solid rgba(56,189,248,0.45);
                       white-space: nowrap; cursor: pointer; flex-shrink: 0; }
         .prop-badge:hover { background: rgba(56,189,248,0.25); }
+        .prop-badge.hot { background: var(--green-dim); color: var(--green); border-color: rgba(34,197,94,0.5); }
         /* Prop board rows (dossier Prop Bets card). */
         .prop-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
         .prop-row:last-child { border-bottom: 0; }
@@ -1664,12 +1665,13 @@
                 const rowBadge = rowPrime
                     ? (_isPrime(g.event_start) ? _primeBadgeText(g.event_start) : (_activeSport === 'MLB' ? 'Prime · NRFI' : 'Prime'))
                     : '';
-                // "Prop Bets X" badge (props pipeline, July 2026): X =
-                // movement-cleared prop suggestions on the game's exchange
-                // prop board. Tapping it opens the dossier (the Prop Bets
-                // card lives there).
+                // "Prop Bets X" badge (props pipeline, July 2026): X = prop
+                // markets the exchange lists on the game (the pull); the ▲N
+                // marker + green tint = movement-cleared movers among them.
+                // Tapping opens the dossier (the Prop Bets card lives there).
+                const hot = g.prop_hot > 0;
                 const propBadge = (_canBet && g.prop_bets > 0)
-                    ? `<span class="prop-badge" title="${g.prop_bets} prop market${g.prop_bets === 1 ? '' : 's'} with sharp movement — tap for the prop board" onclick="pickGame('${g.market_id}')">Prop Bets ${g.prop_bets}</span>`
+                    ? `<span class="prop-badge${hot ? ' hot' : ''}" title="${g.prop_bets} prop market${g.prop_bets === 1 ? '' : 's'} on this game${hot ? ` — ${g.prop_hot} moving sharp` : ''} — tap for the prop board" onclick="pickGame('${g.market_id}')">Prop Bets ${g.prop_bets}${hot ? ` · ${g.prop_hot}▲` : ''}</span>`
                     : '';
                 return `<li class="game-row${rowPrime ? ' prime' : ''}">
                     <div class="game-line1">

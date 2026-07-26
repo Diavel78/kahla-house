@@ -11044,24 +11044,31 @@ def api_handicapper_games():
     # the other way around). For MLB, keep both when they're >1h apart
     # — that's the doubleheader case (real, same teams same day).
     games = _dedup_games(games, sport)
-    # "Prop Bets X" badge (props pipeline, July 2026): X = movement-CLEARED
-    # prop suggestions per game, freshness-bounded so a dead feed ages the
-    # badge out instead of showing stale counts. One batch query for the
-    # whole list. Best-effort — a miss just renders no badges.
+    # "Prop Bets X" badge (props pipeline, July 2026): X = prop MARKETS the
+    # exchange lists on the game (the pull — user: "even with no bets, the
+    # pull should show"), freshness-bounded so a dead feed ages the badge
+    # out. `prop_hot` = the movement-CLEARED subset (the ▲ marker). One
+    # batch query for the whole list. Best-effort — a miss renders no badges.
     try:
         fresh_cut = (now - timedelta(hours=6)).isoformat()
-        prows = (sb.table("prop_suggestions").select("market_id")
+        prows = (sb.table("prop_suggestions").select("market_id,cleared")
                  .in_("market_id", [gm["market_id"] for gm in games])
-                 .eq("cleared", True)
                  .gte("updated_at", fresh_cut)
-                 .limit(2000).execute().data) or []
+                 .limit(8000).execute().data) or []
         pcnt: dict = {}
+        hcnt: dict = {}
         for pr in prows:
-            pcnt[pr["market_id"]] = pcnt.get(pr["market_id"], 0) + 1
+            mid_p = pr["market_id"]
+            pcnt[mid_p] = pcnt.get(mid_p, 0) + 1
+            if pr.get("cleared"):
+                hcnt[mid_p] = hcnt.get(mid_p, 0) + 1
         for gm in games:
             n = pcnt.get(gm["market_id"], 0)
             if n:
                 gm["prop_bets"] = n
+                h = hcnt.get(gm["market_id"], 0)
+                if h:
+                    gm["prop_hot"] = h
     except Exception:
         pass
     # Prime ZONES (minute-bands the bot sizes up + glows green). Multi-zone
