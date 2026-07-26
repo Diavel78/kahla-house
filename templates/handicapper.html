@@ -291,7 +291,8 @@
         /* "Prop Bets X" badge on a game row (props pipeline, July 2026). */
         .prop-badge { padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700;
                       background: rgba(56,189,248,0.14); color: #38bdf8; border: 1px solid rgba(56,189,248,0.45);
-                      white-space: nowrap; cursor: pointer; flex-shrink: 0; }
+                      white-space: nowrap; cursor: pointer; flex-shrink: 0;
+                      appearance: none; -webkit-appearance: none; font-family: inherit; line-height: 1.5; }
         .prop-badge:hover { background: rgba(56,189,248,0.25); }
         .prop-badge.hot { background: var(--green-dim); color: var(--green); border-color: rgba(34,197,94,0.5); }
         /* Prop board rows (dossier Prop Bets card). */
@@ -1671,8 +1672,10 @@
                 // marker + green tint = movement-cleared movers among them.
                 // Tapping opens the dossier (the Prop Bets card lives there).
                 const hot = g.prop_hot > 0;
+                // A real <button> (reliable tap target on mobile) that opens
+                // the dossier and auto-scrolls to the Prop Bets card.
                 const propBadge = (_canBet && g.prop_bets > 0)
-                    ? `<span class="prop-badge${hot ? ' hot' : ''}" title="${g.prop_bets} prop market${g.prop_bets === 1 ? '' : 's'} on this game${hot ? ` — ${g.prop_hot} moving sharp` : ''} — tap for the prop board" onclick="pickGame('${g.market_id}')">Prop Bets ${g.prop_bets}${hot ? ` · ${g.prop_hot}▲` : ''}</span>`
+                    ? `<button type="button" class="prop-badge${hot ? ' hot' : ''}" title="${g.prop_bets} prop market${g.prop_bets === 1 ? '' : 's'} on this game${hot ? ` — ${g.prop_hot} moving sharp` : ''} — tap for the prop board" onclick="pickGame('${g.market_id}', 'props')">Prop Bets ${g.prop_bets}${hot ? ` · ${g.prop_hot}▲` : ''}</button>`
                     : '';
                 return `<li class="game-row${rowPrime ? ' prime' : ''}">
                     <div class="game-line1">
@@ -2248,7 +2251,9 @@
         _renderPickLines();
     }
 
-    async function pickGame(marketId) {
+    async function pickGame(marketId, focus) {
+        // focus: optional section to scroll to once the dossier renders —
+        // 'props' (the Prop Bets badge) jumps straight to the prop board.
         // Click-to-pick from the games list. Pulls from Supabase cache
         // only — no live=true. With the new adaptive cron (5-min cadence
         // when nearest game is < 2h, 15-min when < 6h, 30-min when < 18h)
@@ -2271,6 +2276,12 @@
             _lastDossier = data;
             renderDossier(data);
             _startDossierRefresh(marketId);
+            // Initial open only — the 30s auto-refresh preserves scroll and
+            // must never yank the user back to the props card.
+            if (focus === 'props') {
+                const pc = document.getElementById('propsCard');
+                if (pc) pc.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
         } catch (e) {
             dossierEl.innerHTML = `<div class="dossier-error">Request failed: ${_esc(String(e))}</div>`;
         }
