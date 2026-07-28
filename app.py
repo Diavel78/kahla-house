@@ -3612,6 +3612,47 @@ def _bovada_nrfi_quote(away: str, home: str,
     return None
 
 
+@app.route("/debug-makeup")
+def debug_makeup():
+    """Postponed→makeup linkage probe (the recurring doubleheader pain).
+    ?team=<mlb statsapi teamId>&start=YYYY-MM-DD&end=YYYY-MM-DD — dumps
+    MLB's OFFICIAL schedule rows incl. rescheduledFrom/rescheduleDate, the
+    authoritative answer to "which game of the makeup DH is yesterday's
+    postponed game?" (never guess from time-of-day — MLB states it).
+    Public schedule data, no secrets."""
+    team = (request.args.get("team") or "114").strip()
+    start = (request.args.get("start") or "").strip()
+    end = (request.args.get("end") or "").strip()
+    if not (start and end):
+        today = datetime.now(timezone.utc).date()
+        start = (today - timedelta(days=2)).isoformat()
+        end = today.isoformat()
+    url = (f"https://statsapi.mlb.com/api/v1/schedule?sportId=1"
+           f"&startDate={start}&endDate={end}&teamId={team}")
+    out: dict = {"url": url, "games": []}
+    try:
+        r = _http.get(url, timeout=8)
+        out["status"] = r.status_code
+        for day in (r.json().get("dates") or []):
+            for g in (day.get("games") or []):
+                out["games"].append({
+                    "date": day.get("date"), "gamePk": g.get("gamePk"),
+                    "gameDate": g.get("gameDate"),
+                    "away": ((g.get("teams") or {}).get("away") or {}).get("team", {}).get("name"),
+                    "home": ((g.get("teams") or {}).get("home") or {}).get("team", {}).get("name"),
+                    "state": (g.get("status") or {}).get("detailedState"),
+                    "dh": g.get("doubleHeader"), "gameNumber": g.get("gameNumber"),
+                    "rescheduledFrom": g.get("rescheduledFrom"),
+                    "rescheduleDate": g.get("rescheduleDate") or g.get("rescheduleGameDate"),
+                    "score": {
+                        "away": ((g.get("teams") or {}).get("away") or {}).get("score"),
+                        "home": ((g.get("teams") or {}).get("home") or {}).get("score")},
+                })
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+    return jsonify(out)
+
+
 @app.route("/debug-dk-nrfi")
 def debug_dk_nrfi():
     """DISCOVERY probe for DraftKings' public sportsbook JSON (the $0 path to
