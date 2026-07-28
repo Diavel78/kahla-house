@@ -543,6 +543,106 @@ def _fetch_pending(sb) -> list[dict]:
         return []
 
 
+# ─────────────── MLB postponed → official-makeup remap ───────────────
+# The recurring doubleheader landmine: a pick on a postponed game points at
+# a dead ESPN entry forever (the postponed skip keeps it pending, but
+# nothing ever advances it) while the exchange resolves the bet on the
+# OFFICIAL makeup game. MLB's Stats API states the linkage outright — the
+# postponed game carries `rescheduleDate`, the makeup carries
+# `rescheduledFrom`. NEVER guess by time-of-day: the Jul 28 2026 CLE@CIN
+# makeup was the ADDED 1:40pm game while the postponed game was a 7:10pm
+# start — nearest-time-of-day picks the WRONG game there.
+
+_STATSAPI_SCHED: dict[str, list] = {}   # per-run cache: ET date -> games
+
+
+def _statsapi_games(date_str: str) -> list[dict]:
+    if date_str in _STATSAPI_SCHED:
+        return _STATSAPI_SCHED[date_str]
+    games: list[dict] = []
+    try:
+        r = httpx.get("https://statsapi.mlb.com/api/v1/schedule",
+                      params={"sportId": 1, "date": date_str}, timeout=10)
+        if r.status_code == 200:
+            for day in (r.json().get("dates") or []):
+                games.extend(day.get("games") or [])
+    except Exception as e:
+        log.warning("statsapi schedule %s failed: %s", date_str, e)
+    _STATSAPI_SCHED[date_str] = games
+    return games
+
+
+def _mlb_makeup_remap(sb, bet: dict) -> bool:
+    """Repoint one pending MLB pick from its POSTPONED game to the official
+    makeup game (statsapi `rescheduleDate` → the matching `markets` row,
+    which the ESPN spine will have created). Returns True when the pick was
+    updated — it then grades against the makeup on a later tick. Stamps
+    signal_blob.makeup_from/makeup_gamepk for provenance."""
+    ev = bet.get("event_name") or ""
+    if " @ " not in ev:
+        return False
+    away, home = [s.strip().lower() for s in ev.split(" @ ", 1)]
+    dt = _parse_iso(bet.get("event_start") or "")
+    if not dt:
+        return False
+    et_date = dt.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+
+    def _is(name: str, want: str) -> bool:
+        n = (name or "").lower()
+        return bool(n) and (want in n or n in want)
+
+    target = None
+    for g in _statsapi_games(et_date):
+        t = g.get("teams") or {}
+        ga = ((t.get("away") or {}).get("team") or {}).get("name") or ""
+        gh = ((t.get("home") or {}).get("team") or {}).get("name") or ""
+        if not (_is(ga, away) and _is(gh, home)):
+            continue
+        state = ((g.get("status") or {}).get("detailedState") or "").lower()
+        resched = g.get("rescheduleDate") or g.get("rescheduleGameDate")
+        if "postponed" in state and resched:
+            target = (resched, g.get("gamePk"))
+            break
+    if not target:
+        return False                      # not rescheduled yet → retry next tick
+    rdt = _parse_iso(str(target[0]))
+    if not rdt or abs((rdt - dt).total_seconds()) < 120:
+        return False
+    try:
+        rows = (sb.table("markets")
+                .select("id,event_name,event_start")
+                .eq("sport", "MLB").eq("status", "active")
+                .eq("event_name", bet["event_name"])
+                .gte("event_start", (rdt - timedelta(minutes=30)).isoformat())
+                .lte("event_start", (rdt + timedelta(minutes=30)).isoformat())
+                .limit(2).execute().data) or []
+    except Exception as e:
+        log.warning("makeup markets fetch failed: %s", e)
+        return False
+    if len(rows) != 1 or rows[0]["id"] == bet.get("market_id"):
+        return False                      # 0 / ambiguous / already there → wait
+    mk = rows[0]
+    try:
+        cur = (sb.table("bot_picks").select("signal_blob")
+               .eq("id", bet["id"]).limit(1).execute().data) or []
+        blob = cur[0].get("signal_blob") if cur else None
+        blob = dict(blob) if isinstance(blob, dict) else {}
+        blob.update({"makeup_from": bet.get("event_start"),
+                     "makeup_gamepk": target[1]})
+        sb.table("bot_picks").update({
+            "market_id": mk["id"],
+            "event_start": mk["event_start"],
+            "signal_blob": blob,
+        }).eq("id", bet["id"]).execute()
+    except Exception as e:
+        log.warning("makeup remap update failed for pick %s: %s", bet["id"], e)
+        return False
+    log.info("MAKEUP-REMAP pick %s %s: %s -> %s (gamePk %s)",
+             bet["id"], bet.get("event_name"), bet.get("event_start"),
+             mk["event_start"], target[1])
+    return True
+
+
 def _update(sb, pick_id: int, status: str, pnl: float,
             result_score: dict, clv_pp: float | None = None,
             closing_vsin: dict | None = None) -> bool:
@@ -720,7 +820,9 @@ def main(argv: list[str] | None = None) -> int:
         log.info("pending bot_picks: %d", len(bets))
 
         espn_cache: dict[tuple[str, str], list] = {}
-        won = lost = push = unmatched = not_final = unsupported = 0
+        # `remapped` is log-only — resolver_runs has fixed columns, and an
+        # unknown key in the heartbeat insert would kill the whole heartbeat.
+        won = lost = push = unmatched = not_final = unsupported = remapped = 0
 
         for bet in bets:
             sport = bet.get("sport") or ""
@@ -749,6 +851,24 @@ def main(argv: list[str] | None = None) -> int:
                 m = _match_espn(bet, events)
             if not m:
                 unmatched += 1
+                continue
+
+            # Postponed MLB game → repoint the pick at the OFFICIAL makeup
+            # game (statsapi rescheduleDate). Checked BEFORE the NRFI branch
+            # on purpose: _grade_nrfi on a postponed entry just reads an
+            # absent linescore and loops not_final forever, so an NRFI pick
+            # would otherwise never reach the postponed handling below.
+            if (sport == "MLB" and m.get("state") == "post"
+                    and not m.get("completed", True)):
+                try:
+                    if _mlb_makeup_remap(sb, bet):
+                        remapped += 1
+                        continue
+                except Exception:
+                    log.exception("makeup remap failed for pick %s", bet.get("id"))
+                not_final += 1
+                log.info("SKIP postponed MLB bot_pick %s — staying pending "
+                         "(no makeup announced yet)", bet.get("event_name"))
                 continue
 
             # NRFI / YRFI — graded off the 1st-inning linescore, NOT the
@@ -856,8 +976,8 @@ def main(argv: list[str] | None = None) -> int:
         summary.update(won=won, lost=lost, push=push, unmatched=unmatched,
                        not_final=not_final, unsupported=unsupported)
         log.info("bot_picks resolver done: won=%d lost=%d push=%d unmatched=%d "
-                 "not_final=%d unsupported=%d",
-                 won, lost, push, unmatched, not_final, unsupported)
+                 "not_final=%d unsupported=%d makeup_remapped=%d",
+                 won, lost, push, unmatched, not_final, unsupported, remapped)
         summary["took_ms"] = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
         _write_heartbeat(sb, summary)
 
