@@ -704,6 +704,37 @@ _FI_HINTS = ("1st inning", "first inning", "1st-inning", "first-inning",
              "inning 1", "1st_inning", "first_inning")
 
 
+# ──────────────────────────── Prop collection (July 2026) ───────────────────
+# Every ACTIVE market on a game event that is NOT a full-game main line
+# (ml/spread/total), NOT the first-inning NRFI market, and NOT the UFC
+# distance prop is a PROP: player props, first-five-innings lines,
+# quarters/halves/periods, team props, etc. Polymarket ships them on the
+# SAME event the main-line lookup already fetches, so collecting them is
+# zero extra network cost. Capped — a big football game can list 100+.
+_PROPS_CAP = 80
+
+
+def _prop_entry(m: dict, with_bbo: bool) -> dict | None:
+    """Shape one non-main market as a prop row. Returns None when the
+    market has no question text (nothing to key/display on)."""
+    q = m.get("question") or ""
+    if not q.strip():
+        return None
+    line = m.get("line")
+    if line is not None:
+        try:
+            line = float(line)
+        except (TypeError, ValueError):
+            line = None
+    return {
+        "key":      m.get("slug") or q[:80],
+        "question": q,
+        "type":     (m.get("sportsMarketType") or None),
+        "line":     line,
+        "quote":    _get_market_quote(m) if with_bbo else None,
+    }
+
+
 def _classify_ufc_distance(m: dict) -> str | None:
     """UFC 'go the distance' prop sniff (Fight IQ P3) — lives outside the
     ml/spread/total buckets, exactly like NRFI. YES = the fight reaches
@@ -847,6 +878,7 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
         "total":  [],
         "nrfi":   [],
         "ufc_distance": [],
+        "props":  [],
     }
     # Discovery diagnostic — dump EVERY market on the event (question +
     # type slugs + line + closed/active) so we can see exactly what PMM
@@ -897,6 +929,14 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
                                             "title": m.get("question"),
                                             "quote": _inverse_quote(quote),
                                             "synthetic": True})
+                continue
+            # Everything else on the event = a PROP (player props,
+            # first-five, quarters/halves, team props …). Same lookup
+            # call, zero extra network cost.
+            if len(out["props"]) < _PROPS_CAP:
+                pe = _prop_entry(m, with_bbo)
+                if pe:
+                    out["props"].append(pe)
             continue
         mt, line, side = result
         quote = _get_market_quote(m) if with_bbo else None
@@ -924,7 +964,8 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
             })
 
     if diag is not None:
-        diag["counts"] = {k: len(out.get(k, [])) for k in ("ml", "spread", "total", "nrfi")}
+        diag["counts"] = {k: len(out.get(k, []))
+                          for k in ("ml", "spread", "total", "nrfi", "props")}
     return out
 
 

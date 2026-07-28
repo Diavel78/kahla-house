@@ -6815,7 +6815,23 @@ def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
             rows.append((mt, side, line, cents))
             if mt == "ml" and side in ("home", "away"):
                 ml[side] = cents
-    return {"ml": ml, "rows": rows}
+    # PROPS ride the same lookup() (July 2026 props pipeline) — every
+    # non-main market with a live quote, shaped for prop_snapshots:
+    # (prop_key, question, prop_type, line, yes-mid cents).
+    prop_rows = []
+    for p in (data.get("props") or []):
+        mid_q = (p.get("quote") or {}).get("mid")
+        if mid_q is None or not p.get("key"):
+            continue
+        try:
+            cents = round(float(mid_q) * 100)
+        except (TypeError, ValueError):
+            continue
+        if cents <= 0 or cents >= 100:
+            continue
+        prop_rows.append((p["key"], p.get("question"), p.get("type"),
+                          p.get("line"), cents))
+    return {"ml": ml, "rows": rows, "props": prop_rows}
 
 
 def _pm_insert_changed(sb, rows, now) -> int:
@@ -6865,6 +6881,436 @@ def _pm_insert_changed(sb, rows, now) -> int:
         except Exception:
             return 0
     return len(ins)
+
+
+# ───────────── Prop bets pipeline (July 2026) ────────────────────────────────
+# "Markets move the same, we can log the same" (user). Props are priced order
+# books exactly like the main lines, so the SAME movement engine applies:
+# prop_snapshots is the cent history (deduped on change), prop_suggestions is
+# the current per-prop movement verdict. Both are written on the pm-snapshot
+# tick — the props ride the lookup() call that already runs per game, so
+# ingestion costs zero extra network. v1 is Polymarket-only; the venue column
+# exists so Kalshi prop series can slot in once their tickers are verified
+# via /debug-kalshi-discover (no schema change needed).
+
+# Recency weights for prop movement — same buckets as the main-market sharp
+# score (handicapper_web._RECENCY_WEIGHTS). Cents ARE prob points here, no
+# scale constant needed: gate at 3 weighted cents ≈ the main gate's feel.
+_PROP_RECENCY = ((15, 0.75), (60, 0.50), (120, 0.35), (360, 0.18), (1080, 0.08))
+_PROP_SUGGEST_MIN = 3.0   # weighted cents to ENTER the suggestion gate
+_PROP_SUGGEST_EXIT = 2.0  # hysteresis floor — a cleared prop STAYS cleared
+                          # until its score decays below this (the sticky-gate
+                          # pattern; kills the badge/card flicker when scores
+                          # hover at the gate and recency weights decay them
+                          # across consecutive ticks — July 26 SEA@TEX 3▲→0)
+_PROP_CENTS_LO, _PROP_CENTS_HI = 4, 96   # don't suggest near-resolved longshots
+
+
+def _prop_recency_weight(age_min: float) -> float:
+    for cap, w in _PROP_RECENCY:
+        if age_min <= cap:
+            return w
+    return 0.0
+
+
+def _prop_insert_changed(sb, rows, now) -> int:
+    """Insert (market_id, venue, prop_key, question, prop_type, line, cents)
+    prop_snapshots rows, deduped on cent change per (market_id, venue,
+    prop_key) — the pm_snapshots pattern. prop_key (the PMM slug) is unique
+    per market, so the line is informational, not part of the key."""
+    if not rows:
+        return 0
+    mids = list({r[0] for r in rows})
+    last: dict = {}
+    try:
+        recent = (sb.table("prop_snapshots")
+                  .select("market_id,venue,prop_key,cents,captured_at")
+                  .in_("market_id", mids)
+                  .gte("captured_at", (now - timedelta(hours=24)).isoformat())
+                  .order("captured_at", desc=True).limit(8000).execute().data) or []
+        for r in recent:
+            k = (r["market_id"], r["venue"], r["prop_key"])
+            if k not in last:               # first seen = latest (desc order)
+                last[k] = r["cents"]
+    except Exception:
+        pass
+    ins, seen = [], set()
+    for (mid, venue, key, q, ptype, line, cents) in rows:
+        k = (mid, venue, key)
+        if k in seen:
+            continue
+        seen.add(k)
+        if last.get(k) == cents:            # unchanged → skip
+            continue
+        ins.append({"market_id": mid, "venue": venue, "prop_key": key,
+                    "question": q, "prop_type": ptype, "line": line,
+                    "cents": cents, "captured_at": now.isoformat()})
+    if ins:
+        try:
+            sb.table("prop_snapshots").insert(ins).execute()
+        except Exception:
+            return 0
+    return len(ins)
+
+
+def _prop_update_suggestions(sb, prop_rows, now) -> int:
+    """Recompute the movement verdict for every prop captured THIS tick and
+    upsert prop_suggestions. Movement = recency-weighted signed sum of
+    consecutive cent deltas over the last 18h (the main-market sharp-score
+    shape). Side follows the harder-=-sharp rule: YES price rising = money
+    arriving on YES → suggest 'yes'; falling → 'no'. `cleared` = weighted
+    move ≥ _PROP_SUGGEST_MIN and the current price isn't near-resolved."""
+    if not prop_rows:
+        return 0
+    mids = list({r[0] for r in prop_rows})
+    hist: dict = {}
+    prev_cleared: set = set()
+    try:
+        rows = (sb.table("prop_snapshots")
+                .select("market_id,venue,prop_key,cents,captured_at")
+                .in_("market_id", mids)
+                .gte("captured_at", (now - timedelta(hours=18)).isoformat())
+                .order("captured_at", desc=False).limit(8000).execute().data) or []
+        for r in rows:
+            hist.setdefault((r["market_id"], r["venue"], r["prop_key"]), []).append(r)
+    except Exception:
+        return 0
+    try:
+        prows = (sb.table("prop_suggestions").select("market_id,prop_key,side,cleared")
+                 .in_("market_id", mids).eq("cleared", True)
+                 .limit(4000).execute().data) or []
+        prev_cleared = {(r["market_id"], r["prop_key"], r.get("side")) for r in prows}
+    except Exception:
+        pass
+    ups = []
+    for (mid, venue, key, q, ptype, line, cents) in prop_rows:
+        snaps = hist.get((mid, venue, key)) or []
+        wsum = 0.0
+        for a, b in zip(snaps, snaps[1:]):
+            try:
+                t = datetime.fromisoformat(str(b["captured_at"]).replace("Z", "+00:00"))
+                age_min = max(0.0, (now - t).total_seconds() / 60.0)
+                wsum += (b["cents"] - a["cents"]) * _prop_recency_weight(age_min)
+            except Exception:
+                continue
+        score = round(abs(wsum), 2)
+        side = "yes" if wsum > 0 else ("no" if wsum < 0 else None)
+        # Schmitt trigger: ENTER at _PROP_SUGGEST_MIN, EXIT below
+        # _PROP_SUGGEST_EXIT (same side only) — a mover doesn't flicker off
+        # the moment recency decay shaves it under the entry gate.
+        gate = _PROP_SUGGEST_EXIT if (mid, key, side) in prev_cleared else _PROP_SUGGEST_MIN
+        cleared = (score >= gate and side is not None
+                   and _PROP_CENTS_LO <= cents <= _PROP_CENTS_HI)
+        ups.append({"market_id": mid, "prop_key": key, "venue": venue,
+                    "question": q, "prop_type": ptype, "line": line,
+                    "side": side, "score": score, "cleared": cleared,
+                    "cents": cents, "updated_at": now.isoformat()})
+    if ups:
+        try:
+            sb.table("prop_suggestions").upsert(ups).execute()
+        except Exception:
+            return 0
+    return sum(1 for u in ups if u["cleared"])
+
+
+# ───────────── Polymarket trade tape (whale / order-flow, July 2026) ─────────
+# The cron-friendly answer to enviodev/track-poly-trades (user call: "the
+# trades API version is the better path"): ONE poll of Polymarket's public
+# data-API trade tape per pm-snapshot tick, big taker fills only, matched to
+# OUR upcoming games by team names/tricodes → poly_trades. This is the GLOBAL
+# polymarket.com book's tape — an order-flow SIGNAL (who's hammering a side
+# before the price moves), NOT a record of the user's own US-exchange orders.
+# Earn-in: recorded + shown (dossier Big Trades card), not a scoring input;
+# reviews join poly_trades → pickbot_paperlog on (market_id, time).
+# API shape is UNVERIFIED from the sandbox — the reader tries several param
+# shapes and tolerant field names; /debug-poly-trades dumps ground truth.
+_TRADE_TAPE_URL = "https://data-api.polymarket.com/trades"
+_TRADE_MIN_USD = 500          # big-trade floor (notional = size × price)
+_TRADE_TAPE_LIMIT = 500
+_TRADE_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+
+
+def _tt_get(row: dict, *names, default=None):
+    """Tolerant field getter — the tape's exact schema is probe-verified,
+    so accept the camel/snake variants we might see."""
+    for n in names:
+        v = row.get(n)
+        if v is not None:
+            return v
+    return default
+
+
+def _fetch_poly_trades(diag: dict | None = None) -> list[dict]:
+    """Pull the newest big taker fills off the public tape. Tries param
+    shapes in order (server-side CASH filter first, then unfiltered with a
+    client-side floor). Returns normalized rows; [] on any failure."""
+    shapes = [
+        {"limit": _TRADE_TAPE_LIMIT, "takerOnly": "true",
+         "filterType": "CASH", "filterAmount": _TRADE_MIN_USD},
+        {"limit": _TRADE_TAPE_LIMIT, "takerOnly": "true"},
+        {"limit": _TRADE_TAPE_LIMIT},
+    ]
+    for params in shapes:
+        try:
+            r = _http.get(_TRADE_TAPE_URL, params=params, timeout=6,
+                          headers={"Accept": "application/json",
+                                   "User-Agent": _TRADE_UA})
+            if diag is not None:
+                diag.setdefault("attempts", []).append(
+                    {"params": params, "status": r.status_code,
+                     "bytes": len(r.content or b"")})
+            if r.status_code != 200:
+                continue
+            j = r.json()
+            raw = j if isinstance(j, list) else (
+                (j.get("data") or j.get("trades") or []) if isinstance(j, dict) else [])
+            if not isinstance(raw, list) or not raw:
+                continue
+            if diag is not None:
+                diag["sample_raw"] = raw[:2]
+            out = []
+            for t in raw:
+                if not isinstance(t, dict):
+                    continue
+                try:
+                    price = float(_tt_get(t, "price", "avgPrice", default=0) or 0)
+                    size = float(_tt_get(t, "size", "amount", "shares", default=0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if not (0 < price < 1) or size <= 0:
+                    continue
+                notional = price * size
+                if notional < _TRADE_MIN_USD:
+                    continue
+                ts = _tt_get(t, "timestamp", "matchTime", "ts", "time")
+                traded_at = None
+                try:
+                    tsf = float(ts)
+                    if tsf > 1e12:          # ms epoch
+                        tsf /= 1000.0
+                    traded_at = datetime.fromtimestamp(tsf, tz=timezone.utc).isoformat()
+                except (TypeError, ValueError):
+                    if isinstance(ts, str) and ts:
+                        traded_at = ts
+                out.append({
+                    "title":      _tt_get(t, "title", "question", default="") or "",
+                    "slug":       _tt_get(t, "slug", "marketSlug", default="") or "",
+                    "event_slug": _tt_get(t, "eventSlug", "event_slug", default="") or "",
+                    "outcome":    _tt_get(t, "outcome", "outcomeName"),
+                    "side":       (_tt_get(t, "side", default="") or "").upper() or None,
+                    "price_cents": round(price * 100, 2),
+                    "size":       round(size, 2),
+                    "notional_usd": round(notional, 2),
+                    "wallet":     _tt_get(t, "proxyWallet", "proxy_wallet", "user", "maker"),
+                    "trader":     _tt_get(t, "name", "pseudonym", "profileName"),
+                    "tx_hash":    _tt_get(t, "transactionHash", "tx_hash", "txHash"),
+                    "traded_at":  traded_at,
+                    "_asset":     str(_tt_get(t, "asset", "assetId", "tokenId", default="")),
+                })
+            if out:
+                if diag is not None:
+                    diag["normalized_sample"] = out[:5]
+                return out
+        except Exception as e:
+            if diag is not None:
+                diag.setdefault("errors", []).append(str(e)[:200])
+    return []
+
+
+def _trade_match_index(all_games) -> list[dict]:
+    """Matchable shape per upcoming game: mascot last-tokens + Kalshi-style
+    tricodes + the ET game date (the PMM slug convention)."""
+    idx = []
+    for g in all_games:
+        ev = g.get("event_name") or ""
+        if " @ " not in ev:
+            continue
+        away, home = [s.strip() for s in ev.split(" @ ", 1)]
+        sp = g.get("_sport") or g.get("sport") or ""
+
+        def _tok(name):
+            w = [x for x in re.split(r"[^a-z0-9]+", name.lower()) if x]
+            return w[-1] if w else ""
+        try:
+            et_date = (datetime.fromisoformat(str(g["event_start"]).replace("Z", "+00:00"))
+                       .astimezone(ZoneInfo("America/New_York")).date().isoformat())
+        except Exception:
+            et_date = None
+        idx.append({
+            "market_id": g["id"], "sport": sp, "event_start": g.get("event_start"),
+            "away_tok": _tok(away), "home_tok": _tok(home),
+            "away_code": (_our_team_to_kalshi_code(sp, away) or "").lower(),
+            "home_code": (_our_team_to_kalshi_code(sp, home) or "").lower(),
+            "et_date": et_date,
+        })
+    return idx
+
+
+def _match_poly_trade(t: dict, idx: list[dict]):
+    """Match one tape row to one of our games. Pass 1: BOTH mascot tokens in
+    the row's text. Pass 2: BOTH tricodes as slug tokens. THREE guards from
+    the July 26 SEA@TEX incident (in-play trades from TODAY's game landed on
+    TOMORROW's row at 88-99¢):
+      1. The event-slug DATE is a VETO, not a tie-break — a candidate whose
+         ET game date contradicts the slug's date is dropped even when it's
+         the only candidate (the trade belongs to a game we don't index).
+      2. Parlay markets ("LAA/SF AND SEA/TEX") span games — skipped.
+      3. Candidates across DIFFERENT matchups with no date to disambiguate
+         → ambiguous, skip (never guess a game for a multi-game market)."""
+    title = t.get("title") or ""
+    if " AND " in title:                      # parlay/combined market
+        return None
+    text = " ".join([t.get("event_slug") or "", t.get("slug") or "",
+                     title]).lower()
+    slug_toks = set(re.split(r"[^a-z0-9]+", (t.get("event_slug") or "").lower()))
+    m = re.search(r"\d{4}-\d{2}-\d{2}", t.get("event_slug") or "")
+    slug_date = m.group(0) if m else None
+    cands = []
+    for g in idx:
+        if (g["away_tok"] and g["home_tok"]
+                and g["away_tok"] in text and g["home_tok"] in text):
+            pass
+        elif (g["away_code"] and g["home_code"]
+                and g["away_code"] in slug_toks and g["home_code"] in slug_toks):
+            pass
+        else:
+            continue
+        # Date veto: slug says which ET day this market's game is.
+        if slug_date and g["et_date"] and g["et_date"] != slug_date:
+            continue
+        cands.append(g)
+    if not cands:
+        return None
+    if len({(g["away_tok"], g["home_tok"]) for g in cands}) > 1:
+        return None                           # spans different matchups
+    if len(cands) > 1:
+        # Same series, multiple dates in window, no slug date to pick —
+        # prefer the game nearest the TRADE time (live/today over tomorrow).
+        def _gap(g):
+            try:
+                ge = datetime.fromisoformat(str(g["event_start"]).replace("Z", "+00:00"))
+                tt = datetime.fromisoformat(str(t.get("traded_at")).replace("Z", "+00:00"))
+                return abs((ge - tt).total_seconds())
+            except Exception:
+                return float("inf")
+        cands.sort(key=_gap)
+    return cands[0]
+
+
+def _poly_trades_ingest(sb, all_games, now, diag: dict | None = None) -> dict:
+    """One tape poll → match → insert-new-only (unique trade_key dedup).
+    Returns {fetched, matched, inserted}. Never raises."""
+    import hashlib
+    out = {"fetched": 0, "matched": 0, "inserted": 0}
+    try:
+        rows = _fetch_poly_trades(diag=diag)
+        out["fetched"] = len(rows)
+        if not rows:
+            return out
+        # The upcoming-games index PLUS recently-started games (July 26
+        # SEA@TEX lesson): once a game tips off it leaves `all_games`, so
+        # its in-play trades had only the series-mate (tomorrow's row) to
+        # match. With the live game in the index — and the slug-date veto —
+        # in-play flow attaches to the game it belongs to.
+        live_games = []
+        try:
+            lo = (now - timedelta(hours=7)).isoformat()
+            lrows = (sb.table("markets").select("id,sport,event_name,event_start")
+                     .in_("sport", list(_PM_SPORTS)).eq("status", "active")
+                     .gte("event_start", lo).lt("event_start", now.isoformat())
+                     .limit(120).execute().data) or []
+            for g in lrows:
+                g["_sport"] = g.get("sport")
+                live_games.append(g)
+        except Exception:
+            pass
+        if not all_games and not live_games:
+            return out
+        idx = _trade_match_index(list(all_games) + live_games)
+        matched = []
+        for t in rows:
+            g = _match_poly_trade(t, idx)
+            if not g:
+                if diag is not None and len(diag.setdefault("unmatched_sample", [])) < 10:
+                    diag["unmatched_sample"].append(
+                        (t.get("title") or t.get("event_slug") or "")[:80])
+                continue
+            key = hashlib.sha1("|".join([
+                str(t.get("tx_hash") or ""), t.get("_asset") or "",
+                str(t.get("wallet") or ""), str(t.get("side") or ""),
+                str(t.get("size") or ""), str(t.get("price_cents") or ""),
+                str(t.get("traded_at") or "")]).encode()).hexdigest()
+            matched.append({
+                "trade_key": key, "market_id": g["market_id"], "sport": g["sport"],
+                "title": (t.get("title") or "")[:300], "slug": t.get("slug"),
+                "event_slug": t.get("event_slug"), "outcome": t.get("outcome"),
+                "side": t.get("side"), "price_cents": t.get("price_cents"),
+                "size": t.get("size"), "notional_usd": t.get("notional_usd"),
+                "wallet": t.get("wallet"), "trader": t.get("trader"),
+                "tx_hash": t.get("tx_hash"), "traded_at": t.get("traded_at"),
+                "captured_at": now.isoformat(),
+            })
+        out["matched"] = len(matched)
+        if not matched:
+            return out
+        keys = [m["trade_key"] for m in matched]
+        try:
+            have = {r["trade_key"] for r in
+                    ((sb.table("poly_trades").select("trade_key")
+                      .in_("trade_key", keys).execute().data) or [])}
+        except Exception:
+            have = set()
+        fresh = [m for m in matched if m["trade_key"] not in have]
+        if fresh:
+            try:
+                sb.table("poly_trades").insert(fresh).execute()
+                out["inserted"] = len(fresh)
+            except Exception:
+                # Unique-key race with a concurrent tick → retry rows
+                # individually so one dup can't sink the batch.
+                ok = 0
+                for m in fresh:
+                    try:
+                        sb.table("poly_trades").insert(m).execute()
+                        ok += 1
+                    except Exception:
+                        pass
+                out["inserted"] = ok
+    except Exception as e:
+        if diag is not None:
+            diag.setdefault("errors", []).append(f"ingest: {str(e)[:200]}")
+    return out
+
+
+@app.route("/debug-poly-trades")
+def debug_poly_trades():
+    """Probe for the trade-tape reader (public tape data, no secrets):
+    raw API attempt results + normalized samples + match diagnostics
+    against the current upcoming-games window. Ground truth for tuning
+    _fetch_poly_trades/_match_poly_trade — the sandbox can't reach the
+    tape host, only Vercel can (the Bovada/DK probe pattern)."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+    now = datetime.now(timezone.utc)
+    all_games = []
+    for sp in _PM_SPORTS:
+        hi = (now + timedelta(hours=48)).isoformat()
+        try:
+            rows_sp = (sb.table("markets").select("id,event_name,event_start")
+                       .eq("sport", sp).eq("status", "active")
+                       .gte("event_start", now.isoformat()).lte("event_start", hi)
+                       .limit(100).execute().data) or []
+        except Exception:
+            rows_sp = []
+        for g in rows_sp:
+            g["_sport"] = sp
+            all_games.append(g)
+    diag: dict = {}
+    res = _poly_trades_ingest(sb, all_games, now, diag=diag)
+    return jsonify({"ok": True, "games_in_window": len(all_games),
+                    "ingest": res, "diag": diag})
 
 
 # ───────────── Cross-confirm trigger (PMM+Kalshi → on-demand PINN pull) ─────
@@ -7047,6 +7493,7 @@ def api_pm_snapshot():
     pmm_deadline = _time.time() + 7.5
 
     rows = []
+    prop_rows = []   # props pipeline — (mid, venue, key, q, type, line, cents)
     st = {"pmm_games": 0, "kalshi_games": 0, "pmm_skipped": 0}
     cur = {}   # market_id -> current home cents (both feeds) for the trigger
     for g in all_games:
@@ -7082,8 +7529,9 @@ def api_pm_snapshot():
         if kc.get("home") or kc.get("away"):
             st["kalshi_games"] += 1
 
-        # PMM (budgeted) — one lookup returns ML + spread + total quotes;
-        # all of them land in pm_snapshots (the post-Odds-API history).
+        # PMM (budgeted) — one lookup returns ML + spread + total quotes
+        # AND every prop; main lines land in pm_snapshots, props in
+        # prop_snapshots (the props pipeline, July 2026).
         pmm, pmm_rows = {}, []
         if _time.time() < pmm_deadline:
             pq = _pmm_game_quotes(_pm, _pmm_client, away, home, g["event_start"], sport=sp)
@@ -7091,6 +7539,8 @@ def api_pm_snapshot():
                 st["pmm_games"] += 1
                 pmm = pq.get("ml") or {}
                 pmm_rows = pq.get("rows") or []
+                for (pk, pq_, pt, pl, pc) in (pq.get("props") or []):
+                    prop_rows.append((mid, "polymarket", pk, pq_, pt, pl, pc))
         else:
             st["pmm_skipped"] += 1
 
@@ -7117,8 +7567,15 @@ def api_pm_snapshot():
                         "kalshi_home": int(kc["home"]), "starts_in_min": sim}
 
     inserted = _pm_insert_changed(sb, rows, now)
+    props_inserted = _prop_insert_changed(sb, prop_rows, now)
+    props_cleared = _prop_update_suggestions(sb, prop_rows, now)
+    # Trade tape (whale flow) — ONE poll of the public tape, matched against
+    # the same upcoming-games index this tick already built. ~1-2s of I/O.
+    tt = _poly_trades_ingest(sb, all_games, now)
     xc = _xconfirm_detect(sb, cur, now)
     return jsonify({"ok": True, "games": len(all_games), "inserted": inserted,
+                    "props_inserted": props_inserted, "props_cleared": props_cleared,
+                    "trades": tt,
                     "kalshi": kal_meta, "xconfirm_triggered": xc["triggered"], **st})
 
 
@@ -7592,10 +8049,14 @@ def api_handicapper_paperlog():
     # tip (the on-page ⚠ TAKE NOW chip only shows when the page is open).
     # Independent of the bet cands above: it reads live fill state directly.
     take_warned = _take_warn_alerts(sb, now)
+    # OUTBID push (every 2nd minute) — the red chip's Telegram twin: a
+    # resting maker order lost the touch, re-bid or take.
+    outbid_warned = _outbid_alerts(sb, now)
     # stdout → Vercel runtime logs: the alert pipeline's only observability
     # (the JSON response is visible only in cron-job.org history).
     print(f"paperlog: processed={processed} cands={len(alert_cands)} "
-          f"alerted={bets_alerted} take_warned={take_warned} new_rows={len(rows)}")
+          f"alerted={bets_alerted} take_warned={take_warned} "
+          f"outbid_warned={outbid_warned} new_rows={len(rows)}")
     new_rows = 0
     if rows:
         try:
@@ -8345,11 +8806,126 @@ def _take_warn_alerts(sb, now) -> int:
     return sent
 
 
+def _outbid_line(f: dict, r: dict) -> str:
+    """One bullet for the batched OUTBID message: the game + the warning."""
+    ev = r.get("event_name") or ""
+    mt = (r.get("market_type") or "").upper()
+    side = (r.get("side") or "").upper()
+    u = r.get("units")
+    venue = "Polymarket" if f.get("venue") == "POLYMARKET" else "Kalshi"
+    myp = f.get("my_price_c")
+    bb = f.get("best_bid_c")
+    ahead = f.get("ahead_qty")
+    px = ""
+    if myp is not None and bb is not None:
+        px = f" · you {round(myp)}¢, book {round(bb)}¢"
+        if ahead:
+            px += f" (~{int(ahead):,} ahead)"
+    mins = f.get("mins_to_start")
+    when = f" · tip {mins}m" if mins is not None else ""
+    return f"• {ev} — {mt} {side} {u}u · {venue}{px}{when}"
+
+
+_OUTBID_TICK_MOD = 2   # run the (venue-API-hitting) check every 2nd minute
+
+
+def _outbid_alerts(sb, now) -> int:
+    """Telegram (Filled Bot): the OUTBID warning as a PUSH (July 2026, user:
+    "I love the red chip when outbid, but sending a notification on telegram
+    needs to happen"). The on-page red outbid chip only shows when the page
+    is open; this reaches the phone: someone bid ABOVE your resting maker
+    order, so it won't fill — re-bid or take. Rides the paperlog tick,
+    throttled to every _OUTBID_TICK_MOD minutes (it reuses
+    _compute_fill_status, which hits the venue APIs). Re-alert policy: one
+    ping per bid LEVEL — marker signal_blob.outbid_warned stores the public
+    best bid we warned about; a HIGHER best bid re-pings (they outbid you
+    again), the same level never re-pings. Quiet 11pm-7am AZ (the ingest
+    blackout — overnight books drift and the user is asleep). Stamped only
+    on a successful send so a Telegram failure retries. Never raises."""
+    sent = 0
+    try:
+        if now.minute % _OUTBID_TICK_MOD:
+            return 0
+        if _in_blackout_mt(now):
+            return 0
+        admins = set(_admin_uids())
+        _owner = _kalshi_owner_uid()
+        if _owner:
+            admins.add(_owner)
+        if not admins:
+            return 0
+        for uid in admins:
+            # Pre-check: any pending pre-game pick at all? (The outbid check
+            # only applies to resting pre-game orders.)
+            try:
+                near = (sb.table("bot_picks").select("id")
+                        .eq("status", "pending").eq("asked_by", uid)
+                        .gte("event_start", now.isoformat())
+                        .limit(1).execute().data) or []
+            except Exception:
+                near = []
+            if not near:
+                continue
+            try:
+                res = _compute_fill_status(sb, uid)
+            except Exception:
+                continue
+            if not res.get("configured"):
+                continue
+            hits = [f for f in (res.get("fills") or []) if f.get("outbid")]
+            if not hits:
+                continue
+            ids = [f["id"] for f in hits]
+            try:
+                rows = (sb.table("bot_picks")
+                        .select("id,event_name,market_type,side,units,signal_blob")
+                        .in_("id", ids).execute().data) or []
+            except Exception:
+                continue
+            byid = {r["id"]: r for r in rows}
+            fresh = []
+            for f in hits:
+                r = byid.get(f["id"])
+                if not r:
+                    continue
+                blob = (r.get("signal_blob")
+                        if isinstance(r.get("signal_blob"), dict) else {})
+                prev = blob.get("outbid_warned") or {}
+                prev_bb = prev.get("best_bid_c") if isinstance(prev, dict) else None
+                cur_bb = f.get("best_bid_c")
+                # Already warned at this bid level (or higher) → skip. A
+                # higher public bid than last warned = a NEW outbid → ping.
+                if (prev_bb is not None and cur_bb is not None
+                        and cur_bb <= prev_bb + 0.25):
+                    continue
+                fresh.append((f, r, blob))
+            if not fresh:
+                continue
+            lines = ["🔴 OUTBID — your resting bid is no longer the touch:"]
+            lines += [_outbid_line(f, r) for f, r, _b in fresh]
+            lines.append("Re-bid to reclaim the touch, or cross the ask.")
+            if _send_fill_telegram("\n".join(lines)):
+                sent += 1
+                for f, r, blob in fresh:
+                    try:
+                        nb = dict(blob)
+                        nb["outbid_warned"] = {"at": now.isoformat(),
+                                               "best_bid_c": f.get("best_bid_c")}
+                        (sb.table("bot_picks").update({"signal_blob": nb})
+                         .eq("id", r["id"]).execute())
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return sent
+
+
 def _send_fill_telegram(text):
     """POST to Telegram sendMessage via the "Filled Bot". No-op (False)
     when FILLED_BOT_TOKEN / FILLED_BOT_CHAT_ID aren't set in Vercel env.
-    Stdlib urllib so we don't add a new dep just for this. Sole caller
-    post-cutover: _bet_alerts (the unlogged-bet ping)."""
+    Stdlib urllib so we don't add a new dep just for this. Callers (all on
+    the paperlog tick): _bet_alerts (unlogged-bet ping), _take_warn_alerts
+    (≤5m-to-tip TAKE push), _outbid_alerts (resting bid lost the touch)."""
     import urllib.request
     import urllib.error
     token = (os.environ.get("FILLED_BOT_TOKEN") or "").strip()
@@ -10529,6 +11105,85 @@ def api_handicapper_dossier():
     return jsonify(dossier), code
 
 
+@app.route("/api/handicapper/props")
+@bot_required
+def api_handicapper_props():
+    """Live prop board for one game (props pipeline, July 2026).
+
+    Returns every prop Polymarket lists on the game's event (same
+    lookup() the dossier uses — the 5-min event cache keeps repeat hits
+    cheap) merged with the cron-computed movement verdicts from
+    prop_suggestions. Shape per prop:
+      {key, question, type, line, quote:{bid,ask,mid,*_american},
+       yes_bid_american, no_bid_american,
+       suggestion:{side, score, cleared, updated_at} | null}
+    `suggested` = the cleared subset, score-desc — the "Prop Bets X" list.
+    Like the dossier, this is the bot's READ (no per-user data)."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "Supabase not configured"}), 503
+    market_id = (request.args.get("market_id") or "").strip()
+    if not market_id:
+        return jsonify({"ok": False, "error": "missing market_id"}), 400
+    try:
+        m = (sb.table("markets").select("id,sport,event_name,event_start")
+             .eq("id", market_id).single().execute().data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"market lookup: {e}"}), 404
+    if not m or " @ " not in (m.get("event_name") or ""):
+        return jsonify({"ok": False, "error": "market not found"}), 404
+    away, home = [s.strip() for s in m["event_name"].split(" @ ", 1)]
+
+    live_props = []
+    try:
+        import pmm_markets as _pm
+        client = get_client()
+        data = _pm.lookup(client, m["sport"], away, home, m["event_start"])
+        live_props = (data or {}).get("props") or []
+    except Exception:
+        live_props = []
+
+    sugg: dict = {}
+    try:
+        srows = (sb.table("prop_suggestions")
+                 .select("prop_key,venue,side,score,cleared,updated_at,cents")
+                 .eq("market_id", market_id).limit(500).execute().data) or []
+        for r in srows:
+            sugg[r["prop_key"]] = r
+    except Exception:
+        pass
+
+    from pmm_markets import _inverse_quote as _pm_inv
+    props = []
+    for p in live_props:
+        qu = p.get("quote") or None
+        inv = _pm_inv(qu) if qu else None
+        s = sugg.get(p.get("key"))
+        props.append({
+            "key":      p.get("key"),
+            "question": p.get("question"),
+            "type":     p.get("type"),
+            "line":     p.get("line"),
+            "quote":    qu,
+            "yes_bid_american": (qu or {}).get("bid_american"),
+            "no_bid_american":  (inv or {}).get("bid_american"),
+            "suggestion": ({"side": s.get("side"), "score": s.get("score"),
+                            "cleared": bool(s.get("cleared")),
+                            "updated_at": s.get("updated_at")} if s else None),
+        })
+    # Cleared movers first (score desc), then the rest alphabetically —
+    # a stable, scannable board.
+    props.sort(key=lambda p: (
+        0 if (p["suggestion"] or {}).get("cleared") else 1,
+        -float((p["suggestion"] or {}).get("score") or 0),
+        (p["question"] or "").lower()))
+    suggested = [p for p in props if (p["suggestion"] or {}).get("cleared")]
+    return jsonify({"ok": True, "market_id": market_id,
+                    "event_name": m["event_name"], "sport": m["sport"],
+                    "count": len(props), "suggested_count": len(suggested),
+                    "props": props})
+
+
 # Per-sport DISPLAY window for the Pick Bot games list (calendar days,
 # anchored to America/Phoenix). User decision (June 2026): show a tight
 # "today and tomorrow" (2 days) for the daily/event sports and the full
@@ -10751,6 +11406,33 @@ def api_handicapper_games():
     # the other way around). For MLB, keep both when they're >1h apart
     # — that's the doubleheader case (real, same teams same day).
     games = _dedup_games(games, sport)
+    # "Prop Bets X" badge (props pipeline, July 2026): X = prop MARKETS the
+    # exchange lists on the game (the pull — user: "even with no bets, the
+    # pull should show"), freshness-bounded so a dead feed ages the badge
+    # out. `prop_hot` = the movement-CLEARED subset (the ▲ marker). One
+    # batch query for the whole list. Best-effort — a miss renders no badges.
+    try:
+        fresh_cut = (now - timedelta(hours=6)).isoformat()
+        prows = (sb.table("prop_suggestions").select("market_id,cleared")
+                 .in_("market_id", [gm["market_id"] for gm in games])
+                 .gte("updated_at", fresh_cut)
+                 .limit(8000).execute().data) or []
+        pcnt: dict = {}
+        hcnt: dict = {}
+        for pr in prows:
+            mid_p = pr["market_id"]
+            pcnt[mid_p] = pcnt.get(mid_p, 0) + 1
+            if pr.get("cleared"):
+                hcnt[mid_p] = hcnt.get(mid_p, 0) + 1
+        for gm in games:
+            n = pcnt.get(gm["market_id"], 0)
+            if n:
+                gm["prop_bets"] = n
+                h = hcnt.get(gm["market_id"], 0)
+                if h:
+                    gm["prop_hot"] = h
+    except Exception:
+        pass
     # Prime ZONES (minute-bands the bot sizes up + glows green). Multi-zone
     # since June 2026 (the edge is bimodal) AND per-bet-type — the row glow
     # is per-GAME (one kickoff time), so it uses the UNION of every market's
@@ -11858,11 +12540,14 @@ def api_handicapper_pick():
     if missing:
         return jsonify({"ok": False, "error": f"missing: {missing}"}), 400
 
-    if body["market_type"] not in ("moneyline", "spread", "total", "nrfi", "distance"):
+    if body["market_type"] not in ("moneyline", "spread", "total", "nrfi", "distance", "prop"):
         return jsonify({"ok": False, "error": "bad market_type"}), 400
-    # NRFI/YRFI + the UFC "distance" prop use yes/no sides; everything else
-    # uses home/away/over/under. (UFC round O/U rides market_type='total'.)
-    if body["market_type"] in ("nrfi", "distance"):
+    # NRFI/YRFI, the UFC "distance" prop, and generic exchange PROPS use
+    # yes/no sides; everything else uses home/away/over/under. (UFC round
+    # O/U rides market_type='total'.) A prop's identity travels in
+    # signal_blob.prop + query_text — the 7-day dedup can't tell two props
+    # on the same game apart, so prop logs must send allow_duplicate.
+    if body["market_type"] in ("nrfi", "distance", "prop"):
         if body["side"] not in ("yes", "no"):
             return jsonify({"ok": False, "error": f"{body['market_type']} side must be yes/no"}), 400
     elif body["side"] not in ("home", "away", "over", "under"):

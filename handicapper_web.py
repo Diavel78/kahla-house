@@ -5043,6 +5043,30 @@ def _suggest_picks(odds: dict, splits: dict | None = None,
 
 # ──────────────────────────── Public entry point ────────────────────────────
 
+def _big_trades(sb, market_id: str, hours: int = 24, cap: int = 14) -> list:
+    """Recent BIG Polymarket tape fills on this game — poly_trades rows
+    written by the pm-snapshot trade-tape poll (app.py:_poly_trades_ingest,
+    $500+ taker fills, July 2026). SQL-only, silent-fail. This is the GLOBAL
+    polymarket.com book's tape (an order-flow signal), NOT the user's own
+    US-exchange orders. Top `cap` by notional over the window, returned
+    newest-first for the dossier's Big Trades card."""
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        rows = (sb.table("poly_trades")
+                .select("title,outcome,side,price_cents,size,notional_usd,"
+                        "trader,wallet,traded_at")
+                .eq("market_id", market_id)
+                .gte("traded_at", cutoff)
+                .order("traded_at", desc=True)
+                .limit(cap * 4).execute().data) or []
+    except Exception:
+        return []
+    rows.sort(key=lambda r: -(float(r.get("notional_usd") or 0)))
+    top = rows[:cap]
+    top.sort(key=lambda r: str(r.get("traded_at") or ""), reverse=True)
+    return top
+
+
 def build_dossier(sb, query: str | None, sport_hint: str | None,
                   market_id: str | None = None,
                   live: bool = False) -> dict:
@@ -5402,6 +5426,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
         "team_compare":    team_compare,
         "weather":         weather,
         "power_rating":    power_rating,
+        "big_trades":      _big_trades(sb, market["id"]),
         "nrfi":            nrfi,
         "spread_model":    spread_model,
         "ufc_model":       ufc_model,
