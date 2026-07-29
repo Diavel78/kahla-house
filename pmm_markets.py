@@ -308,7 +308,25 @@ def _match_event_to_game(events: list, away: str, home: str,
          our teams AND title mentions the other
     EVERY pass is date-guarded when bet_dt is known (see _ev_date_ok) —
     a series-mate event on another day can never match, whatever its
-    title format. Returns the matched event (untouched SDK object) or None."""
+    title format. Returns the matched event (untouched SDK object) or None.
+
+    DOUBLEHEADER rule (July 29 2026, the Braves@Mets makeup): two games of
+    the same matchup on the SAME ET day pass every date guard for each
+    other, and the passes are first-match-wins — so events are pre-sorted
+    by |startTime − bet_dt|, making the nearest-in-time event win every
+    pass (the 1:10pm makeup event matches the 1:10pm row, the 7:10pm
+    nightcap matches the 7:10pm row)."""
+    if bet_dt is not None and len(events) > 1:
+        def _st_gap(ev):
+            try:
+                sdt = datetime.fromisoformat(
+                    str(_ev_get(ev, "startTime")).replace("Z", "+00:00"))
+                if sdt.tzinfo is None:
+                    sdt = sdt.replace(tzinfo=timezone.utc)
+                return abs((sdt - bet_dt).total_seconds())
+            except Exception:
+                return float("inf")
+        events = sorted(events, key=_st_gap)
     away_last = _last_token(away)
     home_last = _last_token(home)
     # Pass 0: tricode slug/title + date. The slug encodes away/home ORDER
@@ -414,8 +432,14 @@ def _search_event(client, sport: str, away: str, home: str,
     # (the guard runs in the search, never on a cache hit). The YRFI slug then
     # indexed under BOTH market ids → autolog's uniq check read it as
     # ambiguous → the resting Poly order never became a pick.
+    # The game's UTC HOUR is part of the key (July 29 2026, the Braves@Mets
+    # DH): a DOUBLEHEADER's two games share (teams, ET date), so without it
+    # the second lookup cache-hit the FIRST game's event — bypassing every
+    # date/proximity guard, exactly the July 24 landmine in same-day form.
+    # A retime crossing an hour boundary just misses the cache (harmless).
     cache_key = (f"{sport}:{_norm(away)}:{_norm(home)}:"
-                 f"{(_bet_et_date(bet_dt) or bet_dt.date()).isoformat()}")
+                 f"{(_bet_et_date(bet_dt) or bet_dt.date()).isoformat()}:"
+                 f"{bet_dt.strftime('%H')}")
     cached = _EVENT_CACHE.get(cache_key)
     if cached and (time.time() - cached[0]) < _EVENT_CACHE_TTL_SEC:
         if diag is not None:
