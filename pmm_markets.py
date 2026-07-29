@@ -255,13 +255,32 @@ def _ev_date_ok(ev, bet_dt: datetime | None) -> bool:
     guard on evidence, never on absence."""
     if bet_dt is None:
         return True
-    mo = _PMM_SLUG_RE.match(str(_ev_get(ev, "slug") or ""))
+    # Date extraction is a SEARCH, not the anchored slug regex (July 29
+    # Braves@Mets zombie): a POSTPONED event keeps its original-date slug
+    # (possibly suffixed) while Polymarket moves its startTime to the
+    # makeup slot — an anchored-regex miss fell through to the ±14h
+    # startTime check, which then PASSED the old event against the NEXT
+    # day's regular game. Any yyyy-mm-dd in the slug is date evidence.
+    # MAKEUP EXCEPTION: a slug-date MISMATCH is forgiven only when the
+    # event's CURRENT startTime agrees with our game within ±3h — that's
+    # the postponed event physically moved onto THIS makeup slot (so the
+    # user's real makeup-game bets still match), while a same-day series
+    # mate 6h+ away stays rejected.
+    mo = re.search(r"\d{4}-\d{2}-\d{2}", str(_ev_get(ev, "slug") or ""))
     if mo:
         et = _bet_et_date(bet_dt)
         if et is not None:
             try:
-                return datetime.strptime(mo.group(3), "%Y-%m-%d").date() == et
-            except ValueError:
+                if datetime.strptime(mo.group(0), "%Y-%m-%d").date() == et:
+                    return True
+                st0 = _ev_get(ev, "startTime")
+                if st0:
+                    sdt0 = datetime.fromisoformat(str(st0).replace("Z", "+00:00"))
+                    if sdt0.tzinfo is None:
+                        sdt0 = sdt0.replace(tzinfo=timezone.utc)
+                    return abs((sdt0 - bet_dt).total_seconds()) <= 3 * 3600
+                return False
+            except (ValueError, TypeError):
                 pass
     st = _ev_get(ev, "startTime")
     if st:

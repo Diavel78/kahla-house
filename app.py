@@ -5399,11 +5399,28 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
             if not slug or slug in backed:
                 continue                        # still resting or held → keep
             if blob.get("filled") is not False:
-                continue                        # filled OR no flag (old pick) → keep
+                # Filled at some point. PRE-GAME, no order AND no position
+                # = the user SOLD/exited — remove it (July 29 Braves −1.5
+                # zombie: held, sold 8h pre-game, the latch kept phantom
+                # picks alive; user: "only show MY BETS"). PAST-start
+                # filled picks stay for the resolver — a settled bet's
+                # position vanishes on market resolution, and THAT is
+                # what the latch protects.
+                ev_dt = None
+                try:
+                    ev_dt = datetime.fromisoformat(
+                        str(a.get("event_start")).replace("Z", "+00:00"))
+                except Exception:
+                    pass
+                if ev_dt is None or ev_dt <= now_dt:
+                    continue                    # started/settling → resolver's
+                reason = "sold pre-game"
+            else:
+                reason = "never-filled"
             try:
                 sb.table("bot_picks").delete().eq("id", a["id"]).execute()
                 out["removed"] = out.get("removed", 0) + 1
-                app.logger.info("PMM-AUTOLOG removed never-filled %s (%s)", a["id"], slug)
+                app.logger.info("PMM-AUTOLOG removed %s %s (%s)", reason, a["id"], slug)
             except Exception:
                 pass
 
@@ -5438,6 +5455,28 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                               mk.get("event_start"))
         except Exception:
             continue
+        # Slug-date VETO (the trade-tape rule, July 29 Braves@Mets zombie):
+        # a matched event whose slug carries a DIFFERENT ET date than this
+        # market row must never index its markets here — that's how one
+        # Poly position spawned picks on two games of a DH series. MAKEUP
+        # EXCEPTION (mirrors _ev_date_ok): the mismatch is forgiven when
+        # the event's moved startTime agrees with THIS row within ±3h —
+        # that row IS the makeup game the postponed event now belongs to.
+        _md = re.search(r"\d{4}-\d{2}-\d{2}", str((data or {}).get("event_slug") or ""))
+        if _md:
+            try:
+                _row_dt = datetime.fromisoformat(
+                    str(mk["event_start"]).replace("Z", "+00:00"))
+                _row_et = (_row_dt.astimezone(ZoneInfo("America/New_York"))
+                           .date().isoformat())
+                if _row_et != _md.group(0):
+                    _est = (data or {}).get("event_start")
+                    _edt = (datetime.fromisoformat(str(_est).replace("Z", "+00:00"))
+                            if _est else None)
+                    if _edt is None or abs((_edt - _row_dt).total_seconds()) > 3 * 3600:
+                        continue
+            except Exception:
+                pass
         for key, mt in (("ml", "moneyline"), ("spread", "spread"),
                         ("total", "total"), ("nrfi", "nrfi"),
                         ("ufc_distance", "distance")):
