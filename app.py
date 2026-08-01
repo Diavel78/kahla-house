@@ -4156,11 +4156,14 @@ def _pmm_taker_fee_cents(price_cents) -> float:
     return round(5.0 * p * (1.0 - p), 2)
 
 
-def _pmm_maker_rebate_cents(price_cents) -> float:
-    """Polymarket US MAKER rebate per share, in cents: +1.25c · p·(1-p),
-    credited at fill (max +0.31c at 50c). Makers don't just pay zero — they
-    get PAID (verified June 2026 vs docs.polymarket.us/fees: 0.0125·C·p·(1-p)).
-    Counted as a forgone-rebate term in the make-vs-take cost gap."""
+def _pmm_maker_fee_cents(price_cents) -> float:
+    """Polymarket US MAKER fee per share, in cents: 1.25c · p·(1-p),
+    CHARGED at fill (max 0.31c at 50c). This was a maker REBATE when
+    verified June 2026 — Polymarket flipped it to a fee by Aug 1 2026,
+    PROVEN on the user's own settled NRFI ticket (9.70 contracts @ ~49c,
+    resting maker order, fee −$0.03 = exactly 1.25·p·(1−p)/share; a
+    taker would have paid $0.12). Same silent rebate→fee flip Kalshi
+    pulled July 7 2026, same 25%-of-taker ratio. Trust fills, not docs."""
     if price_cents is None:
         return 0.0
     p = max(0.0, min(1.0, price_cents / 100.0))
@@ -4193,11 +4196,12 @@ def _book_signal(book: dict | None, edge_units: float = 1,
     bb, ba = book["best_bid"], book["best_ask"]
     spread = ba - bb
     fee = _pmm_taker_fee_cents(ba)
-    rebate = _pmm_maker_rebate_cents(bb)   # what a filled maker would EARN
+    maker_fee = _pmm_maker_fee_cents(bb)   # makers PAY now (Aug 2026 flip)
     take_eff = round(ba + fee, 2)          # TRUE cost of taking (ask + fee)
-    # take vs make all-in gap: spread + taker fee + the maker rebate you
-    # give up by not resting (~2.6c at 50/50 on a 1c book).
-    take_cost = round(spread + fee + rebate, 2)
+    # take vs make all-in gap: spread + taker fee − the maker fee you'd
+    # pay anyway by resting (~1.9c at 50/50 on a 1c book — the flip
+    # narrowed the gap from ~2.6c, but MAKE still wins on price).
+    take_cost = round(spread + fee - maker_fee, 2)
     # THE TOP ROW is the truth — best bid size vs best ask size. NOT a
     # 2-level sum: a deep bid wall ONE tick below the touch fooled the old
     # 2-level read into TAKING the Cardinals when the touch was 4x ASK-heavy
@@ -6223,7 +6227,7 @@ def _cross_book_signal(pmm_book: dict | None, kalshi_book: dict | None,
     add("KALSHI", kalshi_book, _kalshi_taker_fee_cents,
         lambda c: _kalshi_maker_fee_cents(c), tick=1.0)
     add("POLYMARKET", pmm_book, _pmm_taker_fee_cents,
-        lambda c: -_pmm_maker_rebate_cents(c), tick=0.5)
+        lambda c: _pmm_maker_fee_cents(c), tick=0.5)
     if not opts:
         return None
     pool = [o for o in opts if o["fillable"]] or opts
