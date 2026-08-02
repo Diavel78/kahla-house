@@ -3897,6 +3897,12 @@ NRFI_EDGE_MIN_PP = 3.0    # our fair − PMM maker entry ≥ this (pp) → light
 # disagrees with the market too much — and at that distance the MARKET is
 # right (same inverse pattern as the whale tier). Past the max → no bet.
 NRFI_EDGE_MAX_PP = 6.0
+# PRICE CAP (user guardrail, Aug 2 2026): never suggest — and the bots never
+# place — a Y/NRFI entry above 54¢/contract, regardless of claimed edge. The
+# recurring case: Coors YRFI at ~58¢ — the user never bets it ("pointless":
+# risking 58 to win 42 on a first-inning coin flip). Mirrored in app.py's
+# re-peg engine (_REPEG_NRFI_PRICE_CAP_C) so a chase can't cross it either.
+NRFI_MAX_ENTRY_C = 54.0
 
 
 def _nrfi_half_scoreless(xr: float) -> float:
@@ -4103,12 +4109,19 @@ def _nrfi_model(sport: str, pitchers: dict | None, away: str | None,
     bet_side = None
     bet_edge_pp = None
     entry_price = None
+    capped_side = None
     for side in ("no", "yes"):
         blk = pmm_block.get(side)
         if not blk or blk.get("bid") is None:
             continue
         edge = (our_prob[side] - blk["bid"]) * 100.0   # pp, vs maker entry
         blk["edge_pp"] = round(edge, 1)
+        if blk["bid"] * 100.0 > NRFI_MAX_ENTRY_C:
+            # user price-cap guardrail: entry above 54¢ is never a bet,
+            # whatever the edge claims (the Coors-YRFI-at-58¢ case)
+            if NRFI_EDGE_MIN_PP <= edge <= NRFI_EDGE_MAX_PP:
+                capped_side = side
+            continue
         if (NRFI_EDGE_MIN_PP <= edge <= NRFI_EDGE_MAX_PP
                 and (bet_edge_pp is None or edge > bet_edge_pp)):
             bet_side = side
@@ -4130,6 +4143,15 @@ def _nrfi_model(sport: str, pitchers: dict | None, away: str | None,
             f"{round(our_prob[bet_side]*100)}% vs {venue_lbl} bid "
             f"{_amer(pmm_block[bet_side].get('bid_american'))} "
             f"→ +{bet_edge_pp}pp edge (rest a maker limit at the bid)")
+    elif pmm_matched and capped_side:
+        _cs = "NRFI" if capped_side == "no" else "YRFI"
+        _cbid = (pmm_block.get(capped_side) or {}).get("bid")
+        reasons.append(
+            f"{_cs} edge exists but the entry "
+            f"({round(_cbid * 100) if _cbid else '?'}¢) is past your "
+            f"{round(NRFI_MAX_ENTRY_C)}¢ price cap — pass (user rule: "
+            f"never pay up past {round(NRFI_MAX_ENTRY_C)}¢ on a 1st-inning "
+            f"market).")
     elif pmm_matched:
         _edges = [b.get("edge_pp") for b in pmm_block.values()
                   if b.get("edge_pp") is not None]

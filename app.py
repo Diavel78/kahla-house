@@ -9162,6 +9162,13 @@ def _outbid_alerts(sb, now) -> int:
 # filling us. Shadow mode (REPEG_ENABLED=False) computes + logs + pings what
 # it WOULD do without touching orders — the earn-in before going live.
 
+# User price-cap guardrail (Aug 2 2026): the bot never PLACES a Y/NRFI
+# order above this side-price, even on the unconditional move 1 — chasing
+# past 54¢ on a first-inning market is "pointless" (their word; the Coors
+# YRFI-at-58¢ case). Mirrors handicapper_web.NRFI_MAX_ENTRY_C, which stops
+# the model SUGGESTING those entries.
+_REPEG_NRFI_PRICE_CAP_C = 54.0
+
 REPEG_ENABLED = True         # LIVE (2nd time) Aug 2 2026 — probe run 2
                              # PROVED the amend: full-params modify (with
                              # quantity) amends IN PLACE, order stays on the
@@ -9356,6 +9363,17 @@ def _repeg_tick(sb, now) -> dict:
                     return True
 
                 # -- stop conditions (once-per-level Telegram, order stays) --
+                if new_c is not None and new_c > _REPEG_NRFI_PRICE_CAP_C:
+                    # price-cap guardrail — overrides even move 1's
+                    # unconditional chase: the bot never places above 54¢
+                    if _mark("repeg_stop", {"reason": "price cap"},
+                             tg=(f"🤖 REPEG STOP — {ev} NRFI {side}: book is "
+                                 f"{round(new_c)}¢ — past your "
+                                 f"{round(_REPEG_NRFI_PRICE_CAP_C)}¢ price "
+                                 f"cap, not chasing; resting at "
+                                 f"{round(old_c) if old_c else '?'}¢")):
+                        res["stopped"] += 1
+                    continue
                 if len(moves) >= _REPEG_MAX_MOVES:
                     if _mark("repeg_stop", {"reason": "move_cap"},
                              tg=(f"🤖 REPEG STOP — {ev} NRFI {side}: move cap "

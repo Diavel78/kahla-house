@@ -160,6 +160,29 @@ on every action. Store the CLOB order id the bot places in
 `signal_blob.order_id` so cancels target exactly the right order (manual
 orders keep matching heuristically via the existing fill-status machinery).
 
+## 6.5 AUTO-PLACEMENT guardrails (locked Aug 2 2026 — NOT BUILT)
+
+The stated endgame: the bot PLACES the model's Y/NRFI bets itself (the
+whole loop: find edge → rest maker order → re-peg bot manages → GTD
+expiry → resolver grades), including **during quiet time** — placing
+edges while the user sleeps is a core benefit, not a restricted window.
+**HARD PREREQUISITE (user, after the first live session): the re-peg bot
+must first accumulate real, verified, boring live re-peg reps. As of the
+lock date it has NEVER successfully made or moved a bet — nothing
+auto-places until that record exists.** Guardrails locked so far, the
+user's own words:
+
+| # | Rule |
+|---|---|
+| 1 | **THE MASTER RULE — $6.00/event max, always, checked before every placement.** |
+| 2 | **Y/NRFI price cap: never place above 54¢/contract, either side, regardless of claimed edge.** The recurring case: model suggests Coors YRFI at ~58¢ — the user never bets it ("pointless"). Enforced LIVE already: `handicapper_web.NRFI_MAX_ENTRY_C` kills the suggestion (chips/card/paperlog gate) and `app.py:_REPEG_NRFI_PRICE_CAP_C` stops the re-peg engine from chasing past it (overrides even the unconditional move 1). |
+| 3 | Y/NRFI markets only (no other market auto-places). |
+| 4 | Never place when the user already has a bet/pick on the game's market group. |
+| 5 | Own kill switch (`AUTOBET_ENABLED`-style constant), shadow-mode "would have bet" pings before any real dollar. |
+
+More rules get added here as the user states them; nothing is built
+until the sheet is complete and the prerequisite record exists.
+
 ## 6. Open questions for Phase 0 to answer
 
 1. Does the API expose Start-of-game TIF? (Fallback defined above.)
