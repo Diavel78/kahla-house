@@ -1,0 +1,54 @@
+name: Savant xwOBA — Ingest
+
+# Diamond IQ ITER4 (the Statcast spine): per-batter per-day xwOBA
+# Probe verifies CSV columns AND Actions-IP tolerance first.
+# aggregates from Baseball Savant into mlb_xwoba_batter_days.
+# team-aggregate blob" gap while pitching is player-level.
+#   probe    — reachability + boxscore shape verification, no writes.
+#   backfill — 2025-03-01 → today (~40 min; ~20 batter rows/game).
+#   delta    — last 4 days (the daily in-season default).
+#
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "probe | backfill | delta"
+        required: false
+        default: "delta"
+  schedule:
+    - cron: "45 10 * * *"
+
+concurrency:
+  group: savant-xwoba-ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run ingest
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          MODE="${{ github.event.inputs.mode || 'delta' }}"
+          echo "mode=$MODE"
+          case "$MODE" in
+            probe)    python -m scripts.ingest_savant_xwoba --probe ;;
+            backfill) python -m scripts.ingest_savant_xwoba --backfill --commit ;;
+            delta|*)  python -m scripts.ingest_savant_xwoba --delta --commit ;;
+          esac
