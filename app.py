@@ -8770,14 +8770,14 @@ _OPEN_ORDER_STATES = {
     "ORDER_STATE_PENDING_NEW",
     "ORDER_STATE_PENDING_REPLACE",
     "ORDER_STATE_PARTIALLY_FILLED",
-    # REPLACED = a successfully AMENDED order, still live on the open-orders
-    # endpoint at its new price (probe run 2, Aug 2 2026: full-params modify
-    # amends in place and restamps state REPLACED with leaves intact).
-    # Without this, the re-peg verify + fill tracker read an amended order
-    # as dead — verify would RE-PLACE it (doubled bet) and the autolog
-    # would delete the pick. Dead predecessors don't appear on the open
-    # endpoint, and every consumer keys on leavesQuantity anyway.
-    "ORDER_STATE_REPLACED",
+    # ORDER_STATE_REPLACED is deliberately NOT here (added for ~1h Aug 2,
+    # reverted): probe run 2's modify left a REPLACED order that the open
+    # endpoint returned but the APP DID NOT SHOW — dead husk or invisible
+    # zombie, ambiguous either way, and the user's trust rule is absolute
+    # (app-invisible = not bet). The re-peg bot therefore never calls
+    # orders.modify — re-pegs are explicit cancel→create, which mint
+    # normal NEW-state app-visible orders. This set stays the July-proven
+    # four.
 }
 
 # Map SDK intent → human-readable side label for the betslip
@@ -9416,7 +9416,15 @@ def _repeg_tick(sb, now) -> dict:
                         res["shadow"] += 1
                     continue
 
-                # -- live amend --
+                # -- live re-peg: CANCEL → fill-check → CREATE fresh --
+                # NEVER orders.modify (banned Aug 2 pm): partial modify
+                # destroys orders behind a success response, and full-params
+                # modify leaves an app-INVISIBLE state-REPLACED order — the
+                # user's trust rule is absolute (app-invisible = not bet).
+                # cancel and create are both probe-proven and the result is
+                # a normal NEW-state order the app renders. The ~1s unquoted
+                # gap is accepted; the fill-check between the legs makes a
+                # raced fill impossible to double-bet.
                 oid, slug = f.get("order_id"), f.get("slug")
                 if not oid or not slug:
                     continue
@@ -9426,68 +9434,78 @@ def _repeg_tick(sb, now) -> dict:
                          else new_c / 100.0)
                 leaves = f.get("order_leaves") or 0
                 qty = max(1, int(leaves)) if leaves >= 1 else 0
-                # FULL replace params — the first live session proved a
-                # partial modify (slug+price only) cancels without
-                # replacing: the API treats modify as cancel/replace and a
-                # replace leg missing quantity dies AFTER the cancel leg.
-                params = {"marketSlug": slug,
-                          "price": {"value": f"{canon:.3f}", "currency": "USD"},
-                          "participateDontInitiate": True}
-                if qty:
-                    params["quantity"] = qty
+                if not qty:
+                    continue
+                if res["acted"] >= 1:
+                    continue    # ONE re-peg per tick — the leg sleeps have
+                                # to fit Vercel's 10s budget; deferred
+                                # candidates re-enter next tick (2 min)
+                if client is None:
+                    client = get_client()
+                try:
+                    client.orders.cancel(oid, {"marketSlug": slug})
+                except Exception:
+                    pass        # canceling a just-filled order errors — the
+                                # position check below decides, not the exc
+                _time.sleep(0.8)
+                # Fill-check between the legs: if the old order filled in
+                # the race, the position exists — STOP, never re-bet it.
+                positions = _pmm_positions_raw(client)
+                if positions is None:
+                    _mark("repeg_stop", {"reason": "cancel state unknown"},
+                          tg=(f"⚠🤖 REPEG UNVERIFIED — {ev} NRFI {side}: "
+                              f"canceled your {round(old_c) if old_c else '?'}"
+                              f"¢ order but the venue reads failed before the "
+                              f"re-place. CHECK THE APP — re-bid "
+                              f"{round(new_c)}¢ if it's gone."))
+                    res["stopped"] += 1
+                    continue
+                pos_net = (positions.get(slug) or {}).get("net") or 0.0
+                if (pos_net < 0 if f.get("synthetic") else pos_net > 0):
+                    continue                           # fill won — done
+                cparams = {"marketSlug": slug, "intent": intent,
+                           "type": "ORDER_TYPE_LIMIT",
+                           "price": {"value": f"{canon:.3f}",
+                                     "currency": "USD"},
+                           "quantity": qty,
+                           "participateDontInitiate": True,
+                           "manualOrderIndicator":
+                               "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
                 if (f.get("order_tif") == "TIME_IN_FORCE_GOOD_TILL_DATE"
                         and f.get("order_good_till")):
-                    params["tif"] = "TIME_IN_FORCE_GOOD_TILL_DATE"
-                    params["goodTillTime"] = f["order_good_till"]
-                if res["acted"] >= 2:
-                    continue    # per-tick amend cap — the 2.5s async-verify
-                                # sleeps have to fit Vercel's 10s budget;
-                                # deferred candidates re-enter next tick
-                amend_exc = None
+                    cparams["tif"] = "TIME_IN_FORCE_GOOD_TILL_DATE"
+                    cparams["goodTillTime"] = f["order_good_till"]
+                new_oid = None
                 try:
-                    if client is None:
-                        client = get_client()
-                    client.orders.modify(oid, params)
-                except Exception as e:
-                    amend_exc = e   # even a sync error can have canceled —
-                                    # the verify below decides, not the exc
-                # TRUST NOTHING after an amend (success OR error — the live
-                # failure returned success): modify is ASYNC (probe-proven),
-                # so wait for it to apply/die, then read the book; recreate
-                # if the venue killed it; a raced FILL is detected via the
-                # position and never re-placed; scream if all else fails.
-                _time.sleep(2.5)
+                    cr = client.orders.create(cparams)
+                    new_oid = (cr.get("id") if isinstance(cr, dict)
+                               else getattr(cr, "id", None))
+                except Exception:
+                    pass        # verify decides — recreate is its fallback
+                _time.sleep(1.5)
                 state = _repeg_verify_or_recreate(
                     client, slug, intent, canon, qty,
                     f.get("order_tif"), f.get("order_good_till"))
                 if state == "filled":
                     continue                           # fill wins — done
-                if state == "ok" and amend_exc is not None:
-                    # order intact but at the OLD price — amend rejected
-                    _mark("repeg_stop",
-                          {"reason": f"amend failed: {amend_exc}"[:200]},
-                          tg=(f"🤖 REPEG FAILED — {ev} NRFI {side}: amend to "
-                              f"{round(new_c)}¢ errored; order untouched at "
-                              f"{round(old_c) if old_c else '?'}¢"))
-                    res["stopped"] += 1
-                    continue
                 if state == "lost":
-                    _mark("repeg_stop", {"reason": "ORDER LOST on amend"},
-                          tg=(f"🚨 ORDER LOST — {ev} NRFI {side}: the amend "
-                              f"canceled your order and the re-place failed. "
-                              f"RE-BID {round(new_c)}¢ BY HAND NOW."))
+                    _mark("repeg_stop", {"reason": "ORDER LOST on re-peg"},
+                          tg=(f"🚨 ORDER LOST — {ev} NRFI {side}: canceled "
+                              f"your order and the re-place failed. RE-BID "
+                              f"{round(new_c)}¢ BY HAND NOW."))
                     res["stopped"] += 1
                     continue
                 if state == "unknown":
-                    _mark("repeg_stop", {"reason": "amend unverified"},
+                    _mark("repeg_stop", {"reason": "re-peg unverified"},
                           tg=(f"⚠🤖 REPEG UNVERIFIED — {ev} NRFI {side}: "
-                              f"amend to {round(new_c)}¢ sent but the verify "
+                              f"re-peg to {round(new_c)}¢ sent but the verify "
                               f"read failed. CHECK THE APP."))
                     res["stopped"] += 1
                     continue
                 nb = dict(blob)
                 nb["repeg"] = moves + [{"from_c": old_c, "to_c": new_c,
-                                        "at": now.isoformat(), "order_id": oid,
+                                        "at": now.isoformat(),
+                                        "order_id": new_oid or oid,
                                         "edge_pp": edge, "verify": state}]
                 upd = {"signal_blob": nb}
                 new_amer = _prob_to_amer_py(new_c / 100.0)
