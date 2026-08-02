@@ -3890,7 +3890,12 @@ NRFI_Q_BASE    = 0.713    # scoreless-half prob at league-avg inputs (→ NRFI �
 NRFI_Q_SLOPE   = 2.0      # logistic sensitivity to xr — backtest-calibrated
 NRFI_TOP_BOOST = 1.10     # top-of-order OBP ≈ 10% above team OBP (fallback only)
 NRFI_LEAN_PP   = 4.0      # |our NRFI% − baseline NRFI%| ≥ this → model lean (context only)
-NRFI_EDGE_MIN_PP = 3.0    # our fair − PMM maker entry ≥ this (pp) → light the BET button
+NRFI_EDGE_MIN_PP = 2.5    # our fair − PMM maker entry ≥ this (pp) → light the BET button
+# (3.0 → 2.5 Aug 2 2026, user call. The 2.5-3.0 band is UNMEASURED — the July
+# review could only grade bets that cleared the old 3.0 gate — so this is an
+# earn-in, not a proven widening: the paperlog stamps edge_pp on every row,
+# grade the [2.5,3.0) bucket after ~50+ rows and raise the floor back if it
+# doesn't print. Risk bounded: flat 1u, $6 Master Rule, 54¢ entry cap.)
 # EDGE CLAMP (July 2026, 247 graded paperlog NRFI rows): the edge is REAL only
 # in the 3-6pp band — YRFI@3-6pp went +21.5u/151 while 6pp+ was flat on both
 # sides (yes +1.5/40, no −1.2/17). A claimed edge past 6pp means the model
