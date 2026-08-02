@@ -5610,6 +5610,93 @@ def api_kalshi_autolog():
     return jsonify({"ok": True, **summary})
 
 
+@app.route("/api/polymarket/probe-exec")
+@admin_required
+def api_polymarket_probe_exec():
+    """Phase-0 write-capability probe for the RE-PEG BOT (spec
+    docs/repeg-bot-spec.md): verify the polymarket_us SDK can preview /
+    place / MODIFY / cancel orders with the existing Vercel creds, and dump
+    the RAW response shapes so the engine's assumptions (price semantics on
+    BUY_SHORT, GTD goodTillTime format, post-only reject behavior, how a
+    raced fill reports) are confirmed against reality before REPEG_ENABLED
+    ever flips. DEFAULT IS DRY (preview only — no order is placed). Full
+    cycle needs ?place=1 and runs create → retrieve → modify(+1¢) →
+    retrieve → cancel → retrieve on a deep off-touch price. Params:
+    slug= (required), side=long|short (default long), price_c= (default 3),
+    qty= (default 1), gtd_min= (default 30 — goodTillTime minutes from now),
+    place=1 to go live. THE MASTER RULE ($6/event) is enforced here too."""
+    out: dict = {"ok": True, "dry": True, "steps": {}}
+    slug = (request.args.get("slug") or "").strip()
+    if not slug:
+        out.update(ok=False, error="pass ?slug=<poly market slug> (find one "
+                   "via the dashboard betslip or /debug-pmm)")
+        return jsonify(out)
+    side = (request.args.get("side") or "long").strip().lower()
+    intent = ("ORDER_INTENT_BUY_SHORT" if side == "short"
+              else "ORDER_INTENT_BUY_LONG")
+    try:
+        price_c = float(request.args.get("price_c") or 3)
+        qty = int(request.args.get("qty") or 1)
+        gtd_min = int(request.args.get("gtd_min") or 30)
+    except Exception:
+        return jsonify({"ok": False, "error": "bad price_c/qty/gtd_min"}), 400
+    cost = qty * price_c / 100.0
+    if cost > _REPEG_MAX_COST_USD:
+        return jsonify({"ok": False, "error": (
+            f"${cost:.2f} breaks the ${_REPEG_MAX_COST_USD:.0f} MASTER RULE "
+            "— probe refuses")}), 400
+    gtd = (datetime.now(timezone.utc)
+           + timedelta(minutes=gtd_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    params = {"marketSlug": slug, "intent": intent,
+              "type": "ORDER_TYPE_LIMIT",
+              "price": {"value": f"{price_c / 100.0:.3f}", "currency": "USD"},
+              "quantity": qty,
+              "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtd,
+              "participateDontInitiate": True,
+              "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
+    out["request_params"] = params
+
+    def _step(name, fn):
+        try:
+            out["steps"][name] = {"ok": True, "resp": fn()}
+        except Exception as e:
+            out["steps"][name] = {"ok": False,
+                                  "error": f"{type(e).__name__}: {e}"[:400]}
+            return False
+        return True
+
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    _step("preview", lambda: client.orders.preview({"request": params}))
+    if (request.args.get("place") or "") not in ("1", "true", "yes"):
+        out["note"] = ("DRY RUN — preview only. Add &place=1 to run "
+                       "create → modify → cancel for real (deep off-touch, "
+                       "master-rule capped).")
+        return jsonify(out)
+    out["dry"] = False
+    oid: dict = {}
+    if _step("create", lambda: client.orders.create(params)):
+        oid["v"] = (out["steps"]["create"]["resp"] or {}).get("id")
+    if not oid.get("v"):
+        out["note"] = "create returned no order id — stopping cycle"
+        return jsonify(out)
+    _step("retrieve_after_create", lambda: client.orders.retrieve(oid["v"]))
+    mod = {"marketSlug": slug,
+           "price": {"value": f"{(price_c + 1) / 100.0:.3f}",
+                     "currency": "USD"},
+           "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtd,
+           "participateDontInitiate": True}
+    out["modify_params"] = mod
+    _step("modify", lambda: client.orders.modify(oid["v"], mod))
+    _step("retrieve_after_modify", lambda: client.orders.retrieve(oid["v"]))
+    _step("cancel", lambda: client.orders.cancel(oid["v"],
+                                                 {"marketSlug": slug}))
+    _step("retrieve_after_cancel", lambda: client.orders.retrieve(oid["v"]))
+    return jsonify(out)
+
+
 @app.route("/api/kalshi/probe")
 @admin_required
 def api_kalshi_probe():
@@ -5762,7 +5849,10 @@ def _pmm_open_orders_raw(client) -> list | None:
                     "qty": _safe_float(_g("quantity")) or 0.0,
                     "cum": _safe_float(_g("cumQuantity")) or 0.0,
                     "leaves": _safe_float(_g("leavesQuantity")) or 0.0,
-                    "price_yes": _safe_float(_g("price"))})
+                    "price_yes": _safe_float(_g("price")),
+                    # re-peg bot needs the order's identity + TIF to amend it
+                    "id": _g("id"), "tif": _g("tif") or "",
+                    "good_till": _g("goodTillTime")})
     return out
 
 
@@ -5821,6 +5911,7 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict) -> dict
     want_intent = "ORDER_INTENT_BUY_SHORT" if synthetic else "ORDER_INTENT_BUY_LONG"
     my_orders = [o for o in orders
                  if o["slug"] == slug and o["intent"] == want_intent]
+    entry["slug"], entry["synthetic"] = slug, synthetic
     init = sum(o["qty"] for o in my_orders)
     cum = sum(o["cum"] for o in my_orders)
     rem = sum(o["leaves"] for o in my_orders)
@@ -5857,9 +5948,16 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict) -> dict
                 if (book and myp is not None
                         and book.get("best_bid") is not None
                         and book["best_bid"] > myp + 0.25):
+                    # Largest resting order = the re-peg bot's amend target.
+                    big = max(my_orders, key=lambda o: o.get("leaves") or 0)
                     entry.update(outbid=True, my_price_c=myp,
                                  best_bid_c=book["best_bid"],
                                  best_ask_c=book.get("best_ask"),
+                                 order_id=big.get("id"),
+                                 order_leaves=big.get("leaves"),
+                                 order_cum=big.get("cum"),
+                                 order_tif=big.get("tif"),
+                                 order_good_till=big.get("good_till"),
                                  ahead_qty=round(sum(
                                      q for c, q in (book.get("bids") or [])
                                      if c > myp + 0.25)))
@@ -8092,6 +8190,10 @@ def api_handicapper_paperlog():
     # tip (the on-page ⚠ TAKE NOW chip only shows when the page is open).
     # Independent of the bet cands above: it reads live fill state directly.
     take_warned = _take_warn_alerts(sb, now)
+    # RE-PEG BOT (every 2nd minute) — amend out-of-touch NRFI maker orders
+    # to the touch (shadow-only while REPEG_ENABLED=False). Runs BEFORE the
+    # outbid ping so a live amend clears the outbid before it would ping.
+    repeg = _repeg_tick(sb, now)
     # OUTBID push (every 2nd minute) — the red chip's Telegram twin: a
     # resting maker order lost the touch, re-bid or take.
     outbid_warned = _outbid_alerts(sb, now)
@@ -8099,7 +8201,7 @@ def api_handicapper_paperlog():
     # (the JSON response is visible only in cron-job.org history).
     print(f"paperlog: processed={processed} cands={len(alert_cands)} "
           f"alerted={bets_alerted} take_warned={take_warned} "
-          f"outbid_warned={outbid_warned} new_rows={len(rows)}")
+          f"outbid_warned={outbid_warned} repeg={repeg} new_rows={len(rows)}")
     new_rows = 0
     if rows:
         try:
@@ -8961,6 +9063,228 @@ def _outbid_alerts(sb, now) -> int:
     except Exception:
         pass
     return sent
+
+
+# ---------------------------------------------------------------------------
+# RE-PEG BOT — out-of-touch Y/NRFI maker order manager (docs/repeg-bot-spec.md)
+# ---------------------------------------------------------------------------
+# When a logged pending NRFI pick's resting Polymarket maker order is outbid,
+# amend it to the current best bid (join the touch) — the automated version of
+# the user re-pegging by hand off the red outbid ping. Dials locked by user
+# Aug 2 2026: NRFI only, admin's picks only, Polymarket only, max 2 moves per
+# bet, every move must re-clear the NRFI edge gate at the NEW price, and THE
+# MASTER RULE — no order may cost more than $6.00 on any event — checked
+# immediately before every amend. Uses orders.modify (atomic amend, no
+# cancel+place unquoted window) with participateDontInitiate=True (post-only:
+# the venue rejects any amend that would cross the spread and take), and
+# manual-order flagging left to create-time (modify has no such param).
+# Downward re-pegs are structurally impossible (user's catch): our resting
+# bid IS the book's best bid — the market can't move below us without
+# filling us. Shadow mode (REPEG_ENABLED=False) computes + logs + pings what
+# it WOULD do without touching orders — the earn-in before going live.
+
+REPEG_ENABLED = False        # kill switch — flip to go live (spec Phase 2)
+_REPEG_MARKET_TYPES = {"nrfi"}
+_REPEG_MAX_MOVES = 2         # lifetime cancel-replace cap per bet
+_REPEG_MAX_COST_USD = 6.00   # ⚠ THE MASTER RULE — never raise casually
+
+
+def _repeg_edge_ok(fair_prob, new_c: float):
+    """(ok, edge_pp) — does the pick still clear the NRFI edge gate at the
+    new price? fair_prob is the pick's logged model fair (bot_picks.fair_prob,
+    0-1; percent normalized defensively). None fair → (None, None): can't
+    judge, treated as a stop (never chase blind)."""
+    f = _safe_float(fair_prob)
+    if f is None or f <= 0:
+        return None, None
+    if f > 1.0:                       # stored as percent, normalize
+        f = f / 100.0
+    try:
+        from handicapper_web import NRFI_EDGE_MIN_PP as _min_pp
+    except Exception:
+        _min_pp = 3.0
+    edge = f * 100.0 - new_c
+    return (edge >= _min_pp), round(edge, 2)
+
+
+def _repeg_tick(sb, now) -> dict:
+    """One re-peg pass, riding the paperlog tick (every _OUTBID_TICK_MOD
+    minutes, same throttle + blackout as the outbid ping; runs BEFORE
+    _outbid_alerts so a live amend clears the outbid before it would ping).
+    Returns counters for the tick log. Never raises."""
+    res = {"acted": 0, "shadow": 0, "stopped": 0}
+    try:
+        if now.minute % _OUTBID_TICK_MOD or _in_blackout_mt(now):
+            return res
+        admins = set(_admin_uids())
+        _owner = _kalshi_owner_uid()
+        if _owner:
+            admins.add(_owner)
+        for uid in admins:
+            try:
+                near = (sb.table("bot_picks").select("id")
+                        .eq("status", "pending").eq("asked_by", uid)
+                        .in_("market_type", list(_REPEG_MARKET_TYPES))
+                        .gte("event_start", now.isoformat())
+                        .limit(1).execute().data) or []
+            except Exception:
+                near = []
+            if not near:
+                continue
+            try:
+                fs = _compute_fill_status(sb, uid)
+            except Exception:
+                continue
+            if not fs.get("configured"):
+                continue
+            cands = [f for f in (fs.get("fills") or [])
+                     if f.get("outbid") and f.get("venue") == "POLYMARKET"
+                     and (f.get("market_type") or "") in _REPEG_MARKET_TYPES
+                     and (f.get("mins_to_start") or 0) > 0
+                     and f.get("best_bid_c") is not None]
+            if not cands:
+                continue
+            ids = [f["id"] for f in cands]
+            try:
+                rows = (sb.table("bot_picks")
+                        .select("id,event_name,market_type,side,units,"
+                                "entry_price,fair_prob,signal_blob")
+                        .in_("id", ids).execute().data) or []
+            except Exception:
+                continue
+            byid = {r["id"]: r for r in rows}
+            client = None
+            for f in cands:
+                r = byid.get(f["id"])
+                if not r:
+                    continue
+                blob = (r.get("signal_blob")
+                        if isinstance(r.get("signal_blob"), dict) else {})
+                moves = blob.get("repeg") if isinstance(blob.get("repeg"), list) else []
+                old_c = f.get("my_price_c")
+                new_c = f.get("best_bid_c")
+                ev = r.get("event_name") or ""
+                side = (r.get("side") or "").upper()
+
+                def _mark(key, payload, tg=None):
+                    """Stamp a once-per-bid-level marker (+ optional TG)."""
+                    prev = blob.get(key) or {}
+                    pbb = prev.get("best_bid_c") if isinstance(prev, dict) else None
+                    if pbb is not None and new_c is not None and new_c <= pbb + 0.25:
+                        return False           # same level already handled
+                    if tg and not _send_fill_telegram(tg):
+                        return False           # TG failed → retry next tick
+                    nb = dict(blob)
+                    nb[key] = dict(payload, best_bid_c=new_c, at=now.isoformat())
+                    try:
+                        (sb.table("bot_picks").update({"signal_blob": nb})
+                         .eq("id", r["id"]).execute())
+                    except Exception:
+                        pass
+                    return True
+
+                # -- stop conditions (once-per-level Telegram, order stays) --
+                if len(moves) >= _REPEG_MAX_MOVES:
+                    if _mark("repeg_stop", {"reason": "move_cap"},
+                             tg=(f"🤖 REPEG STOP — {ev} NRFI {side}: move cap "
+                                 f"({_REPEG_MAX_MOVES}) reached; resting at "
+                                 f"{round(old_c) if old_c else '?'}¢, book "
+                                 f"{round(new_c)}¢")):
+                        res["stopped"] += 1
+                    continue
+                ok, edge = _repeg_edge_ok(r.get("fair_prob"), new_c)
+                if not ok:
+                    why = ("edge gone" if ok is False else "no model fair on pick")
+                    if _mark("repeg_stop", {"reason": why, "edge_pp": edge},
+                             tg=(f"🤖 REPEG STOP — {ev} NRFI {side}: {why} at "
+                                 f"{round(new_c)}¢"
+                                 + (f" (edge {edge}pp)" if edge is not None else "")
+                                 + f"; resting at {round(old_c) if old_c else '?'}¢")):
+                        res["stopped"] += 1
+                    continue
+                # -- ⚠ THE MASTER RULE — last check before any amend --
+                contracts = (f.get("order_cum") or 0) + (f.get("order_leaves") or 0)
+                cost = contracts * new_c / 100.0
+                if not contracts or cost > _REPEG_MAX_COST_USD:
+                    if _mark("repeg_stop",
+                             {"reason": "master_rule", "cost": round(cost, 2)},
+                             tg=(f"🤖 REPEG STOP — {ev} NRFI {side}: ${cost:.2f} "
+                                 f"at {round(new_c)}¢ breaks the $"
+                                 f"{_REPEG_MAX_COST_USD:.0f} MASTER RULE")):
+                        res["stopped"] += 1
+                    continue
+
+                move_n = len(moves) + 1
+                if not REPEG_ENABLED:
+                    # -- shadow: log + ping what we WOULD do, touch nothing --
+                    if _mark("repeg_shadow",
+                             {"from_c": old_c, "to_c": new_c, "move": move_n,
+                              "edge_pp": edge},
+                             tg=(f"🕶 REPEG SHADOW — {ev} NRFI {side}: would "
+                                 f"move {round(old_c) if old_c else '?'}¢ → "
+                                 f"{round(new_c)}¢ (edge {edge}pp, move "
+                                 f"{move_n}/{_REPEG_MAX_MOVES})")):
+                        res["shadow"] += 1
+                    continue
+
+                # -- live amend --
+                oid, slug = f.get("order_id"), f.get("slug")
+                if not oid or not slug:
+                    continue
+                canon = ((100.0 - new_c) / 100.0 if f.get("synthetic")
+                         else new_c / 100.0)
+                params = {"marketSlug": slug,
+                          "price": {"value": f"{canon:.3f}", "currency": "USD"},
+                          "participateDontInitiate": True}
+                if (f.get("order_tif") == "TIME_IN_FORCE_GOOD_TILL_DATE"
+                        and f.get("order_good_till")):
+                    params["tif"] = "TIME_IN_FORCE_GOOD_TILL_DATE"
+                    params["goodTillTime"] = f["order_good_till"]
+                try:
+                    if client is None:
+                        client = get_client()
+                    client.orders.modify(oid, params)
+                except Exception as e:
+                    # Race rule: amend raced a fill → treat as fill, never
+                    # re-place. Anything else: report once per level.
+                    filled = False
+                    try:
+                        od = client.orders.retrieve(oid).get("order") or {}
+                        st = od.get("state") or ""
+                        filled = (st == "ORDER_STATE_FILLED"
+                                  or not _safe_float(od.get("leavesQuantity")))
+                    except Exception:
+                        pass
+                    if filled:
+                        continue                       # fill wins — done
+                    _mark("repeg_stop", {"reason": f"amend failed: {e}"[:200]},
+                          tg=(f"🤖 REPEG FAILED — {ev} NRFI {side}: amend to "
+                              f"{round(new_c)}¢ errored; order untouched at "
+                              f"{round(old_c) if old_c else '?'}¢"))
+                    res["stopped"] += 1
+                    continue
+                nb = dict(blob)
+                nb["repeg"] = moves + [{"from_c": old_c, "to_c": new_c,
+                                        "at": now.isoformat(), "order_id": oid,
+                                        "edge_pp": edge}]
+                upd = {"signal_blob": nb}
+                new_amer = _prob_to_amer_py(new_c / 100.0)
+                if new_amer is not None:
+                    upd["entry_price"] = new_amer   # rest the bid, log the bid
+                try:
+                    (sb.table("bot_picks").update(upd)
+                     .eq("id", r["id"]).execute())
+                except Exception:
+                    pass
+                _send_fill_telegram(
+                    f"🤖 RE-PEGGED — {ev} NRFI {side}: "
+                    f"{round(old_c) if old_c else '?'}¢ → {round(new_c)}¢ "
+                    f"(move {move_n}/{_REPEG_MAX_MOVES}, "
+                    f"{contracts:g} contracts, ${cost:.2f})")
+                res["acted"] += 1
+    except Exception:
+        pass
+    return res
 
 
 def _send_fill_telegram(text):

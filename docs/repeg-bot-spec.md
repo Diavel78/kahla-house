@@ -1,10 +1,32 @@
 # Re-Peg Bot — Out-of-Touch Maker Order Manager (NRFI/YRFI)
 
-> Status: **SPEC — dials locked by user Aug 2 2026, build not started.**
-> Every design question below was answered explicitly in conversation; this
-> doc is self-contained so a fresh session can build from it without the
-> original thread. First execution-WRITE surface in the codebase — until now
-> every Polymarket API use is read-only.
+> Status: **BUILT Aug 2 2026 — live in SHADOW MODE** (`REPEG_ENABLED=False`
+> in `app.py`; the engine computes, Telegram-pings, and `signal_blob`-logs
+> every action it WOULD take, touching no orders). Engine = `_repeg_tick`
+> riding the paperlog tick (every 2nd minute, blackout-gated, before the
+> outbid ping so a live amend will clear the outbid). Phase-0 probe =
+> `GET /api/polymarket/probe-exec` (admin; DRY/preview by default,
+> `&place=1` runs create→modify→cancel on a deep off-touch order). **SDK
+> introspection (polymarket-us 0.1.2) resolved all four §6 open questions
+> at build time:**
+> 1. There is no "Start of game" TIF literal — the app's picker builds
+>    **`TIME_IN_FORCE_GOOD_TILL_DATE` + `goodTillTime`**. The engine
+>    passes the order's existing GTD through on amends; probe confirms the
+>    timestamp format against reality.
+> 2. App-placed orders are amendable/cancelable via API (same account) —
+>    `orders.modify(order_id)` / `orders.cancel(order_id, {marketSlug})`;
+>    probe verifies live.
+> 3. Order states distinguish FILLED / REPLACED / REJECTED / EXPIRED; the
+>    race rule is implemented as retrieve-after-failed-modify → state
+>    FILLED or leaves 0 ⇒ treat as fill, never re-place.
+> 4. **`orders.modify` EXISTS** — re-peg is one atomic amend, no
+>    cancel+place unquoted window. Bonus: **`participateDontInitiate=True`
+>    (post-only)** is set on every amend — the venue itself rejects any
+>    move that would cross the spread, a hard maker-only guarantee.
+>
+> Go-live checklist: (a) hit the probe dry, then `&place=1`, confirm the
+> §6 shapes; (b) review shadow pings over a slate or two; (c) flip
+> `REPEG_ENABLED=True` and deploy. Original spec below, unchanged.
 
 ## 0. What it is (one paragraph)
 
