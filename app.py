@@ -7983,6 +7983,196 @@ AUTOBET_MAX_BETS = 20
 _AUTOBET_CONTRACTS = 1
 _OPENER_LO_H, _OPENER_HI_H = 6, 40   # beyond the live window → listing-time
 
+# --- DIAMOND IQ LIVE ("the steam engine dies tonight" — Aug 2 2026) ---
+# MLB moneylines are priced by the MODEL, not by movement: the daily
+# compute (kahla-scanner/scripts/compute_diamond_iq.py → diamond_iq_
+# snapshot) serializes the walk-forward engine state; _diamond_ml
+# reprojects a game from team offense/bullpen + the probable starters'
+# FIP factors → pythagenpat P(home). Backtest honesty: ITER1 runs 54.6%
+# vs the market's ~57-58% — this lane BETS 1 CONTRACT at openers to
+# measure the model against VIRGIN lines (the winnable bar), under the
+# same caps as the NRFI lane. Every opener read shadow-logs either way.
+_DIQ_CACHE: dict = {"at": 0.0, "snap": None}
+
+
+def _diamond_snapshot(sb):
+    """Latest diamond_iq_snapshot blob, 10-min cached. None = no compute
+    yet (lane silently inert — safe-degrade)."""
+    if _time.time() - _DIQ_CACHE["at"] < 600 and _DIQ_CACHE["snap"]:
+        return _DIQ_CACHE["snap"]
+    snap = None
+    try:
+        rows = (sb.table("diamond_iq_snapshot").select("snapshot")
+                .order("id", desc=True).limit(1).execute().data) or []
+        snap = rows[0]["snapshot"] if rows else None
+    except Exception:
+        snap = None
+    _DIQ_CACHE.update(at=_time.time(), snap=snap)
+    return snap
+
+
+def _diamond_ml(sb, event_name, away_sp_name, home_sp_name):
+    """Model P(home) from the live snapshot; None = can't price (no
+    snapshot / team unmatched / cold team — no bet, never a guess). An
+    unmatched PITCHER prices as league-average (factor 1.0): the
+    probable is an input, not a requirement."""
+    snap = _diamond_snapshot(sb)
+    if not snap or " @ " not in (event_name or ""):
+        return None
+    away_n, home_n = [s.strip().lower()
+                      for s in event_name.split(" @ ", 1)]
+    mc = snap.get("mascot_code") or {}
+
+    def _code(nm):
+        for k in sorted(mc, key=len, reverse=True):
+            if k in nm:
+                return mc[k]
+        return None
+
+    teams = snap.get("teams") or {}
+    ta, th = teams.get(_code(away_n)), teams.get(_code(home_n))
+    ming = snap.get("min_team_games") or 15
+    if (not ta or not th or (ta.get("games") or 0) < ming
+            or (th.get("games") or 0) < ming):
+        return None
+    ps = snap.get("pitchers") or {}
+
+    def _fipf(nm):
+        p = ps.get((nm or "").strip().lower())
+        return p["fip_factor"] if p else 1.0
+
+    shr = snap.get("sp_share") or 0.6
+    prev_h = shr * _fipf(home_sp_name) + (1 - shr) * (th.get("bp_factor") or 1.0)
+    prev_a = shr * _fipf(away_sp_name) + (1 - shr) * (ta.get("bp_factor") or 1.0)
+    xr_h = (th.get("off") or 0) * prev_a
+    xr_a = (ta.get("off") or 0) * prev_h
+    hc = _code(home_n)
+    pf = ((snap.get("park_pf") or {}).get(hc, 100.0)) / 100.0
+    xh, xa = xr_h * pf, xr_a * pf
+    if xh <= 0 or xa <= 0:
+        return None
+    xh *= 1.0 + (snap.get("hfa_mult") or 0.08)
+    k = max(0.5, (xh + xa) ** (snap.get("pyth_exp") or 0.287))
+    return (xh ** k) / (xh ** k + xa ** k)
+
+
+def _peg_target(bid_c, ask_c, fair_c):
+    """(side_c, entry_edge) — the cheap-first whole-cent peg with every
+    gate applied (floor(bid)+1¢; one-cent book → join; virgin book →
+    fair−6 anchor; ≤54¢ cap; ≥2.5pp edge floor). (None, None) = pass."""
+    if bid_c is not None and bid_c > 0:
+        t = float(int(bid_c)) + 1.0
+        if ask_c is not None and t >= ask_c:
+            t = bid_c
+    else:
+        t = float(int(fair_c - 6.0))
+        if ask_c is not None and t >= ask_c:
+            t = float(int(ask_c - 1.0))
+    e = fair_c - t
+    if t <= 0 or t > _REPEG_NRFI_PRICE_CAP_C or e < 2.5:
+        return None, None
+    return t, e
+
+
+def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
+                     side_c, fair_pb, entry_edge, opener_edge,
+                     bid_c, ask_c, extra_blob=None):
+    """Shared auto-bet placement: slate cap → never-double-a-game →
+    Master Rule → post-only create (1 contract, GTD first pitch,
+    AUTOMATIC) → pick insert (the cap counter — inserted the moment
+    create returns so an ambiguous verify can't double-bet) → verify →
+    ping. Returns True when an order was placed."""
+    try:
+        prior = (sb.table("bot_picks").select("id")
+                 .filter("signal_blob->>autobet", "eq", "true")
+                 .gte("event_start", (datetime.now(timezone.utc)
+                                      - timedelta(hours=12)).isoformat())
+                 .limit(AUTOBET_MAX_BETS + 1).execute().data) or []
+    except Exception:
+        return False
+    if len(prior) >= AUTOBET_MAX_BETS:
+        return False
+    owner = _kalshi_owner_uid()
+    if not owner:
+        return False
+    try:
+        mine = (sb.table("bot_picks").select("id")
+                .eq("market_id", g["id"]).eq("market_type", mt)
+                .eq("asked_by", owner).limit(1).execute().data) or []
+    except Exception:
+        return False
+    if mine:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(es).replace("Z", "+00:00"))
+        gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return False
+    if _AUTOBET_CONTRACTS * side_c / 100.0 > _REPEG_MAX_COST_USD:
+        return False                       # ⚠ THE MASTER RULE
+    canon = (100.0 - side_c) / 100.0 if synthetic else side_c / 100.0
+    intent = ("ORDER_INTENT_BUY_SHORT" if synthetic
+              else "ORDER_INTENT_BUY_LONG")
+    params = {"marketSlug": slug, "intent": intent,
+              "type": "ORDER_TYPE_LIMIT",
+              "price": {"value": f"{canon:.3f}", "currency": "USD"},
+              "quantity": _AUTOBET_CONTRACTS,
+              "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
+              "participateDontInitiate": True,
+              "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
+    try:
+        pclient = get_client()
+        cr = pclient.orders.create(params)
+        new_oid = (cr.get("id") if isinstance(cr, dict)
+                   else getattr(cr, "id", None))
+    except Exception as e:
+        _send_fill_telegram(
+            f"🤖 AUTO-BET FAILED — {g.get('event_name')} {side_lbl}: "
+            f"create errored ({e})"[:280])
+        return False
+    entry_amer = _prob_to_amer_py(side_c / 100.0)
+    blob = {"autobet": True, "contracts": _AUTOBET_CONTRACTS,
+            "order_id": new_oid, "pmm_slug": slug,
+            "pmm_synthetic": synthetic, "source": "autobet",
+            "opener_edge_pp": opener_edge,
+            "entry_edge_pp": round(entry_edge, 1),
+            "book_bid_c": bid_c, "book_ask_c": ask_c}
+    if extra_blob:
+        blob.update(extra_blob)
+    try:
+        sb.table("bot_picks").insert({
+            "asked_by": owner, "query_text": "auto-bet: opener",
+            "market_id": g["id"], "sport": "MLB",
+            "event_name": g.get("event_name"), "event_start": es,
+            "market_type": mt, "side": side,
+            "entry_book": "POLYMARKET",
+            "entry_price": int(entry_amer) if entry_amer is not None else None,
+            "entry_line": None, "units": 1, "confidence": "low",
+            "fair_prob": round(float(fair_pb), 4),
+            "edge_pp": round(entry_edge, 1),
+            "reasons": [f"AUTO-BET at the opener — {side_lbl} pegged "
+                        f"{round(side_c)}¢ over the "
+                        f"{round(bid_c) if bid_c else '?'}¢ make, model "
+                        f"fair {round(float(fair_pb) * 100)}¢ → "
+                        f"{round(entry_edge, 1)}pp edge at entry"],
+            "signal_blob": blob,
+        }).execute()
+    except Exception:
+        pass
+    _time.sleep(1.2)
+    state = _repeg_verify_or_recreate(pclient, slug, intent, canon,
+                                      0, None, None)
+    ok = state in ("ok", "filled")
+    _send_fill_telegram(
+        f"🤖💰 AUTO-BET — {g.get('event_name')}: {side_lbl} "
+        f"{_AUTOBET_CONTRACTS} @ {round(side_c)}¢ (book "
+        f"{round(bid_c) if bid_c else '?'}/"
+        f"{round(ask_c) if ask_c else '?'}, fair "
+        f"{round(float(fair_pb) * 100)}¢, {round(entry_edge, 1)}pp, "
+        f"{'verified' if ok else 'VERIFY FAILED — CHECK APP'}). "
+        f"Bet {len(prior) + 1}/{AUTOBET_MAX_BETS} this slate.")
+    return True
+
 
 def _opener_pass(sb, now, deadline):
     """Returns (shadow_rows, stats). Runs on the paperlog tick's LEFTOVER
@@ -8015,14 +8205,17 @@ def _opener_pass(sb, now, deadline):
             return shadow_rows, stats
         mids = [g["id"] for g in games]
         try:
-            done_rows = (sb.table("pickbot_paperlog").select("market_id")
+            done_rows = (sb.table("pickbot_paperlog")
+                         .select("market_id,market_type")
                          .in_("market_id", mids)
                          .filter("signal_blob->>opener_shadow", "eq", "true")
                          .limit(1000).execute().data) or []
         except Exception:
             return shadow_rows, stats     # fail-closed: no dedup read → skip
-        done = {r["market_id"] for r in done_rows}
-        cands = [g for g in games if g["id"] not in done]
+        done = {(r["market_id"], r.get("market_type")) for r in done_rows}
+        cands = [g for g in games
+                 if (g["id"], "nrfi") not in done
+                 or (g["id"], "moneyline") not in done]
         if not cands:
             return shadow_rows, stats
         _random.shuffle(cands)
@@ -8036,6 +8229,78 @@ def _opener_pass(sb, now, deadline):
             except Exception:
                 continue
             stats["opener_eval"] += 1
+            # ---- MONEYLINE: Diamond IQ prices the opener (the model IS
+            # the engine — no steam involved). Runs BEFORE the NRFI
+            # section because that section `continue`s on its own guards.
+            if (g["id"], "moneyline") not in done:
+                mlp = ((((d or {}).get("odds") or {}).get("moneyline") or {})
+                       .get("polymarket") or {})
+                pp = (d or {}).get("probable_pitchers") or {}
+                p_home = _diamond_ml(sb, g.get("event_name"),
+                                     ((pp.get("away") or {}).get("name")),
+                                     ((pp.get("home") or {}).get("name")))
+                if p_home is not None and (mlp.get("home") or mlp.get("away")):
+                    fairs = {"home": p_home, "away": 1.0 - p_home}
+                    best = None
+                    for s in ("away", "home"):
+                        e0 = mlp.get(s) or {}
+                        q0 = e0.get("quote") or {}
+                        if q0.get("bid") is None:
+                            continue
+                        edge0 = fairs[s] * 100.0 - float(q0["bid"]) * 100.0
+                        if best is None or edge0 > best[1]:
+                            best = (s, edge0, e0, q0)
+                    if best is not None:
+                        s, edge0, e0, q0 = best
+                        bid0 = float(q0["bid"]) * 100.0
+                        ask0 = (float(q0["ask"]) * 100.0
+                                if q0.get("ask") is not None else None)
+                        es0 = g.get("event_start")
+                        try:
+                            sim0 = round((datetime.fromisoformat(
+                                str(es0).replace("Z", "+00:00")) - now
+                            ).total_seconds() / 60.0)
+                        except Exception:
+                            sim0 = None
+                        _ea = _prob_to_amer_py(bid0 / 100.0)
+                        _fa = _prob_to_amer_py(fairs[s])
+                        shadow_rows.append({
+                            "market_id": g["id"],
+                            "event_name": g.get("event_name"),
+                            "event_start": es0, "sport": "MLB",
+                            "market_type": "moneyline", "side": s,
+                            "line": None,
+                            "entry_price": (int(_ea) if _ea is not None
+                                            else None),
+                            "units": 1, "confidence": "low",
+                            "timing_window": "opener", "prime_core": False,
+                            "starts_in_min": sim0, "sharp_score": None,
+                            "edge_pp": round(edge0, 1),
+                            "fair_american": (int(_fa) if _fa is not None
+                                              else None),
+                            "gates_cleared": False,
+                            "signal_blob": {"opener_shadow": True,
+                                            "diamond_ml": True,
+                                            "p_home": round(p_home, 4),
+                                            "would_bet": edge0 >= 2.5,
+                                            "opener_unclamped": True},
+                            "logged_at": now.isoformat(),
+                        })
+                        if (AUTOBET_ENABLED and edge0 >= 2.5
+                                and e0.get("slug")):
+                            side_c0, entry_e0 = _peg_target(
+                                bid0, ask0, fairs[s] * 100.0)
+                            if side_c0 is not None and _autobet_execute(
+                                    sb, g, es0, "moneyline", s,
+                                    f"ML {s.upper()}", e0["slug"],
+                                    bool(e0.get("synthetic")), side_c0,
+                                    fairs[s], entry_e0, round(edge0, 1),
+                                    bid0, ask0,
+                                    {"diamond_ml": True,
+                                     "p_home": round(p_home, 4)}):
+                                stats["opener_bets"] += 1
+            if (g["id"], "nrfi") in done:
+                continue                  # NRFI already shadowed
             nrfi = (d or {}).get("nrfi") or {}
             if not nrfi or nrfi.get("p_nrfi") is None:
                 continue
