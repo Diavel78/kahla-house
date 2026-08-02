@@ -119,6 +119,13 @@ class DiamondState:
         self.lg_woba = _Decayed()
         self.lg_xwoba = _Decayed()
         self.bp_recent: dict[str, dict] = {}        # team → {date: reliever outs}
+        self.team_off: dict[str, _Decayed] = {}     # runs scored / game
+        self.team_bp: dict[str, _Decayed] = {}      # bullpen RA9 (per out)
+        self.sp: dict[int, dict[str, _Decayed]] = {}  # per-pitcher K/BB/HR/outs
+        self.team_games: dict[str, int] = {}
+        self.lg_rpg = _Decayed()                    # league runs / team-game
+        self.lg_fip_parts = {k: _Decayed() for k in ("k", "bb", "hr")}
+        self.lg_bp = _Decayed()                     # league bullpen runs/out
 
     def feed_xwoba(self, d: date, day_rows: list[dict]):
         """Feed one DAY of Savant xwOBA aggregates ({batter_id, pa,
@@ -134,13 +141,6 @@ class DiamondState:
             self.batters_x.setdefault(pid, _Decayed()).add(
                 d, v, pa, BATTER_HL_DAYS)
             self.lg_xwoba.add(d, v, pa, self.team_hl)
-        self.team_off: dict[str, _Decayed] = {}     # runs scored / game
-        self.team_bp: dict[str, _Decayed] = {}      # bullpen RA9 (per out)
-        self.sp: dict[int, dict[str, _Decayed]] = {}  # per-pitcher K/BB/HR/outs
-        self.team_games: dict[str, int] = {}
-        self.lg_rpg = _Decayed()                    # league runs / team-game
-        self.lg_fip_parts = {k: _Decayed() for k in ("k", "bb", "hr")}
-        self.lg_bp = _Decayed()                     # league bullpen runs/out
 
     # ---- reads ------------------------------------------------------------
     def _shrunk(self, acc: _Decayed | None, d: date, hl: float,
