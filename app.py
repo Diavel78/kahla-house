@@ -9091,6 +9091,34 @@ _REPEG_MAX_MOVES = 2         # lifetime cancel-replace cap per bet
 _REPEG_MAX_COST_USD = 6.00   # ⚠ THE MASTER RULE — never raise casually
 
 
+def _nrfi_fair_from_paperlog(sb, market_id, side):
+    """Model fair for an NRFI pick with no logged fair_prob — the AUTOLOG
+    case (first live night, Aug 2: app-placed bets become picks via
+    _pmm_autolog, which doesn't run the model, so the repeg gate stopped
+    with 'no model fair on pick'). Source: the latest pickbot_paperlog NRFI
+    row for the same game stamps signal_blob.p_nrfi (the model's live
+    P(NRFI) at that tick, refreshed all through the 5h pre-game window).
+    Oriented to the pick's side (no → p_nrfi, yes → 1−p_nrfi). None when
+    the paperlog never modeled the game — the gate then still stops rather
+    than chase blind."""
+    if not market_id:
+        return None
+    try:
+        rows = (sb.table("pickbot_paperlog")
+                .select("signal_blob")
+                .eq("market_id", market_id).eq("market_type", "nrfi")
+                .order("logged_at", desc=True).limit(5).execute().data) or []
+        for row in rows:
+            blob = (row.get("signal_blob")
+                    if isinstance(row.get("signal_blob"), dict) else {})
+            p = _safe_float(blob.get("p_nrfi"))
+            if p is not None and 0.0 < p < 1.0:
+                return p if (side or "").lower() == "no" else 1.0 - p
+    except Exception:
+        pass
+    return None
+
+
 def _repeg_edge_ok(fair_prob, new_c: float):
     """(ok, edge_pp) — does the pick still clear the NRFI edge gate at the
     new price? fair_prob is the pick's logged model fair (bot_picks.fair_prob,
@@ -9194,7 +9222,11 @@ def _repeg_tick(sb, now) -> dict:
                                  f"{round(new_c)}¢")):
                         res["stopped"] += 1
                     continue
-                ok, edge = _repeg_edge_ok(r.get("fair_prob"), new_c)
+                fair = r.get("fair_prob")
+                if fair is None:
+                    fair = _nrfi_fair_from_paperlog(sb, f.get("market_id"),
+                                                    r.get("side"))
+                ok, edge = _repeg_edge_ok(fair, new_c)
                 if not ok:
                     why = ("edge gone" if ok is False else "no model fair on pick")
                     if _mark("repeg_stop", {"reason": why, "edge_pp": edge},
