@@ -1,7 +1,17 @@
 # Re-Peg Bot — Out-of-Touch Maker Order Manager (NRFI/YRFI)
 
-> Status: **KILLED Aug 2 2026 after the first live session** (`REPEG_ENABLED
-> =False`). The user waived the probe/shadow phases ("go live"); the first
+> Status: **LIVE (2nd flip) Aug 2 2026** — probe run 2 proved the amend:
+> full-params modify (quantity included) amends IN PLACE; the order stays
+> on the open book at the new price with state `ORDER_STATE_REPLACED`
+> (added to `_OPEN_ORDER_STATES` — a missing state there would have made
+> verify re-place successful amends). Modify is ASYNC (2.5s wait before
+> verify), `orders.retrieve` is broken (404s live orders — banned; list is
+> the only truth), raced fills are detected via the position and never
+> re-placed, max 2 amends/tick for the Vercel budget. The kill note below
+> records the first live session's failure for the record:
+>
+> ~~KILLED Aug 2 2026 after the first live session~~ (`REPEG_ENABLED
+> =False` for ~2 hours). The user waived the probe/shadow phases ("go live"); the first
 > two live amends (Phillies/Pirates YRFI, 9:19 AM) **canceled the resting
 > orders without landing a replacement** — `orders.modify` returned
 > success, Telegram pinged RE-PEGGED, but `orders.list` and the app showed
