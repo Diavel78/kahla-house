@@ -1,10 +1,30 @@
 # Re-Peg Bot — Out-of-Touch Maker Order Manager (NRFI/YRFI)
 
-> Status: **LIVE Aug 2 2026** (`REPEG_ENABLED=True` in `app.py` — the user
-> waived the probe + shadow phases same-day: "Go live, games are 2-3 hours
-> out". The Master Rule + amend-fail-safe + post-only bound the worst case;
-> the probe endpoint remains available for post-hoc verification. Flip the
-> constant back to `False` to kill.) Engine = `_repeg_tick`
+> Status: **KILLED Aug 2 2026 after the first live session** (`REPEG_ENABLED
+> =False`). The user waived the probe/shadow phases ("go live"); the first
+> two live amends (Phillies/Pirates YRFI, 9:19 AM) **canceled the resting
+> orders without landing a replacement** — `orders.modify` returned
+> success, Telegram pinged RE-PEGGED, but `orders.list` and the app showed
+> nothing and the autolog removed both picks as sold. No money lost (no
+> fills); the user re-placed by hand. **Root cause (suspected): Polymarket's
+> modify is FIX-style cancel/replace, and a replace leg missing
+> quantity/type dies AFTER the cancel leg executes.** This is precisely
+> what Phase 0 existed to catch — the waived probe ran itself on real
+> orders.
+>
+> **Hardened same day (dark, awaiting re-enable):** modify now sends the
+> FULL replace (quantity included), and after EVERY amend — success or
+> error — `_repeg_verify_or_recreate` treats `orders.list` as the only
+> truth: order survives → verified ping; venue killed it → re-create at
+> the amend price (full create params, master-rule qty) → "re-placed
+> fresh" ping; both gone → **🚨 ORDER LOST — RE-BID BY HAND NOW** ping;
+> verify read failed → never recreate blind (dup risk), ⚠ CHECK THE APP
+> ping.
+>
+> **RE-ENABLE GATE (non-negotiable now): run `GET
+> /api/polymarket/probe-exec?slug=...&place=1` and confirm the modify step
+> leaves an open order on the book (retrieve_after_modify shows an open
+> state with the new price). Only then flip `REPEG_ENABLED=True`.** Engine = `_repeg_tick`
 > riding the paperlog tick (every 2nd minute, blackout-gated, before the
 > outbid ping so a live amend will clear the outbid). Phase-0 probe =
 > `GET /api/polymarket/probe-exec` (admin; DRY/preview by default,

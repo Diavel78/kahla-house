@@ -9101,6 +9101,46 @@ _REPEG_MAX_MOVES = 2         # lifetime cancel-replace cap per bet
 _REPEG_MAX_COST_USD = 6.00   # ⚠ THE MASTER RULE — never raise casually
 
 
+def _repeg_verify_or_recreate(client, slug, intent, canon, qty, orig_tif,
+                              gtt):
+    """Post-amend ground truth — added after the first live session (Aug 2):
+    orders.modify returned SUCCESS while its cancel leg executed and its
+    replace leg silently died, so both live orders vanished. TRUST NOTHING
+    after an amend: orders.list on the slug is the only truth. Returns
+    'ok' (an open order survives), 'recreated' (we placed a fresh order at
+    the amend price after the venue killed the original), 'lost' (both
+    gone — caller screams), 'unknown' (verify read failed — never recreate
+    blind, a dup order would double the bet)."""
+    try:
+        resp = client.orders.list({"slugs": [slug]})
+        raw = (resp.get("orders") if isinstance(resp, dict)
+               else getattr(resp, "orders", [])) or []
+        for o in raw:
+            def _g(k, d=None):
+                return o.get(k, d) if isinstance(o, dict) else getattr(o, k, d)
+            if ((_g("state") or "") in _OPEN_ORDER_STATES
+                    and (_g("intent") or "") == intent):
+                return "ok"
+    except Exception:
+        return "unknown"
+    if not (qty and canon):
+        return "lost"
+    try:
+        params = {"marketSlug": slug, "intent": intent,
+                  "type": "ORDER_TYPE_LIMIT",
+                  "price": {"value": f"{canon:.3f}", "currency": "USD"},
+                  "quantity": int(qty),
+                  "participateDontInitiate": True,
+                  "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
+        if orig_tif == "TIME_IN_FORCE_GOOD_TILL_DATE" and gtt:
+            params["tif"] = "TIME_IN_FORCE_GOOD_TILL_DATE"
+            params["goodTillTime"] = gtt
+        client.orders.create(params)
+        return "recreated"
+    except Exception:
+        return "lost"
+
+
 def _nrfi_fair_from_paperlog(sb, market_id, side):
     """Model fair for an NRFI pick with no logged fair_prob — the AUTOLOG
     case (first live night, Aug 2: app-placed bets become picks via
@@ -9288,22 +9328,33 @@ def _repeg_tick(sb, now) -> dict:
                 oid, slug = f.get("order_id"), f.get("slug")
                 if not oid or not slug:
                     continue
+                intent = ("ORDER_INTENT_BUY_SHORT" if f.get("synthetic")
+                          else "ORDER_INTENT_BUY_LONG")
                 canon = ((100.0 - new_c) / 100.0 if f.get("synthetic")
                          else new_c / 100.0)
+                leaves = f.get("order_leaves") or 0
+                qty = max(1, int(leaves)) if leaves >= 1 else 0
+                # FULL replace params — the first live session proved a
+                # partial modify (slug+price only) cancels without
+                # replacing: the API treats modify as cancel/replace and a
+                # replace leg missing quantity dies AFTER the cancel leg.
                 params = {"marketSlug": slug,
                           "price": {"value": f"{canon:.3f}", "currency": "USD"},
                           "participateDontInitiate": True}
+                if qty:
+                    params["quantity"] = qty
                 if (f.get("order_tif") == "TIME_IN_FORCE_GOOD_TILL_DATE"
                         and f.get("order_good_till")):
                     params["tif"] = "TIME_IN_FORCE_GOOD_TILL_DATE"
                     params["goodTillTime"] = f["order_good_till"]
+                amend_exc = None
                 try:
                     if client is None:
                         client = get_client()
                     client.orders.modify(oid, params)
                 except Exception as e:
                     # Race rule: amend raced a fill → treat as fill, never
-                    # re-place. Anything else: report once per level.
+                    # re-place.
                     filled = False
                     try:
                         od = client.orders.retrieve(oid).get("order") or {}
@@ -9314,16 +9365,41 @@ def _repeg_tick(sb, now) -> dict:
                         pass
                     if filled:
                         continue                       # fill wins — done
-                    _mark("repeg_stop", {"reason": f"amend failed: {e}"[:200]},
+                    amend_exc = e
+                # TRUST NOTHING after an amend (success OR error — the live
+                # failure returned success): verify the order survives on
+                # the book; recreate it at the amend price if the venue
+                # killed it; scream if both are gone.
+                state = _repeg_verify_or_recreate(
+                    client, slug, intent, canon, qty,
+                    f.get("order_tif"), f.get("order_good_till"))
+                if state == "ok" and amend_exc is not None:
+                    # order intact but at the OLD price — amend rejected
+                    _mark("repeg_stop",
+                          {"reason": f"amend failed: {amend_exc}"[:200]},
                           tg=(f"🤖 REPEG FAILED — {ev} NRFI {side}: amend to "
                               f"{round(new_c)}¢ errored; order untouched at "
                               f"{round(old_c) if old_c else '?'}¢"))
                     res["stopped"] += 1
                     continue
+                if state == "lost":
+                    _mark("repeg_stop", {"reason": "ORDER LOST on amend"},
+                          tg=(f"🚨 ORDER LOST — {ev} NRFI {side}: the amend "
+                              f"canceled your order and the re-place failed. "
+                              f"RE-BID {round(new_c)}¢ BY HAND NOW."))
+                    res["stopped"] += 1
+                    continue
+                if state == "unknown":
+                    _mark("repeg_stop", {"reason": "amend unverified"},
+                          tg=(f"⚠🤖 REPEG UNVERIFIED — {ev} NRFI {side}: "
+                              f"amend to {round(new_c)}¢ sent but the verify "
+                              f"read failed. CHECK THE APP."))
+                    res["stopped"] += 1
+                    continue
                 nb = dict(blob)
                 nb["repeg"] = moves + [{"from_c": old_c, "to_c": new_c,
                                         "at": now.isoformat(), "order_id": oid,
-                                        "edge_pp": edge}]
+                                        "edge_pp": edge, "verify": state}]
                 upd = {"signal_blob": nb}
                 new_amer = _prob_to_amer_py(new_c / 100.0)
                 if new_amer is not None:
@@ -9337,11 +9413,14 @@ def _repeg_tick(sb, now) -> dict:
                 # its own "outbid → bot re-pegged" ping so they can check
                 # it. This is also the ONLY notification for the event —
                 # the amend clears the outbid before _outbid_alerts reads.
+                note = (" — venue canceled the original, re-placed fresh"
+                        if state == "recreated" else "")
                 _send_fill_telegram(
                     f"🔴🤖 OUTBID → BOT RE-PEGGED — {ev} NRFI {side}: "
                     f"your bid moved {round(old_c) if old_c else '?'}¢ → "
                     f"{round(new_c)}¢ (move {move_n}/{_REPEG_MAX_MOVES}, "
-                    f"{contracts:g} contracts, ${cost:.2f}). Check it.")
+                    f"{contracts:g} contracts, ${cost:.2f}, verified{note}). "
+                    f"Check it.")
                 res["acted"] += 1
     except Exception:
         pass
