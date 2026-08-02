@@ -8042,10 +8042,31 @@ def _diamond_ml(sb, event_name, away_sp_name, home_sp_name):
         return p["fip_factor"] if p else 1.0
 
     shr = snap.get("sp_share") or 0.6
-    prev_h = shr * _fipf(home_sp_name) + (1 - shr) * (th.get("bp_factor") or 1.0)
-    prev_a = shr * _fipf(away_sp_name) + (1 - shr) * (ta.get("bp_factor") or 1.0)
-    xr_h = (th.get("off") or 0) * prev_a
-    xr_a = (ta.get("off") or 0) * prev_h
+
+    def _bpf(team_blk):
+        """Pen factor with the ITER3 fatigue read (last-2-days reliever
+        outs, stamped at compute time)."""
+        bpf = team_blk.get("bp_factor") or 1.0
+        o2 = team_blk.get("bp_outs2")
+        coef = snap.get("bp_fatigue_coef")
+        if o2 is not None and coef:
+            f = 1.0 + coef * (o2 - (snap.get("bp_fatigue_norm") or 12.0)) / 18.0
+            bpf *= max(0.92, min(1.12, f))
+        return bpf
+
+    prev_h = shr * _fipf(home_sp_name) + (1 - shr) * _bpf(th)
+    prev_a = shr * _fipf(away_sp_name) + (1 - shr) * _bpf(ta)
+    lg_rpg = ((snap.get("lg") or {}).get("rpg"))
+    # ITER2 live: lineup-wOBA offense factor (last-lineup proxy) when the
+    # snapshot has it; else the team-runs read.
+    if th.get("off_bf") and lg_rpg:
+        xr_h = lg_rpg * th["off_bf"] * prev_a
+    else:
+        xr_h = (th.get("off") or 0) * prev_a
+    if ta.get("off_bf") and lg_rpg:
+        xr_a = lg_rpg * ta["off_bf"] * prev_h
+    else:
+        xr_a = (ta.get("off") or 0) * prev_h
     hc = _code(home_n)
     pf = ((snap.get("park_pf") or {}).get(hc, 100.0)) / 100.0
     xh, xa = xr_h * pf, xr_a * pf
