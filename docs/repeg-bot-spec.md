@@ -1,8 +1,10 @@
 # Re-Peg Bot — Out-of-Touch Maker Order Manager (NRFI/YRFI)
 
-> Status: **BUILT Aug 2 2026 — live in SHADOW MODE** (`REPEG_ENABLED=False`
-> in `app.py`; the engine computes, Telegram-pings, and `signal_blob`-logs
-> every action it WOULD take, touching no orders). Engine = `_repeg_tick`
+> Status: **LIVE Aug 2 2026** (`REPEG_ENABLED=True` in `app.py` — the user
+> waived the probe + shadow phases same-day: "Go live, games are 2-3 hours
+> out". The Master Rule + amend-fail-safe + post-only bound the worst case;
+> the probe endpoint remains available for post-hoc verification. Flip the
+> constant back to `False` to kill.) Engine = `_repeg_tick`
 > riding the paperlog tick (every 2nd minute, blackout-gated, before the
 > outbid ping so a live amend will clear the outbid). Phase-0 probe =
 > `GET /api/polymarket/probe-exec` (admin; DRY/preview by default,

@@ -9083,7 +9083,9 @@ def _outbid_alerts(sb, now) -> int:
 # filling us. Shadow mode (REPEG_ENABLED=False) computes + logs + pings what
 # it WOULD do without touching orders — the earn-in before going live.
 
-REPEG_ENABLED = False        # kill switch — flip to go live (spec Phase 2)
+REPEG_ENABLED = True         # kill switch — LIVE Aug 2 2026 (user: "go live";
+                             # probe/shadow phases waived by user — the $6
+                             # Master Rule + amend-fail-safe bound the risk)
 _REPEG_MARKET_TYPES = {"nrfi"}
 _REPEG_MAX_MOVES = 2         # lifetime cancel-replace cap per bet
 _REPEG_MAX_COST_USD = 6.00   # ⚠ THE MASTER RULE — never raise casually
