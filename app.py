@@ -8770,6 +8770,14 @@ _OPEN_ORDER_STATES = {
     "ORDER_STATE_PENDING_NEW",
     "ORDER_STATE_PENDING_REPLACE",
     "ORDER_STATE_PARTIALLY_FILLED",
+    # REPLACED = a successfully AMENDED order, still live on the open-orders
+    # endpoint at its new price (probe run 2, Aug 2 2026: full-params modify
+    # amends in place and restamps state REPLACED with leaves intact).
+    # Without this, the re-peg verify + fill tracker read an amended order
+    # as dead — verify would RE-PLACE it (doubled bet) and the autolog
+    # would delete the pick. Dead predecessors don't appear on the open
+    # endpoint, and every consumer keys on leavesQuantity anyway.
+    "ORDER_STATE_REPLACED",
 }
 
 # Map SDK intent → human-readable side label for the betslip
@@ -9154,19 +9162,18 @@ def _outbid_alerts(sb, now) -> int:
 # filling us. Shadow mode (REPEG_ENABLED=False) computes + logs + pings what
 # it WOULD do without touching orders — the earn-in before going live.
 
-REPEG_ENABLED = False        # ⚠ KILLED Aug 2 2026, first live session: the
-                             # two live amends (Phillies/Pirates YRFI, 9:19)
-                             # CANCELED the resting orders without landing a
-                             # replacement — orders.modify returned success
-                             # but orders.list showed nothing, the app showed
-                             # nothing, and the autolog removed both picks as
-                             # sold. Suspected cause: ModifyOrderParams sent
-                             # without quantity/intent/type — a FIX-style
-                             # cancel/replace needs the FULL new order, and a
-                             # partial replace leg gets rejected AFTER the
-                             # cancel leg. Do NOT re-enable until the probe's
-                             # &place=1 cycle proves a modify that keeps the
-                             # order alive. No money was lost (no fills).
+REPEG_ENABLED = True         # LIVE (2nd time) Aug 2 2026 — probe run 2
+                             # PROVED the amend: full-params modify (with
+                             # quantity) amends IN PLACE, order stays on the
+                             # open book at the new price, state REPLACED
+                             # (now in _OPEN_ORDER_STATES). The morning kill
+                             # (partial modify → order destroyed, success
+                             # returned) is documented in the spec header.
+                             # Engine posture: modify is ASYNC → 2.5s wait →
+                             # verify via orders.list (retrieve is broken,
+                             # 404s live orders) → recreate on venue-kill →
+                             # position check so a raced fill is never
+                             # re-placed → 🚨 ORDER LOST ping as last resort.
 _REPEG_MARKET_TYPES = {"nrfi"}
 _REPEG_MAX_MOVES = 2         # lifetime cancel-replace cap per bet
 _REPEG_MAX_COST_USD = 6.00   # ⚠ THE MASTER RULE — never raise casually
