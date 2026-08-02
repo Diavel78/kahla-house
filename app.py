@@ -9931,7 +9931,7 @@ def _repeg_tick(sb, now) -> dict:
                 continue
             cands = [f for f in (fs.get("fills") or [])
                      if f.get("outbid") and f.get("venue") == "POLYMARKET"
-                     and (f.get("market_type") or "") in _REPEG_MARKET_TYPES
+                     and (f.get("market_type") or "") in ("nrfi", "moneyline")
                      and (f.get("mins_to_start") or 0) > 0
                      and f.get("best_bid_c") is not None]
             if not cands:
@@ -9957,6 +9957,12 @@ def _repeg_tick(sb, now) -> dict:
                 new_c = f.get("best_bid_c")
                 ev = r.get("event_name") or ""
                 side = (r.get("side") or "").upper()
+                mlbl = ("ML" if (f.get("market_type") == "moneyline")
+                        else "NRFI")
+                if (f.get("market_type") == "moneyline"
+                        and not bool(blob.get("autobet"))):
+                    continue    # manual ML bets stay the user's to move —
+                                # only the model's own bets chase (user dial)
 
                 def _mark(key, payload, tg=None):
                     """Stamp a once-per-bid-level marker (+ optional TG)."""
@@ -9980,7 +9986,7 @@ def _repeg_tick(sb, now) -> dict:
                     # price-cap guardrail — overrides even move 1's
                     # unconditional chase: the bot never places above 54¢
                     if _mark("repeg_stop", {"reason": "price cap"},
-                             tg=(f"🤖 REPEG STOP — {ev} NRFI {side}: book is "
+                             tg=(f"🤖 REPEG STOP — {ev} {mlbl} {side}: book is "
                                  f"{round(new_c)}¢ — past your "
                                  f"{round(_REPEG_NRFI_PRICE_CAP_C)}¢ price "
                                  f"cap, not chasing; resting at "
@@ -10001,7 +10007,7 @@ def _repeg_tick(sb, now) -> dict:
                 is_autobet = bool(blob.get("autobet"))
                 if not is_autobet and len(moves) >= _REPEG_MAX_MOVES:
                     if _mark("repeg_stop", {"reason": "move_cap"},
-                             tg=(f"🤖 REPEG STOP — {ev} NRFI {side}: move cap "
+                             tg=(f"🤖 REPEG STOP — {ev} {mlbl} {side}: move cap "
                                  f"({_REPEG_MAX_MOVES}) reached; resting at "
                                  f"{round(old_c) if old_c else '?'}¢, book "
                                  f"{round(new_c)}¢")):
@@ -10019,7 +10025,7 @@ def _repeg_tick(sb, now) -> dict:
                         why = (("model limit" if is_autobet else "edge gone")
                                if ok is False else "no model fair on pick")
                         if _mark("repeg_stop", {"reason": why, "edge_pp": edge},
-                                 tg=(f"🤖 REPEG STOP — {ev} NRFI {side}: "
+                                 tg=(f"🤖 REPEG STOP — {ev} {mlbl} {side}: "
                                      f"{why} at {round(new_c)}¢"
                                      + (f" (edge {edge}pp)" if edge is not None
                                         else "")
@@ -10036,7 +10042,7 @@ def _repeg_tick(sb, now) -> dict:
                 if not contracts or cost > _REPEG_MAX_COST_USD:
                     if _mark("repeg_stop",
                              {"reason": "master_rule", "cost": round(cost, 2)},
-                             tg=(f"🤖 REPEG STOP — {ev} NRFI {side}: ${cost:.2f} "
+                             tg=(f"🤖 REPEG STOP — {ev} {mlbl} {side}: ${cost:.2f} "
                                  f"at {round(new_c)}¢ breaks the $"
                                  f"{_REPEG_MAX_COST_USD:.0f} MASTER RULE")):
                         res["stopped"] += 1
@@ -10048,7 +10054,7 @@ def _repeg_tick(sb, now) -> dict:
                     if _mark("repeg_shadow",
                              {"from_c": old_c, "to_c": new_c, "move": move_n,
                               "edge_pp": edge},
-                             tg=(f"🕶 REPEG SHADOW — {ev} NRFI {side}: would "
+                             tg=(f"🕶 REPEG SHADOW — {ev} {mlbl} {side}: would "
                                  f"move {round(old_c) if old_c else '?'}¢ → "
                                  f"{round(new_c)}¢ ({_elbl}, move "
                                  f"{move_n}/{_REPEG_MAX_MOVES})")):
@@ -10092,7 +10098,7 @@ def _repeg_tick(sb, now) -> dict:
                 positions = _pmm_positions_raw(client)
                 if positions is None:
                     _mark("repeg_stop", {"reason": "cancel state unknown"},
-                          tg=(f"⚠🤖 REPEG UNVERIFIED — {ev} NRFI {side}: "
+                          tg=(f"⚠🤖 REPEG UNVERIFIED — {ev} {mlbl} {side}: "
                               f"canceled your {round(old_c) if old_c else '?'}"
                               f"¢ order but the venue reads failed before the "
                               f"re-place. CHECK THE APP — re-bid "
@@ -10129,14 +10135,14 @@ def _repeg_tick(sb, now) -> dict:
                     continue                           # fill wins — done
                 if state == "lost":
                     _mark("repeg_stop", {"reason": "ORDER LOST on re-peg"},
-                          tg=(f"🚨 ORDER LOST — {ev} NRFI {side}: canceled "
+                          tg=(f"🚨 ORDER LOST — {ev} {mlbl} {side}: canceled "
                               f"your order and the re-place failed. RE-BID "
                               f"{round(new_c)}¢ BY HAND NOW."))
                     res["stopped"] += 1
                     continue
                 if state == "unknown":
                     _mark("repeg_stop", {"reason": "re-peg unverified"},
-                          tg=(f"⚠🤖 REPEG UNVERIFIED — {ev} NRFI {side}: "
+                          tg=(f"⚠🤖 REPEG UNVERIFIED — {ev} {mlbl} {side}: "
                               f"re-peg to {round(new_c)}¢ sent but the verify "
                               f"read failed. CHECK THE APP."))
                     res["stopped"] += 1
@@ -10164,7 +10170,7 @@ def _repeg_tick(sb, now) -> dict:
                 mv_lbl = (f"move {move_n}" if is_autobet
                           else f"move {move_n}/{_REPEG_MAX_MOVES}")
                 _send_fill_telegram(
-                    f"🔴🤖 OUTBID → BOT RE-PEGGED — {ev} NRFI {side}: "
+                    f"🔴🤖 OUTBID → BOT RE-PEGGED — {ev} {mlbl} {side}: "
                     f"your bid moved {round(old_c) if old_c else '?'}¢ → "
                     f"{round(new_c)}¢ ({mv_lbl}, "
                     f"{contracts:g} contracts, ${cost:.2f}, verified{note}). "
