@@ -85,16 +85,36 @@ def group_games(rows: list[dict]) -> list[dict]:
 
 def _team_update_rows(g: dict) -> dict[str, dict]:
     h, a = g["home"], g["away"]
+    hs = g["teams"][h]["starter"]
+    as_ = g["teams"][a]["starter"]
     return {
         h: {"runs_for": g["teams"][a]["runs_allowed"],
-            "pitchers": g["teams"][h]["pitchers"]},
+            "pitchers": g["teams"][h]["pitchers"],
+            "opp": a, "opp_sp": as_, "venue_team": h},
         a: {"runs_for": g["teams"][h]["runs_allowed"],
-            "pitchers": g["teams"][a]["pitchers"]},
+            "pitchers": g["teams"][a]["pitchers"],
+            "opp": h, "opp_sp": hs, "venue_team": h},
     }
 
 
-def run(games: list[dict], team_only: bool, known_starter: bool = True) -> dict:
-    state = di.DiamondState()
+def _fit_pyth_hfa(train: list[tuple]) -> float:
+    """Grid-fit the multiplicative home bump on the TRAIN window only
+    (Brier-minimizing) — the pythag path's analog of ci.fit_params."""
+    best, best_b = 0.0, None
+    for i in range(0, 25):
+        hm = i * 0.005
+        b = sum((di.pyth_prob(xh * (1 + hm), xa) - y) ** 2
+                for xh, xa, y in train) / max(1, len(train))
+        if best_b is None or b < best_b:
+            best, best_b = hm, b
+    return best
+
+
+def run(games: list[dict], team_only: bool, known_starter: bool = True,
+        opp_adj: bool = False, park_adj: bool = False,
+        hr_shrink: float = 1.0, pyth: bool = False) -> dict:
+    state = di.DiamondState(opp_adj=opp_adj, park_adj=park_adj,
+                            hr_shrink=hr_shrink)
     train, evald = [], []
     for g in games:
         hs = g["teams"][g["home"]]["starter"] if known_starter else None
@@ -102,16 +122,26 @@ def run(games: list[dict], team_only: bool, known_starter: bool = True) -> dict:
         proj = state.project(g["home"], g["away"], g["date"], hs, as_,
                              hfa=0.0, team_only=team_only)
         if proj is not None:
-            rec = (proj["margin"], g["home_won"])
+            rec = (proj["margin"], proj["xr_home_env"],
+                   proj["xr_away_env"], g["home_won"])
             (evald if g["date"] >= EVAL_START else train).append(rec)
         state.update(g["date"], _team_update_rows(g))
 
-    hfa, scale = ci.fit_params(train) if train else (di.DEFAULT_HFA,
-                                                     di.DEFAULT_SCALE)
     n = len(evald)
     if n == 0:
         return {"n": 0}
-    probs = [(ci.margin_to_prob(m + hfa, scale), y) for m, y in evald]
+    if pyth:
+        p_train = [(xh, xa, y) for _m, xh, xa, y in train]
+        hfa = _fit_pyth_hfa(p_train) if p_train else 0.03
+        scale = float("nan")
+        probs = [(di.pyth_prob(xh * (1 + hfa), xa), y)
+                 for _m, xh, xa, y in evald]
+    else:
+        m_train = [(m, y) for m, _xh, _xa, y in train]
+        hfa, scale = ci.fit_params(m_train) if m_train else (di.DEFAULT_HFA,
+                                                             di.DEFAULT_SCALE)
+        probs = [(ci.margin_to_prob(m + hfa, scale), y)
+                 for m, _xh, _xa, y in evald]
     acc = sum(1 for p, y in probs if (p >= 0.5) == (y == 1)) / n
     brier = sum((p - y) ** 2 for p, y in probs) / n
     base = sum(y for _, y in probs) / n
@@ -142,18 +172,26 @@ def main() -> int:
              sum(1 for g in games if g["date"] >= EVAL_START))
 
     variants = [
-        ("FULL (offense + starter FIP + bullpen)", False, True),
-        ("NO-STARTER (league-avg SP — probable unknown)", False, False),
-        ("TEAM-ONLY (the dead core control)", True, True),
+        ("V1 FULL (baseline)", {}),
+        ("V1 TEAM-ONLY (dead-core control)", {"team_only": True}),
+        ("+PYTH (pythagenpat win map)", {"pyth": True}),
+        ("+OPP/PARK (adjusted offense)",
+         {"opp_adj": True, "park_adj": True}),
+        ("+HR-SHRINK 2.5 (xFIP-lite)", {"hr_shrink": 2.5}),
+        ("ITER1 FULL (pyth + opp/park + hr-shrink)",
+         {"pyth": True, "opp_adj": True, "park_adj": True,
+          "hr_shrink": 2.5}),
     ]
-    for name, team_only, known in variants:
-        r = run(games, team_only, known)
+    for name, kw in variants:
+        team_only = bool(kw.get("team_only"))
+        extra = {k: v for k, v in kw.items() if k != "team_only"}
+        r = run(games, team_only, True, **extra)
         print(f"\n=== {name} ===")
         if r["n"] == 0:
             print("  no eval games")
             continue
         print(f"  eval n={r['n']} (train n={r['n_train']}) · "
-              f"fit hfa={r['hfa']:.2f} scale={r['scale']:.2f}")
+              f"fit hfa={r['hfa']:.3f} scale={r['scale']:.2f}")
         print(f"  accuracy {r['acc']:.1%} vs home-base {r['home_base']:.1%}")
         print(f"  Brier {r['brier']:.4f} vs base-rate {r['base_brier']:.4f}"
               f"  (dead team core: 52.5%)")
