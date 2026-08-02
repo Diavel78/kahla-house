@@ -9963,6 +9963,15 @@ def _repeg_tick(sb, now) -> dict:
                         and not bool(blob.get("autobet"))):
                     continue    # manual ML bets stay the user's to move —
                                 # only the model's own bets chase (user dial)
+                if bool(blob.get("autobet")) and new_c is not None:
+                    # peg law for the model's own bets: chase to one CENT
+                    # OVER the new make (front of the queue), never at it —
+                    # unless that would cross the ask (then join). Gates
+                    # below all evaluate at this price.
+                    _t = float(int(new_c)) + 1.0
+                    _a = f.get("best_ask_c")
+                    if _a is None or _t < _a:
+                        new_c = _t
 
                 def _mark(key, payload, tg=None):
                     """Stamp a once-per-bid-level marker (+ optional TG)."""
