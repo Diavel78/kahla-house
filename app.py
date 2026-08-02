@@ -5691,12 +5691,40 @@ def api_polymarket_probe_exec():
            "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtd,
            "participateDontInitiate": True}
     out["modify_params"] = mod
+    mod["quantity"] = qty            # FULL replace — partial killed orders
     _step("modify", lambda: client.orders.modify(oid["v"], mod))
-    _step("retrieve_after_modify", lambda: client.orders.retrieve(oid["v"]))
     _step("list_after_modify", lambda: client.orders.list({"slugs": [slug]}))
+    # Modify is ASYNC (probe run 1: sync OK but the listed order still
+    # showed the old price; the morning's orders died seconds AFTER a
+    # success response). Wait, then read again — the delayed list is the
+    # verdict: same id at the NEW price = amend works; order gone or
+    # re-idd = cancel/replace semantics; old price = no-op.
+    _time.sleep(2.5)
+    _step("list_after_modify_delayed",
+          lambda: client.orders.list({"slugs": [slug]}))
     _step("cancel", lambda: client.orders.cancel(oid["v"],
                                                  {"marketSlug": slug}))
-    _step("retrieve_after_cancel", lambda: client.orders.retrieve(oid["v"]))
+    _time.sleep(1.0)
+    # Cleanup sweep: cancel any surviving AUTOMATIC-flagged order on this
+    # slug (a re-idd replacement orphaned by the id-scoped cancel). REAL
+    # orders are safe — the user's app orders carry MANUAL (proven run 1).
+    def _sweep():
+        resp = client.orders.list({"slugs": [slug]})
+        raw = (resp.get("orders") if isinstance(resp, dict)
+               else getattr(resp, "orders", [])) or []
+        killed = []
+        for o in raw:
+            def _g(k, d=None):
+                return o.get(k, d) if isinstance(o, dict) else getattr(o, k, d)
+            if (_g("manualOrderIndicator") == "MANUAL_ORDER_INDICATOR_AUTOMATIC"
+                    and (_g("state") or "") in _OPEN_ORDER_STATES):
+                try:
+                    client.orders.cancel(_g("id"), {"marketSlug": slug})
+                    killed.append(_g("id"))
+                except Exception:
+                    pass
+        return {"killed": killed, "open_seen": len(raw)}
+    _step("cleanup_sweep", _sweep)
     _probe_log(out)
     return jsonify(out)
 
@@ -9150,10 +9178,15 @@ def _repeg_verify_or_recreate(client, slug, intent, canon, qty, orig_tif,
     orders.modify returned SUCCESS while its cancel leg executed and its
     replace leg silently died, so both live orders vanished. TRUST NOTHING
     after an amend: orders.list on the slug is the only truth. Returns
-    'ok' (an open order survives), 'recreated' (we placed a fresh order at
-    the amend price after the venue killed the original), 'lost' (both
-    gone — caller screams), 'unknown' (verify read failed — never recreate
-    blind, a dup order would double the bet)."""
+    'ok' (an open order survives), 'filled' (no open order but the POSITION
+    exists — the amend raced a fill; never re-place), 'recreated' (we
+    placed a fresh order at the amend price after the venue killed the
+    original), 'lost' (both gone — caller screams), 'unknown' (verify read
+    failed — never recreate blind, a dup order would double the bet).
+    NOTE: orders.retrieve is NOT used anywhere — probe run 1 proved it
+    404s on orders that demonstrably exist; orders.list is the only
+    trustworthy read. Callers must sleep ~2.5s before calling — modify is
+    ASYNC (returns success, applies/dies a beat later)."""
     try:
         resp = client.orders.list({"slugs": [slug]})
         raw = (resp.get("orders") if isinstance(resp, dict)
@@ -9166,6 +9199,15 @@ def _repeg_verify_or_recreate(client, slug, intent, canon, qty, orig_tif,
                 return "ok"
     except Exception:
         return "unknown"
+    # No open order — filled or killed? The position decides (recreating a
+    # FILLED bet would double it).
+    positions = _pmm_positions_raw(client)
+    if positions is None:
+        return "unknown"                 # can't distinguish — don't recreate
+    pos = positions.get(slug) or {}
+    net = pos.get("net") or 0.0
+    if (net < 0 if intent == "ORDER_INTENT_BUY_SHORT" else net > 0):
+        return "filled"
     if not (qty and canon):
         return "lost"
     try:
@@ -9390,32 +9432,29 @@ def _repeg_tick(sb, now) -> dict:
                         and f.get("order_good_till")):
                     params["tif"] = "TIME_IN_FORCE_GOOD_TILL_DATE"
                     params["goodTillTime"] = f["order_good_till"]
+                if res["acted"] >= 2:
+                    continue    # per-tick amend cap — the 2.5s async-verify
+                                # sleeps have to fit Vercel's 10s budget;
+                                # deferred candidates re-enter next tick
                 amend_exc = None
                 try:
                     if client is None:
                         client = get_client()
                     client.orders.modify(oid, params)
                 except Exception as e:
-                    # Race rule: amend raced a fill → treat as fill, never
-                    # re-place.
-                    filled = False
-                    try:
-                        od = client.orders.retrieve(oid).get("order") or {}
-                        st = od.get("state") or ""
-                        filled = (st == "ORDER_STATE_FILLED"
-                                  or not _safe_float(od.get("leavesQuantity")))
-                    except Exception:
-                        pass
-                    if filled:
-                        continue                       # fill wins — done
-                    amend_exc = e
+                    amend_exc = e   # even a sync error can have canceled —
+                                    # the verify below decides, not the exc
                 # TRUST NOTHING after an amend (success OR error — the live
-                # failure returned success): verify the order survives on
-                # the book; recreate it at the amend price if the venue
-                # killed it; scream if both are gone.
+                # failure returned success): modify is ASYNC (probe-proven),
+                # so wait for it to apply/die, then read the book; recreate
+                # if the venue killed it; a raced FILL is detected via the
+                # position and never re-placed; scream if all else fails.
+                _time.sleep(2.5)
                 state = _repeg_verify_or_recreate(
                     client, slug, intent, canon, qty,
                     f.get("order_tif"), f.get("order_good_till"))
+                if state == "filled":
+                    continue                           # fill wins — done
                 if state == "ok" and amend_exc is not None:
                     # order intact but at the OLD price — amend rejected
                     _mark("repeg_stop",
