@@ -7971,7 +7971,15 @@ _PAPERLOG_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF", "UFC"]
 # Telegram. Worst case by construction: one contract ≤ 54¢.
 # ---------------------------------------------------------------------------
 AUTOBET_ENABLED = True
-AUTOBET_MAX_BETS = 1          # ⚠ USER GATE — raise only after their review
+# USER REVIEW PASSED (Aug 2, after the first bet fired on Cards@Yankees):
+# "release that clamp... hit them all — fifty cent bets, who cares."
+# The cap is now a rolling-slate count (picks with event_start in the last
+# 12h → future), re-arming daily by construction: 20 × 54¢ ≈ $10.80 worst
+# case per slate. The 6pp trust clamp is ALSO released for the OPENER lane
+# only (game-day NRFI keeps its measured 2.5-6pp band): opener claimed
+# edges of 10-16pp are exactly the question 1-contract stakes exist to
+# answer with real money.
+AUTOBET_MAX_BETS = 20
 _AUTOBET_CONTRACTS = 1
 _OPENER_LO_H, _OPENER_HI_H = 6, 40   # beyond the live window → listing-time
 
@@ -8033,12 +8041,30 @@ def _opener_pass(sb, now, deadline):
                 continue
             if not nrfi.get("pmm_matched"):
                 continue                  # not priced yet → retry next tick
-            bet_side = nrfi.get("bet_side")
+            # OPENER-LANE side selection — the 6pp clamp is RELEASED here
+            # (user, Aug 2): any side with edge ≥ the 2.5pp floor is a bet
+            # candidate, however large the claimed edge. Game-day NRFI
+            # keeps its measured band; this lane exists to price virgin
+            # books the clamp has never been tested on.
+            try:
+                from handicapper_web import NRFI_EDGE_MIN_PP as _min_pp
+            except Exception:
+                _min_pp = 2.5
+            pblock = nrfi.get("polymarket") or {}
+            fair_map = {"no": nrfi.get("p_nrfi"), "yes": nrfi.get("p_yrfi")}
+            bet_side, bet_edge = None, None
+            for s in ("no", "yes"):
+                b = pblock.get(s) or {}
+                fp = fair_map.get(s)
+                if b.get("bid") is None or not fp:
+                    continue
+                e = fp * 100.0 - float(b["bid"]) * 100.0
+                if e >= _min_pp and (bet_edge is None or e > bet_edge):
+                    bet_side, bet_edge = s, e
             side = bet_side or ("no" if (nrfi.get("p_nrfi") or 0) >= 0.5
                                 else "yes")
-            blk = ((nrfi.get("polymarket") or {}).get(side)) or {}
-            entry = (nrfi.get("entry_price") if bet_side
-                     else blk.get("bid_american"))
+            blk = (pblock.get(side)) or {}
+            entry = blk.get("bid_american")
             if entry is None:
                 continue
             es = g.get("event_start")
@@ -8049,10 +8075,11 @@ def _opener_pass(sb, now, deadline):
                 sim = round((dt - now).total_seconds() / 60.0)
             except Exception:
                 pass
-            edge = (nrfi.get("bet_edge_pp") if bet_side
+            edge = (round(bet_edge, 1) if bet_edge is not None
                     else blk.get("edge_pp"))
             blob = {"opener_shadow": True, "p_nrfi": nrfi.get("p_nrfi"),
                     "opener_edge_pp": edge, "would_bet": bool(bet_side),
+                    "opener_unclamped": True,
                     "nrfi_price_src": nrfi.get("price_src")}
             shadow_rows.append({
                 "market_id": g["id"], "event_name": g.get("event_name"),
@@ -8077,19 +8104,59 @@ def _opener_pass(sb, now, deadline):
             bid = blk.get("bid")
             if not slug or bid is None:
                 continue
-            side_c = float(bid) * 100.0
-            if side_c > _REPEG_NRFI_PRICE_CAP_C:
-                continue                  # 54¢ cap (belt over the model gate)
-            if _AUTOBET_CONTRACTS * side_c / 100.0 > _REPEG_MAX_COST_USD:
-                continue                  # ⚠ THE MASTER RULE
-            try:                          # the user's ONE-BET review latch
+            try:                          # rolling-slate cap (re-arms daily)
                 prior = (sb.table("bot_picks").select("id")
                          .filter("signal_blob->>autobet", "eq", "true")
+                         .gte("event_start",
+                              (now - timedelta(hours=12)).isoformat())
                          .limit(AUTOBET_MAX_BETS + 1).execute().data) or []
             except Exception:
-                continue                  # can't verify the latch → no bet
+                continue                  # can't verify the cap → no bet
             if len(prior) >= AUTOBET_MAX_BETS:
                 continue
+            # CHEAP-FIRST GAP PRICING (user, Aug 2: "I don't care about
+            # fair — I want to be CHEAP. Look at the current make, go up
+            # one peg."). Virgin books open ~12¢ wide; the play is best
+            # bid + one tick (0.5¢) — front of the queue at the minimum
+            # possible price, keeping every point of edge above it. The
+            # model still gates: the pegged price must clear the 2.5pp
+            # floor and the 54¢ cap. No bid at all (truly virgin book) →
+            # anchor cheap at fair − 6pp. One-tick-wide book → just join
+            # the bid (can't improve without crossing; post-only would
+            # reject anyway). The re-peg bot fights the queue war from
+            # here.
+            try:
+                pclient = get_client()
+            except Exception:
+                continue
+            fair_c = (fair_map.get(side) or 0) * 100.0
+            book = None
+            try:
+                book = _pmm_book(pclient, slug)
+                if synthetic and book:
+                    book = _invert_book(book)
+            except Exception:
+                book = None
+            bid_c = (book or {}).get("best_bid")
+            ask_c = (book or {}).get("best_ask")
+            if bid_c is None and bid is not None:
+                bid_c = float(bid) * 100.0
+            if bid_c is not None and bid_c > 0:
+                target = bid_c + 0.5                  # one peg above the make
+                if ask_c is not None and target >= ask_c:
+                    target = bid_c                    # one-tick book → join
+            else:
+                target = fair_c - 6.0                 # virgin book → anchor cheap
+                if ask_c is not None:
+                    target = min(target, ask_c - 0.5)
+            target = int(target * 2) / 2.0            # 0.5¢ tick floor
+            side_c = target
+            entry_edge = fair_c - side_c
+            if (side_c <= 0 or side_c > _REPEG_NRFI_PRICE_CAP_C
+                    or entry_edge < _min_pp):
+                continue                  # pegged price fails the gate → pass
+            if _AUTOBET_CONTRACTS * side_c / 100.0 > _REPEG_MAX_COST_USD:
+                continue                  # ⚠ THE MASTER RULE
             owner = _kalshi_owner_uid()
             if not owner:
                 continue
@@ -8116,8 +8183,7 @@ def _opener_pass(sb, now, deadline):
                       "manualOrderIndicator":
                           "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
             try:
-                client = get_client()
-                cr = client.orders.create(params)
+                cr = pclient.orders.create(params)
                 new_oid = (cr.get("id") if isinstance(cr, dict)
                            else getattr(cr, "id", None))
             except Exception as e:
@@ -8125,9 +8191,10 @@ def _opener_pass(sb, now, deadline):
                     f"🤖 AUTO-BET FAILED — {g.get('event_name')} NRFI "
                     f"{side.upper()}: create errored ({e})"[:280])
                 continue
-            # The pick IS the latch — insert it unconditionally once create
-            # returned, so an ambiguous verify can never double-bet.
+            # The pick IS the cap counter — insert it unconditionally once
+            # create returned, so an ambiguous verify can never double-bet.
             side_lbl = "NRFI" if side == "no" else "YRFI"
+            entry_amer = _prob_to_amer_py(side_c / 100.0)
             try:
                 sb.table("bot_picks").insert({
                     "asked_by": owner,
@@ -8136,34 +8203,41 @@ def _opener_pass(sb, now, deadline):
                     "event_name": g.get("event_name"), "event_start": es,
                     "market_type": "nrfi", "side": side,
                     "entry_book": "POLYMARKET",
-                    "entry_price": int(blk.get("bid_american")),
+                    "entry_price": int(entry_amer if entry_amer is not None
+                                       else blk.get("bid_american")),
                     "entry_line": None, "units": 1, "confidence": "low",
                     "fair_prob": (nrfi.get("p_nrfi") if side == "no"
                                   else nrfi.get("p_yrfi")),
-                    "edge_pp": edge,
-                    "reasons": [f"AUTO-BET at the opener — model "
-                                f"{side_lbl} edge {edge}pp, "
-                                f"{_AUTOBET_CONTRACTS} contract"],
+                    "edge_pp": round(entry_edge, 1),
+                    "reasons": [f"AUTO-BET at the opener — {side_lbl} "
+                                f"pegged {round(side_c)}¢ (one tick over "
+                                f"the {round(bid_c) if bid_c else '?'}¢ "
+                                f"make), model fair {round(fair_c)}¢ → "
+                                f"{round(entry_edge, 1)}pp edge at entry"],
                     "signal_blob": {"autobet": True,
                                     "contracts": _AUTOBET_CONTRACTS,
                                     "order_id": new_oid, "pmm_slug": slug,
                                     "pmm_synthetic": synthetic,
                                     "source": "autobet",
-                                    "opener_edge_pp": edge},
+                                    "opener_edge_pp": edge,
+                                    "entry_edge_pp": round(entry_edge, 1),
+                                    "book_bid_c": bid_c,
+                                    "book_ask_c": ask_c},
                 }).execute()
             except Exception:
                 pass
             _time.sleep(1.2)
-            state = _repeg_verify_or_recreate(client, slug, intent, canon,
+            state = _repeg_verify_or_recreate(pclient, slug, intent, canon,
                                               0, None, None)
             ok = state in ("ok", "filled")
             _send_fill_telegram(
-                f"🤖💰 AUTO-BET PLACED — {g.get('event_name')}: "
-                f"{side_lbl} {_AUTOBET_CONTRACTS} contract @ "
-                f"{round(side_c)}¢ (opener edge {edge}pp, "
-                f"{'verified on the book' if ok else 'VERIFY READ FAILED — CHECK THE APP'}). "
-                f"This is the ONE bet — bot is now disarmed until you "
-                f"review it.")
+                f"🤖💰 AUTO-BET — {g.get('event_name')}: {side_lbl} "
+                f"{_AUTOBET_CONTRACTS} contract @ {round(side_c)}¢ "
+                f"(book was {round(bid_c) if bid_c else '?'}/"
+                f"{round(ask_c) if ask_c else '?'}, fair {round(fair_c)}¢, "
+                f"{round(entry_edge, 1)}pp edge, "
+                f"{'verified' if ok else 'VERIFY FAILED — CHECK APP'}). "
+                f"Bet {len(prior) + 1}/{AUTOBET_MAX_BETS} this slate.")
             stats["opener_bets"] += 1
     except Exception:
         pass
