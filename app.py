@@ -5881,7 +5881,7 @@ def api_kalshi_probe():
 # chips still work, sync quietly skips (Edit modal remains the manual
 # override).
 _FILL_STATUS_TTL = 30       # s — server cache; the page polls on its 60s loadData
-_FS_TAKE_WARN_MIN = 7       # unfilled + tip ≤7m → TAKE warning (widened from 5m — user: "5 is too short")
+# (_FS_TAKE_WARN_MIN + the whole TAKE-NOW surface: KILLED Aug 2 2026.)
 
 
 # ───────────── Polymarket fill tracker (dual-venue, July 2026 revert) ─────────
@@ -6038,9 +6038,8 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict) -> dict
         entry["status"], entry["pct"] = "filled", 100.0
     else:
         entry["status"] = "none"
-    if (entry["status"] in ("resting", "partial", "none")
-            and mins is not None and 0 < mins <= _FS_TAKE_WARN_MIN):
-        entry["warn"] = True
+    # (`warn` stays False always — the TAKE-NOW warning died Aug 2 2026,
+    # user: "I bet it where the model wants it, or I let it go.")
     # Entry auto-sync — the held position's avg price becomes the pick's entry
     # (PRICE ONLY; units/line never touched). ≥0.5¢ divergence gate.
     if have_pos and pos.get("avg_price") and entry["status"] in ("filled", "partial"):
@@ -6274,9 +6273,7 @@ def _compute_fill_status(sb, uid: str) -> dict:
             entry["status"], entry["pct"] = "filled", 100.0
         else:
             entry["status"] = "none"
-        if (entry["status"] in ("resting", "partial", "none")
-                and mins is not None and 0 < mins <= _FS_TAKE_WARN_MIN):
-            entry["warn"] = True
+        # (`warn` stays False always — TAKE NOW died Aug 2 2026.)
         # ── Entry auto-sync (the restored Polymarket behavior) ──
         # Real fills exist for this bet → the pick's entry becomes the
         # qty-weighted avg fill price. Price ONLY (cents → American, no
@@ -8864,10 +8861,9 @@ def api_handicapper_paperlog():
     # Alert pass runs BEFORE the insert so a brand-new bet's dedup marker
     # can ride its own insert row (no read-back needed).
     bets_alerted = _bet_alerts(sb, now, alert_cands, recent, rows)
-    # 5-minute TAKE warning (dual-venue) — a PUSH for a bet unfilled ≤5m to
-    # tip (the on-page ⚠ TAKE NOW chip only shows when the page is open).
-    # Independent of the bet cands above: it reads live fill state directly.
-    take_warned = _take_warn_alerts(sb, now)
+    # (The TAKE-NOW push died Aug 2 2026 — user: "TAKE NOW is dead. Kill it.
+    # I bet it where the model wants it, or I let it go, that's how REAL
+    # sharps bet." Full spec in git history.)
     # RE-PEG BOT (every 2nd minute) — amend out-of-touch NRFI maker orders
     # to the touch (shadow-only while REPEG_ENABLED=False). Runs BEFORE the
     # outbid ping so a live amend clears the outbid before it would ping.
@@ -8875,12 +8871,16 @@ def api_handicapper_paperlog():
     # OUTBID push (every 2nd minute) — the red chip's Telegram twin: a
     # resting maker order lost the touch, re-bid or take.
     outbid_warned = _outbid_alerts(sb, now)
+    # TELEGRAM BATCH FLUSH — everything above queued into telegram_queue;
+    # at most ONE 📬 summary per _TG_BATCH_MIN minutes (urgent 🚨 sends
+    # bypassed the queue at send time). Nothing queued → no message.
+    tg_flushed = _tg_flush(sb, now)
     # stdout → Vercel runtime logs: the alert pipeline's only observability
     # (the JSON response is visible only in cron-job.org history).
     print(f"paperlog: processed={processed} cands={len(alert_cands)} "
-          f"alerted={bets_alerted} take_warned={take_warned} "
-          f"outbid_warned={outbid_warned} repeg={repeg} "
-          f"opener={opener_stats} new_rows={len(rows)}")
+          f"alerted={bets_alerted} outbid_warned={outbid_warned} "
+          f"repeg={repeg} opener={opener_stats} tg_flushed={tg_flushed} "
+          f"new_rows={len(rows)}")
     new_rows = 0
     if rows:
         try:
@@ -9539,104 +9539,12 @@ def api_my_orders():
 # ---------------------------------------------------------------------------
 
 
-def _take_warn_line(f: dict, r: dict) -> str:
-    """One bullet for the batched take-warning message."""
-    ev = r.get("event_name") or ""
-    mt = (r.get("market_type") or "").upper()
-    side = (r.get("side") or "").upper()
-    u = r.get("units")
-    mins = f.get("mins_to_start")
-    venue = "Polymarket" if f.get("venue") == "POLYMARKET" else "Kalshi"
-    when = f"{mins}m" if mins is not None else "soon"
-    tail = ""
-    if f.get("outbid") and f.get("best_ask_c") is not None:
-        tail = f" — cross the {round(f['best_ask_c'])}¢ ask"
-    return f"• {ev} — {mt} {side} {u}u · {venue} · tip {when}{tail}"
-
-
-def _take_warn_alerts(sb, now) -> int:
-    """Telegram (Filled Bot): the 5-MINUTE TAKE WARNING as a PUSH — 'a bet is
-    unfilled with ≤5 min to tip, TAKE it now or miss it.' The on-page ⚠ TAKE
-    NOW chip only shows when the page is open; this reaches the phone. Rides
-    the paperlog cron tick. For each admin: a cheap near-tip pre-check, then
-    reuse `_compute_fill_status` (identical fill logic to the page) → picks
-    with warn=True → ONE batched message, one ping per bet (marker
-    signal_blob.take_warned, stamped only on a successful send so a Telegram
-    failure retries next tick). No quiet-hours gate — a warn only fires ≤5m
-    to a real tip, so it's inherently well-timed. Never raises."""
-    sent = 0
-    try:
-        # Whose bets to warn on. Include the KALSHI/Poly OWNER uid (the proven
-        # resolver the autolog uses — KALSHI_OWNER_UID env, else the sole
-        # admin) as well as _admin_uids(), so a flaky Firestore role query
-        # can't silently leave the warn with an empty set (the "never fired"
-        # bug). The Filled Bot's chat is the owner's phone.
-        admins = set(_admin_uids())
-        _owner = _kalshi_owner_uid()
-        if _owner:
-            admins.add(_owner)
-        if not admins:
-            return 0
-        horizon = (now + timedelta(minutes=_FS_TAKE_WARN_MIN + 1)).isoformat()
-        for uid in admins:
-            # Near-tip pre-check — skip the (venue-API-hitting) fill compute
-            # entirely unless this admin has a pick within the warn window.
-            try:
-                near = (sb.table("bot_picks").select("id")
-                        .eq("status", "pending").eq("asked_by", uid)
-                        .gte("event_start", now.isoformat())
-                        .lte("event_start", horizon)
-                        .limit(1).execute().data) or []
-            except Exception:
-                near = []
-            if not near:
-                continue
-            try:
-                res = _compute_fill_status(sb, uid)
-            except Exception:
-                continue
-            if not res.get("configured"):
-                continue
-            warns = [f for f in (res.get("fills") or []) if f.get("warn")]
-            if not warns:
-                continue
-            ids = [f["id"] for f in warns]
-            try:
-                rows = (sb.table("bot_picks")
-                        .select("id,event_name,market_type,side,units,"
-                                "entry_price,signal_blob")
-                        .in_("id", ids).execute().data) or []
-            except Exception:
-                continue
-            byid = {r["id"]: r for r in rows}
-            fresh = []
-            for f in warns:
-                r = byid.get(f["id"])
-                if not r:
-                    continue
-                blob = (r.get("signal_blob")
-                        if isinstance(r.get("signal_blob"), dict) else {})
-                if blob.get("take_warned"):
-                    continue                      # already pinged this bet
-                fresh.append((f, r, blob))
-            if not fresh:
-                continue
-            lines = ["⚠️ TAKE NOW — unfilled, tip is close:"]
-            lines += [_take_warn_line(f, r) for f, r, _b in fresh]
-            if _send_fill_telegram("\n".join(lines)):
-                sent += 1
-                stamp = now.isoformat()
-                for _f, r, blob in fresh:
-                    try:
-                        nb = dict(blob)
-                        nb["take_warned"] = stamp
-                        (sb.table("bot_picks").update({"signal_blob": nb})
-                         .eq("id", r["id"]).execute())
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-    return sent
+# (The 5-minute TAKE-NOW push — _take_warn_line + _take_warn_alerts — was
+# KILLED Aug 2 2026 by user order: "TAKE NOW is dead. Kill it. This is a
+# fully functioning model now, I'm not crossing the take limit, I bet it
+# where the model wants it, or I let it go, that's how REAL sharps bet."
+# The fill tracker's `warn` field now stays False (page chip gone too).
+# Full spec in git history.)
 
 
 def _outbid_line(f: dict, r: dict) -> str:
@@ -9973,11 +9881,22 @@ def _repeg_tick(sb, now) -> dict:
                     if _a is None or _t < _a:
                         new_c = _t
 
-                def _mark(key, payload, tg=None):
-                    """Stamp a once-per-bid-level marker (+ optional TG)."""
+                def _mark(key, payload, tg=None, force=False):
+                    """Stamp a marker (+ optional TG). repeg_stop is ONCE
+                    PER BET (user, Aug 2 evening: "Once we stop chasing, I
+                    don't care it went even farther") — a prior stop marker
+                    suppresses every later stop ping regardless of how much
+                    higher the book climbed; a successful re-peg clears the
+                    marker so a RESUMED chase that stops again earns one
+                    fresh ping. force=True (mid-action failure states —
+                    canceled-order limbo) bypasses the suppression. Other
+                    keys (repeg_shadow) keep once-per-bid-level."""
                     prev = blob.get(key) or {}
+                    if key == "repeg_stop" and prev and not force:
+                        return False           # already told them we stopped
                     pbb = prev.get("best_bid_c") if isinstance(prev, dict) else None
-                    if pbb is not None and new_c is not None and new_c <= pbb + 0.25:
+                    if (not force and pbb is not None and new_c is not None
+                            and new_c <= pbb + 0.25):
                         return False           # same level already handled
                     if tg and not _send_fill_telegram(tg):
                         return False           # TG failed → retry next tick
@@ -10111,7 +10030,7 @@ def _repeg_tick(sb, now) -> dict:
                               f"canceled your {round(old_c) if old_c else '?'}"
                               f"¢ order but the venue reads failed before the "
                               f"re-place. CHECK THE APP — re-bid "
-                              f"{round(new_c)}¢ if it's gone."))
+                              f"{round(new_c)}¢ if it's gone."), force=True)
                     res["stopped"] += 1
                     continue
                 pos_net = (positions.get(slug) or {}).get("net") or 0.0
@@ -10146,17 +10065,20 @@ def _repeg_tick(sb, now) -> dict:
                     _mark("repeg_stop", {"reason": "ORDER LOST on re-peg"},
                           tg=(f"🚨 ORDER LOST — {ev} {mlbl} {side}: canceled "
                               f"your order and the re-place failed. RE-BID "
-                              f"{round(new_c)}¢ BY HAND NOW."))
+                              f"{round(new_c)}¢ BY HAND NOW."), force=True)
                     res["stopped"] += 1
                     continue
                 if state == "unknown":
                     _mark("repeg_stop", {"reason": "re-peg unverified"},
                           tg=(f"⚠🤖 REPEG UNVERIFIED — {ev} {mlbl} {side}: "
                               f"re-peg to {round(new_c)}¢ sent but the verify "
-                              f"read failed. CHECK THE APP."))
+                              f"read failed. CHECK THE APP."), force=True)
                     res["stopped"] += 1
                     continue
                 nb = dict(blob)
+                # A successful move re-arms the once-per-bet stop ping: if
+                # this resumed chase stops again later, that's ONE new ping.
+                nb.pop("repeg_stop", None)
                 nb["repeg"] = moves + [{"from_c": old_c, "to_c": new_c,
                                         "at": now.isoformat(),
                                         "order_id": new_oid or oid,
@@ -10190,12 +10112,12 @@ def _repeg_tick(sb, now) -> dict:
     return res
 
 
-def _send_fill_telegram(text):
-    """POST to Telegram sendMessage via the "Filled Bot". No-op (False)
-    when FILLED_BOT_TOKEN / FILLED_BOT_CHAT_ID aren't set in Vercel env.
-    Stdlib urllib so we don't add a new dep just for this. Callers (all on
-    the paperlog tick): _bet_alerts (unlogged-bet ping), _take_warn_alerts
-    (≤5m-to-tip TAKE push), _outbid_alerts (resting bid lost the touch)."""
+def _tg_send_now(text):
+    """POST to Telegram sendMessage via the "Filled Bot" — the RAW sender.
+    No-op (False) when FILLED_BOT_TOKEN / FILLED_BOT_CHAT_ID aren't set in
+    Vercel env. Stdlib urllib so we don't add a new dep just for this.
+    Almost nothing should call this directly — go through
+    _send_fill_telegram (the 10-min batch queue) instead."""
     import urllib.request
     import urllib.error
     token = (os.environ.get("FILLED_BOT_TOKEN") or "").strip()
@@ -10216,6 +10138,98 @@ def _send_fill_telegram(text):
             return r.status == 200
     except (urllib.error.HTTPError, urllib.error.URLError):
         return False
+
+
+_TG_BATCH_MIN = 10   # max ONE summary message per this many minutes
+
+
+def _send_fill_telegram(text, urgent=False):
+    """Queue a Telegram message for the 10-MINUTE BATCH (user, Aug 2 2026:
+    "Telegram messages every 10 minutes max… If something happened in that
+    10 minutes, it puts them all together? If nothing happened, then don't
+    send one"). Inserts into telegram_queue; _tg_flush (end of every
+    paperlog tick) delivers ONE 📬 summary at most every _TG_BATCH_MIN
+    minutes. Returns True on a successful queue insert — callers' marker
+    stamping ("only stamp on a successful send") keeps its retry semantics
+    against the queue.
+
+    urgent=True (or a 🚨-prefixed text — ORDER LOST) bypasses the queue and
+    sends NOW; the sole batch exception, because a canceled-and-not-replaced
+    order is money off the board. An urgent send also writes a sent_at row
+    so the batch window counts it (the "max one per 10 min" stays honest).
+    DB unreachable → degrade to direct send rather than dropping the ping."""
+    urgent = urgent or text.lstrip().startswith("🚨")
+    if urgent:
+        ok = _tg_send_now(text)
+        if ok:
+            try:
+                get_supabase().table("telegram_queue").insert(
+                    {"text": text,
+                     "sent_at": datetime.now(timezone.utc).isoformat()}
+                ).execute()
+            except Exception:
+                pass
+        return ok
+    try:
+        get_supabase().table("telegram_queue").insert({"text": text}).execute()
+        return True
+    except Exception:
+        return _tg_send_now(text)   # queue down ≠ silence
+
+
+def _tg_flush(sb, now) -> int:
+    """Deliver the queued Telegram batch: if anything is unsent AND it's
+    been ≥ _TG_BATCH_MIN minutes since the last delivery (urgent sends
+    count), compose one 📬 summary and mark the included rows sent. A
+    single queued update goes out as itself (no header). Oversized batches
+    (~3600-char budget — Telegram caps at 4096) leave the tail queued for
+    the next flush. Delivered rows older than 3 days are pruned. Returns
+    the number of updates delivered this tick. Never raises."""
+    try:
+        pend = (sb.table("telegram_queue").select("id,text")
+                .is_("sent_at", "null").order("id")
+                .limit(60).execute().data) or []
+        if not pend:
+            return 0
+        last = (sb.table("telegram_queue").select("sent_at")
+                .not_.is_("sent_at", "null")
+                .order("sent_at", desc=True).limit(1).execute().data) or []
+        if last:
+            try:
+                la = datetime.fromisoformat(
+                    str(last[0]["sent_at"]).replace("Z", "+00:00"))
+                if (now - la).total_seconds() < _TG_BATCH_MIN * 60:
+                    return 0
+            except Exception:
+                pass
+        take, used = [], 0
+        for r in pend:
+            t = r.get("text") or ""
+            if take and used + len(t) > 3600:
+                break
+            take.append(r)
+            used += len(t) + 2
+        if len(take) == 1:
+            msg = take[0].get("text") or ""
+        else:
+            left = len(pend) - len(take)
+            hdr = (f"📬 {len(take)} updates (last {_TG_BATCH_MIN}m)"
+                   + (f" · {left} more next batch" if left else "") + ":")
+            msg = hdr + "\n\n" + "\n\n".join(r.get("text") or "" for r in take)
+        if not _tg_send_now(msg):
+            return 0                 # Telegram down → rows stay queued
+        stamp = now.isoformat()
+        (sb.table("telegram_queue").update({"sent_at": stamp})
+         .in_("id", [r["id"] for r in take]).execute())
+        try:                         # retention: delivered + >3d old → gone
+            cutoff = (now - timedelta(days=3)).isoformat()
+            (sb.table("telegram_queue").delete()
+             .not_.is_("sent_at", "null").lt("created_at", cutoff).execute())
+        except Exception:
+            pass
+        return len(take)
+    except Exception:
+        return 0
 
 
 # ──────────────── Pick Bot bet alerts ────────────────

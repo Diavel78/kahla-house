@@ -873,9 +873,9 @@
     // portfolio API the same day the Polymarket tracker was retired (the
     // user's Kalshi API key predates this repo — the old dashboard era).
     // The pending row + the green logged chip stay AMBER until the order
-    // fills, flip to ✓ green when filled, and pulse a red TAKE warning
-    // when still unfilled ≤30m to tip; ⚠ OUTBID when the rest has been
-    // jumped. Fed by /api/handicapper/fill-status (admin_required — the
+    // fills, flip to ✓ green when filled; ⚠ OUTBID when the rest has been
+    // jumped. (The TAKE-NOW warning died Aug 2 2026 — bet at the model's
+    // price or let it go.) Fed by /api/handicapper/fill-status (admin — the
     // creds are the admin's own Kalshi account; configured:false = quiet
     // no-op for everyone, including an admin who hasn't added the env
     // vars yet). STATUS ONLY — nothing writes back to the pick.
@@ -928,8 +928,8 @@
             html = `<span class="chip fill miss" title="No matching ${V} order or position — not placed yet (or canceled)?">⚠ NO ORDER</span>`;
         if (f.outbid)
             html += `<span class="chip fill take" title="${_esc(_outbidTitle(f))}">⚠ OUTBID ${_fmtCents(f.best_bid_c)}¢ &gt; ${_fmtCents(f.my_price_c)}¢</span>`;
-        if (f.warn)
-            html += `<span class="chip fill take" title="Unfilled with tip ≤7m — a maker won't fill in time. TAKE the ask or miss the bet.">⚠ TAKE NOW</span>`;
+        // (⚠ TAKE NOW chip killed Aug 2 2026 — the model bets at its price
+        // or lets it go; server always sends warn:false now.)
         return html;
     }
     // Decoration for a LOGGED games-list chip: amber ◌/◔ until the Kalshi
@@ -942,9 +942,6 @@
         const V = _fillVenue(f);
         if (f.status === 'filled')
             return { cls: '', mark: '✓', title: 'Logged + FILLED on ' + V };
-        if (f.warn)
-            return { cls: ' unfilled take', mark: '⚠',
-                     title: 'Logged but NOT filled and tip is close — TAKE the ask or miss the bet' };
         if (f.outbid)
             return { cls: ' unfilled take', mark: '⚠', title: 'OUTBID — ' + _outbidTitle(f) };
         if (f.status === 'partial')
