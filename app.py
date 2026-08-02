@@ -9222,20 +9222,33 @@ def _repeg_tick(sb, now) -> dict:
                                  f"{round(new_c)}¢")):
                         res["stopped"] += 1
                     continue
-                fair = r.get("fair_prob")
-                if fair is None:
-                    fair = _nrfi_fair_from_paperlog(sb, f.get("market_id"),
-                                                    r.get("side"))
-                ok, edge = _repeg_edge_ok(fair, new_c)
-                if not ok:
-                    why = ("edge gone" if ok is False else "no model fair on pick")
-                    if _mark("repeg_stop", {"reason": why, "edge_pp": edge},
-                             tg=(f"🤖 REPEG STOP — {ev} NRFI {side}: {why} at "
-                                 f"{round(new_c)}¢"
-                                 + (f" (edge {edge}pp)" if edge is not None else "")
-                                 + f"; resting at {round(old_c) if old_c else '?'}¢")):
-                        res["stopped"] += 1
-                    continue
+                move_n = len(moves) + 1
+                # MOVE 1 IS UNCONDITIONAL (user dial, first live night Aug 2:
+                # "I bet the game, I want it bet — chase 1 repeg, then you
+                # can reevaluate." Months of profitably chasing these by
+                # hand; the market moving onto the bet is confirmation, not
+                # a warning). The model's edge gate only judges MOVE 2+.
+                # Master Rule + the 2-move cap still bound everything.
+                edge = None
+                if move_n > 1:
+                    fair = r.get("fair_prob")
+                    if fair is None:
+                        fair = _nrfi_fair_from_paperlog(sb, f.get("market_id"),
+                                                        r.get("side"))
+                    ok, edge = _repeg_edge_ok(fair, new_c)
+                    if not ok:
+                        why = ("edge gone" if ok is False
+                               else "no model fair on pick")
+                        if _mark("repeg_stop", {"reason": why, "edge_pp": edge},
+                                 tg=(f"🤖 REPEG STOP — {ev} NRFI {side}: move "
+                                     f"{move_n} needs edge and {why} at "
+                                     f"{round(new_c)}¢"
+                                     + (f" (edge {edge}pp)" if edge is not None
+                                        else "")
+                                     + f"; resting at "
+                                     f"{round(old_c) if old_c else '?'}¢")):
+                            res["stopped"] += 1
+                        continue
                 # -- ⚠ THE MASTER RULE — last check before any amend --
                 contracts = (f.get("order_cum") or 0) + (f.get("order_leaves") or 0)
                 cost = contracts * new_c / 100.0
@@ -9248,15 +9261,15 @@ def _repeg_tick(sb, now) -> dict:
                         res["stopped"] += 1
                     continue
 
-                move_n = len(moves) + 1
                 if not REPEG_ENABLED:
                     # -- shadow: log + ping what we WOULD do, touch nothing --
+                    _elbl = f"edge {edge}pp" if edge is not None else "free move 1"
                     if _mark("repeg_shadow",
                              {"from_c": old_c, "to_c": new_c, "move": move_n,
                               "edge_pp": edge},
                              tg=(f"🕶 REPEG SHADOW — {ev} NRFI {side}: would "
                                  f"move {round(old_c) if old_c else '?'}¢ → "
-                                 f"{round(new_c)}¢ (edge {edge}pp, move "
+                                 f"{round(new_c)}¢ ({_elbl}, move "
                                  f"{move_n}/{_REPEG_MAX_MOVES})")):
                         res["shadow"] += 1
                     continue

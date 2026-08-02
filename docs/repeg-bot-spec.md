@@ -62,7 +62,7 @@ order Telegrams the user and does nothing.
 | Re-peg trigger | Outbid only. **Downward re-pegs are impossible** (user's catch): our resting bid IS the book's best bid — the market can't move below us without filling us |
 | Re-peg action | Cancel + re-rest at the **current best bid** (join the touch; no MAKE+ front-stepping in v1). Poly tick = 0.5¢ |
 | Chase limit | **Max 2 re-pegs per bet, lifetime** — after 2, the order sits at its last price until fill or Start-of-game expiry |
-| Edge gate | Every re-peg must still clear the NRFI edge gate at the NEW price (model fair vs new bid inside the 3–6pp band). Gate fails → do NOT re-peg; leave the order resting at its old (better) price — a later fill there is bonus edge — and ping Telegram |
+| Edge gate | **Move 1 is UNCONDITIONAL** (user dial, revised first live night: "I bet the game, I want it bet — chase 1 repeg, then you can reevaluate"; months of hand-chasing these profitably). **Move 2** must clear the NRFI edge gate at the NEW price (pick's `fair_prob`, else the latest paperlog `p_nrfi` — the autolog fallback). Gate fails → do NOT re-peg; leave the order resting at its old (better) price and ping Telegram |
 | Race rule | Cancel returns already-filled → **treat as fill, never re-place** filled qty |
 | Partial fills | Cancel-replace the unfilled remainder only; the existing qty-weighted entry auto-sync blends the average |
 | Kill switch | `REPEG_ENABLED = False` module constant (`KALSHI_EXECUTION` pattern) — ships dark |
