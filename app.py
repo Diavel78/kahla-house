@@ -9083,9 +9083,19 @@ def _outbid_alerts(sb, now) -> int:
 # filling us. Shadow mode (REPEG_ENABLED=False) computes + logs + pings what
 # it WOULD do without touching orders — the earn-in before going live.
 
-REPEG_ENABLED = True         # kill switch — LIVE Aug 2 2026 (user: "go live";
-                             # probe/shadow phases waived by user — the $6
-                             # Master Rule + amend-fail-safe bound the risk)
+REPEG_ENABLED = False        # ⚠ KILLED Aug 2 2026, first live session: the
+                             # two live amends (Phillies/Pirates YRFI, 9:19)
+                             # CANCELED the resting orders without landing a
+                             # replacement — orders.modify returned success
+                             # but orders.list showed nothing, the app showed
+                             # nothing, and the autolog removed both picks as
+                             # sold. Suspected cause: ModifyOrderParams sent
+                             # without quantity/intent/type — a FIX-style
+                             # cancel/replace needs the FULL new order, and a
+                             # partial replace leg gets rejected AFTER the
+                             # cancel leg. Do NOT re-enable until the probe's
+                             # &place=1 cycle proves a modify that keeps the
+                             # order alive. No money was lost (no fills).
 _REPEG_MARKET_TYPES = {"nrfi"}
 _REPEG_MAX_MOVES = 2         # lifetime cancel-replace cap per bet
 _REPEG_MAX_COST_USD = 6.00   # ⚠ THE MASTER RULE — never raise casually
