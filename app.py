@@ -9701,7 +9701,19 @@ def _repeg_tick(sb, now) -> dict:
                                  f"{round(old_c) if old_c else '?'}¢")):
                         res["stopped"] += 1
                     continue
-                if len(moves) >= _REPEG_MAX_MOVES:
+                # TWO RE-PEG REGIMES (user, Aug 2 evening):
+                # - MANUAL bets (the user's 10-contract orders): move 1
+                #   unconditional ("I bet the game, I want it bet"), move
+                #   2 needs the edge gate, HARD CAP at 2 moves.
+                # - AUTO-BET orders (the opener lane, 1 contract, entered
+                #   miles below fair on purpose): NO move cap — "repag all
+                #   the way up to the model and then stop." EVERY move
+                #   must keep ≥ the edge floor at the new price; the model
+                #   fair − 2.5pp is the wall, the 54¢ cap above overrides
+                #   everything, and chasing from 42¢ toward a 50¢ fair is
+                #   walking up our own edge curve, not chasing news.
+                is_autobet = bool(blob.get("autobet"))
+                if not is_autobet and len(moves) >= _REPEG_MAX_MOVES:
                     if _mark("repeg_stop", {"reason": "move_cap"},
                              tg=(f"🤖 REPEG STOP — {ev} NRFI {side}: move cap "
                                  f"({_REPEG_MAX_MOVES}) reached; resting at "
@@ -9710,30 +9722,26 @@ def _repeg_tick(sb, now) -> dict:
                         res["stopped"] += 1
                     continue
                 move_n = len(moves) + 1
-                # MOVE 1 IS UNCONDITIONAL (user dial, first live night Aug 2:
-                # "I bet the game, I want it bet — chase 1 repeg, then you
-                # can reevaluate." Months of profitably chasing these by
-                # hand; the market moving onto the bet is confirmation, not
-                # a warning). The model's edge gate only judges MOVE 2+.
-                # Master Rule + the 2-move cap still bound everything.
                 edge = None
-                if move_n > 1:
+                if is_autobet or move_n > 1:
                     fair = r.get("fair_prob")
                     if fair is None:
                         fair = _nrfi_fair_from_paperlog(sb, f.get("market_id"),
                                                         r.get("side"))
                     ok, edge = _repeg_edge_ok(fair, new_c)
                     if not ok:
-                        why = ("edge gone" if ok is False
-                               else "no model fair on pick")
+                        why = (("model limit" if is_autobet else "edge gone")
+                               if ok is False else "no model fair on pick")
                         if _mark("repeg_stop", {"reason": why, "edge_pp": edge},
-                                 tg=(f"🤖 REPEG STOP — {ev} NRFI {side}: move "
-                                     f"{move_n} needs edge and {why} at "
-                                     f"{round(new_c)}¢"
+                                 tg=(f"🤖 REPEG STOP — {ev} NRFI {side}: "
+                                     f"{why} at {round(new_c)}¢"
                                      + (f" (edge {edge}pp)" if edge is not None
                                         else "")
                                      + f"; resting at "
-                                     f"{round(old_c) if old_c else '?'}¢")):
+                                     f"{round(old_c) if old_c else '?'}¢"
+                                     + (" — the book has reached the model"
+                                        if is_autobet and ok is False
+                                        else ""))):
                             res["stopped"] += 1
                         continue
                 # -- ⚠ THE MASTER RULE — last check before any amend --
@@ -9867,10 +9875,12 @@ def _repeg_tick(sb, now) -> dict:
                 # the amend clears the outbid before _outbid_alerts reads.
                 note = (" — venue canceled the original, re-placed fresh"
                         if state == "recreated" else "")
+                mv_lbl = (f"move {move_n}" if is_autobet
+                          else f"move {move_n}/{_REPEG_MAX_MOVES}")
                 _send_fill_telegram(
                     f"🔴🤖 OUTBID → BOT RE-PEGGED — {ev} NRFI {side}: "
                     f"your bid moved {round(old_c) if old_c else '?'}¢ → "
-                    f"{round(new_c)}¢ (move {move_n}/{_REPEG_MAX_MOVES}, "
+                    f"{round(new_c)}¢ ({mv_lbl}, "
                     f"{contracts:g} contracts, ${cost:.2f}, verified{note}). "
                     f"Check it.")
                 res["acted"] += 1
