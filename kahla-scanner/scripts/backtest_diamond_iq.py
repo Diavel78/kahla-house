@@ -61,6 +61,24 @@ def load_batter_rows(sb) -> list[dict]:
     return out
 
 
+def load_xwoba_days(sb) -> list[tuple]:
+    """[(date, [day rows])] sorted — the walk-forward xwOBA feed."""
+    out, page = [], 0
+    while True:      # explicit paging — the 1,000-row lesson
+        rows = (sb.table("mlb_xwoba_batter_days")
+                .select("game_date,batter_id,pa,xwoba_sum")
+                .order("game_date").order("batter_id")
+                .range(page * 1000, page * 1000 + 999).execute().data) or []
+        out.extend(rows)
+        if len(rows) < 1000:
+            break
+        page += 1
+    by_day: dict = defaultdict(list)
+    for r in out:
+        by_day[date.fromisoformat(r["game_date"])].append(r)
+    return sorted(by_day.items())
+
+
 def group_games(rows: list[dict], batter_rows: list[dict] | None = None
                 ) -> list[dict]:
     b_by_game: dict = defaultdict(list)
@@ -147,12 +165,18 @@ def _fit_pyth_hfa(train: list[tuple]) -> float:
 def run(games: list[dict], team_only: bool, known_starter: bool = True,
         opp_adj: bool = False, park_adj: bool = False,
         hr_shrink: float = 1.0, pyth: bool = False,
-        batter_blend: float = 0.0, bp_fatigue: bool = False) -> dict:
+        batter_blend: float = 0.0, bp_fatigue: bool = False,
+        xwoba_blend: float = 0.0, xdays: list | None = None) -> dict:
     state = di.DiamondState(opp_adj=opp_adj, park_adj=park_adj,
                             hr_shrink=hr_shrink, batter_blend=batter_blend,
-                            bp_fatigue=bp_fatigue)
+                            bp_fatigue=bp_fatigue, xwoba_blend=xwoba_blend)
     train, evald = [], []
+    xi, xdays = 0, (xdays or [])
     for g in games:
+        # feed xwOBA days strictly BEFORE this game date (walk-forward)
+        while xi < len(xdays) and xdays[xi][0] < g["date"]:
+            state.feed_xwoba(xdays[xi][0], xdays[xi][1])
+            xi += 1
         hs = g["teams"][g["home"]]["starter"] if known_starter else None
         as_ = g["teams"][g["away"]]["starter"] if known_starter else None
         proj = state.project(g["home"], g["away"], g["date"], hs, as_,
@@ -214,24 +238,24 @@ def main() -> int:
     log.info("eval season (>= %s): %d games", EVAL_START,
              sum(1 for g in games if g["date"] >= EVAL_START))
 
-    _iter1 = {"pyth": True, "opp_adj": True, "park_adj": True,
-              "hr_shrink": 2.5}
+    xdays = load_xwoba_days(sb)
+    log.info("xwOBA feed: %d days (%s → %s)", len(xdays),
+             xdays[0][0] if xdays else "-", xdays[-1][0] if xdays else "-")
+    _champ = {"pyth": True, "opp_adj": True, "park_adj": True,
+              "hr_shrink": 2.5, "batter_blend": 1.0, "bp_fatigue": True}
     variants = [
-        ("V1 FULL (baseline)", {}),
-        ("ITER1 (pyth + opp/park + hr-shrink) — control", dict(_iter1)),
-        ("ITER2 batters b=0.5 (lineup wOBA half-blend)",
-         dict(_iter1, batter_blend=0.5)),
-        ("ITER2 batters b=1.0 (lineup wOBA full)",
-         dict(_iter1, batter_blend=1.0)),
-        ("ITER3 = b=1.0 + bullpen fatigue (the combo)",
-         dict(_iter1, batter_blend=1.0, bp_fatigue=True)),
-        ("ITER2 b=0.75 (blend sweep)",
-         dict(_iter1, batter_blend=0.75)),
+        ("ITER3 CHAMPION (lineup wOBA + fatigue) — control", dict(_champ)),
+        ("ITER4 xwOBA blend 0.5 (half luck-regression)",
+         dict(_champ, xwoba_blend=0.5)),
+        ("ITER4 xwOBA blend 0.75",
+         dict(_champ, xwoba_blend=0.75)),
+        ("ITER4 xwOBA blend 1.0 (pure expected)",
+         dict(_champ, xwoba_blend=1.0)),
     ]
     for name, kw in variants:
         team_only = bool(kw.get("team_only"))
         extra = {k: v for k, v in kw.items() if k != "team_only"}
-        r = run(games, team_only, True, **extra)
+        r = run(games, team_only, True, xdays=xdays, **extra)
         print(f"\n=== {name} ===")
         if r["n"] == 0:
             print("  no eval games")

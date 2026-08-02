@@ -89,7 +89,8 @@ class DiamondState:
                  sp_share: float = SP_SHARE,
                  opp_adj: bool = False, park_adj: bool = False,
                  hr_shrink: float = 1.0,
-                 batter_blend: float = 0.0, bp_fatigue: bool = False):
+                 batter_blend: float = 0.0, bp_fatigue: bool = False,
+                 xwoba_blend: float = 0.0):
         self.sp_prior = sp_prior
         self.sp_hl = sp_hl
         self.team_hl = team_hl
@@ -109,9 +110,30 @@ class DiamondState:
         # full replace); bp_fatigue = recent reliever workload penalty.
         self.batter_blend = batter_blend
         self.bp_fatigue = bp_fatigue
-        self.batters: dict[int, _Decayed] = {}      # wOBA value per PA
+        # ITER4: xwoba_blend = weight of Statcast expected wOBA vs
+        # realized wOBA inside each batter's quality ratio (luck
+        # regression — xwOBA finds true talent faster).
+        self.xwoba_blend = xwoba_blend
+        self.batters: dict[int, _Decayed] = {}      # realized wOBA per PA
+        self.batters_x: dict[int, _Decayed] = {}    # expected wOBA per PA
         self.lg_woba = _Decayed()
+        self.lg_xwoba = _Decayed()
         self.bp_recent: dict[str, dict] = {}        # team → {date: reliever outs}
+
+    def feed_xwoba(self, d: date, day_rows: list[dict]):
+        """Feed one DAY of Savant xwOBA aggregates ({batter_id, pa,
+        xwoba_sum}). Callers must feed a day strictly BEFORE predicting
+        games of a later date (walk-forward)."""
+        for r in day_rows:
+            pa = r.get("pa") or 0
+            xs = r.get("xwoba_sum")
+            pid = r.get("batter_id")
+            if not pid or pa <= 0 or xs is None:
+                continue
+            v = float(xs) / pa
+            self.batters_x.setdefault(pid, _Decayed()).add(
+                d, v, pa, BATTER_HL_DAYS)
+            self.lg_xwoba.add(d, v, pa, self.team_hl)
         self.team_off: dict[str, _Decayed] = {}     # runs scored / game
         self.team_bp: dict[str, _Decayed] = {}      # bullpen RA9 (per out)
         self.sp: dict[int, dict[str, _Decayed]] = {}  # per-pitcher K/BB/HR/outs
@@ -189,6 +211,9 @@ class DiamondState:
         (caller falls back to the team-runs ratio)."""
         if not lineup or not lgw:
             return None
+        xb = self.xwoba_blend
+        _, lgx = (self.lg_xwoba.mean(d, self.team_hl) if xb > 0
+                  else (0.0, 0.0))
         tot_w = tot = 0.0
         for i, pid in enumerate(lineup[:9]):
             w = SLOT_W[i] if i < len(SLOT_W) else SLOT_W[-1]
@@ -196,11 +221,19 @@ class DiamondState:
             pa, val = acc.mean(d, BATTER_HL_DAYS) if acc else (0.0, 0.0)
             wo = ((val * pa + lgw * BATTER_PRIOR_PA)
                   / (pa + BATTER_PRIOR_PA))
-            tot += w * wo
+            q = wo / lgw                      # realized quality ratio
+            if xb > 0 and lgx:
+                xacc = self.batters_x.get(pid)
+                xpa, xval = (xacc.mean(d, BATTER_HL_DAYS) if xacc
+                             else (0.0, 0.0))
+                wx = ((xval * xpa + lgx * BATTER_PRIOR_PA)
+                      / (xpa + BATTER_PRIOR_PA))
+                q = (1 - xb) * q + xb * (wx / lgx)
+            tot += w * q
             tot_w += w
         if not tot_w:
             return None
-        return ((tot / tot_w) / lgw) ** WOBA_RUNS_EXP
+        return (tot / tot_w) ** WOBA_RUNS_EXP
 
     def project(self, home: str, away: str, d: date,
                 home_sp: int | None, away_sp: int | None,
