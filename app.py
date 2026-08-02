@@ -9293,7 +9293,11 @@ def _repeg_tick(sb, now) -> dict:
     Returns counters for the tick log. Never raises."""
     res = {"acted": 0, "shadow": 0, "stopped": 0}
     try:
-        if now.minute % _OUTBID_TICK_MOD or _in_blackout_mt(now):
+        # No blackout gate (user call Aug 2: "the repeg bot can fire during
+        # rest hours — my phone's silenced anyway"). Overnight management is
+        # load-bearing for the evening-before early-entry lane; the OUTBID
+        # alert keeps its own quiet hours, the bot itself never sleeps.
+        if now.minute % _OUTBID_TICK_MOD:
             return res
         admins = set(_admin_uids())
         _owner = _kalshi_owner_uid()
