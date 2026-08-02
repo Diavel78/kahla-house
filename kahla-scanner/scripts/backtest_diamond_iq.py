@@ -45,7 +45,27 @@ def load_rows(sb) -> list[dict]:
     return out
 
 
-def group_games(rows: list[dict]) -> list[dict]:
+def load_batter_rows(sb) -> list[dict]:
+    out, page = [], 0
+    while True:      # explicit paging — the 1,000-row lesson
+        rows = (sb.table("mlb_batter_games")
+                .select("game_pk,team,batter_id,batting_order,started,"
+                        "ab,hits,doubles,triples,home_runs,walks,hbp,"
+                        "sac_flies")
+                .order("game_pk").order("batter_id")
+                .range(page * 1000, page * 1000 + 999).execute().data) or []
+        out.extend(rows)
+        if len(rows) < 1000:
+            break
+        page += 1
+    return out
+
+
+def group_games(rows: list[dict], batter_rows: list[dict] | None = None
+                ) -> list[dict]:
+    b_by_game: dict = defaultdict(list)
+    for b in (batter_rows or []):
+        b_by_game[b["game_pk"]].append(b)
     by_game: dict = defaultdict(list)
     for r in rows:
         by_game[r["game_pk"]].append(r)
@@ -58,7 +78,8 @@ def group_games(rows: list[dict]) -> list[dict]:
             if not t:
                 continue
             d = teams.setdefault(t, {"runs_allowed": 0, "pitchers": [],
-                                     "starter": None})
+                                     "starter": None, "batters": [],
+                                     "lineup": None})
             d["runs_allowed"] += r.get("runs") or 0
             d["pitchers"].append(r)
             if r.get("started"):
@@ -67,6 +88,17 @@ def group_games(rows: list[dict]) -> list[dict]:
                 home_team = t
             else:
                 away_team = t
+        for b in b_by_game.get(pk, []):
+            t = teams.get(b.get("team"))
+            if t is None:
+                continue
+            t["batters"].append(b)
+        for t in teams.values():
+            starters = sorted((b for b in t["batters"]
+                               if b.get("started") and b.get("batting_order")),
+                              key=lambda b: b["batting_order"])
+            if len(starters) >= 8:
+                t["lineup"] = [b["batter_id"] for b in starters[:9]]
         if not home_team or not away_team or home_team == away_team:
             continue
         h_runs = teams[away_team]["runs_allowed"]   # home scores what away allows
@@ -90,9 +122,11 @@ def _team_update_rows(g: dict) -> dict[str, dict]:
     return {
         h: {"runs_for": g["teams"][a]["runs_allowed"],
             "pitchers": g["teams"][h]["pitchers"],
+            "batters": g["teams"][h].get("batters") or [],
             "opp": a, "opp_sp": as_, "venue_team": h},
         a: {"runs_for": g["teams"][h]["runs_allowed"],
             "pitchers": g["teams"][a]["pitchers"],
+            "batters": g["teams"][a].get("batters") or [],
             "opp": h, "opp_sp": hs, "venue_team": h},
     }
 
@@ -112,15 +146,19 @@ def _fit_pyth_hfa(train: list[tuple]) -> float:
 
 def run(games: list[dict], team_only: bool, known_starter: bool = True,
         opp_adj: bool = False, park_adj: bool = False,
-        hr_shrink: float = 1.0, pyth: bool = False) -> dict:
+        hr_shrink: float = 1.0, pyth: bool = False,
+        batter_blend: float = 0.0, bp_fatigue: bool = False) -> dict:
     state = di.DiamondState(opp_adj=opp_adj, park_adj=park_adj,
-                            hr_shrink=hr_shrink)
+                            hr_shrink=hr_shrink, batter_blend=batter_blend,
+                            bp_fatigue=bp_fatigue)
     train, evald = [], []
     for g in games:
         hs = g["teams"][g["home"]]["starter"] if known_starter else None
         as_ = g["teams"][g["away"]]["starter"] if known_starter else None
         proj = state.project(g["home"], g["away"], g["date"], hs, as_,
-                             hfa=0.0, team_only=team_only)
+                             hfa=0.0, team_only=team_only,
+                             home_lineup=g["teams"][g["home"]].get("lineup"),
+                             away_lineup=g["teams"][g["away"]].get("lineup"))
         if proj is not None:
             rec = (proj["margin"], proj["xr_home_env"],
                    proj["xr_away_env"], g["home_won"])
@@ -164,23 +202,31 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     sb = db.client()
     rows = load_rows(sb)
-    games = group_games(rows)
-    log.info("loaded %d pitcher rows → %d games (%s → %s)", len(rows),
+    b_rows = load_batter_rows(sb)
+    games = group_games(rows, b_rows)
+    with_lineup = sum(1 for g in games
+                      if g["teams"][g["home"]].get("lineup")
+                      and g["teams"][g["away"]].get("lineup"))
+    log.info("loaded %d pitcher rows + %d batter rows → %d games "
+             "(%s → %s), %d with full lineups", len(rows), len(b_rows),
              len(games), games[0]["date"] if games else "-",
-             games[-1]["date"] if games else "-")
+             games[-1]["date"] if games else "-", with_lineup)
     log.info("eval season (>= %s): %d games", EVAL_START,
              sum(1 for g in games if g["date"] >= EVAL_START))
 
+    _iter1 = {"pyth": True, "opp_adj": True, "park_adj": True,
+              "hr_shrink": 2.5}
     variants = [
         ("V1 FULL (baseline)", {}),
-        ("V1 TEAM-ONLY (dead-core control)", {"team_only": True}),
-        ("+PYTH (pythagenpat win map)", {"pyth": True}),
-        ("+OPP/PARK (adjusted offense)",
-         {"opp_adj": True, "park_adj": True}),
-        ("+HR-SHRINK 2.5 (xFIP-lite)", {"hr_shrink": 2.5}),
-        ("ITER1 FULL (pyth + opp/park + hr-shrink)",
-         {"pyth": True, "opp_adj": True, "park_adj": True,
-          "hr_shrink": 2.5}),
+        ("ITER1 (pyth + opp/park + hr-shrink) — control", dict(_iter1)),
+        ("ITER2 batters b=0.5 (lineup wOBA half-blend)",
+         dict(_iter1, batter_blend=0.5)),
+        ("ITER2 batters b=1.0 (lineup wOBA full)",
+         dict(_iter1, batter_blend=1.0)),
+        ("ITER3 = ITER2 b=0.5 + bullpen fatigue",
+         dict(_iter1, batter_blend=0.5, bp_fatigue=True)),
+        ("ITER3b = ITER1 + fatigue only (ablation)",
+         dict(_iter1, bp_fatigue=True)),
     ]
     for name, kw in variants:
         team_only = bool(kw.get("team_only"))

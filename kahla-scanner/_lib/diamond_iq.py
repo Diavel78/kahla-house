@@ -53,6 +53,22 @@ PARK_PF: dict[str, float] = {
 }
 
 
+# ITER2 (batter spine): lineup-aware offense. Per-batter wOBA from game
+# lines (linear weights), decayed + PA-shrunk; a game's offense = the
+# ACTUAL lineup's slot-weighted wOBA ratio vs league, raised to the
+# runs elasticity. ITER3: bullpen fatigue — reliever outs the previous
+# 2 days raise the pen's runs factor.
+BATTER_HL_DAYS = 240.0     # batter talent is stable; long half-life
+BATTER_PRIOR_PA = 120.0    # shrink toward league by plate appearances
+WOBA_RUNS_EXP = 1.8        # runs scale ~ (wOBA ratio)^1.8 (BaseRuns-ish)
+SLOT_W = (0.114, 0.111, 0.108, 0.105, 0.102,
+          0.099, 0.096, 0.093, 0.090)   # PA share by lineup slot
+_WOBA = {"bb": 0.69, "hbp": 0.72, "b1": 0.89,
+         "b2": 1.27, "b3": 1.62, "hr": 2.10}
+BP_FATIGUE_COEF = 0.05     # pen runs +5% per ~18 reliever-outs above norm
+BP_FATIGUE_NORM = 12.0     # typical reliever outs over the prior 2 days
+
+
 def pyth_prob(xr_h: float, xr_a: float) -> float:
     """Pythagenpat home win prob — the run-ENVIRONMENT-aware mapping the
     margin→logistic ignores (a 0.5-run edge at Coors is worth less than
@@ -72,7 +88,8 @@ class DiamondState:
                  team_hl: float = TEAM_HL_DAYS,
                  sp_share: float = SP_SHARE,
                  opp_adj: bool = False, park_adj: bool = False,
-                 hr_shrink: float = 1.0):
+                 hr_shrink: float = 1.0,
+                 batter_blend: float = 0.0, bp_fatigue: bool = False):
         self.sp_prior = sp_prior
         self.sp_hl = sp_hl
         self.team_hl = team_hl
@@ -87,6 +104,14 @@ class DiamondState:
         self.opp_adj = opp_adj
         self.park_adj = park_adj
         self.hr_shrink = hr_shrink
+        # ITER2/3 levers (default OFF): batter_blend = weight of the
+        # lineup-wOBA offense factor vs the team-runs ratio (0=off, 1=
+        # full replace); bp_fatigue = recent reliever workload penalty.
+        self.batter_blend = batter_blend
+        self.bp_fatigue = bp_fatigue
+        self.batters: dict[int, _Decayed] = {}      # wOBA value per PA
+        self.lg_woba = _Decayed()
+        self.bp_recent: dict[str, dict] = {}        # team → {date: reliever outs}
         self.team_off: dict[str, _Decayed] = {}     # runs scored / game
         self.team_bp: dict[str, _Decayed] = {}      # bullpen RA9 (per out)
         self.sp: dict[int, dict[str, _Decayed]] = {}  # per-pitcher K/BB/HR/outs
@@ -151,11 +176,36 @@ class DiamondState:
         bp = self._shrunk(self.team_bp.get(team), d, self.team_hl,
                           lg_bp or 0.16, BP_PRIOR_OUTS)
         bp_factor = bp / lg_bp if lg_bp else 1.0
+        if self.bp_fatigue:
+            hist = self.bp_recent.get(team) or {}
+            o2 = sum(v for dd, v in hist.items() if 0 < (d - dd).days <= 2)
+            f = 1.0 + BP_FATIGUE_COEF * (o2 - BP_FATIGUE_NORM) / 18.0
+            bp_factor *= max(0.92, min(1.12, f))
         return self.sp_share * sp_factor + (1 - self.sp_share) * bp_factor
+
+    def _lineup_factor(self, lineup, d: date, lgw: float):
+        """Offense factor from the ACTUAL lineup: slot-weighted shrunk
+        wOBA vs league, raised to the runs elasticity. None = no lineup
+        (caller falls back to the team-runs ratio)."""
+        if not lineup or not lgw:
+            return None
+        tot_w = tot = 0.0
+        for i, pid in enumerate(lineup[:9]):
+            w = SLOT_W[i] if i < len(SLOT_W) else SLOT_W[-1]
+            acc = self.batters.get(pid)
+            pa, val = acc.mean(d, BATTER_HL_DAYS) if acc else (0.0, 0.0)
+            wo = ((val * pa + lgw * BATTER_PRIOR_PA)
+                  / (pa + BATTER_PRIOR_PA))
+            tot += w * wo
+            tot_w += w
+        if not tot_w:
+            return None
+        return ((tot / tot_w) / lgw) ** WOBA_RUNS_EXP
 
     def project(self, home: str, away: str, d: date,
                 home_sp: int | None, away_sp: int | None,
-                hfa: float = 0.0, team_only: bool = False) -> dict | None:
+                hfa: float = 0.0, team_only: bool = False,
+                home_lineup=None, away_lineup=None) -> dict | None:
         if (self.team_games.get(home, 0) < MIN_TEAM_GAMES
                 or self.team_games.get(away, 0) < MIN_TEAM_GAMES):
             return None
@@ -169,8 +219,18 @@ class DiamondState:
         def prevention(team: str, sp_pid: int | None) -> float:
             return 1.0 if team_only else self._prevention(team, sp_pid, d)
 
-        xr_h = lg_rpg * (off_h / lg_rpg) * prevention(away, away_sp)
-        xr_a = lg_rpg * (off_a / lg_rpg) * prevention(home, home_sp)
+        r_h, r_a = off_h / lg_rpg, off_a / lg_rpg
+        if self.batter_blend > 0 and not team_only:
+            _, lgw = self.lg_woba.mean(d, self.team_hl)
+            bf_h = self._lineup_factor(home_lineup, d, lgw)
+            bf_a = self._lineup_factor(away_lineup, d, lgw)
+            b = self.batter_blend
+            if bf_h is not None:
+                r_h = (1 - b) * r_h + b * bf_h
+            if bf_a is not None:
+                r_a = (1 - b) * r_a + b * bf_a
+        xr_h = lg_rpg * r_h * prevention(away, away_sp)
+        xr_a = lg_rpg * r_a * prevention(home, home_sp)
         # Run ENVIRONMENT values: with park_adj the stored offense is
         # park-neutral, so re-inflate both sides by the venue (home team's
         # park) for anything environment-aware (the pythagenpat exponent).
@@ -222,3 +282,30 @@ class DiamondState:
                         self.team_bp.setdefault(team, _Decayed()).add(
                             d, runs / outs, outs, self.team_hl)
                         self.lg_bp.add(d, runs / outs, outs, self.team_hl)
+                    # ITER3 fatigue read: reliever outs by date (keep ~8d)
+                    hist = self.bp_recent.setdefault(team, {})
+                    hist[d] = hist.get(d, 0) + outs
+                    for dd in [k for k in hist if (d - k).days > 8]:
+                        del hist[dd]
+            # ITER2: per-batter wOBA lines (linear weights per PA)
+            for b_ in (r.get("batters") or []):
+                ab = b_.get("ab") or 0
+                bb = b_.get("walks") or 0
+                hbp = b_.get("hbp") or 0
+                sf = b_.get("sac_flies") or 0
+                pa = ab + bb + hbp + sf
+                if pa <= 0:
+                    continue
+                h = b_.get("hits") or 0
+                d2 = b_.get("doubles") or 0
+                d3 = b_.get("triples") or 0
+                hr = b_.get("home_runs") or 0
+                b1 = max(0, h - d2 - d3 - hr)
+                num = (_WOBA["bb"] * bb + _WOBA["hbp"] * hbp
+                       + _WOBA["b1"] * b1 + _WOBA["b2"] * d2
+                       + _WOBA["b3"] * d3 + _WOBA["hr"] * hr)
+                pid = b_.get("batter_id")
+                if pid:
+                    self.batters.setdefault(pid, _Decayed()).add(
+                        d, num / pa, pa, BATTER_HL_DAYS)
+                self.lg_woba.add(d, num / pa, pa, self.team_hl)
