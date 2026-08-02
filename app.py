@@ -8141,15 +8141,21 @@ def _opener_pass(sb, now, deadline):
             ask_c = (book or {}).get("best_ask")
             if bid_c is None and bid is not None:
                 bid_c = float(bid) * 100.0
+            # WHOLE CENTS ONLY (Padres 47.5¢ incident, Aug 2): the first
+            # half-cent peg made every display disagree — the ping rounded
+            # 47.5 up to "48", the Poly app truncated it down to "47", and
+            # the user read "you bet WITH the market". The app displays
+            # whole cents, so the bot bets whole cents: peg = floor(best
+            # bid) + 1¢. The half-cent of cheapness isn't worth a single
+            # ambiguous screenshot.
             if bid_c is not None and bid_c > 0:
-                target = bid_c + 0.5                  # one peg above the make
+                target = float(int(bid_c)) + 1.0      # one CENT above the make
                 if ask_c is not None and target >= ask_c:
                     target = bid_c                    # one-tick book → join
             else:
-                target = fair_c - 6.0                 # virgin book → anchor cheap
-                if ask_c is not None:
-                    target = min(target, ask_c - 0.5)
-            target = int(target * 2) / 2.0            # 0.5¢ tick floor
+                target = float(int(fair_c - 6.0))     # virgin book → anchor cheap
+                if ask_c is not None and target >= ask_c:
+                    target = float(int(ask_c - 1.0))
             side_c = target
             entry_edge = fair_c - side_c
             if (side_c <= 0 or side_c > _REPEG_NRFI_PRICE_CAP_C
