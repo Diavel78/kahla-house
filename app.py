@@ -9276,11 +9276,15 @@ def _repeg_tick(sb, now) -> dict:
                      .eq("id", r["id"]).execute())
                 except Exception:
                     pass
+                # The user's explicit ask (Aug 2): every LIVE bot move gets
+                # its own "outbid → bot re-pegged" ping so they can check
+                # it. This is also the ONLY notification for the event —
+                # the amend clears the outbid before _outbid_alerts reads.
                 _send_fill_telegram(
-                    f"🤖 RE-PEGGED — {ev} NRFI {side}: "
-                    f"{round(old_c) if old_c else '?'}¢ → {round(new_c)}¢ "
-                    f"(move {move_n}/{_REPEG_MAX_MOVES}, "
-                    f"{contracts:g} contracts, ${cost:.2f})")
+                    f"🔴🤖 OUTBID → BOT RE-PEGGED — {ev} NRFI {side}: "
+                    f"your bid moved {round(old_c) if old_c else '?'}¢ → "
+                    f"{round(new_c)}¢ (move {move_n}/{_REPEG_MAX_MOVES}, "
+                    f"{contracts:g} contracts, ${cost:.2f}). Check it.")
                 res["acted"] += 1
     except Exception:
         pass
