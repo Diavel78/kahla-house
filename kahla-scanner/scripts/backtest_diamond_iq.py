@@ -223,10 +223,10 @@ def main() -> int:
          dict(_iter1, batter_blend=0.5)),
         ("ITER2 batters b=1.0 (lineup wOBA full)",
          dict(_iter1, batter_blend=1.0)),
-        ("ITER3 = ITER2 b=0.5 + bullpen fatigue",
-         dict(_iter1, batter_blend=0.5, bp_fatigue=True)),
-        ("ITER3b = ITER1 + fatigue only (ablation)",
-         dict(_iter1, bp_fatigue=True)),
+        ("ITER3 = b=1.0 + bullpen fatigue (the combo)",
+         dict(_iter1, batter_blend=1.0, bp_fatigue=True)),
+        ("ITER2 b=0.75 (blend sweep)",
+         dict(_iter1, batter_blend=0.75)),
     ]
     for name, kw in variants:
         team_only = bool(kw.get("team_only"))
