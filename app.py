@@ -5674,6 +5674,7 @@ def api_polymarket_probe_exec():
         out["note"] = ("DRY RUN — preview only. Add &place=1 to run "
                        "create → modify → cancel for real (deep off-touch, "
                        "master-rule capped).")
+        _probe_log(out)
         return jsonify(out)
     out["dry"] = False
     oid: dict = {}
@@ -5681,6 +5682,7 @@ def api_polymarket_probe_exec():
         oid["v"] = (out["steps"]["create"]["resp"] or {}).get("id")
     if not oid.get("v"):
         out["note"] = "create returned no order id — stopping cycle"
+        _probe_log(out)
         return jsonify(out)
     _step("retrieve_after_create", lambda: client.orders.retrieve(oid["v"]))
     mod = {"marketSlug": slug,
@@ -5691,10 +5693,51 @@ def api_polymarket_probe_exec():
     out["modify_params"] = mod
     _step("modify", lambda: client.orders.modify(oid["v"], mod))
     _step("retrieve_after_modify", lambda: client.orders.retrieve(oid["v"]))
+    _step("list_after_modify", lambda: client.orders.list({"slugs": [slug]}))
     _step("cancel", lambda: client.orders.cancel(oid["v"],
                                                  {"marketSlug": slug}))
     _step("retrieve_after_cancel", lambda: client.orders.retrieve(oid["v"]))
+    _probe_log(out)
     return jsonify(out)
+
+
+def _probe_log(out: dict):
+    """Persist every probe-exec run to exec_probe_runs so results can be
+    read from the DB (run_sql.sh) instead of relayed by screenshot — the
+    go-live gate reads this table. Never raises."""
+    try:
+        get_supabase().table("exec_probe_runs").insert(
+            {"params": dict(request.args), "result": out}).execute()
+    except Exception:
+        pass
+
+
+@app.route("/debug-probe-exec")
+def debug_probe_exec_page():
+    """Auth'd browser-friendly wrapper for /api/polymarket/probe-exec (the
+    raw API needs the Firebase Bearer token a bare phone tap can't send —
+    gotcha #36's pattern). Sign in on / first, then open this page with the
+    same query params (?slug=...&place=1)."""
+    return ('''<!DOCTYPE html><html><head>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>firebase.initializeApp({apiKey:"AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",authDomain:"kahla-house.firebaseapp.com",projectId:"kahla-house"});</script>
+    </head><body style="background:#0b0e13;color:#e2e8f0;font-family:monospace;padding:16px;font-size:12px">
+    <h2 style="color:#f59e0b">Polymarket exec probe (re-peg bot go-live gate)</h2>
+    <pre id="out" style="white-space:pre-wrap;word-break:break-word">Running...</pre>
+    <script>
+    firebase.auth().onAuthStateChanged(async u => {
+        if (!u) { document.getElementById("out").textContent = "Not logged in. Go to / first, sign in, come back."; return; }
+        try {
+            const t = await u.getIdToken();
+            const r = await fetch("/api/polymarket/probe-exec" + location.search, {headers:{"Authorization":"Bearer "+t}});
+            const d = await r.json();
+            document.getElementById("out").textContent = JSON.stringify(d, null, 2);
+        } catch (e) {
+            document.getElementById("out").textContent = "ERROR: " + e.message;
+        }
+    });
+    </script></body></html>''')
 
 
 @app.route("/api/kalshi/probe")
