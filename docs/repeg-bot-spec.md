@@ -166,11 +166,19 @@ The stated endgame: the bot PLACES the model's Y/NRFI bets itself (the
 whole loop: find edge → rest maker order → re-peg bot manages → GTD
 expiry → resolver grades), including **during quiet time** — placing
 edges while the user sleeps is a core benefit, not a restricted window.
-**HARD PREREQUISITE (user, after the first live session): the re-peg bot
-must first accumulate real, verified, boring live re-peg reps. As of the
-lock date it has NEVER successfully made or moved a bet — nothing
-auto-places until that record exists.** Guardrails locked so far, the
-user's own words:
+**BUILT Aug 2 2026 as the OPENER LANE** (`app.py:_opener_pass`, riding
+the paperlog tick's leftover budget): evaluates the NRFI model against
+tomorrow's games the moment they're priced (6-40h window, one-shot per
+game), logs EVERY opener read as a paperlog shadow row (variant
+`'opener'`, gates_cleared=false always — the opener-edge dataset), and
+when the model's bet gate fires, places **ONE CONTRACT** live via the
+probe-proven create path. **THE REVIEW GATE (user's revision of the
+prerequisite): `AUTOBET_MAX_BETS=1` — the bot places exactly ONE bet
+ever, latched on bot_picks rows with `signal_blob.autobet` (any status,
+survives deploys), then disarms until the user reviews the bet and
+raises the cap.** "I'm willing to spend fifty cents a game to get this
+thing rolling — one bet, then I review." Guardrails locked, the user's
+own words:
 
 | # | Rule |
 |---|---|

@@ -7952,6 +7952,223 @@ def api_vsin_snapshot():
 # its nominal time even while still 'pre' — acceptable, forward data accrues.
 _PAPERLOG_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF", "UFC"]
 
+# ---------------------------------------------------------------------------
+# OPENER LANE (Aug 2 2026) — evaluate the model the moment tomorrow's line is
+# priced, BEFORE the market reacts (user: "not a steam engine — an engine
+# that decides before steam occurs"). v1 = MLB NRFI (90% of the user's book);
+# the scaffold (window/detection/dedup) is sport-generic for the September
+# football boards. Every evaluated opener logs a paperlog SHADOW row
+# (variant 'opener', gates_cleared=False always — tuner protection) = the
+# opener-edge dataset. AUTO-BET: when the model's bet gate fires at the
+# opener, place ONE CONTRACT live via the probe-proven create path —
+# bounded by THE USER'S REVIEW GATE: AUTOBET_MAX_BETS=1, latched on
+# bot_picks rows carrying signal_blob.autobet (any status, survives
+# deploys) — the bot places exactly one bet, ever, until the user reviews
+# it and raises the cap. Guards stack: model gate (2.5-6pp band + 54¢ cap)
+# → Poly-priced only → $6 MASTER RULE → no existing bet on the game →
+# latch → post-only create, GTD to first pitch, AUTOMATIC-flagged →
+# verify on the book → pick logged (repeg bot manages it from there) →
+# Telegram. Worst case by construction: one contract ≤ 54¢.
+# ---------------------------------------------------------------------------
+AUTOBET_ENABLED = True
+AUTOBET_MAX_BETS = 1          # ⚠ USER GATE — raise only after their review
+_AUTOBET_CONTRACTS = 1
+_OPENER_LO_H, _OPENER_HI_H = 6, 40   # beyond the live window → listing-time
+
+
+def _opener_pass(sb, now, deadline):
+    """Returns (shadow_rows, stats). Runs on the paperlog tick's LEFTOVER
+    budget — which is naturally free in the evening/overnight when
+    tomorrow's lines post and the 5h live window is empty. One-shot per
+    game (dedup on the opener paperlog row); a game whose NRFI market
+    isn't priced yet logs nothing and re-evaluates next tick until it is
+    (the listing detector). Never raises."""
+    stats = {"opener_eval": 0, "opener_bets": 0}
+    shadow_rows: list = []
+    try:
+        if _time.time() >= deadline - 1.5:
+            return shadow_rows, stats
+        lo = (now + timedelta(hours=_OPENER_LO_H)).isoformat()
+        hi = (now + timedelta(hours=_OPENER_HI_H)).isoformat()
+        try:
+            raw = (sb.table("markets").select("id,event_name,event_start,sport")
+                   .eq("sport", "MLB").eq("status", "active")
+                   .gte("event_start", lo).lte("event_start", hi)
+                   .order("event_start").limit(40).execute().data) or []
+        except Exception:
+            return shadow_rows, stats
+        games, seen = [], set()
+        for g in raw:
+            n = g.get("event_name") or ""
+            if n and n not in seen:
+                seen.add(n)
+                games.append(g)
+        if not games:
+            return shadow_rows, stats
+        mids = [g["id"] for g in games]
+        try:
+            done_rows = (sb.table("pickbot_paperlog").select("market_id")
+                         .in_("market_id", mids)
+                         .filter("signal_blob->>opener_shadow", "eq", "true")
+                         .limit(1000).execute().data) or []
+        except Exception:
+            return shadow_rows, stats     # fail-closed: no dedup read → skip
+        done = {r["market_id"] for r in done_rows}
+        cands = [g for g in games if g["id"] not in done]
+        if not cands:
+            return shadow_rows, stats
+        _random.shuffle(cands)
+        import handicapper_web
+        for g in cands:
+            if _time.time() >= deadline - 1.0:
+                break
+            try:
+                d = handicapper_web.build_dossier(sb, None, None,
+                                                  market_id=g["id"])
+            except Exception:
+                continue
+            stats["opener_eval"] += 1
+            nrfi = (d or {}).get("nrfi") or {}
+            if not nrfi or nrfi.get("p_nrfi") is None:
+                continue
+            if not nrfi.get("pmm_matched"):
+                continue                  # not priced yet → retry next tick
+            bet_side = nrfi.get("bet_side")
+            side = bet_side or ("no" if (nrfi.get("p_nrfi") or 0) >= 0.5
+                                else "yes")
+            blk = ((nrfi.get("polymarket") or {}).get(side)) or {}
+            entry = (nrfi.get("entry_price") if bet_side
+                     else blk.get("bid_american"))
+            if entry is None:
+                continue
+            es = g.get("event_start")
+            dt = None
+            sim = None
+            try:
+                dt = datetime.fromisoformat(str(es).replace("Z", "+00:00"))
+                sim = round((dt - now).total_seconds() / 60.0)
+            except Exception:
+                pass
+            edge = (nrfi.get("bet_edge_pp") if bet_side
+                    else blk.get("edge_pp"))
+            blob = {"opener_shadow": True, "p_nrfi": nrfi.get("p_nrfi"),
+                    "opener_edge_pp": edge, "would_bet": bool(bet_side),
+                    "nrfi_price_src": nrfi.get("price_src")}
+            shadow_rows.append({
+                "market_id": g["id"], "event_name": g.get("event_name"),
+                "event_start": es, "sport": "MLB",
+                "market_type": "nrfi", "side": side, "line": None,
+                "entry_price": entry, "units": 1, "confidence": "low",
+                "timing_window": "opener", "prime_core": False,
+                "starts_in_min": sim, "sharp_score": None, "edge_pp": edge,
+                "fair_american": (nrfi.get("nrfi_fair_american")
+                                  if side == "no"
+                                  else nrfi.get("yrfi_fair_american")),
+                "gates_cleared": False,
+                "signal_blob": blob, "logged_at": now.isoformat(),
+            })
+            # ---- AUTO-BET: one contract, once, then the review gate ----
+            if not (AUTOBET_ENABLED and bet_side and dt):
+                continue
+            if nrfi.get("price_src") != "polymarket":
+                continue                  # execution is Polymarket-only
+            slug = blk.get("slug")
+            synthetic = bool(blk.get("synthetic"))
+            bid = blk.get("bid")
+            if not slug or bid is None:
+                continue
+            side_c = float(bid) * 100.0
+            if side_c > _REPEG_NRFI_PRICE_CAP_C:
+                continue                  # 54¢ cap (belt over the model gate)
+            if _AUTOBET_CONTRACTS * side_c / 100.0 > _REPEG_MAX_COST_USD:
+                continue                  # ⚠ THE MASTER RULE
+            try:                          # the user's ONE-BET review latch
+                prior = (sb.table("bot_picks").select("id")
+                         .filter("signal_blob->>autobet", "eq", "true")
+                         .limit(AUTOBET_MAX_BETS + 1).execute().data) or []
+            except Exception:
+                continue                  # can't verify the latch → no bet
+            if len(prior) >= AUTOBET_MAX_BETS:
+                continue
+            owner = _kalshi_owner_uid()
+            if not owner:
+                continue
+            try:                          # never bet a game the user has bet
+                mine = (sb.table("bot_picks").select("id")
+                        .eq("market_id", g["id"]).eq("market_type", "nrfi")
+                        .eq("asked_by", owner).limit(1).execute().data) or []
+            except Exception:
+                continue
+            if mine:
+                continue
+            gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            canon = ((100.0 - side_c) / 100.0 if synthetic
+                     else side_c / 100.0)
+            intent = ("ORDER_INTENT_BUY_SHORT" if synthetic
+                      else "ORDER_INTENT_BUY_LONG")
+            params = {"marketSlug": slug, "intent": intent,
+                      "type": "ORDER_TYPE_LIMIT",
+                      "price": {"value": f"{canon:.3f}", "currency": "USD"},
+                      "quantity": _AUTOBET_CONTRACTS,
+                      "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
+                      "goodTillTime": gtt,
+                      "participateDontInitiate": True,
+                      "manualOrderIndicator":
+                          "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
+            try:
+                client = get_client()
+                cr = client.orders.create(params)
+                new_oid = (cr.get("id") if isinstance(cr, dict)
+                           else getattr(cr, "id", None))
+            except Exception as e:
+                _send_fill_telegram(
+                    f"🤖 AUTO-BET FAILED — {g.get('event_name')} NRFI "
+                    f"{side.upper()}: create errored ({e})"[:280])
+                continue
+            # The pick IS the latch — insert it unconditionally once create
+            # returned, so an ambiguous verify can never double-bet.
+            side_lbl = "NRFI" if side == "no" else "YRFI"
+            try:
+                sb.table("bot_picks").insert({
+                    "asked_by": owner,
+                    "query_text": "auto-bet: opener",
+                    "market_id": g["id"], "sport": "MLB",
+                    "event_name": g.get("event_name"), "event_start": es,
+                    "market_type": "nrfi", "side": side,
+                    "entry_book": "POLYMARKET",
+                    "entry_price": int(blk.get("bid_american")),
+                    "entry_line": None, "units": 1, "confidence": "low",
+                    "fair_prob": (nrfi.get("p_nrfi") if side == "no"
+                                  else nrfi.get("p_yrfi")),
+                    "edge_pp": edge,
+                    "reasons": [f"AUTO-BET at the opener — model "
+                                f"{side_lbl} edge {edge}pp, "
+                                f"{_AUTOBET_CONTRACTS} contract"],
+                    "signal_blob": {"autobet": True,
+                                    "contracts": _AUTOBET_CONTRACTS,
+                                    "order_id": new_oid, "pmm_slug": slug,
+                                    "pmm_synthetic": synthetic,
+                                    "source": "autobet",
+                                    "opener_edge_pp": edge},
+                }).execute()
+            except Exception:
+                pass
+            _time.sleep(1.2)
+            state = _repeg_verify_or_recreate(client, slug, intent, canon,
+                                              0, None, None)
+            ok = state in ("ok", "filled")
+            _send_fill_telegram(
+                f"🤖💰 AUTO-BET PLACED — {g.get('event_name')}: "
+                f"{side_lbl} {_AUTOBET_CONTRACTS} contract @ "
+                f"{round(side_c)}¢ (opener edge {edge}pp, "
+                f"{'verified on the book' if ok else 'VERIFY READ FAILED — CHECK THE APP'}). "
+                f"This is the ONE bet — bot is now disarmed until you "
+                f"review it.")
+            stats["opener_bets"] += 1
+    except Exception:
+        pass
+    return shadow_rows, stats
+
 
 @app.route("/api/handicapper/paperlog")
 def api_handicapper_paperlog():
@@ -8021,6 +8238,8 @@ def api_handicapper_paperlog():
             return "ufcveto"
         if b.get("total_blacklist_shadow") in (True, "true"):
             return "totshadow"
+        if b.get("opener_shadow") in (True, "true"):
+            return "opener"
         return ""
     try:
         recent = (sb.table("pickbot_paperlog")
@@ -8267,6 +8486,12 @@ def api_handicapper_paperlog():
                 "gates_cleared": b.get("gates_cleared", True),
                 "signal_blob": b["signal_blob"], "logged_at": now.isoformat(),
             })
+    # OPENER LANE — evaluate tomorrow's freshly-priced games on whatever
+    # budget the live window left over (naturally the evening/overnight
+    # hours, exactly when lines post). Shadow rows ride the same insert;
+    # the one-contract AUTO-BET (user review gate) fires inside.
+    opener_rows, opener_stats = _opener_pass(sb, now, deadline)
+    rows.extend(opener_rows)
     # Bet-time Pinnacle stamp (parlay-api.com) — runs BEFORE the insert so
     # the stamp rides each new bet row. No-op without a key / over budget.
     pin_stamped = _pin_stamp_rows(sb, rows, now)
@@ -8288,7 +8513,8 @@ def api_handicapper_paperlog():
     # (the JSON response is visible only in cron-job.org history).
     print(f"paperlog: processed={processed} cands={len(alert_cands)} "
           f"alerted={bets_alerted} take_warned={take_warned} "
-          f"outbid_warned={outbid_warned} repeg={repeg} new_rows={len(rows)}")
+          f"outbid_warned={outbid_warned} repeg={repeg} "
+          f"opener={opener_stats} new_rows={len(rows)}")
     new_rows = 0
     if rows:
         try:
@@ -8502,7 +8728,8 @@ def _is_shadow_blob(b) -> bool:
     b = b or {}
     return any(b.get(k) in (True, "true") for k in
                ("spread_model", "vsin_vetoed_pick", "ufc_duration",
-                "ufc_model_vetoed_pick", "total_blacklist_shadow"))
+                "ufc_model_vetoed_pick", "total_blacklist_shadow",
+                "opener_shadow"))
 
 
 def _alert_mkt_group(mt: str) -> str:
