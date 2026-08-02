@@ -7027,6 +7027,22 @@ def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
             rows.append((mt, side, line, cents))
             if mt == "ml" and side in ("home", "away"):
                 ml[side] = cents
+    # NRFI cents (Aug 2 2026 — the opener-study gap): the first-inning
+    # market was NEVER logged to pm_snapshots, so the evening-before →
+    # close NRFI price path didn't exist when the user asked for the
+    # early-entry analysis. Same lookup(), zero extra network — log the
+    # yes/no mids so the NRFI opener dataset accrues from today.
+    for row in (data.get("nrfi") or []):
+        side = row.get("side")
+        mid = (row.get("quote") or {}).get("mid")
+        if side not in ("yes", "no") or mid is None:
+            continue
+        try:
+            cents = round(float(mid) * 100)
+        except (TypeError, ValueError):
+            continue
+        if 0 < cents < 100:
+            rows.append(("nrfi", side, None, cents))
     # PROPS ride the same lookup() (July 2026 props pipeline) — every
     # non-main market with a live quote, shaped for prop_snapshots:
     # (prop_key, question, prop_type, line, yes-mid cents).
