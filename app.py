@@ -8399,13 +8399,17 @@ def _opener_pass(sb, now, deadline):
         for g in cands:
             if _time.time() >= deadline - 1.0:
                 break
-            _OPENER_PROBE_TS[g["id"]] = _time.time()
             try:
                 d = handicapper_web.build_dossier(sb, None, None,
                                                   market_id=g["id"])
             except Exception:
                 continue
             stats["opener_eval"] += 1
+            # Backoff stamp AFTER a completed build only (Aug 2 ~12:30am —
+            # stamping BEFORE meant an abandoned/failed build still hid
+            # the game for 20 min, and a warm container stamped its way
+            # through the whole pool into an instant-return stall).
+            _OPENER_PROBE_TS[g["id"]] = _time.time()
             # ---- MONEYLINE: Diamond IQ prices the opener (the model IS
             # the engine — no steam involved). Runs BEFORE the NRFI
             # section because that section `continue`s on its own guards.
@@ -8992,7 +8996,13 @@ def api_handicapper_paperlog():
     # (a couple of minutes), and NOTHING can starve.
     _random.shuffle(games)
 
-    deadline = _time.time() + 8.0
+    # Budget: 8s while live-window games need the tick's attention; 25s
+    # when the window is EMPTY (overnight — opener territory). The 8s was
+    # our own constant, not a platform limit (a 13s tick completed fine);
+    # one cold overnight dossier costs 6-10s, so 8s = at most one and
+    # often zero. Fluid billing charges compute, not the I/O wait these
+    # builds mostly are.
+    deadline = _time.time() + (8.0 if games else 25.0)
     rows, processed, with_pick = [], 0, 0
     for g in games:
         if _time.time() >= deadline:
