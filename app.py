@@ -8341,16 +8341,18 @@ def _opener_pass(sb, now, deadline):
         if not cands:
             return shadow_rows, stats
         # THE POLYMARKET LIST IS THE LIST (user, Aug 2 ~1am AZ): one bulk
-        # events.list call = the whole bettable universe. Only games ON
-        # it get a dossier; unlisted games cost nothing and re-check on
-        # the next cache refresh. Fetch failure → filter skipped.
+        # events.list call = the whole bettable universe, listed games
+        # jump the queue. PRIORITY, NOT EXCLUSION (first cut was a hard
+        # filter and its membership check misfired — opener_pool:21,
+        # opener_listed:0 while the user held fills — stalling the lane
+        # AGAIN; as a sort key a wrong check only slows, never stops).
         listed = _pmm_listed_mlb_keys()
+        lset: set = set()
         if listed is not None:
             stats["opener_pool"] = len(cands)
-            cands = [g for g in cands if _opener_game_listed(g, listed)]
-            stats["opener_listed"] = len(cands)
-        if not cands:
-            return shadow_rows, stats
+            lset = {g["id"] for g in cands if _opener_game_listed(g, listed)}
+            stats["opener_listed"] = len(lset)
+            stats["opener_ldates"] = sorted({k[0] for k in listed})[:4]
         # FRESH-FIRST, then nearest-first (Aug 2 ~midnight AZ — the
         # nearest-first fix stalled the sweep a different way: a game
         # with an ML shadow but NO NRFI listing is un-completable until
@@ -8362,7 +8364,8 @@ def _opener_pass(sb, now, deadline):
         # new slate drains completely before any straggler gets a retry
         # slot.)
         evaluated = {mid for (mid, _mt) in done}
-        cands.sort(key=lambda g: (g["id"] in evaluated,
+        cands.sort(key=lambda g: (g["id"] not in lset if lset else False,
+                                  g["id"] in evaluated,
                                   str(g.get("event_start") or "")))
         # MINUTE-ROTATED HEAD (Aug 2 ~1am AZ — the stall's true root:
         # an UNLISTED game's dossier is the SLOWEST build (the PMM
