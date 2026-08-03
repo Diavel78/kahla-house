@@ -1,0 +1,37 @@
+name: Crease IQ xG — Backtest
+
+# P3: shot-quality (xG) walk-forward backtest over nhl_shot_events +
+# nhl_goalie_games. Manual dispatch; results print to the run log.
+# Requires both spines backfilled first.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: crease-iq-xg-backtest
+  cancel-in-progress: false
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run backtest
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.backtest_crease_iq_xg
+      - name: Node version note
+        if: always()
+        run: "true"
