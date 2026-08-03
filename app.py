@@ -10958,6 +10958,9 @@ def _tg_send_now(text):
 _TG_BATCH_MIN = 10   # max ONE summary message per this many minutes
 
 
+_TG_DIGEST_ALLOW = ("🤖 REPEG STOP", "FAILED", "LOST")
+
+
 def _send_fill_telegram(text, urgent=False):
     """Queue a Telegram message for the 10-MINUTE BATCH (user, Aug 2 2026:
     "Telegram messages every 10 minutes max… If something happened in that
@@ -10974,6 +10977,15 @@ def _send_fill_telegram(text, urgent=False):
     so the batch window counts it (the "max one per 10 min" stays honest).
     DB unreachable → degrade to direct send rather than dropping the ping."""
     urgent = urgent or text.lstrip().startswith("🚨")
+    # DIGEST DIET (user, Aug 3 — settled on: "I don't need filled
+    # either"): ONLY REPEG STOP + failure states ride the digest. Fills
+    # show in the app; routine chatter — auto-bet placements, outbid→
+    # re-pegged moves, shadows, outbid pings — is DROPPED here centrally
+    # (return True so callers' marker stamping proceeds exactly as if
+    # sent; the markers are the dedup state, not the notification).
+    # 🚨-urgent bypasses as always.
+    if not urgent and not any(k in text for k in _TG_DIGEST_ALLOW):
+        return True
     if urgent:
         ok = _tg_send_now(text)
         if ok:
