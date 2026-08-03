@@ -7979,12 +7979,19 @@ AUTOBET_ENABLED = True
 # answer with real money.
 AUTOBET_MAX_BETS = 20
 _AUTOBET_CONTRACTS = 1
-_OPENER_LO_H, _OPENER_HI_H = 6, 64   # beyond the live window → listing-time
-# (40→64 Aug 2 evening — user caught Aug-4 games posted while it was still
-# Aug 2: Poly lists T+2 evenings ~42-46h out, past the old fence. "First
-# posted line" means the window chases the LISTING, not the calendar. The
-# rolling 20-bet slate cap + $6 Master Rule are unchanged and now govern
-# the union of both open slates.)
+_OPENER_LO_H = 6                # below this = the live game-day window
+_OPENER_HI_H = 14 * 24          # sanity bound only — NOT a strategy fence
+# ("Why have a fence at all??" — user, Aug 2 evening, after catching Aug-4
+# lines posted while the old 40h ceiling ignored them.) The REAL gate is
+# "is it listed on Polymarket yet": a listed game gets priced and bet the
+# tick it's found, however far out. The calendar bound exists only as a
+# query sanity cap; compute is protected by the PROBE BACKOFF below — an
+# UNLISTED game re-probes at most every _OPENER_PROBE_S instead of every
+# tick, so the whole future schedule can sit in the pool without churning
+# a dossier build per game per minute. Cold start resets the backoff map
+# (one extra probe burst, harmless).
+_OPENER_PROBE_S = 1200          # unlisted-game re-probe cadence (20 min)
+_OPENER_PROBE_TS: dict = {}     # market_id → last probe ts (warm-container)
 
 # --- DIAMOND IQ LIVE ("the steam engine dies tonight" — Aug 2 2026) ---
 # MLB moneylines are priced by the MODEL, not by movement: the daily
@@ -8216,7 +8223,7 @@ def _opener_pass(sb, now, deadline):
             raw = (sb.table("markets").select("id,event_name,event_start,sport")
                    .eq("sport", "MLB").eq("status", "active")
                    .gte("event_start", lo).lte("event_start", hi)
-                   .order("event_start").limit(40).execute().data) or []
+                   .order("event_start").limit(150).execute().data) or []
         except Exception:
             return shadow_rows, stats
         games, seen = [], set()
@@ -8240,6 +8247,14 @@ def _opener_pass(sb, now, deadline):
         cands = [g for g in games
                  if (g["id"], "nrfi") not in done
                  or (g["id"], "moneyline") not in done]
+        # PROBE BACKOFF — the no-fence budget guard: a game we probed
+        # recently and found UNLISTED waits _OPENER_PROBE_S before the
+        # next probe. A game that listed got its rows and left via the
+        # done-filter, so this only ever throttles the unlisted tail.
+        _now_ts = _time.time()
+        cands = [g for g in cands
+                 if _now_ts - _OPENER_PROBE_TS.get(g["id"], 0.0)
+                 >= _OPENER_PROBE_S]
         if not cands:
             return shadow_rows, stats
         _random.shuffle(cands)
@@ -8247,6 +8262,7 @@ def _opener_pass(sb, now, deadline):
         for g in cands:
             if _time.time() >= deadline - 1.0:
                 break
+            _OPENER_PROBE_TS[g["id"]] = _time.time()
             try:
                 d = handicapper_web.build_dossier(sb, None, None,
                                                   market_id=g["id"])
