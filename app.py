@@ -8208,6 +8208,69 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
     return True
 
 
+_PMM_LISTED_CACHE: dict = {"at": 0.0, "keys": None}
+
+
+def _pmm_listed_mlb_keys():
+    """THE bettable universe, from Polymarket itself (user, Aug 2 ~1am AZ:
+    "we can't bet the game unless it's on Polymarket... we have the damn
+    list from Polymarket, with a date — there's your damn list"). ONE
+    events.list call returns every listed MLB event; slugs carry tricodes
+    + the ET date (mlb-nym-phi-2026-07-16). Returns {(et_date,
+    frozenset({code_a, code_b}))}; None on fetch failure (FAIL-OPEN — the
+    caller skips the filter rather than skipping bettable games). 4-min
+    cache. This replaces per-game discovery-by-probing: an UNLISTED game
+    costs zero dossier builds now, so the poison-probe class is gone."""
+    if (_time.time() - _PMM_LISTED_CACHE["at"] < 240
+            and _PMM_LISTED_CACHE["keys"] is not None):
+        return _PMM_LISTED_CACHE["keys"]
+    try:
+        client = get_client()
+        keys = set()
+        resp = client.events.list({"tagSlug": "mlb", "closed": False,
+                                   "limit": 200})
+        evs = (resp.get("events") if isinstance(resp, dict)
+               else getattr(resp, "events", None)) or []
+        for ev in evs:
+            slug = (ev.get("slug") if isinstance(ev, dict)
+                    else getattr(ev, "slug", None)) or ""
+            m = re.match(r"^mlb-([a-z]{2,4})-([a-z]{2,4})-"
+                         r"(\d{4}-\d{2}-\d{2})$", slug)
+            if m:
+                keys.add((m.group(3), frozenset((m.group(1), m.group(2)))))
+        if not keys:
+            return None                  # empty read = suspect → fail-open
+        _PMM_LISTED_CACHE.update(at=_time.time(), keys=keys)
+        return keys
+    except Exception:
+        return None
+
+
+def _opener_game_listed(g, keys) -> bool:
+    """Is OUR market row on Polymarket's list? Unknown team codes or any
+    parse trouble → True (probe rather than silently skip a bettable
+    game — fail-open in the direction of betting)."""
+    try:
+        import pmm_markets
+        ev = g.get("event_name") or ""
+        if " @ " not in ev:
+            return True
+        away, home = [s.strip() for s in ev.split(" @ ", 1)]
+        ac = {c.lower() for c in (pmm_markets._team_code_cands(away, "MLB") or set())}
+        hc = {c.lower() for c in (pmm_markets._team_code_cands(home, "MLB") or set())}
+        if not ac or not hc:
+            return True
+        dt = datetime.fromisoformat(str(g.get("event_start")).replace("Z", "+00:00"))
+        d_et = pmm_markets._bet_et_date(dt)
+        ds = (d_et or dt.date()).isoformat()
+        for (kd, codes) in keys:
+            if kd == ds and (codes & ac) and (codes & hc):
+                return True
+        return False
+    except Exception:
+        return True
+
+
 def _opener_persist(sb, row) -> bool:
     """Insert ONE opener shadow row IMMEDIATELY (crash-proofing, Aug 2
     ~midnight AZ — the user: "It does not take THIS long to build
@@ -8275,6 +8338,17 @@ def _opener_pass(sb, now, deadline):
         cands = [g for g in cands
                  if _now_ts - _OPENER_PROBE_TS.get(g["id"], 0.0)
                  >= _OPENER_PROBE_S]
+        if not cands:
+            return shadow_rows, stats
+        # THE POLYMARKET LIST IS THE LIST (user, Aug 2 ~1am AZ): one bulk
+        # events.list call = the whole bettable universe. Only games ON
+        # it get a dossier; unlisted games cost nothing and re-check on
+        # the next cache refresh. Fetch failure → filter skipped.
+        listed = _pmm_listed_mlb_keys()
+        if listed is not None:
+            stats["opener_pool"] = len(cands)
+            cands = [g for g in cands if _opener_game_listed(g, listed)]
+            stats["opener_listed"] = len(cands)
         if not cands:
             return shadow_rows, stats
         # FRESH-FIRST, then nearest-first (Aug 2 ~midnight AZ — the
