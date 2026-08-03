@@ -7999,7 +7999,12 @@ _OPENER_HI_H = 72               # pool bound ≈ Poly's real listing horizon
 # tick, so the whole future schedule can sit in the pool without churning
 # a dossier build per game per minute. Cold start resets the backoff map
 # (one extra probe burst, harmless).
-_OPENER_PROBE_S = 1200          # unlisted-game re-probe cadence (20 min)
+_OPENER_PROBE_S = 420           # unlisted-game re-probe cadence (7 min —
+                                # affordable inside the 25s overnight
+                                # budget; ALSO: this deploy itself wipes
+                                # the stale stamp-before-build residue
+                                # that had a warm container insta-
+                                # returning at the backoff gate)
 _OPENER_PROBE_TS: dict = {}     # market_id → last probe ts (warm-container)
 
 # --- DIAMOND IQ LIVE ("the steam engine dies tonight" — Aug 2 2026) ---
