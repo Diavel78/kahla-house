@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "probe | backfill | delta"
+        description: "probe | backfill | backfill-platoon | delta"
         required: false
         default: "delta"
   schedule:
@@ -50,5 +50,7 @@ jobs:
           case "$MODE" in
             probe)    python -m scripts.ingest_savant_xwoba --probe ;;
             backfill) python -m scripts.ingest_savant_xwoba --backfill --commit ;;
-            delta|*)  python -m scripts.ingest_savant_xwoba --delta --commit ;;
+            backfill-platoon)
+                      python -m scripts.ingest_savant_xwoba --backfill --platoon --commit ;;
+            delta|*)  python -m scripts.ingest_savant_xwoba --delta --platoon --commit ;;
           esac
