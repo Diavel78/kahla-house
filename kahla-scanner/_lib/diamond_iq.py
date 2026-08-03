@@ -68,6 +68,17 @@ _WOBA = {"bb": 0.69, "hbp": 0.72, "b1": 0.89,
 BP_FATIGUE_COEF = 0.05     # pen runs +5% per ~18 reliever-outs above norm
 BP_FATIGUE_NORM = 12.0     # typical reliever outs over the prior 2 days
 
+# ITER5 (platoon spine): per-batter REALIZED wOBA split by opposing
+# pitcher hand (mlb_platoon_batter_days), applied in the lineup factor
+# against the opposing STARTER's hand (mlb_pitcher_throws — biology,
+# known pre-game, walk-forward safe to preload). The split is shrunk
+# HARD toward the batter's own overall wOBA scaled by the league
+# handedness tilt (lgp/lgw): no split data → exactly his overall
+# quality (zero drift), and the league-average platoon response — which
+# every pitcher's FIP already absorbs — is never double-counted. Only
+# evidence of an UNUSUAL platoon response moves a batter.
+PLATOON_PRIOR_PA = 600.0   # platoon deltas are noisy — heavy shrink
+
 
 def pyth_prob(xr_h: float, xr_a: float) -> float:
     """Pythagenpat home win prob — the run-ENVIRONMENT-aware mapping the
@@ -90,7 +101,8 @@ class DiamondState:
                  opp_adj: bool = False, park_adj: bool = False,
                  hr_shrink: float = 1.0,
                  batter_blend: float = 0.0, bp_fatigue: bool = False,
-                 xwoba_blend: float = 0.0):
+                 xwoba_blend: float = 0.0, platoon_blend: float = 0.0,
+                 platoon_prior: float = PLATOON_PRIOR_PA):
         self.sp_prior = sp_prior
         self.sp_hl = sp_hl
         self.team_hl = team_hl
@@ -114,10 +126,17 @@ class DiamondState:
         # realized wOBA inside each batter's quality ratio (luck
         # regression — xwOBA finds true talent faster).
         self.xwoba_blend = xwoba_blend
+        # ITER5: platoon_blend = weight of the vs-hand split quality vs
+        # the overall quality inside each batter's ratio.
+        self.platoon_blend = platoon_blend
+        self.platoon_prior = platoon_prior
         self.batters: dict[int, _Decayed] = {}      # realized wOBA per PA
         self.batters_x: dict[int, _Decayed] = {}    # expected wOBA per PA
+        self.batters_p: dict[tuple[int, str], _Decayed] = {}  # (id, vs_hand)
         self.lg_woba = _Decayed()
         self.lg_xwoba = _Decayed()
+        self.lg_woba_p = {"L": _Decayed(), "R": _Decayed()}
+        self.pitcher_throws: dict[int, str] = {}    # static hand map
         self.bp_recent: dict[str, dict] = {}        # team → {date: reliever outs}
         self.team_off: dict[str, _Decayed] = {}     # runs scored / game
         self.team_bp: dict[str, _Decayed] = {}      # bullpen RA9 (per out)
@@ -141,6 +160,27 @@ class DiamondState:
             self.batters_x.setdefault(pid, _Decayed()).add(
                 d, v, pa, BATTER_HL_DAYS)
             self.lg_xwoba.add(d, v, pa, self.team_hl)
+
+    def feed_platoon(self, d: date, day_rows: list[dict]):
+        """Feed one DAY of platoon aggregates ({batter_id, vs_hand, pa,
+        woba_sum} — realized wOBA vs that pitcher hand). Same strictly-
+        before-the-game walk-forward contract as feed_xwoba."""
+        for r in day_rows:
+            pa = r.get("pa") or 0
+            ws = r.get("woba_sum")
+            pid = r.get("batter_id")
+            hand = r.get("vs_hand")
+            if not pid or pa <= 0 or ws is None or hand not in ("L", "R"):
+                continue
+            v = float(ws) / pa
+            self.batters_p.setdefault((pid, hand), _Decayed()).add(
+                d, v, pa, BATTER_HL_DAYS)
+            self.lg_woba_p[hand].add(d, v, pa, self.team_hl)
+
+    def set_pitcher_throws(self, mapping: dict[int, str]):
+        """Preload the static pitcher hand map (biology — known pre-game
+        for every probable, so no walk-forward concern)."""
+        self.pitcher_throws = dict(mapping or {})
 
     # ---- reads ------------------------------------------------------------
     def _shrunk(self, acc: _Decayed | None, d: date, hl: float,
@@ -205,15 +245,21 @@ class DiamondState:
             bp_factor *= max(0.92, min(1.12, f))
         return self.sp_share * sp_factor + (1 - self.sp_share) * bp_factor
 
-    def _lineup_factor(self, lineup, d: date, lgw: float):
+    def _lineup_factor(self, lineup, d: date, lgw: float,
+                       vs_hand: str | None = None):
         """Offense factor from the ACTUAL lineup: slot-weighted shrunk
         wOBA vs league, raised to the runs elasticity. None = no lineup
-        (caller falls back to the team-runs ratio)."""
+        (caller falls back to the team-runs ratio). vs_hand (ITER5) =
+        the opposing starter's throwing hand for platoon adjustment."""
         if not lineup or not lgw:
             return None
         xb = self.xwoba_blend
         _, lgx = (self.lg_xwoba.mean(d, self.team_hl) if xb > 0
                   else (0.0, 0.0))
+        pb = self.platoon_blend
+        lgp = 0.0
+        if pb > 0 and vs_hand in ("L", "R"):
+            _, lgp = self.lg_woba_p[vs_hand].mean(d, self.team_hl)
         tot_w = tot = 0.0
         for i, pid in enumerate(lineup[:9]):
             w = SLOT_W[i] if i < len(SLOT_W) else SLOT_W[-1]
@@ -229,6 +275,18 @@ class DiamondState:
                 wx = ((xval * xpa + lgx * BATTER_PRIOR_PA)
                       / (xpa + BATTER_PRIOR_PA))
                 q = (1 - xb) * q + xb * (wx / lgx)
+            if pb > 0 and lgp:
+                # Shrink the vs-hand rate toward the batter's OWN overall
+                # scaled by the league handedness tilt — no data → q
+                # unchanged; the league-average platoon response (already
+                # in the pitcher's FIP) never double-counts.
+                pacc = self.batters_p.get((pid, vs_hand))
+                ppa, pval = (pacc.mean(d, BATTER_HL_DAYS) if pacc
+                             else (0.0, 0.0))
+                prior_mean = wo * (lgp / lgw)
+                wop = ((pval * ppa + prior_mean * self.platoon_prior)
+                       / (ppa + self.platoon_prior))
+                q = (1 - pb) * q + pb * (wop / lgp)
             tot += w * q
             tot_w += w
         if not tot_w:
@@ -255,8 +313,11 @@ class DiamondState:
         r_h, r_a = off_h / lg_rpg, off_a / lg_rpg
         if self.batter_blend > 0 and not team_only:
             _, lgw = self.lg_woba.mean(d, self.team_hl)
-            bf_h = self._lineup_factor(home_lineup, d, lgw)
-            bf_a = self._lineup_factor(away_lineup, d, lgw)
+            # ITER5: each lineup faces the OPPOSING starter's hand
+            vs_h = self.pitcher_throws.get(away_sp) if away_sp else None
+            vs_a = self.pitcher_throws.get(home_sp) if home_sp else None
+            bf_h = self._lineup_factor(home_lineup, d, lgw, vs_h)
+            bf_a = self._lineup_factor(away_lineup, d, lgw, vs_a)
             b = self.batter_blend
             if bf_h is not None:
                 r_h = (1 - b) * r_h + b * bf_h

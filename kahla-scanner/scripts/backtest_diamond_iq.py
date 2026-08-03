@@ -79,6 +79,38 @@ def load_xwoba_days(sb) -> list[tuple]:
     return sorted(by_day.items())
 
 
+def load_platoon_days(sb) -> list[tuple]:
+    """[(date, [day rows])] sorted — the walk-forward platoon feed."""
+    out, page = [], 0
+    while True:      # explicit paging — the 1,000-row lesson
+        rows = (sb.table("mlb_platoon_batter_days")
+                .select("game_date,batter_id,vs_hand,pa,woba_sum")
+                .order("game_date").order("batter_id").order("vs_hand")
+                .range(page * 1000, page * 1000 + 999).execute().data) or []
+        out.extend(rows)
+        if len(rows) < 1000:
+            break
+        page += 1
+    by_day: dict = defaultdict(list)
+    for r in out:
+        by_day[date.fromisoformat(r["game_date"])].append(r)
+    return sorted(by_day.items())
+
+
+def load_pitcher_throws(sb) -> dict[int, str]:
+    """Static pitcher hand map (biology — safe to preload, no leakage)."""
+    out, page = {}, 0
+    while True:      # explicit paging — the 1,000-row lesson
+        rows = (sb.table("mlb_pitcher_throws").select("pitcher_id,throws")
+                .range(page * 1000, page * 1000 + 999).execute().data) or []
+        for r in rows:
+            out[r["pitcher_id"]] = r["throws"]
+        if len(rows) < 1000:
+            break
+        page += 1
+    return out
+
+
 def group_games(rows: list[dict], batter_rows: list[dict] | None = None
                 ) -> list[dict]:
     b_by_game: dict = defaultdict(list)
@@ -166,17 +198,29 @@ def run(games: list[dict], team_only: bool, known_starter: bool = True,
         opp_adj: bool = False, park_adj: bool = False,
         hr_shrink: float = 1.0, pyth: bool = False,
         batter_blend: float = 0.0, bp_fatigue: bool = False,
-        xwoba_blend: float = 0.0, xdays: list | None = None) -> dict:
+        xwoba_blend: float = 0.0, xdays: list | None = None,
+        platoon_blend: float = 0.0, platoon_prior: float | None = None,
+        pdays: list | None = None, throws: dict | None = None) -> dict:
     state = di.DiamondState(opp_adj=opp_adj, park_adj=park_adj,
                             hr_shrink=hr_shrink, batter_blend=batter_blend,
-                            bp_fatigue=bp_fatigue, xwoba_blend=xwoba_blend)
+                            bp_fatigue=bp_fatigue, xwoba_blend=xwoba_blend,
+                            platoon_blend=platoon_blend,
+                            platoon_prior=(platoon_prior
+                                           if platoon_prior is not None
+                                           else di.PLATOON_PRIOR_PA))
+    state.set_pitcher_throws(throws or {})
     train, evald = [], []
     xi, xdays = 0, (xdays or [])
+    pi, pdays = 0, (pdays or [])
     for g in games:
-        # feed xwOBA days strictly BEFORE this game date (walk-forward)
+        # feed xwOBA + platoon days strictly BEFORE this game date
+        # (walk-forward)
         while xi < len(xdays) and xdays[xi][0] < g["date"]:
             state.feed_xwoba(xdays[xi][0], xdays[xi][1])
             xi += 1
+        while pi < len(pdays) and pdays[pi][0] < g["date"]:
+            state.feed_platoon(pdays[pi][0], pdays[pi][1])
+            pi += 1
         hs = g["teams"][g["home"]]["starter"] if known_starter else None
         as_ = g["teams"][g["away"]]["starter"] if known_starter else None
         proj = state.project(g["home"], g["away"], g["date"], hs, as_,
@@ -241,21 +285,30 @@ def main() -> int:
     xdays = load_xwoba_days(sb)
     log.info("xwOBA feed: %d days (%s → %s)", len(xdays),
              xdays[0][0] if xdays else "-", xdays[-1][0] if xdays else "-")
+    pdays = load_platoon_days(sb)
+    throws = load_pitcher_throws(sb)
+    log.info("platoon feed: %d days (%s → %s) · %d pitcher hands (%d LHP)",
+             len(pdays), pdays[0][0] if pdays else "-",
+             pdays[-1][0] if pdays else "-", len(throws),
+             sum(1 for h in throws.values() if h == "L"))
     _champ = {"pyth": True, "opp_adj": True, "park_adj": True,
               "hr_shrink": 2.5, "batter_blend": 1.0, "bp_fatigue": True}
     variants = [
         ("ITER3 CHAMPION (lineup wOBA + fatigue) — control", dict(_champ)),
-        ("ITER4 xwOBA blend 0.5 (half luck-regression)",
-         dict(_champ, xwoba_blend=0.5)),
-        ("ITER4 xwOBA blend 0.75",
-         dict(_champ, xwoba_blend=0.75)),
-        ("ITER4 xwOBA blend 1.0 (pure expected)",
-         dict(_champ, xwoba_blend=1.0)),
+        ("ITER5 platoon blend 0.35 (prior 600)",
+         dict(_champ, platoon_blend=0.35)),
+        ("ITER5 platoon blend 0.7 (prior 600)",
+         dict(_champ, platoon_blend=0.7)),
+        ("ITER5 platoon blend 1.0 (prior 600)",
+         dict(_champ, platoon_blend=1.0)),
+        ("ITER5 platoon blend 1.0, prior 300 (lighter shrink)",
+         dict(_champ, platoon_blend=1.0, platoon_prior=300.0)),
     ]
     for name, kw in variants:
         team_only = bool(kw.get("team_only"))
         extra = {k: v for k, v in kw.items() if k != "team_only"}
-        r = run(games, team_only, True, xdays=xdays, **extra)
+        r = run(games, team_only, True, xdays=xdays, pdays=pdays,
+                throws=throws, **extra)
         print(f"\n=== {name} ===")
         if r["n"] == 0:
             print("  no eval games")
