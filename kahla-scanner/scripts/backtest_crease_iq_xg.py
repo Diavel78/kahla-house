@@ -64,9 +64,10 @@ def _tsec(period, tip) -> int | None:
         return None
 
 
-def build_shot_layer(shots: list[dict], goalie_home: dict) -> list[tuple]:
+def build_shot_layer(shots: list[dict], goalie_home: dict,
+                     venue_of: dict | None = None) -> list[tuple]:
     """→ raws: (game_id, date, goalie_is_home, goalie_id, x, y, shot_type,
-    skater_diff, rebound, score_diff, label). Chronological per game so
+    skater_diff, rebound, score_diff, label, venue). Chronological per game so
     the P3b extras are computable: rebound = prior same-team SHOT-ON-GOAL
     (a save — goals stop play, misses leave no rebound) within REBOUND_S;
     score_diff = shooter goals − defender goals AT SHOT TIME. Empty-net
@@ -99,7 +100,8 @@ def build_shot_layer(shots: list[dict], goalie_home: dict) -> list[tuple]:
                     raws.append((s["game_id"],
                                  date.fromisoformat(s["game_date"]), gh, gl,
                                  s.get("x"), s.get("y"), s.get("shot_type"),
-                                 sk, reb, sdiff, lab))
+                                 sk, reb, sdiff, lab,
+                                 (venue_of or {}).get(s["game_id"])))
             # state updates AFTER the pre-shot read
             if (s.get("event_type") == "shot-on-goal" and t is not None
                     and tid is not None):
@@ -110,31 +112,59 @@ def build_shot_layer(shots: list[dict], goalie_home: dict) -> list[tuple]:
     return raws
 
 
-def _feats(r, use_reb: bool, use_score: bool):
+def rink_factors(raws) -> dict:
+    """P3c: per-venue radial distance correction from AWAY-team shots on
+    the TRAIN season only (frozen for eval). Visitors rotate through
+    every rink as a league-average sample — a venue where their recorded
+    distances run systematically short/long is scorer bias, not hockey.
+    factor = league_mean / venue_mean, clamped ±15% (bias is subtle)."""
+    import math as _m
+    per: dict = defaultdict(lambda: [0.0, 0])
+    lg_s, lg_n = 0.0, 0
+    for r in raws:
+        if r[1] >= EVAL_START or not r[2]:   # train only; gh=True ⇒ away shooter
+            continue
+        v = r[11]
+        if not v or r[4] is None or r[5] is None:
+            continue
+        d = _m.hypot(89.0 - abs(float(r[4])), float(r[5]))
+        per[v][0] += d
+        per[v][1] += 1
+        lg_s += d
+        lg_n += 1
+    if not lg_n:
+        return {}
+    lg = lg_s / lg_n
+    return {v: max(0.85, min(1.15, lg / (s / n)))
+            for v, (s, n) in per.items() if n >= 300}
+
+
+def _feats(r, use_reb: bool, use_score: bool, rf: dict | None = None):
     return xgm.shot_features(r[4], r[5], r[6], r[7],
                              r[8] if use_reb else 0.0,
-                             r[9] if use_score else 0)
+                             r[9] if use_score else 0,
+                             (rf.get(r[11], 1.0) if rf else 1.0))
 
 
-def season_samples(raws, use_reb, use_score) -> tuple[list, list]:
+def season_samples(raws, use_reb, use_score, rf=None) -> tuple[list, list]:
     """(train, eval) (features, label) pairs for one feature config."""
     tr, ev = [], []
     for r in raws:
-        f = _feats(r, use_reb, use_score)
+        f = _feats(r, use_reb, use_score, rf)
         if f is None:
             continue
         (tr if r[1] < EVAL_START else ev).append((f, r[10]))
     return tr, ev
 
 
-def score_games(model, raws, use_reb, use_score) -> dict:
+def score_games(model, raws, use_reb, use_score, rf=None) -> dict:
     """game_id → {'home_xg','away_xg','home_gf','away_gf',
     'goalies': {gid: [xg_faced, goals_allowed]}} (non-EN attempts).
     Shooter side = opposite the goalie's side."""
     per_game: dict = {}
     for r in raws:
         gid_game, goalie_is_home, goalie_id, y = r[0], r[2], r[3], r[10]
-        f = _feats(r, use_reb, use_score)
+        f = _feats(r, use_reb, use_score, rf)
         if f is None:
             continue
         p = model.predict(f)
@@ -284,30 +314,39 @@ def main() -> int:
     log.info("goalie spine: %d rows → %d games", len(rows), len(games))
     shots = load_shots(sb)
     log.info("shot spine: %d unblocked attempts", len(shots))
-    raws = build_shot_layer(shots, goalie_home)
+    venue_of = {g["game_id"]: g["home"] for g in games}
+    raws = build_shot_layer(shots, goalie_home, venue_of)
     n_reb = sum(1 for r in raws if r[8])
     log.info("usable samples: %d (EN + unmatched dropped: %d) · "
              "rebounds %d (%.1f%%) · nonzero score-state %d", len(raws),
              len(shots) - len(raws), n_reb, 100.0 * n_reb / max(1, len(raws)),
              sum(1 for r in raws if r[9]))
 
-    # P3b ablation: each feature config gets its OWN xG fit + aggregates.
-    # (False, False) is the P3 champion control and must reproduce it.
+    # P3c: rink-scorer distance factors (train-season away shots, frozen)
+    rf = rink_factors(raws)
+    _ranked = sorted(rf.items(), key=lambda kv: kv[1])
+    print("\n=== RINK FACTORS (train-season away-shot distances; "
+          "<1 = rink records shots too FAR, >1 = too CLOSE) ===")
+    print("  " + ", ".join(f"{v}:{f:.3f}" for v, f in _ranked[:5])
+          + "  ...  " + ", ".join(f"{v}:{f:.3f}" for v, f in _ranked[-5:]))
+
+    # Ablation: each config = (use_reb, use_score, rink) with its OWN xG
+    # fit + aggregates. (False, False, None) is the P3 champion control.
     configs = [
-        ("BASE (P3 champion control)", False, False),
-        ("+REBOUND", True, False),
-        ("+SCORE STATE", False, True),
-        ("+BOTH", True, True),
+        ("BASE (P3 champion control)", False, False, None),
+        ("+RINK", False, False, rf),
+        ("+RINK +REBOUND", True, False, rf),
+        ("+RINK +BOTH", True, True, rf),
     ]
     fitted = {}
-    for name, ur, us in configs:
-        tr, ev = season_samples(raws, ur, us)
+    for name, ur, us, r_f in configs:
+        tr, ev = season_samples(raws, ur, us, r_f)
         m = xgm.fit_xg(tr)
         if m is None:
             log.error("xG fit failed for %s", name)
             return 2
-        fitted[(ur, us)] = m
-        if (ur, us) == (True, True):
+        fitted[(ur, us, r_f is not None)] = m
+        if name == "+RINK":
             print(f"\n=== xG MODEL {name} — frozen-model calibration ===")
             print("  train:")
             for line in xgm.calibration_table(m, tr)[::3]:
@@ -317,15 +356,16 @@ def main() -> int:
                 print("   ", line)
 
     variants = [
-        ("xG CORE — BASE (P3 champion control)", (False, False), {}),
-        ("xG CORE — +REBOUND", (True, False), {}),
-        ("xG CORE — +SCORE STATE", (False, True), {}),
-        ("xG CORE — +BOTH", (True, True), {}),
-        ("xG +GOALIE (prior 60) — +BOTH", (True, True),
+        ("xG CORE — BASE (P3 champion control)", (False, False, False), {}),
+        ("xG CORE — +RINK", (False, False, True), {}),
+        ("xG CORE — +RINK +REBOUND", (True, False, True), {}),
+        ("xG CORE — +RINK +BOTH", (True, True, True), {}),
+        ("xG +GOALIE (prior 60) — +RINK +BOTH", (True, True, True),
          dict(use_goalie=True, goalie_prior_xg=60.0)),
     ]
-    for name, (ur, us), extra in variants:
-        per_game = score_games(fitted[(ur, us)], raws, ur, us)
+    for name, (ur, us, use_rf), extra in variants:
+        per_game = score_games(fitted[(ur, us, use_rf)], raws, ur, us,
+                               rf if use_rf else None)
         kw = dict(use_goalie=False, use_finish=False)
         kw.update(extra)
         r = score(collect_xg(games, per_game, **kw))

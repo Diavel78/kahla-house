@@ -34,17 +34,20 @@ def shot_features(x: float | None, y: float | None,
                   shot_type: str | None,
                   skater_diff: int,
                   rebound: float = 0.0,
-                  score_diff: int = 0) -> list[float] | None:
+                  score_diff: int = 0,
+                  dist_scale: float = 1.0) -> list[float] | None:
     """Feature vector for one unblocked attempt; None = no coordinates.
     P3b extras (rebound = prior same-team SOG within 3s; score_diff =
     shooter goals − defender goals at shot time) default to 0 — a
     constant-zero column standardizes to zero contribution, so models
-    built WITHOUT the extras reproduce exactly."""
+    built WITHOUT the extras reproduce exactly. P3c: dist_scale is the
+    RINK-SCORER bias correction (per-venue radial factor, 1.0 = none) —
+    it rescales distance only; angle is direction, not magnitude."""
     if x is None or y is None:
         return None
     dx = 89.0 - abs(float(x))
     dy = float(y)
-    dist = math.hypot(dx, dy)
+    dist = math.hypot(dx, dy) * float(dist_scale)
     angle = math.atan2(abs(dy), dx)          # >π/2 = behind the goal line
     st = (shot_type or "").strip().lower()
     onehot = [1.0 if st == t else 0.0 for t in _SHOT_TYPES]
