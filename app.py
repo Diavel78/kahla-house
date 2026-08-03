@@ -8788,8 +8788,14 @@ def api_handicapper_paperlog():
         if n and n not in seen:
             seen.add(n)
             games.append(g)
-    if not games:
-        return jsonify({"ok": True, "games": 0, "reason": "no upcoming games in 5h"})
+    # NO early return on an empty live window (BUG, caught Aug 2 ~11pm AZ:
+    # "there's lines on the games and zero orders"). Overnight — EXACTLY
+    # when tomorrow's lines post — the 5h window is empty, and this used
+    # to return here, so the OPENER pass / re-peg bot / alerts / telegram
+    # flush below never ran. The opener lane only ever fired while some
+    # live-window game happened to keep the route alive. An empty window
+    # now just means the live loop iterates nothing and the opener lane
+    # gets the whole budget.
 
     # Recent paperlog → (a) last logged_at/game for stale-first ordering,
     # (b) last (side,units) per (game,market) for the bet-change dedup,
