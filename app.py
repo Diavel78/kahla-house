@@ -7262,6 +7262,21 @@ def _prop_update_suggestions(sb, prop_rows, now) -> int:
 _WHIFF_SNAP_CACHE: dict = {}
 _WHIFF_SHADOW_MIN_PP = 4.0        # the UFC-duration shadow gate
 _WHIFF_MIN_STARTS = 3             # debut/no-history pitchers: skip
+# ── K-prop AUTO-BET (Aug 3 2026, user: "why shadow, model checks, let's
+# go... limit to 30") — 1-contract maker orders on the MODEL's side of
+# the K ladder (usually NO — the app sells YES only, so the NO side is
+# API-exclusive). Own slate cap, does NOT eat the opener lane's 40.
+WHIFF_AUTOBET_ENABLED = True
+WHIFF_AUTOBET_MAX_BETS = 30       # rolling slate cap (user: "limit to 30")
+_WHIFF_BET_MIN_PP = 4.0
+_WHIFF_BET_MAX_PP = 10.0          # the claimed-edge cliff (3rd-time rule:
+                                  # NRFI clamp / Fight IQ 0-3 past 15pp /
+                                  # Diamond totals) — >10pp claims stay
+                                  # shadow-only until the record says raise
+_WHIFF_MAX_ENTRY_C = 54           # user guardrail — same as Y/NRFI
+_WHIFF_PEG_BACKOFF_C = 2          # rest 2¢ under the side mid (post-only:
+                                  # a crossing peg rejects → retry next tick)
+_WHIFF_BET_PER_TICK = 1           # create+verify ≈3s — keep the tick fast
 _WHIFF_HL_PITCHER, _WHIFF_HL_TEAM = 365.0, 150.0
 _WHIFF_PRIOR_BF, _WHIFF_PRIOR_PA, _WHIFF_PRIOR_STARTS = 150.0, 1000.0, 4.0
 _WHIFF_Q_RE = re.compile(
@@ -7387,6 +7402,8 @@ def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
             pass
         asof = now.date()
         ins = []
+        bet_cands = []                     # (edge, mid, key, q, name, line,
+                                           #  side, side_c, model_side_p)
         for (mid, _venue, key, q, _pt, line, cents) in kprops:
             m = _WHIFF_Q_RE.match(q or "")
             if not m or line is None:
@@ -7408,11 +7425,20 @@ def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
             edge_yes = model_p * 100.0 - cents
             side = "yes" if edge_yes > 0 else "no"
             edge = abs(edge_yes)
+            side_c = cents if side == "yes" else 100 - cents
+            # bet candidate: band-gated edge + the 54¢ entry cap ("move
+            # up or down a K" — another rung of the same ladder usually
+            # qualifies when this one doesn't)
+            if (_WHIFF_BET_MIN_PP <= edge <= _WHIFF_BET_MAX_PP
+                    and side_c <= _WHIFF_MAX_ENTRY_C
+                    and n_starts >= _WHIFF_MIN_STARTS):
+                bet_cands.append((edge, mid, key, q, name, float(line),
+                                  side, side_c,
+                                  model_p if side == "yes" else 1 - model_p))
             if edge < _WHIFF_SHADOW_MIN_PP:
                 continue
             if prior.get((mid, key)) == side:
                 continue                       # unchanged — not a new row
-            side_c = cents if side == "yes" else 100 - cents
             if not (4 <= side_c <= 96):
                 continue
             entry = (int(round(-100.0 * side_c / (100 - side_c)))
@@ -7438,9 +7464,85 @@ def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
                 break
         if ins:
             sb.table("pickbot_paperlog").insert(ins).execute()
+        if WHIFF_AUTOBET_ENABLED and bet_cands:
+            try:
+                _whiff_autobet(sb, bet_cands, ginfo, now)
+            except Exception:
+                pass
         return len(ins)
     except Exception:
         return 0
+
+
+def _whiff_autobet(sb, bet_cands, ginfo, now):
+    """Place 1-contract maker orders on the best qualifying K-prop rung
+    per PITCHER (rungs of one start are correlated — never ladder-stack).
+    Per-pitcher dedup vs existing whiff_autobet picks; _autobet_execute
+    enforces the WHIFF slate cap (30), Master Rule, post-only create,
+    pick insert, verify, batched ping. ≤_WHIFF_BET_PER_TICK creates per
+    tick keeps the pm-snapshot response fast — the cap fills over a few
+    ticks, not one."""
+    best: dict = {}
+    for c in bet_cands:
+        k = (c[1], c[4])                       # (market_id, pitcher)
+        if k not in best or c[0] > best[k][0]:
+            best[k] = c
+    if not best:
+        return
+    mids = list({k[0] for k in best})
+    done: set = set()
+    try:
+        rows = (sb.table("bot_picks").select("market_id,signal_blob")
+                .in_("market_id", mids).eq("market_type", "prop")
+                .filter("signal_blob->>whiff_autobet", "eq", "true")
+                .limit(500).execute().data) or []
+        for r in rows:
+            b = r.get("signal_blob") or {}
+            done.add((r["market_id"],
+                      ((b.get("whiff") or {}).get("pitcher")) or ""))
+    except Exception:
+        return                                 # fail-closed: no dedup → skip
+    placed = 0
+    for (edge, mid, key, q, name, line, side, side_c, side_p) in sorted(
+            best.values(), key=lambda c: -c[0]):
+        if placed >= _WHIFF_BET_PER_TICK:
+            break
+        if (mid, name) in done:
+            continue
+        g = ginfo.get(mid) or {}
+        es = g.get("event_start")
+        try:
+            dt = datetime.fromisoformat(str(es).replace("Z", "+00:00"))
+            if dt <= now + timedelta(minutes=3):
+                continue                       # too close / started
+        except Exception:
+            continue
+        peg_c = max(1, int(side_c) - _WHIFF_PEG_BACKOFF_C)
+        if peg_c > _WHIFF_MAX_ENTRY_C:
+            continue
+        lbl = (f"{name} {'' if side == 'yes' else 'UNDER '}"
+               f"{int(line)}+ K {side.upper()}")
+        if _autobet_execute(
+                sb, {"id": mid, "event_name": g.get("event_name")}, es,
+                "prop", side, lbl, key, side == "no", peg_c,
+                side_p, side_p * 100.0 - peg_c, None, None, None,
+                extra_blob={"whiff_autobet": True, "whiff_key": key,
+                            "prop": {"key": key, "q": q, "venue": "polymarket",
+                                     "type": "baseball_player_strikeouts",
+                                     "line": line},
+                            "whiff": {"pitcher": name, "line": line,
+                                      "model_p": round(side_p if side == "yes"
+                                                       else 1 - side_p, 4),
+                                      "mid_c": side_c if side == "yes"
+                                      else 100 - side_c,
+                                      "edge_pp": round(edge, 2)}},
+                cap_flag="whiff_autobet", cap_max=WHIFF_AUTOBET_MAX_BETS,
+                query_text=q,
+                reason=(f"Whiff IQ K-prop — model {round(side_p * 100)}% on "
+                        f"{side.upper()} vs {int(side_c)}¢ mid → "
+                        f"{round(edge, 1)}pp; maker at {peg_c}¢"),
+                skip_game_dedup=True):
+            placed += 1
 
 
 # ───────────── Polymarket trade tape (whale / order-flow, July 2026) ─────────
@@ -8326,33 +8428,40 @@ def _peg_target(bid_c, ask_c, fair_c):
 
 def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
                      side_c, fair_pb, entry_edge, opener_edge,
-                     bid_c, ask_c, extra_blob=None):
+                     bid_c, ask_c, extra_blob=None,
+                     cap_flag="autobet", cap_max=None, query_text=None,
+                     reason=None, skip_game_dedup=False):
     """Shared auto-bet placement: slate cap → never-double-a-game →
     Master Rule → post-only create (1 contract, GTD first pitch,
     AUTOMATIC) → pick insert (the cap counter — inserted the moment
     create returns so an ambiguous verify can't double-bet) → verify →
-    ping. Returns True when an order was placed."""
+    ping. Returns True when an order was placed. cap_flag/cap_max let a
+    sibling lane (Whiff IQ K props) run its OWN slate cap without eating
+    the opener lane's; skip_game_dedup is for prop lanes whose caller
+    dedups per-pitcher (a game legitimately carries 2 starter bets)."""
+    cap = cap_max if cap_max is not None else AUTOBET_MAX_BETS
     try:
         prior = (sb.table("bot_picks").select("id")
-                 .filter("signal_blob->>autobet", "eq", "true")
+                 .filter("signal_blob->>" + cap_flag, "eq", "true")
                  .gte("event_start", (datetime.now(timezone.utc)
                                       - timedelta(hours=12)).isoformat())
-                 .limit(AUTOBET_MAX_BETS + 1).execute().data) or []
+                 .limit(cap + 1).execute().data) or []
     except Exception:
         return False
-    if len(prior) >= AUTOBET_MAX_BETS:
+    if len(prior) >= cap:
         return False
     owner = _kalshi_owner_uid()
     if not owner:
         return False
-    try:
-        mine = (sb.table("bot_picks").select("id")
-                .eq("market_id", g["id"]).eq("market_type", mt)
-                .eq("asked_by", owner).limit(1).execute().data) or []
-    except Exception:
-        return False
-    if mine:
-        return False
+    if not skip_game_dedup:
+        try:
+            mine = (sb.table("bot_picks").select("id")
+                    .eq("market_id", g["id"]).eq("market_type", mt)
+                    .eq("asked_by", owner).limit(1).execute().data) or []
+        except Exception:
+            return False
+        if mine:
+            return False
     try:
         dt = datetime.fromisoformat(str(es).replace("Z", "+00:00"))
         gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -8381,9 +8490,9 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
             f"create errored ({e})"[:280])
         return False
     entry_amer = _prob_to_amer_py(side_c / 100.0)
-    blob = {"autobet": True, "contracts": _AUTOBET_CONTRACTS,
+    blob = {cap_flag: True, "contracts": _AUTOBET_CONTRACTS,
             "order_id": new_oid, "pmm_slug": slug,
-            "pmm_synthetic": synthetic, "source": "autobet",
+            "pmm_synthetic": synthetic, "source": cap_flag,
             "opener_edge_pp": opener_edge,
             "entry_edge_pp": round(entry_edge, 1),
             "book_bid_c": bid_c, "book_ask_c": ask_c}
@@ -8391,7 +8500,7 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
         blob.update(extra_blob)
     try:
         sb.table("bot_picks").insert({
-            "asked_by": owner, "query_text": "auto-bet: opener",
+            "asked_by": owner, "query_text": query_text or "auto-bet: opener",
             "market_id": g["id"], "sport": "MLB",
             "event_name": g.get("event_name"), "event_start": es,
             "market_type": mt, "side": side,
@@ -8400,11 +8509,12 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
             "entry_line": None, "units": 1, "confidence": "low",
             "fair_prob": round(float(fair_pb), 4),
             "edge_pp": round(entry_edge, 1),
-            "reasons": [f"AUTO-BET at the opener — {side_lbl} pegged "
-                        f"{round(side_c)}¢ over the "
-                        f"{round(bid_c) if bid_c else '?'}¢ make, model "
-                        f"fair {round(float(fair_pb) * 100)}¢ → "
-                        f"{round(entry_edge, 1)}pp edge at entry"],
+            "reasons": [reason or (
+                f"AUTO-BET at the opener — {side_lbl} pegged "
+                f"{round(side_c)}¢ over the "
+                f"{round(bid_c) if bid_c else '?'}¢ make, model "
+                f"fair {round(float(fair_pb) * 100)}¢ → "
+                f"{round(entry_edge, 1)}pp edge at entry")],
             "signal_blob": blob,
         }).execute()
     except Exception:
@@ -8420,7 +8530,7 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
         f"{round(ask_c) if ask_c else '?'}, fair "
         f"{round(float(fair_pb) * 100)}¢, {round(entry_edge, 1)}pp, "
         f"{'verified' if ok else 'VERIFY FAILED — CHECK APP'}). "
-        f"Bet {len(prior) + 1}/{AUTOBET_MAX_BETS} this slate.")
+        f"Bet {len(prior) + 1}/{cap} this slate.")
     return True
 
 
