@@ -188,9 +188,9 @@ jobs:
             exit 0
           fi
           KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
-          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
-            "https://www.thekahlahouse.com/api/handicapper/paperlog?key=${KEY}" || echo "000")
-          echo "paperlog HTTP $code"
+          body=$(curl -sS -m 60 \
+            "https://www.thekahlahouse.com/api/handicapper/paperlog?key=${KEY}" || echo "CURL-FAILED")
+          echo "paperlog response: ${body:0:800}"
 
       # Kalshi auto-log ping. /api/handicapper/kalshi-autolog reads the admin's
       # filled Kalshi positions and auto-creates the matching 1u bot_pick (ML /
