@@ -7517,15 +7517,34 @@ def _whiff_autobet(sb, bet_cands, ginfo, now):
                 continue                       # too close / started
         except Exception:
             continue
-        peg_c = max(1, int(side_c) - _WHIFF_PEG_BACKOFF_C)
-        if peg_c > _WHIFF_MAX_ENTRY_C:
+        # THE PEG LAW (user, Aug 3 — "we are THE MAKER, not the guy
+        # behind him"): read the actual book and peg floor(best bid)+1
+        # like every other lane (_peg_target — 54¢ cap + edge floor
+        # built in). The launch peg was mid−2 (no book read) = standing
+        # BEHIND the resting maker; never again. Book read fails →
+        # skip, retry next tick (never place a blind behind-the-queue
+        # order again).
+        fair_c = side_p * 100.0
+        book = None
+        try:
+            bclient = get_client()
+            book = _pmm_book(bclient, key)
+            if book and side == "no":
+                book = _invert_book(book)
+        except Exception:
+            book = None
+        if not book:
             continue
+        bid_c, ask_c = book.get("best_bid"), book.get("best_ask")
+        peg_c, entry_edge = _peg_target(bid_c, ask_c, fair_c)
+        if peg_c is None or entry_edge < _WHIFF_BET_MIN_PP:
+            continue                           # whiff bar (4pp), not 2.5
         lbl = (f"{name} {'' if side == 'yes' else 'UNDER '}"
                f"{int(line)}+ K {side.upper()}")
         if _autobet_execute(
                 sb, {"id": mid, "event_name": g.get("event_name")}, es,
                 "prop", side, lbl, key, side == "no", peg_c,
-                side_p, side_p * 100.0 - peg_c, None, None, None,
+                side_p, entry_edge, None, bid_c, ask_c,
                 extra_blob={"whiff_autobet": True, "whiff_key": key,
                             "prop": {"key": key, "q": q, "venue": "polymarket",
                                      "type": "baseball_player_strikeouts",
