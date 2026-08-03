@@ -8290,6 +8290,18 @@ def _opener_pass(sb, now, deadline):
         evaluated = {mid for (mid, _mt) in done}
         cands.sort(key=lambda g: (g["id"] in evaluated,
                                   str(g.get("event_start") or "")))
+        # MINUTE-ROTATED HEAD (Aug 2 ~1am AZ — the stall's true root:
+        # an UNLISTED game's dossier is the SLOWEST build (the PMM
+        # search walks every fallback before giving up), and the
+        # deterministic sort pinned the same unlisted earliest game to
+        # position #1 on EVERY tick — each tick started that build, hit
+        # the platform kill, and died having learned nothing (the probe
+        # stamp is per-container memory). Rotating the start offset by
+        # wall-clock minute is stateless and kill-proof: a poison game
+        # eats at most one tick in N, and every candidate gets a turn
+        # within a few minutes.)
+        rot = int(_time.time() // 60) % max(1, len(cands))
+        cands = cands[rot:] + cands[:rot]
         # NEAREST-FIRST, not shuffled (Aug 2 ~11:45pm AZ — user: "why is
         # it going so incredibly slow"): the no-fence pool holds ~75
         # games but only 1-2 dossiers fit a tick, and a shuffle burned
@@ -8730,6 +8742,8 @@ def _gridiron_opener_pass(sb, now, deadline):
         if not cands:
             return rows, stats
         cands.sort(key=lambda g: str(g.get("event_start") or ""))
+        _grot = int(_time.time() // 60) % max(1, len(cands))
+        cands = cands[_grot:] + cands[:_grot]   # same anti-poison rotation
         import handicapper_web
         for g in cands[:8]:               # per-tick cap — budget courtesy
             if _time.time() >= deadline - 1.0:
