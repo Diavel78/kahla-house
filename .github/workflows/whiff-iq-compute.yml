@@ -1,0 +1,44 @@
+name: Whiff IQ — Compute
+
+# Daily: serialize the pitcher-K model state → whiff_iq_snapshot (the
+# Flask K-prop pricer reads it), then grade yesterday's paperlog
+# shadows from the spine. Runs after the pitcher (10:30) and batter
+# (10:40) ingest deltas.
+#
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "55 10 * * *"
+
+concurrency:
+  group: whiff-iq-compute
+  cancel-in-progress: false
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Build snapshot
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.compute_whiff_iq
+      - name: Grade paperlog shadows
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.grade_whiff_paperlog

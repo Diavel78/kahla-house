@@ -7251,6 +7251,198 @@ def _prop_update_suggestions(sb, prop_rows, now) -> int:
     return sum(1 for u in ups if u["cleared"])
 
 
+# ───────────── Whiff IQ — K-prop shadow pricing (Aug 2026) ─────────
+# The pitcher-strikeout model priced against every live PMM K-ladder quote
+# on the pm-snapshot tick, SHADOW-logged to pickbot_paperlog (earn-in — no
+# bets, no UI). Math MIRRORS kahla-scanner/_lib/whiff_iq.py (Flask can't
+# import the subproject — the ufc_model precedent; keep in sync). State
+# comes from the daily whiff_iq_snapshot (compute_whiff_iq.py). Backtest:
+# beats base rate at every rung (3,363 held-out starts); market tape shows
+# +8-9pp YES-overpricing at K>=6/7 (the app sells YES only — one-way flow).
+_WHIFF_SNAP_CACHE: dict = {}
+_WHIFF_SHADOW_MIN_PP = 4.0        # the UFC-duration shadow gate
+_WHIFF_MIN_STARTS = 3             # debut/no-history pitchers: skip
+_WHIFF_HL_PITCHER, _WHIFF_HL_TEAM = 365.0, 150.0
+_WHIFF_PRIOR_BF, _WHIFF_PRIOR_PA, _WHIFF_PRIOR_STARTS = 150.0, 1000.0, 4.0
+_WHIFF_Q_RE = re.compile(
+    r"^Will (.+?) record at least (\d+) pitching strikeouts in "
+    r"([A-Z]{2,4}) vs ([A-Z]{2,4})")
+
+
+def _whiff_snapshot():
+    """whiff_iq_snapshot row id=1, 10-min cached. None when absent."""
+    now_ts = _time.time()
+    c = _WHIFF_SNAP_CACHE.get("v")
+    if c is not None and now_ts - _WHIFF_SNAP_CACHE.get("ts", 0) < 600:
+        return c or None
+    snap = None
+    try:
+        rows = (get_supabase().table("whiff_iq_snapshot")
+                .select("state,engine,built_at").eq("id", 1)
+                .limit(1).execute().data) or []
+        if rows:
+            snap = rows[0].get("state")
+    except Exception:
+        snap = None
+    _WHIFF_SNAP_CACHE.update(v=snap or {}, ts=now_ts)
+    return snap
+
+
+def _whiff_decayed(rows, asof, hl):
+    """(Σw·num, Σw·den, Σw) over [[iso_date, den, num], ...]."""
+    wn = wd = ww = 0.0
+    for d_iso, den, num in rows:
+        try:
+            age = (asof - datetime.fromisoformat(d_iso).date()).days
+        except Exception:
+            continue
+        w = 0.5 ** (max(age, 0) / hl)
+        wn += w * num
+        wd += w * den
+        ww += w
+    return wn, wd, ww
+
+
+def _whiff_tail_p(snap: dict, pitcher: str, opp: str, line: float,
+                  asof) -> tuple[float, int] | None:
+    """(P(K >= line), n_starts) or None when unpriceable. Mirrors
+    _lib/whiff_iq: log5 matchup rate + leash-mixed binomial tail."""
+    lg = snap.get("lg") or {}
+    lg_k = float(lg.get("k_bf") or 0.22)
+    lg_bf = float(lg.get("bf") or 22.0)
+    bf_sd = float(lg.get("bf_sd") or 4.5)
+    p = (snap.get("pitchers") or {}).get(pitcher)
+    if not p:
+        return None
+    hist = p.get("hist") or []
+    wk, wbf, wn = _whiff_decayed(
+        [[h[0], h[1], h[2]] for h in hist], asof, _WHIFF_HL_PITCHER)
+    p_rate = (wk + _WHIFF_PRIOR_BF * lg_k) / (wbf + _WHIFF_PRIOR_BF)
+    e_bf = (wbf + _WHIFF_PRIOR_STARTS * lg_bf) / (wn + _WHIFF_PRIOR_STARTS)
+    trows = (snap.get("teams") or {}).get(opp) or []
+    tk, tpa, _ = _whiff_decayed(
+        [[t[0], t[1], t[2]] for t in trows], asof, _WHIFF_HL_TEAM)
+    opp_rate = (tk + _WHIFF_PRIOR_PA * lg_k) / (tpa + _WHIFF_PRIOR_PA)
+
+    def _odds(x):
+        x = min(max(x, 1e-6), 1 - 1e-6)
+        return x / (1 - x)
+    o = _odds(p_rate) * _odds(opp_rate) / _odds(lg_k)
+    rate = o / (1 + o)
+    # binomial tail mixed over a discretized-normal leash (BF 6..42)
+    weights, tot = [], 0.0
+    for bf in range(6, 43):
+        z = (bf - e_bf) / bf_sd
+        w = math.exp(-0.5 * z * z)
+        weights.append((bf, w))
+        tot += w
+    tail = 0.0
+    L = int(line)
+    q = 1.0 - rate
+    for bf, w in weights:
+        w /= tot
+        pk = q ** bf
+        acc = pk if 0 >= L else 0.0
+        for k in range(1, bf + 1):
+            pk *= (bf - k + 1) / k * (rate / q)
+            if k >= L:
+                acc += pk
+        tail += w * acc
+    return tail, len(hist)
+
+
+def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
+    """Price every K-prop captured this tick vs Whiff IQ; SHADOW-log the
+    +EV side to pickbot_paperlog when |edge| >= _WHIFF_SHADOW_MIN_PP.
+    One row per (market, prop, side) — an edge-size drift is not a new
+    row, a side flip is (the bet-change dedup, whiff_key-scoped so props
+    on the same game can't collide — the June-28-flood rule). Never
+    raises; returns rows inserted."""
+    try:
+        kprops = [r for r in prop_rows
+                  if r[4] == "baseball_player_strikeouts"
+                  and r[6] is not None and 4 <= r[6] <= 96]
+        if not kprops:
+            return 0
+        snap = _whiff_snapshot()
+        if not snap or not snap.get("pitchers"):
+            return 0
+        ginfo = {g["id"]: g for g in all_games}
+        mids = list({r[0] for r in kprops})
+        prior: dict = {}
+        try:
+            recent = (sb.table("pickbot_paperlog")
+                      .select("market_id,side,signal_blob")
+                      .in_("market_id", mids)
+                      .filter("signal_blob->>whiff_shadow", "eq", "true")
+                      .gte("logged_at",
+                           (now - timedelta(hours=36)).isoformat())
+                      .order("logged_at", desc=True)
+                      .limit(2000).execute().data) or []
+            for r in recent:
+                b = r.get("signal_blob") or {}
+                prior.setdefault((r["market_id"],
+                                  b.get("whiff_key") or ""), r.get("side"))
+        except Exception:
+            pass
+        asof = now.date()
+        ins = []
+        for (mid, _venue, key, q, _pt, line, cents) in kprops:
+            m = _WHIFF_Q_RE.match(q or "")
+            if not m or line is None:
+                continue
+            name, away_tc, home_tc = m.group(1), m.group(3), m.group(4)
+            pteam = ((snap.get("pitchers") or {}).get(name) or {}).get("team")
+            if pteam == away_tc:
+                opp = home_tc
+            elif pteam == home_tc:
+                opp = away_tc
+            else:
+                continue                       # traded/mismapped — skip
+            got = _whiff_tail_p(snap, name, opp, float(line), asof)
+            if not got:
+                continue
+            model_p, n_starts = got
+            if n_starts < _WHIFF_MIN_STARTS:
+                continue
+            edge_yes = model_p * 100.0 - cents
+            side = "yes" if edge_yes > 0 else "no"
+            edge = abs(edge_yes)
+            if edge < _WHIFF_SHADOW_MIN_PP:
+                continue
+            if prior.get((mid, key)) == side:
+                continue                       # unchanged — not a new row
+            side_c = cents if side == "yes" else 100 - cents
+            if not (4 <= side_c <= 96):
+                continue
+            entry = (int(round(-100.0 * side_c / (100 - side_c)))
+                     if side_c >= 50
+                     else int(round(100.0 * (100 - side_c) / side_c)))
+            g = ginfo.get(mid) or {}
+            ins.append({
+                "market_id": mid, "event_name": g.get("event_name"),
+                "event_start": g.get("event_start"), "sport": "MLB",
+                "market_type": "prop", "side": side, "line": float(line),
+                "entry_price": entry, "units": 1, "confidence": "low",
+                "gates_cleared": False, "status": "pending",
+                "logged_at": now.isoformat(),
+                "signal_blob": {"whiff_shadow": True, "whiff_key": key,
+                                "whiff": {"pitcher": name, "q": q,
+                                          "opp": opp, "line": float(line),
+                                          "model_p": round(model_p, 4),
+                                          "cents": cents,
+                                          "edge_pp": round(edge, 2),
+                                          "n_starts": n_starts}},
+            })
+            if len(ins) >= 40:                 # tick latency bound
+                break
+        if ins:
+            sb.table("pickbot_paperlog").insert(ins).execute()
+        return len(ins)
+    except Exception:
+        return 0
+
+
 # ───────────── Polymarket trade tape (whale / order-flow, July 2026) ─────────
 # The cron-friendly answer to enviodev/track-poly-trades (user call: "the
 # trades API version is the better path"): ONE poll of Polymarket's public
@@ -7807,13 +7999,14 @@ def api_pm_snapshot():
     inserted = _pm_insert_changed(sb, rows, now)
     props_inserted = _prop_insert_changed(sb, prop_rows, now)
     props_cleared = _prop_update_suggestions(sb, prop_rows, now)
+    whiff_shadows = _whiff_shadow_pass(sb, prop_rows, all_games, now)
     # Trade tape (whale flow) — ONE poll of the public tape, matched against
     # the same upcoming-games index this tick already built. ~1-2s of I/O.
     tt = _poly_trades_ingest(sb, all_games, now)
     xc = _xconfirm_detect(sb, cur, now)
     return jsonify({"ok": True, "games": len(all_games), "inserted": inserted,
                     "props_inserted": props_inserted, "props_cleared": props_cleared,
-                    "trades": tt,
+                    "whiff_shadows": whiff_shadows, "trades": tt,
                     "kalshi": kal_meta, "xconfirm_triggered": xc["triggered"], **st})
 
 
@@ -9016,6 +9209,10 @@ def api_handicapper_paperlog():
             return "totshadow"
         if b.get("opener_shadow") in (True, "true"):
             return "opener"
+        if b.get("whiff_shadow") in (True, "true"):
+            # whiff_key in the variant — many K props share one game, so
+            # a bare 'whiff' variant would collide (June-28-flood rule)
+            return "whiff:" + str(b.get("whiff_key") or "")
         return ""
     try:
         recent = (sb.table("pickbot_paperlog")
@@ -9521,7 +9718,7 @@ def _is_shadow_blob(b) -> bool:
     return any(b.get(k) in (True, "true") for k in
                ("spread_model", "vsin_vetoed_pick", "ufc_duration",
                 "ufc_model_vetoed_pick", "total_blacklist_shadow",
-                "opener_shadow"))
+                "opener_shadow", "whiff_shadow"))
 
 
 def _alert_mkt_group(mt: str) -> str:
