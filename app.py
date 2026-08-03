@@ -7977,7 +7977,10 @@ AUTOBET_ENABLED = True
 # only (game-day NRFI keeps its measured 2.5-6pp band): opener claimed
 # edges of 10-16pp are exactly the question 1-contract stakes exist to
 # answer with real money.
-AUTOBET_MAX_BETS = 20
+AUTOBET_MAX_BETS = 40   # 20→40 Aug 2 11:30pm AZ (user: "Move the cap to
+                        # 40") — the no-fence opener lane holds TWO open
+                        # slates at once, so the rolling window counts both.
+                        # Worst case 40 × 54¢ ≈ $21.60 across the window.
 _AUTOBET_CONTRACTS = 1
 _OPENER_LO_H = 6                # below this = the live game-day window
 _OPENER_HI_H = 14 * 24          # sanity bound only — NOT a strategy fence
