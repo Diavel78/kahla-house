@@ -8208,6 +8208,23 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
     return True
 
 
+def _opener_persist(sb, row) -> bool:
+    """Insert ONE opener shadow row IMMEDIATELY (crash-proofing, Aug 2
+    ~midnight AZ — the user: "It does not take THIS long to build
+    dossiers"): the route bulk-inserted all paperlog rows at the very END
+    of the request, AFTER the re-peg bot's venue calls — so whenever a
+    busy tick hit the platform kill, the auto-BETS survived (they insert
+    at placement) but the shadow rows vanished, the dedup forgot the
+    game, and every later tick re-evaluated the same slate (~1 net new
+    game per 5 min). A row that exists the moment the game is evaluated
+    makes ANY partial tick permanent forward progress."""
+    try:
+        sb.table("pickbot_paperlog").insert(row).execute()
+        return True
+    except Exception:
+        return False
+
+
 def _opener_pass(sb, now, deadline):
     """Returns (shadow_rows, stats). Runs on the paperlog tick's LEFTOVER
     budget — which is naturally free in the evening/overnight when
@@ -8329,7 +8346,7 @@ def _opener_pass(sb, now, deadline):
                             sim0 = None
                         _ea = _prob_to_amer_py(bid0 / 100.0)
                         _fa = _prob_to_amer_py(fairs[s])
-                        shadow_rows.append({
+                        _opener_persist(sb, {
                             "market_id": g["id"],
                             "event_name": g.get("event_name"),
                             "event_start": es0, "sport": "MLB",
@@ -8411,7 +8428,7 @@ def _opener_pass(sb, now, deadline):
                     "opener_edge_pp": edge, "would_bet": bool(bet_side),
                     "opener_unclamped": True,
                     "nrfi_price_src": nrfi.get("price_src")}
-            shadow_rows.append({
+            _opener_persist(sb, {
                 "market_id": g["id"], "event_name": g.get("event_name"),
                 "event_start": es, "sport": "MLB",
                 "market_type": "nrfi", "side": side, "line": None,
@@ -8752,7 +8769,7 @@ def _gridiron_opener_pass(sb, now, deadline):
                 sim0 = None
             _ea = _prob_to_amer_py(bid0 / 100.0)
             _fa = _prob_to_amer_py(fairs[s])
-            rows.append({
+            _opener_persist(sb, {
                 "market_id": g["id"], "event_name": g.get("event_name"),
                 "event_start": es0, "sport": g["sport"],
                 "market_type": "moneyline", "side": s, "line": None,
