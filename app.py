@@ -8306,10 +8306,11 @@ def _opener_pass(sb, now, deadline):
     game (dedup on the opener paperlog row); a game whose NRFI market
     isn't priced yet logs nothing and re-evaluates next tick until it is
     (the listing detector). Never raises."""
-    stats = {"opener_eval": 0, "opener_bets": 0}
+    stats = {"opener_eval": 0, "opener_bets": 0, "gate": "start"}
     shadow_rows: list = []
     try:
         if _time.time() >= deadline - 1.5:
+            stats["gate"] = "budget"
             return shadow_rows, stats
         lo = (now + timedelta(hours=_OPENER_LO_H)).isoformat()
         hi = (now + timedelta(hours=_OPENER_HI_H)).isoformat()
@@ -8318,7 +8319,8 @@ def _opener_pass(sb, now, deadline):
                    .eq("sport", "MLB").eq("status", "active")
                    .gte("event_start", lo).lte("event_start", hi)
                    .order("event_start").limit(150).execute().data) or []
-        except Exception:
+        except Exception as e:
+            stats["gate"] = ("mkts_err: " + str(e))[:120]
             return shadow_rows, stats
         games, seen = [], set()
         for g in raw:
@@ -8327,6 +8329,7 @@ def _opener_pass(sb, now, deadline):
                 seen.add(n)
                 games.append(g)
         if not games:
+            stats["gate"] = "no_games"
             return shadow_rows, stats
         mids = [g["id"] for g in games]
         try:
@@ -8335,7 +8338,8 @@ def _opener_pass(sb, now, deadline):
                          .in_("market_id", mids)
                          .filter("signal_blob->>opener_shadow", "eq", "true")
                          .limit(1000).execute().data) or []
-        except Exception:
+        except Exception as e:
+            stats["gate"] = ("done_err: " + str(e))[:120]
             return shadow_rows, stats     # fail-closed: no dedup read → skip
         done = {(r["market_id"], r.get("market_type")) for r in done_rows}
         cands = [g for g in games
@@ -8350,7 +8354,9 @@ def _opener_pass(sb, now, deadline):
                  if _now_ts - _OPENER_PROBE_TS.get(g["id"], 0.0)
                  >= _OPENER_PROBE_S]
         if not cands:
+            stats["gate"] = "backoff_empty"
             return shadow_rows, stats
+        stats["gate"] = "loop"
         # THE POLYMARKET LIST IS THE LIST (user, Aug 2 ~1am AZ): one bulk
         # events.list call = the whole bettable universe, listed games
         # jump the queue. PRIORITY, NOT EXCLUSION (first cut was a hard
@@ -8696,8 +8702,8 @@ def _opener_pass(sb, now, deadline):
                 f"{'verified' if ok else 'VERIFY FAILED — CHECK APP'}). "
                 f"Bet {len(prior) + 1}/{AUTOBET_MAX_BETS} this slate.")
             stats["opener_bets"] += 1
-    except Exception:
-        pass
+    except Exception as e:
+        stats["gate"] = ("crash: " + str(e))[:160]
     return shadow_rows, stats
 
 
