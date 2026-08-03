@@ -16,6 +16,10 @@ on:
         description: "probe | backfill | delta"
         required: false
         default: "delta"
+      start:
+        description: "backfill start date (YYYY-MM-DD; default 2024-09-15)"
+        required: false
+        default: ""
   schedule:
     - cron: "0 10 * * *"
 
@@ -48,6 +52,12 @@ jobs:
           echo "mode=$MODE"
           case "$MODE" in
             probe)    python -m scripts.ingest_nhl_goalies --probe ;;
-            backfill) python -m scripts.ingest_nhl_goalies --backfill --commit ;;
+            backfill)
+              START="${{ github.event.inputs.start }}"
+              if [ -n "$START" ]; then
+                python -m scripts.ingest_nhl_goalies --backfill --start "$START" --commit
+              else
+                python -m scripts.ingest_nhl_goalies --backfill --commit
+              fi ;;
             delta|*)  python -m scripts.ingest_nhl_goalies --delta --commit ;;
           esac
