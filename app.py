@@ -9249,7 +9249,9 @@ def api_handicapper_paperlog():
                             "processed": processed}), 500
     return jsonify({"ok": True, "games": len(games), "processed": processed,
                     "with_pick": with_pick, "new_rows": new_rows,
-                    "bets_alerted": bets_alerted, "pin_stamped": pin_stamped})
+                    "bets_alerted": bets_alerted, "pin_stamped": pin_stamped,
+                    "opener": opener_stats, "repeg": repeg,
+                    "tg_flushed": tg_flushed})
 
 
 # ── Bet-time Pinnacle stamp (parlay-api.com — free tier, 1,000 credits/mo) ──
