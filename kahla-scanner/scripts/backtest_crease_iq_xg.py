@@ -41,7 +41,8 @@ def load_shots(sb) -> list[dict]:
     while True:      # explicit paging — the 1,000-row lesson
         rows = (sb.table("nhl_shot_events")
                 .select("game_id,game_date,event_type,is_goal,situation,"
-                        "goalie_id,x,y,shot_type")
+                        "goalie_id,x,y,shot_type,team_id,period,"
+                        "time_in_period")
                 .order("game_date").order("game_id").order("event_id")
                 .range(page * 1000, page * 1000 + 999).execute().data) or []
         out.extend(rows)
@@ -51,35 +52,91 @@ def load_shots(sb) -> list[dict]:
     return out
 
 
-def build_shot_layer(shots: list[dict], goalie_home: dict) -> tuple:
-    """(train_samples, eval_samples, per_game) — feature/label pairs for
-    the xG fit split by season, and per-game aggregates keyed by game_id
-    (built AFTER the model exists via score_games)."""
-    train, evald, usable = [], [], []
+REBOUND_S = 3.0     # attempt within 3s of a prior same-team SAVE = rebound
+
+
+def _tsec(period, tip) -> int | None:
+    """Absolute game seconds from (period, 'MM:SS'). OT periods stack."""
+    try:
+        mm, ss = str(tip or "").split(":")
+        return (int(period or 1) - 1) * 1200 + int(mm) * 60 + int(ss)
+    except (ValueError, TypeError):
+        return None
+
+
+def build_shot_layer(shots: list[dict], goalie_home: dict) -> list[tuple]:
+    """→ raws: (game_id, date, goalie_is_home, goalie_id, x, y, shot_type,
+    skater_diff, rebound, score_diff, label). Chronological per game so
+    the P3b extras are computable: rebound = prior same-team SHOT-ON-GOAL
+    (a save — goals stop play, misses leave no rebound) within REBOUND_S;
+    score_diff = shooter goals − defender goals AT SHOT TIME. Empty-net
+    rows yield no sample but still advance the running score."""
+    by_game: dict = defaultdict(list)
     for s in shots:
-        gid = s.get("goalie_id")
-        if not gid:
-            continue                      # empty net → excluded everywhere
-        gh = goalie_home.get((s["game_id"], gid))
-        if gh is None:
-            continue                      # goalie not in the spine game
-        sk = xgm.skater_diff_from_situation(s.get("situation"), gh)
-        f = xgm.shot_features(s.get("x"), s.get("y"), s.get("shot_type"), sk)
+        by_game[s["game_id"]].append(s)
+    raws = []
+    for gid_game, rows in by_game.items():
+        rows.sort(key=lambda r: (_tsec(r.get("period"),
+                                       r.get("time_in_period")) or 0))
+        goals: dict = defaultdict(int)      # team_id → running goals
+        last_save: dict = {}                # team_id → tsec of last SOG-save
+        for s in rows:
+            t = _tsec(s.get("period"), s.get("time_in_period"))
+            tid = s.get("team_id")
+            lab = 1 if s.get("is_goal") else 0
+            gl = s.get("goalie_id")
+            if gl:
+                gh = goalie_home.get((s["game_id"], gl))
+                if gh is not None:
+                    reb = 0.0
+                    if t is not None and tid is not None:
+                        pt = last_save.get(tid)
+                        if pt is not None and 0 < t - pt <= REBOUND_S:
+                            reb = 1.0
+                    opp = sum(v for k, v in goals.items() if k != tid)
+                    sdiff = (goals.get(tid, 0) - opp) if tid is not None else 0
+                    sk = xgm.skater_diff_from_situation(s.get("situation"), gh)
+                    raws.append((s["game_id"],
+                                 date.fromisoformat(s["game_date"]), gh, gl,
+                                 s.get("x"), s.get("y"), s.get("shot_type"),
+                                 sk, reb, sdiff, lab))
+            # state updates AFTER the pre-shot read
+            if (s.get("event_type") == "shot-on-goal" and t is not None
+                    and tid is not None):
+                last_save[tid] = t
+            if lab and tid is not None:
+                goals[tid] += 1
+    raws.sort(key=lambda r: (r[1], r[0]))
+    return raws
+
+
+def _feats(r, use_reb: bool, use_score: bool):
+    return xgm.shot_features(r[4], r[5], r[6], r[7],
+                             r[8] if use_reb else 0.0,
+                             r[9] if use_score else 0)
+
+
+def season_samples(raws, use_reb, use_score) -> tuple[list, list]:
+    """(train, eval) (features, label) pairs for one feature config."""
+    tr, ev = [], []
+    for r in raws:
+        f = _feats(r, use_reb, use_score)
         if f is None:
             continue
-        y = 1 if s.get("is_goal") else 0
-        rec = (s["game_id"], date.fromisoformat(s["game_date"]), gh, gid, f, y)
-        usable.append(rec)
-        (train if rec[1] < EVAL_START else evald).append((f, y))
-    return train, evald, usable
+        (tr if r[1] < EVAL_START else ev).append((f, r[10]))
+    return tr, ev
 
 
-def score_games(model, usable) -> dict:
+def score_games(model, raws, use_reb, use_score) -> dict:
     """game_id → {'home_xg','away_xg','home_gf','away_gf',
     'goalies': {gid: [xg_faced, goals_allowed]}} (non-EN attempts).
     Shooter side = opposite the goalie's side."""
     per_game: dict = {}
-    for gid_game, _d, goalie_is_home, goalie_id, f, y in usable:
+    for r in raws:
+        gid_game, goalie_is_home, goalie_id, y = r[0], r[2], r[3], r[10]
+        f = _feats(r, use_reb, use_score)
+        if f is None:
+            continue
         p = model.predict(f)
         g = per_game.setdefault(gid_game, {"home_xg": 0.0, "away_xg": 0.0,
                                            "home_gf": 0, "away_gf": 0,
@@ -227,41 +284,51 @@ def main() -> int:
     log.info("goalie spine: %d rows → %d games", len(rows), len(games))
     shots = load_shots(sb)
     log.info("shot spine: %d unblocked attempts", len(shots))
-    train_s, eval_s, usable = build_shot_layer(shots, goalie_home)
-    log.info("xG samples: train %d · eval %d · usable %d "
-             "(EN + unmatched dropped: %d)", len(train_s), len(eval_s),
-             len(usable), len(shots) - len(usable))
-    model = xgm.fit_xg(train_s)
-    if model is None:
-        log.error("xG fit failed — not enough train samples")
-        return 2
-    print("\n=== xG MODEL (fit on train season, frozen) ===")
-    print("  train calibration:")
-    for line in xgm.calibration_table(model, train_s):
-        print("   ", line)
-    print("  EVAL-season calibration (frozen model — the honesty check):")
-    for line in xgm.calibration_table(model, eval_s):
-        print("   ", line)
-    per_game = score_games(model, usable)
-    log.info("scored %d games with xG aggregates", len(per_game))
+    raws = build_shot_layer(shots, goalie_home)
+    n_reb = sum(1 for r in raws if r[8])
+    log.info("usable samples: %d (EN + unmatched dropped: %d) · "
+             "rebounds %d (%.1f%%) · nonzero score-state %d", len(raws),
+             len(shots) - len(raws), n_reb, 100.0 * n_reb / max(1, len(raws)),
+             sum(1 for r in raws if r[9]))
+
+    # P3b ablation: each feature config gets its OWN xG fit + aggregates.
+    # (False, False) is the P3 champion control and must reproduce it.
+    configs = [
+        ("BASE (P3 champion control)", False, False),
+        ("+REBOUND", True, False),
+        ("+SCORE STATE", False, True),
+        ("+BOTH", True, True),
+    ]
+    fitted = {}
+    for name, ur, us in configs:
+        tr, ev = season_samples(raws, ur, us)
+        m = xgm.fit_xg(tr)
+        if m is None:
+            log.error("xG fit failed for %s", name)
+            return 2
+        fitted[(ur, us)] = m
+        if (ur, us) == (True, True):
+            print(f"\n=== xG MODEL {name} — frozen-model calibration ===")
+            print("  train:")
+            for line in xgm.calibration_table(m, tr)[::3]:
+                print("   ", line)
+            print("  EVAL season (the honesty check):")
+            for line in xgm.calibration_table(m, ev)[::3]:
+                print("   ", line)
 
     variants = [
-        ("xG CORE (team xG rates only — no goalie, no finishing)",
-         dict(use_goalie=False, use_finish=False)),
-        ("xG + GOALIE GSAx-ratio (prior 30 xG)",
-         dict(use_goalie=True, use_finish=False)),
-        ("xG + FINISHING (no goalie)",
-         dict(use_goalie=False, use_finish=True)),
-        ("xG FULL (goalie + finishing)",
-         dict(use_goalie=True, use_finish=True)),
-        ("xG FULL, goalie prior 60 (heavier shrink)",
-         dict(use_goalie=True, use_finish=True, goalie_prior_xg=60.0)),
-        ("xG FULL, NO-STARTER control (league goalie)",
-         dict(use_goalie=True, use_finish=True, known_starter=False)),
+        ("xG CORE — BASE (P3 champion control)", (False, False), {}),
+        ("xG CORE — +REBOUND", (True, False), {}),
+        ("xG CORE — +SCORE STATE", (False, True), {}),
+        ("xG CORE — +BOTH", (True, True), {}),
+        ("xG +GOALIE (prior 60) — +BOTH", (True, True),
+         dict(use_goalie=True, goalie_prior_xg=60.0)),
     ]
-    for name, kw in variants:
-        known = kw.pop("known_starter", True)
-        r = score(collect_xg(games, per_game, known_starter=known, **kw))
+    for name, (ur, us), extra in variants:
+        per_game = score_games(fitted[(ur, us)], raws, ur, us)
+        kw = dict(use_goalie=False, use_finish=False)
+        kw.update(extra)
+        r = score(collect_xg(games, per_game, **kw))
         print(f"\n=== {name} ===")
         if r["n"] == 0:
             print("  no eval games")

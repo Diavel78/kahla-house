@@ -32,8 +32,14 @@ _SHOT_TYPES = ("wrist", "slap", "snap", "backhand", "tip-in",
 
 def shot_features(x: float | None, y: float | None,
                   shot_type: str | None,
-                  skater_diff: int) -> list[float] | None:
-    """Feature vector for one unblocked attempt; None = no coordinates."""
+                  skater_diff: int,
+                  rebound: float = 0.0,
+                  score_diff: int = 0) -> list[float] | None:
+    """Feature vector for one unblocked attempt; None = no coordinates.
+    P3b extras (rebound = prior same-team SOG within 3s; score_diff =
+    shooter goals − defender goals at shot time) default to 0 — a
+    constant-zero column standardizes to zero contribution, so models
+    built WITHOUT the extras reproduce exactly."""
     if x is None or y is None:
         return None
     dx = 89.0 - abs(float(x))
@@ -43,7 +49,8 @@ def shot_features(x: float | None, y: float | None,
     st = (shot_type or "").strip().lower()
     onehot = [1.0 if st == t else 0.0 for t in _SHOT_TYPES]
     return [dist, dist * dist / 100.0, angle,
-            float(max(-2, min(2, skater_diff)))] + onehot
+            float(max(-2, min(2, skater_diff)))] + onehot + [
+            float(rebound), float(max(-2, min(2, score_diff)))]
 
 
 def skater_diff_from_situation(situation: str | None,
