@@ -8260,7 +8260,16 @@ def _opener_pass(sb, now, deadline):
                  >= _OPENER_PROBE_S]
         if not cands:
             return shadow_rows, stats
-        _random.shuffle(cands)
+        # NEAREST-FIRST, not shuffled (Aug 2 ~11:45pm AZ — user: "why is
+        # it going so incredibly slow"): the no-fence pool holds ~75
+        # games but only 1-2 dossiers fit a tick, and a shuffle burned
+        # most slots probing UNLISTED Wednesday+ games (the in-memory
+        # backoff resets on every cold start, so those dead probes
+        # repeat). The query is already event_start-ordered and dedup
+        # removes each game once listed+logged, so nearest-first drains
+        # the live edge of the calendar completely before spending a
+        # single slot on the future. No starvation possible: listed
+        # games exit via dedup, unlisted ones via backoff.
         import handicapper_web
         for g in cands:
             if _time.time() >= deadline - 1.0:
@@ -8690,7 +8699,7 @@ def _gridiron_opener_pass(sb, now, deadline):
         cands = [g for g in cands if g["id"] not in done]
         if not cands:
             return rows, stats
-        _random.shuffle(cands)
+        cands.sort(key=lambda g: str(g.get("event_start") or ""))
         import handicapper_web
         for g in cands[:8]:               # per-tick cap — budget courtesy
             if _time.time() >= deadline - 1.0:
