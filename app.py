@@ -10007,6 +10007,48 @@ def _nrfi_fair_from_paperlog(sb, market_id, side):
     return None
 
 
+_REPEG_PROB_CACHE: dict = {}    # event_name → {at, pp} (probables, 15-min)
+
+
+def _fresh_fair_for_repeg(sb, r, mt, market_id):
+    """RE-RUN the model at re-peg time (user, Aug 2 evening: "starter
+    change might drastically change the model between repegs"). An opener
+    auto-bet placed 40+ hours out was priced with whatever probables
+    existed THEN — often none, so an unmatched pitcher priced as league
+    average. Before every chase the gate now asks the model AGAIN with
+    TODAY's information: moneyline → _diamond_ml re-projection with the
+    CURRENT MLB-statsapi probables (15-min cached per game); nrfi → the
+    latest paperlog p_nrfi (the model's freshest read — re-evaluated
+    every tick through the 5h live window, where posted lineups and
+    confirmed starters live). None → caller keeps the entry-time fair
+    (a fetch failure never blocks the gate)."""
+    try:
+        if mt == "nrfi":
+            return _nrfi_fair_from_paperlog(sb, market_id, r.get("side"))
+        if mt != "moneyline":
+            return None
+        ev = r.get("event_name") or ""
+        es = r.get("event_start")
+        if " @ " not in ev or not es:
+            return None
+        c = _REPEG_PROB_CACHE.get(ev)
+        if c and _time.time() - c["at"] < 900:
+            pp = c["pp"]
+        else:
+            import handicapper_web as _hw
+            away, home = [s.strip() for s in ev.split(" @ ", 1)]
+            pp = _hw._mlb_probables(str(es), away, home) or {}
+            _REPEG_PROB_CACHE[ev] = {"at": _time.time(), "pp": pp}
+        p_home = _diamond_ml(sb, ev,
+                             ((pp.get("away") or {}) or {}).get("name"),
+                             ((pp.get("home") or {}) or {}).get("name"))
+        if p_home is None:
+            return None
+        return p_home if (r.get("side") or "") == "home" else 1.0 - p_home
+    except Exception:
+        return None
+
+
 def _repeg_edge_ok(fair_prob, new_c: float):
     """(ok, edge_pp) — does the pick still clear the NRFI edge gate at the
     new price? fair_prob is the pick's logged model fair (bot_picks.fair_prob,
@@ -10069,8 +10111,8 @@ def _repeg_tick(sb, now) -> dict:
             ids = [f["id"] for f in cands]
             try:
                 rows = (sb.table("bot_picks")
-                        .select("id,event_name,market_type,side,units,"
-                                "entry_price,fair_prob,signal_blob")
+                        .select("id,event_name,event_start,market_type,side,"
+                                "units,entry_price,fair_prob,signal_blob")
                         .in_("id", ids).execute().data) or []
             except Exception:
                 continue
@@ -10167,6 +10209,14 @@ def _repeg_tick(sb, now) -> dict:
                 edge = None
                 if is_autobet or move_n > 1:
                     fair = r.get("fair_prob")
+                    if is_autobet:
+                        # ALWAYS re-run the model before chasing — the fair
+                        # at entry may predate the announced starter, and a
+                        # starter change can move it drastically (user rule).
+                        fresh = _fresh_fair_for_repeg(
+                            sb, r, f.get("market_type"), f.get("market_id"))
+                        if fresh is not None:
+                            fair = fresh
                     if fair is None:
                         fair = _nrfi_fair_from_paperlog(sb, f.get("market_id"),
                                                         r.get("side"))
