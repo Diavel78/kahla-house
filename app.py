@@ -8,6 +8,7 @@ Firestore for data storage. First app: Bet System (odds board + P&L dashboard).
 import os
 import re
 import json
+import math
 import random as _random
 import secrets
 import functools
@@ -8533,6 +8534,201 @@ def _opener_pass(sb, now, deadline):
     return shadow_rows, stats
 
 
+# --- GRIDIRON IQ OPENER SHADOWS (football lane, Aug 3 2026) -----------------
+# Football is the ONLY sport whose model is already backtest-proven at
+# promotion grade (full-2025 walk-forward: NFL 66.5%/Brier 0.2171, NCAAF
+# 71.2%/0.1935 — the power_ratings team core, calibrated hfa+scale in the
+# snapshot params). This lane prices each football game's ML the moment it
+# lists on Polymarket inside the watch window and SHADOW-LOGS the model
+# edge — NO auto-bet: Gridiron IQ was validated against FINALS, never
+# against virgin openers, and September NFL openers are some of the
+# sharpest numbers on earth. Shadows accrue for ~a month before the games
+# that count; the promotion decision (real 1-contract bets, the MLB lane's
+# skeleton) reads this dataset. Season-start honesty: August/September
+# ratings are decayed 2025 data (40d half-life) — exactly what the shadow
+# record is for.
+_GRIDIRON_SPORTS = {"NFL": 168, "NCAAF": 96}   # sport → window top (hours)
+# PRESEASON NO-FLY: the ESPN spine lists NFL preseason (backups, tanked
+# halves — the ratings pipeline excludes those results and so does this
+# lane). markets rows don't carry ESPN's season.type, so the gate is a
+# date floor: nothing before Week 1. NCAAF Week 0 (Aug 29) is regular
+# season and passes. UPDATE YEARLY (or teach ingest_espn_markets to stamp
+# season type if this lane outlives the season).
+_GRIDIRON_MIN_START = {"NFL": "2026-09-08", "NCAAF": "2026-08-29"}
+_PWR_CACHE: dict = {}                          # sport → {at, snap}
+
+
+def _power_snapshot(sb, sport):
+    """Latest power_ratings row for a sport, 10-min cached. None = no
+    compute yet (lane silently inert)."""
+    c = _PWR_CACHE.get(sport)
+    if c and _time.time() - c["at"] < 600 and c["snap"]:
+        return c["snap"]
+    snap = None
+    try:
+        rows = (sb.table("power_ratings")
+                .select("league_avg,ratings,params,n_games")
+                .eq("sport", sport).order("computed_at", desc=True)
+                .limit(1).execute().data) or []
+        snap = rows[0] if rows else None
+    except Exception:
+        snap = None
+    _PWR_CACHE[sport] = {"at": _time.time(), "snap": snap}
+    return snap
+
+
+def _gridiron_ml(sb, sport, event_name):
+    """Team-core P(home) from the power_ratings snapshot — EXACTLY the
+    projection the backtest graded (off/def cross + fitted hfa, logistic
+    at the fitted scale). None = can't price (no snapshot / team
+    unmatched) — no shadow, never a guess."""
+    snap = _power_snapshot(sb, sport)
+    if not snap or " @ " not in (event_name or ""):
+        return None
+    ratings = snap.get("ratings") or {}
+    away_n, home_n = [s.strip() for s in event_name.split(" @ ", 1)]
+
+    def _team(nm):
+        if nm in ratings:
+            return ratings[nm]
+        nl = nm.lower()
+        for k, v in ratings.items():
+            kl = (k or "").lower()
+            if kl and (nl in kl or kl in nl):
+                return v
+        return None
+
+    h, a = _team(home_n), _team(away_n)
+    try:
+        lg = float(snap.get("league_avg") or 0.0)
+        params = snap.get("params") or {}
+        hfa = float(params.get("hfa") or 0.0)
+        scale = float(params.get("scale") or 1.0)
+        h_off, h_def = float(h["off"]), float(h["def"])
+        a_off, a_def = float(a["off"]), float(a["def"])
+    except (TypeError, KeyError, ValueError):
+        return None
+    exp_home = h_off + (a_def - lg) + hfa / 2.0
+    exp_away = a_off + (h_def - lg) - hfa / 2.0
+    margin = exp_home - exp_away
+    if scale <= 0:
+        scale = 1.0
+    try:
+        p = 1.0 / (1.0 + math.exp(-margin / scale))
+    except OverflowError:
+        p = 1.0 if margin > 0 else 0.0
+    return max(0.01, min(0.99, p))
+
+
+def _gridiron_opener_pass(sb, now, deadline):
+    """Football opener SHADOWS on the tick's leftover budget (after the
+    MLB opener pass). One shadow per game at first Polymarket listing
+    (same opener_shadow dedup/variant as MLB); a game not yet priced
+    re-evaluates next tick until it lists. Never raises, never bets."""
+    stats = {"g_eval": 0, "g_rows": 0}
+    rows: list = []
+    try:
+        if _time.time() >= deadline - 1.5:
+            return rows, stats
+        lo = (now + timedelta(hours=_OPENER_LO_H)).isoformat()
+        cands = []
+        for sport, hi_h in _GRIDIRON_SPORTS.items():
+            hi = (now + timedelta(hours=hi_h)).isoformat()
+            slo = max(lo, _GRIDIRON_MIN_START.get(sport, "") + "T00:00:00+00:00"
+                      if _GRIDIRON_MIN_START.get(sport) else lo)
+            try:
+                raw = (sb.table("markets")
+                       .select("id,event_name,event_start,sport")
+                       .eq("sport", sport).eq("status", "active")
+                       .gte("event_start", slo).lte("event_start", hi)
+                       .order("event_start").limit(60).execute().data) or []
+            except Exception:
+                continue
+            seen: set = set()
+            for g in raw:
+                n = g.get("event_name") or ""
+                if n and n not in seen:
+                    seen.add(n)
+                    cands.append(g)
+        if not cands:
+            return rows, stats
+        mids = [g["id"] for g in cands]
+        try:
+            done_rows = (sb.table("pickbot_paperlog")
+                         .select("market_id")
+                         .in_("market_id", mids)
+                         .eq("market_type", "moneyline")
+                         .filter("signal_blob->>opener_shadow", "eq", "true")
+                         .limit(1000).execute().data) or []
+        except Exception:
+            return rows, stats            # fail-closed: no dedup read → skip
+        done = {r["market_id"] for r in done_rows}
+        cands = [g for g in cands if g["id"] not in done]
+        if not cands:
+            return rows, stats
+        _random.shuffle(cands)
+        import handicapper_web
+        for g in cands[:8]:               # per-tick cap — budget courtesy
+            if _time.time() >= deadline - 1.0:
+                break
+            p_home = _gridiron_ml(sb, g["sport"], g.get("event_name"))
+            if p_home is None:
+                continue                  # unmatched team → never a guess
+            try:
+                d = handicapper_web.build_dossier(sb, None, None,
+                                                  market_id=g["id"])
+            except Exception:
+                continue
+            stats["g_eval"] += 1
+            mlp = ((((d or {}).get("odds") or {}).get("moneyline") or {})
+                   .get("polymarket") or {})
+            if not (mlp.get("home") or mlp.get("away")):
+                continue                  # not priced yet → retry next tick
+            fairs = {"home": p_home, "away": 1.0 - p_home}
+            best = None
+            for s in ("away", "home"):
+                q0 = ((mlp.get(s) or {}).get("quote") or {})
+                if q0.get("bid") is None:
+                    continue
+                e0 = fairs[s] * 100.0 - float(q0["bid"]) * 100.0
+                if best is None or e0 > best[1]:
+                    best = (s, e0, q0)
+            if best is None:
+                continue
+            s, edge0, q0 = best
+            bid0 = float(q0["bid"]) * 100.0
+            es0 = g.get("event_start")
+            try:
+                sim0 = round((datetime.fromisoformat(
+                    str(es0).replace("Z", "+00:00")) - now
+                ).total_seconds() / 60.0)
+            except Exception:
+                sim0 = None
+            _ea = _prob_to_amer_py(bid0 / 100.0)
+            _fa = _prob_to_amer_py(fairs[s])
+            rows.append({
+                "market_id": g["id"], "event_name": g.get("event_name"),
+                "event_start": es0, "sport": g["sport"],
+                "market_type": "moneyline", "side": s, "line": None,
+                "entry_price": (int(_ea) if _ea is not None else None),
+                "units": 1, "confidence": "low",
+                "timing_window": "opener", "prime_core": False,
+                "starts_in_min": sim0, "sharp_score": None,
+                "edge_pp": round(edge0, 1),
+                "fair_american": (int(_fa) if _fa is not None else None),
+                "gates_cleared": False,
+                "signal_blob": {"opener_shadow": True, "gridiron_ml": True,
+                                "p_home": round(p_home, 4),
+                                "would_bet": edge0 >= 2.5,
+                                "shadow_only": True},
+                "logged_at": now.isoformat(),
+            })
+            stats["g_rows"] += 1
+    except Exception:
+        pass
+    return rows, stats
+
+
 @app.route("/api/handicapper/paperlog")
 def api_handicapper_paperlog():
     """Cron-pinged ~1/min. Auto-logs every GATE-CLEARED Pick Bot suggestion
@@ -8855,6 +9051,11 @@ def api_handicapper_paperlog():
     # the one-contract AUTO-BET (user review gate) fires inside.
     opener_rows, opener_stats = _opener_pass(sb, now, deadline)
     rows.extend(opener_rows)
+    # GRIDIRON IQ football opener SHADOWS (no bets) — after MLB, on
+    # whatever budget remains. Inert until football games list.
+    g_rows, g_stats = _gridiron_opener_pass(sb, now, deadline)
+    rows.extend(g_rows)
+    opener_stats = {**opener_stats, **g_stats}
     # Bet-time Pinnacle stamp (parlay-api.com) — runs BEFORE the insert so
     # the stamp rides each new bet row. No-op without a key / over budget.
     pin_stamped = _pin_stamp_rows(sb, rows, now)
