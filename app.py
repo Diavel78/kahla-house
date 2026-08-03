@@ -8260,6 +8260,19 @@ def _opener_pass(sb, now, deadline):
                  >= _OPENER_PROBE_S]
         if not cands:
             return shadow_rows, stats
+        # FRESH-FIRST, then nearest-first (Aug 2 ~midnight AZ — the
+        # nearest-first fix stalled the sweep a different way: a game
+        # with an ML shadow but NO NRFI listing is un-completable until
+        # PMM posts its 1st-inning market, and a handful of those Monday
+        # stragglers sat at the FRONT of the queue re-eating every
+        # tick's dossier slots — the in-memory backoff can't hold them
+        # back across serverless containers. DB-backed priority instead:
+        # games never evaluated at all outrank partially-done ones, so a
+        # new slate drains completely before any straggler gets a retry
+        # slot.)
+        evaluated = {mid for (mid, _mt) in done}
+        cands.sort(key=lambda g: (g["id"] in evaluated,
+                                  str(g.get("event_start") or "")))
         # NEAREST-FIRST, not shuffled (Aug 2 ~11:45pm AZ — user: "why is
         # it going so incredibly slow"): the no-fence pool holds ~75
         # games but only 1-2 dossiers fit a tick, and a shuffle burned
