@@ -5641,7 +5641,19 @@ def api_polymarket_probe_exec():
         gtd_min = int(request.args.get("gtd_min") or 30)
     except Exception:
         return jsonify({"ok": False, "error": "bad price_c/qty/gtd_min"}), 400
-    cost = qty * price_c / 100.0
+    # SHORT-SIDE LANDMINE (Aug 3 2026, caught before the prop probe):
+    # write prices are YES-CANONICAL (live autobet code, app.py _autobet
+    # create: canon = 1 - side_price for synthetic). So side=short with
+    # the default price_c=3 = "buy NO at 97¢" = INSTANT FILL at a
+    # terrible price. For a safe off-touch NO probe pass price_c=97
+    # (= NO at 3¢). Guard: effective our-side price must be ≤ 50¢.
+    eff_c = (100.0 - price_c) if side == "short" else price_c
+    if eff_c > 50:
+        return jsonify({"ok": False, "error": (
+            f"effective {side} price {eff_c:.0f}¢ is not off-touch — for a "
+            "short probe pass the YES-canonical price (price_c=97 = NO at "
+            "3¢); probe refuses near/above-market resting prices")}), 400
+    cost = qty * eff_c / 100.0
     if cost > _REPEG_MAX_COST_USD:
         return jsonify({"ok": False, "error": (
             f"${cost:.2f} breaks the ${_REPEG_MAX_COST_USD:.0f} MASTER RULE "
