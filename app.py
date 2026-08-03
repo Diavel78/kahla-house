@@ -8299,6 +8299,17 @@ def _opener_persist(sb, row) -> bool:
         return False
 
 
+def _et_day(iso: str | None) -> str:
+    """ET calendar date of an event_start ISO string ('' on parse failure).
+    The per-day dedup key component — ET because MLB slates are ET-dated
+    (a 7:05pm CT start is next-day UTC but same-day ET)."""
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        return dt.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:
+        return ""
+
+
 def _opener_pass(sb, now, deadline):
     """Returns (shadow_rows, stats). Runs on the paperlog tick's LEFTOVER
     budget — which is naturally free in the evening/overnight when
@@ -8322,11 +8333,20 @@ def _opener_pass(sb, now, deadline):
         except Exception as e:
             stats["gate"] = ("mkts_err: " + str(e))[:120]
             return shadow_rows, stats
+        # Dedup dup market rows PER DAY — key is (event_name, ET date),
+        # NOT bare event_name. LANDMINE (Aug 3 2026, "11 orders forever"):
+        # the 72h opener window spans a whole MLB series, and a bare-name
+        # dedup kept only the EARLIEST row per matchup — so every Tuesday
+        # game whose series-mate played Monday was silently discarded,
+        # cands hit 0 (games=15 both_done=15 via SQL replication), and
+        # the lane bet NOTHING while lines sat posted. Same-day dup rows
+        # (gotcha #30 drift) still collapse; series games survive.
         games, seen = [], set()
         for g in raw:
             n = g.get("event_name") or ""
-            if n and n not in seen:
-                seen.add(n)
+            key = (n, _et_day(g.get("event_start")))
+            if n and key not in seen:
+                seen.add(key)
                 games.append(g)
         if not games:
             stats["gate"] = "no_games"
@@ -8345,6 +8365,9 @@ def _opener_pass(sb, now, deadline):
         cands = [g for g in games
                  if (g["id"], "nrfi") not in done
                  or (g["id"], "moneyline") not in done]
+        if not cands:
+            stats["gate"] = "all_done"    # whole window evaluated — healthy
+            return shadow_rows, stats
         # PROBE BACKOFF — the no-fence budget guard: a game we probed
         # recently and found UNLISTED waits _OPENER_PROBE_S before the
         # next probe. A game that listed got its rows and left via the
@@ -8820,9 +8843,10 @@ def _gridiron_opener_pass(sb, now, deadline):
             seen: set = set()
             for g in raw:
                 n = g.get("event_name") or ""
-                if n and n not in seen:
-                    seen.add(n)
-                    cands.append(g)
+                key = (n, _et_day(g.get("event_start")))   # per-DAY dedup —
+                if n and key not in seen:  # bare-name eats series/rematch
+                    seen.add(key)          # games across a multi-day window
+                    cands.append(g)        # (the Aug 3 MLB opener stall)
         if not cands:
             return rows, stats
         mids = [g["id"] for g in cands]
