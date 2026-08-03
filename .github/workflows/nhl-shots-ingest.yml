@@ -1,0 +1,55 @@
+name: NHL Shots — Ingest
+
+# Crease IQ P3 (xG spine): per-shot play-by-play events with rink
+# coordinates from the free NHL API, into nhl_shot_events. Game universe
+# comes from nhl_goalie_games (the P1 spine), so run the goalie ingest
+# first. Probe-first — field names verified from the Action log before
+# any backfill.
+#   probe    — one completed game's shape verification, no writes.
+#   backfill — every goalie-spine game not yet ingested (~2h cold).
+#   delta    — same incremental walk (daily default; off-season no-op).
+#
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "probe | backfill | delta"
+        required: false
+        default: "delta"
+  schedule:
+    - cron: "10 10 * * *"
+
+concurrency:
+  group: nhl-shots-ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run ingest
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          MODE="${{ github.event.inputs.mode || 'delta' }}"
+          echo "mode=$MODE"
+          case "$MODE" in
+            probe)    python -m scripts.ingest_nhl_shots --probe ;;
+            backfill) python -m scripts.ingest_nhl_shots --backfill --commit ;;
+            delta|*)  python -m scripts.ingest_nhl_shots --delta --commit ;;
+          esac
