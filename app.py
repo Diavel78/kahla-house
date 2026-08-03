@@ -7979,7 +7979,12 @@ AUTOBET_ENABLED = True
 # answer with real money.
 AUTOBET_MAX_BETS = 20
 _AUTOBET_CONTRACTS = 1
-_OPENER_LO_H, _OPENER_HI_H = 6, 40   # beyond the live window → listing-time
+_OPENER_LO_H, _OPENER_HI_H = 6, 64   # beyond the live window → listing-time
+# (40→64 Aug 2 evening — user caught Aug-4 games posted while it was still
+# Aug 2: Poly lists T+2 evenings ~42-46h out, past the old fence. "First
+# posted line" means the window chases the LISTING, not the calendar. The
+# rolling 20-bet slate cap + $6 Master Rule are unchanged and now govern
+# the union of both open slates.)
 
 # --- DIAMOND IQ LIVE ("the steam engine dies tonight" — Aug 2 2026) ---
 # MLB moneylines are priced by the MODEL, not by movement: the daily
