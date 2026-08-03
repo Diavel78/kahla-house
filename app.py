@@ -7983,7 +7983,13 @@ AUTOBET_MAX_BETS = 40   # 20→40 Aug 2 11:30pm AZ (user: "Move the cap to
                         # Worst case 40 × 54¢ ≈ $21.60 across the window.
 _AUTOBET_CONTRACTS = 1
 _OPENER_LO_H = 6                # below this = the live game-day window
-_OPENER_HI_H = 14 * 24          # sanity bound only — NOT a strategy fence
+_OPENER_HI_H = 72               # pool bound ≈ Poly's real listing horizon
+# (14d → 72h Aug 2 ~12:25am AZ: Poly lists MLB ~T+2 evenings, so games
+# beyond 3 days CANNOT be listed yet — carrying 90 rotation candidates
+# when only ~35 can possibly be bettable diluted every tick's one
+# dossier slot. 72h covers the entire listing cadence with a day of
+# margin; this is a POOL bound, not the old strategy fence — nothing
+# postable sits outside it.)
 # ("Why have a fence at all??" — user, Aug 2 evening, after catching Aug-4
 # lines posted while the old 40h ceiling ignored them.) The REAL gate is
 # "is it listed on Polymarket yet": a listed game gets priced and bet the
