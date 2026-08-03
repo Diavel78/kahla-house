@@ -10431,7 +10431,9 @@ REPEG_ENABLED = True         # LIVE (2nd time) Aug 2 2026 — probe run 2
                              # 404s live orders) → recreate on venue-kill →
                              # position check so a raced fill is never
                              # re-placed → 🚨 ORDER LOST ping as last resort.
-_REPEG_MARKET_TYPES = {"nrfi"}
+_REPEG_MARKET_TYPES = {"nrfi", "prop"}   # activation trigger — a pending
+                                         # K-prop alone wakes the pass
+                                         # (Aug 3: props chase like Y/NRFI)
 _REPEG_MAX_MOVES = 2         # lifetime cancel-replace cap per bet
 _REPEG_MAX_COST_USD = 6.00   # ⚠ THE MASTER RULE — never raise casually
 
@@ -10614,7 +10616,8 @@ def _repeg_tick(sb, now) -> dict:
                 continue
             cands = [f for f in (fs.get("fills") or [])
                      if f.get("outbid") and f.get("venue") == "POLYMARKET"
-                     and (f.get("market_type") or "") in ("nrfi", "moneyline")
+                     and (f.get("market_type") or "") in ("nrfi", "moneyline",
+                                                          "prop")
                      and (f.get("mins_to_start") or 0) > 0
                      and f.get("best_bid_c") is not None]
             if not cands:
@@ -10641,12 +10644,15 @@ def _repeg_tick(sb, now) -> dict:
                 ev = r.get("event_name") or ""
                 side = (r.get("side") or "").upper()
                 mlbl = ("ML" if (f.get("market_type") == "moneyline")
+                        else "K-PROP" if (f.get("market_type") == "prop")
                         else "NRFI")
-                if (f.get("market_type") == "moneyline"
-                        and not bool(blob.get("autobet"))):
-                    continue    # manual ML bets stay the user's to move —
-                                # only the model's own bets chase (user dial)
-                if bool(blob.get("autobet")) and new_c is not None:
+                is_model_bet = (bool(blob.get("autobet"))
+                                or bool(blob.get("whiff_autobet")))
+                if (f.get("market_type") in ("moneyline", "prop")
+                        and not is_model_bet):
+                    continue    # manual ML/prop bets stay the user's to
+                                # move — only the model's own bets chase
+                if is_model_bet and new_c is not None:
                     # peg law for the model's own bets: chase to one CENT
                     # OVER the new make (front of the queue), never at it —
                     # unless that would cross the ask (then join). Gates
@@ -10707,7 +10713,7 @@ def _repeg_tick(sb, now) -> dict:
                 #   fair − 2.5pp is the wall, the 54¢ cap above overrides
                 #   everything, and chasing from 42¢ toward a 50¢ fair is
                 #   walking up our own edge curve, not chasing news.
-                is_autobet = bool(blob.get("autobet"))
+                is_autobet = is_model_bet
                 if not is_autobet and len(moves) >= _REPEG_MAX_MOVES:
                     if _mark("repeg_stop", {"reason": "move_cap"},
                              tg=(f"🤖 REPEG STOP — {ev} {mlbl} {side}: move cap "
@@ -10728,10 +10734,17 @@ def _repeg_tick(sb, now) -> dict:
                             sb, r, f.get("market_type"), f.get("market_id"))
                         if fresh is not None:
                             fair = fresh
-                    if fair is None:
+                    if fair is None and f.get("market_type") != "prop":
+                        # NRFI paperlog fallback is a GAME-level fair —
+                        # never apply it to a prop on the same market_id
                         fair = _nrfi_fair_from_paperlog(sb, f.get("market_id"),
                                                         r.get("side"))
                     ok, edge = _repeg_edge_ok(fair, new_c)
+                    if (ok and f.get("market_type") == "prop"
+                            and edge is not None
+                            and edge < _WHIFF_BET_MIN_PP):
+                        ok = False    # props hold the whiff entry bar (4pp),
+                                      # not the NRFI 2.5pp chase floor
                     if not ok:
                         why = (("model limit" if is_autobet else "edge gone")
                                if ok is False else "no model fair on pick")
