@@ -10640,7 +10640,7 @@ def _poly_ledger_tick(sb, now) -> dict:
         if not owner:
             return res
         rows = (sb.table("bot_picks")
-                .select("id,side,signal_blob,event_start,status")
+                .select("id,side,signal_blob,poly_pnl,event_start,status")
                 .eq("asked_by", owner)
                 .gte("event_start", (now - timedelta(days=3)).isoformat())
                 .limit(300).execute().data) or []
@@ -10752,15 +10752,18 @@ def _poly_ledger_tick(sb, now) -> dict:
                        L["sell"] + L["payout"] - L["buy"], 2),
                    "final": bool(L["resolved"]) or L["qty"] == 0,
                    "at": now.isoformat()}
-            old = b.get("poly_pnl") or {}
+            old = (r.get("poly_pnl") if isinstance(r.get("poly_pnl"), dict)
+                   else {}) or {}
             if all(old.get(k) == pnl[k] for k in
                    ("buy_usd", "sell_usd", "payout_usd", "open_qty",
                     "final")):
                 continue                       # unchanged — no write
-            nb = dict(b)
-            nb["poly_pnl"] = pnl
+            # OWN COLUMN, not signal_blob (migration 017): the blob has
+            # many read-modify-write writers (fill tracker, repeg marks,
+            # autolog) and the last one silently dropped ledger stamps.
+            # poly_pnl the column has exactly ONE writer — this tick.
             try:
-                (sb.table("bot_picks").update({"signal_blob": nb})
+                (sb.table("bot_picks").update({"poly_pnl": pnl})
                  .eq("id", r["id"]).execute())
                 res["stamped"] += 1
             except Exception:
