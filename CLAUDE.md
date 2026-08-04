@@ -1062,6 +1062,18 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 > "Known Issues" below started as someone saying "this should work"
 > and being wrong about why. Write it down so the next debug session
 > doesn't re-walk the same loop.
+>
+> **A count anomaly the user flags IS the bug until proven otherwise —
+> investigate the anomaly, never narrate past it.** Aug 3 2026: the user
+> said "you should be filling Wednesday" three times; the first status
+> query ALREADY showed Aug-5 NRFIs at zero, and it got explained away
+> twice ("Poly lists later") before anyone looked. The real cause (the
+> Kalshi early-listing latch) was one query deep the whole time. When
+> the human watching the order count disagrees with the healthy-system
+> story, the order count wins. Related architecture rule, violated by
+> that same bug: **Kalshi is SIGNAL ONLY (model confirm / CLV close /
+> fair anchor); execution surfaces must never consume a Kalshi price as
+> a bettable quote — Polymarket's listing is the list.**
 
 ## Known Issues & Gotchas
 1. **The Odds API auth is `?api_key=` query param** — NOT a Bearer header. Easy to copy from one provider's pattern (Owls used Bearer) and break.
