@@ -10872,13 +10872,18 @@ def _harvest_tick(sb, now) -> dict:
             if (b.get("contracts") or 0) < 2 or not b.get("pmm_slug"):
                 continue
             cands.append((r, b))
+        res["cands"] = len(cands)
         if not cands:
+            res["gate"] = "no_cands"
             return res
         client = get_client()
         orders = _pmm_open_orders_raw(client)
         positions = _pmm_positions_raw(client)
         if orders is None or positions is None:
+            res["gate"] = ("orders_none" if orders is None
+                           else "positions_none")
             return res                      # venue dark — never act blind
+        res["held2"] = 0
         for r, b in cands:
             if res["placed"] >= 2:          # tick latency bound
                 break
@@ -10888,6 +10893,7 @@ def _harvest_tick(sb, now) -> dict:
             held = -net if synthetic else net
             if held < 2:
                 continue                    # not (fully) filled / one sold
+            res["held2"] = res.get("held2", 0) + 1
             sell_intent = ("ORDER_INTENT_SELL_SHORT" if synthetic
                            else "ORDER_INTENT_SELL_LONG")
             if any(o.get("slug") == slug and o.get("intent") == sell_intent
