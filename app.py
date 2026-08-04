@@ -9630,6 +9630,10 @@ def api_handicapper_paperlog():
     # OUTBID push (every 2nd minute) — the red chip's Telegram twin: a
     # resting maker order lost the touch, re-bid or take.
     outbid_warned = _outbid_alerts(sb, now)
+    # MONEY LEDGER (every 5th minute) — venue cash truth per pick from
+    # the Polymarket activities feed → signal_blob.poly_pnl. Additive
+    # only; the resolver keeps owning status/pnl_units.
+    ledger = _poly_ledger_tick(sb, now)
     # TELEGRAM BATCH FLUSH — everything above queued into telegram_queue;
     # at most ONE 📬 summary per _TG_BATCH_MIN minutes (urgent 🚨 sends
     # bypassed the queue at send time). Nothing queued → no message.
@@ -9638,8 +9642,8 @@ def api_handicapper_paperlog():
     # (the JSON response is visible only in cron-job.org history).
     print(f"paperlog: processed={processed} cands={len(alert_cands)} "
           f"alerted={bets_alerted} outbid_warned={outbid_warned} "
-          f"repeg={repeg} opener={opener_stats} tg_flushed={tg_flushed} "
-          f"new_rows={len(rows)}")
+          f"repeg={repeg} opener={opener_stats} ledger={ledger} "
+          f"tg_flushed={tg_flushed} new_rows={len(rows)}")
     new_rows = 0
     if rows:
         try:
@@ -10606,6 +10610,119 @@ def _repeg_edge_ok(fair_prob, new_c: float):
         _min_pp = 3.0
     edge = f * 100.0 - new_c
     return (edge >= _min_pp), round(edge, 2)
+
+
+_POLY_LEDGER_MOD = 5      # minutes — rides the paperlog tick
+
+
+def _poly_ledger_tick(sb, now) -> dict:
+    """THE MONEY LEDGER (Aug 3 2026, user: "if we turn this into a
+    trading machine you're going to have to pull profit from trades and
+    sells... Polymarket is the platform we use for grading anyway").
+    Stamps `signal_blob.poly_pnl` on the admin's recent slugged picks:
+    per-(slug, leg) VENUE CASH TRUTH — buys, sells, resolution payouts —
+    parsed from the same activities feed the dashboard P&L uses (its
+    complement-price landmines already solved: cost/qty is the real
+    per-share price, never the SDK `price`). TWO LEDGERS BY DESIGN:
+    ESPN-graded units stay the MODEL's scoreboard (paperlog shadows and
+    other users' picks have no venue position to grade); poly_pnl is the
+    ACCOUNT's scoreboard — the only ledger that can see a SELL.
+    `realized_usd` = sells + payouts − buys, FINAL only when the leg is
+    flat/resolved (while open it's net cash, i.e. −cost of inventory).
+    Legs: YES vs NO by position sign, so both-sides incidents (the
+    LAD@CHC Aug 3 flip) ledger separately. Additive only — never touches
+    status/pnl_units (the resolver owns those). Never raises."""
+    res = {"stamped": 0}
+    try:
+        if now.minute % _POLY_LEDGER_MOD:
+            return res
+        owner = _kalshi_owner_uid()
+        if not owner:
+            return res
+        rows = (sb.table("bot_picks")
+                .select("id,side,signal_blob,event_start,status")
+                .eq("asked_by", owner)
+                .gte("event_start", (now - timedelta(days=3)).isoformat())
+                .limit(300).execute().data) or []
+        picks = []
+        for r in rows:
+            b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+            slug = b.get("pmm_slug")
+            if slug:
+                picks.append((r, b, slug, bool(b.get("pmm_synthetic"))))
+        if not picks:
+            return res
+        client = get_client()
+        acts = fetch_activities(client, max_pages=10)
+        led: dict = {}
+        for act in acts:
+            t = act.get("type")
+            if t == "ACTIVITY_TYPE_TRADE":
+                d = act.get("trade") or {}
+            elif t == "ACTIVITY_TYPE_POSITION_RESOLUTION":
+                d = act.get("positionResolution") or {}
+            else:
+                continue
+            slug = d.get("marketSlug") or ""
+            if not slug:
+                continue
+            bef = d.get("beforePosition") or {}
+            aft = d.get("afterPosition") or {}
+            net_b = _safe_float(bef.get("netPosition")) or 0.0
+            net_a = _safe_float(aft.get("netPosition")) or 0.0
+            leg = (net_b if net_b != 0 else net_a) < 0     # True = NO leg
+            L = led.setdefault((slug, leg),
+                               {"buy": 0.0, "sell": 0.0, "payout": 0.0,
+                                "qty": 0.0, "events": 0, "resolved": False})
+            if t == "ACTIVITY_TYPE_TRADE":
+                cost = _safe_float(d.get("cost"))
+                if cost is None:
+                    continue
+                if abs(net_a) > abs(net_b):                # grew = BUY
+                    L["buy"] += abs(cost)
+                else:                                      # shrank = SELL
+                    L["sell"] += abs(cost)
+                L["qty"] = abs(net_a)
+                L["events"] += 1
+            else:
+                qty = abs(net_b)
+                side = (d.get("side") or "").replace(
+                    "POSITION_RESOLUTION_SIDE_", "")
+                held_yes = net_b > 0
+                won = ((held_yes and side in ("YES", "LONG"))
+                       or (not held_yes and side in ("NO", "SHORT")))
+                L["payout"] += qty if won else 0.0
+                L["qty"] = 0.0
+                L["resolved"] = True
+                L["events"] += 1
+        for r, b, slug, synthetic in picks:
+            L = led.get((slug, synthetic))
+            if not L or not L["events"]:
+                continue
+            pnl = {"buy_usd": round(L["buy"], 2),
+                   "sell_usd": round(L["sell"], 2),
+                   "payout_usd": round(L["payout"], 2),
+                   "open_qty": round(L["qty"], 2),
+                   "realized_usd": round(
+                       L["sell"] + L["payout"] - L["buy"], 2),
+                   "final": bool(L["resolved"]) or L["qty"] == 0,
+                   "at": now.isoformat()}
+            old = b.get("poly_pnl") or {}
+            if all(old.get(k) == pnl[k] for k in
+                   ("buy_usd", "sell_usd", "payout_usd", "open_qty",
+                    "final")):
+                continue                       # unchanged — no write
+            nb = dict(b)
+            nb["poly_pnl"] = pnl
+            try:
+                (sb.table("bot_picks").update({"signal_blob": nb})
+                 .eq("id", r["id"]).execute())
+                res["stamped"] += 1
+            except Exception:
+                pass
+    except Exception as e:
+        res["err"] = str(e)[:120]
+    return res
 
 
 def _repeg_tick(sb, now) -> dict:
