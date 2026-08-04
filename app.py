@@ -7274,6 +7274,17 @@ _WHIFF_BET_MAX_PP = 10.0          # the claimed-edge cliff (3rd-time rule:
                                   # Diamond totals) — >10pp claims stay
                                   # shadow-only until the record says raise
 _WHIFF_MAX_ENTRY_C = 54           # user guardrail — same as Y/NRFI
+_WHIFF_MIN_ENTRY_C = 25           # FILL-VIABILITY floor (user, Aug 3:
+                                  # "a 13% chance... the other guy's
+                                  # betting an 87% chance — it's just
+                                  # unlikely to fill. If we want these
+                                  # to fill we've gotta be somewhat
+                                  # middle ground"). Our maker fill
+                                  # needs a TAKER on the other side;
+                                  # nobody lifts 87¢ favorites. Fills
+                                  # tonight: 26-49¢ filled, deep tails
+                                  # sat. Not an anti-longshot rule — a
+                                  # counterparty-exists rule.
 _WHIFF_TRUST_LO, _WHIFF_TRUST_HI = 0.30, 0.70   # calibration trust zone —
                                   # the model's YES prob must be here to
                                   # BET (compressed tails claim phantom
@@ -7443,7 +7454,7 @@ def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
             # the bias favors us. The v2 sharpening recal re-earns the
             # tails, if ever, with data.
             if (_WHIFF_BET_MIN_PP <= edge <= _WHIFF_BET_MAX_PP
-                    and side_c <= _WHIFF_MAX_ENTRY_C
+                    and _WHIFF_MIN_ENTRY_C <= side_c <= _WHIFF_MAX_ENTRY_C
                     and _WHIFF_TRUST_LO <= model_p <= _WHIFF_TRUST_HI
                     and n_starts >= _WHIFF_MIN_STARTS):
                 bet_cands.append((edge, mid, key, q, name, float(line),
