@@ -5874,6 +5874,15 @@ def api_poly_roi_baseline():
                    or (net < 0 and side in ("NO", "SHORT")))
             M["payout"] += qty if won else 0.0
             M["resolutions"] += 1
+            # WIN RATE + entry mix (user, Aug 3: "what was the actual WIN
+            # rate.. instead of the ROI" — the harvest math hinges on it)
+            M["res_won"] = M.get("res_won", 0) + (1 if won else 0)
+            cost = _safe_float(bef.get("cost"))
+            if cost is not None and qty > 0:
+                key = "win_cost" if won else "loss_cost"
+                M[key] = M.get(key, 0.0) + cost
+                M[key.replace("cost", "qty")] = (
+                    M.get(key.replace("cost", "qty"), 0.0) + qty)
     out: dict = {"ok": True, "fetched_activities": len(acts),
                  "window": "2026-06-01..2026-07-31 (cash-in-month)",
                  "baseball_filter": "slug mlb-*/-mlb-",
@@ -5882,10 +5891,18 @@ def api_poly_roi_baseline():
     for mo in sorted(months):
         M = months[mo]
         net = M["sell"] + M["payout"] - M["buy"]
+        wq, lq = M.get("win_qty", 0.0), M.get("loss_qty", 0.0)
         out["months"][mo] = {
             **{k: round(v, 2) for k, v in M.items()},
             "net_usd": round(net, 2),
-            "roi_pct": round(100.0 * net / M["buy"], 2) if M["buy"] else None}
+            "roi_pct": round(100.0 * net / M["buy"], 2) if M["buy"] else None,
+            "win_rate_pct": (round(100.0 * M.get("res_won", 0)
+                                   / M["resolutions"], 1)
+                             if M["resolutions"] else None),
+            "avg_entry_c_wins": (round(100.0 * M["win_cost"] / wq, 1)
+                                 if wq else None),
+            "avg_entry_c_losses": (round(100.0 * M["loss_cost"] / lq, 1)
+                                   if lq else None)}
         for k in tot:
             tot[k] += M[k]
     net = tot["sell"] + tot["payout"] - tot["buy"]
