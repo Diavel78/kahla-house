@@ -8475,7 +8475,12 @@ AUTOBET_MAX_BETS = 40   # 20→40 Aug 2 11:30pm AZ (user: "Move the cap to
                         # 40") — the no-fence opener lane holds TWO open
                         # slates at once, so the rolling window counts both.
                         # Worst case 40 × 54¢ ≈ $21.60 across the window.
-_AUTOBET_CONTRACTS = 1
+_AUTOBET_CONTRACTS = 2   # 1→2 Aug 3 ~11:30pm AZ (user: "starting right
+                         # now") — the PAIRED HARVEST test: contract 1
+                         # rides to resolution, contract 2 gets a resting
+                         # +35% ROI sell the moment the fill lands
+                         # (_harvest_tick). 2 × 54¢ max = $1.08, well
+                         # inside the $6 master rule.
 _OPENER_LO_H = 6                # below this = the live game-day window
 _OPENER_HI_H = 72               # pool bound ≈ Poly's real listing horizon
 # (14d → 72h Aug 2 ~12:25am AZ: Poly lists MLB ~T+2 evenings, so games
@@ -9798,6 +9803,9 @@ def api_handicapper_paperlog():
     # OUTBID push (every 2nd minute) — the red chip's Telegram twin: a
     # resting maker order lost the touch, re-bid or take.
     outbid_warned = _outbid_alerts(sb, now)
+    # HARVEST LEG (every 2nd minute) — rest the +35% take-profit sell on
+    # every double-filled model bet (contract 2 of the paired test).
+    harvest = _harvest_tick(sb, now)
     # MONEY LEDGER (every 5th minute) — venue cash truth per pick from
     # the Polymarket activities feed → signal_blob.poly_pnl. Additive
     # only; the resolver keeps owning status/pnl_units.
@@ -9810,8 +9818,8 @@ def api_handicapper_paperlog():
     # (the JSON response is visible only in cron-job.org history).
     print(f"paperlog: processed={processed} cands={len(alert_cands)} "
           f"alerted={bets_alerted} outbid_warned={outbid_warned} "
-          f"repeg={repeg} opener={opener_stats} ledger={ledger} "
-          f"tg_flushed={tg_flushed} new_rows={len(rows)}")
+          f"repeg={repeg} opener={opener_stats} harvest={harvest} "
+          f"ledger={ledger} tg_flushed={tg_flushed} new_rows={len(rows)}")
     new_rows = 0
     if rows:
         try:
@@ -9824,6 +9832,7 @@ def api_handicapper_paperlog():
                     "with_pick": with_pick, "new_rows": new_rows,
                     "bets_alerted": bets_alerted, "pin_stamped": pin_stamped,
                     "opener": opener_stats, "repeg": repeg,
+                    "harvest": harvest, "ledger": ledger,
                     "tg_flushed": tg_flushed})
 
 
@@ -10778,6 +10787,110 @@ def _repeg_edge_ok(fair_prob, new_c: float):
         _min_pp = 3.0
     edge = f * 100.0 - new_c
     return (edge >= _min_pp), round(edge, 2)
+
+
+_HARVEST_ENABLED = True
+_HARVEST_ROI = 0.35       # +35% take-profit — the user's pick off the
+                          # break-even table (75% touch rate → +33.3%
+                          # breaks even; 35 is "make a little"). The
+                          # paired test: measured touch rate decides
+                          # whether this dial moves.
+_HARVEST_MOD = 2          # minutes — same cadence as the re-peg pass
+
+
+def _harvest_tick(sb, now) -> dict:
+    """THE HARVEST LEG (Aug 3 2026, user: "2 contracts... 1 rides and
+    wins or losses, the other as soon as it fills has a sell order added
+    — and see who wins"). For every MODEL bet (autobet/whiff_autobet)
+    holding ≥2 contracts, rest a post-only SELL for 1 at
+    ceil(entry × 1.35) — the exchange then watches the game for us:
+    pre-game drift or an in-play surge lifts the ask, no streaming
+    needed (a stop-loss would need websockets; a take-profit needs
+    patience). GTD event_start+7h so the order lives THROUGH the game.
+    DEDUP IS VENUE-STATE, not DB markers (the poly_pnl lesson — blob
+    markers race): skip when an open AUTOMATIC sell already rests on the
+    slug, or the position is already <2 (one sold). SELL creates were
+    never probed — post-only is the shield (a wrong-side canonical price
+    would CROSS and get rejected, never fill badly); first live cycle is
+    the probe, verified via orders.list. Manual bets are never touched.
+    Never raises."""
+    res = {"placed": 0}
+    try:
+        if not _HARVEST_ENABLED or now.minute % _HARVEST_MOD:
+            return res
+        owner = _kalshi_owner_uid()
+        if not owner:
+            return res
+        rows = (sb.table("bot_picks")
+                .select("id,event_name,event_start,entry_price,signal_blob")
+                .eq("status", "pending").eq("asked_by", owner)
+                .gte("event_start", (now - timedelta(hours=7)).isoformat())
+                .limit(200).execute().data) or []
+        cands = []
+        for r in rows:
+            b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+            if not (b.get("autobet") or b.get("whiff_autobet")):
+                continue                    # model bets only — never manual
+            if (b.get("contracts") or 0) < 2 or not b.get("pmm_slug"):
+                continue
+            cands.append((r, b))
+        if not cands:
+            return res
+        client = get_client()
+        orders = _pmm_open_orders_raw(client)
+        positions = _pmm_positions_raw(client)
+        if orders is None or positions is None:
+            return res                      # venue dark — never act blind
+        for r, b in cands:
+            if res["placed"] >= 2:          # tick latency bound
+                break
+            slug = b["pmm_slug"]
+            synthetic = bool(b.get("pmm_synthetic"))
+            net = (positions.get(slug) or {}).get("net") or 0.0
+            held = -net if synthetic else net
+            if held < 2:
+                continue                    # not (fully) filled / one sold
+            sell_intent = ("ORDER_INTENT_SELL_SHORT" if synthetic
+                           else "ORDER_INTENT_SELL_LONG")
+            if any(o.get("slug") == slug and o.get("intent") == sell_intent
+                   and (o.get("state") or "") in _OPEN_ORDER_STATES
+                   for o in orders):
+                continue                    # harvest ask already resting
+            ep = r.get("entry_price")
+            try:
+                ep = float(ep)
+                side_c = (10000.0 / (ep + 100.0) if ep > 0
+                          else 100.0 * (-ep) / ((-ep) + 100.0))
+            except (TypeError, ValueError):
+                continue
+            sell_c = min(99, int(math.ceil(side_c * (1.0 + _HARVEST_ROI))))
+            canon = (100.0 - sell_c) / 100.0 if synthetic else sell_c / 100.0
+            try:
+                dt = datetime.fromisoformat(
+                    str(r.get("event_start")).replace("Z", "+00:00"))
+                gtt = ((dt + timedelta(hours=7)).astimezone(timezone.utc)
+                       .strftime("%Y-%m-%dT%H:%M:%SZ"))
+            except Exception:
+                continue
+            params = {"marketSlug": slug, "intent": sell_intent,
+                      "type": "ORDER_TYPE_LIMIT",
+                      "price": {"value": f"{canon:.3f}", "currency": "USD"},
+                      "quantity": 1,
+                      "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
+                      "goodTillTime": gtt,
+                      "participateDontInitiate": True,
+                      "manualOrderIndicator":
+                          "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
+            try:
+                client.orders.create(params)
+                res["placed"] += 1
+            except Exception as e:
+                _send_fill_telegram(
+                    f"🤖 HARVEST FAILED — {r.get('event_name')}: sell "
+                    f"create errored ({e})"[:240])
+    except Exception as e:
+        res["err"] = str(e)[:120]
+    return res
 
 
 _POLY_LEDGER_MOD = 5      # minutes — rides the paperlog tick
