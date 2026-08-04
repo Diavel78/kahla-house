@@ -10854,7 +10854,8 @@ def _harvest_tick(sb, now) -> dict:
         if not owner:
             return res
         rows = (sb.table("bot_picks")
-                .select("id,event_name,event_start,entry_price,signal_blob")
+                .select("id,event_name,event_start,entry_price,market_type,"
+                        "signal_blob")
                 .eq("status", "pending").eq("asked_by", owner)
                 .gte("event_start", (now - timedelta(hours=7)).isoformat())
                 .limit(200).execute().data) or []
@@ -10863,6 +10864,11 @@ def _harvest_tick(sb, now) -> dict:
             b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
             if not (b.get("autobet") or b.get("whiff_autobet")):
                 continue                    # model bets only — never manual
+            if (r.get("market_type") or "") == "nrfi":
+                continue    # NO NRFI HARVEST (user, Aug 4): the market
+                            # resolves ~25min after first pitch — there's
+                            # no life in which a +35% sell beats the
+                            # resolution minutes away. Both contracts ride.
             if (b.get("contracts") or 0) < 2 or not b.get("pmm_slug"):
                 continue
             cands.append((r, b))
