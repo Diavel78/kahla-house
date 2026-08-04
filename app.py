@@ -9785,9 +9785,10 @@ def api_handicapper_paperlog():
     # opener gets its own 14s regardless of what the live loop spent;
     # other minutes keep the old leftover behavior. The tick already ran
     # 11-13s fine on this platform.
-    opener_deadline = deadline
-    if now.minute % 3 == 0:
-        opener_deadline = max(deadline, _time.time() + 14.0)
+    # EVERY tick (the %3 slice was too slow — user, Aug 4: a day's
+    # backlog draining at 1 game/3min is not a fix). When the pool is
+    # empty the pass exits in <1s (all_done), so the guarantee is free.
+    opener_deadline = max(deadline, _time.time() + 14.0)
     opener_rows, opener_stats = _opener_pass(sb, now, opener_deadline)
     rows.extend(opener_rows)
     # GRIDIRON IQ football opener SHADOWS (no bets) — after MLB, on
