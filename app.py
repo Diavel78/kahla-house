@@ -9776,15 +9776,23 @@ def api_handicapper_paperlog():
                 "gates_cleared": b.get("gates_cleared", True),
                 "signal_blob": b["signal_blob"], "logged_at": now.isoformat(),
             })
-    # OPENER LANE — evaluate tomorrow's freshly-priced games on whatever
-    # budget the live window left over (naturally the evening/overnight
-    # hours, exactly when lines post). Shadow rows ride the same insert;
-    # the one-contract AUTO-BET (user review gate) fires inside.
-    opener_rows, opener_stats = _opener_pass(sb, now, deadline)
+    # OPENER LANE — leftover budget normally, but with a GUARANTEED SLICE
+    # every 3rd minute (Aug 4 2026, the "zero orders... Thursday games
+    # should be out there" starvation: an EARLY slate keeps the 5h live
+    # window occupied from ~4:30am AZ, every daytime tick burned its 8s
+    # on the live loop, and the opener hit gate:"budget" for 8 straight
+    # hours — Monday's late slate had masked it). On minute%3==0 the
+    # opener gets its own 14s regardless of what the live loop spent;
+    # other minutes keep the old leftover behavior. The tick already ran
+    # 11-13s fine on this platform.
+    opener_deadline = deadline
+    if now.minute % 3 == 0:
+        opener_deadline = max(deadline, _time.time() + 14.0)
+    opener_rows, opener_stats = _opener_pass(sb, now, opener_deadline)
     rows.extend(opener_rows)
     # GRIDIRON IQ football opener SHADOWS (no bets) — after MLB, on
     # whatever budget remains. Inert until football games list.
-    g_rows, g_stats = _gridiron_opener_pass(sb, now, deadline)
+    g_rows, g_stats = _gridiron_opener_pass(sb, now, opener_deadline)
     rows.extend(g_rows)
     opener_stats = {**opener_stats, **g_stats}
     # Bet-time Pinnacle stamp (parlay-api.com) — runs BEFORE the insert so
