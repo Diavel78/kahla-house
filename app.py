@@ -10864,11 +10864,11 @@ def _harvest_tick(sb, now) -> dict:
             b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
             if not (b.get("autobet") or b.get("whiff_autobet")):
                 continue                    # model bets only — never manual
-            if (r.get("market_type") or "") == "nrfi":
-                continue    # NO NRFI HARVEST (user, Aug 4): the market
-                            # resolves ~25min after first pitch — there's
-                            # no life in which a +35% sell beats the
-                            # resolution minutes away. Both contracts ride.
+            # (NRFI stays in the harvest program but PRE-MATCH ONLY —
+            # its GTD is first pitch, set below. User, Aug 4: "the sell
+            # is pre-match on everything, and live is on ML, Spread,
+            # Props, O/U" — in-play NRFI resolves in minutes, no life
+            # for a +35% exit there.)
             if (b.get("contracts") or 0) < 2 or not b.get("pmm_slug"):
                 continue
             cands.append((r, b))
@@ -10906,8 +10906,16 @@ def _harvest_tick(sb, now) -> dict:
             try:
                 dt = datetime.fromisoformat(
                     str(r.get("event_start")).replace("Z", "+00:00"))
-                gtt = ((dt + timedelta(hours=7)).astimezone(timezone.utc)
+                # Sell lifetime: PRE-MATCH for NRFI (dies at first pitch
+                # — in-play NRFI resolves in minutes, hold wins there);
+                # THROUGH the game for ML/spread/props/totals (in-play
+                # swings are the harvest's best fills).
+                live_ok = (r.get("market_type") or "") != "nrfi"
+                gtt = ((dt + timedelta(hours=7 if live_ok else 0))
+                       .astimezone(timezone.utc)
                        .strftime("%Y-%m-%dT%H:%M:%SZ"))
+                if not live_ok and dt <= now:
+                    continue               # NRFI already live — no sell
             except Exception:
                 continue
             params = {"marketSlug": slug, "intent": sell_intent,
