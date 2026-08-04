@@ -10681,7 +10681,15 @@ def _poly_ledger_tick(sb, now) -> dict:
                 meta0 = (bef.get("marketMetadata")
                          or aft.get("marketMetadata") or {})
                 outc = str((meta0 or {}).get("outcome") or "").strip().lower()
-                leg = (outc == "no")
+                if outc in ("yes", "no"):
+                    leg = (outc == "no")
+                else:
+                    leg = None      # UNKNOWN leg — merged after the scan
+                                    # into the slug's sole picked leg (a
+                                    # synthetic buy with null position
+                                    # objects otherwise strands its cost
+                                    # on the wrong leg: Boyd's prop win
+                                    # showed payout $1 with no cost)
             L = led.setdefault((slug, leg),
                                {"buy": 0.0, "sell": 0.0, "payout": 0.0,
                                 "qty": 0.0, "events": 0, "resolved": False})
@@ -10714,6 +10722,24 @@ def _poly_ledger_tick(sb, now) -> dict:
                 L["qty"] = 0.0
                 L["resolved"] = True
                 L["events"] += 1
+        # Merge unknown-leg buckets into the slug's sole PICKED leg; a
+        # slug with picks on BOTH legs keeps them unattributed (never
+        # guess which side's cash it is).
+        pick_legs: dict = {}
+        for _r, _b, slug, synthetic in picks:
+            pick_legs.setdefault(slug, set()).add(synthetic)
+        for (slug, leg) in [k for k in led if k[1] is None]:
+            legs = pick_legs.get(slug) or set()
+            if len(legs) == 1:
+                tgt = led.setdefault((slug, next(iter(legs))),
+                                     {"buy": 0.0, "sell": 0.0, "payout": 0.0,
+                                      "qty": 0.0, "events": 0,
+                                      "resolved": False})
+                U = led.pop((slug, None))
+                for k2 in ("buy", "sell", "payout", "qty"):
+                    tgt[k2] += U[k2]
+                tgt["events"] += U["events"]
+                tgt["resolved"] = tgt["resolved"] or U["resolved"]
         for r, b, slug, synthetic in picks:
             L = led.get((slug, synthetic))
             if not L or not L["events"]:
