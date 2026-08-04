@@ -5781,6 +5781,132 @@ def debug_probe_exec_page():
     </script></body></html>''')
 
 
+@app.route("/api/polymarket/roi-baseline")
+@admin_required
+def api_poly_roi_baseline():
+    """The TRADER-BASELINE report (Aug 3 2026, user: "we already have the
+    backtest data for the ROI on my bets... June/July, baseball only —
+    then we have a baseline of what we need to beat"). Walks the account's
+    Polymarket activities back to June 1, filters to BASEBALL slugs
+    ('-mlb-' / 'mlb-' — UFC and everything else excluded), and aggregates
+    per month: dollars spent on buys, received on sells, resolution
+    payouts, net, and ROI = net / buys. Cash-in-month accounting (a
+    position straddling a month boundary contributes to each month's
+    cash; positions live <2 days so edge noise is small — labeled, not
+    hidden). Result is RETURNED and PERSISTED to exec_probe_runs so the
+    analysis session reads it from the DB. Read-only."""
+    cutoff = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    acts, cursor = [], None
+    try:
+        for _ in range(120):                 # up to 12k newest activities
+            params = {"limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+            resp = client.portfolio.activities(params=params)
+            page = resp.get("activities", [])
+            acts.extend(page)
+            # early stop once the page is fully older than the cutoff
+            times = []
+            for a in page:
+                for v in a.values():
+                    if isinstance(v, dict) and v.get("updateTime"):
+                        times.append(str(v["updateTime"]))
+                        break
+            if times and max(times) < cutoff.isoformat():
+                break
+            if resp.get("eof", True) or not resp.get("nextCursor"):
+                break
+            cursor = resp.get("nextCursor")
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"activities: {e}",
+                        "fetched": len(acts)}), 500
+
+    def _is_mlb(slug: str) -> bool:
+        s = (slug or "").lower()
+        return s.startswith("mlb-") or "-mlb-" in s
+
+    months: dict = {}
+    skipped_sports: dict = {}
+    for act in acts:
+        t = act.get("type")
+        if t == "ACTIVITY_TYPE_TRADE":
+            d = act.get("trade") or {}
+        elif t == "ACTIVITY_TYPE_POSITION_RESOLUTION":
+            d = act.get("positionResolution") or {}
+        else:
+            continue
+        ts = str(d.get("updateTime") or "")
+        if not ts or ts < "2026-06-01" or ts >= "2026-08-01":
+            continue
+        slug = d.get("marketSlug") or ""
+        if not _is_mlb(slug):
+            key = (slug.split("-") or ["?"])[0] or "?"
+            skipped_sports[key] = skipped_sports.get(key, 0) + 1
+            continue
+        mo = ts[:7]
+        M = months.setdefault(mo, {"buy": 0.0, "sell": 0.0, "payout": 0.0,
+                                   "trades": 0, "resolutions": 0})
+        if t == "ACTIVITY_TYPE_TRADE":
+            cost = _safe_float(d.get("cost"))
+            if cost is None:
+                continue
+            rpnl = _safe_float(d.get("realizedPnl"))
+            bef = d.get("beforePosition") or {}
+            aft = d.get("afterPosition") or {}
+            bq = abs(_safe_float(bef.get("netPosition")) or 0)
+            aq = abs(_safe_float(aft.get("netPosition")) or 0)
+            if rpnl is not None or bq > aq:
+                M["sell"] += abs(cost)
+            else:
+                M["buy"] += abs(cost)
+            M["trades"] += 1
+        else:
+            bef = d.get("beforePosition") or {}
+            qty = abs(_safe_float(bef.get("netPosition")) or 0)
+            side = (d.get("side") or "").replace(
+                "POSITION_RESOLUTION_SIDE_", "")
+            net = _safe_float(bef.get("netPosition")) or 0
+            won = ((net > 0 and side in ("YES", "LONG"))
+                   or (net < 0 and side in ("NO", "SHORT")))
+            M["payout"] += qty if won else 0.0
+            M["resolutions"] += 1
+    out: dict = {"ok": True, "fetched_activities": len(acts),
+                 "window": "2026-06-01..2026-07-31 (cash-in-month)",
+                 "baseball_filter": "slug mlb-*/-mlb-",
+                 "skipped_non_mlb": skipped_sports, "months": {}}
+    tot = {"buy": 0.0, "sell": 0.0, "payout": 0.0}
+    for mo in sorted(months):
+        M = months[mo]
+        net = M["sell"] + M["payout"] - M["buy"]
+        out["months"][mo] = {
+            **{k: round(v, 2) for k, v in M.items()},
+            "net_usd": round(net, 2),
+            "roi_pct": round(100.0 * net / M["buy"], 2) if M["buy"] else None}
+        for k in tot:
+            tot[k] += M[k]
+    net = tot["sell"] + tot["payout"] - tot["buy"]
+    out["total"] = {**{k: round(v, 2) for k, v in tot.items()},
+                    "net_usd": round(net, 2),
+                    "roi_pct": (round(100.0 * net / tot["buy"], 2)
+                                if tot["buy"] else None)}
+    _probe_log(out)
+    return jsonify(out)
+
+
+@app.route("/debug-poly-roi")
+def debug_poly_roi_page():
+    """Auth'd browser wrapper for /api/polymarket/roi-baseline (the
+    debug-probe-exec pattern). Sign in on / first, then open this page."""
+    return (debug_probe_exec_page()
+            .replace("/api/polymarket/probe-exec", "/api/polymarket/roi-baseline")
+            .replace("Polymarket exec probe (re-peg bot go-live gate)",
+                     "Polymarket ROI baseline (June/July, baseball)"))
+
+
 @app.route("/api/kalshi/probe")
 @admin_required
 def api_kalshi_probe():
