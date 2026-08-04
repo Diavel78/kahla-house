@@ -8900,6 +8900,11 @@ def _opener_pass(sb, now, deadline):
             lset = {g["id"] for g in cands if _opener_game_listed(g, listed)}
             stats["opener_listed"] = len(lset)
             stats["opener_ldates"] = sorted({k[0] for k in listed})[:4]
+            lc: dict = {}
+            for (d0, _pair) in listed:
+                lc[d0] = lc.get(d0, 0) + 1
+            stats["opener_lcounts"] = dict(sorted(lc.items()))
+            stats["opener_ltotal"] = len(listed)
         # FRESH-FIRST, then nearest-first (Aug 2 ~midnight AZ — the
         # nearest-first fix stalled the sweep a different way: a game
         # with an ML shadow but NO NRFI listing is un-completable until
