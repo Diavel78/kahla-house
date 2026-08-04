@@ -7274,6 +7274,11 @@ _WHIFF_BET_MAX_PP = 10.0          # the claimed-edge cliff (3rd-time rule:
                                   # Diamond totals) — >10pp claims stay
                                   # shadow-only until the record says raise
 _WHIFF_MAX_ENTRY_C = 54           # user guardrail — same as Y/NRFI
+_WHIFF_TRUST_LO, _WHIFF_TRUST_HI = 0.30, 0.70   # calibration trust zone —
+                                  # the model's YES prob must be here to
+                                  # BET (compressed tails claim phantom
+                                  # edges vs 85¢ markets); shadows still
+                                  # log the tails for the recal dataset
 _WHIFF_PEG_BACKOFF_C = 2          # rest 2¢ under the side mid (post-only:
                                   # a crossing peg rejects → retry next tick)
 _WHIFF_BET_PER_TICK = 1           # create+verify ≈3s — keep the tick fast
@@ -7428,9 +7433,18 @@ def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
             side_c = cents if side == "yes" else 100 - cents
             # bet candidate: band-gated edge + the 54¢ entry cap ("move
             # up or down a K" — another rung of the same ladder usually
-            # qualifies when this one doesn't)
+            # qualifies when this one doesn't) + the CALIBRATION TRUST
+            # ZONE (Aug 3, user caught Wesneski K≥3 NO at 12¢ / Jones
+            # K≥4 NO at 21¢): the walk-forward calibration is COMPRESSED
+            # at the extremes (model 82% → reality ~87%+), so a claimed
+            # NO edge against an 85¢ market is the artifact, not alpha —
+            # and the tape says low rungs are the ONE place YES is
+            # UNDERpriced. Bet only where the model is calibrated AND
+            # the bias favors us. The v2 sharpening recal re-earns the
+            # tails, if ever, with data.
             if (_WHIFF_BET_MIN_PP <= edge <= _WHIFF_BET_MAX_PP
                     and side_c <= _WHIFF_MAX_ENTRY_C
+                    and _WHIFF_TRUST_LO <= model_p <= _WHIFF_TRUST_HI
                     and n_starts >= _WHIFF_MIN_STARTS):
                 bet_cands.append((edge, mid, key, q, name, float(line),
                                   side, side_c,
