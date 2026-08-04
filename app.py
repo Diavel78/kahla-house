@@ -10670,7 +10670,18 @@ def _poly_ledger_tick(sb, now) -> dict:
             aft = d.get("afterPosition") or {}
             net_b = _safe_float(bef.get("netPosition")) or 0.0
             net_a = _safe_float(aft.get("netPosition")) or 0.0
-            leg = (net_b if net_b != 0 else net_a) < 0     # True = NO leg
+            # Leg (True = NO): position sign when present; else the
+            # held token's name from marketMetadata.outcome (Yes/No on
+            # nrfi/prop markets — netPosition "may be null" on TRADE
+            # activities, the documented SDK trap that put every buy in
+            # the sell column on this ledger's first tick).
+            if net_b or net_a:
+                leg = (net_b if net_b != 0 else net_a) < 0
+            else:
+                meta0 = (bef.get("marketMetadata")
+                         or aft.get("marketMetadata") or {})
+                outc = str((meta0 or {}).get("outcome") or "").strip().lower()
+                leg = (outc == "no")
             L = led.setdefault((slug, leg),
                                {"buy": 0.0, "sell": 0.0, "payout": 0.0,
                                 "qty": 0.0, "events": 0, "resolved": False})
@@ -10678,11 +10689,19 @@ def _poly_ledger_tick(sb, now) -> dict:
                 cost = _safe_float(d.get("cost"))
                 if cost is None:
                     continue
-                if abs(net_a) > abs(net_b):                # grew = BUY
-                    L["buy"] += abs(cost)
-                else:                                      # shrank = SELL
+                # SELL iff realizedPnl non-null OR position shrank — the
+                # dashboard's proven close-detection (never trust nets
+                # alone: they're often null). Everything else is a BUY.
+                rpnl = _safe_float(d.get("realizedPnl"))
+                if rpnl is not None or abs(net_b) > abs(net_a):
                     L["sell"] += abs(cost)
-                L["qty"] = abs(net_a)
+                else:
+                    L["buy"] += abs(cost)
+                if net_a or net_b:
+                    L["qty"] = abs(net_a)
+                else:
+                    q = _safe_float(d.get("qty")) or 0.0
+                    L["qty"] += (-q if (rpnl is not None) else q)
                 L["events"] += 1
             else:
                 qty = abs(net_b)
