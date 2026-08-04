@@ -8498,6 +8498,11 @@ _OPENER_HI_H = 72               # pool bound ≈ Poly's real listing horizon
 # tick, so the whole future schedule can sit in the pool without churning
 # a dossier build per game per minute. Cold start resets the backoff map
 # (one extra probe burst, harmless).
+_OPENER_JUNK_EDGE_PP = 15.0     # a claimed opener edge this big means the
+                                # book is newborn junk (25¢ placeholders) —
+                                # never persist/latch/bet on it; retry as
+                                # the book matures (Aug 4, the Wed slate
+                                # that latched at would_bet with no bets)
 _OPENER_PROBE_S = 420           # unlisted-game re-probe cadence (7 min —
                                 # affordable inside the 25s overnight
                                 # budget; ALSO: this deploy itself wipes
@@ -8989,6 +8994,8 @@ def _opener_pass(sb, now, deadline):
                             ).total_seconds() / 60.0)
                         except Exception:
                             sim0 = None
+                        if edge0 >= _OPENER_JUNK_EDGE_PP:
+                            continue      # newborn junk book — never latch
                         _ea = _prob_to_amer_py(bid0 / 100.0)
                         _fa = _prob_to_amer_py(fairs[s])
                         _opener_persist(sb, {
@@ -9062,6 +9069,15 @@ def _opener_pass(sb, now, deadline):
                 e = fp * 100.0 - float(b["bid"]) * 100.0
                 if e >= _min_pp and (bet_edge is None or e > bet_edge):
                     bet_side, bet_edge = s, e
+            # JUNK-BOOK GUARD (Aug 4 — the user's "BULLSHIT" was right):
+            # all 15 Wed games were evaluated at 9:15pm against just-
+            # opened 25¢ placeholder books, flagged would_bet at 25-35pp
+            # phantom edges, bet NOTHING, and latched DONE forever. A
+            # claimed edge ≥ _OPENER_JUNK_EDGE_PP means the book is
+            # newborn junk (the claimed-edge-cliff, 4th sighting) — skip
+            # WITHOUT persisting; the backoff retries as the book matures.
+            if bet_edge is not None and bet_edge >= _OPENER_JUNK_EDGE_PP:
+                continue
             side = bet_side or ("no" if (nrfi.get("p_nrfi") or 0) >= 0.5
                                 else "yes")
             blk = (pblock.get(side)) or {}
@@ -9416,6 +9432,8 @@ def _gridiron_opener_pass(sb, now, deadline):
             if best is None:
                 continue
             s, edge0, q0 = best
+            if edge0 >= _OPENER_JUNK_EDGE_PP:
+                continue                  # newborn junk book — never latch
             bid0 = float(q0["bid"]) * 100.0
             es0 = g.get("event_start")
             try:
