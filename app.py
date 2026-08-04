@@ -8855,6 +8855,15 @@ def _opener_pass(sb, now, deadline):
                 continue
             if not nrfi.get("pmm_matched"):
                 continue                  # not priced yet → retry next tick
+            if nrfi.get("price_src") != "polymarket":
+                # KALSHI-PRICED EARLY READ — the "down to four orders" gate
+                # (Aug 3 evening, user caught it): Kalshi lists days before
+                # Poly, the model liked 25/25 of these, execution is
+                # Poly-only so none could bet — and persisting the row
+                # LATCHED the game done, so the real Poly listing was never
+                # evaluated. Do NOT persist a non-executable evaluation;
+                # retry (probe-backed off) until Polymarket prices it.
+                continue
             # OPENER-LANE side selection — the 6pp clamp is RELEASED here
             # (user, Aug 2): any side with edge ≥ the 2.5pp floor is a bet
             # candidate, however large the claimed edge. Game-day NRFI
