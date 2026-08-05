@@ -8212,6 +8212,22 @@ def api_pm_snapshot():
         except Exception:
             return 0
     all_games.sort(key=_near_tier)
+    # FAR-GAME SLICE (Aug 5 2026): a busy in-prime slate filled the whole
+    # budget every tick, so far-out games starved — exactly the cent
+    # history the opener/O-U lanes read a book's maturation from (and the
+    # prop-snipe tape). Every 4th budget slot goes to the stalest far
+    # game: near games keep ~75% of the budget, the far tape never fully
+    # stalls. Stable sorts preserved stale-first inside each tier.
+    _near_l = [g for g in all_games if _near_tier(g) == 0]
+    _far_l = [g for g in all_games if _near_tier(g) == 1]
+    _merged, _fi = [], 0
+    for _i, _g in enumerate(_near_l):
+        _merged.append(_g)
+        if (_i + 1) % 3 == 0 and _fi < len(_far_l):
+            _merged.append(_far_l[_fi])
+            _fi += 1
+    _merged.extend(_far_l[_fi:])
+    all_games = _merged
 
     # Kalshi: one bulk call per sport (cheap), indexed up front. Only for
     # sports that actually have a game in the watch window — fetching the
@@ -8782,6 +8798,16 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
     state = _repeg_verify_or_recreate(pclient, slug, intent, canon,
                                       0, None, None)
     ok = state in ("ok", "filled")
+    if not ok:
+        # SECOND LOOK before crying wolf (Aug 5 — the Pirates YRFI ping:
+        # create returned a real order id but orders.list hadn't caught
+        # up in 1.2s, so a healthy bet alarmed "VERIFY FAILED — CHECK
+        # APP" at the user. Creates are ASYNC; one more beat resolves the
+        # race. A true lost order still alarms — just 3s later.)
+        _time.sleep(2.5)
+        state = _repeg_verify_or_recreate(pclient, slug, intent, canon,
+                                          0, None, None)
+        ok = state in ("ok", "filled")
     _send_fill_telegram(
         f"🤖💰 AUTO-BET — {g.get('event_name')}: {side_lbl} "
         f"{n_contracts} @ {round(side_c)}¢ (book "
@@ -9503,6 +9529,14 @@ def _opener_pass(sb, now, deadline):
             state = _repeg_verify_or_recreate(pclient, slug, intent, canon,
                                               0, None, None)
             ok = state in ("ok", "filled")
+            if not ok:
+                # Second look before alarming — async-create race (the
+                # Aug 5 Pirates YRFI false "VERIFY FAILED"). Same fix as
+                # _autobet_execute.
+                _time.sleep(2.5)
+                state = _repeg_verify_or_recreate(pclient, slug, intent,
+                                                  canon, 0, None, None)
+                ok = state in ("ok", "filled")
             _send_fill_telegram(
                 f"🤖💰 AUTO-BET — {g.get('event_name')}: {side_lbl} "
                 f"{_AUTOBET_CONTRACTS} contract @ {round(side_c)}¢ "
@@ -9635,24 +9669,21 @@ def _opener_watchdog(sb, now, opener_stats):
         future_listed = sum(1 for (d0, _p) in keys if d0 > et_today)
         if future_listed < _WATCHDOG_MIN_LISTED:
             return None                        # future slate not priced yet
+        # Wall = standing model bets on games >6h out — a steady CLOCK
+        # definition, not ET-date (the first night's 9:01pm ping was half
+        # artifact: at ET midnight "future-day" flipped and the whole
+        # next-day wall stopped counting for an hour).
         r = (sb.table("bot_picks")
              .select("event_start,signal_blob")
              .eq("status", "pending").eq("sport", "MLB")
-             .gt("event_start", now.isoformat())
+             .gt("event_start", (now + timedelta(hours=6)).isoformat())
              .limit(400).execute())
         wall = 0
         for row in (r.data or []):
             blob = row.get("signal_blob") or {}
-            if not (blob.get("autobet") or blob.get("whiff_autobet")):
-                continue
-            try:
-                d = datetime.fromisoformat(
-                    str(row["event_start"]).replace("Z", "+00:00"))
-                if (d.astimezone(ZoneInfo("America/New_York"))
-                        .date().isoformat()) > et_today:
-                    wall += 1
-            except Exception:
-                continue
+            if (blob.get("autobet") or blob.get("whiff_autobet")
+                    or blob.get("ou_trader")):
+                wall += 1
         if wall >= _WATCHDOG_MIN_WALL:
             return None
         _WATCHDOG_LAST_TS = _time.time()
