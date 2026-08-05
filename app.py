@@ -8683,9 +8683,16 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
     the opener lane's; skip_game_dedup is for prop lanes whose caller
     dedups per-pitcher (a game legitimately carries 2 starter bets)."""
     cap = cap_max if cap_max is not None else AUTOBET_MAX_BETS
+    # CAP = OPEN EXPOSURE, not lifetime count (Aug 4 2026 — the watchdog's
+    # first catch: tonight's 22 SETTLED bets held their slots because this
+    # counter had no status filter, so the lane sat 40/40 and placed
+    # nothing on 14 would-bet Friday games. A graded bet frees its slot
+    # the moment the resolver stamps it; the 12h event_start window still
+    # ages out any stuck-pending stragglers.)
     try:
         prior = (sb.table("bot_picks").select("id")
                  .filter("signal_blob->>" + cap_flag, "eq", "true")
+                 .eq("status", "pending")
                  .gte("event_start", (datetime.now(timezone.utc)
                                       - timedelta(hours=12)).isoformat())
                  .limit(cap + 1).execute().data) or []
