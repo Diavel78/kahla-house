@@ -8680,7 +8680,8 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
                      side_c, fair_pb, entry_edge, opener_edge,
                      bid_c, ask_c, extra_blob=None,
                      cap_flag="autobet", cap_max=None, query_text=None,
-                     reason=None, skip_game_dedup=False):
+                     reason=None, skip_game_dedup=False,
+                     contracts=None, entry_line=None):
     """Shared auto-bet placement: slate cap → never-double-a-game →
     Master Rule → post-only create (1 contract, GTD first pitch,
     AUTOMATIC) → pick insert (the cap counter — inserted the moment
@@ -8724,7 +8725,8 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
         gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception:
         return False
-    if _AUTOBET_CONTRACTS * side_c / 100.0 > _REPEG_MAX_COST_USD:
+    n_contracts = contracts if contracts else _AUTOBET_CONTRACTS
+    if n_contracts * side_c / 100.0 > _REPEG_MAX_COST_USD:
         return False                       # ⚠ THE MASTER RULE
     canon = (100.0 - side_c) / 100.0 if synthetic else side_c / 100.0
     intent = ("ORDER_INTENT_BUY_SHORT" if synthetic
@@ -8732,7 +8734,7 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
     params = {"marketSlug": slug, "intent": intent,
               "type": "ORDER_TYPE_LIMIT",
               "price": {"value": f"{canon:.3f}", "currency": "USD"},
-              "quantity": _AUTOBET_CONTRACTS,
+              "quantity": n_contracts,
               "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
               "participateDontInitiate": True,
               "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
@@ -8747,7 +8749,7 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
             f"create errored ({e})"[:280])
         return False
     entry_amer = _prob_to_amer_py(side_c / 100.0)
-    blob = {cap_flag: True, "contracts": _AUTOBET_CONTRACTS,
+    blob = {cap_flag: True, "contracts": n_contracts,
             "order_id": new_oid, "pmm_slug": slug,
             "pmm_synthetic": synthetic, "source": cap_flag,
             "opener_edge_pp": opener_edge,
@@ -8763,7 +8765,7 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
             "market_type": mt, "side": side,
             "entry_book": "POLYMARKET",
             "entry_price": int(entry_amer) if entry_amer is not None else None,
-            "entry_line": None, "units": 1, "confidence": "low",
+            "entry_line": entry_line, "units": 1, "confidence": "low",
             "fair_prob": round(float(fair_pb), 4),
             "edge_pp": round(entry_edge, 1),
             "reasons": [reason or (
@@ -8782,7 +8784,7 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
     ok = state in ("ok", "filled")
     _send_fill_telegram(
         f"🤖💰 AUTO-BET — {g.get('event_name')}: {side_lbl} "
-        f"{_AUTOBET_CONTRACTS} @ {round(side_c)}¢ (book "
+        f"{n_contracts} @ {round(side_c)}¢ (book "
         f"{round(bid_c) if bid_c else '?'}/"
         f"{round(ask_c) if ask_c else '?'}, fair "
         f"{round(float(fair_pb) * 100)}¢, {round(entry_edge, 1)}pp, "
@@ -8882,6 +8884,113 @@ def _et_day(iso: str | None) -> str:
         return ""
 
 
+_OU_TRADER_MIN_EDGE_PP = 3.0    # peg must sit ≥3pp under the book's own mid
+_OU_TRADER_MIN_ENTRY_C = 25.0   # fill-viability floor (whiff lane's lesson)
+_OU_TRADER_MAX_ENTRY_C = 54.0   # the user's universal entry cap
+
+
+def _ou_trader_eval(sb, g, d, now, done):
+    """MLB O/U TRADER lane (Aug 4 2026 ~10pm AZ, user: "we need O/U on
+    baseball, badly" + "1 contract, sell only. Why keep the one we lose
+    on average"). Buys 1 contract CHEAP on whichever total side pegs
+    ≥3pp under the book's OWN devigged mid, then the harvest tick rests
+    a sell for the whole position at +35% ROI — no deliberate rider; the
+    thesis is the TOUCH CURVE, not the final score (breakeven ≈74% of
+    positions touching, winners auto-touch). ⚠ NO MODEL TOTAL ANYWHERE:
+    the July 4 2026 totals blacklist (model O/U −13.7u lifetime) stays
+    in force — this lane's edge is microstructure (cheap vs the book's
+    own mid). Same opener protocols: junk guard ≥15pp = newborn
+    placeholder book (skip, retry), bet-before-persist (a cap block
+    never latches), 25-54¢ band, master rule. Returns a paperlog row to
+    persist, or None. NO bare `continue` semantics — this runs between
+    the ML and NRFI sections and must never skip them."""
+    if (g["id"], "total") in done:
+        return None
+    tot = ((((d or {}).get("odds") or {}).get("total") or {})
+           .get("polymarket") or {})
+    over, under = tot.get("over") or {}, tot.get("under") or {}
+    qo, qu = over.get("quote") or {}, under.get("quote") or {}
+    line = over.get("line")
+    if line is None or line != under.get("line"):
+        return None                # not listed / mismatched lines → retry
+    if qo.get("mid") is None or qu.get("mid") is None:
+        return None                # no two-sided book yet → retry
+    es = g.get("event_start")
+    try:
+        sim = round((datetime.fromisoformat(
+            str(es).replace("Z", "+00:00")) - now).total_seconds() / 60.0)
+    except Exception:
+        sim = None
+    best = None
+    for side, blk, q in (("over", over, qo), ("under", under, qu)):
+        bid, mid = q.get("bid"), q.get("mid")
+        if bid is None or mid is None or not blk.get("slug"):
+            continue
+        bid_c = bid * 100.0
+        ask_c = q.get("ask") * 100.0 if q.get("ask") is not None else None
+        if bid_c <= 0:
+            continue
+        target = float(int(bid_c)) + 1.0     # whole-cent cheap-first peg
+        if ask_c is not None and target >= ask_c:
+            target = float(int(bid_c))       # one-tick book → join the bid
+        edge = mid * 100.0 - target
+        if not (_OU_TRADER_MIN_ENTRY_C <= target <= _OU_TRADER_MAX_ENTRY_C):
+            continue
+        if edge < _OU_TRADER_MIN_EDGE_PP:
+            continue
+        if best is None or edge > best["edge"]:
+            best = {"side": side, "blk": blk, "target": target,
+                    "edge": edge, "bid_c": bid_c, "ask_c": ask_c,
+                    "mid": mid}
+    if best is not None and best["edge"] >= _OPENER_JUNK_EDGE_PP:
+        return None                # newborn junk book — never latch, retry
+    placed = False
+    if best is not None and AUTOBET_ENABLED:
+        b = best
+        res = _autobet_execute(
+            sb, g, es, "total", b["side"],
+            f"O/U {b['side'].upper()} {line}", b["blk"]["slug"],
+            bool(b["blk"].get("synthetic")), b["target"],
+            b["mid"], b["edge"], round(b["edge"], 1),
+            b["bid_c"], b["ask_c"],
+            extra_blob={"ou_trader": True, "line": line},
+            cap_flag="ou_trader",
+            query_text="auto-bet: O/U trader (sell-only)",
+            reason=(f"O/U TRADER — {b['side']} {line} pegged "
+                    f"{round(b['target'])}¢ vs the book's own "
+                    f"{round(b['mid'] * 100)}¢ mid "
+                    f"({round(b['edge'], 1)}pp cheap); 1 contract, "
+                    f"sell rests at +35% — touch-curve bet, no model"),
+            contracts=1, entry_line=line)
+        if res == "cap":
+            return None            # slate full — don't latch, retry
+        placed = (res == "placed")
+    ea = _prob_to_amer_py((best["target"] if best else
+                           (qo.get("mid") or 0.5) * 100.0) / 100.0)
+    return {
+        "market_id": g["id"], "event_name": g.get("event_name"),
+        "event_start": es, "sport": "MLB",
+        "market_type": "total",
+        "side": (best["side"] if best else "over"),
+        "line": line,
+        "entry_price": int(ea) if ea is not None else None,
+        "units": 1, "confidence": "low",
+        "timing_window": "opener", "prime_core": False,
+        "starts_in_min": sim, "sharp_score": None,
+        "edge_pp": round(best["edge"], 1) if best else None,
+        "fair_american": None,
+        "gates_cleared": False,
+        "signal_blob": {"opener_shadow": True, "ou_trader": True,
+                        "would_bet": best is not None,
+                        "bet_placed": placed,
+                        "book_mid_c": (round(best["mid"] * 100, 1)
+                                       if best else
+                                       round((qo.get("mid") or 0) * 100, 1)),
+                        "opener_unclamped": True},
+        "logged_at": now.isoformat(),
+    }
+
+
 def _opener_pass(sb, now, deadline):
     """Returns (shadow_rows, stats). Runs on the paperlog tick's LEFTOVER
     budget — which is naturally free in the evening/overnight when
@@ -8936,7 +9045,8 @@ def _opener_pass(sb, now, deadline):
         done = {(r["market_id"], r.get("market_type")) for r in done_rows}
         cands = [g for g in games
                  if (g["id"], "nrfi") not in done
-                 or (g["id"], "moneyline") not in done]
+                 or (g["id"], "moneyline") not in done
+                 or (g["id"], "total") not in done]
         if not cands:
             stats["gate"] = "all_done"    # whole window evaluated — healthy
             return shadow_rows, stats
@@ -9104,6 +9214,14 @@ def _opener_pass(sb, now, deadline):
                                             "opener_unclamped": True},
                             "logged_at": now.isoformat(),
                         })
+            # ---- O/U TRADER (Aug 4): 1 contract cheap vs the book's own
+            # mid, sell-only via the harvest tick. Self-contained helper
+            # (its skips can't swallow the NRFI section below).
+            ou_row = _ou_trader_eval(sb, g, d, now, done)
+            if ou_row is not None:
+                if ou_row["signal_blob"].get("bet_placed"):
+                    stats["opener_bets"] += 1
+                _opener_persist(sb, ou_row)
             if (g["id"], "nrfi") in done:
                 continue                  # NRFI already shadowed
             nrfi = (d or {}).get("nrfi") or {}
@@ -9613,6 +9731,59 @@ def _gridiron_opener_pass(sb, now, deadline):
                 "logged_at": now.isoformat(),
             })
             stats["g_rows"] += 1
+            # FOOTBALL SPREAD + O/U OPENER QUOTES (Aug 4 2026, user: "we
+            # need spreads and O/U on football") — shadow rows recording
+            # each market's virgin book at listing: the cheap side's peg
+            # + its edge vs the book's own mid, i.e. exactly the entry
+            # the sell-only touch-harvest lane would take. NO BETS —
+            # this is the earn-in tape for arming football after the
+            # MLB O/U trader proves the touch curve. One-shot at ML
+            # listing time (dedup rides the ML row); a spread/total not
+            # yet posted alongside the ML simply gets no row.
+            for _mt in ("spread", "total"):
+                _blkx = ((((d or {}).get("odds") or {}).get(_mt) or {})
+                         .get("polymarket") or {})
+                _ka, _kb = (("over", "under") if _mt == "total"
+                            else ("away", "home"))
+                _pa, _pb = _blkx.get(_ka) or {}, _blkx.get(_kb) or {}
+                _qa, _qb = _pa.get("quote") or {}, _pb.get("quote") or {}
+                if _qa.get("mid") is None or _qb.get("mid") is None:
+                    continue
+                _cheap = None
+                for _sn, _pblk, _q in ((_ka, _pa, _qa), (_kb, _pb, _qb)):
+                    _bid, _mid = _q.get("bid"), _q.get("mid")
+                    if _bid is None or _mid is None or _bid <= 0:
+                        continue
+                    _tgt = float(int(_bid * 100.0)) + 1.0
+                    _e = _mid * 100.0 - _tgt
+                    if _cheap is None or _e > _cheap[1]:
+                        _cheap = (_sn, _e, _tgt, _pblk.get("line"))
+                if _cheap is None:
+                    continue
+                _ea2 = _prob_to_amer_py(_cheap[2] / 100.0)
+                _opener_persist(sb, {
+                    "market_id": g["id"],
+                    "event_name": g.get("event_name"),
+                    "event_start": es0, "sport": g["sport"],
+                    "market_type": _mt, "side": _cheap[0],
+                    "line": _cheap[3],
+                    "entry_price": (int(_ea2) if _ea2 is not None
+                                    else None),
+                    "units": 1, "confidence": "low",
+                    "timing_window": "opener", "prime_core": False,
+                    "starts_in_min": sim0, "sharp_score": None,
+                    "edge_pp": round(_cheap[1], 1),
+                    "fair_american": None,
+                    "gates_cleared": False,
+                    "signal_blob": {"opener_shadow": True,
+                                    "gridiron_quote": True,
+                                    "shadow_only": True,
+                                    "would_bet": False,
+                                    "a_mid_c": round(_qa["mid"] * 100, 1),
+                                    "b_mid_c": round(_qb["mid"] * 100, 1)},
+                    "logged_at": now.isoformat(),
+                })
+                stats["g_rows"] += 1
     except Exception:
         pass
     return rows, stats
@@ -11018,16 +11189,21 @@ def _harvest_tick(sb, now) -> dict:
         cands = []
         for r in rows:
             b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
-            if not (b.get("autobet") or b.get("whiff_autobet")):
+            if not (b.get("autobet") or b.get("whiff_autobet")
+                    or b.get("ou_trader")):
                 continue                    # model bets only — never manual
             # (NRFI stays in the harvest program but PRE-MATCH ONLY —
             # its GTD is first pitch, set below. User, Aug 4: "the sell
             # is pre-match on everything, and live is on ML, Spread,
             # Props, O/U" — in-play NRFI resolves in minutes, no life
             # for a +35% exit there.)
-            if (b.get("contracts") or 0) < 2 or not b.get("pmm_slug"):
+            # ou_trader = the SELL-ONLY lane (Aug 4, user: "1 contract,
+            # sell only") — 1 contract bought, the WHOLE position gets
+            # the +35% sell; min-held is 1 there, 2 on the paired lanes.
+            min_held = 1 if b.get("ou_trader") else 2
+            if (b.get("contracts") or 0) < min_held or not b.get("pmm_slug"):
                 continue
-            cands.append((r, b))
+            cands.append((r, b, min_held))
         res["cands"] = len(cands)
         if not cands:
             res["gate"] = "no_cands"
@@ -11040,14 +11216,14 @@ def _harvest_tick(sb, now) -> dict:
                            else "positions_none")
             return res                      # venue dark — never act blind
         res["held2"] = 0
-        for r, b in cands:
+        for r, b, min_held in cands:
             if res["placed"] >= 2:          # tick latency bound
                 break
             slug = b["pmm_slug"]
             synthetic = bool(b.get("pmm_synthetic"))
             net = (positions.get(slug) or {}).get("net") or 0.0
             held = -net if synthetic else net
-            if held < 2:
+            if held < min_held:
                 continue                    # not (fully) filled / one sold
             res["held2"] = res.get("held2", 0) + 1
             sell_intent = ("ORDER_INTENT_SELL_SHORT" if synthetic
