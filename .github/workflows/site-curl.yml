@@ -18,7 +18,13 @@ jobs:
     timeout-minutes: 3
     steps:
       - name: curl the endpoint
+        env:
+          # gotcha #22: GitHub secrets often carry trailing whitespace —
+          # a raw ${{ secrets }} interpolation into the URL broke curl
+          # with "Malformed input" on run #1. Strip via env var.
+          CRON_KEY: ${{ secrets.FILLS_CRON_SECRET }}
         run: |
+          KEY="$(printf '%s' "$CRON_KEY" | tr -d '[:space:]')"
           curl -sS --max-time 120 \
-            "https://thekahlahouse.com/${{ inputs.path }}?key=${{ secrets.FILLS_CRON_SECRET }}" \
+            "https://thekahlahouse.com/${{ inputs.path }}?key=${KEY}" \
             | head -c 6000
