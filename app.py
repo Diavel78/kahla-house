@@ -9353,6 +9353,69 @@ def _gridiron_ml(sb, sport, event_name):
     return max(0.01, min(0.99, p))
 
 
+_WATCHDOG_LAST_TS = 0.0
+_WATCHDOG_COOLDOWN_S = 4 * 3600
+_WATCHDOG_MIN_LISTED = 6     # future-day PMM-priced games before we judge
+_WATCHDOG_MIN_WALL = 6       # standing future-day model bets below this = trip
+
+
+def _opener_watchdog(sb, now, opener_stats):
+    """THE WALL ALARM (Aug 4 2026 — three opener outages in two days were
+    all caught by the USER watching his open-order count while the tick
+    reported healthy gates). This makes the machine watch the same number:
+    Polymarket has priced a real future-day MLB slate but our standing
+    future-day wall is thin → 🚨 urgent Telegram (bypasses the digest).
+    READ-ONLY — counts pending picks + reads the listing cache the opener
+    pass just filled; never touches the betting path, so it can't be the
+    next bug. Quiet 10pm-7am AZ (the wall legitimately thins overnight);
+    4h in-memory cooldown (a cold-start re-ping during a real outage is
+    fine — it's an outage alarm). A trip is 'go look', not 'broke for
+    sure': a slate the model fully passes on could also read thin."""
+    global _WATCHDOG_LAST_TS
+    try:
+        az = now.astimezone(ZoneInfo("America/Phoenix"))
+        if az.hour < 7 or az.hour >= 22:
+            return None
+        if _time.time() - _WATCHDOG_LAST_TS < _WATCHDOG_COOLDOWN_S:
+            return None
+        keys = _PMM_LISTED_CACHE.get("keys")   # filled by this tick's opener pass
+        if not keys:
+            return None                        # no listing read → can't judge
+        et_today = now.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+        future_listed = sum(1 for (d0, _p) in keys if d0 > et_today)
+        if future_listed < _WATCHDOG_MIN_LISTED:
+            return None                        # future slate not priced yet
+        r = (sb.table("bot_picks")
+             .select("event_start,signal_blob")
+             .eq("status", "pending").eq("sport", "MLB")
+             .gt("event_start", now.isoformat())
+             .limit(400).execute())
+        wall = 0
+        for row in (r.data or []):
+            blob = row.get("signal_blob") or {}
+            if not (blob.get("autobet") or blob.get("whiff_autobet")):
+                continue
+            try:
+                d = datetime.fromisoformat(
+                    str(row["event_start"]).replace("Z", "+00:00"))
+                if (d.astimezone(ZoneInfo("America/New_York"))
+                        .date().isoformat()) > et_today:
+                    wall += 1
+            except Exception:
+                continue
+        if wall >= _WATCHDOG_MIN_WALL:
+            return None
+        _WATCHDOG_LAST_TS = _time.time()
+        _send_fill_telegram(
+            f"🚨 OPENER WALL LOW: {wall} standing future-day bets vs "
+            f"{future_listed} Polymarket-priced future games "
+            f"(gate={opener_stats.get('gate')}). The lane may be stalled.",
+            urgent=True)
+        return wall
+    except Exception:
+        return None
+
+
 def _gridiron_opener_pass(sb, now, deadline):
     """Football opener SHADOWS on the tick's leftover budget (after the
     MLB opener pass). One shadow per game at first Polymarket listing
@@ -9819,6 +9882,11 @@ def api_handicapper_paperlog():
     g_rows, g_stats = _gridiron_opener_pass(sb, now, opener_deadline)
     rows.extend(g_rows)
     opener_stats = {**opener_stats, **g_stats}
+    # WALL ALARM — read-only tripwire: PMM has priced future games but the
+    # standing future-day wall is thin → 🚨 ping. The user is not the alarm.
+    wd = _opener_watchdog(sb, now, opener_stats)
+    if wd is not None:
+        opener_stats["watchdog"] = wd
     # Bet-time Pinnacle stamp (parlay-api.com) — runs BEFORE the insert so
     # the stamp rides each new bet row. No-op without a key / over budget.
     pin_stamped = _pin_stamp_rows(sb, rows, now)
