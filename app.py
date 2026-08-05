@@ -7774,7 +7774,7 @@ def _whiff_autobet(sb, bet_cands, ginfo, now):
                 reason=(f"Whiff IQ K-prop — model {round(side_p * 100)}% on "
                         f"{side.upper()} vs {int(side_c)}¢ mid → "
                         f"{round(edge, 1)}pp; maker at {peg_c}¢"),
-                skip_game_dedup=True):
+                skip_game_dedup=True) == "placed":
             placed += 1
 
 
@@ -8699,7 +8699,7 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
     except Exception:
         return False
     if len(prior) >= cap:
-        return False
+        return "cap"        # slate full — CALLERS MUST NOT LATCH on this
     owner = _kalshi_owner_uid()
     if not owner:
         return False
@@ -8781,7 +8781,7 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
         f"{round(float(fair_pb) * 100)}¢, {round(entry_edge, 1)}pp, "
         f"{'verified' if ok else 'VERIFY FAILED — CHECK APP'}). "
         f"Bet {len(prior) + 1}/{cap} this slate.")
-    return True
+    return "placed"
 
 
 _PMM_LISTED_CACHE: dict = {"at": 0.0, "keys": None}
@@ -9049,6 +9049,30 @@ def _opener_pass(sb, now, deadline):
                             sim0 = None
                         if edge0 >= _OPENER_JUNK_EDGE_PP:
                             continue      # newborn junk book — never latch
+                        # BET BEFORE PERSIST (Aug 4 — the CAP LATCH, the
+                        # watchdog's first night: 14 would-bet Friday
+                        # games persisted DONE while the cap was full of
+                        # settled bets, so they were never retried). A
+                        # cap-blocked bet skips the persist entirely —
+                        # the game re-enters the pool when slots free.
+                        res0 = None
+                        if (AUTOBET_ENABLED and edge0 >= 2.5
+                                and e0.get("slug")):
+                            side_c0, entry_e0 = _peg_target(
+                                bid0, ask0, fairs[s] * 100.0)
+                            if side_c0 is not None:
+                                res0 = _autobet_execute(
+                                    sb, g, es0, "moneyline", s,
+                                    f"ML {s.upper()}", e0["slug"],
+                                    bool(e0.get("synthetic")), side_c0,
+                                    fairs[s], entry_e0, round(edge0, 1),
+                                    bid0, ask0,
+                                    {"diamond_ml": True,
+                                     "p_home": round(p_home, 4)})
+                                if res0 == "placed":
+                                    stats["opener_bets"] += 1
+                        if res0 == "cap":
+                            continue      # slate full — don't latch, retry
                         _ea = _prob_to_amer_py(bid0 / 100.0)
                         _fa = _prob_to_amer_py(fairs[s])
                         _opener_persist(sb, {
@@ -9073,19 +9097,6 @@ def _opener_pass(sb, now, deadline):
                                             "opener_unclamped": True},
                             "logged_at": now.isoformat(),
                         })
-                        if (AUTOBET_ENABLED and edge0 >= 2.5
-                                and e0.get("slug")):
-                            side_c0, entry_e0 = _peg_target(
-                                bid0, ask0, fairs[s] * 100.0)
-                            if side_c0 is not None and _autobet_execute(
-                                    sb, g, es0, "moneyline", s,
-                                    f"ML {s.upper()}", e0["slug"],
-                                    bool(e0.get("synthetic")), side_c0,
-                                    fairs[s], entry_e0, round(edge0, 1),
-                                    bid0, ask0,
-                                    {"diamond_ml": True,
-                                     "p_home": round(p_home, 4)}):
-                                stats["opener_bets"] += 1
             if (g["id"], "nrfi") in done:
                 continue                  # NRFI already shadowed
             nrfi = (d or {}).get("nrfi") or {}
@@ -9147,6 +9158,22 @@ def _opener_pass(sb, now, deadline):
                 pass
             edge = (round(bet_edge, 1) if bet_edge is not None
                     else blk.get("edge_pp"))
+            # CAP PRE-CHECK before the persist (Aug 4 cap-latch fix, NRFI
+            # twin of the ML reorder above): a would-bet game blocked only
+            # by a full slate must NOT latch done — skip without
+            # persisting so it retries when the resolver frees slots.
+            if AUTOBET_ENABLED and bet_side:
+                try:
+                    _pr = (sb.table("bot_picks").select("id")
+                           .filter("signal_blob->>autobet", "eq", "true")
+                           .eq("status", "pending")
+                           .gte("event_start",
+                                (now - timedelta(hours=12)).isoformat())
+                           .limit(AUTOBET_MAX_BETS + 1).execute().data) or []
+                    if len(_pr) >= AUTOBET_MAX_BETS:
+                        continue          # slate full — don't latch, retry
+                except Exception:
+                    pass
             blob = {"opener_shadow": True, "p_nrfi": nrfi.get("p_nrfi"),
                     "opener_edge_pp": edge, "would_bet": bool(bet_side),
                     "opener_unclamped": True,
@@ -9174,9 +9201,10 @@ def _opener_pass(sb, now, deadline):
             bid = blk.get("bid")
             if not slug or bid is None:
                 continue
-            try:                          # rolling-slate cap (re-arms daily)
+            try:                          # rolling-slate cap = OPEN bets only
                 prior = (sb.table("bot_picks").select("id")
                          .filter("signal_blob->>autobet", "eq", "true")
+                         .eq("status", "pending")
                          .gte("event_start",
                               (now - timedelta(hours=12)).isoformat())
                          .limit(AUTOBET_MAX_BETS + 1).execute().data) or []
