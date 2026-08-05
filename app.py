@@ -7385,8 +7385,17 @@ def _prop_insert_changed(sb, rows, now) -> int:
         if k in seen:
             continue
         seen.add(k)
-        if last.get(k) == cents:            # unchanged → skip
-            continue
+        prev = last.get(k)
+        # ≥2¢ THRESHOLD (Aug 5 2026 — the Supabase Disk-IO email):
+        # any-change dedup wrote 170K rows/day (668MB in 10 days) because
+        # 80 props/game jitter 1¢ perpetually. The movement engine gates
+        # at 3¢ weighted, so sub-2¢ noise carries no signal — skip it.
+        try:
+            if prev is not None and abs(float(cents) - float(prev)) < 2.0:
+                continue
+        except (TypeError, ValueError):
+            if prev == cents:
+                continue
         ins.append({"market_id": mid, "venue": venue, "prop_key": key,
                     "question": q, "prop_type": ptype, "line": line,
                     "cents": cents, "captured_at": now.isoformat()})
