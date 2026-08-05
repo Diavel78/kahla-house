@@ -8518,10 +8518,16 @@ AUTOBET_ENABLED = True
 # only (game-day NRFI keeps its measured 2.5-6pp band): opener claimed
 # edges of 10-16pp are exactly the question 1-contract stakes exist to
 # answer with real money.
-AUTOBET_MAX_BETS = 40   # 20→40 Aug 2 11:30pm AZ (user: "Move the cap to
-                        # 40") — the no-fence opener lane holds TWO open
-                        # slates at once, so the rolling window counts both.
-                        # Worst case 40 × 54¢ ≈ $21.60 across the window.
+AUTOBET_MAX_BETS = 10000  # CAP KILLED Aug 4 ~10pm AZ (user: "kill that 40
+                          # cap right now") after it starved the Friday wall
+                          # while settled bets held slots. The real risk
+                          # fences are per-bet now: MASTER RULE $6/event,
+                          # 54¢ entry cap, 2 contracts — a full 16-game
+                          # slate is ~48 bets ≈ $52 worst case, and the
+                          # slate size itself is the natural ceiling.
+                          # Sentinel not deletion: the counter still runs
+                          # (the "N/cap this slate" ping + a re-cap later
+                          # need only this constant changed back).
 _AUTOBET_CONTRACTS = 2   # 1→2 Aug 3 ~11:30pm AZ (user: "starting right
                          # now") — the PAIRED HARVEST test: contract 1
                          # rides to resolution, contract 2 gets a resting
