@@ -5392,14 +5392,31 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
         backed |= set(positions.keys())
         try:
             autos = (sb.table("bot_picks")
-                     .select("id,event_start,signal_blob")
+                     .select("id,event_start,signal_blob,query_text,picked_at")
                      .eq("asked_by", owner_uid).eq("status", "pending")
-                     .eq("query_text", "auto-logged from Polymarket")
                      .limit(300).execute().data) or []
         except Exception:
             autos = []
         for a in autos:
             blob = a.get("signal_blob") or {}
+            # MACHINE rows only (Aug 5 2026 — the Wesneski/Jones gap: the
+            # sweep matched query_text='auto-logged from Polymarket'
+            # exclusively, so canceled-never-filled AUTOBET/WHIFF/O-U
+            # picks were invisible to it and needed manual deletes).
+            # Manual user-logged picks are still never touched.
+            if not (a.get("query_text") == "auto-logged from Polymarket"
+                    or blob.get("autobet") or blob.get("whiff_autobet")
+                    or blob.get("ou_trader")):
+                continue
+            try:
+                if (now_dt - datetime.fromisoformat(
+                        str(a.get("picked_at")).replace("Z", "+00:00"))
+                        ) < timedelta(minutes=3):
+                    continue    # newborn — creates are ASYNC; a pick whose
+                                # order hasn't hit orders.list yet must not
+                                # read as "nothing on Poly" and get swept
+            except Exception:
+                pass
             slug = blob.get("pmm_slug")
             if not slug or slug in backed:
                 continue                        # still resting or held → keep
