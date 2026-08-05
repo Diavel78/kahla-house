@@ -25,6 +25,6 @@ jobs:
           CRON_KEY: ${{ secrets.FILLS_CRON_SECRET }}
         run: |
           KEY="$(printf '%s' "$CRON_KEY" | tr -d '[:space:]')"
-          curl -sS --max-time 120 \
-            "https://thekahlahouse.com/${{ inputs.path }}?key=${KEY}" \
+          curl -sSL --max-time 120 \
+            "https://www.thekahlahouse.com/${{ inputs.path }}?key=${KEY}" \
             | head -c 6000
