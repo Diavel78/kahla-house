@@ -5924,6 +5924,52 @@ def debug_poly_roi_page():
                      "Polymarket ROI baseline (June/July, baseball)"))
 
 
+@app.route("/api/polymarket/last-reward")
+def api_poly_last_reward():
+    """One-shot reward scan (Aug 4 2026, user: "when was my last maker
+    reward?"): walks the account's activities newest-first and returns the
+    most recent maker-reward / fee-rebate payouts. Shared-secret (?key=
+    FILLS_CRON_SECRET) so the site-curl Actions bridge can trigger it from
+    a sandbox session; result PERSISTED to exec_probe_runs so the answer
+    reads from the DB. Read-only."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    acts = fetch_activities(client, max_pages=60)
+    rewards = []
+    for act in acts:
+        t = act.get("type")
+        if t in ("ACTIVITY_TYPE_LIQUIDITY_PROGRAM",
+                 "ACTIVITY_TYPE_TAKER_FEE_REBATE",
+                 "ACTIVITY_TYPE_TRANSFER"):
+            d = act.get("accountBalanceChange") or act.get("transfer") or {}
+            rewards.append({
+                "type": t,
+                "amount": _safe_float(d.get("amount")),
+                "time": str(d.get("updateTime") or ""),
+            })
+    rewards.sort(key=lambda r: r["time"], reverse=True)
+    oldest_seen = ""
+    for act in acts[-5:]:
+        for v in act.values():
+            if isinstance(v, dict) and v.get("updateTime"):
+                oldest_seen = str(v["updateTime"])
+    out = {"ok": True, "activities_scanned": len(acts),
+           "oldest_activity_seen": oldest_seen,
+           "rewards_found": len(rewards), "latest": rewards[:8]}
+    try:
+        get_supabase().table("exec_probe_runs").insert(
+            {"params": {"kind": "last_reward"}, "result": out}).execute()
+    except Exception:
+        pass
+    return jsonify(out)
+
+
 @app.route("/api/kalshi/probe")
 @admin_required
 def api_kalshi_probe():

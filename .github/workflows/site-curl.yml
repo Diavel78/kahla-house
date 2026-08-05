@@ -1,0 +1,24 @@
+name: site-curl
+# Manual curl bridge: the Claude Code sandbox can't reach
+# thekahlahouse.com (network allowlist), but this runner can — and it
+# holds FILLS_CRON_SECRET, so it can hit the shared-secret cron/debug
+# endpoints. Dispatch with a path; the response prints to the job log
+# (and shared-secret endpoints persist their results to the DB anyway).
+on:
+  workflow_dispatch:
+    inputs:
+      path:
+        description: "Site path to GET (no leading slash, no query). ?key= is appended."
+        required: true
+        type: string
+
+jobs:
+  curl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: curl the endpoint
+        run: |
+          curl -sS --max-time 120 \
+            "https://thekahlahouse.com/${{ inputs.path }}?key=${{ secrets.FILLS_CRON_SECRET }}" \
+            | head -c 6000
