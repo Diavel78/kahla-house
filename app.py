@@ -5952,6 +5952,7 @@ def api_poly_last_reward():
                 "type": t,
                 "amount": _safe_float(d.get("amount")),
                 "time": str(d.get("updateTime") or ""),
+                "raw": act,      # full payload — memo/reason settles promo-vs-reward
             })
     rewards.sort(key=lambda r: r["time"], reverse=True)
     oldest_seen = ""
