@@ -8856,6 +8856,31 @@ def _opener_game_listed(g, keys) -> bool:
         return True
 
 
+_OPENER_REEVAL_H = 4
+
+
+def _opener_upsert(sb, row) -> bool:
+    """Persist an opener eval under the RE-EVAL regime (Aug 5 2026, user:
+    "the machine should never be done buying") — UPDATE the existing
+    (game, market) opener row in place on a re-eval, INSERT on first
+    sight. Row count stays one per (game, market) so the June-28
+    dedup-flood rule survives re-evaluation; pm_snapshots owns the price
+    history a re-eval overwrites."""
+    try:
+        ex = (sb.table("pickbot_paperlog").select("id")
+              .eq("market_id", row["market_id"])
+              .eq("market_type", row["market_type"])
+              .filter("signal_blob->>opener_shadow", "eq", "true")
+              .order("logged_at", desc=True).limit(1).execute().data) or []
+        if ex:
+            (sb.table("pickbot_paperlog").update(row)
+             .eq("id", ex[0]["id"]).execute())
+            return True
+    except Exception:
+        pass
+    return _opener_persist(sb, row)
+
+
 def _opener_persist(sb, row) -> bool:
     """Insert ONE opener shadow row IMMEDIATELY (crash-proofing, Aug 2
     ~midnight AZ — the user: "It does not take THIS long to build
@@ -9035,14 +9060,33 @@ def _opener_pass(sb, now, deadline):
         mids = [g["id"] for g in games]
         try:
             done_rows = (sb.table("pickbot_paperlog")
-                         .select("market_id,market_type")
+                         .select("market_id,market_type,logged_at,signal_blob")
                          .in_("market_id", mids)
                          .filter("signal_blob->>opener_shadow", "eq", "true")
                          .limit(1000).execute().data) or []
         except Exception as e:
             stats["gate"] = ("done_err: " + str(e))[:120]
             return shadow_rows, stats     # fail-closed: no dedup read → skip
-        done = {(r["market_id"], r.get("market_type")) for r in done_rows}
+        # NEVER DONE BUYING (Aug 5 2026, user): a no-bet eval EXPIRES
+        # after _OPENER_REEVAL_H and the game re-enters the pool — fair
+        # moves (starter scratches) and books widen/narrow all day, so a
+        # tight-book pass at 9pm can be a clean entry at noon. would_bet
+        # rows stay permanently done (a placed bet is game-deduped
+        # anyway; a would-bet that failed placement latches as before —
+        # the cap path never persists at all). Parse-failure ⇒ fresh ⇒
+        # done (fail-safe: never re-eval on bad data).
+        done = set()
+        for r in done_rows:
+            _b = r.get("signal_blob") or {}
+            fresh = True
+            try:
+                _ts = datetime.fromisoformat(
+                    str(r.get("logged_at")).replace("Z", "+00:00"))
+                fresh = (now - _ts) < timedelta(hours=_OPENER_REEVAL_H)
+            except Exception:
+                pass
+            if _b.get("would_bet") or fresh:
+                done.add((r["market_id"], r.get("market_type")))
         cands = [g for g in games
                  if (g["id"], "nrfi") not in done
                  or (g["id"], "moneyline") not in done
@@ -9192,7 +9236,7 @@ def _opener_pass(sb, now, deadline):
                             continue      # slate full — don't latch, retry
                         _ea = _prob_to_amer_py(bid0 / 100.0)
                         _fa = _prob_to_amer_py(fairs[s])
-                        _opener_persist(sb, {
+                        _opener_upsert(sb, {
                             "market_id": g["id"],
                             "event_name": g.get("event_name"),
                             "event_start": es0, "sport": "MLB",
@@ -9221,7 +9265,7 @@ def _opener_pass(sb, now, deadline):
             if ou_row is not None:
                 if ou_row["signal_blob"].get("bet_placed"):
                     stats["opener_bets"] += 1
-                _opener_persist(sb, ou_row)
+                _opener_upsert(sb, ou_row)
             if (g["id"], "nrfi") in done:
                 continue                  # NRFI already shadowed
             nrfi = (d or {}).get("nrfi") or {}
@@ -9303,7 +9347,7 @@ def _opener_pass(sb, now, deadline):
                     "opener_edge_pp": edge, "would_bet": bool(bet_side),
                     "opener_unclamped": True,
                     "nrfi_price_src": nrfi.get("price_src")}
-            _opener_persist(sb, {
+            _opener_upsert(sb, {
                 "market_id": g["id"], "event_name": g.get("event_name"),
                 "event_start": es, "sport": "MLB",
                 "market_type": "nrfi", "side": side, "line": None,
