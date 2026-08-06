@@ -1068,6 +1068,15 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 > and being wrong about why. Write it down so the next debug session
 > doesn't re-walk the same loop.
 >
+> **⏰ THE CLOCK RULE — ARIZONA (America/Phoenix, MST, no DST) IS THE ONLY
+> TIME ZONE. THE USER HAS YELLED ABOUT THIS MANY TIMES.** Every "today",
+> every day-count, every "Nth day of X", every slate boundary is an
+> AZ calendar day. NEVER reason from UTC (the UTC date rolls at 5pm AZ
+> and has repeatedly caused off-by-one day counts and phantom "next
+> day" claims); never guess the current time — `select now() at time
+> zone 'America/Phoenix'` via run_sql.sh FIRST whenever a statement
+> depends on what day or time it is.
+>
 > **A count anomaly the user flags IS the bug until proven otherwise —
 > investigate the anomaly, never narrate past it.** Aug 3 2026: the user
 > said "you should be filling Wednesday" three times; the first status
