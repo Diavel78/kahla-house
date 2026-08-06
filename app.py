@@ -7516,7 +7516,13 @@ _WHIFF_MIN_STARTS = 3             # debut/no-history pitchers: skip
 # the K ladder (usually NO — the app sells YES only, so the NO side is
 # API-exclusive). Own slate cap, does NOT eat the opener lane's 40.
 WHIFF_AUTOBET_ENABLED = True
-WHIFF_AUTOBET_MAX_BETS = 30       # rolling slate cap (user: "limit to 30")
+WHIFF_AUTOBET_MAX_BETS = 10000    # CAP KILLED Aug 5 ~11pm AZ (user: "kill
+                                  # that 30 bet prop cap" — the opener cap's
+                                  # sentinel treatment). Fences are per-bet:
+                                  # MASTER RULE $6, 25-54¢ peg band, ≤10pp
+                                  # cliff, one bet per pitcher across the
+                                  # K+outs ladders. Counter machinery
+                                  # survives for a future re-cap.
 _WHIFF_BET_MIN_PP = 4.0
 _WHIFF_BET_MAX_PP = 10.0          # the claimed-edge cliff (3rd-time rule:
                                   # NRFI clamp / Fight IQ 0-3 past 15pp /
@@ -7876,7 +7882,12 @@ def _whiff_autobet(sb, bet_cands, ginfo, now):
     ticks, not one."""
     best: dict = {}
     for c in bet_cands:
-        k = (c[1], c[4])                       # (market_id, pitcher)
+        # One bet per (pitcher, LADDER) — Aug 5 ~11pm AZ, user: "why no
+        # outs and K's on same pitcher?? Different props." K and outs
+        # rungs of one start stay un-stacked within their own ladder;
+        # across ladders the correlation is partial (workload vs whiff
+        # rate) and stakes are ~$1 — both bets are allowed.
+        k = (c[1], c[4], c[9])                 # (market_id, pitcher, ptype)
         if k not in best or c[0] > best[k][0]:
             best[k] = c
     if not best:
@@ -7890,8 +7901,9 @@ def _whiff_autobet(sb, bet_cands, ginfo, now):
                 .limit(500).execute().data) or []
         for r in rows:
             b = r.get("signal_blob") or {}
-            done.add((r["market_id"],
-                      ((b.get("whiff") or {}).get("pitcher")) or ""))
+            w0 = b.get("whiff") or {}
+            done.add((r["market_id"], w0.get("pitcher") or "",
+                      w0.get("ptype") or "k"))  # old K rows have no ptype
     except Exception:
         return                                 # fail-closed: no dedup → skip
     placed = 0
@@ -7899,7 +7911,7 @@ def _whiff_autobet(sb, bet_cands, ginfo, now):
             best.values(), key=lambda c: -c[0]):
         if placed >= _WHIFF_BET_PER_TICK:
             break
-        if (mid, name) in done:
+        if (mid, name, ptype) in done:
             continue
         g = ginfo.get(mid) or {}
         es = g.get("event_start")
