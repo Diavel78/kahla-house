@@ -5447,18 +5447,33 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                 # UN-LATCH the opener eval (Aug 5 2026 — self-healing lost
                 # creates): a swept machine pick left its would_bet=true
                 # opener row latched done, so a genuinely lost order was
-                # never re-placed — the gap the VERIFY FAILED alarm
-                # existed to cover. Deleting the opener row puts the game
-                # back in the pool; the lane re-prices and re-bets on the
-                # next pass. (Props have no opener row — no-op there.)
+                # never re-placed. TWO-STRIKE COOL-OFF: the opener row is
+                # flipped to would_bet=false + swept+1 with a fresh
+                # logged_at, so the game re-enters the pool after the
+                # normal 4h expiry — once. A second sweep (swept>=2 stays
+                # done forever in the done-set builder) means the USER
+                # canceled it deliberately; the machine stops re-betting.
+                # (Props have no opener row — no-op there.)
                 if ((blob.get("autobet") or blob.get("ou_trader"))
                         and a.get("market_id") and a.get("market_type")):
                     try:
-                        (sb.table("pickbot_paperlog").delete()
-                         .eq("market_id", a["market_id"])
-                         .eq("market_type", a["market_type"])
-                         .filter("signal_blob->>opener_shadow", "eq", "true")
-                         .execute())
+                        _op = (sb.table("pickbot_paperlog")
+                               .select("id,signal_blob")
+                               .eq("market_id", a["market_id"])
+                               .eq("market_type", a["market_type"])
+                               .filter("signal_blob->>opener_shadow",
+                                       "eq", "true")
+                               .limit(1).execute().data) or []
+                        if _op:
+                            _ob = (_op[0].get("signal_blob")
+                                   if isinstance(_op[0].get("signal_blob"),
+                                                 dict) else {}) or {}
+                            _ob["would_bet"] = False
+                            _ob["swept"] = int(_ob.get("swept") or 0) + 1
+                            (sb.table("pickbot_paperlog")
+                             .update({"signal_blob": _ob,
+                                      "logged_at": now_dt.isoformat()})
+                             .eq("id", _op[0]["id"]).execute())
                     except Exception:
                         pass
             except Exception:
@@ -9155,7 +9170,8 @@ def _opener_pass(sb, now, deadline):
                 fresh = (now - _ts) < timedelta(hours=_OPENER_REEVAL_H)
             except Exception:
                 pass
-            if _b.get("would_bet") or fresh:
+            if (_b.get("would_bet") or fresh
+                    or int(_b.get("swept") or 0) >= 2):
                 done.add((r["market_id"], r.get("market_type")))
         cands = [g for g in games
                  if (g["id"], "nrfi") not in done
