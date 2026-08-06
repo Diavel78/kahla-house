@@ -66,13 +66,15 @@ def main() -> int:
         return 0
     lo = min(dates)
     starts = (sb.table("mlb_pitcher_games")
-              .select("pitcher_name,game_date,strikeouts,batters_faced")
+              .select("pitcher_name,game_date,strikeouts,batters_faced,outs")
               .eq("started", True).gte("game_date", lo)
               .limit(5000).execute().data) or []
-    actual: dict[tuple, list[int]] = {}
+    # value tuple per start: (strikeouts, outs) — Outs IQ rides the same
+    # grader (Aug 5 2026); the row's whiff.ptype picks the metric.
+    actual: dict[tuple, list[tuple]] = {}
     for s in starts:
         actual.setdefault((s["pitcher_name"], s["game_date"]), []).append(
-            s.get("strikeouts") or 0)
+            (s.get("strikeouts") or 0, s.get("outs")))
 
     graded = skipped = 0
     now = datetime.now(timezone.utc).isoformat()
@@ -98,11 +100,18 @@ def main() -> int:
         if len(ks) > 1:               # doubleheader double-start ambiguity
             skipped += 1
             continue
-        won = (ks[0] >= line) if r["side"] == "yes" else (ks[0] < line)
+        is_outs = ((blob.get("whiff") or {}).get("ptype")) == "outs"
+        val = ks[0][1] if is_outs else ks[0][0]
+        if val is None:
+            skipped += 1
+            continue
+        won = (val >= line) if r["side"] == "yes" else (val < line)
         pnl = _to_win_pnl(r.get("entry_price"), won, float(r.get("units") or 1))
         sb.table("pickbot_paperlog").update(
             {"status": "won" if won else "lost", "pnl_units": pnl,
-             "result_score": json.dumps({"k": ks[0]}), "settled_at": now}
+             "result_score": json.dumps(
+                 {"outs" if is_outs else "k": val}),
+             "settled_at": now}
         ).eq("id", r["id"]).execute()
         graded += 1
     print(f"whiff shadows: graded {graded}, still pending {skipped}")
@@ -124,11 +133,19 @@ def main() -> int:
         if not ks or len(ks) > 1:
             bs += 1
             continue
-        won = (ks[0] >= line) if r["side"] == "yes" else (ks[0] < line)
+        is_outs = (w.get("ptype") == "outs"
+                   or (blob.get("prop") or {}).get("type")
+                   == "baseball_player_outs")
+        val = ks[0][1] if is_outs else ks[0][0]
+        if val is None:
+            bs += 1
+            continue
+        won = (val >= line) if r["side"] == "yes" else (val < line)
         pnl = _to_win_pnl(r.get("entry_price"), won, float(r.get("units") or 1))
         sb.table("bot_picks").update(
             {"status": "won" if won else "lost", "pnl_units": pnl,
-             "result_score": {"k": ks[0]}, "settled_at": now}
+             "result_score": {"outs" if is_outs else "k": val},
+             "settled_at": now}
         ).eq("id", r["id"]).execute()
         bg += 1
     print(f"whiff bot_picks: graded {bg}, still pending {bs}")

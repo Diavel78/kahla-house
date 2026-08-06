@@ -7547,6 +7547,9 @@ _WHIFF_PRIOR_BF, _WHIFF_PRIOR_PA, _WHIFF_PRIOR_STARTS = 150.0, 1000.0, 4.0
 _WHIFF_Q_RE = re.compile(
     r"^Will (.+?) record at least (\d+) pitching strikeouts in "
     r"([A-Z]{2,4}) vs ([A-Z]{2,4})")
+_OUTS_Q_RE = re.compile(
+    r"^Will (.+?) record at least (\d+) outs recorded in "
+    r"([A-Z]{2,4}) vs ([A-Z]{2,4})")
 
 
 def _whiff_snapshot():
@@ -7631,6 +7634,56 @@ def _whiff_tail_p(snap: dict, pitcher: str, opp: str, line: float,
     return tail, len(hist)
 
 
+def _outs_tail_p(snap: dict, pitcher: str, line: float,
+                 asof) -> tuple[float, float] | None:
+    """(P(outs >= line), effective_starts) or None when unpriceable.
+    OUTS IQ (Aug 5 2026 — the props expansion, walk-forward verified:
+    beats base rate at 7/8 lines, peak +.013 Brier at the quoted 16-18;
+    market check: outs-YES underpriced +6-15pp across the 44-73¢ band).
+    Mirrors scripts/backtest_outs_iq.py EXACTLY: per-pitcher decay-
+    weighted outs mean/SD (HL 365d) shrunk toward league by effective
+    starts, normal tail with continuity correction, SD floor 0.75.
+    Needs a snapshot with outs state (hist rows [date,bf,k,OUTS] + lg
+    outs_m/outs_s) — older snapshots return None (quiet no-op)."""
+    lg = snap.get("lg") or {}
+    lg_m, lg_s = lg.get("outs_m"), lg.get("outs_s")
+    if lg_m is None or lg_s is None:
+        return None
+    p = (snap.get("pitchers") or {}).get(pitcher)
+    if not p:
+        return None
+    rows = []
+    for h in (p.get("hist") or []):
+        if len(h) >= 4 and h[3] is not None:
+            try:
+                d0 = datetime.fromisoformat(str(h[0])[:10]).date()
+                rows.append((d0, float(h[3])))
+            except Exception:
+                continue
+    if not rows:
+        return None
+    w = m_acc = 0.0
+    for (d0, outs0) in rows:
+        wt = 0.5 ** ((asof - d0).days / _WHIFF_HL_PITCHER)
+        w += wt
+        m_acc += wt * outs0
+    if w < _WHIFF_MIN_STARTS:
+        return None
+    m_p = m_acc / w
+    v_acc = 0.0
+    for (d0, outs0) in rows:
+        wt = 0.5 ** ((asof - d0).days / _WHIFF_HL_PITCHER)
+        v_acc += wt * (outs0 - m_p) ** 2
+    s_p = math.sqrt(v_acc / w) if w > 0 else float(lg_s)
+    m_hat = ((m_p * w + float(lg_m) * _WHIFF_PRIOR_STARTS)
+             / (w + _WHIFF_PRIOR_STARTS))
+    s_hat = math.sqrt((s_p ** 2 * w + float(lg_s) ** 2 * _WHIFF_PRIOR_STARTS)
+                      / (w + _WHIFF_PRIOR_STARTS))
+    z = (float(line) - 0.5 - m_hat) / max(0.75, s_hat)
+    tail = 1.0 - 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+    return tail, w
+
+
 def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
     """Price every K-prop captured this tick vs Whiff IQ; SHADOW-log the
     +EV side to pickbot_paperlog when |edge| >= _WHIFF_SHADOW_MIN_PP.
@@ -7642,13 +7695,16 @@ def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
         kprops = [r for r in prop_rows
                   if r[4] == "baseball_player_strikeouts"
                   and r[6] is not None and 4 <= r[6] <= 96]
-        if not kprops:
+        oprops = [r for r in prop_rows
+                  if r[4] == "baseball_player_outs"
+                  and r[6] is not None and 4 <= r[6] <= 96]
+        if not kprops and not oprops:
             return 0
         snap = _whiff_snapshot()
         if not snap or not snap.get("pitchers"):
             return 0
         ginfo = {g["id"]: g for g in all_games}
-        mids = list({r[0] for r in kprops})
+        mids = list({r[0] for r in kprops + oprops})
         prior: dict = {}
         try:
             recent = (sb.table("pickbot_paperlog")
@@ -7708,7 +7764,8 @@ def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
                     and n_starts >= _WHIFF_MIN_STARTS):
                 bet_cands.append((edge, mid, key, q, name, float(line),
                                   side, side_c,
-                                  model_p if side == "yes" else 1 - model_p))
+                                  model_p if side == "yes" else 1 - model_p,
+                                  "k"))
             if edge < _WHIFF_SHADOW_MIN_PP:
                 continue
             if prior.get((mid, key)) == side:
@@ -7733,6 +7790,67 @@ def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
                                           "cents": cents,
                                           "edge_pp": round(edge, 2),
                                           "n_starts": n_starts}},
+            })
+            if len(ins) >= 40:                 # tick latency bound
+                break
+        # ---- OUTS IQ (Aug 5 2026, user: "we leaving money on the
+        # table... Nah, fuck that, let's go!") — same plumbing, second
+        # prop family. Walk-forward: beats base rate 7/8 lines, peak at
+        # the quoted 16-18; tape: outs-YES underpriced +6-15pp across
+        # the 44-73¢ band. Same gates as K: 4-10pp band, 25-54¢ entry,
+        # 0.30-0.70 trust zone, min 3 effective starts. Candidates join
+        # the SAME per-pitcher pool as K rungs — outs and Ks of one
+        # start are correlated, so one bet per pitcher, best edge wins
+        # across both ladders (the never-ladder-stack rule, widened).
+        for (mid, _venue, key, q, _pt, line, cents) in oprops:
+            m = _OUTS_Q_RE.match(q or "")
+            if not m or line is None:
+                continue
+            name, away_tc, home_tc = m.group(1), m.group(3), m.group(4)
+            pteam = ((snap.get("pitchers") or {}).get(name) or {}).get("team")
+            if pteam not in (away_tc, home_tc):
+                continue                       # traded/mismapped — skip
+            got = _outs_tail_p(snap, name, float(line), asof)
+            if not got:
+                continue
+            model_p, w_eff = got
+            edge_yes = model_p * 100.0 - cents
+            side = "yes" if edge_yes > 0 else "no"
+            edge = abs(edge_yes)
+            side_c = cents if side == "yes" else 100 - cents
+            if (_WHIFF_BET_MIN_PP <= edge <= _WHIFF_BET_MAX_PP
+                    and _WHIFF_MIN_ENTRY_C <= side_c <= _WHIFF_MAX_ENTRY_C
+                    and _WHIFF_TRUST_LO <= model_p <= _WHIFF_TRUST_HI):
+                bet_cands.append((edge, mid, key, q, name, float(line),
+                                  side, side_c,
+                                  model_p if side == "yes" else 1 - model_p,
+                                  "outs"))
+            if edge < _WHIFF_SHADOW_MIN_PP:
+                continue
+            if prior.get((mid, key)) == side:
+                continue                       # unchanged — not a new row
+            if not (4 <= side_c <= 96):
+                continue
+            entry = (int(round(-100.0 * side_c / (100 - side_c)))
+                     if side_c >= 50
+                     else int(round(100.0 * (100 - side_c) / side_c)))
+            g = ginfo.get(mid) or {}
+            ins.append({
+                "market_id": mid, "event_name": g.get("event_name"),
+                "event_start": g.get("event_start"), "sport": "MLB",
+                "market_type": "prop", "side": side, "line": float(line),
+                "entry_price": entry, "units": 1, "confidence": "low",
+                "gates_cleared": False, "status": "pending",
+                "logged_at": now.isoformat(),
+                "signal_blob": {"whiff_shadow": True, "whiff_key": key,
+                                "outs_iq": True,
+                                "whiff": {"pitcher": name, "q": q,
+                                          "ptype": "outs",
+                                          "line": float(line),
+                                          "model_p": round(model_p, 4),
+                                          "cents": cents,
+                                          "edge_pp": round(edge, 2),
+                                          "n_starts": round(w_eff, 1)}},
             })
             if len(ins) >= 40:                 # tick latency bound
                 break
@@ -7777,7 +7895,7 @@ def _whiff_autobet(sb, bet_cands, ginfo, now):
     except Exception:
         return                                 # fail-closed: no dedup → skip
     placed = 0
-    for (edge, mid, key, q, name, line, side, side_c, side_p) in sorted(
+    for (edge, mid, key, q, name, line, side, side_c, side_p, ptype) in sorted(
             best.values(), key=lambda c: -c[0]):
         if placed >= _WHIFF_BET_PER_TICK:
             break
@@ -7813,17 +7931,22 @@ def _whiff_autobet(sb, bet_cands, ginfo, now):
         peg_c, entry_edge = _peg_target(bid_c, ask_c, fair_c)
         if peg_c is None or entry_edge < _WHIFF_BET_MIN_PP:
             continue                           # whiff bar (4pp), not 2.5
+        _unit = "OUTS" if ptype == "outs" else "K"
         lbl = (f"{name} {'' if side == 'yes' else 'UNDER '}"
-               f"{int(line)}+ K {side.upper()}")
+               f"{int(line)}+ {_unit} {side.upper()}")
         if _autobet_execute(
                 sb, {"id": mid, "event_name": g.get("event_name")}, es,
                 "prop", side, lbl, key, side == "no", peg_c,
                 side_p, entry_edge, None, bid_c, ask_c,
                 extra_blob={"whiff_autobet": True, "whiff_key": key,
+                            "outs_iq": ptype == "outs",
                             "prop": {"key": key, "q": q, "venue": "polymarket",
-                                     "type": "baseball_player_strikeouts",
+                                     "type": ("baseball_player_outs"
+                                              if ptype == "outs" else
+                                              "baseball_player_strikeouts"),
                                      "line": line},
                             "whiff": {"pitcher": name, "line": line,
+                                      "ptype": ptype,
                                       "model_p": round(side_p if side == "yes"
                                                        else 1 - side_p, 4),
                                       "mid_c": side_c if side == "yes"
@@ -7831,7 +7954,8 @@ def _whiff_autobet(sb, bet_cands, ginfo, now):
                                       "edge_pp": round(edge, 2)}},
                 cap_flag="whiff_autobet", cap_max=WHIFF_AUTOBET_MAX_BETS,
                 query_text=q,
-                reason=(f"Whiff IQ K-prop — model {round(side_p * 100)}% on "
+                reason=(f"{'Outs IQ outs-prop' if ptype == 'outs' else 'Whiff IQ K-prop'}"
+                        f" — model {round(side_p * 100)}% on "
                         f"{side.upper()} vs {int(side_c)}¢ mid → "
                         f"{round(edge, 1)}pp; maker at {peg_c}¢"),
                 skip_game_dedup=True) == "placed":
