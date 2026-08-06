@@ -11898,7 +11898,11 @@ def _tg_send_now(text):
 _TG_BATCH_MIN = 10   # max ONE summary message per this many minutes
 
 
-_TG_DIGEST_ALLOW = ("🤖 REPEG STOP", "FAILED", "LOST")
+_TG_DIGEST_ALLOW = ("FAILED", "LOST")
+# REPEG STOP dropped Aug 5 2026 (user: "It's working, no more needed
+# alert") — the stop itself still happens and still stamps its
+# signal_blob.repeg_stop marker (dropped messages return True); only
+# the notification is gone. Failure states + 🚨-urgent remain.
 
 
 def _send_fill_telegram(text, urgent=False):
