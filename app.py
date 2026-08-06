@@ -5392,7 +5392,8 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
         backed |= set(positions.keys())
         try:
             autos = (sb.table("bot_picks")
-                     .select("id,event_start,signal_blob,query_text,picked_at")
+                     .select("id,event_start,signal_blob,query_text,"
+                             "picked_at,market_id,market_type")
                      .eq("asked_by", owner_uid).eq("status", "pending")
                      .limit(300).execute().data) or []
         except Exception:
@@ -5443,6 +5444,23 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                 sb.table("bot_picks").delete().eq("id", a["id"]).execute()
                 out["removed"] = out.get("removed", 0) + 1
                 app.logger.info("PMM-AUTOLOG removed %s %s (%s)", reason, a["id"], slug)
+                # UN-LATCH the opener eval (Aug 5 2026 — self-healing lost
+                # creates): a swept machine pick left its would_bet=true
+                # opener row latched done, so a genuinely lost order was
+                # never re-placed — the gap the VERIFY FAILED alarm
+                # existed to cover. Deleting the opener row puts the game
+                # back in the pool; the lane re-prices and re-bets on the
+                # next pass. (Props have no opener row — no-op there.)
+                if ((blob.get("autobet") or blob.get("ou_trader"))
+                        and a.get("market_id") and a.get("market_type")):
+                    try:
+                        (sb.table("pickbot_paperlog").delete()
+                         .eq("market_id", a["market_id"])
+                         .eq("market_type", a["market_type"])
+                         .filter("signal_blob->>opener_shadow", "eq", "true")
+                         .execute())
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -8840,7 +8858,7 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
         f"{round(bid_c) if bid_c else '?'}/"
         f"{round(ask_c) if ask_c else '?'}, fair "
         f"{round(float(fair_pb) * 100)}¢, {round(entry_edge, 1)}pp, "
-        f"{'verified' if ok else 'VERIFY FAILED — CHECK APP'}). "
+        f"{'verified' if ok else 'verify pending — sweep self-heals'}). "
         f"Bet {len(prior) + 1}/{cap} this slate.")
     return "placed"
 
@@ -9569,7 +9587,7 @@ def _opener_pass(sb, now, deadline):
                 f"(book was {round(bid_c) if bid_c else '?'}/"
                 f"{round(ask_c) if ask_c else '?'}, fair {round(fair_c)}¢, "
                 f"{round(entry_edge, 1)}pp edge, "
-                f"{'verified' if ok else 'VERIFY FAILED — CHECK APP'}). "
+                f"{'verified' if ok else 'verify pending — sweep self-heals'}). "
                 f"Bet {len(prior) + 1}/{AUTOBET_MAX_BETS} this slate.")
             stats["opener_bets"] += 1
     except Exception as e:
