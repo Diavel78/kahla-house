@@ -7931,6 +7931,13 @@ def _whiff_autobet(sb, bet_cands, ginfo, now):
         peg_c, entry_edge = _peg_target(bid_c, ask_c, fair_c)
         if peg_c is None or entry_edge < _WHIFF_BET_MIN_PP:
             continue                           # whiff bar (4pp), not 2.5
+        # PEG-STAGE GATES (Aug 5 2026 — the first Outs IQ bet pegged 12¢
+        # / 31pp on a wide fresh book: the 25¢ fill floor and the 10pp
+        # cliff cap were only checked against the MID at candidate time,
+        # the exact Wesneski shape). The entry that rests is the entry
+        # that must clear the bands.
+        if peg_c < _WHIFF_MIN_ENTRY_C or entry_edge > _WHIFF_BET_MAX_PP:
+            continue
         _unit = "OUTS" if ptype == "outs" else "K"
         lbl = (f"{name} {'' if side == 'yes' else 'UNDER '}"
                f"{int(line)}+ {_unit} {side.upper()}")
