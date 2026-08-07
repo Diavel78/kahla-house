@@ -48,7 +48,7 @@ def main() -> int:
     sb = db.client()
     prows = _paged(sb, "mlb_pitcher_games",
                    "pitcher_id,pitcher_name,game_date,team,started,"
-                   "batters_faced,strikeouts,outs", ["game_date", "game_pk"])
+                   "batters_faced,strikeouts,outs,hits,walks", ["game_date", "game_pk"])
     cutoff = (date.today() - timedelta(days=TEAM_DAYS)).isoformat()
     brows = _paged(sb, "mlb_batter_games",
                    "game_pk,team,game_date,ab,walks,hbp,sac_flies,strikeouts",
@@ -58,6 +58,8 @@ def main() -> int:
     # league constants from ALL starts (stable denominator)
     lg_k = lg_bf = lg_starts = 0
     outs_vals: list[float] = []
+    ha_vals: list[float] = []
+    bb_vals: list[float] = []
     by_pid: dict[int, dict] = {}
     for r in prows:
         if not r.get("started") or (r.get("batters_faced") or 0) <= 0:
@@ -67,6 +69,10 @@ def main() -> int:
         lg_starts += 1
         if r.get("outs") is not None:
             outs_vals.append(float(r["outs"]))
+        if r.get("hits") is not None:
+            ha_vals.append(float(r["hits"]))
+        if r.get("walks") is not None:
+            bb_vals.append(float(r["walks"]))
         p = by_pid.setdefault(r["pitcher_id"],
                               {"name": r["pitcher_name"], "team": r["team"],
                                "hist": []})
@@ -75,7 +81,8 @@ def main() -> int:
         # the app slices [h[0], h[1], h[2]] for the K path, so the
         # extra element is backward-compatible.
         p["hist"].append([r["game_date"], r["batters_faced"],
-                          r.get("strikeouts") or 0, r.get("outs")])
+                          r.get("strikeouts") or 0, r.get("outs"),
+                          r.get("hits"), r.get("walks")])
     if lg_starts < 500:
         print(f"only {lg_starts} starts — refusing to write a thin snapshot")
         return 1
@@ -110,12 +117,18 @@ def main() -> int:
     for (team, gdate, _pk), a in sorted(tagg.items()):
         teams[team].append([gdate, a["pa"], a["k"]])
 
-    o_m = sum(outs_vals) / max(1, len(outs_vals))
-    o_s = (sum((x - o_m) ** 2 for x in outs_vals)
-           / max(1, len(outs_vals) - 1)) ** 0.5
+    def _ms(vals):
+        m = sum(vals) / max(1, len(vals))
+        s = (sum((x - m) ** 2 for x in vals) / max(1, len(vals) - 1)) ** 0.5
+        return round(m, 3), round(s, 3)
+    o_m, o_s = _ms(outs_vals)
+    ha_m, ha_s = _ms(ha_vals)
+    bb_m, bb_s = _ms(bb_vals)
     state = {"lg": {"k_bf": round(lg_k / lg_bf, 5),
                     "bf": round(lg_bf / lg_starts, 3), "bf_sd": BF_SD,
-                    "outs_m": round(o_m, 3), "outs_s": round(o_s, 3)},
+                    "outs_m": o_m, "outs_s": o_s,
+                    "ha_m": ha_m, "ha_s": ha_s,
+                    "bb_m": bb_m, "bb_s": bb_s},
              "pitchers": pitchers, "teams": dict(teams)}
     from datetime import datetime, timezone
     sb.table("whiff_iq_snapshot").upsert(

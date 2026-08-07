@@ -66,15 +66,17 @@ def main() -> int:
         return 0
     lo = min(dates)
     starts = (sb.table("mlb_pitcher_games")
-              .select("pitcher_name,game_date,strikeouts,batters_faced,outs")
+              .select("pitcher_name,game_date,strikeouts,batters_faced,"
+                      "outs,hits,walks")
               .eq("started", True).gte("game_date", lo)
               .limit(5000).execute().data) or []
-    # value tuple per start: (strikeouts, outs) — Outs IQ rides the same
-    # grader (Aug 5 2026); the row's whiff.ptype picks the metric.
+    # value tuple per start: (K, outs, hits, walks) — every pitcher-stat
+    # family rides this grader; whiff.ptype picks the metric index.
     actual: dict[tuple, list[tuple]] = {}
     for s in starts:
         actual.setdefault((s["pitcher_name"], s["game_date"]), []).append(
-            (s.get("strikeouts") or 0, s.get("outs")))
+            (s.get("strikeouts") or 0, s.get("outs"),
+             s.get("hits"), s.get("walks")))
 
     graded = skipped = 0
     now = datetime.now(timezone.utc).isoformat()
@@ -100,8 +102,9 @@ def main() -> int:
         if len(ks) > 1:               # doubleheader double-start ambiguity
             skipped += 1
             continue
-        is_outs = ((blob.get("whiff") or {}).get("ptype")) == "outs"
-        val = ks[0][1] if is_outs else ks[0][0]
+        pty = ((blob.get("whiff") or {}).get("ptype")) or "k"
+        idx = {"k": 0, "outs": 1, "ha": 2, "bb": 3}.get(pty, 0)
+        val = ks[0][idx]
         if val is None:
             skipped += 1
             continue
@@ -109,8 +112,7 @@ def main() -> int:
         pnl = _to_win_pnl(r.get("entry_price"), won, float(r.get("units") or 1))
         sb.table("pickbot_paperlog").update(
             {"status": "won" if won else "lost", "pnl_units": pnl,
-             "result_score": json.dumps(
-                 {"outs" if is_outs else "k": val}),
+             "result_score": json.dumps({pty: val}),
              "settled_at": now}
         ).eq("id", r["id"]).execute()
         graded += 1
@@ -133,10 +135,14 @@ def main() -> int:
         if not ks or len(ks) > 1:
             bs += 1
             continue
-        is_outs = (w.get("ptype") == "outs"
-                   or (blob.get("prop") or {}).get("type")
-                   == "baseball_player_outs")
-        val = ks[0][1] if is_outs else ks[0][0]
+        _tmap = {"baseball_player_outs": "outs",
+                 "baseball_player_hits_allowed": "ha",
+                 "baseball_player_walks_allowed": "bb"}
+        pty = (w.get("ptype")
+               or _tmap.get((blob.get("prop") or {}).get("type") or "")
+               or "k")
+        idx = {"k": 0, "outs": 1, "ha": 2, "bb": 3}.get(pty, 0)
+        val = ks[0][idx]
         if val is None:
             bs += 1
             continue
@@ -144,7 +150,7 @@ def main() -> int:
         pnl = _to_win_pnl(r.get("entry_price"), won, float(r.get("units") or 1))
         sb.table("bot_picks").update(
             {"status": "won" if won else "lost", "pnl_units": pnl,
-             "result_score": {"outs" if is_outs else "k": val},
+             "result_score": {pty: val},
              "settled_at": now}
         ).eq("id", r["id"]).execute()
         bg += 1
