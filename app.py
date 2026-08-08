@@ -11468,6 +11468,14 @@ _HARVEST_ROI = 0.50       # 35→50% Aug 7 2026 (user: "we are cheap selling
                           # holds. Bonus: a walk-off winner that never
                           # trades at the higher bar simply doesn't sell
                           # — and we keep the full $1.00.
+_HARVEST_PROP_FAMS = {"outs"}   # prop ladders whose LOSERS drift enough to
+                          # fill a take-profit (Aug 7 2026): outs only —
+                          # monotonic accumulation, 50% loser touch, the
+                          # one prop that trades like a game market. K
+                          # (33% on 21 losers), hits (0/5) and walks
+                          # (0/1) ride both contracts instead. Re-measure
+                          # per family as the tape grows; adding a family
+                          # here is the whole change.
 _HARVEST_MOD = 2          # minutes — same cadence as the re-peg pass
 
 
@@ -11503,19 +11511,23 @@ def _harvest_tick(sb, now) -> dict:
         cands = []
         for r in rows:
             b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
-            if not (b.get("autobet") or b.get("ou_trader")):
+            # SELL WHERE PRICES DRIFT, RIDE WHERE THEY JUMP (Aug 7 2026 —
+            # the paired test's verdict, split PER FAMILY after the user
+            # caught the blanket version: "do any of the props support a
+            # sell?? We have to split them up"). Loser touch rates at
+            # +35%: ML 46%, OUTS 50%, K 33%, hits 0/5, walks 0/1. Outs is
+            # MONOTONIC — every out is +1, so a losing outs bet drifts up
+            # for innings before it dies, the scenic route a resting ask
+            # needs. K's clump; hits/walks are pure gaps. (Tested and
+            # rejected: a by-SIDE split — under 29% vs over 33%, no
+            # signal. Family is the axis.) Break-even touch at the 50%
+            # target is ~38%, so K's 33% fails on our LARGEST sample
+            # while outs clears it.
+            if not (b.get("autobet") or b.get("ou_trader")
+                    or (b.get("whiff_autobet")
+                        and ((b.get("whiff") or {}).get("ptype")
+                             in _HARVEST_PROP_FAMS))):
                 continue                    # model bets only — never manual
-            # PROPS NO LONGER SELL (Aug 7 2026 — the paired test's other
-            # verdict; user: "stop selling props"). Measured over 35
-            # completed prop pairs: only 31% of LOSERS touched +35% (vs
-            # 46% on ML), so the arm surrendered $11.06 of winner upside
-            # to rescue $5.98 — a −$5.08 drag that turned a +$2.74 prop
-            # week into −$2.34. The mechanism is the user's own call
-            # (Aug 6, on walks): prop prices JUMP, they don't drift — a
-            # pitcher having a bad night gaps down and never comes back,
-            # so a resting ask never gets its scenic route. Sell where
-            # prices DRIFT (ML/O-U), ride where they JUMP (props/NRFI).
-            # whiff_autobet picks now ride both contracts to resolution.
             # (NRFI stays in the harvest program but PRE-MATCH ONLY —
             # its GTD is first pitch, set below. User, Aug 4: "the sell
             # is pre-match on everything, and live is on ML, Spread,
