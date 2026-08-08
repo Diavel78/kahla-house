@@ -8771,6 +8771,21 @@ AUTOBET_MAX_BETS = 10000  # CAP KILLED Aug 4 ~10pm AZ (user: "kill that 40
                           # Sentinel not deletion: the counter still runs
                           # (the "N/cap this slate" ping + a re-cap later
                           # need only this constant changed back).
+_AUTOBET_CONTRACTS_NRFI = 1   # NRFI HALVED Aug 7 2026 (user: "bump that
+                          # shit down to 1 contract for a couple of days,
+                          # that's burning cash") — 5 straight red days
+                          # (−1.48, −2.15, −2.71, −3.11, −0.99 = −10.4u),
+                          # −$3.05 venue on $47.58 deployed this week,
+                          # erasing the +7.25u lifetime edge. NOT a model
+                          # kill: the lane keeps betting every gate-clear,
+                          # at half stake, while the first-inning model
+                          # gets a calibration audit. ⏰ TEMPORARY — the
+                          # user said "a couple of days"; revisit with the
+                          # audit and either restore 2 or act on the
+                          # model. Side effect (correct): at 1 contract
+                          # NRFI can't reach the harvest's min_held=2, so
+                          # its never-filling pre-match sell (0/46) simply
+                          # stops being considered.
 _AUTOBET_CONTRACTS = 2   # 1→2 Aug 3 ~11:30pm AZ (user: "starting right
                          # now") — the PAIRED HARVEST test: contract 1
                          # rides to resolution, contract 2 gets a resting
@@ -9682,7 +9697,8 @@ def _opener_pass(sb, now, deadline):
             if (side_c <= 0 or side_c > _REPEG_NRFI_PRICE_CAP_C
                     or entry_edge < _min_pp):
                 continue                  # pegged price fails the gate → pass
-            if _AUTOBET_CONTRACTS * side_c / 100.0 > _REPEG_MAX_COST_USD:
+            if (_AUTOBET_CONTRACTS_NRFI * side_c / 100.0
+                    > _REPEG_MAX_COST_USD):
                 continue                  # ⚠ THE MASTER RULE
             owner = _kalshi_owner_uid()
             if not owner:
@@ -9703,7 +9719,7 @@ def _opener_pass(sb, now, deadline):
             params = {"marketSlug": slug, "intent": intent,
                       "type": "ORDER_TYPE_LIMIT",
                       "price": {"value": f"{canon:.3f}", "currency": "USD"},
-                      "quantity": _AUTOBET_CONTRACTS,
+                      "quantity": _AUTOBET_CONTRACTS_NRFI,
                       "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
                       "goodTillTime": gtt,
                       "participateDontInitiate": True,
@@ -9742,7 +9758,7 @@ def _opener_pass(sb, now, deadline):
                                 f"make), model fair {round(fair_c)}¢ → "
                                 f"{round(entry_edge, 1)}pp edge at entry"],
                     "signal_blob": {"autobet": True,
-                                    "contracts": _AUTOBET_CONTRACTS,
+                                    "contracts": _AUTOBET_CONTRACTS_NRFI,
                                     "order_id": new_oid, "pmm_slug": slug,
                                     "pmm_synthetic": synthetic,
                                     "source": "autobet",
@@ -9767,7 +9783,7 @@ def _opener_pass(sb, now, deadline):
                 ok = state in ("ok", "filled")
             _send_fill_telegram(
                 f"🤖💰 AUTO-BET — {g.get('event_name')}: {side_lbl} "
-                f"{_AUTOBET_CONTRACTS} contract @ {round(side_c)}¢ "
+                f"{_AUTOBET_CONTRACTS_NRFI} contract @ {round(side_c)}¢ "
                 f"(book was {round(bid_c) if bid_c else '?'}/"
                 f"{round(ask_c) if ask_c else '?'}, fair {round(fair_c)}¢, "
                 f"{round(entry_edge, 1)}pp edge, "
