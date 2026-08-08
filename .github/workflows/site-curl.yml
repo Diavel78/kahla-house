@@ -11,6 +11,10 @@ on:
         description: "Site path to GET (no leading slash, no query). ?key= is appended."
         required: true
         type: string
+      query:
+        description: "Extra query params appended AFTER the key, e.g. 'dry=1&sport=mlb' (no leading &)."
+        required: false
+        type: string
 
 jobs:
   curl:
@@ -25,6 +29,10 @@ jobs:
           CRON_KEY: ${{ secrets.FILLS_CRON_SECRET }}
         run: |
           KEY="$(printf '%s' "$CRON_KEY" | tr -d '[:space:]')"
+          # Extra params must follow the key — putting them in `path`
+          # makes them part of the PATH and 404s (run #4 learned this).
+          Q="${{ inputs.query }}"
+          [ -n "$Q" ] && Q="&${Q}"
           curl -sSL --max-time 120 \
-            "https://www.thekahlahouse.com/${{ inputs.path }}?key=${KEY}" \
+            "https://www.thekahlahouse.com/${{ inputs.path }}?key=${KEY}${Q}" \
             | head -c 6000
