@@ -11452,11 +11452,22 @@ def _repeg_edge_ok(fair_prob, new_c: float):
 
 
 _HARVEST_ENABLED = True
-_HARVEST_ROI = 0.35       # +35% take-profit — the user's pick off the
-                          # break-even table (75% touch rate → +33.3%
-                          # breaks even; 35 is "make a little"). The
-                          # paired test: measured touch rate decides
-                          # whether this dial moves.
+_HARVEST_ROI = 0.50       # 35→50% Aug 7 2026 (user: "we are cheap selling
+                          # the ML losers... it clips just about the same
+                          # %") — THE PAIRED TEST'S FIRST VERDICT, on 48
+                          # completed Wed-Fri pairs. WINNERS ALWAYS FILL
+                          # (a winner climbs to ~100¢, passing any target
+                          # below it: 38/38 sold this week), so raising
+                          # the bar is a GUARANTEED gain on the winner
+                          # side and only costs loser touches. At the
+                          # ~44.7¢ avg ML entry the bar moves 60¢→67¢ —
+                          # seven cents — and 2 of the 6 touchers would
+                          # have to vanish before 50% loses to 35%.
+                          # Sell arm on ML at 35% measured −$0.59 vs pure
+                          # riding; at 50% it's +$0.72 if the touch count
+                          # holds. Bonus: a walk-off winner that never
+                          # trades at the higher bar simply doesn't sell
+                          # — and we keep the full $1.00.
 _HARVEST_MOD = 2          # minutes — same cadence as the re-peg pass
 
 
@@ -11492,9 +11503,19 @@ def _harvest_tick(sb, now) -> dict:
         cands = []
         for r in rows:
             b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
-            if not (b.get("autobet") or b.get("whiff_autobet")
-                    or b.get("ou_trader")):
+            if not (b.get("autobet") or b.get("ou_trader")):
                 continue                    # model bets only — never manual
+            # PROPS NO LONGER SELL (Aug 7 2026 — the paired test's other
+            # verdict; user: "stop selling props"). Measured over 35
+            # completed prop pairs: only 31% of LOSERS touched +35% (vs
+            # 46% on ML), so the arm surrendered $11.06 of winner upside
+            # to rescue $5.98 — a −$5.08 drag that turned a +$2.74 prop
+            # week into −$2.34. The mechanism is the user's own call
+            # (Aug 6, on walks): prop prices JUMP, they don't drift — a
+            # pitcher having a bad night gaps down and never comes back,
+            # so a resting ask never gets its scenic route. Sell where
+            # prices DRIFT (ML/O-U), ride where they JUMP (props/NRFI).
+            # whiff_autobet picks now ride both contracts to resolution.
             # (NRFI stays in the harvest program but PRE-MATCH ONLY —
             # its GTD is first pitch, set below. User, Aug 4: "the sell
             # is pre-match on everything, and live is on ML, Spread,
