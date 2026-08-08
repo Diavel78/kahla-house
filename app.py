@@ -6021,6 +6021,87 @@ def api_poly_last_reward():
     return jsonify(out)
 
 
+@app.route("/api/polymarket/reset-sells")
+def api_poly_reset_sells():
+    """CANCEL every resting BOT sell so the new harvest policy applies to
+    positions already filled (Aug 7 2026, user: "tomorrow already has a
+    bunch of bets in filled and probably sell orders… are we cancelling
+    them and redoing the sell orders at 50%?").
+
+    CANCEL-ONLY BY DESIGN — nothing is re-created here. `_harvest_tick`
+    dedups on VENUE STATE ("skip when an open AUTOMATIC sell already
+    rests on this slug"), so the moment these are gone the next tick
+    re-places at the CURRENT policy: +50% on ML / O-U / outs, and
+    nothing at all on K / hits / walks / NRFI. One cancel pass expresses
+    the whole new ruleset, and a cancel that fails just leaves the old
+    sell resting (worst case: the old policy plays out on that one leg).
+
+    THREE SAFETY GATES, all required: (1) intent is a SELL, (2) the
+    order is flagged AUTOMATIC — the app's own orders are MANUAL, so a
+    hand-placed sell can never be touched (the probe-cleanup rule), and
+    (3) the slug belongs to one of OUR model picks. Shared-secret so the
+    site-curl bridge can fire it; result persisted to exec_probe_runs.
+    Canceling a sell risks no money — the position is simply held."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    dry = request.args.get("dry") == "1"
+    try:
+        sb, client = get_supabase(), get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    owner = _kalshi_owner_uid()
+    mine: dict = {}
+    try:
+        rows = (sb.table("bot_picks").select("signal_blob,market_type")
+                .eq("asked_by", owner).eq("status", "pending")
+                .gte("event_start", (datetime.now(timezone.utc)
+                                     - timedelta(hours=12)).isoformat())
+                .limit(500).execute().data) or []
+        for r in rows:
+            b = r.get("signal_blob") or {}
+            if not (b.get("autobet") or b.get("whiff_autobet")
+                    or b.get("ou_trader")):
+                continue
+            slug = b.get("pmm_slug")
+            if slug:
+                mine[slug] = (r.get("market_type") or "") + ":" + (
+                    (b.get("whiff") or {}).get("ptype") or "-")
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"picks: {e}"}), 500
+    orders = _pmm_open_orders_raw(client)
+    if orders is None:
+        return jsonify({"ok": False, "error": "order read failed"}), 503
+    killed, failed, skipped = [], [], 0
+    for o in orders:
+        if "SELL" not in (o.get("intent") or ""):
+            continue
+        if not o.get("auto") or o.get("slug") not in mine:
+            skipped += 1
+            continue
+        if dry:
+            killed.append({"slug": o["slug"], "lane": mine[o["slug"]],
+                           "dry": True})
+            continue
+        try:
+            client.orders.cancel(o["id"], {"marketSlug": o["slug"]})
+            killed.append({"slug": o["slug"], "lane": mine[o["slug"]]})
+        except Exception as e:
+            failed.append({"slug": o["slug"], "err": str(e)[:120]})
+    out = {"ok": True, "dry": dry, "open_orders": len(orders),
+           "model_slugs": len(mine), "canceled": len(killed),
+           "failed": len(failed), "skipped_not_ours": skipped,
+           "detail": killed[:40], "errors": failed[:10]}
+    try:
+        sb.table("exec_probe_runs").insert(
+            {"params": {"kind": "reset_sells", "dry": dry},
+             "result": out}).execute()
+    except Exception:
+        pass
+    return jsonify(out)
+
+
 @app.route("/api/kalshi/probe")
 @admin_required
 def api_kalshi_probe():
@@ -6176,6 +6257,8 @@ def _pmm_open_orders_raw(client) -> list | None:
                     "price_yes": _safe_float(_g("price")),
                     # re-peg bot needs the order's identity + TIF to amend it
                     "id": _g("id"), "tif": _g("tif") or "",
+                    "auto": (_g("manualOrderIndicator")
+                             == "MANUAL_ORDER_INDICATOR_AUTOMATIC"),
                     "good_till": _g("goodTillTime")})
     return out
 
