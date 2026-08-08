@@ -11627,6 +11627,17 @@ def _harvest_tick(sb, now) -> dict:
                         and ((b.get("whiff") or {}).get("ptype")
                              in _HARVEST_PROP_FAMS))):
                 continue                    # model bets only — never manual
+            if (r.get("market_type") or "") == "nrfi":
+                continue                    # NRFI NEVER SELLS — 0 of 46
+                                            # touched, the most conclusive
+                                            # jump-market read we have (one
+                                            # run and it's over; there's no
+                                            # scenic route). Explicit, NOT
+                                            # a side effect of the 1-contract
+                                            # stake: legacy 2-contract NRFI
+                                            # positions still cleared
+                                            # min_held and were getting sells
+                                            # re-placed (caught live Aug 7).
             # (NRFI stays in the harvest program but PRE-MATCH ONLY —
             # its GTD is first pitch, set below. User, Aug 4: "the sell
             # is pre-match on everything, and live is on ML, Spread,
