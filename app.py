@@ -7432,8 +7432,9 @@ def _match_kalshi_lines(tot_events, spr_events, ac, hc, our_date) -> list:
 
 def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
     """Polymarket quotes for one game, all main markets, mids in int cents.
-    Returns {"ml": {side: cents}, "rows": [(market_type, side, line, cents)]}
-    or {} on any miss. ONE lookup() call — it already fetches + classifies
+    Returns {"ml": {side: cents}, "rows": [(market_type, side, line, cents,
+    bid_c, ask_c)]} or {} on any miss. bid_c/ask_c are the row's own side's
+    book (spread capture, Aug 2026 — nullable). ONE lookup() call — it already fetches + classifies
     every market, so spread/total ride along at zero extra network cost.
     The `ml` dict feeds the cross-confirm trigger (unchanged); `rows` is
     the full per-line feed for pm_snapshots (the Odds-API-retirement
@@ -7446,11 +7447,24 @@ def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
         return {}
     if not data:
         return {}
+
+    def _qc(quote, k):
+        # side-oriented bid/ask in int cents (None-safe) — spread capture
+        # (Aug 2026 adverse-selection review): the mid alone can't price
+        # the spread, so every row carries its own side's book too.
+        try:
+            v = (quote or {}).get(k)
+            c = round(float(v) * 100)
+            return c if 0 < c < 100 else None
+        except (TypeError, ValueError):
+            return None
+
     ml, rows = {}, []
     for mt in ("ml", "spread", "total"):
         for row in (data.get(mt) or []):
             side = row.get("side")
-            mid = (row.get("quote") or {}).get("mid")
+            quote = row.get("quote") or {}
+            mid = quote.get("mid")
             if not side or mid is None:
                 continue
             try:
@@ -7465,7 +7479,8 @@ def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
                     line = float(row["line"])
                 except (TypeError, ValueError):
                     continue                     # spr/tot without a line is junk
-            rows.append((mt, side, line, cents))
+            rows.append((mt, side, line, cents,
+                         _qc(quote, "bid"), _qc(quote, "ask")))
             if mt == "ml" and side in ("home", "away"):
                 ml[side] = cents
     # NRFI cents (Aug 2 2026 — the opener-study gap): the first-inning
@@ -7475,7 +7490,8 @@ def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
     # yes/no mids so the NRFI opener dataset accrues from today.
     for row in (data.get("nrfi") or []):
         side = row.get("side")
-        mid = (row.get("quote") or {}).get("mid")
+        quote = row.get("quote") or {}
+        mid = quote.get("mid")
         if side not in ("yes", "no") or mid is None:
             continue
         try:
@@ -7483,13 +7499,15 @@ def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
         except (TypeError, ValueError):
             continue
         if 0 < cents < 100:
-            rows.append(("nrfi", side, None, cents))
+            rows.append(("nrfi", side, None, cents,
+                         _qc(quote, "bid"), _qc(quote, "ask")))
     # PROPS ride the same lookup() (July 2026 props pipeline) — every
     # non-main market with a live quote, shaped for prop_snapshots:
     # (prop_key, question, prop_type, line, yes-mid cents).
     prop_rows = []
     for p in (data.get("props") or []):
-        mid_q = (p.get("quote") or {}).get("mid")
+        pquote = p.get("quote") or {}
+        mid_q = pquote.get("mid")
         if mid_q is None or not p.get("key"):
             continue
         try:
@@ -7499,16 +7517,19 @@ def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
         if cents <= 0 or cents >= 100:
             continue
         prop_rows.append((p["key"], p.get("question"), p.get("type"),
-                          p.get("line"), cents))
+                          p.get("line"), cents,
+                          _qc(pquote, "bid"), _qc(pquote, "ask")))
     return {"ml": ml, "rows": rows, "props": prop_rows}
 
 
 def _pm_insert_changed(sb, rows, now) -> int:
-    """Insert (market_id, source, market_type, side, line, cents) rows,
-    deduped: only when the cent differs from the latest stored value for
-    that key (book_snapshots pattern). One row per key per tick. `line` is
-    part of the key — PMM offers several spread/total lines per game and
-    each is its own price series."""
+    """Insert (market_id, source, market_type, side, line, cents, bid_c,
+    ask_c) rows, deduped: only when the MID cent differs from the latest
+    stored value for that key (book_snapshots pattern — bid/ask are
+    passengers, never part of the dedup: at 190K rows/day a spread-change
+    dedup would re-run the Aug 5 Disk-IO incident). One row per key per
+    tick. `line` is part of the key — PMM offers several spread/total
+    lines per game and each is its own price series."""
     if not rows:
         return 0
 
@@ -7534,7 +7555,7 @@ def _pm_insert_changed(sb, rows, now) -> int:
     except Exception:
         pass
     ins, seen = [], set()
-    for (mid, source, mt, side, line, cents) in rows:
+    for (mid, source, mt, side, line, cents, bid_c, ask_c) in rows:
         k = (mid, source, mt, side, _lkey(line))
         if k in seen:
             continue
@@ -7543,6 +7564,7 @@ def _pm_insert_changed(sb, rows, now) -> int:
             continue
         ins.append({"market_id": mid, "source": source, "market_type": mt,
                     "side": side, "line": line, "cents": cents,
+                    "bid_c": bid_c, "ask_c": ask_c,
                     "captured_at": now.isoformat()})
     if ins:
         try:
@@ -7583,10 +7605,12 @@ def _prop_recency_weight(age_min: float) -> float:
 
 
 def _prop_insert_changed(sb, rows, now) -> int:
-    """Insert (market_id, venue, prop_key, question, prop_type, line, cents)
-    prop_snapshots rows, deduped on cent change per (market_id, venue,
-    prop_key) — the pm_snapshots pattern. prop_key (the PMM slug) is unique
-    per market, so the line is informational, not part of the key."""
+    """Insert (market_id, venue, prop_key, question, prop_type, line, cents,
+    bid_c, ask_c) prop_snapshots rows, deduped on MID cent change per
+    (market_id, venue, prop_key) — the pm_snapshots pattern; bid/ask are
+    passengers only, NEVER in the dedup (Disk-IO rule). prop_key (the PMM
+    slug) is unique per market, so the line is informational, not part of
+    the key."""
     if not rows:
         return 0
     mids = list({r[0] for r in rows})
@@ -7604,7 +7628,7 @@ def _prop_insert_changed(sb, rows, now) -> int:
     except Exception:
         pass
     ins, seen = [], set()
-    for (mid, venue, key, q, ptype, line, cents) in rows:
+    for (mid, venue, key, q, ptype, line, cents, bid_c, ask_c) in rows:
         k = (mid, venue, key)
         if k in seen:
             continue
@@ -7622,7 +7646,8 @@ def _prop_insert_changed(sb, rows, now) -> int:
                 continue
         ins.append({"market_id": mid, "venue": venue, "prop_key": key,
                     "question": q, "prop_type": ptype, "line": line,
-                    "cents": cents, "captured_at": now.isoformat()})
+                    "cents": cents, "bid_c": bid_c, "ask_c": ask_c,
+                    "captured_at": now.isoformat()})
     if ins:
         try:
             sb.table("prop_snapshots").insert(ins).execute()
@@ -7661,7 +7686,7 @@ def _prop_update_suggestions(sb, prop_rows, now) -> int:
     except Exception:
         pass
     ups = []
-    for (mid, venue, key, q, ptype, line, cents) in prop_rows:
+    for (mid, venue, key, q, ptype, line, cents, _bid_c, _ask_c) in prop_rows:
         snaps = hist.get((mid, venue, key)) or []
         wsum = 0.0
         for a, b in zip(snaps, snaps[1:]):
@@ -7942,7 +7967,7 @@ def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
         ins = []
         bet_cands = []                     # (edge, mid, key, q, name, line,
                                            #  side, side_c, model_side_p)
-        for (mid, _venue, key, q, _pt, line, cents) in kprops:
+        for (mid, _venue, key, q, _pt, line, cents, bid_c, ask_c) in kprops:
             m = _WHIFF_Q_RE.match(q or "")
             if not m or line is None:
                 continue
@@ -8005,6 +8030,7 @@ def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
                                           "opp": opp, "line": float(line),
                                           "model_p": round(model_p, 4),
                                           "cents": cents,
+                                          "bid_c": bid_c, "ask_c": ask_c,
                                           "edge_pp": round(edge, 2),
                                           "n_starts": n_starts}},
             })
@@ -8017,7 +8043,8 @@ def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
         # candidates join the SAME per-(pitcher, ladder) pool — one bet
         # per pitcher per ladder, rung-stacking within a ladder blocked.
         for (fcode, _ptype, fre, fidx, fmk, fsk, ffloor) in _PSTAT_FAMS:
-            for (mid, _venue, key, q, _pt, line, cents) in fam_props[fcode]:
+            for (mid, _venue, key, q, _pt, line, cents, bid_c,
+                 ask_c) in fam_props[fcode]:
                 m = fre.match(q or "")
                 if not m or line is None:
                     continue
@@ -8070,6 +8097,7 @@ def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
                                               "line": float(line),
                                               "model_p": round(model_p, 4),
                                               "cents": cents,
+                                              "bid_c": bid_c, "ask_c": ask_c,
                                               "edge_pp": round(edge, 2),
                                               "n_starts": round(w_eff, 1)}},
                 })
@@ -8693,7 +8721,8 @@ def api_pm_snapshot():
     pmm_deadline = _time.time() + 7.5
 
     rows = []
-    prop_rows = []   # props pipeline — (mid, venue, key, q, type, line, cents)
+    prop_rows = []   # props pipeline — (mid, venue, key, q, type, line,
+                     #                   cents, bid_c, ask_c)
     st = {"pmm_games": 0, "kalshi_games": 0, "pmm_skipped": 0}
     cur = {}   # market_id -> current home cents (both feeds) for the trigger
     for g in all_games:
@@ -8739,22 +8768,24 @@ def api_pm_snapshot():
                 st["pmm_games"] += 1
                 pmm = pq.get("ml") or {}
                 pmm_rows = pq.get("rows") or []
-                for (pk, pq_, pt, pl, pc) in (pq.get("props") or []):
-                    prop_rows.append((mid, "polymarket", pk, pq_, pt, pl, pc))
+                for (pk, pq_, pt, pl, pc, pb, pa) in (pq.get("props") or []):
+                    prop_rows.append((mid, "polymarket", pk, pq_, pt, pl, pc,
+                                      pb, pa))
         else:
             st["pmm_skipped"] += 1
 
-        for (mt, p_side, p_line, c) in pmm_rows:
-            rows.append((mid, "pmm", mt, p_side, p_line, c))
+        for (mt, p_side, p_line, c, p_bid, p_ask) in pmm_rows:
+            rows.append((mid, "pmm", mt, p_side, p_line, c, p_bid, p_ask))
         for side in ("home", "away"):
             c = kc.get(side)
             if c is None or c <= 0 or c >= 100:       # no quote / degenerate
                 continue
-            rows.append((mid, "kalshi", "ml", side, None, int(c)))
+            rows.append((mid, "kalshi", "ml", side, None, int(c), None, None))
         for (mt2, side2, line2, c2) in kline_rows:    # kalshi totals/spreads
             if c2 is None or c2 <= 0 or c2 >= 100:
                 continue
-            rows.append((mid, "kalshi", mt2, side2, line2, int(c2)))
+            rows.append((mid, "kalshi", mt2, side2, line2, int(c2),
+                         None, None))
 
         # Capture both feeds' HOME cents for the cross-confirm trigger.
         if (pmm.get("home") not in (None, 0)) and (kc.get("home") not in (None, 0)):
