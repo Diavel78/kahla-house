@@ -6021,6 +6021,114 @@ def api_poly_last_reward():
     return jsonify(out)
 
 
+@app.route("/api/polymarket/daily-volume")
+def api_poly_daily_volume():
+    """PER-DAY maker volume from the account's own Polymarket activities
+    feed (Aug 8 2026 — stop estimating the maker-reward base from monthly
+    totals and assumed-uniform distribution; the July shape is knowable
+    because the Kalshi detour left a hole in it). Returns, per ET day:
+    trades, distinct market-slugs touched, buy $, sell $, resolution
+    payouts. `from`/`to` bound the window (ET dates, `to` exclusive).
+
+    CAVEAT the numbers can't resolve: the feed doesn't flag maker vs
+    taker. Every MACHINE order is post-only (maker by construction), but
+    hand-placed July fills could include takes. Read the daily shape as
+    an upper bound on maker volume, not a certainty."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    lo = request.args.get("from") or "2026-07-01"
+    hi = request.args.get("to") or "2026-08-10"
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    acts, cursor = [], None
+    try:
+        for _ in range(140):
+            params = {"limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+            resp = client.portfolio.activities(params=params)
+            page = resp.get("activities", [])
+            acts.extend(page)
+            times = []
+            for a in page:
+                for v in a.values():
+                    if isinstance(v, dict) and v.get("updateTime"):
+                        times.append(str(v["updateTime"]))
+                        break
+            if times and max(times) < lo:
+                break
+            if resp.get("eof", True) or not resp.get("nextCursor"):
+                break
+            cursor = resp.get("nextCursor")
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"activities: {e}",
+                        "fetched": len(acts)}), 500
+    days: dict = {}
+    for act in acts:
+        t = act.get("type")
+        if t == "ACTIVITY_TYPE_TRADE":
+            d = act.get("trade") or {}
+        elif t == "ACTIVITY_TYPE_POSITION_RESOLUTION":
+            d = act.get("positionResolution") or {}
+        else:
+            continue
+        ts = str(d.get("updateTime") or "")
+        if not ts:
+            continue
+        try:
+            day = (datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                   .astimezone(ZoneInfo("America/New_York")).date().isoformat())
+        except Exception:
+            continue
+        if day < lo or day >= hi:
+            continue
+        D = days.setdefault(day, {"trades": 0, "buy": 0.0, "sell": 0.0,
+                                  "payout": 0.0, "slugs": set()})
+        slug = d.get("marketSlug") or ""
+        if slug:
+            D["slugs"].add(slug)
+        if t == "ACTIVITY_TYPE_POSITION_RESOLUTION":
+            D["payout"] += _safe_float(d.get("payout")) or 0.0
+            continue
+        cost = _safe_float(d.get("cost"))
+        if cost is None:
+            continue
+        D["trades"] += 1
+        # SELL iff realizedPnl non-null OR the position shrank — the
+        # documented null-netPosition trap (money-ledger lesson).
+        bef = d.get("beforePosition") or {}
+        aft = d.get("afterPosition") or {}
+        nb = _safe_float(bef.get("netPosition"))
+        na = _safe_float(aft.get("netPosition"))
+        is_sell = (_safe_float(d.get("realizedPnl")) is not None
+                   or (nb is not None and na is not None and abs(na) < abs(nb)))
+        if is_sell:
+            D["sell"] += abs(cost)
+        else:
+            D["buy"] += abs(cost)
+    out_days = {k: {"trades": v["trades"], "markets": len(v["slugs"]),
+                    "buy_usd": round(v["buy"], 2),
+                    "sell_usd": round(v["sell"], 2),
+                    "payout_usd": round(v["payout"], 2)}
+                for k, v in sorted(days.items())}
+    tot = {"trades": sum(d["trades"] for d in out_days.values()),
+           "buy_usd": round(sum(d["buy_usd"] for d in out_days.values()), 2),
+           "days_active": len([d for d in out_days.values() if d["trades"]])}
+    out = {"ok": True, "from": lo, "to": hi, "activities_scanned": len(acts),
+           "total": tot, "days": out_days}
+    try:
+        get_supabase().table("exec_probe_runs").insert(
+            {"params": {"kind": "daily_volume", "from": lo, "to": hi},
+             "result": out}).execute()
+    except Exception:
+        pass
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/reset-sells")
 def api_poly_reset_sells():
     """CANCEL every resting BOT sell so the new harvest policy applies to
