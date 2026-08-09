@@ -6129,6 +6129,87 @@ def api_poly_daily_volume():
     return jsonify(out)
 
 
+@app.route("/api/polymarket/fill-times")
+def api_poly_fill_times():
+    """Per-fill timestamps for the account's BUY trades (Aug 9 2026 — the
+    resting-window / fill-window analysis: win rate by how close to first
+    pitch each fill landed; nothing stores fill times, the activities feed
+    has them). READ-ONLY venue-truth probe (the daily-volume pattern):
+    shared-secret, fired via the site-curl bridge, result persisted to
+    exec_probe_runs for run_sql.sh readback. `days` bounds the lookback
+    (default 10, max 40). Sells/resolutions excluded — same sell test as
+    daily-volume (realizedPnl non-null OR position shrank)."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    try:
+        days = min(int(request.args.get("days", 10)), 40)
+    except ValueError:
+        days = 10
+    lo_s = (datetime.now(timezone.utc)
+            - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    buys, scanned, cursor = [], 0, None
+    try:
+        for _ in range(140):
+            params = {"limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+            resp = client.portfolio.activities(params=params)
+            page = resp.get("activities", [])
+            scanned += len(page)
+            times = []
+            for a in page:
+                d = None
+                if a.get("type") == "ACTIVITY_TYPE_TRADE":
+                    d = a.get("trade") or {}
+                else:
+                    for v in a.values():
+                        if isinstance(v, dict) and v.get("updateTime"):
+                            times.append(str(v["updateTime"])[:19])
+                            break
+                    continue
+                ts = str(d.get("updateTime") or "")[:19]
+                if ts:
+                    times.append(ts)
+                if not ts or ts < lo_s:
+                    continue
+                bef = d.get("beforePosition") or {}
+                aft = d.get("afterPosition") or {}
+                nb = _safe_float(bef.get("netPosition"))
+                na = _safe_float(aft.get("netPosition"))
+                is_sell = (_safe_float(d.get("realizedPnl")) is not None
+                           or (nb is not None and na is not None
+                               and abs(na) < abs(nb)))
+                if is_sell:
+                    continue
+                buys.append({"slug": d.get("marketSlug") or "", "t": ts,
+                             "cost": round(_safe_float(d.get("cost"))
+                                           or 0.0, 2),
+                             "qty": _safe_float(d.get("qty"))})
+            if times and max(times) < lo_s:
+                break
+            if resp.get("eof", True) or not resp.get("nextCursor"):
+                break
+            cursor = resp.get("nextCursor")
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"activities: {e}",
+                        "fetched": len(buys)}), 500
+    out = {"ok": True, "since": lo_s, "activities_scanned": scanned,
+           "n_buys": len(buys), "buys": buys}
+    try:
+        get_supabase().table("exec_probe_runs").insert(
+            {"params": {"kind": "fill_times", "days": days},
+             "result": out}).execute()
+    except Exception:
+        pass
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/reset-sells")
 def api_poly_reset_sells():
     """CANCEL every resting BOT sell so the new harvest policy applies to
