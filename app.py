@@ -7845,6 +7845,25 @@ _WHIFF_TRUST_LO, _WHIFF_TRUST_HI = 0.30, 0.70   # calibration trust zone —
 _WHIFF_PEG_BACKOFF_C = 2          # rest 2¢ under the side mid (post-only:
                                   # a crossing peg rejects → retry next tick)
 _WHIFF_BET_PER_TICK = 1           # create+verify ≈3s — keep the tick fast
+_WHIFF_DAYOF_MIN = 360            # DAY-OF WINDOW (user, Aug 9 — "start
+                                  # props at 6 hours out"): first make
+                                  # order no earlier than T-6h. Three
+                                  # aligned reasons: (a) the reward
+                                  # schedule has NO props Early program —
+                                  # pre-T-6h resting earns ZERO (day-of
+                                  # + live pools only, both start at
+                                  # T-6h); (b) the overnight rest is the
+                                  # uncompensated scratch-option window
+                                  # (fill-times retro: slow fills won
+                                  # 41% vs 54% fast; no time-before-
+                                  # start win effect to lose); (c) T-6h
+                                  # placement caps bid staleness. A
+                                  # too-early candidate skips and
+                                  # retries each tick until the window
+                                  # opens. SHADOWS still log from
+                                  # listing (the early dataset keeps
+                                  # accruing); re-peg needs no gate —
+                                  # it only chases picks that exist.
 _WHIFF_HL_PITCHER, _WHIFF_HL_TEAM = 365.0, 150.0
 _WHIFF_PRIOR_BF, _WHIFF_PRIOR_PA, _WHIFF_PRIOR_STARTS = 150.0, 1000.0, 4.0
 _WHIFF_Q_RE = re.compile(
@@ -8243,6 +8262,9 @@ def _whiff_autobet(sb, bet_cands, ginfo, now):
             dt = datetime.fromisoformat(str(es).replace("Z", "+00:00"))
             if dt <= now + timedelta(minutes=3):
                 continue                       # too close / started
+            if dt > now + timedelta(minutes=_WHIFF_DAYOF_MIN):
+                continue                       # pre-day-of — retry when
+                                               # the T-6h window opens
         except Exception:
             continue
         # THE PEG LAW (user, Aug 3 — "we are THE MAKER, not the guy
