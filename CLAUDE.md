@@ -1095,6 +1095,19 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 > that same bug: **Kalshi is SIGNAL ONLY (model confirm / CLV close /
 > fair anchor); execution surfaces must never consume a Kalshi price as
 > a bettable quote — Polymarket's listing is the list.**
+>
+> **📊 WHEN THE USER ASKS "HOW DID WE DO" — ANSWER FROM POLYMARKET.
+> ALWAYS. The user has said this MANY times (last: Aug 9 2026, at
+> volume).** Results = the VENUE's cash truth: `poly_pnl`
+> (buys/sells/resolution payouts, stamped within minutes of the venue
+> resolving — tonight's props are usually IN THE DB while the ESPN
+> grader is still hours away) and the activities feed. NEVER tell the
+> user to wait for `grade_whiff_paperlog`/the resolver — those
+> ESPN/statsapi graders exist for the MODEL's shadow scoreboard
+> (calibration, shadows have no venue position), not for answering the
+> user. Also don't misread `realized_usd` on status='pending' rows as
+> "cash deployed": once `poly_pnl.final` is true the venue has RESOLVED
+> that bet and the number is real P&L, whatever bot_picks.status says.
 
 ## Known Issues & Gotchas
 1. **The Odds API auth is `?api_key=` query param** — NOT a Bearer header. Easy to copy from one provider's pattern (Owls used Bearer) and break.
