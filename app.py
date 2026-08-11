@@ -9096,27 +9096,25 @@ AUTOBET_MAX_BETS = 10000  # CAP KILLED Aug 4 ~10pm AZ (user: "kill that 40
                           # Sentinel not deletion: the counter still runs
                           # (the "N/cap this slate" ping + a re-cap later
                           # need only this constant changed back).
-_AUTOBET_CONTRACTS_NRFI = 1   # NRFI HALVED Aug 7 2026 (user: "bump that
-                          # shit down to 1 contract for a couple of days,
-                          # that's burning cash") — 5 straight red days
-                          # (−1.48, −2.15, −2.71, −3.11, −0.99 = −10.4u),
-                          # −$3.05 venue on $47.58 deployed this week,
-                          # erasing the +7.25u lifetime edge. NOT a model
-                          # kill: the lane keeps betting every gate-clear,
-                          # at half stake, while the first-inning model
-                          # gets a calibration audit. ⏰ TEMPORARY — the
-                          # user said "a couple of days"; revisit with the
-                          # audit and either restore 2 or act on the
-                          # model. Side effect (correct): at 1 contract
-                          # NRFI can't reach the harvest's min_held=2, so
-                          # its never-filling pre-match sell (0/46) simply
-                          # stops being considered.
-_AUTOBET_CONTRACTS = 2   # 1→2 Aug 3 ~11:30pm AZ (user: "starting right
-                         # now") — the PAIRED HARVEST test: contract 1
-                         # rides to resolution, contract 2 gets a resting
-                         # +35% ROI sell the moment the fill lands
-                         # (_harvest_tick). 2 × 54¢ max = $1.08, well
-                         # inside the $6 master rule.
+_AUTOBET_CONTRACTS_NRFI = 2   # 1→2 Aug 10 2026 (user, with the book-wide
+                          # double). The Aug 7 halving was explicitly
+                          # "a couple of days" after 5 red days; NRFI
+                          # then returned +$2.32 on $3.68 (+63%) at half
+                          # stake and is still the best lane of the run
+                          # (+$8.83 / 86 bets). NRFI NEVER SELLS — that
+                          # is enforced by market_type in _harvest_tick,
+                          # NOT by the contract count (the Aug 7 lesson:
+                          # legacy 2-contract NRFI positions cleared
+                          # min_held and got sells re-placed). ⏰ The
+                          # calibration audit is still owed.
+_AUTOBET_CONTRACTS = 4   # 2→4 Aug 10 2026 (user: "Time to double shares.
+                         # All the 2 contracts go to 4"). Split is
+                         # unchanged in shape: HALF rides to resolution,
+                         # HALF gets the resting take-profit — so 4 =
+                         # sell 2, keep 2 (_harvest_tick derives both
+                         # from this, never hardcodes). 4 × 54¢ max =
+                         # $2.16 per order, still well inside the $6
+                         # master rule. (1→2 Aug 3; 2→4 here.)
 _OPENER_LO_H = 6                # below this = the live game-day window
 _OPENER_HI_H = 72               # pool bound ≈ Poly's real listing horizon
 # (14d → 72h Aug 2 ~12:25am AZ: Poly lists MLB ~T+2 evenings, so games
@@ -9624,12 +9622,13 @@ _OU_TRADER_MAX_ENTRY_C = 54.0   # the user's universal entry cap
 
 def _ou_trader_eval(sb, g, d, now, done):
     """MLB O/U TRADER lane (Aug 4 2026 ~10pm AZ, user: "we need O/U on
-    baseball, badly" + "1 contract, sell only. Why keep the one we lose
-    on average"). Buys 1 contract CHEAP on whichever total side pegs
-    ≥3pp under the book's OWN devigged mid, then the harvest tick rests
-    a sell for the whole position at +35% ROI — no deliberate rider; the
-    thesis is the TOUCH CURVE, not the final score (breakeven ≈74% of
-    positions touching, winners auto-touch). ⚠ NO MODEL TOTAL ANYWHERE:
+    baseball, badly"). Buys CHEAP on whichever total side pegs ≥3pp
+    under the book's OWN devigged mid; the harvest tick then rests a
+    sell on HALF the position at +60% ROI. Started sell-only at 1
+    contract ("Why keep the one we lose on average") and joined the
+    paired shape at `_AUTOBET_CONTRACTS` on Aug 10 2026 — same split as
+    ML: sell half, ride half. The thesis is still the TOUCH CURVE, not
+    the final score; the ridden half is the change. ⚠ NO MODEL TOTAL ANYWHERE:
     the July 4 2026 totals blacklist (model O/U −13.7u lifetime) stays
     in force — this lane's edge is microstructure (cheap vs the book's
     own mid). Same opener protocols: junk guard ≥15pp = newborn
@@ -9688,13 +9687,15 @@ def _ou_trader_eval(sb, g, d, now, done):
             b["bid_c"], b["ask_c"],
             extra_blob={"ou_trader": True, "line": line},
             cap_flag="ou_trader",
-            query_text="auto-bet: O/U trader (sell-only)",
+            query_text="auto-bet: O/U trader",
             reason=(f"O/U TRADER — {b['side']} {line} pegged "
                     f"{round(b['target'])}¢ vs the book's own "
                     f"{round(b['mid'] * 100)}¢ mid "
-                    f"({round(b['edge'], 1)}pp cheap); 1 contract, "
-                    f"sell rests at +35% — touch-curve bet, no model"),
-            contracts=1, entry_line=line)
+                    f"({round(b['edge'], 1)}pp cheap); "
+                    f"{_AUTOBET_CONTRACTS} contracts, half rests at "
+                    f"+{round(_HARVEST_ROI * 100)}% — touch-curve bet, "
+                    f"no model"),
+            contracts=_AUTOBET_CONTRACTS, entry_line=line)
         if res == "cap":
             return None            # slate full — don't latch, retry
         placed = (res == "placed")
@@ -11930,7 +11931,18 @@ def _repeg_edge_ok(fair_prob, new_c: float):
 
 
 _HARVEST_ENABLED = True
-_HARVEST_ROI = 0.50       # 35→50% Aug 7 2026 (user: "we are cheap selling
+_HARVEST_ROI = 0.60       # 50→60% Aug 10 2026 (user). The break-even
+                          # table at this week's real entries (44.1¢ book,
+                          # 41.8¢ ML) and W/L: the bar falls FASTER than
+                          # the touches do — 35%→50% cut the requirement
+                          # 57%→43% (14 points) while measured touches
+                          # fell ~3. At 60% the bar is 35% book-wide /
+                          # 37% ML, and ML touched 52.9% in the 50% era.
+                          # Winner side is free (a winner runs to ~100¢
+                          # past any target — 15 of 16 sold), so each
+                          # notch up is a guaranteed winner-side gain
+                          # against a slow bleed of loser touches.
+                          # (Was 0.50: 35→50% Aug 7, user: "we are cheap selling
                           # the ML losers... it clips just about the same
                           # %") — THE PAIRED TEST'S FIRST VERDICT, on 48
                           # completed Wed-Fri pairs. WINNERS ALWAYS FILL
@@ -11945,15 +11957,21 @@ _HARVEST_ROI = 0.50       # 35→50% Aug 7 2026 (user: "we are cheap selling
                           # riding; at 50% it's +$0.72 if the touch count
                           # holds. Bonus: a walk-off winner that never
                           # trades at the higher bar simply doesn't sell
-                          # — and we keep the full $1.00.
-_HARVEST_PROP_FAMS = {"outs"}   # prop ladders whose LOSERS drift enough to
-                          # fill a take-profit (Aug 7 2026): outs only —
-                          # monotonic accumulation, 50% loser touch, the
-                          # one prop that trades like a game market. K
-                          # (33% on 21 losers), hits (0/5) and walks
-                          # (0/1) ride both contracts instead. Re-measure
-                          # per family as the tape grows; adding a family
-                          # here is the whole change.
+                          # — and we keep the full $1.00.)
+_HARVEST_PROP_FAMS: set = set()   # NO PROP FAMILY SELLS (Aug 10 2026 —
+                          # user killed outs: "nobody is betting it live
+                          # during the game, costing us more than keeping
+                          # them"). Outs had looked like the one prop
+                          # that trades like a game market on the 35%-era
+                          # sample (4 of 8 losers), then touched 1 of 13
+                          # at 50% — there is no in-play counterparty for
+                          # a pitcher line once the start is over, so the
+                          # ask just sits while the position dies. K
+                          # (33%), hits (0/5), walks (0/1) never cleared
+                          # either. Every prop rides its full position.
+                          # Re-adding a family here is the whole change —
+                          # but it needs live-market liquidity, not just
+                          # a drifting price.
 _HARVEST_MOD = 2          # minutes — same cadence as the re-peg pass
 
 
@@ -12022,11 +12040,17 @@ def _harvest_tick(sb, now) -> dict:
             # is pre-match on everything, and live is on ML, Spread,
             # Props, O/U" — in-play NRFI resolves in minutes, no life
             # for a +35% exit there.)
-            # ou_trader = the SELL-ONLY lane (Aug 4, user: "1 contract,
-            # sell only") — 1 contract bought, the WHOLE position gets
-            # the +35% sell; min-held is 1 there, 2 on the paired lanes.
-            min_held = 1 if b.get("ou_trader") else 2
-            if (b.get("contracts") or 0) < min_held or not b.get("pmm_slug"):
+            # SELL HALF, RIDE HALF — derived from the bet's OWN stake, so
+            # a stake change never needs a second edit here (Aug 10 2026,
+            # user: "the 4 contracts keep same split, sell 2, keep 2").
+            # min_held = the full position (only a completely filled bet
+            # harvests, as before); sell_qty = half of it. Legacy rows
+            # scale correctly: a 2-contract ML sells 1, and a 1-contract
+            # O/U from the old sell-only era sells its whole position
+            # (max(1, …)). O/U itself joined the paired shape at 4 in the
+            # same change — it is no longer sell-only.
+            min_held = int(b.get("contracts") or 2)
+            if min_held < 1 or not b.get("pmm_slug"):
                 continue
             cands.append((r, b, min_held))
         res["cands"] = len(cands)
@@ -12084,7 +12108,7 @@ def _harvest_tick(sb, now) -> dict:
             params = {"marketSlug": slug, "intent": sell_intent,
                       "type": "ORDER_TYPE_LIMIT",
                       "price": {"value": f"{canon:.3f}", "currency": "USD"},
-                      "quantity": 1,
+                      "quantity": max(1, min_held // 2),
                       "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
                       "goodTillTime": gtt,
                       "participateDontInitiate": True,
