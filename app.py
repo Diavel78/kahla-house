@@ -6447,7 +6447,8 @@ def api_poly_reset_sells():
     owner = _kalshi_owner_uid()
     mine: dict = {}
     try:
-        rows = (sb.table("bot_picks").select("signal_blob,market_type")
+        rows = (sb.table("bot_picks")
+                .select("signal_blob,market_type,entry_price")
                 .eq("asked_by", owner).eq("status", "pending")
                 .gte("event_start", (datetime.now(timezone.utc)
                                      - timedelta(hours=12)).isoformat())
@@ -6459,8 +6460,16 @@ def api_poly_reset_sells():
                 continue
             slug = b.get("pmm_slug")
             if slug:
-                mine[slug] = (r.get("market_type") or "") + ":" + (
-                    (b.get("whiff") or {}).get("ptype") or "-")
+                try:
+                    _ep = float(r.get("entry_price"))
+                    _ec = (10000.0 / (_ep + 100.0) if _ep > 0
+                           else 100.0 * (-_ep) / ((-_ep) + 100.0))
+                except (TypeError, ValueError):
+                    _ec = None
+                mine[slug] = {
+                    "lane": (r.get("market_type") or "") + ":" + (
+                        (b.get("whiff") or {}).get("ptype") or "-"),
+                    "entry_c": round(_ec) if _ec is not None else None}
     except Exception as e:
         return jsonify({"ok": False, "error": f"picks: {e}"}), 500
     orders = _pmm_open_orders_raw(client)
@@ -6473,13 +6482,25 @@ def api_poly_reset_sells():
         if not o.get("auto") or o.get("slug") not in mine:
             skipped += 1
             continue
+        m = mine[o["slug"]]
+        # Our side's ask: price_yes is YES-canonical, so a SELL_SHORT
+        # (we hold NO) reads 100−price_yes. `roi` is what the dry run is
+        # FOR — it proves the resting asks actually carry the current
+        # _HARVEST_ROI instead of just counting them (Aug 10 2026).
+        pc = o.get("price_yes")
+        ask_c = (None if pc is None else
+                 round((100.0 - pc * 100.0) if "SHORT" in (o.get("intent") or "")
+                       else pc * 100.0))
+        row = {"slug": o["slug"], "lane": m["lane"], "entry_c": m["entry_c"],
+               "ask_c": ask_c,
+               "roi": (None if not (ask_c and m["entry_c"])
+                       else round(ask_c / m["entry_c"] - 1.0, 2))}
         if dry:
-            killed.append({"slug": o["slug"], "lane": mine[o["slug"]],
-                           "dry": True})
+            killed.append(dict(row, dry=True))
             continue
         try:
             client.orders.cancel(o["id"], {"marketSlug": o["slug"]})
-            killed.append({"slug": o["slug"], "lane": mine[o["slug"]]})
+            killed.append(row)
         except Exception as e:
             failed.append({"slug": o["slug"], "err": str(e)[:120]})
     out = {"ok": True, "dry": dry, "open_orders": len(orders),
