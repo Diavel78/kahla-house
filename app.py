@@ -6212,6 +6212,9 @@ def api_poly_fill_times():
     return jsonify(out)
 
 
+_TOPUP_BUDGET_S = 5.0     # wall-clock stop for LIVE top-ups (see below)
+
+
 @app.route("/api/polymarket/topup")
 def api_poly_topup():
     """Raise ALREADY-PLACED model bets to the current stake (Aug 10 2026,
@@ -6250,7 +6253,16 @@ def api_poly_topup():
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
     dry = request.args.get("dry") == "1"
-    lim = max(1, min(40, int(request.args.get("max") or 12)))
+    # ⚠ NEVER START AN ACTION WE CAN'T FINISH. Each live top-up is a
+    # cancel → 0.8s → position re-read → create → 1.5s → verify ≈ 4s, and
+    # this function carries no maxDuration — a platform kill BETWEEN the
+    # cancel and the create is exactly the ORDER LOST state. So live runs
+    # are bounded twice: a small default batch AND a wall-clock deadline
+    # checked before each cancel. Re-fire the endpoint to continue; the
+    # already-topped bets skip themselves via `contracts`.
+    lim = max(1, min(40, int(request.args.get("max")
+                             or (40 if dry else 2))))
+    deadline = _time.time() + (0.0 if dry else _TOPUP_BUDGET_S)
     try:
         sb, client = get_supabase(), get_client()
     except Exception as e:
@@ -6326,6 +6338,9 @@ def api_poly_topup():
             act["dry"] = True
             done.append(act)
             continue
+        if _time.time() >= deadline:
+            _skip("budget")                 # stop BEFORE the cancel
+            break
         try:
             client.orders.cancel(o["id"], {"marketSlug": slug})
         except Exception:
