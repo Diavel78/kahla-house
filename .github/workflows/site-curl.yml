@@ -15,6 +15,10 @@ on:
         description: "Extra query params appended AFTER the key, e.g. 'dry=1&sport=mlb' (no leading &)."
         required: false
         type: string
+      repeat:
+        description: "Call the endpoint this many times, 6s apart (default 1). For endpoints that work a bounded batch per invocation."
+        required: false
+        type: string
 
 jobs:
   curl:
@@ -33,6 +37,20 @@ jobs:
           # makes them part of the PATH and 404s (run #4 learned this).
           Q="${{ inputs.query }}"
           [ -n "$Q" ] && Q="&${Q}"
-          curl -sSL --max-time 120 \
-            "https://www.thekahlahouse.com/${{ inputs.path }}?key=${KEY}${Q}" \
-            | head -c 6000
+          # Repeat drives endpoints that deliberately bound their own work
+          # per invocation (e.g. /api/polymarket/topup, which refuses to
+          # start a cancel→create it can't finish inside the function
+          # budget). Each pass is its own short serverless call.
+          N="${{ inputs.repeat }}"
+          case "$N" in ''|*[!0-9]*) N=1 ;; esac
+          [ "$N" -lt 1 ] && N=1
+          [ "$N" -gt 40 ] && N=40
+          for i in $(seq 1 "$N"); do
+            [ "$N" -gt 1 ] && echo "=== pass $i/$N ==="
+            curl -sSL --max-time 120 \
+              "https://www.thekahlahouse.com/${{ inputs.path }}?key=${KEY}${Q}" \
+              | head -c 6000
+            echo
+            [ "$i" -lt "$N" ] && sleep 6
+          done
+          exit 0
