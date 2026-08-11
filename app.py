@@ -5797,8 +5797,10 @@ def _probe_log(out: dict):
     read from the DB (run_sql.sh) instead of relayed by screenshot — the
     go-live gate reads this table. Never raises."""
     try:
+        # never persist the shared secret into the table we read back
+        pr = {k: v for k, v in request.args.items() if k != "key"}
         get_supabase().table("exec_probe_runs").insert(
-            {"params": dict(request.args), "result": out}).execute()
+            {"params": pr, "result": out}).execute()
     except Exception:
         pass
 
@@ -6207,6 +6209,185 @@ def api_poly_fill_times():
              "result": out}).execute()
     except Exception:
         pass
+    return jsonify(out)
+
+
+@app.route("/api/polymarket/topup")
+def api_poly_topup():
+    """Raise ALREADY-PLACED model bets to the current stake (Aug 10 2026,
+    user: "on existing orders (and positions if the line is still the
+    same) is it possible to fix the orders?" — asked right after the
+    2→4 double).
+
+    ONLY the fully-UNFILLED case is touched, and that is the whole
+    design. A resting order with nothing filled has no cost basis and no
+    position, so cancel → verify-no-fill → create fresh at the SAME
+    price with the new quantity is exactly the re-peg's proven sequence
+    (never orders.modify — banned; the app must see a NEW order). The
+    ~1s unquoted gap and the lost queue slot are the price, and these
+    are next-day games with hours of queue life left.
+
+    ⚠ FILLED AND PARTIAL POSITIONS ARE SKIPPED ON PURPOSE. Topping one
+    up means BUYING MORE AT TODAY'S BOOK, which (a) makes the stored
+    `entry_price` no longer describe the position — and that single
+    number is what the harvest's sell price, CLV, and to-WIN grading all
+    key off — and (b) strands the position between stakes: bumping
+    `contracts` to 4 while only 2 are held pushes it under the harvest's
+    min_held, so a leg that sells today would stop selling until the
+    top-up filled. Not worth ~$20 of exposure. They keep their old stake
+    and their old split (a 2-contract bet still sells 1 — the derived
+    min_held handles that).
+
+    ONE ORDER PER SLUG IS AN INVARIANT, not a preference: the re-peg bot
+    cancels a SINGLE order_id per bet, so a second resting order on the
+    same slug would be stranded at the old price the first time the book
+    moved. That's why this replaces the order rather than adding to it,
+    and why a slug already carrying multiple orders is skipped.
+
+    Shared-secret + `&dry=1`; result persisted to exec_probe_runs."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    dry = request.args.get("dry") == "1"
+    lim = max(1, min(40, int(request.args.get("max") or 12)))
+    try:
+        sb, client = get_supabase(), get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    now = datetime.now(timezone.utc)
+    owner = _kalshi_owner_uid()
+    try:
+        rows = (sb.table("bot_picks")
+                .select("id,event_name,event_start,market_type,side,"
+                        "entry_price,signal_blob")
+                .eq("asked_by", owner).eq("status", "pending")
+                .gt("event_start", now.isoformat())
+                .limit(300).execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"picks: {e}"}), 500
+    orders = _pmm_open_orders_raw(client)
+    positions = _pmm_positions_raw(client)
+    if orders is None or positions is None:
+        return jsonify({"ok": False, "error": "venue read failed"}), 503
+    done, skipped = [], {}
+
+    def _skip(why):
+        skipped[why] = skipped.get(why, 0) + 1
+
+    for r in rows:
+        if len(done) >= lim:
+            break
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if not (b.get("autobet") or b.get("whiff_autobet")
+                or b.get("ou_trader")):
+            continue                       # model bets only — never manual
+        mt = r.get("market_type") or ""
+        target = (_AUTOBET_CONTRACTS_NRFI if mt == "nrfi"
+                  else _AUTOBET_CONTRACTS)
+        have = int(b.get("contracts") or 0)
+        if have >= target:
+            _skip("at_target")
+            continue
+        slug = b.get("pmm_slug")
+        if not slug:
+            _skip("no_slug")
+            continue
+        synthetic = bool(b.get("pmm_synthetic"))
+        intent = ("ORDER_INTENT_BUY_SHORT" if synthetic
+                  else "ORDER_INTENT_BUY_LONG")
+        net = (positions.get(slug) or {}).get("net") or 0.0
+        if (net < 0 if synthetic else net > 0):
+            _skip("holds_position")         # basis + min_held — see docstring
+            continue
+        mine = [o for o in orders
+                if o["slug"] == slug and o["intent"] == intent]
+        if len(mine) != 1:
+            _skip("no_order" if not mine else "multi_order")
+            continue
+        o = mine[0]
+        if o["cum"] > 0:
+            _skip("partial_fill")
+            continue
+        canon = o.get("price_yes")
+        if canon is None:
+            _skip("no_price")
+            continue
+        side_c = (100.0 - canon * 100.0) if synthetic else canon * 100.0
+        if side_c > _REPEG_NRFI_PRICE_CAP_C:
+            _skip("over_price_cap")         # 54¢ — never re-place above it
+            continue
+        if target * side_c / 100.0 > _REPEG_MAX_COST_USD:
+            _skip("master_rule")            # ⚠ $6/order
+            continue
+        act = {"event": r.get("event_name"), "mt": mt, "side": r.get("side"),
+               "c": round(side_c), "from": have, "to": target}
+        if dry:
+            act["dry"] = True
+            done.append(act)
+            continue
+        try:
+            client.orders.cancel(o["id"], {"marketSlug": slug})
+        except Exception:
+            pass            # a just-filled order errors on cancel — the
+                            # position re-read below decides, not the exc
+        _time.sleep(0.8)
+        pos2 = _pmm_positions_raw(client)
+        if pos2 is None:
+            act["state"] = "unverified"     # never re-place blind
+            done.append(act)
+            _send_fill_telegram(
+                f"⚠🤖 TOPUP UNVERIFIED — {r.get('event_name')} {mt}: "
+                f"canceled the {round(side_c)}¢ order but the venue read "
+                f"failed before the re-place. CHECK THE APP.", urgent=True)
+            continue
+        n2 = (pos2.get(slug) or {}).get("net") or 0.0
+        if (n2 < 0 if synthetic else n2 > 0):
+            act["state"] = "raced_fill"     # it filled at the old size — keep
+            done.append(act)
+            continue
+        cparams = {"marketSlug": slug, "intent": intent,
+                   "type": "ORDER_TYPE_LIMIT",
+                   "price": {"value": f"{float(canon):.3f}",
+                             "currency": "USD"},
+                   "quantity": target,
+                   "participateDontInitiate": True,
+                   "manualOrderIndicator":
+                       "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
+        if (o.get("tif") == "TIME_IN_FORCE_GOOD_TILL_DATE"
+                and o.get("good_till")):
+            cparams["tif"] = "TIME_IN_FORCE_GOOD_TILL_DATE"
+            cparams["goodTillTime"] = o["good_till"]
+        try:
+            client.orders.create(cparams)
+        except Exception:
+            pass            # verify decides — recreate is its fallback
+        _time.sleep(1.5)
+        state = _repeg_verify_or_recreate(client, slug, intent, float(canon),
+                                          target, o.get("tif"),
+                                          o.get("good_till"))
+        act["state"] = state
+        done.append(act)
+        if state == "lost":
+            _send_fill_telegram(
+                f"🚨 ORDER LOST — {r.get('event_name')} {mt} "
+                f"{(r.get('side') or '').upper()}: top-up canceled your "
+                f"order and the re-place failed. RE-BID {round(side_c)}¢ "
+                f"BY HAND NOW.", urgent=True)
+            continue
+        if state in ("ok", "recreated"):
+            nb = dict(b)
+            nb["contracts"] = target
+            nb["topup"] = {"from": have, "to": target, "at": now.isoformat()}
+            try:
+                (sb.table("bot_picks").update({"signal_blob": nb})
+                 .eq("id", r["id"]).execute())
+            except Exception:
+                pass
+    out = {"ok": True, "dry": dry, "acted": len(done), "actions": done,
+           "skipped": skipped, "targets": {"nrfi": _AUTOBET_CONTRACTS_NRFI,
+                                           "other": _AUTOBET_CONTRACTS}}
+    _probe_log(out)
     return jsonify(out)
 
 
