@@ -9386,7 +9386,31 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
     return "placed"
 
 
-_PMM_LISTED_CACHE: dict = {"at": 0.0, "keys": None}
+_PMM_LISTED_CACHE: dict = {"at": 0.0, "keys": None, "evs": []}
+
+# Polymarket's MLB slug tricodes → our canonical markets.event_name team
+# names (the 30 strings the table already uses). Verified against live
+# slugs Aug 2026 — PMM's dialect matches _TEAM_TO_KALSHI's codes exactly
+# (az / cws / ath / kc / sd / sf / wsh / tb). This map is what lets the
+# VENUE'S OWN LIST mint schedule rows without ESPN.
+_MLB_CODE_TEAM = {
+    "az": "Arizona Diamondbacks", "atl": "Atlanta Braves",
+    "bal": "Baltimore Orioles", "bos": "Boston Red Sox",
+    "cws": "Chicago White Sox", "chc": "Chicago Cubs",
+    "cin": "Cincinnati Reds", "cle": "Cleveland Guardians",
+    "col": "Colorado Rockies", "det": "Detroit Tigers",
+    "hou": "Houston Astros", "kc": "Kansas City Royals",
+    "laa": "Los Angeles Angels", "lad": "Los Angeles Dodgers",
+    "mia": "Miami Marlins", "mil": "Milwaukee Brewers",
+    "min": "Minnesota Twins", "nym": "New York Mets",
+    "nyy": "New York Yankees", "ath": "Athletics",
+    "phi": "Philadelphia Phillies", "pit": "Pittsburgh Pirates",
+    "sd": "San Diego Padres", "sf": "San Francisco Giants",
+    "sea": "Seattle Mariners", "stl": "St. Louis Cardinals",
+    "tb": "Tampa Bay Rays", "tex": "Texas Rangers",
+    "tor": "Toronto Blue Jays", "wsh": "Washington Nationals",
+}
+_MLB_TEAM_CODE = {v: k for k, v in _MLB_CODE_TEAM.items()}
 
 
 def _pmm_listed_mlb_keys():
@@ -9404,7 +9428,7 @@ def _pmm_listed_mlb_keys():
         return _PMM_LISTED_CACHE["keys"]
     try:
         client = get_client()
-        keys = set()
+        keys, listed = set(), []
         resp = client.events.list({"tagSlug": "mlb", "closed": False,
                                    "limit": 200})
         evs = (resp.get("events") if isinstance(resp, dict)
@@ -9416,12 +9440,103 @@ def _pmm_listed_mlb_keys():
                          r"(\d{4}-\d{2}-\d{2})$", slug)
             if m:
                 keys.add((m.group(3), frozenset((m.group(1), m.group(2)))))
+                # Slug order is AWAY-HOME (verified against markets rows:
+                # mlb-sea-nyy-2026-08-11 = "Seattle Mariners @ New York
+                # Yankees"). startTime is the venue's own first pitch.
+                listed.append({
+                    "slug": slug, "away": m.group(1), "home": m.group(2),
+                    "date": m.group(3),
+                    "start": (ev.get("startTime") if isinstance(ev, dict)
+                              else getattr(ev, "startTime", None)),
+                })
         if not keys:
             return None                  # empty read = suspect → fail-open
-        _PMM_LISTED_CACHE.update(at=_time.time(), keys=keys)
+        _PMM_LISTED_CACHE.update(at=_time.time(), keys=keys, evs=listed)
         return keys
     except Exception:
         return None
+
+
+def _pmm_ensure_markets(sb, now) -> dict:
+    """POLYMARKET IS THE SCHEDULE (Aug 10 2026 — user, for the Nth time:
+    "I don't give a flying fuck what ESPN does... get the fucking list
+    from Polymarket, bet on Polymarket"). Mints a `markets` row for every
+    MLB game Polymarket lists that we don't already have one for.
+
+    THE OUTAGE THIS ENDS: `markets` — the schedule EVERYTHING joins on —
+    was written only by the ESPN spine cron, and ESPN began 403'ing the
+    GitHub runners ~Aug 4 2026. The step is `continue-on-error` + a
+    log.warning, so it reported SUCCESS every minute for six days while
+    creating nothing: the board ran dry after Aug 11 and the opener lane
+    reported the healthy gate "all_done" over an empty pool. Meanwhile
+    this very tick was already fetching Polymarket's full listed slate —
+    and using it only as a SORT KEY over the ESPN-fed pool. So the
+    machine held the venue's list every minute and threw it away.
+
+    The row is still needed (it's the join key for bot_picks /
+    pm_snapshots / prop_snapshots / grading) — it just no longer needs a
+    third party to exist. ESPN drops to what it's good for: final scores.
+
+    Never raises; a bad read simply mints nothing."""
+    st = {"pmm_sched_listed": 0, "pmm_sched_new": 0}
+    try:
+        if _pmm_listed_mlb_keys() is None:
+            st["pmm_sched"] = "no_list"
+            return st
+        evs = _PMM_LISTED_CACHE.get("evs") or []
+        st["pmm_sched_listed"] = len(evs)
+        lo = now - timedelta(hours=6)
+        hi = now + timedelta(hours=_OPENER_HI_H + 24)
+        try:
+            have = (sb.table("markets")
+                    .select("event_name,event_start")
+                    .eq("sport", "MLB").eq("status", "active")
+                    .gte("event_start", (lo - timedelta(hours=12)).isoformat())
+                    .lte("event_start", (hi + timedelta(hours=12)).isoformat())
+                    .limit(400).execute().data) or []
+        except Exception as e:
+            st["pmm_sched"] = ("have_err: " + str(e))[:80]
+            return st
+        seen = set()
+        for r in have:
+            nm = r.get("event_name") or ""
+            if " @ " not in nm:
+                continue
+            a, h = [s.strip() for s in nm.split(" @ ", 1)]
+            ac, hc = _MLB_TEAM_CODE.get(a), _MLB_TEAM_CODE.get(h)
+            if ac and hc:
+                seen.add((_et_day(r.get("event_start")),
+                          frozenset((ac, hc))))
+        new = []
+        for ev in evs:
+            a = _MLB_CODE_TEAM.get(ev["away"])
+            h = _MLB_CODE_TEAM.get(ev["home"])
+            if not (a and h):
+                continue                 # unknown tricode → never guess
+            try:
+                start = datetime.fromisoformat(
+                    str(ev.get("start")).replace("Z", "+00:00"))
+            except Exception:
+                continue                 # no venue start → no row
+            if not (lo <= start <= hi):
+                continue
+            key = (_et_day(start.isoformat()),
+                   frozenset((ev["away"], ev["home"])))
+            if key in seen:
+                continue
+            seen.add(key)                # same-tick dup guard
+            new.append({"sport": "MLB", "event_name": f"{a} @ {h}",
+                        "event_start": start.isoformat(), "status": "active",
+                        "notes": {"src": "pmm_schedule", "slug": ev["slug"]}})
+        if new:
+            try:
+                sb.table("markets").insert(new).execute()
+                st["pmm_sched_new"] = len(new)
+            except Exception as e:
+                st["pmm_sched"] = ("ins_err: " + str(e))[:80]
+    except Exception as e:
+        st["pmm_sched"] = ("err: " + str(e))[:80]
+    return st
 
 
 def _opener_game_listed(g, keys) -> bool:
@@ -9622,6 +9737,11 @@ def _opener_pass(sb, now, deadline):
         if _time.time() >= deadline - 1.5:
             stats["gate"] = "budget"
             return shadow_rows, stats
+        # THE LIST COMES FROM THE VENUE. Mint schedule rows for anything
+        # Polymarket lists that we lack, BEFORE reading the pool — so a
+        # game the venue posted this minute is bettable this minute, with
+        # no third-party spine in the path. (See _pmm_ensure_markets.)
+        stats.update(_pmm_ensure_markets(sb, now))
         lo = (now + timedelta(hours=_OPENER_LO_H)).isoformat()
         hi = (now + timedelta(hours=_OPENER_HI_H)).isoformat()
         try:
@@ -10248,18 +10368,35 @@ def _opener_watchdog(sb, now, opener_stats):
              .gt("event_start", (now + timedelta(hours=6)).isoformat())
              .limit(400).execute())
         wall = 0
+        by_day: dict = {}
         for row in (r.data or []):
             blob = row.get("signal_blob") or {}
             if (blob.get("autobet") or blob.get("whiff_autobet")
                     or blob.get("ou_trader")):
                 wall += 1
-        if wall >= _WATCHDOG_MIN_WALL:
+                d0 = _et_day(row.get("event_start"))
+                by_day[d0] = by_day.get(d0, 0) + 1
+        # PER-DAY HOLE (Aug 10 2026 — the shape the total-count rule
+        # MISSED for six days): the wall read a healthy 10 while every
+        # one of those bets sat on ONE date and the days behind it were
+        # empty, because the ESPN spine had stopped minting rows past
+        # Aug 11. A full slate PMM prices with nothing standing on it is
+        # an outage no matter how good the total looks.
+        day_games: dict = {}
+        for (d0, _p) in keys:
+            if d0 > et_today:
+                day_games[d0] = day_games.get(d0, 0) + 1
+        hole = next((d0 for d0 in sorted(day_games)
+                     if day_games[d0] >= 5 and by_day.get(d0, 0) < 2), None)
+        if wall >= _WATCHDOG_MIN_WALL and hole is None:
             return None
         _WATCHDOG_LAST_TS = _time.time()
         _send_fill_telegram(
             f"🚨 OPENER WALL LOW: {wall} standing future-day bets vs "
-            f"{future_listed} Polymarket-priced future games "
-            f"(gate={opener_stats.get('gate')}). The lane may be stalled.",
+            f"{future_listed} Polymarket-priced future games"
+            + (f" — {hole} lists {day_games.get(hole)} games with "
+               f"{by_day.get(hole, 0)} bets" if hole else "")
+            + f" (gate={opener_stats.get('gate')}). The lane may be stalled.",
             urgent=True)
         return wall
     except Exception:

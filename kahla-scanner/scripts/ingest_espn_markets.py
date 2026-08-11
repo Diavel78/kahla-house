@@ -111,14 +111,40 @@ def _espn_games(grp: str, league: str, days: int) -> list[dict]:
     now = datetime.now(timezone.utc)
     dates = f"{now:%Y%m%d}-{(now + timedelta(days=days)):%Y%m%d}"
     url = f"https://site.api.espn.com/apis/site/v2/sports/{grp}/{league}/scoreboard"
-    try:
-        r = httpx.get(url, params={"dates": dates},
-                      headers={"User-Agent": _UA}, timeout=15)
-        r.raise_for_status()
-        events = (r.json() or {}).get("events", []) or []
-    except Exception as e:
-        log.warning("  ESPN fetch failed (%s/%s): %s", grp, league, e)
-        return []
+
+    def _get(params) -> list | None:
+        try:
+            r = httpx.get(url, params=params, headers={"User-Agent": _UA},
+                          timeout=15)
+            r.raise_for_status()
+            return (r.json() or {}).get("events", []) or []
+        except Exception as e:
+            log.warning("  ESPN fetch failed (%s/%s %s): %s", grp, league,
+                        params, e)
+            return None
+
+    events = _get({"dates": dates})
+    if events is None:
+        # DAY-BY-DAY FALLBACK (Aug 10 2026): ESPN started 403'ing the
+        # multi-day `dates=A-B` range from the Actions runners ~Aug 4 and
+        # the whole spine went dark for six days while this step reported
+        # SUCCESS every minute (continue-on-error + a log.warning). Single
+        # dates are a different code path on their side; a partial answer
+        # beats none. If EVERY day also fails, the caller now shouts.
+        events = []
+        ok = False
+        for i in range(days + 1):
+            d = _get({"dates": f"{now + timedelta(days=i):%Y%m%d}"})
+            if d is not None:
+                ok = True
+                events.extend(d)
+        if not ok:
+            log.error("  ESPN UNREACHABLE (%s/%s) — range AND per-day both "
+                      "failed; schedule spine is DARK for this sport",
+                      grp, league)
+            return []
+        log.warning("  ESPN range blocked (%s/%s) — used per-day fallback, "
+                    "%d events", grp, league, len(events))
 
     games: list[dict] = []
     for ev in events:
@@ -475,6 +501,14 @@ def main(argv: list[str] | None = None) -> int:
     log.info("TOTAL %d games · %d %s · %d reused · %d pruned", totals["games"],
              totals["create"], "created" if args.commit else "would-create",
              totals["reuse"], totals["pruned"])
+    if not totals["games"]:
+        # FAIL LOUD (Aug 10 2026). This step is `continue-on-error`, so a
+        # zero-game run used to paint a green check while the schedule
+        # spine was dark — six days of it. Zero games across EVERY sport
+        # is never normal in August; a red X is the point.
+        log.error("ZERO games across all sports — ESPN unreachable or the "
+                  "scoreboard shape changed. Schedule spine is DARK.")
+        return 1
     return 0
 
 
