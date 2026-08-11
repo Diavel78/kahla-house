@@ -6301,11 +6301,19 @@ def api_poly_topup():
         if have >= target:
             _skip("at_target")
             continue
-        slug = b.get("pmm_slug")
+        slug = b.get("pmm_slug") or (
+            (b.get("execution") or {}).get("pmm_slug")
+            if isinstance(b.get("execution"), dict) else None)
         if not slug:
             _skip("no_slug")
             continue
-        synthetic = bool(b.get("pmm_synthetic"))
+        # READ BOTH PLACES (the _pmm_fill_entry landmine): the autolog
+        # stamps pmm_synthetic top-level, the frontend stamps it under
+        # `execution`. Top-level only ⇒ an autologged NO/dog side reads
+        # as YES, we search the wrong order intent, find nothing and
+        # silently skip a bet that should have been topped.
+        _ex = b.get("execution") if isinstance(b.get("execution"), dict) else {}
+        synthetic = bool(b.get("pmm_synthetic") or _ex.get("pmm_synthetic"))
         intent = ("ORDER_INTENT_BUY_SHORT" if synthetic
                   else "ORDER_INTENT_BUY_LONG")
         net = (positions.get(slug) or {}).get("net") or 0.0
