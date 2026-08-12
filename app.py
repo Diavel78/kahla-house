@@ -8050,7 +8050,7 @@ _WHIFF_BET_MAX_PP = 10.0          # the claimed-edge cliff (3rd-time rule:
                                   # NRFI clamp / Fight IQ 0-3 past 15pp /
                                   # Diamond totals) — >10pp claims stay
                                   # shadow-only until the record says raise
-_WHIFF_MAX_ENTRY_C = 54           # user guardrail — same as Y/NRFI
+_WHIFF_MAX_ENTRY_C = 60           # user guardrail — same as Y/NRFI
 _WHIFF_MIN_ENTRY_C = 25           # FILL-VIABILITY floor (user, Aug 3:
                                   # "a 13% chance... the other guy's
                                   # betting an 87% chance — it's just
@@ -9856,7 +9856,7 @@ def _et_day(iso: str | None) -> str:
 
 _OU_TRADER_MIN_EDGE_PP = 3.0    # peg must sit ≥3pp under the book's own mid
 _OU_TRADER_MIN_ENTRY_C = 25.0   # fill-viability floor (whiff lane's lesson)
-_OU_TRADER_MAX_ENTRY_C = 54.0   # the user's universal entry cap
+_OU_TRADER_MAX_ENTRY_C = 60.0   # the user's universal entry cap
 
 
 def _ou_trader_eval(sb, g, d, now, done):
@@ -12096,7 +12096,7 @@ def _outbid_alerts(sb, now) -> int:
 # past 54¢ on a first-inning market is "pointless" (their word; the Coors
 # YRFI-at-58¢ case). Mirrors handicapper_web.NRFI_MAX_ENTRY_C, which stops
 # the model SUGGESTING those entries.
-_REPEG_NRFI_PRICE_CAP_C = 54.0
+_REPEG_NRFI_PRICE_CAP_C = 60.0
 
 REPEG_ENABLED = True         # LIVE (2nd time) Aug 2 2026 — probe run 2
                              # PROVED the amend: full-params modify (with
