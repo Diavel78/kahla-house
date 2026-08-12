@@ -10649,14 +10649,54 @@ def _opener_watchdog(sb, now, opener_stats):
         # empty, because the ESPN spine had stopped minting rows past
         # Aug 11. A full slate PMM prices with nothing standing on it is
         # an outage no matter how good the total looks.
+        # ⚠ ONLY DATES THE LANE CAN ACTUALLY BUY (Aug 11 2026 — this check
+        # cried wolf its first night). Polymarket lists further out than
+        # the opener's `_OPENER_HI_H` window, so a date whose games are
+        # 90h away legitimately has zero bets and always will until it
+        # enters the pool. Counting it as a hole made the watchdog fire
+        # on a perfectly healthy lane. Use the listing's own start times
+        # (`evs`), not the key set, so the window is real rather than
+        # inferred from the ET date.
+        horizon = now + timedelta(hours=_OPENER_HI_H)
         day_games: dict = {}
-        for (d0, _p) in keys:
+        for ev in (_PMM_LISTED_CACHE.get("evs") or []):
+            try:
+                st = datetime.fromisoformat(
+                    str(ev.get("start")).replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if not (now < st <= horizon):
+                continue
+            d0 = _et_day(st.isoformat())
             if d0 > et_today:
                 day_games[d0] = day_games.get(d0, 0) + 1
         hole = next((d0 for d0 in sorted(day_games)
                      if day_games[d0] >= 5 and by_day.get(d0, 0) < 2), None)
         if wall >= _WATCHDOG_MIN_WALL and hole is None:
             return None
+        # DURABLE COOLDOWN (Aug 11 2026 — the alarm's first night sent the
+        # same ping at 9:08, 9:12 and 9:19). `_WATCHDOG_LAST_TS` is a
+        # module global and Vercel recycles containers constantly, so a
+        # cold start forgets it fired and every fresh container re-pings.
+        # Checked HERE, after every other gate, so a healthy tick never
+        # pays for the read. An alarm that repeats is an alarm that gets
+        # ignored — which defeats the whole point of it.
+        try:
+            _prev = (sb.table("exec_probe_runs").select("at")
+                     .filter("params->>kind", "eq", "watchdog")
+                     .gte("at", (now - timedelta(
+                         seconds=_WATCHDOG_COOLDOWN_S)).isoformat())
+                     .limit(1).execute().data) or []
+            if _prev:
+                _WATCHDOG_LAST_TS = _time.time()
+                return None                    # another container just sent it
+            sb.table("exec_probe_runs").insert(
+                {"params": {"kind": "watchdog"},
+                 "result": {"wall": wall, "listed": future_listed,
+                            "hole": hole}}).execute()
+        except Exception:
+            pass          # DB unreachable ⇒ ping anyway; a missed outage
+                          # alarm is worse than a duplicate one
         _WATCHDOG_LAST_TS = _time.time()
         _send_fill_telegram(
             f"🚨 OPENER WALL LOW: {wall} standing future-day bets vs "
