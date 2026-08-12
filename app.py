@@ -9284,6 +9284,20 @@ def api_vsin_snapshot():
 # its nominal time even while still 'pre' — acceptable, forward data accrues.
 _PAPERLOG_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF", "UFC"]
 
+# EGRESS DISCIPLINE (Aug 11 2026 outage — Supabase hit 138% of the free
+# 5 GB egress quota and the fair-use throttle started refusing
+# connections, taking Dashboard + Pick Bot down). signal_blob is a FAT
+# jsonb; the per-minute tick reads used to pull it whole for thousands of
+# rows to test a handful of flags. PostgREST can project JSON fields
+# (`alias:col->>key`), so read the flags, not the blob.
+# ⚠ `->>` returns TEXT — "false" is a truthy Python string. Every
+# consumer of a projected flag MUST compare against (True, "true"),
+# never rely on plain truthiness.
+_PL_VARIANT_KEYS = ("spread_model", "vsin_vetoed_pick", "ufc_duration",
+                    "ufc_model_vetoed_pick", "total_blacklist_shadow",
+                    "opener_shadow", "whiff_shadow", "whiff_key")
+_PL_VARIANT_SEL = ",".join(f"{k}:signal_blob->>{k}" for k in _PL_VARIANT_KEYS)
+
 # ---------------------------------------------------------------------------
 # OPENER LANE (Aug 2 2026) — evaluate the model the moment tomorrow's line is
 # priced, BEFORE the market reacts (user: "not a steam engine — an engine
@@ -9998,14 +10012,26 @@ def _opener_pass(sb, now, deadline):
             return shadow_rows, stats
         mids = [g["id"] for g in games]
         try:
+            # EGRESS: flags only, never the blob (see _PL_VARIANT_SEL).
             done_rows = (sb.table("pickbot_paperlog")
-                         .select("market_id,market_type,logged_at,signal_blob")
+                         .select("market_id,market_type,logged_at,"
+                                 "would_bet:signal_blob->>would_bet,"
+                                 "swept:signal_blob->>swept")
                          .in_("market_id", mids)
                          .filter("signal_blob->>opener_shadow", "eq", "true")
                          .limit(1000).execute().data) or []
-        except Exception as e:
-            stats["gate"] = ("done_err: " + str(e))[:120]
-            return shadow_rows, stats     # fail-closed: no dedup read → skip
+        except Exception:
+            try:
+                done_rows = (sb.table("pickbot_paperlog")
+                             .select("market_id,market_type,logged_at,"
+                                     "signal_blob")
+                             .in_("market_id", mids)
+                             .filter("signal_blob->>opener_shadow",
+                                     "eq", "true")
+                             .limit(1000).execute().data) or []
+            except Exception as e:
+                stats["gate"] = ("done_err: " + str(e))[:120]
+                return shadow_rows, stats  # fail-closed: no dedup → skip
         # NEVER DONE BUYING (Aug 5 2026, user): a no-bet eval EXPIRES
         # after _OPENER_REEVAL_H and the game re-enters the pool — fair
         # moves (starter scratches) and books widen/narrow all day, so a
@@ -10016,7 +10042,14 @@ def _opener_pass(sb, now, deadline):
         # done (fail-safe: never re-eval on bad data).
         done = set()
         for r in done_rows:
-            _b = r.get("signal_blob") or {}
+            # Row is either the narrowed projection (flags at top level,
+            # as TEXT) or the fat fallback (flags inside signal_blob).
+            # ⚠ `->>` yields the STRING "false", which is truthy — the
+            # would_bet test MUST be an explicit membership check or
+            # every no-bet eval latches as done and the lane stops
+            # buying entirely.
+            _b = r.get("signal_blob") if isinstance(
+                r.get("signal_blob"), dict) else r
             fresh = True
             try:
                 _ts = datetime.fromisoformat(
@@ -10024,8 +10057,12 @@ def _opener_pass(sb, now, deadline):
                 fresh = (now - _ts) < timedelta(hours=_OPENER_REEVAL_H)
             except Exception:
                 pass
-            if (_b.get("would_bet") or fresh
-                    or int(_b.get("swept") or 0) >= 2):
+            try:
+                _swept = int(_b.get("swept") or 0)
+            except (TypeError, ValueError):
+                _swept = 0
+            if (_b.get("would_bet") in (True, "true") or fresh
+                    or _swept >= 2):
                 done.add((r["market_id"], r.get("market_type")))
         cands = [g for g in games
                  if (g["id"], "nrfi") not in done
@@ -10588,17 +10625,21 @@ def _opener_watchdog(sb, now, opener_stats):
         # definition, not ET-date (the first night's 9:01pm ping was half
         # artifact: at ET midnight "future-day" flipped and the whole
         # next-day wall stopped counting for an hour).
-        r = (sb.table("bot_picks")
-             .select("event_start,signal_blob")
+        r = (sb.table("bot_picks")          # EGRESS: flags, not the blob
+             .select("event_start,"
+                     "autobet:signal_blob->>autobet,"
+                     "whiff_autobet:signal_blob->>whiff_autobet,"
+                     "ou_trader:signal_blob->>ou_trader")
              .eq("status", "pending").eq("sport", "MLB")
              .gt("event_start", (now + timedelta(hours=6)).isoformat())
              .limit(400).execute())
         wall = 0
         by_day: dict = {}
         for row in (r.data or []):
-            blob = row.get("signal_blob") or {}
-            if (blob.get("autobet") or blob.get("whiff_autobet")
-                    or blob.get("ou_trader")):
+            blob = row
+            if (blob.get("autobet") in (True, "true")
+                    or blob.get("whiff_autobet") in (True, "true")
+                    or blob.get("ou_trader") in (True, "true")):
                 wall += 1
                 d0 = _et_day(row.get("event_start"))
                 by_day[d0] = by_day.get(d0, 0) + 1
@@ -10877,18 +10918,41 @@ def api_handicapper_paperlog():
             # a bare 'whiff' variant would collide (June-28-flood rule)
             return "whiff:" + str(b.get("whiff_key") or "")
         return ""
+    # EGRESS (Aug 11 2026 — the outage): this pulled 6h of paperlog rows
+    # with the FULL signal_blob, up to 5000 of them, EVERY tick. Once the
+    # Polymarket spine took the pool from 4 games to 63 it was the single
+    # largest byte source on the account and helped push Supabase egress
+    # to 138% of the free-plan quota (6.91/5 GB), where the fair-use
+    # throttle started refusing connections. `_variant` only needs eight
+    # flags, so select those JSON fields instead of the whole blob.
+    # Fallback to the fat read if the JSON-select syntax is ever
+    # rejected — a raised query here would silently break bet-change
+    # dedup and re-open the June-28 logging flood.
+    _sel = ("id,market_id,market_type,side,units,logged_at,"
+            + _PL_VARIANT_SEL)
+    narrowed, recent = True, []
     try:
-        recent = (sb.table("pickbot_paperlog")
-                  .select("id,market_id,market_type,side,units,logged_at,signal_blob")
+        recent = (sb.table("pickbot_paperlog").select(_sel)
                   .in_("market_id", mids)
                   .gte("logged_at", (now - timedelta(hours=6)).isoformat())
                   .order("logged_at", desc=True).limit(5000).execute().data) or []
-        for r in recent:
-            last_bet.setdefault(
-                (r["market_id"], r["market_type"], _variant(r.get("signal_blob"))),
-                (r.get("side"), r.get("units")))
     except Exception:
-        pass
+        narrowed = False
+        try:
+            recent = (sb.table("pickbot_paperlog")
+                      .select("id,market_id,market_type,side,units,"
+                              "logged_at,signal_blob")
+                      .in_("market_id", mids)
+                      .gte("logged_at", (now - timedelta(hours=6)).isoformat())
+                      .order("logged_at", desc=True)
+                      .limit(5000).execute().data) or []
+        except Exception:
+            recent = []
+    for r in recent:
+        src = r if narrowed else (r.get("signal_blob") or {})
+        last_bet.setdefault(
+            (r["market_id"], r["market_type"], _variant(src)),
+            (r.get("side"), r.get("units")))
     # (dedup keys, stale-first ordering, and the dossier build below are all
     # sport-agnostic — nothing else in this loop assumes MLB.)
     # Rotation = RANDOM shuffle (July 2026 — fixed a starvation bug). The
