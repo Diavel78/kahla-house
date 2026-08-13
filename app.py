@@ -6270,6 +6270,32 @@ def api_poly_cancel_live_buys():
                               "start": r.get("event_start")}
     except Exception as e:
         return jsonify({"ok": False, "error": f"picks: {e}"}), 500
+    # `&all=1` (dry only) widens the listing to EVERY model buy, started or
+    # not, and reports each order's tif/good_till. That is the read that
+    # settles whether the re-peg's echoed expiry is silently dropping —
+    # a re-pegged order showing good_till=None is the proof.
+    if request.args.get("all") == "1":
+        try:
+            rows2 = (sb.table("bot_picks")
+                     .select("event_name,market_type,event_start,signal_blob")
+                     .eq("asked_by", owner).eq("status", "pending")
+                     .gte("event_start", (now - timedelta(hours=12)).isoformat())
+                     .limit(500).execute().data) or []
+            for r in rows2:
+                b = r.get("signal_blob") or {}
+                if not (b.get("autobet") or b.get("whiff_autobet")
+                        or b.get("ou_trader")):
+                    continue
+                s2 = b.get("pmm_slug")
+                if s2 and s2 not in live:
+                    live[s2] = {"event": r.get("event_name"),
+                                "mt": r.get("market_type"),
+                                "start": r.get("event_start"),
+                                "repegged": bool(b.get("repeg"))}
+                elif s2:
+                    live[s2]["repegged"] = bool(b.get("repeg"))
+        except Exception:
+            pass
     orders = _pmm_open_orders_raw(client)
     if orders is None:
         return jsonify({"ok": False, "error": "order read failed"}), 503
@@ -6284,7 +6310,11 @@ def api_poly_cancel_live_buys():
         row = {"slug": o["slug"], "event": m["event"], "mt": m["mt"],
                "start": m["start"], "qty": o.get("qty"),
                "leaves": o.get("leaves"), "tif": o.get("tif"),
-               "good_till": o.get("good_till")}
+               "good_till": o.get("good_till"),
+               "repegged": m.get("repegged")}
+        if request.args.get("all") == "1":
+            killed.append(dict(row, dry=True))   # listing only, never cancel
+            continue
         if dry:
             killed.append(dict(row, dry=True))
             continue
