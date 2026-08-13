@@ -6215,6 +6215,56 @@ def api_poly_fill_times():
 _TOPUP_BUDGET_S = 5.0     # wall-clock stop for LIVE top-ups (see below)
 
 
+@app.route("/api/polymarket/probe-tif")
+def api_poly_probe_tif():
+    """Enumerate every TIME_IN_FORCE literal the installed SDK knows about.
+
+    WHY (Aug 12 2026): the app's order ticket offers "Start of game" as an
+    expiry, and a hand-placed order with it dies at first pitch. Ours use
+    `TIME_IN_FORCE_GOOD_TILL_DATE` + a timestamp WE compute from our own
+    stored `event_start`, and one of those filled 13 minutes past its
+    expiry (the CIN@CWS YRFI). `docs/repeg-bot-spec.md` claims there is no
+    start-of-game literal — but that introspection was done Aug 2 and the
+    app plainly has the option, so the claim needs re-checking against the
+    SDK that is actually deployed rather than a note.
+
+    Read-only: greps the installed package source for the literals and
+    reports the version. No orders touched."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    import re as _re
+    out: dict = {"ok": True}
+    try:
+        import polymarket_us as _pm
+        out["version"] = getattr(_pm, "__version__", "?")
+        root = os.path.dirname(_pm.__file__)
+        lits: set = set()
+        tif_ctx: list = []
+        for dirpath, _d, files in os.walk(root):
+            for fn in files:
+                if not fn.endswith(".py"):
+                    continue
+                try:
+                    src = open(os.path.join(dirpath, fn),
+                               encoding="utf-8", errors="ignore").read()
+                except Exception:
+                    continue
+                lits.update(_re.findall(r"TIME_IN_FORCE_[A-Z_]+", src))
+                for m in _re.finditer(r".{0,90}(?:goodTillTime|GoodTill|"
+                                      r"start_of_game|StartOfGame|GAME)"
+                                      r".{0,90}", src):
+                    if len(tif_ctx) < 12:
+                        tif_ctx.append(f"{fn}: {m.group(0).strip()}")
+        out["time_in_force_literals"] = sorted(lits)
+        out["context"] = tif_ctx
+    except Exception as e:
+        out.update(ok=False, error=str(e)[:200])
+    _probe_log(out)
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/cancel-live-buys")
 def api_poly_cancel_live_buys():
     """Kill any model BUY order still resting on a game that has already
