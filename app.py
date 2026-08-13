@@ -12684,6 +12684,22 @@ def _repeg_tick(sb, now) -> dict:
                         else "NRFI")
                 is_model_bet = (bool(blob.get("autobet"))
                                 or bool(blob.get("whiff_autobet")))
+                # ⚠ NEVER CHASE A LIVE GAME (Aug 12 2026 — the CIN@CWS
+                # YRFI filled 13 minutes after first pitch). Every model
+                # buy is a PRE-GAME bet: the model prices a game that
+                # hasn't started. Once it has, our resting bid is a stale
+                # quote against people who can see the field, and the only
+                # counterparty who wants it is one dumping a loser. The
+                # GTD recomputed below should already kill these, but a
+                # venue that honors expiries lazily would still let one
+                # through — this guard doesn't depend on the venue.
+                try:
+                    if datetime.fromisoformat(
+                            str(r.get("event_start")).replace("Z", "+00:00")
+                    ) <= now:
+                        continue
+                except Exception:
+                    pass          # unparseable start ⇒ fall through
                 if (f.get("market_type") in ("moneyline", "prop")
                         and not is_model_bet):
                     continue    # manual ML/prop bets stay the user's to
@@ -12876,10 +12892,30 @@ def _repeg_tick(sb, now) -> dict:
                            "participateDontInitiate": True,
                            "manualOrderIndicator":
                                "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
-                if (f.get("order_tif") == "TIME_IN_FORCE_GOOD_TILL_DATE"
-                        and f.get("order_good_till")):
+                # EXPIRY IS RECOMPUTED FROM THE PICK, NEVER ECHOED (Aug 12
+                # 2026 — the CIN@CWS YRFI). Echoing the old order's TIF
+                # means a single empty field from the SDK produces a
+                # re-placed order with NO expiry — good-till-canceled —
+                # which then rests straight through first pitch. That
+                # YRFI filled 13 MINUTES INTO THE GAME, sold to us by
+                # someone dumping a first-inning bet that was visibly
+                # dying, and lost 3 minutes later. A model BUY is always
+                # a pre-game bet, so its expiry is always first pitch;
+                # deriving it from event_start is authoritative and
+                # self-heals any order that already lost its GTD.
+                _gtt = None
+                try:
+                    _gtt = (datetime.fromisoformat(
+                        str(r.get("event_start")).replace("Z", "+00:00"))
+                        .astimezone(timezone.utc)
+                        .strftime("%Y-%m-%dT%H:%M:%SZ"))
+                except Exception:
+                    _gtt = (f.get("order_good_till")
+                            if f.get("order_tif")
+                            == "TIME_IN_FORCE_GOOD_TILL_DATE" else None)
+                if _gtt:
                     cparams["tif"] = "TIME_IN_FORCE_GOOD_TILL_DATE"
-                    cparams["goodTillTime"] = f["order_good_till"]
+                    cparams["goodTillTime"] = _gtt
                 new_oid = None
                 try:
                     cr = client.orders.create(cparams)
