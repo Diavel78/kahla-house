@@ -6215,6 +6215,92 @@ def api_poly_fill_times():
 _TOPUP_BUDGET_S = 5.0     # wall-clock stop for LIVE top-ups (see below)
 
 
+@app.route("/api/polymarket/cancel-live-buys")
+def api_poly_cancel_live_buys():
+    """Kill any model BUY order still resting on a game that has already
+    started (Aug 12 2026 — the CIN@CWS YRFI filled 13 minutes after
+    first pitch and lost 3 minutes later).
+
+    Every model buy is a PRE-GAME bet. Once the game is live our resting
+    bid is a stale quote against people watching the field, and the only
+    counterparty who wants it is one dumping a loser — the worst possible
+    fill, by construction. Orders carry GTD=first pitch, but the re-peg
+    used to ECHO that expiry when re-creating an order, so a single empty
+    SDK field turned it good-till-canceled. Both holes are fixed; this
+    sweeps the ones already loose and stands as a permanent net.
+
+    BUYS ONLY — the harvest's SELL orders rest through the game ON
+    PURPOSE (in-play swings are their best fills, GTD event_start+7h).
+    Cancelling those would break the take-profit arm.
+
+    Same three gates as reset-sells: BUY intent, AUTOMATIC flag (the
+    app's own orders are MANUAL, so a hand-placed bid can never be
+    touched), and the slug must belong to one of our own model picks
+    whose game has started. Shared-secret + `&dry=1`."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    dry = request.args.get("dry") == "1"
+    try:
+        sb, client = get_supabase(), get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    now = datetime.now(timezone.utc)
+    owner = _kalshi_owner_uid()
+    live: dict = {}
+    try:
+        rows = (sb.table("bot_picks")
+                .select("event_name,market_type,event_start,signal_blob")
+                .eq("asked_by", owner).eq("status", "pending")
+                .lt("event_start", now.isoformat())
+                .gte("event_start", (now - timedelta(hours=12)).isoformat())
+                .limit(500).execute().data) or []
+        for r in rows:
+            b = r.get("signal_blob") or {}
+            if not (b.get("autobet") or b.get("whiff_autobet")
+                    or b.get("ou_trader")):
+                continue
+            slug = b.get("pmm_slug") or (
+                (b.get("execution") or {}).get("pmm_slug")
+                if isinstance(b.get("execution"), dict) else None)
+            if slug:
+                live[slug] = {"event": r.get("event_name"),
+                              "mt": r.get("market_type"),
+                              "start": r.get("event_start")}
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"picks: {e}"}), 500
+    orders = _pmm_open_orders_raw(client)
+    if orders is None:
+        return jsonify({"ok": False, "error": "order read failed"}), 503
+    killed, failed, skipped = [], [], 0
+    for o in orders:
+        if "BUY" not in (o.get("intent") or ""):
+            continue                    # sells rest through the game
+        m = live.get(o.get("slug"))
+        if not o.get("auto") or not m:
+            skipped += 1
+            continue
+        row = {"slug": o["slug"], "event": m["event"], "mt": m["mt"],
+               "start": m["start"], "qty": o.get("qty"),
+               "leaves": o.get("leaves"), "tif": o.get("tif"),
+               "good_till": o.get("good_till")}
+        if dry:
+            killed.append(dict(row, dry=True))
+            continue
+        try:
+            client.orders.cancel(o["id"], {"marketSlug": o["slug"]})
+            killed.append(row)
+        except Exception as e:
+            failed.append({"slug": o["slug"], "err": str(e)[:120]})
+    out = {"ok": True, "dry": dry, "open_orders": len(orders),
+           "live_slugs": len(live), "canceled": len(killed),
+           "failed": len(failed), "skipped": skipped, "detail": killed,
+           "errors": failed}
+    _probe_log(out)
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/topup")
 def api_poly_topup():
     """Raise ALREADY-PLACED model bets to the current stake (Aug 10 2026,
