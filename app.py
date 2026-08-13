@@ -6215,6 +6215,59 @@ def api_poly_fill_times():
 _TOPUP_BUDGET_S = 5.0     # wall-clock stop for LIVE top-ups (see below)
 
 
+def _cancel_live_buys_tick(sb, now) -> dict:
+    """Cancel model BUY orders resting on a game that has already started.
+    The engine behind /api/polymarket/cancel-live-buys, run every minute.
+
+    Cheap by construction: it only touches the venue when a pending model
+    pick's game has started in the last 12h, which on most ticks is a
+    short list and often empty. Never raises."""
+    res = {"swept": 0}
+    try:
+        owner = _kalshi_owner_uid()
+        if not owner:
+            return res
+        rows = (sb.table("bot_picks")
+                .select("event_name,market_type,event_start,signal_blob")
+                .eq("asked_by", owner).eq("status", "pending")
+                .lt("event_start", now.isoformat())
+                .gte("event_start", (now - timedelta(hours=12)).isoformat())
+                .limit(300).execute().data) or []
+        live: dict = {}
+        for r in rows:
+            b = r.get("signal_blob") or {}
+            if not (b.get("autobet") or b.get("whiff_autobet")
+                    or b.get("ou_trader")):
+                continue
+            slug = b.get("pmm_slug") or (
+                (b.get("execution") or {}).get("pmm_slug")
+                if isinstance(b.get("execution"), dict) else None)
+            if slug:
+                live[slug] = r.get("event_name")
+        if not live:
+            return res                     # nothing live — no venue call
+        client = get_client()
+        orders = _pmm_open_orders_raw(client)
+        if orders is None:
+            return res                     # venue dark — never act blind
+        for o in orders:
+            if "BUY" not in (o.get("intent") or ""):
+                continue                   # sells rest through the game
+            if not o.get("auto") or o.get("slug") not in live:
+                continue                   # hand-placed orders untouchable
+            try:
+                client.orders.cancel(o["id"], {"marketSlug": o["slug"]})
+                res["swept"] += 1
+                _send_fill_telegram(
+                    f"🧹 FIRST-PITCH SWEEP — {live[o['slug']]}: canceled a "
+                    f"resting buy on a game already underway (stale expiry)")
+            except Exception:
+                pass                       # already gone / venue raced us
+    except Exception as e:
+        res["err"] = str(e)[:100]
+    return res
+
+
 @app.route("/api/polymarket/probe-tif")
 def api_poly_probe_tif():
     """Enumerate every TIME_IN_FORCE literal the installed SDK knows about.
@@ -11436,6 +11489,17 @@ def api_handicapper_paperlog():
     # to the touch (shadow-only while REPEG_ENABLED=False). Runs BEFORE the
     # outbid ping so a live amend clears the outbid before it would ping.
     repeg = _repeg_tick(sb, now)
+    # FIRST-PITCH SWEEP — cancel our own model BUYs the moment their game
+    # is underway (Aug 12 2026, the CIN@CWS YRFI: bought 13 minutes into
+    # the game, lost 3 minutes later). The SDK has no start-of-game TIF —
+    # only GOOD_TILL_DATE + a timestamp — so every order's expiry is a
+    # COPY of what we believed first pitch was WHEN THE ORDER WAS PLACED.
+    # Correct the schedule afterwards (an ESPN retime, a corrected PMM
+    # listing) and the resting order keeps the stale expiry and outlives
+    # the start. Rather than trust any timestamp, we cancel on the clock
+    # ourselves. BUYS ONLY — the harvest's sells rest through the game on
+    # purpose.
+    live_swept = _cancel_live_buys_tick(sb, now)
     # OUTBID push (every 2nd minute) — the red chip's Telegram twin: a
     # resting maker order lost the touch, re-bid or take.
     outbid_warned = _outbid_alerts(sb, now)
@@ -11468,6 +11532,7 @@ def api_handicapper_paperlog():
                     "with_pick": with_pick, "new_rows": new_rows,
                     "bets_alerted": bets_alerted, "pin_stamped": pin_stamped,
                     "opener": opener_stats, "repeg": repeg,
+                    "live_swept": live_swept,
                     "harvest": harvest, "ledger": ledger,
                     "tg_flushed": tg_flushed})
 
