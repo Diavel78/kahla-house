@@ -13,13 +13,8 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 
-    <!-- Firebase Auth (compat mode) -->
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
-    <!-- html2canvas: rasterizes the betslip modal so it can be saved /
-         shared as a single PNG (the slip can grow longer than the
-         viewport when many open orders + positions stack up). ~50KB. -->
-    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
     <script>
         const FC = {
             apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
@@ -36,772 +31,108 @@
         :root {
             --bg: #0b0e13;
             --surface: #13171e;
-            --surface-2: #1a1f2b;
-            --surface-3: #1f2533;
-            --border: #1e2530;
-            --border-light: #2a3140;
-            --text: #e2e8f0;
-            --text-secondary: #8890a8;
-            --text-muted: #555d78;
-            --blue: #4a7cff;
-            --green: #22c55e;
-            --orange: #f59e0b;
-            --red: #ef4444;
-            --purple: #a855f7;
-            --blue-dim: rgba(74,124,255,0.08);
-            --green-dim: rgba(34,197,94,0.10);
-            --orange-dim: rgba(245,158,11,0.10);
-            --red-dim: rgba(239,68,68,0.10);
-            --purple-dim: rgba(168,85,247,0.10);
+            --line: #232a37;
+            --text: #e8edf5;
+            --muted: #7d8799;
+            --green: #34d399;
+            --red: #f87171;
+            --cyan: #22d3ee;
         }
-
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-
+        * { box-sizing: border-box; }
+        html, body { overflow-x: hidden; }
         body {
-            font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: var(--bg);
-            color: var(--text);
-            min-height: 100vh;
-            position: relative;
+            margin: 0; background: var(--bg); color: var(--text);
+            font-family: 'DM Sans', system-ui, sans-serif;
+            -webkit-font-smoothing: antialiased;
         }
-
-        body::before {
-            content: '';
-            position: fixed;
-            inset: 0;
-            background-image:
-                linear-gradient(rgba(74,124,255,0.03) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(74,124,255,0.03) 1px, transparent 1px);
-            background-size: 60px 60px;
-            pointer-events: none;
-            z-index: 0;
+        .topbar {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--line);
         }
-
-        body::after {
-            content: '';
-            position: fixed;
-            top: -200px;
-            left: 50%;
-            transform: translateX(-50%);
-            width: 800px;
-            height: 600px;
-            background: radial-gradient(ellipse, rgba(74,124,255,0.08) 0%, transparent 70%);
-            pointer-events: none;
-            z-index: 0;
+        .nav { display: flex; gap: 16px; flex-wrap: wrap; }
+        .nav a {
+            color: var(--muted); text-decoration: none; font-size: 14px;
+            font-weight: 500;
         }
-
-        /* --- Top Bar --- */
-        .top-bar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0 24px;
-            height: 56px;
-            background: var(--surface);
-            border-bottom: 1px solid var(--border);
-            position: relative;
-            z-index: 10;
+        .nav a:hover, .nav a.on { color: var(--text); }
+        .logout {
+            background: none; border: 1px solid var(--line); color: var(--muted);
+            border-radius: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer;
+            font-family: inherit;
         }
-        .top-bar-left {
-            display: flex;
-            align-items: center;
-            gap: 16px;
-        }
-        .top-bar-logo {
-            width: 36px;
-            height: 36px;
-            background: linear-gradient(135deg, var(--blue), var(--purple));
-            border-radius: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-family: 'JetBrains Mono', monospace;
-            font-weight: 700;
-            font-size: 14px;
-            color: #fff;
-            letter-spacing: -0.5px;
-        }
-        .top-bar-title {
-            font-size: 16px;
-            font-weight: 700;
-            color: var(--text);
-            letter-spacing: -0.3px;
-        }
-        .nav-links {
-            display: flex;
-            gap: 4px;
-            margin-left: 12px;
-        }
-        .nav-link {
-            padding: 6px 14px;
-            font-size: 13px;
-            font-weight: 600;
-            color: var(--text-secondary);
-            text-decoration: none;
-            border-radius: 8px;
-            transition: all 0.15s;
-        }
-        .nav-link:hover {
-            color: var(--text);
-            background: var(--surface-2);
-        }
-        .nav-link.active {
-            color: #fff;
-            background: var(--blue);
-        }
-        .top-bar-right {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-        .status {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 11px;
-            color: var(--text-secondary);
-            min-height: 16px;
-            white-space: nowrap;
-        }
-        .status.loading { color: var(--orange); }
-        .status.error { color: var(--red); }
-        .logout-btn {
-            padding: 6px 14px;
-            background: var(--surface-2);
-            color: var(--text-secondary);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            font-size: 12px;
-            font-weight: 600;
-            font-family: 'DM Sans', sans-serif;
-            cursor: pointer;
-            transition: all 0.15s;
-        }
-        .logout-btn:hover {
-            background: var(--border);
-            color: var(--text);
-        }
-        .btn-sm {
-            padding: 6px 14px;
-            background: var(--surface-2);
-            color: var(--text-secondary);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            font-size: 13px;
-            font-weight: 600;
-            font-family: 'DM Sans', sans-serif;
-            cursor: pointer;
-            transition: all 0.15s;
-        }
-        .btn-sm:hover {
-            background: var(--border);
-            color: var(--text);
-        }
-        .btn-hide { font-size: 16px; min-width: 36px; text-align: center; }
-        .btn-hide.active { background: var(--border); }
-
-        /* --- Hide amounts mode --- */
-        body.hide-amounts .amt { visibility: hidden; position: relative; }
-        body.hide-amounts .amt::after {
-            content: '***';
-            visibility: visible;
-            position: absolute;
-            left: 0;
-            right: 0;
-        }
-        body.hide-amounts .card .amt::after { position: static; }
-        body.hide-amounts .card .amt { font-size: inherit; }
-        body.hide-amounts td.right .amt::after { text-align: right; }
-
-        /* --- Auth Gate --- */
-        #auth-gate {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            background: var(--bg);
-            position: relative;
-            z-index: 100;
-        }
-        #auth-gate .spinner-lg {
-            width: 32px;
-            height: 32px;
-            border: 3px solid var(--border);
-            border-top-color: var(--blue);
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-        }
-
-        /* --- Layout --- */
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 28px 24px;
-            position: relative;
-            z-index: 1;
-        }
-
-        /* --- Summary cards --- */
-        .cards {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 14px;
-            margin-bottom: 32px;
+        .wrap { max-width: 720px; margin: 0 auto; padding: 28px 18px 60px; }
+        .grid {
+            display: grid; gap: 14px;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
         }
         .card {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 24px;
-            transition: transform 0.2s, border-color 0.2s;
-            opacity: 0;
-            animation: fadeUp 0.5s ease forwards;
-            border-left: 3px solid var(--blue);
-            position: relative;
+            background: var(--surface); border: 1px solid var(--line);
+            border-radius: 16px; padding: 20px 18px;
         }
-        .card.card-pnl { border-left-color: var(--green); }
-        .card.card-pnl.neg { border-left-color: var(--red); }
-        .card.card-purple { border-left-color: var(--purple); }
-        .card:hover {
-            transform: translateY(-2px);
-            border-color: rgba(74,124,255,0.25);
+        .card.wide { grid-column: 1 / -1; }
+        .label {
+            font-size: 12px; letter-spacing: .08em; text-transform: uppercase;
+            color: var(--muted); font-weight: 600; margin-bottom: 10px;
         }
-        .card:hover.card-pnl { border-left-color: var(--green); }
-        .card:hover.card-pnl.neg { border-left-color: var(--red); }
-        .card:hover.card-purple { border-left-color: var(--purple); }
-        .card:nth-child(1) { animation-delay: 0.05s; }
-        .card:nth-child(2) { animation-delay: 0.10s; }
-        .card:nth-child(3) { animation-delay: 0.15s; }
-        .card:nth-child(4) { animation-delay: 0.20s; }
-        .card:nth-child(5) { animation-delay: 0.25s; }
-        .card:nth-child(6) { animation-delay: 0.30s; }
-        .card:nth-child(7) { animation-delay: 0.35s; }
-        .card .label {
-            font-size: 11px;
-            text-transform: uppercase;
-            letter-spacing: 0.8px;
-            color: var(--text-muted);
-            margin-bottom: 10px;
-            font-weight: 600;
-            display: flex;
-            align-items: center;
-            gap: 6px;
+        .value {
+            font-family: 'JetBrains Mono', monospace; font-weight: 700;
+            font-size: 30px; line-height: 1.1; letter-spacing: -0.02em;
         }
-        .card .label .card-icon {
-            font-size: 14px;
-            line-height: 1;
+        .card.wide .value { font-size: 40px; }
+        .pos { color: var(--green); }
+        .neg { color: var(--red); }
+        .sub { margin-top: 8px; font-size: 13px; color: var(--muted); }
+        .foot {
+            margin-top: 22px; display: flex; justify-content: space-between;
+            align-items: center; gap: 10px; font-size: 12px; color: var(--muted);
         }
-        .card .value {
-            font-size: 26px;
-            font-weight: 700;
-            color: var(--text);
-            font-family: 'JetBrains Mono', monospace;
-        }
-        .card .value.positive { color: var(--green); }
-        .card .value.negative { color: var(--red); }
-        .winrate-bar {
-            margin-top: 10px;
-            height: 4px;
-            background: var(--surface-2);
-            border-radius: 2px;
-            overflow: hidden;
-        }
-        .winrate-bar-fill {
-            height: 100%;
-            background: var(--purple);
-            border-radius: 2px;
-            transition: width 0.6s ease;
-        }
-
-        @keyframes fadeUp {
-            from { opacity: 0; transform: translateY(12px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        /* --- Tabs --- */
-        .tabs {
-            display: flex;
-            gap: 0;
-            margin-bottom: 24px;
-            border-bottom: 1px solid var(--border);
-        }
-        .tab {
-            padding: 12px 24px;
-            font-size: 15px;
-            font-weight: 600;
-            color: var(--text-secondary);
-            cursor: pointer;
-            border-bottom: 2px solid transparent;
-            transition: color 0.2s, border-color 0.2s;
-            font-family: 'DM Sans', sans-serif;
-        }
-        .tab:hover { color: var(--text); }
-        .tab.active {
-            color: #fff;
-            border-bottom-color: var(--blue);
-        }
-        .tab-count {
-            font-size: 12px;
-            background: var(--surface-3);
-            color: var(--text-secondary);
-            padding: 2px 9px;
-            border-radius: 10px;
-            margin-left: 8px;
-            font-family: 'JetBrains Mono', monospace;
-            font-weight: 600;
-        }
-        .tab.active .tab-count {
-            background: var(--blue-dim);
-            color: var(--blue);
-        }
-        .tab-panel { display: none; }
-        .tab-panel.active { display: block; }
-
-        /* --- Tables --- */
-        .section {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            margin-bottom: 32px;
-            overflow: hidden;
-        }
-        .section-header {
-            padding: 16px 20px;
-            border-bottom: 1px solid var(--border);
-            font-weight: 600;
-            font-size: 15px;
-            color: var(--text);
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        th {
-            text-align: left;
-            padding: 12px 20px;
-            font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 0.8px;
-            color: var(--text-muted);
-            border-bottom: 1px solid var(--border);
-            background: var(--surface-2);
-            font-weight: 700;
-        }
-        th.right, td.right { text-align: right; }
-        td {
-            padding: 14px 20px;
-            font-size: 14px;
-            border-bottom: 1px solid rgba(30,37,48,0.5);
-            color: var(--text);
-        }
-        td.market-name {
-            font-size: 15px;
-            font-weight: 600;
-        }
-        tr:last-child td { border-bottom: none; }
-        tr:hover td { background: var(--blue-dim); }
-        tr:nth-child(even) td { background: rgba(255,255,255,0.01); }
-        tr:nth-child(even):hover td { background: var(--blue-dim); }
-        td.mono {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 13px;
-        }
-        td.pnl-cell {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 14px;
-            font-weight: 700;
-        }
-        .positive { color: var(--green); }
-        .negative { color: var(--red); }
-        .side-yes {
-            background: rgba(34,197,94,0.12);
-            color: var(--green);
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 12px;
-            font-weight: 700;
-            font-family: 'JetBrains Mono', monospace;
-        }
-        .side-no {
-            background: rgba(239,68,68,0.12);
-            color: var(--red);
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 12px;
-            font-weight: 700;
-            font-family: 'JetBrains Mono', monospace;
-        }
-
-        /* Result badges */
-        .badge {
-            display: inline-block;
-            padding: 3px 10px;
-            border-radius: 12px;
-            font-size: 12px;
-            font-weight: 700;
-            font-family: 'JetBrains Mono', monospace;
-            letter-spacing: 0.3px;
-            line-height: 1.4;
-        }
-        .badge-win {
-            background: var(--green-dim);
-            color: var(--green);
-        }
-        .badge-loss {
-            background: var(--red-dim);
-            color: var(--red);
-        }
-        .badge-sold {
-            background: var(--blue-dim);
-            color: var(--blue);
-        }
-        .badge-push {
-            background: rgba(85,93,120,0.15);
-            color: var(--text-muted);
-        }
-
-        .empty-state {
-            padding: 48px;
-            text-align: center;
-            color: var(--text-muted);
-            font-size: 14px;
-        }
-
-        /* --- Spinner --- */
-        .spinner {
-            display: inline-block;
-            width: 14px;
-            height: 14px;
-            border: 2px solid var(--border);
-            border-top-color: var(--blue);
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-            vertical-align: middle;
-            margin-right: 6px;
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
-
-        /* --- Bet Slip Modal --- */
-        .betslip-overlay {
-            display: none;
-            position: fixed;
-            inset: 0;
-            background: rgba(0, 0, 0, 0.7);
-            z-index: 1000;
-            justify-content: center;
-            align-items: center;
-            backdrop-filter: blur(6px);
-        }
-        .betslip-overlay.open { display: flex; }
-        .betslip {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            width: 440px;
-            max-width: 92vw;
-            max-height: 85vh;
-            overflow-y: auto;
-            box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
-        }
-        .betslip-header {
-            padding: 22px 24px 16px;
-            border-bottom: 1px solid var(--border);
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-        .betslip-header h2 {
-            font-size: 16px;
-            font-weight: 700;
-            color: var(--text);
-            letter-spacing: 1.5px;
-            font-family: 'JetBrains Mono', monospace;
-        }
-        .betslip-date {
-            font-size: 12px;
-            color: var(--text-muted);
-            margin-top: 4px;
-        }
-        .betslip-close {
-            background: none;
-            border: none;
-            color: var(--text-muted);
-            font-size: 22px;
-            cursor: pointer;
-            padding: 4px 8px;
-            border-radius: 8px;
-            line-height: 1;
-            transition: all 0.15s;
-        }
-        .betslip-close:hover { background: var(--surface-2); color: var(--text); }
-        .betslip-actions { display: flex; align-items: center; gap: 8px; }
-        .betslip-share {
-            background: var(--surface-2);
-            border: 1px solid var(--border);
-            color: var(--text);
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 11px;
-            font-weight: 700;
-            letter-spacing: 0.08em;
-            padding: 6px 12px;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: all 0.15s;
-        }
-        .betslip-share:hover { background: var(--blue-dim); border-color: var(--blue); }
-        .betslip-share:disabled { opacity: 0.5; cursor: wait; }
-        /* When capturing the slip to image, expand it past the viewport
-           cap so html2canvas grabs the FULL list (otherwise you get a
-           cropped screenshot identical to the on-screen view). */
-        .betslip.capturing {
-            max-height: none !important;
-            overflow: visible !important;
-        }
-        .betslip-body { padding: 8px 0; }
-        .betslip-item {
-            padding: 14px 24px;
-            border-bottom: 1px solid rgba(30,37,48,0.5);
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-        }
-        .betslip-item:last-child { border-bottom: none; }
-        .betslip-market {
-            font-size: 14px;
-            font-weight: 600;
-            color: var(--text);
-            flex: 1;
-            min-width: 0;
-        }
-        .betslip-side {
-            font-size: 11px;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-top: 3px;
-        }
-        .betslip-side.yes { color: var(--green); }
-        .betslip-side.no { color: var(--red); }
-        .betslip-odds {
-            font-size: 16px;
-            font-weight: 700;
-            font-family: 'JetBrains Mono', monospace;
-            white-space: nowrap;
-            padding: 6px 12px;
-            border-radius: 8px;
-            background: var(--surface-2);
-            border: 1px solid var(--border);
-        }
-        .betslip-odds.fav { color: var(--orange); }
-        .betslip-odds.dog { color: var(--blue); }
-        .betslip-result {
-            font-size: 13px;
-            font-weight: 700;
-            font-family: 'JetBrains Mono', monospace;
-            letter-spacing: 0.5px;
-            white-space: nowrap;
-            padding: 6px 12px;
-            border-radius: 8px;
-            min-width: 44px;
-            text-align: center;
-        }
-        .betslip-result.win {
-            color: var(--green);
-            background: var(--green-dim);
-            border: 1px solid rgba(34,197,94,0.35);
-        }
-        .betslip-result.loss {
-            color: var(--red);
-            background: var(--red-dim);
-            border: 1px solid rgba(239,68,68,0.35);
-        }
-        .betslip-result.push {
-            color: var(--text-muted);
-            background: var(--surface-2);
-            border: 1px solid var(--border);
-        }
-        .betslip-section-label {
-            padding: 10px 24px 6px;
-            font-size: 10px;
-            font-weight: 700;
-            letter-spacing: 1.2px;
-            color: var(--text-muted);
-            font-family: 'JetBrains Mono', monospace;
-            text-transform: uppercase;
-        }
-        .betslip-footer {
-            padding: 14px 24px 18px;
-            border-top: 1px solid var(--border);
-            text-align: center;
-        }
-        .betslip-footer span {
-            font-size: 11px;
-            color: var(--text-muted);
-            letter-spacing: 1px;
-            font-family: 'JetBrains Mono', monospace;
-            font-weight: 600;
-        }
-        .betslip-empty {
-            padding: 36px 24px;
-            text-align: center;
-            color: var(--text-muted);
-            font-size: 14px;
-        }
-        .btn-betslip {
-            background: linear-gradient(135deg, var(--orange), #d97706);
-            color: var(--bg);
-            border: none;
-            font-weight: 700;
-            font-size: 13px;
-            letter-spacing: 0.3px;
-        }
-        .btn-betslip:hover {
-            background: linear-gradient(135deg, #fbbf24, var(--orange));
-        }
-
-        /* --- Responsive --- */
-        @media (max-width: 768px) {
-            .container { padding: 12px; }
-            .top-bar { padding: 8px 12px; height: auto; flex-wrap: wrap; gap: 6px; }
-            .top-bar-title { display: none; }
-            .top-bar-left { width: 100%; }
-            .top-bar-right { width: 100%; justify-content: flex-end; }
-            .nav-links { margin-left: 6px; gap: 2px; }
-            .nav-link { padding: 4px 8px; font-size: 11px; }
-            .cards { grid-template-columns: repeat(2, 1fr); gap: 8px; }
-            .card { padding: 16px; border-radius: 10px; }
-            .card .label { font-size: 10px; }
-            .card .value { font-size: 19px; }
-            .section { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 10px; }
-            table { min-width: 520px; }
-            td, th { padding: 10px 14px; font-size: 12px; white-space: nowrap; }
-            .tab { padding: 10px 16px; font-size: 13px; }
-            .top-bar-right { gap: 8px; }
-            .status { font-size: 10px; }
+        .foot a { color: var(--muted); }
+        .skel { color: var(--muted); }
+        @media (max-width: 520px) {
+            .value { font-size: 26px; }
+            .card.wide .value { font-size: 34px; }
         }
     </style>
 </head>
 <body>
-    <!-- Auth gate -->
-    <div id="auth-gate"><div class="spinner-lg"></div></div>
+    <div class="topbar">
+        <div class="nav">
+            <a href="/">Home</a>
+            <a href="/dashboard" class="on">Dashboard</a>
+            <a href="/handicapper">Pick Bot</a>
+        </div>
+        <button class="logout" onclick="doLogout()">Log out</button>
+    </div>
 
-    <div id="app" style="display:none">
-        <!-- Nav bar -->
-        <div class="top-bar">
-            <div class="top-bar-left">
-                <div class="top-bar-logo">KH</div>
-                <div class="top-bar-title">The Kahla House</div>
-                <div class="nav-links">
-                    <a href="/" class="nav-link">Home</a>
-                    <a href="/games" class="nav-link">Games</a>
-                    <a href="/dashboard" class="nav-link active">Dashboard</a>
-                    <a href="/handicapper" class="nav-link bot-only" style="display:none">Pick Bot</a>
-                </div>
+    <div class="wrap">
+        <div class="grid">
+            <div class="card wide">
+                <div class="label">Lifetime earnings</div>
+                <div class="value skel" id="vTotal">—</div>
+                <div class="sub" id="subTotal">realized + open + maker rewards</div>
             </div>
-            <div class="top-bar-right">
-                <span class="status" id="status">Loading...</span>
-                <button class="btn-sm btn-betslip" onclick="openBetSlip()">Bet Slip</button>
-                <button class="btn-sm btn-hide" id="hideBtn" onclick="toggleHide()">&#128065;</button>
-                <button class="logout-btn" onclick="doLogout()">Logout</button>
+            <div class="card">
+                <div class="label">Today</div>
+                <div class="value skel" id="vToday">—</div>
+            </div>
+            <div class="card">
+                <div class="label">Yesterday</div>
+                <div class="value skel" id="vYest">—</div>
+            </div>
+            <div class="card wide">
+                <div class="label">Maker rewards — lifetime</div>
+                <div class="value skel" id="vMaker">—</div>
+                <div class="sub" id="subMaker">liquidity reward payouts</div>
             </div>
         </div>
 
-        <div class="container">
-            <!-- Summary cards -->
-            <div class="cards" id="cards">
-                <div class="card">
-                    <div class="label"><span class="card-icon">&#x1F4B0;</span> Balance</div>
-                    <div class="value" id="card-balance">--</div>
-                </div>
-                <div class="card">
-                    <div class="label"><span class="card-icon">&#x1F4CA;</span> Open Positions</div>
-                    <div class="value" id="card-positions">--</div>
-                </div>
-                <div class="card">
-                    <div class="label"><span class="card-icon">&#x1F4BC;</span> Portfolio Value</div>
-                    <div class="value" id="card-value">--</div>
-                </div>
-                <div class="card card-pnl" id="card-today-wrap">
-                    <div class="label"><span class="card-icon">&#x2600;&#xFE0F;</span> Today's P&amp;L</div>
-                    <div class="value" id="card-today-pnl">--</div>
-                </div>
-                <div class="card card-pnl" id="card-yesterday-wrap">
-                    <div class="label"><span class="card-icon">&#x1F556;</span> Yesterday's P&amp;L</div>
-                    <div class="value" id="card-yesterday-pnl">--</div>
-                </div>
-                <div class="card card-pnl" id="card-maker-wrap">
-                    <div class="label"><span class="card-icon">&#x1F4B0;</span> Maker Rewards</div>
-                    <div class="value" id="card-maker">--</div>
-                </div>
-                <div class="card card-pnl" id="card-pnl-wrap">
-                    <div class="label"><span class="card-icon">&#x1F4C8;</span> Total P&amp;L</div>
-                    <div class="value" id="card-pnl">--</div>
-                </div>
-                <div class="card card-purple">
-                    <div class="label"><span class="card-icon">&#x1F3AF;</span> Win Rate</div>
-                    <div class="value" id="card-winrate">--</div>
-                    <div class="winrate-bar"><div class="winrate-bar-fill" id="winrate-fill" style="width:0%"></div></div>
-                </div>
-                <div class="card" id="card-clv-wrap" title="Closing Line Value: avg pp difference between your fills and PIN's no-vig closing line. Positive = sharp entries, negative = picked off. Open positions whose game has started.">
-                    <div class="label"><span class="card-icon">&#x1F4CA;</span> Avg CLV</div>
-                    <div class="value" id="card-clv">--</div>
-                    <div class="clv-meta" id="card-clv-meta" style="font-size:11px;color:var(--text-muted);margin-top:4px"></div>
-                </div>
-            </div>
-
-            <!-- Tabs -->
-            <div class="tabs">
-                <div class="tab active" data-tab="open" onclick="switchTab('open')">
-                    Open Positions <span class="tab-count" id="open-count">0</span>
-                </div>
-                <div class="tab" data-tab="closed" onclick="switchTab('closed')">
-                    Closed Positions <span class="tab-count" id="closed-count">0</span>
-                </div>
-            </div>
-
-            <!-- Open Positions tab -->
-            <div class="tab-panel active" id="panel-open">
-                <div class="section">
-                    <div id="positions-body">
-                        <div class="empty-state"><span class="spinner"></span> Loading positions...</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Closed Positions tab -->
-            <div class="tab-panel" id="panel-closed">
-                <div class="section">
-                    <div id="closed-body">
-                        <div class="empty-state"><span class="spinner"></span> Loading...</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Bet Slip Modal -->
-        <div class="betslip-overlay" id="betslip-overlay" onclick="closeBetSlipOutside(event)">
-            <div class="betslip" id="betslip">
-                <div class="betslip-header">
-                    <div>
-                        <h2>BET SLIP</h2>
-                        <div class="betslip-date" id="betslip-date"></div>
-                    </div>
-                    <div class="betslip-actions">
-                        <button class="betslip-share" id="betslip-share-btn" onclick="shareBetSlip()" title="Save / share as image">Share</button>
-                        <button class="betslip-close" onclick="closeBetSlip()">&times;</button>
-                    </div>
-                </div>
-                <div class="betslip-body" id="betslip-body">
-                    <div class="betslip-empty">No open positions</div>
-                </div>
-                <div class="betslip-footer">
-                    <span>KAHLA HOUSE</span>
-                </div>
-            </div>
+        <div class="foot">
+            <span id="stamp">loading…</span>
+            <a href="/dashboard-full">Full dashboard →</a>
         </div>
     </div>
 
-    <script>
-    // ─── Firebase Auth Guard ───
+<script>
     async function authFetch(url, options = {}) {
         const user = firebase.auth().currentUser;
         if (!user) { window.location.href = '/'; return null; }
@@ -814,559 +145,52 @@
         firebase.auth().signOut().then(() => { window.location.href = '/'; });
     }
 
-    firebase.auth().onAuthStateChanged(async user => {
-        if (!user) {
-            window.location.href = '/';
-            return;
-        }
-        // Admin-gate: /api/me returns current role; non-admins go back to landing.
+    function money(v) {
+        if (v === null || v === undefined || isNaN(v)) return '—';
+        const s = v < 0 ? '-' : '+';
+        return s + '$' + Math.abs(v).toFixed(2);
+    }
+
+    function paint(el, v, signed) {
+        const n = document.getElementById(el);
+        n.classList.remove('skel', 'pos', 'neg');
+        if (v === null || v === undefined || isNaN(v)) { n.textContent = '—'; return; }
+        n.textContent = signed ? money(v) : '$' + Number(v).toFixed(2);
+        if (signed) n.classList.add(v >= 0 ? 'pos' : 'neg');
+    }
+
+    async function load() {
         try {
-            const token = await user.getIdToken();
-            const r = await fetch('/api/me', { headers: { 'Authorization': 'Bearer ' + token } });
-            if (!r.ok) { window.location.href = '/'; return; }
-            const me = await r.json();
-            if (!me.approved || me.role !== 'admin') { window.location.href = '/'; return; }
-            if (me.role === 'admin' || me.bot_access) {
-                document.querySelectorAll('.bot-only').forEach(el => { el.style.display = ''; });
-            }
+            const tz = -new Date().getTimezoneOffset();
+            const r = await authFetch('/api/data?slim=1&tz=' + tz);
+            if (!r) return;
+            const j = await r.json();
+            if (!j.ok) { document.getElementById('stamp').textContent = 'error'; return; }
+            const s = j.summary || {};
+            paint('vTotal', s.total_pnl, true);
+            paint('vToday', s.today_pnl, true);
+            paint('vYest', s.yesterday_pnl, true);
+            paint('vMaker', s.maker_rewards, false);
+            const bal = (j.balances || {}).current_balance;
+            document.getElementById('subTotal').textContent =
+                'realized + open + maker rewards' +
+                (bal != null ? ' · balance $' + Number(bal).toFixed(2) : '') +
+                (s.open_positions != null ? ' · ' + s.open_positions + ' open' : '');
+            document.getElementById('stamp').textContent =
+                'updated ' + new Date().toLocaleTimeString();
         } catch (e) {
-            window.location.href = '/';
-            return;
+            document.getElementById('stamp').textContent = 'error';
         }
-        document.getElementById('auth-gate').style.display = 'none';
-        document.getElementById('app').style.display = '';
-        initApp();
+    }
+
+    firebase.auth().onAuthStateChanged(async user => {
+        if (!user) { window.location.href = '/'; return; }
+        const r = await authFetch('/api/me');
+        const me = r ? await r.json() : null;
+        if (!me || !me.ok || me.role !== 'admin') { window.location.href = '/'; return; }
+        load();
+        setInterval(load, 60000);
     });
-
-    // ─── App Logic ───
-    function initApp() {
-
-    const $ = id => document.getElementById(id);
-
-    let amountsHidden = localStorage.getItem('hideAmounts') === '1';
-
-    function toggleHide() {
-        amountsHidden = !amountsHidden;
-        localStorage.setItem('hideAmounts', amountsHidden ? '1' : '0');
-        document.body.classList.toggle('hide-amounts', amountsHidden);
-        $('hideBtn').classList.toggle('active', amountsHidden);
-    }
-    // expose globally for onclick
-    window.toggleHide = toggleHide;
-
-    // Apply on load
-    if (amountsHidden) {
-        document.body.classList.add('hide-amounts');
-        $('hideBtn').classList.add('active');
-    }
-
-    function fmtRaw(val, prefix) {
-        if (val === null || val === undefined) return '--';
-        prefix = prefix || '';
-        return prefix + val.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-    }
-
-    function amt(val, prefix) {
-        if (val === null || val === undefined) return '--';
-        return `<span class="amt">${fmtRaw(val, prefix)}</span>`;
-    }
-
-    function pnlClass(val) {
-        if (val === null || val === undefined) return '';
-        return val >= 0 ? 'positive' : 'negative';
-    }
-
-    function pnlAmt(val) {
-        if (val === null || val === undefined) return '--';
-        const sign = val >= 0 ? '+' : '';
-        return `<span class="amt">${sign}${fmtRaw(val, '$')}</span>`;
-    }
-
-    function sideTag(side) {
-        if (!side) return '';
-        const cls = side === 'YES' ? 'side-yes' : 'side-no';
-        return `<span class="${cls}">${side}</span>`;
-    }
-
-    function switchTab(name) {
-        document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
-        document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
-    }
-    window.switchTab = switchTab;
-
-    function renderClvCard() {
-        const el  = $('card-clv');
-        const elM = $('card-clv-meta');
-        if (!el) return;
-        const v = _lastClvAvg;
-        if (v == null || !Number.isFinite(v)) {
-            el.textContent = '--';
-            el.className = 'value';
-            if (elM) elM.textContent = (Array.isArray(_lastClv) && _lastClv.length === 0)
-                ? 'no matched bets yet' : '';
-            return;
-        }
-        const cls = v > 0 ? 'pnl-pos' : (v < 0 ? 'pnl-neg' : '');
-        el.textContent = (v > 0 ? '+' : '') + v.toFixed(2) + '%';
-        el.className = 'value ' + cls;
-        if (elM) elM.textContent = `${(_lastClv || []).length} matched bets`;
-    }
-
-    function renderCards(data) {
-        const s = data.summary;
-        const b = data.balances;
-
-        $('card-balance').innerHTML = b.current_balance !== null ? amt(b.current_balance, '$') : '--';
-        $('card-positions').textContent = s.total_positions;
-        $('card-value').innerHTML = amt(s.total_current, '$');
-
-        const todayEl = $('card-today-pnl');
-        todayEl.innerHTML = pnlAmt(s.today_pnl);
-        todayEl.className = 'value ' + pnlClass(s.today_pnl);
-        // Dynamic P&L card border colors
-        const todayWrap = $('card-today-wrap');
-        todayWrap.classList.toggle('neg', s.today_pnl !== null && s.today_pnl < 0);
-
-        const yesterdayEl = $('card-yesterday-pnl');
-        yesterdayEl.innerHTML = pnlAmt(s.yesterday_pnl);
-        yesterdayEl.className = 'value ' + pnlClass(s.yesterday_pnl);
-        const yesterdayWrap = $('card-yesterday-wrap');
-        yesterdayWrap.classList.toggle('neg', s.yesterday_pnl !== null && s.yesterday_pnl < 0);
-
-        const makerEl = $('card-maker');
-        makerEl.innerHTML = pnlAmt(s.maker_rewards || 0);
-        makerEl.className = 'value ' + pnlClass(s.maker_rewards || 0);
-        const makerWrap = $('card-maker-wrap');
-        makerWrap.classList.toggle('neg', false); // rewards are always positive
-
-        const pnlEl = $('card-pnl');
-        pnlEl.innerHTML = pnlAmt(s.total_pnl);
-        pnlEl.className = 'value ' + pnlClass(s.total_pnl);
-        const pnlWrap = $('card-pnl-wrap');
-        pnlWrap.classList.toggle('neg', s.total_pnl !== null && s.total_pnl < 0);
-
-        const wr = s.win_rate;
-        $('card-winrate').textContent = wr !== null
-            ? wr.toFixed(1) + '%'
-            : (s.resolved_total === 0 ? 'N/A' : '--');
-        $('winrate-fill').style.width = (wr !== null ? Math.min(wr, 100) : 0) + '%';
-    }
-
-    function renderPositions(positions) {
-        const el = $('positions-body');
-        $('open-count').textContent = positions.length;
-        if (!positions.length) {
-            el.innerHTML = '<div class="empty-state">No open positions</div>';
-            return;
-        }
-        // Build a slug→clv lookup so we can decorate each row inline.
-        // CLV only computes for positions whose game has started.
-        const clvBySlug = {};
-        if (Array.isArray(_lastClv)) {
-            for (const c of _lastClv) {
-                if (c.market_slug) clvBySlug[c.market_slug] = c.clv_pp;
-            }
-        }
-        const fmtClv = (v) => {
-            if (v == null || !Number.isFinite(v)) return '<span class="mono na">--</span>';
-            const cls = v > 0 ? 'pnl-pos' : (v < 0 ? 'pnl-neg' : '');
-            const s = (v > 0 ? '+' : '') + v.toFixed(1) + '%';
-            return `<span class="mono ${cls}">${s}</span>`;
-        };
-        let html = '<table><thead><tr>' +
-            '<th>Market / Pick</th>' +
-            '<th class="right">Qty</th><th class="right">Entry</th>' +
-            '<th class="right">Current</th><th class="right">P&L</th>' +
-            '<th class="right">Return %</th>' +
-            '<th class="right" title="Closing Line Value: how your fill compared to PIN\'s no-vig closing line. + = sharp, - = picked off.">CLV</th></tr></thead><tbody>';
-
-        for (const p of positions) {
-            const clv = clvBySlug[p.market_slug];
-            html += `<tr>
-                <td class="market-name">${esc(p.market_name.replace(/\s+\d{4}-\d{2}-\d{2}$/, ''))}${p.outcome ? ' &mdash; ' + esc(p.outcome) : ''}</td>
-                <td class="right mono">${p.quantity.toFixed(0)}</td>
-                <td class="right mono">${p.entry_price !== null ? amt(p.entry_price, '$') : '--'}</td>
-                <td class="right mono">${p.current_price !== null ? amt(p.current_price, '$') : '--'}</td>
-                <td class="right pnl-cell ${pnlClass(p.pnl)}">${pnlAmt(p.pnl)}</td>
-                <td class="right mono ${pnlClass(p.pnl_pct)}">${p.pnl_pct !== null ? ((p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct.toFixed(1) + '%') : '--'}</td>
-                <td class="right">${fmtClv(clv)}</td>
-            </tr>`;
-        }
-        html += '</tbody></table>';
-        el.innerHTML = html;
-    }
-
-    function renderClosed(closed) {
-        const el = $('closed-body');
-        $('closed-count').textContent = closed.length;
-        if (!closed.length) {
-            el.innerHTML = '<div class="empty-state">No closed positions yet</div>';
-            return;
-        }
-        let html = '<table><thead><tr>' +
-            '<th>Date</th><th>Market</th><th>Result</th>' +
-            '<th class="right">Qty</th><th class="right">Cost</th>' +
-            '<th class="right">P&L</th></tr></thead><tbody>';
-
-        for (const c of closed) {
-            let result = '';
-            if (c.type === 'Transfer' || c.type === 'Liquidity Program') {
-                result = '<span class="badge badge-win">Maker</span>';
-            } else if (c.type === 'Taker Fee Rebate') {
-                result = '<span class="badge badge-win">Rebate</span>';
-            } else if (c.type === 'Trade') {
-                result = '<span class="badge badge-sold">Sold</span>';
-            } else if (c.pnl !== null && c.pnl > 0) {
-                result = '<span class="badge badge-win">W</span>';
-            } else if (c.pnl !== null && c.pnl < 0) {
-                result = '<span class="badge badge-loss">L</span>';
-            } else {
-                result = '<span class="badge badge-push">Push</span>';
-            }
-            html += `<tr>
-                <td class="mono">${localTime(c.timestamp)}</td>
-                <td class="market-name">${esc(c.market)}</td>
-                <td>${result}</td>
-                <td class="right mono">${c.quantity !== null ? c.quantity.toFixed(0) : '--'}</td>
-                <td class="right mono">${c.price !== null ? amt(c.price, '$') : '--'}</td>
-                <td class="right pnl-cell ${pnlClass(c.pnl)}">${pnlAmt(c.pnl)}</td>
-            </tr>`;
-        }
-        html += '</tbody></table>';
-        el.innerHTML = html;
-    }
-
-    function esc(str) {
-        if (!str) return '';
-        const d = document.createElement('div');
-        d.textContent = str;
-        return d.innerHTML;
-    }
-
-    function localTime(utcStr) {
-        if (!utcStr) return '';
-        try {
-            const dt = new Date(utcStr.replace(' ', 'T') + 'Z');
-            if (isNaN(dt)) return utcStr;
-            return dt.toLocaleString('en-US', {
-                month: 'short', day: 'numeric',
-                hour: 'numeric', minute: '2-digit',
-                hour12: true
-            });
-        } catch (e) { return utcStr; }
-    }
-
-    // --- Bet Slip ---
-    let _lastPositions = [];
-    let _lastClosed = [];
-    let _lastOrders = [];  // open/unfilled limit orders from /api/my-orders
-    let _lastClv = [];     // closing line value per position from /api/clv
-    let _lastClvAvg = null;
-
-    function isToday(utcStr) {
-        if (!utcStr) return false;
-        try {
-            const dt = new Date(utcStr.replace(' ', 'T') + 'Z');
-            if (isNaN(dt)) return false;
-            const now = new Date();
-            return dt.getFullYear() === now.getFullYear()
-                && dt.getMonth() === now.getMonth()
-                && dt.getDate() === now.getDate();
-        } catch (e) { return false; }
-    }
-
-    function probToAmericanOdds(prob) {
-        if (prob === null || prob === undefined || prob <= 0 || prob >= 1) return null;
-        if (prob >= 0.5) {
-            return -Math.round(prob / (1 - prob) * 100);
-        } else {
-            return Math.round((1 - prob) / prob * 100);
-        }
-    }
-
-    function fmtOdds(odds) {
-        if (odds === null) return '--';
-        return odds > 0 ? '+' + odds : '' + odds;
-    }
-
-    function buildBetSlipLabel(p) {
-        const title = (p.market_name || '').replace(/\s+\d{4}-\d{2}-\d{2}$/, '');
-        const pick = p.outcome || '';
-
-        if (!pick || pick === title) {
-            return title;
-        }
-        return title + ' \u2014 ' + pick;
-    }
-
-    function openBetSlip() {
-        const overlay = $('betslip-overlay');
-        const body = $('betslip-body');
-        const dateEl = $('betslip-date');
-
-        const now = new Date();
-        dateEl.textContent = now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
-
-        const settledToday = _lastClosed.filter(c =>
-            (c.type === 'Position Resolution' || c.type === 'Trade')
-            && c.pnl !== null
-            && isToday(c.timestamp)
-        );
-
-        if (!_lastOrders.length && !_lastPositions.length && !settledToday.length) {
-            body.innerHTML = '<div class="betslip-empty">No bets today</div>';
-        } else {
-            let html = '';
-            // Open Orders — limit orders sitting in the CLOB book that
-            // haven't filled yet. Shown above held positions because
-            // these are forward-looking ("here's what I'm trying to
-            // get into") versus positions ("here's what I'm holding").
-            if (_lastOrders.length) {
-                html += '<div class="betslip-section-label">Open Orders</div>';
-                for (const o of _lastOrders) {
-                    const odds = probToAmericanOdds(o.price);
-                    const oddsStr = fmtOdds(odds);
-                    const oddsClass = odds !== null ? (odds < 0 ? 'fav' : 'dog') : '';
-                    const label = buildBetSlipLabel(o);
-                    // Show fill progress only when partial; "1/100 filled" style.
-                    const fillNote = (o.fill_pct > 0 && o.fill_pct < 100)
-                        ? ` <span style="color:var(--text-muted);font-size:11px">(${o.cum_quantity}/${o.quantity})</span>`
-                        : '';
-                    html += `<div class="betslip-item">
-                        <div class="betslip-market">${esc(label)}${fillNote}</div>
-                        <div class="betslip-odds ${oddsClass}">${oddsStr}</div>
-                    </div>`;
-                }
-            }
-            if (_lastPositions.length) {
-                html += '<div class="betslip-section-label">Pending</div>';
-                for (const p of _lastPositions) {
-                    const odds = probToAmericanOdds(p.entry_price);
-                    const oddsStr = fmtOdds(odds);
-                    const oddsClass = odds !== null ? (odds < 0 ? 'fav' : 'dog') : '';
-                    const label = buildBetSlipLabel(p);
-
-                    html += `<div class="betslip-item">
-                        <div class="betslip-market">${esc(label)}</div>
-                        <div class="betslip-odds ${oddsClass}">${oddsStr}</div>
-                    </div>`;
-                }
-            }
-            if (settledToday.length) {
-                html += '<div class="betslip-section-label">Settled Today</div>';
-                for (const c of settledToday) {
-                    const won = c.pnl !== null && c.pnl > 0;
-                    const lost = c.pnl !== null && c.pnl < 0;
-                    const resultCls = won ? 'win' : (lost ? 'loss' : 'push');
-                    const baseLabel = won ? 'W' : (lost ? 'L' : 'PUSH');
-                    const resultLabel = c.type === 'Trade' ? `Sold - ${baseLabel}` : baseLabel;
-                    // Same pretty label as Pending (game — pick) so we
-                    // don't lose which side won/lost. Falls back to the
-                    // bare market name when no team-name pick was
-                    // resolvable from the SDK metadata.
-                    const label = buildBetSlipLabel(c);
-                    const odds = probToAmericanOdds(c.entry_price);
-                    const oddsStr = fmtOdds(odds);
-                    const oddsClass = odds !== null ? (odds < 0 ? 'fav' : 'dog') : '';
-                    // Show entry odds beside the result badge when we
-                    // have them (Position Resolution always; sells when
-                    // the SDK provided a beforePosition cost basis).
-                    const oddsCell = odds !== null
-                        ? `<div class="betslip-odds ${oddsClass}" style="margin-right:8px">${oddsStr}</div>`
-                        : '';
-
-                    html += `<div class="betslip-item">
-                        <div class="betslip-market">${esc(label)}</div>
-                        <div style="display:flex;align-items:center;gap:0">
-                            ${oddsCell}
-                            <div class="betslip-result ${resultCls}">${resultLabel}</div>
-                        </div>
-                    </div>`;
-                }
-            }
-            body.innerHTML = html;
-        }
-
-        overlay.classList.add('open');
-    }
-    window.openBetSlip = openBetSlip;
-
-    function closeBetSlip() {
-        $('betslip-overlay').classList.remove('open');
-    }
-    window.closeBetSlip = closeBetSlip;
-
-    function closeBetSlipOutside(e) {
-        if (e.target === $('betslip-overlay')) closeBetSlip();
-    }
-    window.closeBetSlipOutside = closeBetSlipOutside;
-
-    // Capture the betslip modal as a PNG so it can be sent to friends
-    // without scrolling-screenshot gymnastics. On mobile we hand the
-    // image to navigator.share() (pops up iMessage / share sheet); on
-    // desktop we trigger a download. Why this is needed: the slip can
-    // grow longer than viewport once Open Orders + Pending +
-    // Settled-Today stack up — a normal screenshot crops it.
-    async function shareBetSlip() {
-        const btn  = $('betslip-share-btn');
-        const slip = $('betslip');
-        if (!slip || !window.html2canvas) return;
-
-        btn.disabled = true;
-        const origLabel = btn.textContent;
-        btn.textContent = 'Saving…';
-
-        // Hide the action buttons during capture so they don't appear
-        // in the saved image. Also expand max-height past viewport so
-        // html2canvas grabs the full content, not the scrolled view.
-        const actions = slip.querySelector('.betslip-actions');
-        const prevActionsDisplay = actions ? actions.style.display : '';
-        if (actions) actions.style.display = 'none';
-        slip.classList.add('capturing');
-
-        try {
-            // Wait for fonts so the capture isn't a fallback-typeface frame
-            // (DM Sans / JetBrains Mono load via @font-face).
-            if (document.fonts && document.fonts.ready) {
-                try { await document.fonts.ready; } catch {}
-            }
-
-            const canvas = await html2canvas(slip, {
-                backgroundColor: getComputedStyle(slip).backgroundColor || '#0d1117',
-                scale: window.devicePixelRatio > 1 ? 2 : 2,  // 2x = sharp on retina + good IG quality
-                useCORS: true,
-                logging: false,
-                // Match slip's actual scrollHeight so the WHOLE list
-                // is in the image, not just what was visible.
-                windowHeight: slip.scrollHeight + 40,
-                height: slip.scrollHeight,
-            });
-
-            const filename = 'kahla-house-betslip-' +
-                new Date().toISOString().slice(0, 10) + '.png';
-
-            // Try Web Share API (mobile primarily). canShare with files
-            // is the right capability check — bare navigator.share exists
-            // on desktop Safari but can't take an image attachment.
-            const blob = await new Promise(res => canvas.toBlob(res, 'image/png', 0.95));
-            if (blob && navigator.canShare) {
-                const file = new File([blob], filename, { type: 'image/png' });
-                if (navigator.canShare({ files: [file] })) {
-                    try {
-                        await navigator.share({
-                            files: [file],
-                            title: 'Kahla House Bet Slip',
-                            text:  'Another day of heartbreak and losses queued up!',
-                        });
-                        return;  // success, skip download fallback
-                    } catch (err) {
-                        // User cancelled — silently fall through to download.
-                        if (err && err.name !== 'AbortError') console.warn('share:', err);
-                        if (err && err.name === 'AbortError') return;
-                    }
-                }
-            }
-
-            // Desktop fallback: trigger a PNG download.
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            setTimeout(() => URL.revokeObjectURL(url), 1000);
-        } catch (err) {
-            console.error('shareBetSlip:', err);
-            alert('Could not generate image: ' + (err.message || err));
-        } finally {
-            slip.classList.remove('capturing');
-            if (actions) actions.style.display = prevActionsDisplay;
-            btn.disabled = false;
-            btn.textContent = origLabel;
-        }
-    }
-    window.shareBetSlip = shareBetSlip;
-
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') closeBetSlip();
-    });
-
-    async function loadData() {
-        const statusEl = $('status');
-        statusEl.className = 'status loading';
-        statusEl.innerHTML = '<span class="spinner"></span> Fetching data...';
-
-        try {
-            const tz = new Date().getTimezoneOffset();
-            // Fetch positions/P&L, open orders, and CLV in parallel \u2014
-            // they all hit different sources (SDK + Supabase) so no
-            // point serializing.
-            const [resp, ordersResp, clvResp] = await Promise.all([
-                authFetch('/api/data?tz=' + tz),
-                authFetch('/api/my-orders'),
-                authFetch('/api/clv'),
-            ]);
-            if (!resp) return;
-            const data = await resp.json();
-            if (!data.ok) throw new Error(data.error || 'API error');
-
-            _lastPositions = data.positions || [];
-            _lastClosed = data.closed_positions || [];
-
-            // Orders are best-effort \u2014 if the SDK call fails, log and
-            // keep going. The dashboard's positions tabs work without
-            // them; only the betslip's "Open Orders" section disappears.
-            if (ordersResp) {
-                try {
-                    const ordersData = await ordersResp.json();
-                    _lastOrders = (ordersData && ordersData.ok) ? (ordersData.orders || []) : [];
-                } catch { _lastOrders = []; }
-            } else {
-                _lastOrders = [];
-            }
-
-            // CLV is also best-effort \u2014 Supabase reads can fail or a
-            // bet may be on a market we don't track. Failures fall
-            // through to '--' in the CLV column.
-            if (clvResp) {
-                try {
-                    const clvData = await clvResp.json();
-                    if (clvData && clvData.ok) {
-                        _lastClv    = clvData.clv || [];
-                        _lastClvAvg = clvData.avg_clv_pp;
-                    } else {
-                        _lastClv = []; _lastClvAvg = null;
-                    }
-                } catch { _lastClv = []; _lastClvAvg = null; }
-            } else {
-                _lastClv = []; _lastClvAvg = null;
-            }
-
-            renderCards(data);
-            renderPositions(data.positions);
-            renderClosed(data.closed_positions || []);
-            renderClvCard();
-
-            const ts = new Date(data.timestamp);
-            if (data.errors && data.errors.length) {
-                statusEl.className = 'status error';
-                statusEl.textContent = 'Partial data \u2014 errors: ' + data.errors.join('; ');
-            } else {
-                statusEl.className = 'status';
-                statusEl.textContent = 'Updated ' + ts.toLocaleTimeString();
-            }
-        } catch (err) {
-            statusEl.className = 'status error';
-            statusEl.textContent = 'Error: ' + err.message;
-        }
-    }
-
-    // Load on page load, auto-refresh every 60 seconds
-    loadData();
-    setInterval(loadData, 60000);
-
-    } // end initApp
-    </script>
+</script>
 </body>
 </html>

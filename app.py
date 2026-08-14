@@ -889,8 +889,22 @@ def odds_page():
 
 @app.route("/dashboard")
 def dashboard():
-    """Polymarket P&L dashboard — admin only (client-side gated)."""
+    """Polymarket P&L dashboard — admin only (client-side gated).
+
+    SLIM since Aug 13 2026 (user: "sum today, sum yesterday, maker
+    rewards lifetime, and lifetime total earnings. All of the rest of
+    that I don't need"). Four numbers off `/api/data?slim=1`, which skips
+    shipping every position and closed trade to the browser. The old
+    full view — positions table, closed tab, betslip, CLV column — is
+    intact at /dashboard-full."""
     return render_template("dashboard.html")
+
+
+@app.route("/dashboard-full")
+def dashboard_full():
+    """The previous dashboard, kept whole: open positions, closed
+    positions, the shareable betslip and the CLV column."""
+    return render_template("dashboard_full.html")
 
 
 @app.route("/handicapper")
@@ -14642,6 +14656,26 @@ def api_data():
 
     for act in parsed_acts:
         act.pop("_is_close", None)
+
+    # `?slim=1` — the four numbers and nothing else (Aug 13 2026, user:
+    # "sum today, sum yesterday, maker rewards lifetime, and lifetime
+    # total earnings. All of the rest of that I don't need"). The heavy
+    # part of this response was never the math — it's shipping every
+    # position and closed trade to the browser and rendering them.
+    if request.args.get("slim") == "1":
+        return jsonify({
+            "ok": True,
+            "timestamp": now.isoformat(),
+            "summary": {
+                "today_pnl": summary.get("today_pnl"),
+                "yesterday_pnl": summary.get("yesterday_pnl"),
+                "maker_rewards": summary.get("maker_rewards"),
+                "total_pnl": summary.get("total_pnl"),
+                "open_positions": len(open_positions),
+            },
+            "balances": {"current_balance": balance},
+            "errors": errors,
+        })
 
     return jsonify({
         "ok": True,
