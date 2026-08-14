@@ -160,9 +160,15 @@
     }
 
     async function load() {
+        // Never sit silently on "loading…" — a slow or dead upstream has
+        // to say so. The activities walk can take tens of seconds on a
+        // cold container, and an unbounded await just looks broken.
+        const ctl = new AbortController();
+        const kill = setTimeout(() => ctl.abort(), 45000);
         try {
             const tz = -new Date().getTimezoneOffset();
-            const r = await authFetch('/api/data?slim=1&tz=' + tz);
+            const r = await authFetch('/api/data?slim=1&tz=' + tz,
+                                      { signal: ctl.signal });
             if (!r) return;
             const j = await r.json();
             if (!j.ok) { document.getElementById('stamp').textContent = 'error'; return; }
@@ -179,7 +185,11 @@
             document.getElementById('stamp').textContent =
                 'updated ' + new Date().toLocaleTimeString();
         } catch (e) {
-            document.getElementById('stamp').textContent = 'error';
+            document.getElementById('stamp').textContent =
+                (e && e.name === 'AbortError')
+                    ? 'timed out — retrying' : 'error — retrying';
+        } finally {
+            clearTimeout(kill);
         }
     }
 

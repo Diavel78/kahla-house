@@ -1125,7 +1125,7 @@ def _acts_from_db(sb) -> list:
         return []
 
 
-def fetch_activities(client, max_pages=40, cache_key=None):
+def fetch_activities(client, max_pages=15, cache_key=None):
     """Walk the activities feed newest-first.
 
     ⚠ THE WINDOW IS A CEILING, AND THE ACCOUNT OUTGREW IT (Aug 13 2026).
@@ -1137,10 +1137,12 @@ def fetch_activities(client, max_pages=40, cache_key=None):
     end of the window) and every page load slowed ~7× (all 20 pages come
     back full now, so it never short-circuits on eof).
 
-    Raised to 40 and CACHED, which buys headroom without making the cold
-    walk unbounded. The real fix is to persist activities to Supabase
-    incrementally and compute from there — a fixed window can only ever
-    postpone this, and at current growth 40 pages is ~8 days."""
+    Deliberately SHALLOW (15 pages) and CACHED. Depth is no longer this
+    function's job: poly_activities mirrors the feed, and the reward rows
+    — the only thing that truly needed unbounded history — are spliced in
+    from there below. Paging deeper here only bought a slower cold load;
+    at 40 pages the slim dashboard sat on "loading…" through 40
+    sequential round trips before it could paint a single number."""
     if cache_key:
         c = _cache.get(cache_key)
         if c and (_time.time() - c["ts"]) < _ACTS_CACHE_TTL:
