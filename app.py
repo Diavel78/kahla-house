@@ -995,6 +995,110 @@ def fetch_market(client, slug_or_id):
 
 
 _ACTS_CACHE_TTL = 300     # 5 min — the dashboard polls every 60s
+_ACTS_CUTOFF = "2026-03-01T00:00:00+00:00"   # same cutoff the dashboard uses
+
+
+def _act_detail(act: dict) -> dict:
+    """The type-specific payload dict hanging off an activity."""
+    for k, v in (act or {}).items():
+        if k != "type" and isinstance(v, dict):
+            return v
+    return {}
+
+
+def _act_key(act: dict) -> str:
+    """Stable identity for one activity.
+
+    Prefer the venue's own transactionId — activities are append-only
+    history, but a payload hash would mint a NEW row if any field is ever
+    revised (a status flipping to COMPLETED, say), and a duplicate here
+    double-counts money on the dashboard. The hash is only the fallback
+    for types that carry no id."""
+    d = _act_detail(act)
+    tid = d.get("transactionId") or d.get("id") or d.get("tradeId")
+    if tid:
+        return f"{act.get('type', '')}:{tid}"
+    return hashlib.sha1(
+        json.dumps(act, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _act_at(act: dict):
+    d = _act_detail(act)
+    return d.get("updateTime") or d.get("timestamp") or None
+
+
+def _acts_store(sb, acts: list) -> int:
+    """Upsert raw activities. Returns how many rows were written."""
+    rows, seen = [], set()
+    for a in acts or []:
+        k = _act_key(a)
+        if k in seen:
+            continue                       # same page can repeat a row
+        seen.add(k)
+        rows.append({"key": k, "at": _act_at(a), "type": a.get("type"),
+                     "slug": _act_detail(a).get("marketSlug"), "payload": a})
+    if not rows:
+        return 0
+    try:
+        sb.table("poly_activities").upsert(rows, on_conflict="key").execute()
+        return len(rows)
+    except Exception:
+        return 0
+
+
+def _acts_sync(sb, client, pages: int = 3) -> dict:
+    """Incremental catch-up: walk the newest pages and stop once we reach
+    activity we already hold. Normally 1 page — the feed only grows by
+    what the machine did in the last few minutes."""
+    res = {"pages": 0, "stored": 0}
+    try:
+        newest = None
+        try:
+            r = (sb.table("poly_activities").select("at")
+                 .order("at", desc=True).limit(1).execute().data) or []
+            newest = r[0]["at"] if r else None
+        except Exception:
+            pass
+        cursor = None
+        for _ in range(pages):
+            params = {"limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+            resp = client.portfolio.activities(params=params)
+            page = resp.get("activities", []) or []
+            res["pages"] += 1
+            res["stored"] += _acts_store(sb, page)
+            if not page or resp.get("eof", True) or not resp.get("nextCursor"):
+                break
+            # Caught up: this page reaches back past what we already have.
+            if newest:
+                oldest = min((str(_act_at(a) or "") for a in page),
+                             default="")
+                if oldest and oldest <= str(newest):
+                    break
+            cursor = resp.get("nextCursor")
+    except Exception as e:
+        res["err"] = str(e)[:100]
+    return res
+
+
+def _acts_from_db(sb) -> list:
+    """Every stored activity back to the dashboard's cutoff, newest-first,
+    as RAW payloads — the exact shape the live walk returns, so
+    parse_activities() cannot tell the difference."""
+    out, page = [], 0
+    while page < 40:                       # 40k ceiling, a real backstop
+        try:
+            rows = (sb.table("poly_activities").select("payload")
+                    .gte("at", _ACTS_CUTOFF).order("at", desc=True)
+                    .range(page * 1000, page * 1000 + 999).execute().data) or []
+        except Exception:
+            break
+        out.extend(r["payload"] for r in rows)
+        if len(rows) < 1000:
+            break
+        page += 1
+    return out
 
 
 def fetch_activities(client, max_pages=40, cache_key=None):
@@ -1017,6 +1121,18 @@ def fetch_activities(client, max_pages=40, cache_key=None):
         c = _cache.get(cache_key)
         if c and (_time.time() - c["ts"]) < _ACTS_CACHE_TTL:
             return c["data"]
+        # THE MIRROR IS THE SOURCE (Aug 13 2026). poly_activities holds
+        # the whole feed back to the cutoff, so history stops depending on
+        # how deep we are willing to page. Falls through to the live walk
+        # while the backfill is still running or if the table is
+        # unreachable — a thin answer beats no dashboard.
+        try:
+            db_acts = _acts_from_db(get_supabase())
+        except Exception:
+            db_acts = []
+        if db_acts:
+            _cache[cache_key] = {"data": db_acts, "ts": _time.time()}
+            return db_acts
     all_activities = []
     cursor = None
     try:
@@ -6292,6 +6408,82 @@ def _cancel_live_buys_tick(sb, now) -> dict:
     return res
 
 
+@app.route("/api/polymarket/acts-backfill")
+def api_poly_acts_backfill():
+    """Walk the activities feed BACKWARDS into poly_activities, resumably.
+
+    A serverless call can't hold the whole feed, so each call walks a
+    bounded number of pages from the stored cursor and saves where it got
+    to. Fire it repeatedly (site-curl `repeat=N`) until `done` is true.
+    Idempotent — upserts on key, so overlapping calls cost nothing."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    try:
+        pages = max(1, min(25, int(request.args.get("pages") or 12)))
+    except (TypeError, ValueError):
+        pages = 12
+    try:
+        sb, client = get_supabase(), get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    st = {}
+    try:
+        r = (sb.table("poly_activities_state").select("*")
+             .eq("id", 1).limit(1).execute().data) or []
+        st = r[0] if r else {}
+    except Exception:
+        pass
+    if st.get("backfill_done") and request.args.get("restart") != "1":
+        return jsonify({"ok": True, "done": True, "note": "already complete"})
+    cursor = None if request.args.get("restart") == "1" else st.get("backfill_cursor")
+    walked = int(st.get("pages_walked") or 0)
+    stored, done, oldest = 0, False, None
+    try:
+        for _ in range(pages):
+            params = {"limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+            resp = client.portfolio.activities(params=params)
+            page = resp.get("activities", []) or []
+            stored += _acts_store(sb, page)
+            walked += 1
+            for a in page:
+                t = str(_act_at(a) or "")
+                if t and (oldest is None or t < oldest):
+                    oldest = t
+            nxt = resp.get("nextCursor")
+            if not page or resp.get("eof", True) or not nxt:
+                done = True
+                break
+            cursor = nxt
+            if oldest and oldest < _ACTS_CUTOFF:
+                done = True               # past the dashboard's horizon
+                break
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:200],
+                        "stored": stored, "pages_walked": walked}), 502
+    try:
+        sb.table("poly_activities_state").upsert(
+            {"id": 1, "backfill_cursor": (None if done else cursor),
+             "backfill_done": done, "pages_walked": walked,
+             "updated_at": datetime.now(timezone.utc).isoformat()},
+            on_conflict="id").execute()
+    except Exception:
+        pass
+    total = None
+    try:
+        total = (sb.table("poly_activities").select("key", count="exact")
+                 .limit(1).execute()).count
+    except Exception:
+        pass
+    out = {"ok": True, "done": done, "stored_this_call": stored,
+           "pages_walked": walked, "oldest_seen": oldest, "total_rows": total}
+    _probe_log(out)
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/probe-tif")
 def api_poly_probe_tif():
     """Enumerate every TIME_IN_FORCE literal the installed SDK knows about.
@@ -11524,6 +11716,17 @@ def api_handicapper_paperlog():
     # ourselves. BUYS ONLY — the harvest's sells rest through the game on
     # purpose.
     live_swept = _cancel_live_buys_tick(sb, now)
+    # ACTIVITIES MIRROR — keep poly_activities caught up (every 5th min).
+    # Normally one page: the feed only grows by what we just did. This is
+    # what lets the dashboard read complete history locally instead of
+    # paging the venue on every load (Aug 13 2026 — the halved Maker
+    # Rewards card was rows falling off a fixed window, not lost money).
+    acts_sync = {}
+    if not now.minute % _POLY_LEDGER_MOD:
+        try:
+            acts_sync = _acts_sync(sb, get_client(), pages=3)
+        except Exception as e:
+            acts_sync = {"err": str(e)[:80]}
     # OUTBID push (every 2nd minute) — the red chip's Telegram twin: a
     # resting maker order lost the touch, re-bid or take.
     outbid_warned = _outbid_alerts(sb, now)
@@ -11556,7 +11759,7 @@ def api_handicapper_paperlog():
                     "with_pick": with_pick, "new_rows": new_rows,
                     "bets_alerted": bets_alerted, "pin_stamped": pin_stamped,
                     "opener": opener_stats, "repeg": repeg,
-                    "live_swept": live_swept,
+                    "live_swept": live_swept, "acts_sync": acts_sync,
                     "harvest": harvest, "ledger": ledger,
                     "tg_flushed": tg_flushed})
 
