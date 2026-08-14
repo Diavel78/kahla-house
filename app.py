@@ -994,7 +994,29 @@ def fetch_market(client, slug_or_id):
             return None
 
 
-def fetch_activities(client, max_pages=20):
+_ACTS_CACHE_TTL = 300     # 5 min — the dashboard polls every 60s
+
+
+def fetch_activities(client, max_pages=40, cache_key=None):
+    """Walk the activities feed newest-first.
+
+    ⚠ THE WINDOW IS A CEILING, AND THE ACCOUNT OUTGREW IT (Aug 13 2026).
+    max_pages × 100 rows is ALL the history any caller sees. At 20 pages
+    that was 2,000 activities — written when the account placed a few
+    bets a day, and roughly FOUR DAYS once the machine was running ~500
+    activities daily. Two symptoms, one cause: the dashboard's Maker
+    Rewards card silently halved (May/June/early-Aug payouts fell off the
+    end of the window) and every page load slowed ~7× (all 20 pages come
+    back full now, so it never short-circuits on eof).
+
+    Raised to 40 and CACHED, which buys headroom without making the cold
+    walk unbounded. The real fix is to persist activities to Supabase
+    incrementally and compute from there — a fixed window can only ever
+    postpone this, and at current growth 40 pages is ~8 days."""
+    if cache_key:
+        c = _cache.get(cache_key)
+        if c and (_time.time() - c["ts"]) < _ACTS_CACHE_TTL:
+            return c["data"]
     all_activities = []
     cursor = None
     try:
@@ -1010,6 +1032,8 @@ def fetch_activities(client, max_pages=20):
             cursor = response.get("nextCursor")
     except Exception as e:
         print(f"ERROR fetching activities: {e}")
+    if cache_key and all_activities:
+        _cache[cache_key] = {"data": all_activities, "ts": _time.time()}
     return all_activities
 
 
@@ -14373,7 +14397,7 @@ def api_data():
 
         activities = []
         try:
-            activities = fetch_activities(client)
+            activities = fetch_activities(client, cache_key='acts:all')
         except Exception as e:
             errors.append(f"activities: {e}")
 
@@ -14488,7 +14512,7 @@ def api_debug_deposits():
     """Show all balance changes with their reasons — helps identify maker rewards vs deposits."""
     try:
         client = get_client()
-        activities = fetch_activities(client)
+        activities = fetch_activities(client, cache_key='acts:all')
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -14721,7 +14745,7 @@ def api_debug_trades():
         return jsonify({"error": str(e)}), 500
 
     try:
-        all_acts = fetch_activities(client)
+        all_acts = fetch_activities(client, cache_key='acts:all')
     except Exception as e:
         return jsonify({"error": f"activities: {e}"}), 500
 
@@ -16615,7 +16639,7 @@ def _pmm_sync_run(dry_run: bool = True) -> dict:
     # last 48h — that's when the Pick Bot went live; anything older
     # isn't worth backfilling.
     try:
-        activities = fetch_activities(client)
+        activities = fetch_activities(client, cache_key='acts:all')
     except Exception as e:
         summary["errors"].append(f"activities fetch: {e}")
         activities = []
