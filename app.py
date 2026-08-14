@@ -1082,23 +1082,33 @@ def _acts_sync(sb, client, pages: int = 3) -> dict:
     return res
 
 
+_ACTS_DEEP_TYPES = ("ACTIVITY_TYPE_TRANSFER",
+                    "ACTIVITY_TYPE_LIQUIDITY_PROGRAM",
+                    "ACTIVITY_TYPE_TAKER_FEE_REBATE")
+
+
 def _acts_from_db(sb) -> list:
-    """Every stored activity back to the dashboard's cutoff, newest-first,
-    as RAW payloads — the exact shape the live walk returns, so
-    parse_activities() cannot tell the difference."""
-    out, page = [], 0
-    while page < 40:                       # 40k ceiling, a real backstop
-        try:
-            rows = (sb.table("poly_activities").select("payload")
-                    .gte("at", _ACTS_CUTOFF).order("at", desc=True)
-                    .range(page * 1000, page * 1000 + 999).execute().data) or []
-        except Exception:
-            break
-        out.extend(r["payload"] for r in rows)
-        if len(rows) < 1000:
-            break
-        page += 1
-    return out
+    """The rows the live walk can no longer reach: reward-type activities
+    back to the cutoff, as RAW payloads.
+
+    ⚠ DELIBERATELY NOT "everything". Serving the WHOLE feed from here
+    would be ~10k payloads ≈ 10 MB per read, and the module cache dies
+    with each serverless container — a dashboard polling every 60s would
+    pull that repeatedly and undo the entire egress diet. The old live
+    walk costs Supabase nothing, so it stays the source for trades and
+    positions, which only need recent history anyway.
+
+    Rewards are the ONLY thing that genuinely needs unbounded history
+    (they're what silently halved), and there are ~10 of them ever — a
+    few KB. Merged into the live walk by the caller, deduped on key."""
+    try:
+        rows = (sb.table("poly_activities").select("payload")
+                .in_("type", list(_ACTS_DEEP_TYPES))
+                .gte("at", _ACTS_CUTOFF)
+                .order("at", desc=True).limit(500).execute().data) or []
+        return [r["payload"] for r in rows]
+    except Exception:
+        return []
 
 
 def fetch_activities(client, max_pages=40, cache_key=None):
@@ -1121,18 +1131,6 @@ def fetch_activities(client, max_pages=40, cache_key=None):
         c = _cache.get(cache_key)
         if c and (_time.time() - c["ts"]) < _ACTS_CACHE_TTL:
             return c["data"]
-        # THE MIRROR IS THE SOURCE (Aug 13 2026). poly_activities holds
-        # the whole feed back to the cutoff, so history stops depending on
-        # how deep we are willing to page. Falls through to the live walk
-        # while the backfill is still running or if the table is
-        # unreachable — a thin answer beats no dashboard.
-        try:
-            db_acts = _acts_from_db(get_supabase())
-        except Exception:
-            db_acts = []
-        if db_acts:
-            _cache[cache_key] = {"data": db_acts, "ts": _time.time()}
-            return db_acts
     all_activities = []
     cursor = None
     try:
@@ -1148,8 +1146,19 @@ def fetch_activities(client, max_pages=40, cache_key=None):
             cursor = response.get("nextCursor")
     except Exception as e:
         print(f"ERROR fetching activities: {e}")
-    if cache_key and all_activities:
-        _cache[cache_key] = {"data": all_activities, "ts": _time.time()}
+    if cache_key:
+        # Splice in the reward rows the walk can no longer reach. Cheap
+        # (~10 rows) and it is exactly what the Maker Rewards card lost
+        # when the account outgrew the page window.
+        try:
+            seen = {_act_key(a) for a in all_activities}
+            for a in _acts_from_db(get_supabase()):
+                if _act_key(a) not in seen:
+                    all_activities.append(a)
+        except Exception:
+            pass
+        if all_activities:
+            _cache[cache_key] = {"data": all_activities, "ts": _time.time()}
     return all_activities
 
 
