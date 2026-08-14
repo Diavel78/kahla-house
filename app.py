@@ -1102,6 +1102,45 @@ _ACTS_DEEP_TYPES = ("ACTIVITY_TYPE_TRANSFER",
                     "ACTIVITY_TYPE_TAKER_FEE_REBATE")
 
 
+def _maker_rewards_split(sb) -> dict:
+    """Real liquidity earnings vs one-off account credits.
+
+    ⚠ THE CARD HAS ALWAYS CONFLATED THESE (found Aug 13 2026 once the
+    mirror gave us the descriptions). Both arrive as the same activity
+    type; only the description separates them. Of $105.75 sitting in the
+    reward bucket, $79.20 was Polymarket compensating for World Cup
+    downtime and a stuck position — goodwill, paid once, unrelated to
+    providing liquidity. Only $26.55 was earned.
+
+    That distinction is load-bearing, not cosmetic: the whole
+    scratch-on-betting/income-from-rent thesis is priced off the reward
+    rate, and a number inflated 4× by remediation credits would make the
+    machine look like it earns three times what it does."""
+    out = {"rewards": 0.0, "credits": 0.0, "n_rewards": 0, "n_credits": 0}
+    try:
+        rows = (sb.table("poly_activities").select("payload")
+                .in_("type", list(_ACTS_DEEP_TYPES))
+                .order("at", desc=True).limit(500).execute().data) or []
+    except Exception:
+        return out
+    for r in rows:
+        d = _act_detail(r.get("payload") or {})
+        try:
+            amt = float(((d.get("amount") or {}).get("value")) or 0)
+        except (TypeError, ValueError):
+            continue
+        desc = (d.get("description") or "").lower()
+        if "liquidity reward" in desc:
+            out["rewards"] += amt
+            out["n_rewards"] += 1
+        else:
+            out["credits"] += amt
+            out["n_credits"] += 1
+    out["rewards"] = round(out["rewards"], 2)
+    out["credits"] = round(out["credits"], 2)
+    return out
+
+
 def _acts_from_db(sb) -> list:
     """The rows the live walk can no longer reach: reward-type activities
     back to the cutoff, as RAW payloads.
@@ -14680,13 +14719,27 @@ def api_data():
     # part of this response was never the math — it's shipping every
     # position and closed trade to the browser and rendering them.
     if request.args.get("slim") == "1":
+        try:
+            _mrs = _maker_rewards_split(get_supabase())
+        except Exception:
+            _mrs = {"rewards": summary.get("maker_rewards"), "credits": None,
+                    "n_rewards": None}
+        if not _mrs.get("rewards") and not _mrs.get("n_rewards"):
+            # Mirror not populated yet — fall back to the old combined
+            # figure rather than showing a confident zero.
+            _mrs = {"rewards": summary.get("maker_rewards"), "credits": None,
+                    "n_rewards": None}
         return jsonify({
             "ok": True,
             "timestamp": now.isoformat(),
             "summary": {
                 "today_pnl": summary.get("today_pnl"),
                 "yesterday_pnl": summary.get("yesterday_pnl"),
-                "maker_rewards": summary.get("maker_rewards"),
+                # Real liquidity earnings only — remediation/promo credits
+                # are reported separately (see _maker_rewards_split).
+                "maker_rewards": _mrs.get("rewards"),
+                "account_credits": _mrs.get("credits"),
+                "n_rewards": _mrs.get("n_rewards"),
                 "total_pnl": summary.get("total_pnl"),
                 "open_positions": len(open_positions),
             },

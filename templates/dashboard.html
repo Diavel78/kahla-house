@@ -177,6 +177,13 @@
             paint('vToday', s.today_pnl, true);
             paint('vYest', s.yesterday_pnl, true);
             paint('vMaker', s.maker_rewards, false);
+            // Remediation / promo credits are NOT liquidity earnings —
+            // they were inflating this card ~4x before the split.
+            const cr = s.account_credits;
+            document.getElementById('subMaker').textContent =
+                'liquidity reward payouts'
+                + (s.n_rewards != null ? ' · ' + s.n_rewards + ' payments' : '')
+                + (cr ? ' · plus $' + Number(cr).toFixed(2) + ' account credits' : '');
             const bal = (j.balances || {}).current_balance;
             document.getElementById('subTotal').textContent =
                 'realized + open + maker rewards' +
