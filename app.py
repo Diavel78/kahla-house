@@ -9,6 +9,7 @@ import os
 import re
 import json
 import math
+import hashlib
 import random as _random
 import secrets
 import functools
