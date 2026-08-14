@@ -6433,6 +6433,17 @@ def _cancel_live_buys_tick(sb, now) -> dict:
     return res
 
 
+def _acts_state_save(sb, cursor, done, walked):
+    try:
+        sb.table("poly_activities_state").upsert(
+            {"id": 1, "backfill_cursor": cursor, "backfill_done": bool(done),
+             "pages_walked": int(walked),
+             "updated_at": datetime.now(timezone.utc).isoformat()},
+            on_conflict="id").execute()
+    except Exception:
+        pass
+
+
 @app.route("/api/polymarket/acts-backfill")
 def api_poly_acts_backfill():
     """Walk the activities feed BACKWARDS into poly_activities, resumably.
@@ -6445,10 +6456,15 @@ def api_poly_acts_backfill():
     want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
+    # ⚠ SMALL BATCHES, AND SAVE AFTER EVERY PAGE. The first version
+    # walked 20 pages before writing anything and never completed: the
+    # call outran the function limit, so nothing was stored, the cursor
+    # bookmark never advanced, and no probe row was written either — it
+    # failed completely silently. Same lesson as the top-up endpoint.
     try:
-        pages = max(1, min(25, int(request.args.get("pages") or 12)))
+        pages = max(1, min(10, int(request.args.get("pages") or 4)))
     except (TypeError, ValueError):
-        pages = 12
+        pages = 4
     try:
         sb, client = get_supabase(), get_client()
     except Exception as e:
@@ -6483,20 +6499,18 @@ def api_poly_acts_backfill():
                 done = True
                 break
             cursor = nxt
+            # Bookmark after EVERY page, not at the end — a call that
+            # dies mid-walk must not lose the pages it already stored.
+            _acts_state_save(sb, cursor, False, walked)
             if oldest and oldest < _ACTS_CUTOFF:
                 done = True               # past the dashboard's horizon
                 break
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)[:200],
-                        "stored": stored, "pages_walked": walked}), 502
-    try:
-        sb.table("poly_activities_state").upsert(
-            {"id": 1, "backfill_cursor": (None if done else cursor),
-             "backfill_done": done, "pages_walked": walked,
-             "updated_at": datetime.now(timezone.utc).isoformat()},
-            on_conflict="id").execute()
-    except Exception:
-        pass
+        out = {"ok": False, "error": str(e)[:200], "stored": stored,
+               "pages_walked": walked}
+        _probe_log(out)                   # failures must leave a trace too
+        return jsonify(out), 502
+    _acts_state_save(sb, (None if done else cursor), done, walked)
     total = None
     try:
         total = (sb.table("poly_activities").select("key", count="exact")
