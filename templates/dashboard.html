@@ -112,12 +112,14 @@
                 <div class="sub" id="subTotal">realized + open + maker rewards</div>
             </div>
             <div class="card">
-                <div class="label">Today</div>
+                <div class="label">Today's games</div>
                 <div class="value skel" id="vToday">—</div>
+                <div class="sub">settled · AZ</div>
             </div>
             <div class="card">
-                <div class="label">Yesterday</div>
+                <div class="label">Last night</div>
                 <div class="value skel" id="vYest">—</div>
+                <div class="sub">settled · AZ</div>
             </div>
             <div class="card wide">
                 <div class="label">Maker rewards — lifetime</div>
@@ -166,8 +168,9 @@
         const ctl = new AbortController();
         const kill = setTimeout(() => ctl.abort(), 45000);
         try {
-            const tz = -new Date().getTimezoneOffset();
-            const r = await authFetch('/api/data?slim=1&tz=' + tz,
+            // No tz param: the day cards bucket by Arizona game day
+            // server-side. This machine has one timezone.
+            const r = await authFetch('/api/data?slim=1',
                                       { signal: ctl.signal });
             if (!r) return;
             const j = await r.json();

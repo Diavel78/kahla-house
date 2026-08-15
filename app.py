@@ -1102,6 +1102,47 @@ _ACTS_DEEP_TYPES = ("ACTIVITY_TYPE_TRANSFER",
                     "ACTIVITY_TYPE_TAKER_FEE_REBATE")
 
 
+def _gameday_pnl(sb) -> dict:
+    """Today / yesterday by ARIZONA GAME DAY, from the venue ledger.
+
+    ⚠ NOT by payout timestamp, and NOT by the browser's timezone (Aug 15
+    2026). The dashboard used to bucket on when Polymarket credited the
+    money, so a Friday night game resolving at 12:20am counted as
+    Saturday — at 7am Saturday, with nothing played, the card read
+    +$7.22 "today". It also asked the browser what timezone it was in.
+    Arizona is the only timezone this machine has ever needed; MST, no
+    DST, hardcoded.
+
+    Settled bets only — an unplayed game's `realized_usd` is just the
+    cash deployed, so counting it would show tonight's slate as a loss
+    before first pitch."""
+    out = {"today": None, "yesterday": None}
+    try:
+        az = ZoneInfo("America/Phoenix")
+        today = datetime.now(timezone.utc).astimezone(az).date()
+        rows = (sb.table("bot_picks").select("event_start,poly_pnl")
+                .gte("event_start",
+                     (datetime.now(timezone.utc) - timedelta(days=3)).isoformat())
+                .limit(1000).execute().data) or []
+        acc = {}
+        for r in rows:
+            p = r.get("poly_pnl") or {}
+            if not p.get("final"):
+                continue
+            try:
+                d = datetime.fromisoformat(
+                    str(r["event_start"]).replace("Z", "+00:00")
+                ).astimezone(az).date()
+                acc[d] = acc.get(d, 0.0) + float(p.get("realized_usd") or 0)
+            except (TypeError, ValueError, KeyError):
+                continue
+        out["today"] = round(acc.get(today, 0.0), 2)
+        out["yesterday"] = round(acc.get(today - timedelta(days=1), 0.0), 2)
+    except Exception:
+        pass
+    return out
+
+
 def _maker_rewards_split(sb) -> dict:
     """Real liquidity earnings vs one-off account credits.
 
@@ -14720,6 +14761,10 @@ def api_data():
     # position and closed trade to the browser and rendering them.
     if request.args.get("slim") == "1":
         try:
+            _gd = _gameday_pnl(get_supabase())
+        except Exception:
+            _gd = {"today": None, "yesterday": None}
+        try:
             _mrs = _maker_rewards_split(get_supabase())
         except Exception:
             _mrs = {"rewards": summary.get("maker_rewards"), "credits": None,
@@ -14733,8 +14778,12 @@ def api_data():
             "ok": True,
             "timestamp": now.isoformat(),
             "summary": {
-                "today_pnl": summary.get("today_pnl"),
-                "yesterday_pnl": summary.get("yesterday_pnl"),
+                # AZ GAME DAY, not payout timestamp (see _gameday_pnl).
+                "today_pnl": (_gd.get("today") if _gd.get("today") is not None
+                              else summary.get("today_pnl")),
+                "yesterday_pnl": (_gd.get("yesterday")
+                                  if _gd.get("yesterday") is not None
+                                  else summary.get("yesterday_pnl")),
                 # Real liquidity earnings only — remediation/promo credits
                 # are reported separately (see _maker_rewards_split).
                 "maker_rewards": _mrs.get("rewards"),
