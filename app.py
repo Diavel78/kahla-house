@@ -1574,6 +1574,61 @@ def _maker_rewards_split(sb) -> dict:
     return out
 
 
+_DASH_CACHE_MAX_AGE_S = 900     # 15 min — the tick refreshes every 5
+
+
+def _dash_cache_refresh(sb, client) -> dict:
+    """Compute the dashboard summary ONCE on the tick and park the result.
+
+    The slim dashboard needed total_pnl, which needed a 15-page sequential
+    walk of the activities feed on every page load. Reading the feed from
+    the mirror instead is explicitly rejected (whole feed ≈ 10 MB per read;
+    it put Supabase egress at 138% of quota and took the site down). So the
+    page reads NEITHER: the tick already walks the feed, so it now also
+    computes the summary and stores a few hundred bytes here.
+
+    Never raises — a stale cache degrades the dashboard to the live walk,
+    which is merely slow, not broken."""
+    res = {"ok": False}
+    try:
+        acts = fetch_activities(client, cache_key='acts:all')
+        parsed = parse_activities(client, acts)
+        parsed = [a for a in parsed
+                  if a.get("timestamp", "") >= "2026-03-01"]
+        positions = fetch_positions(client)
+        rows = [_position_row_fast(sl, p) for sl, p in positions]
+        summary = compute_summary(rows, parsed, tz_offset_minutes=0)
+        bal = parse_balances(fetch_balances(client)) or {}
+        (sb.table("poly_dash_cache").upsert({
+            "id": 1, "summary": summary,
+            "balance": bal.get("current_balance"),
+            "open_count": len([p for p in rows if not p.get("expired")]),
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+            "note": "ok"}).execute())
+        res = {"ok": True, "acts": len(parsed)}
+    except Exception as e:
+        res["err"] = f"{type(e).__name__}: {e}"[:160]
+    return res
+
+
+def _dash_cache_read(sb):
+    """Fresh cached summary, or None. None → caller does the live walk."""
+    try:
+        r = (sb.table("poly_dash_cache").select("*")
+             .eq("id", 1).limit(1).execute().data) or []
+        if not r:
+            return None
+        row = r[0]
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(
+            str(row["computed_at"]).replace("Z", "+00:00"))).total_seconds()
+        if age > _DASH_CACHE_MAX_AGE_S:
+            return None
+        row["age_s"] = int(age)
+        return row
+    except Exception:
+        return None
+
+
 def _acts_from_db(sb) -> list:
     """The rows the live walk can no longer reach: reward-type activities
     back to the cutoff, as RAW payloads.
@@ -12909,6 +12964,12 @@ def api_handicapper_paperlog():
             acts_sync = _acts_sync(sb, get_client(), pages=3)
         except Exception as e:
             acts_sync = {"err": str(e)[:80]}
+        # …and precompute the dashboard summary while the feed is hot, so
+        # the page never pays for the walk itself.
+        try:
+            acts_sync["dash"] = _dash_cache_refresh(sb, get_client())
+        except Exception as e:
+            acts_sync["dash"] = {"err": str(e)[:80]}
     # OUTBID push (every 2nd minute) — the red chip's Telegram twin: a
     # resting maker order lost the touch, re-bid or take.
     outbid_warned = _outbid_alerts(sb, now)
@@ -15848,6 +15909,60 @@ def api_data():
     enriched = []
     parsed_acts = []
     balance = 0.0
+
+    # FAST PATH: the slim dashboard answers entirely from the DB when the
+    # tick's cached summary is fresh — no venue calls at all. Before this,
+    # the page made ~215 sequential round trips to Polymarket (two per
+    # position via enrich_positions, plus a 15-page activities walk) to
+    # render four numbers.
+    if request.args.get("slim") == "1":
+        _c = _dash_cache_read(get_supabase())
+        if _c:
+            _s = _c.get("summary") or {}
+            try:
+                _gd = _gameday_pnl(get_supabase())
+            except Exception:
+                _gd = {"today": None, "yesterday": None}
+            try:
+                _mrs = _maker_rewards_split(get_supabase())
+            except Exception:
+                _mrs = {"rewards": _s.get("maker_rewards"), "credits": None,
+                        "n_rewards": None}
+            try:
+                _rw = _gameday_rewards(get_supabase())
+            except Exception:
+                _rw = {"today": None, "yesterday": None}
+            if not _mrs.get("rewards") and not _mrs.get("n_rewards"):
+                _mrs = {"rewards": _s.get("maker_rewards"), "credits": None,
+                        "n_rewards": None}
+            return jsonify({
+                "ok": True, "timestamp": now.isoformat(), "cached": True,
+                "cache_age_s": _c.get("age_s"),
+                "summary": {
+                    "today_pnl": (_gd.get("today") if _gd.get("today") is not None
+                                  else _s.get("today_pnl")),
+                    "yesterday_pnl": (_gd.get("yesterday")
+                                      if _gd.get("yesterday") is not None
+                                      else _s.get("yesterday_pnl")),
+                    "maker_rewards": _mrs.get("rewards"),
+                    "account_credits": _mrs.get("credits"),
+                    "n_rewards": _mrs.get("n_rewards"),
+                    "today_rewards": _rw.get("today"),
+                    "yesterday_rewards": _rw.get("yesterday"),
+                    "rewards_tz_note": "reward days are ET; P&L days are AZ",
+                    "today_all_in": _all_in(
+                        _gd.get("today"), (_rw.get("today") or {}).get("total")),
+                    "yesterday_all_in": _all_in(
+                        _gd.get("yesterday"),
+                        (_rw.get("yesterday") or {}).get("total")),
+                    "total_pnl": _s.get("total_pnl"),
+                    "open_positions": _c.get("open_count"),
+                },
+                "balances": {"current_balance": _c.get("balance")},
+                "positions": [], "closed_positions": [], "activities": [],
+                "errors": [],
+            })
+        # cache cold/stale → fall through to the live walk below
 
     try:
         client = get_client()
