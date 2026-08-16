@@ -112,14 +112,14 @@
                 <div class="sub" id="subTotal">realized + open + maker rewards</div>
             </div>
             <div class="card">
-                <div class="label">Today's games</div>
+                <div class="label">Today — all in</div>
                 <div class="value skel" id="vToday">—</div>
-                <div class="sub">settled · AZ</div>
+                <div class="sub" id="subToday">settled · AZ</div>
             </div>
             <div class="card">
-                <div class="label">Last night</div>
+                <div class="label">Last night — all in</div>
                 <div class="value skel" id="vYest">—</div>
-                <div class="sub">settled · AZ</div>
+                <div class="sub" id="subYest">settled · AZ</div>
             </div>
             <div class="card wide">
                 <div class="label">Maker rewards — lifetime</div>
@@ -177,9 +177,28 @@
             if (!j.ok) { document.getElementById('stamp').textContent = 'error'; return; }
             const s = j.summary || {};
             paint('vTotal', s.total_pnl, true);
-            paint('vToday', s.today_pnl, true);
-            paint('vYest', s.yesterday_pnl, true);
+            // ALL-IN = trading + liquidity rent (pending included). Rent is
+            // most of what this machine earns, so a day card showing only
+            // trading was telling less than half the story. Falls back to
+            // bare trading P&L if the incentive mirror hasn't synced.
+            paint('vToday', s.today_all_in != null ? s.today_all_in : s.today_pnl, true);
+            paint('vYest', s.yesterday_all_in != null ? s.yesterday_all_in : s.yesterday_pnl, true);
             paint('vMaker', s.maker_rewards, false);
+            // Show the split, so "all in" is never a black box: what the
+            // bets did vs what the resting orders earned, and how much of
+            // that rent is still PENDING at the venue.
+            const dayNote = (pnl, rw) => {
+                if (!rw) return 'settled · AZ';
+                const bits = ['bets ' + (pnl == null ? '—'
+                              : (pnl < 0 ? '-$' : '+$') + Math.abs(pnl).toFixed(2))];
+                bits.push('rent +$' + Number(rw.total || 0).toFixed(2));
+                if (rw.pending) bits.push('$' + Number(rw.pending).toFixed(2) + ' pending');
+                return bits.join(' · ');
+            };
+            document.getElementById('subToday').textContent =
+                dayNote(s.today_pnl, s.today_rewards);
+            document.getElementById('subYest').textContent =
+                dayNote(s.yesterday_pnl, s.yesterday_rewards);
             // Remediation / promo credits are NOT liquidity earnings —
             // they were inflating this card ~4x before the split.
             const cr = s.account_credits;

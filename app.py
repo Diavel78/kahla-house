@@ -1384,6 +1384,39 @@ def _incentive_day_rewards(sb, days: int = 3) -> dict:
     return out
 
 
+def _all_in(pnl, rewards):
+    """Trading P&L + liquidity rent for a day, or None if we don't have
+    the trading half. Rewards alone are not a day's result."""
+    if pnl is None:
+        return None
+    return round(float(pnl) + float(rewards or 0), 2)
+
+
+def _gameday_rewards(sb) -> dict:
+    """{'today': {...}, 'yesterday': {...}} liquidity rewards, PENDING
+    included, for the day cards.
+
+    ⚠ TIMEZONE, stated rather than fudged: the venue stamps each reward
+    row with an EASTERN calendar day; this project reports ARIZONA game
+    days. For an evening slate the two line up, but they are not the same
+    unit and a late-night ET rollover will land a reward on the next ET
+    day while the game stays on tonight's AZ card. We match the dates
+    directly and LABEL it, instead of shifting by a guess."""
+    out = {"today": None, "yesterday": None}
+    try:
+        az = ZoneInfo("America/Phoenix")
+        today = datetime.now(timezone.utc).astimezone(az).date()
+        days = _incentive_day_rewards(sb, days=4)
+        for label, d in (("today", today),
+                         ("yesterday", today - timedelta(days=1))):
+            b = days.get(d.isoformat())
+            out[label] = b or {"total": 0.0, "paid": 0.0,
+                               "pending": 0.0, "skipped": 0.0}
+    except Exception:
+        pass
+    return out
+
+
 @app.route("/api/polymarket/incentives-sync")
 def api_poly_incentives_sync():
     """Manual/cron trigger for the incentive mirror. Shared-secret."""
@@ -15470,6 +15503,10 @@ def api_data():
         except Exception:
             _mrs = {"rewards": summary.get("maker_rewards"), "credits": None,
                     "n_rewards": None}
+        try:
+            _rw = _gameday_rewards(get_supabase())
+        except Exception:
+            _rw = {"today": None, "yesterday": None}
         if not _mrs.get("rewards") and not _mrs.get("n_rewards"):
             # Mirror not populated yet — fall back to the old combined
             # figure rather than showing a confident zero.
@@ -15490,6 +15527,24 @@ def api_data():
                 "maker_rewards": _mrs.get("rewards"),
                 "account_credits": _mrs.get("credits"),
                 "n_rewards": _mrs.get("n_rewards"),
+                # LIQUIDITY REWARDS PER DAY, INCLUDING PENDING (Aug 16
+                # 2026). Rent earned that day, whether or not the venue
+                # has credited it yet — waiting for the PAID lump means
+                # a day's economics stay unknown for 5-7 business days,
+                # which is how the reward rate went unmeasured for weeks.
+                # ⚠ keyed on the venue's EASTERN reward date; the P&L
+                # beside it is an ARIZONA game day. Close for an evening
+                # slate, NOT identical — labelled, never silently shifted.
+                "today_rewards": _rw.get("today"),
+                "yesterday_rewards": _rw.get("yesterday"),
+                "rewards_tz_note": "reward days are ET; P&L days are AZ",
+                # trading + rent, the number that says whether the day
+                # actually made money
+                "today_all_in": _all_in(_gd.get("today"),
+                                        (_rw.get("today") or {}).get("total")),
+                "yesterday_all_in": _all_in(
+                    _gd.get("yesterday"),
+                    (_rw.get("yesterday") or {}).get("total")),
                 "total_pnl": summary.get("total_pnl"),
                 "open_positions": len(open_positions),
             },
