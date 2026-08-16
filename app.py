@@ -1211,7 +1211,7 @@ def _incentives_sync(sb, client) -> dict:
         # markets have no incentive programs at all, while our own earnings
         # feed showed props earning. Walk every page. Public endpoint (no
         # auth required), rate limit 5 rps.
-        payload, token, pages = [], None, 0
+        payload, token, pages, last_size = [], None, 0, -1
         while pages < _INCENTIVE_MAX_PAGES:
             q = {"pageSize": 200}
             if token:
@@ -1244,8 +1244,14 @@ def _incentives_sync(sb, client) -> dict:
                     })
             pages += 1
             token = cat.get("nextPageToken") or cat.get("next_page_token")
-            if not token:
+            # The venue returns a nextPageToken even at the end of the
+            # catalog, so trusting it alone spins the full page cap over
+            # the same 100 markets (observed: 60 pages, 318 rows, zero new).
+            # Stop when a page adds nothing new.
+            grew = len({(p["market_slug"], p["program_id"]) for p in payload})
+            if not token or grew == last_size:
                 break
+            last_size = grew
             _time.sleep(0.21)      # 5 rps limit
         res["pages"] = pages
         res["truncated"] = bool(token)   # hit the page cap with more to come
@@ -6586,11 +6592,14 @@ def api_poly_incentive_config():
         except Exception as e:
             entry["market_error"] = f"{type(e).__name__}: {e}"[:200]
         try:
-            entry["incentive_by_slug"] = _trim(client.get(
-                "/v1/incentives", query={"marketSlug": s},
+            # `symbols` is the documented filter (marketSlug is the
+            # EARNINGS param and is silently ignored here — it returned the
+            # whole catalog and briefly looked like "props have no program")
+            entry["incentive_by_symbols"] = _trim(client.get(
+                "/v1/incentives", query={"symbols": s},
                 authenticated=True), 1500)
         except Exception as e:
-            entry["incentive_by_slug"] = f"{type(e).__name__}: {e}"[:200]
+            entry["incentive_by_symbols"] = f"{type(e).__name__}: {e}"[:200]
         out["markets"][s] = entry
 
     _probe_log(out)
