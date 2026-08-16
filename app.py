@@ -6414,18 +6414,22 @@ def api_poly_incentives():
         except Exception as e:
             out["raw"][label] = {"error": f"{type(e).__name__}: {e}"[:300]}
 
+    # Run #3 (id=94) read the signature and found the whole bug:
+    #     def get(self, path, *, query=None, authenticated=False)
+    # `authenticated` DEFAULTS TO FALSE — runs #1-2 sent an UNSIGNED
+    # request, which is exactly the "User must be authenticated" we got.
+    # (Same reason the paged attempt TypeError'd: the kwarg is `query`,
+    # not `params`.) Send it signed.
     for p in paths:
-        _record(f"client.get {p}", lambda p=p: client.get(p))
-    # the SDK's signed helper may want params; try one paged shape too
-    _record("client.get paged",
-            lambda: client.get(paths[0], params={"limit": 100}))
-    http = getattr(client, "_http", None)
-    if http is not None:
-        for bname, bval in bases.items():
-            if not bval.startswith("http"):
-                continue
-            _record(f"_http {bname}",
-                    lambda b=bval: http.get(b.rstrip("/") + paths[0]))
+        _record(f"AUTHED {p}",
+                lambda p=p: client.get(p, authenticated=True))
+    for label, q in (("limit", {"limit": 100}),
+                     ("noargs", None)):
+        _record(f"AUTHED {paths[0]} ?{label}",
+                lambda q=q: client.get(paths[0], query=q,
+                                       authenticated=True))
+    # keep one unauthenticated control so the row proves the difference
+    _record("control-unauthed", lambda: client.get(paths[0]))
 
     # ---- phase 4: HOW does a WORKING call authenticate? ----
     # Run #2 proved the route is real: /v1/incentives/earnings returns
