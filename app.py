@@ -1255,6 +1255,75 @@ def _incentives_sync(sb, client) -> dict:
             _time.sleep(0.21)      # 5 rps limit
         res["pages"] = pages
         res["truncated"] = bool(token)   # hit the page cap with more to come
+
+        # ⚠ THE UNFILTERED CATALOG DOES NOT LIST OUR MARKETS. Walking every
+        # page returns ~100 markets (politics + a few game MLs) and ZERO
+        # player-prop programs — while the earnings feed shows props paying.
+        # The programs are real and only surface via the `symbols` filter.
+        # So explicitly ask for the slugs we actually rest orders on.
+        want = set()
+        try:
+            since = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
+            er = (sb.table("poly_incentive_earnings").select("market_slug")
+                  .gte("earn_date",
+                       (datetime.now(timezone.utc).date()
+                        - timedelta(days=4)).isoformat())
+                  .limit(600).execute().data) or []
+            want.update(str(r["market_slug"]) for r in er if r.get("market_slug"))
+            bp = (sb.table("bot_picks").select("signal_blob")
+                  .gte("picked_at", since).limit(400).execute().data) or []
+            for r in bp:
+                b = r.get("signal_blob") or {}
+                s = (b.get("pmm") or {}).get("slug") or b.get("pmm_slug")
+                if s:
+                    want.add(str(s))
+        except Exception as e:
+            res["symbols_src_err"] = str(e)[:120]
+        want = sorted(want)[:400]
+        res["symbols_asked"] = len(want)
+        sym_payload, enc = [], None
+        for i in range(0, len(want), 20):
+            chunk = want[i:i + 20]
+            got = None
+            # the array encoding isn't documented; try a real list first,
+            # then comma-joined, and record which one the venue accepted
+            for mode, val in (("list", chunk), ("csv", ",".join(chunk))):
+                try:
+                    r2 = client.get("/v1/incentives", query={"symbols": val},
+                                    authenticated=True) or {}
+                    if r2.get("programs"):
+                        got, enc = r2, enc or mode
+                        break
+                except Exception:
+                    continue
+            if not got:
+                continue
+            for m in (got.get("programs") or []):
+                slug = str(m.get("marketSlug") or "").strip()
+                if not slug:
+                    continue
+                for tp in (m.get("timePeriods") or []):
+                    pid = str(tp.get("programId") or "").strip()
+                    if not pid:
+                        continue
+                    sym_payload.append({
+                        "market_slug": slug, "program_id": pid,
+                        "program_type": tp.get("programType"),
+                        "period": tp.get("period"),
+                        "starts_at": tp.get("start") or None,
+                        "ends_at": tp.get("end") or None,
+                        "reward_pool": _safe_float(tp.get("rewardPool")),
+                        "discount_factor": _safe_float(tp.get("discountFactor")),
+                        "target_size": _safe_float(tp.get("targetSize")),
+                        "status": tp.get("status"),
+                        "category": m.get("category") or None,
+                        "subcategory": m.get("subcategory") or None,
+                        "event_start": m.get("eventStartTime") or None,
+                        "synced_at": datetime.now(timezone.utc).isoformat(),
+                    })
+            _time.sleep(0.21)          # 5 rps
+        res["symbols_encoding"] = enc
+        payload.extend(sym_payload)
         # de-dup within the batch: upsert rejects repeated keys in one call
         uniq = {}
         for p in payload:
