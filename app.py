@@ -6378,37 +6378,54 @@ def api_poly_incentives():
     if not out["sdk"]:
         out["sdk"]["_note"] = "no matching SDK accessor found — see discover"
 
-    # ---- phase 3: signed raw GET through the SDK's own transport ----
-    # We do NOT hand-roll the signature: find whatever http object the SDK
-    # already authenticated and reuse it, so this can't drift from however
-    # the SDK signs today.
-    transport, tname = None, None
-    for attr in ("_client", "_http", "_transport", "client", "http",
-                 "_session", "session", "_api"):
-        cand = getattr(client, attr, None)
-        if cand is not None and hasattr(cand, "get"):
-            transport, tname = cand, attr
-            break
-    out["raw"]["transport"] = tname or "none-found"
-    if transport is not None:
-        for label, args in (("bare", {}),
-                            ("paged", {"params": {"limit": 100}})):
-            try:
-                r = transport.get("/v1/incentives/earnings", **args)
-                body = None
-                for meth in ("json", "text"):
-                    try:
-                        body = getattr(r, meth)
-                        body = body() if callable(body) else body
-                        break
-                    except Exception:
+    # ---- phase 3: signed GET, via the client's OWN request helpers ----
+    # Probe run #1 (id=60) settled the shape: SDK 0.1.2 has no incentives
+    # resource, the client itself carries .get/.post (so IT is the signed
+    # transport), and client._http is a bare httpx that demands an ABSOLUTE
+    # url ("UnsupportedProtocol"). So: prefer client.get (it signs + resolves
+    # the base), then fall back to _http against each known base. Still no
+    # hand-rolled signature anywhere.
+    bases = {}
+    for b in ("api_base_url", "gateway_base_url"):
+        try:
+            bases[b] = str(getattr(client, b, "") or "")
+        except Exception:
+            bases[b] = "?"
+    out["raw"]["bases"] = bases
+    paths = ("/v1/incentives/earnings", "/incentives/earnings")
+
+    def _record(label, fn):
+        try:
+            r = fn()
+            body = None
+            for meth in ("json", "text"):
+                try:
+                    body = getattr(r, meth, None)
+                    if body is None:
                         continue
-                out["raw"][label] = {
-                    "status": getattr(r, "status_code", "?"),
-                    "body": _trim(body if body is not None else r),
-                }
-            except Exception as e:
-                out["raw"][label] = {"error": f"{type(e).__name__}: {e}"[:300]}
+                    body = body() if callable(body) else body
+                    break
+                except Exception:
+                    continue
+            out["raw"][label] = {
+                "status": getattr(r, "status_code", "?"),
+                "body": _trim(body if body is not None else r),
+            }
+        except Exception as e:
+            out["raw"][label] = {"error": f"{type(e).__name__}: {e}"[:300]}
+
+    for p in paths:
+        _record(f"client.get {p}", lambda p=p: client.get(p))
+    # the SDK's signed helper may want params; try one paged shape too
+    _record("client.get paged",
+            lambda: client.get(paths[0], params={"limit": 100}))
+    http = getattr(client, "_http", None)
+    if http is not None:
+        for bname, bval in bases.items():
+            if not bval.startswith("http"):
+                continue
+            _record(f"_http {bname}",
+                    lambda b=bval: http.get(b.rstrip("/") + paths[0]))
 
     _probe_log(out)
     return jsonify(out)
