@@ -6269,6 +6269,151 @@ def api_poly_last_reward():
     return jsonify(out)
 
 
+@app.route("/api/polymarket/incentives")
+def api_poly_incentives():
+    """PROBE: is there a first-party maker-reward EARNINGS read? (Aug 15
+    2026 — user spotted `GET /v1/incentives/earnings` in the Polymarket US
+    API surface.) Today every reward number we have is reverse-engineered
+    from the activities feed: we see PAYOUTS (lump credits, ~5-7 business
+    days after the event-day period) and have to hand-attribute them to
+    windows. An earnings read would give ACCRUAL and — if it itemizes —
+    PER-MARKET attribution, which is the missing denominator for "does the
+    props lane pay for its own rewards".
+
+    PROBE-FIRST, three phases, each independent + never raising (the
+    /api/kalshi/probe + /debug-pmm discipline — assume NO field names,
+    dump the RAW shape and let the DB row be the ground truth):
+      1. DISCOVER — grep the installed SDK source for incentives/earnings
+         resources + URL literals, so we learn the real accessor instead
+         of guessing it.
+      2. SDK CALL — try the plausible accessors found/guessed.
+      3. RAW GET — reach the SDK's underlying signed transport and hit
+         the path directly, in a few param shapes.
+    Shared-secret (?key=FILLS_CRON_SECRET) so the site-curl bridge can
+    fire it; result PERSISTED to exec_probe_runs. READ-ONLY — touches no
+    order, places nothing, cancels nothing."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+
+    import re as _re
+    out: dict = {"ok": True, "discover": {}, "sdk": {}, "raw": {}}
+
+    def _trim(v, n=2500):
+        """Raw shapes only — never let one fat payload blow the row."""
+        try:
+            s = v if isinstance(v, str) else json.dumps(v, default=str)
+        except Exception:
+            s = str(v)
+        return s[:n]
+
+    # ---- phase 1: discover what the installed SDK actually exposes ----
+    try:
+        import polymarket_us as _pm
+        out["discover"]["version"] = getattr(_pm, "__version__", "?")
+        root = os.path.dirname(_pm.__file__)
+        hits, urls, defs = [], set(), set()
+        for dirpath, _d, files in os.walk(root):
+            for fn in files:
+                if not fn.endswith(".py"):
+                    continue
+                try:
+                    src = open(os.path.join(dirpath, fn),
+                               encoding="utf-8", errors="ignore").read()
+                except Exception:
+                    continue
+                if not _re.search(r"incentive|earning|reward|liquidity",
+                                  src, _re.I):
+                    continue
+                rel = os.path.relpath(os.path.join(dirpath, fn), root)
+                urls.update(_re.findall(r"[\"'](/v\d+/[a-z0-9/_\-{}]*"
+                                        r"(?:incentive|earning|reward)"
+                                        r"[a-z0-9/_\-{}]*)[\"']", src, _re.I))
+                for m in _re.finditer(r"(?:def|class)\s+\w*"
+                                      r"(?:incentive|earning|reward)\w*"
+                                      r"[^\n]{0,120}", src, _re.I):
+                    defs.add(f"{rel}: {m.group(0).strip()}")
+                if len(hits) < 25:
+                    for m in _re.finditer(r".{0,80}(?:incentive|earning)"
+                                          r".{0,80}", src, _re.I):
+                        if len(hits) < 25:
+                            hits.append(f"{rel}: {m.group(0).strip()}")
+        out["discover"].update(url_literals=sorted(urls),
+                               definitions=sorted(defs)[:25],
+                               context=hits)
+    except Exception as e:
+        out["discover"]["error"] = str(e)[:200]
+
+    try:
+        client = get_client()
+    except Exception as e:
+        out.update(ok=False, error=f"client: {e}")
+        _probe_log(out)
+        return jsonify(out)
+
+    # top-level client attributes — names the resource even if our guesses miss
+    try:
+        out["discover"]["client_attrs"] = sorted(
+            a for a in dir(client) if not a.startswith("_"))
+    except Exception:
+        pass
+
+    # ---- phase 2: call it through the SDK, whatever it's called ----
+    for path in ("incentives.earnings", "incentives.list", "incentives.get",
+                 "rewards.earnings", "rewards.list", "earnings.list"):
+        obj, ok = client, True
+        for part in path.split("."):
+            obj = getattr(obj, part, None)
+            if obj is None:
+                ok = False
+                break
+        if not ok or not callable(obj):
+            continue
+        try:
+            out["sdk"][path] = {"ok": True, "raw": _trim(obj())}
+        except Exception as e:
+            out["sdk"][path] = {"ok": False,
+                                "error": f"{type(e).__name__}: {e}"[:300]}
+    if not out["sdk"]:
+        out["sdk"]["_note"] = "no matching SDK accessor found — see discover"
+
+    # ---- phase 3: signed raw GET through the SDK's own transport ----
+    # We do NOT hand-roll the signature: find whatever http object the SDK
+    # already authenticated and reuse it, so this can't drift from however
+    # the SDK signs today.
+    transport, tname = None, None
+    for attr in ("_client", "_http", "_transport", "client", "http",
+                 "_session", "session", "_api"):
+        cand = getattr(client, attr, None)
+        if cand is not None and hasattr(cand, "get"):
+            transport, tname = cand, attr
+            break
+    out["raw"]["transport"] = tname or "none-found"
+    if transport is not None:
+        for label, args in (("bare", {}),
+                            ("paged", {"params": {"limit": 100}})):
+            try:
+                r = transport.get("/v1/incentives/earnings", **args)
+                body = None
+                for meth in ("json", "text"):
+                    try:
+                        body = getattr(r, meth)
+                        body = body() if callable(body) else body
+                        break
+                    except Exception:
+                        continue
+                out["raw"][label] = {
+                    "status": getattr(r, "status_code", "?"),
+                    "body": _trim(body if body is not None else r),
+                }
+            except Exception as e:
+                out["raw"][label] = {"error": f"{type(e).__name__}: {e}"[:300]}
+
+    _probe_log(out)
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/daily-volume")
 def api_poly_daily_volume():
     """PER-DAY maker volume from the account's own Polymarket activities
