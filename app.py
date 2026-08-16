@@ -7572,7 +7572,15 @@ def api_poly_topup():
                 or b.get("ou_trader")):
             continue                       # model bets only — never manual
         mt = r.get("market_type") or ""
+        # ⚠ K PROPS ARE EXEMPT FROM THE BOOK-WIDE STAKE (Aug 16 2026). A K
+        # row is market_type 'prop', so the plain else-branch would top it
+        # up to 10 and silently undo the decision to hold that lane at 4 —
+        # the lane that fills 73.4% of the time and whose fills win 43%.
+        # Size there buys mostly the adversely-selected half.
+        _fam = ((b.get("whiff") or {}).get("ptype")
+                if isinstance(b.get("whiff"), dict) else None)
         target = (_AUTOBET_CONTRACTS_NRFI if mt == "nrfi"
+                  else _WHIFF_CONTRACTS_K if (_fam or "") in _JOIN_TOUCH_FAMS
                   else _AUTOBET_CONTRACTS)
         have = int(b.get("contracts") or 0)
         if have >= target:
