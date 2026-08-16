@@ -13501,6 +13501,19 @@ _REPEG_MARKET_TYPES = {"nrfi", "prop"}   # activation trigger — a pending
                                          # K-prop alone wakes the pass
                                          # (Aug 3: props chase like Y/NRFI)
 _REPEG_MAX_MOVES = 2         # lifetime cancel-replace cap per bet
+_REPEG_MAX_ACTIONS = 6    # re-pegs per tick. Was an implicit 1, justified in
+                          # comment by "Vercel's 10s budget" — a HOBBY-tier
+                          # number that predates the Pro upgrade, and the
+                          # runtime logs show zero timeouts ever. Paired with
+                          # the wall clock below so the real constraint is
+                          # measured time, not a guessed count: with ~100
+                          # resting orders and the join-touch peg (which gets
+                          # displaced more often BY DESIGN) one chase per two
+                          # minutes could never keep up, and every tick spent
+                          # off the touch costs 60-70% of that order's score.
+_REPEG_BUDGET_S = 20.0    # hard wall clock for the chase loop. Stops mid-pass
+                          # rather than risk a platform kill between a cancel
+                          # and its create — that gap IS the ORDER LOST state.
 _REPEG_MAX_COST_USD = 6.50   # ⚠ THE MASTER RULE — never raise casually.
                              # 6.00→6.50 Aug 16 2026 (user, explicitly, after
                              # being shown the arithmetic): the 10-contract
@@ -14049,6 +14062,7 @@ def _repeg_tick(sb, now) -> dict:
     _outbid_alerts so a live amend clears the outbid before it would ping).
     Returns counters for the tick log. Never raises."""
     res = {"acted": 0, "shadow": 0, "stopped": 0}
+    _t0 = _time.time()          # measured, so the cap stops being a guess
     try:
         # No blackout gate (user call Aug 2: "the repeg bot can fire during
         # rest hours — my phone's silenced anyway"). Overnight management is
@@ -14296,9 +14310,9 @@ def _repeg_tick(sb, now) -> dict:
                 qty = max(1, int(leaves)) if leaves >= 1 else 0
                 if not qty:
                     continue
-                if res["acted"] >= 1:
-                    continue    # ONE re-peg per tick — the leg sleeps have
-                                # to fit Vercel's 10s budget; deferred
+                if (res["acted"] >= _REPEG_MAX_ACTIONS
+                        or (_time.time() - _t0) > _REPEG_BUDGET_S):
+                    continue    # budget spent — remaining chases defer
                                 # candidates re-enter next tick (2 min)
                 if client is None:
                     client = get_client()
@@ -14416,6 +14430,11 @@ def _repeg_tick(sb, now) -> dict:
                 res["acted"] += 1
     except Exception:
         pass
+    # MEASURED, not assumed. The 1-per-tick cap was justified by a 10s
+    # Hobby-tier budget this project left months ago; every tick now
+    # reports what the chase loop actually cost so the cap can be set
+    # from evidence instead of folklore.
+    res["ms"] = int((_time.time() - _t0) * 1000)
     return res
 
 
