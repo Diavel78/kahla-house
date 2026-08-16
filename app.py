@@ -6378,14 +6378,40 @@ def api_polymarket_probe_exec():
         _probe_log(out)
         return jsonify(out)
     out["dry"] = False
+    # SPLIT THE CYCLE SO A HUMAN CAN ACTUALLY LOOK (Aug 16 2026). The
+    # original harness ran create→modify→cancel in one request, leaving a
+    # ~7-second window to catch the order in the Polymarket app — and the
+    # app view is the ENTIRE point, because the ban rests on "app-invisible
+    # = not bet". Two params fix it:
+    #   stop_after=create  → place it and leave it; go look at 3¢
+    #   modify_id=<id>     → amend that resting order; go look again at 4¢
+    #   keep=1             → never cancel (order self-expires via GTD)
+    # Cost of leaving it up: one contract, deep off-touch, a few cents.
+    keep = (request.args.get("keep") or "") in ("1", "true", "yes")
+    stop_after = (request.args.get("stop_after") or "").strip().lower()
+    mod_id = (request.args.get("modify_id") or "").strip()
     oid: dict = {}
-    if _step("create", lambda: client.orders.create(params)):
-        oid["v"] = (out["steps"]["create"]["resp"] or {}).get("id")
-    if not oid.get("v"):
-        out["note"] = "create returned no order id — stopping cycle"
-        _probe_log(out)
-        return jsonify(out)
-    _step("retrieve_after_create", lambda: client.orders.retrieve(oid["v"]))
+    if mod_id:
+        oid["v"] = mod_id
+        out["note"] = f"modifying existing order {mod_id} (no create)"
+    else:
+        if _step("create", lambda: client.orders.create(params)):
+            oid["v"] = (out["steps"]["create"]["resp"] or {}).get("id")
+        if not oid.get("v"):
+            out["note"] = "create returned no order id — stopping cycle"
+            _probe_log(out)
+            return jsonify(out)
+        if stop_after == "create":
+            out["note"] = (f"CREATED {oid['v']} at {price_c:g}¢ and LEFT IT "
+                           f"RESTING. Check the Polymarket app now, then "
+                           f"re-run with &modify_id={oid['v']}&keep=1 to "
+                           f"amend it to {price_c + 1:g}¢.")
+            _step("list_after_create",
+                  lambda: client.orders.list({"slugs": [slug]}))
+            _probe_log(out)
+            return jsonify(out)
+        _step("retrieve_after_create",
+              lambda: client.orders.retrieve(oid["v"]))
     mod = {"marketSlug": slug,
            "price": {"value": f"{(price_c + 1) / 100.0:.3f}",
                      "currency": "USD"},
@@ -6403,6 +6429,13 @@ def api_polymarket_probe_exec():
     _time.sleep(2.5)
     _step("list_after_modify_delayed",
           lambda: client.orders.list({"slugs": [slug]}))
+    if keep:
+        out["note"] = (f"MODIFIED {oid['v']} to {price_c + 1:g}¢ and LEFT IT "
+                       "RESTING (keep=1 — no cancel, no sweep). Go look at "
+                       "the Polymarket app: visible at the new price means "
+                       "the modify ban dies. It self-expires at the GTD.")
+        _probe_log(out)
+        return jsonify(out)
     _step("cancel", lambda: client.orders.cancel(oid["v"],
                                                  {"marketSlug": slug}))
     _time.sleep(1.0)
