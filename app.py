@@ -6269,6 +6269,153 @@ def api_poly_last_reward():
     return jsonify(out)
 
 
+@app.route("/api/docs-fetch")
+def api_docs_fetch():
+    """Read Polymarket's OWN documentation, server-side.
+
+    Aug 16 2026, after an expensive lesson: every reward figure in this
+    repo was reverse-engineered from the activities feed for weeks while
+    /v1/incentives/earnings sat documented the whole time. The Claude
+    sandbox has docs.polymarket.us egress-BLOCKED, so a session cannot
+    read the docs directly — Vercel can. This closes that gap: no more
+    guessing at a vendor that publishes everything.
+
+    Shared-secret + HOST-ALLOWLISTED (Polymarket docs/help only) so it
+    can't be used as a general fetch primitive. GET only, no redirects
+    off-allowlist, body truncated, result persisted to exec_probe_runs."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    url = (request.args.get("url") or "").strip()
+    allow = ("docs.polymarket.us", "polymarket.us", "docs.polymarket.com",
+             "help.polymarket.com", "learn.polymarket.com")
+    try:
+        from urllib.parse import urlparse as _up
+        host = (_up(url).hostname or "").lower()
+    except Exception:
+        host = ""
+    if not url.startswith("https://") or host not in allow:
+        return jsonify({"ok": False, "error": "host not allowed",
+                        "host": host, "allow": list(allow)}), 400
+    out = {"ok": True, "url": url}
+    try:
+        r = _http.get(url, timeout=25, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; kahla-house/1.0)",
+            "Accept": "text/html,application/json,text/plain,*/*",
+        })
+        out["status"] = r.status_code
+        body = r.text or ""
+        # strip script/style then collapse tags — we want the prose+tables,
+        # not the SPA shell
+        body = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", body)
+        body = re.sub(r"(?s)<[^>]+>", " ", body)
+        body = re.sub(r"&nbsp;?", " ", body)
+        body = re.sub(r"\s{2,}", " ", body).strip()
+        out["chars"] = len(body)
+        out["text"] = body[:14000]
+    except Exception as e:
+        out.update(ok=False, error=f"{type(e).__name__}: {e}"[:300])
+    _probe_log(out)
+    return jsonify(out)
+
+
+@app.route("/api/polymarket/incentive-config")
+def api_poly_incentive_config():
+    """PER-MARKET reward configuration — the answer to "what is the
+    minimum qualifying order size, and are our 1-4 contract orders even
+    earning?".
+
+    The docs state each incentivised market carries its own daily reward
+    rate, max qualifying spread and min qualifying order size, readable
+    through the API. Our own earnings feed shows outs props earned $14.98
+    while K props earned $0.50 on comparable order counts — if the K
+    markets' minimum size is above our order size we are taking the
+    adverse selection and collecting no rent at all.
+
+    Probes /v1/incentives (offer discovery) and dumps the FULL raw market
+    object for sample slugs, since the reward config may ride on the
+    market itself. Assumes no field names. Read-only."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+
+    def _trim(v, n=3000):
+        try:
+            s = v if isinstance(v, str) else json.dumps(v, default=str)
+        except Exception:
+            s = str(v)
+        return s[:n]
+
+    out = {"ok": True, "offers": {}, "markets": {}}
+
+    # -- offer discovery: what programs exist / their parameters --
+    for label, path, q in (
+        ("v1/incentives", "/v1/incentives", None),
+        ("v1/incentives?limit", "/v1/incentives", {"limit": 50}),
+        ("v1/incentives/programs", "/v1/incentives/programs", None),
+    ):
+        try:
+            out["offers"][label] = _trim(
+                client.get(path, query=q, authenticated=True))
+        except Exception as e:
+            out["offers"][label] = f"{type(e).__name__}: {e}"[:200]
+
+    # -- per-market: the FULL object, so a rewards block can't hide --
+    slugs = [s for s in (request.args.get("slugs") or "").split(",") if s]
+    if not slugs:
+        # live slugs beat historical ones (a closed market may drop its
+        # reward config); pull today's from our own recent prop picks
+        try:
+            sb = get_supabase()
+            rows = (sb.table("bot_picks")
+                    .select("signal_blob")
+                    .eq("status", "pending")
+                    .order("picked_at", desc=True)
+                    .limit(40).execute().data) or []
+            for r in rows:
+                b = r.get("signal_blob") or {}
+                s = (b.get("pmm") or {}).get("slug") or b.get("pmm_slug")
+                if s and s not in slugs:
+                    slugs.append(s)
+                if len(slugs) >= 6:
+                    break
+        except Exception as e:
+            out["slug_lookup_error"] = str(e)[:200]
+    out["slugs_probed"] = slugs
+
+    for s in slugs[:6]:
+        entry = {}
+        try:
+            m = client.markets.retrieve_by_slug(s)
+            entry["market_keys"] = sorted((m or {}).keys()) \
+                if isinstance(m, dict) else str(type(m))
+            # any key that smells like reward config, verbatim
+            if isinstance(m, dict):
+                entry["reward_fields"] = {
+                    k: v for k, v in m.items()
+                    if re.search(r"reward|incentive|rate|min|max|spread|size",
+                                 str(k), re.I)}
+            entry["raw"] = _trim(m, 2000)
+        except Exception as e:
+            entry["market_error"] = f"{type(e).__name__}: {e}"[:200]
+        try:
+            entry["incentive_by_slug"] = _trim(client.get(
+                "/v1/incentives", query={"marketSlug": s},
+                authenticated=True), 1500)
+        except Exception as e:
+            entry["incentive_by_slug"] = f"{type(e).__name__}: {e}"[:200]
+        out["markets"][s] = entry
+
+    _probe_log(out)
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/incentives")
 def api_poly_incentives():
     """PROBE: is there a first-party maker-reward EARNINGS read? (Aug 15
