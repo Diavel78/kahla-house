@@ -111,6 +111,21 @@
                 <div class="value skel" id="vTotal">—</div>
                 <div class="sub" id="subTotal">realized + open + maker rewards</div>
             </div>
+            <!-- TRAILING 7 DAYS. A single day's rent is not measurable —
+                 the venue publishes a day only after its reward periods
+                 end and may compute for up to 5 business days, so the
+                 newest days are always still filling in. A trailing
+                 window is the only honest read until that lag is known. -->
+            <div class="card wide">
+                <div class="label">Last 7 days — all in</div>
+                <div class="value skel" id="v7">—</div>
+                <div class="sub" id="sub7">bets + rent</div>
+            </div>
+            <div class="card wide">
+                <div class="label">Rent — last 7 days</div>
+                <div class="value skel" id="vRent7">—</div>
+                <div class="sub" id="subRent7">paid + pending</div>
+            </div>
             <div class="card">
                 <div class="label">Today — all in</div>
                 <div class="value skel" id="vToday">—</div>
@@ -206,6 +221,27 @@
                 dayNote(s.today_pnl, s.today_rewards);
             document.getElementById('subYest').textContent =
                 dayNote(s.yesterday_pnl, s.yesterday_rewards);
+            // Trailing 7 days — bets and rent on their own lines, because
+            // rent is the number we're still trying to size and burying it
+            // inside a combined figure hides it.
+            const r7 = s.rent_7d || null;
+            paint('v7', s.all_in_7d, true);
+            paint('vRent7', r7 ? r7.total : null, false);
+            document.getElementById('sub7').textContent =
+                'bets ' + (s.pnl_7d == null ? '—'
+                    : (s.pnl_7d < 0 ? '-$' : '+$') + Math.abs(s.pnl_7d).toFixed(2))
+                + ' · rent ' + (r7 ? '+$' + Number(r7.total).toFixed(2) : '—');
+            // ⚠ This number is a FLOOR and drifts up as the newest days
+            // settle. Showing how current the feed is keeps a week-over-week
+            // dip from being misread as a decline.
+            document.getElementById('subRent7').textContent = r7
+                ? ('$' + Number(r7.paid).toFixed(2) + ' paid · $'
+                   + Number(r7.pending).toFixed(2) + ' pending · '
+                   + r7.n_markets + ' markets'
+                   + (r7.newest_date ? ' · newest ' + r7.newest_date : '')
+                   + (r7.skipped ? ' · $' + Number(r7.skipped).toFixed(2)
+                      + ' forfeited <$1/day' : ''))
+                : 'paid + pending';
             // Remediation / promo credits are NOT liquidity earnings —
             // they were inflating this card ~4x before the split.
             const cr = s.account_credits;

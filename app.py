@@ -1384,6 +1384,84 @@ def _incentive_day_rewards(sb, days: int = 3) -> dict:
     return out
 
 
+def _rent_window(sb, days: int = 7) -> dict:
+    """Liquidity rent over a trailing window — PAID + PENDING.
+
+    A single day's rent is not measurable: the venue publishes a day only
+    after its reward periods end and may compute for up to 5 business
+    days, so recent days are always still filling in (observed 8.83 →
+    3.57 → 0.78 walking toward today, which is fill-in, not decline).
+    A trailing window is the only honest read until the lag is measured.
+
+    PAID + PENDING is the basis; SKIPPED is EXCLUDED because it is money
+    we never receive — days that never reached the $1.00 minimum payout.
+
+    ⚠ This UNDERCOUNTS by design. The newest day or two are incomplete,
+    so the number is a floor that drifts up as they settle — never read a
+    week-over-week dip as a decline. `newest_date` is returned so a caller
+    can show how current the data actually is."""
+    out = {"total": 0.0, "paid": 0.0, "pending": 0.0, "skipped": 0.0,
+           "days": days, "newest_date": None, "n_markets": 0}
+    try:
+        az = ZoneInfo("America/Phoenix")
+        today = datetime.now(timezone.utc).astimezone(az).date()
+        since = today - timedelta(days=days - 1)
+        rows = (sb.table("poly_incentive_earnings")
+                .select("earn_date,status,reward,market_slug")
+                .gte("earn_date", since.isoformat())
+                .limit(5000).execute().data) or []
+        slugs = set()
+        for r in rows:
+            amt = _safe_float(r.get("reward")) or 0.0
+            st = str(r.get("status") or "").upper()
+            d = str(r.get("earn_date") or "")[:10]
+            if d and (out["newest_date"] is None or d > out["newest_date"]):
+                out["newest_date"] = d
+            if st == "SKIPPED":
+                out["skipped"] += amt
+                continue          # forfeited — never counted as earnings
+            out["paid" if st == "PAID" else "pending"] += amt
+            out["total"] += amt
+            if r.get("market_slug"):
+                slugs.add(r["market_slug"])
+        out["n_markets"] = len(slugs)
+        for k in ("total", "paid", "pending", "skipped"):
+            out[k] = round(out[k], 2)
+    except Exception:
+        pass
+    return out
+
+
+def _window_pnl(sb, days: int = 7) -> float | None:
+    """Trading P&L over the trailing window, by ARIZONA game day, settled
+    bets only — the same basis as the day cards so the two can be added."""
+    try:
+        az = ZoneInfo("America/Phoenix")
+        today = datetime.now(timezone.utc).astimezone(az).date()
+        since = today - timedelta(days=days - 1)
+        rows = (sb.table("bot_picks").select("event_start,poly_pnl")
+                .gte("event_start",
+                     (datetime.now(timezone.utc)
+                      - timedelta(days=days + 2)).isoformat())
+                .limit(3000).execute().data) or []
+        tot = 0.0
+        for r in rows:
+            p = r.get("poly_pnl") or {}
+            if not p.get("final"):
+                continue
+            try:
+                d = datetime.fromisoformat(
+                    str(r["event_start"]).replace("Z", "+00:00")
+                ).astimezone(az).date()
+            except (TypeError, ValueError, KeyError):
+                continue
+            if since <= d <= today:
+                tot += float(p.get("realized_usd") or 0)
+        return round(tot, 2)
+    except Exception:
+        return None
+
+
 def _all_in(pnl, rewards):
     """Trading P&L + liquidity rent for a day, or None if we don't have
     the trading half. Rewards alone are not a day's result."""
@@ -15942,6 +16020,13 @@ def api_data():
             if not _mrs.get("rewards") and not _mrs.get("n_rewards"):
                 _mrs = {"rewards": _s.get("maker_rewards"), "credits": None,
                         "n_rewards": None}
+            # TRAILING 7 DAYS — the only honest rent measure while the
+            # venue's per-day publication lags (see _rent_window).
+            try:
+                _r7 = _rent_window(get_supabase(), 7)
+                _p7 = _window_pnl(get_supabase(), 7)
+            except Exception:
+                _r7, _p7 = None, None
             return jsonify({
                 "ok": True, "timestamp": now.isoformat(), "cached": True,
                 "cache_age_s": _c.get("age_s"),
@@ -15964,6 +16049,8 @@ def api_data():
                         (_rw.get("yesterday") or {}).get("total")),
                     "total_pnl": _s.get("total_pnl"),
                     "open_positions": _c.get("open_count"),
+                    "rent_7d": _r7, "pnl_7d": _p7,
+                    "all_in_7d": _all_in(_p7, (_r7 or {}).get("total")),
                 },
                 "balances": {"current_balance": _c.get("balance")},
                 "positions": [], "closed_positions": [], "activities": [],
@@ -16051,6 +16138,11 @@ def api_data():
             _rw = _gameday_rewards(get_supabase())
         except Exception:
             _rw = {"today": None, "yesterday": None}
+        try:
+            _r7f = _rent_window(get_supabase(), 7)
+            _p7f = _window_pnl(get_supabase(), 7)
+        except Exception:
+            _r7f, _p7f = None, None
         if not _mrs.get("rewards") and not _mrs.get("n_rewards"):
             # Mirror not populated yet — fall back to the old combined
             # figure rather than showing a confident zero.
@@ -16091,6 +16183,8 @@ def api_data():
                     (_rw.get("yesterday") or {}).get("total")),
                 "total_pnl": summary.get("total_pnl"),
                 "open_positions": len(open_positions),
+                "rent_7d": _r7f, "pnl_7d": _p7f,
+                "all_in_7d": _all_in(_p7f, (_r7f or {}).get("total")),
             },
             "balances": {"current_balance": balance},
             "errors": errors,
