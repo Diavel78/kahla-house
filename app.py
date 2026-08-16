@@ -6427,6 +6427,74 @@ def api_poly_incentives():
             _record(f"_http {bname}",
                     lambda b=bval: http.get(b.rstrip("/") + paths[0]))
 
+    # ---- phase 4: HOW does a WORKING call authenticate? ----
+    # Run #2 proved the route is real: /v1/incentives/earnings returns
+    # AuthenticationError while /incentives/earnings returns NotFound — a
+    # missing path 404s, so ours exists and we simply aren't signing it.
+    # client.get is plainly a raw helper; the resource methods
+    # (portfolio.positions et al) DO authenticate. Read their source and
+    # find the signed request helper instead of inventing headers.
+    out["auth"] = {}
+    try:
+        import inspect as _insp
+        try:
+            out["auth"]["client_get_src"] = _trim(
+                _insp.getsource(type(client).get), 1800)
+        except Exception as e:
+            out["auth"]["client_get_src"] = f"err: {e}"[:200]
+        port = getattr(client, "portfolio", None)
+        if port is not None:
+            out["auth"]["portfolio_attrs"] = sorted(
+                a for a in dir(port) if not a.startswith("__"))
+            for m in ("positions", "activities"):
+                fn = getattr(port, m, None)
+                if fn is None:
+                    continue
+                try:
+                    out["auth"][f"portfolio.{m}_src"] = _trim(
+                        _insp.getsource(fn), 1800)
+                except Exception as e:
+                    out["auth"][f"portfolio.{m}_src"] = f"err: {e}"[:200]
+                break
+        # every private callable on the client — the signed helper is here
+        out["auth"]["client_private"] = sorted(
+            a for a in dir(client)
+            if a.startswith("_") and not a.startswith("__")
+            and callable(getattr(client, a, None)))
+    except Exception as e:
+        out["auth"]["error"] = str(e)[:200]
+
+    # the auth header literals the SDK builds, wherever it builds them
+    try:
+        import polymarket_us as _pm2
+        root2 = os.path.dirname(_pm2.__file__)
+        hdrs, sign_ctx = set(), []
+        for dirpath, _d, files in os.walk(root2):
+            for fn in files:
+                if not fn.endswith(".py"):
+                    continue
+                try:
+                    src = open(os.path.join(dirpath, fn),
+                               encoding="utf-8", errors="ignore").read()
+                except Exception:
+                    continue
+                hdrs.update(_re.findall(r"[\"']([A-Za-z\-]*(?:api[_-]?key|"
+                                        r"signature|timestamp|authorization|"
+                                        r"poly[a-z\-]*)[A-Za-z\-]*)[\"']",
+                                        src, _re.I))
+                if len(sign_ctx) < 10:
+                    for m in _re.finditer(r".{0,100}(?:def _?(?:request|"
+                                          r"_signed|sign)\w*|headers\s*=)"
+                                          r".{0,100}", src):
+                        if len(sign_ctx) < 10:
+                            rel = os.path.relpath(
+                                os.path.join(dirpath, fn), root2)
+                            sign_ctx.append(f"{rel}: {m.group(0).strip()}")
+        out["auth"]["header_literals"] = sorted(hdrs)[:30]
+        out["auth"]["sign_context"] = sign_ctx
+    except Exception as e:
+        out["auth"]["grep_error"] = str(e)[:200]
+
     _probe_log(out)
     return jsonify(out)
 
