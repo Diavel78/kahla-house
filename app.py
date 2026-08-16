@@ -9327,7 +9327,26 @@ _WHIFF_BET_MAX_PP = 10.0          # the claimed-edge cliff (3rd-time rule:
                                   # NRFI clamp / Fight IQ 0-3 past 15pp /
                                   # Diamond totals) — >10pp claims stay
                                   # shadow-only until the record says raise
-_WHIFF_MAX_ENTRY_C = 60           # user guardrail — same as Y/NRFI
+_WHIFF_CONTRACTS_K = 4            # K props stay at 4 while everything else
+                                  # goes to 10 (user, Aug 16). K is the worst
+                                  # lane on BOTH axes at once: 73.4% fill (the
+                                  # highest) so it rests least and earns least
+                                  # rent ($0.0035/order vs outs' $0.106), AND
+                                  # its fills are the adversely-selected ones
+                                  # (filled K won 43%, unfilled 75%). Size on
+                                  # this lane buys mostly the bad half.
+_JOIN_TOUCH_FAMS = {'k'}          # peg AT the touch, not a cent over it.
+                                  # Leading is worth ~2.85x the rent per
+                                  # SECOND (it demotes the whole queue one
+                                  # tick) but it also puts us first in line
+                                  # for every seller. Rent = score x TIME, and
+                                  # on K the time term dominates: we don't
+                                  # want these fills, and joining is a cent
+                                  # cheaper when we do get them.
+_WHIFF_MAX_ENTRY_C = 64           # user guardrail — same as Y/NRFI
+                                  # (60→64 Aug 16 2026: -178 is still
+                                  # short of the -200 the cap exists
+                                  # to refuse)
 _WHIFF_MIN_ENTRY_C = 25           # FILL-VIABILITY floor (user, Aug 3:
                                   # "a 13% chance... the other guy's
                                   # betting an 87% chance — it's just
@@ -9788,7 +9807,8 @@ def _whiff_autobet(sb, bet_cands, ginfo, now):
         if not book:
             continue
         bid_c, ask_c = book.get("best_bid"), book.get("best_ask")
-        peg_c, entry_edge = _peg_target(bid_c, ask_c, fair_c)
+        _join = (ptype or '') in _JOIN_TOUCH_FAMS
+        peg_c, entry_edge = _peg_target(bid_c, ask_c, fair_c, join=_join)
         if peg_c is None or entry_edge < _WHIFF_BET_MIN_PP:
             continue                           # whiff bar (4pp), not 2.5
         # PEG-STAGE GATES (Aug 5 2026 — the first Outs IQ bet pegged 12¢
@@ -9821,6 +9841,10 @@ def _whiff_autobet(sb, bet_cands, ginfo, now):
                                       else 100 - side_c,
                                       "edge_pp": round(edge, 2)}},
                 cap_flag="whiff_autobet", cap_max=WHIFF_AUTOBET_MAX_BETS,
+                # K stays at 4 while the other pstat families go to 10 —
+                # size on K buys mostly the adversely-selected half.
+                contracts=(_WHIFF_CONTRACTS_K if ptype in _JOIN_TOUCH_FAMS
+                           else _AUTOBET_CONTRACTS),
                 query_text=q,
                 reason=(f"Pitcher-prop [{_unit}]"
                         f" — model {round(side_p * 100)}% on "
@@ -10612,7 +10636,16 @@ AUTOBET_MAX_BETS = 10000  # CAP KILLED Aug 4 ~10pm AZ (user: "kill that 40
                           # Sentinel not deletion: the counter still runs
                           # (the "N/cap this slate" ping + a re-cap later
                           # need only this constant changed back).
-_AUTOBET_CONTRACTS_NRFI = 2   # 1→2 Aug 10 2026 (user, with the book-wide
+_AUTOBET_CONTRACTS_NRFI = 5   # 2→5 Aug 16 2026 (user). NRFI earned $0.01
+                              # of liquidity rent EVER while resting an
+                              # average 36.5h out — the player-prop
+                              # programs have NO early period, so those
+                              # hours pay nothing and only expose the
+                              # order to being picked off (78.2% fill,
+                              # the highest of any lane). Paired with the
+                              # T-6h gate + touch peg below, which put it
+                              # on the book during the window that pays.
+                              # Prior note: 1→2 Aug 10 2026 (user, with the book-wide
                           # double). The Aug 7 halving was explicitly
                           # "a couple of days" after 5 red days; NRFI
                           # then returned +$2.32 on $3.68 (+63%) at half
@@ -10623,7 +10656,12 @@ _AUTOBET_CONTRACTS_NRFI = 2   # 1→2 Aug 10 2026 (user, with the book-wide
                           # legacy 2-contract NRFI positions cleared
                           # min_held and got sells re-placed). ⏰ The
                           # calibration audit is still owed.
-_AUTOBET_CONTRACTS = 4   # 2→4 Aug 10 2026 (user: "Time to double shares.
+_AUTOBET_CONTRACTS = 10  # 4→10 Aug 16 2026 (user). Reward score is
+                         # DF^ticks × SIZE and our 4 contracts were 0.08%
+                         # of a 5,000 target — rent is linear in size at
+                         # this scale, so size is the lever. K props are
+                         # EXEMPT (stay 4, see _WHIFF_CONTRACTS_K).
+                         # Prior note: 2→4 Aug 10 2026 (user: "Time to double shares.
                          # All the 2 contracts go to 4"). Split is
                          # unchanged in shape: HALF rides to resolution,
                          # HALF gets the resting take-profit — so 4 =
@@ -10755,14 +10793,20 @@ def _diamond_ml(sb, event_name, away_sp_name, home_sp_name):
     return (xh ** k) / (xh ** k + xa ** k)
 
 
-def _peg_target(bid_c, ask_c, fair_c):
+def _peg_target(bid_c, ask_c, fair_c, join=False):
     """(side_c, entry_edge) — the cheap-first whole-cent peg with every
     gate applied (floor(bid)+1¢; one-cent book → join; virgin book →
-    fair−6 anchor; ≤54¢ cap; ≥2.5pp edge floor). (None, None) = pass."""
+    fair−6 anchor; entry cap; ≥2.5pp edge floor). (None, None) = pass.
+
+    join=True pegs AT the touch instead of a cent over it. Both positions
+    score DF^0 for our own order, but leading also pushes every other
+    resting order down a tick, which is worth ~2.85× the rent per second.
+    You trade that away for TIME on the book — the right trade only where
+    we'd rather not be filled at all (see _JOIN_TOUCH_FAMS)."""
     if bid_c is not None and bid_c > 0:
-        t = float(int(bid_c)) + 1.0
+        t = float(int(bid_c)) + (0.0 if join else 1.0)
         if ask_c is not None and t >= ask_c:
-            t = bid_c
+            t = float(int(bid_c))
     else:
         t = float(int(fair_c - 6.0))
         if ask_c is not None and t >= ask_c:
@@ -11133,7 +11177,7 @@ def _et_day(iso: str | None) -> str:
 
 _OU_TRADER_MIN_EDGE_PP = 3.0    # peg must sit ≥3pp under the book's own mid
 _OU_TRADER_MIN_ENTRY_C = 25.0   # fill-viability floor (whiff lane's lesson)
-_OU_TRADER_MAX_ENTRY_C = 60.0   # the user's universal entry cap
+_OU_TRADER_MAX_ENTRY_C = 64.0   # the user's universal entry cap
 
 
 def _ou_trader_eval(sb, g, d, now, done):
@@ -11617,6 +11661,23 @@ def _opener_pass(sb, now, deadline):
             # ---- AUTO-BET: one contract, once, then the review gate ----
             if not (AUTOBET_ENABLED and bet_side and dt):
                 continue
+            # DAY-OF WINDOW (Aug 16 2026 — the $0.01 finding). YRFI markets
+            # sit in the SAME player-prop programs as the pitcher props that
+            # earned $21.90, on identical terms — and those programs have NO
+            # `early` period. We were resting an average of 36.5h out, ~30h
+            # before the meter starts, at a 78.2% fill rate (the highest of
+            # any lane), so the order was usually filled and gone before the
+            # paying window ever opened. Total rent collected, ever: $0.01.
+            #
+            # Placement time itself is NOT the eligibility criterion —
+            # verified: 12 markets we placed >8h out and never filled all
+            # earned, because the order carried into the window. Those early
+            # hours simply pay nothing while handing the market a free option
+            # on us. So don't be there. The model is unharmed: NRFI's edge is
+            # early (≥2h30m went 88-81/+8.88u), and T-6h is well inside it.
+            if dt > now + timedelta(minutes=_WHIFF_DAYOF_MIN):
+                continue                  # pre-day-of — retry each tick until
+                                          # the T-6h window opens
             if nrfi.get("price_src") != "polymarket":
                 continue                  # execution is Polymarket-only
             slug = blk.get("slug")
@@ -11670,9 +11731,15 @@ def _opener_pass(sb, now, deadline):
             # bid) + 1¢. The half-cent of cheapness isn't worth a single
             # ambiguous screenshot.
             if bid_c is not None and bid_c > 0:
-                target = float(int(bid_c)) + 1.0      # one CENT above the make
+                # JOIN THE TOUCH, don't lead it (Aug 16 2026, user). Leading
+                # is worth ~2.85× the rent per second because it demotes the
+                # whole queue a tick — but it also puts us first in line for
+                # every seller, and rent is score × TIME. At a 78.2% fill rate
+                # the time term is what we were losing. Joining also enters a
+                # cent cheaper on the fills we do get.
+                target = float(int(bid_c))
                 if ask_c is not None and target >= ask_c:
-                    target = bid_c                    # one-tick book → join
+                    target = float(int(bid_c))
             else:
                 target = float(int(fair_c - 6.0))     # virgin book → anchor cheap
                 if ask_c is not None and target >= ask_c:
@@ -13408,7 +13475,7 @@ def _outbid_alerts(sb, now) -> int:
 # past 54¢ on a first-inning market is "pointless" (their word; the Coors
 # YRFI-at-58¢ case). Mirrors handicapper_web.NRFI_MAX_ENTRY_C, which stops
 # the model SUGGESTING those entries.
-_REPEG_NRFI_PRICE_CAP_C = 60.0
+_REPEG_NRFI_PRICE_CAP_C = 64.0
 
 REPEG_ENABLED = True         # LIVE (2nd time) Aug 2 2026 — probe run 2
                              # PROVED the amend: full-params modify (with
@@ -13426,7 +13493,13 @@ _REPEG_MARKET_TYPES = {"nrfi", "prop"}   # activation trigger — a pending
                                          # K-prop alone wakes the pass
                                          # (Aug 3: props chase like Y/NRFI)
 _REPEG_MAX_MOVES = 2         # lifetime cancel-replace cap per bet
-_REPEG_MAX_COST_USD = 6.00   # ⚠ THE MASTER RULE — never raise casually
+_REPEG_MAX_COST_USD = 6.50   # ⚠ THE MASTER RULE — never raise casually.
+                             # 6.00→6.50 Aug 16 2026 (user, explicitly, after
+                             # being shown the arithmetic): the 10-contract
+                             # stake at the new 64¢ entry cap costs $6.40, so
+                             # a $6.00 rule would have SILENTLY SKIPPED every
+                             # bet in the 60-64¢ band and stopped the re-peg
+                             # chase there. $6.50 leaves a dime of headroom.
 
 
 def _repeg_verify_or_recreate(client, slug, intent, canon, qty, orig_tif,
@@ -13572,7 +13645,26 @@ def _repeg_edge_ok(fair_prob, new_c: float):
 
 
 _HARVEST_ENABLED = True
-_HARVEST_ROI = 0.60       # 50→60% Aug 10 2026 (user). The break-even
+_HARVEST_RUNGS = (0.40, 0.50, 0.65)   # LADDER (Aug 16 2026, user). One
+                          # contract per rung, lowest first, all placed in a
+                          # single pass on a fully-filled position. Replaces a
+                          # single flat target, and it is the only clean way to
+                          # measure the take-profit bar: three rungs on ONE
+                          # position share an entry and a price path, so the
+                          # comparison is within-subject. Calendar-block
+                          # comparisons of 35/50/60 were confounded by win rate
+                          # and told us nothing.
+                          # Rungs are NESTED — reaching +65% means the price
+                          # passed +50% and +40%, so the fills describe a
+                          # survival curve rather than three independent tests.
+_HARVEST_SELL_FRAC = 0.30 # sell ~30%, ride ~70% (10 → sell 3, keep 7). Derived
+                          # from the bet's OWN stake so a stake change needs no
+                          # second edit: a legacy 2-lot still sells 1.
+_HARVEST_MAX_ORDERS = 4   # creates per tick — 3 rungs is 3 API calls per bet
+                          # and this function has no maxDuration.
+_HARVEST_ROI = 0.60       # legacy single target, kept for the ping copy and
+                          # any caller still reading it.
+                          # 50→60% Aug 10 2026 (user). The break-even
                           # table at this week's real entries (44.1¢ book,
                           # 41.8¢ ML) and W/L: the bar falls FASTER than
                           # the touches do — 35%→50% cut the requirement
@@ -13729,8 +13821,16 @@ def _harvest_tick(sb, now) -> dict:
                           else 100.0 * (-ep) / ((-ep) + 100.0))
             except (TypeError, ValueError):
                 continue
-            sell_c = min(99, int(math.ceil(side_c * (1.0 + _HARVEST_ROI))))
-            canon = (100.0 - sell_c) / 100.0 if synthetic else sell_c / 100.0
+            # LADDER: ~30% of the position, one contract per rung, lowest
+            # rung first. Bounded by keep-at-least-1 so a 1-lot never sells
+            # itself out. The whole ladder goes up in one pass; the venue-state
+            # dedup above (any resting sell ⇒ skip) then holds until a rung
+            # fills, and a partial fill drops `held` below min_held so the
+            # position can never be re-harvested past its keep.
+            _n_sell = max(1, int(round(_HARVEST_SELL_FRAC * min_held)))
+            _n_sell = min(_n_sell, max(0, min_held - 1), len(_HARVEST_RUNGS))
+            if _n_sell < 1:
+                continue
             try:
                 dt = datetime.fromisoformat(
                     str(r.get("event_start")).replace("Z", "+00:00"))
@@ -13746,22 +13846,29 @@ def _harvest_tick(sb, now) -> dict:
                     continue               # NRFI already live — no sell
             except Exception:
                 continue
-            params = {"marketSlug": slug, "intent": sell_intent,
-                      "type": "ORDER_TYPE_LIMIT",
-                      "price": {"value": f"{canon:.3f}", "currency": "USD"},
-                      "quantity": max(1, min_held // 2),
-                      "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
-                      "goodTillTime": gtt,
-                      "participateDontInitiate": True,
-                      "manualOrderIndicator":
-                          "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
-            try:
-                client.orders.create(params)
-                res["placed"] += 1
-            except Exception as e:
-                _send_fill_telegram(
-                    f"🤖 HARVEST FAILED — {r.get('event_name')}: sell "
-                    f"create errored ({e})"[:240])
+            for _roi in _HARVEST_RUNGS[:_n_sell]:
+                if res.get("orders", 0) >= _HARVEST_MAX_ORDERS:
+                    break
+                sell_c = min(99, int(math.ceil(side_c * (1.0 + _roi))))
+                canon = ((100.0 - sell_c) / 100.0 if synthetic
+                         else sell_c / 100.0)
+                params = {"marketSlug": slug, "intent": sell_intent,
+                          "type": "ORDER_TYPE_LIMIT",
+                          "price": {"value": f"{canon:.3f}", "currency": "USD"},
+                          "quantity": 1,
+                          "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
+                          "goodTillTime": gtt,
+                          "participateDontInitiate": True,
+                          "manualOrderIndicator":
+                              "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
+                try:
+                    client.orders.create(params)
+                    res["orders"] = res.get("orders", 0) + 1
+                except Exception as e:
+                    _send_fill_telegram(
+                        f"🤖 HARVEST FAILED — {r.get('event_name')}: sell "
+                        f"create errored at +{round(_roi * 100)}% ({e})"[:240])
+            res["placed"] += 1
     except Exception as e:
         res["err"] = str(e)[:120]
     return res
@@ -14021,7 +14128,19 @@ def _repeg_tick(sb, now) -> dict:
                     # OVER the new make (front of the queue), never at it —
                     # unless that would cross the ask (then join). Gates
                     # below all evaluate at this price.
-                    _t = float(int(new_c)) + 1.0
+                    #
+                    # EXCEPT the join-touch lanes (K props, NRFI — Aug 16
+                    # 2026): those chase TO the touch, never over it. Leading
+                    # buys ~2.85× rent per second and spends it on being first
+                    # in the fill queue; on these two lanes we would rather
+                    # keep the order resting. A chase that re-leads the market
+                    # every tick would undo the entry peg on the very next
+                    # move, so the re-peg has to honour the same rule.
+                    _blobfam = ((blob.get("whiff") or {}).get("ptype")
+                                if isinstance(blob.get("whiff"), dict) else None)
+                    _join_lane = (f.get("market_type") == "nrfi"
+                                  or (_blobfam or "") in _JOIN_TOUCH_FAMS)
+                    _t = float(int(new_c)) + (0.0 if _join_lane else 1.0)
                     _a = f.get("best_ask_c")
                     if _a is None or _t < _a:
                         new_c = _t

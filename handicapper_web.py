@@ -3907,7 +3907,7 @@ NRFI_EDGE_MAX_PP = 6.0
 # recurring case: Coors YRFI at ~58¢ — the user never bets it ("pointless":
 # risking 58 to win 42 on a first-inning coin flip). Mirrored in app.py's
 # re-peg engine (_REPEG_NRFI_PRICE_CAP_C) so a chase can't cross it either.
-NRFI_MAX_ENTRY_C = 60.0
+NRFI_MAX_ENTRY_C = 64.0
 
 
 def _nrfi_half_scoreless(xr: float) -> float:
