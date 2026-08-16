@@ -6390,6 +6390,45 @@ def api_polymarket_probe_exec():
     keep = (request.args.get("keep") or "") in ("1", "true", "yes")
     stop_after = (request.args.get("stop_after") or "").strip().lower()
     mod_id = (request.args.get("modify_id") or "").strip()
+    # modify_latest=1 — find OUR newest AUTOMATIC order on this slug and
+    # amend that. Added because asking a human to copy a hex order id
+    # between two browser taps failed twice in a row, and BOTH times
+    # orders.modify happily reported ok:true on the stale id: a wrong id
+    # is indistinguishable from success, so the copy-paste step could
+    # silently invalidate the whole experiment.
+    if (request.args.get("modify_latest") or "") in ("1", "true", "yes"):
+        try:
+            _r = client.orders.list({"slugs": [slug]})
+            _raw = (_r.get("orders") if isinstance(_r, dict)
+                    else getattr(_r, "orders", [])) or []
+            _cands = []
+            for _o in _raw:
+                def _og(k, d=None):
+                    return (_o.get(k, d) if isinstance(_o, dict)
+                            else getattr(_o, k, d))
+                if (str(_og("manualOrderIndicator") or "")
+                        != "MANUAL_ORDER_INDICATOR_AUTOMATIC"):
+                    continue
+                if (_og("state") or "") not in _OPEN_ORDER_STATES:
+                    continue
+                _cands.append((str(_og("createTime") or ""), _og("id"),
+                               (_og("price") or {}).get("value")
+                               if isinstance(_og("price"), dict) else None))
+            _cands.sort(reverse=True)
+            if not _cands:
+                out.update(ok=False, error=(
+                    "modify_latest found no open AUTOMATIC order on this "
+                    "slug — run the create link first"))
+                _probe_log(out)
+                return jsonify(out)
+            mod_id = _cands[0][1]
+            out["modify_latest_found"] = {"id": mod_id,
+                                          "price": _cands[0][2],
+                                          "created": _cands[0][0]}
+        except Exception as e:
+            out.update(ok=False, error=f"modify_latest lookup: {e}"[:200])
+            _probe_log(out)
+            return jsonify(out)
     oid: dict = {}
     if mod_id:
         oid["v"] = mod_id
