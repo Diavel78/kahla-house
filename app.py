@@ -6435,7 +6435,7 @@ def api_poly_incentives():
     # The signed call returns {"rewards":[{reward, programType, marketSlug,
     # date, status}, ...]} — per-MARKET, per-DAY, with PENDING status. That
     # is attribution + accrual + grain, the three things the activities feed
-    # could never give us. The raw body is trimmed for the row, sototals
+    # could never give us. The raw body is trimmed for the row, so totals
     # are computed here from the FULL payload.
     try:
         data = client.get(paths[0], authenticated=True)
