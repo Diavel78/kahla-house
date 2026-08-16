@@ -6370,6 +6370,37 @@ def api_polymarket_probe_exec():
         client = get_client()
     except Exception as e:
         return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    # list_only=1 — READ ONLY. No preview, no create, no modify, no cancel.
+    # Added Aug 16 2026 to answer "is ORDER_STATE_REPLACED just an app
+    # rendering delay?": read the venue and the app at the same moment and
+    # compare. Also the only way to inspect a REPLACED order at all, since
+    # it is deliberately excluded from _OPEN_ORDER_STATES and therefore
+    # invisible to the fill tracker, the outbid ping and the dedup sweep.
+    if (request.args.get("list_only") or "") in ("1", "true", "yes"):
+        out["list_only"] = True
+        try:
+            _r = client.orders.list({"slugs": [slug]})
+            _raw = (_r.get("orders") if isinstance(_r, dict)
+                    else getattr(_r, "orders", [])) or []
+            rows = []
+            for _o in _raw:
+                def _og(k, d=None):
+                    return (_o.get(k, d) if isinstance(_o, dict)
+                            else getattr(_o, k, d))
+                _p = _og("price")
+                rows.append({
+                    "id": _og("id"), "state": _og("state"),
+                    "price": (_p.get("value") if isinstance(_p, dict) else _p),
+                    "qty": _og("quantity"), "leaves": _og("leavesQuantity"),
+                    "filled": _og("cumQuantity"),
+                    "good_till": str(_og("goodTillTime") or ""),
+                    "flag": _og("manualOrderIndicator")})
+            out["orders"] = rows
+            out["count"] = len(rows)
+        except Exception as e:
+            out.update(ok=False, error=f"{type(e).__name__}: {e}"[:220])
+        _probe_log(out)
+        return jsonify(out)
     _step("preview", lambda: client.orders.preview({"request": params}))
     if (request.args.get("place") or "") not in ("1", "true", "yes"):
         out["note"] = ("DRY RUN — preview only. Add &place=1 to run "
