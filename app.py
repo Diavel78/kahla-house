@@ -6431,6 +6431,55 @@ def api_poly_incentives():
     # keep one unauthenticated control so the row proves the difference
     _record("control-unauthed", lambda: client.get(paths[0]))
 
+    # ---- phase 3b: AGGREGATE (run #4 struck oil) ----
+    # The signed call returns {"rewards":[{reward, programType, marketSlug,
+    # date, status}, ...]} — per-MARKET, per-DAY, with PENDING status. That
+    # is attribution + accrual + grain, the three things the activities feed
+    # could never give us. The raw body is trimmed for the row, sototals
+    # are computed here from the FULL payload.
+    try:
+        data = client.get(paths[0], authenticated=True)
+        rows = (data or {}).get("rewards") or []
+        agg = {"n": len(rows), "total": 0.0, "by_status": {},
+               "by_date": {}, "by_kind": {}, "top": []}
+
+        def _kind(slug: str) -> str:
+            """aec-* are game markets; astatc-* carry the pstat family as a
+            token (…-ha-edurod-gte6). Anything else stays labelled raw so a
+            new prefix can't be silently folded into the wrong bucket."""
+            s = slug or ""
+            if s.startswith("aec-"):
+                return "game (ML/total)"
+            if s.startswith("astatc-"):
+                for fam in ("-k-", "-outs-", "-ha-", "-bb-"):
+                    if fam in s:
+                        return f"prop {fam.strip('-')}"
+                return "prop other"
+            return f"other:{s.split('-')[0] if s else '?'}"
+
+        for r in rows:
+            amt = _safe_float(r.get("reward")) or 0.0
+            st = str(r.get("status") or "?")
+            dt = str(r.get("date") or "?")
+            kd = _kind(str(r.get("marketSlug") or ""))
+            agg["total"] += amt
+            agg["by_status"][st] = round(
+                agg["by_status"].get(st, 0.0) + amt, 4)
+            agg["by_date"][dt] = round(agg["by_date"].get(dt, 0.0) + amt, 4)
+            agg["by_kind"][kd] = round(agg["by_kind"].get(kd, 0.0) + amt, 4)
+        agg["total"] = round(agg["total"], 4)
+        agg["top"] = sorted(
+            ({"slug": str(r.get("marketSlug") or ""),
+              "reward": _safe_float(r.get("reward")) or 0.0,
+              "date": str(r.get("date") or ""),
+              "status": str(r.get("status") or "")} for r in rows),
+            key=lambda r: r["reward"], reverse=True)[:15]
+        agg["program_types"] = sorted(
+            {str(r.get("programType") or "?") for r in rows})
+        out["agg"] = agg
+    except Exception as e:
+        out["agg"] = {"error": f"{type(e).__name__}: {e}"[:300]}
+
     # ---- phase 4: HOW does a WORKING call authenticate? ----
     # Run #2 proved the route is real: /v1/incentives/earnings returns
     # AuthenticationError while /incentives/earnings returns NotFound — a
