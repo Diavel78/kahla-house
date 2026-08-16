@@ -1143,6 +1143,163 @@ def _gameday_pnl(sb) -> dict:
     return out
 
 
+_INCENTIVE_SYNC_MOD = 10   # minutes between incentive pulls (two venue GETs)
+
+
+def _incentives_sync(sb, client) -> dict:
+    """Mirror the venue's liquidity-incentive truth into Supabase.
+
+    Two reads, both authenticated (the SDK's client.get defaults
+    authenticated=False — that default cost us four probe rounds):
+      /v1/incentives/earnings -> per market, per ET day, PAID/PENDING/
+                                 SKIPPED. The ONLY source of accrual;
+                                 the activities feed shows PAID only.
+      /v1/incentives          -> the full program catalog: rewardPool,
+                                 discountFactor and TARGET SIZE per
+                                 market and time period.
+
+    Never raises — a reward outage must not take the tick down."""
+    res = {"earnings": 0, "programs": 0, "merged": 0, "err": None}
+    try:
+        data = client.get("/v1/incentives/earnings", authenticated=True) or {}
+        rows = data.get("rewards") or []
+        # Collapse to one row per (slug, ET day, programType), SUMMING any
+        # duplicates rather than letting an upsert silently keep the last
+        # one — a collapse here would quietly undercount real money.
+        acc: dict = {}
+        for r in rows:
+            slug = str(r.get("marketSlug") or "").strip()
+            day = str(r.get("date") or "").strip()[:10]
+            ptype = str(r.get("programType") or "liquidityProgram")
+            if not slug or not day:
+                continue
+            k = (slug, day, ptype)
+            cur = acc.get(k)
+            amt = _safe_float(r.get("reward")) or 0.0
+            st = str(r.get("status") or "")
+            if cur is None:
+                acc[k] = {"reward": amt, "status": st, "n": 1}
+            else:
+                cur["reward"] += amt
+                cur["n"] += 1
+                # PAID beats PENDING beats SKIPPED when a key spans states
+                if st == "PAID" or cur["status"] == "SKIPPED":
+                    cur["status"] = st
+        payload = []
+        for (slug, day, ptype), v in acc.items():
+            if v["n"] > 1:
+                res["merged"] += 1
+            payload.append({
+                "market_slug": slug, "earn_date": day, "program_type": ptype,
+                "status": v["status"], "reward": round(v["reward"], 4),
+                "merged_rows": v["n"],
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+        for i in range(0, len(payload), 300):
+            (sb.table("poly_incentive_earnings").upsert(
+                payload[i:i + 300],
+                on_conflict="market_slug,earn_date,program_type").execute())
+        res["earnings"] = len(payload)
+    except Exception as e:
+        res["err"] = f"earnings: {type(e).__name__}: {e}"[:200]
+
+    try:
+        cat = client.get("/v1/incentives", authenticated=True) or {}
+        progs = cat.get("programs") or []
+        payload = []
+        for m in progs:
+            slug = str(m.get("marketSlug") or "").strip()
+            if not slug:
+                continue
+            for tp in (m.get("timePeriods") or []):
+                pid = str(tp.get("programId") or "").strip()
+                if not pid:
+                    continue
+                payload.append({
+                    "market_slug": slug, "program_id": pid,
+                    "program_type": tp.get("programType"),
+                    "period": tp.get("period"),
+                    "starts_at": tp.get("start") or None,
+                    "ends_at": tp.get("end") or None,
+                    "reward_pool": _safe_float(tp.get("rewardPool")),
+                    "discount_factor": _safe_float(tp.get("discountFactor")),
+                    "target_size": _safe_float(tp.get("targetSize")),
+                    "status": tp.get("status"),
+                    "category": m.get("category") or None,
+                    "subcategory": m.get("subcategory") or None,
+                    "event_start": m.get("eventStartTime") or None,
+                    "synced_at": datetime.now(timezone.utc).isoformat(),
+                })
+        for i in range(0, len(payload), 300):
+            (sb.table("poly_incentive_programs").upsert(
+                payload[i:i + 300],
+                on_conflict="market_slug,program_id").execute())
+        res["programs"] = len(payload)
+    except Exception as e:
+        res["err"] = ((res["err"] or "") +
+                      f" | programs: {type(e).__name__}: {e}")[:300]
+
+    try:
+        (sb.table("poly_incentive_sync").upsert({
+            "id": 1, "ran_at": datetime.now(timezone.utc).isoformat(),
+            "earnings_rows": res["earnings"], "program_rows": res["programs"],
+            "note": res["err"] or "ok"}).execute())
+    except Exception:
+        pass
+    return res
+
+
+def _incentive_day_rewards(sb, days: int = 3) -> dict:
+    """{AZ date -> {'total','paid','pending','skipped'}} of liquidity
+    earnings, for the day cards.
+
+    ⚠ earn_date is EASTERN per the venue; this project reports ARIZONA
+    days. A reward "date" is the ET calendar day the order was resting,
+    which is the same wall-clock window as an AZ evening slate offset by
+    three hours — there is no clean mapping, so we do NOT pretend one.
+    The ET day is carried through as-is and LABELLED as ET, rather than
+    shifted by a guess."""
+    out: dict = {}
+    try:
+        since = (datetime.now(timezone.utc).date() - timedelta(days=days + 2))
+        rows = (sb.table("poly_incentive_earnings")
+                .select("earn_date,status,reward")
+                .gte("earn_date", since.isoformat())
+                .limit(2000).execute().data) or []
+        for r in rows:
+            d = str(r.get("earn_date") or "")[:10]
+            if not d:
+                continue
+            b = out.setdefault(d, {"total": 0.0, "paid": 0.0,
+                                   "pending": 0.0, "skipped": 0.0})
+            amt = _safe_float(r.get("reward")) or 0.0
+            st = str(r.get("status") or "").upper()
+            b["total"] += amt
+            b[{"PAID": "paid", "PENDING": "pending",
+               "SKIPPED": "skipped"}.get(st, "pending")] += amt
+        for b in out.values():
+            for k in b:
+                b[k] = round(b[k], 4)
+    except Exception:
+        pass
+    return out
+
+
+@app.route("/api/polymarket/incentives-sync")
+def api_poly_incentives_sync():
+    """Manual/cron trigger for the incentive mirror. Shared-secret."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    try:
+        out = _incentives_sync(get_supabase(), get_client())
+    except Exception as e:
+        out = {"err": f"{type(e).__name__}: {e}"[:200]}
+    _probe_log(out)
+    return jsonify(out)
+
+
 def _maker_rewards_split(sb) -> dict:
     """Real liquidity earnings vs one-off account credits.
 
@@ -12287,6 +12444,17 @@ def api_handicapper_paperlog():
     # the Polymarket activities feed → signal_blob.poly_pnl. Additive
     # only; the resolver keeps owning status/pnl_units.
     ledger = _poly_ledger_tick(sb, now)
+    # LIQUIDITY INCENTIVES (every 10th minute) — mirror the venue's own
+    # earnings + program catalog. This is the ONLY read that shows PENDING
+    # accrual; the activities feed shows PAID lumps 5-7 business days late,
+    # which is what the reward economics were (wrongly) inferred from for
+    # weeks. Two GETs, both authenticated.
+    incentives = {}
+    if not now.minute % _INCENTIVE_SYNC_MOD:
+        try:
+            incentives = _incentives_sync(sb, get_client())
+        except Exception as e:
+            incentives = {"err": str(e)[:80]}
     # TELEGRAM BATCH FLUSH — everything above queued into telegram_queue;
     # at most ONE 📬 summary per _TG_BATCH_MIN minutes (urgent 🚨 sends
     # bypassed the queue at send time). Nothing queued → no message.
@@ -12311,6 +12479,7 @@ def api_handicapper_paperlog():
                     "opener": opener_stats, "repeg": repeg,
                     "live_swept": live_swept, "acts_sync": acts_sync,
                     "harvest": harvest, "ledger": ledger,
+                    "incentives": incentives,
                     "tg_flushed": tg_flushed})
 
 
