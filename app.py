@@ -1144,6 +1144,8 @@ def _gameday_pnl(sb) -> dict:
 
 
 _INCENTIVE_SYNC_MOD = 10   # minutes between incentive pulls (two venue GETs)
+_INCENTIVE_MAX_PAGES = 60  # program-catalog page cap; res['truncated'] flags
+                           # a hit so a growing catalog can't silently clip
 
 
 def _incentives_sync(sb, client) -> dict:
@@ -1163,73 +1165,95 @@ def _incentives_sync(sb, client) -> dict:
     try:
         data = client.get("/v1/incentives/earnings", authenticated=True) or {}
         rows = data.get("rewards") or []
-        # Collapse to one row per (slug, ET day, programType), SUMMING any
-        # duplicates rather than letting an upsert silently keep the last
-        # one — a collapse here would quietly undercount real money.
-        acc: dict = {}
+        # ⚠ STATUS IS PART OF THE KEY. Per the API reference: "A single
+        # market on a single date may return multiple rows — one per payout
+        # status (PAID, PENDING, SKIPPED)." Keying without status collapses
+        # a part-paid/part-pending market-day into one mislabelled row and
+        # destroys the accrual split this mirror exists for.
+        # Earnings is NOT paginated; startDate defaults to 2026-03-21, so
+        # one call returns full history.
+        payload, seen = [], set()
         for r in rows:
             slug = str(r.get("marketSlug") or "").strip()
             day = str(r.get("date") or "").strip()[:10]
             ptype = str(r.get("programType") or "liquidityProgram")
-            if not slug or not day:
+            st = str(r.get("status") or "").strip().upper()
+            if not slug or not day or not st:
                 continue
-            k = (slug, day, ptype)
-            cur = acc.get(k)
-            amt = _safe_float(r.get("reward")) or 0.0
-            st = str(r.get("status") or "")
-            if cur is None:
-                acc[k] = {"reward": amt, "status": st, "n": 1}
-            else:
-                cur["reward"] += amt
-                cur["n"] += 1
-                # PAID beats PENDING beats SKIPPED when a key spans states
-                if st == "PAID" or cur["status"] == "SKIPPED":
-                    cur["status"] = st
-        payload = []
-        for (slug, day, ptype), v in acc.items():
-            if v["n"] > 1:
-                res["merged"] += 1
+            k = (slug, day, ptype, st)
+            if k in seen:      # same key twice in one response ⇒ sum
+                for p in payload:
+                    if (p["market_slug"], p["earn_date"],
+                            p["program_type"], p["status"]) == k:
+                        p["reward"] = round(
+                            p["reward"] + (_safe_float(r.get("reward")) or 0), 4)
+                        res["merged"] += 1
+                        break
+                continue
+            seen.add(k)
             payload.append({
                 "market_slug": slug, "earn_date": day, "program_type": ptype,
-                "status": v["status"], "reward": round(v["reward"], 4),
-                "merged_rows": v["n"],
+                "status": st, "reward": round(_safe_float(r.get("reward")) or 0, 4),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
         for i in range(0, len(payload), 300):
             (sb.table("poly_incentive_earnings").upsert(
                 payload[i:i + 300],
-                on_conflict="market_slug,earn_date,program_type").execute())
+                on_conflict="market_slug,earn_date,program_type,status")
+             .execute())
         res["earnings"] = len(payload)
     except Exception as e:
         res["err"] = f"earnings: {type(e).__name__}: {e}"[:200]
 
     try:
-        cat = client.get("/v1/incentives", authenticated=True) or {}
-        progs = cat.get("programs") or []
-        payload = []
-        for m in progs:
-            slug = str(m.get("marketSlug") or "").strip()
-            if not slug:
-                continue
-            for tp in (m.get("timePeriods") or []):
-                pid = str(tp.get("programId") or "").strip()
-                if not pid:
+        # ⚠ /v1/incentives IS PAGINATED (pageToken / nextPageToken). The
+        # first cut read page 1 only and concluded — wrongly — that prop
+        # markets have no incentive programs at all, while our own earnings
+        # feed showed props earning. Walk every page. Public endpoint (no
+        # auth required), rate limit 5 rps.
+        payload, token, pages = [], None, 0
+        while pages < _INCENTIVE_MAX_PAGES:
+            q = {"pageSize": 200}
+            if token:
+                q["pageToken"] = token
+            cat = client.get("/v1/incentives", query=q,
+                             authenticated=True) or {}
+            for m in (cat.get("programs") or []):
+                slug = str(m.get("marketSlug") or "").strip()
+                if not slug:
                     continue
-                payload.append({
-                    "market_slug": slug, "program_id": pid,
-                    "program_type": tp.get("programType"),
-                    "period": tp.get("period"),
-                    "starts_at": tp.get("start") or None,
-                    "ends_at": tp.get("end") or None,
-                    "reward_pool": _safe_float(tp.get("rewardPool")),
-                    "discount_factor": _safe_float(tp.get("discountFactor")),
-                    "target_size": _safe_float(tp.get("targetSize")),
-                    "status": tp.get("status"),
-                    "category": m.get("category") or None,
-                    "subcategory": m.get("subcategory") or None,
-                    "event_start": m.get("eventStartTime") or None,
-                    "synced_at": datetime.now(timezone.utc).isoformat(),
-                })
+                for tp in (m.get("timePeriods") or []):
+                    pid = str(tp.get("programId") or "").strip()
+                    if not pid:
+                        continue
+                    payload.append({
+                        "market_slug": slug, "program_id": pid,
+                        "program_type": tp.get("programType"),
+                        "period": tp.get("period"),
+                        "starts_at": tp.get("start") or None,
+                        # omitted while a live game is still in progress
+                        "ends_at": tp.get("end") or None,
+                        "reward_pool": _safe_float(tp.get("rewardPool")),
+                        "discount_factor": _safe_float(tp.get("discountFactor")),
+                        "target_size": _safe_float(tp.get("targetSize")),
+                        "status": tp.get("status"),
+                        "category": m.get("category") or None,
+                        "subcategory": m.get("subcategory") or None,
+                        "event_start": m.get("eventStartTime") or None,
+                        "synced_at": datetime.now(timezone.utc).isoformat(),
+                    })
+            pages += 1
+            token = cat.get("nextPageToken") or cat.get("next_page_token")
+            if not token:
+                break
+            _time.sleep(0.21)      # 5 rps limit
+        res["pages"] = pages
+        res["truncated"] = bool(token)   # hit the page cap with more to come
+        # de-dup within the batch: upsert rejects repeated keys in one call
+        uniq = {}
+        for p in payload:
+            uniq[(p["market_slug"], p["program_id"])] = p
+        payload = list(uniq.values())
         for i in range(0, len(payload), 300):
             (sb.table("poly_incentive_programs").upsert(
                 payload[i:i + 300],
