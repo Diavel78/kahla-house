@@ -1410,8 +1410,15 @@ def _gameday_rewards(sb) -> dict:
         for label, d in (("today", today),
                          ("yesterday", today - timedelta(days=1))):
             b = days.get(d.isoformat())
-            out[label] = b or {"total": 0.0, "paid": 0.0,
-                               "pending": 0.0, "skipped": 0.0}
+            # ⚠ ABSENT ≠ ZERO. The venue publishes a day's rent only after
+            # its periods end (day_of runs T-6h→first pitch, live runs
+            # start→settlement) and computes "within 5 business days". So
+            # the current day almost always has NO ROW, and rendering that
+            # as "+$0.00" reads as "earned nothing" when the truth is "not
+            # reported yet". `unpublished` lets the card say so.
+            out[label] = (dict(b, unpublished=False) if b else
+                          {"total": 0.0, "paid": 0.0, "pending": 0.0,
+                           "skipped": 0.0, "unpublished": True})
     except Exception:
         pass
     return out

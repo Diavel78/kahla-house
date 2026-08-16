@@ -191,8 +191,15 @@
                 if (!rw) return 'settled · AZ';
                 const bits = ['bets ' + (pnl == null ? '—'
                               : (pnl < 0 ? '-$' : '+$') + Math.abs(pnl).toFixed(2))];
-                bits.push('rent +$' + Number(rw.total || 0).toFixed(2));
-                if (rw.pending) bits.push('$' + Number(rw.pending).toFixed(2) + ' pending');
+                // Absent rent is NOT zero rent — the venue publishes a day
+                // only after its reward periods end, so the current day
+                // normally has no row at all. Saying "+$0.00" would read as
+                // "earned nothing" instead of "not reported yet".
+                if (rw.unpublished) bits.push('rent not posted yet');
+                else {
+                    bits.push('rent +$' + Number(rw.total || 0).toFixed(2));
+                    if (rw.pending) bits.push('$' + Number(rw.pending).toFixed(2) + ' pending');
+                }
                 return bits.join(' · ');
             };
             document.getElementById('subToday').textContent =
