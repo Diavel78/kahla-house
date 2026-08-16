@@ -1759,6 +1759,50 @@ def enrich_positions(client, positions):
 _REWARD_TYPE_LABELS = {"Transfer", "Liquidity Program", "Taker Fee Rebate"}
 
 
+def _position_row_fast(slug, pos):
+    """enrich_positions' MATH without its two per-position venue calls.
+
+    enrich_positions hits fetch_market AND fetch_market_price once per
+    position, sequentially — ~200 round trips on a 100-position book,
+    every dashboard load, before anything paints. Neither is needed for
+    the money: `cashValue`, `cost`, `realized`, `netPosition` and
+    `expired` all ride on the raw position object. fetch_market only
+    supplied a display `question`, and fetch_market_price is a FALLBACK
+    used when cashValue is missing.
+
+    So the slim dashboard builds rows from raw data and keeps total_pnl
+    honest. Same keys compute_summary indexes with [] — it uses direct
+    key access, so a missing key here is a 500, not a blank card."""
+    net = _safe_float(pos.get("netPosition")) or 0
+    qty = abs(net)
+    cost = _safe_float(pos.get("cost"))
+    cash_value = _safe_float(pos.get("cashValue"))
+    realized = _safe_float(pos.get("realized"))
+    entry_price = (cost / qty) if cost is not None and qty > 0 else None
+    current_price = (cash_value / qty) if cash_value is not None and qty else None
+    current_value = cash_value
+    pnl = pnl_pct = None
+    if current_value is not None and cost is not None:
+        pnl = current_value - cost
+        if realized is not None:
+            pnl += realized
+        if cost > 0:
+            pnl_pct = (pnl / cost) * 100
+    elif realized is not None:
+        pnl = realized
+    md = pos.get("marketMetadata") or {}
+    return {
+        "market_name": (md.get("title") if isinstance(md, dict) else None) or slug,
+        "market_slug": (md.get("slug") if isinstance(md, dict) else None) or slug,
+        "outcome": (md.get("outcome") if isinstance(md, dict) else "") or "",
+        "side": "YES" if net >= 0 else "NO",
+        "quantity": qty, "entry_price": entry_price,
+        "current_price": current_price, "current_value": current_value,
+        "pnl": pnl, "pnl_pct": pnl_pct,
+        "expired": pos.get("expired", False),
+    }
+
+
 def compute_summary(enriched, parsed_activities, tz_offset_minutes=0):
     total_invested = 0.0
     total_current = 0.0
@@ -6376,6 +6420,21 @@ def api_polymarket_probe_exec():
     # compare. Also the only way to inspect a REPLACED order at all, since
     # it is deliberately excluded from _OPEN_ORDER_STATES and therefore
     # invisible to the fill tracker, the outbid ping and the dedup sweep.
+    # cancel_id=<id> — kill one order by id, no create/modify. Needed
+    # because a REPLACED husk is unreachable from the app AND from every
+    # sweep we own (excluded from _OPEN_ORDER_STATES). Also answers whether
+    # such an order is LIVE or inert: a successful cancel means it was
+    # still cancellable, an error means it was already dead.
+    _cid = (request.args.get("cancel_id") or "").strip()
+    if _cid:
+        out["cancel_only"] = _cid
+        _step("cancel", lambda: client.orders.cancel(_cid,
+                                                     {"marketSlug": slug}))
+        _time.sleep(1.0)
+        _step("list_after_cancel",
+              lambda: client.orders.list({"slugs": [slug]}))
+        _probe_log(out)
+        return jsonify(out)
     if (request.args.get("list_only") or "") in ("1", "true", "yes"):
         out["list_only"] = True
         try:
@@ -15799,10 +15858,21 @@ def api_data():
             positions = []
             errors.append(f"positions: {e}")
 
-        try:
-            enriched = enrich_positions(client, positions)
-        except Exception as e:
-            errors.append(f"enrich: {e}")
+        # ⚠ enrich_positions calls fetch_market ONCE PER POSITION,
+        # SEQUENTIALLY. At ~100 open positions that is ~100 round trips to
+        # Polymarket before the page can paint anything — and it was running
+        # even for ?slim=1, which uses positions for a COUNT and nothing
+        # else. `expired` comes straight off the raw position object, so the
+        # count needs no enrichment at all. Skipping it on the slim path
+        # takes the request from ~115 venue round trips to ~16.
+        _slim = request.args.get("slim") == "1"
+        if _slim:
+            enriched = [_position_row_fast(slug, p) for slug, p in positions]
+        else:
+            try:
+                enriched = enrich_positions(client, positions)
+            except Exception as e:
+                errors.append(f"enrich: {e}")
 
         activities = []
         try:
