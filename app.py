@@ -1417,6 +1417,109 @@ def _gameday_rewards(sb) -> dict:
     return out
 
 
+@app.route("/api/polymarket/dedup-orders")
+def api_poly_dedup_orders():
+    """Cancel DUPLICATE resting BUY orders — one order per (slug, intent).
+
+    Aug 16 2026. Found live: two 5-contract BUYs resting on the same YRFI
+    slug, created 2.2 SECONDS apart, against a single bot_picks row. Cause
+    was overlapping topup batches — each CALL is bounded, but concurrent
+    calls are not safe against each other: two passes read the same order,
+    one won the cancel, both created. One-order-per-slug is an INVARIANT
+    (the re-peg cancels a single order_id per bet, so any twin is stranded
+    at the old price the moment the book moves, and the position is double
+    the size the row claims).
+
+    ⚠ BUY INTENTS ONLY. The harvest ladder rests THREE sells per slug at
+    +40/+50/+65% by design — deduping sells would dismantle it.
+
+    Keeps the OLDEST order in each duplicate group (it holds the queue
+    position and matches the logged entry) and cancels the rest. Three
+    gates, all required: AUTOMATIC flag (hand-placed MANUAL orders can
+    never be touched), a BUY intent, and the slug must belong to one of
+    our own model picks. &dry=1 lists without cancelling."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    dry = (request.args.get("dry") or "") in ("1", "true", "yes")
+    out = {"ok": True, "dry": dry, "groups": 0, "canceled": 0, "actions": []}
+    try:
+        sb, client = get_supabase(), get_client()
+        owner = _kalshi_owner_uid()
+        if not owner:
+            out.update(ok=False, error="no owner uid")
+            return jsonify(out)
+        # slugs we actually bet — never touch anything else
+        rows = (sb.table("bot_picks").select("signal_blob")
+                .eq("asked_by", owner).eq("status", "pending")
+                .gte("event_start", (datetime.now(timezone.utc)
+                                     - timedelta(hours=12)).isoformat())
+                .limit(600).execute().data) or []
+        mine = set()
+        for r in rows:
+            b = r.get("signal_blob") or {}
+            sl = (b.get("pmm") or {}).get("slug") or b.get("pmm_slug")
+            if sl:
+                mine.add(str(sl))
+        try:
+            resp = client.orders.list()
+            raw = (resp.get("orders") if isinstance(resp, dict)
+                   else getattr(resp, "orders", [])) or []
+        except Exception as e:
+            out.update(ok=False, error=f"orders.list: {e}"[:200])
+            return jsonify(out)
+        groups: dict = {}
+        for o in raw:
+            def _g(k, d=None):
+                return o.get(k, d) if isinstance(o, dict) else getattr(o, k, d)
+            if (_g("state") or "") not in _OPEN_ORDER_STATES:
+                continue
+            intent = str(_g("intent") or "")
+            if "BUY" not in intent:
+                continue            # ⚠ sells are laddered on purpose
+            if (str(_g("manualOrderIndicator") or "")
+                    != "MANUAL_ORDER_INDICATOR_AUTOMATIC"):
+                continue            # never touch a hand-placed order
+            md = _g("marketMetadata") or {}
+            slug = ((md.get("slug") if isinstance(md, dict)
+                     else getattr(md, "slug", None)) or "")
+            if slug not in mine:
+                continue
+            groups.setdefault((slug, intent), []).append({
+                "id": _g("id"), "created": str(_g("createTime") or ""),
+                "price": ((_g("price") or {}).get("value")
+                          if isinstance(_g("price"), dict) else None),
+                "qty": _safe_float(_g("quantity")) or 0.0})
+        for (slug, intent), lst in groups.items():
+            if len(lst) < 2:
+                continue
+            out["groups"] += 1
+            lst.sort(key=lambda x: x["created"])      # oldest first = keeper
+            keep, extras = lst[0], lst[1:]
+            for e in extras:
+                act = {"slug": slug, "cancel_id": e["id"],
+                       "cancel_price": e["price"], "cancel_qty": e["qty"],
+                       "kept_id": keep["id"], "kept_price": keep["price"],
+                       "created": e["created"]}
+                if dry:
+                    act["dry"] = True
+                else:
+                    try:
+                        client.orders.cancel(e["id"], {"marketSlug": slug})
+                        out["canceled"] += 1
+                        act["canceled"] = True
+                    except Exception as ex:
+                        act["error"] = f"{type(ex).__name__}: {ex}"[:160]
+                    _time.sleep(0.25)        # venue rate limit — a probe
+                                             # sweep already hit Cloudflare
+                out["actions"].append(act)
+    except Exception as e:
+        out.update(ok=False, error=f"{type(e).__name__}: {e}"[:200])
+    _probe_log(out)
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/incentives-sync")
 def api_poly_incentives_sync():
     """Manual/cron trigger for the incentive mirror. Shared-secret."""
