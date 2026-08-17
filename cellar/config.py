@@ -116,9 +116,28 @@ STATE_DIR = os.path.expanduser(os.environ.get("CELLAR_STATE_DIR", "~/.cellar"))
 JOURNAL_PATH = os.path.join(STATE_DIR, "intents.sqlite3")
 
 
+def money_lanes_enabled() -> list[str]:
+    """Enabled lanes that can actually move money."""
+    return [n for n in LANES_ENABLED
+            if n in ALL_LANES and ALL_LANES[n].writes_money]
+
+
 def summary() -> str:
     """One-line startup banner. Printed to the log so a tail tells you the
-    posture immediately -- the thing you most want after an unattended boot."""
-    mode = "DRY-RUN (no money)" if DRY_RUN else "*** LIVE — REAL MONEY ***"
+    posture immediately -- the thing you most want after an unattended boot.
+
+    The REAL MONEY warning fires only when a money lane is BOTH enabled and
+    un-dry-run. Shouting it whenever CELLAR_DRY_RUN=0 would be a false alarm
+    for the common case (running only `batch`, which touches no money), and a
+    warning that cries wolf is worse than no warning -- you stop reading it,
+    and then it is not there on the night it matters.
+    """
+    money = money_lanes_enabled()
+    if DRY_RUN:
+        mode = "DRY-RUN (money lanes inert)"
+    elif money:
+        mode = f"*** LIVE — REAL MONEY via {','.join(money)} ***"
+    else:
+        mode = "armed (no money lanes enabled)"
     lanes = ",".join(LANES_ENABLED) or "(none)"
     return f"cellar owner={OWNER} tz={TZ} mode={mode} lanes={lanes}"
