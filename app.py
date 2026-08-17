@@ -13002,11 +13002,21 @@ def api_handicapper_paperlog():
     # backlog draining at 1 game/3min is not a fix). When the pool is
     # empty the pass exits in <1s (all_done), so the guarantee is free.
     opener_deadline = max(deadline, _time.time() + 14.0)
-    opener_rows, opener_stats = _opener_pass(sb, now, opener_deadline)
+    # THE CELLAR: shadow no-op unless CELLAR_LEASE_ENFORCED is set. Claimed
+    # ONCE and reused for the gridiron pass below -- both belong to the
+    # `opener` lane, and letting the football shadows run while the real
+    # opener is gated would double-write pickbot_paperlog rows (the June 28
+    # flood class of bug), even though those shadows place no money.
+    _own_opener = _cellar_owns(sb, "opener", 180)
+    if _own_opener:
+        opener_rows, opener_stats = _opener_pass(sb, now, opener_deadline)
+    else:
+        opener_rows, opener_stats = [], {"gate": "cellar_owns_lane"}
     rows.extend(opener_rows)
     # GRIDIRON IQ football opener SHADOWS (no bets) — after MLB, on
     # whatever budget remains. Inert until football games list.
-    g_rows, g_stats = _gridiron_opener_pass(sb, now, opener_deadline)
+    g_rows, g_stats = (_gridiron_opener_pass(sb, now, opener_deadline)
+                       if _own_opener else ([], {}))
     rows.extend(g_rows)
     opener_stats = {**opener_stats, **g_stats}
     # WALL ALARM — read-only tripwire: PMM has priced future games but the
@@ -13795,7 +13805,7 @@ def _outbid_alerts(sb, now) -> int:
     on a successful send so a Telegram failure retries. Never raises."""
     sent = 0
     try:
-        if now.minute % _OUTBID_TICK_MOD:
+        if now.minute % _OUTBID_TICK_MOD or not _cellar_owns(sb, "alerts", 300):
             return 0
         if _in_blackout_mt(now):
             return 0
@@ -14140,6 +14150,56 @@ _HARVEST_PROP_FAMS: set = set()   # NO PROP FAMILY SELLS (Aug 10 2026 —
 _HARVEST_MOD = 2          # minutes — same cadence as the re-peg pass
 
 
+# ---------------------------------------------------------------------------
+# THE CELLAR — Vercel side of the single-writer lease.
+# Spec: docs/cellar-migration-spec.md §5. Table: kahla-scanner/supabase/cellar.sql
+#
+# Vercel is the STANDBY. It may hold a lane only while the cellar isn't running
+# one; the cellar preempts at will, and Vercel reclaims automatically once the
+# cellar's heartbeat goes stale (the house lost power / internet).
+#
+# DEFAULT IS SHADOW. With CELLAR_LEASE_ENFORCED unset, this claims the lane
+# (so ownership is visible and heartbeats stay fresh) and then returns True
+# REGARDLESS -- behavior is bit-identical to before the lease existed. Flip the
+# env var only when cutting a lane over. Same shadow-then-enforce pattern the
+# paperlog/whiff/repeg work already uses.
+#
+# FAILS CLOSED when enforced: an RPC error reads as "not ours". That costs
+# nothing real, because the lease lives in the same Supabase every engine
+# reads and writes -- if it's unreachable the engine had no work it could do
+# anyway. Failing OPEN would risk both sides placing the same order, which is
+# the failure this whole mechanism exists to prevent.
+_CELLAR_LEASE_ENFORCED = (os.environ.get("CELLAR_LEASE_ENFORCED") or "").strip().lower() \
+    not in ("", "0", "false", "no", "off")
+
+
+# GATED SO FAR (lane in quotes):
+#   "opener"  -> _opener_pass + _gridiron_opener_pass (one claim, both passes)
+#   "repeg"   -> _repeg_tick
+#   "harvest" -> _harvest_tick
+#   "ledger"  -> _poly_ledger_tick
+#   "alerts"  -> _outbid_alerts
+# NOT YET GATED (all on the "alerts" lane, all in the paperlog route body):
+#   _tg_flush, _bet_alerts, _opener_watchdog. Each is individually near-
+#   idempotent (per-bet markers, send-and-mark, cooldowns) so double-running
+#   costs at worst a duplicate ping -- but they must be gated before the
+#   `alerts` lane is cut over for real.
+
+
+def _cellar_owns(sb, lane: str, ttl_s: int = 180) -> bool:
+    """True if THIS (Vercel) side should run `lane`. Never raises."""
+    owned = False
+    try:
+        res = sb.rpc("cellar_claim",
+                     {"p_lane": lane, "p_owner": "vercel", "p_ttl": ttl_s}).execute()
+        owned = bool(res.data)
+    except Exception:
+        owned = False                      # fail closed (see note above)
+    if not _CELLAR_LEASE_ENFORCED:
+        return True                        # shadow: observe, never gate
+    return owned
+
+
 def _harvest_tick(sb, now) -> dict:
     """THE HARVEST LEG (Aug 3 2026, user: "2 contracts... 1 rides and
     wins or losses, the other as soon as it fills has a sell order added
@@ -14158,7 +14218,8 @@ def _harvest_tick(sb, now) -> dict:
     Never raises."""
     res = {"placed": 0}
     try:
-        if not _HARVEST_ENABLED or now.minute % _HARVEST_MOD:
+        if (not _HARVEST_ENABLED or now.minute % _HARVEST_MOD
+                or not _cellar_owns(sb, "harvest", 300)):
             return res
         owner = _kalshi_owner_uid()
         if not owner:
@@ -14328,7 +14389,7 @@ def _poly_ledger_tick(sb, now) -> dict:
     status/pnl_units (the resolver owns those). Never raises."""
     res = {"stamped": 0}
     try:
-        if now.minute % _POLY_LEDGER_MOD:
+        if now.minute % _POLY_LEDGER_MOD or not _cellar_owns(sb, "ledger", 900):
             return res
         owner = _kalshi_owner_uid()
         if not owner:
@@ -14479,7 +14540,7 @@ def _repeg_tick(sb, now) -> dict:
         # rest hours — my phone's silenced anyway"). Overnight management is
         # load-bearing for the evening-before early-entry lane; the OUTBID
         # alert keeps its own quiet hours, the bot itself never sleeps.
-        if now.minute % _OUTBID_TICK_MOD:
+        if now.minute % _OUTBID_TICK_MOD or not _cellar_owns(sb, "repeg", 300):
             return res
         admins = set(_admin_uids())
         _owner = _kalshi_owner_uid()
