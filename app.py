@@ -1694,6 +1694,32 @@ def _maker_rewards_split(sb) -> dict:
 _DASH_CACHE_MAX_AGE_S = 900     # 15 min — the tick refreshes every 5
 
 
+def _dash_derived(sb) -> dict:
+    """Every DB-derived block the slim dashboard shows, computed once.
+
+    ⚠ THESE DO NOT BELONG ON A PAGE LOAD. Each looks cheap in isolation
+    and together they are the whole problem poly_dash_cache was built to
+    solve: 500 activity PAYLOADS for the reward split, 5000 earnings rows
+    for the rent window, 3000 bot_picks for the 7-day P&L, plus the day
+    cards — six Supabase queries, three of them large scans aggregated in
+    Python, on every 60-second poll. Adding a card to the dashboard means
+    adding it HERE, not in the request handler.
+
+    Never raises; a block that fails comes back None and the page falls
+    back to computing that one live."""
+    out: dict = {}
+    for key, fn in (("gameday_pnl", lambda: _gameday_pnl(sb)),
+                    ("maker_split", lambda: _maker_rewards_split(sb)),
+                    ("gameday_rewards", lambda: _gameday_rewards(sb)),
+                    ("rent_7d", lambda: _rent_window(sb, 7)),
+                    ("pnl_7d", lambda: _window_pnl(sb, 7))):
+        try:
+            out[key] = fn()
+        except Exception:
+            out[key] = None
+    return out
+
+
 def _dash_cache_refresh(sb, client) -> dict:
     """Compute the dashboard summary ONCE on the tick and park the result.
 
@@ -1718,6 +1744,7 @@ def _dash_cache_refresh(sb, client) -> dict:
         bal = parse_balances(fetch_balances(client)) or {}
         (sb.table("poly_dash_cache").upsert({
             "id": 1, "summary": summary,
+            "derived": _dash_derived(sb),
             "balance": bal.get("current_balance"),
             "open_count": len([p for p in rows if not p.get("expired")]),
             "computed_at": datetime.now(timezone.utc).isoformat(),
@@ -16097,29 +16124,44 @@ def api_data():
         _c = _dash_cache_read(get_supabase())
         if _c:
             _s = _c.get("summary") or {}
-            try:
-                _gd = _gameday_pnl(get_supabase())
-            except Exception:
-                _gd = {"today": None, "yesterday": None}
-            try:
-                _mrs = _maker_rewards_split(get_supabase())
-            except Exception:
-                _mrs = {"rewards": _s.get("maker_rewards"), "credits": None,
-                        "n_rewards": None}
-            try:
-                _rw = _gameday_rewards(get_supabase())
-            except Exception:
-                _rw = {"today": None, "yesterday": None}
+            # ONE ROW, ZERO QUERIES. The tick parks every derived block
+            # (day cards, reward split, 7-day window) alongside the
+            # summary — see _dash_derived for why they must not be
+            # recomputed here. The per-block live fallbacks below exist
+            # only for the window between a deploy and the first tick,
+            # and for a block that failed on the tick.
+            _d = _c.get("derived") or {}
+
+            def _blk(key, fn, dflt):
+                v = _d.get(key)
+                if v is not None:
+                    return v
+                try:
+                    return fn()
+                except Exception:
+                    return dflt
+
+            _gd = _blk("gameday_pnl", lambda: _gameday_pnl(get_supabase()),
+                       {"today": None, "yesterday": None})
+            _mrs = _blk("maker_split",
+                        lambda: _maker_rewards_split(get_supabase()),
+                        {"rewards": _s.get("maker_rewards"), "credits": None,
+                         "n_rewards": None})
+            _rw = _blk("gameday_rewards",
+                       lambda: _gameday_rewards(get_supabase()),
+                       {"today": None, "yesterday": None})
             if not _mrs.get("rewards") and not _mrs.get("n_rewards"):
                 _mrs = {"rewards": _s.get("maker_rewards"), "credits": None,
                         "n_rewards": None}
             # TRAILING 7 DAYS — the only honest rent measure while the
             # venue's per-day publication lags (see _rent_window).
-            try:
-                _r7 = _rent_window(get_supabase(), 7)
-                _p7 = _window_pnl(get_supabase(), 7)
-            except Exception:
-                _r7, _p7 = None, None
+            _r7 = _blk("rent_7d", lambda: _rent_window(get_supabase(), 7), None)
+            _p7 = _d.get("pnl_7d")
+            if _p7 is None and "pnl_7d" not in _d:
+                try:
+                    _p7 = _window_pnl(get_supabase(), 7)
+                except Exception:
+                    _p7 = None
             return jsonify({
                 "ok": True, "timestamp": now.isoformat(), "cached": True,
                 "cache_age_s": _c.get("age_s"),
