@@ -1202,6 +1202,38 @@ def _incentives_sync(sb, client) -> dict:
                 on_conflict="market_slug,earn_date,program_type,status")
              .execute())
         res["earnings"] = len(payload)
+
+        # ⚠ STATUS TRANSITIONS SUPERSEDE, THEY DO NOT ACCUMULATE.
+        # status is part of the key (a market-day really can carry more
+        # than one status), but a row does not stay PENDING once it is
+        # PAID — the venue flips it. An upsert-only sync therefore leaves
+        # the stale PENDING row alongside the new PAID one and DOUBLE
+        # COUNTS the day. Caught Aug 17 2026 with 162 market-days and
+        # $24.99 of phantom pending on the books, inflating every rent
+        # figure by roughly the paid amount.
+        #
+        # The venue's own response is the authority: whatever statuses it
+        # returned for a (slug, day, program) this pull are the only ones
+        # that exist. Anything else we hold for that key is stale.
+        try:
+            keys: dict = {}
+            for p in payload:
+                keys.setdefault((p["market_slug"], p["earn_date"],
+                                 p["program_type"]), set()).add(p["status"])
+            stale = 0
+            for (slug, day, ptype), live in keys.items():
+                dead = [s for s in ("PAID", "PENDING", "SKIPPED")
+                        if s not in live]
+                if not dead:
+                    continue
+                r = (sb.table("poly_incentive_earnings").delete()
+                     .eq("market_slug", slug).eq("earn_date", day)
+                     .eq("program_type", ptype).in_("status", dead)
+                     .execute())
+                stale += len(getattr(r, "data", None) or [])
+            res["stale_removed"] = stale
+        except Exception as e:
+            res["stale_err"] = f"{type(e).__name__}: {e}"[:120]
     except Exception as e:
         res["err"] = f"earnings: {type(e).__name__}: {e}"[:200]
 
