@@ -111,6 +111,11 @@ Firestore behind for users/book-club/grocery.
 **Leave on Vercel:** the website, Firebase Auth, Firestore.
 **Leave in the cloud:** Supabase.
 
+> ⚠️ **"Leave" here means DURING the migration, not forever.** The end goal is
+> $0 infrastructure — Vercel Pro and Supabase Pro both go. See **§12**, which
+> also explains why Supabase must be the LAST thing to move rather than the
+> first. Everything in this section is about surviving the cutover safely.
+
 Why not move everything:
 
 1. **The site has users who aren't you.** Book Club and Grocery are family-facing. A house box means home internet, home power, and an inbound tunnel between your wife and her grocery list. That's a new failure mode with no upside.
@@ -440,13 +445,123 @@ reason Supabase stays in the cloud.
 
 ---
 
-## 11. Explicitly not moving
+## 11. Not moving *during the migration*
 
-- The website and its users.
-- Firebase Auth / Firestore.
-- Supabase Postgres.
+Scoped to Phases 0-4. Two of these DO move at the end — see §12.
+
+- The website and its users. *(moves in §12, optional)*
+- Firebase Auth / Firestore. Stays permanently — it's free and it's the
+  identity layer for family members, not part of the machine.
+- Supabase Postgres. **The safety seam. Moves LAST, in §12 — never before.**
 - The resolver's ESPN grading (it's fine where it is, and it's the standby's
   only real job).
 - Anything about the models, the gates, the thresholds, or the money rules.
   **This migration changes where the machine runs. It changes nothing about
   what the machine decides.**
+
+---
+
+## 12. The end state: $0 and unthrottled
+
+The actual goal, stated so nobody has to infer it from the phases: **no paid
+infrastructure, and none of the machine's speed decided by someone else's
+platform.** Phases 0-4 move the machine. This is where the bills stop.
+
+### 12a. What the throttling costs today, and what survives
+
+Every one of these is an artifact of serverless. All of them die:
+
+| Today | After |
+|---|---|
+| `8.0s` paperlog budget (25s empty window) | gone — the whole slate, properly |
+| `7.5s` PMM loop / `14s` opener / `20s` re-peg / `5s` top-up | gone |
+| Random-shuffle rotation, because the budget starves games | gone — every game, every tick |
+| `minute % N` gates against the **UTC** clock | real schedules on an **AZ** clock |
+| 2-minute pegs | 15s or faster |
+| Caches cold on every tick | loaded once, held |
+| Games processed serially inside one request | fan out |
+
+**What does NOT go away: Polymarket's own rate limits.** This repo already
+records tripping Cloudflare on the venue by firing overlapping write batches.
+The cellar can be as fast as we like; the venue cannot. Going faster than
+Polymarket tolerates does not buy better fills — it buys being throttled by
+them instead of by us. The write-serialization mutex in `cellar/runner.py`
+exists precisely to respect that ceiling. **Ours is the throttling that dies.
+Theirs is real and permanent.**
+
+### 12b. The bills, and the order they die in
+
+| Service | Today | End state | When |
+|---|---|---|---|
+| Vercel Pro | $20/mo | **$0** — Hobby covers a low-traffic family Flask app once the per-minute compute leaves | after Phase 4 |
+| Supabase Pro | ~$25/mo | **$0** — Postgres on the cellar | **LAST**, see 12c |
+| GitHub Actions | $0 (public repo) | $0 | — |
+| cron-job.org | $0 | $0 (retired) | Phase 4 |
+| Electricity | — | ~$2/mo | — |
+
+Optionally, later: the website itself comes home behind a Cloudflare Tunnel
+and Vercel disappears entirely. The cost of that is real but modest — a home
+internet outage takes the Book Club and the grocery list down with it, which
+is a different risk from the machine pausing.
+
+### 12c. Why Supabase goes LAST (correction to §2)
+
+§2 argues Supabase stays in the cloud. **That is correct for the migration and
+wrong as a permanent statement**, and the original draft did not distinguish
+them. The reasoning that keeps it in the cloud is entirely about the *cutover*:
+
+- it is the seam that lets the cellar and Vercel both be live,
+- it is what makes the lease's automatic failover meaningful,
+- it is why rollback is "stop the daemon" instead of "restore a database."
+
+Every one of those reasons expires once the cellar is the sole writer and has
+proven itself over Phase 4's 30 quiet days. **Move Postgres home before then
+and you have welded a data migration onto a runtime migration and thrown away
+the safety net.** Move it after, and it is just a copy.
+
+Repatriating also kills a throttle that is currently invisible: every DB call
+today is a cloud round trip through PostgREST. Local Postgres over a unix
+socket is orders of magnitude faster, and that starts to matter at a 15-second
+peg loop.
+
+### 12d. The free tier is not reachable — measured, not assumed
+
+Aug 16 2026, live DB:
+
+```
+total                 1738 MB
+  prop_snapshots      1175 MB   (68% of everything)
+  pm_snapshots         184 MB
+  nhl_shot_events       70 MB
+  book_snapshots        48 MB
+```
+
+Supabase free is **500 MB**. Retention is already doing its job — the nightly
+cleanup holds `prop_snapshots` to a 15-day window and the table is at steady
+state, not running away. So the only route to free-tier is cutting prop
+retention to roughly four days, which would destroy the stored bid/ask history
+the spread-decomposition analysis runs on. **Not worth $25/mo.**
+
+Which means the $0 path is self-hosting, not downgrading. At 1.7 GB steady
+state that is nothing for a local SSD.
+
+### 12e. The real price of repatriating: backups become your job
+
+Not money — responsibility. Supabase does this silently today; on the cellar
+the disk is the only copy until something is built. **Repatriation is not done
+when Postgres runs locally. It is done when a restore has been tested.**
+
+Minimum bar before the Supabase project is deleted:
+
+1. Nightly `pg_dump` to a second physical disk, not just another folder.
+2. An off-site copy (cheap object storage or a NAS) — a house fire should not
+   also be a data loss event.
+3. **A restore actually performed** into a scratch database and verified, at
+   least once, before the cloud copy goes away.
+4. Backup age surfaced on the health chip, same as any lane. A backup nobody
+   watches is the ESPN-403 failure wearing a different hat.
+
+Until all four exist, keeping Supabase Pro is the correct call. $25/mo is a
+fair price for someone else worrying about durability, and the machine's
+edge does not come from saving it.
+
