@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import re
 import sys
 import time
@@ -79,7 +80,18 @@ class Fetcher:
             log.info("JS challenge detected — starting headless Chromium")
             from playwright.sync_api import sync_playwright
             self._pw = sync_playwright().start()
-            self._browser = self._pw.chromium.launch()
+            # PLAYWRIGHT_CHANNEL lets an older host drive an INSTALLED browser
+            # instead of Playwright's bundled Chromium. Needed on macOS 13:
+            # Playwright dropped bundled-Chromium builds for mac13 ("Playwright
+            # does not support chromium on mac13"), but real Google Chrome still
+            # supports it. Set PLAYWRIGHT_CHANNEL=chrome on such a box.
+            # Unset => bundled Chromium, i.e. exactly the GitHub Actions
+            # behavior this has always had.
+            _chan = (os.environ.get("PLAYWRIGHT_CHANNEL") or "").strip()
+            if _chan:
+                log.info("launching browser channel=%s", _chan)
+            self._browser = self._pw.chromium.launch(
+                **({"channel": _chan} if _chan else {}))
             self._page = self._browser.new_page(user_agent=_UA)
         page = self._page
         try:
