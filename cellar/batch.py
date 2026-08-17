@@ -233,6 +233,43 @@ def _warn_blocked(job_name: str, needs: str) -> None:
                 "always shows it)", job_name, needs)
 
 
+# FAILURE BACKOFF. A job stays due until it SUCCEEDS, so without this a
+# persistently broken job re-runs every 60s forever -- observed live the first
+# night: ufc_stats failed four times in four minutes and would have run all
+# night. Heavy jobs (a browser scrape, a model compute) make that genuinely
+# costly, and the log noise buries whatever else is wrong.
+#
+# In-memory on purpose: a daemon restart clears it, because a restart is a
+# human saying "I fixed something, try again now."
+_FAIL_BACKOFF: dict[str, tuple[int, float]] = {}     # job -> (fails, next_ts)
+_BACKOFF_BASE_S = 300
+_BACKOFF_MAX_S = 6 * 3600
+
+
+def _backoff_ok(job_name: str) -> bool:
+    """False => still serving a penalty from a recent failure."""
+    entry = _FAIL_BACKOFF.get(job_name)
+    if not entry:
+        return True
+    fails, next_ts = entry
+    if time.time() >= next_ts:
+        return True
+    log.debug("batch: %s backing off (%d consecutive failures, %ds left)",
+              job_name, fails, int(next_ts - time.time()))
+    return False
+
+
+def _note_result(job_name: str, ok: bool) -> None:
+    if ok:
+        _FAIL_BACKOFF.pop(job_name, None)
+        return
+    fails = _FAIL_BACKOFF.get(job_name, (0, 0.0))[0] + 1
+    delay = min(_BACKOFF_MAX_S, _BACKOFF_BASE_S * (2 ** (fails - 1)))
+    _FAIL_BACKOFF[job_name] = (fails, time.time() + delay)
+    log.warning("batch: %s failed (%d in a row) — next attempt in %dm",
+                job_name, fails, delay // 60)
+
+
 def _have(module: str) -> bool:
     """Is an optional dependency importable on this box?"""
     import importlib.util
@@ -276,6 +313,9 @@ def lane_batch(ctx) -> int:
         if not is_due(job, _last_ok(sb, job.name), now_az):
             continue
 
+        if not _backoff_ok(job.name):
+            continue
+
         if job.needs and not _have(job.needs):
             # BLOCKED, not failed. Skip to the next due job without stamping a
             # run, so --batch-status keeps showing it as outstanding instead of
@@ -302,6 +342,7 @@ def lane_batch(ctx) -> int:
             log.warning("batch: tick write failed: %s", e)
 
         log.info("batch: %s %s in %dms", job.name, "ok" if ok else "FAILED", ms)
+        _note_result(job.name, ok)
         if not ok:
             log.error("batch: %s output tail:\n%s", job.name, out[-800:])
         return steps if ok else 0
