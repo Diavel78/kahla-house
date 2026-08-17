@@ -119,10 +119,11 @@ def cmd_status() -> int:
 def cmd_batch_status() -> int:
     from .batch import status
     rows = status(_supabase(standalone=True))
-    print(f"{'JOB':<20} {'SCHEDULE':<16} {'LAST OK':<14} DUE  NOTE")
+    print(f"{'JOB':<20} {'SCHEDULE':<16} {'LAST OK':<14} {'DUE':<8} NOTE")
     for r in rows:
+        due = "BLOCKED" if r.get("blocked") else ("YES" if r["due"] else "  .")
         print(f"{r['job']:<20} {r['sched']:<16} {r['last_ok']:<14} "
-              f"{'YES' if r['due'] else '  .'}  {r['note']}")
+              f"{due:<8} {r['note']}")
     return 0
 
 

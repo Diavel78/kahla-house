@@ -74,6 +74,11 @@ class Job:
     note: str = ""
     # Jobs that must run in order (power ratings: ingest THEN compute).
     then: tuple[tuple[str, ...], ...] = field(default_factory=tuple)
+    # An importable module this job REQUIRES beyond requirements.txt. Missing
+    # => the job is BLOCKED: skipped, never stamped as run, and reported as
+    # such by --batch-status. Failing loudly once a week at 3am on a box
+    # nobody is watching is exactly the outcome this migration exists to end.
+    needs: str | None = None
 
 
 # The scheduled roster. UTC in the workflow -> AZ here (UTC-7, no DST).
@@ -92,7 +97,11 @@ JOBS: tuple[Job, ...] = (
         hour=3, minute=30, note="MLB pitcher game lines (Diamond/Whiff/Outs spine)"),
     Job("mlb_batters", ["scripts.ingest_mlb_batters", "--delta", "--commit"],
         hour=3, minute=40, note="MLB batter game lines"),
-    Job("savant_xwoba", ["scripts.ingest_savant_xwoba", "--delta", "--commit"],
+    # --platoon is REQUIRED: the daily delta writes BOTH the xwOBA and the
+    # platoon spine in one pass. Without it the platoon table silently stops
+    # updating while everything looks healthy.
+    Job("savant_xwoba",
+        ["scripts.ingest_savant_xwoba", "--delta", "--platoon", "--commit"],
         hour=3, minute=45, note="Statcast xwOBA + platoon spine"),
 
     # -- daily model computes (order matters: after their spines) ----------
@@ -107,8 +116,18 @@ JOBS: tuple[Job, ...] = (
         then=(("scripts.compute_power_ratings",),)),
 
     # -- weekly ------------------------------------------------------------
-    Job("ufc_stats", ["scripts.ingest_ufc_stats", "--delta", "--commit"],
-        hour=3, weekday=0, timeout_s=3600, note="UFCStats delta (Mon)"),
+    # NOT --delta: this script has no such flag. Its delta mode is
+    # `--events --fighters --commit --limit 80` (see ufc-stats-ingest.yml).
+    # Needs Playwright + Chromium — UFCStats fronts requests with a JS
+    # proof-of-work challenge that the fetcher solves in headless Chromium.
+    # Deliberately absent from requirements.txt (scanner-poll pip-installs
+    # that file every minute), so install it on the box explicitly:
+    #     pip install playwright && python -m playwright install chromium
+    Job("ufc_stats",
+        ["scripts.ingest_ufc_stats", "--events", "--fighters", "--commit",
+         "--limit", "80"],
+        hour=3, weekday=0, timeout_s=3600, needs="playwright",
+        note="UFCStats delta (Mon) — needs playwright"),
     Job("ufc_model", ["scripts.compute_ufc_model", "--commit"],
         hour=4, weekday=0, timeout_s=2700,
         note="Fight IQ snapshot + paperlog grading (Mon)",
@@ -194,6 +213,15 @@ def run_job(job: Job) -> tuple[bool, int, str]:
 # The lane
 # ---------------------------------------------------------------------------
 
+def _have(module: str) -> bool:
+    """Is an optional dependency importable on this box?"""
+    import importlib.util
+    try:
+        return importlib.util.find_spec(module) is not None
+    except Exception:
+        return False
+
+
 def _last_ok(sb, job_name: str) -> datetime | None:
     """Last successful run, read from cellar_ticks.
 
@@ -226,6 +254,14 @@ def lane_batch(ctx) -> int:
 
     for job in JOBS:
         if not is_due(job, _last_ok(sb, job.name), now_az):
+            continue
+
+        if job.needs and not _have(job.needs):
+            # BLOCKED, not failed. Skip to the next due job without stamping a
+            # run, so --batch-status keeps showing it as outstanding instead of
+            # quietly pretending it happened.
+            log.warning("batch: %s BLOCKED — missing %r. Install it or leave "
+                        "this job on GitHub Actions.", job.name, job.needs)
             continue
 
         if ctx.dry_run:
@@ -290,12 +326,14 @@ def status(sb) -> list[dict]:
     out = []
     for job in JOBS:
         last = seen.get(job.name)
+        blocked = bool(job.needs and not _have(job.needs))
         out.append({
             "job": job.name,
+            "blocked": blocked,
             "sched": (f"{'Mon ' if job.weekday == 0 else 'daily '}"
                       f"{job.hour:02d}:{job.minute:02d} AZ"),
             "last_ok": last.strftime("%m-%d %H:%M") if last else "never",
-            "due": is_due(job, last, now_az),
+            "due": is_due(job, last, now_az) and not blocked,
             "note": job.note,
         })
     return out

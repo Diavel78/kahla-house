@@ -207,12 +207,55 @@ def test_batch_commands_exist() -> None:
           not missing, f"missing {missing}")
 
 
+def test_batch_flags_are_real() -> None:
+    """Every flag a job passes must exist in that script's argparse.
+
+    Caught three real bugs the first time it ran: ufc_stats was being invoked
+    with --delta (a flag it does not have, so argparse would have killed it),
+    savant_xwoba was missing --platoon (so the platoon spine would silently
+    stop updating), and the whole class was invisible because these jobs only
+    run once a day or once a week, at 3am, on a box nobody watches.
+    """
+    import os
+    import re
+    from cellar.batch import JOBS, SCANNER_DIR
+
+    problems = []
+    for j in JOBS:
+        for argv in (list(j.argv),) + tuple(list(t) for t in j.then):
+            mod, args = argv[0], argv[1:]
+            path = os.path.join(SCANNER_DIR, *mod.split(".")) + ".py"
+            if not os.path.exists(path):
+                problems.append(f"{mod}: script missing")
+                continue
+            src = open(path).read()
+            declared = set(re.findall(r'add_argument\(\s*"(--[a-z0-9-]+)"', src))
+            for a in args:
+                if a.startswith("--") and a not in declared:
+                    problems.append(f"{mod}: passes {a}, script does not declare it")
+    check("every batch flag exists in its script's argparse",
+          not problems, "; ".join(problems))
+
+
+def test_batch_blocked_deps() -> None:
+    """A job with an unmet dependency must report BLOCKED, not silently pass."""
+    from cellar.batch import JOBS, _have, status
+
+    needs = {j.name: j.needs for j in JOBS if j.needs}
+    check("ufc_stats declares its playwright dependency",
+          needs.get("ufc_stats") == "playwright", f"got {needs}")
+    check("_have() detects a present module", _have("json") is True)
+    check("_have() detects an absent module",
+          _have("definitely_not_a_real_module_xyz") is False)
+
+
 def main() -> int:
     print("THE CELLAR — offline selftest\n")
     for t in (test_imports_without_creds, test_config_validation,
               test_lease_fails_closed, test_journal_survives_crash,
               test_lane_registry_matches_config, test_batch_schedule,
-              test_batch_commands_exist):
+              test_batch_commands_exist, test_batch_flags_are_real,
+              test_batch_blocked_deps):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
