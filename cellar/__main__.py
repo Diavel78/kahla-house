@@ -21,6 +21,11 @@ def _setup_logging() -> None:
         format="%(asctime)s %(levelname)-7s %(name)-16s %(message)s",
     )
     logging.Formatter.converter = time.localtime
+    # httpx/httpcore log one INFO line PER REQUEST, which buries the actual
+    # output under a wall of URLs. Supabase-py talks over httpx, so a 12-job
+    # status read prints 12 lines of noise first. Quiet unless something breaks.
+    for noisy in ("httpx", "httpcore", "hpack", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def _supabase(*, standalone: bool = False):
@@ -53,6 +58,43 @@ def _supabase(*, standalone: bool = False):
     return sb
 
 
+def _fmt_age(ts: str | None) -> str:
+    """How long since a lane was last claimed.
+
+    THE column on the status table: it is what tells you whether the named
+    owner is actually alive, or just the last thing to touch the row before it
+    died. Module level rather than a closure so it can be tested directly.
+    """
+    from datetime import datetime, timezone
+    if not ts:
+        return "never"
+    try:
+        d = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return "?"
+    if d.year < 1980:                      # seeded 'epoch' = never claimed
+        return "never"
+    secs = int((datetime.now(timezone.utc) - d).total_seconds())
+    if secs < 90:
+        return f"{secs}s"
+    if secs < 5400:
+        return f"{secs // 60}m"
+    if secs < 172800:
+        return f"{secs // 3600}h"
+    return f"{secs // 86400}d"
+
+
+def _age_secs(age: str) -> int | None:
+    """Parse _fmt_age output back to seconds. None = never/unknown."""
+    if not age or age in ("never", "?"):
+        return None
+    unit, mult = age[-1], {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    try:
+        return int(age[:-1]) * mult[unit]
+    except Exception:
+        return None
+
+
 def cmd_status() -> int:
     from . import config
     from .lease import Lease
@@ -61,9 +103,16 @@ def cmd_status() -> int:
     if not rows:
         print("no lease rows — apply kahla-scanner/supabase/cellar.sql")
         return 1
-    print(f"{'LANE':<16} {'OWNER':<8} {'AGE':>8}  NOTE")
+    print(f"{'LANE':<16} {'OWNER':<8} {'AGE':>7}  {'STATE':<6} NOTE")
     for r in rows:
-        print(f"{r['lane']:<16} {r['owner']:<8} {'':>8}  {r.get('note') or ''}")
+        age = _fmt_age(r.get("heartbeat_at"))
+        secs = _age_secs(age)
+        ttl = int(r.get("ttl_seconds") or 180)
+        # LIVE  = renewed inside its TTL, so the owner genuinely holds it.
+        # stale = past TTL; the other side may take it at any moment.
+        # idle  = never claimed by anyone.
+        state = "idle" if secs is None else ("LIVE" if secs < ttl else "stale")
+        print(f"{r['lane']:<16} {r['owner']:<8} {age:>7}  {state:<6} {r.get('note') or ''}")
     return 0
 
 

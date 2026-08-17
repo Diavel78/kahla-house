@@ -254,12 +254,42 @@ def lane_batch(ctx) -> int:
     return 0
 
 
+def _last_ok_map(sb) -> dict[str, datetime]:
+    """Last successful run for EVERY batch job in ONE query.
+
+    The per-job lookup is fine inside the lane (it runs on the box, once a
+    minute, and stops at the first due job), but `--batch-status` called it 12
+    times = 12 internet round trips before printing a single row. PostgREST has
+    no GROUP BY, so pull the recent ok-ticks once and reduce in Python.
+    """
+    try:
+        rows = (sb.table("cellar_ticks")
+                .select("lane,started_at")
+                .like("lane", "batch:%").eq("ok", True)
+                .order("started_at", desc=True).limit(500)
+                .execute().data) or []
+    except Exception as e:
+        log.warning("batch: bulk last_ok lookup failed: %s", e)
+        return {}
+    out: dict[str, datetime] = {}
+    for r in rows:                      # already newest-first; keep the first
+        name = (r.get("lane") or "")[len("batch:"):]
+        if name and name not in out:
+            ts = r["started_at"].replace("Z", "+00:00")
+            try:
+                out[name] = datetime.fromisoformat(ts).astimezone(AZ)
+            except Exception:
+                pass
+    return out
+
+
 def status(sb) -> list[dict]:
     """What's due, what ran, when. For `python -m cellar --batch-status`."""
     now_az = datetime.now(AZ)
+    seen = _last_ok_map(sb)
     out = []
     for job in JOBS:
-        last = _last_ok(sb, job.name)
+        last = seen.get(job.name)
         out.append({
             "job": job.name,
             "sched": (f"{'Mon ' if job.weekday == 0 else 'daily '}"
