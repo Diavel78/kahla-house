@@ -43,6 +43,7 @@ class Runner:
         self.write_lock = threading.Lock()
         self._next_due: dict[str, float] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._renewer: threading.Thread | None = None
 
     # -- validation ---------------------------------------------------------
 
@@ -66,6 +67,31 @@ class Runner:
                         f"enabling both double-fires every engine. Pick one."
                     )
         return problems
+
+    # -- lease renewal ------------------------------------------------------
+
+    def _renew_loop(self) -> None:
+        """Keep held leases fresh INDEPENDENTLY of lane execution.
+
+        Without this, a lane only renews when it runs -- so a long job lets its
+        own lease go stale while it works. Caught live: ufc_stats ran 5m12s
+        through a browser and the batch heartbeat aged past 3 minutes with the
+        daemon perfectly healthy, which reads externally as "the cellar died."
+
+        Worse than cosmetic: if a job outran its TTL, the standby could reclaim
+        the lane MID-RUN and start doing the same work. batch survives only
+        because its TTL is 3600s and its longest timeout is also 3600s -- a
+        coin-flip margin, which is not a margin.
+
+        Renews every 30s: comfortably inside the tightest TTL (180s) and one
+        cheap RPC per held lane.
+        """
+        while not self.stop.is_set():
+            for lane in list(self.lease.held):
+                spec = config.ALL_LANES.get(lane)
+                if spec is not None:
+                    self.lease.claim(lane, ttl_s=spec.ttl_s)
+            self.stop.wait(30.0)
 
     # -- heartbeat ----------------------------------------------------------
 
@@ -166,6 +192,10 @@ class Runner:
 
         for s in (signal.SIGINT, signal.SIGTERM):
             signal.signal(s, lambda *_: self.stop.set())
+
+        self._renewer = threading.Thread(target=self._renew_loop,
+                                         name="cellar-renew", daemon=True)
+        self._renewer.start()
 
         log.info("%s", config.summary())
         while not self.stop.is_set():
