@@ -85,8 +85,26 @@ def cmd_selftest() -> int:
 def main(argv: list[str]) -> int:
     _setup_logging()
 
+    # Selftest runs BEFORE .env is loaded, deliberately. Its whole purpose is
+    # to prove the package works with no credentials and no configuration, so
+    # letting a local .env inject CELLAR_LANES / CELLAR_DRY_RUN would make it
+    # assert against the box's config instead of the defaults.
     if "--selftest" in argv:
         return cmd_selftest()
+
+    # Everything else needs .env. This MUST happen before `from . import
+    # config`, because config reads CELLAR_DRY_RUN / CELLAR_LANES at import
+    # time -- load it later and those settings are silently ignored, which is
+    # the worst kind of bug here: the daemon would look configured and run
+    # nothing. (The daemon path used to get this by accident, via app.py's own
+    # load_dotenv; the standalone --status/--batch-status path never did.)
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), ".env"))
+    except Exception as e:
+        print(f"warning: could not load .env ({e})", file=sys.stderr)
+
     if "--status" in argv:
         return cmd_status()
     if "--batch-status" in argv:
