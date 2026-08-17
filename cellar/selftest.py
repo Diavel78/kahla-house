@@ -146,11 +146,73 @@ def test_lane_registry_matches_config() -> None:
     check("every TTL exceeds its cadence", not bad, f"too tight: {bad}")
 
 
+def test_batch_schedule() -> None:
+    from datetime import datetime, timedelta
+    from cellar.batch import AZ, JOBS, Job, due_at, is_due
+
+    daily = Job("t", ["x"], hour=3, minute=30)
+    now = datetime(2026, 8, 16, 5, 0, tzinfo=AZ)          # Sun 05:00 AZ
+
+    check("daily: fire time is today when now is past it",
+          due_at(daily, now) == datetime(2026, 8, 16, 3, 30, tzinfo=AZ))
+    check("daily: fire time rolls back when now is before it",
+          due_at(daily, now.replace(hour=2)) == datetime(2026, 8, 15, 3, 30, tzinfo=AZ))
+    check("never run => due", is_due(daily, None, now))
+    check("ran before today's fire => due",
+          is_due(daily, datetime(2026, 8, 15, 3, 31, tzinfo=AZ), now))
+    check("ran after today's fire => NOT due",
+          not is_due(daily, datetime(2026, 8, 16, 3, 31, tzinfo=AZ), now))
+    # The behavior a laptop needs and cron does not give you: a box asleep at
+    # 03:30 must run the job when it wakes, not skip the day.
+    check("CATCH-UP: box asleep for 3 days => due on wake",
+          is_due(daily, now - timedelta(days=3), now))
+
+    weekly = Job("w", ["x"], hour=4, weekday=0)            # Mondays 04:00
+    wed = datetime(2026, 8, 19, 9, 0, tzinfo=AZ)           # Wed
+    fire = due_at(weekly, wed)
+    check("weekly: fires on the most recent Monday",
+          fire.weekday() == 0 and fire <= wed and (wed - fire).days < 7,
+          f"got {fire}")
+    mon_early = datetime(2026, 8, 17, 2, 0, tzinfo=AZ)     # Mon, before 04:00
+    fire2 = due_at(weekly, mon_early)
+    # Mon 02:00, job fires Mondays 04:00 -> today's firing hasn't happened yet,
+    # so the most recent one is LAST Monday. (Not `.days == 7`: the gap is
+    # 6d22h, which floors to 6.)
+    check("weekly: before the hour on the day => previous week",
+          fire2 == datetime(2026, 8, 10, 4, 0, tzinfo=AZ), f"got {fire2}")
+
+    names = [j.name for j in JOBS]
+    check("batch job names are unique", len(names) == len(set(names)))
+    check("no batch job schedules an impossible hour",
+          all(0 <= j.hour <= 23 and 0 <= j.minute <= 59 for j in JOBS))
+
+
+def test_batch_commands_exist() -> None:
+    """Every job must point at a module that is actually on disk.
+
+    A typo here would fail silently at 3am on a box nobody is watching, which
+    is exactly the class of failure this migration is supposed to end.
+    """
+    import os
+    from cellar.batch import JOBS, SCANNER_DIR
+
+    missing = []
+    for j in JOBS:
+        for argv in (list(j.argv),) + tuple(list(t) for t in j.then):
+            mod = argv[0]                       # e.g. scripts.ingest_nhl_shots
+            path = os.path.join(SCANNER_DIR, *mod.split(".")) + ".py"
+            if not os.path.exists(path):
+                missing.append(mod)
+    check("every batch command resolves to a real script",
+          not missing, f"missing {missing}")
+
+
 def main() -> int:
     print("THE CELLAR — offline selftest\n")
     for t in (test_imports_without_creds, test_config_validation,
               test_lease_fails_closed, test_journal_survives_crash,
-              test_lane_registry_matches_config):
+              test_lane_registry_matches_config, test_batch_schedule,
+              test_batch_commands_exist):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

@@ -86,6 +86,10 @@ ALL_LANES: dict[str, Lane] = {
         Lane("vsin",           900,  1800, False, "circa/dk splits logger"),
         Lane("kalshi_autolog", 120,   300, False, "kalshi fill -> bot_picks"),
         Lane("alerts",          60,   180, False, "telegram flush + pings"),
+        # Phase 1: the ~20 scheduled workflows. Ticks every minute but only
+        # ACTS when something is due (see cellar/batch.py). Long TTL because
+        # a model compute can legitimately run for tens of minutes.
+        Lane("batch",           60,  3600, False, "daily ingests + model computes"),
     ]
 }
 

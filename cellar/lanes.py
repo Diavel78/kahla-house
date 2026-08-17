@@ -171,6 +171,12 @@ def lane_ledger(ctx: Ctx) -> int:
     return int(stats.get("stamped") or stats.get("updated") or 0)
 
 
+def lane_batch(ctx: Ctx) -> int:
+    """Phase 1: the scheduled workflow roster. Implementation in batch.py."""
+    from .batch import lane_batch as _impl
+    return _impl(ctx)
+
+
 def lane_alerts(ctx: Ctx) -> int:
     import app as _app
     n = 0
@@ -195,6 +201,7 @@ REGISTRY: dict[str, Callable[[Ctx], int]] = {
     "harvest":        lane_harvest,
     "ledger":         lane_ledger,
     "alerts":         lane_alerts,
+    "batch":          lane_batch,
 }
 
 

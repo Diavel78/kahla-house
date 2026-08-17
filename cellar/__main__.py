@@ -2,6 +2,7 @@
 
     python -m cellar              # run the daemon
     python -m cellar --status     # who owns what right now (read-only)
+    python -m cellar --batch-status   # scheduled jobs: last run + what's due
     python -m cellar --selftest   # offline checks, no network, no creds
 
 Spec: docs/cellar-migration-spec.md
@@ -22,8 +23,29 @@ def _setup_logging() -> None:
     logging.Formatter.converter = time.localtime
 
 
-def _supabase():
-    """Reuse app.py's client so credentials resolve exactly one way."""
+def _supabase(*, standalone: bool = False):
+    """A Supabase client.
+
+    `standalone=True` builds one straight from the environment instead of going
+    through `app.get_supabase()`. That matters: importing `app` drags in the
+    whole Flask tree (firebase_admin at line ~24), so without this the
+    read-only `--status` / `--batch-status` commands would be unusable on a
+    box that has the scanner deps but not the site's. Diagnostics should work
+    on a half-built machine -- that is when you most need them.
+
+    The daemon proper still goes through `app`, since its lanes import it anyway
+    and credentials should resolve exactly one way for anything that acts.
+    """
+    if standalone:
+        url = (os.environ.get("SUPABASE_URL") or "").strip()
+        key = (os.environ.get("SUPABASE_SERVICE_KEY") or "").strip()
+        if url and key:
+            try:
+                from supabase import create_client
+                return create_client(url, key)
+            except Exception as e:
+                print(f"direct supabase client failed ({e}); falling back to app", file=sys.stderr)
+
     import app as _app
     sb = _app.get_supabase()
     if sb is None:
@@ -34,7 +56,7 @@ def _supabase():
 def cmd_status() -> int:
     from . import config
     from .lease import Lease
-    lease = Lease(_supabase(), config.OWNER)
+    lease = Lease(_supabase(standalone=True), config.OWNER)
     rows = lease.status()
     if not rows:
         print("no lease rows — apply kahla-scanner/supabase/cellar.sql")
@@ -42,6 +64,16 @@ def cmd_status() -> int:
     print(f"{'LANE':<16} {'OWNER':<8} {'AGE':>8}  NOTE")
     for r in rows:
         print(f"{r['lane']:<16} {r['owner']:<8} {'':>8}  {r.get('note') or ''}")
+    return 0
+
+
+def cmd_batch_status() -> int:
+    from .batch import status
+    rows = status(_supabase(standalone=True))
+    print(f"{'JOB':<20} {'SCHEDULE':<16} {'LAST OK':<14} DUE  NOTE")
+    for r in rows:
+        print(f"{r['job']:<20} {r['sched']:<16} {r['last_ok']:<14} "
+              f"{'YES' if r['due'] else '  .'}  {r['note']}")
     return 0
 
 
@@ -57,6 +89,8 @@ def main(argv: list[str]) -> int:
         return cmd_selftest()
     if "--status" in argv:
         return cmd_status()
+    if "--batch-status" in argv:
+        return cmd_batch_status()
 
     from . import config
     from .journal import Journal
