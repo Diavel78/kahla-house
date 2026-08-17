@@ -58,10 +58,25 @@ if [ "$FATAL" -eq 0 ]; then
     # shellcheck disable=SC1091
     source .venv/bin/activate
     python -m pip install -q --upgrade pip
-    if python -m pip install -q -r requirements.txt -r kahla-scanner/requirements.txt; then
+    # --prefer-binary is LOAD-BEARING on an Intel Mac (hit for real on the 2017
+    # MBP, Aug 16 2026): recent `cryptography` releases ship macOS wheels for
+    # arm64 only, so plain pip resolves to the newest version, finds no x86_64
+    # wheel, and tries to COMPILE it through Rust/maturin -- which fails on a
+    # box with no Rust toolchain, and would take forever on a dual-core even
+    # with one. --prefer-binary makes pip fall back to the newest version that
+    # actually HAS a wheel. Harmless on Apple Silicon and Linux.
+    if python -m pip install -q --prefer-binary \
+         -r requirements.txt -r kahla-scanner/requirements.txt; then
       ok "installed requirements.txt + kahla-scanner/requirements.txt"
     else
       bad "dependency install failed — scroll up for the offending package"
+      echo "        If it is a package trying to COMPILE (maturin / cargo /"
+      echo "        'building wheel for ...'), no prebuilt wheel matched this"
+      echo "        platform. Try pinning that one package to a wheeled build:"
+      echo "            source .venv/bin/activate"
+      echo "            pip install --only-binary=:all: <package>"
+      echo "        Last resort, install a compiler toolchain:"
+      echo "            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
       FATAL=1
     fi
   fi
