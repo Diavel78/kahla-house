@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  THE CELLAR — launchd service for the house box.
+  Spec: docs/cellar-migration-spec.md §4
+
+  INSTALL (a LaunchDAEMON, not a LaunchAgent — a daemon starts at boot with no
+  user session, so the box recovers from a cold start without anyone logging
+  in; an agent would sit there waiting for a login that never happens):
+
+    sudo cp scripts/com.kahlahouse.cellard.plist /Library/LaunchDaemons/
+    sudo chown root:wheel /Library/LaunchDaemons/com.kahlahouse.cellard.plist
+    sudo chmod 644        /Library/LaunchDaemons/com.kahlahouse.cellard.plist
+    sudo launchctl load -w /Library/LaunchDaemons/com.kahlahouse.cellard.plist
+
+  CONTROL:
+    sudo launchctl kickstart -k system/com.kahlahouse.cellard   # restart
+    sudo launchctl bootout system/com.kahlahouse.cellard        # stop
+    tail -f /usr/local/var/log/cellard.log
+
+  EDIT BEFORE INSTALLING: the two paths below assume the repo is at
+  /Users/robkahla/dev/kahla-house. Change them if it lives elsewhere.
+
+  NOTE ON SECRETS: the daemon reads .env from its working directory, which is
+  why WorkingDirectory is the repo. Do NOT put credentials in this plist —
+  it lives in /Library and is world-readable by design.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kahlahouse.cellard</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/robkahla/dev/kahla-house/.venv/bin/python</string>
+        <string>-m</string>
+        <string>cellar</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/robkahla/dev/kahla-house</string>
+
+    <!-- Restart if it ever exits, for any reason. The whole point of a house
+         box is that nobody is watching it at 3am. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Don't hammer a crash-looping process; 10s between restarts. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/cellard.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/cellard.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Every "today" in this codebase is an Arizona calendar day. -->
+        <key>TZ</key>
+        <string>America/Phoenix</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <!-- Lanes and DRY_RUN deliberately live in .env, NOT here: changing
+             what the machine does should be one file edit plus a restart,
+             not a sudo edit of a system plist. -->
+    </dict>
+
+    <!-- Run as the login user, not root. The daemon needs the repo, the venv
+         and ~/.cellar (the intent journal) — all user-owned. Running as root
+         would create root-owned journal files that later break a user-run
+         status command. -->
+    <key>UserName</key>
+    <string>robkahla</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

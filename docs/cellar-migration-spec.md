@@ -5,18 +5,26 @@ journal and the bootstrap script exist and are tested. **Nothing is cut over
 and nothing bets** — `CELLAR_DRY_RUN` defaults to 1 and `CELLAR_LANES` defaults
 to empty, so a fresh clone is inert. Vercel still runs every lane.
 
-Built so far (Phase 2 of §6):
+Built so far:
 - `kahla-scanner/supabase/cellar.sql` — `cellar_lease` + `cellar_ticks` + the
   `cellar_claim`/`cellar_release` functions. **Applied to the live DB** and
   proven against it: cellar preempts vercel / vercel blocked while cellar is
   alive / renew / clean release / **failover at 200s past a 180s TTL**.
 - `cellar/` — config, lease client, crash-safe intent journal, lane registry,
-  scheduler, entrypoint. 23/23 offline selftests pass (`python -m cellar
-  --selftest`, no credentials needed).
+  scheduler, entrypoint. 34/34 offline selftests (`python -m cellar --selftest`,
+  no credentials needed).
+- `cellar/batch.py` — **Phase 1**: all 12 scheduled jobs (ingests, computes,
+  graders, cleanup) as a lane, on AZ-time schedules with catch-up. Inspect with
+  `python -m cellar --batch-status`.
+- `app.py:_cellar_owns` — **the Vercel side of the lease, SHADOW by default.**
+  Gates `opener` (+gridiron), `repeg`, `harvest`, `ledger`, `alerts`. Verified
+  inert across all six states; nothing changes until `CELLAR_LEASE_ENFORCED` is
+  set in the Vercel env.
 - `scripts/cellar-bootstrap.sh` — one-shot setup for the house box.
 
-Not built: any change to `app.py` (Vercel still claims nothing — see §6 Phase 3),
-the batch-job move (Phase 1), the health chip.
+Not built: `_tg_flush` / `_bet_alerts` / `_opener_watchdog` lease gates (needed
+before the `alerts` lane cuts over), the health chip, the launchd plist, and
+anything in §12.
 
 ---
 
