@@ -213,6 +213,26 @@ def run_job(job: Job) -> tuple[bool, int, str]:
 # The lane
 # ---------------------------------------------------------------------------
 
+# Blocked jobs warn on a cooldown, not every tick. A job that is due and
+# permanently blocked (ufc_stats without playwright) is due FOREVER, so a
+# naive warning re-fires every 60s and drowns the log -- which is how a real
+# warning gets missed later. Observed immediately on the first live run.
+_BLOCKED_WARNED: dict[str, float] = {}
+_BLOCKED_WARN_EVERY_S = 6 * 3600
+
+
+def _warn_blocked(job_name: str, needs: str) -> None:
+    last = _BLOCKED_WARNED.get(job_name, 0.0)
+    now = time.time()
+    if now - last < _BLOCKED_WARN_EVERY_S:
+        log.debug("batch: %s still blocked (missing %r)", job_name, needs)
+        return
+    _BLOCKED_WARNED[job_name] = now
+    log.warning("batch: %s BLOCKED — missing %r. Install it, or leave this "
+                "job on GitHub Actions. (silenced for 6h; --batch-status "
+                "always shows it)", job_name, needs)
+
+
 def _have(module: str) -> bool:
     """Is an optional dependency importable on this box?"""
     import importlib.util
@@ -260,8 +280,7 @@ def lane_batch(ctx) -> int:
             # BLOCKED, not failed. Skip to the next due job without stamping a
             # run, so --batch-status keeps showing it as outstanding instead of
             # quietly pretending it happened.
-            log.warning("batch: %s BLOCKED — missing %r. Install it or leave "
-                        "this job on GitHub Actions.", job.name, job.needs)
+            _warn_blocked(job.name, job.needs)
             continue
 
         if ctx.dry_run:
