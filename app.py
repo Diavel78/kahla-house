@@ -7197,21 +7197,32 @@ def _fb_h_to_kick(iso_win, iso_kick):
         return None
 
 
-_FB_TAG_CANDS = {                     # league tags are not always the
-    "NFL":   ["nfl"],                 # obvious string — try candidates and
-    "NCAAF": ["college-football", "ncaaf", "cfb",
-              "college-football-ncaaf"],
+# PROBED Aug 18 2026, not guessed. NCAAF's tag is `cfb` (182 events, 90
+# games); `college-football`, `ncaaf` and `college-football-ncaaf` all
+# return ZERO. A wrong tag is indistinguishable from an unlisted sport,
+# which is why the recon reports each attempt's own count.
+_FB_TAG_CANDS = {
+    "NFL":   ["nfl"],
+    "NCAAF": ["cfb"],
 }
 
 
 def _fb_is_game(ev: dict) -> bool:
-    """A GAME event, not a season future. Two teams and a date: the title
-    reads 'X vs Y' or the slug ends in a calendar date."""
+    """A GAME event, not a season future.
+
+    ⚠ "slug ends in a date" is NOT enough (Aug 18, second run): season
+    futures carry dates too — nfl-mostrecyds-2027-01-10 is the receiving
+    yards leader, nfl-vitvea-2026-09-13 is a Vita Vea next-team market,
+    and both sailed through a date-suffix test. A game is TWO TEAMS and a
+    date, so the slug needs two team tokens before it — league-away-home-
+    date, the same convention as mlb-sea-mil-2026-08-19. Titles that
+    actually name two teams ("X vs. Y") pass on their own."""
     t = str(ev.get("title") or "").lower()
     sl = str(ev.get("slug") or "").lower()
     if " vs " in t or " vs. " in t or " @ " in t:
         return True
-    return bool(re.search(r"-20\d\d-\d\d-\d\d$", sl))
+    return bool(re.match(r"^[a-z]+-[a-z]{2,5}-[a-z]{2,5}-20\d\d-\d\d-\d\d$",
+                         sl))
 
 
 def _fb_market_of_event(md: dict, ev_slug: str) -> bool:
