@@ -8096,6 +8096,90 @@ def api_poly_probe_tif():
     return jsonify(out)
 
 
+@app.route("/api/polymarket/cancel-ou")
+def api_poly_cancel_ou():
+    """Cancel every RESTING, UNFILLED O/U buy the trader lane placed.
+
+    The lane itself is off (OU_TRADER_ENABLED=False — there is no MLB
+    totals reward program), but switching off placement does not retire
+    the orders already on the book: each one is still a bet waiting to
+    happen. "No more bets on O/U" means those come off too.
+
+    Only UNFILLED orders are touched. A filled O/U position is a
+    position, not an order — it grades out normally and any harvest sell
+    already resting on it stays put; unwinding one is a sell decision
+    nobody has made.
+
+    Same three gates as reset-sells / cancel-live-buys: BUY intent,
+    AUTOMATIC flag (the app's own orders are MANUAL, so a hand-placed bid
+    can never be touched), and the slug must belong to one of OUR pending
+    ou_trader picks. Shared-secret + `&dry=1`."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    dry = request.args.get("dry") == "1"
+    try:
+        sb, client = get_supabase(), get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    owner = _kalshi_owner_uid()
+    if not owner:
+        return jsonify({"ok": False, "error": "no owner uid"}), 500
+    mine: dict = {}
+    try:
+        rows = (sb.table("bot_picks")
+                .select("event_name,event_start,entry_price,poly_pnl,"
+                        "signal_blob")
+                .eq("asked_by", owner).eq("status", "pending")
+                .eq("market_type", "total").limit(500).execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"picks: {e}"}), 500
+    for r in rows:
+        b = r.get("signal_blob") or {}
+        if not b.get("ou_trader"):
+            continue                       # this lane only
+        slug = b.get("pmm_slug")
+        if slug:
+            mine[slug] = r.get("event_name")
+    out = {"ok": True, "dry": dry, "ou_pending": len(mine),
+           "canceled": 0, "orders": []}
+    if not mine:
+        return jsonify(out)                # nothing ours — no venue call
+    orders = _pmm_open_orders_raw(client)
+    if orders is None:
+        return jsonify({"ok": False, "error": "venue read failed"}), 503
+    for o in orders:
+        if "BUY" not in (o.get("intent") or ""):
+            continue                       # never touch the harvest sells
+        if not o.get("auto") or o.get("slug") not in mine:
+            continue                       # hand-placed orders untouchable
+        # price_yes is YES-CANONICAL (gotcha #23): on a synthetic NO side
+        # the real per-share price is 1 - price. Listed raw and labelled
+        # so a dry run is never misread as "we bid 70c on the under".
+        rec = {"slug": o.get("slug"), "game": mine.get(o.get("slug")),
+               "price_yes_c": (round(o["price_yes"] * 100, 1)
+                               if o.get("price_yes") is not None else None),
+               "qty": o.get("qty"), "filled": o.get("cum"),
+               "unfilled": o.get("leaves"), "state": o.get("state")}
+        if dry:
+            out["orders"].append(rec)
+            continue
+        try:
+            client.orders.cancel(o["id"], {"marketSlug": o["slug"]})
+            rec["canceled"] = True
+            out["canceled"] += 1
+        except Exception as e:
+            rec["error"] = f"{type(e).__name__}: {e}"[:120]
+        out["orders"].append(rec)
+    if out["canceled"]:
+        _send_fill_telegram(
+            f"\U0001f6d1 O/U LANE KILLED — canceled {out['canceled']} resting "
+            f"total order(s). No MLB totals reward program exists.")
+    _probe_log(out)
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/cancel-live-buys")
 def api_poly_cancel_live_buys():
     """Kill any model BUY order still resting on a game that has already
@@ -11951,6 +12035,25 @@ def _et_day(iso: str | None) -> str:
         return ""
 
 
+# ⚠ LANE KILLED Aug 18 2026 (user, immediately on reading the reward
+# schedule): **THERE IS NO MLB TOTALS PROGRAM.** The live schedule at
+# polymarket.us/rewards carries 86 programs; MLB has Moneyline
+# (Early/Day-of/Live), Spreads (Early/Day-of/Live), Player Props and Team
+# Props (Day-of/Live) and Futures — and NO totals line of any kind. Our
+# own ledger agrees: every MLB O/U rent row we have ever been paid totals
+# $46.74, of which $46.33 landed Mar 31 / Apr 1 / Apr 10 under the PRIOR
+# regime (current program ids are date-stamped _20260712 onward). Since
+# the relaunch: ten rows, $0.41, none above 11 cents.
+#
+# So this lane was quoting for free — taking adverse selection on a
+# market that pays no rent, with no model behind the side (the July 4
+# totals blacklist stands, and this lane never had a projection; its
+# whole thesis was the touch curve). Rent was the only reason it existed.
+#
+# The SHADOW row still logs — it costs nothing and NFL totals DO carry
+# programs (Live $900 / Day-of $225 / Early $75), so if a totals lane
+# ever returns it will be for football, and it should return with a tape.
+OU_TRADER_ENABLED = False
 _OU_TRADER_MIN_EDGE_PP = 3.0    # peg must sit ≥3pp under the book's own mid
 _OU_TRADER_MIN_ENTRY_C = 25.0   # fill-viability floor (whiff lane's lesson)
 _OU_TRADER_MAX_ENTRY_C = 64.0   # the user's universal entry cap
@@ -12013,7 +12116,7 @@ def _ou_trader_eval(sb, g, d, now, done):
     if best is not None and best["edge"] >= _OPENER_JUNK_EDGE_PP:
         return None                # newborn junk book — never latch, retry
     placed = False
-    if best is not None and AUTOBET_ENABLED:
+    if best is not None and AUTOBET_ENABLED and OU_TRADER_ENABLED:
         b = best
         res = _autobet_execute(
             sb, g, es, "total", b["side"],
