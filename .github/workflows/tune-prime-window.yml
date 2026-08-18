@@ -23,9 +23,19 @@ on:
         description: "Print the decision without writing (true/false)"
         required: false
         default: "false"
-  schedule:
-    # Mondays 12:00 UTC — fresh weekly window off the prior week's settled picks.
-    - cron: "0 12 * * 1"
+  # ── SCHEDULE DISABLED 2026-08-17 — THE CELLAR OWNS THIS JOB ──────────────
+  # Runs from the house box instead (cellar/batch.py, `batch` lane). The
+  # cellar_lease does NOT protect against GitHub Actions — Actions claims
+  # nothing, it just fires — so leaving this cron on means the job runs twice
+  # a day. Verified first: 12/12 jobs ran unattended from the cellar overnight.
+  #
+  # workflow_dispatch is deliberately KEPT: this workflow remains the standby
+  # and stays runnable by hand. Disable, never delete (spec §8 item 7).
+  # To hand the job back to Actions, uncomment the schedule below and drop the
+  # job from cellar/batch.py JOBS.
+  # schedule:
+  # # Mondays 12:00 UTC — fresh weekly window off the prior week's settled picks.
+  # - cron: "0 12 * * 1"
 
 concurrency:
   group: tune-prime-window

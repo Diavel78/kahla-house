@@ -6521,6 +6521,13 @@ def api_kalshi_autolog():
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
     sb = get_supabase()
+    # THE CELLAR: standby no-op when the house box owns this lane. Shadow
+    # (returns True regardless) until CELLAR_LEASE_ENFORCED is set in the
+    # Vercel env. Vercel keeps getting curled every minute either way, so when
+    # the cellar goes dark its heartbeat expires and this side resumes
+    # automatically within the lane's TTL — no deploy, no human.
+    if not _cellar_owns(sb, "kalshi_autolog", 300):
+        return jsonify({"ok": True, "skipped": "cellar_owns_lane"}), 200
     owner = _kalshi_owner_uid()
     if not owner:
         return jsonify({"ok": True, "skipped": "no owner uid"}), 200
@@ -10706,6 +10713,13 @@ def api_pm_snapshot():
     sb = get_supabase()
     if sb is None:
         return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+    # THE CELLAR: standby no-op when the house box owns this lane. Shadow
+    # (returns True regardless) until CELLAR_LEASE_ENFORCED is set in the
+    # Vercel env. Vercel keeps getting curled every minute either way, so when
+    # the cellar goes dark its heartbeat expires and this side resumes
+    # automatically within the lane's TTL — no deploy, no human.
+    if not _cellar_owns(sb, "pm_snapshot", 180):
+        return jsonify({"ok": True, "skipped": "cellar_owns_lane"}), 200
 
     now = datetime.now(timezone.utc)
 
@@ -11008,6 +11022,13 @@ def api_vsin_snapshot():
     sb = get_supabase()
     if sb is None:
         return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+    # THE CELLAR: standby no-op when the house box owns this lane. Shadow
+    # (returns True regardless) until CELLAR_LEASE_ENFORCED is set in the
+    # Vercel env. Vercel keeps getting curled every minute either way, so when
+    # the cellar goes dark its heartbeat expires and this side resumes
+    # automatically within the lane's TTL — no deploy, no human.
+    if not _cellar_owns(sb, "vsin", 1800):
+        return jsonify({"ok": True, "skipped": "cellar_owns_lane"}), 200
 
     import handicapper_web
     now = datetime.now(timezone.utc)
@@ -12714,6 +12735,13 @@ def api_handicapper_paperlog():
     sb = get_supabase()
     if sb is None:
         return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+    # THE CELLAR: standby no-op when the house box owns this lane. Shadow
+    # (returns True regardless) until CELLAR_LEASE_ENFORCED is set in the
+    # Vercel env. Vercel keeps getting curled every minute either way, so when
+    # the cellar goes dark its heartbeat expires and this side resumes
+    # automatically within the lane's TTL — no deploy, no human.
+    if not _cellar_owns(sb, "paperlog", 180):
+        return jsonify({"ok": True, "skipped": "cellar_owns_lane"}), 200
 
     now = datetime.now(timezone.utc)
     lo = (now + timedelta(minutes=1)).isoformat()    # stop 1 min before tip
