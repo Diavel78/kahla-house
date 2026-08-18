@@ -11162,7 +11162,19 @@ _AUTOBET_CONTRACTS = 10  # 4→10 Aug 16 2026 (user). Reward score is
                          # from this, never hardcodes). 4 × 54¢ max =
                          # $2.16 per order, still well inside the $6
                          # master rule. (1→2 Aug 3; 2→4 here.)
-_OPENER_LO_H = 6                # below this = the live game-day window
+_OPENER_LO_H = 6                # ML/O-U floor: they buy at the OPENER, and
+                                # a game inside 6h is no longer an opener
+_OPENER_DAYOF_LO_MIN = 30       # ⚠ POOL floor, NOT the lane floor (Aug 18
+                                # 2026). The pool used to start at
+                                # _OPENER_LO_H, which made NRFI unbettable
+                                # by construction the moment the day-of gate
+                                # shipped: the pool held games >=6h out, the
+                                # NRFI gate fired only <=6h out, so the two
+                                # windows never overlapped and the lane
+                                # placed ZERO orders for two days. The pool
+                                # now runs to 30 min out; ML and O/U keep
+                                # their own >= _OPENER_LO_H guard below, so
+                                # only NRFI sees the extra games.
 _OPENER_HI_H = 72               # pool bound ≈ Poly's real listing horizon
 # (14d → 72h Aug 2 ~12:25am AZ: Poly lists MLB ~T+2 evenings, so games
 # beyond 3 days CANNOT be listed yet — carrying 90 rotation candidates
@@ -11798,7 +11810,7 @@ def _opener_pass(sb, now, deadline):
         # game the venue posted this minute is bettable this minute, with
         # no third-party spine in the path. (See _pmm_ensure_markets.)
         stats.update(_pmm_ensure_markets(sb, now))
-        lo = (now + timedelta(hours=_OPENER_LO_H)).isoformat()
+        lo = (now + timedelta(minutes=_OPENER_DAYOF_LO_MIN)).isoformat()
         hi = (now + timedelta(hours=_OPENER_HI_H)).isoformat()
         try:
             raw = (sb.table("markets").select("id,event_name,event_start,sport")
@@ -11989,10 +12001,24 @@ def _opener_pass(sb, now, deadline):
             # the game for 20 min, and a warm container stamped its way
             # through the whole pool into an instant-return stall).
             _OPENER_PROBE_TS[g["id"]] = _time.time()
+            # OPENER FLOOR for the opener-priced lanes only. The pool now
+            # reaches into the day-of window for NRFI's sake, so ML and O/U
+            # carry the 6h floor themselves — their edge is the VIRGIN line,
+            # and a game inside 6h has a mature book they were never meant
+            # to buy. A flag, never a `continue`: the NRFI section below
+            # must still run for these games (that's the whole point).
+            _is_opener_window = True
+            try:
+                _is_opener_window = (
+                    datetime.fromisoformat(
+                        str(g.get("event_start")).replace("Z", "+00:00"))
+                    >= now + timedelta(hours=_OPENER_LO_H))
+            except Exception:
+                pass
             # ---- MONEYLINE: Diamond IQ prices the opener (the model IS
             # the engine — no steam involved). Runs BEFORE the NRFI
             # section because that section `continue`s on its own guards.
-            if (g["id"], "moneyline") not in done:
+            if _is_opener_window and (g["id"], "moneyline") not in done:
                 mlp = ((((d or {}).get("odds") or {}).get("moneyline") or {})
                        .get("polymarket") or {})
                 pp = (d or {}).get("probable_pitchers") or {}
@@ -12075,7 +12101,8 @@ def _opener_pass(sb, now, deadline):
             # ---- O/U TRADER (Aug 4): 1 contract cheap vs the book's own
             # mid, sell-only via the harvest tick. Self-contained helper
             # (its skips can't swallow the NRFI section below).
-            ou_row = _ou_trader_eval(sb, g, d, now, done)
+            ou_row = (_ou_trader_eval(sb, g, d, now, done)
+                      if _is_opener_window else None)
             if ou_row is not None:
                 if ou_row["signal_blob"].get("bet_placed"):
                     stats["opener_bets"] += 1
