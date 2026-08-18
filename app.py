@@ -11162,20 +11162,37 @@ _AUTOBET_CONTRACTS = 10  # 4→10 Aug 16 2026 (user). Reward score is
                          # from this, never hardcodes). 4 × 54¢ max =
                          # $2.16 per order, still well inside the $6
                          # master rule. (1→2 Aug 3; 2→4 here.)
-_OPENER_LO_H = 6                # ML/O-U floor: they buy at the OPENER, and
-                                # a game inside 6h is no longer an opener
-_OPENER_DAYOF_LO_MIN = 30       # ⚠ POOL floor, NOT the lane floor (Aug 18
-                                # 2026). The pool used to start at
-                                # _OPENER_LO_H, which made NRFI unbettable
-                                # by construction the moment the day-of gate
-                                # shipped: the pool held games >=6h out, the
-                                # NRFI gate fired only <=6h out, so the two
-                                # windows never overlapped and the lane
-                                # placed ZERO orders for two days. The pool
-                                # now runs to 30 min out; ML and O/U keep
-                                # their own >= _OPENER_LO_H guard below, so
-                                # only NRFI sees the extra games.
-_OPENER_HI_H = 72               # pool bound ≈ Poly's real listing horizon
+_OPENER_LO_H = 6                # gridiron shadow lane only (football).
+                                # The MLB money lanes do NOT use this — see
+                                # the window table below.
+_OPENER_DAYOF_LO_MIN = 3        # POOL floor = effectively first pitch.
+# ⚠ THE WINDOW TABLE (user, Aug 18 2026 — say it once, here):
+#     ML, O/U   opening -> game start
+#     props     T-6h    -> game start
+#     NRFI      T-6h    -> game start
+# Rent is score x TIME, so every lane quotes for as long as its program
+# pays and stops at first pitch. Two bugs came out of getting this wrong:
+# the pool used to start at _OPENER_LO_H (6h) while the NRFI gate fired
+# only INSIDE 6h, so the windows never overlapped and NRFI placed ZERO
+# orders for two days; and ML/O-U were capped at T-6h, so a game whose
+# market listed late — or whose model read only cleared late — could
+# never be bought at all.
+#
+# The 6h cap on ML/O-U was a PROXY for "the book has matured, our edge is
+# gone." That proxy is unnecessary: both lanes already measure maturity
+# directly (ML needs >=2.5pp vs the model, O/U >=3pp vs the book's own
+# devigged mid). A tight late book fails those tests on its own, so the
+# clock guard only ever removed the late games that were STILL mispriced
+# — exactly the ones worth having.
+_OPENER_HI_H = 96               # pool bound = the MINT bound (_pmm_ensure_
+                                # markets runs to _OPENER_HI_H, and the pool
+                                # must never be shallower than the thing
+                                # that creates rows — a market we mint and
+                                # never evaluate is invisible, which is the
+                                # exact shape of the two-day NRFI hole).
+                                # 72 -> 96 Aug 18 2026: Poly's furthest
+                                # listing sat EXACTLY on the old 72h bound,
+                                # so it could not be told apart from a clip.
 # (14d → 72h Aug 2 ~12:25am AZ: Poly lists MLB ~T+2 evenings, so games
 # beyond 3 days CANNOT be listed yet — carrying 90 rotation candidates
 # when only ~35 can possibly be bettable diluted every tick's one
@@ -11549,7 +11566,10 @@ def _pmm_ensure_markets(sb, now) -> dict:
         evs = _PMM_LISTED_CACHE.get("evs") or []
         st["pmm_sched_listed"] = len(evs)
         lo = now - timedelta(hours=6)
-        hi = now + timedelta(hours=_OPENER_HI_H + 24)
+        # Mint exactly as deep as the pool evaluates, never deeper. The old
+        # +24 created a band of markets rows that existed but were never
+        # looked at — invisible inventory, the same shape as the NRFI hole.
+        hi = now + timedelta(hours=_OPENER_HI_H)
         try:
             have = (sb.table("markets")
                     .select("event_name,event_start")
@@ -12001,24 +12021,13 @@ def _opener_pass(sb, now, deadline):
             # the game for 20 min, and a warm container stamped its way
             # through the whole pool into an instant-return stall).
             _OPENER_PROBE_TS[g["id"]] = _time.time()
-            # OPENER FLOOR for the opener-priced lanes only. The pool now
-            # reaches into the day-of window for NRFI's sake, so ML and O/U
-            # carry the 6h floor themselves — their edge is the VIRGIN line,
-            # and a game inside 6h has a mature book they were never meant
-            # to buy. A flag, never a `continue`: the NRFI section below
-            # must still run for these games (that's the whole point).
-            _is_opener_window = True
-            try:
-                _is_opener_window = (
-                    datetime.fromisoformat(
-                        str(g.get("event_start")).replace("Z", "+00:00"))
-                    >= now + timedelta(hours=_OPENER_LO_H))
-            except Exception:
-                pass
             # ---- MONEYLINE: Diamond IQ prices the opener (the model IS
             # the engine — no steam involved). Runs BEFORE the NRFI
             # section because that section `continue`s on its own guards.
-            if _is_opener_window and (g["id"], "moneyline") not in done:
+            # No clock guard: ML runs opening -> game start (window table
+            # at _OPENER_DAYOF_LO_MIN). The >=2.5pp edge test is what
+            # decides whether a late book is still worth buying.
+            if (g["id"], "moneyline") not in done:
                 mlp = ((((d or {}).get("odds") or {}).get("moneyline") or {})
                        .get("polymarket") or {})
                 pp = (d or {}).get("probable_pitchers") or {}
@@ -12101,8 +12110,7 @@ def _opener_pass(sb, now, deadline):
             # ---- O/U TRADER (Aug 4): 1 contract cheap vs the book's own
             # mid, sell-only via the harvest tick. Self-contained helper
             # (its skips can't swallow the NRFI section below).
-            ou_row = (_ou_trader_eval(sb, g, d, now, done)
-                      if _is_opener_window else None)
+            ou_row = _ou_trader_eval(sb, g, d, now, done)
             if ou_row is not None:
                 if ou_row["signal_blob"].get("bet_placed"):
                     stats["opener_bets"] += 1
