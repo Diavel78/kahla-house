@@ -178,7 +178,10 @@ move.** The migration is a scheduling and ownership change, not a port.
 
 ## 4. Hardware
 
-**The box: a spare MacBook Pro already in the house.** No purchase.
+**The box: a MacBook Pro already in the house — PERMANENT, not a stopgap.**
+No purchase. It is shared with another household member until ~mid-Sept 2026,
+when a replacement laptop frees it to be dedicated full-time. There is no
+planned migration to different hardware: this machine IS the cellar.
 
 ```
 MacBookPro14,2 — 13-inch 2017, Four Thunderbolt 3 Ports
@@ -210,7 +213,7 @@ bite if skipped:
 | # | Item | Why it matters |
 |---|---|---|
 | 1 | **FileVault: LEAVE IT ON** | Reversed Aug 16 2026, and worth reading before someone "fixes" it back. The original call was OFF, reasoning that a power cut leaves the disk locked until a human types the password, defeating unattended recovery. That reasoning was written before the §5 lease existed. It does not survive it: when the box goes dark the lease hands every lane back to Vercel automatically, so the slate keeps running — the only cost is that the *cellar* stays down until you're home. Weigh that against what's on the disk: Polymarket trading keys, the Firebase service account, and the Supabase service key. Trading an encrypted laptop for a few hours of faster recovery is a bad trade on a machine that can walk out of a house. Keep FileVault, size the UPS to ride out short outages, accept the manual unlock for long ones. |
-| 2 | **Battery condition** | A 2017 battery run plugged-in 24/7. Check it before committing the box: `system_profiler SPPowerDataType`. A swollen battery in a closed laptop is the one genuinely unsafe outcome here. Replace or retire the machine if the condition isn't Normal. |
+| 2 | **Battery — reads `Service`** | Measured Aug 16 2026. Capacity loss alone is irrelevant on a machine that lives on AC, and a physical check found no swelling, so it runs. But this box is now PERMANENT rather than a stopgap, which flips the economics: a ~$150 battery on hardware expected to run 24/7 for years is cheap insurance, and swelling is the one failure mode here that is unsafe rather than merely inconvenient. Re-check periodically (`system_profiler SPPowerDataType`, plus the does-it-rock-on-a-table test); replace at the first sign of swelling. |
 | 3 | **Lid-closed operation** | `sudo pmset -a disablesleep 1 sleep 0 disksleep 0 powernap 0`. Without it, clamshell sleeps the moment the lid shuts unless an external display is attached. |
 | 4 | **Wired ethernet** | The chassis has only Thunderbolt 3 — needs a TB3→Gigabit adapter (~$20). The process that places orders does not run on Wi-Fi. |
 
@@ -337,6 +340,15 @@ of failure.
 `kill -9` that `launchd`/`systemd` restarts cleanly.
 
 ### Phase 3 — Cut the lanes over, one at a time
+
+> **Sequencing against this box's availability (Aug 2026).** Until ~mid-Sept the
+> laptop is still shared, so it can be closed, moved, or shut down by someone
+> who is not thinking about the cellar. The lease makes that survivable —
+> Vercel reclaims within a TTL — but "survivable" is a different bar for a
+> logger than for a lane holding real orders. So: run the **zero-money lanes
+> now** (steps 1-3 below), and hold **harvest / repeg / opener** until the box
+> is actually dedicated. That is not caution for its own sake; it means the
+> money lanes cut over onto hardware whose uptime is already a known quantity.
 
 Order matters. Each step is one lane, one week, with the lease doing the
 handoff. Roll back by revoking the lease — no deploy needed.
