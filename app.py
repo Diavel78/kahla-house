@@ -11672,6 +11672,98 @@ def _peg_target(bid_c, ask_c, fair_c, join=False):
     return t, e
 
 
+# ═══════════ THE RENT RULE (user, Aug 18 2026 — HARD RULE) ═══════════
+# "No computer bets, AT ALL, if it isn't paying rent, and in the rent
+# window."
+#
+# Enforced HERE, at the single placement chokepoint every lane calls,
+# rather than as a per-lane constant — per-lane clocks are what produced
+# the two-day NRFI hole (a pool floor and a lane gate that never
+# overlapped) and the O/U lane quoting a market with no program at all.
+# One gate, DEFAULT-DENY: a market family we cannot prove pays rent does
+# not get bet.
+#
+# The table is READ FROM THE VENUE, not assumed — polymarket.us/rewards
+# via /api/docs-fetch, Aug 18 2026 (86 programs). Refresh it the same way
+# when the schedule changes; program ids are date-stamped, so a regime
+# change is visible there before it is visible in our earnings.
+#
+# ⚠ THE PERIODS ARE THE VENUE'S, AND THEY ARE NOT SYMMETRIC ACROSS SPORTS:
+#   MLB moneyline  early + day_of + live   → bettable from listing
+#   MLB spread     early + day_of + live
+#   MLB props      day_of + live ONLY      → nothing before T-6h
+#   MLB totals     NOTHING                 → never (lane killed Aug 18)
+#   NFL moneyline  LIVE ONLY               → NO pre-game NFL ML, ever
+#   NFL spread     early + day_of + live
+#   NFL totals     early + day_of + live
+#   NFL props      early + day_of + live
+#   CFB / NCAAF    futures only            → no game market pays anything
+_RENT_PERIODS: dict = {
+    ("mlb", "moneyline"):   {"early", "day_of", "live"},
+    ("mlb", "spread"):      {"early", "day_of", "live"},
+    ("mlb", "total"):       set(),
+    ("mlb", "player_prop"): {"day_of", "live"},
+    ("mlb", "team_prop"):   {"day_of", "live"},
+    ("nfl", "moneyline"):   {"live"},
+    ("nfl", "spread"):      {"early", "day_of", "live"},
+    ("nfl", "total"):       {"early", "day_of", "live"},
+    # "NFL Props Early" ($1,000 / 537 markets) is not split player-vs-team
+    # on the schedule the way the Day-of and Live rows are; both families
+    # are credited with `early` until a football earnings row says
+    # otherwise. Football is not bet yet, so this costs nothing today.
+    ("nfl", "player_prop"): {"early", "day_of", "live"},
+    ("nfl", "team_prop"):   {"early", "day_of", "live"},
+    ("cfb", "moneyline"):   set(),
+    ("cfb", "spread"):      set(),
+    ("cfb", "total"):       set(),
+}
+_RENT_DAYOF_MIN = 360           # the venue's own boundary: early runs from
+                                # listing to T-6h, day_of from T-6h to start
+
+
+def _rent_family(slug: str):
+    """(sport, family) from the venue's own slug, which is the only
+    identifier guaranteed present at placement time. Prefixes are the
+    venue's: aec- moneyline, asc- spread, tsc- total, astatc- player
+    prop, atc- team/inning prop. Unknown shape returns (None, None),
+    which the gate treats as DENY."""
+    parts = str(slug or "").lower().split("-")
+    if len(parts) < 2:
+        return None, None
+    fam = {"aec": "moneyline", "asc": "spread", "tsc": "total",
+           "astatc": "player_prop", "atc": "team_prop"}.get(parts[0])
+    return (parts[1] or None), fam
+
+
+def _rent_ok(slug, event_start, now):
+    """(ok, reason) — may we rest a NEW maker order on this market right
+    now under the rent rule? DEFAULT-DENY.
+
+    We are a pre-game maker: a `live`-only program means the market pays
+    nothing while we would be resting, so it is not bettable at all by
+    this machine even though the program exists."""
+    sport, fam = _rent_family(slug)
+    if not sport or not fam:
+        return False, f"unknown market family for slug {slug!r}"
+    periods = _RENT_PERIODS.get((sport, fam))
+    if periods is None:
+        return False, f"no known rent program for {sport}/{fam}"
+    if not periods:
+        return False, f"{sport}/{fam} has NO rent program"
+    try:
+        mins = (datetime.fromisoformat(
+            str(event_start).replace("Z", "+00:00")) - now).total_seconds() / 60.0
+    except (TypeError, ValueError):
+        return False, "unparseable event_start"
+    if mins <= 0:
+        return False, "game has started (we do not rest in-play)"
+    need = "early" if mins > _RENT_DAYOF_MIN else "day_of"
+    if need not in periods:
+        return False, (f"{sport}/{fam} pays no {need} rent "
+                       f"(T-{round(mins / 60.0, 1)}h)")
+    return True, need
+
+
 def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
                      side_c, fair_pb, entry_edge, opener_edge,
                      bid_c, ask_c, extra_blob=None,
@@ -11686,6 +11778,15 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
     sibling lane (Whiff IQ K props) run its OWN slate cap without eating
     the opener lane's; skip_game_dedup is for prop lanes whose caller
     dedups per-pitcher (a game legitimately carries 2 starter bets)."""
+    # ⚠ THE RENT RULE, FIRST AND UNCONDITIONAL (user, Aug 18 2026): no
+    # computer bet at all unless this market pays rent AND we are inside
+    # its paying window. Checked before the cap, before the dedup, before
+    # any venue call — a bet that cannot earn rent is not a cheaper bet,
+    # it is a bet we do not make.
+    _rent_go, _rent_why = _rent_ok(slug, es, datetime.now(timezone.utc))
+    if not _rent_go:
+        app.logger.info("RENT-GATE refused %s %s: %s", mt, slug, _rent_why)
+        return "rent"
     cap = cap_max if cap_max is not None else AUTOBET_MAX_BETS
     # CAP = OPEN EXPOSURE, not lifetime count (Aug 4 2026 — the watchdog's
     # first catch: tonight's 22 SETTLED bets held their slots because this
@@ -12681,6 +12782,20 @@ def _opener_pass(sb, now, deadline):
             except Exception:
                 continue
             if mine:
+                continue
+            # ⚠ THE RENT RULE (user, Aug 18 2026). NRFI builds and sends
+            # its OWN order — it is the one money lane that does not go
+            # through _autobet_execute — so the gate has to be repeated
+            # here or the rule silently would not apply to it. The T-6h
+            # check above already agrees with the venue (first-inning
+            # markets sit in the player-prop programs, which have NO
+            # early period); this makes that agreement enforced rather
+            # than coincidental, and it stays right if either moves.
+            # A refusal leaves dayof_wait set, so the game does not latch
+            # and is re-checked once its paying window opens.
+            _rgo, _rwhy = _rent_ok(slug, es, now)
+            if not _rgo:
+                app.logger.info("RENT-GATE refused nrfi %s: %s", slug, _rwhy)
                 continue
             gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             canon = ((100.0 - side_c) / 100.0 if synthetic

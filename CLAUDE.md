@@ -37,6 +37,38 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 > - The four things that earn a spot: **gotchas/landmines, decisions + their why, the map (where things live), and invariants (rules you must not break).** Everything else is a deletion candidate.
 > - The file should stay roughly the same size over time, not grow. If it feels heavy, do a deletion pass.
 
+> # ⚠️ THE RENT RULE — HARD RULE (user, Aug 18 2026) ⚠️
+>
+> **NO COMPUTER BET, AT ALL, unless the market PAYS RENT and we are INSIDE
+> its paying window.** Rent is not a bonus on top of a bet — it is the
+> reason the bet is placed. A market with no liquidity program is a market
+> where we take adverse selection for free.
+>
+> Enforced in code, DEFAULT-DENY, by `_rent_ok(slug, event_start, now)` at
+> **both** placement paths — `_autobet_execute` (ML, O/U, whiff/props) and
+> the NRFI section's own `orders.create` (**NRFI does NOT go through
+> `_autobet_execute`** — a second call site that must be kept in step).
+> Family comes from the venue's slug prefix (`aec-` ML, `asc-` spread,
+> `tsc-` total, `astatc-` player prop, `atc-` team/inning prop); an
+> unrecognised family or sport is REFUSED, never assumed.
+>
+> `_RENT_PERIODS` is **read from the venue** (polymarket.us/rewards via
+> `/api/docs-fetch`, 86 programs, Aug 18 2026) — refresh it there, never
+> from memory. **The periods are NOT symmetric across sports:**
+>
+> | | early (listing→T-6h) | day_of (T-6h→start) | live |
+> |---|---|---|---|
+> | MLB ML / spread | ✅ | ✅ | ✅ |
+> | MLB props + NRFI | ❌ | ✅ | ✅ |
+> | **MLB totals** | ❌ | ❌ | ❌ — no program at all |
+> | **NFL ML** | ❌ | ❌ | ✅ **live only — NO pre-game NFL ML, ever** |
+> | NFL spread / total / props | ✅ | ✅ | ✅ |
+> | **CFB / NCAAF game markets** | ❌ | ❌ | ❌ — futures only |
+>
+> We are a PRE-GAME maker, so a `live`-only program means the market is
+> not bettable by this machine at all. Two lanes already died to this
+> rule: MLB O/U (killed Aug 18) and pre-game NFL ML (never built).
+
 ## Access Control (read this first)
 
 Three roles in Firestore `users/{uid}.role`:
