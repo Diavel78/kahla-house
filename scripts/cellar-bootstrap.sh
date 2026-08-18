@@ -131,8 +131,6 @@ if [ "$(uname -s)" = "Darwin" ]; then
            echo "        Cost is the cellar staying down until you're home." ;;
     *)     warn "FileVault status unknown" ;;
   esac
-  BATT="$(system_profiler SPPowerDataType 2>/dev/null | awk '/Condition/{print $2; exit}')"
-  [ -n "$BATT" ] && { [ "$BATT" = "Normal" ] && ok "battery condition: $BATT" || warn "battery condition: $BATT — replace before running this box unattended"; }
   pmset -g 2>/dev/null | grep -q "disablesleep.*1" \
     && ok "sleep disabled (clamshell-safe)" \
     || warn "run: sudo pmset -a disablesleep 1 sleep 0 disksleep 0 powernap 0 autorestart 1"
