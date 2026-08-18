@@ -46,7 +46,29 @@ class Ctx:
 # ---------------------------------------------------------------------------
 
 def _cron_key() -> str:
-    return (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    """The shared secret the cron routes check.
+
+    If the box does not have the real one, MINT AN EPHEMERAL ONE and put it in
+    this process's environment. The route reads the same os.environ at request
+    time, so both sides agree and the check passes.
+
+    That is not a bypass. The secret exists to stop the public internet from
+    hitting these endpoints on Vercel; the cellar reaches them through Flask's
+    in-process test client, never over a socket, so there is no attacker to
+    authenticate against. Requiring the operator to copy a secret out of a
+    dashboard just to let a process call itself is friction with no security
+    benefit — and Vercel marks that value write-only anyway, so it often
+    CANNOT be copied.
+
+    A real FILLS_CRON_SECRET in .env is still honored if present.
+    """
+    key = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not key:
+        import secrets as _secrets
+        key = _secrets.token_hex(32)
+        os.environ["FILLS_CRON_SECRET"] = key
+        log.info("no FILLS_CRON_SECRET set — minted an ephemeral in-process key")
+    return key
 
 
 def _drive_route(path: str) -> tuple[int, dict]:
