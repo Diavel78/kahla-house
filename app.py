@@ -11616,6 +11616,8 @@ def _opener_game_listed(g, keys) -> bool:
 
 
 _OPENER_REEVAL_H = 4
+_OPENER_WAIT_REEVAL_MIN = 20    # re-check cadence for a would-bet that has
+                                # no order yet AND is inside the paid window
 
 
 def _opener_upsert(sb, row) -> bool:
@@ -11830,6 +11832,7 @@ def _opener_pass(sb, now, deadline):
             done_rows = (sb.table("pickbot_paperlog")
                          .select("market_id,market_type,logged_at,"
                                  "would_bet:signal_blob->>would_bet,"
+                                 "dayof_wait:signal_blob->>dayof_wait,"
                                  "swept:signal_blob->>swept")
                          .in_("market_id", mids)
                          .filter("signal_blob->>opener_shadow", "eq", "true")
@@ -11854,6 +11857,18 @@ def _opener_pass(sb, now, deadline):
         # anyway; a would-bet that failed placement latches as before —
         # the cap path never persists at all). Parse-failure ⇒ fresh ⇒
         # done (fail-safe: never re-eval on bad data).
+        # Paid-window map: a dayof_wait row inside T-6h is rent we are NOT
+        # collecting this minute, so it re-checks on a 20-min cadence
+        # instead of the 4h one. Outside the window the 4h cadence stands —
+        # a game 40h out has nothing to gain from being re-priced.
+        _dayof_cut = now + timedelta(minutes=_WHIFF_DAYOF_MIN)
+        _start_by_mid = {}
+        for g in games:
+            try:
+                _start_by_mid[g["id"]] = datetime.fromisoformat(
+                    str(g.get("event_start")).replace("Z", "+00:00"))
+            except Exception:
+                pass
         done = set()
         for r in done_rows:
             # Row is either the narrowed projection (flags at top level,
@@ -11864,19 +11879,27 @@ def _opener_pass(sb, now, deadline):
             # buying entirely.
             _b = r.get("signal_blob") if isinstance(
                 r.get("signal_blob"), dict) else r
+            # A would-bet that never produced an order (dayof_wait) is
+            # UNFINISHED WORK, not a completed evaluation — see the
+            # landmine note at the NRFI blob.
+            _wait = _b.get("dayof_wait") in (True, "true")
+            _st = _start_by_mid.get(r["market_id"])
+            _inwin = bool(_wait and _st is not None and _st <= _dayof_cut)
             fresh = True
             try:
                 _ts = datetime.fromisoformat(
                     str(r.get("logged_at")).replace("Z", "+00:00"))
-                fresh = (now - _ts) < timedelta(hours=_OPENER_REEVAL_H)
+                fresh = (now - _ts) < (
+                    timedelta(minutes=_OPENER_WAIT_REEVAL_MIN) if _inwin
+                    else timedelta(hours=_OPENER_REEVAL_H))
             except Exception:
                 pass
             try:
                 _swept = int(_b.get("swept") or 0)
             except (TypeError, ValueError):
                 _swept = 0
-            if (_b.get("would_bet") in (True, "true") or fresh
-                    or _swept >= 2):
+            if ((_b.get("would_bet") in (True, "true") and not _wait)
+                    or fresh or _swept >= 2):
                 done.add((r["market_id"], r.get("market_type")))
         cands = [g for g in games
                  if (g["id"], "nrfi") not in done
@@ -12138,7 +12161,22 @@ def _opener_pass(sb, now, deadline):
                     "opener_edge_pp": edge, "would_bet": bool(bet_side),
                     "opener_unclamped": True,
                     "nrfi_price_src": nrfi.get("price_src")}
-            _opener_upsert(sb, {
+            # ⚠ WOULD-BET WITHOUT AN ORDER MUST NOT LATCH (Aug 17 2026 —
+            # the day-of gate broke NRFI silently). The done-set treats
+            # would_bet=true as permanently done, which was safe only while
+            # persist and placement happened in the same evaluation. The
+            # T-6h gate (Aug 16) is the first blocker that separates them:
+            # a game evaluated 15-40h out persisted would_bet=true, hit
+            # `continue` at the window check, and was never looked at again
+            # — so when T-6h arrived nobody placed the order. 18 of 19 rows
+            # on the Aug 17-18 slates read would_bet=true / no bet; the one
+            # live order predates the gate. `dayof_wait` marks a would-bet
+            # that has NOT yet produced an order; the done-set refuses to
+            # latch it and re-checks it every _OPENER_WAIT_REEVAL_MIN once
+            # the paid window opens. Cleared on the successful create below.
+            if bet_side:
+                blob["dayof_wait"] = True
+            nrfi_row = {
                 "market_id": g["id"], "event_name": g.get("event_name"),
                 "event_start": es, "sport": "MLB",
                 "market_type": "nrfi", "side": side, "line": None,
@@ -12150,7 +12188,8 @@ def _opener_pass(sb, now, deadline):
                                   else nrfi.get("yrfi_fair_american")),
                 "gates_cleared": False,
                 "signal_blob": blob, "logged_at": now.isoformat(),
-            })
+            }
+            _opener_upsert(sb, nrfi_row)
             # ---- AUTO-BET: one contract, once, then the review gate ----
             if not (AUTOBET_ENABLED and bet_side and dt):
                 continue
@@ -12312,6 +12351,14 @@ def _opener_pass(sb, now, deadline):
                                     "book_bid_c": bid_c,
                                     "book_ask_c": ask_c},
                 }).execute()
+            except Exception:
+                pass
+            # Order exists → the row may latch. Clearing dayof_wait is what
+            # stops the 20-min in-window re-check from rebuilding a dossier
+            # for a game we're already resting on.
+            try:
+                nrfi_row["signal_blob"] = dict(blob, dayof_wait=False)
+                _opener_upsert(sb, nrfi_row)
             except Exception:
                 pass
             _time.sleep(1.2)
