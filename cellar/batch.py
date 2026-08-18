@@ -53,6 +53,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from .util import retrying
+
 log = logging.getLogger("cellar.batch")
 
 AZ = ZoneInfo("America/Phoenix")
@@ -287,11 +289,12 @@ def _last_ok(sb, job_name: str) -> datetime | None:
     the cellar has already done.
     """
     try:
-        rows = (sb.table("cellar_ticks")
-                .select("started_at")
-                .eq("lane", f"batch:{job_name}").eq("ok", True)
-                .order("started_at", desc=True).limit(1)
-                .execute().data) or []
+        rows = retrying(
+            lambda: (sb.table("cellar_ticks")
+                     .select("started_at")
+                     .eq("lane", f"batch:{job_name}").eq("ok", True)
+                     .order("started_at", desc=True).limit(1)
+                     .execute().data), what=f"last_ok {job_name}") or []
     except Exception as e:
         log.warning("batch: last_ok lookup failed for %s: %s", job_name, e)
         # Fail CLOSED: unknown history means "don't run", so a DB blip can't
@@ -359,11 +362,12 @@ def _last_ok_map(sb) -> dict[str, datetime]:
     no GROUP BY, so pull the recent ok-ticks once and reduce in Python.
     """
     try:
-        rows = (sb.table("cellar_ticks")
-                .select("lane,started_at")
-                .like("lane", "batch:%").eq("ok", True)
-                .order("started_at", desc=True).limit(500)
-                .execute().data) or []
+        rows = retrying(
+            lambda: (sb.table("cellar_ticks")
+                     .select("lane,started_at")
+                     .like("lane", "batch:%").eq("ok", True)
+                     .order("started_at", desc=True).limit(500)
+                     .execute().data), what="last_ok bulk") or []
     except Exception as e:
         log.warning("batch: bulk last_ok lookup failed: %s", e)
         return {}

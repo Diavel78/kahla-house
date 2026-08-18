@@ -27,6 +27,8 @@ from __future__ import annotations
 import logging
 import threading
 
+from .util import retrying
+
 log = logging.getLogger("cellar.lease")
 
 
@@ -58,10 +60,12 @@ class Lease:
         other side holds the lane and this caller must no-op.
         """
         try:
-            res = self._sb.rpc(
-                "cellar_claim",
-                {"p_lane": lane, "p_owner": self._owner, "p_ttl": ttl_s},
-            ).execute()
+            res = retrying(
+                lambda: self._sb.rpc(
+                    "cellar_claim",
+                    {"p_lane": lane, "p_owner": self._owner, "p_ttl": ttl_s},
+                ).execute(),
+                what=f"claim {lane}")
         except Exception as e:
             # FAIL CLOSED. An unreachable lease table means we cannot prove we
             # are the only writer, so we must behave as though we are not.
@@ -84,9 +88,11 @@ class Lease:
         """Voluntarily hand a lane back so the standby can take it at once
         rather than waiting out the TTL. Called on clean shutdown."""
         try:
-            res = self._sb.rpc(
-                "cellar_release", {"p_lane": lane, "p_owner": self._owner}
-            ).execute()
+            res = retrying(
+                lambda: self._sb.rpc(
+                    "cellar_release", {"p_lane": lane, "p_owner": self._owner}
+                ).execute(),
+                what=f"release {lane}")
         except Exception as e:
             log.warning("lease release %s failed: %s", lane, e)
             return False

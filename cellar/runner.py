@@ -29,6 +29,7 @@ import time
 from . import config, lanes as lanes_mod
 from .journal import Journal
 from .lease import Lease
+from .util import retrying
 
 log = logging.getLogger("cellar.runner")
 
@@ -99,7 +100,7 @@ class Runner:
                work: int, ms: int, detail: dict | None = None,
                error: str | None = None) -> None:
         try:
-            self.sb.table("cellar_ticks").insert({
+            retrying(lambda: self.sb.table("cellar_ticks").insert({
                 "lane": lane,
                 "owner": config.OWNER,
                 "duration_ms": ms,
@@ -108,7 +109,7 @@ class Runner:
                 "work": work,
                 "detail": detail,
                 "error": (error or None) and str(error)[:2000],
-            }).execute()
+            }).execute(), what=f"tick {lane}")
         except Exception as e:
             # Never let observability failure take down the machine.
             log.warning("heartbeat write failed for %s: %s", lane, e)
