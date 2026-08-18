@@ -7197,6 +7197,37 @@ def _fb_h_to_kick(iso_win, iso_kick):
         return None
 
 
+_FB_TAG_CANDS = {                     # league tags are not always the
+    "NFL":   ["nfl"],                 # obvious string — try candidates and
+    "NCAAF": ["college-football", "ncaaf", "cfb",
+              "college-football-ncaaf"],
+}
+
+
+def _fb_is_game(ev: dict) -> bool:
+    """A GAME event, not a season future. Two teams and a date: the title
+    reads 'X vs Y' or the slug ends in a calendar date."""
+    t = str(ev.get("title") or "").lower()
+    sl = str(ev.get("slug") or "").lower()
+    if " vs " in t or " vs. " in t or " @ " in t:
+        return True
+    return bool(re.search(r"-20\d\d-\d\d-\d\d$", sl))
+
+
+def _fb_market_of_event(md: dict, ev_slug: str) -> bool:
+    """Does this market actually belong to that event? The venue's slug
+    convention is <prefix>-<event slug>[-suffix], so the event slug (or
+    its distinctive tail) has to appear in the market slug."""
+    ms = str(md.get("slug") or "").lower()
+    ev = str(ev_slug or "").lower()
+    if not ms or not ev:
+        return False
+    if ev in ms:
+        return True
+    tail = "-".join(ev.split("-")[-3:])          # teams + date
+    return bool(tail) and tail in ms
+
+
 @app.route("/api/football/recon")
 def api_football_recon():
     """FOOTBALL GO-LIVE RECON — read-only. Answers the three questions no
@@ -7238,56 +7269,99 @@ def api_football_recon():
     sports = [s.strip().upper() for s in
               (request.args.get("sports")
                or ",".join(_FB_RECON_SPORTS)).split(",") if s.strip()]
+    win_min = (request.args.get("start_min") or "").strip() or None
+    win_max = (request.args.get("start_max") or "").strip() or None
+    if win_min and not win_max:
+        win_max = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
     out = {"ok": True, "at": datetime.now(timezone.utc).isoformat(),
            "sports": {}, "rent": {}}
     probe: list = []                      # (sport, slug, kickoff_iso)
 
     for sport in sports:
-        tag = _pmm._SPORT_TAG_SLUG.get(sport)
-        rec = {"tag": tag, "events": 0, "sample": [], "attempts": {}}
+        tags = _FB_TAG_CANDS.get(sport) or (
+            [_pmm._SPORT_TAG_SLUG[sport]] if sport in _pmm._SPORT_TAG_SLUG
+            else [])
+        rec = {"tags_tried": tags, "events": 0, "games": 0,
+               "sample": [], "attempts": {}}
         out["sports"][sport] = rec
-        if not tag:
-            rec["error"] = "sport not in _SPORT_TAG_SLUG"
+        if not tags:
+            rec["error"] = "no tag candidate"
             continue
         evs, seen = [], set()
-        for i, params in enumerate((
-                {"tagSlug": tag, "closed": False, "limit": 100},
-                {"tagSlug": tag, "closed": False, "relatedTags": True,
-                 "limit": 100})):
-            try:
-                resp = client.events.list(params)
-            except Exception as e:
-                rec["attempts"]["a%d" % i] = f"{type(e).__name__}: {e}"[:160]
-                continue
-            got = (resp.get("events") if isinstance(resp, dict)
-                   else getattr(resp, "events", None)) or []
-            rec["attempts"]["a%d" % i] = len(got)
-            for ev in got:
-                d = _pmm._event_to_dict(ev)
-                sl = d.get("slug")
-                if sl and sl not in seen:
-                    seen.add(sl)
-                    evs.append(d)
+        for tag in tags:
+            shapes = [{"tagSlug": tag, "closed": False, "limit": 200}]
+            if win_min:                    # a time window is what separates
+                shapes.insert(0, {         # week-1 GAMES from season futures
+                    "tagSlug": tag, "closed": False, "limit": 200,
+                    "startTimeMin": win_min, "startTimeMax": win_max})
+            for i, params in enumerate(shapes):
+                try:
+                    resp = client.events.list(params)
+                except Exception as e:
+                    rec["attempts"]["%s.%d" % (tag, i)] = (
+                        f"{type(e).__name__}: {e}"[:160])
+                    continue
+                got = (resp.get("events") if isinstance(resp, dict)
+                       else getattr(resp, "events", None)) or []
+                rec["attempts"]["%s.%d" % (tag, i)] = len(got)
+                for ev in got:
+                    d = _pmm._event_to_dict(ev)
+                    sl = d.get("slug")
+                    if sl and sl not in seen:
+                        seen.add(sl)
+                        evs.append(d)
         evs.sort(key=lambda d: str(d.get("startTime") or "z"))
         rec["events"] = len(evs)
+        # ⚠ A LEAGUE TAG IS MOSTLY SEASON FUTURES (found Aug 18: sorting the
+        # nfl tag by startTime put `nfl-mostpassyds-2027-01-10` and friends
+        # first, so the taxonomy pass expanded futures and learned nothing
+        # about games). A GAME event is two teams and a date — require it.
+        games = [d for d in evs if _fb_is_game(d)]
+        rec["games"] = len(games)
         rec["sample"] = [{"slug": d.get("slug"), "title": d.get("title"),
-                          "start": d.get("startTime")} for d in evs[:12]]
+                          "start": d.get("startTime")} for d in games[:12]]
+        rec["sample_nongame"] = [{"slug": d.get("slug"),
+                                  "start": d.get("startTime")}
+                                 for d in evs if not _fb_is_game(d)][:6]
+        evs = games
         # -- taxonomy: expand the nearest N events into market types --
         tally, samples = {}, {}
         for d in evs[:n_ev]:
             sl = d.get("slug")
             if not sl:
                 continue
+            ms = []
+            # ⚠ markets.list's eventSlug filter is ADVISORY (Aug 18: asking
+            # for an NFL futures event returned MLB and US-election markets
+            # — the same "filter silently ignored" shape as `marketSlug` on
+            # /v1/incentives). Ask the event for its own markets first, and
+            # VERIFY whatever comes back actually belongs to this event.
             try:
-                mresp = client.markets.list({"eventSlug": [sl],
-                                             "closed": False, "limit": 200})
+                full = client.events.retrieve_by_slug(sl)
+                evf = (full.get("event") if isinstance(full, dict)
+                       else getattr(full, "event", None)) or full
+                ms = (_pmm._event_to_dict(evf) or {}).get("markets") or []
             except Exception as e:
-                rec.setdefault("market_errors", []).append(str(e)[:160])
-                continue
-            ms = (mresp.get("markets") if isinstance(mresp, dict)
-                  else getattr(mresp, "markets", None)) or []
-            for m in ms:
-                md = _pmm._market_to_dict(m)
+                rec.setdefault("market_errors", []).append(
+                    ("retrieve %s: " % sl) + str(e)[:120])
+            if not ms:
+                try:
+                    mresp = client.markets.list({"eventSlug": [sl],
+                                                 "closed": False,
+                                                 "limit": 200})
+                    ms = (mresp.get("markets") if isinstance(mresp, dict)
+                          else getattr(mresp, "markets", None)) or []
+                    ms = [_pmm._market_to_dict(m) for m in ms]
+                except Exception as e:
+                    rec.setdefault("market_errors", []).append(
+                        ("list %s: " % sl) + str(e)[:120])
+            kept = []
+            for md in ms:
+                if _fb_market_of_event(md, sl):
+                    kept.append(md)
+            rec.setdefault("verify", {})[sl] = {
+                "returned": len(ms), "kept": len(kept)}
+            for md in kept:
                 v1 = str(md.get("sportsMarketType") or "?")
                 tally[v1] = tally.get(v1, 0) + 1
                 if v1 not in samples:
