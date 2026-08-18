@@ -7179,6 +7179,170 @@ def api_poly_incentive_config():
     return jsonify(out)
 
 
+# ── FOOTBALL GO-LIVE RECON (Aug 18 2026) ───────────────────────────────
+_FB_RECON_SPORTS = ("NFL", "NCAAF")
+
+
+def _fb_h_to_kick(iso_win, iso_kick):
+    """Hours from a program-window edge to kickoff (positive = that many
+    hours BEFORE kickoff, negative = after it). Every reward window is
+    reported in this form because it is the only one that transfers
+    between sports — MLB's answer was ML/O-U opening->start and props
+    T-6h->start, and football has fewer, bigger events."""
+    try:
+        w = datetime.fromisoformat(str(iso_win).replace("Z", "+00:00"))
+        k = datetime.fromisoformat(str(iso_kick).replace("Z", "+00:00"))
+        return round((k - w).total_seconds() / 3600.0, 1)
+    except Exception:
+        return None
+
+
+@app.route("/api/football/recon")
+def api_football_recon():
+    """FOOTBALL GO-LIVE RECON — read-only. Answers the three questions no
+    DB row can answer, in one call.
+
+    ⚠ WHY THE DB CANNOT ANSWER THIS. `_incentives_sync` seeds its
+    `symbols` filter from OUR OWN earnings + picks (the unfiltered
+    catalog does not list game/prop markets — see the landmine there), so
+    `poly_incentive_programs` holds programs only for markets we already
+    rest orders on. Football is absent from that table because we have
+    NEVER BET FOOTBALL, not because football carries no programs. Reading
+    the mirror and concluding "no football rent" is the exact shape of
+    the bug that once concluded "props have no programs".
+
+      1. LISTING  — does Poly list NFL / NCAAF yet, and how far out?
+      2. TAXONOMY — every market type on a football event, so the prop
+         inventory is a fact instead of a guess (v1 + v2 + a sample
+         question per type; the v1 rename landmine means the v1 strings
+         are what any future classifier work keys off).
+      3. RENT     — the incentive programs for those exact slugs, each
+         period stated relative to kickoff.
+
+    Params: key (shared secret), sports=NFL,NCAAF, events=N (per sport,
+    max 6). Persists to exec_probe_runs — read it back with run_sql.sh,
+    never by screenshot."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    import pmm_markets as _pmm
+    try:
+        n_ev = max(1, min(6, int(request.args.get("events") or 3)))
+    except (TypeError, ValueError):
+        n_ev = 3
+    sports = [s.strip().upper() for s in
+              (request.args.get("sports")
+               or ",".join(_FB_RECON_SPORTS)).split(",") if s.strip()]
+    out = {"ok": True, "at": datetime.now(timezone.utc).isoformat(),
+           "sports": {}, "rent": {}}
+    probe: list = []                      # (sport, slug, kickoff_iso)
+
+    for sport in sports:
+        tag = _pmm._SPORT_TAG_SLUG.get(sport)
+        rec = {"tag": tag, "events": 0, "sample": [], "attempts": {}}
+        out["sports"][sport] = rec
+        if not tag:
+            rec["error"] = "sport not in _SPORT_TAG_SLUG"
+            continue
+        evs, seen = [], set()
+        for i, params in enumerate((
+                {"tagSlug": tag, "closed": False, "limit": 100},
+                {"tagSlug": tag, "closed": False, "relatedTags": True,
+                 "limit": 100})):
+            try:
+                resp = client.events.list(params)
+            except Exception as e:
+                rec["attempts"]["a%d" % i] = f"{type(e).__name__}: {e}"[:160]
+                continue
+            got = (resp.get("events") if isinstance(resp, dict)
+                   else getattr(resp, "events", None)) or []
+            rec["attempts"]["a%d" % i] = len(got)
+            for ev in got:
+                d = _pmm._event_to_dict(ev)
+                sl = d.get("slug")
+                if sl and sl not in seen:
+                    seen.add(sl)
+                    evs.append(d)
+        evs.sort(key=lambda d: str(d.get("startTime") or "z"))
+        rec["events"] = len(evs)
+        rec["sample"] = [{"slug": d.get("slug"), "title": d.get("title"),
+                          "start": d.get("startTime")} for d in evs[:12]]
+        # -- taxonomy: expand the nearest N events into market types --
+        tally, samples = {}, {}
+        for d in evs[:n_ev]:
+            sl = d.get("slug")
+            if not sl:
+                continue
+            try:
+                mresp = client.markets.list({"eventSlug": [sl],
+                                             "closed": False, "limit": 200})
+            except Exception as e:
+                rec.setdefault("market_errors", []).append(str(e)[:160])
+                continue
+            ms = (mresp.get("markets") if isinstance(mresp, dict)
+                  else getattr(mresp, "markets", None)) or []
+            for m in ms:
+                md = _pmm._market_to_dict(m)
+                v1 = str(md.get("sportsMarketType") or "?")
+                tally[v1] = tally.get(v1, 0) + 1
+                if v1 not in samples:
+                    samples[v1] = {
+                        "q": str(md.get("question") or "")[:120],
+                        "slug": md.get("slug"),
+                        "v2": md.get("sportsMarketTypeV2"),
+                        "line": md.get("line"),
+                        "bid": ((md.get("bestBidQuote") or {}).get("value")
+                                if isinstance(md.get("bestBidQuote"), dict)
+                                else None),
+                    }
+                    if md.get("slug"):
+                        probe.append((sport, md["slug"], d.get("startTime")))
+        rec["market_types"] = dict(sorted(tally.items(),
+                                          key=lambda kv: -kv[1]))
+        rec["type_samples"] = samples
+        rec["expanded_events"] = min(n_ev, len(evs))
+
+    # ---- 3. RENT: ask the venue about these exact slugs ----
+    for sport, slug, kick in probe[:24]:
+        entry = {"sport": sport, "kickoff": kick}
+        try:
+            raw = client.get("/v1/incentives", query={"symbols": slug},
+                             authenticated=True) or {}
+        except Exception as e:
+            entry["error"] = f"{type(e).__name__}: {e}"[:160]
+            out["rent"][slug] = entry
+            continue
+        progs = (raw.get("programs") if isinstance(raw, dict) else None) or []
+        entry["programs_returned"] = len(progs)
+        periods = []
+        for m in progs:
+            # the symbols filter has been observed to be advisory (it once
+            # returned the whole catalog) — keep only the slug we asked for
+            if str(m.get("marketSlug") or "") != slug:
+                continue
+            kk = m.get("eventStartTime") or kick
+            for tp in (m.get("timePeriods") or []):
+                periods.append({
+                    "type": tp.get("programType"),
+                    "period": tp.get("period"),
+                    "pool": tp.get("rewardPool"),
+                    "df": tp.get("discountFactor"),
+                    "target": tp.get("targetSize"),
+                    "status": tp.get("status"),
+                    "opens_h_before_kick": _fb_h_to_kick(tp.get("start"), kk),
+                    "closes_h_before_kick": _fb_h_to_kick(tp.get("end"), kk),
+                })
+        entry["periods"] = periods
+        out["rent"][slug] = entry
+    _probe_log(out)
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/incentives")
 def api_poly_incentives():
     """PROBE: is there a first-party maker-reward EARNINGS read? (Aug 15
