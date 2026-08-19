@@ -13480,8 +13480,17 @@ def _gridiron_opener_pass(sb, now, deadline):
             if best is None:
                 continue
             s, edge0, q0 = best
-            if edge0 >= _OPENER_JUNK_EDGE_PP:
-                continue                  # newborn junk book — never latch
+            # THE JUNK GATE IS FOR BETS, NOT FOR SHADOWS. On the MLB
+            # opener a >=15pp claimed edge means a newborn book we must
+            # not latch onto with money. Here nothing is bet -- and
+            # filtering these out builds a tape containing only the games
+            # the model ALREADY AGREES WITH, which is precisely the tape
+            # that cannot answer whether the model is usable. Football
+            # ratings in August are decayed 2025 data (40-day half life,
+            # a season seven months gone), so the disagreements ARE the
+            # measurement. Recorded and flagged, never dropped: this gate
+            # is why the first run evaluated 8 games and wrote 0 rows.
+            junk0 = edge0 >= _OPENER_JUNK_EDGE_PP
             bid0 = float(q0["bid"]) * 100.0
             es0 = g.get("event_start")
             try:
@@ -13503,10 +13512,25 @@ def _gridiron_opener_pass(sb, now, deadline):
                 "edge_pp": round(edge0, 1),
                 "fair_american": (int(_fa) if _fa is not None else None),
                 "gates_cleared": False,
-                "signal_blob": {"opener_shadow": True, "gridiron_ml": True,
-                                "p_home": round(p_home, 4),
-                                "would_bet": edge0 >= 2.5,
-                                "shadow_only": True},
+                "signal_blob": {
+                    "opener_shadow": True, "gridiron_ml": True,
+                    "p_home": round(p_home, 4),
+                    # would_bet stays honest: a junk-edge game would never
+                    # have been bet, so it must not read as one.
+                    "would_bet": (edge0 >= 2.5) and not junk0,
+                    "junk_edge": junk0,
+                    # BOTH SIDES OF THE BOOK. Edge measured against the
+                    # bid counts half the spread as alpha (the Aug 9
+                    # spread-fiction finding), and football books this
+                    # far out are wide. Storing bid/ask/mid means the
+                    # tape can be re-scored on the honest basis later
+                    # without recapturing anything.
+                    "book_bid_c": round(bid0, 1),
+                    "book_ask_c": (round(float(q0["ask"]) * 100.0, 1)
+                                   if q0.get("ask") is not None else None),
+                    "book_mid_c": (round(float(q0["mid"]) * 100.0, 1)
+                                   if q0.get("mid") is not None else None),
+                    "shadow_only": True},
                 "logged_at": now.isoformat(),
             })
             stats["g_rows"] += 1
