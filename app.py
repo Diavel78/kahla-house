@@ -7069,10 +7069,8 @@ def api_docs_fetch():
         body = r.text or ""
         # strip script/style then collapse tags — we want the prose+tables,
         # not the SPA shell
-        body = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", body)
-        body = re.sub(r"(?s)<[^>]+>", " ", body)
-        body = re.sub(r"&nbsp;?", " ", body)
-        body = re.sub(r"\s{2,}", " ", body).strip()
+        body = _html_to_text(body)          # ONE implementation (shared
+                                            # with the rewards sync)
         out["chars"] = len(body)
         out["text"] = body[:14000]
     except Exception as e:
@@ -11700,6 +11698,21 @@ def _peg_target(bid_c, ask_c, fair_c, join=False):
     return t, e
 
 
+def _html_to_text(body: str, limit: int = 0) -> str:
+    """HTML -> prose+tables text. ONE implementation, shared by
+    /api/docs-fetch and the reward-schedule sync — the sync originally
+    re-implemented this, skipped the whitespace collapse, and parsed
+    ZERO rows because "Program Category Time period" only appears
+    contiguously AFTER the collapse. Two copies of a parser is two
+    parsers that disagree."""
+    body = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", body or "")
+    body = re.sub(r"(?s)<[^>]+>", " ", body)
+    body = _html.unescape(body)
+    body = re.sub(r"&nbsp;?", " ", body)
+    body = re.sub(r"\s{2,}", " ", body).strip()
+    return body[:limit] if limit else body
+
+
 # ─────────── THE REWARD SCHEDULE, READ LIVE (Aug 18 2026) ───────────
 # The rent rule needs to know which markets pay and when. That answer is
 # NOT a constant — it is whatever polymarket.us/rewards says today.
@@ -11793,9 +11806,7 @@ def _reward_schedule_sync(sb) -> dict:
         if r.status_code != 200:
             res["err"] = f"http {r.status_code}"
             return res
-        text = re.sub(r"<[^>]+>", " ", r.text)
-        text = _html.unescape(text)
-        rows, bad = _reward_rows_parse(text)
+        rows, bad = _reward_rows_parse(_html_to_text(r.text))
         res["unparsed"] = bad[:8]
         if not rows:
             res["err"] = "no rows parsed"      # never wipe on a bad read
