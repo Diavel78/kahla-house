@@ -88,6 +88,29 @@
         }
         .foot a { color: var(--muted); }
         .skel { color: var(--muted); }
+        /* THE MACHINE card. One row per lane, readable at arm's length on
+           a phone -- this exists to be glanced at, not studied. */
+        .lanes { display: flex; flex-direction: column; gap: 2px; }
+        .lane {
+            display: grid; grid-template-columns: 10px 1fr auto;
+            align-items: center; gap: 10px; padding: 7px 0;
+            border-bottom: 1px solid rgba(35,42,55,.6);
+            font-size: 13px;
+        }
+        .lane:last-child { border-bottom: none; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+        .dot.ok     { background: var(--green); }
+        .dot.vercel { background: var(--cyan); }
+        .dot.idle   { background: #fbbf24; }
+        .dot.stale, .dot.error { background: var(--red); }
+        .lane .nm { font-weight: 600; letter-spacing: .01em; }
+        .lane .nm span { font-weight: 400; color: var(--muted); margin-left: 7px; }
+        .lane .rt {
+            font-family: 'JetBrains Mono', monospace; font-size: 12px;
+            color: var(--muted); text-align: right; white-space: nowrap;
+        }
+        .lane.bad .rt { color: #fbbf24; }
+        .lane.dead .rt { color: var(--red); }
         @media (max-width: 520px) {
             .value { font-size: 26px; }
             .card.wide .value { font-size: 34px; }
@@ -136,6 +159,17 @@
                 <div class="value skel" id="vYest">—</div>
                 <div class="sub" id="subYest">settled · AZ</div>
             </div>
+            <!-- THE MACHINE. A heartbeat is not health: the ledger lane
+                 renewed its lease every five seconds for twenty-two hours
+                 while doing nothing at all, and that was found by noticing
+                 a P&L number looked wrong. The right column is WORK. -->
+            <div class="card wide">
+                <div class="label">The machine</div>
+                <div class="lanes" id="lanes">
+                    <div class="sub" style="margin:0">loading…</div>
+                </div>
+                <div class="sub" id="subLanes">lane · owner · last work</div>
+            </div>
             <div class="card wide">
                 <div class="label">Maker rewards — lifetime</div>
                 <div class="value skel" id="vMaker">—</div>
@@ -166,6 +200,44 @@
         if (v === null || v === undefined || isNaN(v)) return '—';
         const s = v < 0 ? '-' : '+';
         return s + '$' + Math.abs(v).toFixed(2);
+    }
+
+    // "2m" / "3h" / "5d". Null is never rendered as 0 -- "never" and
+    // "just now" are opposite answers and must not look alike.
+    function ago(sec) {
+        if (sec === null || sec === undefined) return 'never';
+        if (sec < 90) return Math.max(0, Math.round(sec)) + 's';
+        if (sec < 5400) return Math.round(sec / 60) + 'm';
+        if (sec < 172800) return Math.round(sec / 3600) + 'h';
+        return Math.round(sec / 86400) + 'd';
+    }
+
+    function paintLanes(c) {
+        const box = document.getElementById('lanes');
+        const sub = document.getElementById('subLanes');
+        if (!c || !c.lanes || !c.lanes.length) {
+            box.innerHTML = '<div class="sub" style="margin:0">no lane data</div>';
+            sub.textContent = 'lane · owner · last work';
+            return;
+        }
+        box.innerHTML = c.lanes.map(l => {
+            const dead = (l.state === 'stale' || l.state === 'error');
+            const cls = dead ? 'lane dead' : (l.state === 'idle' ? 'lane bad' : 'lane');
+            // Vercel writes no tick history, so its lanes are judged on
+            // heartbeat alone and say so rather than showing a false zero.
+            const right = l.owner !== 'cellar'
+                ? ('beat ' + ago(l.hb_age_s))
+                : (l.state === 'stale' ? 'no beat ' + ago(l.hb_age_s)
+                   : l.state === 'error' ? l.fails_1h + ' fails/1h'
+                   : 'work ' + ago(l.last_work_s)
+                     + (l.work_1h ? ' · ' + l.work_1h + '/1h' : ''));
+            return '<div class="' + cls + '">'
+                 + '<span class="dot ' + l.state + '"></span>'
+                 + '<span class="nm">' + l.lane + '<span>' + l.owner + '</span></span>'
+                 + '<span class="rt">' + right + '</span></div>';
+        }).join('');
+        sub.textContent = c.on_cellar + ' on the cellar · ' + c.on_vercel
+            + ' on vercel' + (c.bad ? ' · ' + c.bad + ' need a look' : ' · all working');
     }
 
     function paint(el, v, signed) {
@@ -254,6 +326,7 @@
                 'realized + open + maker rewards' +
                 (bal != null ? ' · balance $' + Number(bal).toFixed(2) : '') +
                 (s.open_positions != null ? ' · ' + s.open_positions + ' open' : '');
+            paintLanes(j.cellar);
             document.getElementById('stamp').textContent =
                 'updated ' + new Date().toLocaleTimeString();
         } catch (e) {

@@ -1692,6 +1692,87 @@ def _maker_rewards_split(sb) -> dict:
     return out
 
 
+# How long a lane may do NOTHING before that is worth a human's attention.
+# Deliberately generous: this flags "suspicious", never "broken", and a
+# warning that cries wolf is one you stop reading — which is how you end up
+# not reading the one that mattered.
+#
+# None = zero work is the CORRECT steady state for this lane, so never warn.
+# kalshi_autolog is the live example: it creates picks from Kalshi fills and
+# Kalshi execution has been dormant since July 24, so it has legitimately
+# never done a unit of work in its life.
+_LANE_WORK_WARN_S = {
+    "pm_snapshot":     1_800,      # logs cents nearly every tick
+    "paperlog":        3_600,
+    "opener":         21_600,      # a quiet slate is real
+    "ledger":         21_600,      # 22h of silence is what we missed
+    "harvest":        86_400,
+    "repeg":          86_400,
+    "vsin":           10_800,
+    "batch":         100_800,      # daily jobs; 28h covers a late run
+    "alerts":         86_400,
+    "kalshi_autolog":   None,      # dormant by design — see above
+}
+
+
+def _cellar_health(sb) -> dict:
+    """Per-lane vitals for the dashboard: who owns it, is it alive, and
+    IS IT ACTUALLY DOING ANYTHING.
+
+    That last one is the entire reason this exists. The `ledger` lane held
+    its lease with a five-second heartbeat for twenty-two hours while
+    stamping nothing, and every signal we had said healthy; it was caught
+    by a human noticing a P&L number looked wrong two days later. Liveness
+    and usefulness are separate clocks and this reports both.
+
+    ⚠ cellar_ticks is written ONLY by the house box, so a vercel-owned
+    lane has no tick history at all. Its absence of work is not evidence
+    of anything and must never paint red — those lanes report state
+    'vercel' and are judged on heartbeat alone.
+
+    Never raises; an unreachable DB returns {} and the card hides."""
+    try:
+        rows = sb.rpc("cellar_health", {}).execute().data or []
+    except Exception:
+        return {}
+    lanes, bad = [], 0
+    for r in rows:
+        lane = r.get("lane") or ""
+        owner = r.get("owner") or "?"
+        hb = r.get("hb_age_s")
+        ttl = r.get("ttl_seconds") or 180
+        work_s = r.get("last_work_s")
+        fails = int(r.get("fails_1h") or 0)
+        stale = hb is not None and hb > ttl
+        warn_s = _LANE_WORK_WARN_S.get(lane, 21_600)
+        if owner != "cellar":
+            # Vercel's side: heartbeat is all we can see. A stale one here
+            # is genuinely bad — it means NOBODY is renewing the lane.
+            state = "stale" if stale else "vercel"
+        elif stale:
+            state = "stale"
+        elif fails:
+            state = "error"
+        elif warn_s is not None and (work_s is None or work_s > warn_s):
+            state = "idle"
+        else:
+            state = "ok"
+        if state in ("stale", "error", "idle"):
+            bad += 1
+        lanes.append({
+            "lane": lane, "owner": owner, "state": state,
+            "hb_age_s": hb, "last_tick_s": r.get("last_tick_s"),
+            "last_work_s": work_s, "work_1h": int(r.get("work_1h") or 0),
+            "ticks_1h": int(r.get("ticks_1h") or 0), "fails_1h": fails,
+            "error": r.get("last_error"),
+        })
+    return {
+        "lanes": lanes, "bad": bad,
+        "on_cellar": sum(1 for l in lanes if l["owner"] == "cellar"),
+        "on_vercel": sum(1 for l in lanes if l["owner"] != "cellar"),
+    }
+
+
 _DASH_CACHE_MAX_AGE_S = 900     # 15 min — the tick refreshes every 5
 
 
@@ -1710,6 +1791,7 @@ def _dash_derived(sb) -> dict:
     back to computing that one live."""
     out: dict = {}
     for key, fn in (("gameday_pnl", lambda: _gameday_pnl(sb)),
+                    ("cellar", lambda: _cellar_health(sb)),
                     ("maker_split", lambda: _maker_rewards_split(sb)),
                     ("gameday_rewards", lambda: _gameday_rewards(sb)),
                     ("rent_7d", lambda: _rent_window(sb, 7)),
@@ -17019,6 +17101,12 @@ def api_data():
                     "all_in_7d": _all_in(_p7, (_r7 or {}).get("total")),
                 },
                 "balances": {"current_balance": _c.get("balance")},
+                # Machine health rides the same cached tick as the money
+                # numbers. Computed live if the tick has not run since a
+                # deploy — a health surface that goes blank exactly when
+                # something is wrong would be worse than none.
+                "cellar": _blk("cellar",
+                               lambda: _cellar_health(get_supabase()), {}),
                 "positions": [], "closed_positions": [], "activities": [],
                 "errors": [],
             })
