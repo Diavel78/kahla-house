@@ -19,7 +19,7 @@ import requests as _http  # module-level HTTP client — ESPN scoreboard + Kalsh
                           # fetches use it. (Was accidentally dropped with the
                           # Odds Board removal, which NameError'd every _http.get
                           # → empty ESPN scores. Restored.)
-from datetime import datetime, timezone, timedelta, date
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 import firebase_admin
@@ -1103,44 +1103,8 @@ _ACTS_DEEP_TYPES = ("ACTIVITY_TYPE_TRANSFER",
                     "ACTIVITY_TYPE_TAKER_FEE_REBATE")
 
 
-def _venue_gameday_map(sb, days: int = 8) -> dict:
-    """{AZ game day -> realized USD}, straight from Polymarket.
-
-    THE VENUE IS THE SCOREBOARD. A bet is graded when Poly pays it — not
-    when our resolver matches an ESPN box score, and not when our own
-    ledger tick gets around to stamping a flag on the row. Those are the
-    MODEL's scoreboard; this is the ACCOUNT's.
-
-    This function exists because the day card used to require
-    `poly_pnl.final`, a flag OUR pipeline writes. When the ledger tick
-    stopped stamping (it moved to the cellar, where it had no admin uid
-    and returned at its second line), the card read $0.00 for a day the
-    venue had already settled at +$6.85 — a silent, confident zero. Any
-    reading that can be zeroed by one of our own background jobs failing
-    is the wrong reading. This one cannot: it is Polymarket's numbers,
-    deduped and bucketed, with nothing of ours in the path.
-
-    Server-side in `poly_gameday_pnl` (kahla-scanner/supabase/) because
-    the activities mirror stores ~90 duplicate copies of every resolution
-    and reading four days of raw payloads is megabytes.
-
-    Returns {} on any failure — callers fall back rather than show a
-    fabricated zero."""
-    try:
-        rows = sb.rpc("poly_gameday_pnl", {"p_days": int(days)}).execute().data
-    except Exception:
-        return {}
-    out = {}
-    for r in (rows or []):
-        try:
-            out[date.fromisoformat(str(r["game_day"])[:10])] = float(r["pnl"])
-        except (TypeError, ValueError, KeyError):
-            continue
-    return out
-
-
 def _gameday_pnl(sb) -> dict:
-    """Today / yesterday by ARIZONA GAME DAY, as settled by Polymarket.
+    """Today / yesterday by ARIZONA GAME DAY, from the venue ledger.
 
     ⚠ NOT by payout timestamp, and NOT by the browser's timezone (Aug 15
     2026). The dashboard used to bucket on when Polymarket credited the
@@ -1150,28 +1114,9 @@ def _gameday_pnl(sb) -> dict:
     Arizona is the only timezone this machine has ever needed; MST, no
     DST, hardcoded.
 
-    A day with no resolutions yet is genuinely $0.00 — the venue has
-    settled nothing. That is different from the old failure mode, where
-    a stalled ledger tick made every day look like $0.00."""
-    out = {"today": None, "yesterday": None}
-    try:
-        az = ZoneInfo("America/Phoenix")
-        today = datetime.now(timezone.utc).astimezone(az).date()
-        acc = _venue_gameday_map(sb, 4)
-        if not acc:
-            return _gameday_pnl_legacy(sb)
-        out["today"] = round(acc.get(today, 0.0), 2)
-        out["yesterday"] = round(acc.get(today - timedelta(days=1), 0.0), 2)
-    except Exception:
-        pass
-    return out
-
-
-def _gameday_pnl_legacy(sb) -> dict:
-    """The pre-venue reading, kept ONLY as a fallback for when the RPC is
-    unreachable. Gates on `poly_pnl.final`, so it under-reports whenever
-    the ledger tick is behind — which is exactly the bug that moved the
-    card onto the venue. Never promote this back to primary."""
+    Settled bets only — an unplayed game's `realized_usd` is just the
+    cash deployed, so counting it would show tonight's slate as a loss
+    before first pitch."""
     out = {"today": None, "yesterday": None}
     try:
         az = ZoneInfo("America/Phoenix")
@@ -1521,21 +1466,12 @@ def _rent_window(sb, days: int = 7) -> dict:
 
 
 def _window_pnl(sb, days: int = 7) -> float | None:
-    """Trading P&L over the trailing window, by ARIZONA game day, as
-    settled by Polymarket — the same basis as the day cards, so the two
-    can be added.
-
-    Reads the venue for the same reason the day cards do: a window that
-    silently shrinks whenever our own ledger tick falls behind is not a
-    measurement. Falls back to the legacy `poly_pnl` sum only when the
-    RPC is unreachable."""
+    """Trading P&L over the trailing window, by ARIZONA game day, settled
+    bets only — the same basis as the day cards so the two can be added."""
     try:
         az = ZoneInfo("America/Phoenix")
         today = datetime.now(timezone.utc).astimezone(az).date()
         since = today - timedelta(days=days - 1)
-        acc = _venue_gameday_map(sb, days)
-        if acc:
-            return round(sum(v for d, v in acc.items() if since <= d <= today), 2)
         rows = (sb.table("bot_picks").select("event_start,poly_pnl")
                 .gte("event_start",
                      (datetime.now(timezone.utc)
@@ -15325,15 +15261,25 @@ def _poly_ledger_tick(sb, now, *, force: bool = False) -> dict:
     status/pnl_units (the resolver owns those). Never raises."""
     res = {"stamped": 0}
     try:
+        # NO LEASE ON THIS ONE, AND THAT IS THE POINT. A lease exists so a
+        # thing happens EXACTLY ONCE -- an order, a cancel. This tick reads
+        # the venue and writes a derived value that is byte-identical no
+        # matter who computes it (an unchanged stamp is skipped outright,
+        # a few lines down), so exclusivity buys nothing and costs the one
+        # thing that matters: if the holder stops working, nobody stamps.
+        #
+        # Which is exactly what happened. The lane moved to the cellar and
+        # took the lease with it; the cellar's copy was then blocked by the
+        # modulo below, and Vercel -- correctly losing a claim it could not
+        # win -- stood down. Both sides gated off, 22 hours of stale
+        # ledger, and a dashboard reading $0.00 on a settled slate.
+        #
         # THE MODULO IS VERCEL'S, NOT THE LANE'S. On Vercel this rides the
         # 1-minute paperlog tick and fires on every 5th minute. The cellar
         # runs it on its own 300s schedule, whose phase is whatever minute
-        # the daemon happened to start on — so a cellar that booted at :03
+        # the daemon happened to boot on -- so a cellar that started at :03
         # ticks at :03, :08, :13 and fails this test every single time.
-        # That is not hypothetical: it stamped nothing for hours, ok=True,
-        # no error, while the dashboard read $0.00.
-        if (not force and now.minute % _POLY_LEDGER_MOD) \
-                or not _cellar_owns(sb, "ledger", 900):
+        if not force and now.minute % _POLY_LEDGER_MOD:
             return res
         owner = _kalshi_owner_uid()
         if not owner:
