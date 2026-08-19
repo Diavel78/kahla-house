@@ -7,6 +7,7 @@ Firestore for data storage. First app: Bet System (odds board + P&L dashboard).
 
 import os
 import re
+import html as _html
 import json
 import math
 import hashlib
@@ -8096,6 +8097,33 @@ def api_poly_probe_tif():
     return jsonify(out)
 
 
+@app.route("/api/polymarket/rewards-sync")
+def api_poly_rewards_sync():
+    """Mirror the live reward schedule (polymarket.us/rewards) into
+    poly_reward_schedule — the table the RENT RULE reads.
+
+    This is what keeps the rule honest as the calendar moves: football
+    programs are provisioned a couple of weeks out, so a family that
+    pays nothing today can start paying without any code change. It also
+    reports NEWLY seen programs, which is the 'football has arrived'
+    signal we would otherwise have to check by hand."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    try:
+        sb = get_supabase()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    out = _reward_schedule_sync(sb)
+    _RENT_LIVE_CACHE.pop("v", None)          # next read sees the new rows
+    out["rent_map"] = {f"{k[0]}/{k[1]}": sorted(v)
+                       for k, v in sorted(_rent_periods_live(sb).items())}
+    out["ok"] = "err" not in out
+    _probe_log(out)
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/cancel-ou")
 def api_poly_cancel_ou():
     """Cancel every RESTING, UNFILLED O/U buy the trader lane placed.
@@ -11672,6 +11700,160 @@ def _peg_target(bid_c, ask_c, fair_c, join=False):
     return t, e
 
 
+# ─────────── THE REWARD SCHEDULE, READ LIVE (Aug 18 2026) ───────────
+# The rent rule needs to know which markets pay and when. That answer is
+# NOT a constant — it is whatever polymarket.us/rewards says today.
+#
+# ⚠ WHY THIS EXISTS (owner caught it): a program row appears on that page
+# only once the venue has provisioned it AND it has markets to put in the
+# bucket. So "no CFB game program" today means "not built out yet", NOT
+# "college never pays" — CFB games start Aug 29 and the venue provisions
+# football programs a couple of weeks out (the NFL ids are date-stamped
+# _20260805/_20260806/_20260810). Hardcoding that absence as a permanent
+# `set()` would have kept college — and possibly NFL moneyline — blocked
+# forever, long after the venue lit them up. Same ABSENT ≠ ZERO trap the
+# earnings window already warns about, one layer up.
+#
+# So the gate reads THIS table, refreshed from the venue, and the
+# hardcoded _RENT_PERIODS below is only a cold-start fallback. When
+# football programs post, the lanes unblock on their own — no deploy.
+#
+# The one case that is NOT "too early": a family absent while its OWN
+# games are listed and every sibling family on those same games pays.
+# MLB totals is that — 54 ML / 276 spread / 2,848 player-prop markets on
+# the same games, no totals row anywhere — and the ledger agrees.
+_REWARDS_URL = "https://polymarket.us/rewards"
+_REWARD_ROW_RE = re.compile(
+    r'^(?P<label>.+?)\s+(?P<pid>[a-z0-9]+(?:_[a-z0-9]+)+)\s+(?P<mid>.*?)'
+    r'(?P<period>Live|Day-of|Early|Daily \(per event\)|Daily|Tournament)\s+'
+    r'\$\s*(?P<pool>[\d,]+)\s+(?P<df>[\d.]+)\s+(?P<target>[\d,]+)\s+'
+    r'(?P<mkts>[\d,]+)$')
+# ORDER MATTERS: "player props" / "team props" must be tested before the
+# bare "props", and before "moneyline" etc., or "MLB Player Props" files
+# itself under the wrong family.
+_REWARD_FAMS = (("player props", "player_prop"), ("team props", "team_prop"),
+                ("moneyline", "moneyline"), ("spreads", "spread"),
+                ("totals", "total"), ("futures", "futures"),
+                ("props", "prop_any"))
+_REWARD_SPORTS = {"mlb": "mlb", "nfl": "nfl", "cfb": "cfb", "ncaa": "cfb",
+                  "nba": "nba", "nhl": "nhl", "cbb": "cbb", "ufc": "ufc",
+                  "wnba": "wnba"}
+_REWARD_PERIODS = {"Live": "live", "Day-of": "day_of", "Early": "early",
+                   "Daily (per event)": "daily", "Daily": "daily",
+                   "Tournament": "daily"}
+_RENT_LIVE_CACHE: dict = {}
+_RENT_LIVE_TTL = 900
+
+
+def _reward_rows_parse(text: str) -> tuple[list, list]:
+    """(rows, unparsed) from the rewards page's program table. Unparsed
+    labels are RETURNED, never swallowed — a renamed program has to be
+    visible, because silently dropping one reads as 'stopped paying'."""
+    i = text.find("Program Category Time period")
+    j = text.find("Reward pool, discount factor and target size are set")
+    if i < 0:
+        return [], ["table header not found"]
+    body = text[i:j] if j > i else text[i:]
+    out, bad = [], []
+    for chunk in body.split("\u25b8"):
+        r = " ".join(chunk.split())
+        if not r or r.startswith("Program Category"):
+            continue
+        m = _REWARD_ROW_RE.match(r)
+        if not m:
+            bad.append(r[:90])
+            continue
+        lab = m.group("label")
+        low = lab.lower()
+        fam = next((f for k, f in _REWARD_FAMS if k in low), None)
+        sport = _REWARD_SPORTS.get(low.split()[0]) if low.split() else None
+
+        def _n(g):
+            try:
+                return float(m.group(g).replace(",", ""))
+            except (TypeError, ValueError):
+                return None
+        out.append({"program_id": m.group("pid"), "label": lab,
+                    "sport": sport, "family": fam,
+                    "period": _REWARD_PERIODS.get(m.group("period")),
+                    "pool": _n("pool"), "discount_factor": _n("df"),
+                    "target_size": _n("target"),
+                    "n_markets": int(_n("mkts") or 0)})
+    return out, bad
+
+
+def _reward_schedule_sync(sb) -> dict:
+    """Mirror polymarket.us/rewards into poly_reward_schedule. Never
+    raises. Returns counts + any unparsed labels + programs NEWLY seen
+    (that is the football-has-arrived signal)."""
+    res = {"rows": 0, "new": [], "unparsed": []}
+    try:
+        r = _http.get(_REWARDS_URL, timeout=20,
+                      headers={"User-Agent": _TRADE_UA})
+        if r.status_code != 200:
+            res["err"] = f"http {r.status_code}"
+            return res
+        text = re.sub(r"<[^>]+>", " ", r.text)
+        text = _html.unescape(text)
+        rows, bad = _reward_rows_parse(text)
+        res["unparsed"] = bad[:8]
+        if not rows:
+            res["err"] = "no rows parsed"      # never wipe on a bad read
+            return res
+        try:
+            known = {x["program_id"] for x in
+                     (sb.table("poly_reward_schedule").select("program_id")
+                      .limit(2000).execute().data or [])}
+        except Exception:
+            known = set()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for x in rows:
+            x["synced_at"] = now_iso
+            if x["program_id"] not in known:
+                res["new"].append(x["label"])
+        try:
+            sb.table("poly_reward_schedule").upsert(
+                rows, on_conflict="program_id").execute()
+            res["rows"] = len(rows)
+        except Exception as e:
+            res["err"] = f"upsert: {type(e).__name__}: {e}"[:140]
+    except Exception as e:
+        res["err"] = f"{type(e).__name__}: {e}"[:140]
+    return res
+
+
+def _rent_periods_live(sb) -> dict:
+    """{(sport, family): {periods}} from the mirrored schedule, cached.
+    Empty dict = no usable mirror, and the caller falls back to the
+    hardcoded snapshot. A family only counts when the program actually
+    has markets in it — an empty bucket pays nobody."""
+    c = _RENT_LIVE_CACHE.get("v")
+    if c and _time.time() - c["at"] < _RENT_LIVE_TTL:
+        return c["map"]
+    out: dict = {}
+    try:
+        rows = (sb.table("poly_reward_schedule")
+                .select("sport,family,period,n_markets")
+                .limit(2000).execute().data) or []
+    except Exception:
+        return {}
+    for r in rows:
+        sp, fam, per = r.get("sport"), r.get("family"), r.get("period")
+        if not sp or not fam or not per or fam == "futures":
+            continue
+        if (r.get("n_markets") or 0) <= 0:
+            continue
+        out.setdefault((sp, fam), set()).add(per)
+        # "NFL Props Early" is not split player-vs-team the way the
+        # Day-of and Live rows are, so it credits both prop families.
+        if fam == "prop_any":
+            for f2 in ("player_prop", "team_prop"):
+                out.setdefault((sp, f2), set()).add(per)
+    out.pop(("", ""), None)
+    _RENT_LIVE_CACHE["v"] = {"at": _time.time(), "map": out}
+    return out
+
+
 # ═══════════ THE RENT RULE (user, Aug 18 2026 — HARD RULE) ═══════════
 # "No computer bets, AT ALL, if it isn't paying rent, and in the rent
 # window."
@@ -11735,7 +11917,7 @@ def _rent_family(slug: str):
     return (parts[1] or None), fam
 
 
-def _rent_ok(slug, event_start, now):
+def _rent_ok(slug, event_start, now, sb=None):
     """(ok, reason) — may we rest a NEW maker order on this market right
     now under the rent rule? DEFAULT-DENY.
 
@@ -11745,11 +11927,22 @@ def _rent_ok(slug, event_start, now):
     sport, fam = _rent_family(slug)
     if not sport or not fam:
         return False, f"unknown market family for slug {slug!r}"
-    periods = _RENT_PERIODS.get((sport, fam))
+    live = _rent_periods_live(sb) if sb is not None else {}
+    src_lbl = "venue"
+    if live:
+        periods = live.get((sport, fam))
+        if periods is None:
+            periods = set()          # venue lists no such program TODAY
+    else:
+        periods = _RENT_PERIODS.get((sport, fam))
+        src_lbl = "snapshot"
     if periods is None:
-        return False, f"no known rent program for {sport}/{fam}"
+        return False, f"no known rent program for {sport}/{fam} ({src_lbl})"
     if not periods:
-        return False, f"{sport}/{fam} has NO rent program"
+        # NOT "never pays" — the venue simply lists no such program right
+        # now. Football buckets fill in as the season approaches, so this
+        # denial is expected to expire on its own.
+        return False, f"{sport}/{fam} has no rent program listed ({src_lbl})"
     try:
         mins = (datetime.fromisoformat(
             str(event_start).replace("Z", "+00:00")) - now).total_seconds() / 60.0
@@ -11783,7 +11976,7 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
     # its paying window. Checked before the cap, before the dedup, before
     # any venue call — a bet that cannot earn rent is not a cheaper bet,
     # it is a bet we do not make.
-    _rent_go, _rent_why = _rent_ok(slug, es, datetime.now(timezone.utc))
+    _rent_go, _rent_why = _rent_ok(slug, es, datetime.now(timezone.utc), sb)
     if not _rent_go:
         app.logger.info("RENT-GATE refused %s %s: %s", mt, slug, _rent_why)
         return "rent"
@@ -12793,7 +12986,7 @@ def _opener_pass(sb, now, deadline):
             # than coincidental, and it stays right if either moves.
             # A refusal leaves dayof_wait set, so the game does not latch
             # and is re-checked once its paying window opens.
-            _rgo, _rwhy = _rent_ok(slug, es, now)
+            _rgo, _rwhy = _rent_ok(slug, es, now, sb)
             if not _rgo:
                 app.logger.info("RENT-GATE refused nrfi %s: %s", slug, _rwhy)
                 continue
@@ -13722,6 +13915,28 @@ def api_handicapper_paperlog():
             incentives = _incentives_sync(sb, get_client())
         except Exception as e:
             incentives = {"err": str(e)[:80]}
+        # THE RENT RULE'S SOURCE OF TRUTH. Refreshed on the same cadence
+        # so a family that starts paying (football, as its season comes
+        # into range) unblocks its lane with no deploy — and a family
+        # that STOPS paying stops being bet, which is the half that
+        # actually protects money. A NEW program is announced once: that
+        # is the "football has arrived" signal, and it is the thing we
+        # would otherwise be checking by hand at T-90h.
+        try:
+            _sched = _reward_schedule_sync(sb)
+            incentives["schedule"] = {k: _sched.get(k)
+                                      for k in ("rows", "err", "unparsed")}
+            _newp = [p for p in (_sched.get("new") or [])
+                     if re.search(r"nfl|cfb|ncaa", p, re.I)]
+            if _newp:
+                _RENT_LIVE_CACHE.pop("v", None)
+                _send_fill_telegram(
+                    "🏈 NEW REWARD PROGRAM(S) LISTED: "
+                    + ", ".join(_newp[:6])
+                    + " — football markets now pay rent; the lane gate "
+                      "opens on its own.")
+        except Exception as e:
+            incentives["schedule"] = {"err": str(e)[:80]}
     # TELEGRAM BATCH FLUSH — everything above queued into telegram_queue;
     # at most ONE 📬 summary per _TG_BATCH_MIN minutes (urgent 🚨 sends
     # bypassed the queue at send time). Nothing queued → no message.
