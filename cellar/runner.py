@@ -183,6 +183,35 @@ class Runner:
             log.warning("no lanes enabled (CELLAR_LANES is empty) — idling. "
                         "This is the correct posture for a fresh install.")
 
+        # OWNER PRE-FLIGHT. Five engines need the admin's uid to know whose
+        # book they are acting on. Without it they return at their second line
+        # with a zero — no exception, no error, just nothing done. That is not
+        # hypothetical: `ledger` ran 242 consecutive healthy ticks on this box
+        # doing exactly that, and the dashboard's day card read $0.00 while
+        # looking fine. A money lane failing this way (harvest, repeg) would
+        # report healthy while leaving real orders unmanaged.
+        #
+        # So refuse to start. A daemon that runs and does nothing is strictly
+        # worse than one that will not start and says why.
+        need = [n for n in enabled if config.ALL_LANES[n].needs_owner]
+        if need:
+            try:
+                import app as _app
+                owner = _app._kalshi_owner_uid()
+            except Exception as e:
+                owner, _ = None, log.error("owner pre-flight failed: %s", e)
+            if not owner:
+                log.error("CONFIG: lane(s) %s need the admin uid and none "
+                          "resolves on this box.", ", ".join(sorted(need)))
+                log.error("  Set KALSHI_OWNER_UID=<uid> in .env (one line, no "
+                          "Firebase needed), or provide FIREBASE_SERVICE_ACCOUNT "
+                          "so the sole-admin lookup works.")
+                log.error("  Refusing to start rather than tick healthily "
+                          "while doing nothing.")
+                return 2
+            log.info("owner pre-flight ok (%s lane(s), uid ...%s)",
+                     len(need), str(owner)[-6:])
+
         # Boot reconciliation: anything left open is a write we died inside of.
         if self.journal is not None:
             for wound in self.journal.open_intents():

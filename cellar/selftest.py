@@ -249,13 +249,33 @@ def test_batch_blocked_deps() -> None:
           _have("definitely_not_a_real_module_xyz") is False)
 
 
+def test_owner_dependent_lanes() -> None:
+    """The five engines that need the admin uid must be marked.
+
+    Unmarked, they run and silently do nothing on a box without Firebase —
+    242 healthy ticks with work=0 is what that looked like in production,
+    and the dashboard read $0.00 the whole time.
+    """
+    from cellar import config
+    need = {n for n, l in config.ALL_LANES.items() if l.needs_owner}
+    check("owner-dependent lanes are exactly the five that need a uid",
+          need == {"repeg", "harvest", "ledger", "kalshi_autolog", "alerts"},
+          f"got {sorted(need)}")
+    # A money lane failing this way is the dangerous case: healthy-looking
+    # while real orders go unmanaged.
+    money_needing = {n for n, l in config.ALL_LANES.items()
+                     if l.needs_owner and l.writes_money}
+    check("repeg and harvest are covered (money lanes)",
+          money_needing == {"repeg", "harvest"}, f"got {sorted(money_needing)}")
+
+
 def main() -> int:
     print("THE CELLAR — offline selftest\n")
     for t in (test_imports_without_creds, test_config_validation,
               test_lease_fails_closed, test_journal_survives_crash,
               test_lane_registry_matches_config, test_batch_schedule,
               test_batch_commands_exist, test_batch_flags_are_real,
-              test_batch_blocked_deps):
+              test_batch_blocked_deps, test_owner_dependent_lanes):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

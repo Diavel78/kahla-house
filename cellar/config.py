@@ -67,6 +67,13 @@ class Lane:
     every_s: int                 # cadence
     ttl_s: int                   # lease TTL; must exceed every_s with margin
     writes_money: bool = False   # gates on DRY_RUN
+    # Engine needs the admin's uid to know WHOSE book it is acting on. It
+    # resolves from KALSHI_OWNER_UID, else the sole Firestore admin. On a box
+    # with neither, the engine returns at its second line with a zero — no
+    # error, no exception, just nothing. That is what happened when `ledger`
+    # moved to the cellar: 242 consecutive healthy ticks, work=0, and the
+    # dashboard's day card silently read $0.00. Refuse to start instead.
+    needs_owner: bool = False
     note: str = ""
 
 
@@ -77,19 +84,25 @@ class Lane:
 #   kalshi_autolog               -> 2 min
 ALL_LANES: dict[str, Lane] = {
     l.name: l for l in [
-        Lane("pm_snapshot",     60,   180, False, "exchange cent logger"),
-        Lane("paperlog",        60,   180, False, "suggestion + shadow logger"),
-        Lane("opener",          60,   180, True,  "opener lane + autobet (NEW MONEY)"),
-        Lane("repeg",          120,   300, True,  "maker order chase"),
-        Lane("harvest",        120,   300, True,  "take-profit sells"),
-        Lane("ledger",         300,   900, False, "poly money ledger"),
-        Lane("vsin",           900,  1800, False, "circa/dk splits logger"),
-        Lane("kalshi_autolog", 120,   300, False, "kalshi fill -> bot_picks"),
-        Lane("alerts",          60,   180, False, "telegram flush + pings"),
+        Lane("pm_snapshot",     60,   180, note="exchange cent logger"),
+        Lane("paperlog",        60,   180, note="suggestion + shadow logger"),
+        Lane("opener",          60,   180, writes_money=True,
+             note="opener lane + autobet (NEW MONEY)"),
+        Lane("repeg",          120,   300, writes_money=True, needs_owner=True,
+             note="maker order chase"),
+        Lane("harvest",        120,   300, writes_money=True, needs_owner=True,
+             note="take-profit sells"),
+        Lane("ledger",         300,   900, needs_owner=True,
+             note="poly money ledger"),
+        Lane("vsin",           900,  1800, note="circa/dk splits logger"),
+        Lane("kalshi_autolog", 120,   300, needs_owner=True,
+             note="kalshi fill -> bot_picks"),
+        Lane("alerts",          60,   180, needs_owner=True,
+             note="telegram flush + pings"),
         # Phase 1: the ~20 scheduled workflows. Ticks every minute but only
         # ACTS when something is due (see cellar/batch.py). Long TTL because
         # a model compute can legitimately run for tens of minutes.
-        Lane("batch",           60,  3600, False, "daily ingests + model computes"),
+        Lane("batch",           60,  3600, note="daily ingests + model computes"),
     ]
 }
 
@@ -114,6 +127,12 @@ def renew_every(lane: Lane) -> float:
 
 STATE_DIR = os.path.expanduser(os.environ.get("CELLAR_STATE_DIR", "~/.cellar"))
 JOURNAL_PATH = os.path.join(STATE_DIR, "intents.sqlite3")
+
+
+def owner_lanes_enabled() -> list[str]:
+    """Enabled lanes that cannot function without the admin's uid."""
+    return [n for n in LANES_ENABLED
+            if n in ALL_LANES and ALL_LANES[n].needs_owner]
 
 
 def money_lanes_enabled() -> list[str]:
