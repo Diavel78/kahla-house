@@ -155,6 +155,15 @@ def main(argv: list[str]) -> int:
     except Exception as e:
         print(f"warning: could not load .env ({e})", file=sys.stderr)
 
+    # THIS PROCESS IS THE CELLAR. Engines shared with Vercel check the lease
+    # through app._cellar_owns, which claims under whatever side it is told
+    # it is. Left at the default it would claim as 'vercel' from in here --
+    # and once enforcement is on, fail (the cellar's own lease is still
+    # fresh) and quietly stop running the very lane we moved here. Set, not
+    # setdefault: no .env line may override what this process demonstrably
+    # is.
+    os.environ["CELLAR_SIDE"] = "cellar"
+
     if "--status" in argv:
         return cmd_status()
     if "--batch-status" in argv:

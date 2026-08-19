@@ -269,13 +269,70 @@ def test_owner_dependent_lanes() -> None:
           money_needing == {"repeg", "harvest"}, f"got {sorted(money_needing)}")
 
 
+def test_side_and_phase() -> None:
+    """Two wiring invariants that only bite in production.
+
+    1. THIS PROCESS MUST CLAIM AS 'cellar'. The engines it drives share
+       app._cellar_owns with Vercel, which claims under whatever side it
+       is told it is. Left at the default, the cellar would claim as
+       'vercel' — and once enforcement is on, fail its own claim (its
+       real lease is still fresh) and stop running the lane we moved
+       here, healthily.
+
+    2. THE LEDGER'S MINUTE-MODULO IS VERCEL'S. It rides a 1-minute tick
+       there and fires on every 5th minute. Here the lane has its own
+       300s schedule whose phase is whatever minute the daemon booted
+       on, so a cellar that started at :03 ticks at :03, :08, :13 and
+       fails that test forever. Observed: hours of stamped=0, ok=True,
+       no error, and a $0.00 dashboard.
+
+    Source-level because neither has an offline runtime surface — same
+    shape as the argparse checks above.
+    """
+    import os as _os
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    main_src = open(_os.path.join(here, "__main__.py"), encoding="utf-8").read()
+    lanes_src = open(_os.path.join(here, "lanes.py"), encoding="utf-8").read()
+    check("the cellar declares its lease side as itself",
+          'os.environ["CELLAR_SIDE"] = "cellar"' in main_src)
+    check("side is set, not setdefault (no .env may claim we are vercel)",
+          'setdefault("CELLAR_SIDE"' not in main_src)
+    check("ledger lane bypasses Vercel's minute-modulo",
+          "force=True" in lanes_src.split("def lane_ledger")[1].split("\ndef ")[0])
+
+
+def test_ttls_agree_with_engines() -> None:
+    """A lane's TTL must be the SAME NUMBER on both sides of the lease.
+
+    Both the cellar (via Lease) and the shared engine (via
+    app._cellar_owns) pass a TTL on every claim, and `cellar_claim`
+    overwrites the stored value with whatever it is handed. If the two
+    disagree, the failover deadline silently becomes whichever side
+    claimed most recently — so how long a dead cellar goes unnoticed
+    depends on a race. Caught alerts at 180 vs 300.
+    """
+    import os as _os, re as _re
+    from cellar import config
+    root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    src = open(_os.path.join(root, "app.py"), encoding="utf-8").read()
+    found = _re.findall(r'_cellar_owns\(\s*sb\s*,\s*"([a-z_]+)"\s*,\s*(\d+)\s*\)', src)
+    check("every engine's lease gate names a known lane",
+          all(n in config.ALL_LANES for n, _ in found),
+          f"unknown: {[n for n, _ in found if n not in config.ALL_LANES]}")
+    bad = [(n, t, config.ALL_LANES[n].ttl_s) for n, t in found
+           if n in config.ALL_LANES and int(t) != config.ALL_LANES[n].ttl_s]
+    check("lane TTLs agree between config and the engines", not bad,
+          f"mismatched (lane, app.py, config): {bad}")
+
+
 def main() -> int:
     print("THE CELLAR — offline selftest\n")
     for t in (test_imports_without_creds, test_config_validation,
               test_lease_fails_closed, test_journal_survives_crash,
               test_lane_registry_matches_config, test_batch_schedule,
               test_batch_commands_exist, test_batch_flags_are_real,
-              test_batch_blocked_deps, test_owner_dependent_lanes):
+              test_batch_blocked_deps, test_owner_dependent_lanes,
+              test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

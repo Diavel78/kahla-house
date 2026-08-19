@@ -1132,17 +1132,41 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 > a bettable quote — Polymarket's listing is the list.**
 >
 > **📊 WHEN THE USER ASKS "HOW DID WE DO" — ANSWER FROM POLYMARKET.
-> ALWAYS. The user has said this MANY times (last: Aug 9 2026, at
-> volume).** Results = the VENUE's cash truth: `poly_pnl`
-> (buys/sells/resolution payouts, stamped within minutes of the venue
-> resolving — tonight's props are usually IN THE DB while the ESPN
-> grader is still hours away) and the activities feed. NEVER tell the
-> user to wait for `grade_whiff_paperlog`/the resolver — those
-> ESPN/statsapi graders exist for the MODEL's shadow scoreboard
-> (calibration, shadows have no venue position), not for answering the
-> user. Also don't misread `realized_usd` on status='pending' rows as
-> "cash deployed": once `poly_pnl.final` is true the venue has RESOLVED
-> that bet and the number is real P&L, whatever bot_picks.status says.
+> ALWAYS. The user has said this MANY times (last: Aug 18 2026, at
+> volume: "it's graded when Poly pays me").** A bet is graded when the
+> venue settles it. NEVER tell the user to wait for
+> `grade_whiff_paperlog`/the resolver — those ESPN/statsapi graders are
+> the MODEL's shadow scoreboard (calibration; shadows hold no venue
+> position), not the answer to "how did we do".
+>
+> **THE SOURCE IS `poly_gameday_pnl(p_days)`** (SQL function, DDL
+> `kahla-scanner/supabase/poly_gameday_pnl.sql`, applied) → realized USD
+> per **Arizona game day**, read by `app.py:_venue_gameday_map` and
+> through it by the dashboard's day cards and 7-day window. It reads
+> Polymarket's own `ACTIVITY_TYPE_POSITION_RESOLUTION` rows in
+> `poly_activities`: `afterPosition.realized` is the venue's CUMULATIVE
+> P&L for that (market, leg) — cost, harvest sells and payout already
+> netted, nothing for us to recompute. Dedup key is **(marketSlug,
+> outcome)** — the mirror stores ~90 identical copies of every
+> resolution, each with its own row key, and the slug alone would
+> collapse a both-legs-held market into one side. Day is the AZ date of
+> `market.gameStartTime` (eventSlug's date as fallback; on 217 markets
+> they never disagreed).
+>
+> ⚠ **NEVER GATE A RESULT ON `poly_pnl.final`.** That flag is written by
+> OUR ledger tick, and the whole reason this rule keeps getting repeated
+> is what happens when the tick stalls: it moved to the cellar without an
+> admin uid, returned at its second line for 242 consecutive healthy
+> ticks, and the day card read **$0.00 for a day the venue had settled at
+> +$6.85**. A reading that one of our own background jobs can silently
+> zero is the wrong reading. `poly_pnl` stays as the PER-PICK ledger
+> (`_poly_ledger_tick` owns it, additive, never touches
+> status/pnl_units); the DAY/WINDOW numbers come from the venue directly.
+> `_gameday_pnl_legacy` exists only as an RPC-unreachable fallback —
+> never promote it back. Known gap, benign today: a position fully closed
+> before resolution emits no resolution row, and the harvest always rides
+> at least one contract (`min_held`), so 109 of 109 recent settlements
+> were still long.
 
 ## Known Issues & Gotchas
 1. **The Odds API auth is `?api_key=` query param** — NOT a Bearer header. Easy to copy from one provider's pattern (Owls used Bearer) and break.

@@ -188,7 +188,11 @@ def lane_harvest(ctx: Ctx) -> int:
 
 def lane_ledger(ctx: Ctx) -> int:
     import app as _app
-    stats = _app._poly_ledger_tick(ctx.sb, ctx.now) or {}
+    # force=True: the minute-modulo inside the tick is Vercel's
+    # 1-minute-tick throttle. This lane HAS its own 300s schedule, and
+    # obeying both means firing only when the two phases happen to
+    # agree — which, for a daemon that booted at :03, is never.
+    stats = _app._poly_ledger_tick(ctx.sb, ctx.now, force=True) or {}
     log.info("ledger: %s", stats)
     return int(stats.get("stamped") or stats.get("updated") or 0)
 

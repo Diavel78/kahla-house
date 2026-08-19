@@ -285,6 +285,24 @@ Add to that:
   and reconcile against `orders.list`. This is strictly better than what
   serverless can do.
 
+**`CELLAR_SIDE` — a process must claim as what it is.** The shared engines
+check the lease through `app._cellar_owns`, which claims under
+`_CELLAR_SIDE` (env `CELLAR_SIDE`, default `vercel`). `cellar/__main__.py`
+sets it to `cellar` unconditionally — set, not setdefault, so no stray
+`.env` line can make the house box introduce itself as Vercel. Get this
+wrong and the bug is invisible until enforcement flips on: the cellar
+would claim as `vercel`, correctly LOSE (its own lease is still fresh),
+and stop running the lane it was moved there to run — while reporting
+healthy ticks.
+
+**A shared engine's minute-modulo belongs to Vercel.** Several engines
+gate on `now.minute % N` because on Vercel they ride a 1-minute tick.
+A cellar lane has its own cadence whose phase is whatever minute the
+daemon booted on, so obeying both fires only when the phases coincide —
+for a 300s lane against `% 5`, either always or never. `_poly_ledger_tick`
+takes `force=True` for this; any engine cut over next needs the same
+treatment or it will tick healthily and do nothing.
+
 **Acceptance gate for the whole migration:** the lease is proven by killing
 `cellard` mid-slate and watching Vercel pick the lanes back up within one TTL,
 with zero duplicate orders on the venue.

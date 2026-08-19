@@ -97,7 +97,10 @@ ALL_LANES: dict[str, Lane] = {
         Lane("vsin",           900,  1800, note="circa/dk splits logger"),
         Lane("kalshi_autolog", 120,   300, needs_owner=True,
              note="kalshi fill -> bot_picks"),
-        Lane("alerts",          60,   180, needs_owner=True,
+        # 300 to match the TTL the engine's own _cellar_owns call passes;
+        # the two sides naming different numbers means whoever claims last
+        # silently changes the failover deadline (selftest enforces this).
+        Lane("alerts",          60,   300, needs_owner=True,
              note="telegram flush + pings"),
         # Phase 1: the ~20 scheduled workflows. Ticks every minute but only
         # ACTS when something is due (see cellar/batch.py). Long TTL because
