@@ -13188,7 +13188,21 @@ def _opener_pass(sb, now, deadline):
 # skeleton) reads this dataset. Season-start honesty: August/September
 # ratings are decayed 2025 data (40d half-life) — exactly what the shadow
 # record is for.
-_GRIDIRON_SPORTS = {"NFL": 168, "NCAAF": 96}   # sport → window top (hours)
+# Sport → how far ahead to look for football games to shadow, in hours.
+#
+# ⚠ THIS MUST EXCEED THE VENUE'S LISTING HORIZON, and for the first three
+# weeks of its life it was a quarter of it. Polymarket lists NFL games ~50
+# days out and NCAAF ~100; the window was 7 days and 4. So a game sat
+# listed and quoted for six weeks before this pass ever looked at it, and
+# the "opener" shadow it eventually took would have been anything but --
+# assuming it took one at all, which it never did: 154 football games
+# listed, zero shadow rows, first row not due until Sep 3.
+#
+# The dedup is one-shot per game, so a wide window costs a bounded burst
+# (8 games/tick on leftover budget) and then idles forever. A narrow one
+# costs the entire tape. Wide is the only side of that trade worth being
+# on -- and it is what makes "first listing" mean first listing.
+_GRIDIRON_SPORTS = {"NFL": 2400, "NCAAF": 2400}   # 100 days
 # PRESEASON NO-FLY: the ESPN spine lists NFL preseason (backups, tanked
 # halves — the ratings pipeline excludes those results and so does this
 # lane). markets rows don't carry ESPN's season.type, so the gate is a
@@ -13403,7 +13417,12 @@ def _gridiron_opener_pass(sb, now, deadline):
                        .select("id,event_name,event_start,sport")
                        .eq("sport", sport).eq("status", "active")
                        .gte("event_start", slo).lte("event_start", hi)
-                       .order("event_start").limit(60).execute().data) or []
+                       # 400, not 60: ordered by event_start with a
+                       # one-shot dedup applied AFTER the pull, a small
+                       # limit means the same finished games come back
+                       # every tick and everything behind them is
+                       # unreachable. The limit must exceed the slate.
+                       .order("event_start").limit(400).execute().data) or []
             except Exception:
                 continue
             seen: set = set()
@@ -13935,9 +13954,22 @@ def api_handicapper_paperlog():
     else:
         opener_rows, opener_stats = [], {"gate": "cellar_owns_lane"}
     rows.extend(opener_rows)
-    # GRIDIRON IQ football opener SHADOWS (no bets) — after MLB, on
-    # whatever budget remains. Inert until football games list.
-    g_rows, g_stats = (_gridiron_opener_pass(sb, now, opener_deadline)
+    # GRIDIRON IQ football opener SHADOWS (no bets).
+    #
+    # ITS OWN SLICE, not MLB's leftovers. "Whatever budget remains" is
+    # nothing on a busy slate -- the MLB pass is guaranteed 14s and will
+    # happily use them, after which this returns at its first line. That
+    # starves football during precisely the weeks football is listing,
+    # which is when the tape has to be built: the season starts on a fixed
+    # date whether or not we captured anything, and a shadow not taken at
+    # listing cannot be taken later.
+    #
+    # Costs nothing when idle -- with no candidates the pass exits in well
+    # under a second, so the extra seconds are only spent while there is
+    # actual tape to capture, and the one-shot dedup makes that a bounded
+    # burst that ends for good.
+    g_deadline = max(opener_deadline, _time.time() + 6.0)
+    g_rows, g_stats = (_gridiron_opener_pass(sb, now, g_deadline)
                        if _own_opener else ([], {}))
     rows.extend(g_rows)
     opener_stats = {**opener_stats, **g_stats}
