@@ -14734,7 +14734,7 @@ def _outbid_line(f: dict, r: dict) -> str:
 _OUTBID_TICK_MOD = 2   # run the (venue-API-hitting) check every 2nd minute
 
 
-def _outbid_alerts(sb, now) -> int:
+def _outbid_alerts(sb, now, *, force: bool = False) -> int:
     """Telegram (Filled Bot): the OUTBID warning as a PUSH (July 2026, user:
     "I love the red chip when outbid, but sending a notification on telegram
     needs to happen"). The on-page red outbid chip only shows when the page
@@ -14749,7 +14749,15 @@ def _outbid_alerts(sb, now) -> int:
     on a successful send so a Telegram failure retries. Never raises."""
     sent = 0
     try:
-        if now.minute % _OUTBID_TICK_MOD or not _cellar_owns(sb, "alerts", 300):
+        # force=True lets a caller with its OWN cadence past a modulo that
+        # belongs to Vercel's 1-minute tick. A cellar lane on a 120s
+        # schedule advances `minute` by exactly 2 every time, so `% 2` is
+        # CONSTANT for the life of the process -- always true or always
+        # false, decided by the minute it happened to boot on. The ledger
+        # lane lost 22 hours to exactly this. The LEASE below is untouched:
+        # these move real money and must stay exactly-once.
+        if (not force and now.minute % _OUTBID_TICK_MOD) \
+                or not _cellar_owns(sb, "alerts", 300):
             return 0
         if _in_blackout_mt(now):
             return 0
@@ -15154,7 +15162,7 @@ def _cellar_owns(sb, lane: str, ttl_s: int = 180) -> bool:
     return owned
 
 
-def _harvest_tick(sb, now) -> dict:
+def _harvest_tick(sb, now, *, force: bool = False) -> dict:
     """THE HARVEST LEG (Aug 3 2026, user: "2 contracts... 1 rides and
     wins or losses, the other as soon as it fills has a sell order added
     — and see who wins"). For every MODEL bet (autobet/whiff_autobet)
@@ -15172,7 +15180,15 @@ def _harvest_tick(sb, now) -> dict:
     Never raises."""
     res = {"placed": 0}
     try:
-        if (not _HARVEST_ENABLED or now.minute % _HARVEST_MOD
+        # force=True lets a caller with its OWN cadence past a modulo that
+        # belongs to Vercel's 1-minute tick. A cellar lane on a 120s
+        # schedule advances `minute` by exactly 2 every time, so `% 2` is
+        # CONSTANT for the life of the process -- always true or always
+        # false, decided by the minute it happened to boot on. The ledger
+        # lane lost 22 hours to exactly this. The LEASE below is untouched:
+        # these move real money and must stay exactly-once.
+        if (not _HARVEST_ENABLED
+                or (not force and now.minute % _HARVEST_MOD)
                 or not _cellar_owns(sb, "harvest", 300)):
             return res
         owner = _kalshi_owner_uid()
@@ -15500,7 +15516,7 @@ def _poly_ledger_tick(sb, now, *, force: bool = False) -> dict:
     return res
 
 
-def _repeg_tick(sb, now) -> dict:
+def _repeg_tick(sb, now, *, force: bool = False) -> dict:
     """One re-peg pass, riding the paperlog tick (every _OUTBID_TICK_MOD
     minutes, same throttle + blackout as the outbid ping; runs BEFORE
     _outbid_alerts so a live amend clears the outbid before it would ping).
@@ -15512,7 +15528,15 @@ def _repeg_tick(sb, now) -> dict:
         # rest hours — my phone's silenced anyway"). Overnight management is
         # load-bearing for the evening-before early-entry lane; the OUTBID
         # alert keeps its own quiet hours, the bot itself never sleeps.
-        if now.minute % _OUTBID_TICK_MOD or not _cellar_owns(sb, "repeg", 300):
+        # force=True lets a caller with its OWN cadence past a modulo that
+        # belongs to Vercel's 1-minute tick. A cellar lane on a 120s
+        # schedule advances `minute` by exactly 2 every time, so `% 2` is
+        # CONSTANT for the life of the process -- always true or always
+        # false, decided by the minute it happened to boot on. The ledger
+        # lane lost 22 hours to exactly this. The LEASE below is untouched:
+        # these move real money and must stay exactly-once.
+        if (not force and now.minute % _OUTBID_TICK_MOD) \
+                or not _cellar_owns(sb, "repeg", 300):
             return res
         admins = set(_admin_uids())
         _owner = _kalshi_owner_uid()
@@ -15970,8 +15994,18 @@ def _tg_flush(sb, now) -> int:
     single queued update goes out as itself (no header). Oversized batches
     (~3600-char budget — Telegram caps at 4096) leave the tail queued for
     the next flush. Delivered rows older than 3 days are pruned. Returns
-    the number of updates delivered this tick. Never raises."""
+    the number of updates delivered this tick. Never raises.
+
+    ⚠ UNDER THE `alerts` LEASE, and it was the one engine that had no
+    gate at all. Two processes draining one queue is not a duplicate-work
+    problem you can shrug at -- each flusher selects the unsent rows,
+    composes a digest from what it saw, and marks those rows sent, so a
+    race splits one batch across two pushes or sends the same batch
+    twice. Harmless-looking right up until the alerts lane cuts over to
+    the cellar while paperlog is still running on Vercel."""
     try:
+        if not _cellar_owns(sb, "alerts", 300):
+            return 0
         pend = (sb.table("telegram_queue").select("id,text")
                 .is_("sent_at", "null").order("id")
                 .limit(60).execute().data) or []

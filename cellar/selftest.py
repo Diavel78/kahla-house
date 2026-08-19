@@ -275,30 +275,69 @@ def test_side_and_phase() -> None:
     1. THIS PROCESS MUST CLAIM AS 'cellar'. The engines it drives share
        app._cellar_owns with Vercel, which claims under whatever side it
        is told it is. Left at the default, the cellar would claim as
-       'vercel' — and once enforcement is on, fail its own claim (its
+       'vercel' -- and once enforcement is on, fail its own claim (its
        real lease is still fresh) and stop running the lane we moved
        here, healthily.
 
-    2. THE LEDGER'S MINUTE-MODULO IS VERCEL'S. It rides a 1-minute tick
-       there and fires on every 5th minute. Here the lane has its own
-       300s schedule whose phase is whatever minute the daemon booted
-       on, so a cellar that started at :03 ticks at :03, :08, :13 and
-       fails that test forever. Observed: hours of stamped=0, ok=True,
-       no error, and a $0.00 dashboard.
+    2. NO LANE MAY INHERIT VERCEL'S MINUTE-MODULO. Several engines gate
+       on `now.minute % N` because on Vercel they ride a 1-minute tick.
+       A cellar lane has its own cadence, and if that cadence is a
+       multiple of N the modulo is CONSTANT for the life of the process:
+       always true or always false, decided by the minute the daemon
+       booted on. `ledger` ran for 22 hours that way -- claimed, ran,
+       returned zero, renewed -- with the dashboard reading $0.00.
 
-    Source-level because neither has an offline runtime surface — same
-    shape as the argparse checks above.
+       So: for every engine a lane calls directly, if that engine's body
+       contains a minute-modulo, the lane must pass force=True. Derived
+       from the source of both files rather than a hand-kept list, so a
+       new lane or a newly-gated engine is covered without anyone
+       remembering to update this test.
     """
-    import os as _os
+    import os as _os, re as _re
     here = _os.path.dirname(_os.path.abspath(__file__))
+    root = _os.path.dirname(here)
     main_src = open(_os.path.join(here, "__main__.py"), encoding="utf-8").read()
     lanes_src = open(_os.path.join(here, "lanes.py"), encoding="utf-8").read()
+    app_src = open(_os.path.join(root, "app.py"), encoding="utf-8").read()
+
     check("the cellar declares its lease side as itself",
           'os.environ["CELLAR_SIDE"] = "cellar"' in main_src)
     check("side is set, not setdefault (no .env may claim we are vercel)",
           'setdefault("CELLAR_SIDE"' not in main_src)
-    check("ledger lane bypasses Vercel's minute-modulo",
-          "force=True" in lanes_src.split("def lane_ledger")[1].split("\ndef ")[0])
+
+    # Which app.py engines gate on a minute-modulo?
+    gated = set()
+    for m in _re.finditer(r"^def (_\w+)\(", app_src, _re.M):
+        name = m.group(1)
+        body = app_src[m.end():]
+        nxt = _re.search(r"^def ", body, _re.M)
+        if "now.minute %" in (body[:nxt.start()] if nxt else body):
+            gated.add(name)
+    check("found the modulo-gated engines in app.py", len(gated) >= 3,
+          f"found {sorted(gated)}")
+
+    # For each lane, every _app.<engine>( it calls directly.
+    missing, checked = [], 0
+    for m in _re.finditer(r"^def (lane_\w+)\(", lanes_src, _re.M):
+        body = lanes_src[m.end():]
+        nxt = _re.search(r"^def ", body, _re.M)
+        body = body[:nxt.start()] if nxt else body
+        for call in _re.finditer(r"_app\.(_\w+)\(([^)]*)\)", body):
+            if call.group(1) in gated:
+                checked += 1
+                if "force=True" not in call.group(2):
+                    missing.append(f"{m.group(1)} -> {call.group(1)}")
+    check("every modulo-gated engine a lane drives is called with force=True",
+          not missing, f"missing force=True: {missing}")
+    check("the force check actually inspected some calls", checked >= 3,
+          f"only inspected {checked}")
+
+    # The telegram flush is the one engine with no modulo but a shared
+    # queue: two drainers split or duplicate a digest.
+    body = app_src[app_src.index("def _tg_flush("):]
+    body = body[:body.index("\ndef ", 1)]
+    check("_tg_flush is under the alerts lease (one drainer only)",
+          '_cellar_owns(sb, "alerts"' in body)
 
 
 def test_ttls_agree_with_engines() -> None:

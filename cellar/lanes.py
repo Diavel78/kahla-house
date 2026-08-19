@@ -167,11 +167,19 @@ def lane_opener(ctx: Ctx) -> int:
 
 
 def lane_repeg(ctx: Ctx) -> int:
+    """force=True on every engine below: the minute-modulo inside each tick
+    is Vercel's 1-minute-tick throttle, not this lane's schedule. A 120s
+    lane advances `minute` by exactly 2 per tick, so `% 2` never changes
+    for the life of the process -- always true or always false, decided by
+    the minute the daemon booted on. The ledger lane lost 22 hours to it.
+
+    The LEASE is deliberately left in place: these move real money and must
+    stay exactly-once, which is what a lease is actually for."""
     import app as _app
     if ctx.dry_run:
         log.info("repeg: DRY-RUN, not executing")
         return 0
-    stats = _app._repeg_tick(ctx.sb, ctx.now) or {}
+    stats = _app._repeg_tick(ctx.sb, ctx.now, force=True) or {}
     log.info("repeg: %s", stats)
     return int(stats.get("moved") or stats.get("placed") or 0)
 
@@ -181,7 +189,7 @@ def lane_harvest(ctx: Ctx) -> int:
     if ctx.dry_run:
         log.info("harvest: DRY-RUN, not executing")
         return 0
-    stats = _app._harvest_tick(ctx.sb, ctx.now) or {}
+    stats = _app._harvest_tick(ctx.sb, ctx.now, force=True) or {}
     log.info("harvest: %s", stats)
     return int(stats.get("placed") or 0)
 
@@ -207,7 +215,7 @@ def lane_alerts(ctx: Ctx) -> int:
     import app as _app
     n = 0
     try:
-        n += int(_app._outbid_alerts(ctx.sb, ctx.now) or 0)
+        n += int(_app._outbid_alerts(ctx.sb, ctx.now, force=True) or 0)
     except Exception as e:
         log.warning("outbid alerts failed: %s", e)
     try:
