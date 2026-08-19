@@ -13435,17 +13435,26 @@ def _gridiron_opener_pass(sb, now, deadline):
         if not cands:
             return rows, stats
         mids = [g["id"] for g in cands]
+        # DEDUP PER (game, market_type). It used to key on the moneyline row
+        # alone -- "we shadowed the ML, this game is finished" -- which is
+        # wrong the moment a game has no moneyline: Polymarket lists NFL
+        # week 1 spread and total ladders three weeks out WITHOUT one, so
+        # the ML row never existed, the game never counted as done, and the
+        # spread/total capture below (nested under the ML branch) was never
+        # reached. Zero football tape on the two markets that are both
+        # listed AND the only ones paying pre-game rent.
         try:
             done_rows = (sb.table("pickbot_paperlog")
-                         .select("market_id")
+                         .select("market_id,market_type")
                          .in_("market_id", mids)
-                         .eq("market_type", "moneyline")
                          .filter("signal_blob->>opener_shadow", "eq", "true")
-                         .limit(1000).execute().data) or []
+                         .limit(3000).execute().data) or []
         except Exception:
             return rows, stats            # fail-closed: no dedup read → skip
-        done = {r["market_id"] for r in done_rows}
-        cands = [g for g in cands if g["id"] not in done]
+        done = {(r["market_id"], r["market_type"]) for r in done_rows}
+        _WANT = ("moneyline", "spread", "total")
+        cands = [g for g in cands
+                 if any((g["id"], mt) not in done for mt in _WANT)]
         if not cands:
             return rows, stats
         cands.sort(key=lambda g: str(g.get("event_start") or ""))
@@ -13455,9 +13464,11 @@ def _gridiron_opener_pass(sb, now, deadline):
         for g in cands[:8]:               # per-tick cap — budget courtesy
             if _time.time() >= deadline - 1.0:
                 break
+            # An unmatched team or a missing moneyline used to abandon the
+            # game. Neither has anything to do with the spread and total
+            # quotes, which need no model at all -- they record the venue's
+            # own book. Build the dossier first, then take whatever is there.
             p_home = _gridiron_ml(sb, g["sport"], g.get("event_name"))
-            if p_home is None:
-                continue                  # unmatched team → never a guess
             try:
                 d = handicapper_web.build_dossier(sb, None, None,
                                                   market_id=g["id"])
@@ -13466,32 +13477,11 @@ def _gridiron_opener_pass(sb, now, deadline):
             stats["g_eval"] += 1
             mlp = ((((d or {}).get("odds") or {}).get("moneyline") or {})
                    .get("polymarket") or {})
-            if not (mlp.get("home") or mlp.get("away")):
-                continue                  # not priced yet → retry next tick
-            fairs = {"home": p_home, "away": 1.0 - p_home}
-            best = None
-            for s in ("away", "home"):
-                q0 = ((mlp.get(s) or {}).get("quote") or {})
-                if q0.get("bid") is None:
-                    continue
-                e0 = fairs[s] * 100.0 - float(q0["bid"]) * 100.0
-                if best is None or e0 > best[1]:
-                    best = (s, e0, q0)
-            if best is None:
-                continue
-            s, edge0, q0 = best
-            # THE JUNK GATE IS FOR BETS, NOT FOR SHADOWS. On the MLB
-            # opener a >=15pp claimed edge means a newborn book we must
-            # not latch onto with money. Here nothing is bet -- and
-            # filtering these out builds a tape containing only the games
-            # the model ALREADY AGREES WITH, which is precisely the tape
-            # that cannot answer whether the model is usable. Football
-            # ratings in August are decayed 2025 data (40-day half life,
-            # a season seven months gone), so the disagreements ARE the
-            # measurement. Recorded and flagged, never dropped: this gate
-            # is why the first run evaluated 8 games and wrote 0 rows.
-            junk0 = edge0 >= _OPENER_JUNK_EDGE_PP
-            bid0 = float(q0["bid"]) * 100.0
+            _ml_ok = (p_home is not None
+                      and bool(mlp.get("home") or mlp.get("away"))
+                      and (g["id"], "moneyline") not in done)
+            fairs = ({"home": p_home, "away": 1.0 - p_home}
+                     if p_home is not None else {})
             es0 = g.get("event_start")
             try:
                 sim0 = round((datetime.fromisoformat(
@@ -13499,51 +13489,92 @@ def _gridiron_opener_pass(sb, now, deadline):
                 ).total_seconds() / 60.0)
             except Exception:
                 sim0 = None
-            _ea = _prob_to_amer_py(bid0 / 100.0)
-            _fa = _prob_to_amer_py(fairs[s])
-            _opener_persist(sb, {
-                "market_id": g["id"], "event_name": g.get("event_name"),
-                "event_start": es0, "sport": g["sport"],
-                "market_type": "moneyline", "side": s, "line": None,
-                "entry_price": (int(_ea) if _ea is not None else None),
-                "units": 1, "confidence": "low",
-                "timing_window": "opener", "prime_core": False,
-                "starts_in_min": sim0, "sharp_score": None,
-                "edge_pp": round(edge0, 1),
-                "fair_american": (int(_fa) if _fa is not None else None),
-                "gates_cleared": False,
-                "signal_blob": {
-                    "opener_shadow": True, "gridiron_ml": True,
-                    "p_home": round(p_home, 4),
-                    # would_bet stays honest: a junk-edge game would never
-                    # have been bet, so it must not read as one.
-                    "would_bet": (edge0 >= 2.5) and not junk0,
-                    "junk_edge": junk0,
-                    # BOTH SIDES OF THE BOOK. Edge measured against the
-                    # bid counts half the spread as alpha (the Aug 9
-                    # spread-fiction finding), and football books this
-                    # far out are wide. Storing bid/ask/mid means the
-                    # tape can be re-scored on the honest basis later
-                    # without recapturing anything.
-                    "book_bid_c": round(bid0, 1),
-                    "book_ask_c": (round(float(q0["ask"]) * 100.0, 1)
-                                   if q0.get("ask") is not None else None),
-                    "book_mid_c": (round(float(q0["mid"]) * 100.0, 1)
-                                   if q0.get("mid") is not None else None),
-                    "shadow_only": True},
-                "logged_at": now.isoformat(),
-            })
-            stats["g_rows"] += 1
+            # MONEYLINE SHADOW -- only when the model resolved BOTH
+            # teams and the venue actually quotes an ML. Its absence
+            # is no longer the game's problem: the spread and total
+            # capture below runs either way.
+            if _ml_ok:
+                best = None
+                for s in ("away", "home"):
+                    q0 = ((mlp.get(s) or {}).get("quote") or {})
+                    if q0.get("bid") is None:
+                        continue
+                    e0 = fairs[s] * 100.0 - float(q0["bid"]) * 100.0
+                    if best is None or e0 > best[1]:
+                        best = (s, e0, q0)
+                if best is None:
+                    _ml_ok = False        # quoted, but no bid on either side
+            # Second gate, deliberately separate: the block above can turn
+            # _ml_ok off, and unpacking `best` when it is None would raise
+            # out of the whole pass (the try wraps everything) and take the
+            # spread/total capture down with it.
+            if _ml_ok:
+                s, edge0, q0 = best
+                # THE JUNK GATE IS FOR BETS, NOT FOR SHADOWS. On the MLB
+                # opener a >=15pp claimed edge means a newborn book we must
+                # not latch onto with money. Here nothing is bet -- and
+                # filtering these out builds a tape containing only the games
+                # the model ALREADY AGREES WITH, which is precisely the tape
+                # that cannot answer whether the model is usable. Football
+                # ratings in August are decayed 2025 data (40-day half life,
+                # a season seven months gone), so the disagreements ARE the
+                # measurement. Recorded and flagged, never dropped: this gate
+                # is why the first run evaluated 8 games and wrote 0 rows.
+                junk0 = edge0 >= _OPENER_JUNK_EDGE_PP
+                bid0 = float(q0["bid"]) * 100.0
+                _ea = _prob_to_amer_py(bid0 / 100.0)
+                _fa = _prob_to_amer_py(fairs[s])
+                _opener_persist(sb, {
+                    "market_id": g["id"], "event_name": g.get("event_name"),
+                    "event_start": es0, "sport": g["sport"],
+                    "market_type": "moneyline", "side": s, "line": None,
+                    "entry_price": (int(_ea) if _ea is not None else None),
+                    "units": 1, "confidence": "low",
+                    "timing_window": "opener", "prime_core": False,
+                    "starts_in_min": sim0, "sharp_score": None,
+                    "edge_pp": round(edge0, 1),
+                    "fair_american": (int(_fa) if _fa is not None else None),
+                    "gates_cleared": False,
+                    "signal_blob": {
+                        "opener_shadow": True, "gridiron_ml": True,
+                        "p_home": round(p_home, 4),
+                        # would_bet stays honest: a junk-edge game would never
+                        # have been bet, so it must not read as one.
+                        "would_bet": (edge0 >= 2.5) and not junk0,
+                        "junk_edge": junk0,
+                        # BOTH SIDES OF THE BOOK. Edge measured against the
+                        # bid counts half the spread as alpha (the Aug 9
+                        # spread-fiction finding), and football books this
+                        # far out are wide. Storing bid/ask/mid means the
+                        # tape can be re-scored on the honest basis later
+                        # without recapturing anything.
+                        "book_bid_c": round(bid0, 1),
+                        "book_ask_c": (round(float(q0["ask"]) * 100.0, 1)
+                                       if q0.get("ask") is not None else None),
+                        "book_mid_c": (round(float(q0["mid"]) * 100.0, 1)
+                                       if q0.get("mid") is not None else None),
+                        "shadow_only": True},
+                    "logged_at": now.isoformat(),
+                })
+                stats["g_rows"] += 1
             # FOOTBALL SPREAD + O/U OPENER QUOTES (Aug 4 2026, user: "we
             # need spreads and O/U on football") — shadow rows recording
             # each market's virgin book at listing: the cheap side's peg
             # + its edge vs the book's own mid, i.e. exactly the entry
             # the sell-only touch-harvest lane would take. NO BETS —
-            # this is the earn-in tape for arming football after the
-            # MLB O/U trader proves the touch curve. One-shot at ML
-            # listing time (dedup rides the ML row); a spread/total not
-            # yet posted alongside the ML simply gets no row.
+            # this is the earn-in tape for arming football.
+            #
+            # NO LONGER GATED ON THE MONEYLINE. These used to be nested
+            # inside the ML branch and deduped off the ML row, so a game
+            # the venue quotes without an ML -- which is every NFL week 1
+            # game right now, spread and total ladders posted three weeks
+            # out with no moneyline beside them -- produced nothing at
+            # all. And these are the markets that matter: NFL moneyline
+            # rent is LIVE-ONLY, so spread and total are the only football
+            # game markets we could ever make pre-game.
             for _mt in ("spread", "total"):
+                if (g["id"], _mt) in done:
+                    continue              # already taped this market
                 _blkx = ((((d or {}).get("odds") or {}).get(_mt) or {})
                          .get("polymarket") or {})
                 _ka, _kb = (("over", "under") if _mt == "total"
