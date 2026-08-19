@@ -15140,7 +15140,52 @@ def _repeg_edge_ok(fair_prob, new_c: float):
     return (edge >= _min_pp), round(edge, 2)
 
 
-_HARVEST_ENABLED = True
+_HARVEST_ENABLED = False  # KILLED Aug 19 2026 (user: "kill it and sweep the
+                          # sells"). The Aug 3 paired test — 1 contract
+                          # rides, 1 rests a take-profit, see who wins —
+                          # has answered over 161 fills and four target
+                          # regimes: RIDING WINS, narrowly. Lifetime the
+                          # sell arm is −$7.17 vs holding the same
+                          # contracts to resolution, and every dollar of
+                          # that sits in lanes that had already stopped
+                          # selling (O/U −2.56, outs −2.13, unclassified
+                          # props −2.41, K −0.70, hits −1.18). What was
+                          # still running — ML only — is +$1.81 over 91
+                          # sells on $82 of proceeds: noise, ~$0.13/day.
+                          # THE THREE THINGS THAT DECIDED IT:
+                          #  (1) Every ladder rung sits BELOW its
+                          #      break-even touch bar at the lane's real
+                          #      43.7% win rate / 45.5¢ entry — +40%
+                          #      touched 40.0 vs 44.1 needed, +50% 27.8
+                          #      vs 36.0, +65% 0/10 vs 25.7. No loser has
+                          #      ever touched the top rung, so it was
+                          #      winner-only by construction.
+                          #  (2) A resting sell earns NO RENT — measured,
+                          #      not assumed. On market-days where the
+                          #      buy had filled and the harvest ask was
+                          #      the only thing working, rent ran
+                          #      $0.054/mkt-day vs $0.075 on markets with
+                          #      no ask at all ($1.61 total, all-time).
+                          #      The rungs rest 40-65% above entry, far
+                          #      outside whatever band the program pays.
+                          #      This was the open question that could
+                          #      have flipped the sign. It doesn't.
+                          #  (3) Buggiest surface per line in the machine
+                          #      — two real defects found in one review
+                          #      (see the sold-by-tier note in CLAUDE.md),
+                          #      one of them silently rewriting
+                          #      entry_price, which drives to-WIN grading
+                          #      and CLV.
+                          # NOT killed because it bled: the lanes that
+                          # bled had already stopped selling. Killed
+                          # because it does nothing, earns nothing, and
+                          # costs correctness.
+                          # Code kept DORMANT (the OU_TRADER_ENABLED /
+                          # KALSHI_EXECUTION pattern) — flipping this back
+                          # restores the ladder exactly. If it ever
+                          # returns it should be the back-burner v2 (rest
+                          # the sell at the MODEL's fair, not entry×1.4),
+                          # and that needs a model worth quoting around.
 _HARVEST_RUNGS = (0.40, 0.50, 0.65)   # LADDER (Aug 16 2026, user). One
                           # contract per rung, lowest first, all placed in a
                           # single pass on a fully-filled position. Replaces a
