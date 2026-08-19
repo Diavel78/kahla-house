@@ -8989,7 +8989,22 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict) -> dict
     # user: "I bet it where the model wants it, or I let it go.")
     # Entry auto-sync — the held position's avg price becomes the pick's entry
     # (PRICE ONLY; units/line never touched). ≥0.5¢ divergence gate.
-    if have_pos and pos.get("avg_price") and entry["status"] in ("filled", "partial"):
+    # HARVEST GUARD (Aug 19 2026 — found in the sold-by-tier review). Once a
+    # harvest rung fills, the venue nets the sale proceeds out of the
+    # position's `cost`, so cost/qty stops being what we paid and collapses
+    # toward zero: a 51.7¢ ML read back as 33¢ and was written to the pick as
+    # entry_price +202. That number is load-bearing — to-WIN grading (a loss
+    # at +202 costs 0.49u instead of 0.93u), the CLV stamp, and the price any
+    # future ladder would rest at all key off it. Same invariant the topup
+    # endpoint protects: entry_price must keep describing the position. The
+    # harvest only ever fires on a FULL position, so holding less than the
+    # pick's own stake means something sold — never sync then. (A partial BUY
+    # also lands here, and skipping costs nothing: every chunk fills from one
+    # resting order at one price, which entry_price already carries.)
+    _stake = _safe_float(pblob.get("contracts"))
+    _sold_into = bool(_stake and pos_qty and pos_qty < _stake - 0.01)
+    if (have_pos and pos.get("avg_price") and not _sold_into
+            and entry["status"] in ("filled", "partial")):
         fill_c = pos["avg_price"] * 100.0
         new_amer = _prob_to_amer_py(pos["avg_price"])
         cur_amer = p.get("entry_price")
@@ -15138,6 +15153,17 @@ _HARVEST_RUNGS = (0.40, 0.50, 0.65)   # LADDER (Aug 16 2026, user). One
                           # Rungs are NESTED — reaching +65% means the price
                           # passed +50% and +40%, so the fills describe a
                           # survival curve rather than three independent tests.
+                          # FIRST READ (Aug 19, 16 settled ladders, venue tape):
+                          # marginal $ vs riding the same contract — +40%
+                          # +$0.81, +50% −$0.20, +65% −$1.06 (ladder −$0.45).
+                          # Loser touch vs the break-even bar at the lane's
+                          # real 43.7% win rate / 45.5¢ entry: +40% 40.0 vs
+                          # 44.1, +50% 27.8 vs 36.0, +65% 0/10 vs 25.7. Winners
+                          # touch EVERY rung (6/6), so a rung no loser reaches
+                          # is pure surrendered upside, not a free option.
+                          # 3 days / 10 losers — re-run the tape query before
+                          # moving these numbers. Unmeasured and possibly
+                          # sign-flipping: maker rewards on the resting ask.
 _HARVEST_SELL_FRAC = 0.30 # sell ~30%, ride ~70% (10 → sell 3, keep 7). Derived
                           # from the bet's OWN stake so a stake change needs no
                           # second edit: a legacy 2-lot still sells 1.
@@ -15396,9 +15422,17 @@ def _harvest_tick(sb, now, *, force: bool = False) -> dict:
                     continue               # NRFI already live — no sell
             except Exception:
                 continue
+            # ALL-OR-NOTHING LADDER (Aug 19 2026 — found in the sold-by-tier
+            # review). A ladder truncated mid-way is truncated FOREVER: the
+            # venue-state dedup above skips any position that already has a
+            # resting sell, so a bet that got only its +40% rung this tick
+            # never receives +50/+65 — it silently reverts to the old
+            # single-target regime. The per-tick order budget must therefore
+            # be spent on WHOLE ladders. Out of room ⇒ leave the position
+            # untouched and take it on the next tick (2 min), which is free.
+            if res.get("orders", 0) + _n_sell > _HARVEST_MAX_ORDERS:
+                break
             for _roi in _HARVEST_RUNGS[:_n_sell]:
-                if res.get("orders", 0) >= _HARVEST_MAX_ORDERS:
-                    break
                 sell_c = min(99, int(math.ceil(side_c * (1.0 + _roi))))
                 canon = ((100.0 - sell_c) / 100.0 if synthetic
                          else sell_c / 100.0)
