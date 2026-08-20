@@ -46,6 +46,17 @@ on conflict (lane) do nothing;
 -- Atomic claim. Single UPDATE => Postgres row locking serializes racers and
 -- the loser re-evaluates the WHERE after the winner commits, so exactly one
 -- caller can hold a lane. Server clock only -- never trust the caller's.
+--
+-- v2 (Aug 20 2026): BOOTSTRAP A MISSING LANE instead of refusing it forever.
+-- v1 was UPDATE-only, so a lane with no row could never be claimed by anyone
+-- and cellar_claim returned false on every call. That is harmless in shadow
+-- mode (the return value is discarded) and a SILENT PERMANENT HALT of that
+-- lane the moment enforcement is on -- add a lane in code, forget the seed
+-- row, and it never runs again while every heartbeat looks fine. A missing
+-- row is a MISCONFIGURATION, not contention, and the safe reading of a
+-- misconfiguration is "run it under one owner", not "stop and say nothing".
+-- The insert only bootstraps (back-dated so it cannot mask a real holder);
+-- arbitration below is unchanged and a second owner is still refused.
 create or replace function cellar_claim(
   p_lane  text,
   p_owner text,
@@ -55,6 +66,11 @@ language plpgsql
 as $$
 declare v_ok boolean;
 begin
+  insert into cellar_lease (lane, owner, heartbeat_at, ttl_seconds)
+  values (p_lane, p_owner, now() - make_interval(secs => 3600),
+          coalesce(p_ttl, 180))
+  on conflict (lane) do nothing;
+
   update cellar_lease
      set owner        = p_owner,
          heartbeat_at = now(),
