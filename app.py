@@ -8422,6 +8422,100 @@ def api_poly_cancel_live_buys():
     return jsonify(out)
 
 
+@app.route("/api/polymarket/cancel-unpaid")
+def api_poly_cancel_unpaid():
+    """Cancel every resting model BUY that is NOT currently paying rent
+    (user, Aug 19 2026: "I want all those MLB early bets cancelled — if
+    they don't pay rent").
+
+    RULE #1 APPLIED TO ORDERS ALREADY ON THE BOOK. The rent gate runs at
+    placement, so an order placed while a program was live keeps resting
+    after the venue pulls that program — which is exactly what happened:
+    the venue dropped MLB Moneyline Early on Aug 19 ~15:00 and 30-odd
+    moneyline bets went on sitting in a window that pays nothing.
+
+    NOT A ONE-OFF, AND DELIBERATELY NOT MLB-SHAPED. The predicate is
+    `_rent_ok` itself, so this stays correct as the venue moves programs
+    around: it cancels whatever is unpaid TODAY, whatever sport, whatever
+    family, and leaves everything that still pays. A game that pays
+    nothing early but starts paying at T-6h is simply re-placed by the
+    opener lane once it crosses — cancelling now costs nothing but the
+    spread we never paid.
+
+    Three gates, all required, same as the sibling sweeps: (1) BUY intent
+    — sells are not ours to touch here, (2) AUTOMATIC flag, so a
+    hand-placed bid can never be cancelled, and (3) the slug belongs to
+    one of OUR pending model picks. Cancel-only; nothing is re-created.
+    Shared-secret + `&dry=1`."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    dry = request.args.get("dry") == "1"
+    try:
+        sb, client = get_supabase(), get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    now = datetime.now(timezone.utc)
+    owner = _kalshi_owner_uid()
+    mine: dict = {}
+    try:
+        rows = (sb.table("bot_picks")
+                .select("event_name,market_type,event_start,signal_blob")
+                .eq("asked_by", owner).eq("status", "pending")
+                .gte("event_start", now.isoformat())
+                .limit(500).execute().data) or []
+        for r in rows:
+            b = r.get("signal_blob") or {}
+            if not (b.get("autobet") or b.get("whiff_autobet")
+                    or b.get("ou_trader")):
+                continue                 # model bets only — never manual
+            slug = b.get("pmm_slug")
+            if slug:
+                mine[slug] = {"event": r.get("event_name"),
+                              "mt": r.get("market_type"),
+                              "start": r.get("event_start")}
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"picks: {e}"}), 500
+    orders = _pmm_open_orders_raw(client)
+    if orders is None:
+        return jsonify({"ok": False, "error": "order read failed"}), 503
+    killed, kept, failed, skipped = [], [], [], 0
+    for o in orders:
+        if "BUY" not in (o.get("intent") or ""):
+            continue
+        m = mine.get(o.get("slug"))
+        if not o.get("auto") or not m:
+            skipped += 1
+            continue
+        ok, why = _rent_ok(o["slug"], m["start"], now, sb)
+        row = {"slug": o["slug"], "event": m["event"], "mt": m["mt"],
+               "start": m["start"], "leaves": o.get("leaves"), "why": why}
+        if ok:
+            kept.append(row)             # still paying — leave it alone
+            continue
+        if dry:
+            killed.append(dict(row, dry=True))
+            continue
+        try:
+            client.orders.cancel(o["id"], {"marketSlug": o["slug"]})
+            killed.append(row)
+        except Exception as e:
+            failed.append({"slug": o["slug"], "err": str(e)[:120]})
+    out = {"ok": True, "dry": dry, "open_orders": len(orders),
+           "model_slugs": len(mine), "canceled": len(killed),
+           "kept_paying": len(kept), "failed": len(failed),
+           "skipped_not_ours": skipped, "detail": killed, "kept": kept,
+           "errors": failed}
+    if killed and not dry:
+        _send_fill_telegram(
+            f"\U0001f6d1 RENT SWEEP — canceled {len(killed)} resting order(s) "
+            f"in windows that pay no rent; {len(kept)} still paying, left "
+            f"alone.")
+    _probe_log(out)
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/topup")
 def api_poly_topup():
     """Raise ALREADY-PLACED model bets to the current stake (Aug 10 2026,
@@ -12078,6 +12172,70 @@ def _rent_family(slug: str):
     return (parts[1] or None), fam
 
 
+_RENT_MKT_CACHE: dict = {}   # slug -> {"at": ts, "periods": set|None}
+_RENT_MKT_TTL = 600          # 10 min — the venue re-provisions on its own
+                             # clock and a game crossing T-6h must be able
+                             # to flip within one cadence, not one deploy.
+
+
+def _rent_market_periods(slug: str):
+    """Periods the venue lists as ACTIVE **for this exact market**, or None
+    if we could not read it. Empty set = the venue knows the market and is
+    paying nothing on it right now.
+
+    ⚠ WHY PER-MARKET AND NOT PER-FAMILY (user, Aug 19 2026 — RULE #1):
+    "we don't bet unless that specific game AND the bet type are paying
+    rent." A family-level answer is not that answer. When MLB Moneyline
+    Early still existed it carried 40 markets against 54 listed games —
+    fourteen games were in no early program at all, and a family-level
+    gate happily cleared every one of them.
+
+    ⚠ NEVER read the window off starts_at/ends_at. Those are the program's
+    CATALOG lifecycle, not this event's paying window — every MLB game
+    reads T-960h on them. The `period` LABEL plus our own T-6h boundary is
+    the only truth about when a period pays for one game.
+
+    `pending` is not `active`: a day_of program provisioned but not yet
+    started pays nothing yet, and flips on its own inside the TTL."""
+    c = _RENT_MKT_CACHE.get(slug)
+    if c and _time.time() - c["at"] < _RENT_MKT_TTL:
+        return c["periods"]
+    periods = None
+    try:
+        client = get_client()
+        resp, read_ok = None, False
+        # Same two encodings the catalog sync uses — the venue has accepted
+        # both a repeated list and a comma string; first one that answers
+        # wins. A SUCCESSFUL but empty answer is data ("pays nothing"), and
+        # must not be mistaken for a failed read ("we don't know").
+        for val in ([slug], slug):
+            try:
+                r = client.get("/v1/incentives", query={"symbols": val},
+                               authenticated=True) or {}
+                read_ok = True
+                if r.get("programs"):
+                    resp = r
+                    break
+                resp = resp if resp is not None else r
+            except Exception:
+                continue
+        if read_ok:
+            periods = set()
+            for m in ((resp or {}).get("programs") or []):
+                if str(m.get("marketSlug") or "").strip() != slug:
+                    continue
+                for tp in (m.get("timePeriods") or []):
+                    if str(tp.get("status") or "").strip().lower() != "active":
+                        continue
+                    p = str(tp.get("period") or "").strip()
+                    if p:
+                        periods.add(p)
+    except Exception:
+        periods = None
+    _RENT_MKT_CACHE[slug] = {"at": _time.time(), "periods": periods}
+    return periods
+
+
 def _rent_ok(slug, event_start, now, sb=None):
     """(ok, reason) — may we rest a NEW maker order on this market right
     now under the rent rule? DEFAULT-DENY.
@@ -12115,6 +12273,23 @@ def _rent_ok(slug, event_start, now, sb=None):
     if need not in periods:
         return False, (f"{sport}/{fam} pays no {need} rent "
                        f"(T-{round(mins / 60.0, 1)}h)")
+    # ── PER-MARKET CONFIRMATION (RULE #1) ──────────────────────────────
+    # The family answer above is a fast pre-filter, nothing more. The bet
+    # is only allowed if the VENUE says THIS slug is in a program that is
+    # active for the period we are actually in, right now. Dynamic by
+    # construction: a game that pays nothing early and starts paying at
+    # T-6h becomes bettable the moment the venue flips it, with no deploy;
+    # a program pulled mid-slate stops clearing bets within the TTL.
+    #
+    # DEFAULT-DENY ON AN UNREADABLE ANSWER. A missed bet costs one bet; a
+    # bet resting in an unpaid window is the exact loss this rule exists
+    # to prevent, and it is the condition that killed the O/U lane.
+    mkt = _rent_market_periods(slug)
+    if mkt is None:
+        return False, f"could not confirm rent for {slug} (venue read failed)"
+    if need not in mkt:
+        return False, (f"{slug} is in no active {need} program "
+                       f"(venue lists: {sorted(mkt) or 'nothing'})")
     return True, need
 
 
