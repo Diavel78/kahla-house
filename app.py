@@ -13159,6 +13159,24 @@ def _opener_pass(sb, now, deadline):
                                             "diamond_ml": True,
                                             "p_home": round(p_home, 4),
                                             "would_bet": edge0 >= 2.5,
+                                            # A would-bet that produced NO
+                                            # order must not latch. The
+                                            # done-set treats would_bet=true
+                                            # as finished, which is only safe
+                                            # when persist and placement
+                                            # happen together -- and the rent
+                                            # gate separates them by design:
+                                            # MLB moneyline pays nothing
+                                            # early, so every game 6-96h out
+                                            # is refused now and becomes
+                                            # bettable at T-6h. Without this
+                                            # marker the refusal reads as
+                                            # "evaluated, done" and the day-of
+                                            # window arrives with nobody
+                                            # watching. Exactly the NRFI hole
+                                            # of Aug 16, one lane over.
+                                            "dayof_wait": (edge0 >= 2.5
+                                                           and res0 != "placed"),
                                             "opener_unclamped": True},
                             "logged_at": now.isoformat(),
                         })
