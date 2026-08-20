@@ -11871,6 +11871,13 @@ _REWARD_PERIODS = {"Live": "live", "Day-of": "day_of", "Early": "early",
                    "Tournament": "daily"}
 _RENT_LIVE_CACHE: dict = {}
 _RENT_LIVE_TTL = 900
+_RENT_SCHED_TOL_MIN = 45   # a program still on the page is re-synced
+                           # every ~10 min, so anything more than a few
+                           # cycles behind the newest row was DROPPED by
+                           # the venue. Wide enough to survive a couple
+                           # of failed scrapes, far short of the 14.5h
+                           # that MLB Early sat stale while still paying
+                           # out permission to bet.
 
 
 def _reward_rows_parse(text: str) -> tuple[list, list]:
@@ -11959,16 +11966,44 @@ def _rent_periods_live(sb) -> dict:
     out: dict = {}
     try:
         rows = (sb.table("poly_reward_schedule")
-                .select("sport,family,period,n_markets")
+                .select("sport,family,period,n_markets,synced_at")
                 .limit(2000).execute().data) or []
     except Exception:
         return {}
+    # ⚠ ONLY PROGRAMS THE VENUE LISTED ON THE MOST RECENT SCRAPE COUNT.
+    # Rows here are UPSERTED, never deleted -- a program the venue drops
+    # simply stops being refreshed and sits at its last synced_at. Without
+    # this filter it keeps voting "this pays" for the rest of time, which
+    # is the rent rule failing OPEN at the exact moment it matters.
+    #
+    # Live example, and the reason this exists: the venue pulled MLB
+    # Moneyline Early (mlb_moneyline_early_20260712) on Aug 19 ~15:00.
+    # Day-of and Live kept refreshing every 10 minutes; Early froze. The
+    # gate went on clearing pre-T-6h MLB moneyline bets all day against a
+    # program that no longer existed -- the opener lane resting in an
+    # unpaid window, which is precisely the condition that killed O/U.
+    #
+    # RELATIVE to the newest row, not to wall-clock: if the scrape itself
+    # breaks, every row ages together and the map still resolves off the
+    # last good read (the caller's snapshot fallback covers a total
+    # outage). Absolute staleness would empty the map and halt every lane
+    # the first time the rewards page hiccuped.
+    _fresh = max((str(r.get("synced_at") or "") for r in rows), default="")
+    _cut = ""
+    if _fresh:
+        try:
+            _cut = (datetime.fromisoformat(_fresh.replace("Z", "+00:00"))
+                    - timedelta(minutes=_RENT_SCHED_TOL_MIN)).isoformat()
+        except ValueError:
+            _cut = ""
     for r in rows:
         sp, fam, per = r.get("sport"), r.get("family"), r.get("period")
         if not sp or not fam or not per or fam == "futures":
             continue
         if (r.get("n_markets") or 0) <= 0:
             continue
+        if _cut and str(r.get("synced_at") or "") < _cut:
+            continue                 # venue stopped listing it — not paying
         out.setdefault((sp, fam), set()).add(per)
         # "NFL Props Early" is not split player-vs-team the way the
         # Day-of and Live rows are, so it credits both prop families.
