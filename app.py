@@ -8422,6 +8422,56 @@ def api_poly_cancel_live_buys():
     return jsonify(out)
 
 
+@app.route("/api/rent-earnings-probe")
+def api_rent_earnings_probe():
+    """IS THE EARNINGS PULL TRUNCATED? (Aug 20 2026)
+
+    `_incentives_sync` reads /v1/incentives/earnings UNFILTERED on the
+    assertion that it is not paginated and one call returns full history.
+    If that is wrong — an undocumented row cap, oldest-first — we would
+    hold a frozen set of old rows and silently stop seeing new days. That
+    is exactly the symptom: nothing newer than earn_date Aug 17 while the
+    sync runs clean every 10 minutes and re-touches all 427 rows.
+
+    Asks the same endpoint two ways and reports what each returns:
+      undated  — what the sync actually gets today
+      ?since=  — the same call with an explicit startDate
+
+    If the dated call returns days the undated one does not, the cap is
+    real and the fix is to window or page the pull. If both stop at the
+    same date, the venue simply has not posted and our side is fine.
+    Read-only, shared-secret."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    since = (request.args.get("since") or "").strip() or "2026-08-14"
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+
+    def _probe(q):
+        try:
+            d = client.get("/v1/incentives/earnings", query=q,
+                           authenticated=True) or {}
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"[:160]}
+        rows = d.get("rewards") or []
+        days = sorted({str(r.get("date") or "")[:10] for r in rows if r.get("date")})
+        # Any pagination hint the response carries, whatever it is called.
+        hints = {k: d[k] for k in d
+                 if k != "rewards" and isinstance(d[k], (str, int, float, bool))}
+        return {"rows": len(rows), "first_day": days[0] if days else None,
+                "last_day": days[-1] if days else None,
+                "distinct_days": len(days), "newest_5": days[-5:],
+                "other_keys": hints}
+
+    return jsonify({"ok": True, "since": since,
+                    "undated": _probe(None),
+                    "dated": _probe({"startDate": since})})
+
+
 @app.route("/api/rent-check")
 def api_rent_check():
     """RULE #1 OBSERVABILITY: does THIS market pay rent right now, and why.
