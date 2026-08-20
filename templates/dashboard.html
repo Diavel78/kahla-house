@@ -103,6 +103,7 @@
         .dot.vercel { background: var(--cyan); }
         .dot.idle   { background: #fbbf24; }
         .dot.stale, .dot.error { background: var(--red); }
+        .dot.off    { background: var(--muted); opacity: .5; }
         .lane .nm { font-weight: 600; letter-spacing: .01em; }
         .lane .nm span { font-weight: 400; color: var(--muted); margin-left: 7px; }
         .lane .rt {
@@ -111,6 +112,7 @@
         }
         .lane.bad .rt { color: #fbbf24; }
         .lane.dead .rt { color: var(--red); }
+        .lane.off, .lane.off .rt { opacity: .55; }
         @media (max-width: 520px) {
             .value { font-size: 26px; }
             .card.wide .value { font-size: 34px; }
@@ -222,10 +224,17 @@
         }
         box.innerHTML = c.lanes.map(l => {
             const dead = (l.state === 'stale' || l.state === 'error');
-            const cls = dead ? 'lane dead' : (l.state === 'idle' ? 'lane bad' : 'lane');
+            const cls = dead ? 'lane dead'
+                : (l.state === 'idle' ? 'lane bad'
+                   : (l.state === 'off' ? 'lane off' : 'lane'));
             // Vercel writes no tick history, so its lanes are judged on
             // heartbeat alone and say so rather than showing a false zero.
-            const right = l.owner !== 'cellar'
+            // A lane switched off at the source reports that instead of a
+            // heartbeat age -- it is never coming back on its own, so
+            // counting the silence is noise, not news.
+            const right = l.state === 'off'
+                ? 'off'
+                : l.owner !== 'cellar'
                 ? ('beat ' + ago(l.hb_age_s))
                 : (l.state === 'stale' ? 'no beat ' + ago(l.hb_age_s)
                    : l.state === 'error' ? l.fails_1h + ' fails/1h'
@@ -237,7 +246,8 @@
                  + '<span class="rt">' + right + '</span></div>';
         }).join('');
         sub.textContent = c.on_cellar + ' on the cellar · ' + c.on_vercel
-            + ' on vercel' + (c.bad ? ' · ' + c.bad + ' need a look' : ' · all working');
+            + ' on vercel' + (c.off ? ' · ' + c.off + ' off' : '')
+            + (c.bad ? ' · ' + c.bad + ' need a look' : ' · all working');
     }
 
     function paint(el, v, signed) {

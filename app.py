@@ -1715,6 +1715,18 @@ _LANE_WORK_WARN_S = {
 }
 
 
+# Lanes switched OFF at the source, by name -> the flag that decides it.
+# A killed lane stops heartbeating forever, and without this it reports
+# `stale` and trips "N need a look" on the dashboard for the rest of time
+# -- a permanent red light for a thing we turned off on purpose, which is
+# exactly the kind of alarm people learn to ignore right before it matters.
+# Read from the LIVE flag rather than a hand-kept list, so flipping the
+# engine back on restores its monitoring in the same commit.
+def _lane_disabled(lane: str) -> bool:
+    return {"harvest": not _HARVEST_ENABLED,
+            "ou_trader": not OU_TRADER_ENABLED}.get(lane, False)
+
+
 def _cellar_health(sb) -> dict:
     """Per-lane vitals for the dashboard: who owns it, is it alive, and
     IS IT ACTUALLY DOING ANYTHING.
@@ -1745,7 +1757,9 @@ def _cellar_health(sb) -> dict:
         fails = int(r.get("fails_1h") or 0)
         stale = hb is not None and hb > ttl
         warn_s = _LANE_WORK_WARN_S.get(lane, 21_600)
-        if owner != "cellar":
+        if _lane_disabled(lane):
+            state = "off"                  # killed on purpose — not a fault
+        elif owner != "cellar":
             # Vercel's side: heartbeat is all we can see. A stale one here
             # is genuinely bad — it means NOBODY is renewing the lane.
             state = "stale" if stale else "vercel"
@@ -1768,6 +1782,10 @@ def _cellar_health(sb) -> dict:
         })
     return {
         "lanes": lanes, "bad": bad,
+        # Counted separately from `bad` so an intentional kill is VISIBLE
+        # without being an alarm — "off" should read as a decision someone
+        # made, not as something to go fix.
+        "off": sum(1 for l in lanes if l["state"] == "off"),
         "on_cellar": sum(1 for l in lanes if l["owner"] == "cellar"),
         "on_vercel": sum(1 for l in lanes if l["owner"] != "cellar"),
     }
