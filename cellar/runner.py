@@ -183,7 +183,25 @@ class Runner:
             log.warning("no lanes enabled (CELLAR_LANES is empty) — idling. "
                         "This is the correct posture for a fresh install.")
 
-        # OWNER PRE-FLIGHT. Five engines need the admin's uid to know whose
+        # DRY-RUN PRE-FLIGHT. A money lane claims its lease BEFORE it looks
+        # at dry_run (Invariant 1), so an enabled-but-inert money lane holds
+        # the lease and — with CELLAR_LEASE_ENFORCED on — makes Vercel stand
+        # down, then does nothing itself. That is a total betting blackout
+        # that reads healthy everywhere: the lane ticks, the heartbeat is
+        # fresh, the dashboard is green. There is no rehearsal value worth
+        # that; rehearse with the read-only lanes instead.
+        inert = config.dry_run_blackout(enabled)
+        if inert:
+            log.error("CONFIG: money lane(s) %s enabled while "
+                      "CELLAR_DRY_RUN is on.", ", ".join(sorted(inert)))
+            log.error("  They would hold the lease, stand Vercel down, and "
+                      "place nothing. Set CELLAR_DRY_RUN=0 in .env, or drop "
+                      "them from CELLAR_LANES.")
+            log.error("  Refusing to start rather than run a blackout that "
+                      "looks healthy.")
+            return 2
+
+        # OWNER PRE-FLIGHT. Six engines need the admin's uid to know whose
         # book they are acting on. Without it they return at their second line
         # with a zero — no exception, no error, just nothing done. That is not
         # hypothetical: `ledger` ran 242 consecutive healthy ticks on this box

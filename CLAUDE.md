@@ -695,14 +695,35 @@ tick, per-market rent checks effectively free.
 `kalshi_autolog`. vercel: `opener`, `repeg`, `paperlog`, `alerts` — i.e. the
 expensive, write-heavy half.
 
-⚠ **THE BLOCKER IS THE LEASE, NOT THE CODE.** `_CELLAR_LEASE_ENFORCED` is
-unset, so `_cellar_owns()` claims the lane, records ownership, heartbeats —
-and then returns `True` REGARDLESS. It is shadow mode by design. Move the
-opener or the re-peg while that is still shadow and **both sides run it and
-both place orders**: duplicate buys, and the one-order-per-slug invariant the
-re-peg depends on goes with it (the Aug 16 duplicate incident, on the buy side
-with real stakes). Order of work: enforce the lease → verify one side actually
-stands down → then move a write lane. Read-only lanes can move first.
+✅ **STEP 1 DONE (Aug 20 2026): the lease is ENFORCED.** `CELLAR_LEASE_ENFORCED`
+is set on Vercel, so a side that loses a claim actually stands down. Before
+this, `_cellar_owns()` claimed, recorded ownership, heartbeated — and returned
+`True` REGARDLESS (shadow mode by design), which meant moving a write lane
+would have had **both sides placing orders**: duplicate buys, and the
+one-order-per-slug invariant the re-peg depends on gone with it (the Aug 16
+duplicate incident, on the buy side with real stakes). Arbitration is
+selftested 8/8 (renew-own / dead-holder / cellar-preempts-vercel), and
+`cellar_claim` bootstraps a missing lane row with a stale heartbeat so a
+first-ever claim can't deadlock.
+
+**Step 2 is one line of `.env` on the house box** — add `opener` to
+`CELLAR_LANES`, restart the daemon — and two boot guards now stand behind it,
+because both failure modes are silent and look healthy:
+- **`needs_owner`** — `_autobet_execute` resolves `_kalshi_owner_uid()` and
+  returns `False` on `None`, so an opener lane with no admin uid keeps
+  persisting its shadow rows (`work>0`, reads ALIVE) and places **zero bets**.
+  Worse than the ledger's silent zero, because the tick count lies. The lane
+  is flagged, so the runner refuses to start instead.
+- **`dry_run_blackout()`** — a money lane claims its lease BEFORE it checks
+  `dry_run` (Invariant 1), so `CELLAR_DRY_RUN=1` + `opener` = holds the lease,
+  stands the enforced Vercel side down, places nothing. Total betting blackout,
+  green on every dashboard. Enabled money lane + dry-run now refuses the boot.
+  Rehearse with read-only lanes; there is no rehearsal worth a blackout.
+
+⚠ **`CELLAR_DRY_RUN` defaults to TRUE, and existing healthy `work=12` ticks are
+NOT evidence it is off** — `_drive_route` lanes (pm_snapshot/paperlog/vsin/
+kalshi_autolog) ignore the flag entirely; only the direct-call money lanes
+check it. Read the boot banner (`mode=`), not the tick counts.
 
 Spec: `docs/cellar-migration-spec.md` §5. Lease table
 `kahla-scanner/supabase/cellar.sql`; `CELLAR_SIDE=cellar` on the house box so

@@ -86,7 +86,13 @@ ALL_LANES: dict[str, Lane] = {
     l.name: l for l in [
         Lane("pm_snapshot",     60,   180, note="exchange cent logger"),
         Lane("paperlog",        60,   180, note="suggestion + shadow logger"),
-        Lane("opener",          60,   180, writes_money=True,
+        # needs_owner: _autobet_execute resolves _kalshi_owner_uid() and
+        # returns False on None — so with no owner the lane still persists
+        # its opener shadow rows (work>0, looks ALIVE) and places ZERO bets.
+        # Worse than the ledger's silent zero, because the tick count lies.
+        # Enforcement means Vercel stands down, so that is a total betting
+        # blackout that reads healthy on every dashboard. Refuse to start.
+        Lane("opener",          60,   180, writes_money=True, needs_owner=True,
              note="opener lane + autobet (NEW MONEY)"),
         Lane("repeg",          120,   300, writes_money=True, needs_owner=True,
              note="maker order chase"),
@@ -142,6 +148,20 @@ def money_lanes_enabled() -> list[str]:
     """Enabled lanes that can actually move money."""
     return [n for n in LANES_ENABLED
             if n in ALL_LANES and ALL_LANES[n].writes_money]
+
+
+def dry_run_blackout(enabled: list[str]) -> list[str]:
+    """Money lanes that are enabled while DRY_RUN is on.
+
+    Non-empty means the daemon must refuse to start: a money lane claims its
+    lease before it checks dry_run, so it would hold the lease, stand the
+    enforced Vercel side down, and place nothing — a betting blackout that
+    reads healthy on every dashboard.
+    """
+    if not DRY_RUN:
+        return []
+    return sorted(n for n in enabled
+                  if n in ALL_LANES and ALL_LANES[n].writes_money)
 
 
 def summary() -> str:

@@ -250,23 +250,54 @@ def test_batch_blocked_deps() -> None:
 
 
 def test_owner_dependent_lanes() -> None:
-    """The five engines that need the admin uid must be marked.
+    """The six engines that need the admin uid must be marked.
 
     Unmarked, they run and silently do nothing on a box without Firebase —
     242 healthy ticks with work=0 is what that looked like in production,
     and the dashboard read $0.00 the whole time.
+
+    `opener` was the sixth, added at cutover time: _autobet_execute resolves
+    _kalshi_owner_uid() and returns False on None, so an unmarked opener lane
+    keeps persisting its shadow rows (work>0 — it reads ALIVE) while placing
+    zero bets. With the lease enforced, Vercel has stood down. That is a
+    total betting blackout every dashboard calls healthy.
     """
     from cellar import config
     need = {n for n, l in config.ALL_LANES.items() if l.needs_owner}
-    check("owner-dependent lanes are exactly the five that need a uid",
-          need == {"repeg", "harvest", "ledger", "kalshi_autolog", "alerts"},
+    check("owner-dependent lanes are exactly the six that need a uid",
+          need == {"repeg", "harvest", "ledger", "kalshi_autolog", "alerts",
+                   "opener"},
           f"got {sorted(need)}")
     # A money lane failing this way is the dangerous case: healthy-looking
-    # while real orders go unmanaged.
+    # while real orders go unmanaged (or never placed at all).
     money_needing = {n for n, l in config.ALL_LANES.items()
                      if l.needs_owner and l.writes_money}
-    check("repeg and harvest are covered (money lanes)",
-          money_needing == {"repeg", "harvest"}, f"got {sorted(money_needing)}")
+    check("every money lane is owner-covered",
+          money_needing == {"repeg", "harvest", "opener"},
+          f"got {sorted(money_needing)}")
+
+
+def test_dry_run_blackout() -> None:
+    """A money lane enabled under DRY_RUN must refuse the boot.
+
+    It claims its lease before it checks dry_run, so with the lease enforced
+    it stands Vercel down and then places nothing — the blackout that reads
+    healthy. Read-only lanes under dry-run are fine (that is rehearsal).
+    """
+    from cellar import config
+    real = config.DRY_RUN
+    try:
+        config.DRY_RUN = True
+        check("dry-run + money lane => blackout flagged",
+              config.dry_run_blackout(["opener", "pm_snapshot"]) == ["opener"],
+              f"got {config.dry_run_blackout(['opener', 'pm_snapshot'])}")
+        check("dry-run + read-only lanes only => fine",
+              config.dry_run_blackout(["pm_snapshot", "vsin"]) == [])
+        config.DRY_RUN = False
+        check("live + money lane => fine",
+              config.dry_run_blackout(["opener", "repeg"]) == [])
+    finally:
+        config.DRY_RUN = real
 
 
 def test_side_and_phase() -> None:
@@ -371,6 +402,7 @@ def main() -> int:
               test_lane_registry_matches_config, test_batch_schedule,
               test_batch_commands_exist, test_batch_flags_are_real,
               test_batch_blocked_deps, test_owner_dependent_lanes,
+              test_dry_run_blackout,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
