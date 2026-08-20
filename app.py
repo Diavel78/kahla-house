@@ -13665,6 +13665,36 @@ _WATCHDOG_MIN_LISTED = 6     # future-day PMM-priced games before we judge
 _WATCHDOG_MIN_WALL = 6       # standing future-day model bets below this = trip
 
 
+def _watchdog_listed(sb, now):
+    """PMM-listed future MLB games as [{"start": iso}, ...], for the wall
+    alarm.
+
+    Prefers `_PMM_LISTED_CACHE["evs"]`, which the opener pass fills in ITS
+    OWN process. CELLAR LANDMINE (Aug 20 2026): once `opener` moves to the
+    house box, Vercel never runs `_pmm_ensure_markets`, so Vercel's copy of
+    that cache stays empty forever — and the watchdog, which rides the
+    Vercel paperlog tick, returns None at its listing gate and goes silent.
+    The blackout alarm would die at exactly the moment it starts mattering.
+
+    So fall back to the DB: `_pmm_ensure_markets` stamps every row it mints
+    with notes.src='pmm_schedule', i.e. rows that are PROVABLY on the
+    venue's own list — not the ESPN spine, so the count can't drift up into
+    false alarms. Cross-process by construction, and no venue call.
+    """
+    evs = _PMM_LISTED_CACHE.get("evs") or []
+    if evs:
+        return evs
+    try:
+        rows = (sb.table("markets").select("event_start")
+                .eq("sport", "MLB").eq("status", "active")
+                .filter("notes->>src", "eq", "pmm_schedule")
+                .gt("event_start", now.isoformat())
+                .limit(400).execute().data) or []
+    except Exception:
+        return []
+    return [{"start": r.get("event_start")} for r in rows]
+
+
 def _opener_watchdog(sb, now, opener_stats):
     """THE WALL ALARM (Aug 4 2026 — three opener outages in two days were
     all caught by the USER watching his open-order count while the tick
@@ -13684,11 +13714,21 @@ def _opener_watchdog(sb, now, opener_stats):
             return None
         if _time.time() - _WATCHDOG_LAST_TS < _WATCHDOG_COOLDOWN_S:
             return None
-        keys = _PMM_LISTED_CACHE.get("keys")   # filled by this tick's opener pass
-        if not keys:
+        # This tick's opener pass when Vercel owns the lane; the DB's
+        # pmm_schedule rows when the cellar does. See _watchdog_listed.
+        listed = _watchdog_listed(sb, now)
+        if not listed:
             return None                        # no listing read → can't judge
         et_today = now.astimezone(ZoneInfo("America/New_York")).date().isoformat()
-        future_listed = sum(1 for (d0, _p) in keys if d0 > et_today)
+        listed_starts = []
+        for ev in listed:
+            try:
+                listed_starts.append(datetime.fromisoformat(
+                    str(ev.get("start")).replace("Z", "+00:00")))
+            except Exception:
+                continue
+        future_listed = sum(1 for st in listed_starts
+                            if _et_day(st.isoformat()) > et_today)
         if future_listed < _WATCHDOG_MIN_LISTED:
             return None                        # future slate not priced yet
         # Wall = standing model bets on games >6h out — a steady CLOCK
@@ -13729,12 +13769,7 @@ def _opener_watchdog(sb, now, opener_stats):
         # inferred from the ET date.
         horizon = now + timedelta(hours=_OPENER_HI_H)
         day_games: dict = {}
-        for ev in (_PMM_LISTED_CACHE.get("evs") or []):
-            try:
-                st = datetime.fromisoformat(
-                    str(ev.get("start")).replace("Z", "+00:00"))
-            except Exception:
-                continue
+        for st in listed_starts:
             if not (now < st <= horizon):
                 continue
             d0 = _et_day(st.isoformat())
