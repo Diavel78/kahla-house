@@ -8422,6 +8422,79 @@ def api_poly_cancel_live_buys():
     return jsonify(out)
 
 
+@app.route("/api/rent-check")
+def api_rent_check():
+    """RULE #1 OBSERVABILITY: does THIS market pay rent right now, and why.
+
+    Two forms:
+      ?slug=<market slug>[&start=<iso>]   — check one exact market
+      ?sport=NFL&away=..&home=..&start=.. — enumerate the game's markets
+                                            via the PMM lookup, check each
+
+    Reports the family answer, the PER-MARKET answer (what the venue lists
+    as active for that slug), and the `_rent_ok` verdict when a start time
+    is available. This is the read that settles "we should be betting X" —
+    the family table says a program exists, and only the per-market answer
+    says whether this game is in it. Shared-secret; read-only."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    now = datetime.now(timezone.utc)
+    try:
+        sb = get_supabase()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    start = (request.args.get("start") or "").strip() or None
+    slugs: list = []
+    diag: dict = {}
+    one = (request.args.get("slug") or "").strip()
+    if one:
+        slugs = [one]
+    else:
+        sport = (request.args.get("sport") or "").strip().upper()
+        away = (request.args.get("away") or "").strip()
+        home = (request.args.get("home") or "").strip()
+        if not (sport and away and home):
+            return jsonify({"ok": False,
+                            "error": "need slug=, or sport=&away=&home="}), 400
+        try:
+            import pmm_markets
+            data = pmm_markets.lookup(get_client(), sport, away, home,
+                                      start) or {}
+            diag = (data.get("diag") or {}).get("counts") or {}
+            seen = set()
+            for mt in ("ml", "spread", "total", "nrfi"):
+                for row in (data.get(mt) or []):
+                    sg = row.get("slug")
+                    if sg and sg not in seen:
+                        seen.add(sg)
+                        slugs.append(sg)
+            for p in (data.get("props") or []):
+                sg = p.get("key")
+                if sg and sg not in seen:
+                    seen.add(sg)
+                    slugs.append(sg)
+            if not start:
+                start = data.get("event_start") or None
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"lookup: {e}"}), 500
+    fam_map = _rent_periods_live(sb)
+    out = []
+    for sg in slugs[:60]:
+        sport_k, fam = _rent_family(sg)
+        mkt = _rent_market_periods(sg)
+        row = {"slug": sg, "sport": sport_k, "family": fam,
+               "family_pays": sorted(fam_map.get((sport_k, fam)) or []),
+               "market_pays": (None if mkt is None else sorted(mkt))}
+        if start:
+            ok, why = _rent_ok(sg, start, now, sb)
+            row["bettable_now"], row["why"] = ok, why
+        out.append(row)
+    return jsonify({"ok": True, "now": now.isoformat(), "start": start,
+                    "counts": diag, "n": len(out), "markets": out})
+
+
 @app.route("/api/polymarket/cancel-unpaid")
 def api_poly_cancel_unpaid():
     """Cancel every resting model BUY that is NOT currently paying rent
