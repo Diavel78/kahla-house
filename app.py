@@ -14797,7 +14797,18 @@ def api_handicapper_paperlog():
     # paging the venue on every load (Aug 13 2026 — the halved Maker
     # Rewards card was rows falling off a fixed window, not lost money).
     acts_sync = {}
-    if run_engines and not now.minute % _POLY_LEDGER_MOD:
+    # NOT gated on run_engines. `_acts_sync` mirrors the activities feed and
+    # `_dash_cache_refresh` precomputes the dashboard from it -- neither is an
+    # engine, neither has a lane, and neither moves money. Gating them with
+    # the engines (Aug 20) stopped the dashboard precompute the moment the
+    # cellar took paperlog: the page served a 9-hour-old snapshot overnight
+    # and its lane card read "no lane data" while all nine lanes were
+    # healthy. Exactly the failure the engines=0 dependency guard exists to
+    # prevent -- I listed the pin stamp, the bet alert, the watchdog, the
+    # first-pitch sweep and the rent sync as must-keep-running, and missed
+    # this one because it is NESTED INSIDE the activities-sync block rather
+    # than being a call of its own.
+    if not now.minute % _POLY_LEDGER_MOD:
         try:
             acts_sync = _acts_sync(sb, get_client(), pages=3)
         except Exception as e:
