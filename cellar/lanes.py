@@ -125,11 +125,20 @@ def lane_pm_snapshot(ctx: Ctx) -> int:
 
 
 def lane_paperlog(ctx: Ctx) -> int:
-    # NOTE: the paperlog route is the one that also carries opener/repeg/
-    # harvest/ledger/alerts on Vercel. Running this lane on the cellar while
-    # those lanes ALSO run here would double them -- so `paperlog` and the
-    # engine lanes are mutually exclusive in the runner (see runner.CONFLICTS).
-    code, body = _drive_route("/api/handicapper/paperlog")
+    """THE LOGGER ONLY. `engines=0` is load-bearing, not a tidiness flag.
+
+    The paperlog route also carries opener / repeg / harvest / ledger /
+    alerts. Each self-gates on its own cellar lease, which arbitrates
+    correctly across TWO processes and fails inside ONE: this lane and the
+    `opener` lane, in the same daemon, both ask "do we own opener?", both
+    hear yes, and the engine runs twice -- a double-write on the money path.
+    That is what runner.CONFLICTS used to forbid outright, at the cost of
+    making paperlog un-movable and pinning Vercel Pro alive (spec 12b).
+
+    So: pass engines=0 and own the engines through their own lanes. Vercel's
+    cron ping omits the param and keeps running everything, lease-gated, as
+    the standby. Selftest asserts this param is still here."""
+    code, body = _drive_route("/api/handicapper/paperlog?engines=0")
     if code != 200:
         raise RuntimeError(f"paperlog HTTP {code}: {str(body)[:200]}")
     return _work_from(body, "logged", "rows", "inserted")
@@ -243,9 +252,14 @@ REGISTRY: dict[str, Callable[[Ctx], int]] = {
 # cellar runs that route AND those lanes, every engine fires twice per tick --
 # the duplicate-order failure, self-inflicted. The runner refuses to start on
 # an overlapping config.
-CONFLICTS: dict[str, set[str]] = {
-    "paperlog": {"opener", "repeg", "harvest", "ledger", "alerts"},
-}
+# Was {"paperlog": {opener, repeg, harvest, ledger, alerts}} until Aug 20
+# 2026. That entry existed because the paperlog ROUTE runs those engines
+# inline; `lane_paperlog` now drives it with engines=0, so the combination is
+# safe and paperlog can finally leave Vercel. Kept (empty) rather than deleted
+# because the validator that reads it is the right place for the NEXT such
+# coupling, and because an empty dict documents that the conflict was RESOLVED
+# rather than forgotten.
+CONFLICTS: dict[str, set[str]] = {}
 
 
 def utcnow() -> datetime:

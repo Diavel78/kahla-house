@@ -57,16 +57,32 @@ def test_imports_without_creds() -> None:
 
 
 def test_config_validation() -> None:
+    import inspect
+
+    from cellar import lanes as lanes_mod
     from cellar.runner import Runner
     check("unknown lane is rejected",
           any("unknown lane" in p for p in Runner.validate(["nope"])))
     check("valid lane set is accepted", Runner.validate(["opener", "repeg"]) == [])
-    # THE IMPORTANT ONE: the paperlog route internally runs the engine lanes,
-    # so enabling both would fire every engine twice per tick.
-    problems = Runner.validate(["paperlog", "opener"])
-    check("paperlog+opener refused (would double-fire engines)",
-          any("double-fire" in p for p in problems),
-          f"got {problems}")
+    # WAS "paperlog+opener must be refused" until Aug 20 2026. The route
+    # runs the engines inline, so in one process both callers see their own
+    # lease and fire twice. That is now solved at the source -- lane_paperlog
+    # drives the route with engines=0 -- so the combination is ALLOWED and
+    # the param is the thing under test.
+    check("paperlog+opener no longer collides on the engines",
+          not any("double-fire" in p
+                  for p in Runner.validate(["paperlog", "opener"])))
+    # Moving paperlog strands every engine that only ran inside its route.
+    probs = Runner.validate(["paperlog", "opener"])
+    check("paperlog without repeg/alerts/ledger is refused",
+          any("run NOWHERE" in p for p in probs), f"got {probs}")
+    check("paperlog with the full hot path is accepted",
+          Runner.validate(["paperlog", "opener", "repeg", "alerts",
+                           "ledger"]) == [])
+    src = inspect.getsource(lanes_mod.lane_paperlog)
+    check("lane_paperlog drives the route with engines=0 (LOAD-BEARING: "
+          "without it, paperlog+opener double-fires every engine)",
+          "engines=0" in src, "the param is gone from lane_paperlog")
 
 
 def test_lease_fails_closed() -> None:

@@ -14071,6 +14071,36 @@ def api_handicapper_paperlog():
     if not _cellar_owns(sb, "paperlog", 180):
         return jsonify({"ok": True, "skipped": "cellar_owns_lane"}), 200
 
+    # ?engines=0 => THE LOGGER ONLY (Aug 20 2026, the paperlog cutover).
+    #
+    # Six engines ride this route and each self-gates on its OWN cellar
+    # lease. Across TWO PROCESSES that arbitrates correctly — it is how
+    # Vercel stands down today. Inside ONE process it does the opposite:
+    # the cellar driving this route as the `paperlog` lane while also
+    # running the `opener` lane means both callers ask "do we own opener?",
+    # both are told yes, and the engine fires TWICE. That is the June-28
+    # double-write class, on the money path, and it is why
+    # lanes.CONFLICTS used to forbid the combination outright.
+    #
+    # So the cellar's paperlog lane passes engines=0 and gets the logger;
+    # its other lanes own the engines. Vercel's cron ping omits the param
+    # and keeps running everything, lease-gated, as the standby — the
+    # posture that makes "stop the daemon" a complete rollback.
+    #
+    # ⚠ THIS PROTECTS THE MASTER RULE. The $6 cap is enforced PER ORDER
+    # (_autobet_execute), so two engines placing on one event is $12 on that
+    # event — the one failure this machine is not allowed to have. The
+    # per-game dedup catches the slow version and loses the race (the Aug 16
+    # duplicate-order incident, and why 016_autolog_uniq exists). Not
+    # double-firing in the first place is the actual defense.
+    #
+    # What is NOT skipped, because it has no lane of its own and would
+    # otherwise stop running everywhere: the bet-time Pinnacle stamp, the
+    # unlogged-bet alert, the wall watchdog, the first-pitch BUY sweep and
+    # the incentives (rent) sync.
+    run_engines = (request.args.get("engines")
+                   or "1").strip().lower() not in ("0", "false", "no")
+
     now = datetime.now(timezone.utc)
     lo = (now + timedelta(minutes=1)).isoformat()    # stop 1 min before tip
     hi = (now + timedelta(hours=5)).isoformat()      # start 5h out
@@ -14422,7 +14452,7 @@ def api_handicapper_paperlog():
     # `opener` lane, and letting the football shadows run while the real
     # opener is gated would double-write pickbot_paperlog rows (the June 28
     # flood class of bug), even though those shadows place no money.
-    _own_opener = _cellar_owns(sb, "opener", 180)
+    _own_opener = run_engines and _cellar_owns(sb, "opener", 180)
     if _own_opener:
         opener_rows, opener_stats = _opener_pass(sb, now, opener_deadline)
     else:
@@ -14464,7 +14494,7 @@ def api_handicapper_paperlog():
     # RE-PEG BOT (every 2nd minute) — amend out-of-touch NRFI maker orders
     # to the touch (shadow-only while REPEG_ENABLED=False). Runs BEFORE the
     # outbid ping so a live amend clears the outbid before it would ping.
-    repeg = _repeg_tick(sb, now)
+    repeg = _repeg_tick(sb, now) if run_engines else {"gate": "engines_off"}
     # FIRST-PITCH SWEEP — cancel our own model BUYs the moment their game
     # is underway (Aug 12 2026, the CIN@CWS YRFI: bought 13 minutes into
     # the game, lost 3 minutes later). The SDK has no start-of-game TIF —
@@ -14482,7 +14512,7 @@ def api_handicapper_paperlog():
     # paging the venue on every load (Aug 13 2026 — the halved Maker
     # Rewards card was rows falling off a fixed window, not lost money).
     acts_sync = {}
-    if not now.minute % _POLY_LEDGER_MOD:
+    if run_engines and not now.minute % _POLY_LEDGER_MOD:
         try:
             acts_sync = _acts_sync(sb, get_client(), pages=3)
         except Exception as e:
@@ -14495,14 +14525,14 @@ def api_handicapper_paperlog():
             acts_sync["dash"] = {"err": str(e)[:80]}
     # OUTBID push (every 2nd minute) — the red chip's Telegram twin: a
     # resting maker order lost the touch, re-bid or take.
-    outbid_warned = _outbid_alerts(sb, now)
+    outbid_warned = _outbid_alerts(sb, now) if run_engines else 0
     # HARVEST LEG (every 2nd minute) — rest the +35% take-profit sell on
     # every double-filled model bet (contract 2 of the paired test).
-    harvest = _harvest_tick(sb, now)
+    harvest = _harvest_tick(sb, now) if run_engines else {"gate": "engines_off"}
     # MONEY LEDGER (every 5th minute) — venue cash truth per pick from
     # the Polymarket activities feed → signal_blob.poly_pnl. Additive
     # only; the resolver keeps owning status/pnl_units.
-    ledger = _poly_ledger_tick(sb, now)
+    ledger = _poly_ledger_tick(sb, now) if run_engines else {"gate": "engines_off"}
     # LIQUIDITY INCENTIVES (every 10th minute) — mirror the venue's own
     # earnings + program catalog. This is the ONLY read that shows PENDING
     # accrual; the activities feed shows PAID lumps 5-7 business days late,
@@ -14539,7 +14569,7 @@ def api_handicapper_paperlog():
     # TELEGRAM BATCH FLUSH — everything above queued into telegram_queue;
     # at most ONE 📬 summary per _TG_BATCH_MIN minutes (urgent 🚨 sends
     # bypassed the queue at send time). Nothing queued → no message.
-    tg_flushed = _tg_flush(sb, now)
+    tg_flushed = _tg_flush(sb, now) if run_engines else 0
     # stdout → Vercel runtime logs: the alert pipeline's only observability
     # (the JSON response is visible only in cron-job.org history).
     print(f"paperlog: processed={processed} cands={len(alert_cands)} "
@@ -14561,6 +14591,7 @@ def api_handicapper_paperlog():
                     "live_swept": live_swept, "acts_sync": acts_sync,
                     "harvest": harvest, "ledger": ledger,
                     "incentives": incentives,
+                    "engines": run_engines,
                     "tg_flushed": tg_flushed})
 
 

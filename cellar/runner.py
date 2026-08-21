@@ -61,6 +61,28 @@ class Runner:
         for n in enabled:
             if n not in config.ALL_LANES:
                 problems.append(f"unknown lane {n!r} (known: {', '.join(sorted(config.ALL_LANES))})")
+        # MOVING `paperlog` MOVES THE WHOLE HOT PATH WITH IT.
+        #
+        # Vercel's paperlog route returns at its FIRST gate once the cellar
+        # holds that lease -- so every engine that only ever ran inside that
+        # route stops running on Vercel the moment this lane moves. They then
+        # run here or nowhere. Enable paperlog alone and the re-peg silently
+        # stops chasing, the Telegram digest silently stops flushing, and the
+        # money ledger silently stops stamping, all while every lane on the
+        # dashboard reads green.
+        #
+        # `harvest` is deliberately absent: its engine is off at the source
+        # (_HARVEST_ENABLED=False), so it has nothing to keep running.
+        if "paperlog" in enabled:
+            need = [n for n in ("opener", "repeg", "alerts", "ledger")
+                    if n not in enabled]
+            if need:
+                problems.append(
+                    f"lane 'paperlog' requires {', '.join(need)} — once the "
+                    f"cellar owns paperlog, Vercel's route no-ops at its "
+                    f"first gate and those engines run NOWHERE. Add them to "
+                    f"CELLAR_LANES or leave paperlog on Vercel."
+                )
         for lane, conflicts in lanes_mod.CONFLICTS.items():
             if lane in enabled:
                 clash = sorted(conflicts & set(enabled))
