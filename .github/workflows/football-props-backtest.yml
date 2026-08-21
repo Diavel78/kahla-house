@@ -1,0 +1,54 @@
+name: Football Props — Backtest
+
+# Gate 1 for the football prop families (pass_yds / rush_yds / receptions /
+# rec_yds): walk-forward per-player model vs base rate over the
+# football_player_games spine. Prints per-rung Brier + calibration to the
+# run log — read it there, nothing is written.
+#
+# First run (Aug 21 2026, 3 NFL seasons): ALL 22 rungs beat base rate,
+# margins +0.004 to +0.025 — receptions strongest. Known wart: the model
+# over-forecasts overs 2-5pp in the upper half (the early-exit mass a
+# symmetric normal can't carry). SD inflation was TESTED and is Brier-
+# negative — the v2 lever is a truncated-game mixture, not a wider normal.
+#
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      family:
+        description: "pass_yds | rush_yds | receptions | rec_yds (blank = all)"
+        required: false
+        default: ""
+
+concurrency:
+  group: football-props-backtest
+  cancel-in-progress: true
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run backtest
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          FAM="${{ github.event.inputs.family }}"
+          if [ -n "$FAM" ]; then
+            python -m scripts.backtest_football_props --family "$FAM"
+          else
+            python -m scripts.backtest_football_props
+          fi

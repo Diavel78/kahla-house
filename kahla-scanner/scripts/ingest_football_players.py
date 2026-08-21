@@ -189,7 +189,7 @@ def _games(sb, sport: str, start: str, end: str) -> list[dict]:
     rows: list[dict] = []
     for page in range(20):
         chunk = (sb.table("game_results")
-                 .select("espn_id,event_start,game_date")
+                 .select("espn_id,event_start,game_date,home,away")
                  .eq("sport", sport)
                  .gte("game_date", start)
                  .lte("game_date", end)
@@ -202,6 +202,13 @@ def _games(sb, sport: str, start: str, end: str) -> list[dict]:
     out = []
     for r in rows:
         if not r.get("espn_id"):
+            continue
+        # Pro Bowl guard: game_results carries the AFC/NFC exhibition (it's
+        # harmless to ratings — no real team matches those names) but flag-
+        # football stat lines would poison player histories. ESPN currently
+        # serves no boxscore for them (the 2024-26 backfill parsed 0 rows);
+        # skip explicitly so that stays true if ESPN ever starts.
+        if {r.get("home"), r.get("away")} == {"AFC", "NFC"}:
             continue
         out.append({"espn_id": str(r["espn_id"]),
                     "event_start": r.get("event_start"),
