@@ -179,10 +179,28 @@ def lane_opener(ctx: Ctx) -> int:
     # a stuck-lane backstop, not a throughput limit.
     deadline = _t.time() + 120.0
     rows, stats = _app._opener_pass(ctx.sb, ctx.now, deadline)
+
+    # THE FOOTBALL PASS RUNS HERE TOO, and forgetting it orphaned the lane.
+    #
+    # `_gridiron_opener_pass` had exactly ONE call site: inside the paperlog
+    # ROUTE body. app.py's own lease-gate table says the `opener` lane means
+    # "_opener_pass + _gridiron_opener_pass (one claim, both passes)" -- the
+    # contract was written down and the implementation only honoured half of
+    # it. That cost nothing while Vercel ran the route with engines on. The
+    # moment the cellar took paperlog with engines=0, `_own_opener` went
+    # False there and the football pass stopped executing ANYWHERE.
+    #
+    # Four consecutive fixes to that pass -- budget, backoff, rotation
+    # stride, sport priority -- were all real defects and none of them could
+    # possibly have produced a row, because the function was never called.
+    # THE LESSON: before tuning a path, prove it EXECUTES.
+    g_deadline = max(deadline, _t.time() + _app._GRIDIRON_BUDGET_S)
+    g_rows, g_stats = _app._gridiron_opener_pass(ctx.sb, ctx.now, g_deadline)
+    stats = {**(stats or {}), **(g_stats or {})}
     log.info("opener: %s", stats)
     if ctx.detail is not None and isinstance(stats, dict):
         ctx.detail.update(stats)
-    return len(rows or [])
+    return len(rows or []) + len(g_rows or [])
 
 
 def lane_repeg(ctx: Ctx) -> int:

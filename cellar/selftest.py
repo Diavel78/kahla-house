@@ -293,6 +293,34 @@ def test_owner_dependent_lanes() -> None:
           f"got {sorted(money_needing)}")
 
 
+def test_lane_covers_its_documented_engines() -> None:
+    """A lane must call EVERY engine app.py says it owns.
+
+    `_gridiron_opener_pass` had one call site -- inside the paperlog route --
+    while app.py's lease-gate table said the `opener` lane runs it. Harmless
+    until the cellar took paperlog with engines=0, at which point the
+    football pass stopped executing anywhere and four consecutive fixes to
+    it could not possibly have produced a row.
+    """
+    import inspect
+    import re
+
+    from cellar import lanes as lanes_mod
+    import os as _os
+    _root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    src = open(_os.path.join(_root, "app.py"), encoding="utf-8").read()
+    # The table in app.py is the contract: `#   "lane" -> _engine_a + _engine_b`
+    for m in re.finditer(r'^#\s+"(\w+)"\s*->\s*([^\n]+)$', src, re.M):
+        lane, rhs = m.group(1), m.group(2)
+        fn = lanes_mod.REGISTRY.get(lane)
+        if fn is None:
+            continue
+        body = inspect.getsource(fn)
+        for eng in re.findall(r'_[a-z_]+(?:_pass|_tick|_alerts|_flush)', rhs):
+            check(f"lane {lane!r} calls {eng}", eng in body,
+                  f"app.py says {lane} owns {eng}; {fn.__name__} never calls it")
+
+
 def test_dry_run_blackout() -> None:
     """A money lane enabled under DRY_RUN must refuse the boot.
 
@@ -487,6 +515,7 @@ def main() -> int:
               test_batch_commands_exist, test_batch_flags_are_real,
               test_batch_blocked_deps, test_owner_dependent_lanes,
               test_dry_run_blackout, test_overrun_detector,
+              test_lane_covers_its_documented_engines,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
