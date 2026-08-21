@@ -1272,10 +1272,24 @@ converts a projected margin into P(beat this line).
   margin.**
 - Three distributions ship (`empirical` / `normal` / `blend`); the backtest
   picks by measured calibration, not by argument.
-- **Gate 1 result (walk-forward): NFL Brier 0.2027 vs a 0.2500 coinflip,
-  calibration sound across the band a book actually posts. NCAAF still
-  over-predicts the favored side by 4-7pp and is NOT trustworthy** — which
-  costs nothing, since the venue pays no rent on any NCAAF game market.
+- **Gate 1, walk-forward, per market (`--market spread|total`):**
+
+  | | Brier | verdict |
+  |---|---|---|
+  | **NFL spread** | **0.2027** | ✅ **PASSES** — calibration sound across the band a book posts |
+  | NFL total | 0.2029 | ❌ **FAILS** — over-predicts the OVER by 6-8pp at every bucket above 0.5 (0.55→0.488, 0.65→0.568, 0.75→0.686) |
+  | NCAAF spread | 0.2168 | ❌ over-predicts the favored side 4-7pp |
+  | NCAAF total | 0.1996 | ✅ calibrates best of all four — **and is unbettable** (no rent) |
+
+  Read the Brier column and you would wire NFL totals; read the calibration
+  and you must not. **A good Brier with a one-sided miss is a model that is
+  confidently wrong in a direction you can be picked off in** — the average
+  error is small because the misses cancel, and a bettor never gets the
+  average. NFL totals are the MLB totals disease again (over-projected
+  scoring, third independent sighting) and the shrinkage does NOT cure it.
+  So football is spreads — which the user said weeks before the model
+  agreed. NCAAF's numbers cost nothing either way: the venue pays no rent on
+  any NCAAF game market.
 - Gate 2 (beating the market) needs historical closing spreads we do not
   store for football; it accrues forward from `pm_snapshots`. **NOT WIRED TO
   ANYTHING** — it prices a line, it does not decide to bet one.

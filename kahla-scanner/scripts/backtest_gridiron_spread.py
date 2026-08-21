@@ -99,7 +99,8 @@ def _fetch_games(sb, sport: str) -> list[dict]:
 
 def backtest_sport(sb, sport: str, warmup: int, min_gp: int,
                    resid_warmup: int, json_path: str | None = None,
-                   params_mode: str = "fitted") -> dict | None:
+                   params_mode: str = "fitted",
+                   market: str = "spread") -> dict | None:
     games = (_fetch_json(json_path, sport) if json_path
              else _fetch_games(sb, sport))
     if len(games) < warmup + 40:
@@ -164,21 +165,26 @@ def backtest_sport(sb, sport: str, warmup: int, min_gp: int,
             a = ratings["teams"].get(g["away"]) or {}
             if h.get("gp", 0) < min_gp or a.get("gp", 0) < min_gp:
                 continue
-            actual = g["home_score"] - g["away_score"]
-            todays.append((proj["margin"], actual))
+            actual = (g["home_score"] + g["away_score"] if market == "total"
+                      else g["home_score"] - g["away_score"])
+            projected = proj["total"] if market == "total" else proj["margin"]
+            todays.append((projected, actual))
             if state is None:
                 continue
 
             n_games += 1
-            abs_err += abs(proj["margin"] - actual); err_n += 1
-            centre = int(round(proj["margin"]))
+            abs_err += abs(projected - actual); err_n += 1
+            centre = int(round(projected))
             for off in _OFFSETS:
                 # Half-point threshold => no push, the venue's own convention.
                 thr = centre + off + 0.5
-                line = -thr                     # home's spread
+                # spread: `line` is the home side's own spread, home covers
+                # when margin > -line. total: OVER covers when the total
+                # clears the number, which is the same tail with line = -thr.
+                line = -thr
                 covered = 1.0 if actual > thr else 0.0
                 for dist in _DISTS:
-                    p = gsp.cover_prob(state, proj["margin"], line, dist=dist)
+                    p = gsp.cover_prob(state, projected, line, dist=dist)
                     if p is None:
                         continue
                     s = stats[dist]
@@ -195,7 +201,7 @@ def backtest_sport(sb, sport: str, warmup: int, min_gp: int,
     if not n_games:
         return None
     out = {"sport": sport, "games": n_games, "pairs": len(pairs),
-           "params_mode": params_mode,
+           "params_mode": params_mode, "market": market,
            "margin_mae": abs_err / max(err_n, 1), "dists": {}}
     for dist in _DISTS:
         s = stats[dist]
@@ -228,6 +234,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="min games played per team before a game counts")
     ap.add_argument("--resid-warmup", type=int, default=80,
                     help="prior (proj, actual) pairs before grading begins")
+    ap.add_argument("--market", default="spread",
+                    choices=("spread", "total"),
+                    help="spread = margin vs a line; total = projected total "
+                         "vs a line (NFL totals pay rent in all three "
+                         "periods, so they are a real lane, but MLB's totals "
+                         "history says prove it, do not assume it)")
     ap.add_argument("--params", default="fitted",
                     choices=("fitted", "static"),
                     help="fitted = the hfa production actually holds "
@@ -244,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
         sb = db.client()
 
     log.info("=" * 68)
-    log.info("GRIDIRON SPREAD BACKTEST — margin → cover, walk-forward")
+    log.info("GRIDIRON BACKTEST — projection → cover, walk-forward")
     log.info("Gate 1 only: is the cover probability CALIBRATED?")
     log.info("Beating the market is gate 2 and needs historical lines.")
     log.info("=" * 68)
@@ -252,15 +264,16 @@ def main(argv: list[str] | None = None) -> int:
     any_run = False
     for sport in sports:
         res = backtest_sport(sb, sport, args.warmup, args.min_gp,
-                             args.resid_warmup, args.json, args.params)
+                             args.resid_warmup, args.json, args.params,
+                             args.market)
         if not res:
             continue
         any_run = True
         log.info("")
-        log.info("%s — %d games graded (%d residual pairs), margin MAE %.2f "
+        log.info("%s %s — %d games graded (%d residual pairs), MAE %.2f "
                  "[params: %s]",
-                 res["sport"], res["games"], res["pairs"], res["margin_mae"],
-                 res["params_mode"])
+                 res["sport"], res["market"].upper(), res["games"],
+                 res["pairs"], res["margin_mae"], res["params_mode"])
         log.info("  %-10s %8s %8s %9s", "dist", "brier", "logloss", "events")
         for dist, m in res["dists"].items():
             log.info("  %-10s %8.4f %8.4f %9d",
