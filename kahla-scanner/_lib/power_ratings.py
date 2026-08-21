@@ -223,23 +223,48 @@ def calibrate(games: list[dict], ratings: dict,
     """Fit HFA + logistic scale from the actual results, replacing the
     eyeballed SPORT_PARAMS guesses.
 
-    HFA = the empirical mean home margin over the window (the real home
-    edge in this sport's run/point units). Scale = the value that
-    minimizes the Brier score of margin_to_prob(projected_margin, scale)
-    against actual home wins, grid-searched. Returns {hfa, scale, brier,
-    n} or None when too few gradable games. In-sample (one-param logistic
-    + an empirical mean — negligible overfit) but on the same opponent-
-    adjusted ratings the live projection uses, so it's the right mapping.
+    HFA = the mean home margin REMAINING AFTER the opponent adjustment —
+    i.e. the mean of (actual margin − margin projected at hfa=0). Scale =
+    the value that minimizes the Brier score of margin_to_prob(projected
+    margin, scale) against actual home wins, grid-searched. Returns {hfa,
+    scale, brier, n} or None when too few gradable games. In-sample (one
+    grid-searched parameter + a residual mean — negligible overfit) but on
+    the same opponent-adjusted ratings the live projection uses, so it's
+    the right mapping.
+
+    ⚠ HFA IS A RESIDUAL, NOT THE RAW MEAN HOME MARGIN. This used to be
+    `mean(home_score − away_score)`, which is only a valid HFA estimate
+    when home and away teams are of equal average quality. NFL schedules
+    are balanced, so it looked right there (fitted 1.97 vs the hand-set
+    2.0) and nobody checked further. **NCAAF schedules are not** — Power-5
+    programs host cupcakes — so the raw mean came out **+8.70**, of which
+    roughly six points is team quality the opponent-adjusted ratings had
+    ALREADY counted. Double-counted, that put every NCAAF projection
+    **5.24 points too favorable to the home team** (measured walk-forward,
+    582 games), while win-prob accuracy fell only 70.8% → 69.2% — which is
+    why a metric suite built on win probability never saw it. A 5-point
+    margin bias is fatal to spread pricing and merely annoying to a
+    moneyline, and football is a spread business.
     """
     if not (games and ratings):
         return None
-    # Empirical HFA = mean home margin.
-    margins = [float(g["home_score"]) - float(g["away_score"])
-               for g in games
-               if g.get("home_score") is not None and g.get("away_score") is not None]
-    if not margins:
+    # Residual HFA: what home still gains once both teams' strength is
+    # already in the projection. Falls back to the raw mean only if the
+    # projection can't be built for any game.
+    resid, raw = [], []
+    for g in games:
+        hs, as_ = g.get("home_score"), g.get("away_score")
+        if hs is None or as_ is None:
+            continue
+        margin = float(hs) - float(as_)
+        raw.append(margin)
+        flat = project(ratings, g["home"], g["away"], hfa=0.0)
+        if flat:
+            resid.append(margin - flat["margin"])
+    if not raw:
         return None
-    hfa = sum(margins) / len(margins)
+    hfa = (sum(resid) / len(resid)) if len(resid) >= 30 \
+        else (sum(raw) / len(raw))
 
     # Build (model_margin, home_won) pairs from the ratings projection.
     pairs: list[tuple[float, int]] = []

@@ -1,0 +1,41 @@
+name: Gridiron spread backtest
+
+# Gate 1 for betting NFL spreads: is the margin -> cover conversion
+# calibrated? Manual only -- this reads history, it decides nothing.
+on:
+  workflow_dispatch:
+    inputs:
+      sport:
+        description: "NFL or NCAAF (blank = both)"
+        required: false
+        default: ""
+      resid_warmup:
+        description: "prior (proj, actual) pairs before grading begins"
+        required: false
+        default: "80"
+      params:
+        description: "fitted (what production holds) or static (SPORT_PARAMS)"
+        required: false
+        default: "fitted"
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Backtest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          python -m scripts.backtest_gridiron_spread \
+            ${{ github.event.inputs.sport && format('--sport {0}', github.event.inputs.sport) || '' }} \
+            --resid-warmup ${{ github.event.inputs.resid_warmup }} \
+            --params ${{ github.event.inputs.params }}
