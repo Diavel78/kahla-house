@@ -62,9 +62,24 @@ def _fetch_games(sb, sport: str, since_iso: str) -> list[dict]:
 
 _SPREAD_FIT_SPORTS = ("NFL", "NCAAF")
 
+# The residual fit gets its OWN lookback, wider than the ratings window.
+# One season of pairs is what made the walk-forward NFL totals calibration
+# fail gate 1 (grading started in November on 80-220 pairs while monthly
+# scoring wobbled ±4 points around the fitted intercept); the same code on
+# three seasons calibrates within ±2.6pp at every bucket. Ratings stay on
+# _WINDOW_DAYS — team form is current-season; the residual DISTRIBUTION is
+# stable across seasons (per-season beta 0.645/0.648 in 2024/2025).
+_FIT_LOOKBACK_DAYS = 1100
 
-def _spread_fit(games: list[dict], params: dict) -> dict | None:
-    """Walk-forward (alpha, beta, sd) for the margin → cover conversion.
+# Inside the fit's walk, ratings for each date come from a bounded prior
+# window — the SAME 250 days the backtest harness uses. An unbounded prior
+# here would be the validated-at-one-number, deployed-at-another disease
+# (the NCAAF +8.70 HFA lesson) in miniature, and it triples the solve cost.
+_FIT_RATINGS_WINDOW_DAYS = 250
+
+
+def _resid_fits(games: list[dict], params: dict) -> dict | None:
+    """Walk-forward (alpha, beta, sd) for margin→cover AND total→over.
 
     WALK-FORWARD ON PURPOSE, even though hfa/scale beside it are fit
     in-sample. Those two are one parameter each and shrug off the overfit;
@@ -75,10 +90,13 @@ def _spread_fit(games: list[dict], params: dict) -> dict | None:
     projected from ratings built only from earlier games, exactly as the
     backtest grades it.
 
-    Costs a ratings solve per game date (about a minute for a full NCAAF
-    season) in a daily batch job. Returns None rather than raising: a
-    missing spread_fit degrades to "no cover probability", never to a
-    wrong one.
+    One walk prices both markets — project() returns margin and total from
+    the same solve, so the total fit is free. `total_fit` ships in the
+    snapshot for the (future) totals lane; nothing consumes it yet.
+
+    Costs a ratings solve per game date (a few minutes for three NCAAF
+    seasons) in a daily batch job. Returns None rather than raising: a
+    missing fit degrades to "no cover probability", never to a wrong one.
     """
     try:
         from collections import defaultdict
@@ -100,34 +118,55 @@ def _spread_fit(games: list[dict], params: dict) -> dict | None:
         for g in parsed:
             by_date[g["_dt"].date()].append(g)
         dates = sorted(by_date)
-        pairs: list[tuple[float, float]] = []
+        m_pairs: list[tuple[float, float]] = []
+        t_pairs: list[tuple[float, float]] = []
         for d in dates:
-            prior = [g for g in parsed if g["_dt"].date() < d]
-            if len(prior) < 40:
-                continue
             cut = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+            prior = [g for g in parsed if g["_dt"].date() < d
+                     and (cut - g["_dt"]).days <= _FIT_RATINGS_WINDOW_DAYS]
+            # Warmup + per-team gp floor MATCH THE BACKTEST HARNESS
+            # (warmup=60, min_gp=4). Without them the fit ingests pairs the
+            # harness would never grade — cold-start projections whose noise
+            # attenuates beta (measured: 0.43 unguarded vs 0.56 guarded on
+            # the same three NFL seasons) — and the thing tested stops being
+            # the thing that ships.
+            if len(prior) < 60:
+                continue
             R = pr.compute_ratings(prior, half_life_days=hl, as_of=cut)
             if not R:
                 continue
             for g in by_date[d]:
+                h = R["teams"].get(g["home"]) or {}
+                a = R["teams"].get(g["away"]) or {}
+                if h.get("gp", 0) < 4 or a.get("gp", 0) < 4:
+                    continue
                 proj = pr.project(R, g["home"], g["away"],
                                   hfa=params.get("hfa", 0.0))
                 if not proj:
                     continue
-                pairs.append((proj["margin"],
-                              g["home_score"] - g["away_score"]))
-        st = gsp.fit(pairs)
-        if not st:
-            return None
-        # Only the three numbers Flask needs for the normal tail. The
-        # empirical PMF is deliberately NOT shipped: it graded level with
-        # the normal on NFL (brier 0.2027 vs 0.2028) and is 120 entries
-        # instead of 3, so the mirror in app.py stays small enough to be
-        # obviously correct.
-        return {"alpha": st["alpha"], "beta": st["beta"], "sd": st["sd"],
-                "mean": st["mean"], "n": st["n"]}
+                m_pairs.append((proj["margin"],
+                                g["home_score"] - g["away_score"]))
+                t_pairs.append((proj["total"],
+                                g["home_score"] + g["away_score"]))
+
+        # Only the numbers Flask needs for the normal tail. The empirical
+        # PMF is deliberately NOT shipped: it graded level with the normal
+        # (NFL spread 0.2027 vs 0.2028; NFL total 0.1918 vs 0.1914 on three
+        # seasons) and is 120 entries instead of 3, so the mirror in app.py
+        # stays small enough to be obviously correct.
+        def _slim(st):
+            return {"alpha": st["alpha"], "beta": st["beta"], "sd": st["sd"],
+                    "mean": st["mean"], "n": st["n"]} if st else None
+
+        out = {}
+        sf, tf = _slim(gsp.fit(m_pairs)), _slim(gsp.fit(t_pairs))
+        if sf:
+            out["spread_fit"] = sf
+        if tf:
+            out["total_fit"] = tf
+        return out or None
     except Exception as e:
-        log.warning("spread fit failed: %s", e)
+        log.warning("resid fit failed: %s", e)
         return None
 
 
@@ -195,9 +234,12 @@ def main(argv: list[str] | None = None) -> int:
         # only place we can make a pre-game game market, so it is the only
         # place this is worth the walk.
         if sport in _SPREAD_FIT_SPORTS:
-            fit = _spread_fit(games, params)
-            if fit:
-                params = {**params, "spread_fit": fit}
+            # Wider pull than the ratings window — see _FIT_LOOKBACK_DAYS.
+            fit_since = (now - timedelta(days=_FIT_LOOKBACK_DAYS)).isoformat()
+            fit_games = _fetch_games(sb, sport, fit_since) or games
+            fits = _resid_fits(fit_games, params)
+            if fits:
+                params = {**params, **fits}
         if _write_snapshot(sb, sport, ratings, params):
             cal_frag = (f" · fit hfa={cal['hfa']} scale={cal['scale']} "
                         f"brier={cal['brier']}") if cal else " · uncalibrated"

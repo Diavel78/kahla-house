@@ -470,7 +470,7 @@ A **completely separate, non-betting** surface for the family's book club. Lives
   - `kahla-scanner/scripts/compute_power_ratings.py` — reads the finals window per sport, runs the engine + calibration, writes one `power_ratings` snapshot row per sport.
   - `kahla-scanner/scripts/backtest_power_ratings.py` — walk-forward backtest harness (per-sport accuracy/Brier/calibration). Validates the TEAM core only (not the MLB pitcher layer, not live CLV).
   - `kahla-scanner/supabase/power_ratings.sql` — DDL for `game_results` + `power_ratings`. Must exist before the pipeline works (else Flask silently uses the v1 season-stat fallback). **Already applied to the live DB** (verified May 2026 via `run_sql.sh`); re-run with `run_sql.sh -f` if you ever rebuild the project.
-  - `.github/workflows/power-ratings.yml` — daily 11:00 UTC: `ingest_results` + `compute_power_ratings`; `workflow_dispatch` with `days` input backfills a season. Separate from `scanner-poll.yml`.
+  - `.github/workflows/power-ratings.yml` — daily 11:00 UTC (schedule handed to the cellar's batch lane Aug 2026; dispatch kept): `ingest_results` + `compute_power_ratings`; `workflow_dispatch` with `days` (+ optional `sport`) backfills. Football 2023+2024 backfilled Aug 21 2026 — `game_results` holds NFL/NCAAF 2023→present, which the football residual fits depend on (see `_FIT_LOOKBACK_DAYS`).
   - `.github/workflows/power-ratings-backtest.yml` — manual `workflow_dispatch`; prints walk-forward metrics to the run log.
   - The Flask-side projection lives in `handicapper_web.py:_power_rating_v2` (reads the latest `power_ratings` snapshot, runs the lightweight off/def→margin projection + all the per-game layers: pitcher, bullpen, park, lineup, goalie, injuries, rest). `_power_rating_v1` is the raw-season-stat fallback.
 - `kahla-scanner/supabase/bot_picks.sql` — `bot_picks` table DDL (run via `run_sql.sh -f` or the Supabase SQL editor; **already applied** as of May 2026)
@@ -912,13 +912,12 @@ betting the game*. Do not smuggle it into the Cellar's lanes.
 - **PROPS. "Lots and lots and lots of props."** Football props outnumber
   baseball's roughly tenfold, and NFL `prop_any` early is the largest early
   pool on the board. This is the main event, not a side quest.
-- **Totals are not allowed to be a shrug.** "We can't do totals cuz we are
-  dumb" is not an acceptable answer. NFL totals failed gate 1 by
-  over-predicting the OVER 6-8pp at every bucket above 0.5 — a UNIFORM,
-  one-sided miss, which is the most fixable shape a calibration failure can
-  have. Diagnosis so far: projected total mean 46.64 vs actual 45.80,
-  residual mean −0.84 / median −0.25 / skew −0.19 on n=221. Location and
-  skew are both small, so the miss is NOT explained by either — unfinished.
+- **Totals are not allowed to be a shrug — and they no longer are: NFL
+  totals PASSED gate 1 (Aug 21 2026)** once the harness had three seasons
+  to walk (Brier 0.1914, every bucket ±2.6pp). The 6-8pp OVER bias was the
+  one-season walk's location lag, not the model — full diagnosis in the
+  Gridiron IQ section. What a totals lane still needs is gate 2: beat the
+  market's line, accruing forward from pm_snapshots once football lists.
 - **Unit sizes come DOWN.** Betting many more markets at the current stake
   is a capital problem; expect to peel back `_AUTOBET_CONTRACTS` as breadth
   grows. That is a feature of going wide, not a retreat.
@@ -1394,24 +1393,41 @@ converts a projected margin into P(beat this line).
   margin.**
 - Three distributions ship (`empirical` / `normal` / `blend`); the backtest
   picks by measured calibration, not by argument.
-- **Gate 1, walk-forward, per market (`--market spread|total`):**
+- **Gate 1, walk-forward, per market — ALL FOUR CELLS PASS on three seasons
+  (Aug 21 2026; `game_results` backfilled football 2023+2024 via
+  power-ratings.yml's new `sport` dispatch input):**
 
-  | | Brier | verdict |
-  |---|---|---|
-  | **NFL spread** | **0.2027** | ✅ **PASSES** — calibration sound across the band a book posts |
-  | NFL total | 0.2029 | ❌ **FAILS** — over-predicts the OVER by 6-8pp at every bucket above 0.5 (0.55→0.488, 0.65→0.568, 0.75→0.686) |
-  | NCAAF spread | 0.2168 | ❌ over-predicts the favored side 4-7pp |
-  | NCAAF total | 0.1996 | ✅ calibrates best of all four — **and is unbettable** (no rent) |
+  | | 1 season | 3 seasons (blend Brier) | verdict |
+  |---|---|---|---|
+  | NFL spread | 0.2027 | **0.1990** | ✅ |
+  | NFL total | 0.2029, OVER +6-8pp | **0.1914 — every bucket ±2.6pp** | ✅ |
+  | NCAAF spread | 0.2168, fav +4-7pp | **0.2093 — ±1.6pp through 0.1-0.8** | ✅ |
+  | NCAAF total | 0.1996 | **0.1962** | ✅ |
 
-  Read the Brier column and you would wire NFL totals; read the calibration
-  and you must not. **A good Brier with a one-sided miss is a model that is
-  confidently wrong in a direction you can be picked off in** — the average
-  error is small because the misses cancel, and a bettor never gets the
-  average. NFL totals are the MLB totals disease again (over-projected
-  scoring, third independent sighting) and the shrinkage does NOT cure it.
-  So football is spreads — which the user said weeks before the model
-  agreed. NCAAF's numbers cost nothing either way: the venue pays no rent on
-  any NCAAF game market.
+  **The one-season "failures" were the HARNESS's sample, not the model.**
+  The NFL-totals OVER bias (and NCAAF's favored-side bias) was walk-forward
+  LOCATION LAG: on one season, grading starts in November with only 80-220
+  residual pairs while actual scoring wobbles ±4 pts month-to-month around
+  the fitted intercept (Nov −4.2 / Dec +2.3 / Jan −4.8). Proven three ways
+  before touching anything: an oracle full-season state calibrates within
+  ±2pp with the same code; CHASING the wobble (recency-decayed location)
+  grades WORSE, so it is noise, not seasonality; and the untouched code on
+  three seasons calibrates everywhere. The "NFL totals = the MLB totals
+  disease" claim is DEAD — the totals game-signal is real (corr +0.24,
+  beats a league-mean-only pricer 0.2033 vs 0.2093) and there is no
+  over-projection once the location fits on enough sample. The residual
+  RELATION is stable across seasons (NFL spread beta 0.645/0.648 in
+  2024/2025 — 2023's 0.388 is a cold-start artifact of a walk with no
+  prior season), which is why pooling seasons is right: the production fit
+  (`compute_power_ratings._resid_fits`) now pulls `_FIT_LOOKBACK_DAYS`=1100
+  days while ratings stay on the 365-day window, matches the harness's
+  warmup/min_gp guards (unguarded it ingested cold-start pairs the harness
+  never grades — beta 0.43 vs 0.56 on identical data), and ships
+  **`total_fit`** beside `spread_fit` (same walk, free; nothing consumes it
+  yet). ⚠ SURVIVING CAVEAT: the far tails under-predict blowouts by 5-10pp
+  in every cell (p≈0.05 bucket: NFL total actual 0.10, NCAAF spread 0.15) —
+  a line 10-14 points off projection is mispriced by this state; the band a
+  book posts is sound. NCAAF stays unbettable regardless (no rent).
 - Gate 2 (beating the market) needs historical closing spreads we do not
   store for football; it accrues forward from `pm_snapshots`. **NOT WIRED TO
   ANYTHING** — it prices a line, it does not decide to bet one.
