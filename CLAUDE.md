@@ -85,8 +85,18 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 > | MLB props + NRFI | ❌ | ✅ | ✅ |
 > | **MLB totals** | ❌ | ❌ | ❌ — no program at all |
 > | **NFL ML** | ❌ | ❌ | ✅ **live only — NO pre-game NFL ML, ever** |
-> | **NFL spread / total** | ✅ | ✅ | ✅ |
-> | **CFB / NCAAF game markets** | ❌ | ❌ | ❌ — futures only |
+> | **NFL spread** | ✅ $150 | ✅ $225 | ✅ $800 — 1,489 markets |
+> | **NFL total** | ✅ $75 | ✅ $225 | ✅ $900 — 1,481 markets |
+> | **NFL props** | ✅ $1,000 `prop_any` | ✅ $500 player / $500 team | ✅ $750 / $750 |
+> | **CFB / NCAAF game markets** | ❌ | ❌ | ❌ — **futures only** |
+>
+> (NFL/CFB rows re-read from `poly_reward_schedule` Aug 20 2026 19:51 AZ.
+> **NCAAF has NO game-market program of any kind — moneyline, spread, total
+> and props are all absent; only `futures` pays.** So rule #1 forbids every
+> NCAAF game bet, and the football deadline that matters is **NFL Sept 8, not
+> NCAAF Aug 29.** Note also **NFL `prop_any` early = a $1,000 pool at a 7,500
+> target — the largest early pool on the board**, and unlike MLB, football
+> props DO pay pre-T-6h.)
 >
 > We are a PRE-GAME maker, so a `live`-only program means the market is not
 > bettable by this machine at all. Three lanes have died to this rule: MLB
@@ -1212,6 +1222,65 @@ silent v1 fallback). To actually populate ratings + CLV:
 - **TODO:** prior-season cold-start prior; home/road + pace splits; confirmed-starter goalie feed; MLB umpire/platoon splits. Several layers (lineup, goalie, NBA/NFL injuries, bullpen) were built blind to the live ESPN/MLB shapes — guarded to no-op on mismatch, **sanity-check each against a real game once live**.
 
 **Backtest** (`scripts/backtest_power_ratings.py`, `.github/workflows/power-ratings-backtest.yml`): walk-forward (ratings from prior games only → project → grade), reports per-sport accuracy vs home baseline + Brier + calibration table. **Validates the TEAM core only** — not the MLB pitcher layer (no historical probables) and not CLV (15d snapshot retention; model-vs-close accrues forward via `bot_picks.clv_pp` bucketed by model-agree). First real run (~900 games/sport): **NBA 66.6% vs 54.1% → signal; MLB team-core 52.5% → noise** (can't predict baseball without the pitcher); NHL/CBB too weak. **July 2026 run on the backfilled 2025 football season (preseason rows excluded — `ingest_results` now skips ESPN season.type 1): NFL 66.5%/Brier 0.2171, NCAAF 71.2%/0.1935 → both real signal; NHL re-confirmed dead (53.3%, Brier worse than coinflip, n=912) — the missing piece is a CONFIRMED-STARTING-GOALIE feed, not more team math.**
+
+> ### ⚠ THE HFA BUG (found Aug 20 2026, live since the ratings shipped)
+>
+> `power_ratings.calibrate()` set **HFA = mean(home_score − away_score)**.
+> That is a valid HFA estimate ONLY when home and away teams are of equal
+> average quality. NFL schedules are balanced, so it looked right there
+> (fitted 1.97 vs the hand-set 2.0) and nobody looked further. **NCAAF
+> schedules are not** — Power-5 programs host cupcakes — so the raw mean came
+> out **+8.70**, of which ~6 points is team quality the opponent-adjusted
+> ratings had ALREADY counted. The live snapshot carried `hfa: 8.697`.
+>
+> Double-counted, that put every NCAAF projection **5.24 points too favorable
+> to the home team** (walk-forward, 582 games) while win-prob accuracy fell
+> only 70.8% → 69.2%. **A metric suite built on win probability cannot see a
+> five-point margin bias** — the margin is the number spreads need, and
+> nothing had ever measured it. That is the general lesson: *measure the
+> quantity you intend to bet, not the one that is easy to score.*
+>
+> HFA is now the mean margin REMAINING after the opponent adjustment. NFL
+> 1.97 → 2.057 (the control holds), NCAAF 8.70 → **2.431**. Mean margin
+> residual −5.24 → +1.03. Honest caveat: win-prob Brier worsens slightly
+> (0.1976 → 0.2013) because the refit scale moves with it — accepted, because
+> football is a spread business.
+>
+> **And the structural twin: the backtest graded `SPORT_PARAMS` while
+> production prices off the SNAPSHOT's fitted params.** Validated at one
+> number, deployed at another, for months. `backtest_gridiron_spread` now
+> fits per-date from the same prior window so the thing tested is the thing
+> that ships (`--params static` measures the gap on purpose). **Check this
+> whenever a model has both a hand-set default and a fitted value.**
+
+### Gridiron IQ — margin → COVER (`_lib/gridiron_spread.py`, Aug 20 2026)
+
+The object needed to bet a spread, and the one the model never had. Gridiron
+IQ's published accuracy is measured on the WIN probability — the projected
+margin squeezed through a logistic, its least useful projection. `cover_prob`
+converts a projected margin into P(beat this line).
+
+- **Residuals live on the INTEGERS** (`r = actual − round(proj_calibrated)`)
+  so football's key numbers (3, 7, 10, 14) survive instead of being averaged
+  into a normal. Polymarket posts football spreads on **half points**, which
+  cannot push — the hardest part of spread pricing is absent at our venue.
+- **Shrinkage is the bigger term.** The raw projection is ~a third too
+  extreme (NFL β=0.66, NCAAF β=0.70 — a projected blowout under-delivers by
+  5-7 points in BOTH directions). Same disease as the Diamond totals work
+  (β=0.37). `fit()` regresses actual on projected and prices the shrunk
+  number; tail bias collapses to under ±2 points. **Never price off the raw
+  margin.**
+- Three distributions ship (`empirical` / `normal` / `blend`); the backtest
+  picks by measured calibration, not by argument.
+- **Gate 1 result (walk-forward): NFL Brier 0.2027 vs a 0.2500 coinflip,
+  calibration sound across the band a book actually posts. NCAAF still
+  over-predicts the favored side by 4-7pp and is NOT trustworthy** — which
+  costs nothing, since the venue pays no rent on any NCAAF game market.
+- Gate 2 (beating the market) needs historical closing spreads we do not
+  store for football; it accrues forward from `pm_snapshots`. **NOT WIRED TO
+  ANYTHING** — it prices a line, it does not decide to bet one.
+- Run it: `.github/workflows/gridiron-spread-backtest.yml`, or locally with
+  `--json` (the sandbox cannot import the supabase client — cffi panic).
 
 **Sizing gate:** `MODEL_SIZING_SPORTS = {NBA, NFL, NCAAF}`. NBA backtest-proven (66.6% vs 54.1%). **Football ("Gridiron IQ") earned in July 2026** on the full-2025-season walk-forward (preseason excluded): NFL 66.5% vs 52.2% baseline / Brier 0.2171, NCAAF 71.2% vs 57.2% / Brier 0.1935 — both honest at the top calibration bucket (77%/80% at 70+). Live CLV audits them in-season via `signal_blob.model.agree`. **MLB removed July 2026: the live review it was waiting on GRADED IT OUT** (model-disagree real ML picks beat model-agree +24.5u vs +13.6u, CLV 0.94 vs 0.11 — see the constant's comment); the MLB model's remaining TOTALS role was blacklisted July 4 2026 (see the O/U blacklist note). NHL (53.3% vs 52.7%, Brier 0.2576 over 912 games — confirmed dead without a real goalie feed) and CBB stay reference-only. `_power_rating` stamps `feeds_sizing`; `_model_edge_for_side` returns 0 when off. Every web-logged pick stores `signal_blob.model = {source, feeds_sizing, sp_adjusted, n_games, edge_pp, agree}` so settled picks can be bucketed by model-agree for the ~2-week MLB CLV review. Whale (10u) still disabled. Widen `MODEL_EDGE_CAP_PP` past 1.5pp only after backtest + live CLV both say a sport beats the close.
 
