@@ -684,6 +684,44 @@ suppressing a real outage later.
 
 ## THE CELLAR CUTOVER — next job (user, Aug 19 2026: "we need it now")
 
+> ⚠ **THE GOAL IS `$0` AND EVERYTHING ON THE BOX — storage, IO, compute, bets,
+> model.** Read `docs/cellar-migration-spec.md` **§12** before reasoning about
+> any of this; it is the end state and this briefing used to omit it, which is
+> exactly how a session came to argue the opposite (below). Vercel Pro $20/mo
+> and Supabase Pro ~$25/mo both die. Order: Vercel after Phase 4, **Postgres
+> LAST** (§12c) — after the cellar is sole writer and has been boring for 30
+> days, and not before a `pg_dump` restore has actually been TESTED (§12e:
+> repatriation is done when a restore works, not when Postgres runs locally).
+>
+> **Two corrections a session got wrong on Aug 20, both already answered in
+> the spec:**
+> - *"The database should not follow the compute into the basement — the lease
+>   needs a shared DB."* **§12c says that is correct for the MIGRATION and wrong
+>   as a permanent statement.** Every reason to keep Postgres in the cloud (the
+>   seam that lets both sides be live, meaningful lease failover, rollback =
+>   stop the daemon) **expires** once the cellar is sole writer. Local Postgres
+>   over a unix socket also kills an invisible throttle: every DB call today is
+>   a cloud round trip through PostgREST, which starts to matter at a 15s peg.
+> - *"Supabase is fine, nothing to do."* **§12d already measured this** (Aug 16:
+>   1,738 MB; Aug 20: 1,822 MB — steady state confirmed, retention working).
+>   Free tier is 500 MB and is NOT reachable without cutting prop retention to
+>   ~4 days, which destroys the bid/ask tape the prop reviews run on. **The $0
+>   path is SELF-HOSTING, NOT DOWNGRADING.** 1.8 GB is nothing for a local SSD.
+>
+> ⚠ **`paperlog` IS ON THE CRITICAL PATH TO `$0`, not an optimization.** While
+> it stays on Vercel, Vercel keeps running per-minute compute, so Vercel Pro
+> cannot drop to Hobby (§12b). Its blocker is real (see below) but it has to be
+> solved, not skipped.
+>
+> ⚠ **The lane order is DELIBERATE and we deviated from it.** §6 Phase 3 runs
+> money lanes LAST (opener is step 6) and holds them until the box is dedicated
+> ~mid-Sept, because until then the laptop can be closed by someone not
+> thinking about the cellar. **The opener moved FIRST on Aug 20 anyway**, by
+> explicit user call ("Football is coming... if I lose a couple of baseball
+> bets, OH WELL"). That is an accepted risk, not an oversight, and it degrades
+> gracefully: a closed laptop lets the lease go stale and Vercel reclaims the
+> lane within its 180s TTL — back to 14s passes, never a blackout.
+
 Vercel's function budget is now the binding constraint on the machine's
 thinking. The opener can't walk a slate inside it — a live tick showed
 `opener_pool: 4`, four games evaluated out of fifteen — and rule #1's
@@ -711,9 +749,10 @@ engines inline. Cross-side that is safe (the lease arbitrates — which is
 exactly what `cellar_owns_lane` above shows); in ONE process it is a
 double-fire. So moving paperlog means either re-coupling the opener to it
 (undoing this) or extracting the engines out of the route (spec §8 item 6).
-Neither is worth doing on a live money path while Vercel is healthy: the
-paperlog move's whole justification was the cancellation, and moving the
-opener already fixed it.
+The cancellation that justified the move urgently is gone — but the move
+itself is NOT optional: paperlog on Vercel is what keeps Vercel Pro alive
+(§12b). **The extraction is the real work item**, and it is on the path to
+`$0`, not a nice-to-have.
 
 ✅ **STEP 1 DONE (Aug 20 2026): the lease is ENFORCED.** `CELLAR_LEASE_ENFORCED`
 is set on Vercel, so a side that loses a claim actually stands down. Before
