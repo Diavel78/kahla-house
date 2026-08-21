@@ -1535,6 +1535,64 @@ def _gameday_rewards(sb) -> dict:
     return out
 
 
+@app.route("/api/polymarket/orders")
+def api_poly_orders():
+    """READ-ONLY: every open order on the account. Venue truth, no writes.
+
+    "What am I quoting right now" had no read a session could reach.
+    /api/my-orders is Firebase-gated, so a sandbox has no path to it;
+    dedup-orders deliberately excludes hand-placed MANUAL orders (that
+    exclusion is a safety property, not an oversight); and probe-exec's
+    listing is slug-filtered, i.e. it needs the answer as its input.
+
+    What that left was GUESSING slugs, which produced two confident wrong
+    readings of a football market that does not exist: Polymarket posts
+    football spreads as a LADDER, one market per rung, so there is no
+    `asc-nfl-<away>-<home>-<date>` to ask about. An invented slug returns
+    "nothing active", which reads exactly like "pays nothing" -- the shape
+    of every wrong zero in this file.
+
+    Shared-secret like its sibling sweeps. Filters to _OPEN_ORDER_STATES,
+    so a REPLACED husk stays invisible here exactly as it is everywhere
+    else; use probe-exec's list_only for those.
+    """
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    want_slug = (request.args.get("slug") or "").strip().lower()
+    out: dict = {"ok": True, "orders": [], "count": 0}
+    try:
+        client = get_client()
+        _r = client.orders.list({})
+        _raw = (_r.get("orders") if isinstance(_r, dict)
+                else getattr(_r, "orders", [])) or []
+        rows = []
+        for _o in _raw:
+            def _og(k, d=None):
+                return (_o.get(k, d) if isinstance(_o, dict)
+                        else getattr(_o, k, d))
+            st = str(_og("state") or "")
+            if st not in _OPEN_ORDER_STATES:
+                continue
+            sl = str(_og("marketSlug") or "")
+            if want_slug and want_slug not in sl.lower():
+                continue
+            _p = _og("price")
+            rows.append({
+                "slug": sl, "state": st, "intent": _og("intent"),
+                "price": (_p.get("value") if isinstance(_p, dict) else _p),
+                "qty": _og("quantity"), "leaves": _og("leavesQuantity"),
+                "filled": _og("cumQuantity"),
+                "flag": _og("manualOrderIndicator"),
+                "good_till": str(_og("goodTillTime") or "")})
+        rows.sort(key=lambda r: str(r.get("slug") or ""))
+        out["orders"], out["count"] = rows, len(rows)
+    except Exception as e:
+        out.update(ok=False, error=f"{type(e).__name__}: {e}"[:220])
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/dedup-orders")
 def api_poly_dedup_orders():
     """Cancel DUPLICATE resting BUY orders — one order per (slug, intent).
@@ -6689,7 +6747,8 @@ def api_polymarket_probe_exec():
     slug = (request.args.get("slug") or "").strip()
     if not slug:
         out.update(ok=False, error="pass ?slug=<poly market slug> (find one "
-                   "via the dashboard betslip or /debug-pmm)")
+                   "via the dashboard betslip or /debug-pmm), or use "
+                   "/api/polymarket/orders for every open order")
         return jsonify(out)
     side = (request.args.get("side") or "long").strip().lower()
     intent = ("ORDER_INTENT_BUY_SHORT" if side == "short"
