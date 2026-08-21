@@ -20,6 +20,10 @@ on:
         description: "Days of finals to ingest (use ~200 for a season backfill)"
         required: false
         default: "2"
+      sport:
+        description: "Limit ingest to one sport (e.g. NFL) — a multi-season backfill across all six sports would blow the timeout"
+        required: false
+        default: ""
   # ── SCHEDULE DISABLED 2026-08-17 — THE CELLAR OWNS THIS JOB ──────────────
   # Runs from the house box instead (cellar/batch.py, `batch` lane). The
   # cellar_lease does NOT protect against GitHub Actions — Actions claims
@@ -64,7 +68,10 @@ jobs:
         env:
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python -m scripts.ingest_results --days ${{ github.event.inputs.days || '2' }}
+        run: >
+          python -m scripts.ingest_results
+          --days ${{ github.event.inputs.days || '2' }}
+          ${{ github.event.inputs.sport && format('--sport {0}', github.event.inputs.sport) || '' }}
 
       - name: Compute power ratings
         env:
