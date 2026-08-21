@@ -789,6 +789,16 @@ because both failure modes are silent and look healthy:
   green on every dashboard. Enabled money lane + dry-run now refuses the boot.
   Rehearse with read-only lanes; there is no rehearsal worth a blackout.
 
+⚠ **A PUSH TO `main` NO LONGER REACHES THE OPENER.** The cellar runs `app.py`
+out of a working directory on the house box, so any change to the opener, the
+autobet, the re-peg or the gridiron shadows is **inert until someone pulls and
+restarts the daemon** — silent, and indistinguishable from a fix that did not
+work. Before the cutover, Vercel redeployed every push within a minute. The
+daemon now stamps its git SHA at boot (`exec_probe_runs`, `kind=cellar_boot`)
+and the dashboard's lane card prints `code <sha>`, or `⚠ cellar on X, site on
+Y — pull + restart` when they differ. **Check that line before debugging why a
+change "didn't work".**
+
 ⚠ **`CELLAR_DRY_RUN` defaults to TRUE, and existing healthy `work=12` ticks are
 NOT evidence it is off** — `_drive_route` lanes (pm_snapshot/paperlog/vsin/
 kalshi_autolog) ignore the flag entirely; only the direct-call money lanes
