@@ -103,6 +103,55 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 > slug that had no such market: football spreads are a LADDER, one market
 > per rung, so there is no single `asc-nfl-<away>-<home>-<date>`).
 >
+> ## ⚡ RENT IS PAID FOR BEING EARLY AND ALONE (measured Aug 21 2026)
+>
+> The single most valuable thing this project has measured. Rent per
+> market-day, MLB moneyline, last 7 days, bucketed by how far ahead of the
+> game the liquidity was resting:
+>
+> | days before game | market-days | $/market-day |
+> |---|---|---|
+> | 1 | 12 | $0.084 |
+> | 2 | 42 | $0.268 |
+> | **3** | **35** | **$2.187** |
+>
+> **Three days out paid 26× what one day out paid**, monotonic at every
+> step, and the older data shows the same shape. Confirmed in cash: a
+> $73.23 payout landed Aug 21, pending→paid at full value in ~2 hours.
+>
+> **THE MECHANISM (this is the durable part — the numbers above will move).**
+> Rent is your share of a per-market pool. Near game time every maker piles
+> in and 10 contracts is a rounding error; three days out, on a market
+> nobody is quoting yet, the same 10 contracts is a large fraction of all
+> liquidity present. **You are not paid for size. You are paid for being
+> early and alone.**
+>
+> This kills the model that used to sit in this file — share ≈ (your size /
+> `target_size`) × pool, predicting ~$0.11/market. That was fitted entirely
+> on day-of data, where it happens to be right, and it is simply the wrong
+> model for the early window (actual: $9.63 on a single market-day).
+>
+> **CONSEQUENCES:**
+> - **Breadth beats size.** More markets rested early > more contracts on
+>   fewer markets. This is what makes the football spread LADDER valuable:
+>   fifteen rungs is not fifteen chances to fill, it is fifteen markets each
+>   earning its own rent.
+> - **We are already at the ceiling for MLB.** `_OPENER_HI_H`=96h, and
+>   Polymarket only lists ~4 days of baseball (the opener's `opener_ldates`
+>   shows 4 dates). Resting bets sit at 3.7-3.9 days — pressed against a
+>   VENUE limit, not a self-imposed one. Nothing to gain there.
+> - **Football is where this compounds.** The venue lists NFL *weeks* out
+>   (Sept 10 games listed Aug 21). If the gradient holds past day 3, a
+>   football ladder resting 20 days out is a different order of magnitude.
+>   UNTESTED — day 3 is the edge of our sample (one lone day-7 row showed
+>   $2.72) and it may flatten or reverse.
+>
+> **RE-MEASURE, NEVER RECALL** (the same rule as the deleted program table).
+> The query is the durable artifact: join `poly_incentive_earnings` to the
+> game date parsed out of `market_slug`, bucket `reward` by
+> `game_date − earn_date`, split by family and by era so a program change
+> cannot masquerade as a trend.
+>
 > The only durable facts: the periods are **early** (listing→T-6h),
 > **day_of** (T-6h→start) and **live**; they are NOT symmetric across
 > families; and a family answer is never the rule — the per-market answer is.
