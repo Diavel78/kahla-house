@@ -75,28 +75,37 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 > recent scrape count (`_RENT_SCHED_TOL_MIN`, RELATIVE to the newest row so
 > a broken scrape ages everything together instead of halting every lane).
 >
-> **The periods are NOT symmetric, and they MOVE — read them, never recall
-> them.** As of Aug 19 2026:
+> ⚠ **NEVER WRITE THE PROGRAM TABLE DOWN. THERE ARE NO CONSTANT MAKER
+> REWARDS ON THIS VENUE — THEY CHANGE CONSTANTLY** (user, Aug 20 2026, on
+> deleting the table that used to sit here). The rule is the whole rule:
+> **ask whether THIS market pays rent right now; if it does, bet it; if it
+> doesn't, don't.** A snapshot of which families pay which periods is
+> accurate for about a day and then quietly lies, and a session that reads
+> the stale copy will "fix" a working machine or talk itself out of a live
+> lane. Both already happened from the table that was here:
 >
-> | | early (listing→T-6h) | day_of (T-6h→start) | live |
-> |---|---|---|---|
-> | **MLB ML** | ❌ **PULLED Aug 19** — day-of business now | ✅ | ✅ |
-> | MLB spread | ✅ | ✅ | ✅ |
-> | MLB props + NRFI | ❌ | ✅ | ✅ |
-> | **MLB totals** | ❌ | ❌ | ❌ — no program at all |
-> | **NFL ML** | ❌ | ❌ | ✅ **live only — NO pre-game NFL ML, ever** |
-> | **NFL spread** | ✅ $150 | ✅ $225 | ✅ $800 — 1,489 markets |
-> | **NFL total** | ✅ $75 | ✅ $225 | ✅ $900 — 1,481 markets |
-> | **NFL props** | ✅ $1,000 `prop_any` | ✅ $500 player / $500 team | ✅ $750 / $750 |
-> | **CFB / NCAAF game markets** | ❌ | ❌ | ❌ — **futures only** |
+> - it said MLB Moneyline Early was PULLED (true Aug 19). The venue put it
+>   back Aug 20 ~22:11 and the gate started betting early again inside its
+>   10-minute cache — **before the user had looked.** That is the design
+>   working; the doc was the only thing that was wrong.
+> - it said MLB totals had "no program at all". They pay early/day_of/live
+>   again. (Totals still do NOT get bet — the July 4 model blacklist stands.
+>   No rent was never the only reason, just the loudest one.)
+> - it made a session state "NFL is 18 days out" as though football could
+>   not be bet, when NFL families were paying that day, preseason included.
 >
-> (NFL/CFB rows re-read from `poly_reward_schedule` Aug 20 2026 19:51 AZ.
-> **NCAAF has NO game-market program of any kind — moneyline, spread, total
-> and props are all absent; only `futures` pays.** So rule #1 forbids every
-> NCAAF game bet, and the football deadline that matters is **NFL Sept 8, not
-> NCAAF Aug 29.** Note also **NFL `prop_any` early = a $1,000 pool at a 7,500
-> target — the largest early pool on the board**, and unlike MLB, football
-> props DO pay pre-T-6h.)
+> **How to ask, always:** `/api/rent-check?slug=…` (or
+> `?sport=&away=&home=&start=`) reports the family answer, the per-market
+> answer and the `_rent_ok` verdict side by side. `poly_reward_schedule` is
+> the scraped raw. **Run a KNOWN-GOOD control before believing a zero** — an
+> invented or mis-shaped slug returns "nothing active", which reads exactly
+> like "pays nothing" (cost a session two wrong conclusions about a football
+> slug that had no such market: football spreads are a LADDER, one market
+> per rung, so there is no single `asc-nfl-<away>-<home>-<date>`).
+>
+> The only durable facts: the periods are **early** (listing→T-6h),
+> **day_of** (T-6h→start) and **live**; they are NOT symmetric across
+> families; and a family answer is never the rule — the per-market answer is.
 >
 > We are a PRE-GAME maker, so a `live`-only program means the market is not
 > bettable by this machine at all. Three lanes have died to this rule: MLB
