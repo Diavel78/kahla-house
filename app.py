@@ -10490,6 +10490,27 @@ def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
     return {"ml": ml, "rows": rows, "props": prop_rows}
 
 
+def _sb_paged(build, max_pages: int) -> list:
+    """Collect up to max_pages×1000 rows from a PostgREST read, paged.
+
+    PostgREST hard-caps ONE response at 1,000 rows no matter what .limit()
+    asks for (proven Aug 21 2026: limit=5000 returned exactly 1,000). The
+    snapshot dedup maps below can legitimately exceed 1,000 rows in their
+    window — a football Sunday's props alone will — and a TRUNCATED dedup
+    map re-inserts unchanged rows every tick (the Disk-IO failure mode).
+    `build` is a factory returning a FRESH query builder each call —
+    builders are mutable, so reusing one across .range() calls stacks
+    params."""
+    out: list = []
+    for page in range(max_pages):
+        rows = (build().range(page * 1000, page * 1000 + 999)
+                .execute().data) or []
+        out.extend(rows)
+        if len(rows) < 1000:
+            break
+    return out
+
+
 def _pm_insert_changed(sb, rows, now) -> int:
     """Insert (market_id, source, market_type, side, line, cents, bid_c,
     ask_c) rows, deduped: only when the MID cent differs from the latest
@@ -10510,11 +10531,12 @@ def _pm_insert_changed(sb, rows, now) -> int:
     mids = list({r[0] for r in rows})
     last: dict = {}
     try:
-        recent = (sb.table("pm_snapshots")
-                  .select("market_id,source,market_type,side,line,cents,captured_at")
-                  .in_("market_id", mids)
-                  .gte("captured_at", (now - timedelta(hours=24)).isoformat())
-                  .order("captured_at", desc=True).limit(5000).execute().data) or []
+        recent = _sb_paged(lambda: (
+            sb.table("pm_snapshots")
+            .select("market_id,source,market_type,side,line,cents,captured_at")
+            .in_("market_id", mids)
+            .gte("captured_at", (now - timedelta(hours=24)).isoformat())
+            .order("captured_at", desc=True)), max_pages=5)
         for r in recent:
             k = (r["market_id"], r["source"], r.get("market_type") or "ml",
                  r["side"], _lkey(r.get("line")))
@@ -10584,11 +10606,12 @@ def _prop_insert_changed(sb, rows, now) -> int:
     mids = list({r[0] for r in rows})
     last: dict = {}
     try:
-        recent = (sb.table("prop_snapshots")
-                  .select("market_id,venue,prop_key,cents,captured_at")
-                  .in_("market_id", mids)
-                  .gte("captured_at", (now - timedelta(hours=24)).isoformat())
-                  .order("captured_at", desc=True).limit(8000).execute().data) or []
+        recent = _sb_paged(lambda: (
+            sb.table("prop_snapshots")
+            .select("market_id,venue,prop_key,cents,captured_at")
+            .in_("market_id", mids)
+            .gte("captured_at", (now - timedelta(hours=24)).isoformat())
+            .order("captured_at", desc=True)), max_pages=8)
         for r in recent:
             k = (r["market_id"], r["venue"], r["prop_key"])
             if k not in last:               # first seen = latest (desc order)
@@ -11882,11 +11905,12 @@ def _vsin_insert_changed(sb, rows, now) -> int:
     mids = list({r[0] for r in rows})
     last: dict = {}
     try:
-        recent = (sb.table("vsin_snapshots")
-                  .select("market_id,book,market_type,side,line,handle_pct,bets_pct,captured_at")
-                  .in_("market_id", mids)
-                  .gte("captured_at", (now - timedelta(hours=36)).isoformat())
-                  .order("captured_at", desc=True).limit(8000).execute().data) or []
+        recent = _sb_paged(lambda: (
+            sb.table("vsin_snapshots")
+            .select("market_id,book,market_type,side,line,handle_pct,bets_pct,captured_at")
+            .in_("market_id", mids)
+            .gte("captured_at", (now - timedelta(hours=36)).isoformat())
+            .order("captured_at", desc=True)), max_pages=8)
         for r in recent:
             k = (r["market_id"], r["book"], r["market_type"], r["side"], _lkey(r.get("line")))
             if k not in last:                 # first seen = latest (desc order)

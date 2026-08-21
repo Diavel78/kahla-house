@@ -44,14 +44,24 @@ _WINDOW_DAYS = {
 
 
 def _fetch_games(sb, sport: str, since_iso: str) -> list[dict]:
+    # PAGED — PostgREST hard-caps ONE response at 1,000 rows no matter what
+    # .limit() asks for (proven Aug 21 2026: limit=5000 returned exactly
+    # 1000, and the first NCAAF residual fit silently ran on the newest
+    # 1,000 of 2,882 games — spread_fit n=812 instead of ~1,730). Any read
+    # that can exceed 1,000 rows pages with .range(), the mlb-ingest lesson.
     try:
-        rows = (sb.table("game_results")
-                .select("home,away,home_score,away_score,event_start")
-                .eq("sport", sport)
-                .gte("event_start", since_iso)
-                .order("event_start", desc=True)
-                .limit(5000)
-                .execute().data) or []
+        rows: list[dict] = []
+        for page in range(20):
+            chunk = (sb.table("game_results")
+                     .select("home,away,home_score,away_score,event_start")
+                     .eq("sport", sport)
+                     .gte("event_start", since_iso)
+                     .order("event_start", desc=True)
+                     .range(page * 1000, page * 1000 + 999)
+                     .execute().data) or []
+            rows.extend(chunk)
+            if len(chunk) < 1000:
+                break
     except Exception as e:
         log.error("game_results fetch failed for %s: %s", sport, e)
         return []

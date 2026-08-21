@@ -43,13 +43,20 @@ _WINDOW_DAYS = {"MLB": 120, "NBA": 150, "CBB": 150,
 
 
 def _fetch_games(sb, sport: str) -> list[dict]:
+    # PAGED — PostgREST caps one response at 1,000 rows regardless of
+    # .limit(); see compute_power_ratings._fetch_games for the proof.
     try:
-        rows = (sb.table("game_results")
-                .select("home,away,home_score,away_score,event_start")
-                .eq("sport", sport)
-                .order("event_start", desc=False)
-                .limit(20000)
-                .execute().data) or []
+        rows: list[dict] = []
+        for page in range(20):
+            chunk = (sb.table("game_results")
+                     .select("home,away,home_score,away_score,event_start")
+                     .eq("sport", sport)
+                     .order("event_start", desc=False)
+                     .range(page * 1000, page * 1000 + 999)
+                     .execute().data) or []
+            rows.extend(chunk)
+            if len(chunk) < 1000:
+                break
     except Exception as e:
         log.error("fetch failed for %s: %s", sport, e)
         return []

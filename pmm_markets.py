@@ -516,15 +516,37 @@ def _search_event(client, sport: str, away: str, home: str,
         if not existing_markets and slug:
             fetched_markets: list = []
             # Primary: markets.list(eventSlug=[slug]) — returns markets
-            # with embedded bestBidQuote/bestAskQuote.
+            # with embedded bestBidQuote/bestAskQuote. PAGED (Aug 21 2026,
+            # football prep): a single limit=100 page silently truncated
+            # busy events — a Week-1 NFL event carries ~50 ladder markets
+            # BEFORE any prop posts, and one preseason game showed 102
+            # distinct props, so game-week football blows past 100. The
+            # SDK declares limit+offset (PaginationParams); since its
+            # TypedDicts have lied before, a page that yields zero NEW
+            # markets stops the loop — a server that ignores offset
+            # degrades to the old one-page behaviour, never spins.
             try:
-                mresp = client.markets.list({
-                    "eventSlug": [slug],
-                    "closed":    False,
-                    "limit":     100,
-                })
-                ms = mresp.get("markets") if isinstance(mresp, dict) else getattr(mresp, "markets", None)
-                fetched_markets = ms or []
+                seen_pg: set = set()
+                for _pg in range(6):        # 600 markets/event ceiling
+                    mresp = client.markets.list({
+                        "eventSlug": [slug],
+                        "closed":    False,
+                        "limit":     100,
+                        "offset":    _pg * 100,
+                    })
+                    ms = (mresp.get("markets") if isinstance(mresp, dict)
+                          else getattr(mresp, "markets", None)) or []
+                    fresh = []
+                    for m in ms:
+                        mk = (m.get("slug") or m.get("id")) if isinstance(m, dict) \
+                            else (getattr(m, "slug", None) or getattr(m, "id", None))
+                        if mk in seen_pg:
+                            continue
+                        seen_pg.add(mk)
+                        fresh.append(m)
+                    fetched_markets.extend(fresh)
+                    if len(ms) < 100 or not fresh:
+                        break
             except Exception as e:
                 if diag is not None:
                     diag["markets_list_error"] = str(e)[:200]
@@ -753,8 +775,12 @@ _FI_HINTS = ("1st inning", "first inning", "1st-inning", "first-inning",
 # distance prop is a PROP: player props, first-five-innings lines,
 # quarters/halves/periods, team props, etc. Polymarket ships them on the
 # SAME event the main-line lookup already fetches, so collecting them is
-# zero extra network cost. Capped — a big football game can list 100+.
-_PROPS_CAP = 80
+# zero extra network cost. Capped as a runaway guard only — 300 covers a
+# full NFL game week (raised from 80 Aug 21 2026 for football: a truncated
+# prop tape has holes exactly where the biggest early pools are, and the
+# per-tick cost moved to the cellar with pm_snapshot, where breadth is
+# cheap; prop_snapshots rows only write on ≥2¢ change regardless).
+_PROPS_CAP = 300
 
 
 def _prop_entry(m: dict, with_bbo: bool) -> dict | None:
