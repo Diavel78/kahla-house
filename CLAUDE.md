@@ -119,56 +119,45 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 > step, and the older data shows the same shape. Confirmed in cash: a
 > $73.23 payout landed Aug 21, pending→paid at full value in ~2 hours.
 >
-> **THE MECHANISM — IT IS THIN, NOT EARLY** (corrected same day, by the user,
-> against a live order book). Rent is **your share of the qualifying depth on
-> that market**, times the pool. Early is only a PROXY for thin, because a
-> freshly-listed market has not been quoted yet — and the proxy FAILS, which
-> is how this got caught:
+> **THE MECHANISM — WHAT IS KNOWN, AND WHAT IS NOT.** Rent tracks how ALONE
+> we are near the touch, not how early we are and not how wide the spread
+> is. Early is a PROXY for alone (a freshly-listed market has not been
+> quoted yet) and the proxy FAILS:
 >
 > | | MLB `aec-mlb-laa-tex-2026-08-22` | NFL `asc-nfl-atl-ind-2026-08-22-pos-21pt5` |
 > |---|---|---|
 > | days ahead | 3 | 3 |
 > | our position | resting | **best bid, 1¢ spread** |
-> | book depth | ~234 contracts (implied) | **16,505 shares** |
-> | our share | 4.3% | 0.09% (0.58% within 3¢) |
-> | earned | **$9.63/day** | **$0.00** — computes to $0.87, under the floor |
+> | depth within 3¢ | **1.5 shares** | **2,598 shares** |
+> | total book depth | 47,091 | 16,505 |
+> | earned | **$9.63/day** | **$0.00** |
 >
 > Same horizon, same account, and the one at the TOUCH of a 1¢ spread earned
-> nothing, because 70× more depth sat underneath it. **Being the touch is not
-> being a large share.** A wide spread is not evidence of a thin book either
-> — that NFL rung is a cheap longshot lots of people quote.
+> nothing. **Being the touch is not being alone**, a wide spread is not
+> evidence of a thin book, and TOTAL depth is the wrong denominator — the
+> MLB market has 47,091 shares in it and 1.5 of them near the price.
 >
-> ⚠ **THE $1/DAY FORFEIT FLOOR IS PART OF THE MECHANISM.** Below it the venue
-> pays nothing and may not even emit a row (status `SKIPPED` when it does —
-> `_rent_window` excludes those from earnings). So a small share of a deep
-> book is not "a little rent", it is **zero**. Any market-selection rule has
-> to clear that floor, which makes depth a HARD input, not a nicety.
+> ⚠ **THERE IS NO VALIDATED FORMULA. Do not write one down and do not
+> optimize against one.** A session got as far as "rent = our share of
+> near-touch depth × pool" and it died on the first falsification test the
+> user demanded: `tsc-mlb-nym-stl-2026-04-01-7pt5` paid **$37.96 on ONE
+> market-day** against an MLB totals pool of $75 early / $225 day-of. Half a
+> program pool on a single market is impossible under a shared-pool model;
+> and under a per-market pool, $9.63 on a market with 1.5 shares near the
+> touch means we captured only 4.3% of it, which is absurd. **Both readings
+> cannot be true and neither fits both observations.**
 >
-> **CONSEQUENCE FOR THE MARKET-MAKER LANE:** "quote the junk lines nobody is
-> playing in" is exactly wrong when those junk lines carry 16,000 shares.
-> The lane must MEASURE DEPTH before quoting and skip anything where our size
-> cannot clear the floor. We do not currently capture book depth anywhere —
-> `pm_snapshots` stores prices, not sizes. That is the gap to close first.
+> **AND IT CANNOT BE BACKTESTED TODAY.** The model's input is near-touch
+> depth and we have NEVER recorded it — `pm_snapshots` stores prices, not
+> sizes. The first order book this project ever read was Aug 21 2026, live,
+> via `/api/polymarket/book`. So the honest state is: a direction that keeps
+> being confirmed in cash, and no arithmetic behind it. Capturing depth on
+> the pm_snapshot tick is what would make it answerable — deliberately NOT
+> built yet (user, Aug 21: the Market Maker is phase 2).
 >
-> This kills the model that used to sit in this file — share ≈ (your size /
-> `target_size`) × pool, predicting ~$0.11/market. That was fitted entirely
-> on day-of data, where it happens to be right, and it is simply the wrong
-> model for the early window (actual: $9.63 on a single market-day).
->
-> **CONSEQUENCES:**
-> - **Breadth beats size.** More markets rested early > more contracts on
->   fewer markets. This is what makes the football spread LADDER valuable:
->   fifteen rungs is not fifteen chances to fill, it is fifteen markets each
->   earning its own rent.
-> - **We are already at the ceiling for MLB.** `_OPENER_HI_H`=96h, and
->   Polymarket only lists ~4 days of baseball (the opener's `opener_ldates`
->   shows 4 dates). Resting bets sit at 3.7-3.9 days — pressed against a
->   VENUE limit, not a self-imposed one. Nothing to gain there.
-> - **Football is where this compounds.** The venue lists NFL *weeks* out
->   (Sept 10 games listed Aug 21). If the gradient holds past day 3, a
->   football ladder resting 20 days out is a different order of magnitude.
->   UNTESTED — day 3 is the edge of our sample (one lone day-7 row showed
->   $2.72) and it may flatten or reverse.
+> What the failed model DID kill for good: share ≈ (our size / `target_size`)
+> × pool, which predicted ~$0.11/market and was off by 87×. It was fitted on
+> day-of data, where it happens to be right.
 >
 > **RE-MEASURE, NEVER RECALL** (the same rule as the deleted program table).
 > The query is the durable artifact: join `poly_incentive_earnings` to the
@@ -448,6 +437,20 @@ A **completely separate, non-betting** surface for the family's book club. Lives
 - `.github/workflows/site-curl.yml` — **the sandbox→site curl bridge** (Aug 4 2026): `workflow_dispatch` with a `path` input; the Actions runner curls `https://www.thekahlahouse.com/<path>?key=FILLS_CRON_SECRET` (secret whitespace-stripped — gotcha #22 broke run 1; `-L` + www — the apex 307s broke run 2). Lets a Claude session trigger shared-secret endpoints it can't reach (network allowlist) and read results from the DB (the `_probe_log`/exec_probe_runs pattern). Example consumer: `/api/polymarket/last-reward` (newest maker-reward/rebate/transfer credits with raw payloads — descriptions distinguish real "liquidity reward payout" rows from outage/promo credits).
 - **`/api/rent-check`** (shared-secret, read-only) — RULE #1 observability: `?slug=…` or `?sport=&away=&home=&start=` reports the FAMILY answer, the PER-MARKET answer (what the venue lists as active for that exact slug) and the `_rent_ok` verdict side by side. The read that settles "should we be betting X". Confirmed live Aug 19: ATL@IND NFL spreads pay `early` at T-65h while that game's moneyline is live-only.
 - **`/api/polymarket/cancel-unpaid`** (shared-secret, `&dry=1`) — cancel-only sweep of resting model BUYS that are no longer in a paying window. The rent gate runs at PLACEMENT, so the venue moving a program underneath a resting bet is not something placement can catch. Predicate is `_rent_ok` itself, so it stays correct as programs move — cancels whatever is unpaid today, keeps whatever still pays. Same three gates as the sibling sweeps (BUY intent, AUTOMATIC flag, slug belongs to one of our pending model picks). First run Aug 19 cancelled 27 MLB moneylines, kept 0 (nothing was in a paying window at that hour). ⚠ It leaves `swept=1` on the checklist rows it touches, and the opener's done-set latches at `swept>=2` — understand that counter before running it twice.
+- **`/api/polymarket/orders`** (shared-secret, read-only, optional `?slug=`
+  substring filter) — **every open order on the account.** "What am I quoting
+  right now" had no read any session could reach: `/api/my-orders` is
+  Firebase-gated, `dedup-orders` deliberately excludes hand-placed MANUAL
+  orders, and probe-exec's listing needs the slug as its input. What that
+  left was GUESSING slugs, which produced two confident wrong readings of a
+  football market that does not exist (see the ladder note below).
+- **`/api/polymarket/book?slug=`** (shared-secret, read-only) — the order-book
+  ladder, depth totals, **depth within 1/3/5¢ of the touch**, and where our
+  own orders sit with the quantity ahead of them. The near-touch number is
+  the one that matters and the one nothing else reports. ⚠ **FOOTBALL SPREADS
+  ARE A LADDER** — one market per rung (`asc-nfl-atl-ind-2026-08-22-pos-21pt5`),
+  so there is no `asc-nfl-<away>-<home>-<date>`; an invented slug returns
+  "nothing active", which reads exactly like "pays nothing".
 - **Venue-truth admin endpoints** (all shared-secret, fire via the `site-curl` bridge, results persisted to `exec_probe_runs` — read them back with `run_sql.sh`, never by screenshot): `/api/polymarket/last-reward` (newest maker-reward/rebate credits WITH raw payload descriptions — "liquidity reward payout" is the real thing; round-number "remediation"/"promotional credit" rows are outage compensation, not earnings), `/api/polymarket/daily-volume?from=&to=` (per-ET-day trades / distinct markets / buy / sell / payout from the activities feed — the maker-reward denominator; the feed does NOT flag maker vs taker, so hand-placed fills are an upper bound while machine orders are post-only by construction), `/api/polymarket/reset-sells` (+`&dry=1`) (**cancel-only** sweep of resting BOT sells so a changed harvest policy applies to already-filled positions — `_harvest_tick` re-places at current policy on its next tick because its dedup is venue-state; three required gates: SELL intent + AUTOMATIC flag + slug belongs to one of our model picks, so hand-placed orders can never be touched; its **`&dry=1` lists every resting bot sell as entry→ask→ROI**, which is how you PROVE the harvest target is live instead of counting orders and inferring it), `/api/polymarket/topup` (+`&dry=1`) (raise already-placed model bets to the current `_AUTOBET_CONTRACTS` after a stake change — **UNFILLED orders only**, via cancel → verify-no-fill → create fresh at the SAME price, the re-peg's proven sequence; never `orders.modify`. FILLED/partial positions are skipped BY DESIGN: topping one up means buying at today's book, which makes the stored `entry_price` stop describing the position — the harvest sell price, CLV and to-WIN grading all key off that one number — and bumping `contracts` while the extra hasn't filled pushes the bet under the harvest's `min_held` so a leg that sells today stops selling. **One order per slug is an INVARIANT**: the re-peg cancels a single `order_id` per bet, so adding a second order strands it at the old price the first time the book moves — hence replace, never add. LIVE runs are bounded to 2/call AND a 5s wall clock checked BEFORE each cancel — this function has no `maxDuration`, and a platform kill between the cancel and the create IS the ORDER LOST state. A `state:"unknown"` (verify read failed) never recreates blind and never stamps `contracts`, so the bet stays eligible and the next pass heals it — observed live Aug 10, healed 19s later), `/api/polymarket/roi-baseline` (monthly buys/sells/payouts/ROI — the pre-machine baseline: June+July 2026 = −0.62% ROI, ~48% win rate, 48.5¢ avg entries).
 - **THE PROGRAM TABLE, READ FROM THE VENUE (Aug 18 2026, `/api/football/recon` — per-market-family, not inferred from earnings).** Per game, `/v1/incentives?symbols=<slug>` returns: **ML (`aec-`) early $225/df 0.40 + day_of $500/df 0.35 + live $2,500/df 0.30, target 20-25k**; **spread (`asc-`) early $75 + day_of $225 + live $1,200, target 15k**; **player props + first-inning (`astatc-`/`atc-`) day_of $750 + live $750, target 5k and NO `early` period** (the $0.01-NRFI finding, confirmed at the source); **totals (`tsc-`) NOTHING but a closed legacy $25 row** — which is why the O/U lane earns ~$0.016/order. Two landmines: (a) **`starts_at`/`ends_at` on a program are the CATALOG LIFECYCLE, not that event's paying window** — every MLB game reads `T-960h`, i.e. 40 days, because the program spans many events; the only truth about when a period actually pays for one game is the `period` LABEL plus our own earnings ledger (that is why the real MLB answer — rent lands 2-3 days pre-game — came from `poly_incentive_earnings`, never from here). (b) **`poly_incentive_programs` is STRUCTURALLY BLIND to any sport we have never bet**: `_incentives_sync` seeds its `symbols` filter from our own earnings + picks because the unfiltered catalog does not list game/prop markets, so "no rows for sport X" means "we have never bet X", never "X has no rent". Ask the venue with `symbols=`, and always run a KNOWN-GOOD control (an MLB game slug) through the same code path before believing a zero.
 - **MAKER-REWARD DATA (Aug 2026, measured not assumed).** Payments: May 11 $1.03, Jun 4 $2.72, **Aug 6 $7.06** — the gap is NOT a missed payment, it's the Kalshi routing detour (the feed shows **July 13-21 completely dark, zero Polymarket trades**). ~~"$7.06 = July's check → 1.10% of volume"~~ **DEAD (Aug 9): there are no monthly periods.** The program's periods are per-event-day (Early listing→T-6h / Day-of T-6h→start / Live start→settlement), paid ~5-7 business days after period end — and the schedule's program IDs are DATE-SUFFIXED (`*_20260712`, `*_20260727`, `*_20260805`), i.e. the current program regime launched ~Jul 12. So $7.06 ≈ late-July period batch at hand scale; attribute every payment to the event days ~5-7 business days back via `/api/polymarket/daily-volume`. July context: 224 trades / $640.91 buys / $2.86 avg fill. August at machine scale inverted the shape: **$0.70 avg fill, 4× the count, up to 107 distinct markets touched in a day** (vs 10-20 in July). The two reward models diverge ~5× on that shape — dollar-weighted ≈ $14/month, per-fill/per-market ≈ $66 — and real LP programs usually score per-market time-weighted share near the mid, which would favor our many-tiny-orders posture. **PAYOUTS WENT ROLLING (Aug 9 2026): three same-morning "liquidity reward payout" credits ($2.27 + $2.46 + $8.39 = $13.12, seven-minute batch spacing) landed three days after the $7.06, then **$4.13 + $2.24 = $6.37 on Aug 11** in the same seven-minute shape — **$26.55 of verified real rewards Aug 6-11, ~$5.30/day ≈ $160/month at the current pace, and still paying for PRE-double volume** (payouts lag event days ~5-7 business days). The wait-for-September plan is obsolete: measure the rate from payment history week-over-week (`/api/polymarket/last-reward` via site-curl; real payouts say "liquidity reward payout", round-number "remediation"/promo credits are NOT rewards).** Observed pace implies $60-130/month at machine scale — the same order as the lanes' weekly bleed, i.e. a first-order term in the maker-vs-taker economics, likely per-market time-weighted share favoring the many-tiny-orders posture. Still unknown: the accrual window per payout, and whether cheap-pegging AWAY from the mid narrows the reward share.
@@ -892,6 +895,33 @@ it claims as itself (getting that wrong makes the cellar fail its own claim
 once enforcement is on, and silently stop running the lane it was moved there
 to run). NOT YET GATED and still riding the paperlog route body: `_tg_flush`,
 `_bet_alerts`, `_opener_watchdog`.
+
+## THE ORDER OF WORK (user, Aug 21 2026 — do not reorder)
+
+**1. The Cellar goes live. 2. FOOTBALL. 3. The Market Maker.**
+
+The Cellar is a **gambling / rent-collecting** machine — model picks a side,
+rule #1 confirms that exact market pays rent right now, bet rests, rent
+accrues. That is what exists and what football has to be ready for.
+
+The **Market Maker is phase 2 and is a DIFFERENT machine**: buy the fringe,
+sell the fringe, rinse, repeat, collect rent, *with no intention of ever
+betting the game*. Do not smuggle it into the Cellar's lanes.
+
+**What football readiness means, in the user's words:**
+- **PROPS. "Lots and lots and lots of props."** Football props outnumber
+  baseball's roughly tenfold, and NFL `prop_any` early is the largest early
+  pool on the board. This is the main event, not a side quest.
+- **Totals are not allowed to be a shrug.** "We can't do totals cuz we are
+  dumb" is not an acceptable answer. NFL totals failed gate 1 by
+  over-predicting the OVER 6-8pp at every bucket above 0.5 — a UNIFORM,
+  one-sided miss, which is the most fixable shape a calibration failure can
+  have. Diagnosis so far: projected total mean 46.64 vs actual 45.80,
+  residual mean −0.84 / median −0.25 / skew −0.19 on n=221. Location and
+  skew are both small, so the miss is NOT explained by either — unfinished.
+- **Unit sizes come DOWN.** Betting many more markets at the current stake
+  is a capital problem; expect to peel back `_AUTOBET_CONTRACTS` as breadth
+  grows. That is a feature of going wide, not a retreat.
 
 ## TWO LANES: the model bets, and the market maker (direction, Aug 19 2026)
 
