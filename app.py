@@ -13614,6 +13614,9 @@ _GRIDIRON_SPORTS = {"NFL": 2400, "NCAAF": 2400}   # 100 days
 # season and passes. UPDATE YEARLY (or teach ingest_espn_markets to stamp
 # season type if this lane outlives the season).
 _GRIDIRON_MIN_START = {"NFL": "2026-09-08", "NCAAF": "2026-08-29"}
+# Seconds guaranteed to the football pass after the MLB opener has had its
+# fill. See the call site for why 6 (a Vercel-era number) starved it to zero.
+_GRIDIRON_BUDGET_S = float(os.environ.get("GRIDIRON_BUDGET_S") or 30.0)
 _PWR_CACHE: dict = {}                          # sport → {at, snap}
 
 
@@ -14595,7 +14598,20 @@ def api_handicapper_paperlog():
     # under a second, so the extra seconds are only spent while there is
     # actual tape to capture, and the one-shot dedup makes that a bounded
     # burst that ends for good.
-    g_deadline = max(opener_deadline, _time.time() + 6.0)
+    # 6s WAS A VERCEL NUMBER (raised Aug 20 2026, on the cellar's first
+    # night). It bought a slice of a 10-second request; here nothing kills
+    # the pass, and 6 seconds does not fund a single build_dossier, so
+    # football captured NOTHING on the first six minutes after the cutover
+    # while the MLB pass used its whole 120s. Meanwhile every MLB game on
+    # the board was 15+ hours out, i.e. outside the day-of rent window, so
+    # that time bought zero bets by construction.
+    #
+    # Football is the one with a fixed date: a shadow not taken at listing
+    # cannot be taken later, and NFL week 1 is the first thing the model-vs-
+    # market tape needs. Still idle-cheap -- with no candidates the pass
+    # exits in well under a second, and the one-shot dedup makes the capture
+    # a bounded burst.
+    g_deadline = max(opener_deadline, _time.time() + _GRIDIRON_BUDGET_S)
     g_rows, g_stats = (_gridiron_opener_pass(sb, now, g_deadline)
                        if _own_opener else ([], {}))
     rows.extend(g_rows)
