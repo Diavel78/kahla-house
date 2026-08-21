@@ -35,6 +35,23 @@ from .util import retrying
 log = logging.getLogger("cellar.runner")
 
 
+def _clip(d, limit: int = 4000):
+    """Lane stats, bounded, for cellar_ticks.detail.
+
+    A tick row is a heartbeat, not a log sink: an unbounded blob from a
+    misbehaving lane would bloat the table the health card reads. Drops the
+    whole thing rather than truncate into invalid JSON.
+    """
+    if not d:
+        return None
+    try:
+        import json
+        s = json.dumps(d, default=str)
+        return d if len(s) <= limit else {"clipped": len(s)}
+    except Exception:
+        return None
+
+
 class Runner:
     def __init__(self, sb, lease: Lease, journal: Journal | None = None):
         self.sb = sb
@@ -159,7 +176,8 @@ class Runner:
             return
 
         ctx = lanes_mod.Ctx(sb=self.sb, now=lanes_mod.utcnow(),
-                            dry_run=config.DRY_RUN, journal=self.journal)
+                            dry_run=config.DRY_RUN, journal=self.journal,
+                            detail={})
 
         # Invariant 2: serialize venue writes.
         lock = self.write_lock if spec.writes_money else None
@@ -169,7 +187,8 @@ class Runner:
             work = int(fn(ctx) or 0)
             ms = int((time.time() - t0) * 1000)
             log.info("lane %s ok work=%d %dms", name, work, ms)
-            self.record(name, claimed=True, ok=True, work=work, ms=ms)
+            self.record(name, claimed=True, ok=True, work=work, ms=ms,
+                        detail=_clip(ctx.detail))
         except Exception as e:
             ms = int((time.time() - t0) * 1000)
             log.exception("lane %s FAILED after %dms", name, ms)

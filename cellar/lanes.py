@@ -39,6 +39,14 @@ class Ctx:
     now: datetime
     dry_run: bool
     journal: object | None = None
+    # A lane may drop its own stats here; the runner writes them to
+    # cellar_ticks.detail. Engine stats used to exist ONLY in the daemon's
+    # log file on the house box, which meant that after the cutover the
+    # single most useful debugging signal was invisible to anyone not
+    # sitting at that machine -- four rounds of guessing at the football
+    # pass, when its stats dict said exactly what it was doing the whole
+    # time. Bounded and best-effort: observability must never fail a lane.
+    detail: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +180,8 @@ def lane_opener(ctx: Ctx) -> int:
     deadline = _t.time() + 120.0
     rows, stats = _app._opener_pass(ctx.sb, ctx.now, deadline)
     log.info("opener: %s", stats)
+    if ctx.detail is not None and isinstance(stats, dict):
+        ctx.detail.update(stats)
     return len(rows or [])
 
 
