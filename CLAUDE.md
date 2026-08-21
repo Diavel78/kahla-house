@@ -691,9 +691,29 @@ per-market confirmation added a venue call per slug on top of the dossier
 build. On the house box there is no function timeout: the whole slate every
 tick, per-market rent checks effectively free.
 
-**Split today.** cellar: `batch`, `pm_snapshot`, `ledger`, `vsin`,
-`kalshi_autolog`. vercel: `opener`, `repeg`, `paperlog`, `alerts` — i.e. the
-expensive, write-heavy half.
+**Split today (opener moved Aug 20 2026).** cellar: `batch`, `pm_snapshot`,
+`ledger`, `vsin`, `kalshi_autolog`, **`opener`**. vercel: `repeg`, `paperlog`,
+`alerts`.
+
+✅ **THE MOVE IS MEASURED, NOT ASSUMED.** First cellar opener tick ran
+**120,493 ms** — the full self-imposed deadline — against the ~14s of a shared
+request it got on Vercel. Same speed per game; roughly 8× the games walked per
+pass. Cadence trades down with it: a 120s pass on a 60s schedule skips every
+other tick, so the slate sweeps every ~2 min instead of every 1. Far more games
+evaluated per hour, which is the number that matters. And Vercel's paperlog
+came back to life the same minute — 15/15 requests 200, zero cancellations,
+every tick logging `opener={'gate': 'cellar_owns_lane'}`.
+
+⚠ **`paperlog` CANNOT JOIN IT WITHOUT A REFACTOR — and no longer needs to.**
+`lanes.CONFLICTS["paperlog"] = {opener, repeg, harvest, ledger, alerts}` and
+`Runner.validate` refuses the boot, because the paperlog ROUTE BODY runs those
+engines inline. Cross-side that is safe (the lease arbitrates — which is
+exactly what `cellar_owns_lane` above shows); in ONE process it is a
+double-fire. So moving paperlog means either re-coupling the opener to it
+(undoing this) or extracting the engines out of the route (spec §8 item 6).
+Neither is worth doing on a live money path while Vercel is healthy: the
+paperlog move's whole justification was the cancellation, and moving the
+opener already fixed it.
 
 ✅ **STEP 1 DONE (Aug 20 2026): the lease is ENFORCED.** `CELLAR_LEASE_ENFORCED`
 is set on Vercel, so a side that loses a claim actually stands down. Before
