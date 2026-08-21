@@ -1599,10 +1599,16 @@ def api_poly_book():
                     "our_side_c": ours_c, "qty": _og("quantity"),
                     "leaves": _og("leavesQuantity"),
                     "flag": _og("manualOrderIndicator"),
-                    # Depth in front of us on the side we are actually on.
-                    "ahead_qty": round(sum(
-                        q for c, q in bids if c > (canon if not short
-                                                   else 100.0 - ours_c)), 1)})
+                    # DEPTH IN FRONT OF US, ON THE LADDER WE ACTUALLY REST
+                    # ON. A BUY_SHORT of YES is a SELL of YES, so it queues
+                    # on the ASK side at the canonical price and the orders
+                    # ahead of it are the CHEAPER asks. Walking the bids for
+                    # it (the first cut of this endpoint) reported 0 ahead
+                    # for an order that may be behind a hundred others.
+                    "rests_on": "ask" if short else "bid",
+                    "ahead_qty": round(
+                        sum(q for c, q in asks if c < canon) if short
+                        else sum(q for c, q in bids if c > canon), 1)})
             out["mine"], out["mine_count"] = mine, len(mine)
         except Exception as e:
             out["mine_err"] = f"{type(e).__name__}: {e}"[:160]
