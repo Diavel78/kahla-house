@@ -245,9 +245,17 @@
                  + '<span class="nm">' + l.lane + '<span>' + l.owner + '</span></span>'
                  + '<span class="rt">' + right + '</span></div>';
         }).join('');
+        // Code drift: the cellar runs from a working directory on the house
+        // box, so a push to main is inert there until someone pulls. Say so
+        // rather than let it look like a fix that didn't work.
+        const b = c.boot || {};
+        const codeFrag = b.stale ? ' · ⚠ cellar on ' + b.sha + ', site on '
+                                   + b.site_sha + ' — pull + restart'
+                       : (b.sha ? ' · code ' + b.sha : '');
         sub.textContent = c.on_cellar + ' on the cellar · ' + c.on_vercel
             + ' on vercel' + (c.off ? ' · ' + c.off + ' off' : '')
-            + (c.bad ? ' · ' + c.bad + ' need a look' : ' · all working');
+            + (c.bad ? ' · ' + c.bad + ' need a look' : ' · all working')
+            + codeFrag;
     }
 
     function paint(el, v, signed) {

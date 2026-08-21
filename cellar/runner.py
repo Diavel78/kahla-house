@@ -22,6 +22,7 @@ Three invariants it enforces, in order of how badly they hurt when broken:
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import threading
 import time
@@ -179,6 +180,41 @@ class Runner:
             self._started.pop(name, None)
             self._stuck.discard(name)      # it finished — re-arm the alarm
 
+    def _stamp_boot(self, enabled: list[str]) -> None:
+        """Record WHICH COMMIT this daemon is running.
+
+        THE TRAP THIS EXISTS FOR, created the day the opener moved here: the
+        cellar runs app.py out of a working directory on the house box, so a
+        fix pushed to main is INERT until someone pulls and restarts. Before
+        the cutover every push reached the running engine within a minute via
+        Vercel; now the most important engines are on a box that updates when
+        a human says so. Silent, and it looks exactly like a fix that didn't
+        work.
+
+        So publish the SHA where the dashboard can see it and compare against
+        what Vercel is serving. Best-effort in every direction — a daemon
+        that can't read git or can't reach the DB still runs; it just can't
+        prove which code it is.
+        """
+        sha = os.environ.get("CELLAR_SHA") or ""
+        if not sha:
+            try:
+                import subprocess
+                sha = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    capture_output=True, text=True, timeout=10).stdout.strip()
+            except Exception:
+                sha = ""
+        log.info("cellar code: %s", sha[:12] or "UNKNOWN (git unreadable)")
+        try:
+            self.sb.table("exec_probe_runs").insert(
+                {"params": {"kind": "cellar_boot"},
+                 "result": {"sha": sha, "lanes": sorted(enabled),
+                            "side": config.OWNER}}).execute()
+        except Exception as e:
+            log.warning("boot stamp write failed: %s", e)
+
     def _overrun_check(self, name: str, spec, now: float) -> None:
         """A lane running longer than its OWN lease TTL is stuck. Say so.
 
@@ -296,6 +332,8 @@ class Runner:
                 return 2
             log.info("owner pre-flight ok (%s lane(s), uid ...%s)",
                      len(need), str(owner)[-6:])
+
+        self._stamp_boot(enabled)
 
         # Boot reconciliation: anything left open is a write we died inside of.
         if self.journal is not None:

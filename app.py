@@ -1780,8 +1780,28 @@ def _cellar_health(sb) -> dict:
             "ticks_1h": int(r.get("ticks_1h") or 0), "fails_1h": fails,
             "error": r.get("last_error"),
         })
+    # WHICH CODE IS THE CELLAR RUNNING? Since the opener moved to the house
+    # box, a fix pushed to main is inert there until someone pulls and
+    # restarts — silent, and indistinguishable from a fix that didn't work.
+    # The daemon stamps its SHA at boot; surface it next to Vercel's own so
+    # a drift is visible instead of debugged.
+    boot = {}
+    try:
+        r = (sb.table("exec_probe_runs").select("at,result")
+             .filter("params->>kind", "eq", "cellar_boot")
+             .order("at", desc=True).limit(1).execute().data) or []
+        if r:
+            _sha = ((r[0].get("result") or {}).get("sha") or "")
+            _mine = (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "").strip()
+            boot = {"sha": _sha[:12], "booted_at": r[0].get("at"),
+                    "site_sha": _mine[:12],
+                    # Only claim a mismatch when BOTH are known — an unknown
+                    # SHA is a missing reading, not a stale daemon.
+                    "stale": bool(_sha and _mine and _sha[:12] != _mine[:12])}
+    except Exception:
+        boot = {}
     return {
-        "lanes": lanes, "bad": bad,
+        "lanes": lanes, "bad": bad, "boot": boot,
         # Counted separately from `bad` so an intentional kill is VISIBLE
         # without being an alarm — "off" should read as a decision someone
         # made, not as something to go fix.
