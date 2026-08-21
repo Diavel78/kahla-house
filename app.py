@@ -11936,6 +11936,51 @@ _GRIDIRON_PROBE_TS: dict = {}   # same, for the football pass
 # ~150 games against a per-tick cap of 8 — a game the venue has not priced
 # must get out of the way or it eats the budget forever (below).
 _GRIDIRON_PROBE_S = 1200.0
+_RENT_FAMILY_CACHE: dict = {"at": 0.0, "sports": None}
+# Our own sport tokens, to tell "this sport does not pay" apart from
+# "the schedule names sports differently than we do".
+_OUR_SPORT_TOKENS = {"mlb", "nfl", "ncaaf", "nba", "nhl", "ufc", "cbb"}
+
+
+def _sport_pays_game_markets(sb, sport: str) -> bool:
+    """Does the venue run ANY game-market rent program for this sport?
+
+    Budget priority, NOT a bet gate -- `_rent_ok` still decides every wager.
+    This only answers "is it worth spending capture budget here first", and
+    it asks the reward schedule instead of hardcoding an answer, because
+    RULE #1's whole lesson is that programs move: NCAAF pays futures only
+    TODAY, and the day the venue adds a spread program this starts
+    prioritising it with no code change. A hardcoded skip would be exactly
+    the recall-from-memory mistake the rent rule exists to prevent.
+
+    Fails OPEN, unlike `_rent_ok`: guessing wrong here costs a little
+    capture budget, never a bet resting unpaid.
+    """
+    try:
+        c = _RENT_FAMILY_CACHE
+        if c["sports"] is None or _time.time() - c["at"] > 3600:
+            rows = (sb.table("poly_reward_schedule").select("sport,family")
+                    .limit(2000).execute().data) or []
+            pays = set()
+            for r in rows:
+                fam = (r.get("family") or "").lower()
+                sp = (r.get("sport") or "").strip().lower()
+                # A blank sport would match EVERY sport under any substring
+                # rule, and an empty string is not a sport. Drop it.
+                if sp and fam and fam != "futures":
+                    pays.add(sp)
+            c.update(at=_time.time(), sports=pays)
+        pays = c["sports"] or set()
+        # EXACT match only. A substring rule reads "nba" as paying because
+        # it sits inside "wnba" — caught by a test, and it is the whole
+        # class of near-miss this file keeps paying for. If the schedule's
+        # vocabulary does not overlap ours AT ALL, the mapping is wrong
+        # rather than the answer being "nobody pays", so fail open.
+        if not pays or not (pays & _OUR_SPORT_TOKENS):
+            return True
+        return (sport or "").strip().lower() in pays
+    except Exception:
+        return True
 
 # --- DIAMOND IQ LIVE ("the steam engine dies tonight" — Aug 2 2026) ---
 # MLB moneylines are priced by the MODEL, not by movement: the daily
@@ -13988,7 +14033,19 @@ def _gridiron_opener_pass(sb, now, deadline):
         if not cands:
             stats["g_gate"] = "backoff_empty"
             return rows, stats
-        cands.sort(key=lambda g: str(g.get("event_start") or ""))
+        # RENT-PAYING SPORTS GO FIRST. Sorting purely by event_start put the
+        # 79-game NCAAF slate -- which the venue quotes no game markets for
+        # and pays no game-market rent on -- ahead of every NFL game, on a
+        # pool of 154 against a per-tick cap of 8. The one sport we can
+        # actually bet was last in line, 18 days out. A PRIORITY, not a
+        # filter: NCAAF still gets taped on spare budget, and if the venue
+        # ever adds a program it moves to the front by itself.
+        _pays = {}
+        cands.sort(key=lambda g: (
+            0 if _pays.setdefault(
+                g.get("sport"),
+                _sport_pays_game_markets(sb, g.get("sport"))) else 1,
+            str(g.get("event_start") or "")))
         # STRIDE BY THE WINDOW, not by one. `% len(cands)` advanced the start
         # a single game per minute while taking 8, so consecutive passes
         # overlapped by seven and a full cycle took ~150 MINUTES. Striding by
