@@ -1535,6 +1535,82 @@ def _gameday_rewards(sb) -> dict:
     return out
 
 
+@app.route("/api/polymarket/book")
+def api_poly_book():
+    """READ-ONLY: the full order-book ladder for one slug, plus depth totals.
+
+    THE MEASUREMENT THIS MACHINE HAS NEVER HAD. Rent is our share of the
+    qualifying depth on a market, and depth is captured NOWHERE --
+    pm_snapshots stores prices, not sizes -- so every claim about why one
+    market pays and another does not has been derived from the payout and
+    an assumed share model rather than measured. That is backwards, and it
+    produced an "implied ~234 contracts" figure that the account owner
+    rejected on sight.
+
+    Also reports where OUR resting order sits in that ladder, because the
+    two questions that matter are the same question: how much is in front
+    of us, and how much is behind.
+
+    Shared-secret, no writes.
+    """
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    slug = (request.args.get("slug") or "").strip()
+    if not slug:
+        return jsonify({"ok": False, "error": "pass ?slug="}), 400
+    out: dict = {"ok": True, "slug": slug}
+    try:
+        client = get_client()
+        bk = _pmm_book(client, slug) or {}
+        bids, asks = bk.get("bids") or [], bk.get("asks") or []
+        out["best_bid"], out["best_ask"] = bk.get("best_bid"), bk.get("best_ask")
+        out["bids"] = [{"c": c, "qty": q} for c, q in bids[:12]]
+        out["asks"] = [{"c": c, "qty": q} for c, q in asks[:12]]
+        out["bid_depth"] = round(sum(q for _, q in bids), 1)
+        out["ask_depth"] = round(sum(q for _, q in asks), 1)
+        bb = bk.get("best_bid")
+        if bb is not None:
+            for band in (1, 3, 5):
+                out[f"bid_depth_within_{band}c"] = round(
+                    sum(q for c, q in bids if c >= bb - band), 1)
+        # Our own resting orders on this slug, and what sits ahead of them.
+        try:
+            _r = client.orders.list({"slugs": [slug]})
+            _raw = (_r.get("orders") if isinstance(_r, dict)
+                    else getattr(_r, "orders", [])) or []
+            mine = []
+            for _o in _raw:
+                def _og(k, d=None):
+                    return (_o.get(k, d) if isinstance(_o, dict)
+                            else getattr(_o, k, d))
+                if str(_og("state") or "") not in _OPEN_ORDER_STATES:
+                    continue
+                _p = _og("price")
+                pv = (_p.get("value") if isinstance(_p, dict) else _p)
+                canon = round(float(pv) * 100.0, 1)
+                short = "SHORT" in str(_og("intent") or "")
+                # BUY_SHORT reports the YES-canonical price; our real
+                # per-share price is the complement (gotcha #23).
+                ours_c = round(100.0 - canon, 1) if short else canon
+                mine.append({
+                    "intent": _og("intent"), "canon_c": canon,
+                    "our_side_c": ours_c, "qty": _og("quantity"),
+                    "leaves": _og("leavesQuantity"),
+                    "flag": _og("manualOrderIndicator"),
+                    # Depth in front of us on the side we are actually on.
+                    "ahead_qty": round(sum(
+                        q for c, q in bids if c > (canon if not short
+                                                   else 100.0 - ours_c)), 1)})
+            out["mine"], out["mine_count"] = mine, len(mine)
+        except Exception as e:
+            out["mine_err"] = f"{type(e).__name__}: {e}"[:160]
+    except Exception as e:
+        out.update(ok=False, error=f"{type(e).__name__}: {e}"[:220])
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/orders")
 def api_poly_orders():
     """READ-ONLY: every open order on the account. Venue truth, no writes.
