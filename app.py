@@ -11931,6 +11931,11 @@ _OPENER_PROBE_S = 420           # unlisted-game re-probe cadence (7 min —
                                 # that had a warm container insta-
                                 # returning at the backoff gate)
 _OPENER_PROBE_TS: dict = {}     # market_id → last probe ts (warm-container)
+_GRIDIRON_PROBE_TS: dict = {}   # same, for the football pass
+# 20 min. Football listings change far slower than MLB's, and the pool is
+# ~150 games against a per-tick cap of 8 — a game the venue has not priced
+# must get out of the way or it eats the budget forever (below).
+_GRIDIRON_PROBE_S = 1200.0
 
 # --- DIAMOND IQ LIVE ("the steam engine dies tonight" — Aug 2 2026) ---
 # MLB moneylines are priced by the MODEL, not by movement: the daily
@@ -13966,11 +13971,33 @@ def _gridiron_opener_pass(sb, now, deadline):
                  if any((g["id"], mt) not in done for mt in _WANT)]
         if not cands:
             return rows, stats
+        # A GAME THE VENUE HAS NOT PRICED MUST GET OUT OF THE WAY.
+        #
+        # This pool is ~150 games and the per-tick cap is 8. A candidate only
+        # leaves it by producing a row, and a game Polymarket does not quote
+        # produces nothing — so the whole NCAAF slate (which the venue lists
+        # no game markets for at all: futures only, no rent, unbettable)
+        # sat permanently in front of the NFL games that DO have a book,
+        # consuming the budget on every tick forever. Same family as the
+        # harvest ladder and the spread-row dedup: something that can never
+        # complete must not hold a slot. Back it off like the MLB pass does.
+        _gnow = _time.time()
+        cands = [g for g in cands
+                 if _gnow - _GRIDIRON_PROBE_TS.get(g["id"], 0.0)
+                 >= _GRIDIRON_PROBE_S]
+        if not cands:
+            stats["g_gate"] = "backoff_empty"
+            return rows, stats
         cands.sort(key=lambda g: str(g.get("event_start") or ""))
-        _grot = int(_time.time() // 60) % max(1, len(cands))
+        # STRIDE BY THE WINDOW, not by one. `% len(cands)` advanced the start
+        # a single game per minute while taking 8, so consecutive passes
+        # overlapped by seven and a full cycle took ~150 MINUTES. Striding by
+        # the cap turns that into ~19 passes.
+        _gwin = 8
+        _grot = ((int(_gnow // 60) * _gwin) % max(1, len(cands)))
         cands = cands[_grot:] + cands[:_grot]   # same anti-poison rotation
         import handicapper_web
-        for g in cands[:8]:               # per-tick cap — budget courtesy
+        for g in cands[:_gwin]:           # per-tick cap — budget courtesy
             if _time.time() >= deadline - 1.0:
                 break
             # An unmatched team or a missing moneyline used to abandon the
@@ -13984,6 +14011,9 @@ def _gridiron_opener_pass(sb, now, deadline):
             except Exception:
                 continue
             stats["g_eval"] += 1
+            # Stamped AFTER a completed build only — the MLB pass's rule: a
+            # build that died must not look like a game we have checked.
+            _GRIDIRON_PROBE_TS[g["id"]] = _time.time()
             mlp = ((((d or {}).get("odds") or {}).get("moneyline") or {})
                    .get("polymarket") or {})
             _ml_ok = (p_home is not None
