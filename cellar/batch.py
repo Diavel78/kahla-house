@@ -105,6 +105,12 @@ JOBS: tuple[Job, ...] = (
     Job("savant_xwoba",
         ["scripts.ingest_savant_xwoba", "--delta", "--platoon", "--commit"],
         hour=3, minute=45, note="Statcast xwOBA + platoon spine"),
+    # Off-season this is a one-query no-op (game_results has no fresh
+    # football finals to fetch summaries for); in-season it fills the prop
+    # spine the morning after each slate.
+    Job("football_players",
+        ["scripts.ingest_football_players", "--delta", "--commit"],
+        hour=3, minute=48, note="NFL player game lines (football prop spine)"),
 
     # -- daily model computes (order matters: after their spines) ----------
     Job("diamond_iq", ["scripts.compute_diamond_iq"],

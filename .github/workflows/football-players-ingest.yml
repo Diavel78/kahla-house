@@ -1,0 +1,60 @@
+name: Football Players — Ingest
+
+# Football prop spine: per-game player stat lines (passing/rushing/
+# receiving/fumbles/kicking) from ESPN boxscores into
+# football_player_games. Game universe = game_results, so this can never
+# ingest a game the ratings pipeline doesn't know (and never preseason).
+#   probe    — fetch ONE game, print raw category labels + parsed rows.
+#              READ THAT LOG before trusting a backfill.
+#   backfill — 2023-08-01 → today (~860 NFL summaries, ~15 min).
+#   delta    — last 8 days (the in-season daily; scheduled on the CELLAR,
+#              cellar/batch.py `football_players` — this workflow is the
+#              dispatch-only standby, the mlb-pitchers pattern).
+#
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "probe | backfill | delta"
+        required: false
+        default: "delta"
+      sport:
+        description: "NFL | NCAAF"
+        required: false
+        default: "NFL"
+
+concurrency:
+  group: football-players-ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run ingest
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          MODE="${{ github.event.inputs.mode || 'delta' }}"
+          SPORT="${{ github.event.inputs.sport || 'NFL' }}"
+          echo "mode=$MODE sport=$SPORT"
+          case "$MODE" in
+            probe)    python -m scripts.ingest_football_players --probe --sport "$SPORT" ;;
+            backfill) python -m scripts.ingest_football_players --backfill --sport "$SPORT" --commit ;;
+            delta|*)  python -m scripts.ingest_football_players --delta --sport "$SPORT" --commit ;;
+          esac
