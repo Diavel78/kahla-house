@@ -14573,7 +14573,13 @@ def api_handicapper_paperlog():
     if _own_opener:
         opener_rows, opener_stats = _opener_pass(sb, now, opener_deadline)
     else:
-        opener_rows, opener_stats = [], {"gate": "cellar_owns_lane"}
+        # Two different reasons to skip, and they must not read the same.
+        # "engines_off" = this request IS the cellar's paperlog lane, and the
+        # opener is running right now in its own lane in the same daemon.
+        # "cellar_owns_lane" = we are Vercel and stood down. Both are
+        # healthy; only the second means the house box is carrying it.
+        opener_rows, opener_stats = [], {
+            "gate": "cellar_owns_lane" if run_engines else "engines_off"}
     rows.extend(opener_rows)
     # GRIDIRON IQ football opener SHADOWS (no bets).
     #
