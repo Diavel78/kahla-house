@@ -1535,6 +1535,60 @@ def _gameday_rewards(sb) -> dict:
     return out
 
 
+@app.route("/api/polymarket/earnings-raw")
+def api_poly_earnings_raw():
+    """RAW /v1/incentives/earnings rows + the orders we had on those markets.
+
+    `_incentives_sync` keeps only five fields (slug, date, programType,
+    status, reward). If the venue also returns qualifying size, resting
+    time, or our share, that is the missing input to the rent formula --
+    and we would have been throwing it away on every sync. This dumps the
+    UNPARSED rows so the question is answerable by looking rather than by
+    modelling.
+
+    ?slug= filters (substring). ?n= caps rows (default 8).
+    """
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    want_slug = (request.args.get("slug") or "").strip().lower()
+    try:
+        n = max(1, min(40, int(request.args.get("n") or 8)))
+    except Exception:
+        n = 8
+    out: dict = {"ok": True}
+    try:
+        client = get_client()
+        data = client.get("/v1/incentives/earnings", authenticated=True) or {}
+        rows = data.get("rewards") or []
+        out["envelope_keys"] = sorted(data.keys())
+        out["total_rows"] = len(rows)
+        if rows:
+            out["row_keys"] = sorted(rows[0].keys()) if isinstance(rows[0], dict) else None
+        sel = [r for r in rows
+               if not want_slug
+               or want_slug in str(r.get("marketSlug") or "").lower()]
+        sel = sorted(sel, key=lambda r: float(r.get("reward") or 0), reverse=True)
+        out["rows"] = sel[:n]
+        # What we had resting on those markets, from our own book.
+        slugs = [str(r.get("marketSlug") or "") for r in sel[:n]]
+        try:
+            sb = get_supabase()
+            pk = (sb.table("bot_picks")
+                  .select("event_name,market_type,side,entry_price,picked_at,"
+                          "event_start,contracts:signal_blob->>contracts,"
+                          "pmm_slug:signal_blob->>pmm_slug")
+                  .in_("signal_blob->>pmm_slug", slugs)
+                  .limit(60).execute().data) or []
+            out["our_picks"] = pk
+        except Exception as e:
+            out["picks_err"] = f"{type(e).__name__}: {e}"[:160]
+    except Exception as e:
+        out.update(ok=False, error=f"{type(e).__name__}: {e}"[:220])
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/book")
 def api_poly_book():
     """READ-ONLY: the full order-book ladder for one slug, plus depth totals.
