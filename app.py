@@ -13918,13 +13918,26 @@ def _gridiron_opener_pass(sb, now, deadline):
         # listed AND the only ones paying pre-game rent.
         try:
             done_rows = (sb.table("pickbot_paperlog")
-                         .select("market_id,market_type")
+                         .select("market_id,market_type,"
+                                 "cover_p:signal_blob->>cover_p")
                          .in_("market_id", mids)
                          .filter("signal_blob->>opener_shadow", "eq", "true")
                          .limit(3000).execute().data) or []
         except Exception:
             return rows, stats            # fail-closed: no dedup read → skip
-        done = {(r["market_id"], r["market_type"]) for r in done_rows}
+        # A SPREAD ROW WITHOUT THE MODEL NUMBER IS NOT DONE (Aug 20 2026).
+        #
+        # One-shot dedup plus a row written before the cover model existed
+        # equals that game never carrying a model number, forever — all 16
+        # NFL week 1 games were already in exactly that state. Same shape as
+        # the harvest ladder bug: WHEN A DEDUP KEYS ON WORK ALREADY WRITTEN,
+        # A PARTIAL WRITE IS A PERMANENT WRITE. So a spread row only counts
+        # as done once it has `cover_p`. Re-tapes each stale game once and
+        # then settles; moneyline and total are unaffected (neither carries
+        # a model number — a total would need a projected TOTAL, which is
+        # its own earn-in).
+        done = {(r["market_id"], r["market_type"]) for r in done_rows
+                if r["market_type"] != "spread" or r.get("cover_p")}
         _WANT = ("moneyline", "spread", "total")
         cands = [g for g in cands
                  if any((g["id"], mt) not in done for mt in _WANT)]
