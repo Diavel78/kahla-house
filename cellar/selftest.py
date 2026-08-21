@@ -300,6 +300,74 @@ def test_dry_run_blackout() -> None:
         config.DRY_RUN = real
 
 
+def test_overrun_detector() -> None:
+    """A lane past its own TTL must go LOUD, once, and keep its lease.
+
+    This test exists because the thing it replaces -- config.LANE_TIMEOUT_S --
+    sat in the file for weeks naming a ceiling that nothing enforced. A guard
+    with no test is the same fiction with more steps.
+    """
+    import sys
+    import types
+    from cellar import config
+    from cellar.runner import Runner
+
+    pings, rows = [], []
+
+    class _Exec:
+        def __init__(self, payload): self.payload = payload
+        def execute(self): rows.append(self.payload); return self
+    class _Tbl:
+        def insert(self, payload): return _Exec(payload)
+    class _SB:
+        def table(self, _n): return _Tbl()
+
+    fake_app = types.ModuleType("app")
+    fake_app._send_fill_telegram = lambda text, urgent=False: pings.append(
+        (text, urgent))
+    real_app = sys.modules.get("app")
+    sys.modules["app"] = fake_app
+    try:
+        r = Runner(_SB(), lease=None)
+        spec = config.ALL_LANES["opener"]
+        now = 1_000_000.0
+
+        # Running, but inside its TTL — silence.
+        r._started["opener"] = now - (spec.ttl_s - 5)
+        r._overrun_check("opener", spec, now)
+        check("inside its TTL => no alarm", not rows and not pings,
+              f"rows={len(rows)} pings={len(pings)}")
+
+        # Past the TTL — one failed tick row and one URGENT ping.
+        r._started["opener"] = now - (spec.ttl_s + 30)
+        r._overrun_check("opener", spec, now)
+        check("past its TTL => failed tick recorded",
+              len(rows) == 1 and rows[0]["ok"] is False
+              and str(rows[0]["error"]).startswith("overrun:"),
+              f"got {rows}")
+        check("past its TTL => one urgent ping",
+              len(pings) == 1 and pings[0][1] is True, f"got {pings}")
+
+        # Still stuck next tick — must NOT re-ping every minute.
+        r._overrun_check("opener", spec, now + 60)
+        check("stuck lane pings once per episode",
+              len(pings) == 1 and len(rows) == 1,
+              f"rows={len(rows)} pings={len(pings)}")
+
+        # Completing re-arms the alarm for the next episode.
+        r._started.pop("opener", None)
+        r._stuck.discard("opener")
+        r._started["opener"] = now - (spec.ttl_s + 30)
+        r._overrun_check("opener", spec, now + 120)
+        check("a completed run re-arms the alarm", len(pings) == 2,
+              f"got {len(pings)}")
+    finally:
+        if real_app is not None:
+            sys.modules["app"] = real_app
+        else:
+            sys.modules.pop("app", None)
+
+
 def test_side_and_phase() -> None:
     """Two wiring invariants that only bite in production.
 
@@ -402,7 +470,7 @@ def main() -> int:
               test_lane_registry_matches_config, test_batch_schedule,
               test_batch_commands_exist, test_batch_flags_are_real,
               test_batch_blocked_deps, test_owner_dependent_lanes,
-              test_dry_run_blackout,
+              test_dry_run_blackout, test_overrun_detector,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")

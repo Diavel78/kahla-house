@@ -44,6 +44,8 @@ class Runner:
         self.write_lock = threading.Lock()
         self._next_due: dict[str, float] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._started: dict[str, float] = {}     # lane -> t0 of the live run
+        self._stuck: set[str] = set()            # lanes already reported stuck
         self._renewer: threading.Thread | None = None
 
     # -- validation ---------------------------------------------------------
@@ -124,6 +126,7 @@ class Runner:
             return
 
         t0 = time.time()
+        self._started[name] = t0
 
         # Invariant 1: claim BEFORE any work.
         if not self.lease.claim(name, ttl_s=spec.ttl_s):
@@ -151,6 +154,47 @@ class Runner:
         finally:
             if lock:
                 lock.release()
+            self._started.pop(name, None)
+            self._stuck.discard(name)      # it finished — re-arm the alarm
+
+    def _overrun_check(self, name: str, spec, now: float) -> None:
+        """A lane running longer than its OWN lease TTL is stuck. Say so.
+
+        Why the TTL is the right line: the TTL is exactly the window in which
+        the standby side treats the holder as dead. `_renew_loop` refreshes
+        the heartbeat independently of lane execution, so a hung lane keeps
+        its lease green forever -- the alarm the renewal loop suppresses is
+        the one we need back. Past its own TTL, a lane is by its own
+        definition too slow to be trusted.
+
+        WE DO NOT RELEASE THE LEASE. A hung thread cannot be killed in Python
+        and may be sitting inside a venue write; dropping the lease would let
+        the standby start the same work alongside it, which is the Aug 16
+        duplicate-order incident with extra steps. Holding a lease and doing
+        nothing is bad; two sides writing at once is worse. So convert the
+        SILENT stall into a LOUD one -- a failed tick row (so the dashboard's
+        lane health stops reading green) and one urgent ping -- and let a
+        human decide. Once per episode, re-armed when the lane completes.
+        """
+        t0 = self._started.get(name)
+        if t0 is None or name in self._stuck:
+            return
+        held = now - t0
+        if held < spec.ttl_s:
+            return
+        self._stuck.add(name)
+        msg = (f"lane {name} has been running {int(held)}s, past its own "
+               f"{spec.ttl_s}s lease TTL — the lease is HELD and the standby "
+               f"is stood down, so this lane is doing nothing and looks "
+               f"healthy. Check the daemon.")
+        log.error("STUCK LANE: %s", msg)
+        self.record(name, claimed=True, ok=False, work=0,
+                    ms=int(held * 1000), error=f"overrun: {int(held)}s")
+        try:
+            import app as _app
+            _app._send_fill_telegram(f"🚨 STUCK LANE: {msg}", urgent=True)
+        except Exception as e:
+            log.warning("stuck-lane ping failed: %s", e)
 
     def _tick(self, now: float, enabled: list[str]) -> None:
         for name in enabled:
@@ -162,6 +206,7 @@ class Runner:
                 # Still running from last time. Do NOT stack a second copy --
                 # that is the overlapping-batch bug in miniature.
                 log.warning("lane %s still running, skipping this tick", name)
+                self._overrun_check(name, spec, now)
                 self._next_due[name] = now + spec.every_s
                 continue
             self._next_due[name] = now + spec.every_s

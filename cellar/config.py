@@ -51,10 +51,18 @@ def _flag(name: str, default: bool) -> bool:
 # WOULD do, but no venue write and no DB mutation from a write engine.
 DRY_RUN = _flag("CELLAR_DRY_RUN", True)
 
-# Wall-clock ceiling for a single lane invocation. Not a Vercel-style budget
-# (there is no platform killing us here) -- purely a stuck-lane backstop so
-# one hung HTTP call can't wedge the scheduler forever.
-LANE_TIMEOUT_S = float(os.environ.get("CELLAR_LANE_TIMEOUT_S", "180"))
+# NO LANE_TIMEOUT_S (removed Aug 20 2026). It existed here for weeks as a
+# "wall-clock ceiling for a single lane invocation" that NOTHING READ -- the
+# runner never wrapped a lane call in it, so the reassurance was fictional.
+# A dead knob that names a guarantee is worse than no knob: it stops you
+# looking for the real thing.
+#
+# There is also nothing to enforce it WITH: a Python thread cannot be killed,
+# so a genuinely hung lane runs until the process dies no matter what number
+# sits here. What the runner does instead is detect the overrun against the
+# lane's OWN ttl_s -- the window in which the standby would call the holder
+# dead -- and make it LOUD (failed tick row + urgent ping) rather than
+# silent. See Runner._overrun_check for why it does not release the lease.
 
 
 # --------------------------------------------------------------------------
