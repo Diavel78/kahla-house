@@ -60,6 +60,77 @@ def _fetch_games(sb, sport: str, since_iso: str) -> list[dict]:
              "date": r.get("event_start")} for r in rows]
 
 
+_SPREAD_FIT_SPORTS = ("NFL", "NCAAF")
+
+
+def _spread_fit(games: list[dict], params: dict) -> dict | None:
+    """Walk-forward (alpha, beta, sd) for the margin → cover conversion.
+
+    WALK-FORWARD ON PURPOSE, even though hfa/scale beside it are fit
+    in-sample. Those two are one parameter each and shrug off the overfit;
+    the residual SD does not. Projecting past games with ratings that
+    already contain their results understates the spread, and an
+    understated SD makes every cover probability MORE confident than the
+    model has earned — the one direction that costs money. So each date is
+    projected from ratings built only from earlier games, exactly as the
+    backtest grades it.
+
+    Costs a ratings solve per game date (about a minute for a full NCAAF
+    season) in a daily batch job. Returns None rather than raising: a
+    missing spread_fit degrades to "no cover probability", never to a
+    wrong one.
+    """
+    try:
+        from collections import defaultdict
+
+        from _lib import gridiron_spread as gsp
+
+        hl = params.get("half_life_days")
+        # `_fetch_games` leaves `date` as the raw ISO string (compute_ratings
+        # parses it itself), so parse once here and key off the real date.
+        parsed = []
+        for g in games:
+            dt = pr._parse_dt(g.get("date"))
+            if not dt or g.get("home_score") is None or g.get("away_score") is None:
+                continue
+            parsed.append({**g, "_dt": dt,
+                           "home_score": float(g["home_score"]),
+                           "away_score": float(g["away_score"])})
+        by_date = defaultdict(list)
+        for g in parsed:
+            by_date[g["_dt"].date()].append(g)
+        dates = sorted(by_date)
+        pairs: list[tuple[float, float]] = []
+        for d in dates:
+            prior = [g for g in parsed if g["_dt"].date() < d]
+            if len(prior) < 40:
+                continue
+            cut = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+            R = pr.compute_ratings(prior, half_life_days=hl, as_of=cut)
+            if not R:
+                continue
+            for g in by_date[d]:
+                proj = pr.project(R, g["home"], g["away"],
+                                  hfa=params.get("hfa", 0.0))
+                if not proj:
+                    continue
+                pairs.append((proj["margin"],
+                              g["home_score"] - g["away_score"]))
+        st = gsp.fit(pairs)
+        if not st:
+            return None
+        # Only the three numbers Flask needs for the normal tail. The
+        # empirical PMF is deliberately NOT shipped: it graded level with
+        # the normal on NFL (brier 0.2027 vs 0.2028) and is 120 entries
+        # instead of 3, so the mirror in app.py stays small enough to be
+        # obviously correct.
+        return {"alpha": st["alpha"], "beta": st["beta"], "sd": st["sd"],
+                "mean": st["mean"], "n": st["n"]}
+    except Exception as e:
+        log.warning("spread fit failed: %s", e)
+        return None
+
+
 def _write_snapshot(sb, sport: str, ratings: dict, params: dict) -> bool:
     try:
         sb.table("power_ratings").insert({
@@ -119,6 +190,14 @@ def main(argv: list[str] | None = None) -> int:
             params = {**params, "hfa": cal["hfa"], "scale": cal["scale"],
                       "calibrated": True, "fit_brier": cal["brier"],
                       "fit_n": cal["n"]}
+        # SPREAD FIT (football only) — the shrinkage + residual spread that
+        # turn a projected margin into a cover probability. Football is the
+        # only place we can make a pre-game game market, so it is the only
+        # place this is worth the walk.
+        if sport in _SPREAD_FIT_SPORTS:
+            fit = _spread_fit(games, params)
+            if fit:
+                params = {**params, "spread_fit": fit}
         if _write_snapshot(sb, sport, ratings, params):
             cal_frag = (f" · fit hfa={cal['hfa']} scale={cal['scale']} "
                         f"brier={cal['brier']}") if cal else " · uncalibrated"

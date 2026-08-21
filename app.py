@@ -13616,11 +13616,14 @@ def _power_snapshot(sb, sport):
     return snap
 
 
-def _gridiron_ml(sb, sport, event_name):
-    """Team-core P(home) from the power_ratings snapshot — EXACTLY the
-    projection the backtest graded (off/def cross + fitted hfa, logistic
-    at the fitted scale). None = can't price (no snapshot / team
-    unmatched) — no shadow, never a guess."""
+def _gridiron_margin(sb, sport, event_name):
+    """Projected home MARGIN from the power_ratings snapshot, plus the
+    snapshot's params. Returns (margin, params) or None.
+
+    The margin is the model's NATIVE output; P(home) is that number
+    squeezed through a logistic. Factored out because football is a spread
+    business and the spread path needs the margin, not the squeeze.
+    """
     snap = _power_snapshot(sb, sport)
     if not snap or " @ " not in (event_name or ""):
         return None
@@ -13642,14 +13645,65 @@ def _gridiron_ml(sb, sport, event_name):
         lg = float(snap.get("league_avg") or 0.0)
         params = snap.get("params") or {}
         hfa = float(params.get("hfa") or 0.0)
-        scale = float(params.get("scale") or 1.0)
         h_off, h_def = float(h["off"]), float(h["def"])
         a_off, a_def = float(a["off"]), float(a["def"])
     except (TypeError, KeyError, ValueError):
         return None
     exp_home = h_off + (a_def - lg) + hfa / 2.0
     exp_away = a_off + (h_def - lg) - hfa / 2.0
-    margin = exp_home - exp_away
+    return exp_home - exp_away, params
+
+
+def _gridiron_cover_p(params, margin, line):
+    """P(the HOME side covers `line`) — the model's spread number.
+
+    MIRRORS `kahla-scanner/_lib/gridiron_spread.py`; Flask cannot import the
+    subproject, same arrangement as `_whiff_tail_p`. **Keep the two in step.**
+
+    Two things this does that pricing off the raw margin would not:
+      • SHRINKS the projection (alpha + beta*margin). The raw projection is
+        ~a third too extreme — a projected blowout under-delivers by 5-7
+        points in BOTH directions — so the tails would be sold at prices the
+        model itself cannot support.
+      • Uses the NORMAL tail. The engine also ships an integer-PMF form that
+        keeps football's key numbers, but it graded level with the normal on
+        NFL (brier 0.2027 vs 0.2028) and needs 120 numbers in the snapshot
+        instead of 3. Revisit if a season of data separates them.
+
+    `line` is the home side's own spread (−3.5 = home lays 3.5). Home covers
+    when margin > −line. Half-point lines cannot push, which is what the
+    venue posts; a whole number would leave the mass sitting exactly on it
+    unmodelled, so this returns None for one rather than misprice it.
+    """
+    fit = (params or {}).get("spread_fit") or {}
+    try:
+        sd = float(fit["sd"])
+        alpha, beta = float(fit["alpha"]), float(fit["beta"])
+        mean = float(fit.get("mean") or 0.0)
+        thr = -float(line)
+        proj = alpha + beta * float(margin)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if sd <= 0 or abs(thr - round(thr)) < 0.01:
+        return None                     # no fit, or a pushable whole number
+    z = (thr - (proj + mean)) / sd
+    p = 1.0 - 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+    return max(0.005, min(0.995, p))
+
+
+def _gridiron_ml(sb, sport, event_name):
+    """Team-core P(home) from the power_ratings snapshot — EXACTLY the
+    projection the backtest graded (off/def cross + fitted hfa, logistic
+    at the fitted scale). None = can't price (no snapshot / team
+    unmatched) — no shadow, never a guess."""
+    got = _gridiron_margin(sb, sport, event_name)
+    if not got:
+        return None
+    margin, params = got
+    try:
+        scale = float(params.get("scale") or 1.0)
+    except (TypeError, ValueError):
+        return None
     if scale <= 0:
         scale = 1.0
     try:
@@ -14014,6 +14068,34 @@ def _gridiron_opener_pass(sb, now, deadline):
                 if _cheap is None:
                     continue
                 _ea2 = _prob_to_amer_py(_cheap[2] / 100.0)
+                # THE MODEL'S NUMBER ON THE SAME ROW (Aug 20 2026).
+                #
+                # These rows taped the MARKET (two mids and a cheap peg) and
+                # nothing else, because there was no way to price a spread.
+                # There is now, so stamp it: the gate-2 dataset — model fair
+                # vs the price we would actually have paid — cannot be
+                # reconstructed later from prices alone, and football starts
+                # listing in days. Spread only; a total needs a projected
+                # TOTAL, which is its own earn-in and its own backtest.
+                _mdl = {}
+                if _mt == "spread" and _cheap[3] is not None:
+                    _got = _gridiron_margin(sb, g["sport"], g.get("event_name"))
+                    if _got:
+                        _mg, _pm = _got
+                        # cover_prob is home-perspective; the away line is
+                        # the mirror, and half-points cannot tie, so the
+                        # away side is exactly the complement.
+                        _lh = (float(_cheap[3]) if _cheap[0] == "home"
+                               else -float(_cheap[3]))
+                        _ph = _gridiron_cover_p(_pm, _mg, _lh)
+                        if _ph is not None:
+                            _ps = _ph if _cheap[0] == "home" else 1.0 - _ph
+                            _mdl = {"gridiron_margin": round(_mg, 2),
+                                    "cover_p": round(_ps, 4),
+                                    "model_edge_pp": round(
+                                        _ps * 100.0 - _cheap[2], 1),
+                                    "peg_c": _cheap[2],
+                                    "line_home": _lh}
                 _opener_persist(sb, {
                     "market_id": g["id"],
                     "event_name": g.get("event_name"),
@@ -14026,12 +14108,14 @@ def _gridiron_opener_pass(sb, now, deadline):
                     "timing_window": "opener", "prime_core": False,
                     "starts_in_min": sim0, "sharp_score": None,
                     "edge_pp": round(_cheap[1], 1),
-                    "fair_american": None,
+                    "fair_american": (_prob_to_amer_py(_mdl["cover_p"])
+                                      if _mdl else None),
                     "gates_cleared": False,
                     "signal_blob": {"opener_shadow": True,
                                     "gridiron_quote": True,
                                     "shadow_only": True,
                                     "would_bet": False,
+                                    **_mdl,
                                     "a_mid_c": round(_qa["mid"] * 100, 1),
                                     "b_mid_c": round(_qb["mid"] * 100, 1)},
                     "logged_at": now.isoformat(),
