@@ -119,12 +119,36 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 > step, and the older data shows the same shape. Confirmed in cash: a
 > $73.23 payout landed Aug 21, pending→paid at full value in ~2 hours.
 >
-> **THE MECHANISM (this is the durable part — the numbers above will move).**
-> Rent is your share of a per-market pool. Near game time every maker piles
-> in and 10 contracts is a rounding error; three days out, on a market
-> nobody is quoting yet, the same 10 contracts is a large fraction of all
-> liquidity present. **You are not paid for size. You are paid for being
-> early and alone.**
+> **THE MECHANISM — IT IS THIN, NOT EARLY** (corrected same day, by the user,
+> against a live order book). Rent is **your share of the qualifying depth on
+> that market**, times the pool. Early is only a PROXY for thin, because a
+> freshly-listed market has not been quoted yet — and the proxy FAILS, which
+> is how this got caught:
+>
+> | | MLB `aec-mlb-laa-tex-2026-08-22` | NFL `asc-nfl-atl-ind-2026-08-22-pos-21pt5` |
+> |---|---|---|
+> | days ahead | 3 | 3 |
+> | our position | resting | **best bid, 1¢ spread** |
+> | book depth | ~234 contracts (implied) | **16,505 shares** |
+> | our share | 4.3% | 0.09% (0.58% within 3¢) |
+> | earned | **$9.63/day** | **$0.00** — computes to $0.87, under the floor |
+>
+> Same horizon, same account, and the one at the TOUCH of a 1¢ spread earned
+> nothing, because 70× more depth sat underneath it. **Being the touch is not
+> being a large share.** A wide spread is not evidence of a thin book either
+> — that NFL rung is a cheap longshot lots of people quote.
+>
+> ⚠ **THE $1/DAY FORFEIT FLOOR IS PART OF THE MECHANISM.** Below it the venue
+> pays nothing and may not even emit a row (status `SKIPPED` when it does —
+> `_rent_window` excludes those from earnings). So a small share of a deep
+> book is not "a little rent", it is **zero**. Any market-selection rule has
+> to clear that floor, which makes depth a HARD input, not a nicety.
+>
+> **CONSEQUENCE FOR THE MARKET-MAKER LANE:** "quote the junk lines nobody is
+> playing in" is exactly wrong when those junk lines carry 16,000 shares.
+> The lane must MEASURE DEPTH before quoting and skip anything where our size
+> cannot clear the floor. We do not currently capture book depth anywhere —
+> `pm_snapshots` stores prices, not sizes. That is the gap to close first.
 >
 > This kills the model that used to sit in this file — share ≈ (your size /
 > `target_size`) × pool, predicting ~$0.11/market. That was fitted entirely
