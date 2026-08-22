@@ -60,9 +60,19 @@ DRY_RUN = _flag("CELLAR_DRY_RUN", True)
 # There is also nothing to enforce it WITH: a Python thread cannot be killed,
 # so a genuinely hung lane runs until the process dies no matter what number
 # sits here. What the runner does instead is detect the overrun against the
-# lane's OWN ttl_s -- the window in which the standby would call the holder
-# dead -- and make it LOUD (failed tick row + urgent ping) rather than
-# silent. See Runner._overrun_check for why it does not release the lease.
+# lane's stuck line (stuck_s, defaulting to its ttl_s) and make it LOUD
+# (failed tick row + urgent ping) rather than silent. See
+# Runner._overrun_check for why it does not release the lease.
+#
+# ttl_s and stuck_s are DIFFERENT CLOCKS since the renewer shipped: the
+# renew loop heartbeats every held lane every 30s independently of lane
+# execution, so a lane legitimately running past its ttl_s never loses its
+# lease. ttl_s is "how fast the standby takes over if the DAEMON dies";
+# stuck_s is "how long before a running lane is presumed hung". They were
+# the same number until the opener's designed workload (120s MLB pass +
+# in-flight-game overshoot + the football pass) grew past its 180s ttl and
+# every healthy ~182s tick got branded STUCK — a failed tick row and a
+# false 🚨 page, 4-5 an hour, on a lane doing exactly its job.
 
 
 # --------------------------------------------------------------------------
@@ -82,6 +92,10 @@ class Lane:
     # moved to the cellar: 242 consecutive healthy ticks, work=0, and the
     # dashboard's day card silently read $0.00. Refuse to start instead.
     needs_owner: bool = False
+    # Stuck line for _overrun_check, when the lane's DESIGNED workload runs
+    # longer than its lease TTL (see the two-clocks note above). None = the
+    # ttl_s, which is right for every lane whose ticks are short.
+    stuck_s: int | None = None
     note: str = ""
 
 
@@ -100,8 +114,12 @@ ALL_LANES: dict[str, Lane] = {
         # Worse than the ledger's silent zero, because the tick count lies.
         # Enforcement means Vercel stands down, so that is a total betting
         # blackout that reads healthy on every dashboard. Refuse to start.
+        # stuck_s=420: the designed workload is ~120s MLB pass + in-flight
+        # game overshoot + the football pass — healthy ticks run ~180-200s.
+        # 420 is 2x that: a real hang, not a full slate. Lease ttl stays 180
+        # (daemon-death failover speed; the renewer covers live execution).
         Lane("opener",          60,   180, writes_money=True, needs_owner=True,
-             note="opener lane + autobet (NEW MONEY)"),
+             stuck_s=420, note="opener lane + autobet (NEW MONEY)"),
         Lane("repeg",          120,   300, writes_money=True, needs_owner=True,
              note="maker order chase"),
         Lane("harvest",        120,   300, writes_money=True, needs_owner=True,

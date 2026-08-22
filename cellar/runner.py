@@ -257,11 +257,16 @@ class Runner:
         if t0 is None or name in self._stuck:
             return
         held = now - t0
-        if held < spec.ttl_s:
+        # stuck_s where the lane's designed workload outruns its lease TTL
+        # (the opener's two passes run ~180-200s healthy); ttl_s otherwise.
+        # The renewer keeps the lease alive through either, so this line is
+        # purely "presumed hung", never "about to lose the lane".
+        line = spec.stuck_s or spec.ttl_s
+        if held < line:
             return
         self._stuck.add(name)
-        msg = (f"lane {name} has been running {int(held)}s, past its own "
-               f"{spec.ttl_s}s lease TTL — the lease is HELD and the standby "
+        msg = (f"lane {name} has been running {int(held)}s, past its "
+               f"{line}s stuck line — the lease is HELD and the standby "
                f"is stood down, so this lane is doing nothing and looks "
                f"healthy. Check the daemon.")
         log.error("STUCK LANE: %s", msg)

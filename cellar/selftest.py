@@ -374,22 +374,27 @@ def test_overrun_detector() -> None:
     try:
         r = Runner(_SB(), lease=None)
         spec = config.ALL_LANES["opener"]
+        # The stuck line, NOT the ttl: they diverged when the opener's
+        # designed workload (two passes, ~180-200s healthy) outgrew its
+        # 180s lease TTL — the renewer keeps the lease alive regardless.
+        line = spec.stuck_s or spec.ttl_s
         now = 1_000_000.0
 
-        # Running, but inside its TTL — silence.
-        r._started["opener"] = now - (spec.ttl_s - 5)
+        # Running, but inside its stuck line — silence. A healthy full-slate
+        # opener tick (~182s, past the old ttl-based line) must be silent.
+        r._started["opener"] = now - max(line - 5, spec.ttl_s + 5)
         r._overrun_check("opener", spec, now)
-        check("inside its TTL => no alarm", not rows and not pings,
+        check("inside its stuck line => no alarm", not rows and not pings,
               f"rows={len(rows)} pings={len(pings)}")
 
-        # Past the TTL — one failed tick row and one URGENT ping.
-        r._started["opener"] = now - (spec.ttl_s + 30)
+        # Past the stuck line — one failed tick row and one URGENT ping.
+        r._started["opener"] = now - (line + 30)
         r._overrun_check("opener", spec, now)
-        check("past its TTL => failed tick recorded",
+        check("past its stuck line => failed tick recorded",
               len(rows) == 1 and rows[0]["ok"] is False
               and str(rows[0]["error"]).startswith("overrun:"),
               f"got {rows}")
-        check("past its TTL => one urgent ping",
+        check("past its stuck line => one urgent ping",
               len(pings) == 1 and pings[0][1] is True, f"got {pings}")
 
         # Still stuck next tick — must NOT re-ping every minute.
@@ -401,7 +406,7 @@ def test_overrun_detector() -> None:
         # Completing re-arms the alarm for the next episode.
         r._started.pop("opener", None)
         r._stuck.discard("opener")
-        r._started["opener"] = now - (spec.ttl_s + 30)
+        r._started["opener"] = now - (line + 30)
         r._overrun_check("opener", spec, now + 120)
         check("a completed run re-arms the alarm", len(pings) == 2,
               f"got {len(pings)}")
