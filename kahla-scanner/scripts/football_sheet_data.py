@@ -55,6 +55,12 @@ _EDGE_SPREAD_PTS = 3.0
 _EDGE_SPREAD_RANKED_PTS = 2.0
 _EDGE_TOTAL_PTS = 4.0
 
+# Season floors — NO PRESEASON SHEETS (mirror of app.py _GRIDIRON_MIN_START;
+# ⚠ UPDATE YEARLY). Without this the first shakedown run built 27 preseason
+# NFL sheets priced off regular-season ratings — garbage projections for
+# games where starters sit.
+_SEASON_FLOOR = {"NFL": "2026-09-08", "NCAAF": "2026-08-29"}
+
 # Friday diff thresholds — below these a move isn't worth a changes line.
 _DIFF_SPREAD_PTS = 0.5
 _DIFF_TOTAL_PTS = 1.0
@@ -101,6 +107,15 @@ def sb_upsert(table: str, rows: list[dict], on_conflict: str) -> None:
                        params={"on_conflict": on_conflict},
                        headers=h, json=rows[i:i + 50], timeout=60)
         r.raise_for_status()
+
+
+def sb_delete(table: str, filters: dict) -> None:
+    base, headers = _sb_base()
+    h = dict(headers)
+    h["Prefer"] = "return=minimal"
+    r = httpx.delete(f"{base}/rest/v1/{table}", params=filters, headers=h,
+                     timeout=30)
+    r.raise_for_status()
 
 
 def sb_patch(table: str, filters: dict, patch: dict) -> None:
@@ -744,8 +759,12 @@ def run(mode: str, sports: list[str], days: int, week_key: str,
         fpi = espn_fpi(sport)
         spine = spine_markets(sport)
 
+        floor = datetime.fromisoformat(
+            _SEASON_FLOOR[sport] + "T00:00:00+00:00")
+        espn_ok = True
         games = espn_week_games(sport, days)
         if games is None:
+            espn_ok = False
             # ESPN dark (e.g. sandbox). Fall back to the spine so line/model
             # sections still build; ESPN sections render unavailable.
             log.warning("%s: ESPN unreachable — falling back to markets spine",
@@ -773,6 +792,7 @@ def run(mode: str, sports: list[str], days: int, week_key: str,
             now = datetime.now(timezone.utc)
             games = [g for g in games
                      if now < g["event_start"] <= now + timedelta(days=days)]
+        games = [g for g in games if g["event_start"] >= floor]
 
         for g in games:
             g["market_id"] = match_market(g, spine)
@@ -834,6 +854,16 @@ def run(mode: str, sports: list[str], days: int, week_key: str,
                 "week_key": week_key, "sport": sport, "games": len(rows),
                 "deep_games": sum(1 for r in rows if r["tier"] == "deep"),
             }], "week_key,sport")
+        if commit and espn_ok:
+            # Sweep stale rows this ESPN-backed build didn't touch — spelling
+            # drift mints dupes ("San José State" vs "San Jose State": the
+            # unique key treats them as different games), and season-floor
+            # changes can orphan whole slates (the 27 preseason NFL rows).
+            # Gated on espn_ok so a degraded spine-fallback run can never
+            # delete a fuller ESPN-named build.
+            sb_delete("football_sheets", {
+                "week_key": f"eq.{week_key}", "sport": f"eq.{sport}",
+                "data_built_at": f"lt.{now_iso}"})
         summary[sport] = {
             "games": len(rows),
             "deep": sum(1 for r in rows if r["tier"] == "deep"),
