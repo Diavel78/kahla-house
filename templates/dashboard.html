@@ -88,6 +88,29 @@
         }
         .foot a { color: var(--muted); }
         .skel { color: var(--muted); }
+        /* Top strip: Open bets N · Orders N — the two-number glance that
+           says the machine is holding inventory and still quoting. */
+        .quick {
+            display: flex; gap: 10px; margin-bottom: 14px;
+        }
+        .q {
+            flex: 1; display: flex; align-items: center; gap: 9px;
+            background: var(--surface); border: 1px solid var(--line);
+            border-radius: 12px; padding: 12px 16px;
+            font-size: 14px; color: var(--muted); font-weight: 600;
+        }
+        .q b {
+            font-family: 'JetBrains Mono', monospace; font-size: 20px;
+            color: var(--text); margin-left: auto;
+        }
+        .qdot {
+            width: 9px; height: 9px; border-radius: 50%;
+            background: var(--line); flex: none;
+        }
+        .qdot.on { background: var(--green);
+                   box-shadow: 0 0 6px rgba(52,211,153,.6); }
+        .qdot.zero { background: var(--muted); }
+        .qdot.dark { background: var(--red); }
         /* THE MACHINE card. One row per lane, readable at arm's length on
            a phone -- this exists to be glanced at, not studied. */
         .lanes { display: flex; flex-direction: column; gap: 2px; }
@@ -170,6 +193,12 @@
     </div>
 
     <div class="wrap">
+        <div class="quick">
+            <span class="q"><i class="qdot" id="qdBets"></i>Open bets
+                <b id="qBets">—</b></span>
+            <span class="q"><i class="qdot" id="qdOrders"></i>Orders
+                <b id="qOrders">—</b></span>
+        </div>
         <div class="grid">
             <!-- DAY CARDS ARE BETS-ONLY (user, Aug 22 2026): the venue
                  publishes a day's rent only after its reward periods end
@@ -304,6 +333,21 @@
             + codeFrag;
     }
 
+    // Top strip: number + dot. Green = holding/quoting (n>0), muted = a
+    // true zero, red = the count itself is unavailable (never render a
+    // failed read as 0 — "empty book" and "can't see the book" are
+    // opposite states).
+    function paintQuick(numEl, dotEl, v) {
+        const n = document.getElementById(numEl);
+        const d = document.getElementById(dotEl);
+        d.classList.remove('on', 'zero', 'dark');
+        if (v === null || v === undefined || isNaN(v)) {
+            n.textContent = '—'; d.classList.add('dark'); return;
+        }
+        n.textContent = v;
+        d.classList.add(v > 0 ? 'on' : 'zero');
+    }
+
     function paint(el, v, signed) {
         const n = document.getElementById(el);
         n.classList.remove('skel', 'pos', 'neg');
@@ -327,6 +371,8 @@
             const j = await r.json();
             if (!j.ok) { document.getElementById('stamp').textContent = 'error'; return; }
             const s = j.summary || {};
+            paintQuick('qBets', 'qdBets', s.open_positions);
+            paintQuick('qOrders', 'qdOrders', s.open_orders);
             // LIFETIME reads the venue ledger ONLY (balance + withdrawn −
             // deposited, cash basis). The old walk-based total_pnl read
             // $50.20 and $247.04 thirteen minutes apart — a dash while the

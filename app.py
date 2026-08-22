@@ -2233,11 +2233,30 @@ def _dash_cache_refresh(sb, client) -> dict:
         rows = [_position_row_fast(sl, p) for sl, p in positions]
         summary = compute_summary(rows, parsed, tz_offset_minutes=0)
         bal = parse_balances(fetch_balances(client)) or {}
+        # Resting-order count for the dashboard's top strip ("Open bets N ·
+        # Orders N" — the two-number is-the-machine-working glance). Same
+        # working-state filter as /api/my-orders. None on failure — a dash
+        # is honest, a zero from a failed read is not.
+        order_count = None
+        try:
+            _resp = client.orders.list()
+            _raw = (_resp.get("orders") if isinstance(_resp, dict)
+                    else getattr(_resp, "orders", None)) or []
+
+            def _ostate(o):
+                return ((o.get("state") if isinstance(o, dict)
+                         else getattr(o, "state", "")) or "")
+
+            order_count = sum(1 for o in _raw
+                              if _ostate(o) in _OPEN_ORDER_STATES)
+        except Exception:
+            pass
         (sb.table("poly_dash_cache").upsert({
             "id": 1, "summary": summary,
             "derived": _dash_derived(sb),
             "balance": bal.get("current_balance"),
             "open_count": len([p for p in rows if not p.get("expired")]),
+            "order_count": order_count,
             "computed_at": datetime.now(timezone.utc).isoformat(),
             "note": "ok"}).execute())
         res = {"ok": True, "acts": len(parsed)}
@@ -18599,6 +18618,7 @@ def api_data():
                         (_rw.get("yesterday") or {}).get("total")),
                     "total_pnl": _s.get("total_pnl"),
                     "open_positions": _c.get("open_count"),
+                    "open_orders": _c.get("order_count"),
                     "rent_7d": _r7, "pnl_7d": _p7,
                     "all_in_7d": _all_in(_p7, (_r7 or {}).get("total")),
                     "pnl_stack": _stk,
