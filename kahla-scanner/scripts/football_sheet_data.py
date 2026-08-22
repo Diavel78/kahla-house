@@ -115,14 +115,26 @@ def sb_patch(table: str, filters: dict, patch: dict) -> None:
 
 # ---------------------------------------------------------------- ESPN layer
 def _espn_get(url: str, params: dict | None = None) -> dict | None:
-    try:
-        r = httpx.get(url, params=params or {}, headers={"User-Agent": _UA},
-                      timeout=20)
-        r.raise_for_status()
-        return r.json() or {}
-    except Exception as e:
-        log.warning("ESPN fetch failed %s %s: %s", url, params, e)
-        return None
+    """GET with a host fallback: site.api.espn.com started hard-403'ing the
+    Actions runners (Aug 2026, every request — the per-day trick died too),
+    while site.web.api.espn.com serves the same site/v2 paths and is NOT
+    blocked (proven by the FPI fetch). Try the canonical host, then the
+    web host."""
+    last = None
+    for u in (url, url.replace("://site.api.espn.com/",
+                               "://site.web.api.espn.com/")):
+        try:
+            r = httpx.get(u, params=params or {}, headers={"User-Agent": _UA},
+                          timeout=20)
+            r.raise_for_status()
+            return r.json() or {}
+        except Exception as e:
+            last = e
+            if u == url and "site.api.espn.com" in url:
+                continue
+            break
+    log.warning("ESPN fetch failed %s %s: %s", url, params, last)
+    return None
 
 
 def espn_week_games(sport: str, days: int) -> list[dict] | None:
