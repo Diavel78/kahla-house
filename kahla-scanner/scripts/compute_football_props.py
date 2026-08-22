@@ -37,7 +37,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from storage.supabase_client import get_client          # noqa: E402
+from storage import supabase_client as db               # noqa: E402
 
 # ── model constants — MIRROR backtest_football_props.py, keep in step ──
 HALF_LIFE_DAYS = 126.0
@@ -145,7 +145,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--commit", action="store_true")
     args = ap.parse_args()
-    sb = get_client()
+    sb = db.client()
     rows = _fetch(sb)
     if not rows:
         print("no football_player_games rows — refusing to write an empty "
