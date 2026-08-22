@@ -14271,6 +14271,14 @@ _GRIDIRON_CONTRACTS = 5           # user cap; 5 × ≤60¢ = ≤$3, under the $6
 _GRIDIRON_TOTAL_CONTRACTS = 2     # totals stake (user, Aug 22 2026: "Turn on
                                   # totals, 2 contracts... spread for both 5
                                   # contracts max, totals 2 max for now")
+_GRIDIRON_ML_MAX_SPREAD = 2.5     # football IS spreads and totals (user,
+                                  # Aug 22 2026: "Why the fuck would you even
+                                  # look at a money line? Obviously, if the
+                                  # spread is like 1.5 or 2.5, then you can
+                                  # look"). The ML is evaluated — taped or
+                                  # bet — ONLY when the posted spread's
+                                  # magnitude is at or under this; a chalk
+                                  # game's ML is not looked at, at all.
 _GRIDIRON_MAX_ENTRY_C = 60.0      # the standing machine-wide entry cap
 _GRIDIRON_MIN_EDGE_PP = 2.5       # same floor as the MLB opener
 # Seconds guaranteed to the football pass after the MLB opener has had its
@@ -14660,7 +14668,11 @@ def _gridiron_opener_pass(sb, now, deadline):
                 if (r["market_type"] == "spread" and r.get("cover_p"))
                 or (r["market_type"] == "total" and r.get("total_p"))
                 or (r["market_type"] == "moneyline" and r.get("bet_gate"))}
-        _WANT = ("moneyline", "spread", "total")
+        # SPREAD AND TOTAL drive game selection — never the ML. Football is
+        # spreads and O/U (user, Aug 22 2026); the ML is an opportunistic
+        # side-glance taken only during a spread/total visit on a
+        # near-pickem game, so it must not hold a game in the pool.
+        _WANT = ("spread", "total")
         cands = [g for g in cands
                  if any((g["id"], mt) not in done for mt in _WANT)]
         if not cands:
@@ -14722,7 +14734,21 @@ def _gridiron_opener_pass(sb, now, deadline):
             _GRIDIRON_PROBE_TS[g["id"]] = _time.time()
             mlp = ((((d or {}).get("odds") or {}).get("moneyline") or {})
                    .get("polymarket") or {})
-            _ml_ok = (p_home is not None
+            # FOOTBALL IS SPREADS AND OVERS/UNDERS (user, Aug 22 2026). The
+            # ML is looked at ONLY when the posted spread says near-pickem
+            # (|line| ≤ 2.5) — a chalk game's ML is not evaluated, taped,
+            # or bet. No posted spread = no justification = no look.
+            _spb = ((((d or {}).get("odds") or {}).get("spread") or {})
+                    .get("polymarket") or {})
+            _spl = ((_spb.get("home") or {}).get("line")
+                    if (_spb.get("home") or {}).get("line") is not None
+                    else (_spb.get("away") or {}).get("line"))
+            try:
+                _ml_worth = (_spl is not None
+                             and abs(float(_spl)) <= _GRIDIRON_ML_MAX_SPREAD)
+            except (TypeError, ValueError):
+                _ml_worth = False
+            _ml_ok = (_ml_worth and p_home is not None
                       and bool(mlp.get("home") or mlp.get("away"))
                       and (g["id"], "moneyline") not in done)
             fairs = ({"home": p_home, "away": 1.0 - p_home}

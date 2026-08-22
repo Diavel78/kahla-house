@@ -1256,7 +1256,12 @@ The phased UFC model (plan artifact "Fight IQ", July 2026). Targeting: **the DUR
   user override; the fills + `bet_gate` tape ARE the gate-2 dataset now.
   Done-set rule extended to every market: spread rows need `cover_p`,
   total rows `total_p`, ML rows a non-null `bet_gate` ("model" = evaluated,
-  didn't clear) — pre-bet-era rows re-tape once and settle. **NOT in
+  didn't clear) — pre-bet-era rows re-tape once and settle. **FOOTBALL ML
+  IS A SIDE-GLANCE, NEVER A LANE (user, same day: "It's spreads and overs
+  and unders... if the spread is like 1.5 or 2.5, then you can look"):**
+  the ML is evaluated/taped/bet ONLY when the posted spread's |line| ≤
+  `_GRIDIRON_ML_MAX_SPREAD` (2.5), during a spread/total visit — `_WANT`
+  is spread+total only, so ML never holds a game in the pool. **NOT in
   `_REPEG_MARKET_TYPES`** — v1 rests at its peg, no chasing. `bet_gate` in
   every gridiron shadow blob names why a game did or didn't bet.
 - **GRIDIRON OPENER SHADOWS (Aug 3 2026 — football, NO bets):** `_gridiron_opener_pass` rides the same tick after the MLB pass — prices each NFL/NCAAF ML at first Polymarket listing via `_gridiron_ml` (the EXACT team-core projection the backtest graded: `power_ratings` snapshot off/def cross + fitted hfa → logistic at the fitted scale; team unmatched → no row, never a guess) and shadow-logs the edge (`signal_blob.gridiron_ml`, same `opener_shadow` dedup/variant). Windows NFL 168h / NCAAF 96h; **PRESEASON NO-FLY via `_GRIDIRON_MIN_START` date floors (NFL 2026-09-08, NCAAF 2026-08-29 Week 0) — UPDATE YEARLY**, the ESPN spine lists preseason but ratings exclude it. Shadow-only ON PURPOSE: Gridiron IQ (NFL 66.5%/NCAAF 71.2%) was validated vs FINALS, never vs virgin openers, and Aug/Sep ratings are decayed-2025 data (40d half-life) — the shadow record IS the promotion gate for a real 1-contract football lane (the MLB skeleton).
