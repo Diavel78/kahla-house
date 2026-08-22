@@ -1228,22 +1228,29 @@ The phased UFC model (plan artifact "Fight IQ", July 2026). Targeting: **the DUR
 - **MONEYLINE = Diamond IQ live:** `compute_diamond_iq.py` (+ `diamond-iq-compute.yml`, daily 10:50 UTC) serializes the ITER1 walk-forward state → `diamond_iq_snapshot` (DDL applied); `app.py:_diamond_ml` reprojects any game (mascot→tricode, probable-starter FIP by name, park env, pythagenpat, hfa 0.08). Every opener read SHADOW-LOGS (`diamond_ml`+`p_home` in blob); edge ≥2.5pp → auto-bet via `_autobet_execute`. Team unmatched/cold → None = no bet, never a guess.
 - **Pricing (user law): CHEAP-FIRST WHOLE-CENT PEG** (`_peg_target`): floor(best bid)+1¢ — front of queue at minimum price ("I don't care about fair, I want to be cheap"); one-cent book → join; virgin book → fair−6 anchor. **WHOLE CENTS ONLY — Poly ROUNDS half-cents DOWN silently on innings markets (probe-proven; ML/spread books do support 0.5¢).** Every peg must clear ≥2.5pp at entry + the 60¢ cap (**applies to ML too for now → dogs/near-pickems only, favorites shadow**) + MASTER RULE $6.
 - **Placed bets join the family:** autolog adopts, fill tracker watches, **re-peg bot chases UNCAPPED for autobet picks — the model is the wall** (every move needs ≥2.5pp at the new price; stop ping "model limit", ONCE per bet via `signal_blob.repeg_stop`, re-armed by a successful move); **the fair is RE-COMPUTED before every autobet move** (`_fresh_fair_for_repeg`, 15-min `_REPEG_PROB_CACHE` — user: "Starter change might drastically change the model between repegs"); manual bets keep move-1-free/2-max. GTD to first pitch, resolver grades, CLV stamps.
-- **NFL SPREADS BET REAL MONEY (Aug 22 2026 — explicit user go-order over
+- **FOOTBALL BETS REAL MONEY (Aug 22 2026 — explicit user go-order over
   the shadow earn-in: "put some damn money on the NFL... limit to 5
-  contracts").** `_gridiron_opener_pass`'s spread branch now calls
-  `_autobet_execute` for **NFL spreads only**: model side = best
-  cover-model edge at its own cheap peg (floor(bid)+1¢), gates = edge ≥
-  `_GRIDIRON_MIN_EDGE_PP` 2.5pp, < 15pp junk cliff, peg ≤ 60¢, 5 contracts
-  (`_GRIDIRON_CONTRACTS`), cap_flag `gridiron_autobet` (sentinel cap), rent
-  + $6 Master Rule inside the executor. Cover prob = the SLIM normal fit
-  (`spread_fit` alpha/beta/sd/mean in the power_ratings snapshot) mirrored
-  as `_gridiron_cover_p`. **Cap/rent refusals skip the persist** so the
-  game retries (the tape's done-set must not latch a refused bet).
-  **NOT in `_REPEG_MARKET_TYPES`** — v1 rests at its peg, no chasing (early
-  window is long, rent accrues while resting; add spread repeg only with a
-  fresh-fair recompute). NFL ML stays shadow (live-only rent), NCAAF stays
-  shadow (no rent), totals stay shadow (gate 2 pending). `bet_gate` in
-  every spread shadow blob names why a game did or didn't bet.
+  contracts").** `_gridiron_opener_pass` now calls `_autobet_execute` for
+  football **ML and SPREAD** whenever the MODEL clears — both gate-1
+  validated (win-prob walk-forward; the cover fit, all cells, 3 seasons).
+  **WHICH markets get money is `_rent_ok`'s per-market answer at
+  placement — no sport or family is written off in code** (user, same
+  day, rejecting a first draft that hard-gated to NFL spreads: "we don't
+  know what is paying rent or what isn't... it's dynamic now after model
+  clear" — the MLB-ML-early-returned precedent). Gates: model side = best
+  edge at its own cheap peg (floor(bid)+1¢), edge ≥ `_GRIDIRON_MIN_EDGE_PP`
+  2.5pp, < 15pp junk cliff, peg ≤ 60¢, 5 contracts (`_GRIDIRON_CONTRACTS`),
+  cap_flag `gridiron_autobet` (sentinel cap), rent + $6 Master Rule inside
+  the executor. Cover prob = the SLIM normal fit (`spread_fit`
+  alpha/beta/sd/mean in the power_ratings snapshot) mirrored as
+  `_gridiron_cover_p`. **Cap refusals skip the persist** (slot frees →
+  retry); **rent refusals PERSIST with `bet_gate="rent"`** — the tape must
+  accrue, and those rows are the evidence for a football dayof_wait wire
+  (known gap: the one-shot done-set misses a market that starts paying
+  only later in its life). Totals stay shadow for a MODEL reason (gate 2
+  vs market prices pending), not a rent claim. **NOT in
+  `_REPEG_MARKET_TYPES`** — v1 rests at its peg, no chasing. `bet_gate` in
+  every gridiron shadow blob names why a game did or didn't bet.
 - **GRIDIRON OPENER SHADOWS (Aug 3 2026 — football, NO bets):** `_gridiron_opener_pass` rides the same tick after the MLB pass — prices each NFL/NCAAF ML at first Polymarket listing via `_gridiron_ml` (the EXACT team-core projection the backtest graded: `power_ratings` snapshot off/def cross + fitted hfa → logistic at the fitted scale; team unmatched → no row, never a guess) and shadow-logs the edge (`signal_blob.gridiron_ml`, same `opener_shadow` dedup/variant). Windows NFL 168h / NCAAF 96h; **PRESEASON NO-FLY via `_GRIDIRON_MIN_START` date floors (NFL 2026-09-08, NCAAF 2026-08-29 Week 0) — UPDATE YEARLY**, the ESPN spine lists preseason but ratings exclude it. Shadow-only ON PURPOSE: Gridiron IQ (NFL 66.5%/NCAAF 71.2%) was validated vs FINALS, never vs virgin openers, and Aug/Sep ratings are decayed-2025 data (40d half-life) — the shadow record IS the promotion gate for a real 1-contract football lane (the MLB skeleton).
 - **Backtest honesty (Aug 2 iteration night — walk-forward, eval 2026 n=1,667):** Diamond IQ climbed ITER1 (park/opp-adjusted, pyth, hr-shrink) 54.6% → **ITER3 CHAMPION (lineup-wOBA batter offense b=1.0 + bullpen fatigue) 55.7% / Brier 0.2489 — LIVE** (`compute_diamond_iq.py` serializes exactly this config; snapshot `engine` tag says so) vs the market's ~57-58% at CLOSES. The lane's bar is OPENERS (virgin lines) at 1-contract stakes, self-grading via shadows+CLV. Spines: `mlb_batter_games` (daily 10:40 UTC) + `mlb_xwoba_batter_days` (Savant Statcast, 378 days backfilled, daily 10:45 UTC). **ITER4 VERDICT — xwOBA luck-regression GRADED OUT, don't re-try blind:** blending batter quality toward expected wOBA was MONOTONICALLY worse (blend 0.5 → 55.3%, 0.75 → 54.9%, 1.0 → 54.3%) — at a 240-day half-life + 120-PA prior, realized wOBA has already washed its luck and xwOBA just discards real skill (speed/park). The Savant spine stays (props fuel — its CSV carries `stand`/`p_throws`). **ITER5 VERDICT (Aug 3) — PLATOON graded out the same way, don't re-try on single-season data:** vs-hand splits (`mlb_platoon_batter_days` + `mlb_pitcher_throws`, DDL applied, fed by the same Savant fetch via `--platoon` — the daily delta now writes BOTH spines in one pass) were MONOTONICALLY worse (blend 0.35 → 55.2%, 0.7 → 55.1%, 1.0 → 54.6%; lighter 300-PA shrink worse still at 54.5%) even with the delta shrunk 600 PA toward each batter's tilt-scaled overall — ~150 PA/season vs LHP can't identify platoon skill (the classic multi-season-sample result), and lineup selection already embeds it. Batter-level offense is at its ceiling with day-grain single-season data; remaining levers are pitcher-side (umpire, weather, framing) + projection priors. **ENGINE LANDMINE (cost a run):** `DiamondState.__init__`'s state dicts once got silently indented into a new method body — an AttributeError only at project time; when adding methods to the engine, re-run the backtest control and check it reproduces the champion number exactly.
 

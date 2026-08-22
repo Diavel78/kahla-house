@@ -14256,14 +14256,17 @@ _GRIDIRON_SPORTS = {"NFL": 2400, "NCAAF": 2400}   # 100 days
 # season type if this lane outlives the season).
 _GRIDIRON_MIN_START = {"NFL": "2026-09-08", "NCAAF": "2026-08-29"}
 # THE FIRST FOOTBALL MONEY (user, Aug 22 2026: "ready to put some damn
-# money on the NFL YET?? ... Limit to 5 contracts for now"). NFL SPREADS
-# ONLY: the one football lane where the model (gate-1 passed, all four
-# cells, 3-season fit) and the rent (early+day_of+live, confirmed live
-# Aug 19 at T-65h) both work. NFL ML is live-only rent = never bettable
-# pre-game; NCAAF pays no game-market rent at all; totals passed gate 1
-# but stay shadow until gate 2 (vs the market) accrues. Explicit user
-# go-order over the shadow-record earn-in — tiny stakes, same per-bet
-# fences as MLB (rent gate, $6 Master Rule, entry cap, junk-edge cliff).
+# money on the NFL YET?? ... Limit to 5 contracts for now"). ML and
+# SPREAD bet whenever the MODEL clears (both gate-1 validated: win-prob
+# walk-forward and the cover fit, all cells, 3-season data) — WHICH
+# markets actually get money is _rent_ok's per-market answer at
+# placement, never a sport or family written off in code (user, same
+# day: "we don't know what is paying rent or what isn't... it's dynamic
+# now after model clear"). Totals stay shadow for a MODEL reason —
+# gate 2 (vs market prices) hasn't accrued — not a rent claim. Explicit
+# user go-order over the shadow-record earn-in — tiny stakes, same
+# per-bet fences as MLB (rent gate, $6 Master Rule, entry cap,
+# junk-edge cliff).
 _GRIDIRON_CONTRACTS = 5           # user cap; 5 × ≤60¢ = ≤$3, under the $6 rule
 _GRIDIRON_MAX_ENTRY_C = 60.0      # the standing machine-wide entry cap
 _GRIDIRON_MIN_EDGE_PP = 2.5       # same floor as the MLB opener
@@ -14707,6 +14710,7 @@ def _gridiron_opener_pass(sb, now, deadline):
             # _ml_ok off, and unpacking `best` when it is None would raise
             # out of the whole pass (the try wraps everything) and take the
             # spread/total capture down with it.
+            _mlgate = None
             if _ml_ok:
                 s, edge0, q0 = best
                 # THE JUNK GATE IS FOR BETS, NOT FOR SHADOWS. On the MLB
@@ -14721,6 +14725,52 @@ def _gridiron_opener_pass(sb, now, deadline):
                 # is why the first run evaluated 8 games and wrote 0 rows.
                 junk0 = edge0 >= _OPENER_JUNK_EDGE_PP
                 bid0 = float(q0["bid"]) * 100.0
+                # DYNAMIC RENT — NO WRITTEN-DOWN PROGRAM TABLE (user,
+                # Aug 22 2026, correcting this exact lane: "we don't know
+                # what is paying rent or what isn't... it's dynamic now
+                # after model clear"). The model gates decide whether this
+                # is a bet worth making; _rent_ok inside the executor asks
+                # the venue, per market, whether it pays TODAY. No football
+                # sport or market family is written off in code — an ML or
+                # an NCAAF market that starts paying gets bet on the next
+                # pass with no deploy, exactly the MLB-ML-early precedent.
+                # Known gap, logged not solved: the tape's one-shot done-set
+                # means a market that pays only LATER (day_of) is missed by
+                # this pass — the football dayof_wait wire comes when
+                # bet_gate="rent" rows show that actually happening.
+                _peg0 = float(int(bid0)) + 1.0
+                _epeg0 = fairs[s] * 100.0 - _peg0
+                _mblk0 = mlp.get(s) or {}
+                if (_epeg0 >= _GRIDIRON_MIN_EDGE_PP and not junk0
+                        and _peg0 <= _GRIDIRON_MAX_ENTRY_C
+                        and _mblk0.get("slug")):
+                    _r0 = _autobet_execute(
+                        sb, g, es0, "moneyline", s, f"{s} ML",
+                        _mblk0["slug"], bool(_mblk0.get("synthetic")),
+                        _peg0, fairs[s], _epeg0, round(edge0, 1),
+                        round(bid0, 1),
+                        (round(float(q0["ask"]) * 100.0, 1)
+                         if q0.get("ask") is not None else None),
+                        extra_blob={"gridiron_autobet": True,
+                                    "gridiron_ml": True,
+                                    "p_home": round(p_home, 4)},
+                        cap_flag="gridiron_autobet", cap_max=10000,
+                        query_text="auto-bet: gridiron opener",
+                        reason=(f"GRIDIRON AUTO-BET — {s} ML pegged "
+                                f"{round(_peg0)}¢, model fair "
+                                f"{round(fairs[s] * 100)}¢ → "
+                                f"{round(_epeg0, 1)}pp edge"),
+                        contracts=_GRIDIRON_CONTRACTS,
+                        sport=g["sport"])
+                    _mlgate = (_r0 if _r0 in ("cap", "rent")
+                               else ("placed" if _r0 is True else "failed"))
+                    if _r0 is True:
+                        stats["g_bets"] = stats.get("g_bets", 0) + 1
+            # A cap refusal must not latch as taped (slot frees → retry);
+            # a RENT refusal persists — the tape must keep accruing, and
+            # bet_gate="rent" is itself the dataset that decides whether
+            # football needs the dayof_wait wire.
+            if _ml_ok and _mlgate != "cap":
                 _ea = _prob_to_amer_py(bid0 / 100.0)
                 _fa = _prob_to_amer_py(fairs[s])
                 _opener_persist(sb, {
@@ -14752,7 +14802,8 @@ def _gridiron_opener_pass(sb, now, deadline):
                                        if q0.get("ask") is not None else None),
                         "book_mid_c": (round(float(q0["mid"]) * 100.0, 1)
                                        if q0.get("mid") is not None else None),
-                        "shadow_only": True},
+                        "bet_gate": _mlgate,
+                        "shadow_only": _mlgate != "placed"},
                     "logged_at": now.isoformat(),
                 })
                 stats["g_rows"] += 1
@@ -14822,7 +14873,7 @@ def _gridiron_opener_pass(sb, now, deadline):
                                     _ps * 100.0 - _cheap[2], 1),
                                 "peg_c": _cheap[2],
                                 "line_home": _lh}
-                # ══ THE FIRST FOOTBALL MONEY — NFL SPREADS (Aug 22 2026,
+                # ══ THE FIRST FOOTBALL MONEY — SPREADS (Aug 22 2026,
                 # explicit user go-order, 5 contracts). The bet side is the
                 # MODEL's best side at its own peg — not the book-geometry
                 # cheap side the shadow tapes. Gates, in order: model
@@ -14831,11 +14882,12 @@ def _gridiron_opener_pass(sb, now, deadline):
                 # huge claimed edge means the market is right — and the
                 # cover model's own tails under-predict blowouts); peg ≤
                 # 60¢; then _autobet_execute runs the rent gate (per-market,
-                # asc- family) and the $6 Master Rule. BET BEFORE PERSIST:
-                # a cap- or rent-refused game must not latch as taped, so
-                # those skip the persist and retry on the probe backoff.
+                # asc- family, DYNAMIC — no sport is written off here) and
+                # the $6 Master Rule. BET BEFORE PERSIST for cap only: a
+                # cap-refused game must not latch as taped; a rent refusal
+                # persists with bet_gate="rent" so the tape accrues.
                 _bet_gate = None
-                if _mt == "spread" and g["sport"] == "NFL" and _got:
+                if _mt == "spread" and _got:
                     _mg, _pm = _got
                     _bc = None
                     for _sn2, _pblk2 in (("away", _pa), ("home", _pb)):
@@ -14893,11 +14945,15 @@ def _gridiron_opener_pass(sb, now, deadline):
                                     f"{round(_e2, 1)}pp edge"),
                                 contracts=_GRIDIRON_CONTRACTS,
                                 entry_line=_pblk2.get("line"),
-                                sport="NFL")
-                            if _r in ("cap", "rent"):
-                                _bet_gate = _r
+                                sport=g["sport"])
+                            if _r == "cap":
                                 continue   # NOT taped — retries next pass
-                            _bet_gate = "placed" if _r is True else "failed"
+                            # rent refusals PERSIST (bet_gate="rent"): the
+                            # tape must accrue, and those rows are the
+                            # evidence for a football dayof_wait wire.
+                            _bet_gate = (_r if _r == "rent" else
+                                         ("placed" if _r is True
+                                          else "failed"))
                             if _r is True:
                                 stats["g_bets"] = stats.get("g_bets", 0) + 1
                 _opener_persist(sb, {
@@ -14918,8 +14974,12 @@ def _gridiron_opener_pass(sb, now, deadline):
                     "signal_blob": {"opener_shadow": True,
                                     "gridiron_quote": True,
                                     "shadow_only": _bet_gate != "placed",
+                                    # would_bet = the MODEL cleared it; a
+                                    # rent refusal is the venue's answer,
+                                    # not the model's.
                                     "would_bet": _bet_gate in ("placed",
-                                                               "failed"),
+                                                               "failed",
+                                                               "rent"),
                                     "bet_gate": _bet_gate,
                                     **_mdl,
                                     "a_mid_c": round(_qa["mid"] * 100, 1),
