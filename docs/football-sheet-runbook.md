@@ -66,40 +66,68 @@ rows = sb_select("football_sheets", {"select": "id,event_name,tier,data_blob",
 sb_patch("football_sheets", {"id": "eq.<ID>"}, {"sheet_md": md})
 ```
 
+**VOICE — read this before writing a word (Rob, Aug 22 2026).** You are a
+**sports handicapper**, not a quant. Football betting is **spreads and
+totals** — never lead with a win percentage ("91% to win" on a −7.5
+favorite is saying nothing). The model runs in the engine room; the reader
+never sees its machinery. BANNED from narrative text: "calibrated",
+"shrinkage", "raw projection", "logistic", "opponent-adjusted", "fit",
+"pp", any model internals. The model is "our number", and a play is
+stated the way a capper states it: **"TCU −7.5 is the bet at −135 or
+better; −6.5 works to −152"** — the blob's `model.bet_spread` /
+`model.bet_total` blocks carry exactly these numbers (side, line, fair
+price, ±1pt ladder, play/lean/pass verdict). Use them verbatim; don't
+re-derive.
+
 **Depth by tier** (the assembly already decided `tier` + `tier_reasons`):
 
 - **`deep`** — the full read, modeled on the Alamo Bowl reference format:
-  1. **What the model sees** — Gridiron IQ margin (calibrated), total, win
-     prob, cover prob at the posted line; where model and market disagree,
-     in points and pp. The blob's `model` node has every number.
-  2. **Line movement & splits read** — open→now from the exchange tape +
-     DK/Circa; call out RLM flags (`splits.rlm`), handle-vs-tickets
-     divergence, where the sharp money looks to be.
-  3. **Personnel** — who actually takes the field. Injuries from the blob;
-     weigh the impact (a starting QB out is worth ~a TD — the model does
-     NOT know injuries, say so explicitly when one moves the number).
-  4. **Form / common opponents / H2H** — from `history` (labeled 2025
-     season until current-season results accrue).
-  5. **MY ANALYSIS** — the synthesis. Where you'd disagree with the model
-     and why.
-  6. **RECOMMENDATION** — a small table: play / line / confidence
-     (primary play, sprinkles, leans — or "pass"). Analysis for humans
-     betting by hand; be honest when there's nothing.
-- **`data`** — 2-4 sentences: the model read, the one thing that stands
-  out, lean or pass.
+  1. **The bet** — spread first, then the total, in price-or-better
+     terms from `bet_spread`/`bet_total`. Where our number and the
+     market disagree, say it in points ("we make it TCU −12, the market
+     says −7.5 — that gap is the whole card"). Pass honestly when
+     there's no edge.
+  2. **Who's new / who's out (THE HEART OF THE SHEET)** — college is a
+     new team every year: **new starting QB, transfers in and out, new
+     head coach / coordinators, key returners** — and, in-season,
+     injuries and suspensions (blob `injuries`). The blob does NOT carry
+     roster news: this comes from your own knowledge and **WebSearch
+     when the tool is available** (search "<team> 2026 starting QB
+     transfers coaching changes"). Roster FACTS are the one place you
+     write beyond the blob — hedge what you can't verify ("as of the
+     preseason polls…", "confirm his status Friday") and never fabricate
+     a stat or a name. Crucially: say whether the ratings KNOW this —
+     our number is built from last season's results, so a team that
+     lost its QB1 and both coordinators is overrated by the model, and
+     that's exactly the kind of read that overrides it.
+  3. **Line movement & money** — open→now from the tape + DK/Circa
+     splits; RLM flags (`splits.rlm`); where the sharp money looks to
+     be. Plain talk: "the money's on X and the line moved the other
+     way".
+  4. **Form / common opponents / H2H** — from `history`, but FILTERED
+     through section 2: last year's results belong to last year's
+     roster. "TCU beat this program 48–14 last September — with a QB
+     who's now in the NFL" is analysis; the bare score is trivia.
+  5. **MY ANALYSIS** — the synthesis; where you'd side with or against
+     our number, and why.
+  6. **RECOMMENDATION** — the table: play / line / price-or-better /
+     confidence (primary play, sprinkles, leans — or "pass").
+- **`data`** — 2-4 sentences in the same voice: the bet (or the pass) +
+  the one roster/situational thing that matters.
 
 **Guardrails for the narrative:**
-- Every number you cite must exist in the blob. The model does not know
-  injuries/news — when you adjust off the model, label it as your read.
-- The model's raw margins are too extreme by construction — cite
-  `margin_cal`/`total_cal`, never `margin_raw` as the headline.
+- Every STAT/NUMBER you cite must exist in the blob (roster facts are
+  the exception above — hedged, never fabricated).
+- The model doesn't know injuries, transfers, or coaching changes — when
+  your read overrides the number for those reasons, say so explicitly.
 - NCAAF has NO Polymarket rent programs and the NFL model lane is still in
   shadow earn-in — do not describe any sheet play as "the machine is on
-  it". These sheets are for humans.
+  it". These sheets are for humans betting by hand.
 - ~45+ deep dives on a September Monday is more than one context holds:
   fan out subagents (Agent tool), 5-8 games each, each writing its
   `sheet_md` rows directly via `sb_patch`, then verify every deep row has
-  `sheet_md` before rendering.
+  `sheet_md` before rendering. Give each subagent the VOICE rules above
+  verbatim.
 
 ## 2B. FRIDAY — changes only
 

@@ -119,6 +119,13 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .small { font-size: 8.5pt; color: #5a6b7f; }
 .idx td { font-size: 9pt; padding: 2.5px 7px; }
 .pos { color: #0c7a4d; font-weight: 700; } .neg { color: #b02040; font-weight: 700; }
+.betline { margin: 5px 0; }
+.verdict { display: inline-block; font-size: 7.5pt; font-weight: 800;
+           letter-spacing: .07em; padding: 2px 7px; border-radius: 9px;
+           vertical-align: 1px; margin-right: 4px; }
+.vplay { background: #103c2c; color: #7ce6b2; }
+.vlean { background: #4a3a10; color: #ffd27a; }
+.vpass { background: #e6ecf2; color: #5a6b7f; }
 pre.mdfallback { white-space: pre-wrap; font: inherit; }
 .footer { margin-top: 14px; padding-top: 6px; border-top: 1px solid #d8e0e8;
           font-size: 8pt; color: #98a6b6; }
@@ -154,6 +161,15 @@ def _line_str(node: dict | None) -> str:
 def _lines_table(blob: dict) -> str:
     lines, splits = blob.get("lines") or {}, blob.get("splits") or {}
     rows = []
+    bo = blob.get("book_odds") or {}
+    if bo:
+        sp = bo.get("spread_home")
+        tt = bo.get("total")
+        rows.append(
+            f"<tr><td>{_e(bo.get('provider') or 'Consensus')}</td><td>—</td>"
+            f"<td>{f'{sp:+g}' if sp is not None else '—'}</td>"
+            f"<td>{f'{tt:g}' if tt is not None else '—'}</td>"
+            f"<td></td><td></td></tr>")
     for src, label in (("pmm", "Polymarket"), ("kalshi", "Kalshi")):
         s = lines.get(src) or {}
         if not s:
@@ -211,51 +227,76 @@ def _lines_table(blob: dict) -> str:
               " handle%/bets%. Arrows = open → now.</p>")
 
 
+def _short(name: str) -> str:
+    """'TCU Horned Frogs' → 'TCU' style short handle: drop the mascot."""
+    parts = (name or "").split()
+    return " ".join(parts[:-1]) if len(parts) > 1 else (name or "")
+
+
+_VERDICT = {"play": ("PLAY", "vplay"), "lean": ("LEAN", "vlean"),
+            "pass": ("PASS", "vpass")}
+
+
+def _ladder_txt(bet: dict, label_fn) -> str:
+    """'−6.5 needs −152 · −8.5 needs −118' — the shopping rungs after the
+    market number."""
+    alts = bet.get("ladder", [])[1:]
+    if not alts:
+        return ""
+    return " · alt: " + " / ".join(
+        f"{label_fn(a['line'])} to {_fair(a['fair'])}" for a in alts)
+
+
 def _ournum(blob: dict) -> str:
+    """THE BET card. A handicapper's read: the side, the line, and the
+    price it's good to — model machinery stays in the engine room."""
     m = blob.get("model")
     if not m:
-        return ("<div class='ournum'><span class='unavail'>Model unavailable "
-                "for this matchup (unrated team — usually an FCS opponent)."
+        return ("<div class='ournum'><span class='unavail'>No number on "
+                "this one (unrated opponent — usually FCS). Market only."
                 "</span></div>")
     away, home = blob["game"]["away"], blob["game"]["home"]
     margin = m.get("margin_cal", m.get("margin_raw"))
     total = m.get("total_cal", m.get("total_raw"))
     fav = home if margin >= 0 else away
-    line_txt = f"{fav} by {abs(margin):.1f}"
-    win = m.get("win_prob_home")
-    cov = m.get("cover") or {}
-    tvl = m.get("total_v_line") or {}
-    rows = [f"<div class='big'>Gridiron IQ: {line_txt} · "
-            f"projected total {total:.1f}</div>",
-            f"<div>Win prob: {home} {_pct(win)} / {away} "
-            f"{_pct(1 - win) if win is not None else '—'}"
-            + (" · <b>neutral site (no HFA)</b>" if m.get("neutral_site") else "")
+    rows = [f"<div class='big'>Our number: {_e(_short(fav))} "
+            f"−{abs(margin):.1f} · total {total:.1f}"
+            + (" · <b>neutral site</b>" if m.get("neutral_site") else "")
             + "</div>"]
-    if cov:
-        p = cov.get("p_home_cover")
-        edge = cov.get("edge_pts")
-        cls = "pos" if (edge or 0) > 0 else "neg"
+
+    bs, bt = m.get("bet_spread"), m.get("bet_total")
+    if bs:
+        vtxt, vcls = _VERDICT[bs["verdict"]]
+        team = _short(bs["team"])
         rows.append(
-            f"<div>vs the line — {cov.get('src')} home {cov['home_line']:+g}: "
-            f"<b>{home} covers {_pct(p)}</b> (fair {_fair(cov.get('fair_home'))})"
-            f" · model vs market gap <span class='{cls}'>{edge:+.1f} pts"
-            f"</span></div>")
-    if tvl:
-        p = tvl.get("p_over")
-        edge = tvl.get("edge_pts")
-        cls = "pos" if (edge or 0) > 0 else "neg"
+            f"<div class='betline'><span class='verdict {vcls}'>{vtxt}</span> "
+            f"<b>Spread</b> — market {_e(team)} {bs['line']:+g} "
+            f"({_e(bs['src'])}): "
+            + (f"<b>{_e(team)} {bs['line']:+g} at {_fair(bs['fair'])} or "
+               f"better</b>{_ladder_txt(bs, lambda l: f'{l:+g}')}"
+               if bs["verdict"] != "pass" else
+               f"our number sits {abs(bs['edge_pts']):.1f} pt off the market "
+               f"— no edge, pass")
+            + "</div>")
+    if bt:
+        vtxt, vcls = _VERDICT[bt["verdict"]]
+        side = "Over" if bt["side"] == "over" else "Under"
         rows.append(
-            f"<div>vs the total — {tvl.get('src')} {tvl['line']:g}: "
-            f"<b>over {_pct(p)}</b> (fair {_fair(tvl.get('fair_over'))}) · "
-            f"model vs market <span class='{cls}'>{edge:+.1f} pts</span></div>")
-    if not cov and not tvl:
-        rows.append("<div class='unavail'>No posted line to price yet — "
-                    "cover/total probabilities land once a line is up.</div>")
-    rows.append(f"<div class='small'>Opponent-adjusted ratings · "
-                f"{m.get('n_games')} games · shrinkage fit n="
-                f"{m.get('spread_fit_n', '—')} · win prob from the validated "
-                f"logistic; margins/totals are calibrated (raw projections "
-                f"run too extreme)</div>")
+            f"<div class='betline'><span class='verdict {vcls}'>{vtxt}</span> "
+            f"<b>Total</b> — market {bt['line']:g} ({_e(bt['src'])}): "
+            + (f"<b>{side} {bt['line']:g} at {_fair(bt['fair'])} or better"
+               f"</b>{_ladder_txt(bt, lambda l: f'{l:g}')}"
+               if bt["verdict"] != "pass" else
+               f"our number {abs(bt['edge_pts']):.1f} off the market — pass")
+            + "</div>")
+    if not bs and not bt:
+        rows.append("<div class='unavail'>No posted line yet — the plays "
+                    "price in once a number is up (Friday update).</div>")
+    win = m.get("win_prob_home")
+    rows.append(f"<div class='small'>ML reference: {_e(_short(home))} "
+                f"{_pct(win)} / {_e(_short(away))} "
+                f"{_pct(1 - win) if win is not None else '—'} · "
+                f"Gridiron IQ, {m.get('n_games')} games rated</div>")
     return "<div class='ournum'>" + "".join(rows) + "</div>"
 
 
@@ -340,9 +381,9 @@ def _game_header(row: dict, blob: dict) -> str:
 
     tier = row.get("tier") or "data"
     edge_tag = ""
-    cov = (blob.get("model") or {}).get("cover") or {}
-    if abs(cov.get("edge_pts") or 0) >= 3:
-        edge_tag = "<span class='tag edge'>MODEL EDGE</span>"
+    bs = (blob.get("model") or {}).get("bet_spread") or {}
+    if bs.get("verdict") == "play":
+        edge_tag = "<span class='tag edge'>EDGE</span>"
     recs = g.get("records") or {}
     rec_txt = ""
     if recs.get("away") or recs.get("home"):
@@ -367,22 +408,39 @@ def _index_table(rows: list[dict]) -> str:
         model_txt = "—"
         if margin is not None:
             fav = (g.get("home") if margin >= 0 else g.get("away")) or ""
-            model_txt = f"{fav.split()[-1]} −{abs(margin):.1f}"
-        cov = m.get("cover") or {}
-        mkt = f"{cov['home_line']:+g} ({cov.get('src', '')[:4]})" if cov else "—"
-        edge = cov.get("edge_pts")
-        edge_txt = f"{edge:+.1f}" if edge is not None else "—"
-        cls = "pos" if (edge or 0) >= 3 or (edge or 0) <= -3 else ""
+            model_txt = f"{_short(fav)} −{abs(margin):.1f}"
+        bs, bt = m.get("bet_spread") or {}, m.get("bet_total") or {}
+        mkt = (f"{_short(bs.get('team', ''))} {bs['line']:+g}"
+               if bs else "—")
+        sp_play = "—"
+        sp_cls = ""
+        if bs:
+            if bs["verdict"] == "pass":
+                sp_play = "pass"
+            else:
+                sp_play = (f"{_short(bs['team'])} {bs['line']:+g} "
+                           f"@ {_fair(bs['fair'])}")
+                sp_cls = "pos" if bs["verdict"] == "play" else ""
+        ou_play = "—"
+        ou_cls = ""
+        if bt:
+            if bt["verdict"] == "pass":
+                ou_play = f"{bt['line']:g} · pass"
+            else:
+                ou_play = (f"{'O' if bt['side'] == 'over' else 'U'} "
+                           f"{bt['line']:g} @ {_fair(bt['fair'])}")
+                ou_cls = "pos" if bt["verdict"] == "play" else ""
         body += (f"<tr><td>{_az(r.get('event_start'))}</td>"
                  f"<td>{_e(r.get('event_name'))}</td>"
                  f"<td class='num'>{_e(model_txt)}</td>"
-                 f"<td class='num'>{mkt}</td>"
-                 f"<td class='num {cls}'>{edge_txt}</td>"
-                 f"<td class='num'>{_pct(m.get('win_prob_home'))}</td>"
+                 f"<td class='num'>{_e(mkt)}</td>"
+                 f"<td class='num {sp_cls}'>{_e(sp_play)}</td>"
+                 f"<td class='num {ou_cls}'>{_e(ou_play)}</td>"
                  f"<td>{'●' if r.get('tier') == 'deep' else ''}</td></tr>")
     return ("<table class='idx'><tr><th>Kickoff (AZ)</th><th>Game</th>"
-            "<th class='num'>Model line</th><th class='num'>Market (home)</th>"
-            "<th class='num'>Gap pts</th><th class='num'>Home win%</th>"
+            "<th class='num'>Our line</th><th class='num'>Market</th>"
+            "<th class='num'>Spread play (or better)</th>"
+            "<th class='num'>Total play</th>"
             "<th>Deep</th></tr>" + body + "</table>")
 
 

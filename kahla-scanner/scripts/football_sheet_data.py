@@ -180,6 +180,7 @@ def espn_week_games(sport: str, days: int) -> list[dict] | None:
         comp = (ev.get("competitions") or [{}])[0]
         home = away = None
         recs: dict[str, str] = {}
+        abbr: dict[str, str] = {}
         for c in comp.get("competitors") or []:
             t = c.get("team") or {}
             name = t.get("displayName") or t.get("name") or ""
@@ -189,8 +190,11 @@ def espn_week_games(sport: str, days: int) -> list[dict] | None:
                     rec = rr.get("summary") or ""
             if c.get("homeAway") == "home":
                 home, recs["home"] = name, rec
+                abbr["home"] = t.get("abbreviation") or ""
             elif c.get("homeAway") == "away":
                 away, recs["away"] = name, rec
+                abbr["away"] = t.get("abbreviation") or ""
+        book = _parse_espn_odds(comp, abbr)
         state = ((ev.get("status") or {}).get("type") or {}).get("state")
         if not (home and away) or state != "pre":
             continue
@@ -209,8 +213,49 @@ def espn_week_games(sport: str, days: int) -> list[dict] | None:
                 b for bl in (comp.get("broadcasts") or [])
                 for b in (bl.get("names") or [])),
             "records": recs,
+            "book_odds": book,
         })
     return out
+
+
+def _parse_espn_odds(comp: dict, abbr: dict) -> dict | None:
+    """Consensus/ESPN BET line from the scoreboard event itself — the line
+    the Monday sheet prices against, since VSiN only enters its 80h window
+    mid-week. `details` names the favorite by abbreviation ("TCU -7.5");
+    orient to the home side. Tolerant: anything unexpected → None."""
+    try:
+        odds = (comp.get("odds") or [])
+        if not odds:
+            return None
+        o = odds[0]
+        out: dict = {"provider": ((o.get("provider") or {}).get("name")
+                                  or "consensus")}
+        ou = o.get("overUnder")
+        if ou is not None:
+            out["total"] = float(ou)
+        spread = o.get("spread")
+        details = o.get("details") or ""
+        home_line = None
+        if spread is not None:
+            mag = abs(float(spread))
+            fav_abbr = details.split()[0] if details else ""
+            if fav_abbr and fav_abbr == abbr.get("away"):
+                home_line = +mag
+            elif fav_abbr and fav_abbr == abbr.get("home"):
+                home_line = -mag
+            else:
+                hto = o.get("homeTeamOdds") or {}
+                if hto.get("favorite") is True:
+                    home_line = -mag
+                elif (o.get("awayTeamOdds") or {}).get("favorite") is True:
+                    home_line = +mag
+        if home_line is not None:
+            out["spread_home"] = home_line
+        if details:
+            out["details"] = details
+        return out if ("spread_home" in out or "total" in out) else None
+    except (TypeError, ValueError, IndexError, AttributeError):
+        return None
 
 
 def espn_injuries(sport: str) -> dict[str, list] | None:
@@ -549,19 +594,26 @@ def history_block(results: list[dict], away: str, home: str) -> dict:
 
 
 # ---------------------------------------------------------------- assembly
-def _best_market_lines(pm: dict | None, vs: dict | None) -> dict:
+def _best_market_lines(pm: dict | None, vs: dict | None,
+                       book: dict | None) -> dict:
     """The posted lines the model prices against, with provenance.
-    Preference: DK (the book Rob's friends bet) → Circa → PMM → Kalshi."""
+    Preference: DK (the book the crew bets) → Circa → the ESPN consensus
+    line (available Monday, before VSiN's 80h window opens) → PMM →
+    Kalshi."""
     out: dict = {}
     def _set(kind, line, src):
         if line is not None and kind not in out:
             out[kind] = {"line": float(line), "src": src}
-    for book in ("draftkings", "circa"):
-        b = (vs or {}).get(book) or {}
+    for bk in ("draftkings", "circa"):
+        b = (vs or {}).get(bk) or {}
         sp = (b.get("spread") or {}).get("home") or {}
-        _set("spread_home", sp.get("line"), book)
+        _set("spread_home", sp.get("line"), bk)
         tt = (b.get("total") or {}).get("over") or {}
-        _set("total", tt.get("line"), book)
+        _set("total", tt.get("line"), bk)
+    if book:
+        _set("spread_home", book.get("spread_home"),
+             book.get("provider") or "consensus")
+        _set("total", book.get("total"), book.get("provider") or "consensus")
     for src in ("pmm", "kalshi"):
         s = (pm or {}).get(src) or {}
         sp = s.get("spread") or {}
@@ -571,6 +623,78 @@ def _best_market_lines(pm: dict | None, vs: dict | None) -> dict:
         if tt.get("side") == "over":
             _set("total", tt.get("line"), src)
     return out
+
+
+# Verdict thresholds, in model-vs-market points. Below `lean` = pass.
+_PLAY_SPREAD_PTS, _LEAN_SPREAD_PTS = 3.0, 1.5
+_PLAY_TOTAL_PTS, _LEAN_TOTAL_PTS = 4.0, 2.0
+
+
+def _bet_spread(model: dict, priced: dict, away: str, home: str,
+                mkt: dict) -> dict | None:
+    """The spread play, in a handicapper's terms: the side our number
+    likes, the line, and the price the bet is good TO ('−7.5 at −135 or
+    better'), plus a ±1pt shopping ladder. Fair price = the model's cover
+    probability at that exact line."""
+    node = mkt.get("spread_home")
+    if not node:
+        return None
+    line = node["line"]
+    margin = priced.get("margin_cal", priced["margin_raw"])
+    edge = round(margin + line, 1)          # >0 → model likes home vs line
+    side = "home" if edge >= 0 else "away"
+    team = home if side == "home" else away
+
+    def _fair(home_line: float) -> int | None:
+        p = cover_at(model, priced["margin_raw"], home_line)
+        if p is None:
+            return None
+        return gsp.american(p if side == "home" else 1.0 - p)
+
+    own_line = line if side == "home" else -line
+    ladder = []
+    for d in (0.0, 1.0, -1.0):
+        hl = line + (d if side == "home" else -d)
+        f = _fair(hl)
+        if f is not None:
+            ladder.append({"line": round(own_line + d, 1), "fair": f})
+    if not ladder:
+        return None
+    verdict = ("play" if abs(edge) >= _PLAY_SPREAD_PTS
+               else "lean" if abs(edge) >= _LEAN_SPREAD_PTS else "pass")
+    return {"side": side, "team": team, "line": ladder[0]["line"],
+            "fair": ladder[0]["fair"], "ladder": ladder,
+            "market_home_line": line, "src": node["src"],
+            "edge_pts": edge, "verdict": verdict}
+
+
+def _bet_total(model: dict, priced: dict, mkt: dict) -> dict | None:
+    node = mkt.get("total")
+    if not node:
+        return None
+    line = node["line"]
+    total = priced.get("total_cal", priced["total_raw"])
+    edge = round(total - line, 1)           # >0 → model likes the over
+    side = "over" if edge >= 0 else "under"
+
+    def _fair(tl: float) -> int | None:
+        p = over_at(model, priced["total_raw"], tl)
+        if p is None:
+            return None
+        return gsp.american(p if side == "over" else 1.0 - p)
+
+    ladder = []
+    for d in (0.0, 1.0, -1.0):
+        f = _fair(line + d)
+        if f is not None:
+            ladder.append({"line": round(line + d, 1), "fair": f})
+    if not ladder:
+        return None
+    verdict = ("play" if abs(edge) >= _PLAY_TOTAL_PTS
+               else "lean" if abs(edge) >= _LEAN_TOTAL_PTS else "pass")
+    return {"side": side, "line": ladder[0]["line"],
+            "fair": ladder[0]["fair"], "ladder": ladder, "src": node["src"],
+            "edge_pts": edge, "verdict": verdict}
 
 
 def build_game_blob(g: dict, sport: str, model: dict | None,
@@ -587,36 +711,23 @@ def build_game_blob(g: dict, sport: str, model: dict | None,
     vs = _vsin_lines(g["market_id"]) if g.get("market_id") else None
     blob["lines"] = pm or {}
     blob["splits"] = vs or {}
+    blob["book_odds"] = g.get("book_odds")
     if not pm:
         unavailable.append("exchange_tape")
     if not vs:
         unavailable.append("vsin")
 
-    mkt = _best_market_lines(pm, vs)
+    mkt = _best_market_lines(pm, vs, g.get("book_odds"))
     if model:
         priced = price_game(model, g["home"], g["away"],
                             bool(g.get("neutral_site")))
         if priced:
-            if "spread_home" in mkt:
-                line = mkt["spread_home"]["line"]
-                p = cover_at(model, priced["margin_raw"], line)
-                if p is not None:
-                    priced["cover"] = {
-                        "home_line": line, "src": mkt["spread_home"]["src"],
-                        "p_home_cover": p, "fair_home": gsp.american(p),
-                        "edge_pts": round(
-                            priced.get("margin_cal", priced["margin_raw"])
-                            + line, 1)}
-            if "total" in mkt:
-                tl = mkt["total"]["line"]
-                p = over_at(model, priced["total_raw"], tl)
-                if p is not None:
-                    priced["total_v_line"] = {
-                        "line": tl, "src": mkt["total"]["src"],
-                        "p_over": p, "fair_over": gsp.american(p),
-                        "edge_pts": round(
-                            priced.get("total_cal", priced["total_raw"]) - tl,
-                            1)}
+            bs = _bet_spread(model, priced, g["away"], g["home"], mkt)
+            if bs:
+                priced["bet_spread"] = bs
+            bt = _bet_total(model, priced, mkt)
+            if bt:
+                priced["bet_total"] = bt
             blob["model"] = priced
         else:
             unavailable.append("model_unrated_team")
@@ -663,8 +774,8 @@ def decide_tiers(sport: str, games: list[dict]) -> None:
         reasons, prio = [], 0.0
         both_ranked = len(ranks) == 2
         either_ranked = len(ranks) >= 1
-        sp_edge = abs((model.get("cover") or {}).get("edge_pts") or 0.0)
-        tot_edge = abs((model.get("total_v_line") or {}).get("edge_pts") or 0.0)
+        sp_edge = abs((model.get("bet_spread") or {}).get("edge_pts") or 0.0)
+        tot_edge = abs((model.get("bet_total") or {}).get("edge_pts") or 0.0)
         if both_ranked:
             reasons.append("ranked matchup")
             prio += 100
@@ -719,6 +830,17 @@ def friday_diff(old_blob: dict, new_blob: dict) -> list[str]:
                 o, n = oml.get("now_c"), nml.get("now_c")
                 if o is not None and n is not None and abs(n - o) >= _DIFF_ML_CENTS:
                     changes.append(f"{label} ML {side}: {o}¢ → {n}¢")
+
+    ob, nb = old_blob.get("book_odds") or {}, new_blob.get("book_odds") or {}
+    for key, label, thresh in (("spread_home", "spread", _DIFF_SPREAD_PTS),
+                               ("total", "total", _DIFF_TOTAL_PTS)):
+        o, n = ob.get(key), nb.get(key)
+        try:
+            if o is not None and n is not None and abs(float(n) - float(o)) >= thresh:
+                changes.append(f"{nb.get('provider') or 'Book'} {label}: "
+                               f"{float(o):g} → {float(n):g}")
+        except (TypeError, ValueError):
+            pass
 
     def _inj_set(blob):
         out = {}
@@ -815,6 +937,7 @@ def run(mode: str, sports: list[str], days: int, week_key: str,
                 new_blob["friday"] = {
                     "built_at": datetime.now(timezone.utc).isoformat(),
                     "lines": fresh.get("lines"), "splits": fresh.get("splits"),
+                    "book_odds": fresh.get("book_odds"),
                     "injuries": fresh.get("injuries"),
                     "model": fresh.get("model"),
                     "changes": changes}
