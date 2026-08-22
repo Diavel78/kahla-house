@@ -20913,7 +20913,14 @@ def api_handicapper_props():
 # week (the July 2026 "nothing coming up for UFC" report: card 8 days out,
 # tab blank). 9 days = the next card is visible the morning after the last
 # one ends, even across a skipped week + late-night AZ main-event times.
-_GAMES_DISPLAY_DAYS = {"NFL": 7, "NCAAF": 7, "UFC": 9}
+# NFL 7→25, NCAAF 7→15 (Aug 22 2026): the machine bets Week 1 from
+# listing day (the sweep window is 25d) and the manual Bet button lives
+# on the dossier — a 7-day display hid the very games money was resting
+# on ("I can't see NFL or NCAA football due to the time restriction").
+# The display window shows what's BETTABLE, and football is bettable
+# weeks out. NCAAF stays tighter: 15d covers Week 0 + Week 1 without a
+# 100-game wall of unlisted games.
+_GAMES_DISPLAY_DAYS = {"NFL": 25, "NCAAF": 15, "UFC": 9}
 _GAMES_DISPLAY_DAYS_DEFAULT = 2  # MLB, NBA, NCAAB, NHL
 
 
