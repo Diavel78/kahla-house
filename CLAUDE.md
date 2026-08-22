@@ -1589,11 +1589,17 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 > the MODEL's shadow scoreboard (calibration; shadows hold no venue
 > position), not the answer to "how did we do".
 >
-> **THE SOURCE IS `poly_gameday_pnl(p_days)`** — ⚠ **NOT ACTUALLY APPLIED (verified
-> Aug 19 2026: the function does not exist in the DB and there is no DDL file), so
-> `_venue_gameday_map` has been silently running on `_gameday_pnl_legacy` this whole
-> time. Either write and apply the function or stop calling the fallback forbidden.**
-> The METHOD below is still the right one and reproduces by hand → realized USD
+> **THE SOURCE IS `poly_gameday_pnl(p_days)`** — **WRITTEN AND APPLIED Aug 21
+> 2026** (DDL `kahla-scanner/supabase/poly_gameday_pnl.sql`), the night the gap
+> finally bit: a Supabase disconnect silently nulled the bot_picks-side compute,
+> the API fell back to the tick summary's CREDIT-TIME number, and the "Last
+> night" card showed ~$76 for a night the venue settled at **−$0.98** (the
+> final-gated path had been showing −$5.10 — wrong in the other direction).
+> `_gameday_pnl` is now RPC-first; the final-gated bot_picks compute survives
+> only as its disconnect-retried fallback (the `final` gate is that path's
+> price, not a virtue), and the API's credit-time fallback is DELETED — a
+> day card with no truthful number shows a dash, never an invented figure.
+> The METHOD below is the applied one and reproduces by hand → realized USD
 > per **Arizona game day**, read by `app.py:_venue_gameday_map` and
 > through it by the dashboard's day cards and 7-day window. It reads
 > Polymarket's own `ACTIVITY_TYPE_POSITION_RESOLUTION` rows in

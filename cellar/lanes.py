@@ -149,7 +149,11 @@ def lane_paperlog(ctx: Ctx) -> int:
     code, body = _drive_route("/api/handicapper/paperlog?engines=0")
     if code != 200:
         raise RuntimeError(f"paperlog HTTP {code}: {str(body)[:200]}")
-    return _work_from(body, "logged", "rows", "inserted")
+    # The route reports its insert count as `new_rows` — the old key list
+    # matched nothing, so this lane stamped work=0 forever while
+    # pickbot_paperlog took 391 rows in 6 hours (the repeg counter bug's
+    # second sighting; the third was the opener below, same night).
+    return _work_from(body, "new_rows", "logged", "rows", "inserted")
 
 
 def lane_vsin(ctx: Ctx) -> int:
@@ -200,7 +204,20 @@ def lane_opener(ctx: Ctx) -> int:
     log.info("opener: %s", stats)
     if ctx.detail is not None and isinstance(stats, dict):
         ctx.detail.update(stats)
-    return len(rows or []) + len(g_rows or [])
+    # Both passes return VESTIGIAL empty row lists — persistence happens
+    # inside them per game (_opener_persist), so len(rows) was zero on
+    # every tick the lane has ever run and the card read `idle` on a lane
+    # that placed real bets all day (the repeg counter bug's third
+    # sighting in one night). Work = what the pass actually did: games
+    # evaluated (each one is a dossier build + rent check + model price)
+    # plus bets placed plus gridiron rows persisted. A zero now really
+    # means "nothing listed to walk", which is the ESPN-dark-spine signal
+    # the idle clock exists to catch.
+    return (len(rows or []) + len(g_rows or [])
+            + int(stats.get("opener_eval") or 0)
+            + int(stats.get("opener_bets") or 0)
+            + int(stats.get("g_eval") or 0)
+            + int(stats.get("g_rows") or 0))
 
 
 def lane_repeg(ctx: Ctx) -> int:

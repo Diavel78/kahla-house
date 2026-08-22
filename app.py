@@ -1118,13 +1118,33 @@ def _gameday_pnl(sb) -> dict:
     cash deployed, so counting it would show tonight's slate as a loss
     before first pitch."""
     out = {"today": None, "yesterday": None}
+    az = ZoneInfo("America/Phoenix")
+    today = datetime.now(timezone.utc).astimezone(az).date()
+    # PRIMARY: the venue's own ledger via poly_gameday_pnl (WRITTEN AND
+    # APPLIED Aug 21 2026 — the operating rules named this function as the
+    # source while it did not exist, and the night it finally bit, the
+    # fallback chain showed ~$76 for a -$0.98 night). Resolution rows,
+    # deduped per (market, leg, side), bucketed by AZ GAME day.
     try:
-        az = ZoneInfo("America/Phoenix")
-        today = datetime.now(timezone.utc).astimezone(az).date()
-        rows = (sb.table("bot_picks").select("event_start,poly_pnl")
-                .gte("event_start",
-                     (datetime.now(timezone.utc) - timedelta(days=3)).isoformat())
-                .limit(1000).execute().data) or []
+        rows = (sb.rpc("poly_gameday_pnl", {"p_days": 3}).execute().data) or []
+        by_day = {str(r.get("az_day")): float(r.get("realized_usd") or 0)
+                  for r in rows}
+        out["today"] = round(by_day.get(today.isoformat(), 0.0), 2)
+        out["yesterday"] = round(
+            by_day.get((today - timedelta(days=1)).isoformat(), 0.0), 2)
+        return out
+    except Exception:
+        pass                     # RPC unreachable → the bot_picks fallback
+    # FALLBACK ONLY: the per-pick ledger, final-gated (the gate is the
+    # price of this path — pre-final realized_usd is just cash deployed).
+    # Disconnect-retried: a dropped read here used to silently null the
+    # block, which is what let the credit-time number reach the card.
+    try:
+        rows = (_sb_read_retry(
+            lambda: sb.table("bot_picks").select("event_start,poly_pnl")
+            .gte("event_start",
+                 (datetime.now(timezone.utc) - timedelta(days=3)).isoformat())
+            .limit(1000), label="gameday bot_picks").data) or []
         acc = {}
         for r in rows:
             p = r.get("poly_pnl") or {}
@@ -18199,6 +18219,15 @@ def api_data():
 
             _gd = _blk("gameday_pnl", lambda: _gameday_pnl(get_supabase()),
                        {"today": None, "yesterday": None})
+            # A cached dict with null MEMBERS is a failed compute wearing a
+            # valid shape — _blk only retries on a missing/None BLOCK, so a
+            # tick that nulled out gets served for 15 minutes. Recompute
+            # live instead (RPC-backed, cheap).
+            if _gd.get("today") is None and _gd.get("yesterday") is None:
+                try:
+                    _gd = _gameday_pnl(get_supabase())
+                except Exception:
+                    pass
             _mrs = _blk("maker_split",
                         lambda: _maker_rewards_split(get_supabase()),
                         {"rewards": _s.get("maker_rewards"), "credits": None,
@@ -18222,11 +18251,15 @@ def api_data():
                 "ok": True, "timestamp": now.isoformat(), "cached": True,
                 "cache_age_s": _c.get("age_s"),
                 "summary": {
-                    "today_pnl": (_gd.get("today") if _gd.get("today") is not None
-                                  else _s.get("today_pnl")),
-                    "yesterday_pnl": (_gd.get("yesterday")
-                                      if _gd.get("yesterday") is not None
-                                      else _s.get("yesterday_pnl")),
+                    # NO fallback to the tick summary's today/yesterday.
+                    # Those bucket by CREDIT time — the exact bug the
+                    # Aug 16 game-day fix killed — and the fallback kept
+                    # it alive: the night the game-day block nulled out,
+                    # the "Last night" card showed ~$76 for a -$0.98
+                    # night. A dash is honest; a wrong dollar figure on a
+                    # money surface never is.
+                    "today_pnl": _gd.get("today"),
+                    "yesterday_pnl": _gd.get("yesterday"),
                     "maker_rewards": _mrs.get("rewards"),
                     "account_credits": _mrs.get("credits"),
                     "n_rewards": _mrs.get("n_rewards"),
