@@ -51,9 +51,12 @@ _LEAGUES = {"NFL": ("football", "nfl"), "NCAAF": ("football", "college-football"
 # / ≥4pt total gap; capped at _NCAAF_DEEP_CAP by priority (both-ranked
 # always survive the cap). Everything else = full data sheet + short read.
 _NCAAF_DEEP_CAP = 18
-_EDGE_SPREAD_PTS = 3.0
-_EDGE_SPREAD_RANKED_PTS = 2.0
-_EDGE_TOTAL_PTS = 4.0
+# Aligned with the PLAY bar (1.5 pts, Aug 22 2026): a game the sheet calls
+# a PLAY deserves the deep dive. The cap keeps the long tail bounded —
+# priority ranking still puts the biggest edges first.
+_EDGE_SPREAD_PTS = 1.5
+_EDGE_SPREAD_RANKED_PTS = 1.0
+_EDGE_TOTAL_PTS = 1.5
 
 # Season floors — NO PRESEASON SHEETS (mirror of app.py _GRIDIRON_MIN_START;
 # ⚠ UPDATE YEARLY). Without this the first shakedown run built 27 preseason
@@ -632,8 +635,10 @@ def _best_market_lines(pm: dict | None, vs: dict | None,
 
 
 # Verdict thresholds, in model-vs-market points. Below `lean` = pass.
-_PLAY_SPREAD_PTS, _LEAN_SPREAD_PTS = 3.0, 1.5
-_PLAY_TOTAL_PTS, _LEAN_TOTAL_PTS = 4.0, 2.0
+# PLAY = anything over 1.5 pts on spread AND total (Rob, Aug 22 2026 —
+# "football, tight lines, the goal is to gamble").
+_PLAY_SPREAD_PTS, _LEAN_SPREAD_PTS = 1.5, 0.75
+_PLAY_TOTAL_PTS, _LEAN_TOTAL_PTS = 1.5, 0.75
 
 
 def _bet_spread(model: dict, priced: dict, away: str, home: str,

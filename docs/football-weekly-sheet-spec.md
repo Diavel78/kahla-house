@@ -12,8 +12,9 @@
 >    links. A `/football` page mock was proposed to Rob; build it only on
 >    his yes.
 > 2. **NCAAF tiering** — NFL all deep; NCAAF deep on ranked involvement /
->    model-vs-market gap (≥3 spread, ≥4 total pts), capped 18/week; the
->    rest get the data sheet + short read. `decide_tiers` in
+>    model-vs-market gap ≥1.5 pts (aligned with the PLAY bar — Rob:
+>    "anything over 1.5 on total and spread is a play"), capped 18/week;
+>    the rest get the data sheet + short read. `decide_tiers` in
 >    `kahla-scanner/scripts/football_sheet_data.py`.
 > 3. **Week-0 shakedown** — yes; the first Monday Routine fire
 >    (Aug 24 2026, 6:30pm AZ) runs the Aug 29 slate as the dry run.
