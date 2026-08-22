@@ -2169,6 +2169,8 @@ def fetch_activities(client, max_pages=15, cache_key=None):
             return c["data"]
     all_activities = []
     cursor = None
+    complete = False
+    walk_err = None
     try:
         for _ in range(max_pages):
             params = {"limit": 100}
@@ -2180,8 +2182,27 @@ def fetch_activities(client, max_pages=15, cache_key=None):
             if response.get("eof", True) or not response.get("nextCursor"):
                 break
             cursor = response.get("nextCursor")
+        complete = True          # eof, or the window read to its cap
     except Exception as e:
+        walk_err = e
         print(f"ERROR fetching activities: {e}")
+    if not complete:
+        # A PARTIAL WALK MUST NEVER PUBLISH (Aug 21 2026: the LIFETIME
+        # card read $50.20 and $247.04 thirteen minutes apart — a page
+        # fetch died mid-walk, the partial list was summed AND cached,
+        # and 'earnings' became a function of the connection weather).
+        # Stale-but-complete beats fresh-but-partial; with no stale copy,
+        # raising is the right failure everywhere this is called: the
+        # dash tick keeps its prior cache row, the ledger tick retries
+        # next minute instead of stamping money from a half-read feed,
+        # and a page 500 is rarer and more honest than a wrong dollar.
+        if cache_key:
+            c = _cache.get(cache_key)
+            if c:
+                return c["data"]
+        raise RuntimeError(
+            f"activities walk partial ({len(all_activities)} rows) — "
+            f"refusing to publish a partial sum") from walk_err
     if cache_key:
         # Splice in the reward rows the walk can no longer reach. Cheap
         # (~10 rows) and it is exactly what the Maker Rewards card lost
