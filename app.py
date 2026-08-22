@@ -6550,6 +6550,21 @@ def _kalshi_autolog(sb, owner_uid, positions=None, fills=None, orders=None,
     return out
 
 
+# Machine pitcher-prop slugs the reconcile can book WITHOUT the game-market
+# matcher: astatc-mlb-<away>-<home>-<date>-<fam>-<pitcherkey>-gte<line>.
+# The slug alone carries teams, ET date, family, pitcher key and line —
+# which is what makes prop adoption possible at all.
+_PROP_ADOPT_RE = re.compile(
+    r"^astatc-mlb-([a-z]+)-([a-z]+)-(\d{4}-\d{2}-\d{2})-"
+    r"(k|outs|ha|wa)-([a-z]+)-gte(\d+)$")
+
+
+def _whiff_name_key(nm: str) -> str:
+    """'Gerrit Cole' -> 'gercol' — the slug's 6-char pitcher key."""
+    parts = re.sub(r"[^a-z ]", "", str(nm or "").lower()).split()
+    return (parts[0][:3] + parts[-1][:3]) if len(parts) >= 2 else ""
+
+
 def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dict:
     """Reconcile the admin's POLYMARKET book into bot_picks — the Poly analog
     of `_kalshi_autolog` (dual-venue, July 2026 revert). USER RULE: "I bet on
@@ -6855,6 +6870,94 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                             mk["event_name"], mt, side, price, slug)
         except Exception as e:
             app.logger.warning("PMM-AUTOLOG insert failed %s: %s", slug, e)
+
+    # ── PROP ORPHAN ADOPTION (Aug 21 2026, the wa-gercol lesson) ─────────
+    # A machine PROP position with no book entry stayed invisible FOREVER:
+    # the game-market matcher above can't see astatc- prop slugs, so a
+    # book write lost between order-create and pick-insert had no healing
+    # path — a filled, resolved, PAID +$5 bet the book never knew, found
+    # only when the venue-truth day RPC disagreed with the pick ledger.
+    # The user's rule is absolute: the machine bet it, the machine books
+    # it — no human step. Any intended bet on a parseable machine prop
+    # slug with no pick carrying that pmm_slug becomes one: entry from
+    # the fill avg (or resting bid), pitcher best-effort matched against
+    # the whiff snapshot so the weekly grader can still grade it (an
+    # unmatched pitcher just leaves the row for manual settle — the MONEY
+    # is booked either way). Insert races are dead by construction:
+    # bot_picks_machine_slug_uniq covers pmm_autolog rows too, so a
+    # duplicate-key IS success.
+    for (slug, syn), prob in intended.items():
+        pm_m = _PROP_ADOPT_RE.match(slug or "")
+        if not pm_m or prob is None or not (0 < prob < 1):
+            continue
+        away_c, home_c, et_date, fam, pkey, gline = pm_m.groups()
+        try:
+            already = (sb.table("bot_picks").select("id")
+                       .eq("asked_by", owner_uid)
+                       .contains("signal_blob", {"pmm_slug": slug})
+                       .limit(1).execute().data) or []
+        except Exception:
+            continue                    # can't verify → retry next tick
+        if already:
+            continue
+        away = _MLB_CODE_TEAM.get(away_c.upper())
+        home = _MLB_CODE_TEAM.get(home_c.upper())
+        mk2 = None
+        for cand in markets:
+            if (cand.get("sport") != "MLB"
+                    or cand.get("event_name") != f"{away} @ {home}"):
+                continue
+            try:
+                _et = (datetime.fromisoformat(
+                    str(cand["event_start"]).replace("Z", "+00:00"))
+                    .astimezone(ZoneInfo("America/New_York"))
+                    .date().isoformat())
+            except Exception:
+                continue
+            if _et == et_date:
+                mk2 = cand
+                break
+        if mk2 is None:
+            out["prop_unmatched"] = out.get("prop_unmatched", 0) + 1
+            continue
+        pitcher = None
+        try:
+            hits = [nm for nm in ((_whiff_snapshot() or {})
+                                  .get("pitchers") or {})
+                    if _whiff_name_key(nm) == pkey]
+            if len(hits) == 1:
+                pitcher = hits[0]
+        except Exception:
+            pass
+        wb = {"key": slug, "ptype": fam, "line": float(gline)}
+        if pitcher:
+            wb["pitcher"] = pitcher
+        held = slug in filled_slugs
+        row2 = {
+            "asked_by": owner_uid,
+            "query_text": "auto-logged from Polymarket",
+            "market_id": mk2["id"], "sport": "MLB",
+            "event_name": mk2["event_name"],
+            "event_start": mk2["event_start"],
+            "market_type": "prop", "side": ("no" if syn else "yes"),
+            "entry_book": "POLYMARKET",
+            "entry_price": int(_prob_to_amer_py(prob)),
+            "units": 1, "confidence": "low",
+            "reasons": [f"ADOPTED by the reconcile — venue "
+                        f"{'position' if held else 'order'} on {slug} "
+                        f"had no book entry"],
+            "signal_blob": {"source": "pmm_autolog", "adopted_prop": True,
+                            "pmm_slug": slug, "pmm_synthetic": syn,
+                            "filled": held, "whiff": wb},
+        }
+        try:
+            sb.table("bot_picks").insert(row2).execute()
+            out["adopted_props"] = out.get("adopted_props", 0) + 1
+            app.logger.info("PMM-AUTOLOG adopted prop %s (%s)", slug,
+                            "filled" if held else "resting")
+        except Exception as e:
+            if "duplicate key" not in str(e) and "23505" not in str(e):
+                app.logger.warning("PMM-AUTOLOG adopt failed %s: %s", slug, e)
     return out
 
 
@@ -12897,11 +13000,15 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
             if "duplicate key" in str(e2) or "23505" in str(e2):
                 pass                       # first insert committed — booked
             else:
+                # NOT "log it by hand" (user: "you bet, you model — log
+                # your shit"): the autolog's prop-orphan ADOPTION books it
+                # on its next tick from the venue order itself. This note
+                # rides the batched digest purely so a repeat-offender
+                # pattern is visible — no action is being requested.
                 _send_fill_telegram(
-                    f"🚨 BOOK WRITE FAILED — order {new_oid} is LIVE on "
-                    f"{slug} ({side_lbl} {n_contracts} @ {round(side_c)}¢) "
-                    f"with NO pick row. Log it by hand. "
-                    f"({e1} / {e2})"[:280], urgent=True)
+                    f"🤖 book write failed on {slug} (order {new_oid}, "
+                    f"{side_lbl} {n_contracts} @ {round(side_c)}¢) — the "
+                    f"reconcile adopts it next tick. ({e2})"[:280])
     _time.sleep(1.2)
     state = _repeg_verify_or_recreate(pclient, slug, intent, canon,
                                       0, None, None)
