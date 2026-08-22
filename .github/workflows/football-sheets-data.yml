@@ -1,0 +1,91 @@
+name: Football Sheets — Data Assembly
+
+# FOOTBALL WEEKLY GAME SHEETS (docs/football-sheet-runbook.md).
+# Assembles the mechanical data_blob per game (full FBS + NFL week: model
+# pricing, exchange tape, VSiN splits, ESPN injuries/FPI/AP ranks, history)
+# into the football_sheets table. Runs HERE because the Actions runner is
+# the only compute that reaches BOTH ESPN and Supabase — the CCR generation
+# sandbox is ESPN-blocked, the cellar stays a betting machine.
+#
+# Schedule (UTC — AZ is UTC-7 year-round):
+#   Tue 00:00 UTC = Monday 5:00 pm AZ  → monday mode (full build). The
+#     Monday generation Routine fires 6:30 pm AZ and reads these blobs.
+#   Fri 21:00 UTC = Friday 2:00 pm AZ  → friday mode (diff vs Monday). The
+#     Friday Routine fires 3:30 pm AZ.
+# In-season only in effect: outside the season the script finds no games
+# and exits quietly (monday mode exits 1 on a truly empty slate so a dark
+# spine shows red — the six-day-green lesson).
+#
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "monday (full build) or friday (diff vs Monday)"
+        required: false
+        default: "monday"
+      week_key:
+        description: "Week key YYYY-MM-DD (default: this week's Monday, AZ)"
+        required: false
+        default: ""
+      sport:
+        description: "Limit to one sport (NFL or NCAAF)"
+        required: false
+        default: ""
+      days:
+        description: "Lookahead window in days"
+        required: false
+        default: "8"
+  schedule:
+    - cron: "0 0 * * 2"    # Mon 5pm AZ — monday build
+    - cron: "0 21 * * 5"   # Fri 2pm AZ — friday diff
+
+concurrency:
+  group: football-sheets-data
+  cancel-in-progress: true
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: kahla-scanner
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Resolve mode
+        id: mode
+        run: |
+          # Scheduled fires pick mode by day-of-week (Tue UTC = monday build,
+          # Fri UTC = friday diff); dispatch takes the input.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ github.event.inputs.mode || 'monday' }}" >> "$GITHUB_OUTPUT"
+          elif [ "$(date -u +%u)" = "5" ]; then
+            echo "mode=friday" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=monday" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Assemble sheet data
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: >
+          python -m scripts.football_sheet_data
+          --mode ${{ steps.mode.outputs.mode }}
+          --days ${{ github.event.inputs.days || '8' }}
+          --commit
+          ${{ github.event.inputs.week_key && format('--week-key {0}', github.event.inputs.week_key) || '' }}
+          ${{ github.event.inputs.sport && format('--sport {0}', github.event.inputs.sport) || '' }}
