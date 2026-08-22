@@ -10503,6 +10503,32 @@ def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
     return {"ml": ml, "rows": rows, "props": prop_rows}
 
 
+def _sb_disconnect(e: Exception) -> bool:
+    """A Supabase keep-alive connection the pooler killed under load —
+    'Server disconnected' / HTTP/2 ConnectionTerminated. The request very
+    likely never reached Postgres, so ONE fresh-connection retry almost
+    always succeeds. Retry READS only on this: an ambiguous drop during a
+    WRITE may have committed, and retrying it double-commits."""
+    s = f"{type(e).__name__}: {e}"
+    return ("Server disconnected" in s or "ConnectionTerminated" in s
+            or "RemoteProtocolError" in s or "Connection reset" in s)
+
+
+def _sb_read_retry(build, label: str = ""):
+    """Execute a PostgREST READ with one disconnect retry (see above).
+    Evenings drop a handful of keep-alive connections under load; before
+    this, one drop 500'd a whole paperlog tick (8× on Aug 21 alone)."""
+    try:
+        return build().execute()
+    except Exception as e:
+        if not _sb_disconnect(e):
+            raise
+        app.logger.warning("supabase read %s disconnected — retrying once",
+                           label)
+        _time.sleep(0.4)
+        return build().execute()
+
+
 def _sb_paged(build, max_pages: int) -> list:
     """Collect up to max_pages×1000 rows from a PostgREST read, paged.
 
@@ -10513,11 +10539,17 @@ def _sb_paged(build, max_pages: int) -> list:
     map re-inserts unchanged rows every tick (the Disk-IO failure mode).
     `build` is a factory returning a FRESH query builder each call —
     builders are mutable, so reusing one across .range() calls stacks
-    params."""
+    params.
+
+    Disconnect-retried per page: the dedup maps' callers swallow read
+    errors by design (a missing map must never block the snapshot), which
+    means a dropped connection here silently turns into 'everything looks
+    new' — a one-tick insert flood, the exact disease the paging fixed."""
     out: list = []
     for page in range(max_pages):
-        rows = (build().range(page * 1000, page * 1000 + 999)
-                .execute().data) or []
+        rows = (_sb_read_retry(
+            lambda: build().range(page * 1000, page * 1000 + 999),
+            label="paged").data) or []
         out.extend(rows)
         if len(rows) < 1000:
             break
@@ -14544,10 +14576,17 @@ def api_handicapper_paperlog():
     lo = (now + timedelta(minutes=1)).isoformat()    # stop 1 min before tip
     hi = (now + timedelta(hours=5)).isoformat()      # start 5h out
     try:
-        raw = (sb.table("markets").select("id,event_name,event_start,sport")
-               .in_("sport", _PAPERLOG_SPORTS).eq("status", "active")
-               .gte("event_start", lo).lte("event_start", hi)
-               .order("event_start").execute().data) or []
+        # Disconnect-retried: this is the route's FIRST read, and evening
+        # load makes Supabase drop the occasional warm keep-alive
+        # connection ('Server disconnected') — before the retry, one drop
+        # 500'd the whole tick and painted the paperlog lane red (8× on
+        # Aug 21 alone, every one a transient).
+        raw = (_sb_read_retry(
+            lambda: sb.table("markets")
+            .select("id,event_name,event_start,sport")
+            .in_("sport", _PAPERLOG_SPORTS).eq("status", "active")
+            .gte("event_start", lo).lte("event_start", hi)
+            .order("event_start"), label="paperlog markets").data) or []
     except Exception as e:
         return jsonify({"ok": False, "error": f"markets: {e}"}), 500
     games, seen = [], set()           # dedup duplicate market rows (gotcha #30)
