@@ -1523,6 +1523,72 @@ def _all_in(pnl, rewards):
     return round(float(pnl) + float(rewards or 0), 2)
 
 
+def _rent_by_day(sb, since) -> dict | None:
+    """Liquidity rent bucketed by earn_date (PAID+PENDING, SKIPPED out),
+    paged — a YTD read of poly_incentive_earnings can exceed the 1,000-row
+    PostgREST cap (gotcha #40). Returns {date: usd} or None on failure —
+    a missing rent half must render as a dash, never as $0.00."""
+    try:
+        rows = _sb_paged(lambda: (
+            sb.table("poly_incentive_earnings")
+            .select("earn_date,status,reward")
+            .gte("earn_date", since.isoformat())
+            .order("earn_date")), max_pages=30)
+        out: dict = {}
+        for r in rows:
+            if str(r.get("status") or "").upper() == "SKIPPED":
+                continue          # forfeited — never counted as earnings
+            d = str(r.get("earn_date") or "")[:10]
+            if d:
+                out[d] = out.get(d, 0.0) + (_safe_float(r.get("reward")) or 0.0)
+        return out
+    except Exception:
+        return None
+
+
+def _pnl_stack(sb) -> dict | None:
+    """The P&L stack (mockup E, Aug 22 2026): Today/Yesterday bets-only,
+    then 7d / 30d / YTD all-in with the bets-vs-rent split per window.
+
+    ONE venue read for every bets number: poly_gameday_pnl walked back to
+    Jan 1 gives per-AZ-game-day realized USD, and the windows are sums
+    over the same rows the day cards read — no second accounting basis.
+    Rent buckets by EARN date (the day the resting orders earned it), so
+    a window answers "how did the machine do", not "when did the venue
+    pay" — the payout lag is why the day cards say bets-only.
+
+    Returns None when the venue RPC is unreachable — the card shows
+    dashes; a partial stack would put two different lies side by side."""
+    az = ZoneInfo("America/Phoenix")
+    today = datetime.now(timezone.utc).astimezone(az).date()
+    jan1 = today.replace(month=1, day=1)
+    ytd_days = (today - jan1).days + 1
+    try:
+        rows = (sb.rpc("poly_gameday_pnl",
+                       {"p_days": ytd_days}).execute().data) or []
+    except Exception:
+        return None
+    by_day: dict = {}
+    for r in rows:
+        d = str(r.get("az_day") or "")[:10]
+        if d:
+            by_day[d] = by_day.get(d, 0.0) + float(r.get("realized_usd") or 0)
+    rent = _rent_by_day(sb, jan1)
+
+    def _win(days: int) -> dict:
+        since = (today - timedelta(days=days - 1)).isoformat()
+        bets = round(sum(v for d, v in by_day.items() if d >= since), 2)
+        rw = (None if rent is None else
+              round(sum(v for d, v in rent.items() if d >= since), 2))
+        return {"bets": bets, "rent": rw,
+                "total": round(bets + (rw or 0), 2)}
+
+    return {"today": round(by_day.get(today.isoformat(), 0.0), 2),
+            "yesterday": round(
+                by_day.get((today - timedelta(days=1)).isoformat(), 0.0), 2),
+            "d7": _win(7), "d30": _win(30), "ytd": _win(ytd_days)}
+
+
 def _gameday_rewards(sb) -> dict:
     """{'today': {...}, 'yesterday': {...}} liquidity rewards, PENDING
     included, for the day cards.
@@ -2060,7 +2126,8 @@ def _dash_derived(sb) -> dict:
                     ("maker_split", lambda: _maker_rewards_split(sb)),
                     ("gameday_rewards", lambda: _gameday_rewards(sb)),
                     ("rent_7d", lambda: _rent_window(sb, 7)),
-                    ("pnl_7d", lambda: _window_pnl(sb, 7))):
+                    ("pnl_7d", lambda: _window_pnl(sb, 7)),
+                    ("pnl_stack", lambda: _pnl_stack(sb))):
         try:
             out[key] = fn()
         except Exception:
@@ -18453,6 +18520,16 @@ def api_data():
                     _p7 = _window_pnl(get_supabase(), 7)
                 except Exception:
                     _p7 = None
+            # THE P&L STACK (mockup E). Same null-member rule as the day
+            # cards: a cached dict whose day numbers both nulled is a
+            # failed compute wearing a valid shape — recompute live.
+            _stk = _blk("pnl_stack", lambda: _pnl_stack(get_supabase()), None)
+            if (_stk and _stk.get("today") is None
+                    and _stk.get("yesterday") is None):
+                try:
+                    _stk = _pnl_stack(get_supabase())
+                except Exception:
+                    pass
             return jsonify({
                 "ok": True, "timestamp": now.isoformat(), "cached": True,
                 "cache_age_s": _c.get("age_s"),
@@ -18490,6 +18567,7 @@ def api_data():
                     "open_positions": _c.get("open_count"),
                     "rent_7d": _r7, "pnl_7d": _p7,
                     "all_in_7d": _all_in(_p7, (_r7 or {}).get("total")),
+                    "pnl_stack": _stk,
                 },
                 "balances": {"current_balance": _c.get("balance")},
                 # Machine health rides the same cached tick as the money
@@ -18588,6 +18666,14 @@ def api_data():
             _p7f = _window_pnl(get_supabase(), 7)
         except Exception:
             _r7f, _p7f = None, None
+        try:
+            _stkf = _pnl_stack(get_supabase())
+        except Exception:
+            _stkf = None
+        try:
+            _ltf = _lifetime_venue(get_supabase(), balance)
+        except Exception:
+            _ltf = None
         if not _mrs.get("rewards") and not _mrs.get("n_rewards"):
             # Mirror not populated yet — fall back to the old combined
             # figure rather than showing a confident zero.
@@ -18630,6 +18716,8 @@ def api_data():
                 "open_positions": len(open_positions),
                 "rent_7d": _r7f, "pnl_7d": _p7f,
                 "all_in_7d": _all_in(_p7f, (_r7f or {}).get("total")),
+                "pnl_stack": _stkf,
+                "lifetime_venue": _ltf,
             },
             "balances": {"current_balance": balance},
             "errors": errors,

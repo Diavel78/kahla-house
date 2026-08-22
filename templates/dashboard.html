@@ -112,6 +112,45 @@
         }
         .lane.bad .rt { color: #fbbf24; }
         .lane.dead .rt { color: var(--red); }
+        /* THE P&L STACK (mockup E, picked Aug 22 2026): day cards are
+           bets-only pairs; 7d/30d/YTD live in one ledger block, each row
+           carrying a bets-vs-rent split bar; Lifetime is the hero below. */
+        .tag {
+            display: inline-block; font-size: 10px; letter-spacing: .07em;
+            font-weight: 600; color: var(--muted); text-transform: uppercase;
+            border: 1px solid var(--line); border-radius: 5px;
+            padding: 1px 6px; margin-left: 7px; vertical-align: 2px;
+        }
+        .erow { padding: 14px 0 13px; border-bottom: 1px solid rgba(35,42,55,.6); }
+        .erow:last-child { border-bottom: none; padding-bottom: 4px; }
+        .erow:first-child { padding-top: 4px; }
+        .etop { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+        .rlbl {
+            font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+            color: var(--muted); font-weight: 600;
+        }
+        .rnum {
+            font-family: 'JetBrains Mono', monospace; font-weight: 700;
+            font-size: 20px; font-variant-numeric: tabular-nums;
+        }
+        .bar {
+            display: flex; height: 5px; border-radius: 3px; overflow: hidden;
+            margin-top: 9px; background: rgba(35,42,55,.6);
+        }
+        .bar i { display: block; height: 100%; }
+        .bar .bbets { background: var(--cyan); }
+        .bar .brent { background: #fbbf24; }
+        .keys {
+            display: flex; justify-content: space-between; gap: 14px;
+            margin-top: 6px; font-size: 12px; color: var(--muted);
+            font-variant-numeric: tabular-nums;
+        }
+        .dotk {
+            display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+            margin-right: 5px;
+        }
+        .dk-b { background: var(--cyan); }
+        .dk-r { background: #fbbf24; }
         .lane.off, .lane.off .rt { opacity: .55; }
         @media (max-width: 520px) {
             .value { font-size: 26px; }
@@ -131,35 +170,36 @@
 
     <div class="wrap">
         <div class="grid">
-            <div class="card wide">
-                <div class="label">Lifetime earnings</div>
-                <div class="value skel" id="vTotal">—</div>
-                <div class="sub" id="subTotal">realized + open + maker rewards</div>
-            </div>
-            <!-- TRAILING 7 DAYS. A single day's rent is not measurable —
-                 the venue publishes a day only after its reward periods
-                 end and may compute for up to 5 business days, so the
-                 newest days are always still filling in. A trailing
-                 window is the only honest read until that lag is known. -->
-            <div class="card wide">
-                <div class="label">Last 7 days — all in</div>
-                <div class="value skel" id="v7">—</div>
-                <div class="sub" id="sub7">bets + rent</div>
-            </div>
-            <div class="card wide">
-                <div class="label">Rent — last 7 days</div>
-                <div class="value skel" id="vRent7">—</div>
-                <div class="sub" id="subRent7">paid + pending</div>
-            </div>
+            <!-- DAY CARDS ARE BETS-ONLY (user, Aug 22 2026): the venue
+                 publishes a day's rent only after its reward periods end
+                 and may compute for up to 5 business days, so an "all in"
+                 day card was always half-blank. Rent lives in the windows
+                 below, bucketed by the day it was EARNED. -->
             <div class="card">
-                <div class="label">Today — all in</div>
+                <div class="label">Today <span class="tag">bets only</span></div>
                 <div class="value skel" id="vToday">—</div>
                 <div class="sub" id="subToday">settled · AZ</div>
             </div>
             <div class="card">
-                <div class="label">Last night — all in</div>
+                <div class="label">Last night <span class="tag">bets only</span></div>
                 <div class="value skel" id="vYest">—</div>
                 <div class="sub" id="subYest">settled · AZ</div>
+            </div>
+            <!-- THE LEDGER: 7d / 30d / YTD all-in, one row each, with the
+                 bets-vs-rent split bar (cyan = bets, gold = rent). Rent by
+                 earn date is a FLOOR — the newest day or two are always
+                 still filling in at the venue. -->
+            <div class="card wide">
+                <div class="label">Rolling windows — all in</div>
+                <div id="ledger">
+                    <div class="sub" style="margin:0">loading…</div>
+                </div>
+                <div class="sub" id="subLedger">bets + rent · rent counts on the day it was earned</div>
+            </div>
+            <div class="card wide">
+                <div class="label">Lifetime</div>
+                <div class="value skel" id="vTotal">—</div>
+                <div class="sub" id="subTotal">cash out vs cash in — venue ledger</div>
             </div>
             <!-- THE MACHINE. A heartbeat is not health: the ledger lane
                  renewed its lease every five seconds for twenty-two hours
@@ -292,56 +332,52 @@
             // mirror finishes backfilling is honest; that number was not.
             const lt = s.lifetime_venue || null;
             paint('vTotal', lt ? lt.lifetime : null, true);
-            // ALL-IN = trading + liquidity rent (pending included). Rent is
-            // most of what this machine earns, so a day card showing only
-            // trading was telling less than half the story. Falls back to
-            // bare trading P&L if the incentive mirror hasn't synced.
-            paint('vToday', s.today_all_in != null ? s.today_all_in : s.today_pnl, true);
-            paint('vYest', s.yesterday_all_in != null ? s.yesterday_all_in : s.yesterday_pnl, true);
-            paint('vMaker', s.maker_rewards, false);
-            // Show the split, so "all in" is never a black box: what the
-            // bets did vs what the resting orders earned, and how much of
-            // that rent is still PENDING at the venue.
-            const dayNote = (pnl, rw) => {
-                if (!rw) return 'settled · AZ';
-                const bits = ['bets ' + (pnl == null ? '—'
-                              : (pnl < 0 ? '-$' : '+$') + Math.abs(pnl).toFixed(2))];
-                // Absent rent is NOT zero rent — the venue publishes a day
-                // only after its reward periods end, so the current day
-                // normally has no row at all. Saying "+$0.00" would read as
-                // "earned nothing" instead of "not reported yet".
-                if (rw.unpublished) bits.push('rent not posted yet');
-                else {
-                    bits.push('rent +$' + Number(rw.total || 0).toFixed(2));
-                    if (rw.pending) bits.push('$' + Number(rw.pending).toFixed(2) + ' pending');
-                }
-                return bits.join(' · ');
-            };
+            // DAY CARDS — bets only, venue-settled, AZ game day. Rent is
+            // deliberately NOT here (the venue publishes it days late);
+            // it lives in the windows below by earn date.
+            const st = s.pnl_stack || null;
+            paint('vToday', st ? st.today : s.today_pnl, true);
+            paint('vYest', st ? st.yesterday : s.yesterday_pnl, true);
             document.getElementById('subToday').textContent =
-                dayNote(s.today_pnl, s.today_rewards);
-            document.getElementById('subYest').textContent =
-                dayNote(s.yesterday_pnl, s.yesterday_rewards);
-            // Trailing 7 days — bets and rent on their own lines, because
-            // rent is the number we're still trying to size and burying it
-            // inside a combined figure hides it.
-            const r7 = s.rent_7d || null;
-            paint('v7', s.all_in_7d, true);
-            paint('vRent7', r7 ? r7.total : null, false);
-            document.getElementById('sub7').textContent =
-                'bets ' + (s.pnl_7d == null ? '—'
-                    : (s.pnl_7d < 0 ? '-$' : '+$') + Math.abs(s.pnl_7d).toFixed(2))
-                + ' · rent ' + (r7 ? '+$' + Number(r7.total).toFixed(2) : '—');
-            // ⚠ This number is a FLOOR and drifts up as the newest days
-            // settle. Showing how current the feed is keeps a week-over-week
-            // dip from being misread as a decline.
-            document.getElementById('subRent7').textContent = r7
-                ? ('$' + Number(r7.paid).toFixed(2) + ' paid · $'
-                   + Number(r7.pending).toFixed(2) + ' pending · '
-                   + r7.n_markets + ' markets'
-                   + (r7.newest_date ? ' · newest ' + r7.newest_date : '')
-                   + (r7.skipped ? ' · $' + Number(r7.skipped).toFixed(2)
-                      + ' forfeited <$1/day' : ''))
-                : 'paid + pending';
+                'settled · AZ · rent lands in ~5 days';
+            document.getElementById('subYest').textContent = 'venue-settled · AZ';
+            paint('vMaker', s.maker_rewards, false);
+            // THE LEDGER — 7d / 30d / YTD, big all-in number per row plus
+            // the bets-vs-rent split bar. Bar widths are each half's share
+            // of the absolute contributions, so a rent-carried week reads
+            // as a mostly-gold bar at a glance.
+            const led = document.getElementById('ledger');
+            if (st) {
+                const row = (lbl, w) => {
+                    if (!w) return '';
+                    const total = w.total, bets = w.bets, rent = w.rent;
+                    const cls = total >= 0 ? 'pos' : 'neg';
+                    const ab = Math.abs(bets || 0), ar = Math.abs(rent || 0);
+                    const bar = (ab + ar) > 0 && rent !== null
+                        ? '<div class="bar"><i class="bbets" style="width:'
+                          + (100 * ab / (ab + ar)).toFixed(1) + '%"></i>'
+                          + '<i class="brent" style="width:'
+                          + (100 * ar / (ab + ar)).toFixed(1) + '%"></i></div>'
+                        : '';
+                    return '<div class="erow">'
+                        + '<div class="etop"><span class="rlbl">' + lbl + '</span>'
+                        + '<span class="rnum ' + cls + '">' + money(total) + '</span></div>'
+                        + bar
+                        + '<div class="keys">'
+                        + '<span><span class="dotk dk-b"></span>bets '
+                        + money(bets) + '</span>'
+                        + '<span><span class="dotk dk-r"></span>rent '
+                        + (rent === null ? '—' : money(rent)) + '</span>'
+                        + '</div></div>';
+                };
+                led.innerHTML = row('7 days', st.d7) + row('30 days', st.d30)
+                              + row('YTD', st.ytd);
+            } else {
+                // No stack = the venue RPC was unreachable. Dashes, never
+                // a partial or invented figure on a money surface.
+                led.innerHTML = '<div class="sub" style="margin:0">'
+                    + 'venue ledger unreachable — retrying</div>';
+            }
             // Remediation / promo credits are NOT liquidity earnings —
             // they were inflating this card ~4x before the split.
             const cr = s.account_credits;
