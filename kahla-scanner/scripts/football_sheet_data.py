@@ -181,6 +181,7 @@ def espn_week_games(sport: str, days: int) -> list[dict] | None:
         home = away = None
         recs: dict[str, str] = {}
         abbr: dict[str, str] = {}
+        locs: dict[str, str] = {}
         for c in comp.get("competitors") or []:
             t = c.get("team") or {}
             name = t.get("displayName") or t.get("name") or ""
@@ -191,9 +192,11 @@ def espn_week_games(sport: str, days: int) -> list[dict] | None:
             if c.get("homeAway") == "home":
                 home, recs["home"] = name, rec
                 abbr["home"] = t.get("abbreviation") or ""
+                locs["home"] = t.get("location") or ""
             elif c.get("homeAway") == "away":
                 away, recs["away"] = name, rec
                 abbr["away"] = t.get("abbreviation") or ""
+                locs["away"] = t.get("location") or ""
         book = _parse_espn_odds(comp, abbr)
         state = ((ev.get("status") or {}).get("type") or {}).get("state")
         if not (home and away) or state != "pre":
@@ -213,6 +216,9 @@ def espn_week_games(sport: str, days: int) -> list[dict] | None:
                 b for bl in (comp.get("broadcasts") or [])
                 for b in (bl.get("names") or [])),
             "records": recs,
+            "locs": locs,      # ESPN team.location — the short handle
+                               # ("TCU", "North Carolina"); mascots are
+                               # multi-word too often to strip by heuristic
             "book_odds": book,
         })
     return out
@@ -705,7 +711,8 @@ def build_game_blob(g: dict, sport: str, model: dict | None,
         "game": {"sport": sport, "away": g["away"], "home": g["home"],
                  "event_start": g["event_start"].isoformat(),
                  "venue": g.get("venue"), "neutral_site": g.get("neutral_site"),
-                 "broadcast": g.get("broadcast"), "records": g.get("records")},
+                 "broadcast": g.get("broadcast"), "records": g.get("records"),
+                 "locs": g.get("locs")},
     }
     pm = _pm_lines(g["market_id"]) if g.get("market_id") else None
     vs = _vsin_lines(g["market_id"]) if g.get("market_id") else None

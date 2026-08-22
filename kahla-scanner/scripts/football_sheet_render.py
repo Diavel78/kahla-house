@@ -227,8 +227,15 @@ def _lines_table(blob: dict) -> str:
               " handle%/bets%. Arrows = open → now.</p>")
 
 
-def _short(name: str) -> str:
-    """'TCU Horned Frogs' → 'TCU' style short handle: drop the mascot."""
+def _short(name: str, blob: dict | None = None) -> str:
+    """Short handle for a team. Prefer ESPN's `location` from the blob
+    ('TCU', 'North Carolina') — mascots are multi-word too often for a
+    drop-the-last-word heuristic ('TCU Horned'). Fallback: drop one word."""
+    g = (blob or {}).get("game") or {}
+    locs = g.get("locs") or {}
+    for k in ("home", "away"):
+        if g.get(k) == name and locs.get(k):
+            return locs[k]
     parts = (name or "").split()
     return " ".join(parts[:-1]) if len(parts) > 1 else (name or "")
 
@@ -259,7 +266,7 @@ def _ournum(blob: dict) -> str:
     margin = m.get("margin_cal", m.get("margin_raw"))
     total = m.get("total_cal", m.get("total_raw"))
     fav = home if margin >= 0 else away
-    rows = [f"<div class='big'>Our number: {_e(_short(fav))} "
+    rows = [f"<div class='big'>Our number: {_e(_short(fav, blob))} "
             f"−{abs(margin):.1f} · total {total:.1f}"
             + (" · <b>neutral site</b>" if m.get("neutral_site") else "")
             + "</div>"]
@@ -267,7 +274,7 @@ def _ournum(blob: dict) -> str:
     bs, bt = m.get("bet_spread"), m.get("bet_total")
     if bs:
         vtxt, vcls = _VERDICT[bs["verdict"]]
-        team = _short(bs["team"])
+        team = _short(bs["team"], blob)
         rows.append(
             f"<div class='betline'><span class='verdict {vcls}'>{vtxt}</span> "
             f"<b>Spread</b> — market {_e(team)} {bs['line']:+g} "
@@ -293,8 +300,8 @@ def _ournum(blob: dict) -> str:
         rows.append("<div class='unavail'>No posted line yet — the plays "
                     "price in once a number is up (Friday update).</div>")
     win = m.get("win_prob_home")
-    rows.append(f"<div class='small'>ML reference: {_e(_short(home))} "
-                f"{_pct(win)} / {_e(_short(away))} "
+    rows.append(f"<div class='small'>ML reference: {_e(_short(home, blob))} "
+                f"{_pct(win)} / {_e(_short(away, blob))} "
                 f"{_pct(1 - win) if win is not None else '—'} · "
                 f"Gridiron IQ, {m.get('n_games')} games rated</div>")
     return "<div class='ournum'>" + "".join(rows) + "</div>"
@@ -386,7 +393,8 @@ def _game_header(row: dict, blob: dict) -> str:
         edge_tag = "<span class='tag edge'>EDGE</span>"
     recs = g.get("records") or {}
     rec_txt = ""
-    if recs.get("away") or recs.get("home"):
+    if (recs.get("away") or recs.get("home")) and \
+            {recs.get("away"), recs.get("home")} != {"0-0"}:
         rec_txt = f" · {recs.get('away', '')} / {recs.get('home', '')}"
     return (f"<div class='gamehead'><h2>{_e(_nm('away'))} @ {_e(_nm('home'))}"
             f"<span class='tag {tier}'>{'DEEP DIVE' if tier == 'deep' else 'DATA SHEET'}</span>"
@@ -408,9 +416,9 @@ def _index_table(rows: list[dict]) -> str:
         model_txt = "—"
         if margin is not None:
             fav = (g.get("home") if margin >= 0 else g.get("away")) or ""
-            model_txt = f"{_short(fav)} −{abs(margin):.1f}"
+            model_txt = f"{_short(fav, blob)} −{abs(margin):.1f}"
         bs, bt = m.get("bet_spread") or {}, m.get("bet_total") or {}
-        mkt = (f"{_short(bs.get('team', ''))} {bs['line']:+g}"
+        mkt = (f"{_short(bs.get('team', ''), blob)} {bs['line']:+g}"
                if bs else "—")
         sp_play = "—"
         sp_cls = ""
@@ -418,7 +426,7 @@ def _index_table(rows: list[dict]) -> str:
             if bs["verdict"] == "pass":
                 sp_play = "pass"
             else:
-                sp_play = (f"{_short(bs['team'])} {bs['line']:+g} "
+                sp_play = (f"{_short(bs['team'], blob)} {bs['line']:+g} "
                            f"@ {_fair(bs['fair'])}")
                 sp_cls = "pos" if bs["verdict"] == "play" else ""
         ou_play = "—"
