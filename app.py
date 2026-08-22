@@ -11690,8 +11690,29 @@ def _fbprop_pass(sb, prop_rows, all_games, now) -> dict:
                     continue
                 try:
                     name = (m.group("name") or "").strip()
-                    line = float(m.group("line"))
-                except (IndexError, TypeError, ValueError):
+                except (IndexError, TypeError):
+                    continue
+                # THE LINE COMES FROM PMM'S STRUCTURED FIELD, never from
+                # text alone. The venue phrases these "at least N" (= over
+                # N−0.5, the MLB families' proven convention); when the
+                # pattern also captured N, the two must agree or the row
+                # is skipped — a misparse must cost a missed bet, never a
+                # wrong one.
+                try:
+                    ln_s = float(_ln) if _ln is not None else None
+                except (TypeError, ValueError):
+                    ln_s = None
+                ln_q = None
+                try:
+                    if m.groupdict().get("line") is not None:
+                        ln_q = float(m.group("line")) - 0.5
+                except (TypeError, ValueError):
+                    ln_q = None
+                if (ln_s is not None and ln_q is not None
+                        and abs(ln_s - ln_q) > 0.51):
+                    continue
+                line = ln_s if ln_s is not None else ln_q
+                if line is None or not name:
                     continue
                 got = _fbprop_tail_p(snap, name, line, fam)
                 if not got:
