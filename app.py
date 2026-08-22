@@ -4488,7 +4488,12 @@ _PM_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF", "UFC"]
 # invisible until Tuesday while its lines drifted off camp news /
 # weigh-ins — the very drift the early window exists to capture. UFC is
 # a weekly card sport like NFL; watch it the full week.
-_PM_WINDOW_H = {"MLB": 36, "NBA": 96, "NHL": 96, "NFL": 168, "NCAAF": 72,
+# NFL 168h→504h (Aug 22 2026, pre-box-freeze): Week-1 props can list any
+# day now and NFL prop EARLY rent pays from listing — a 7-day watch would
+# have kept the whole slate off the tape (and the fbprop lane blind)
+# until Sep 3. 21 days adds ~16 games to the budgeted rotation; the
+# near-game priority tier keeps in-prime freshness safe.
+_PM_WINDOW_H = {"MLB": 36, "NBA": 96, "NHL": 96, "NFL": 504, "NCAAF": 72,
                 "UFC": 168}
 _KALSHI_CACHE: dict[str, tuple[float, dict]] = {}
 _KALSHI_TTL = 30  # seconds
@@ -11542,6 +11547,219 @@ def _pstat_tail_p(snap: dict, pitcher: str, line: float, asof,
     return tail, w
 
 
+_FBPROP_CONF_CACHE: dict = {}     # 5-min cached fbprop_config row
+_FBPROP_SNAP_CACHE: dict = {}     # 10-min cached football_props_snapshot
+
+
+def _fbprop_config(sb) -> dict:
+    """fbprop_config row id=1 — THE REMOTE CONTROL for the NFL props
+    lane (built Aug 22 2026, the hour before a 6-day box freeze). The
+    box polls this every tick, so the lane's capture patterns, stake,
+    cap and master switch are all editable via run_sql.sh while the box
+    cannot take a deploy. Dormant default: enabled=false, no patterns."""
+    now_ts = _time.time()
+    c = _FBPROP_CONF_CACHE.get("v")
+    if c is not None and now_ts - _FBPROP_CONF_CACHE.get("ts", 0) < 300:
+        return c
+    conf: dict = {}
+    try:
+        rows = (sb.table("fbprop_config").select("config")
+                .eq("id", 1).limit(1).execute().data) or []
+        if rows:
+            conf = rows[0].get("config") or {}
+    except Exception:
+        conf = c or {}
+    _FBPROP_CONF_CACHE.update(v=conf, ts=now_ts)
+    return conf
+
+
+def _fbprop_snapshot():
+    """football_props_snapshot state, 10-min cached. None when absent."""
+    now_ts = _time.time()
+    c = _FBPROP_SNAP_CACHE.get("v")
+    if c is not None and now_ts - _FBPROP_SNAP_CACHE.get("ts", 0) < 600:
+        return c or None
+    snap = None
+    try:
+        rows = (get_supabase().table("football_props_snapshot")
+                .select("state").eq("id", 1).limit(1).execute().data) or []
+        if rows:
+            snap = rows[0].get("state")
+    except Exception:
+        snap = None
+    _FBPROP_SNAP_CACHE.update(v=snap or {}, ts=now_ts)
+    return snap
+
+
+def _fbprop_tail_p(snap, name, line, fam):
+    """P(player goes OVER `line`) for one football prop family.
+
+    MIRRORS compute_football_props.py / backtest_football_props.py (the
+    gate-1-passed model) — decay-weighted player mean/SD (126d half
+    life), shrunk `shrink_games` toward the usage-floored league prior,
+    normal tail. Also enforces the model's own ELIGIBILITY rule from
+    the snapshot rows: trailing-5 usage must clear the family floor
+    (prior-games only — a player who lost his role prices as None, not
+    as his stale form). Returns (p_over, n_games) or None."""
+    if not snap:
+        return None
+    fams = snap.get("fams") or {}
+    fc = fams.get(fam)
+    lg = (snap.get("lg") or {}).get(fam)
+    pl = (snap.get("players") or {}).get(name)
+    if not (fc and lg and pl):
+        return None
+    cols = snap.get("stat_cols") or []
+    try:
+        si = cols.index(fc["stat"]) + 1     # +1: games rows are [date, *stats]
+        ui = cols.index(fc["use"]) + 1
+        floor = float(fc["floor"])
+        hl = float(snap.get("half_life_days") or 126.0)
+        k = float(snap.get("shrink_games") or 5.0)
+        games = [g for g in (pl.get("games") or []) if g[si] is not None]
+        if len(games) < int(snap.get("min_prior") or 3):
+            return None
+        recent = games[-5:]
+        uses = [g[ui] for g in recent if g[ui] is not None]
+        if not uses or sum(uses) / len(recent) < floor:
+            return None                     # role gone — no number
+        asof = datetime.now(timezone.utc).date()
+        w, vals = [], []
+        for g in games:
+            d = datetime.fromisoformat(str(g[0])[:10]).date()
+            w.append(0.5 ** (max((asof - d).days, 0) / hl))
+            vals.append(float(g[si]))
+        W = sum(w)
+        mu_p = sum(wi * v for wi, v in zip(w, vals)) / W
+        var_p = sum(wi * (v - mu_p) ** 2 for wi, v in zip(w, vals)) / W
+        mu = (W * mu_p + k * float(lg["m"])) / (W + k)
+        var = (W * var_p + k * float(lg["v"])) / (W + k)
+        sd = math.sqrt(max(var, 1.0))
+        z = (float(line) - mu) / sd
+        p = 1.0 - 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+        return min(max(p, 0.01), 0.99), len(games)
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+
+
+def _fbprop_pass(sb, prop_rows, all_games, now) -> dict:
+    """NFL props AUTO-BET pass — dormant until fbprop_config arms it.
+
+    Rides the pm-snapshot tick beside the whiff pass. For each captured
+    football prop whose question matches a CONFIG pattern (patterns are
+    DATA, written from real captures — blind shape-guessing on the money
+    path failed twice on Aug 22 alone): price via _fbprop_tail_p, same
+    gate family as the pitcher props (4-10pp band with the claimed-edge
+    cliff, 25-60¢ entry, 0.30-0.70 trust zone), best edge per (game,
+    player) — a player's rungs are correlated, never stacked. NO day-of
+    wait: NFL prop EARLY rent is the largest early pool on the board
+    (Aug recon), and _rent_ok answers per-market at placement anyway.
+    ≤1 create per tick. v1 has no repeg chase and no paperlog shadow —
+    the tape's prop_snapshots rows + venue truth are the record until
+    the Thursday wire-up."""
+    st = {"fbp_eval": 0, "fbp_bets": 0}
+    try:
+        conf = _fbprop_config(sb)
+        pats = conf.get("fams") or []
+        if not conf.get("enabled") or not pats:
+            return st
+        snap = _fbprop_snapshot()
+        if not snap or not snap.get("players"):
+            return st
+        ginfo = {g["id"]: g for g in all_games}
+        fb_mids = {mid for mid, g in ginfo.items()
+                   if g.get("sport") in ("NFL", "NCAAF")}
+        if not fb_mids:
+            return st
+        compiled = []
+        for p in pats:
+            try:
+                compiled.append((p["fam"], re.compile(p["pattern"], re.I)))
+            except (re.error, KeyError, TypeError):
+                continue                    # a bad pattern is a no-op
+        if not compiled:
+            return st
+        best: dict = {}                     # (mid, player) -> candidate
+        for r in prop_rows:
+            mid, _v, pk, q, _pt, _ln, cents, bid_c, ask_c = r
+            if mid not in fb_mids or cents is None:
+                continue
+            for fam, cre in compiled:
+                m = cre.search(q or "")
+                if not m:
+                    continue
+                try:
+                    name = (m.group("name") or "").strip()
+                    line = float(m.group("line"))
+                except (IndexError, TypeError, ValueError):
+                    continue
+                got = _fbprop_tail_p(snap, name, line, fam)
+                if not got:
+                    continue
+                st["fbp_eval"] += 1
+                model_p, n_games = got
+                edge_yes = model_p * 100.0 - cents
+                side = "yes" if edge_yes > 0 else "no"
+                edge = abs(edge_yes)
+                side_c = cents if side == "yes" else 100 - cents
+                if not (_WHIFF_BET_MIN_PP <= edge <= _WHIFF_BET_MAX_PP
+                        and 25.0 <= side_c <= _WHIFF_MAX_ENTRY_C
+                        and _WHIFF_TRUST_LO <= model_p <= _WHIFF_TRUST_HI):
+                    continue
+                key = (mid, name)
+                if key not in best or edge > best[key][0]:
+                    best[key] = (edge, fam, pk, q, name, line, side,
+                                 side_c, model_p, bid_c, ask_c)
+                break                       # one family per question
+        if not best:
+            return st
+        placed = 0
+        for (mid, name), cand in sorted(best.items(),
+                                        key=lambda kv: -kv[1][0]):
+            if placed >= 1:                 # tick latency bound
+                break
+            edge, fam, pk, q, name2, line, side, side_c, model_p, \
+                bid_c, ask_c = cand
+            g = ginfo.get(mid) or {}
+            # one live bet per (game, player) — rungs/fams correlated
+            try:
+                have = (sb.table("bot_picks").select("id")
+                        .eq("market_id", mid).eq("status", "pending")
+                        .filter("signal_blob->fbprop->>player", "eq", name2)
+                        .limit(1).execute().data) or []
+            except Exception:
+                continue
+            if have:
+                continue
+            fair = model_p if side == "yes" else 1.0 - model_p
+            r = _autobet_execute(
+                sb, g, g.get("event_start"), "prop", side,
+                f"{name2} {fam} {line} {side.upper()}", pk,
+                side == "no", side_c, fair, edge, round(edge, 1),
+                bid_c, ask_c,
+                extra_blob={"fbprop_autobet": True,
+                            "fbprop": {"player": name2, "fam": fam,
+                                       "line": line, "q": q,
+                                       "model_p": round(model_p, 4)}},
+                cap_flag="fbprop_autobet",
+                cap_max=int(conf.get("max_bets") or 30),
+                query_text="auto-bet: football prop",
+                reason=(f"FBPROP AUTO-BET — {name2} {fam} "
+                        f"{'over' if side == 'yes' else 'under'} {line}, "
+                        f"model {round(fair * 100)}¢ vs "
+                        f"{round(side_c)}¢ entry → {round(edge, 1)}pp"),
+                skip_game_dedup=True,
+                contracts=int(conf.get("contracts") or 1),
+                entry_line=line,
+                sport=g.get("sport") or "NFL")
+            if r is True:
+                placed += 1
+                st["fbp_bets"] += 1
+    except Exception:
+        pass
+    return st
+
+
 def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
     """Price every K-prop captured this tick vs Whiff IQ; SHADOW-log the
     +EV side to pickbot_paperlog when |edge| >= _WHIFF_SHADOW_MIN_PP.
@@ -12438,6 +12656,9 @@ def api_pm_snapshot():
     props_inserted = _prop_insert_changed(sb, prop_rows, now)
     props_cleared = _prop_update_suggestions(sb, prop_rows, now)
     whiff_shadows = _whiff_shadow_pass(sb, prop_rows, all_games, now)
+    # NFL props lane — dormant until fbprop_config arms it (remote-
+    # controllable via SQL through the 6-day box freeze, Aug 22 2026).
+    fbprop = _fbprop_pass(sb, prop_rows, all_games, now)
     # Trade tape (whale flow) — ONE poll of the public tape, matched against
     # the same upcoming-games index this tick already built. ~1-2s of I/O.
     tt = _poly_trades_ingest(sb, all_games, now)
@@ -12445,7 +12666,8 @@ def api_pm_snapshot():
     return jsonify({"ok": True, "games": len(all_games), "inserted": inserted,
                     "props_inserted": props_inserted, "props_cleared": props_cleared,
                     "whiff_shadows": whiff_shadows, "trades": tt,
-                    "kalshi": kal_meta, "xconfirm_triggered": xc["triggered"], **st})
+                    "kalshi": kal_meta, "xconfirm_triggered": xc["triggered"],
+                    **fbprop, **st})
 
 
 # ───────────── VSiN splits snapshot (Circa + DK handle/bets time series) ─────
