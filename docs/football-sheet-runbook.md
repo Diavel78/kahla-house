@@ -152,7 +152,16 @@ min; links are public — Rob forwards the PDF to friends). Then:
 | Tiering | assembly `decide_tiers` — NFL all deep; NCAAF ranked/edge-gated, cap 18 | Rob-approved Aug 2026 |
 
 Landmines already hit: ESPN CFB scoreboard needs `groups=80&limit=400` or
-it returns only the featured slate; ESPN 403s multi-day `dates=A-B` from
-Actions (per-day loop); team names need accent-folding (`_fold`) to join
-ratings/game_results ("San José State", "Hawai'i"); `SUPABASE_URL` env in
-the CCR sandbox is wrapped in literal `<>`.
+it returns only the featured slate; **`site.api.espn.com` hard-403s the
+Actions runners on EVERY request now (Aug 2026 — the per-day trick died
+too), while `site.web.api.espn.com` serves the same site/v2 paths
+unblocked — `_espn_get` falls back host-wise, proven live (injuries, AP
+ranks, scoreboard all landed via the web host)**; team names need
+accent-folding (`_fold`) to join ratings/game_results ("San José State",
+"Hawai'i") and spelling drift also mints DUPE sheet rows under the
+`(week_key, sport, event_name)` unique key — the monday build sweeps rows
+it didn't touch, gated on ESPN having answered; `_SEASON_FLOOR` (mirror
+of app.py `_GRIDIRON_MIN_START`, **update yearly**) keeps preseason out —
+the first shakedown built 27 preseason NFL sheets priced off
+regular-season ratings before it existed; `SUPABASE_URL` env in the CCR
+sandbox is wrapped in literal `<>`.
