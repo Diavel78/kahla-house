@@ -1254,9 +1254,20 @@ The phased UFC model (plan artifact "Fight IQ", July 2026). Targeting: **the DUR
   **spreads 5 / totals 2 contracts** (`_GRIDIRON_TOTAL_CONTRACTS`), both
   sports. Gate 2 (vs market prices) never ran for any football market —
   user override; the fills + `bet_gate` tape ARE the gate-2 dataset now.
-  Done-set rule extended to every market: spread rows need `cover_p`,
-  total rows `total_p`, ML rows a non-null `bet_gate` ("model" = evaluated,
-  didn't clear) — pre-bet-era rows re-tape once and settle. **FOOTBALL ML
+  Done-set rule extended to every market: spread rows need `cover_p` **AND
+  `bet_gate`** (cover_p alone latched all 16 pre-bet-era Week-1 rows as
+  done — caught in go-live hour one), total rows `total_p`, ML rows a
+  non-null `bet_gate` ("model" = evaluated, didn't clear) — pre-bet-era
+  rows re-tape once and settle. **TAIL GATE (`_GRIDIRON_TAIL_PTS`=10):** no
+  bet on a rung >10 pts from the shrunk projection — weeks out, the only
+  rungs with books are ±17.5/±21.5 ladder junk, exactly where the cover
+  model's own backtest says its tails are 5-10pp miscalibrated. **WEEK-OF
+  BET SWEEP (`_gridiron_bet_sweep`):** the tape is one-shot at listing,
+  when books are junk rungs the tail gate refuses — so inside 8 days of
+  kickoff every football game is re-evaluated for BETTING (spread+total,
+  hourly per-game, no tape rows; the executor's per-(market,type) dedup is
+  the one-bet guard). Real Week-1 bets come from the sweep when real lines
+  post, not from listing day. Both passes share `_gridiron_try_bet`. **FOOTBALL ML
   IS A SIDE-GLANCE, NEVER A LANE (user, same day: "It's spreads and overs
   and unders... if the spread is like 1.5 or 2.5, then you can look"):**
   the ML is evaluated/taped/bet ONLY when the posted spread's |line| ≤

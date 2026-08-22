@@ -14592,6 +14592,172 @@ def _opener_watchdog(sb, now, opener_stats):
         return None
 
 
+_GRIDIRON_TAIL_PTS = 10.0   # bet only rungs within this many points of the
+                            # SHRUNK projection — the backtest's own caveat:
+                            # the far tails under-predict blowouts by 5-10pp
+                            # (p≈0.05 buckets), so a rung 10+ points off the
+                            # projection is mispriced by this model. Nineteen
+                            # days out the ONLY rungs with books are ±17.5/
+                            # ±21.5 junk — exactly what this refuses.
+
+
+def _gridiron_try_bet(sb, g, es0, d, mt, gp):
+    """ONE football bet attempt (spread or total) — the shared leg behind
+    the opener tape AND the week-of sweep. Model's best side at its own
+    cheap peg; gates in order: no_book / edge (<2.5pp) / junk (≥15pp) /
+    tail (rung >10 pts off the shrunk projection) / entry_cap (>60¢);
+    then _autobet_execute runs rent + the $6 Master Rule per market.
+    Returns the gate string ("placed" = an order is resting). The
+    executor's per-(market, type) dedup is the one-bet-per-game guard, so
+    calling this twice is safe."""
+    if not gp:
+        return None
+    mg, tt, pm = gp
+    fit = (pm or {}).get("spread_fit" if mt == "spread" else "total_fit") or {}
+    try:
+        proj = (float(fit["alpha"])
+                + float(fit["beta"]) * (mg if mt == "spread" else tt))
+    except (TypeError, ValueError, KeyError):
+        return None
+    blkx = ((((d or {}).get("odds") or {}).get(mt) or {})
+            .get("polymarket") or {})
+    ka, kb = (("over", "under") if mt == "total" else ("away", "home"))
+    bc = None
+    for sn in (ka, kb):
+        pblk = blkx.get(sn) or {}
+        q = pblk.get("quote") or {}
+        ln = pblk.get("line")
+        if (q.get("bid") is None or ln is None or not pblk.get("slug")
+                or float(q["bid"]) <= 0):
+            continue
+        peg = float(int(float(q["bid"]) * 100.0)) + 1.0
+        if mt == "spread":
+            lh = float(ln) if sn == "home" else -float(ln)
+            ph = _gridiron_cover_p(pm, mg, lh)
+            ps = None if ph is None else (ph if sn == "home" else 1.0 - ph)
+            thr = -lh
+        else:
+            po = _gridiron_over_p(pm, tt, float(ln))
+            ps = None if po is None else (po if sn == "over" else 1.0 - po)
+            thr = float(ln)
+        if ps is None:
+            continue
+        e = ps * 100.0 - peg
+        if bc is None or e > bc[1]:
+            bc = (sn, e, peg, pblk, ps, q, abs(thr - proj))
+    if bc is None:
+        return "no_book"
+    sn, e, peg, pblk, ps, q, dist = bc
+    if e < _GRIDIRON_MIN_EDGE_PP:
+        return "edge"
+    if e >= _OPENER_JUNK_EDGE_PP:
+        return "junk"
+    if dist > _GRIDIRON_TAIL_PTS:
+        return "tail"
+    if peg > _GRIDIRON_MAX_ENTRY_C:
+        return "entry_cap"
+    xb = {"gridiron_autobet": True,
+          "gridiron_margin": round(mg, 2),
+          "gridiron_total": round(tt, 2)}
+    if mt == "spread":
+        xb["cover_p"] = round(ps, 4)
+        xb["line_home"] = (float(pblk["line"]) if sn == "home"
+                           else -float(pblk["line"]))
+    else:
+        xb["total_p"] = round(ps, 4)
+    r = _autobet_execute(
+        sb, g, es0, mt, sn, f"{sn} {pblk.get('line')}",
+        pblk["slug"], bool(pblk.get("synthetic")),
+        peg, ps, e, round(e, 1),
+        round(float(q["bid"]) * 100.0, 1),
+        (round(float(q["ask"]) * 100.0, 1)
+         if q.get("ask") is not None else None),
+        extra_blob=xb,
+        cap_flag="gridiron_autobet", cap_max=10000,
+        query_text="auto-bet: gridiron opener",
+        reason=(f"GRIDIRON AUTO-BET — {sn} {pblk.get('line')} pegged "
+                f"{round(peg)}¢, model {round(ps * 100)}¢ → "
+                f"{round(e, 1)}pp edge"),
+        # user stakes, Aug 22 2026: spreads 5, totals 2, both sports.
+        contracts=(_GRIDIRON_CONTRACTS if mt == "spread"
+                   else _GRIDIRON_TOTAL_CONTRACTS),
+        entry_line=pblk.get("line"),
+        sport=g["sport"])
+    if r in ("cap", "rent"):
+        return r
+    return "placed" if r is True else "failed"
+
+
+_GRIDIRON_SWEEP_TS: dict = {}     # per-game last sweep-eval, in-memory
+_GRIDIRON_SWEEP_S = 3600.0        # re-eval cadence inside the week-of window
+_GRIDIRON_SWEEP_DAYS = 8          # how close a game must be to get swept
+_GRIDIRON_SWEEP_CAP = 4           # dossier builds per tick — budget courtesy
+
+
+def _gridiron_bet_sweep(sb, now, deadline, stats):
+    """WEEK-OF BET SWEEP (Aug 22 2026) — the second visit the one-shot
+    tape can't give. The opener tapes a game at LISTING, when football
+    books are junk ladder ends (±21.5 nineteen days out) that the tail
+    gate rightly refuses — so a taped game would otherwise never be bet
+    when its REAL lines post. Inside 8 days of kickoff, every football
+    game gets re-evaluated for BETTING (spread + total) on an hourly
+    per-game cadence: no persists, no tape rows — the executor's pick
+    row is the record and its per-(market, type) dedup is the one-bet
+    guard. Rent stays per-market at placement, as always."""
+    try:
+        if _time.time() >= deadline - 1.5:
+            return
+        import handicapper_web
+        lo = (now + timedelta(hours=_OPENER_LO_H)).isoformat()
+        hi = (now + timedelta(days=_GRIDIRON_SWEEP_DAYS)).isoformat()
+        cands = []
+        for sport in _GRIDIRON_SPORTS:
+            slo = max(lo, _GRIDIRON_MIN_START.get(sport, "")
+                      + "T00:00:00+00:00"
+                      if _GRIDIRON_MIN_START.get(sport) else lo)
+            try:
+                raw = (sb.table("markets")
+                       .select("id,event_name,event_start,sport")
+                       .eq("sport", sport).eq("status", "active")
+                       .gte("event_start", slo).lte("event_start", hi)
+                       .order("event_start").limit(120).execute().data) or []
+            except Exception:
+                continue
+            seen: set = set()
+            for gg in raw:
+                key = (gg.get("event_name"), _et_day(gg.get("event_start")))
+                if gg.get("event_name") and key not in seen:
+                    seen.add(key)
+                    cands.append(gg)
+        nowt = _time.time()
+        cands = [gg for gg in cands
+                 if nowt - _GRIDIRON_SWEEP_TS.get(gg["id"], 0.0)
+                 >= _GRIDIRON_SWEEP_S]
+        built = 0
+        for gg in cands:
+            if _time.time() >= deadline - 1.0 or built >= _GRIDIRON_SWEEP_CAP:
+                break
+            gp = _gridiron_proj(sb, gg["sport"], gg.get("event_name"))
+            if not gp:
+                _GRIDIRON_SWEEP_TS[gg["id"]] = _time.time()
+                continue          # unmatched team — never a guess
+            try:
+                d = handicapper_web.build_dossier(sb, None, None,
+                                                  market_id=gg["id"])
+            except Exception:
+                continue
+            _GRIDIRON_SWEEP_TS[gg["id"]] = _time.time()
+            built += 1
+            stats["g_sweep"] = stats.get("g_sweep", 0) + 1
+            for mt in ("spread", "total"):
+                r = _gridiron_try_bet(sb, gg, gg.get("event_start"),
+                                      d, mt, gp)
+                if r == "placed":
+                    stats["g_bets"] = stats.get("g_bets", 0) + 1
+    except Exception:
+        pass
+
+
 def _gridiron_opener_pass(sb, now, deadline):
     """Football opener SHADOWS on the tick's leftover budget (after the
     MLB opener pass). One shadow per game at first Polymarket listing
@@ -14664,8 +14830,13 @@ def _gridiron_opener_pass(sb, now, deadline):
         # needs a bet_gate verdict. Each pre-bet-era row re-tapes exactly
         # once (its rewrite carries the model number and the bet attempt),
         # then settles.
+        # Spread rows need cover_p AND a bet_gate: last night's 16 Week-1
+        # rows carried cover_p from the Aug 20 model stamp but predate the
+        # bet leg — cover_p alone latched them all as done and the bet
+        # lane never touched Week 1 (caught live, first hour of go-live).
         done = {(r["market_id"], r["market_type"]) for r in done_rows
-                if (r["market_type"] == "spread" and r.get("cover_p"))
+                if (r["market_type"] == "spread" and r.get("cover_p")
+                    and r.get("bet_gate"))
                 or (r["market_type"] == "total" and r.get("total_p"))
                 or (r["market_type"] == "moneyline" and r.get("bet_gate"))}
         # SPREAD AND TOTAL drive game selection — never the ML. Football is
@@ -14958,105 +15129,21 @@ def _gridiron_opener_pass(sb, now, deadline):
                                     "model_edge_pp": round(
                                         _ps * 100.0 - _cheap[2], 1),
                                     "peg_c": _cheap[2]}
-                # ══ THE FIRST FOOTBALL MONEY — SPREADS (Aug 22 2026,
-                # explicit user go-order, 5 contracts). The bet side is the
-                # MODEL's best side at its own peg — not the book-geometry
-                # cheap side the shadow tapes. Gates, in order: model
-                # resolved both teams; edge ≥ 2.5pp at the peg; edge under
-                # the 15pp junk cliff (four independent sightings say a
-                # huge claimed edge means the market is right — and the
-                # cover model's own tails under-predict blowouts); peg ≤
-                # 60¢; then _autobet_execute runs the rent gate (per-market,
-                # asc- family, DYNAMIC — no sport is written off here) and
-                # the $6 Master Rule. BET BEFORE PERSIST for cap only: a
-                # cap-refused game must not latch as taped; a rent refusal
-                # persists with bet_gate="rent" so the tape accrues.
+                # ══ THE FIRST FOOTBALL MONEY (Aug 22 2026, explicit user
+                # go-order). The shared bet leg — _gridiron_try_bet — runs
+                # the model gates + tail band, then rent + Master Rule in
+                # the executor. BET BEFORE PERSIST for cap only: a
+                # cap-refused game must not latch as taped; every other
+                # verdict (rent included) persists with its bet_gate so
+                # the tape accrues, and the week-of SWEEP gives taped
+                # games their second look once real lines post.
                 _bet_gate = None
                 if _gp:
-                    _mg, _tt, _pm = _gp
-                    _bc = None
-                    for _sn2, _pblk2 in ((_ka, _pa), (_kb, _pb)):
-                        _q2 = _pblk2.get("quote") or {}
-                        _ln2 = _pblk2.get("line")
-                        if (_q2.get("bid") is None or _ln2 is None
-                                or not _pblk2.get("slug")
-                                or float(_q2["bid"]) <= 0):
-                            continue
-                        _peg2 = float(int(float(_q2["bid"]) * 100.0)) + 1.0
-                        if _mt == "spread":
-                            _lh2 = (float(_ln2) if _sn2 == "home"
-                                    else -float(_ln2))
-                            _ph2 = _gridiron_cover_p(_pm, _mg, _lh2)
-                            _ps2 = (None if _ph2 is None else
-                                    (_ph2 if _sn2 == "home"
-                                     else 1.0 - _ph2))
-                        else:
-                            _po2 = _gridiron_over_p(_pm, _tt, float(_ln2))
-                            _ps2 = (None if _po2 is None else
-                                    (_po2 if _sn2 == "over"
-                                     else 1.0 - _po2))
-                        if _ps2 is None:
-                            continue
-                        _e2 = _ps2 * 100.0 - _peg2
-                        if _bc is None or _e2 > _bc[1]:
-                            _bc = (_sn2, _e2, _peg2, _pblk2, _ps2, _q2)
-                    if _bc is None:
-                        _bet_gate = "no_book"
-                    else:
-                        _sn2, _e2, _peg2, _pblk2, _ps2, _q2 = _bc
-                        if _e2 < _GRIDIRON_MIN_EDGE_PP:
-                            _bet_gate = "edge"
-                        elif _e2 >= _OPENER_JUNK_EDGE_PP:
-                            _bet_gate = "junk"
-                        elif _peg2 > _GRIDIRON_MAX_ENTRY_C:
-                            _bet_gate = "entry_cap"
-                        else:
-                            _xb = {"gridiron_autobet": True,
-                                   "gridiron_margin": round(_mg, 2),
-                                   "gridiron_total": round(_tt, 2)}
-                            if _mt == "spread":
-                                _xb["cover_p"] = round(_ps2, 4)
-                                _xb["line_home"] = (
-                                    float(_pblk2["line"])
-                                    if _sn2 == "home"
-                                    else -float(_pblk2["line"]))
-                            else:
-                                _xb["total_p"] = round(_ps2, 4)
-                            _r = _autobet_execute(
-                                sb, g, es0, _mt, _sn2,
-                                f"{_sn2} {_pblk2.get('line')}",
-                                _pblk2["slug"],
-                                bool(_pblk2.get("synthetic")),
-                                _peg2, _ps2, _e2, round(_e2, 1),
-                                round(float(_q2["bid"]) * 100.0, 1),
-                                (round(float(_q2["ask"]) * 100.0, 1)
-                                 if _q2.get("ask") is not None else None),
-                                extra_blob=_xb,
-                                cap_flag="gridiron_autobet", cap_max=10000,
-                                query_text="auto-bet: gridiron opener",
-                                reason=(
-                                    f"GRIDIRON AUTO-BET — {_sn2} "
-                                    f"{_pblk2.get('line')} pegged "
-                                    f"{round(_peg2)}¢, model "
-                                    f"{round(_ps2 * 100)}¢ → "
-                                    f"{round(_e2, 1)}pp edge"),
-                                # user stakes, Aug 22 2026: spreads 5,
-                                # totals 2, both sports.
-                                contracts=(_GRIDIRON_CONTRACTS
-                                           if _mt == "spread"
-                                           else _GRIDIRON_TOTAL_CONTRACTS),
-                                entry_line=_pblk2.get("line"),
-                                sport=g["sport"])
-                            if _r == "cap":
-                                continue   # NOT taped — retries next pass
-                            # rent refusals PERSIST (bet_gate="rent"): the
-                            # tape must accrue, and those rows are the
-                            # evidence for a football dayof_wait wire.
-                            _bet_gate = (_r if _r == "rent" else
-                                         ("placed" if _r is True
-                                          else "failed"))
-                            if _r is True:
-                                stats["g_bets"] = stats.get("g_bets", 0) + 1
+                    _bet_gate = _gridiron_try_bet(sb, g, es0, d, _mt, _gp)
+                    if _bet_gate == "cap":
+                        continue   # NOT taped — retries next pass
+                    if _bet_gate == "placed":
+                        stats["g_bets"] = stats.get("g_bets", 0) + 1
                 _opener_persist(sb, {
                     "market_id": g["id"],
                     "event_name": g.get("event_name"),
@@ -15554,6 +15641,12 @@ def api_handicapper_paperlog():
     g_rows, g_stats = (_gridiron_opener_pass(sb, now, g_deadline)
                        if _own_opener else ([], {}))
     rows.extend(g_rows)
+    # WEEK-OF BET SWEEP — the taped-but-unbet second look (real football
+    # lines post days after listing; the tape is one-shot). Same lease,
+    # its own small budget after the tape pass.
+    if _own_opener:
+        _gridiron_bet_sweep(sb, now,
+                            max(g_deadline, _time.time() + 20.0), g_stats)
     opener_stats = {**opener_stats, **g_stats}
     # WALL ALARM — read-only tripwire: PMM has priced future games but the
     # standing future-day wall is thin → 🚨 ping. The user is not the alarm.
