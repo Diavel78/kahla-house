@@ -14789,8 +14789,18 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
 
 
 _GRIDIRON_SWEEP_TS: dict = {}     # per-game last sweep-eval, in-memory
-_GRIDIRON_SWEEP_S = 3600.0        # re-eval cadence inside the week-of window
-_GRIDIRON_SWEEP_DAYS = 8          # how close a game must be to get swept
+_GRIDIRON_SWEEP_S = 3600.0        # re-eval cadence inside the sweep window
+_GRIDIRON_SWEEP_DAYS = 25         # 8→25 within the hour (user: "let's bet
+                                  # some damn NFL spreads and totals"):
+                                  # rent is paid for being EARLY AND ALONE
+                                  # (3 days out paid 26× 1 day out, MLB
+                                  # measured) and NFL early programs pay
+                                  # from LISTING — an 8-day window would
+                                  # have left Week 1's rent on the table
+                                  # for 11 days. The tail gate + ESPN
+                                  # anchor make far-out lines safe to
+                                  # evaluate; the executor dedup makes
+                                  # re-sweeps free.
 _GRIDIRON_SWEEP_CAP = 4           # dossier builds per tick — budget courtesy
 
 
