@@ -286,7 +286,12 @@
             const j = await r.json();
             if (!j.ok) { document.getElementById('stamp').textContent = 'error'; return; }
             const s = j.summary || {};
-            paint('vTotal', s.total_pnl, true);
+            // LIFETIME reads the venue ledger ONLY (balance + withdrawn −
+            // deposited, cash basis). The old walk-based total_pnl read
+            // $50.20 and $247.04 thirteen minutes apart — a dash while the
+            // mirror finishes backfilling is honest; that number was not.
+            const lt = s.lifetime_venue || null;
+            paint('vTotal', lt ? lt.lifetime : null, true);
             // ALL-IN = trading + liquidity rent (pending included). Rent is
             // most of what this machine earns, so a day card showing only
             // trading was telling less than half the story. Falls back to
@@ -346,7 +351,10 @@
                 + (cr ? ' · plus $' + Number(cr).toFixed(2) + ' account credits' : '');
             const bal = (j.balances || {}).current_balance;
             document.getElementById('subTotal').textContent =
-                'realized + open + maker rewards' +
+                (lt ? 'cash out vs cash in — venue ledger (open bets count '
+                      + 'when they settle · $' + Number(lt.deposited).toFixed(0)
+                      + ' in, $' + Number(lt.withdrawn).toFixed(0) + ' back)'
+                    : 'rebuilding from the venue ledger') +
                 (bal != null ? ' · balance $' + Number(bal).toFixed(2) : '') +
                 (s.open_positions != null ? ' · ' + s.open_positions + ' open' : '');
             paintLanes(j.cellar);

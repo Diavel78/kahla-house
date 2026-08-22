@@ -2068,6 +2068,48 @@ def _dash_derived(sb) -> dict:
     return out
 
 
+def _lifetime_venue(sb, balance) -> dict | None:
+    """LIFETIME, cash basis, from the venue ledger: balance + everything
+    withdrawn − everything deposited. One equation over stored rows — no
+    walk, no window, no weather (Aug 21 2026: the old walk-based number
+    read $50.20 and $247.04 thirteen minutes apart).
+
+    Refuses to answer until the mirror backfill has reached the feed's
+    true beginning (backfill_done) — a lifetime number over partial
+    deposit history is the same lie with better posture. Open stakes are
+    deliberately NOT marked to market: they count when they settle, and
+    the sublabel says so."""
+    if balance is None:
+        return None
+    try:
+        st = (sb.table("poly_activities_state").select("backfill_done")
+              .eq("id", 1).limit(1).execute().data) or []
+        if not st or not st[0].get("backfill_done"):
+            return None
+        rows = _sb_paged(lambda: (
+            sb.table("poly_activities")
+            .select("type,payload")
+            .in_("type", ["ACTIVITY_TYPE_ACCOUNT_DEPOSIT",
+                          "ACTIVITY_TYPE_ACCOUNT_WITHDRAWAL"])
+            .order("at")), max_pages=2)
+        dep = wd = 0.0
+        for r in rows:
+            try:
+                amt = abs(float(((r.get("payload") or {})
+                                 .get("accountBalanceChange") or {})
+                                .get("amount", {}).get("value")))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if r["type"] == "ACTIVITY_TYPE_ACCOUNT_DEPOSIT":
+                dep += amt
+            else:
+                wd += amt
+        return {"lifetime": round(float(balance) + wd - dep, 2),
+                "deposited": round(dep, 2), "withdrawn": round(wd, 2)}
+    except Exception:
+        return None
+
+
 def _dash_cache_refresh(sb, client) -> dict:
     """Compute the dashboard summary ONCE on the tick and park the result.
 
@@ -8470,7 +8512,9 @@ def api_poly_acts_backfill():
         st = r[0] if r else {}
     except Exception:
         pass
-    if st.get("backfill_done") and request.args.get("restart") != "1":
+    full = request.args.get("full") == "1"
+    if (st.get("backfill_done") and request.args.get("restart") != "1"
+            and not full):
         return jsonify({"ok": True, "done": True, "note": "already complete"})
     cursor = None if request.args.get("restart") == "1" else st.get("backfill_cursor")
     walked = int(st.get("pages_walked") or 0)
@@ -8496,7 +8540,13 @@ def api_poly_acts_backfill():
             # Bookmark after EVERY page, not at the end — a call that
             # dies mid-walk must not lose the pages it already stored.
             _acts_state_save(sb, cursor, False, walked)
-            if oldest and oldest < _ACTS_CUTOFF:
+            # &full=1 walks to the feed's TRUE end. The cutoff stop was
+            # fine for the dashboard's windowed reads, but it stamped
+            # backfill_done with pre-cutoff history unread — caught by the
+            # ledger itself: a $50 withdrawal on Mar 7 preceded every
+            # recorded deposit, which is impossible. A lifetime equation
+            # needs genesis, not a horizon.
+            if not full and oldest and oldest < _ACTS_CUTOFF:
                 done = True               # past the dashboard's horizon
                 break
     except Exception as e:
@@ -18409,6 +18459,15 @@ def api_data():
                     # money surface never is.
                     "today_pnl": _gd.get("today"),
                     "yesterday_pnl": _gd.get("yesterday"),
+                    # LIFETIME from the venue ledger, cash basis — the
+                    # walk-based total_pnl below stays in the payload for
+                    # the legacy full page, but the headline card reads
+                    # THIS and dashes until the mirror reaches genesis.
+                    "lifetime_venue": _blk(
+                        "__never_cached__",
+                        lambda: _lifetime_venue(get_supabase(),
+                                                _c.get("balance")),
+                        None),
                     "maker_rewards": _mrs.get("rewards"),
                     "account_credits": _mrs.get("credits"),
                     "n_rewards": _mrs.get("n_rewards"),
