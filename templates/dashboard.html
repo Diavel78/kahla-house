@@ -493,7 +493,9 @@
         const me = r ? await r.json() : null;
         if (!me || !me.ok || me.role !== 'admin') { window.location.href = '/'; return; }
         load();
-        setInterval(load, 60000);
+        // 15s, not 60: the box refreshes the cache every tick now, and a
+        // slim poll is one cached-row read — the page should feel live.
+        setInterval(load, 15000);
     });
 </script>
 </body>

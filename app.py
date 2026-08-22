@@ -15827,17 +15827,22 @@ def api_handicapper_paperlog():
     # first-pitch sweep and the rent sync as must-keep-running, and missed
     # this one because it is NESTED INSIDE the activities-sync block rather
     # than being a call of its own.
-    if not now.minute % _POLY_LEDGER_MOD:
-        try:
-            acts_sync = _acts_sync(sb, get_client(), pages=3)
-        except Exception as e:
-            acts_sync = {"err": str(e)[:80]}
-        # …and precompute the dashboard summary while the feed is hot, so
-        # the page never pays for the walk itself.
-        try:
-            acts_sync["dash"] = _dash_cache_refresh(sb, get_client())
-        except Exception as e:
-            acts_sync["dash"] = {"err": str(e)[:80]}
+    # EVERY TICK, not every 5th (user, Aug 22 2026: "vercel/supabase is
+    # literally just a display portal at this point — can't we refresh it
+    # way faster??"). The 5-minute gate was a Vercel-budget economy; on
+    # the box the whole refresh is ~3 venue calls + a few DB reads. One
+    # feed page per minute keeps the mirror current (a 5-minute gap
+    # needed 3); the dashboard cache is never more than ~1 tick old.
+    try:
+        acts_sync = _acts_sync(sb, get_client(), pages=2)
+    except Exception as e:
+        acts_sync = {"err": str(e)[:80]}
+    # …and precompute the dashboard summary while the feed is hot, so
+    # the page never pays for the walk itself.
+    try:
+        acts_sync["dash"] = _dash_cache_refresh(sb, get_client())
+    except Exception as e:
+        acts_sync["dash"] = {"err": str(e)[:80]}
     # OUTBID push (every 2nd minute) — the red chip's Telegram twin: a
     # resting maker order lost the touch, re-bid or take.
     outbid_warned = _outbid_alerts(sb, now) if run_engines else 0
