@@ -115,6 +115,11 @@ JOBS: tuple[Job, ...] = (
     # -- daily model computes (order matters: after their spines) ----------
     Job("diamond_iq", ["scripts.compute_diamond_iq"],
         hour=3, minute=50, note="MLB ML model snapshot"),
+    # After the football_players delta (3:48) — the NFL props model state
+    # (per-player decayed mean/SD + league priors, the gate-1 mirror).
+    # The betting wire lands separately, from real captured prop shapes.
+    Job("football_props", ["scripts.compute_football_props", "--commit"],
+        hour=3, minute=52, note="NFL props model snapshot"),
     Job("whiff_iq", ["scripts.compute_whiff_iq"],
         hour=3, minute=55, timeout_s=2700,
         note="pitcher-prop model snapshot",
