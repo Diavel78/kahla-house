@@ -2239,21 +2239,40 @@ def _dash_cache_refresh(sb, client) -> dict:
         # is honest, a zero from a failed read is not.
         order_count = None
         order_err = None
+        # ⚠ RATE-LIMIT DISCIPLINE (Aug 22 2026, caught within the hour of
+        # the every-tick refresh): stacking the orders read onto every
+        # minute's refresh drew a Cloudflare RateLimitError and the strip
+        # dashed. Read orders every 3rd minute only, and CARRY FORWARD the
+        # last good count between reads and across failures — a count a
+        # couple minutes old is truth; a dash for a rate limit is noise.
+        # (The dedup-orders lesson: never let call volume creep up on the
+        # venue.)
+        _prev_oc = None
         try:
-            _resp = client.orders.list()
-            _raw = (_resp.get("orders") if isinstance(_resp, dict)
-                    else getattr(_resp, "orders", None)) or []
+            _pr = (sb.table("poly_dash_cache").select("order_count")
+                   .eq("id", 1).limit(1).execute().data) or []
+            _prev_oc = _pr[0].get("order_count") if _pr else None
+        except Exception:
+            pass
+        if datetime.now(timezone.utc).minute % 3:
+            order_count = _prev_oc            # off-minute: carry forward
+        else:
+            try:
+                _resp = client.orders.list()
+                _raw = (_resp.get("orders") if isinstance(_resp, dict)
+                        else getattr(_resp, "orders", None)) or []
 
-            def _ostate(o):
-                return ((o.get("state") if isinstance(o, dict)
-                         else getattr(o, "state", "")) or "")
+                def _ostate(o):
+                    return ((o.get("state") if isinstance(o, dict)
+                             else getattr(o, "state", "")) or "")
 
-            order_count = sum(1 for o in _raw
-                              if _ostate(o) in _OPEN_ORDER_STATES)
-        except Exception as e:
-            # The dash renders order_count=null as a red dot — record WHY
-            # so a persistent dash is diagnosable from the row itself.
-            order_err = f"{type(e).__name__}: {e}"[:140]
+                order_count = sum(1 for o in _raw
+                                  if _ostate(o) in _OPEN_ORDER_STATES)
+            except Exception as e:
+                # Carry the last good count; record WHY the fresh read
+                # failed so a persistent problem is diagnosable.
+                order_count = _prev_oc
+                order_err = f"{type(e).__name__}: {e}"[:140]
         (sb.table("poly_dash_cache").upsert({
             "id": 1, "summary": summary,
             "derived": _dash_derived(sb),
@@ -8959,6 +8978,99 @@ def api_poly_cancel_gridiron():
     return jsonify(out)
 
 
+@app.route("/api/polymarket/cancel-fam")
+def api_poly_cancel_fam():
+    """Cancel every RESTING, UNFILLED prop buy of ONE whiff family and
+    remove its book row once the venue confirms nothing filled.
+
+    Built for the K kill (user, Aug 22 2026: "Kill K's immediately,
+    cancel any K open bets" — weekend review: 48-60, −$27.05 bets,
+    $0.32 rent). ?fam= one of k/outs/ha/wa (the slug family token).
+    Same gates as cancel-gridiron: BUY intent, AUTOMATIC flag, slug
+    belongs to one of OUR pending whiff_autobet picks, and the slug
+    carries this family's token. Pick rows are deleted only after a
+    live cancel AND a venue positions read showing zero holding — a
+    filled position is a position; it stays and grades out.
+    Shared-secret + `&dry=1`."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    fam = (request.args.get("fam") or "").strip().lower()
+    if fam not in ("k", "outs", "ha", "wa"):
+        return jsonify({"ok": False, "error": "fam must be k/outs/ha/wa"}), 400
+    tok = f"-{fam}-"
+    dry = request.args.get("dry") == "1"
+    try:
+        sb, client = get_supabase(), get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    owner = _kalshi_owner_uid()
+    if not owner:
+        return jsonify({"ok": False, "error": "no owner uid"}), 500
+    mine: dict = {}
+    try:
+        rows = (sb.table("bot_picks").select("id,event_name,signal_blob")
+                .eq("asked_by", owner).eq("status", "pending")
+                .eq("market_type", "prop").limit(500).execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"picks: {e}"}), 500
+    for r in rows:
+        b = r.get("signal_blob") or {}
+        if b.get("source") != "whiff_autobet":
+            continue
+        slug = b.get("pmm_slug") or ""
+        if slug and tok in slug:
+            mine[slug] = {"pick_id": r["id"], "game": r.get("event_name")}
+    out = {"ok": True, "dry": dry, "fam": fam, "fam_pending": len(mine),
+           "canceled": 0, "picks_removed": 0, "orders": []}
+    if not mine:
+        return jsonify(out)
+    orders = _pmm_open_orders_raw(client)
+    if orders is None:
+        return jsonify({"ok": False, "error": "venue read failed"}), 503
+    for o in orders:
+        if "BUY" not in (o.get("intent") or ""):
+            continue
+        if not o.get("auto") or o.get("slug") not in mine:
+            continue
+        m = mine[o["slug"]]
+        rec = {"slug": o.get("slug"), "game": m["game"],
+               "price_yes_c": (round(o["price_yes"] * 100, 1)
+                               if o.get("price_yes") is not None else None),
+               "qty": o.get("qty"), "filled": o.get("cum"),
+               "state": o.get("state")}
+        if dry:
+            out["orders"].append(rec)
+            continue
+        try:
+            client.orders.cancel(o["id"], {"marketSlug": o["slug"]})
+            rec["canceled"] = True
+            out["canceled"] += 1
+        except Exception as e:
+            rec["error"] = f"{type(e).__name__}: {e}"[:120]
+            out["orders"].append(rec)
+            continue
+        pos = _pmm_positions_raw(client)
+        held = True if pos is None else (o["slug"] in pos)
+        if not held:
+            try:
+                sb.table("bot_picks").delete().eq(
+                    "id", m["pick_id"]).execute()
+                rec["pick_removed"] = True
+                out["picks_removed"] += 1
+            except Exception as e:
+                rec["pick_error"] = f"{type(e).__name__}: {e}"[:120]
+        out["orders"].append(rec)
+    if out["canceled"]:
+        _send_fill_telegram(
+            f"🛑 {fam.upper()} LANE KILLED — canceled {out['canceled']} "
+            f"resting order(s), {out['picks_removed']} unfilled book "
+            f"row(s) removed. Filled positions ride to resolution.")
+    _probe_log(out)
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/cancel-live-buys")
 def api_poly_cancel_live_buys():
     """Kill any model BUY order still resting on a game that has already
@@ -11200,6 +11312,15 @@ WHIFF_AUTOBET_MAX_BETS = 10000    # CAP KILLED Aug 5 ~11pm AZ (user: "kill
                                   # cliff, one bet per pitcher across the
                                   # K+outs ladders. Counter machinery
                                   # survives for a future re-cap.
+# K LANE KILLED (user, Aug 22 2026: "Kill K's immediately"). The weekend
+# review's verdict on the full current regime (Aug 13-22): 122 bets,
+# 48-60, −$27.05 — and joining the touch means it never rests, so it
+# earned $0.32 of rent on the whole run: the lane's Rule-1 reason to
+# exist was gone by construction. Both live K configs lost (peg-behind
+# 29.3%, join-touch 44%) while the backtest edge is real at every rung —
+# an execution puzzle to solve on paper. SHADOWS KEEP LOGGING (the
+# forward dataset); only bet candidates are filtered.
+_WHIFF_FAM_KILLED = {"k"}
 _WHIFF_BET_MIN_PP = 4.0
 _WHIFF_BET_MAX_PP = 10.0          # the claimed-edge cliff (3rd-time rule:
                                   # NRFI clamp / Fight IQ 0-3 past 15pp /
@@ -11502,7 +11623,8 @@ def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
             if (_WHIFF_BET_MIN_PP <= edge <= _WHIFF_BET_MAX_PP
                     and _WHIFF_MIN_ENTRY_C <= side_c <= _WHIFF_MAX_ENTRY_C
                     and _WHIFF_TRUST_LO <= model_p <= _WHIFF_TRUST_HI
-                    and n_starts >= _WHIFF_MIN_STARTS):
+                    and n_starts >= _WHIFF_MIN_STARTS
+                    and "k" not in _WHIFF_FAM_KILLED):
                 bet_cands.append((edge, mid, key, q, name, float(line),
                                   side, side_c,
                                   model_p if side == "yes" else 1 - model_p,
@@ -11564,7 +11686,8 @@ def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
                 if (_WHIFF_BET_MIN_PP <= edge <= _WHIFF_BET_MAX_PP
                         and _WHIFF_MIN_ENTRY_C <= side_c
                         <= _WHIFF_MAX_ENTRY_C
-                        and _WHIFF_TRUST_LO <= model_p <= _WHIFF_TRUST_HI):
+                        and _WHIFF_TRUST_LO <= model_p <= _WHIFF_TRUST_HI
+                        and fcode not in _WHIFF_FAM_KILLED):
                     bet_cands.append((edge, mid, key, q, name, float(line),
                                       side, side_c,
                                       model_p if side == "yes"
