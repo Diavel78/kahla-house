@@ -2075,10 +2075,17 @@ def _espn_team_stats(sport: str, team_id: str | None) -> dict[str, float]:
     (offseason / endpoint change / etc.)."""
     if not team_id:
         return {}
-    path = _ESPN_PATH.get(sport)
-    if not path:
+    pair = _ESPN_PATH.get(sport)
+    if not pair:
         return {}
-    url = f"https://site.web.api.espn.com/apis/site/v2/sports/{path}/teams/{team_id}/statistics"
+    # _ESPN_PATH values are (group, league) TUPLES — formatting the pair
+    # raw produced .../sports/('football', 'college-football')/teams/...
+    # and every team-statistics fetch 404'd into a JSON-parse warning
+    # (caught in the cellar log, Aug 22 2026 — silent for who knows how
+    # long because the block degrades to "no stats" without erroring).
+    grp, lg = pair
+    url = (f"https://site.web.api.espn.com/apis/site/v2/sports/"
+           f"{grp}/{lg}/teams/{team_id}/statistics")
     data = _http_get(url)
     if not data:
         return {}
