@@ -218,7 +218,13 @@ def lane_repeg(ctx: Ctx) -> int:
         return 0
     stats = _app._repeg_tick(ctx.sb, ctx.now, force=True) or {}
     log.info("repeg: %s", stats)
-    return int(stats.get("moved") or stats.get("placed") or 0)
+    # _repeg_tick reports {"acted", "shadow", "stopped"} — "moved"/"placed"
+    # never existed on it, so this lane stamped work=0 forever while moving
+    # real orders (14 in the 6h before this was caught; signal_blob.repeg is
+    # the ground truth) and the dashboard showed a permanent `work never`.
+    # A standing yellow on a healthy lane is the "off is not broken" failure:
+    # it trains you to skip the panel.
+    return int(stats.get("acted") or 0)
 
 
 def lane_harvest(ctx: Ctx) -> int:
