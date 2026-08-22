@@ -539,7 +539,9 @@ def _latest_snapshots(sb, market_id: str) -> dict:
 _PIN_HISTORY_HOURS = 18
 
 
-def _attach_pmm_to_odds(odds: dict, pmm: dict, sport: str) -> None:
+def _attach_pmm_to_odds(odds: dict, pmm: dict, sport: str,
+                        away: str | None = None, home: str | None = None,
+                        event_start=None) -> None:
     """For each market_type block in `odds`, attach a `polymarket` field
     carrying:
         {
@@ -588,6 +590,21 @@ def _attach_pmm_to_odds(odds: dict, pmm: dict, sport: str) -> None:
             anchor_line = exch_side.get("line")
             if anchor_line is None:
                 anchor_line = pin_side.get("line")
+            # Football has NO exchange/PIN anchor (pm_snapshots only watch
+            # near games; PIN froze at the cutover) — anchor on ESPN's own
+            # consensus book line, the same industry number the weekly
+            # sheets price against. Anchorless selection is what bet
+            # under-25.5 on a 44.5-total game (Aug 22 2026).
+            if (anchor_line is None and market_type in ("spread", "total")
+                    and away and home):
+                _bl = _espn_book_lines(sport, away, home, event_start)
+                if _bl:
+                    if market_type == "total":
+                        anchor_line = _bl.get("total")
+                    else:
+                        _sh = _bl.get("spread_home")
+                        if _sh is not None:
+                            anchor_line = _sh if side == "home" else -_sh
             pin_line = anchor_line   # name kept for the projection call below
             entry = pmm_markets.best_line_for(pmm, pmm_key, side, anchor_line)
             if not entry:
@@ -1463,6 +1480,84 @@ def _fetch_splits(sport: str, away: str, home: str) -> dict:
     out["per_source"]    = diagnostics
     return out
 
+
+
+_ESPN_BOOK_CACHE: dict = {}   # (sport, ET date) -> {"at": ts, "events": []}
+_ESPN_BOOK_TTL_S = 600.0
+
+
+def _espn_book_lines(sport, away, home, event_start):
+    """ESPN's own consensus book line {spread_home, total} for one game —
+    the industry anchor the football sheets already price against (user,
+    Aug 22 2026: "the sheet pulled standard odds... can't you just use
+    that as the starting odds?"). Football-only; None on any miss —
+    best_line_for then falls back to the nearest-50¢ rung. Orientation
+    logic MIRRORS football_sheet_data._parse_espn_odds (details names the
+    favorite by abbreviation; homeTeamOdds.favorite as backup)."""
+    if sport not in ("NFL", "NCAAF"):
+        return None
+    try:
+        dt = (event_start if isinstance(event_start, datetime)
+              else datetime.fromisoformat(
+                  str(event_start).replace("Z", "+00:00")))
+        dkey = dt.astimezone(ZoneInfo("America/New_York")).strftime("%Y%m%d")
+    except (TypeError, ValueError):
+        return None
+    ck = (sport, dkey)
+    c = _ESPN_BOOK_CACHE.get(ck)
+    if c and time.time() - c["at"] < _ESPN_BOOK_TTL_S:
+        events = c["events"]
+    else:
+        pair = _ESPN_PATH.get(sport)
+        if not pair:
+            return None
+        grp, lg = pair
+        params = {"dates": dkey}
+        if sport == "NCAAF":
+            # the runbook landmine: without groups=80&limit=400 ESPN's CFB
+            # scoreboard returns only the featured slate
+            params.update({"groups": "80", "limit": "400"})
+        data = _http_get(
+            f"https://site.api.espn.com/apis/site/v2/sports/{grp}/{lg}"
+            f"/scoreboard", params=params) or {}
+        events = data.get("events", []) or []
+        _ESPN_BOOK_CACHE[ck] = {"at": time.time(), "events": events}
+    ev = _espn_match_event(events, away, home, dt)
+    if not ev:
+        return None
+    comp = ((ev.get("competitions") or [{}])[0]) or {}
+    try:
+        odds = comp.get("odds") or []
+        if not odds:
+            return None
+        o = odds[0]
+        out: dict = {}
+        ou = o.get("overUnder")
+        if ou is not None:
+            out["total"] = float(ou)
+        spread = o.get("spread")
+        details = o.get("details") or ""
+        ab: dict = {}
+        for c2 in comp.get("competitors") or []:
+            sd = "home" if c2.get("homeAway") == "home" else "away"
+            ab[sd] = ((c2.get("team") or {}).get("abbreviation") or "")
+        if spread is not None:
+            mag = abs(float(spread))
+            fav = details.split()[0] if details else ""
+            hl = None
+            if fav and fav == ab.get("away"):
+                hl = +mag
+            elif fav and fav == ab.get("home"):
+                hl = -mag
+            elif (o.get("homeTeamOdds") or {}).get("favorite") is True:
+                hl = -mag
+            elif (o.get("awayTeamOdds") or {}).get("favorite") is True:
+                hl = +mag
+            if hl is not None:
+                out["spread_home"] = hl
+        return out or None
+    except (TypeError, ValueError, IndexError, AttributeError):
+        return None
 
 
 def _espn_scoreboard(sport: str, date_yyyymmdd: str) -> list:
@@ -5249,7 +5344,8 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     # the maker bid (entry price) at the at-the-money line. Skipped silently
     # when no PMM data.
     if pmm_data:
-        _attach_pmm_to_odds(odds, pmm_data, sport)
+        _attach_pmm_to_odds(odds, pmm_data, sport,
+                            away=away, home=home, event_start=bet_dt)
 
     espn_block: dict = {}
     if sport in _ESPN_PATH and bet_dt and away and home:
