@@ -8513,8 +8513,15 @@ def api_poly_acts_backfill():
     except Exception:
         pass
     full = request.args.get("full") == "1"
-    if (st.get("backfill_done") and request.args.get("restart") != "1"
-            and not full):
+    # ⚠ full=1 must RESPECT a stamped done. The first version let full
+    # bypass it so the one-time genesis walk could get past the old
+    # cutoff-era stamp — and the very next queued pass then restarted
+    # from the TOP of the feed (done cleared the cursor), re-walked
+    # already-stored recent pages, and re-stamped done=false: an
+    # un-completion loop where every extra pass undid the finish
+    # (caught live Aug 22 2026, pages 150→182 storing 1 new row).
+    # Genesis is reached; any deliberate re-walk goes through restart=1.
+    if st.get("backfill_done") and request.args.get("restart") != "1":
         return jsonify({"ok": True, "done": True, "note": "already complete"})
     cursor = None if request.args.get("restart") == "1" else st.get("backfill_cursor")
     walked = int(st.get("pages_walked") or 0)
