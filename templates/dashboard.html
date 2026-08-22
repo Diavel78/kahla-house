@@ -232,6 +232,10 @@
             // A lane switched off at the source reports that instead of a
             // heartbeat age -- it is never coming back on its own, so
             // counting the silence is noise, not news.
+            // A healthy lane with a stray transient failure shows a muted
+            // retry count on its green row — red is reserved for a lane
+            // whose latest tick failed or that is failing a heavy fraction
+            // of the hour (the server decides; see _cellar_health).
             const right = l.state === 'off'
                 ? 'off'
                 : l.owner !== 'cellar'
@@ -239,7 +243,8 @@
                 : (l.state === 'stale' ? 'no beat ' + ago(l.hb_age_s)
                    : l.state === 'error' ? l.fails_1h + ' fails/1h'
                    : 'work ' + ago(l.last_work_s)
-                     + (l.work_1h ? ' · ' + l.work_1h + '/1h' : ''));
+                     + (l.work_1h ? ' · ' + l.work_1h + '/1h' : '')
+                     + (l.fails_1h ? ' · ' + l.fails_1h + ' retr' : ''));
             return '<div class="' + cls + '">'
                  + '<span class="dot ' + l.state + '"></span>'
                  + '<span class="nm">' + l.lane + '<span>' + l.owner + '</span></span>'

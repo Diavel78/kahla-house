@@ -19,12 +19,25 @@
 --
 -- Cheap by construction: one seq scan of cellar_lease (ten rows) and
 -- index-only lookups on cellar_ticks_lane_time per lane.
-create or replace function cellar_health()
+--
+-- last_fail_s / last_ok_s (Aug 21 2026): red must mean "failing NOW",
+-- not "hiccuped once in the trailing hour". A lane ticking 60x/hour over
+-- a network takes the occasional dropped connection; its work is
+-- idempotent and the next tick catches up. Painting that identical to a
+-- lane that is down is the false-alarm disease (repeg `work never`, the
+-- opener stuck-line — third sighting in one night). These two columns
+-- let Flask ask the only question that matters: did the MOST RECENT
+-- completed tick fail?
+--
+-- Return type changed => drop first (create or replace cannot).
+drop function if exists cellar_health();
+create function cellar_health()
 returns table (
   lane text, owner text, note text,
   hb_age_s integer, ttl_seconds integer,
   last_tick_s integer, last_work_s integer,
-  ticks_1h integer, work_1h bigint, fails_1h integer, last_error text
+  ticks_1h integer, work_1h bigint, fails_1h integer, last_error text,
+  last_fail_s integer, last_ok_s integer
 ) language sql stable as $$
   select
     l.lane, l.owner, l.note,
@@ -48,6 +61,12 @@ returns table (
         and not t.ok),
     (select left(t.error, 140) from cellar_ticks t
       where t.lane = l.lane and t.error is not null
+      order by t.started_at desc limit 1),
+    (select extract(epoch from (now() - t.started_at))::integer
+       from cellar_ticks t where t.lane = l.lane and not t.ok
+      order by t.started_at desc limit 1),
+    (select extract(epoch from (now() - t.started_at))::integer
+       from cellar_ticks t where t.lane = l.lane and t.ok
       order by t.started_at desc limit 1)
   from cellar_lease l
   order by l.lane;

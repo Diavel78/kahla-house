@@ -1951,6 +1951,19 @@ def _cellar_health(sb) -> dict:
         fails = int(r.get("fails_1h") or 0)
         stale = hb is not None and hb > ttl
         warn_s = _LANE_WORK_WARN_S.get(lane, 21_600)
+        # RED MEANS FAILING NOW, not "hiccuped once since an hour ago". A
+        # lane ticking 60×/h over a network takes the occasional dropped
+        # connection; its work is idempotent and the next tick catches up.
+        # So error = the MOST RECENT completed tick failed (nothing has
+        # succeeded since), or failures are a heavy fraction of the hour
+        # (≥⅓, min 3). A stray transient stays a green row with a muted
+        # retry count — the third false-alarm class fixed the night the
+        # user sent two screenshots of red rows on a working machine.
+        # Old RPC without last_fail_s/last_ok_s degrades to the old
+        # any-fail-is-red behavior rather than hiding failures.
+        lf, lo = r.get("last_fail_s"), r.get("last_ok_s")
+        failing_now = fails > 0 and (lf is None or lo is None or lf <= lo)
+        heavy = fails >= max(3, int(r.get("ticks_1h") or 0) // 3)
         if _lane_disabled(lane):
             state = "off"                  # killed on purpose — not a fault
         elif owner != "cellar":
@@ -1959,7 +1972,7 @@ def _cellar_health(sb) -> dict:
             state = "stale" if stale else "vercel"
         elif stale:
             state = "stale"
-        elif fails:
+        elif fails and (failing_now or heavy):
             state = "error"
         elif warn_s is not None and (work_s is None or work_s > warn_s):
             state = "idle"
