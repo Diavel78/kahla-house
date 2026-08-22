@@ -12860,8 +12860,7 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
             "book_bid_c": bid_c, "book_ask_c": ask_c}
     if extra_blob:
         blob.update(extra_blob)
-    try:
-        sb.table("bot_picks").insert({
+    _pick_row = {
             "asked_by": owner, "query_text": query_text or "auto-bet: opener",
             "market_id": g["id"], "sport": "MLB",
             "event_name": g.get("event_name"), "event_start": es,
@@ -12878,9 +12877,31 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
                 f"fair {round(float(fair_pb) * 100)}¢ → "
                 f"{round(entry_edge, 1)}pp edge at entry")],
             "signal_blob": blob,
-        }).execute()
-    except Exception:
-        pass
+        }
+    try:
+        sb.table("bot_picks").insert(_pick_row).execute()
+    except Exception as e1:
+        # THE ORDER IS ALREADY LIVE AT THE VENUE. Swallowing this made the
+        # wa-gercol-gte2 orphan (Aug 20 14:01): a dropped connection here
+        # left a filled, resolved, PAID position with no book entry — and
+        # props sit outside the autolog's adoption net, so nothing ever
+        # healed it. Retry once (safe: bot_picks_machine_slug_uniq makes a
+        # double-commit impossible — a duplicate-key error means the first
+        # insert landed and IS success), and if the book write still can't
+        # land, page the human with the exact slug and order id. A bet the
+        # book doesn't know about is never allowed to be silent again.
+        try:
+            _time.sleep(0.5)
+            sb.table("bot_picks").insert(_pick_row).execute()
+        except Exception as e2:
+            if "duplicate key" in str(e2) or "23505" in str(e2):
+                pass                       # first insert committed — booked
+            else:
+                _send_fill_telegram(
+                    f"🚨 BOOK WRITE FAILED — order {new_oid} is LIVE on "
+                    f"{slug} ({side_lbl} {n_contracts} @ {round(side_c)}¢) "
+                    f"with NO pick row. Log it by hand. "
+                    f"({e1} / {e2})"[:280], urgent=True)
     _time.sleep(1.2)
     state = _repeg_verify_or_recreate(pclient, slug, intent, canon,
                                       0, None, None)
