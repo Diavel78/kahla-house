@@ -2238,6 +2238,7 @@ def _dash_cache_refresh(sb, client) -> dict:
         # working-state filter as /api/my-orders. None on failure — a dash
         # is honest, a zero from a failed read is not.
         order_count = None
+        order_err = None
         try:
             _resp = client.orders.list()
             _raw = (_resp.get("orders") if isinstance(_resp, dict)
@@ -2249,8 +2250,10 @@ def _dash_cache_refresh(sb, client) -> dict:
 
             order_count = sum(1 for o in _raw
                               if _ostate(o) in _OPEN_ORDER_STATES)
-        except Exception:
-            pass
+        except Exception as e:
+            # The dash renders order_count=null as a red dot — record WHY
+            # so a persistent dash is diagnosable from the row itself.
+            order_err = f"{type(e).__name__}: {e}"[:140]
         (sb.table("poly_dash_cache").upsert({
             "id": 1, "summary": summary,
             "derived": _dash_derived(sb),
@@ -2258,7 +2261,8 @@ def _dash_cache_refresh(sb, client) -> dict:
             "open_count": len([p for p in rows if not p.get("expired")]),
             "order_count": order_count,
             "computed_at": datetime.now(timezone.utc).isoformat(),
-            "note": "ok"}).execute())
+            "note": "ok" if order_err is None
+                    else f"ok; orders_err: {order_err}"}).execute())
         res = {"ok": True, "acts": len(parsed)}
     except Exception as e:
         res["err"] = f"{type(e).__name__}: {e}"[:160]
