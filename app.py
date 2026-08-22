@@ -14268,6 +14268,9 @@ _GRIDIRON_MIN_START = {"NFL": "2026-09-08", "NCAAF": "2026-08-29"}
 # per-bet fences as MLB (rent gate, $6 Master Rule, entry cap,
 # junk-edge cliff).
 _GRIDIRON_CONTRACTS = 5           # user cap; 5 × ≤60¢ = ≤$3, under the $6 rule
+_GRIDIRON_TOTAL_CONTRACTS = 2     # totals stake (user, Aug 22 2026: "Turn on
+                                  # totals, 2 contracts... spread for both 5
+                                  # contracts max, totals 2 max for now")
 _GRIDIRON_MAX_ENTRY_C = 60.0      # the standing machine-wide entry cap
 _GRIDIRON_MIN_EDGE_PP = 2.5       # same floor as the MLB opener
 # Seconds guaranteed to the football pass after the MLB opener has had its
@@ -14295,13 +14298,15 @@ def _power_snapshot(sb, sport):
     return snap
 
 
-def _gridiron_margin(sb, sport, event_name):
-    """Projected home MARGIN from the power_ratings snapshot, plus the
-    snapshot's params. Returns (margin, params) or None.
+def _gridiron_proj(sb, sport, event_name):
+    """Projected home MARGIN and game TOTAL from the power_ratings
+    snapshot, plus the snapshot's params. Returns (margin, total, params)
+    or None.
 
     The margin is the model's NATIVE output; P(home) is that number
     squeezed through a logistic. Factored out because football is a spread
-    business and the spread path needs the margin, not the squeeze.
+    business and the spread path needs the margin, not the squeeze. The
+    total is the same solve's other reading (exp_home + exp_away).
     """
     snap = _power_snapshot(sb, sport)
     if not snap or " @ " not in (event_name or ""):
@@ -14330,7 +14335,38 @@ def _gridiron_margin(sb, sport, event_name):
         return None
     exp_home = h_off + (a_def - lg) + hfa / 2.0
     exp_away = a_off + (h_def - lg) - hfa / 2.0
-    return exp_home - exp_away, params
+    return exp_home - exp_away, exp_home + exp_away, params
+
+
+def _gridiron_margin(sb, sport, event_name):
+    """Back-compat 2-tuple (margin, params) over _gridiron_proj."""
+    got = _gridiron_proj(sb, sport, event_name)
+    return (got[0], got[2]) if got else None
+
+
+def _gridiron_over_p(params, proj_total, line):
+    """P(the game total goes OVER `line`) — the model's totals number.
+
+    The total twin of _gridiron_cover_p, priced off `total_fit` (shipped
+    in the snapshot since Aug 21, unconsumed until the user turned totals
+    on Aug 22: "Turn on totals, 2 contracts... run the damn model gate
+    check"). Same discipline: shrink first (beta ≈ 0.36 — a football
+    total projection is two-thirds league-mean), normal tail, refuse
+    whole-number lines rather than misprice the push."""
+    fit = (params or {}).get("total_fit") or {}
+    try:
+        sd = float(fit["sd"])
+        alpha, beta = float(fit["alpha"]), float(fit["beta"])
+        mean = float(fit.get("mean") or 0.0)
+        thr = float(line)
+        proj = alpha + beta * float(proj_total)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if sd <= 0 or abs(thr - round(thr)) < 0.01:
+        return None                     # no fit, or a pushable whole number
+    z = (thr - (proj + mean)) / sd
+    p = 1.0 - 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+    return max(0.005, min(0.995, p))
 
 
 def _gridiron_cover_p(params, margin, line):
@@ -14598,7 +14634,9 @@ def _gridiron_opener_pass(sb, now, deadline):
         try:
             done_rows = (sb.table("pickbot_paperlog")
                          .select("market_id,market_type,"
-                                 "cover_p:signal_blob->>cover_p")
+                                 "cover_p:signal_blob->>cover_p,"
+                                 "total_p:signal_blob->>total_p,"
+                                 "bet_gate:signal_blob->>bet_gate")
                          .in_("market_id", mids)
                          .filter("signal_blob->>opener_shadow", "eq", "true")
                          .limit(3000).execute().data) or []
@@ -14611,12 +14649,17 @@ def _gridiron_opener_pass(sb, now, deadline):
         # NFL week 1 games were already in exactly that state. Same shape as
         # the harvest ladder bug: WHEN A DEDUP KEYS ON WORK ALREADY WRITTEN,
         # A PARTIAL WRITE IS A PERMANENT WRITE. So a spread row only counts
-        # as done once it has `cover_p`. Re-tapes each stale game once and
-        # then settles; moneyline and total are unaffected (neither carries
-        # a model number — a total would need a projected TOTAL, which is
-        # its own earn-in).
+        # as done once it has `cover_p`.
+        # …and the same rule now holds for every market (Aug 22 2026, the
+        # turn-it-all-on order): a row taped before its market could BET is
+        # not done — spread needs cover_p, total needs total_p, moneyline
+        # needs a bet_gate verdict. Each pre-bet-era row re-tapes exactly
+        # once (its rewrite carries the model number and the bet attempt),
+        # then settles.
         done = {(r["market_id"], r["market_type"]) for r in done_rows
-                if r["market_type"] != "spread" or r.get("cover_p")}
+                if (r["market_type"] == "spread" and r.get("cover_p"))
+                or (r["market_type"] == "total" and r.get("total_p"))
+                or (r["market_type"] == "moneyline" and r.get("bet_gate"))}
         _WANT = ("moneyline", "spread", "total")
         cands = [g for g in cands
                  if any((g["id"], mt) not in done for mt in _WANT)]
@@ -14802,7 +14845,10 @@ def _gridiron_opener_pass(sb, now, deadline):
                                        if q0.get("ask") is not None else None),
                         "book_mid_c": (round(float(q0["mid"]) * 100.0, 1)
                                        if q0.get("mid") is not None else None),
-                        "bet_gate": _mlgate,
+                        # never null: "model" = the model didn't clear the
+                        # bet gates — a non-null gate is what marks an ML
+                        # row DONE in the dedup above.
+                        "bet_gate": _mlgate or "model",
                         "shadow_only": _mlgate != "placed"},
                     "logged_at": now.isoformat(),
                 })
@@ -14852,27 +14898,40 @@ def _gridiron_opener_pass(sb, now, deadline):
                 # There is now, so stamp it: the gate-2 dataset — model fair
                 # vs the price we would actually have paid — cannot be
                 # reconstructed later from prices alone, and football starts
-                # listing in days. Spread only; a total needs a projected
-                # TOTAL, which is its own earn-in and its own backtest.
+                # listing in days. Totals joined Aug 22 (user: "Turn on
+                # totals... run the damn model gate check") — priced off
+                # total_fit via _gridiron_over_p, same walk, same shrink.
                 _mdl = {}
-                _got = (_gridiron_margin(sb, g["sport"], g.get("event_name"))
-                        if _mt == "spread" else None)
-                if _mt == "spread" and _cheap[3] is not None and _got:
-                    _mg, _pm = _got
-                    # cover_prob is home-perspective; the away line is
-                    # the mirror, and half-points cannot tie, so the
-                    # away side is exactly the complement.
-                    _lh = (float(_cheap[3]) if _cheap[0] == "home"
-                           else -float(_cheap[3]))
-                    _ph = _gridiron_cover_p(_pm, _mg, _lh)
-                    if _ph is not None:
-                        _ps = _ph if _cheap[0] == "home" else 1.0 - _ph
-                        _mdl = {"gridiron_margin": round(_mg, 2),
-                                "cover_p": round(_ps, 4),
-                                "model_edge_pp": round(
-                                    _ps * 100.0 - _cheap[2], 1),
-                                "peg_c": _cheap[2],
-                                "line_home": _lh}
+                _gp = _gridiron_proj(sb, g["sport"], g.get("event_name"))
+                if _cheap[3] is not None and _gp:
+                    _mg, _tt, _pm = _gp
+                    if _mt == "spread":
+                        # cover_prob is home-perspective; the away line is
+                        # the mirror, and half-points cannot tie, so the
+                        # away side is exactly the complement.
+                        _lh = (float(_cheap[3]) if _cheap[0] == "home"
+                               else -float(_cheap[3]))
+                        _ph = _gridiron_cover_p(_pm, _mg, _lh)
+                        if _ph is not None:
+                            _ps = _ph if _cheap[0] == "home" else 1.0 - _ph
+                            _mdl = {"gridiron_margin": round(_mg, 2),
+                                    "cover_p": round(_ps, 4),
+                                    "model_edge_pp": round(
+                                        _ps * 100.0 - _cheap[2], 1),
+                                    "peg_c": _cheap[2],
+                                    "line_home": _lh}
+                    else:
+                        # totals share one line; the under side is the
+                        # complement of over at the same half-point.
+                        _po = _gridiron_over_p(_pm, _tt, float(_cheap[3]))
+                        if _po is not None:
+                            _ps = (_po if _cheap[0] == "over"
+                                   else 1.0 - _po)
+                            _mdl = {"gridiron_total": round(_tt, 2),
+                                    "total_p": round(_ps, 4),
+                                    "model_edge_pp": round(
+                                        _ps * 100.0 - _cheap[2], 1),
+                                    "peg_c": _cheap[2]}
                 # ══ THE FIRST FOOTBALL MONEY — SPREADS (Aug 22 2026,
                 # explicit user go-order, 5 contracts). The bet side is the
                 # MODEL's best side at its own peg — not the book-geometry
@@ -14887,10 +14946,10 @@ def _gridiron_opener_pass(sb, now, deadline):
                 # cap-refused game must not latch as taped; a rent refusal
                 # persists with bet_gate="rent" so the tape accrues.
                 _bet_gate = None
-                if _mt == "spread" and _got:
-                    _mg, _pm = _got
+                if _gp:
+                    _mg, _tt, _pm = _gp
                     _bc = None
-                    for _sn2, _pblk2 in (("away", _pa), ("home", _pb)):
+                    for _sn2, _pblk2 in ((_ka, _pa), (_kb, _pb)):
                         _q2 = _pblk2.get("quote") or {}
                         _ln2 = _pblk2.get("line")
                         if (_q2.get("bid") is None or _ln2 is None
@@ -14898,12 +14957,20 @@ def _gridiron_opener_pass(sb, now, deadline):
                                 or float(_q2["bid"]) <= 0):
                             continue
                         _peg2 = float(int(float(_q2["bid"]) * 100.0)) + 1.0
-                        _lh2 = (float(_ln2) if _sn2 == "home"
-                                else -float(_ln2))
-                        _ph2 = _gridiron_cover_p(_pm, _mg, _lh2)
-                        if _ph2 is None:
+                        if _mt == "spread":
+                            _lh2 = (float(_ln2) if _sn2 == "home"
+                                    else -float(_ln2))
+                            _ph2 = _gridiron_cover_p(_pm, _mg, _lh2)
+                            _ps2 = (None if _ph2 is None else
+                                    (_ph2 if _sn2 == "home"
+                                     else 1.0 - _ph2))
+                        else:
+                            _po2 = _gridiron_over_p(_pm, _tt, float(_ln2))
+                            _ps2 = (None if _po2 is None else
+                                    (_po2 if _sn2 == "over"
+                                     else 1.0 - _po2))
+                        if _ps2 is None:
                             continue
-                        _ps2 = _ph2 if _sn2 == "home" else 1.0 - _ph2
                         _e2 = _ps2 * 100.0 - _peg2
                         if _bc is None or _e2 > _bc[1]:
                             _bc = (_sn2, _e2, _peg2, _pblk2, _ps2, _q2)
@@ -14918,8 +14985,19 @@ def _gridiron_opener_pass(sb, now, deadline):
                         elif _peg2 > _GRIDIRON_MAX_ENTRY_C:
                             _bet_gate = "entry_cap"
                         else:
+                            _xb = {"gridiron_autobet": True,
+                                   "gridiron_margin": round(_mg, 2),
+                                   "gridiron_total": round(_tt, 2)}
+                            if _mt == "spread":
+                                _xb["cover_p"] = round(_ps2, 4)
+                                _xb["line_home"] = (
+                                    float(_pblk2["line"])
+                                    if _sn2 == "home"
+                                    else -float(_pblk2["line"]))
+                            else:
+                                _xb["total_p"] = round(_ps2, 4)
                             _r = _autobet_execute(
-                                sb, g, es0, "spread", _sn2,
+                                sb, g, es0, _mt, _sn2,
                                 f"{_sn2} {_pblk2.get('line')}",
                                 _pblk2["slug"],
                                 bool(_pblk2.get("synthetic")),
@@ -14927,23 +15005,20 @@ def _gridiron_opener_pass(sb, now, deadline):
                                 round(float(_q2["bid"]) * 100.0, 1),
                                 (round(float(_q2["ask"]) * 100.0, 1)
                                  if _q2.get("ask") is not None else None),
-                                extra_blob={
-                                    "gridiron_autobet": True,
-                                    "gridiron_margin": round(_mg, 2),
-                                    "cover_p": round(_ps2, 4),
-                                    "line_home": (
-                                        float(_pblk2["line"])
-                                        if _sn2 == "home"
-                                        else -float(_pblk2["line"]))},
+                                extra_blob=_xb,
                                 cap_flag="gridiron_autobet", cap_max=10000,
                                 query_text="auto-bet: gridiron opener",
                                 reason=(
                                     f"GRIDIRON AUTO-BET — {_sn2} "
                                     f"{_pblk2.get('line')} pegged "
-                                    f"{round(_peg2)}¢, cover model "
+                                    f"{round(_peg2)}¢, model "
                                     f"{round(_ps2 * 100)}¢ → "
                                     f"{round(_e2, 1)}pp edge"),
-                                contracts=_GRIDIRON_CONTRACTS,
+                                # user stakes, Aug 22 2026: spreads 5,
+                                # totals 2, both sports.
+                                contracts=(_GRIDIRON_CONTRACTS
+                                           if _mt == "spread"
+                                           else _GRIDIRON_TOTAL_CONTRACTS),
                                 entry_line=_pblk2.get("line"),
                                 sport=g["sport"])
                             if _r == "cap":
@@ -14968,8 +15043,9 @@ def _gridiron_opener_pass(sb, now, deadline):
                     "timing_window": "opener", "prime_core": False,
                     "starts_in_min": sim0, "sharp_score": None,
                     "edge_pp": round(_cheap[1], 1),
-                    "fair_american": (_prob_to_amer_py(_mdl["cover_p"])
-                                      if _mdl else None),
+                    "fair_american": (_prob_to_amer_py(
+                        _mdl.get("cover_p", _mdl.get("total_p")))
+                        if _mdl else None),
                     "gates_cleared": False,
                     "signal_blob": {"opener_shadow": True,
                                     "gridiron_quote": True,
