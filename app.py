@@ -8836,6 +8836,106 @@ def api_poly_cancel_ou():
     return jsonify(out)
 
 
+@app.route("/api/polymarket/cancel-gridiron")
+def api_poly_cancel_gridiron():
+    """Cancel every RESTING, UNFILLED football (gridiron_autobet) buy and
+    remove its book row once the venue confirms nothing filled.
+
+    Built Aug 22 2026, go-live hour two: with no PIN anchor,
+    best_line_for handed the bet leg the FIRST ladder rung the API
+    listed — the machine's first NFL bet was GB@MIN under 25.5 at 7¢
+    against a real total of ~44.5. The selector is fixed (no anchor →
+    the rung priced nearest 50¢); this sweep retires anything placed on
+    a wrong rung. The fixed code re-bets the correct line via the
+    week-of sweep, so a canceled order here is not a lost bet.
+
+    Same three gates as cancel-ou / reset-sells: BUY intent, AUTOMATIC
+    flag (hand-placed orders untouchable), slug must belong to one of
+    OUR pending gridiron_autobet picks. The pick row is DELETED only
+    after a live cancel AND a venue positions read showing zero holding
+    on that slug — the book must mirror the venue, in both directions.
+    Shared-secret + `&dry=1`."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    dry = request.args.get("dry") == "1"
+    try:
+        sb, client = get_supabase(), get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    owner = _kalshi_owner_uid()
+    if not owner:
+        return jsonify({"ok": False, "error": "no owner uid"}), 500
+    mine: dict = {}
+    try:
+        rows = (sb.table("bot_picks").select("id,event_name,signal_blob")
+                .eq("asked_by", owner).eq("status", "pending")
+                .limit(500).execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"picks: {e}"}), 500
+    for r in rows:
+        b = r.get("signal_blob") or {}
+        if b.get("source") != "gridiron_autobet":
+            continue                       # this lane only
+        slug = b.get("pmm_slug")
+        if slug:
+            mine[slug] = {"pick_id": r["id"], "game": r.get("event_name")}
+    out = {"ok": True, "dry": dry, "gridiron_pending": len(mine),
+           "canceled": 0, "picks_removed": 0, "orders": []}
+    if not mine:
+        return jsonify(out)                # nothing ours — no venue call
+    orders = _pmm_open_orders_raw(client)
+    if orders is None:
+        return jsonify({"ok": False, "error": "venue read failed"}), 503
+    for o in orders:
+        if "BUY" not in (o.get("intent") or ""):
+            continue
+        if not o.get("auto") or o.get("slug") not in mine:
+            continue
+        m = mine[o["slug"]]
+        rec = {"slug": o.get("slug"), "game": m["game"],
+               "price_yes_c": (round(o["price_yes"] * 100, 1)
+                               if o.get("price_yes") is not None else None),
+               "qty": o.get("qty"), "filled": o.get("cum"),
+               "state": o.get("state")}
+        if dry:
+            out["orders"].append(rec)
+            continue
+        try:
+            client.orders.cancel(o["id"], {"marketSlug": o["slug"]})
+            rec["canceled"] = True
+            out["canceled"] += 1
+        except Exception as e:
+            rec["error"] = f"{type(e).__name__}: {e}"[:120]
+            out["orders"].append(rec)
+            continue
+        # Book mirrors venue: delete the pick ONLY on venue-confirmed
+        # zero holding (a partial fill is a position — it stays and
+        # grades; never delete a row money is standing behind).
+        # _pmm_positions_raw returns {slug: {...}} or None on read failure
+        # (None must read as "held" — never wipe a row on a failed read).
+        pos = _pmm_positions_raw(client)
+        held = True if pos is None else (o["slug"] in pos)
+        if not held:
+            try:
+                sb.table("bot_picks").delete().eq(
+                    "id", m["pick_id"]).execute()
+                rec["pick_removed"] = True
+                out["picks_removed"] += 1
+            except Exception as e:
+                rec["pick_error"] = f"{type(e).__name__}: {e}"[:120]
+        out["orders"].append(rec)
+    if out["canceled"]:
+        _send_fill_telegram(
+            f"🛑 GRIDIRON RUNG SWEEP — canceled {out['canceled']} football "
+            f"order(s) placed on wrong ladder rungs (anchorless "
+            f"best_line_for); {out['picks_removed']} book row(s) removed. "
+            f"The fixed selector re-bets the real lines.")
+    _probe_log(out)
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/cancel-live-buys")
 def api_poly_cancel_live_buys():
     """Kill any model BUY order still resting on a game that has already

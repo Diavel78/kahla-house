@@ -1057,8 +1057,26 @@ def best_line_for(pmm: dict | None, market_type: str, side: str,
     same_side = [e for e in entries if e.get("side") == side]
     if not same_side:
         return None
-    if market_type == "ml" or pin_line is None:
+    if market_type == "ml":
         return same_side[0]
+    if pin_line is None:
+        # NO ANCHOR — pick the venue's OWN main line: the rung priced
+        # nearest 50¢. Returning same_side[0] here handed football (which
+        # has no PIN line since the cutover) whatever ladder rung the API
+        # listed first — the machine's first NFL bet was under 25.5 at 7¢
+        # on a game whose real total sat at ~44.5, and the user caught it
+        # on the app inside the hour (Aug 22 2026: "that's not the real
+        # line... let's get fucking serious"). RULE 0.001: the book IS
+        # the signal — the at-the-money rung is the main line.
+        best, bd = None, None
+        for e in same_side:
+            mid = (e.get("quote") or {}).get("mid")
+            if mid is None:
+                continue
+            d = abs(float(mid) - 0.5)
+            if bd is None or d < bd:
+                best, bd = e, d
+        return best or same_side[0]
     # Closest line wins.
     best = None
     best_diff = None
