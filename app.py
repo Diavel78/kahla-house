@@ -8883,6 +8883,121 @@ def api_poly_cancel_ou():
     return jsonify(out)
 
 
+@app.route("/api/polymarket/manual-order", methods=["POST"])
+@admin_required
+def api_poly_manual_order():
+    """MANUAL bet from the website (user, Aug 22 2026: "Ya know what
+    would be handy??? If there was a way for me to manually bet on a
+    game via my website!").
+
+    Places a REAL post-only Polymarket order under the MANUAL order
+    indicator — the same flag the venue's own app uses — so every
+    machine sweep (dedup, topup, cancel-*, re-peg) is structurally
+    blind to it: hand bets are never touched by automation, exactly as
+    the AUTOMATIC-gated sweeps were designed. Admin-gated via Firebase
+    (this is a human on the site, not a cron).
+
+    body: {slug, synthetic, price_c, contracts, event_start,
+           preview: true|false}
+    preview=true returns the side's live book + a suggested peg and
+    places nothing. Rails on placement: half-cent price grid, must not
+    cross the book (post-only would reject anyway — fail loud instead),
+    contracts 1-250, cost ≤ $500 fat-finger cap, GTD = kickoff (a
+    pre-game bet must not rest into the live game). The RENT RULE does
+    not gate this: it governs COMPUTER bets; a human clicking a button
+    is the human's own call."""
+    body = request.get_json(silent=True) or {}
+    slug = str(body.get("slug") or "").strip()
+    synthetic = bool(body.get("synthetic"))
+    if not slug:
+        return jsonify({"ok": False, "error": "slug required"}), 400
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    book = _pmm_book(client, slug)
+    if book is None:
+        return jsonify({"ok": False,
+                        "error": "book unreadable — try again"}), 503
+    # our-side view: a synthetic NO side reads the inverted ladder
+    if synthetic:
+        s_bid = (100 - book["best_ask"]) if book["best_ask"] is not None else None
+        s_ask = (100 - book["best_bid"]) if book["best_bid"] is not None else None
+    else:
+        s_bid, s_ask = book["best_bid"], book["best_ask"]
+    if body.get("preview"):
+        sugg = (float(int(s_bid)) + 1.0) if s_bid is not None else None
+        if (sugg is not None and s_ask is not None and sugg >= s_ask
+                and s_bid is not None):
+            sugg = s_bid                 # one-tick book — join, don't cross
+        return jsonify({"ok": True, "preview": True, "slug": slug,
+                        "side_bid_c": s_bid, "side_ask_c": s_ask,
+                        "suggest_c": sugg})
+    try:
+        price_c = float(body.get("price_c"))
+        contracts = int(body.get("contracts"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "price_c and contracts "
+                        "must be numbers"}), 400
+    if abs(price_c * 2 - round(price_c * 2)) > 1e-6:
+        return jsonify({"ok": False,
+                        "error": "price must be on the half-cent grid"}), 400
+    if not (1.0 <= price_c <= 99.0):
+        return jsonify({"ok": False, "error": "price must be 1-99¢"}), 400
+    if not (1 <= contracts <= 250):
+        return jsonify({"ok": False, "error": "contracts must be 1-250"}), 400
+    cost = contracts * price_c / 100.0
+    if cost > 500.0:
+        return jsonify({"ok": False, "error": f"cost ${cost:.2f} over the "
+                        "$500 fat-finger cap"}), 400
+    if s_ask is not None and price_c >= s_ask:
+        return jsonify({"ok": False, "error": f"{price_c:g}¢ crosses the "
+                        f"{s_ask:g}¢ ask — post-only would reject; bid "
+                        "below the ask"}), 400
+    try:
+        dt = datetime.fromisoformat(
+            str(body.get("event_start")).replace("Z", "+00:00"))
+        gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return jsonify({"ok": False,
+                        "error": "event_start (ISO) required — orders "
+                        "expire at kickoff"}), 400
+    canon = (100.0 - price_c) / 100.0 if synthetic else price_c / 100.0
+    params = {"marketSlug": slug,
+              "intent": ("ORDER_INTENT_BUY_SHORT" if synthetic
+                         else "ORDER_INTENT_BUY_LONG"),
+              "type": "ORDER_TYPE_LIMIT",
+              "price": {"value": f"{canon:.3f}", "currency": "USD"},
+              "quantity": contracts,
+              "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
+              "participateDontInitiate": True,
+              "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_MANUAL"}
+    try:
+        cr = client.orders.create(params)
+        oid = (cr.get("id") if isinstance(cr, dict)
+               else getattr(cr, "id", None))
+    except Exception as e:
+        return jsonify({"ok": False,
+                        "error": f"create failed: {e}"[:200]}), 502
+    # orders.list is the only truthful read (retrieve 404s on live
+    # orders — the probe-proven landmine). Post-only rejections show up
+    # here as a missing/rejected order rather than a resting one.
+    state = None
+    try:
+        for o in (_pmm_open_orders_raw(client) or []):
+            if o.get("id") == oid:
+                state = o.get("state")
+                break
+    except Exception:
+        pass
+    _probe_log({"manual_order": True, "slug": slug, "price_c": price_c,
+                "contracts": contracts, "synthetic": synthetic,
+                "order_id": oid, "state": state})
+    return jsonify({"ok": True, "order_id": oid, "state": state,
+                    "resting": state in _OPEN_ORDER_STATES,
+                    "cost": round(cost, 2)})
+
+
 @app.route("/api/polymarket/cancel-gridiron")
 def api_poly_cancel_gridiron():
     """Cancel every RESTING, UNFILLED football (gridiron_autobet) buy and

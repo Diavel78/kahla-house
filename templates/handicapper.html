@@ -448,6 +448,8 @@
         .market-card .pick-side-btn { padding: 3px 8px; font-size: 10px; font-family: inherit; border: 1px solid var(--border-light); background: var(--surface-2); color: var(--text); border-radius: 5px; cursor: pointer; letter-spacing: 0.02em; }
         .market-card .pick-side-btn:hover { background: var(--blue); border-color: var(--blue); color: #fff; }
         .market-card .pick-side-btn.bot { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
+        .market-card .pick-side-btn.betpoly { background: #1d3a2c; border-color: #2f5c44; color: #7ee2ae; margin-right: 6px; font-weight: 600; }
+        .market-card .pick-side-btn.betpoly:hover { background: #34d399; border-color: #34d399; color: #06231a; }
         .market-card .pick-side-btn.bot.t05 { background: #2b3a5e; border-color: #2b3a5e; color: #b9cdf2; }
         .market-card .pick-side-btn.bot.t3  { background: var(--orange); border-color: var(--orange); color: #1c1306; }
         .market-card .pick-side-btn.bot.t5  { background: var(--gold); border-color: var(--gold); color: #2a1f02; }
@@ -719,6 +721,55 @@
     </div>
 
     <!-- Log-pick modal -->
+<!-- MANUAL BET modal (Aug 22 2026, user: "a way for me to manually bet
+     on a game via my website"). Places a REAL post-only Polymarket order
+     via /api/polymarket/manual-order (admin-only, MANUAL flag — no
+     machine sweep can touch it), then auto-logs the pick. -->
+    <div class="modal-bg" id="betModal">
+        <div class="modal">
+            <h3>💰 Bet on Polymarket</h3>
+            <div class="field">
+                <label>Selection</label>
+                <input type="text" id="bmSel" readonly />
+            </div>
+            <div class="field">
+                <label>Live book (your side)</label>
+                <div id="bmBook" style="font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.6;padding:8px 10px;border:1px solid var(--border,#2a2f3a);border-radius:8px;">loading…</div>
+            </div>
+            <div class="row2">
+                <div class="field">
+                    <label>Your price (¢)</label>
+                    <input type="number" id="bmPrice" step="0.5" min="1" max="99" oninput="bmCost()" />
+                </div>
+                <div class="field">
+                    <label>Contracts</label>
+                    <input type="number" id="bmQty" step="1" min="1" max="250" value="10" oninput="bmCost()" />
+                </div>
+            </div>
+            <div class="row2">
+                <div class="field">
+                    <label>Cost if filled</label>
+                    <input type="text" id="bmCostRow" readonly value="—" />
+                </div>
+                <div class="field">
+                    <label>Log as (units)</label>
+                    <select id="bmUnits">
+                        <option value="0.25">0.25u</option>
+                        <option value="0.5">0.5u</option>
+                        <option value="1" selected>1u</option>
+                        <option value="3">3u</option>
+                        <option value="5">5u</option>
+                    </select>
+                </div>
+            </div>
+            <div class="actions">
+                <button onclick="closeBetModal()">Cancel</button>
+                <button class="primary" id="bmGo" onclick="betPolyPlace()">Place order</button>
+            </div>
+            <div id="bmStatus" style="margin-top:12px;padding:8px 10px;border-radius:6px;font-size:13px;font-family:monospace;display:none;white-space:pre-wrap;word-break:break-word;"></div>
+        </div>
+    </div>
+
     <div class="modal-bg" id="logModal">
         <div class="modal">
             <h3>Log this pick</h3>
@@ -3524,7 +3575,7 @@
 
             const blockCls = 'side-block' + (isBotPick ? ' bot-picked' : '');
             blocks += `<div class="${blockCls}">
-                <div class="side-head"><span class="name">${_esc(sideName)}</span>${btn}</div>
+                <div class="side-head"><span class="name">${_esc(sideName)}</span>${(_isAdmin && pmmBlock && pmmBlock.slug) ? `<button class="pick-side-btn betpoly" onclick="openBetPoly('${mt}','${s}')">💰 Bet</button>` : ''}${btn}</div>
                 ${rows}
                 ${kqRow}
                 ${pmmRow}
@@ -3612,6 +3663,122 @@
     // price=exchange bid/fair). Defaults to 1u/low — there's no bot
     // signal to justify higher sizing on a side the bot rejected. User
     // can bump units in the log modal if they have qualitative reasons.
+    // ── MANUAL POLYMARKET BET (admin only, Aug 22 2026) ──────────────
+    // Places a REAL post-only order via /api/polymarket/manual-order
+    // (MANUAL flag — machine sweeps are structurally blind to it), then
+    // auto-logs the pick so the book and the venue agree from second one.
+    let _betCtx = null;
+    async function openBetPoly(mt, side) {
+        const d = _lastDossier;
+        if (!d || !_isAdmin) return;
+        const blk = (d.odds || {})[mt] || {};
+        const pmm = ((blk.polymarket || {})[side]) || null;
+        if (!pmm || !pmm.slug) { _toast('No Polymarket market for this side'); return; }
+        const g = (_currentGames || []).find(x => x.market_id === d.market_id) || {};
+        const es = g.event_start || d.event_start || null;
+        if (!es) { _toast('No kickoff time — cannot set order expiry'); return; }
+        _betCtx = { mt, side, slug: pmm.slug, synthetic: !!pmm.synthetic,
+                    line: (pmm.line != null ? pmm.line : null),
+                    market_id: d.market_id, event_start: es,
+                    game: d.event_name || g.event_name || '' };
+        const lnFrag = _betCtx.line != null ? ` @${_fmtPt(_betCtx.line)}` : '';
+        document.getElementById('bmSel').value =
+            `${side.toUpperCase()} ${mt}${lnFrag} — ${_betCtx.game}`;
+        document.getElementById('bmBook').textContent = 'loading…';
+        const st = document.getElementById('bmStatus');
+        st.style.display = 'none';
+        document.getElementById('bmGo').disabled = false;
+        document.getElementById('betModal').classList.add('show');
+        try {
+            const r = await authFetch('/api/polymarket/manual-order', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ slug: _betCtx.slug,
+                    synthetic: _betCtx.synthetic, preview: true }) });
+            const j = r ? await r.json() : null;
+            if (j && j.ok) {
+                document.getElementById('bmBook').textContent =
+                    `bid ${j.side_bid_c != null ? j.side_bid_c + '¢' : '—'} · ` +
+                    `ask ${j.side_ask_c != null ? j.side_ask_c + '¢' : '—'}` +
+                    (j.suggest_c != null ? `  →  suggested peg ${j.suggest_c}¢` : '');
+                if (j.suggest_c != null)
+                    document.getElementById('bmPrice').value = j.suggest_c;
+            } else {
+                document.getElementById('bmBook').textContent =
+                    'book unreadable — ' + ((j && j.error) || 'error');
+            }
+        } catch (e) {
+            document.getElementById('bmBook').textContent = 'book read failed';
+        }
+        bmCost();
+    }
+    function bmCost() {
+        const p = parseFloat(document.getElementById('bmPrice').value);
+        const q = parseInt(document.getElementById('bmQty').value);
+        document.getElementById('bmCostRow').value =
+            (isFinite(p) && isFinite(q) && p > 0 && q > 0)
+                ? '$' + (q * p / 100).toFixed(2) : '—';
+    }
+    function closeBetModal() {
+        document.getElementById('betModal').classList.remove('show');
+    }
+    async function betPolyPlace() {
+        if (!_betCtx) return;
+        const price = parseFloat(document.getElementById('bmPrice').value);
+        const qty = parseInt(document.getElementById('bmQty').value);
+        const st = document.getElementById('bmStatus');
+        const show = (msg, bad) => {
+            st.style.display = 'block';
+            st.style.background = bad ? 'rgba(248,113,113,.12)' : 'rgba(52,211,153,.12)';
+            st.textContent = msg;
+        };
+        if (!isFinite(price) || !isFinite(qty)) { show('price and contracts required', true); return; }
+        if (!confirm(`Rest ${qty} contracts at ${price}¢ ($${(qty * price / 100).toFixed(2)} if filled)\n${document.getElementById('bmSel').value}?`)) return;
+        const go = document.getElementById('bmGo');
+        go.disabled = true;
+        try {
+            const r = await authFetch('/api/polymarket/manual-order', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ slug: _betCtx.slug,
+                    synthetic: _betCtx.synthetic, price_c: price,
+                    contracts: qty, event_start: _betCtx.event_start }) });
+            const j = r ? await r.json() : null;
+            if (!j || !j.ok) {
+                show('Order failed: ' + ((j && j.error) || (r && r.status) || 'network'), true);
+                go.disabled = false;
+                return;
+            }
+            show(j.resting
+                ? `✓ Order resting at ${price}¢ — ${qty} contracts ($${j.cost})`
+                : `⚠ Order sent but not visible as resting (state: ${j.state || 'unknown'}) — check the app`, !j.resting);
+            // auto-log the pick — the book must know about the bet from
+            // second one (the wa-gercol lesson, human edition).
+            const amer = price >= 50
+                ? Math.round(-100 * price / (100 - price))
+                : Math.round(100 * (100 - price) / price);
+            const body = { market_id: _betCtx.market_id,
+                market_type: _betCtx.mt, side: _betCtx.side,
+                book: 'POLYMARKET', price: amer,
+                line: _betCtx.line,
+                units: parseFloat(document.getElementById('bmUnits').value) || 1,
+                confidence: 'low', allow_duplicate: true,
+                query_text: 'manual web bet',
+                reasons: [`Manual web bet — ${qty} contracts resting at ${price}¢`],
+                signal_blob: { manual_web_bet: true, pmm_slug: _betCtx.slug,
+                    pmm_synthetic: _betCtx.synthetic, order_id: j.order_id,
+                    contracts: qty } };
+            const r2 = await authFetch('/api/handicapper/pick', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body) });
+            const o2 = r2 ? await r2.json() : null;
+            _toast((o2 && (o2.ok || o2.skipped)) ? 'Bet placed + logged ✓'
+                : 'Order placed — but the pick log failed; log it by hand');
+            loadData(false);
+        } catch (e) {
+            show('Order failed: ' + (e && e.message ? e.message : e), true);
+            go.disabled = false;
+        }
+    }
+
     function pickSideFromGrid(mt, side) {
         if (!_lastDossier) return;
         const blk = (_lastDossier.odds || {})[mt] || {};
