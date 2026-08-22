@@ -151,6 +151,7 @@
         }
         .dk-b { background: var(--cyan); }
         .dk-r { background: #fbbf24; }
+        .bar .bother, .dk-o { background: var(--muted); opacity: .75; }
         .lane.off, .lane.off .rt { opacity: .55; }
         @media (max-width: 520px) {
             .value { font-size: 26px; }
@@ -370,8 +371,43 @@
                         + (rent === null ? '—' : money(rent)) + '</span>'
                         + '</div></div>';
                 };
+                // YTD headline is the CASH EQUATION — balance now, plus
+                // what left this year, minus what came in this year (user:
+                // "Cash ledger 12/31/25. Cash ledger today. Tada."). The
+                // settle basis read -$256 for a ~+$95 year because it
+                // can't see sell-to-close profits or outage/promo credits;
+                // those show up here as the third key. Year-start balance
+                // (~$20, 3-week-old account) is not netted — labeled fuzz,
+                // never a modeled number.
+                const balNow = (j.balances || {}).current_balance;
+                const y = st.ytd || {};
+                let ytdRow;
+                if (y.dep != null && balNow != null) {
+                    const cash = Math.round((balNow + y.wd - y.dep) * 100) / 100;
+                    const other = Math.round((cash - (y.bets || 0) - (y.rent || 0)) * 100) / 100;
+                    const ab = Math.abs(y.bets || 0), ar = Math.abs(y.rent || 0),
+                          ao = Math.abs(other), tot = ab + ar + ao;
+                    const seg = (cls, v) => tot > 0
+                        ? '<i class="' + cls + '" style="width:'
+                          + (100 * v / tot).toFixed(1) + '%"></i>' : '';
+                    ytdRow = '<div class="erow">'
+                        + '<div class="etop"><span class="rlbl">YTD · cash</span>'
+                        + '<span class="rnum ' + (cash >= 0 ? 'pos' : 'neg') + '">'
+                        + money(cash) + '</span></div>'
+                        + (tot > 0 ? '<div class="bar">' + seg('bbets', ab)
+                          + seg('brent', ar) + seg('bother', ao) + '</div>' : '')
+                        + '<div class="keys">'
+                        + '<span><span class="dotk dk-b"></span>bets ' + money(y.bets) + '</span>'
+                        + '<span><span class="dotk dk-r"></span>rent '
+                        + (y.rent === null ? '—' : money(y.rent)) + '</span>'
+                        + '<span><span class="dotk dk-o"></span>sells &amp; credits '
+                        + money(other) + '</span>'
+                        + '</div></div>';
+                } else {
+                    ytdRow = row('YTD', st.ytd);
+                }
                 led.innerHTML = row('7 days', st.d7) + row('30 days', st.d30)
-                              + row('YTD', st.ytd);
+                              + ytdRow;
             } else {
                 // No stack = the venue RPC was unreachable. Dashes, never
                 // a partial or invented figure on a money surface.

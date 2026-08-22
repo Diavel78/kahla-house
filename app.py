@@ -1583,10 +1583,44 @@ def _pnl_stack(sb) -> dict | None:
         return {"bets": bets, "rent": rw,
                 "total": round(bets + (rw or 0), 2)}
 
-    return {"today": round(by_day.get(today.isoformat(), 0.0), 2),
-            "yesterday": round(
-                by_day.get((today - timedelta(days=1)).isoformat(), 0.0), 2),
-            "d7": _win(7), "d30": _win(30), "ytd": _win(ytd_days)}
+    out = {"today": round(by_day.get(today.isoformat(), 0.0), 2),
+           "yesterday": round(
+               by_day.get((today - timedelta(days=1)).isoformat(), 0.0), 2),
+           "d7": _win(7), "d30": _win(30), "ytd": _win(ytd_days)}
+    # YTD's headline is the CASH EQUATION, not the settle-basis sum (user,
+    # Aug 22 2026: "Cash ledger 12/31/25. Cash ledger today. Tada.") — the
+    # settle basis read -$256 for a year the cash ledger closes at ~+$95,
+    # because it can't see sell-to-close profits (no resolution row) or
+    # the ~$179 of outage/promo credits. Ship the year's deposits and
+    # withdrawals; the page adds the live balance:
+    #   ytd_cash = balance + wd_ytd - dep_ytd
+    # Year-start balance is NOT netted: the account was 3 weeks old with
+    # ~$20 in it at NYE (recorded: $25 in, -$31 realized, i.e. some launch
+    # credit the feed never recorded), so the anchor is ~$0-40 of fuzz on
+    # a $3.7k year — labeled, not modeled. bets/rent stay in the row as
+    # composition; the remainder is sells + credits.
+    try:
+        rows = sb.table("poly_activities").select("type,payload") \
+            .in_("type", ["ACTIVITY_TYPE_ACCOUNT_DEPOSIT",
+                          "ACTIVITY_TYPE_ACCOUNT_WITHDRAWAL"]) \
+            .gte("at", jan1.isoformat()).limit(1000).execute().data or []
+        dep = wd = 0.0
+        for r in rows:
+            try:
+                amt = abs(float(((r.get("payload") or {})
+                                 .get("accountBalanceChange") or {})
+                                .get("amount", {}).get("value")))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if r["type"] == "ACTIVITY_TYPE_ACCOUNT_DEPOSIT":
+                dep += amt
+            else:
+                wd += amt
+        out["ytd"]["dep"] = round(dep, 2)
+        out["ytd"]["wd"] = round(wd, 2)
+    except Exception:
+        pass                      # no flows -> the page keeps settle-basis
+    return out
 
 
 def _gameday_rewards(sb) -> dict:
