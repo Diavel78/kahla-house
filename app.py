@@ -15368,6 +15368,16 @@ def _gridiron_bet_sweep(sb, now, deadline, stats):
                                       d, mt, gp)
                 if r == "placed":
                     stats["g_bets"] = stats.get("g_bets", 0) + 1
+                # Per-verdict tallies + a short per-game trace. Added the
+                # night 13 builds refused silently and the stats couldn't
+                # say which gate did it (rent was cleared at the venue, so
+                # the answer had to be edge/book — but proven, not argued).
+                if r:
+                    stats[f"gate_{r}"] = stats.get(f"gate_{r}", 0) + 1
+                    ref = stats.setdefault("gate_ref", [])
+                    if len(ref) < 12:
+                        ref.append(f"{(gg.get('event_name') or '')[:24]}"
+                                   f" {mt[:3]}:{r}")
     except Exception:
         pass
 
