@@ -13667,7 +13667,15 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
                      bid_c, ask_c, extra_blob=None,
                      cap_flag="autobet", cap_max=None, query_text=None,
                      reason=None, skip_game_dedup=False,
-                     contracts=None, entry_line=None, sport=None):
+                     contracts=None, entry_line=None, sport=None,
+                     fail_tag=None):
+    # fail_tag: optional list — each silent `return False` names itself
+    # into it (Aug 23 2026: 26 gridiron executor refusals in a row were
+    # indistinguishable from the outside; five False paths, zero signal).
+    def _fail(t):
+        if isinstance(fail_tag, list):
+            fail_tag.append(t)
+        return False
     """Shared auto-bet placement: slate cap → never-double-a-game →
     Master Rule → post-only create (1 contract, GTD first pitch,
     AUTOMATIC) → pick insert (the cap counter — inserted the moment
@@ -13700,29 +13708,29 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
                                       - timedelta(hours=12)).isoformat())
                  .limit(cap + 1).execute().data) or []
     except Exception:
-        return False
+        return _fail("cap_q")
     if len(prior) >= cap:
         return "cap"        # slate full — CALLERS MUST NOT LATCH on this
     owner = _kalshi_owner_uid()
     if not owner:
-        return False
+        return _fail("owner")
     if not skip_game_dedup:
         try:
             mine = (sb.table("bot_picks").select("id")
                     .eq("market_id", g["id"]).eq("market_type", mt)
                     .eq("asked_by", owner).limit(1).execute().data) or []
         except Exception:
-            return False
+            return _fail("mine_q")
         if mine:
-            return False
+            return _fail("dedup")
     try:
         dt = datetime.fromisoformat(str(es).replace("Z", "+00:00"))
         gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception:
-        return False
+        return _fail("gtd")
     n_contracts = contracts if contracts else _AUTOBET_CONTRACTS
     if n_contracts * side_c / 100.0 > _REPEG_MAX_COST_USD:
-        return False                       # ⚠ THE MASTER RULE
+        return _fail("master6")            # ⚠ THE MASTER RULE
     canon = (100.0 - side_c) / 100.0 if synthetic else side_c / 100.0
     intent = ("ORDER_INTENT_BUY_SHORT" if synthetic
               else "ORDER_INTENT_BUY_LONG")
@@ -13742,7 +13750,7 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
         _send_fill_telegram(
             f"🤖 AUTO-BET FAILED — {g.get('event_name')} {side_lbl}: "
             f"create errored ({e})"[:280])
-        return False
+        return _fail(("create:" + f"{type(e).__name__}: {e}")[:90])
     entry_amer = _prob_to_amer_py(side_c / 100.0)
     blob = {cap_flag: True, "contracts": n_contracts,
             "order_id": new_oid, "pmm_slug": slug,
@@ -15286,6 +15294,7 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
                            else -float(pblk["line"]))
     else:
         xb["total_p"] = round(ps, 4)
+    _ftag: list = []
     r = _autobet_execute(
         sb, g, es0, mt, sn, f"{sn} {pblk.get('line')}",
         pblk["slug"], bool(pblk.get("synthetic")),
@@ -15303,10 +15312,12 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
         contracts=(_GRIDIRON_CONTRACTS if mt == "spread"
                    else _GRIDIRON_TOTAL_CONTRACTS),
         entry_line=pblk.get("line"),
-        sport=g["sport"])
+        sport=g["sport"], fail_tag=_ftag)
     if r in ("cap", "rent"):
         return r
-    return "placed" if r is True else "failed"
+    if r is True:
+        return "placed"
+    return "failed:" + (_ftag[0] if _ftag else "?")
 
 
 _GRIDIRON_SWEEP_TS: dict = {}     # per-game last sweep-eval, in-memory
@@ -15431,6 +15442,9 @@ def api_gridiron_sweep_now():
         return jsonify({"ok": False, "error": "forbidden"}), 403
     stats: dict = {}
     try:
+        if (request.args.get("force") or "") in ("1", "true", "yes"):
+            _GRIDIRON_SWEEP_TS.clear()     # this container's stamps only
+            stats["forced"] = True
         sb = get_supabase()
         now = datetime.now(timezone.utc)
         _gridiron_bet_sweep(sb, now, _time.time() + 8.0, stats)
