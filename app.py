@@ -15372,6 +15372,47 @@ def _gridiron_bet_sweep(sb, now, deadline, stats):
         pass
 
 
+@app.route("/api/gridiron/sweep-now")
+def api_gridiron_sweep_now():
+    """FREEZE-WEEK BRIDGE TOOL (Aug 23 2026): run the week-of football bet
+    sweep ONCE on Vercel, whoever owns the opener lane.
+
+    Why it exists: the sweep's only call site is the paperlog ROUTE body,
+    gated `if _own_opener` — and the cellar's `opener` lane (lanes.py)
+    calls the tape pass but NOT the sweep. So with the box healthy the
+    sweep runs NOWHERE: it only ever fired during the Aug 23 box outage,
+    when Vercel held the lease (which is what re-bet the Week-1 totals).
+    Found the day the venue silently canceled 20 resting football orders
+    and nothing re-placed them. The box-side fix (call the sweep from
+    lane_opener) lands with the Thursday unfreeze; this endpoint is the
+    remote-fire stopgap the frozen box can't give.
+
+    Race note: the box's tape pass bets a game ONCE, at first listing
+    (done-set latched) — so for any game already taped this cannot double
+    an order (the executor's pending-pick dedup guards the rest). Don't
+    fire it in the same minutes a fresh listing burst is being taped; a
+    `/api/polymarket/dedup-orders?dry=1` read after a batch is the check.
+    Serial fires only (site-curl `repeat` is serial by construction).
+
+    Each call is one bounded pass (~8s, ≤_GRIDIRON_SWEEP_CAP dossier
+    builds); the in-container `_GRIDIRON_SWEEP_TS` stamps paginate
+    consecutive calls across the slate. Returns the sweep's stats.
+    """
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    stats: dict = {}
+    try:
+        sb = get_supabase()
+        now = datetime.now(timezone.utc)
+        _gridiron_bet_sweep(sb, now, _time.time() + 8.0, stats)
+        return jsonify({"ok": True, **stats})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"[:220],
+                        **stats})
+
+
 def _gridiron_opener_pass(sb, now, deadline):
     """Football opener SHADOWS on the tick's leftover budget (after the
     MLB opener pass). One shadow per game at first Polymarket listing
