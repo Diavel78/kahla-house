@@ -15241,6 +15241,17 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
                 or float(q["bid"]) <= 0):
             continue
         peg = float(int(float(q["bid"]) * 100.0)) + 1.0
+        # ONE-TICK BOOK → JOIN, don't jump (_peg_target's rule; this leg
+        # re-implemented the peg raw and missed it). On the tight books
+        # the venue re-provisioned Aug 23, floor(bid)+1 lands ON the ask,
+        # the post-only create is ACCEPTED with a real id and then
+        # async-REJECTED — 19 of 20 sweep bets died that way, invisible
+        # until the venue order list was read back. Joining the bid is
+        # post-only-safe at any book width.
+        _askc = (float(q["ask"]) * 100.0
+                 if q.get("ask") is not None else None)
+        if _askc is not None and peg >= _askc:
+            peg = float(q["bid"]) * 100.0
         if mt == "spread":
             lh = float(ln) if sn == "home" else -float(ln)
             ph = _gridiron_cover_p(pm, mg, lh)
