@@ -1817,6 +1817,12 @@ def api_poly_orders():
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
     want_slug = (request.args.get("slug") or "").strip().lower()
+    # all=1: include TERMINAL states (REJECTED/CANCELED/EXPIRED...). Added
+    # Aug 23 2026 chasing 19 football creates that returned real ids and
+    # were gone minutes later — REJECTED (async post-only, peg crossed)
+    # and CANCELED (venue killed a resting order) need different fixes,
+    # and only the terminal state can say which. Read-only either way.
+    want_all = (request.args.get("all") or "") in ("1", "true", "yes")
     out: dict = {"ok": True, "orders": [], "count": 0}
     try:
         client = get_client()
@@ -1829,7 +1835,7 @@ def api_poly_orders():
                 return (_o.get(k, d) if isinstance(_o, dict)
                         else getattr(_o, k, d))
             st = str(_og("state") or "")
-            if st not in _OPEN_ORDER_STATES:
+            if st not in _OPEN_ORDER_STATES and not want_all:
                 continue
             sl = str(_og("marketSlug") or "")
             if want_slug and want_slug not in sl.lower():
