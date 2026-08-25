@@ -160,6 +160,18 @@ min; links are public — Rob forwards the PDF to friends). Then:
 
 ## 4. Failure posture
 
+**⚠ CONTAINER RESTARTS ARE REAL AND SILENT (learned Aug 24-25 2026: the
+first Monday Routine session died mid-run with zero trace, and a recovery
+session lost 3 subagents the same way the next day).** Defenses, in order:
+save each narrative to its row the moment it's written (a `sb_patch`ed row
+survives a restart; anything held in memory doesn't); fan out writers in
+SMALL batches (2-3 games each) so a kill costs little; on wake/start,
+check which rows already have `sheet_md` and only write the gaps — the
+whole pipeline is resumable by design. If a run fails hard, insert a
+telegram_queue row saying so before ending — never die quietly. The
+Routines push completion notifications to Rob's phone: a missing
+notification by ~7pm Monday IS the alarm.
+
 - Renderer crash on one league must not eat the other — publish what
   works, say what didn't in the Telegram ping.
 - A section's source being dark is CONTENT ("injury feed unavailable at
