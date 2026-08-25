@@ -43,6 +43,59 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32))
 
 # ---------------------------------------------------------------------------
+# Firestore routing-header shim -- KEEP UNTIL GOOGLE FIXES THEIR SIDE
+# ---------------------------------------------------------------------------
+# Aug 25 2026: every Firestore read started failing with
+#     InvalidArgument: 400 Invalid database id %28default%29
+# %28default%29 is `(default)` percent-encoded. google-api-core builds the
+# gRPC routing header `x-goog-request-params` with
+# `urlencode({...}, safe="/")`, so the default database id has ALWAYS gone
+# out as `databases/%28default%29` -- that encoding is byte-identical in
+# every api-core from 2.19.0 to 2.35.0, and firebase-admin passes a clean
+# "(default)" through. Nothing on our side changed: the SERVER stopped
+# URL-decoding that header. Pinning is therefore useless (verified live --
+# google-cloud-firestore 2.28.1 fails exactly like 2.29.0).
+#
+# So we widen the safe set to leave the parens literal, which is what the
+# server now wants. Deliberately narrow: it only affects how the routing
+# header is spelled, never request bodies or document paths, and parens
+# are legal unreserved-ish characters in that header. Guarded so a shape
+# change upstream can only no-op, never break boot.
+#
+# REMOVE THIS once Google restores decoding AND /api/firebase-probe reads
+# clean without it. Verify with the probe, never by assumption.
+def _patch_firestore_routing_header() -> str:
+    try:
+        from urllib.parse import urlencode
+        from google.api_core.gapic_v1 import routing_header as _rh
+    except Exception as e:
+        return f"skipped: import failed ({type(e).__name__})"
+    try:
+        probe = _rh.to_routing_header((("parent", "databases/(default)"),))
+        if "%28" not in probe:
+            return "not needed: parens already literal"
+
+        def _urlencode_param(key, value):
+            return urlencode({key: value}, safe="/()")
+
+        _rh._urlencode_param = _urlencode_param
+        # to_routing_header resolves _urlencode_param from module globals,
+        # so replacing the attribute is enough -- but the original is
+        # lru_cached and may hold pre-patch values.
+        for fn in (getattr(_rh, "to_routing_header", None),):
+            cc = getattr(fn, "cache_clear", None)
+            if cc:
+                cc()
+        after = _rh.to_routing_header((("parent", "databases/(default)"),))
+        return "patched" if "%28" not in after else "FAILED: still encoded"
+    except Exception as e:
+        return f"skipped: {type(e).__name__}: {e}"
+
+
+_ROUTING_HEADER_PATCH = _patch_firestore_routing_header()
+
+
+# ---------------------------------------------------------------------------
 # Firebase Admin SDK init
 # ---------------------------------------------------------------------------
 _firebase_app = None
@@ -3268,6 +3321,18 @@ def api_firebase_probe():
         except Exception as e:
             vers[mod] = f"IMPORT FAILED: {type(e).__name__}: {e}"
     out["versions"] = vers
+    try:
+        import google.api_core as _ac
+        out["versions"]["google.api_core"] = getattr(_ac, "__version__", "unknown")
+    except Exception:
+        pass
+    out["routing_header_patch"] = _ROUTING_HEADER_PATCH
+    try:
+        from google.api_core.gapic_v1 import routing_header as _rh
+        out["routing_header_sample"] = _rh.to_routing_header(
+            (("parent", "projects/p/databases/(default)/documents"),))
+    except Exception as e:
+        out["routing_header_sample"] = f"{type(e).__name__}: {e}"
 
     # --- init ------------------------------------------------------------
     try:
