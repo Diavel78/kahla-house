@@ -43,56 +43,72 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32))
 
 # ---------------------------------------------------------------------------
-# Firestore routing-header shim -- KEEP UNTIL GOOGLE FIXES THEIR SIDE
+# Firestore path-template shim -- the Aug 25 2026 outage
 # ---------------------------------------------------------------------------
-# Aug 25 2026: every Firestore read started failing with
+# Every Firestore read failed with:
 #     InvalidArgument: 400 Invalid database id %28default%29
-# %28default%29 is `(default)` percent-encoded. google-api-core builds the
-# gRPC routing header `x-goog-request-params` with
-# `urlencode({...}, safe="/")`, so the default database id has ALWAYS gone
-# out as `databases/%28default%29` -- that encoding is byte-identical in
-# every api-core from 2.19.0 to 2.35.0, and firebase-admin passes a clean
-# "(default)" through. Nothing on our side changed: the SERVER stopped
-# URL-decoding that header. Pinning is therefore useless (verified live --
-# google-cloud-firestore 2.28.1 fails exactly like 2.29.0).
+# %28default%29 is `(default)` percent-encoded.
 #
-# So we widen the safe set to leave the parens literal, which is what the
-# server now wants. Deliberately narrow: it only affects how the routing
-# header is spelled, never request bodies or document paths, and parens
-# are legal unreserved-ish characters in that header. Guarded so a shape
-# change upstream can only no-op, never break boot.
+# CAUSE (bisected against the real wheels, not guessed): google-api-core
+# 2.35.0 added `urllib.parse.quote(val, safe="/")` inside
+# `path_template.expand()`. Firestore's BaseClient._database_string builds
+# its database path with exactly that call:
+#     expand("projects/{project}/databases/{database}", database="(default)")
+#   api-core 2.34.0 -> projects/<p>/databases/(default)      works
+#   api-core 2.35.0 -> projects/<p>/databases/%28default%29  REJECTED
+# That string is the `parent` on every request, so the whole app's auth
+# died. api-core is a TRANSITIVE dep and requirements.txt pinned nothing,
+# so a routine Vercel rebuild took production down with no code change.
 #
-# REMOVE THIS once Google restores decoding AND /api/firebase-probe reads
-# clean without it. Verify with the probe, never by assumption.
-def _patch_firestore_routing_header() -> str:
+# The real fix is the `google-api-core<2.35.0` pin in requirements.txt.
+# This shim is BELT-AND-BRACES for the case where the pin is lost (a
+# resolver bump, someone loosening it, a stale build cache): it restores
+# the parens as safe characters so the database id survives expansion.
+#
+# Two earlier attempts are recorded so nobody retries them: pinning
+# google-cloud-firestore did nothing (2.28.1 failed identically), and
+# patching gapic_v1.routing_header did nothing either (the header was a
+# red herring -- verified live, header clean, read still failed). The
+# encoding is in path_template, and only there.
+#
+# Narrow + self-checking: if expand() no longer encodes, it reports
+# "not needed" and patches nothing; any import/shape change downgrades to
+# a no-op rather than breaking boot. Safe to delete once every supported
+# api-core leaves the parens alone -- confirm with /api/firebase-probe.
+def _patch_firestore_path_template() -> str:
     try:
-        from urllib.parse import urlencode
-        from google.api_core.gapic_v1 import routing_header as _rh
+        import urllib.parse
+        from google.api_core import path_template as _pt
     except Exception as e:
         return f"skipped: import failed ({type(e).__name__})"
     try:
-        probe = _rh.to_routing_header((("parent", "databases/(default)"),))
-        if "%28" not in probe:
-            return "not needed: parens already literal"
+        tmpl = "projects/{project}/databases/{database}"
+        if "%28" not in _pt.expand(tmpl, project="p", database="(default)"):
+            return "not needed: expand leaves parens literal"
 
-        def _urlencode_param(key, value):
-            return urlencode({key: value}, safe="/()")
+        _orig_quote = urllib.parse.quote
 
-        _rh._urlencode_param = _urlencode_param
-        # to_routing_header resolves _urlencode_param from module globals,
-        # so replacing the attribute is enough -- but the original is
-        # lru_cached and may hold pre-patch values.
-        for fn in (getattr(_rh, "to_routing_header", None),):
-            cc = getattr(fn, "cache_clear", None)
-            if cc:
-                cc()
-        after = _rh.to_routing_header((("parent", "databases/(default)"),))
+        def _quote_keep_parens(string, safe="/", *a, **kw):
+            # Only widen the safe set; never change anything else about
+            # the caller's quoting.
+            if isinstance(safe, str) and "(" not in safe:
+                safe = safe + "()"
+            return _orig_quote(string, safe, *a, **kw)
+
+        # Patch the name inside path_template's namespace ONLY -- never
+        # urllib globally, which would reach unrelated callers.
+        if getattr(_pt, "urllib", None) is not None:
+            _pt.urllib = type(
+                "_UrllibShim", (), {"parse": type(
+                    "_ParseShim", (), {"quote": staticmethod(_quote_keep_parens)})()}
+            )()
+        after = _pt.expand(tmpl, project="p", database="(default)")
         return "patched" if "%28" not in after else "FAILED: still encoded"
     except Exception as e:
         return f"skipped: {type(e).__name__}: {e}"
 
 
-_ROUTING_HEADER_PATCH = _patch_firestore_routing_header()
+_PATH_TEMPLATE_PATCH = _patch_firestore_path_template()
 
 
 # ---------------------------------------------------------------------------
@@ -3326,7 +3342,14 @@ def api_firebase_probe():
         out["versions"]["google.api_core"] = getattr(_ac, "__version__", "unknown")
     except Exception:
         pass
-    out["routing_header_patch"] = _ROUTING_HEADER_PATCH
+    out["path_template_patch"] = _PATH_TEMPLATE_PATCH
+    try:
+        from google.api_core import path_template as _pt
+        out["database_string_sample"] = _pt.expand(
+            "projects/{project}/databases/{database}",
+            project="p", database="(default)")
+    except Exception as e:
+        out["database_string_sample"] = f"{type(e).__name__}: {e}"
     try:
         from google.api_core.gapic_v1 import routing_header as _rh
         out["routing_header_sample"] = _rh.to_routing_header(
