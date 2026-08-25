@@ -50,21 +50,38 @@ _firestore_client = None
 
 
 def _init_firebase():
+    """Initialise the Admin SDK app + Firestore client (idempotent).
+
+    LANDMINE: the guard is on `_firestore_client`, NOT `_firebase_app`.
+    `firestore.client()` can raise *after* `initialize_app()` succeeded --
+    and the old guard (`if _firebase_app is not None: return`) then made
+    that permanent: the app was set, so every later call short-circuited
+    and `get_db()` handed back a None client forever. The whole container
+    then answered every Firebase-authed request with
+    `Database error: 'NoneType' object has no attribute 'collection'`,
+    which the page gates read as "not authorized" and bounced home.
+    Re-entering here lets a transient client build heal on the next call.
+    """
     global _firebase_app, _firestore_client
-    if _firebase_app is not None:
+    if _firestore_client is not None:
         return
-    sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT", "")
-    if sa_json:
-        try:
-            sa_dict = json.loads(sa_json)
-            cred = credentials.Certificate(sa_dict)
-            _firebase_app = firebase_admin.initialize_app(cred)
-        except Exception as e:
-            print(f"Firebase init error: {e}")
+    if _firebase_app is None:
+        sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT", "")
+        if sa_json:
+            try:
+                sa_dict = json.loads(sa_json)
+                cred = credentials.Certificate(sa_dict)
+                _firebase_app = firebase_admin.initialize_app(cred)
+            except ValueError:
+                # Already initialised on this container (re-entry after a
+                # failed firestore.client()) -- reuse rather than crash.
+                _firebase_app = firebase_admin.get_app()
+            except Exception as e:
+                print(f"Firebase init error: {e}")
+                _firebase_app = firebase_admin.initialize_app()
+        else:
+            # Fall back to default credentials (local dev with GOOGLE_APPLICATION_CREDENTIALS)
             _firebase_app = firebase_admin.initialize_app()
-    else:
-        # Fall back to default credentials (local dev with GOOGLE_APPLICATION_CREDENTIALS)
-        _firebase_app = firebase_admin.initialize_app()
     _firestore_client = firestore.client()
 
 
@@ -3198,6 +3215,84 @@ def api_me():
         "odds_access": bool(g.user_data.get("odds_access")) or role == "admin",
         "grocery_access": bool(g.user_data.get("grocery_access")) or role == "admin",
     })
+
+
+@app.route("/api/firebase-probe")
+def api_firebase_probe():
+    """Why is every Firebase-authed request failing? (shared-secret, read-only)
+
+    `/api/me` can only answer 500 from ONE place: the Firestore user-doc
+    read raising inside `firebase_auth_required`. The exception text goes
+    into the response body -- which only a logged-in browser ever sees,
+    and the page gates swallow it by redirecting home. This reproduces
+    that exact read from a shared-secret route so the string is reachable
+    from a session via the site-curl bridge.
+
+    Reports which credential env is present (NEVER the value), the
+    service account's project/client identity, whether the SDK inits,
+    whether a real Firestore read completes, and the installed versions
+    of the SDK + its gRPC transport (unpinned in requirements.txt, so a
+    dependency bump is a live suspect for a break with no code change).
+    """
+    import traceback
+
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+
+    out: dict = {"ok": True}
+
+    # --- credential presence + identity (no secret values echoed) --------
+    sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT", "")
+    out["service_account_env_set"] = bool(sa_json)
+    out["service_account_len"] = len(sa_json)
+    if sa_json:
+        try:
+            sa = json.loads(sa_json)
+            out["service_account"] = {
+                "project_id": sa.get("project_id"),
+                "client_email": sa.get("client_email"),
+                "type": sa.get("type"),
+                "has_private_key": bool(sa.get("private_key")),
+            }
+        except Exception as e:
+            out["service_account_parse_error"] = f"{type(e).__name__}: {e}"
+
+    # --- installed versions (dependency drift is the no-code-change cause)
+    vers = {}
+    for mod in ("firebase_admin", "google.cloud.firestore", "grpc", "google.auth"):
+        try:
+            m = __import__(mod, fromlist=["__version__"])
+            vers[mod] = getattr(m, "__version__", "unknown")
+        except Exception as e:
+            vers[mod] = f"IMPORT FAILED: {type(e).__name__}: {e}"
+    out["versions"] = vers
+
+    # --- init ------------------------------------------------------------
+    try:
+        _init_firebase()
+        out["init"] = "ok"
+        out["client_is_none"] = _firestore_client is None
+    except Exception as e:
+        out["init"] = f"{type(e).__name__}: {e}"
+        out["traceback"] = traceback.format_exc()[-2000:]
+        return jsonify(out)
+
+    # --- the actual read that /api/me performs ---------------------------
+    try:
+        db = get_db()
+        out["db_is_none"] = db is None
+        t0 = _time.time()
+        docs = list(db.collection("users").limit(1).stream())
+        out["read"] = "ok"
+        out["read_ms"] = int((_time.time() - t0) * 1000)
+        out["users_doc_found"] = len(docs)
+    except Exception as e:
+        out["read"] = f"{type(e).__name__}: {e}"
+        out["traceback"] = traceback.format_exc()[-3000:]
+
+    return jsonify(out)
 
 
 # ---------------------------------------------------------------------------

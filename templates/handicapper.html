@@ -1029,11 +1029,40 @@
     // NRFI/TOT accrue their own zones.
     const MODEL_BET_EARLY_MIN = 150;                // 2h30m+
 
+    // --- access-gate failure handling ------------------------------------
+    // A 5xx (or a network failure) from /api/me means the SERVER is broken,
+    // NOT that you lack access. Redirecting home on it produced an endless
+    // click -> bounce loop with nothing on screen to explain it: the whole
+    // site looked "stuck in a loop" while the real fault was one failing
+    // Firestore read. Only an auth/permission answer (401/403) may bounce.
+    function _gateServerError(detail) {
+        try { document.querySelectorAll('#auth-gate,#gate').forEach(function (el) { el.style.display = 'none'; }); } catch (e) {}
+        var o = document.createElement('div');
+        o.setAttribute('data-gate-error', '1');
+        o.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;'
+            + 'justify-content:center;padding:24px;background:#0b0f14;color:#e6edf3;'
+            + 'font:15px/1.55 system-ui,-apple-system,sans-serif;text-align:center';
+        o.innerHTML = '<div style="max-width:460px">'
+            + '<div style="font-size:34px;margin-bottom:12px">⚠️</div>'
+            + '<div style="font-size:18px;font-weight:600;margin-bottom:8px">Server error &mdash; not a permissions problem</div>'
+            + '<div style="color:#9aa7b4;margin-bottom:6px">The sign-in check (<code>/api/me</code>) failed, so this page can&rsquo;t confirm your access.</div>'
+            + '<div style="color:#9aa7b4;margin-bottom:18px">You are still signed in. This is a backend fault, not your account.</div>'
+            + '<div style="font:12px ui-monospace,monospace;color:#6e7d8d;margin-bottom:18px">' + String(detail || '') + '</div>'
+            + '<button id="_gateRetry" style="background:#1f6feb;color:#fff;border:0;border-radius:8px;'
+            + 'padding:10px 18px;font-size:14px;cursor:pointer;margin-right:8px">Retry</button>'
+            + '<a href="/" style="color:#9aa7b4;font-size:14px">Home</a>'
+            + '</div>';
+        document.body.appendChild(o);
+        var b = document.getElementById('_gateRetry');
+        if (b) b.onclick = function () { location.reload(); };
+    }
+
     firebase.auth().onAuthStateChanged(async user => {
         if (!user) { window.location.href = '/'; return; }
         try {
             const token = await user.getIdToken();
             const r = await fetch('/api/me', { headers: { 'Authorization': 'Bearer ' + token } });
+            if (r.status >= 500) { _gateServerError('/api/me returned ' + r.status); return; }
             if (!r.ok) { window.location.href = '/'; return; }
             const me = await r.json();
             if (!me.approved) { window.location.href = '/'; return; }
@@ -1047,7 +1076,7 @@
             if (_isAdmin) {
                 document.querySelectorAll('.admin-only').forEach(el => el.style.display = '');
             }
-        } catch { window.location.href = '/'; return; }
+        } catch (e) { _gateServerError('sign-in check failed: ' + e); return; }
         document.getElementById('auth-gate').style.display = 'none';
         document.getElementById('app').style.display = '';
         _applyViewerMode();
