@@ -226,6 +226,17 @@
                 </div>
                 <div class="sub" id="subLedger">bets + rent · rent counts on the day it was earned</div>
             </div>
+            <!-- RENT BY DAY (user, Aug 25: "I ask this every day, lol") —
+                 the last 5 earn-days straight off the venue's ledger,
+                 pending included. A day the venue hasn't posted yet says
+                 so — never $0.00 (the ledger runs ~a day behind). -->
+            <div class="card wide">
+                <div class="label">Rent by day <span class="tag">paid + pending</span></div>
+                <div id="rentDays">
+                    <div class="sub" style="margin:0">loading…</div>
+                </div>
+                <div class="sub">by earn date · newest days still filling in at the venue</div>
+            </div>
             <div class="card wide">
                 <div class="label">Lifetime</div>
                 <div class="value skel" id="vTotal">—</div>
@@ -459,6 +470,40 @@
                 // a partial or invented figure on a money surface.
                 led.innerHTML = '<div class="sub" style="margin:0">'
                     + 'venue ledger unreachable — retrying</div>';
+            }
+            // RENT BY DAY — the daily "did we get rent?" answer, off the
+            // ledger. Unposted day = say so; a pending slice gets its own
+            // tag so paid-vs-still-computing is visible at a glance.
+            const rdEl = document.getElementById('rentDays');
+            if (rdEl) {
+                const rds = st && st.rent_days;
+                if (rds && rds.length) {
+                    const dn = iso => new Date(iso + 'T12:00:00')
+                        .toLocaleDateString('en-US',
+                            { weekday: 'short', month: 'short', day: 'numeric' });
+                    rdEl.innerHTML = rds.map(r => {
+                        const posted = r.paid !== null || r.pending !== null;
+                        let right;
+                        if (!posted) {
+                            right = '<span class="rnum" style="color:#8b93a7;'
+                                + 'font-size:.85em">not posted yet</span>';
+                        } else {
+                            const tot = (r.paid || 0) + (r.pending || 0);
+                            right = '<span class="rnum pos">' + money(tot)
+                                + '</span>'
+                                + (r.pending > 0
+                                    ? ' <span class="tag">$'
+                                      + r.pending.toFixed(2) + ' pending</span>'
+                                    : '');
+                        }
+                        return '<div class="erow" style="padding:9px 0 8px">'
+                            + '<div class="etop"><span class="rlbl">' + dn(r.d)
+                            + '</span><span>' + right + '</span></div></div>';
+                    }).join('');
+                } else {
+                    rdEl.innerHTML = '<div class="sub" style="margin:0">'
+                        + 'ledger unreachable — retrying</div>';
+                }
             }
             // Remediation / promo credits are NOT liquidity earnings —
             // they were inflating this card ~4x before the split.

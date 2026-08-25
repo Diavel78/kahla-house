@@ -1706,6 +1706,37 @@ def _pnl_stack(sb) -> dict | None:
         out["ytd"]["wd"] = round(wd, 2)
     except Exception:
         pass                      # no flows -> the page keeps settle-basis
+    # RENT BY DAY (user, Aug 25 2026: "I ask this every day, lol") — the
+    # last 5 earn-days with the paid/pending split, straight off the
+    # ledger. A day with no rows is None (the venue posts earn-days ~a
+    # day behind; "not posted yet" must render as a dash, never $0.00).
+    try:
+        since5 = (today - timedelta(days=5)).isoformat()
+        rows = (sb.table("poly_incentive_earnings")
+                .select("earn_date,status,reward")
+                .gte("earn_date", since5).limit(1000).execute().data) or []
+        agg: dict = {}
+        for r in rows:
+            st = str(r.get("status") or "").upper()
+            if st == "SKIPPED":
+                continue
+            d = str(r.get("earn_date") or "")[:10]
+            if not d:
+                continue
+            a = agg.setdefault(d, {"paid": 0.0, "pending": 0.0})
+            a["pending" if st == "PENDING" else "paid"] += (
+                _safe_float(r.get("reward")) or 0.0)
+        days = []
+        for i in range(5):
+            d = (today - timedelta(days=i)).isoformat()
+            a = agg.get(d)
+            days.append({"d": d,
+                         "paid": None if a is None else round(a["paid"], 2),
+                         "pending": (None if a is None
+                                     else round(a["pending"], 2))})
+        out["rent_days"] = days
+    except Exception:
+        pass                      # widget hides; the stack stays whole
     return out
 
 
