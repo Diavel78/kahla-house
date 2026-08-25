@@ -43,6 +43,75 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32))
 
 # ---------------------------------------------------------------------------
+# Firestore path-template shim -- the Aug 25 2026 outage
+# ---------------------------------------------------------------------------
+# Every Firestore read failed with:
+#     InvalidArgument: 400 Invalid database id %28default%29
+# %28default%29 is `(default)` percent-encoded.
+#
+# CAUSE (bisected against the real wheels, not guessed): google-api-core
+# 2.35.0 added `urllib.parse.quote(val, safe="/")` inside
+# `path_template.expand()`. Firestore's BaseClient._database_string builds
+# its database path with exactly that call:
+#     expand("projects/{project}/databases/{database}", database="(default)")
+#   api-core 2.34.0 -> projects/<p>/databases/(default)      works
+#   api-core 2.35.0 -> projects/<p>/databases/%28default%29  REJECTED
+# That string is the `parent` on every request, so the whole app's auth
+# died. api-core is a TRANSITIVE dep and requirements.txt pinned nothing,
+# so a routine Vercel rebuild took production down with no code change.
+#
+# The real fix is the `google-api-core<2.35.0` pin in requirements.txt.
+# This shim is BELT-AND-BRACES for the case where the pin is lost (a
+# resolver bump, someone loosening it, a stale build cache): it restores
+# the parens as safe characters so the database id survives expansion.
+#
+# Two earlier attempts are recorded so nobody retries them: pinning
+# google-cloud-firestore did nothing (2.28.1 failed identically), and
+# patching gapic_v1.routing_header did nothing either (the header was a
+# red herring -- verified live, header clean, read still failed). The
+# encoding is in path_template, and only there.
+#
+# Narrow + self-checking: if expand() no longer encodes, it reports
+# "not needed" and patches nothing; any import/shape change downgrades to
+# a no-op rather than breaking boot. Safe to delete once every supported
+# api-core leaves the parens alone -- confirm with /api/firebase-probe.
+def _patch_firestore_path_template() -> str:
+    try:
+        import urllib.parse
+        from google.api_core import path_template as _pt
+    except Exception as e:
+        return f"skipped: import failed ({type(e).__name__})"
+    try:
+        tmpl = "projects/{project}/databases/{database}"
+        if "%28" not in _pt.expand(tmpl, project="p", database="(default)"):
+            return "not needed: expand leaves parens literal"
+
+        _orig_quote = urllib.parse.quote
+
+        def _quote_keep_parens(string, safe="/", *a, **kw):
+            # Only widen the safe set; never change anything else about
+            # the caller's quoting.
+            if isinstance(safe, str) and "(" not in safe:
+                safe = safe + "()"
+            return _orig_quote(string, safe, *a, **kw)
+
+        # Patch the name inside path_template's namespace ONLY -- never
+        # urllib globally, which would reach unrelated callers.
+        if getattr(_pt, "urllib", None) is not None:
+            _pt.urllib = type(
+                "_UrllibShim", (), {"parse": type(
+                    "_ParseShim", (), {"quote": staticmethod(_quote_keep_parens)})()}
+            )()
+        after = _pt.expand(tmpl, project="p", database="(default)")
+        return "patched" if "%28" not in after else "FAILED: still encoded"
+    except Exception as e:
+        return f"skipped: {type(e).__name__}: {e}"
+
+
+_PATH_TEMPLATE_PATCH = _patch_firestore_path_template()
+
+
+# ---------------------------------------------------------------------------
 # Firebase Admin SDK init
 # ---------------------------------------------------------------------------
 _firebase_app = None
@@ -50,21 +119,38 @@ _firestore_client = None
 
 
 def _init_firebase():
+    """Initialise the Admin SDK app + Firestore client (idempotent).
+
+    LANDMINE: the guard is on `_firestore_client`, NOT `_firebase_app`.
+    `firestore.client()` can raise *after* `initialize_app()` succeeded --
+    and the old guard (`if _firebase_app is not None: return`) then made
+    that permanent: the app was set, so every later call short-circuited
+    and `get_db()` handed back a None client forever. The whole container
+    then answered every Firebase-authed request with
+    `Database error: 'NoneType' object has no attribute 'collection'`,
+    which the page gates read as "not authorized" and bounced home.
+    Re-entering here lets a transient client build heal on the next call.
+    """
     global _firebase_app, _firestore_client
-    if _firebase_app is not None:
+    if _firestore_client is not None:
         return
-    sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT", "")
-    if sa_json:
-        try:
-            sa_dict = json.loads(sa_json)
-            cred = credentials.Certificate(sa_dict)
-            _firebase_app = firebase_admin.initialize_app(cred)
-        except Exception as e:
-            print(f"Firebase init error: {e}")
+    if _firebase_app is None:
+        sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT", "")
+        if sa_json:
+            try:
+                sa_dict = json.loads(sa_json)
+                cred = credentials.Certificate(sa_dict)
+                _firebase_app = firebase_admin.initialize_app(cred)
+            except ValueError:
+                # Already initialised on this container (re-entry after a
+                # failed firestore.client()) -- reuse rather than crash.
+                _firebase_app = firebase_admin.get_app()
+            except Exception as e:
+                print(f"Firebase init error: {e}")
+                _firebase_app = firebase_admin.initialize_app()
+        else:
+            # Fall back to default credentials (local dev with GOOGLE_APPLICATION_CREDENTIALS)
             _firebase_app = firebase_admin.initialize_app()
-    else:
-        # Fall back to default credentials (local dev with GOOGLE_APPLICATION_CREDENTIALS)
-        _firebase_app = firebase_admin.initialize_app()
     _firestore_client = firestore.client()
 
 
@@ -1620,7 +1706,49 @@ def _pnl_stack(sb) -> dict | None:
         out["ytd"]["wd"] = round(wd, 2)
     except Exception:
         pass                      # no flows -> the page keeps settle-basis
+    try:
+        out["rent_days"] = _rent_days_recent(sb)
+    except Exception:
+        pass                      # widget hides; the stack stays whole
     return out
+
+
+def _rent_days_recent(sb, n_days: int = 5) -> list:
+    """RENT BY DAY (user, Aug 25 2026: "I ask this every day, lol") — the
+    last N earn-days with the paid/pending split, straight off the
+    ledger. A day with no rows is None (the venue posts earn-days ~a
+    day behind; "not posted yet" must render as a dash, never $0.00).
+    Own helper because the cached pnl_stack is computed by the BOX —
+    frozen code through Aug 27 — so /api/data patches this key into a
+    cached stack that predates it."""
+    az = ZoneInfo("America/Phoenix")
+    today = datetime.now(timezone.utc).astimezone(az).date()
+    since = (today - timedelta(days=n_days)).isoformat()
+    rows = (sb.table("poly_incentive_earnings")
+            .select("earn_date,status,reward")
+            .gte("earn_date", since).limit(1000).execute().data) or []
+    agg: dict = {}
+    for r in rows:
+        st = str(r.get("status") or "").upper()
+        if st == "SKIPPED":
+            continue
+        d = str(r.get("earn_date") or "")[:10]
+        if not d:
+            continue
+        a = agg.setdefault(d, {"paid": 0.0, "pending": 0.0})
+        a["pending" if st == "PENDING" else "paid"] += (
+            _safe_float(r.get("reward")) or 0.0)
+    days = []
+    # Starting with YESTERDAY (user, Aug 25): today's earn-day is never
+    # posted while the day is still being played — an all-dash row.
+    for i in range(1, n_days + 1):
+        d = (today - timedelta(days=i)).isoformat()
+        a = agg.get(d)
+        days.append({"d": d,
+                     "paid": None if a is None else round(a["paid"], 2),
+                     "pending": (None if a is None
+                                 else round(a["pending"], 2))})
+    return days
 
 
 def _gameday_rewards(sb) -> dict:
@@ -1817,6 +1945,12 @@ def api_poly_orders():
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
     want_slug = (request.args.get("slug") or "").strip().lower()
+    # all=1: include TERMINAL states (REJECTED/CANCELED/EXPIRED...). Added
+    # Aug 23 2026 chasing 19 football creates that returned real ids and
+    # were gone minutes later — REJECTED (async post-only, peg crossed)
+    # and CANCELED (venue killed a resting order) need different fixes,
+    # and only the terminal state can say which. Read-only either way.
+    want_all = (request.args.get("all") or "") in ("1", "true", "yes")
     out: dict = {"ok": True, "orders": [], "count": 0}
     try:
         client = get_client()
@@ -1829,7 +1963,7 @@ def api_poly_orders():
                 return (_o.get(k, d) if isinstance(_o, dict)
                         else getattr(_o, k, d))
             st = str(_og("state") or "")
-            if st not in _OPEN_ORDER_STATES:
+            if st not in _OPEN_ORDER_STATES and not want_all:
                 continue
             sl = str(_og("marketSlug") or "")
             if want_slug and want_slug not in sl.lower():
@@ -2239,21 +2373,40 @@ def _dash_cache_refresh(sb, client) -> dict:
         # is honest, a zero from a failed read is not.
         order_count = None
         order_err = None
+        # ⚠ RATE-LIMIT DISCIPLINE (Aug 22 2026, caught within the hour of
+        # the every-tick refresh): stacking the orders read onto every
+        # minute's refresh drew a Cloudflare RateLimitError and the strip
+        # dashed. Read orders every 3rd minute only, and CARRY FORWARD the
+        # last good count between reads and across failures — a count a
+        # couple minutes old is truth; a dash for a rate limit is noise.
+        # (The dedup-orders lesson: never let call volume creep up on the
+        # venue.)
+        _prev_oc = None
         try:
-            _resp = client.orders.list()
-            _raw = (_resp.get("orders") if isinstance(_resp, dict)
-                    else getattr(_resp, "orders", None)) or []
+            _pr = (sb.table("poly_dash_cache").select("order_count")
+                   .eq("id", 1).limit(1).execute().data) or []
+            _prev_oc = _pr[0].get("order_count") if _pr else None
+        except Exception:
+            pass
+        if datetime.now(timezone.utc).minute % 3:
+            order_count = _prev_oc            # off-minute: carry forward
+        else:
+            try:
+                _resp = client.orders.list()
+                _raw = (_resp.get("orders") if isinstance(_resp, dict)
+                        else getattr(_resp, "orders", None)) or []
 
-            def _ostate(o):
-                return ((o.get("state") if isinstance(o, dict)
-                         else getattr(o, "state", "")) or "")
+                def _ostate(o):
+                    return ((o.get("state") if isinstance(o, dict)
+                             else getattr(o, "state", "")) or "")
 
-            order_count = sum(1 for o in _raw
-                              if _ostate(o) in _OPEN_ORDER_STATES)
-        except Exception as e:
-            # The dash renders order_count=null as a red dot — record WHY
-            # so a persistent dash is diagnosable from the row itself.
-            order_err = f"{type(e).__name__}: {e}"[:140]
+                order_count = sum(1 for o in _raw
+                                  if _ostate(o) in _OPEN_ORDER_STATES)
+            except Exception as e:
+                # Carry the last good count; record WHY the fresh read
+                # failed so a persistent problem is diagnosable.
+                order_count = _prev_oc
+                order_err = f"{type(e).__name__}: {e}"[:140]
         (sb.table("poly_dash_cache").upsert({
             "id": 1, "summary": summary,
             "derived": _dash_derived(sb),
@@ -3173,6 +3326,103 @@ def api_me():
         "odds_access": bool(g.user_data.get("odds_access")) or role == "admin",
         "grocery_access": bool(g.user_data.get("grocery_access")) or role == "admin",
     })
+
+
+@app.route("/api/firebase-probe")
+def api_firebase_probe():
+    """Why is every Firebase-authed request failing? (shared-secret, read-only)
+
+    `/api/me` can only answer 500 from ONE place: the Firestore user-doc
+    read raising inside `firebase_auth_required`. The exception text goes
+    into the response body -- which only a logged-in browser ever sees,
+    and the page gates swallow it by redirecting home. This reproduces
+    that exact read from a shared-secret route so the string is reachable
+    from a session via the site-curl bridge.
+
+    Reports which credential env is present (NEVER the value), the
+    service account's project/client identity, whether the SDK inits,
+    whether a real Firestore read completes, and the installed versions
+    of the SDK + its gRPC transport (unpinned in requirements.txt, so a
+    dependency bump is a live suspect for a break with no code change).
+    """
+    import traceback
+
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+
+    out: dict = {"ok": True}
+
+    # --- credential presence + identity (no secret values echoed) --------
+    sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT", "")
+    out["service_account_env_set"] = bool(sa_json)
+    out["service_account_len"] = len(sa_json)
+    if sa_json:
+        try:
+            sa = json.loads(sa_json)
+            out["service_account"] = {
+                "project_id": sa.get("project_id"),
+                "client_email": sa.get("client_email"),
+                "type": sa.get("type"),
+                "has_private_key": bool(sa.get("private_key")),
+            }
+        except Exception as e:
+            out["service_account_parse_error"] = f"{type(e).__name__}: {e}"
+
+    # --- installed versions (dependency drift is the no-code-change cause)
+    vers = {}
+    for mod in ("firebase_admin", "google.cloud.firestore", "grpc", "google.auth"):
+        try:
+            m = __import__(mod, fromlist=["__version__"])
+            vers[mod] = getattr(m, "__version__", "unknown")
+        except Exception as e:
+            vers[mod] = f"IMPORT FAILED: {type(e).__name__}: {e}"
+    out["versions"] = vers
+    try:
+        import google.api_core as _ac
+        out["versions"]["google.api_core"] = getattr(_ac, "__version__", "unknown")
+    except Exception:
+        pass
+    out["path_template_patch"] = _PATH_TEMPLATE_PATCH
+    try:
+        from google.api_core import path_template as _pt
+        out["database_string_sample"] = _pt.expand(
+            "projects/{project}/databases/{database}",
+            project="p", database="(default)")
+    except Exception as e:
+        out["database_string_sample"] = f"{type(e).__name__}: {e}"
+    try:
+        from google.api_core.gapic_v1 import routing_header as _rh
+        out["routing_header_sample"] = _rh.to_routing_header(
+            (("parent", "projects/p/databases/(default)/documents"),))
+    except Exception as e:
+        out["routing_header_sample"] = f"{type(e).__name__}: {e}"
+
+    # --- init ------------------------------------------------------------
+    try:
+        _init_firebase()
+        out["init"] = "ok"
+        out["client_is_none"] = _firestore_client is None
+    except Exception as e:
+        out["init"] = f"{type(e).__name__}: {e}"
+        out["traceback"] = traceback.format_exc()[-2000:]
+        return jsonify(out)
+
+    # --- the actual read that /api/me performs ---------------------------
+    try:
+        db = get_db()
+        out["db_is_none"] = db is None
+        t0 = _time.time()
+        docs = list(db.collection("users").limit(1).stream())
+        out["read"] = "ok"
+        out["read_ms"] = int((_time.time() - t0) * 1000)
+        out["users_doc_found"] = len(docs)
+    except Exception as e:
+        out["read"] = f"{type(e).__name__}: {e}"
+        out["traceback"] = traceback.format_exc()[-3000:]
+
+    return jsonify(out)
 
 
 # ---------------------------------------------------------------------------
@@ -4469,7 +4719,12 @@ _PM_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF", "UFC"]
 # invisible until Tuesday while its lines drifted off camp news /
 # weigh-ins — the very drift the early window exists to capture. UFC is
 # a weekly card sport like NFL; watch it the full week.
-_PM_WINDOW_H = {"MLB": 36, "NBA": 96, "NHL": 96, "NFL": 168, "NCAAF": 72,
+# NFL 168h→504h (Aug 22 2026, pre-box-freeze): Week-1 props can list any
+# day now and NFL prop EARLY rent pays from listing — a 7-day watch would
+# have kept the whole slate off the tape (and the fbprop lane blind)
+# until Sep 3. 21 days adds ~16 games to the budgeted rotation; the
+# near-game priority tier keeps in-prime freshness safe.
+_PM_WINDOW_H = {"MLB": 36, "NBA": 96, "NHL": 96, "NFL": 504, "NCAAF": 72,
                 "UFC": 168}
 _KALSHI_CACHE: dict[str, tuple[float, dict]] = {}
 _KALSHI_TTL = 30  # seconds
@@ -8859,6 +9114,121 @@ def api_poly_cancel_ou():
     return jsonify(out)
 
 
+@app.route("/api/polymarket/manual-order", methods=["POST"])
+@admin_required
+def api_poly_manual_order():
+    """MANUAL bet from the website (user, Aug 22 2026: "Ya know what
+    would be handy??? If there was a way for me to manually bet on a
+    game via my website!").
+
+    Places a REAL post-only Polymarket order under the MANUAL order
+    indicator — the same flag the venue's own app uses — so every
+    machine sweep (dedup, topup, cancel-*, re-peg) is structurally
+    blind to it: hand bets are never touched by automation, exactly as
+    the AUTOMATIC-gated sweeps were designed. Admin-gated via Firebase
+    (this is a human on the site, not a cron).
+
+    body: {slug, synthetic, price_c, contracts, event_start,
+           preview: true|false}
+    preview=true returns the side's live book + a suggested peg and
+    places nothing. Rails on placement: half-cent price grid, must not
+    cross the book (post-only would reject anyway — fail loud instead),
+    contracts 1-250, cost ≤ $500 fat-finger cap, GTD = kickoff (a
+    pre-game bet must not rest into the live game). The RENT RULE does
+    not gate this: it governs COMPUTER bets; a human clicking a button
+    is the human's own call."""
+    body = request.get_json(silent=True) or {}
+    slug = str(body.get("slug") or "").strip()
+    synthetic = bool(body.get("synthetic"))
+    if not slug:
+        return jsonify({"ok": False, "error": "slug required"}), 400
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    book = _pmm_book(client, slug)
+    if book is None:
+        return jsonify({"ok": False,
+                        "error": "book unreadable — try again"}), 503
+    # our-side view: a synthetic NO side reads the inverted ladder
+    if synthetic:
+        s_bid = (100 - book["best_ask"]) if book["best_ask"] is not None else None
+        s_ask = (100 - book["best_bid"]) if book["best_bid"] is not None else None
+    else:
+        s_bid, s_ask = book["best_bid"], book["best_ask"]
+    if body.get("preview"):
+        sugg = (float(int(s_bid)) + 1.0) if s_bid is not None else None
+        if (sugg is not None and s_ask is not None and sugg >= s_ask
+                and s_bid is not None):
+            sugg = s_bid                 # one-tick book — join, don't cross
+        return jsonify({"ok": True, "preview": True, "slug": slug,
+                        "side_bid_c": s_bid, "side_ask_c": s_ask,
+                        "suggest_c": sugg})
+    try:
+        price_c = float(body.get("price_c"))
+        contracts = int(body.get("contracts"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "price_c and contracts "
+                        "must be numbers"}), 400
+    if abs(price_c * 2 - round(price_c * 2)) > 1e-6:
+        return jsonify({"ok": False,
+                        "error": "price must be on the half-cent grid"}), 400
+    if not (1.0 <= price_c <= 99.0):
+        return jsonify({"ok": False, "error": "price must be 1-99¢"}), 400
+    if not (1 <= contracts <= 250):
+        return jsonify({"ok": False, "error": "contracts must be 1-250"}), 400
+    cost = contracts * price_c / 100.0
+    if cost > 500.0:
+        return jsonify({"ok": False, "error": f"cost ${cost:.2f} over the "
+                        "$500 fat-finger cap"}), 400
+    if s_ask is not None and price_c >= s_ask:
+        return jsonify({"ok": False, "error": f"{price_c:g}¢ crosses the "
+                        f"{s_ask:g}¢ ask — post-only would reject; bid "
+                        "below the ask"}), 400
+    try:
+        dt = datetime.fromisoformat(
+            str(body.get("event_start")).replace("Z", "+00:00"))
+        gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return jsonify({"ok": False,
+                        "error": "event_start (ISO) required — orders "
+                        "expire at kickoff"}), 400
+    canon = (100.0 - price_c) / 100.0 if synthetic else price_c / 100.0
+    params = {"marketSlug": slug,
+              "intent": ("ORDER_INTENT_BUY_SHORT" if synthetic
+                         else "ORDER_INTENT_BUY_LONG"),
+              "type": "ORDER_TYPE_LIMIT",
+              "price": {"value": f"{canon:.3f}", "currency": "USD"},
+              "quantity": contracts,
+              "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
+              "participateDontInitiate": True,
+              "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_MANUAL"}
+    try:
+        cr = client.orders.create(params)
+        oid = (cr.get("id") if isinstance(cr, dict)
+               else getattr(cr, "id", None))
+    except Exception as e:
+        return jsonify({"ok": False,
+                        "error": f"create failed: {e}"[:200]}), 502
+    # orders.list is the only truthful read (retrieve 404s on live
+    # orders — the probe-proven landmine). Post-only rejections show up
+    # here as a missing/rejected order rather than a resting one.
+    state = None
+    try:
+        for o in (_pmm_open_orders_raw(client) or []):
+            if o.get("id") == oid:
+                state = o.get("state")
+                break
+    except Exception:
+        pass
+    _probe_log({"manual_order": True, "slug": slug, "price_c": price_c,
+                "contracts": contracts, "synthetic": synthetic,
+                "order_id": oid, "state": state})
+    return jsonify({"ok": True, "order_id": oid, "state": state,
+                    "resting": state in _OPEN_ORDER_STATES,
+                    "cost": round(cost, 2)})
+
+
 @app.route("/api/polymarket/cancel-gridiron")
 def api_poly_cancel_gridiron():
     """Cancel every RESTING, UNFILLED football (gridiron_autobet) buy and
@@ -8955,6 +9325,99 @@ def api_poly_cancel_gridiron():
             f"order(s) placed on wrong ladder rungs (anchorless "
             f"best_line_for); {out['picks_removed']} book row(s) removed. "
             f"The fixed selector re-bets the real lines.")
+    _probe_log(out)
+    return jsonify(out)
+
+
+@app.route("/api/polymarket/cancel-fam")
+def api_poly_cancel_fam():
+    """Cancel every RESTING, UNFILLED prop buy of ONE whiff family and
+    remove its book row once the venue confirms nothing filled.
+
+    Built for the K kill (user, Aug 22 2026: "Kill K's immediately,
+    cancel any K open bets" — weekend review: 48-60, −$27.05 bets,
+    $0.32 rent). ?fam= one of k/outs/ha/wa (the slug family token).
+    Same gates as cancel-gridiron: BUY intent, AUTOMATIC flag, slug
+    belongs to one of OUR pending whiff_autobet picks, and the slug
+    carries this family's token. Pick rows are deleted only after a
+    live cancel AND a venue positions read showing zero holding — a
+    filled position is a position; it stays and grades out.
+    Shared-secret + `&dry=1`."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    fam = (request.args.get("fam") or "").strip().lower()
+    if fam not in ("k", "outs", "ha", "wa"):
+        return jsonify({"ok": False, "error": "fam must be k/outs/ha/wa"}), 400
+    tok = f"-{fam}-"
+    dry = request.args.get("dry") == "1"
+    try:
+        sb, client = get_supabase(), get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    owner = _kalshi_owner_uid()
+    if not owner:
+        return jsonify({"ok": False, "error": "no owner uid"}), 500
+    mine: dict = {}
+    try:
+        rows = (sb.table("bot_picks").select("id,event_name,signal_blob")
+                .eq("asked_by", owner).eq("status", "pending")
+                .eq("market_type", "prop").limit(500).execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"picks: {e}"}), 500
+    for r in rows:
+        b = r.get("signal_blob") or {}
+        if b.get("source") != "whiff_autobet":
+            continue
+        slug = b.get("pmm_slug") or ""
+        if slug and tok in slug:
+            mine[slug] = {"pick_id": r["id"], "game": r.get("event_name")}
+    out = {"ok": True, "dry": dry, "fam": fam, "fam_pending": len(mine),
+           "canceled": 0, "picks_removed": 0, "orders": []}
+    if not mine:
+        return jsonify(out)
+    orders = _pmm_open_orders_raw(client)
+    if orders is None:
+        return jsonify({"ok": False, "error": "venue read failed"}), 503
+    for o in orders:
+        if "BUY" not in (o.get("intent") or ""):
+            continue
+        if not o.get("auto") or o.get("slug") not in mine:
+            continue
+        m = mine[o["slug"]]
+        rec = {"slug": o.get("slug"), "game": m["game"],
+               "price_yes_c": (round(o["price_yes"] * 100, 1)
+                               if o.get("price_yes") is not None else None),
+               "qty": o.get("qty"), "filled": o.get("cum"),
+               "state": o.get("state")}
+        if dry:
+            out["orders"].append(rec)
+            continue
+        try:
+            client.orders.cancel(o["id"], {"marketSlug": o["slug"]})
+            rec["canceled"] = True
+            out["canceled"] += 1
+        except Exception as e:
+            rec["error"] = f"{type(e).__name__}: {e}"[:120]
+            out["orders"].append(rec)
+            continue
+        pos = _pmm_positions_raw(client)
+        held = True if pos is None else (o["slug"] in pos)
+        if not held:
+            try:
+                sb.table("bot_picks").delete().eq(
+                    "id", m["pick_id"]).execute()
+                rec["pick_removed"] = True
+                out["picks_removed"] += 1
+            except Exception as e:
+                rec["pick_error"] = f"{type(e).__name__}: {e}"[:120]
+        out["orders"].append(rec)
+    if out["canceled"]:
+        _send_fill_telegram(
+            f"🛑 {fam.upper()} LANE KILLED — canceled {out['canceled']} "
+            f"resting order(s), {out['picks_removed']} unfilled book "
+            f"row(s) removed. Filled positions ride to resolution.")
     _probe_log(out)
     return jsonify(out)
 
@@ -11200,6 +11663,23 @@ WHIFF_AUTOBET_MAX_BETS = 10000    # CAP KILLED Aug 5 ~11pm AZ (user: "kill
                                   # cliff, one bet per pitcher across the
                                   # K+outs ladders. Counter machinery
                                   # survives for a future re-cap.
+# K LANE KILLED (user, Aug 22 2026: "Kill K's immediately"). The weekend
+# review's verdict on the full current regime (Aug 13-22): 122 bets,
+# 48-60, −$27.05 — and joining the touch means it never rests, so it
+# earned $0.32 of rent on the whole run: the lane's Rule-1 reason to
+# exist was gone by construction. Both live K configs lost (peg-behind
+# 29.3%, join-touch 44%) while the backtest edge is real at every rung —
+# an execution puzzle to solve on paper. SHADOWS KEEP LOGGING (the
+# forward dataset); only bet candidates are filtered.
+#
+# "ha" KILLED Aug 24 2026 (user: "Kill hits. it's not paying any rent").
+# Week of Aug 18-24, venue truth: 4W/15, -$36.07 bets, $0.43 rent. The
+# bar the user set: a lane with no rent program must be a profitable
+# betting machine on its own — hits was neither. walks/outs pass that
+# same bar (+$17 / +$27 the same week) and keep their seats. Until the
+# Thursday box pull, the box-side stop is the ha_m/ha_s strip from
+# whiff_iq_snapshot (re-applied by the daily check after each rebuild).
+_WHIFF_FAM_KILLED = {"k", "ha"}
 _WHIFF_BET_MIN_PP = 4.0
 _WHIFF_BET_MAX_PP = 10.0          # the claimed-edge cliff (3rd-time rule:
                                   # NRFI clamp / Fight IQ 0-3 past 15pp /
@@ -11421,6 +11901,240 @@ def _pstat_tail_p(snap: dict, pitcher: str, line: float, asof,
     return tail, w
 
 
+_FBPROP_CONF_CACHE: dict = {}     # 5-min cached fbprop_config row
+_FBPROP_SNAP_CACHE: dict = {}     # 10-min cached football_props_snapshot
+
+
+def _fbprop_config(sb) -> dict:
+    """fbprop_config row id=1 — THE REMOTE CONTROL for the NFL props
+    lane (built Aug 22 2026, the hour before a 6-day box freeze). The
+    box polls this every tick, so the lane's capture patterns, stake,
+    cap and master switch are all editable via run_sql.sh while the box
+    cannot take a deploy. Dormant default: enabled=false, no patterns."""
+    now_ts = _time.time()
+    c = _FBPROP_CONF_CACHE.get("v")
+    if c is not None and now_ts - _FBPROP_CONF_CACHE.get("ts", 0) < 300:
+        return c
+    conf: dict = {}
+    try:
+        rows = (sb.table("fbprop_config").select("config")
+                .eq("id", 1).limit(1).execute().data) or []
+        if rows:
+            conf = rows[0].get("config") or {}
+    except Exception:
+        conf = c or {}
+    _FBPROP_CONF_CACHE.update(v=conf, ts=now_ts)
+    return conf
+
+
+def _fbprop_snapshot():
+    """football_props_snapshot state, 10-min cached. None when absent."""
+    now_ts = _time.time()
+    c = _FBPROP_SNAP_CACHE.get("v")
+    if c is not None and now_ts - _FBPROP_SNAP_CACHE.get("ts", 0) < 600:
+        return c or None
+    snap = None
+    try:
+        rows = (get_supabase().table("football_props_snapshot")
+                .select("state").eq("id", 1).limit(1).execute().data) or []
+        if rows:
+            snap = rows[0].get("state")
+    except Exception:
+        snap = None
+    _FBPROP_SNAP_CACHE.update(v=snap or {}, ts=now_ts)
+    return snap
+
+
+def _fbprop_tail_p(snap, name, line, fam):
+    """P(player goes OVER `line`) for one football prop family.
+
+    MIRRORS compute_football_props.py / backtest_football_props.py (the
+    gate-1-passed model) — decay-weighted player mean/SD (126d half
+    life), shrunk `shrink_games` toward the usage-floored league prior,
+    normal tail. Also enforces the model's own ELIGIBILITY rule from
+    the snapshot rows: trailing-5 usage must clear the family floor
+    (prior-games only — a player who lost his role prices as None, not
+    as his stale form). Returns (p_over, n_games) or None."""
+    if not snap:
+        return None
+    fams = snap.get("fams") or {}
+    fc = fams.get(fam)
+    lg = (snap.get("lg") or {}).get(fam)
+    pl = (snap.get("players") or {}).get(name)
+    if not (fc and lg and pl):
+        return None
+    cols = snap.get("stat_cols") or []
+    try:
+        si = cols.index(fc["stat"]) + 1     # +1: games rows are [date, *stats]
+        ui = cols.index(fc["use"]) + 1
+        floor = float(fc["floor"])
+        hl = float(snap.get("half_life_days") or 126.0)
+        k = float(snap.get("shrink_games") or 5.0)
+        games = [g for g in (pl.get("games") or []) if g[si] is not None]
+        if len(games) < int(snap.get("min_prior") or 3):
+            return None
+        recent = games[-5:]
+        uses = [g[ui] for g in recent if g[ui] is not None]
+        if not uses or sum(uses) / len(recent) < floor:
+            return None                     # role gone — no number
+        asof = datetime.now(timezone.utc).date()
+        w, vals = [], []
+        for g in games:
+            d = datetime.fromisoformat(str(g[0])[:10]).date()
+            w.append(0.5 ** (max((asof - d).days, 0) / hl))
+            vals.append(float(g[si]))
+        W = sum(w)
+        mu_p = sum(wi * v for wi, v in zip(w, vals)) / W
+        var_p = sum(wi * (v - mu_p) ** 2 for wi, v in zip(w, vals)) / W
+        mu = (W * mu_p + k * float(lg["m"])) / (W + k)
+        var = (W * var_p + k * float(lg["v"])) / (W + k)
+        sd = math.sqrt(max(var, 1.0))
+        z = (float(line) - mu) / sd
+        p = 1.0 - 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+        return min(max(p, 0.01), 0.99), len(games)
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+
+
+def _fbprop_pass(sb, prop_rows, all_games, now) -> dict:
+    """NFL props AUTO-BET pass — dormant until fbprop_config arms it.
+
+    Rides the pm-snapshot tick beside the whiff pass. For each captured
+    football prop whose question matches a CONFIG pattern (patterns are
+    DATA, written from real captures — blind shape-guessing on the money
+    path failed twice on Aug 22 alone): price via _fbprop_tail_p, same
+    gate family as the pitcher props (4-10pp band with the claimed-edge
+    cliff, 25-60¢ entry, 0.30-0.70 trust zone), best edge per (game,
+    player) — a player's rungs are correlated, never stacked. NO day-of
+    wait: NFL prop EARLY rent is the largest early pool on the board
+    (Aug recon), and _rent_ok answers per-market at placement anyway.
+    ≤1 create per tick. v1 has no repeg chase and no paperlog shadow —
+    the tape's prop_snapshots rows + venue truth are the record until
+    the Thursday wire-up."""
+    st = {"fbp_eval": 0, "fbp_bets": 0}
+    try:
+        conf = _fbprop_config(sb)
+        pats = conf.get("fams") or []
+        if not conf.get("enabled") or not pats:
+            return st
+        snap = _fbprop_snapshot()
+        if not snap or not snap.get("players"):
+            return st
+        ginfo = {g["id"]: g for g in all_games}
+        fb_mids = {mid for mid, g in ginfo.items()
+                   if g.get("sport") in ("NFL", "NCAAF")}
+        if not fb_mids:
+            return st
+        compiled = []
+        for p in pats:
+            try:
+                compiled.append((p["fam"], re.compile(p["pattern"], re.I)))
+            except (re.error, KeyError, TypeError):
+                continue                    # a bad pattern is a no-op
+        if not compiled:
+            return st
+        best: dict = {}                     # (mid, player) -> candidate
+        for r in prop_rows:
+            mid, _v, pk, q, _pt, _ln, cents, bid_c, ask_c = r
+            if mid not in fb_mids or cents is None:
+                continue
+            for fam, cre in compiled:
+                m = cre.search(q or "")
+                if not m:
+                    continue
+                try:
+                    name = (m.group("name") or "").strip()
+                except (IndexError, TypeError):
+                    continue
+                # THE LINE COMES FROM PMM'S STRUCTURED FIELD, never from
+                # text alone. The venue phrases these "at least N" (= over
+                # N−0.5, the MLB families' proven convention); when the
+                # pattern also captured N, the two must agree or the row
+                # is skipped — a misparse must cost a missed bet, never a
+                # wrong one.
+                try:
+                    ln_s = float(_ln) if _ln is not None else None
+                except (TypeError, ValueError):
+                    ln_s = None
+                ln_q = None
+                try:
+                    if m.groupdict().get("line") is not None:
+                        ln_q = float(m.group("line")) - 0.5
+                except (TypeError, ValueError):
+                    ln_q = None
+                if (ln_s is not None and ln_q is not None
+                        and abs(ln_s - ln_q) > 0.51):
+                    continue
+                line = ln_s if ln_s is not None else ln_q
+                if line is None or not name:
+                    continue
+                got = _fbprop_tail_p(snap, name, line, fam)
+                if not got:
+                    continue
+                st["fbp_eval"] += 1
+                model_p, n_games = got
+                edge_yes = model_p * 100.0 - cents
+                side = "yes" if edge_yes > 0 else "no"
+                edge = abs(edge_yes)
+                side_c = cents if side == "yes" else 100 - cents
+                if not (_WHIFF_BET_MIN_PP <= edge <= _WHIFF_BET_MAX_PP
+                        and 25.0 <= side_c <= _WHIFF_MAX_ENTRY_C
+                        and _WHIFF_TRUST_LO <= model_p <= _WHIFF_TRUST_HI):
+                    continue
+                key = (mid, name)
+                if key not in best or edge > best[key][0]:
+                    best[key] = (edge, fam, pk, q, name, line, side,
+                                 side_c, model_p, bid_c, ask_c)
+                break                       # one family per question
+        if not best:
+            return st
+        placed = 0
+        for (mid, name), cand in sorted(best.items(),
+                                        key=lambda kv: -kv[1][0]):
+            if placed >= 1:                 # tick latency bound
+                break
+            edge, fam, pk, q, name2, line, side, side_c, model_p, \
+                bid_c, ask_c = cand
+            g = ginfo.get(mid) or {}
+            # one live bet per (game, player) — rungs/fams correlated
+            try:
+                have = (sb.table("bot_picks").select("id")
+                        .eq("market_id", mid).eq("status", "pending")
+                        .filter("signal_blob->fbprop->>player", "eq", name2)
+                        .limit(1).execute().data) or []
+            except Exception:
+                continue
+            if have:
+                continue
+            fair = model_p if side == "yes" else 1.0 - model_p
+            r = _autobet_execute(
+                sb, g, g.get("event_start"), "prop", side,
+                f"{name2} {fam} {line} {side.upper()}", pk,
+                side == "no", side_c, fair, edge, round(edge, 1),
+                bid_c, ask_c,
+                extra_blob={"fbprop_autobet": True,
+                            "fbprop": {"player": name2, "fam": fam,
+                                       "line": line, "q": q,
+                                       "model_p": round(model_p, 4)}},
+                cap_flag="fbprop_autobet",
+                cap_max=int(conf.get("max_bets") or 30),
+                query_text="auto-bet: football prop",
+                reason=(f"FBPROP AUTO-BET — {name2} {fam} "
+                        f"{'over' if side == 'yes' else 'under'} {line}, "
+                        f"model {round(fair * 100)}¢ vs "
+                        f"{round(side_c)}¢ entry → {round(edge, 1)}pp"),
+                skip_game_dedup=True,
+                contracts=int(conf.get("contracts") or 1),
+                entry_line=line,
+                sport=g.get("sport") or "NFL")
+            if r is True:
+                placed += 1
+                st["fbp_bets"] += 1
+    except Exception:
+        pass
+    return st
+
+
 def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
     """Price every K-prop captured this tick vs Whiff IQ; SHADOW-log the
     +EV side to pickbot_paperlog when |edge| >= _WHIFF_SHADOW_MIN_PP.
@@ -11502,7 +12216,8 @@ def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
             if (_WHIFF_BET_MIN_PP <= edge <= _WHIFF_BET_MAX_PP
                     and _WHIFF_MIN_ENTRY_C <= side_c <= _WHIFF_MAX_ENTRY_C
                     and _WHIFF_TRUST_LO <= model_p <= _WHIFF_TRUST_HI
-                    and n_starts >= _WHIFF_MIN_STARTS):
+                    and n_starts >= _WHIFF_MIN_STARTS
+                    and "k" not in _WHIFF_FAM_KILLED):
                 bet_cands.append((edge, mid, key, q, name, float(line),
                                   side, side_c,
                                   model_p if side == "yes" else 1 - model_p,
@@ -11564,7 +12279,8 @@ def _whiff_shadow_pass(sb, prop_rows, all_games, now) -> int:
                 if (_WHIFF_BET_MIN_PP <= edge <= _WHIFF_BET_MAX_PP
                         and _WHIFF_MIN_ENTRY_C <= side_c
                         <= _WHIFF_MAX_ENTRY_C
-                        and _WHIFF_TRUST_LO <= model_p <= _WHIFF_TRUST_HI):
+                        and _WHIFF_TRUST_LO <= model_p <= _WHIFF_TRUST_HI
+                        and fcode not in _WHIFF_FAM_KILLED):
                     bet_cands.append((edge, mid, key, q, name, float(line),
                                       side, side_c,
                                       model_p if side == "yes"
@@ -12315,6 +13031,9 @@ def api_pm_snapshot():
     props_inserted = _prop_insert_changed(sb, prop_rows, now)
     props_cleared = _prop_update_suggestions(sb, prop_rows, now)
     whiff_shadows = _whiff_shadow_pass(sb, prop_rows, all_games, now)
+    # NFL props lane — dormant until fbprop_config arms it (remote-
+    # controllable via SQL through the 6-day box freeze, Aug 22 2026).
+    fbprop = _fbprop_pass(sb, prop_rows, all_games, now)
     # Trade tape (whale flow) — ONE poll of the public tape, matched against
     # the same upcoming-games index this tick already built. ~1-2s of I/O.
     tt = _poly_trades_ingest(sb, all_games, now)
@@ -12322,7 +13041,8 @@ def api_pm_snapshot():
     return jsonify({"ok": True, "games": len(all_games), "inserted": inserted,
                     "props_inserted": props_inserted, "props_cleared": props_cleared,
                     "whiff_shadows": whiff_shadows, "trades": tt,
-                    "kalshi": kal_meta, "xconfirm_triggered": xc["triggered"], **st})
+                    "kalshi": kal_meta, "xconfirm_triggered": xc["triggered"],
+                    **fbprop, **st})
 
 
 # ───────────── VSiN splits snapshot (Circa + DK handle/bets time series) ─────
@@ -13180,7 +13900,15 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
                      bid_c, ask_c, extra_blob=None,
                      cap_flag="autobet", cap_max=None, query_text=None,
                      reason=None, skip_game_dedup=False,
-                     contracts=None, entry_line=None, sport=None):
+                     contracts=None, entry_line=None, sport=None,
+                     fail_tag=None):
+    # fail_tag: optional list — each silent `return False` names itself
+    # into it (Aug 23 2026: 26 gridiron executor refusals in a row were
+    # indistinguishable from the outside; five False paths, zero signal).
+    def _fail(t):
+        if isinstance(fail_tag, list):
+            fail_tag.append(t)
+        return False
     """Shared auto-bet placement: slate cap → never-double-a-game →
     Master Rule → post-only create (1 contract, GTD first pitch,
     AUTOMATIC) → pick insert (the cap counter — inserted the moment
@@ -13213,29 +13941,29 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
                                       - timedelta(hours=12)).isoformat())
                  .limit(cap + 1).execute().data) or []
     except Exception:
-        return False
+        return _fail("cap_q")
     if len(prior) >= cap:
         return "cap"        # slate full — CALLERS MUST NOT LATCH on this
     owner = _kalshi_owner_uid()
     if not owner:
-        return False
+        return _fail("owner")
     if not skip_game_dedup:
         try:
             mine = (sb.table("bot_picks").select("id")
                     .eq("market_id", g["id"]).eq("market_type", mt)
                     .eq("asked_by", owner).limit(1).execute().data) or []
         except Exception:
-            return False
+            return _fail("mine_q")
         if mine:
-            return False
+            return _fail("dedup")
     try:
         dt = datetime.fromisoformat(str(es).replace("Z", "+00:00"))
         gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception:
-        return False
+        return _fail("gtd")
     n_contracts = contracts if contracts else _AUTOBET_CONTRACTS
     if n_contracts * side_c / 100.0 > _REPEG_MAX_COST_USD:
-        return False                       # ⚠ THE MASTER RULE
+        return _fail("master6")            # ⚠ THE MASTER RULE
     canon = (100.0 - side_c) / 100.0 if synthetic else side_c / 100.0
     intent = ("ORDER_INTENT_BUY_SHORT" if synthetic
               else "ORDER_INTENT_BUY_LONG")
@@ -13255,7 +13983,7 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
         _send_fill_telegram(
             f"🤖 AUTO-BET FAILED — {g.get('event_name')} {side_lbl}: "
             f"create errored ({e})"[:280])
-        return False
+        return _fail(("create:" + f"{type(e).__name__}: {e}")[:90])
     entry_amer = _prob_to_amer_py(side_c / 100.0)
     blob = {cap_flag: True, "contracts": n_contracts,
             "order_id": new_oid, "pmm_slug": slug,
@@ -14754,6 +15482,17 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
                 or float(q["bid"]) <= 0):
             continue
         peg = float(int(float(q["bid"]) * 100.0)) + 1.0
+        # ONE-TICK BOOK → JOIN, don't jump (_peg_target's rule; this leg
+        # re-implemented the peg raw and missed it). On the tight books
+        # the venue re-provisioned Aug 23, floor(bid)+1 lands ON the ask,
+        # the post-only create is ACCEPTED with a real id and then
+        # async-REJECTED — 19 of 20 sweep bets died that way, invisible
+        # until the venue order list was read back. Joining the bid is
+        # post-only-safe at any book width.
+        _askc = (float(q["ask"]) * 100.0
+                 if q.get("ask") is not None else None)
+        if _askc is not None and peg >= _askc:
+            peg = float(q["bid"]) * 100.0
         if mt == "spread":
             lh = float(ln) if sn == "home" else -float(ln)
             ph = _gridiron_cover_p(pm, mg, lh)
@@ -14788,6 +15527,7 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
                            else -float(pblk["line"]))
     else:
         xb["total_p"] = round(ps, 4)
+    _ftag: list = []
     r = _autobet_execute(
         sb, g, es0, mt, sn, f"{sn} {pblk.get('line')}",
         pblk["slug"], bool(pblk.get("synthetic")),
@@ -14805,10 +15545,12 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
         contracts=(_GRIDIRON_CONTRACTS if mt == "spread"
                    else _GRIDIRON_TOTAL_CONTRACTS),
         entry_line=pblk.get("line"),
-        sport=g["sport"])
+        sport=g["sport"], fail_tag=_ftag)
     if r in ("cap", "rent"):
         return r
-    return "placed" if r is True else "failed"
+    if r is True:
+        return "placed"
+    return "failed:" + (_ftag[0] if _ftag else "?")
 
 
 _GRIDIRON_SWEEP_TS: dict = {}     # per-game last sweep-eval, in-memory
@@ -14887,8 +15629,62 @@ def _gridiron_bet_sweep(sb, now, deadline, stats):
                                       d, mt, gp)
                 if r == "placed":
                     stats["g_bets"] = stats.get("g_bets", 0) + 1
+                # Per-verdict tallies + a short per-game trace. Added the
+                # night 13 builds refused silently and the stats couldn't
+                # say which gate did it (rent was cleared at the venue, so
+                # the answer had to be edge/book — but proven, not argued).
+                if r:
+                    stats[f"gate_{r}"] = stats.get(f"gate_{r}", 0) + 1
+                    ref = stats.setdefault("gate_ref", [])
+                    if len(ref) < 12:
+                        ref.append(f"{(gg.get('event_name') or '')[:24]}"
+                                   f" {mt[:3]}:{r}")
     except Exception:
         pass
+
+
+@app.route("/api/gridiron/sweep-now")
+def api_gridiron_sweep_now():
+    """FREEZE-WEEK BRIDGE TOOL (Aug 23 2026): run the week-of football bet
+    sweep ONCE on Vercel, whoever owns the opener lane.
+
+    Why it exists: the sweep's only call site is the paperlog ROUTE body,
+    gated `if _own_opener` — and the cellar's `opener` lane (lanes.py)
+    calls the tape pass but NOT the sweep. So with the box healthy the
+    sweep runs NOWHERE: it only ever fired during the Aug 23 box outage,
+    when Vercel held the lease (which is what re-bet the Week-1 totals).
+    Found the day the venue silently canceled 20 resting football orders
+    and nothing re-placed them. The box-side fix (call the sweep from
+    lane_opener) lands with the Thursday unfreeze; this endpoint is the
+    remote-fire stopgap the frozen box can't give.
+
+    Race note: the box's tape pass bets a game ONCE, at first listing
+    (done-set latched) — so for any game already taped this cannot double
+    an order (the executor's pending-pick dedup guards the rest). Don't
+    fire it in the same minutes a fresh listing burst is being taped; a
+    `/api/polymarket/dedup-orders?dry=1` read after a batch is the check.
+    Serial fires only (site-curl `repeat` is serial by construction).
+
+    Each call is one bounded pass (~8s, ≤_GRIDIRON_SWEEP_CAP dossier
+    builds); the in-container `_GRIDIRON_SWEEP_TS` stamps paginate
+    consecutive calls across the slate. Returns the sweep's stats.
+    """
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    stats: dict = {}
+    try:
+        if (request.args.get("force") or "") in ("1", "true", "yes"):
+            _GRIDIRON_SWEEP_TS.clear()     # this container's stamps only
+            stats["forced"] = True
+        sb = get_supabase()
+        now = datetime.now(timezone.utc)
+        _gridiron_bet_sweep(sb, now, _time.time() + 8.0, stats)
+        return jsonify({"ok": True, **stats})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"[:220],
+                        **stats})
 
 
 def _gridiron_opener_pass(sb, now, deadline):
@@ -15827,17 +16623,22 @@ def api_handicapper_paperlog():
     # first-pitch sweep and the rent sync as must-keep-running, and missed
     # this one because it is NESTED INSIDE the activities-sync block rather
     # than being a call of its own.
-    if not now.minute % _POLY_LEDGER_MOD:
-        try:
-            acts_sync = _acts_sync(sb, get_client(), pages=3)
-        except Exception as e:
-            acts_sync = {"err": str(e)[:80]}
-        # …and precompute the dashboard summary while the feed is hot, so
-        # the page never pays for the walk itself.
-        try:
-            acts_sync["dash"] = _dash_cache_refresh(sb, get_client())
-        except Exception as e:
-            acts_sync["dash"] = {"err": str(e)[:80]}
+    # EVERY TICK, not every 5th (user, Aug 22 2026: "vercel/supabase is
+    # literally just a display portal at this point — can't we refresh it
+    # way faster??"). The 5-minute gate was a Vercel-budget economy; on
+    # the box the whole refresh is ~3 venue calls + a few DB reads. One
+    # feed page per minute keeps the mirror current (a 5-minute gap
+    # needed 3); the dashboard cache is never more than ~1 tick old.
+    try:
+        acts_sync = _acts_sync(sb, get_client(), pages=2)
+    except Exception as e:
+        acts_sync = {"err": str(e)[:80]}
+    # …and precompute the dashboard summary while the feed is hot, so
+    # the page never pays for the walk itself.
+    try:
+        acts_sync["dash"] = _dash_cache_refresh(sb, get_client())
+    except Exception as e:
+        acts_sync["dash"] = {"err": str(e)[:80]}
     # OUTBID push (every 2nd minute) — the red chip's Telegram twin: a
     # resting maker order lost the touch, re-bid or take.
     outbid_warned = _outbid_alerts(sb, now) if run_engines else 0
@@ -19044,6 +19845,13 @@ def api_data():
                     _stk = _pnl_stack(get_supabase())
                 except Exception:
                     pass
+            # The box computes the cached stack on frozen code (no
+            # rent_days until the Aug 27 pull) — patch the key in here.
+            if _stk and "rent_days" not in _stk:
+                try:
+                    _stk["rent_days"] = _rent_days_recent(get_supabase())
+                except Exception:
+                    pass
             return jsonify({
                 "ok": True, "timestamp": now.isoformat(), "cached": True,
                 "cache_age_s": _c.get("age_s"),
@@ -20427,7 +21235,14 @@ def api_handicapper_props():
 # week (the July 2026 "nothing coming up for UFC" report: card 8 days out,
 # tab blank). 9 days = the next card is visible the morning after the last
 # one ends, even across a skipped week + late-night AZ main-event times.
-_GAMES_DISPLAY_DAYS = {"NFL": 7, "NCAAF": 7, "UFC": 9}
+# NFL 7→25, NCAAF 7→15 (Aug 22 2026): the machine bets Week 1 from
+# listing day (the sweep window is 25d) and the manual Bet button lives
+# on the dossier — a 7-day display hid the very games money was resting
+# on ("I can't see NFL or NCAA football due to the time restriction").
+# The display window shows what's BETTABLE, and football is bettable
+# weeks out. NCAAF stays tighter: 15d covers Week 0 + Week 1 without a
+# 100-game wall of unlisted games.
+_GAMES_DISPLAY_DAYS = {"NFL": 25, "NCAAF": 15, "UFC": 9}
 _GAMES_DISPLAY_DAYS_DEFAULT = 2  # MLB, NBA, NCAAB, NHL
 
 
