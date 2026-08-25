@@ -15,13 +15,28 @@ and the manual-order endpoint. Ordered by money-at-risk:
    site is the Vercel paperlog route behind `_own_opener`). One call after
    `_gridiron_opener_pass`, same lease, small budget. Then the sweep-now
    bridge endpoint demotes to a manual tool.
-3. **Football verify-after-create + venue reconcile** — the ghost-order
-   class (venue cancels resting orders on ladder re-provision; the pick
-   row then blocks re-betting forever). Make football self-healing like
-   MLB: a periodic pass that clears order-less unfilled football picks
-   (venue-verified: no open order, no position, no TRADE activity) so the
-   sweep re-places at current books. The manual procedure it replaces is
-   in CLAUDE.md's football bullet and the daily-check routine prompt.
+3. **THE RECONCILE PASS — user doctrine, Aug 25, final form:** monitor
+   every resting machine order; when it leaves the book, exactly two
+   cases (the user cancels nothing, so there is no third):
+   - **Filled** (TRADE row / position on the slug) → never re-bet; the
+     position rides (or scalps per the sell-arm spec).
+   - **Gone without a fill = SHADOW-CANCELED by the venue** → clear the
+     pick row and put the market **back through the full gauntlet: rule
+     1 rent check at the current market, model re-verdict at the current
+     book, re-bet if both still pass.** Fresh decision, never a blind
+     re-place — Aug 25's re-bets correctly came back on different rungs
+     than the dead orders.
+   Context that forced this: Polymarket killed the resting football book
+   three times in four days (ladder re-provisioning, program-unrelated —
+   rent-check verified per-market programs unchanged), their API exposes
+   NO cancel history (orders.list ages terminal states out entirely, so
+   `all=1` shows nothing), and every dead order's pick row silently
+   blocked the executor's dedup from re-betting. Runs per-tick on the
+   box; MLB GTD expiries at first pitch are NORMAL, not kills. Until
+   built, the 3am AZ routine + 9am daily check run this logic remotely.
+   If the user ever does cancel a machine order by hand, deleting the
+   pick on /handicapper is the "don't re-bet" signal (the venue can't
+   tell us who canceled).
 4. **fbprop graders** — the NFL props lane is armed and bets on listing;
    nothing grades `fbprop_autobet` picks yet (venue truth via poly_pnl
    covers money; the model scoreboard needs a grader off
