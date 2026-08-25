@@ -909,6 +909,13 @@ accrues. That is what exists and what football has to be ready for.
 The **Market Maker is phase 2 and is a DIFFERENT machine**: buy the fringe,
 sell the fringe, rinse, repeat, collect rent, *with no intention of ever
 betting the game*. Do not smuggle it into the Cellar's lanes.
+**Phase 2 v1 is SPEC'D (Aug 24, user-designed): the SCALP SELL ARM —
+`docs/scalp-sell-arm-spec.md`, build at the Thursday Aug 27 unfreeze.**
+Every RENT-lane fill (ML + football; edge lanes NEVER — model lanes ride,
+rent lanes scalp) rests a sell at the top of the book, walks down, floors
+at entry+1¢, stays working in-play until fill or resolution. The dead
+harvest's edge-forfeit math doesn't apply: three weeks of venue truth put
+rent-lane entries at ~zero edge, so the spread capture is the product.
 
 **What football readiness means, in the user's words:**
 - **PROPS. "Lots and lots and lots of props."** Football props outnumber
