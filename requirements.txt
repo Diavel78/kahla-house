@@ -3,6 +3,16 @@ polymarket-us>=0.1.0
 requests>=2.31.0
 python-dotenv>=1.0.0
 firebase-admin>=6.4.0
+# PIN — DO NOT LOOSEN WITHOUT PROBING. google-cloud-firestore 2.29.0 sends
+# the default database id URL-ENCODED, so every read dies server-side with
+# `InvalidArgument: 400 Invalid database id %28default%29`. It is a
+# transitive dep of firebase-admin, so an unpinned rebuild picked it up on
+# its own and took down every Firebase-authed route (Aug 25 2026): /api/me
+# 500'd, the page gates read that as "no access", and the whole site became
+# a click->bounce loop. Verify any bump with /api/firebase-probe BEFORE
+# widening this — the probe reports the installed versions and does the
+# exact read that breaks.
+google-cloud-firestore>=2.21.0,<2.29.0
 supabase>=2.7.0
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
