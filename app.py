@@ -11446,7 +11446,15 @@ WHIFF_AUTOBET_MAX_BETS = 10000    # CAP KILLED Aug 5 ~11pm AZ (user: "kill
 # 29.3%, join-touch 44%) while the backtest edge is real at every rung —
 # an execution puzzle to solve on paper. SHADOWS KEEP LOGGING (the
 # forward dataset); only bet candidates are filtered.
-_WHIFF_FAM_KILLED = {"k"}
+#
+# "ha" KILLED Aug 24 2026 (user: "Kill hits. it's not paying any rent").
+# Week of Aug 18-24, venue truth: 4W/15, -$36.07 bets, $0.43 rent. The
+# bar the user set: a lane with no rent program must be a profitable
+# betting machine on its own — hits was neither. walks/outs pass that
+# same bar (+$17 / +$27 the same week) and keep their seats. Until the
+# Thursday box pull, the box-side stop is the ha_m/ha_s strip from
+# whiff_iq_snapshot (re-applied by the daily check after each rebuild).
+_WHIFF_FAM_KILLED = {"k", "ha"}
 _WHIFF_BET_MIN_PP = 4.0
 _WHIFF_BET_MAX_PP = 10.0          # the claimed-edge cliff (3rd-time rule:
                                   # NRFI clamp / Fight IQ 0-3 past 15pp /
