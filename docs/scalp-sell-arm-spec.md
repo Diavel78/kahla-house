@@ -9,6 +9,13 @@ machine. The only way that it actually can completely one hundred percent
 become a rent machine is if we get to the point where every time an order
 fills, we automatically put in a sell order to take profit."*
 
+**THE DESIGN PRINCIPLE, verbatim (user, closing the discussion): "Yes, you
+could sell a winner. Yes, you could sell a loser. What it does do one
+hundred percent for certainty is it removes the variance. Take profits,
+collect rent, move on."** This sentence settles every future argument about
+whether some clever exception should ride: it shouldn't. The model lanes
+that earned the right to ride are named below; everything else scalps.
+
 ## Why the dead harvest's math doesn't apply
 
 The Aug 19 harvest kill reasoned that selling early gives up the model's
