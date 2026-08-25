@@ -1739,7 +1739,9 @@ def _rent_days_recent(sb, n_days: int = 5) -> list:
         a["pending" if st == "PENDING" else "paid"] += (
             _safe_float(r.get("reward")) or 0.0)
     days = []
-    for i in range(n_days):
+    # Starting with YESTERDAY (user, Aug 25): today's earn-day is never
+    # posted while the day is still being played — an all-dash row.
+    for i in range(1, n_days + 1):
         d = (today - timedelta(days=i)).isoformat()
         a = agg.get(d)
         days.append({"d": d,

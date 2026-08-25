@@ -231,7 +231,7 @@
                  pending included. A day the venue hasn't posted yet says
                  so — never $0.00 (the ledger runs ~a day behind). -->
             <div class="card wide">
-                <div class="label">Rent by day <span class="tag">paid + pending</span></div>
+                <div class="label">Rent by day <span class="tag" style="color:var(--green)">paid</span> <span class="tag" style="color:#fbbf24">pending</span></div>
                 <div id="rentDays">
                     <div class="sub" style="margin:0">loading…</div>
                 </div>
@@ -481,20 +481,23 @@
                     const dn = iso => new Date(iso + 'T12:00:00')
                         .toLocaleDateString('en-US',
                             { weekday: 'short', month: 'short', day: 'numeric' });
+                    // Color IS the status (user, Aug 25): green = paid,
+                    // gold = pending, split day = green / gold. No words.
+                    const G = v => '<span class="rnum pos">' + money(v) + '</span>';
+                    const Y = v => '<span class="rnum" style="color:#fbbf24">'
+                        + money(v) + '</span>';
                     rdEl.innerHTML = rds.map(r => {
-                        const posted = r.paid !== null || r.pending !== null;
                         let right;
-                        if (!posted) {
-                            right = '<span class="rnum" style="color:#8b93a7;'
-                                + 'font-size:.85em">not posted yet</span>';
+                        if (r.paid === null && r.pending === null) {
+                            right = '<span class="rnum" style="color:#8b93a7">—</span>';
+                        } else if ((r.paid || 0) > 0 && (r.pending || 0) > 0) {
+                            right = G(r.paid)
+                                + '<span style="color:#8b93a7"> / </span>'
+                                + Y(r.pending);
+                        } else if ((r.pending || 0) > 0) {
+                            right = Y(r.pending);
                         } else {
-                            const tot = (r.paid || 0) + (r.pending || 0);
-                            right = '<span class="rnum pos">' + money(tot)
-                                + '</span>'
-                                + (r.pending > 0
-                                    ? ' <span class="tag">$'
-                                      + r.pending.toFixed(2) + ' pending</span>'
-                                    : '');
+                            right = G(r.paid || 0);
                         }
                         return '<div class="erow" style="padding:9px 0 8px">'
                             + '<div class="etop"><span class="rlbl">' + dn(r.d)
