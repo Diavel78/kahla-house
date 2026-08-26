@@ -8200,6 +8200,25 @@ def api_kalshi_incentives():
                      for p in (request.args.get("find") or "").split(",")
                      if p.strip())
     resume = (request.args.get("cursor") or "").strip() or None
+    # ?resume=auto — pick the cursor up from THIS probe's own last run for
+    # the same prefixes. Lets site-curl's `repeat` chain the walk across
+    # calls; without it each call restarts at page 1 and the walk can never
+    # finish, which is how "not found yet" masquerades as an answer.
+    prior_scanned = 0
+    if not resume and (request.args.get("resume") or "") == "auto" and find_pre:
+        try:
+            pr = get_supabase().table("exec_probe_runs") \
+                .select("result").order("id", desc=True).limit(25).execute()
+            for row in (pr.data or []):
+                f = ((row.get("result") or {}).get("find") or {})
+                if (tuple(f.get("prefixes") or []) == find_pre
+                        and f.get("resume_cursor")):
+                    resume = f["resume_cursor"]
+                    prior_scanned = int(f.get("rows_scanned_total")
+                                        or f.get("rows_scanned_this_call") or 0)
+                    break
+        except Exception:
+            pass
     import time as _tt
     _deadline = _tt.time() + 50.0
     census = (request.args.get("census") or "") in ("1", "true", "yes")
@@ -8282,6 +8301,8 @@ def api_kalshi_incentives():
             "prefixes": list(find_pre),
             "found": len(find_hits),
             "rows_scanned_this_call": find_scanned,
+            "rows_scanned_total": prior_scanned + find_scanned,
+            "resumed_from_prior": bool(prior_scanned),
             "pages_this_call": pages,
             "exhausted": exhausted,
             "resume_cursor": None if exhausted else cursor,
@@ -8291,7 +8312,8 @@ def api_kalshi_incentives():
         out["verdict"] = (
             f"FOUND {len(find_hits)} program(s) on {'/'.join(find_pre)}"
             if find_hits else
-            ("NOT ON THE LIST — cursor exhausted, whole catalogue walked"
+            (f"NOT ON THE LIST — cursor exhausted after "
+             f"{prior_scanned + find_scanned:,} programs walked"
              if exhausted else
              "not found YET — cursor still open, resume with ?cursor="))
         out["rows"] = find_scanned
