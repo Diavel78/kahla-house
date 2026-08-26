@@ -8121,6 +8121,87 @@ def api_kalshi_incentives():
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
 
+    # ?verify=1 — is this even the right API? Three ORTHOGONAL checks, so
+    # the negative does not rest on one endpoint, one base and one string
+    # match: (1) every base compared head-to-head, (2) the FULL raw live
+    # MLB market object scanned for any reward/incentive field of its own,
+    # (3) the series object, and (4) the live market's market_id looked up
+    # against the program list by ID rather than by ticker text.
+    if (request.args.get("verify") or "") in ("1", "true", "yes"):
+        v: dict = {"ok": True, "check": "kalshi-incentives-verification"}
+        # (1) base-by-base, same query
+        v["bases"] = {}
+        for base in _KALSHI_BASES:
+            try:
+                r = _http.get(base + "/incentive_programs",
+                              params={"limit": 5},
+                              headers={"Accept": "application/json",
+                                       "User-Agent": "kahla-house/1.0"},
+                              timeout=15)
+                d = r.json() if r.status_code == 200 else {}
+                rr, kk = _kalshi_rows_from(d)
+                v["bases"][base] = {
+                    "status": r.status_code, "row_key": kk, "n": len(rr),
+                    "first_ticker": (rr[0] or {}).get("market_ticker") if rr else None,
+                    "top_keys": list(d.keys())[:8] if isinstance(d, dict) else None}
+            except Exception as e:
+                v["bases"][base] = {"error": f"{type(e).__name__}: {e}"[:160]}
+        # (2) the live MLB game market, FULL object
+        mk = _kalshi_pub_get("/markets", {"series_ticker": "KXMLBGAME",
+                                          "status": "open", "limit": 1})
+        mrows, _ = _kalshi_rows_from(mk.get("data")) if mk.get("ok") else ([], None)
+        m0 = mrows[0] if mrows else None
+        v["live_mlb_market"] = {
+            "found": bool(m0),
+            "ticker": (m0 or {}).get("ticker"),
+            "series_segment": str((m0 or {}).get("ticker") or "").split("-", 1)[0],
+            "all_field_names": sorted((m0 or {}).keys()) if isinstance(m0, dict) else None,
+            "reward_ish_fields": {k: vv for k, vv in (m0 or {}).items()
+                                  if any(w in k.lower() for w in
+                                         ("incent", "reward", "liquid", "rebate",
+                                          "maker", "target", "discount"))}
+            if isinstance(m0, dict) else None,
+        }
+        # (3) the series object
+        sr = _kalshi_pub_get("/series/KXMLBGAME")
+        v["series_object"] = (sr.get("data") if sr.get("ok")
+                              else {"error": (sr.get("error") or "")[:200]})
+        # (4) by market_id, not by ticker text
+        mid = (m0 or {}).get("market_id") or (m0 or {}).get("id")
+        v["market_id_probed"] = mid
+        if mid:
+            hit, scanned, cur, pages = None, 0, None, 0
+            import time as _t2
+            dl = _t2.time() + 40.0
+            q = {"limit": 200, "type": "all"}
+            while pages < 5000:
+                if cur:
+                    q["cursor"] = cur
+                res = _kalshi_pub_get("/incentive_programs", q)
+                if not res.get("ok"):
+                    break
+                rws, _ = _kalshi_rows_from(res.get("data"))
+                if not rws:
+                    break
+                scanned += len(rws)
+                pages += 1
+                for row in rws:
+                    if str((row or {}).get("market_id") or "") == str(mid):
+                        hit = row
+                        break
+                cur = _kalshi_next_cursor(res.get("data"))
+                if hit or not cur or _t2.time() > dl:
+                    break
+            v["by_market_id"] = {"hit": hit, "scanned": scanned,
+                                 "pages": pages, "exhausted": not cur,
+                                 "verdict": ("PROGRAM EXISTS for this market_id"
+                                             if hit else
+                                             ("no program for this market_id "
+                                              "(cursor exhausted)" if not cur else
+                                              "no program yet (cursor still open)"))}
+        _probe_log(v)
+        return jsonify(v)
+
     typ = (request.args.get("type") or "liquidity").strip().lower()
     tick_f = (request.args.get("ticker") or "").strip().upper()
     raw = (request.args.get("raw") or "") in ("1", "true", "yes")
