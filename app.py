@@ -7942,8 +7942,13 @@ def api_docs_fetch():
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
     url = (request.args.get("url") or "").strip()
+    # Kalshi joined the allowlist Aug 26 2026 — same reason Polymarket
+    # did: the sandbox is egress-blocked, Vercel is not, and this repo
+    # had been ASSUMING Kalshi's incentive terms from its own silence.
     allow = ("docs.polymarket.us", "polymarket.us", "docs.polymarket.com",
-             "help.polymarket.com", "learn.polymarket.com")
+             "help.polymarket.com", "learn.polymarket.com",
+             "docs.kalshi.com", "help.kalshi.com", "kalshi.com",
+             "www.kalshi.com", "trading-api.readme.io")
     try:
         from urllib.parse import urlparse as _up
         host = (_up(url).hostname or "").lower()
@@ -7960,14 +7965,189 @@ def api_docs_fetch():
         })
         out["status"] = r.status_code
         body = r.text or ""
-        # strip script/style then collapse tags — we want the prose+tables,
-        # not the SPA shell
-        body = _html_to_text(body)          # ONE implementation (shared
+        # ?raw=1 skips the HTML->text pass. Needed for text/markdown
+        # sources (docs.kalshi.com/llms.txt): the collapser eats newlines,
+        # which is right for an SPA shell and destroys a markdown index.
+        if (request.args.get("raw") or "") in ("1", "true", "yes"):
+            out["mode"] = "raw"
+        else:
+            # strip script/style then collapse tags — we want the
+            # prose+tables, not the SPA shell
+            body = _html_to_text(body)      # ONE implementation (shared
                                             # with the rewards sync)
+            out["mode"] = "text"
         out["chars"] = len(body)
         out["text"] = body[:14000]
     except Exception as e:
         out.update(ok=False, error=f"{type(e).__name__}: {e}"[:300])
+    _probe_log(out)
+    return jsonify(out)
+
+
+# ─────────── KALSHI INCENTIVE PROGRAMS, READ FROM THE VENUE ───────────
+# Aug 26 2026. Rule #1 (rent) has a Polymarket answer (_rent_ok +
+# /v1/incentives) and, until tonight, an ASSUMED Kalshi answer: this repo
+# said Kalshi had no sports liquidity program, inferred purely from its
+# own silence. That is the poly_incentive_programs blindness trap in a
+# different coat — "no rows for X" means we never bet X, never "X pays
+# nothing". Kalshi publishes GET /trade-api/v2/incentive_programs.
+#
+# ASSUMES NO FIELD NAMES and no path (the docs render two spellings), so
+# it walks candidate paths across every base, unauthed first then signed,
+# and dumps the FULL first row. A KNOWN-GOOD CONTROL rides along: if the
+# control also returns nothing, the reader is broken and a zero here
+# means nothing. Read-only; never raises.
+_KALSHI_INCENTIVE_PATHS = ("/incentive_programs", "/incentives",
+                           "/incentive-programs", "/liquidity_incentives")
+
+
+def _kalshi_pub_get(path: str, params: dict | None = None) -> dict:
+    """Unauthed GET across _KALSHI_BASES. {ok, base, status, data|error}."""
+    headers = {"Accept": "application/json", "User-Agent": "kahla-house/1.0"}
+    last = None
+    for base in _KALSHI_BASES:
+        try:
+            r = _http.get(base + path, params=params or {},
+                          headers=headers, timeout=15)
+            if r.status_code == 200:
+                try:
+                    return {"ok": True, "base": base, "status": 200,
+                            "data": r.json()}
+                except Exception:
+                    last = f"HTTP 200 @ {base} but body is not JSON: {(r.text or '')[:160]}"
+                    continue
+            last = f"HTTP {r.status_code} @ {base}: {(r.text or '')[:200]}"
+            # 401/403 = exists but needs auth; report it rather than
+            # burning the other bases on the same answer.
+            if r.status_code in (401, 403):
+                return {"ok": False, "base": base, "status": r.status_code,
+                        "error": last, "needs_auth": True}
+        except Exception as e:
+            last = f"{type(e).__name__} @ {base}: {str(e)[:140]}"
+    return {"ok": False, "error": last}
+
+
+def _kalshi_rows_from(data):
+    """Pull the row list out of a response without assuming the key."""
+    if isinstance(data, list):
+        return data, "<root list>"
+    if not isinstance(data, dict):
+        return [], None
+    for k in ("incentive_programs", "incentives", "programs",
+              "liquidity_incentives", "markets", "data", "results"):
+        v = data.get(k)
+        if isinstance(v, list):
+            return v, k
+    # last resort: the sole list value on the object
+    lists = [(k, v) for k, v in data.items() if isinstance(v, list)]
+    if len(lists) == 1:
+        return lists[0][1], lists[0][0]
+    return [], None
+
+
+@app.route("/api/kalshi/incentives")
+def api_kalshi_incentives():
+    """Kalshi's live incentive programs — the Kalshi twin of the
+    Polymarket reward-schedule read.
+
+    Params: ?type=liquidity|volume|all (default liquidity), ?ticker=SUBSTR
+    to filter rows, ?raw=1 to dump full rows (default: 3 samples + a
+    ticker roll-up), ?limit=N page size.
+
+    Reports per candidate path: the HTTP status, which base answered, the
+    row key it found, the row count, and the FULL first row so the field
+    names are read off reality rather than off a help-centre paraphrase.
+    Sports roll-up buckets rows by our known series prefixes."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+
+    typ = (request.args.get("type") or "liquidity").strip().lower()
+    tick_f = (request.args.get("ticker") or "").strip().upper()
+    raw = (request.args.get("raw") or "") in ("1", "true", "yes")
+    try:
+        limit = max(1, min(1000, int(request.args.get("limit") or 200)))
+    except Exception:
+        limit = 200
+
+    out: dict = {"ok": True, "type": typ, "paths_tried": [],
+                 "found_path": None, "rows": 0}
+
+    params = {"limit": limit}
+    if typ and typ != "none":
+        params["type"] = typ
+
+    rows, src = [], None
+    # Two passes: filtered, then BARE. An unsupported ?type=/?limit= 400s
+    # every path and reads exactly like "this venue has no programs" —
+    # the same false zero the control below guards against.
+    attempts = [(p, params, "filtered") for p in _KALSHI_INCENTIVE_PATHS] + \
+               [(p, {}, "bare") for p in _KALSHI_INCENTIVE_PATHS]
+    for path, q, pass_name in attempts:
+        res = _kalshi_pub_get(path, q)
+        att = {"path": path, "pass": pass_name, "status": res.get("status"),
+               "base": res.get("base"), "ok": res.get("ok"),
+               "error": (res.get("error") or "")[:200] or None}
+        if not res.get("ok") and res.get("needs_auth"):
+            # documented endpoint that wants a signature — retry signed
+            sres = _kalshi_authed_get(path, q)
+            att["authed_retry"] = {"ok": sres.get("ok"),
+                                   "status": sres.get("status"),
+                                   "error": (sres.get("error") or "")[:200] or None}
+            if sres.get("ok"):
+                res = {"ok": True, "base": sres.get("base"),
+                       "status": 200, "data": sres.get("data")}
+        if res.get("ok"):
+            r, k = _kalshi_rows_from(res.get("data"))
+            att["row_key"] = k
+            att["row_count"] = len(r)
+            att["top_keys"] = (list(res["data"].keys())[:12]
+                               if isinstance(res.get("data"), dict) else None)
+            if r and not rows:
+                rows, src = r, path
+                out["found_path"] = path
+                out["base_used"] = res.get("base")
+        out["paths_tried"].append(att)
+        if rows:
+            break
+
+    # ---- KNOWN-GOOD CONTROL: an empty program list is only meaningful
+    # if the reader can reach Kalshi at all (this repo's standing rule).
+    ctl = _kalshi_pub_get("/markets", {"series_ticker": "KXMLBGAME",
+                                       "status": "open", "limit": 1})
+    cr, _ck = _kalshi_rows_from(ctl.get("data")) if ctl.get("ok") else ([], None)
+    out["control"] = {"ok": ctl.get("ok"), "status": ctl.get("status"),
+                      "mlb_markets_seen": len(cr),
+                      "error": (ctl.get("error") or "")[:200] or None}
+    out["control_verdict"] = ("reader OK — a zero above is a real venue zero"
+                              if cr else
+                              "READER BROKEN — a zero above means NOTHING")
+
+    if tick_f:
+        rows = [r for r in rows
+                if tick_f in str((r or {}).get("market_ticker")
+                                 or (r or {}).get("ticker") or "").upper()]
+    out["rows"] = len(rows)
+
+    if rows:
+        out["first_row_full"] = rows[0]
+        out["field_names"] = sorted((rows[0] or {}).keys()) \
+            if isinstance(rows[0], dict) else None
+        # sports roll-up by our known series prefixes
+        buckets: dict = {}
+        for r in rows:
+            t = str((r or {}).get("market_ticker")
+                    or (r or {}).get("ticker") or "")
+            pre = t.split("-", 1)[0] if "-" in t else (t or "?")
+            b = buckets.setdefault(pre, {"n": 0, "sample": t})
+            b["n"] += 1
+        out["by_series_prefix"] = dict(
+            sorted(buckets.items(), key=lambda kv: -kv[1]["n"])[:40])
+        out["samples"] = rows[:3]
+        if raw:
+            out["all_rows"] = rows[:200]
+
     _probe_log(out)
     return jsonify(out)
 
