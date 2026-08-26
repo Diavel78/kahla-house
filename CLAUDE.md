@@ -474,13 +474,31 @@ A **completely separate, non-betting** surface for the family's book club. Lives
   sellout / team-sale props. So a Kalshi leg on an MLB moneyline earns
   ZERO and pays the maker fee (`1.75·p(1−p)`¢) — the cross-venue
   two-sided-quote idea gets no rent on the lane that matters.
-  ⚠ **Read as a FLOOR: the census is `complete:false`** (cursor still open
-  at the 400-page cap). It is strong — the walk surfaces game-type series
-  when they exist (`KXNCAABBGAME`, `KXNCAASBGAME`) — but it is not proof.
-  **LIVE FOR FOOTBALL:** `KXNFLPASSYDS` / `RECYDS` / `RSHYDS` / `PASSTDS` /
-  `KXNFLTD` **are in the catalogue but NOT active tonight** — Week 1 has not
-  listed. Re-run the census once it does; that is the read that says whether
-  the props lane can earn on both venues.
+  ✅ **SETTLED, NOT A FLOOR (`?find=` walked the cursor to EXHAUSTION):**
+  **132,966 liquidity programs — ZERO on any game series.** Then `type=all`
+  over **155,284** programs found exactly **32**, every one of them
+  `KXNFLGAME` and every one `incentive_type=volume`, windowed
+  **2025-09-18 → 2025-09-25**: a one-week NFL promo from LAST season,
+  expired, **0 active now**, and `target_size_fp`/`discount_factor_bps`
+  both NULL because volume programs pay for TRADING, not for resting. So
+  Kalshi has never paid resting-order rent on a game market. A Kalshi leg
+  on an MLB moneyline earns nothing and pays the maker fee — the
+  cross-venue two-sided quote is DEAD on the game lanes (user call, Aug 26:
+  "if Kalshi ain't paying rent, then this is dead").
+  ⚠ **TWO LANDMINES THIS COST.** (a) `?type=` DEFAULTS to liquidity-only in
+  our probe, and the game-market programs are `volume` — a type-scoped walk
+  that says "nothing" is answering a narrower question than it looks like;
+  always close with `type=all`. (b) **Match the SERIES SEGMENT, not a
+  prefix**: `KXUFCFIGHTOCCUR` ("will the fight happen", expired, paid_out)
+  starts with `KXUFCFIGHT`, invented a hit, and halted the walk 48,400 rows
+  in — a false POSITIVE that read as "Kalshi pays on fights". `market_ticker`
+  is `SERIES-<rest>`; compare the segment before the first dash.
+  **THE ONE LIVE THREAD:** `KXNFLPASSYDS` / `RECYDS` / `RSHYDS` / `PASSTDS` /
+  `KXNFLTD` carry real **liquidity** programs in the catalogue — none active
+  tonight because Week 1 has not listed. Player props are the only family
+  where Kalshi might pay us to rest, so re-run `?census=1` the day Week 1
+  lists; that is the read that says whether the props lane can earn on both
+  venues. Game lines never will.
   Two dials, uniform on every row seen: **`discount_factor_bps` = 5000
   (0.5)** — each step off the touch HALVES the score, which independently
   confirms the lead-the-touch peg and answers for Kalshi the question still
