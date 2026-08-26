@@ -14,6 +14,27 @@ and the manual-order endpoint. Ordered by money-at-risk:
    phase 2 day… this is no longer about betting, we are gonna be the
    bookie!" Every fill on a rent lane is the scalp arm's inventory —
    build this first, everything else waits behind it.**
+1b. **DOUBLE THE CONTRACTS — everything ×2, Master Rule → $13 (user,
+   Aug 25 night: "we are doubling the contracts, it's time to make some
+   fucking money"; scope + rule confirmed by explicit choice, then held
+   for Thursday: "No… Thursday…"). Ship WITH the box pull so both sides
+   change together.** The numbers, already arithmetic-checked:
+   - `_AUTOBET_CONTRACTS` 10 → 20 (ML + outs/walks)
+   - `_AUTOBET_CONTRACTS_NRFI` 5 → 10 (10 × 64¢ = $6.40)
+   - `_GRIDIRON_CONTRACTS` 5 → 10, `_GRIDIRON_TOTAL_CONTRACTS` 2 → 4
+   - `fbprop_config.contracts` 2 → 4 (DB edit, live next tick, no deploy)
+   - `_REPEG_MAX_COST_USD` 6.50 → **13.00** — REQUIRED: at 20 contracts
+     the $6.50 rule silently blocks every ML/outs/walks entry above
+     32.5¢ (the exact Aug 16 failure class). User-approved with the
+     arithmetic shown, per that precedent. `_WHIFF_CONTRACTS_K` stays 4
+     (K is killed anyway).
+   - ⚠ **FIX TOPUP FIRST**: `/api/polymarket/topup`'s target is
+     `nrfi → NRFI const, else _AUTOBET_CONTRACTS` — a football
+     spread/total pick would be topped to 20, not 10. Teach it
+     `_GRIDIRON_CONTRACTS`/`_GRIDIRON_TOTAL_CONTRACTS` for
+     gridiron_autobet picks BEFORE running it; then topup resizes the
+     resting unfilled book to the new stakes (cancel → verify → create
+     at the SAME price; filled positions stay untouched by design).
 2. **Wire `_gridiron_bet_sweep` into `cellar/lanes.py:lane_opener`** — the
    sweep currently runs NOWHERE while the box is healthy (its only call
    site is the Vercel paperlog route behind `_own_opener`). One call after
