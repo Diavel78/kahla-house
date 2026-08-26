@@ -17523,9 +17523,19 @@ REPEG_ENABLED = True         # LIVE (2nd time) Aug 2 2026 — probe run 2
                              # 404s live orders) → recreate on venue-kill →
                              # position check so a raced fill is never
                              # re-placed → 🚨 ORDER LOST ping as last resort.
-_REPEG_MARKET_TYPES = {"nrfi", "prop"}   # activation trigger — a pending
+_REPEG_MARKET_TYPES = {"nrfi", "prop",
+                       "spread", "total"}  # activation trigger — a pending
                                          # K-prop alone wakes the pass
-                                         # (Aug 3: props chase like Y/NRFI)
+                                         # (Aug 3: props chase like Y/NRFI).
+                                         # spread/total added Aug 26 2026 —
+                                         # FOOTBALL CHASES NOW (user, at
+                                         # volume, on finding the M-OH +16.5
+                                         # order 24¢ behind a re-centered
+                                         # book: "the god damn repeg isn't
+                                         # turned on for football!!"). Only
+                                         # gridiron_autobet picks chase;
+                                         # manual football bets stay the
+                                         # user's to move, like manual ML.
 _REPEG_MAX_MOVES = 2         # lifetime cancel-replace cap per bet
 _REPEG_MAX_ACTIONS = 6    # re-pegs per tick. Was an implicit 1, justified in
                           # comment by "Vercel's 10s budget" — a HOBBY-tier
@@ -17649,6 +17659,41 @@ def _fresh_fair_for_repeg(sb, r, mt, market_id):
     try:
         if mt == "nrfi":
             return _nrfi_fair_from_paperlog(sb, market_id, r.get("side"))
+        if mt in ("spread", "total"):
+            # Football (Gridiron IQ, Aug 26 2026) — re-price the pick's own
+            # rung off TODAY'S power_ratings snapshot, exactly the numbers
+            # _gridiron_try_bet placed it with. Ratings refresh daily, so a
+            # chase two days later runs on fresher form than the entry.
+            # Non-gridiron spread/total picks have no model → None (the
+            # caller then stops on "no model fair" rather than chase blind).
+            blob = (r.get("signal_blob")
+                    if isinstance(r.get("signal_blob"), dict) else {})
+            if not blob.get("gridiron_autobet"):
+                return None
+            got = _gridiron_proj(sb, (r.get("sport") or "").upper(),
+                                 r.get("event_name") or "")
+            if not got:
+                return None
+            mg, tt, pm = got
+            side = (r.get("side") or "").lower()
+            if mt == "spread":
+                lh = _safe_float(blob.get("line_home"))
+                if lh is None:
+                    el = _safe_float(r.get("entry_line"))
+                    if el is None:
+                        return None
+                    lh = el if side == "home" else -el
+                ph = _gridiron_cover_p(pm, mg, lh)
+                if ph is None:
+                    return None
+                return ph if side == "home" else 1.0 - ph
+            ln = _safe_float(r.get("entry_line"))
+            if ln is None:
+                return None
+            po = _gridiron_over_p(pm, tt, ln)
+            if po is None:
+                return None
+            return po if side == "over" else 1.0 - po
         if mt != "moneyline":
             return None
         ev = r.get("event_name") or ""
@@ -18279,7 +18324,8 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
             cands = [f for f in (fs.get("fills") or [])
                      if f.get("outbid") and f.get("venue") == "POLYMARKET"
                      and (f.get("market_type") or "") in ("nrfi", "moneyline",
-                                                          "prop")
+                                                          "prop", "spread",
+                                                          "total")
                      and (f.get("mins_to_start") or 0) > 0
                      and f.get("best_bid_c") is not None]
             if not cands:
@@ -18288,7 +18334,8 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
             try:
                 rows = (sb.table("bot_picks")
                         .select("id,event_name,event_start,market_type,side,"
-                                "units,entry_price,fair_prob,signal_blob")
+                                "units,entry_price,entry_line,fair_prob,"
+                                "sport,signal_blob")
                         .in_("id", ids).execute().data) or []
             except Exception:
                 continue
@@ -18307,9 +18354,13 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 side = (r.get("side") or "").upper()
                 mlbl = ("ML" if (f.get("market_type") == "moneyline")
                         else "K-PROP" if (f.get("market_type") == "prop")
+                        else "SPR" if (f.get("market_type") == "spread")
+                        else "TOT" if (f.get("market_type") == "total")
                         else "NRFI")
+                _is_gridiron = bool(blob.get("gridiron_autobet"))
                 is_model_bet = (bool(blob.get("autobet"))
-                                or bool(blob.get("whiff_autobet")))
+                                or bool(blob.get("whiff_autobet"))
+                                or _is_gridiron)
                 # ⚠ NEVER CHASE A LIVE GAME (Aug 12 2026 — the CIN@CWS
                 # YRFI filled 13 minutes after first pitch). Every model
                 # buy is a PRE-GAME bet: the model prices a game that
@@ -18326,10 +18377,12 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                         continue
                 except Exception:
                     pass          # unparseable start ⇒ fall through
-                if (f.get("market_type") in ("moneyline", "prop")
+                if (f.get("market_type") in ("moneyline", "prop",
+                                             "spread", "total")
                         and not is_model_bet):
-                    continue    # manual ML/prop bets stay the user's to
-                                # move — only the model's own bets chase
+                    continue    # manual ML/prop/football bets stay the
+                                # user's to move — only the model's own
+                                # bets chase
                 if is_model_bet and new_c is not None:
                     # peg law for the model's own bets: chase to one CENT
                     # OVER the new make (front of the queue), never at it —
@@ -18381,13 +18434,17 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                     return True
 
                 # -- stop conditions (once-per-level Telegram, order stays) --
-                if new_c is not None and new_c > _REPEG_NRFI_PRICE_CAP_C:
+                # football holds the machine-wide 60¢ entry cap; everything
+                # else keeps the Y/NRFI 64¢ guardrail
+                _cap_c = (_GRIDIRON_MAX_ENTRY_C if _is_gridiron
+                          else _REPEG_NRFI_PRICE_CAP_C)
+                if new_c is not None and new_c > _cap_c:
                     # price-cap guardrail — overrides even move 1's
-                    # unconditional chase: the bot never places above 54¢
+                    # unconditional chase
                     if _mark("repeg_stop", {"reason": "price cap"},
                              tg=(f"🤖 REPEG STOP — {ev} {mlbl} {side}: book is "
                                  f"{round(new_c)}¢ — past your "
-                                 f"{round(_REPEG_NRFI_PRICE_CAP_C)}¢ price "
+                                 f"{round(_cap_c)}¢ price "
                                  f"cap, not chasing; resting at "
                                  f"{round(old_c) if old_c else '?'}¢")):
                         res["stopped"] += 1
@@ -18424,9 +18481,11 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                             sb, r, f.get("market_type"), f.get("market_id"))
                         if fresh is not None:
                             fair = fresh
-                    if fair is None and f.get("market_type") != "prop":
+                    if fair is None and f.get("market_type") not in (
+                            "prop", "spread", "total"):
                         # NRFI paperlog fallback is a GAME-level fair —
-                        # never apply it to a prop on the same market_id
+                        # never apply it to a prop or a football rung on
+                        # the same market_id
                         fair = _nrfi_fair_from_paperlog(sb, f.get("market_id"),
                                                         r.get("side"))
                     ok, edge = _repeg_edge_ok(fair, new_c)
