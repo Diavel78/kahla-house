@@ -8222,7 +8222,7 @@ def api_kalshi_incentives():
             if find_pre:
                 hits = [x for x in r
                         if str((x or {}).get("market_ticker") or "")
-                        .upper().startswith(find_pre)]
+                        .upper().split("-", 1)[0] in find_pre]
                 find_scanned += len(r)
                 if hits:
                     find_hits.extend(hits)
@@ -8273,7 +8273,7 @@ def api_kalshi_incentives():
     if find_pre:
         pg1 = [x for x in rows
                if str((x or {}).get("market_ticker") or "")
-               .upper().startswith(find_pre)]
+               .upper().split("-", 1)[0] in find_pre]
         if pg1:
             find_hits = pg1 + find_hits
         find_scanned += len(rows)
