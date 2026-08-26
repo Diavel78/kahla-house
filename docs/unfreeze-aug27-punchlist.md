@@ -62,3 +62,21 @@ and the manual-order endpoint. Ordered by money-at-risk:
    strong-vs-weak-side quoting; ML watch — a second ~31% week reopens the
    model question (weekly baseline −$1.28 / −$2.73 / −$98.15 vs ~$197/wk
    rent).
+9. **HOCKEY (user, Aug 25 night: "That's for all of these, hockey coming
+   up quick!") — the rent rails are ready, the betting brain is not.**
+   Ready with zero work: the rent gate is sport-agnostic/per-slug (NHL
+   programs clear the day the venue lists them), pm-snapshot + Kalshi
+   cross-confirm already watch NHL (96h window), repeg covers
+   ML/spread/total. Missing, in build order: (a) the **confirmed-starter
+   goalie feed** (Crease IQ P1b — the actual planned edge is the
+   news-vs-line timing play; pages populate ~late Sept preseason);
+   (b) an **NHL bet pass** wired rent→model→bet through
+   `_autobet_execute` (nothing exists — MLB has _opener_pass, football
+   the gridiron pass); (c) an NHL ML **chase fair** in
+   `_fresh_fair_for_repeg` (the moneyline branch is Diamond IQ /
+   MLB-only). HONESTY GATE: no Crease IQ number has cleared gate 1
+   (team core dead 53.3%; xG core 54.4%/0.2467 still loses to the
+   market) — if nothing clears by puck drop, the opening posture is
+   rent-lane quoting only, NOT model picks. Don't re-run the
+   goalie-identity shape (struck out three times); the levers are the
+   starter-news feed and training depth (2022-24 shot backfill).
