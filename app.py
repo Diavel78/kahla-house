@@ -8027,6 +8027,21 @@ def _kalshi_pub_get(path: str, params: dict | None = None) -> dict:
     return {"ok": False, "error": last}
 
 
+_KALSHI_INC_MAX_PAGES = 40      # 40 x 200 = 8,000 program rows
+
+
+def _kalshi_next_cursor(data):
+    """next_cursor off a paged Kalshi response, without assuming the key.
+    Kalshi returns '' (not null) at the end — treat empty as done."""
+    if not isinstance(data, dict):
+        return None
+    for k in ("next_cursor", "cursor", "nextCursor"):
+        v = data.get(k)
+        if isinstance(v, str) and v.strip():
+            return v
+    return None
+
+
 def _kalshi_rows_from(data):
     """Pull the row list out of a response without assuming the key."""
     if isinstance(data, list):
@@ -8078,7 +8093,7 @@ def api_kalshi_incentives():
     if typ and typ != "none":
         params["type"] = typ
 
-    rows, src = [], None
+    rows, src, _last_page_data = [], None, None
     # Two passes: filtered, then BARE. An unsupported ?type=/?limit= 400s
     # every path and reads exactly like "this venue has no programs" —
     # the same false zero the control below guards against.
@@ -8108,9 +8123,39 @@ def api_kalshi_incentives():
                 rows, src = r, path
                 out["found_path"] = path
                 out["base_used"] = res.get("base")
+                _last_page_data = res.get("data")
         out["paths_tried"].append(att)
         if rows:
             break
+
+    # ---- PAGE IT. The first response carried next_cursor and 200 rows
+    # that were ALL 15-minute crypto/commodity periods — one page reads
+    # exactly like "Kalshi has no sports programs" when it only means
+    # "page 1 is sorted by something else". Same false-floor class as
+    # gotcha #40 (PostgREST's 1,000-row cap): a capped read is not an
+    # answer. Bounded so a cursor that never terminates cannot spin.
+    pages, cursor, truncated = 1, None, False
+    if rows and out.get("found_path"):
+        q0 = dict(params)
+        cursor = _kalshi_next_cursor(_last_page_data)
+        while cursor and pages < _KALSHI_INC_MAX_PAGES:
+            q0["cursor"] = cursor
+            res = _kalshi_pub_get(out["found_path"], q0)
+            if not res.get("ok"):
+                out["page_error"] = (res.get("error") or "")[:200]
+                break
+            r, _k = _kalshi_rows_from(res.get("data"))
+            if not r:
+                break
+            rows.extend(r)
+            pages += 1
+            cursor = _kalshi_next_cursor(res.get("data"))
+        truncated = bool(cursor) and pages >= _KALSHI_INC_MAX_PAGES
+    out["pages"] = pages
+    out["page_truncated"] = truncated
+    if truncated:
+        out["page_warning"] = ("hit the page cap with a cursor still open — "
+                               "counts below are a FLOOR, not a total")
 
     # ---- KNOWN-GOOD CONTROL: an empty program list is only meaningful
     # if the reader can reach Kalshi at all (this repo's standing rule).
@@ -8144,6 +8189,19 @@ def api_kalshi_incentives():
             b["n"] += 1
         out["by_series_prefix"] = dict(
             sorted(buckets.items(), key=lambda kv: -kv[1]["n"])[:40])
+        # Explicit sports roll-up — the prefix histogram buries a handful
+        # of game rows under thousands of 15-minute crypto periods.
+        sports_pre = ("KXMLBGAME", "KXNFLGAME", "KXNBA", "KXNHL", "KXUFC",
+                      "KXNCAAF", "KXCFBGAME", "KXMLB", "KXNFL")
+        sp = [r for r in rows
+              if str((r or {}).get("market_ticker") or "").upper()
+              .startswith(sports_pre)]
+        out["sports"] = {
+            "n": len(sp),
+            "tickers": sorted({str((r or {}).get("market_ticker") or "")
+                               for r in sp})[:60],
+            "sample_row": sp[0] if sp else None,
+        }
         out["samples"] = rows[:3]
         if raw:
             out["all_rows"] = rows[:200]
