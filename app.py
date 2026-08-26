@@ -8071,6 +8071,25 @@ _KALSHI_SPORT_PREFIXES = ("KXMLB", "KXNFL", "KXNBA", "KXNHL", "KXUFC",
                           "KXNCAA", "KXCFB", "KXCBB", "KXWNBA")
 
 
+def _inc_active(rows: list) -> list:
+    """Programs whose window contains NOW (UTC). A program row is not
+    permission; its window is."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    out = []
+    for r in rows or []:
+        try:
+            sd = (r or {}).get("start_date") or ""
+            ed = (r or {}).get("end_date") or ""
+            s0 = datetime.fromisoformat(sd.replace("Z", "+00:00"))
+            e0 = datetime.fromisoformat(ed.replace("Z", "+00:00"))
+            if s0 <= now <= e0:
+                out.append(r)
+        except Exception:
+            continue
+    return out
+
+
 def _census_add(acc: dict, rows: list):
     for r in rows or []:
         t = str((r or {}).get("market_ticker") or "")
@@ -8233,6 +8252,12 @@ def api_kalshi_incentives():
                 str((r or {}).get("market_ticker") or "").split("-", 1)[0]
                 for r in sports_seen}),
             "sports_rows": len(sports_seen),
+            # the rows themselves, ACTIVE ones first — a series appearing in
+            # the census says nothing about whether it pays TODAY (the dead
+            # poly_reward_schedule lesson: a retired program that still reads
+            # as permission). Callers must see start/end, not just a name.
+            "sports_active_now": _inc_active(sports_seen)[:250],
+            "sports_sample": sports_seen[:60],
             "top_series": dict(sorted(census_pre.items(),
                                       key=lambda kv: -kv[1])[:60]),
         }
