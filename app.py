@@ -8149,6 +8149,8 @@ def api_kalshi_incentives():
     census_pre: dict = {}
     sports_seen: list = []
     census_n = 0
+    find_hits: list = []
+    find_scanned = 0
     # Two passes: filtered, then BARE. An unsupported ?type=/?limit= 400s
     # every path and reads exactly like "this venue has no programs" —
     # the same false zero the control below guards against.
@@ -8189,12 +8191,25 @@ def api_kalshi_incentives():
     # "page 1 is sorted by something else". Same false-floor class as
     # gotcha #40 (PostgREST's 1,000-row cap): a capped read is not an
     # answer. Bounded so a cursor that never terminates cannot spin.
+    # ?find=KXMLBGAME,KXNFLGAME — walk until one of these prefixes appears.
+    # Early-exits on the first hit and, on a wall-clock deadline, hands back
+    # resume_cursor so the walk CONTINUES on the next call instead of
+    # restarting. A capped walk answers "not in the first N"; only an
+    # exhausted cursor answers "not on the list".
+    find_pre = tuple(p.strip().upper()
+                     for p in (request.args.get("find") or "").split(",")
+                     if p.strip())
+    resume = (request.args.get("cursor") or "").strip() or None
+    import time as _tt
+    _deadline = _tt.time() + 50.0
     census = (request.args.get("census") or "") in ("1", "true", "yes")
-    max_pages = _KALSHI_INC_CENSUS_PAGES if census else _KALSHI_INC_MAX_PAGES
+    max_pages = (5000 if find_pre else
+                 (_KALSHI_INC_CENSUS_PAGES if census
+                  else _KALSHI_INC_MAX_PAGES))
     pages, cursor, truncated = 1, None, False
     if rows and out.get("found_path"):
         q0 = dict(params)
-        cursor = _kalshi_next_cursor(_last_page_data)
+        cursor = resume or _kalshi_next_cursor(_last_page_data)
         while cursor and pages < max_pages:
             q0["cursor"] = cursor
             res = _kalshi_pub_get(out["found_path"], q0)
@@ -8204,6 +8219,21 @@ def api_kalshi_incentives():
             r, _k = _kalshi_rows_from(res.get("data"))
             if not r:
                 break
+            if find_pre:
+                hits = [x for x in r
+                        if str((x or {}).get("market_ticker") or "")
+                        .upper().startswith(find_pre)]
+                find_scanned += len(r)
+                if hits:
+                    find_hits.extend(hits)
+                    cursor = _kalshi_next_cursor(res.get("data"))
+                    pages += 1
+                    break
+                pages += 1
+                cursor = _kalshi_next_cursor(res.get("data"))
+                if _tt.time() > _deadline:
+                    break
+                continue
             if census:
                 # keep only what the census answers: the prefix histogram
                 # and any row on a sports series. Holding 80k rows to count
@@ -8239,6 +8269,34 @@ def api_kalshi_incentives():
                 if tick_f in str((r or {}).get("market_ticker")
                                  or (r or {}).get("ticker") or "").upper()]
     out["rows"] = len(rows)
+
+    if find_pre:
+        pg1 = [x for x in rows
+               if str((x or {}).get("market_ticker") or "")
+               .upper().startswith(find_pre)]
+        if pg1:
+            find_hits = pg1 + find_hits
+        find_scanned += len(rows)
+        exhausted = not cursor
+        out["find"] = {
+            "prefixes": list(find_pre),
+            "found": len(find_hits),
+            "rows_scanned_this_call": find_scanned,
+            "pages_this_call": pages,
+            "exhausted": exhausted,
+            "resume_cursor": None if exhausted else cursor,
+            "hits": find_hits[:40],
+            "active_hits": _inc_active(find_hits)[:40],
+        }
+        out["verdict"] = (
+            f"FOUND {len(find_hits)} program(s) on {'/'.join(find_pre)}"
+            if find_hits else
+            ("NOT ON THE LIST — cursor exhausted, whole catalogue walked"
+             if exhausted else
+             "not found YET — cursor still open, resume with ?cursor="))
+        out["rows"] = find_scanned
+        _probe_log(out)
+        return jsonify(out)
 
     if census:
         _census_add(census_pre, rows)          # page 1
