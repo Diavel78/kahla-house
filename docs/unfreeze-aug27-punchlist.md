@@ -9,7 +9,11 @@ and the manual-order endpoint. Ordered by money-at-risk:
 
 1. **BUILD THE SCALP SELL ARM** — `docs/scalp-sell-arm-spec.md`. The
    session's centerpiece. Shadow 2-3 days (`signal_blob.scalp_shadow`),
-   then Rob's call to arm.
+   then Rob's call to arm. **CONFIRMED THE DAY'S HEADLINE (user, Aug 25
+   night, watching a wave of fills land): "Thursday is going to be a
+   phase 2 day… this is no longer about betting, we are gonna be the
+   bookie!" Every fill on a rent lane is the scalp arm's inventory —
+   build this first, everything else waits behind it.**
 2. **Wire `_gridiron_bet_sweep` into `cellar/lanes.py:lane_opener`** — the
    sweep currently runs NOWHERE while the box is healthy (its only call
    site is the Vercel paperlog route behind `_own_opener`). One call after
@@ -62,8 +66,9 @@ and the manual-order endpoint. Ordered by money-at-risk:
    strong-vs-weak-side quoting; ML watch — a second ~31% week reopens the
    model question (weekly baseline −$1.28 / −$2.73 / −$98.15 vs ~$197/wk
    rent).
-9. **HOCKEY (user, Aug 25 night: "That's for all of these, hockey coming
-   up quick!") — the rent rails are ready, the betting brain is not.**
+9. **HOCKEY — "NHL can wait" (user, Aug 25 night, minutes after the
+   line above): NOT a Thursday item. Parked here so the readiness read
+   isn't lost. The rent rails are ready, the betting brain is not.**
    Ready with zero work: the rent gate is sport-agnostic/per-slug (NHL
    programs clear the day the venue lists them), pm-snapshot + Kalshi
    cross-confirm already watch NHL (96h window), repeg covers
