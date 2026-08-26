@@ -8087,12 +8087,21 @@ def api_kalshi_incentives():
         limit = 200
 
     out: dict = {"ok": True, "type": typ, "paths_tried": [],
-                 "found_path": None, "rows": 0}
+                 "found_path": None, "rows": 0,
+                 "venue_params": None}
 
     params = {"limit": limit}
     if typ and typ != "none":
         params["type"] = typ
+    # SERVER-SIDE passthrough: any ?q_<name>= rides to Kalshi as <name>.
+    # Client-side filtering can only ever filter what a truncated page walk
+    # already returned — useless for proving a series is ABSENT. Ask the
+    # venue about the exact series instead (the /api/rent-check lesson).
+    for k, v in request.args.items():
+        if k.startswith("q_") and len(k) > 2 and v:
+            params[k[2:]] = v
 
+    out["venue_params"] = {k: v for k, v in params.items()}
     rows, src, _last_page_data = [], None, None
     # Two passes: filtered, then BARE. An unsupported ?type=/?limit= 400s
     # every path and reads exactly like "this venue has no programs" —
