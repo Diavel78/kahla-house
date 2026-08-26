@@ -62,6 +62,20 @@ and the manual-order endpoint. Ordered by money-at-risk:
    If the user ever does cancel a machine order by hand, deleting the
    pick on /handicapper is the "don't re-bet" signal (the venue can't
    tell us who canceled).
+   **TWO ADDITIONS from the first 3am reconcile run (Aug 26, zero
+   zombies found — the 67-pick vs 37-order gap was ALL fills):**
+   (a) the pass must ALSO check **position size vs pick contracts** —
+   lad-det-2026-08-28 filled 20 contracts on a 10-contract pick because
+   an ORPHAN order (C3CWVXD88FSS, created with no pick row — likely a
+   bet-then-persist-failed pass) rested invisible to the executor's
+   dedup until a second order joined it. Both filled at 59¢, $8.13 on
+   one event. Detect: our net position on a slug > the pick's stamped
+   contracts. (b) **TAPE-QUERY GOTCHA: the venue labels a BUY_SHORT
+   (NO-side buy) as `side=ORDER_SIDE_SELL`** — any poly_activities
+   trade query must classify our side by `intent`
+   (BUY_LONG/BUY_SHORT = we bought), never by `side`, or every NO/dog
+   fill silently drops out (this bug briefly overstated a week's ROI
+   by missing 44% of the bet denominator).
 4. **fbprop graders** — the NFL props lane is armed and bets on listing;
    nothing grades `fbprop_autobet` picks yet (venue truth via poly_pnl
    covers money; the model scoreboard needs a grader off
