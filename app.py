@@ -8028,6 +8028,13 @@ def _kalshi_pub_get(path: str, params: dict | None = None) -> dict:
 
 
 _KALSHI_INC_MAX_PAGES = 40      # 40 x 200 = 8,000 program rows
+_KALSHI_INC_CENSUS_PAGES = 400  # ?census=1 — walk the whole catalogue,
+                                # keeping ONLY prefix counts + sports rows.
+                                # Proving a series is ABSENT needs the whole
+                                # list: the venue silently IGNORES
+                                # ?series_ticker= (verified — the filtered
+                                # response came back byte-identical to the
+                                # unfiltered one), so there is no cheap ask.
 
 
 def _kalshi_next_cursor(data):
@@ -8058,6 +8065,23 @@ def _kalshi_rows_from(data):
     if len(lists) == 1:
         return lists[0][1], lists[0][0]
     return [], None
+
+
+_KALSHI_SPORT_PREFIXES = ("KXMLB", "KXNFL", "KXNBA", "KXNHL", "KXUFC",
+                          "KXNCAA", "KXCFB", "KXCBB", "KXWNBA")
+
+
+def _census_add(acc: dict, rows: list):
+    for r in rows or []:
+        t = str((r or {}).get("market_ticker") or "")
+        pre = t.split("-", 1)[0] if "-" in t else (t or "?")
+        acc[pre] = acc.get(pre, 0) + 1
+
+
+def _sports_rows(rows: list) -> list:
+    return [r for r in rows or []
+            if str((r or {}).get("market_ticker") or "")
+            .upper().startswith(_KALSHI_SPORT_PREFIXES)]
 
 
 @app.route("/api/kalshi/incentives")
@@ -8103,6 +8127,9 @@ def api_kalshi_incentives():
 
     out["venue_params"] = {k: v for k, v in params.items()}
     rows, src, _last_page_data = [], None, None
+    census_pre: dict = {}
+    sports_seen: list = []
+    census_n = 0
     # Two passes: filtered, then BARE. An unsupported ?type=/?limit= 400s
     # every path and reads exactly like "this venue has no programs" —
     # the same false zero the control below guards against.
@@ -8143,11 +8170,13 @@ def api_kalshi_incentives():
     # "page 1 is sorted by something else". Same false-floor class as
     # gotcha #40 (PostgREST's 1,000-row cap): a capped read is not an
     # answer. Bounded so a cursor that never terminates cannot spin.
+    census = (request.args.get("census") or "") in ("1", "true", "yes")
+    max_pages = _KALSHI_INC_CENSUS_PAGES if census else _KALSHI_INC_MAX_PAGES
     pages, cursor, truncated = 1, None, False
     if rows and out.get("found_path"):
         q0 = dict(params)
         cursor = _kalshi_next_cursor(_last_page_data)
-        while cursor and pages < _KALSHI_INC_MAX_PAGES:
+        while cursor and pages < max_pages:
             q0["cursor"] = cursor
             res = _kalshi_pub_get(out["found_path"], q0)
             if not res.get("ok"):
@@ -8156,10 +8185,18 @@ def api_kalshi_incentives():
             r, _k = _kalshi_rows_from(res.get("data"))
             if not r:
                 break
-            rows.extend(r)
+            if census:
+                # keep only what the census answers: the prefix histogram
+                # and any row on a sports series. Holding 80k rows to count
+                # them is how a probe OOMs a serverless function.
+                _census_add(census_pre, r)
+                sports_seen.extend(_sports_rows(r))
+                census_n += len(r)
+            else:
+                rows.extend(r)
             pages += 1
             cursor = _kalshi_next_cursor(res.get("data"))
-        truncated = bool(cursor) and pages >= _KALSHI_INC_MAX_PAGES
+        truncated = bool(cursor) and pages >= max_pages
     out["pages"] = pages
     out["page_truncated"] = truncated
     if truncated:
@@ -8183,6 +8220,25 @@ def api_kalshi_incentives():
                 if tick_f in str((r or {}).get("market_ticker")
                                  or (r or {}).get("ticker") or "").upper()]
     out["rows"] = len(rows)
+
+    if census:
+        _census_add(census_pre, rows)          # page 1
+        sports_seen.extend(_sports_rows(rows))
+        census_n += len(rows)
+        out["census"] = {
+            "programs_total": census_n,
+            "distinct_series": len(census_pre),
+            "complete": not truncated,
+            "sports_game_series_found": sorted({
+                str((r or {}).get("market_ticker") or "").split("-", 1)[0]
+                for r in sports_seen}),
+            "sports_rows": len(sports_seen),
+            "top_series": dict(sorted(census_pre.items(),
+                                      key=lambda kv: -kv[1])[:60]),
+        }
+        out["rows"] = census_n
+        _probe_log(out)
+        return jsonify(out)
 
     if rows:
         out["first_row_full"] = rows[0]
