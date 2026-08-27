@@ -7942,8 +7942,13 @@ def api_docs_fetch():
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
     url = (request.args.get("url") or "").strip()
+    # Kalshi joined the allowlist Aug 26 2026 — same reason Polymarket
+    # did: the sandbox is egress-blocked, Vercel is not, and this repo
+    # had been ASSUMING Kalshi's incentive terms from its own silence.
     allow = ("docs.polymarket.us", "polymarket.us", "docs.polymarket.com",
-             "help.polymarket.com", "learn.polymarket.com")
+             "help.polymarket.com", "learn.polymarket.com",
+             "docs.kalshi.com", "help.kalshi.com", "kalshi.com",
+             "www.kalshi.com", "trading-api.readme.io")
     try:
         from urllib.parse import urlparse as _up
         host = (_up(url).hostname or "").lower()
@@ -7960,14 +7965,498 @@ def api_docs_fetch():
         })
         out["status"] = r.status_code
         body = r.text or ""
-        # strip script/style then collapse tags — we want the prose+tables,
-        # not the SPA shell
-        body = _html_to_text(body)          # ONE implementation (shared
+        # ?raw=1 skips the HTML->text pass. Needed for text/markdown
+        # sources (docs.kalshi.com/llms.txt): the collapser eats newlines,
+        # which is right for an SPA shell and destroys a markdown index.
+        if (request.args.get("raw") or "") in ("1", "true", "yes"):
+            out["mode"] = "raw"
+        else:
+            # strip script/style then collapse tags — we want the
+            # prose+tables, not the SPA shell
+            body = _html_to_text(body)      # ONE implementation (shared
                                             # with the rewards sync)
+            out["mode"] = "text"
         out["chars"] = len(body)
         out["text"] = body[:14000]
     except Exception as e:
         out.update(ok=False, error=f"{type(e).__name__}: {e}"[:300])
+    _probe_log(out)
+    return jsonify(out)
+
+
+# ─────────── KALSHI INCENTIVE PROGRAMS, READ FROM THE VENUE ───────────
+# Aug 26 2026. Rule #1 (rent) has a Polymarket answer (_rent_ok +
+# /v1/incentives) and, until tonight, an ASSUMED Kalshi answer: this repo
+# said Kalshi had no sports liquidity program, inferred purely from its
+# own silence. That is the poly_incentive_programs blindness trap in a
+# different coat — "no rows for X" means we never bet X, never "X pays
+# nothing". Kalshi publishes GET /trade-api/v2/incentive_programs.
+#
+# ASSUMES NO FIELD NAMES and no path (the docs render two spellings), so
+# it walks candidate paths across every base, unauthed first then signed,
+# and dumps the FULL first row. A KNOWN-GOOD CONTROL rides along: if the
+# control also returns nothing, the reader is broken and a zero here
+# means nothing. Read-only; never raises.
+_KALSHI_INCENTIVE_PATHS = ("/incentive_programs", "/incentives",
+                           "/incentive-programs", "/liquidity_incentives")
+
+
+def _kalshi_pub_get(path: str, params: dict | None = None) -> dict:
+    """Unauthed GET across _KALSHI_BASES. {ok, base, status, data|error}."""
+    headers = {"Accept": "application/json", "User-Agent": "kahla-house/1.0"}
+    last = None
+    for base in _KALSHI_BASES:
+        try:
+            r = _http.get(base + path, params=params or {},
+                          headers=headers, timeout=15)
+            if r.status_code == 200:
+                try:
+                    return {"ok": True, "base": base, "status": 200,
+                            "data": r.json()}
+                except Exception:
+                    last = f"HTTP 200 @ {base} but body is not JSON: {(r.text or '')[:160]}"
+                    continue
+            last = f"HTTP {r.status_code} @ {base}: {(r.text or '')[:200]}"
+            # 401/403 = exists but needs auth; report it rather than
+            # burning the other bases on the same answer.
+            if r.status_code in (401, 403):
+                return {"ok": False, "base": base, "status": r.status_code,
+                        "error": last, "needs_auth": True}
+        except Exception as e:
+            last = f"{type(e).__name__} @ {base}: {str(e)[:140]}"
+    return {"ok": False, "error": last}
+
+
+_KALSHI_INC_MAX_PAGES = 40      # 40 x 200 = 8,000 program rows
+_KALSHI_INC_CENSUS_PAGES = 400  # ?census=1 — walk the whole catalogue,
+                                # keeping ONLY prefix counts + sports rows.
+                                # Proving a series is ABSENT needs the whole
+                                # list: the venue silently IGNORES
+                                # ?series_ticker= (verified — the filtered
+                                # response came back byte-identical to the
+                                # unfiltered one), so there is no cheap ask.
+
+
+def _kalshi_next_cursor(data):
+    """next_cursor off a paged Kalshi response, without assuming the key.
+    Kalshi returns '' (not null) at the end — treat empty as done."""
+    if not isinstance(data, dict):
+        return None
+    for k in ("next_cursor", "cursor", "nextCursor"):
+        v = data.get(k)
+        if isinstance(v, str) and v.strip():
+            return v
+    return None
+
+
+def _kalshi_rows_from(data):
+    """Pull the row list out of a response without assuming the key."""
+    if isinstance(data, list):
+        return data, "<root list>"
+    if not isinstance(data, dict):
+        return [], None
+    for k in ("incentive_programs", "incentives", "programs",
+              "liquidity_incentives", "markets", "data", "results"):
+        v = data.get(k)
+        if isinstance(v, list):
+            return v, k
+    # last resort: the sole list value on the object
+    lists = [(k, v) for k, v in data.items() if isinstance(v, list)]
+    if len(lists) == 1:
+        return lists[0][1], lists[0][0]
+    return [], None
+
+
+_KALSHI_SPORT_PREFIXES = ("KXMLB", "KXNFL", "KXNBA", "KXNHL", "KXUFC",
+                          "KXNCAA", "KXCFB", "KXCBB", "KXWNBA")
+
+
+def _inc_active(rows: list) -> list:
+    """Programs whose window contains NOW (UTC). A program row is not
+    permission; its window is."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    out = []
+    for r in rows or []:
+        try:
+            sd = (r or {}).get("start_date") or ""
+            ed = (r or {}).get("end_date") or ""
+            s0 = datetime.fromisoformat(sd.replace("Z", "+00:00"))
+            e0 = datetime.fromisoformat(ed.replace("Z", "+00:00"))
+            if s0 <= now <= e0:
+                out.append(r)
+        except Exception:
+            continue
+    return out
+
+
+def _census_add(acc: dict, rows: list):
+    for r in rows or []:
+        t = str((r or {}).get("market_ticker") or "")
+        pre = t.split("-", 1)[0] if "-" in t else (t or "?")
+        acc[pre] = acc.get(pre, 0) + 1
+
+
+def _sports_rows(rows: list) -> list:
+    return [r for r in rows or []
+            if str((r or {}).get("market_ticker") or "")
+            .upper().startswith(_KALSHI_SPORT_PREFIXES)]
+
+
+@app.route("/api/kalshi/incentives")
+def api_kalshi_incentives():
+    """Kalshi's live incentive programs — the Kalshi twin of the
+    Polymarket reward-schedule read.
+
+    Params: ?type=liquidity|volume|all (default liquidity), ?ticker=SUBSTR
+    to filter rows, ?raw=1 to dump full rows (default: 3 samples + a
+    ticker roll-up), ?limit=N page size.
+
+    Reports per candidate path: the HTTP status, which base answered, the
+    row key it found, the row count, and the FULL first row so the field
+    names are read off reality rather than off a help-centre paraphrase.
+    Sports roll-up buckets rows by our known series prefixes."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+
+    # ?verify=1 — is this even the right API? Three ORTHOGONAL checks, so
+    # the negative does not rest on one endpoint, one base and one string
+    # match: (1) every base compared head-to-head, (2) the FULL raw live
+    # MLB market object scanned for any reward/incentive field of its own,
+    # (3) the series object, and (4) the live market's market_id looked up
+    # against the program list by ID rather than by ticker text.
+    if (request.args.get("verify") or "") in ("1", "true", "yes"):
+        v: dict = {"ok": True, "check": "kalshi-incentives-verification"}
+        # (1) base-by-base, same query
+        v["bases"] = {}
+        for base in _KALSHI_BASES:
+            try:
+                r = _http.get(base + "/incentive_programs",
+                              params={"limit": 5},
+                              headers={"Accept": "application/json",
+                                       "User-Agent": "kahla-house/1.0"},
+                              timeout=15)
+                d = r.json() if r.status_code == 200 else {}
+                rr, kk = _kalshi_rows_from(d)
+                v["bases"][base] = {
+                    "status": r.status_code, "row_key": kk, "n": len(rr),
+                    "first_ticker": (rr[0] or {}).get("market_ticker") if rr else None,
+                    "top_keys": list(d.keys())[:8] if isinstance(d, dict) else None}
+            except Exception as e:
+                v["bases"][base] = {"error": f"{type(e).__name__}: {e}"[:160]}
+        # (2) the live MLB game market, FULL object
+        mk = _kalshi_pub_get("/markets", {"series_ticker": "KXMLBGAME",
+                                          "status": "open", "limit": 1})
+        mrows, _ = _kalshi_rows_from(mk.get("data")) if mk.get("ok") else ([], None)
+        m0 = mrows[0] if mrows else None
+        v["live_mlb_market"] = {
+            "found": bool(m0),
+            "ticker": (m0 or {}).get("ticker"),
+            "series_segment": str((m0 or {}).get("ticker") or "").split("-", 1)[0],
+            "all_field_names": sorted((m0 or {}).keys()) if isinstance(m0, dict) else None,
+            "reward_ish_fields": {k: vv for k, vv in (m0 or {}).items()
+                                  if any(w in k.lower() for w in
+                                         ("incent", "reward", "liquid", "rebate",
+                                          "maker", "target", "discount"))}
+            if isinstance(m0, dict) else None,
+        }
+        # (3) the series object
+        sr = _kalshi_pub_get("/series/KXMLBGAME")
+        v["series_object"] = (sr.get("data") if sr.get("ok")
+                              else {"error": (sr.get("error") or "")[:200]})
+        # (4) by market_id, not by ticker text
+        mid = (m0 or {}).get("market_id") or (m0 or {}).get("id")
+        v["market_id_probed"] = mid
+        if mid:
+            hit, scanned, cur, pages = None, 0, None, 0
+            import time as _t2
+            dl = _t2.time() + 40.0
+            q = {"limit": 200, "type": "all"}
+            while pages < 5000:
+                if cur:
+                    q["cursor"] = cur
+                res = _kalshi_pub_get("/incentive_programs", q)
+                if not res.get("ok"):
+                    break
+                rws, _ = _kalshi_rows_from(res.get("data"))
+                if not rws:
+                    break
+                scanned += len(rws)
+                pages += 1
+                for row in rws:
+                    if str((row or {}).get("market_id") or "") == str(mid):
+                        hit = row
+                        break
+                cur = _kalshi_next_cursor(res.get("data"))
+                if hit or not cur or _t2.time() > dl:
+                    break
+            v["by_market_id"] = {"hit": hit, "scanned": scanned,
+                                 "pages": pages, "exhausted": not cur,
+                                 "verdict": ("PROGRAM EXISTS for this market_id"
+                                             if hit else
+                                             ("no program for this market_id "
+                                              "(cursor exhausted)" if not cur else
+                                              "no program yet (cursor still open)"))}
+        _probe_log(v)
+        return jsonify(v)
+
+    typ = (request.args.get("type") or "liquidity").strip().lower()
+    tick_f = (request.args.get("ticker") or "").strip().upper()
+    raw = (request.args.get("raw") or "") in ("1", "true", "yes")
+    try:
+        limit = max(1, min(1000, int(request.args.get("limit") or 200)))
+    except Exception:
+        limit = 200
+
+    out: dict = {"ok": True, "type": typ, "paths_tried": [],
+                 "found_path": None, "rows": 0,
+                 "venue_params": None}
+
+    params = {"limit": limit}
+    if typ and typ != "none":
+        params["type"] = typ
+    # SERVER-SIDE passthrough: any ?q_<name>= rides to Kalshi as <name>.
+    # Client-side filtering can only ever filter what a truncated page walk
+    # already returned — useless for proving a series is ABSENT. Ask the
+    # venue about the exact series instead (the /api/rent-check lesson).
+    for k, v in request.args.items():
+        if k.startswith("q_") and len(k) > 2 and v:
+            params[k[2:]] = v
+
+    out["venue_params"] = {k: v for k, v in params.items()}
+    rows, src, _last_page_data = [], None, None
+    census_pre: dict = {}
+    sports_seen: list = []
+    census_n = 0
+    find_hits: list = []
+    find_scanned = 0
+    # Two passes: filtered, then BARE. An unsupported ?type=/?limit= 400s
+    # every path and reads exactly like "this venue has no programs" —
+    # the same false zero the control below guards against.
+    attempts = [(p, params, "filtered") for p in _KALSHI_INCENTIVE_PATHS] + \
+               [(p, {}, "bare") for p in _KALSHI_INCENTIVE_PATHS]
+    for path, q, pass_name in attempts:
+        res = _kalshi_pub_get(path, q)
+        att = {"path": path, "pass": pass_name, "status": res.get("status"),
+               "base": res.get("base"), "ok": res.get("ok"),
+               "error": (res.get("error") or "")[:200] or None}
+        if not res.get("ok") and res.get("needs_auth"):
+            # documented endpoint that wants a signature — retry signed
+            sres = _kalshi_authed_get(path, q)
+            att["authed_retry"] = {"ok": sres.get("ok"),
+                                   "status": sres.get("status"),
+                                   "error": (sres.get("error") or "")[:200] or None}
+            if sres.get("ok"):
+                res = {"ok": True, "base": sres.get("base"),
+                       "status": 200, "data": sres.get("data")}
+        if res.get("ok"):
+            r, k = _kalshi_rows_from(res.get("data"))
+            att["row_key"] = k
+            att["row_count"] = len(r)
+            att["top_keys"] = (list(res["data"].keys())[:12]
+                               if isinstance(res.get("data"), dict) else None)
+            if r and not rows:
+                rows, src = r, path
+                out["found_path"] = path
+                out["base_used"] = res.get("base")
+                _last_page_data = res.get("data")
+        out["paths_tried"].append(att)
+        if rows:
+            break
+
+    # ---- PAGE IT. The first response carried next_cursor and 200 rows
+    # that were ALL 15-minute crypto/commodity periods — one page reads
+    # exactly like "Kalshi has no sports programs" when it only means
+    # "page 1 is sorted by something else". Same false-floor class as
+    # gotcha #40 (PostgREST's 1,000-row cap): a capped read is not an
+    # answer. Bounded so a cursor that never terminates cannot spin.
+    # ?find=KXMLBGAME,KXNFLGAME — walk until one of these prefixes appears.
+    # Early-exits on the first hit and, on a wall-clock deadline, hands back
+    # resume_cursor so the walk CONTINUES on the next call instead of
+    # restarting. A capped walk answers "not in the first N"; only an
+    # exhausted cursor answers "not on the list".
+    find_pre = tuple(p.strip().upper()
+                     for p in (request.args.get("find") or "").split(",")
+                     if p.strip())
+    resume = (request.args.get("cursor") or "").strip() or None
+    # ?resume=auto — pick the cursor up from THIS probe's own last run for
+    # the same prefixes. Lets site-curl's `repeat` chain the walk across
+    # calls; without it each call restarts at page 1 and the walk can never
+    # finish, which is how "not found yet" masquerades as an answer.
+    prior_scanned = 0
+    if not resume and (request.args.get("resume") or "") == "auto" and find_pre:
+        try:
+            pr = get_supabase().table("exec_probe_runs") \
+                .select("result").order("id", desc=True).limit(25).execute()
+            for row in (pr.data or []):
+                f = ((row.get("result") or {}).get("find") or {})
+                if (tuple(f.get("prefixes") or []) == find_pre
+                        and f.get("resume_cursor")):
+                    resume = f["resume_cursor"]
+                    prior_scanned = int(f.get("rows_scanned_total")
+                                        or f.get("rows_scanned_this_call") or 0)
+                    break
+        except Exception:
+            pass
+    import time as _tt
+    _deadline = _tt.time() + 50.0
+    census = (request.args.get("census") or "") in ("1", "true", "yes")
+    max_pages = (5000 if find_pre else
+                 (_KALSHI_INC_CENSUS_PAGES if census
+                  else _KALSHI_INC_MAX_PAGES))
+    pages, cursor, truncated = 1, None, False
+    if rows and out.get("found_path"):
+        q0 = dict(params)
+        cursor = resume or _kalshi_next_cursor(_last_page_data)
+        while cursor and pages < max_pages:
+            q0["cursor"] = cursor
+            res = _kalshi_pub_get(out["found_path"], q0)
+            if not res.get("ok"):
+                out["page_error"] = (res.get("error") or "")[:200]
+                break
+            r, _k = _kalshi_rows_from(res.get("data"))
+            if not r:
+                break
+            if find_pre:
+                hits = [x for x in r
+                        if str((x or {}).get("market_ticker") or "")
+                        .upper().split("-", 1)[0] in find_pre]
+                find_scanned += len(r)
+                if hits:
+                    find_hits.extend(hits)
+                    cursor = _kalshi_next_cursor(res.get("data"))
+                    pages += 1
+                    break
+                pages += 1
+                cursor = _kalshi_next_cursor(res.get("data"))
+                if _tt.time() > _deadline:
+                    break
+                continue
+            if census:
+                # keep only what the census answers: the prefix histogram
+                # and any row on a sports series. Holding 80k rows to count
+                # them is how a probe OOMs a serverless function.
+                _census_add(census_pre, r)
+                sports_seen.extend(_sports_rows(r))
+                census_n += len(r)
+            else:
+                rows.extend(r)
+            pages += 1
+            cursor = _kalshi_next_cursor(res.get("data"))
+        truncated = bool(cursor) and pages >= max_pages
+    out["pages"] = pages
+    out["page_truncated"] = truncated
+    if truncated:
+        out["page_warning"] = ("hit the page cap with a cursor still open — "
+                               "counts below are a FLOOR, not a total")
+
+    # ---- KNOWN-GOOD CONTROL: an empty program list is only meaningful
+    # if the reader can reach Kalshi at all (this repo's standing rule).
+    ctl = _kalshi_pub_get("/markets", {"series_ticker": "KXMLBGAME",
+                                       "status": "open", "limit": 1})
+    cr, _ck = _kalshi_rows_from(ctl.get("data")) if ctl.get("ok") else ([], None)
+    out["control"] = {"ok": ctl.get("ok"), "status": ctl.get("status"),
+                      "mlb_markets_seen": len(cr),
+                      "error": (ctl.get("error") or "")[:200] or None}
+    out["control_verdict"] = ("reader OK — a zero above is a real venue zero"
+                              if cr else
+                              "READER BROKEN — a zero above means NOTHING")
+
+    if tick_f:
+        rows = [r for r in rows
+                if tick_f in str((r or {}).get("market_ticker")
+                                 or (r or {}).get("ticker") or "").upper()]
+    out["rows"] = len(rows)
+
+    if find_pre:
+        pg1 = [x for x in rows
+               if str((x or {}).get("market_ticker") or "")
+               .upper().split("-", 1)[0] in find_pre]
+        if pg1:
+            find_hits = pg1 + find_hits
+        find_scanned += len(rows)
+        exhausted = not cursor
+        out["find"] = {
+            "prefixes": list(find_pre),
+            "found": len(find_hits),
+            "rows_scanned_this_call": find_scanned,
+            "rows_scanned_total": prior_scanned + find_scanned,
+            "resumed_from_prior": bool(prior_scanned),
+            "pages_this_call": pages,
+            "exhausted": exhausted,
+            "resume_cursor": None if exhausted else cursor,
+            "hits": find_hits[:40],
+            "active_hits": _inc_active(find_hits)[:40],
+        }
+        out["verdict"] = (
+            f"FOUND {len(find_hits)} program(s) on {'/'.join(find_pre)}"
+            if find_hits else
+            (f"NOT ON THE LIST — cursor exhausted after "
+             f"{prior_scanned + find_scanned:,} programs walked"
+             if exhausted else
+             "not found YET — cursor still open, resume with ?cursor="))
+        out["rows"] = find_scanned
+        _probe_log(out)
+        return jsonify(out)
+
+    if census:
+        _census_add(census_pre, rows)          # page 1
+        sports_seen.extend(_sports_rows(rows))
+        census_n += len(rows)
+        out["census"] = {
+            "programs_total": census_n,
+            "distinct_series": len(census_pre),
+            "complete": not truncated,
+            "sports_game_series_found": sorted({
+                str((r or {}).get("market_ticker") or "").split("-", 1)[0]
+                for r in sports_seen}),
+            "sports_rows": len(sports_seen),
+            # the rows themselves, ACTIVE ones first — a series appearing in
+            # the census says nothing about whether it pays TODAY (the dead
+            # poly_reward_schedule lesson: a retired program that still reads
+            # as permission). Callers must see start/end, not just a name.
+            "sports_active_now": _inc_active(sports_seen)[:250],
+            "sports_sample": sports_seen[:60],
+            "top_series": dict(sorted(census_pre.items(),
+                                      key=lambda kv: -kv[1])[:60]),
+        }
+        out["rows"] = census_n
+        _probe_log(out)
+        return jsonify(out)
+
+    if rows:
+        out["first_row_full"] = rows[0]
+        out["field_names"] = sorted((rows[0] or {}).keys()) \
+            if isinstance(rows[0], dict) else None
+        # sports roll-up by our known series prefixes
+        buckets: dict = {}
+        for r in rows:
+            t = str((r or {}).get("market_ticker")
+                    or (r or {}).get("ticker") or "")
+            pre = t.split("-", 1)[0] if "-" in t else (t or "?")
+            b = buckets.setdefault(pre, {"n": 0, "sample": t})
+            b["n"] += 1
+        out["by_series_prefix"] = dict(
+            sorted(buckets.items(), key=lambda kv: -kv[1]["n"])[:40])
+        # Explicit sports roll-up — the prefix histogram buries a handful
+        # of game rows under thousands of 15-minute crypto periods.
+        sports_pre = ("KXMLBGAME", "KXNFLGAME", "KXNBA", "KXNHL", "KXUFC",
+                      "KXNCAAF", "KXCFBGAME", "KXMLB", "KXNFL")
+        sp = [r for r in rows
+              if str((r or {}).get("market_ticker") or "").upper()
+              .startswith(sports_pre)]
+        out["sports"] = {
+            "n": len(sp),
+            "tickers": sorted({str((r or {}).get("market_ticker") or "")
+                               for r in sp})[:60],
+            "sample_row": sp[0] if sp else None,
+        }
+        out["samples"] = rows[:3]
+        if raw:
+            out["all_rows"] = rows[:200]
+
     _probe_log(out)
     return jsonify(out)
 
