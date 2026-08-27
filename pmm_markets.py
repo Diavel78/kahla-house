@@ -785,7 +785,23 @@ _PROPS_CAP = 300
 
 def _prop_entry(m: dict, with_bbo: bool) -> dict | None:
     """Shape one non-main market as a prop row. Returns None when the
-    market has no question text (nothing to key/display on)."""
+    market has no question text (nothing to key/display on).
+
+    ⚠ TEAM PERIOD-DERIVATIVES ARE NOT PROPS (user, Aug 27 2026 — the
+    Memphis@UNLV first-half cover ladder showed up as 'Prop Bets': "That
+    ain't a prop"). A first-half/quarter spread, an inning-winner, an F5
+    total — those are derivative TEAM lines, not props, and they were a
+    THIRD of the prop tape's disk (~430k of 1.27M rows: inning-winners
+    ~310k, F5 lines ~118k) with zero review/model/bet consumers. Props =
+    PLAYER markets (plus the UFC/NRFI sniffs, which never reach here).
+    v1 `sportsMarketType` names team derivatives explicitly
+    (football_team_first_half_spread, baseball_team_inning5_winner…) —
+    refuse anything with 'team' in the v1. Full-game team main lines are
+    classified upstream and never reach this function, so this cannot
+    drop a bettable main line."""
+    v1 = str(m.get("sportsMarketType") or "").lower()
+    if "team" in v1:
+        return None
     q = m.get("question") or ""
     if not q.strip():
         return None
