@@ -1749,28 +1749,57 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 > the MODEL's shadow scoreboard (calibration; shadows hold no venue
 > position), not the answer to "how did we do".
 >
-> **THE SOURCE IS `poly_gameday_pnl(p_days)`** — **WRITTEN AND APPLIED Aug 21
-> 2026** (DDL `kahla-scanner/supabase/poly_gameday_pnl.sql`), the night the gap
-> finally bit: a Supabase disconnect silently nulled the bot_picks-side compute,
-> the API fell back to the tick summary's CREDIT-TIME number, and the "Last
-> night" card showed ~$76 for a night the venue settled at **−$0.98** (the
-> final-gated path had been showing −$5.10 — wrong in the other direction).
-> `_gameday_pnl` is now RPC-first; the final-gated bot_picks compute survives
-> only as its disconnect-retried fallback (the `final` gate is that path's
-> price, not a virtue), and the API's credit-time fallback is DELETED — a
-> day card with no truthful number shows a dash, never an invented figure.
-> The METHOD below is the applied one and reproduces by hand → realized USD
-> per **Arizona game day**, read by `app.py:_venue_gameday_map` and
-> through it by the dashboard's day cards and 7-day window. It reads
-> Polymarket's own `ACTIVITY_TYPE_POSITION_RESOLUTION` rows in
-> `poly_activities`: `afterPosition.realized` is the venue's CUMULATIVE
-> P&L for that (market, leg) — cost, harvest sells and payout already
-> netted, nothing for us to recompute. Dedup key is **(marketSlug,
-> outcome)** — the mirror stores ~90 identical copies of every
-> resolution, each with its own row key, and the slug alone would
-> collapse a both-legs-held market into one side. Day is the AZ date of
-> `market.gameStartTime` (eventSlug's date as fallback; on 217 markets
-> they never disagreed).
+> **THE SOURCE IS `app.py:_venue_day_map(sb, days)`** — AZ day → realized
+> bets USD, read by `_gameday_pnl` (today/yesterday cards) and `_pnl_stack`
+> (7d/30d/YTD). ONE basis for every bets number on the dashboard.
+>
+> ⚠ **THE MATH IS `parse_activities`'s, AND ONLY EVER THAT** (rewritten Aug
+> 28 2026, after the day card read **+$8.21 for a night the dashboard's own
+> Closed Positions table totalled +$4.39**). Per leg:
+>
+> ```
+> resolution : qty = |beforePosition.netPosition| ; cost = beforePosition.cost
+>              won = (held long & side LONG) or (held short & side SHORT)
+>              pnl = qty - cost   if won   else   -cost
+> sell       : price = trade.cost / trade.qty       (never trade.price)
+>              pnl   = (price - running_avg_cost) * qty, avg self-tracked
+>                      per slug oldest→newest across ALL its trades
+> ```
+>
+> ⚠⚠ **NEVER READ `afterPosition.realized`, `trade.costBasis`, OR
+> `trade.realizedPnl`** (gotchas #7/#8). All three are complement-poisoned
+> on SHORT positions or populated late by the venue, and every one has now
+> put a wrong number on this dashboard: `afterPosition.realized` sat at
+> `0.0000` for **7 of 11 Aug 27 legs** (hiding $33.10 of settled cost) while
+> those same legs read −$5.20/−$5.00/−$3.80 in Closed Positions; and
+> `cost − costBasis` reported a **+$0.21 scalp exit as −$1.27**, which got
+> escalated as a fake "the scalp arm is dumping below its floor" money bug.
+> The venue does not hand you a P&L number — the dashboard has computed its
+> own since it was built, and that is why it has been right for a year.
+>
+> ✅ **IF A DAY TOTAL EVER DISAGREES WITH CLOSED POSITIONS, THAT TABLE IS
+> RIGHT.** It is the same arithmetic; check the day math, never the table.
+>
+> **Two clocks, deliberately** — each single-key scheme has shipped a bug:
+> a **RESOLUTION** buckets on the AZ day of `market.gameStartTime` (keying
+> it on payout time is the Aug 15 2026 bug: a game settling 12:20am read as
+> the next day's profit before anything was played); a **SELL** buckets on
+> the AZ day it was TRADED (keying it on game start is the Aug 28 2026 bug:
+> last night's scalp exits on today's games made the card read −$1.53 at
+> 12:04am with nothing started).
+>
+> **Split by design:** `poly_gameday_pnl(p_days)` (DDL
+> `kahla-scanner/supabase/poly_gameday_pnl.sql`, applied) does RESOLUTIONS
+> ONLY — the dedupe is set-based and a YTD window is hundreds of thousands
+> of raw rows for a few thousand real legs. Sells stay in Python because the
+> running average is ORDER-DEPENDENT (a sell leaves the average alone; a
+> later buy re-blends it against the reduced quantity), which no window
+> function expresses. Two mirror artifacts the RPC must keep handling:
+> resolutions carry no id, so `_act_key` hashes the whole activity and a
+> nested market `updatedAt` mints **~19 copies** per leg (the live feed
+> returns one); and some settlements emit an **UNDEFINED-side twin** of a
+> real leg, which doubles the day AND books a WINNING leg as a full loss.
+> Trades carry a real id and never duplicate.
 >
 > ⚠ **NEVER GATE A RESULT ON `poly_pnl.final`.** That flag is written by
 > OUR ledger tick, and the whole reason this rule keeps getting repeated
@@ -1780,17 +1809,11 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 > +$6.85**. A reading that one of our own background jobs can silently
 > zero is the wrong reading. `poly_pnl` stays as the PER-PICK ledger
 > (`_poly_ledger_tick` owns it, additive, never touches
-> status/pnl_units); the DAY/WINDOW numbers come from the venue directly.
-> `_gameday_pnl_legacy` exists only as an RPC-unreachable fallback —
-> never promote it back. The scalp-exit gap is CLOSED (Aug 27 2026, the
-> night the scalp arm armed — a fully-sold position emits no resolution
-> row, so a scalped round trip vanished from the day cards; user:
-> "Dashboard better learn how to track sells"): the RPC now also counts
-> our-side SELL trades as `trade.cost − trade.costBasis` (venue-stamped
-> dollars; our side = passive when isAggressor=false else aggressor,
-> classified by INTENT never side), EXCLUDING any (slug, outcome) that
-> also has a resolution row — the resolution's cumulative realized
-> already nets partial sells, so double-count is structurally impossible.
+> status/pnl_units); the DAY/WINDOW numbers are computed from the venue's
+> raw activities. It is also NOT a cross-check to trust blindly — its own
+> per-leg figures drift a few cents from the venue's (−4.97 vs −5.00,
+> +5.43 vs +5.40), and trusting it over Closed Positions produced a
+> confidently wrong "+$4.04 truth" on the Aug 27 night.
 
 ## Known Issues & Gotchas
 1. **The Odds API auth is `?api_key=` query param** — NOT a Bearer header. Easy to copy from one provider's pattern (Owls used Bearer) and break.

@@ -1189,38 +1189,150 @@ _ACTS_DEEP_TYPES = ("ACTIVITY_TYPE_TRANSFER",
                     "ACTIVITY_TYPE_TAKER_FEE_REBATE")
 
 
+# A scalp position can sit open for days before it exits, and the running
+# average cost is ORDER-DEPENDENT (a sell leaves the average alone, but a
+# later buy re-blends against the reduced quantity), so pricing one sell
+# means walking that slug's trades from the position's real opening — not
+# from the edge of the day window.
+_VENUE_TRADE_LOOKBACK_D = 45
+
+
+def _venue_day_map(sb, days: int = 4) -> dict:
+    """AZ day -> realized BETS P&L, by the one proven Polymarket math.
+
+    ⚠ THE RULE THIS EXISTS TO OBEY (Aug 28 2026, after the day card read
+    +$8.21 for a night the Closed Positions table totalled +$4.39): per-leg
+    P&L is computed the way `parse_activities` has computed it since the
+    dashboard was built. It NEVER reads `afterPosition.realized`,
+    `trade.costBasis` or `trade.realizedPnl` — all three are either
+    complement-poisoned on SHORT positions or populated late by the venue,
+    and every one of them has now put a wrong number on this dashboard
+    (gotchas #7/#8). `afterPosition.realized` sat at 0.0000 for 7 of 11
+    Aug 27 legs, hiding $33.10 of settled cost; `cost - costBasis` reported
+    a +$0.21 scalp exit as -$1.27.
+
+        resolution : qty = |before.netPosition| ; cost = before.cost
+                     won = (held long & side LONG) or (held short & side SHORT)
+                     pnl = qty - cost   if won   else   -cost
+        sell       : price = trade.cost / trade.qty      (never trade.price)
+                     pnl   = (price - running_avg_cost) * qty
+
+    IF A DAY TOTAL EVER DISAGREES WITH CLOSED POSITIONS AGAIN, THAT TABLE
+    IS RIGHT AND THIS IS WRONG — it runs this same arithmetic.
+
+    Bucketing is deliberately SPLIT, because the two kinds of money are
+    earned at different moments and each single-key scheme has already
+    shipped a bug:
+      * a RESOLUTION is the game's result   -> AZ day of gameStartTime.
+        (Keying it on payout time is the Aug 15 2026 bug: a game settling
+        12:20am read as the next day's profit before anything was played.)
+      * a SELL is a completed trade         -> AZ day it was traded.
+        (Keying it on game start is the Aug 28 2026 bug: last night's
+        scalp exits on today's games made the card read -$1.53 at 12:04am
+        with no game started.)
+
+    Rewards are EXCLUDED — the cards report rent separately, and folding
+    it in here would double-count it."""
+    az = ZoneInfo("America/Phoenix")
+
+    def _v(x):
+        """{'value': '1.23'} | '1.23' | 1.23 -> float, else None."""
+        if isinstance(x, dict):
+            x = x.get("value")
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+
+    def _day(ts):
+        if not ts:
+            return None
+        # A bare YYYY-MM-DD (the RPC's az_day) is ALREADY an Arizona day.
+        # Parsing it as a timestamp makes it UTC midnight and the AZ
+        # conversion then walks it back to the previous day.
+        s = str(ts)
+        if len(s) == 10 and s[4] == "-":
+            try:
+                return datetime.strptime(s, "%Y-%m-%d").date()
+            except ValueError:
+                return None
+        try:
+            d = datetime.fromisoformat(
+                str(ts).replace("Z", "+00:00").replace(" ", "T"))
+        except ValueError:
+            return None
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return d.astimezone(az).date()
+
+    acc: dict = {}
+
+    # ---- resolutions: set-based dedupe + win math in SQL --------------
+    # poly_gameday_pnl runs exactly the beforePosition formula above. It
+    # lives in SQL because the dedupe is set-based (the mirror keeps ~19
+    # copies of every resolution) and a YTD window is hundreds of
+    # thousands of raw rows — but only a few thousand real legs.
+    for r in (sb.rpc("poly_gameday_pnl", {"p_days": days}).execute().data) or []:
+        d = _day(r.get("az_day"))
+        if d is not None:
+            acc[d] = acc.get(d, 0.0) + float(r.get("realized_usd") or 0)
+
+    # ---- sells: self-tracked average cost, walked oldest -> newest ----
+    t_since = (datetime.now(timezone.utc) - timedelta(
+        days=days + _VENUE_TRADE_LOOKBACK_D)).isoformat()
+    trows = _sb_paged(
+        lambda: sb.table("poly_activities").select("payload,at")
+        .eq("type", "ACTIVITY_TYPE_TRADE").gte("at", t_since).order("at"),
+        max_pages=15)
+    pos: dict = {}
+    for r in trows:
+        t = ((r.get("payload") or {}).get("trade") or {})
+        slug, qty = t.get("marketSlug"), _v(t.get("qty"))
+        if not slug or not qty:
+            continue
+        cost = _v(t.get("cost"))
+        price = (cost / qty) if cost is not None else _v(t.get("price"))
+        if price is None:
+            continue
+        bq = abs(_v((t.get("beforePosition") or {}).get("netPosition")) or 0)
+        aq = abs(_v((t.get("afterPosition") or {}).get("netPosition")) or 0)
+        p = pos.setdefault(slug, {"qty": 0.0, "cost": 0.0})
+        if not (t.get("realizedPnl") is not None or bq > aq):
+            p["qty"] += qty                      # a BUY opens/adds
+            p["cost"] += price * qty
+            continue
+        if p["qty"] <= 0:
+            continue                             # sell with no tracked buys
+        avg = p["cost"] / p["qty"]
+        d = _day(t.get("updateTime") or r.get("at"))
+        if d is not None:
+            acc[d] = acc.get(d, 0.0) + (price - avg) * qty
+        sold = min(qty, p["qty"])
+        p["cost"] -= avg * sold
+        p["qty"] -= sold
+
+    return acc
+
+
 def _gameday_pnl(sb) -> dict:
-    """Today / yesterday by ARIZONA GAME DAY, from the venue ledger.
+    """Today / yesterday in ARIZONA, by the proven per-leg math.
 
-    ⚠ NOT by payout timestamp, and NOT by the browser's timezone (Aug 15
-    2026). The dashboard used to bucket on when Polymarket credited the
-    money, so a Friday night game resolving at 12:20am counted as
-    Saturday — at 7am Saturday, with nothing played, the card read
-    +$7.22 "today". It also asked the browser what timezone it was in.
     Arizona is the only timezone this machine has ever needed; MST, no
-    DST, hardcoded.
+    DST, hardcoded — the card never asks the browser what zone it is in.
 
-    Settled bets only — an unplayed game's `realized_usd` is just the
-    cash deployed, so counting it would show tonight's slate as a loss
-    before first pitch."""
+    Settled bets only. See `_venue_day_map` for the arithmetic, the three
+    venue fields that must never be trusted, and why resolutions and sells
+    bucket on different clocks."""
     out = {"today": None, "yesterday": None}
     az = ZoneInfo("America/Phoenix")
     today = datetime.now(timezone.utc).astimezone(az).date()
-    # PRIMARY: the venue's own ledger via poly_gameday_pnl (WRITTEN AND
-    # APPLIED Aug 21 2026 — the operating rules named this function as the
-    # source while it did not exist, and the night it finally bit, the
-    # fallback chain showed ~$76 for a -$0.98 night). Resolution rows,
-    # deduped per (market, leg, side), bucketed by AZ GAME day.
     try:
-        rows = (sb.rpc("poly_gameday_pnl", {"p_days": 3}).execute().data) or []
-        by_day = {str(r.get("az_day")): float(r.get("realized_usd") or 0)
-                  for r in rows}
-        out["today"] = round(by_day.get(today.isoformat(), 0.0), 2)
-        out["yesterday"] = round(
-            by_day.get((today - timedelta(days=1)).isoformat(), 0.0), 2)
+        acc = _venue_day_map(sb, days=4)
+        out["today"] = round(acc.get(today, 0.0), 2)
+        out["yesterday"] = round(acc.get(today - timedelta(days=1), 0.0), 2)
         return out
     except Exception:
-        pass                     # RPC unreachable → the bot_picks fallback
+        pass                     # mirror unreachable → the bot_picks fallback
     # FALLBACK ONLY: the per-pick ledger, final-gated (the gate is the
     # price of this path — pre-final realized_usd is just cash deployed).
     # Disconnect-retried: a dropped read here used to silently null the
@@ -1636,9 +1748,11 @@ def _pnl_stack(sb) -> dict | None:
     """The P&L stack (mockup E, Aug 22 2026): Today/Yesterday bets-only,
     then 7d / 30d / YTD all-in with the bets-vs-rent split per window.
 
-    ONE venue read for every bets number: poly_gameday_pnl walked back to
-    Jan 1 gives per-AZ-game-day realized USD, and the windows are sums
-    over the same rows the day cards read — no second accounting basis.
+    ONE basis for every bets number: `_venue_day_map` walked back to Jan 1,
+    the same per-day map the day cards read — resolutions AND sell-to-close
+    exits. (Before Aug 28 2026 this read the resolution-only RPC directly,
+    which is why the note below says the settle basis "can't see
+    sell-to-close profits" — it can now.)
     Rent buckets by EARN date (the day the resting orders earned it), so
     a window answers "how did the machine do", not "when did the venue
     pay" — the payout lag is why the day cards say bets-only.
@@ -1650,15 +1764,10 @@ def _pnl_stack(sb) -> dict | None:
     jan1 = today.replace(month=1, day=1)
     ytd_days = (today - jan1).days + 1
     try:
-        rows = (sb.rpc("poly_gameday_pnl",
-                       {"p_days": ytd_days}).execute().data) or []
+        by_day = {d.isoformat(): v
+                  for d, v in _venue_day_map(sb, days=ytd_days).items()}
     except Exception:
         return None
-    by_day: dict = {}
-    for r in rows:
-        d = str(r.get("az_day") or "")[:10]
-        if d:
-            by_day[d] = by_day.get(d, 0.0) + float(r.get("realized_usd") or 0)
     rent = _rent_by_day(sb, jan1)
 
     def _win(days: int) -> dict:
