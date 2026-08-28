@@ -18839,7 +18839,13 @@ def _reconcile_tick(sb, now) -> dict:
            "cleared": 0, "sold_skip": 0, "size_warn": 0}
     if _time.time() - _RECON_LAST_TS < _RECON_EVERY_S:
         return {"gate": "cadence"}
-    _RECON_LAST_TS = _time.time()
+    # ⚠ The cadence slot is consumed only AFTER a pass that actually got
+    # venue reads (set below). First live night (Aug 27, the venue
+    # flapping through its own incident): the timer was stamped up top,
+    # so every attempt that landed on a dark moment burned a full 15-min
+    # slot doing nothing — the purge clears crawled behind a venue that
+    # was up 80% of the time. Cheap gates below (owner, one DB read) are
+    # fine to retry every tick.
     owner = _kalshi_owner_uid()
     if not owner:
         return {"gate": "no_owner"}
@@ -18875,6 +18881,9 @@ def _reconcile_tick(sb, now) -> dict:
     positions = _pmm_positions_raw(client)
     if orders is None or positions is None:
         return {"gate": "venue_read"}      # default-deny: dark venue = no-op
+                                           # (and the slot is NOT consumed —
+                                           # retry next tick)
+    _RECON_LAST_TS = _time.time()          # reads OK — this pass counts
     open_keys = {(o["slug"], o["intent"]) for o in orders
                  if str(o.get("intent") or "").startswith("ORDER_INTENT_BUY")}
     # expected size per (slug, side) — the orphan-order check compares the

@@ -249,6 +249,13 @@ def lane_repeg(ctx: Ctx) -> int:
         return 0
     stats = _app._repeg_tick(ctx.sb, ctx.now, force=True) or {}
     log.info("repeg: %s", stats)
+    # Plumb the tick stats into the journal row — the first armed night
+    # (Aug 27) the reconcile + scalp arms rode this lane and their gates
+    # (venue_read vs cadence vs work) were invisible from the DB side:
+    # every diagnosis ran on inference instead of the tick row. The
+    # opener lane has always done this; repeg just never did.
+    if ctx.detail is not None and isinstance(stats, dict):
+        ctx.detail.update(stats)
     # _repeg_tick reports {"acted", "shadow", "stopped"} — "moved"/"placed"
     # never existed on it, so this lane stamped work=0 forever while moving
     # real orders (14 in the 6h before this was caught; signal_blob.repeg is
