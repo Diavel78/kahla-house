@@ -19262,7 +19262,12 @@ def _scalp_tick(sb, now) -> dict:
         entry_c = _scalp_entry_c(r, b)
         if entry_c is None:
             continue
-        floor_c = min(99.0, float(int(entry_c)) + 1.0)
+        # FLOOR = ceil(real cost) + 1 (Aug 27 night — user caught an ask
+        # at 52¢ on a 51.7¢ cost: int(entry)+1 floored a FRACTIONAL entry
+        # at +0.3¢/share, which the ~0.4¢ maker fee eats. "Cost +1" means
+        # one whole cent over the real cost, rounded up — 51.7¢ → 53¢.
+        # A whole-cent entry is unchanged: 35.0¢ → 36¢.)
+        floor_c = min(99.0, float(math.ceil(entry_c - 1e-9)) + 1.0)
         # IN-PLAY = DUMP AT MONEY-BACK (user policy, Aug 27 night: "The
         # only thing that survives a game going live is the scalp...
         # Dump it as soon as we get our money back"). Pre-game the ask
@@ -19337,7 +19342,16 @@ def _scalp_tick(sb, now) -> dict:
         if our_ask is None:
             continue
         tgt = None
-        if _inplay:
+        if our_ask < floor_c - 0.26:
+            # FLOOR REPAIR — an ask resting below its true floor (placed
+            # under the old int()+1 rounding) is the one legal UP-move:
+            # lift it to cost+1 proper.
+            tgt = floor_c
+            if best_bid is not None and tgt <= best_bid:
+                tgt = float(int(best_bid)) + 1.0
+            if tgt <= our_ask + 0.26:
+                tgt = None
+        elif _inplay:
             _dump = max(floor_c, (float(int(best_bid)) + 1.0
                                   if best_bid is not None else floor_c))
             if _dump < our_ask - 0.26:
@@ -19349,9 +19363,12 @@ def _scalp_tick(sb, now) -> dict:
             tgt = max(floor_c, float(int(comp_ask)) - 1.0)
         elif our_ask > floor_c:
             tgt = max(floor_c, our_ask - 1.0)             # alone → step down
+        _repair = tgt is not None and our_ask < floor_c - 0.26
         if tgt is not None and best_bid is not None and tgt <= best_bid:
             tgt = float(int(best_bid)) + 1.0
-        if tgt is None or tgt >= our_ask - 0.26 or tgt < floor_c:
+        # down-moves only — EXCEPT the floor repair, the one legal up-move
+        if (tgt is None or tgt < floor_c
+                or (not _repair and tgt >= our_ask - 0.26)):
             continue                     # nothing to do this pass
         if not SCALP_ENABLED:
             _scalp_shadow(sb, r, b, now, tgt, best_bid, comp_ask, held, res)
