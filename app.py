@@ -19126,6 +19126,61 @@ def _scalp_lanes(b: dict, mt: str) -> bool:
     return bool(b.get("autobet")) and mt == "moneyline"   # MLB ML
 
 
+_SCALP_RENT_SLUGS = ("aec-mlb-", "asc-nfl-", "tsc-nfl-",
+                     "asc-cfb-", "tsc-cfb-", "asc-ncaaf-", "tsc-ncaaf-")
+
+
+def _scalp_adopted_ok(sb, r, b, slug, synth) -> bool:
+    """ADOPTED machine inventory qualifies too (Aug 27 night — user,
+    staring at an uncovered +$1.03 Padres ML: "This is money staring at
+    me… I see no sell order"). A pick the autolog re-created after its
+    original row was lost (the purge/ghost era) carries NO machine flags,
+    so the flag-based lane filter skipped real rent-lane positions. The
+    truth is on the tape: rent lanes are defined by the MARKET FAMILY,
+    and whose buy it was is stamped on the fill itself. Qualifies when
+    (a) the slug is a rent-lane family AND (b) the position's BUY trade
+    was MANUAL_ORDER_INDICATOR_AUTOMATIC — a hand-placed buy stays the
+    user's to sell, exactly per spec ("manual bets untouched"). Verdict
+    cached on the blob so the tape read runs once per pick; a failed
+    read caches nothing and retries next pass (default-deny)."""
+    if b.get("source") != "pmm_autolog":
+        return False
+    if not str(slug or "").startswith(_SCALP_RENT_SLUGS):
+        return False
+    cached = b.get("scalp_adopted")
+    if cached is not None:
+        return bool(cached)
+    verdict = None
+    try:
+        acts = (sb.table("poly_activities").select("payload")
+                .eq("type", "ACTIVITY_TYPE_TRADE").eq("slug", slug)
+                .limit(60).execute().data) or []
+        want = ("ORDER_INTENT_BUY_SHORT" if synth
+                else "ORDER_INTENT_BUY_LONG")
+        for a in acts:
+            t = (a.get("payload") or {}).get("trade") or {}
+            mo = (t.get("aggressor")
+                  if t.get("isAggressor") else t.get("passive")) or {}
+            if mo.get("intent") != want:
+                continue
+            verdict = (mo.get("manualOrderIndicator")
+                       == "MANUAL_ORDER_INDICATOR_AUTOMATIC")
+            break
+    except Exception:
+        return False                     # read failed — retry next pass
+    if verdict is None:
+        return False                     # no buy trade visible yet
+    try:
+        nb = dict(b)
+        nb["scalp_adopted"] = bool(verdict)
+        (sb.table("bot_picks").update({"signal_blob": nb})
+         .eq("id", r["id"]).execute())
+        b["scalp_adopted"] = bool(verdict)
+    except Exception:
+        pass
+    return bool(verdict)
+
+
 def _scalp_entry_c(r, b) -> float | None:
     """The pick's own-side entry in cents — the floor's anchor. entry_price
     auto-syncs to the real fill average, so the floor tracks venue truth."""
@@ -19176,13 +19231,14 @@ def _scalp_tick(sb, now) -> dict:
         mt = (r.get("market_type") or "").lower()
         if mt in ("nrfi", "prop"):
             continue                     # edge lanes NEVER sell (spec)
-        if not _scalp_lanes(b, mt):
-            continue
         ex = b.get("execution") if isinstance(b.get("execution"), dict) else {}
         slug = b.get("pmm_slug") or ex.get("pmm_slug")
         if not slug:
             continue
         synth = bool(b.get("pmm_synthetic") or ex.get("pmm_synthetic"))
+        if not (_scalp_lanes(b, mt)
+                or _scalp_adopted_ok(sb, r, b, slug, synth)):
+            continue
         cands.append((r, b, slug, synth))
     if not cands:
         return {"gate": "no_cands"}
