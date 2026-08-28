@@ -34,7 +34,7 @@
 create or replace function poly_gameday_pnl(p_days int default 3)
 returns table (az_day date, realized_usd numeric, legs int)
 language sql stable as $$
-  with res as (
+  with res0 as (
     select distinct on (
         payload->'positionResolution'->'market'->>'slug',
         payload->'positionResolution'->'afterPosition'
@@ -45,7 +45,8 @@ language sql stable as $$
       (payload->'positionResolution'->'market'->>'gameStartTime') as gst,
       payload->'positionResolution'->'market'->>'slug' as slug,
       payload->'positionResolution'->'afterPosition'
-             ->'marketMetadata'->>'outcome' as outcome
+             ->'marketMetadata'->>'outcome' as outcome,
+      payload->'positionResolution'->>'side' as res_side
     from poly_activities
     where type = 'ACTIVITY_TYPE_POSITION_RESOLUTION'
       -- credits lag game start by hours, never days: a 2-day cushion on
@@ -56,6 +57,22 @@ language sql stable as $$
                     ->'marketMetadata'->>'outcome',
              payload->'positionResolution'->>'side',
              at desc
+  ),
+  -- ⚠ THE UNDEFINED-SIDE TWIN (caught by the user Aug 27 night, re-adding
+  -- the day's legs by hand: "Check this again"): some settlements emit a
+  -- SECOND resolution row with side=POSITION_RESOLUTION_SIDE_UNDEFINED
+  -- carrying the SAME cumulative realized as the real LONG/SHORT row.
+  -- With side in the dedup key it counted as a second leg — the Aug 27
+  -- YRFIs each double-counted. Keep the UNDEFINED row ONLY when it is
+  -- the sole row for its (slug, outcome).
+  res as (
+    select realized, gst, slug, outcome from res0 r0
+    where r0.res_side <> 'POSITION_RESOLUTION_SIDE_UNDEFINED'
+       or not exists (
+         select 1 from res0 r1
+         where r1.slug = r0.slug
+           and r1.outcome is not distinct from r0.outcome
+           and r1.res_side <> 'POSITION_RESOLUTION_SIDE_UNDEFINED')
   ),
   tr as (
     select distinct on (payload->'trade'->>'id')
