@@ -19112,8 +19112,12 @@ _SCALP_MAX_PLACE = 5         # fresh asks per tick (creates — no cancel leg).
                              # real limits are SERIAL writes (kept — the
                              # Aug 16 duplicate/Cloudflare lesson) and the
                              # wall clock below.
-_SCALP_MAX_WALKS = 2         # cancel→verify→create walks per tick (1→2 same
-                             # night; still serial, wall-clock guarded)
+_SCALP_MAX_WALKS = 5         # cancel→verify→create walks per tick (1→2→5
+                             # first armed night; still serial, wall-clock
+                             # guarded — each walk ≈4s, 5 fits the 30s
+                             # budget. With every pre-game ask stepping
+                             # toward its floor by design, 2/tick made the
+                             # queue drain take hours).
 _SCALP_BUDGET_S = 30.0       # wall clock, checked BEFORE each write (12→30
                              # on the box — nothing kills the pass here)
 _SCALP_SHADOW_CAP = 30       # shadow entries kept per pick blob
@@ -19250,6 +19254,32 @@ def _scalp_tick(sb, now) -> dict:
     positions = _pmm_positions_raw(client)
     if orders is None or positions is None:
         return {"gate": "venue_read"}    # venue dark — never act blind
+
+    # FLOOR VIOLATIONS FIRST (Aug 27 night): with every pre-game ask
+    # stepping toward its floor by design, all 30+ candidates want a walk
+    # every tick and the per-tick cap kept handing its slots to the front
+    # of a stable list — an ask resting BELOW its floor (fee-eating if
+    # lifted) sat queued for hours behind routine 1¢ steps. Repairs are
+    # correctness, steps are optimization: repairs jump the line.
+    def _floor_viol(c4):
+        r4, b4, slug4, synth4 = c4
+        e4 = _scalp_entry_c(r4, b4)
+        if e4 is None:
+            return 1
+        si4 = ("ORDER_INTENT_SELL_SHORT" if synth4
+               else "ORDER_INTENT_SELL_LONG")
+        a4 = None
+        for o4 in orders:
+            if (o4.get("slug") == slug4 and o4.get("intent") == si4
+                    and o4.get("auto") and o4.get("price_yes") is not None):
+                a4 = ((100.0 - o4["price_yes"] * 100.0) if synth4
+                      else o4["price_yes"] * 100.0)
+                break
+        if a4 is None:
+            return 1
+        f4 = min(99.0, float(math.ceil(e4 - 1e-9)) + 1.0)
+        return 0 if a4 < f4 - 0.26 else 1
+    cands.sort(key=_floor_viol)
     for r, b, slug, synth in cands:
         if _time.time() - _t0 > _SCALP_BUDGET_S:
             res["gate"] = "budget"
