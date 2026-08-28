@@ -1782,10 +1782,15 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 > (`_poly_ledger_tick` owns it, additive, never touches
 > status/pnl_units); the DAY/WINDOW numbers come from the venue directly.
 > `_gameday_pnl_legacy` exists only as an RPC-unreachable fallback —
-> never promote it back. Known gap, benign today: a position fully closed
-> before resolution emits no resolution row, and the harvest always rides
-> at least one contract (`min_held`), so 109 of 109 recent settlements
-> were still long.
+> never promote it back. The scalp-exit gap is CLOSED (Aug 27 2026, the
+> night the scalp arm armed — a fully-sold position emits no resolution
+> row, so a scalped round trip vanished from the day cards; user:
+> "Dashboard better learn how to track sells"): the RPC now also counts
+> our-side SELL trades as `trade.cost − trade.costBasis` (venue-stamped
+> dollars; our side = passive when isAggressor=false else aggressor,
+> classified by INTENT never side), EXCLUDING any (slug, outcome) that
+> also has a resolution row — the resolution's cumulative realized
+> already nets partial sells, so double-count is structurally impossible.
 
 ## Known Issues & Gotchas
 1. **The Odds API auth is `?api_key=` query param** — NOT a Bearer header. Easy to copy from one provider's pattern (Owls used Bearer) and break.
