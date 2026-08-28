@@ -7093,7 +7093,10 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
             # Manual user-logged picks are still never touched.
             if not (a.get("query_text") == "auto-logged from Polymarket"
                     or blob.get("autobet") or blob.get("whiff_autobet")
-                    or blob.get("ou_trader")):
+                    or blob.get("ou_trader") or blob.get("gridiron_autobet")):
+                # gridiron joined Aug 27 2026 (the rinse-repeat wire): a
+                # scalped-out football pick must clear its row or the
+                # executor dedup blocks the sweep's re-buy forever.
                 continue
             try:
                 if (now_dt - datetime.fromisoformat(
@@ -7142,6 +7145,25 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                 # (Props have no opener row — no-op there.)
                 if ((blob.get("autobet") or blob.get("ou_trader"))
                         and a.get("market_id") and a.get("market_type")):
+                    # RINSE-REPEAT vs USER-EXIT — the pick's own scalp
+                    # stamp tells them apart (Aug 27 2026, minutes after
+                    # the first live round trip; user, watching PIT
+                    # buy $10.04 → sell $10.26 in 20 min: "Now buy it
+                    # again if it still clears, gimme gimme gimme… buy
+                    # sell buy sell, rent rent rent"). A MACHINE scalp
+                    # exit (blob.scalp stamped by _scalp_create) re-arms
+                    # the game as dayof_wait — the 20-min in-window
+                    # re-check runs the FULL gauntlet (rent → model at
+                    # the CURRENT book) and re-buys only if it still
+                    # clears; swept is NOT bumped, because the two-strike
+                    # latch means "the user canceled deliberately" and a
+                    # scalp exit is the machine doing its job. A sold
+                    # pick with NO scalp stamp = the user exited by hand
+                    # → the original cool-off (would_bet=false, swept+1,
+                    # 4h expiry, permanent at swept>=2) stands.
+                    _scalped = (reason == "sold pre-game"
+                                and isinstance(blob.get("scalp"), list)
+                                and len(blob.get("scalp") or []) > 0)
                     try:
                         _op = (sb.table("pickbot_paperlog")
                                .select("id,signal_blob")
@@ -7155,13 +7177,19 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                                    if isinstance(_op[0].get("signal_blob"),
                                                  dict) else {}) or {}
                             _ob["would_bet"] = False
-                            _ob["swept"] = int(_ob.get("swept") or 0) + 1
+                            if _scalped:
+                                _ob["dayof_wait"] = True
+                            else:
+                                _ob["swept"] = int(_ob.get("swept") or 0) + 1
                             (sb.table("pickbot_paperlog")
                              .update({"signal_blob": _ob,
                                       "logged_at": now_dt.isoformat()})
                              .eq("id", _op[0]["id"]).execute())
                     except Exception:
                         pass
+                # (Gridiron picks need no latch release — the week-of
+                # sweep's only dedup is the pick row just deleted, so the
+                # re-buy evaluation happens on its next hourly visit.)
             except Exception:
                 pass
 
