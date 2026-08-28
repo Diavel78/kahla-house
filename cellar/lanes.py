@@ -200,6 +200,20 @@ def lane_opener(ctx: Ctx) -> int:
     # THE LESSON: before tuning a path, prove it EXECUTES.
     g_deadline = max(deadline, _t.time() + _app._GRIDIRON_BUDGET_S)
     g_rows, g_stats = _app._gridiron_opener_pass(ctx.sb, ctx.now, g_deadline)
+    # WEEK-OF BET SWEEP — same lesson as the pass above, same shape (Aug 27
+    # 2026): `_gridiron_bet_sweep` had exactly ONE call site, the Vercel
+    # paperlog route, gated `_own_opener` — which is False the moment the
+    # box holds this lease. So with the box healthy the sweep ran NOWHERE;
+    # it only ever fired during a box outage (the Aug 23 finding). The tape
+    # is one-shot at listing when books are junk rungs the tail gate
+    # refuses; the sweep is what actually bets Week 1 when real lines post.
+    # Small budget after the tape pass; hourly per-game backoff inside it
+    # keeps this idle-cheap.
+    try:
+        _app._gridiron_bet_sweep(ctx.sb, ctx.now,
+                                 max(g_deadline, _t.time() + 20.0), g_stats)
+    except Exception:
+        log.exception("opener: gridiron bet sweep failed")
     stats = {**(stats or {}), **(g_stats or {})}
     log.info("opener: %s", stats)
     if ctx.detail is not None and isinstance(stats, dict):
