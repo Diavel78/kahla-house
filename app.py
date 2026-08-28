@@ -18801,6 +18801,215 @@ def _poly_ledger_tick(sb, now, *, force: bool = False) -> dict:
     return res
 
 
+# ── VENUE-TRUTH RECONCILE (built Aug 28 2026, staged for the Thursday
+# unfreeze — the automated version of the Aug 27 fire drill). THE GHOST-
+# ORDER CLASS: the venue cancels resting orders when it re-provisions a
+# ladder's books (20 of 26 Week-1 football orders died over one weekend),
+# and the Aug 27 platform incident ended in an ACCOUNT-WIDE purge of every
+# resting order. A pick row whose order died blocks the executor's dedup
+# forever — the machine believes it is bet and never re-bets. Invariant:
+# pending machine picks = resting orders + fills. This pass enforces it.
+_RECON_LAST_TS = 0.0           # in-memory cadence — per process
+_RECON_EVERY_S = 900.0         # one pass per 15 min; the repeg lane hosts it
+_RECON_CONFIRM_MIN = 12.0      # two-strike: a miss must persist this long
+                               # (orders.list is one read — a transient gap
+                               # must never read as a purge; create is async)
+_RECON_MAX_CLEARS = 6          # per pass — bounded; the next pass continues
+_RECON_START_GUARD_MIN = 30.0  # never touch a pick this close to kickoff
+
+
+def _reconcile_tick(sb, now) -> dict:
+    """Order-book truth per pending machine pick. Three verdicts:
+    - open order on (slug, our intent) → healthy (clears any miss stamp);
+    - no order but the POSITION is held on our side → it rides (plus the
+      orphan-order size check: position >> pick contracts = the double-fill
+      class, lad-det 20-on-10 Aug 27 — warn once, never auto-fix);
+    - no order, no position, AND no evidence it ever filled (poly_pnl buys,
+      poly_activities TRADE with our intent — a filled-then-SOLD pick is the
+      autolog's to remove, not ours) → ZOMBIE: two-strike stamp, then backup
+      to reconcile_bak → delete the row → the opener/sweep re-bets through
+      the FULL gauntlet (rent → model → bet at current books; never a blind
+      re-place — user, Aug 27: 'model, RENT, bet'). For MLB opener rows the
+      paperlog latch is released via dayof_wait=true (a would-bet whose
+      order died IS unfinished work — the done-set semantic, exactly).
+    Default-deny everywhere: a failed venue read does nothing; a failed
+    backup insert never deletes."""
+    global _RECON_LAST_TS
+    res = {"checked": 0, "healthy": 0, "filled": 0, "stamped": 0,
+           "cleared": 0, "sold_skip": 0, "size_warn": 0}
+    if _time.time() - _RECON_LAST_TS < _RECON_EVERY_S:
+        return {"gate": "cadence"}
+    _RECON_LAST_TS = _time.time()
+    owner = _kalshi_owner_uid()
+    if not owner:
+        return {"gate": "no_owner"}
+    lo = (now + timedelta(minutes=_RECON_START_GUARD_MIN)).isoformat()
+    try:
+        rows = (sb.table("bot_picks")
+                .select("id,event_name,event_start,market_type,side,"
+                        "market_id,sport,signal_blob,poly_pnl")
+                .eq("asked_by", owner).eq("status", "pending")
+                .gt("event_start", lo).limit(400).execute().data) or []
+    except Exception as e:
+        return {"gate": ("picks_err: " + str(e))[:100]}
+    cands = []
+    for r in rows:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if not (b.get("autobet") or b.get("whiff_autobet")
+                or b.get("gridiron_autobet") or b.get("fbprop_autobet")
+                or b.get("ou_trader")):
+            continue                       # machine picks only — never manual
+        ex = b.get("execution") if isinstance(b.get("execution"), dict) else {}
+        slug = b.get("pmm_slug") or ex.get("pmm_slug")
+        if not slug:
+            continue                       # no venue identity → nothing to check
+        synth = bool(b.get("pmm_synthetic") or ex.get("pmm_synthetic"))
+        cands.append((r, b, slug, synth))
+    if not cands:
+        return {"gate": "no_cands"}
+    try:
+        client = get_client()
+    except Exception:
+        return {"gate": "no_client"}
+    orders = _pmm_open_orders_raw(client)
+    positions = _pmm_positions_raw(client)
+    if orders is None or positions is None:
+        return {"gate": "venue_read"}      # default-deny: dark venue = no-op
+    open_keys = {(o["slug"], o["intent"]) for o in orders
+                 if str(o.get("intent") or "").startswith("ORDER_INTENT_BUY")}
+    # expected size per (slug, side) — the orphan-order check compares the
+    # POSITION (per slug-side) against the SUM of pick stakes on that side
+    exp_by_key: dict = {}
+    for r, b, slug, synth in cands:
+        exp_by_key[(slug, synth)] = (exp_by_key.get((slug, synth), 0.0)
+                                     + float(b.get("contracts") or 0))
+    warned_keys = set()
+    cleared_lbl = []
+    for r, b, slug, synth in cands:
+        res["checked"] += 1
+        intent = "ORDER_INTENT_BUY_SHORT" if synth else "ORDER_INTENT_BUY_LONG"
+        if (slug, intent) in open_keys:
+            res["healthy"] += 1
+            if b.get("recon_miss"):        # order came back — clear the strike
+                try:
+                    nb = dict(b)
+                    nb.pop("recon_miss", None)
+                    (sb.table("bot_picks").update({"signal_blob": nb})
+                     .eq("id", r["id"]).execute())
+                except Exception:
+                    pass
+            continue
+        pos = positions.get(slug) or {}
+        net = float(pos.get("net") or 0.0)
+        on_side = (net < 0) if synth else (net > 0)
+        if on_side:
+            res["filled"] += 1
+            exp = exp_by_key.get((slug, synth)) or 0.0
+            if (exp > 0 and abs(net) > exp * 1.25 + 0.5
+                    and (slug, synth) not in warned_keys
+                    and not b.get("recon_size_warned")):
+                warned_keys.add((slug, synth))
+                res["size_warn"] += 1
+                try:
+                    nb = dict(b)
+                    nb["recon_size_warned"] = now.isoformat()
+                    (sb.table("bot_picks").update({"signal_blob": nb})
+                     .eq("id", r["id"]).execute())
+                except Exception:
+                    pass
+                _send_fill_telegram(
+                    f"⚠️ RECONCILE — position bigger than the pick: "
+                    f"{r.get('event_name')} {r.get('market_type')} "
+                    f"{r.get('side')} holds {abs(net):g} vs {exp:g} logged "
+                    f"({slug}). The orphan-order double-fill class — "
+                    f"check the venue.")
+            continue
+        # no order, no position — but did it ever FILL? (filled-then-sold
+        # is the autolog's SOLD-removal, not a zombie; poly_pnl lags ~5min
+        # and the activities mirror a beat more — the two-strike delay
+        # below outwaits both)
+        pnl = r.get("poly_pnl") if isinstance(r.get("poly_pnl"), dict) else {}
+        if float(pnl.get("buy_usd") or 0.0) > 0.0:
+            res["sold_skip"] += 1
+            continue
+        traded = False
+        try:
+            acts = (sb.table("poly_activities").select("payload")
+                    .eq("type", "ACTIVITY_TYPE_TRADE").eq("slug", slug)
+                    .limit(60).execute().data) or []
+            want = "BUY_SHORT" if synth else "BUY_LONG"
+            traded = any(want in json.dumps(a.get("payload") or {})
+                         for a in acts)
+        except Exception:
+            traded = True                  # read failed → assume filled → skip
+        if traded:
+            res["sold_skip"] += 1
+            continue
+        miss = b.get("recon_miss")
+        if not miss:
+            try:
+                nb = dict(b)
+                nb["recon_miss"] = now.isoformat()
+                (sb.table("bot_picks").update({"signal_blob": nb})
+                 .eq("id", r["id"]).execute())
+                res["stamped"] += 1
+            except Exception:
+                pass
+            continue
+        try:
+            aged = ((now - datetime.fromisoformat(
+                str(miss).replace("Z", "+00:00"))).total_seconds()
+                / 60.0) >= _RECON_CONFIRM_MIN
+        except Exception:
+            aged = False
+        if not aged or res["cleared"] >= _RECON_MAX_CLEARS:
+            continue
+        # ZOMBIE CONFIRMED — backup, delete, release the opener latch.
+        try:
+            (sb.table("reconcile_bak")
+             .insert({"pick_id": r["id"], "reason": "venue_killed_order",
+                      "row": r}).execute())
+        except Exception:
+            continue                       # no backup → never delete
+        try:
+            (sb.table("bot_picks").delete().eq("id", r["id"]).execute())
+        except Exception:
+            continue
+        res["cleared"] += 1
+        cleared_lbl.append(f"{r.get('event_name')} "
+                           f"{r.get('market_type')} {r.get('side')}")
+        # MLB opener lanes latch on their paperlog opener rows (would_bet
+        # stays permanently done) — flip dayof_wait so the game re-enters
+        # the pool. Football/props dedup lives on bot_picks alone (the row
+        # we just deleted), so the sweep / whiff pass re-bets on its own.
+        if b.get("autobet") and r.get("market_id"):
+            try:
+                prows = (sb.table("pickbot_paperlog")
+                         .select("id,signal_blob")
+                         .eq("market_id", r["market_id"])
+                         .eq("market_type", r.get("market_type"))
+                         .filter("signal_blob->>opener_shadow", "eq", "true")
+                         .limit(5).execute().data) or []
+                for pr in prows:
+                    pb = (pr.get("signal_blob")
+                          if isinstance(pr.get("signal_blob"), dict) else {})
+                    if pb.get("dayof_wait") in (True, "true"):
+                        continue
+                    (sb.table("pickbot_paperlog")
+                     .update({"signal_blob": dict(pb, dayof_wait=True)})
+                     .eq("id", pr["id"]).execute())
+            except Exception:
+                pass
+    if cleared_lbl:
+        _send_fill_telegram(
+            f"🧹 RECONCILE — venue killed {len(cleared_lbl)} resting "
+            f"order(s), no fill: " + "; ".join(cleared_lbl[:8])
+            + (" …" if len(cleared_lbl) > 8 else "")
+            + ". Rows cleared; the opener/sweep re-bets through the full "
+              "gauntlet (rent → model) on its next pass.")
+    return res
+
+
 def _repeg_tick(sb, now, *, force: bool = False) -> dict:
     """One re-peg pass, riding the paperlog tick (every _OUTBID_TICK_MOD
     minutes, same throttle + blackout as the outbid ping; runs BEFORE
@@ -19195,6 +19404,14 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                     f"{contracts:g} contracts, ${cost:.2f}, verified{note}). "
                     f"Check it.")
                 res["acted"] += 1
+        # VENUE-TRUTH RECONCILE rides here — inside the repeg lease (the
+        # lane that already owns order mutation), after the chase work.
+        # Own 15-min cadence inside; its own try so a reconcile fault can
+        # never cost a chase.
+        try:
+            res["reconcile"] = _reconcile_tick(sb, now)
+        except Exception:
+            pass
     except Exception:
         pass
     # MEASURED, not assumed. The 1-per-tick cap was justified by a 10s
