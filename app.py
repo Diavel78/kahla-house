@@ -18810,11 +18810,19 @@ def _poly_ledger_tick(sb, now, *, force: bool = False) -> dict:
 # forever — the machine believes it is bet and never re-bets. Invariant:
 # pending machine picks = resting orders + fills. This pass enforces it.
 _RECON_LAST_TS = 0.0           # in-memory cadence — per process
-_RECON_EVERY_S = 900.0         # one pass per 15 min; the repeg lane hosts it
+_RECON_EVERY_S = 420.0         # one pass per 7 min; the repeg lane hosts it
+                               # (900→420 first armed night — 15 min was
+                               # Vercel-budget deference; the two-strike
+                               # CONFIRM window below is the safety, not
+                               # the cadence)
 _RECON_CONFIRM_MIN = 12.0      # two-strike: a miss must persist this long
                                # (orders.list is one read — a transient gap
                                # must never read as a purge; create is async)
-_RECON_MAX_CLEARS = 6          # per pass — bounded; the next pass continues
+_RECON_MAX_CLEARS = 12         # per pass — bounded; the next pass continues
+                               # (6→12 first armed night: a purge-scale
+                               # event is exactly when you want the heal
+                               # to finish in one pass, and every clear is
+                               # backup-gated anyway)
 _RECON_START_GUARD_MIN = 30.0  # never touch a pick this close to kickoff
 
 
@@ -19040,11 +19048,17 @@ SCALP_ENABLED = True         # ARMED Aug 27 2026 night, ~40 min into shadow,
                              # GTD through resolution. First live cycle is
                              # the probe (the harvest precedent) — verify
                              # the first asks via orders.list/the app.
-_SCALP_MAX_PLACE = 2         # fresh asks per tick (creates — no cancel leg)
-_SCALP_MAX_WALKS = 1         # cancel→verify→create walks per tick (spec:
-                             # serial writes, 1 sell walk/tick beside the
-                             # buy repeg's budget)
-_SCALP_BUDGET_S = 12.0       # wall clock, checked BEFORE each write
+_SCALP_MAX_PLACE = 5         # fresh asks per tick (creates — no cancel leg).
+                             # 2→5 first armed night (user: "why is
+                             # everything so slow"): the 2-cap was sized for
+                             # a shared Vercel request; on the box the only
+                             # real limits are SERIAL writes (kept — the
+                             # Aug 16 duplicate/Cloudflare lesson) and the
+                             # wall clock below.
+_SCALP_MAX_WALKS = 2         # cancel→verify→create walks per tick (1→2 same
+                             # night; still serial, wall-clock guarded)
+_SCALP_BUDGET_S = 30.0       # wall clock, checked BEFORE each write (12→30
+                             # on the box — nothing kills the pass here)
 _SCALP_SHADOW_CAP = 30       # shadow entries kept per pick blob
 
 
