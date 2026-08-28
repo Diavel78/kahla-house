@@ -19021,9 +19021,16 @@ def _reconcile_tick(sb, now) -> dict:
 # NOT the dead harvest (_HARVEST_ENABLED stays dead; git keeps the
 # ladder): the harvest rested fixed rungs losers never touched — this
 # rests AT THE TOUCH and walks DOWN, so it actually trades.
-SCALP_ENABLED = False        # ⚠ SHADOW MODE (spec rollout: 2-3 days of
-                             # signal_blob.scalp_shadow, then flip on the
-                             # user's review — his call to shorten).
+SCALP_ENABLED = True         # ARMED Aug 27 2026 night, ~40 min into shadow,
+                             # by explicit user order (the spec reserved the
+                             # shortening to him): "ARE WE READY OR NOT...
+                             # Start at the maker, you can't go below my
+                             # cost +1. And it runs until it sells or
+                             # finalizes." Mechanics confirmed = the built
+                             # engine: join-the-touch ask, floor entry+1¢,
+                             # GTD through resolution. First live cycle is
+                             # the probe (the harvest precedent) — verify
+                             # the first asks via orders.list/the app.
 _SCALP_MAX_PLACE = 2         # fresh asks per tick (creates — no cancel leg)
 _SCALP_MAX_WALKS = 1         # cancel→verify→create walks per tick (spec:
                              # serial writes, 1 sell walk/tick beside the
