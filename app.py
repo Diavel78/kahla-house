@@ -19207,6 +19207,18 @@ def _scalp_tick(sb, now) -> dict:
         if entry_c is None:
             continue
         floor_c = min(99.0, float(int(entry_c)) + 1.0)
+        # IN-PLAY = DUMP AT MONEY-BACK (user policy, Aug 27 night: "The
+        # only thing that survives a game going live is the scalp...
+        # Dump it as soon as we get our money back"). Pre-game the ask
+        # captures spread (join the touch, walk down 1¢/pass); the moment
+        # the game is LIVE the goal flips to exit — the ask goes STRAIGHT
+        # to max(floor, bid+1): money back plus the baby profit, resting
+        # as tight to the bid as post-only allows, no 15-minute walk.
+        try:
+            _inplay = (datetime.fromisoformat(
+                str(r.get("event_start")).replace("Z", "+00:00")) <= now)
+        except Exception:
+            _inplay = False
         sell_intent = ("ORDER_INTENT_SELL_SHORT" if synth
                        else "ORDER_INTENT_SELL_LONG")
         mine = [o for o in orders
@@ -19237,8 +19249,16 @@ def _scalp_tick(sb, now) -> dict:
             break
         if not mine:
             # ── PLACE: join the top of the book, never cross, floor binds
-            if comp_ask is not None:
-                tgt = max(floor_c, float(int(comp_ask)))
+            if _inplay:
+                tgt = max(floor_c, (float(int(best_bid)) + 1.0
+                                    if best_bid is not None else floor_c))
+            elif comp_ask is not None:
+                # LEAD the ask by 1¢ — be THE maker, front of the queue,
+                # not a joiner (user, Aug 27 night: "we are THE maker on
+                # the sell right? Not joining the Queue? following the
+                # rule of my cost +1" — supersedes the spec's join rule).
+                # The floor still wins: never under cost+1.
+                tgt = max(floor_c, float(int(comp_ask)) - 1.0)
             else:
                 tgt = max(floor_c, entry_c + 10.0)
             tgt = min(99.0, float(int(round(tgt))))
@@ -19256,12 +19276,21 @@ def _scalp_tick(sb, now) -> dict:
                              tgt, int(held), now):
                 res["placed"] += 1
             continue
-        # ── WALK: down to a lower competitor ask, or 1¢/pass when alone
+        # ── WALK: down to a lower competitor ask, or 1¢/pass when alone;
+        # in-play there is no walk — one jump straight to money-back
         if our_ask is None:
             continue
         tgt = None
-        if comp_ask is not None and float(int(comp_ask)) < our_ask - 0.26:
-            tgt = max(floor_c, float(int(comp_ask)))      # join the lower ask
+        if _inplay:
+            _dump = max(floor_c, (float(int(best_bid)) + 1.0
+                                  if best_bid is not None else floor_c))
+            if _dump < our_ask - 0.26:
+                tgt = _dump
+        elif (comp_ask is not None
+              and float(int(comp_ask)) - 1.0 < our_ask - 0.26):
+            # a competitor is at or inside our ask → retake the front:
+            # LEAD them by 1¢ (never join), floored at cost+1
+            tgt = max(floor_c, float(int(comp_ask)) - 1.0)
         elif our_ask > floor_c:
             tgt = max(floor_c, our_ask - 1.0)             # alone → step down
         if tgt is not None and best_bid is not None and tgt <= best_bid:
