@@ -16150,14 +16150,43 @@ def _gridiron_bet_sweep(sb, now, deadline, stats):
                 if gg.get("event_name") and key not in seen:
                     seen.add(key)
                     cands.append(gg)
+        # NEAREST KICKOFF FIRST (Aug 27 2026 — the user's 5th ask for a
+        # college bet: "Remember that one time we bet college football?
+        # Me either…"). The sport loop assembled NFL before NCAAF, so a
+        # boot that reset the sweep stamps spent its 4 builds/tick on
+        # Sep-10 NFL games — dedup-bouncing off the already-bet wall —
+        # while Week 0 college, kicking off IN TWO DAYS, waited ~45 min
+        # for a slot. Soonest game first is the right rule always: its
+        # books are the most real and its betting windows close first.
+        cands.sort(key=lambda gg: str(gg.get("event_start") or ""))
         nowt = _time.time()
         cands = [gg for gg in cands
                  if nowt - _GRIDIRON_SWEEP_TS.get(gg["id"], 0.0)
                  >= _GRIDIRON_SWEEP_S]
+        # FULLY-BET GAMES DON'T EAT BUILD SLOTS (same night): a game with
+        # pending picks on BOTH spread and total can only bounce off the
+        # executor's dedup — a full build_dossier per bounce is why the
+        # NFL backlog took ticks to drain instead of seconds.
+        try:
+            _pk = (sb.table("bot_picks").select("market_id,market_type")
+                   .eq("status", "pending")
+                   .in_("market_type", ["spread", "total"])
+                   .gt("event_start", now.isoformat())
+                   .limit(500).execute().data) or []
+            _bet_mt: dict = {}
+            for _p in _pk:
+                _bet_mt.setdefault(str(_p.get("market_id")), set()).add(
+                    _p.get("market_type"))
+        except Exception:
+            _bet_mt = {}
         built = 0
         for gg in cands:
             if _time.time() >= deadline - 1.0 or built >= _GRIDIRON_SWEEP_CAP:
                 break
+            if {"spread", "total"} <= _bet_mt.get(str(gg["id"]), set()):
+                _GRIDIRON_SWEEP_TS[gg["id"]] = _time.time()
+                stats["g_skip_bet"] = stats.get("g_skip_bet", 0) + 1
+                continue
             gp = _gridiron_proj(sb, gg["sport"], gg.get("event_name"))
             if not gp:
                 _GRIDIRON_SWEEP_TS[gg["id"]] = _time.time()
