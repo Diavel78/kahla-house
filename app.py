@@ -19010,6 +19010,298 @@ def _reconcile_tick(sb, now) -> dict:
     return res
 
 
+# ── THE SCALP SELL ARM — Market Maker Phase 2 v1 (built Aug 28 2026 per
+# docs/scalp-sell-arm-spec.md; user-designed Aug 24: "every time an order
+# fills, we automatically put in a sell order to take profit... Take
+# profits, collect rent, move on"). RENT LANES ONLY — MLB moneyline +
+# football spreads/totals (gridiron). EDGE LANES NEVER SELL: NRFI (0/46
+# losers touched), walks/outs/K props, any lane whose model prints on its
+# own. Doctrine: model lanes ride, rent lanes scalp. Manual bets untouched
+# (machine-flag filter + any existing sell on the slug is respected).
+# NOT the dead harvest (_HARVEST_ENABLED stays dead; git keeps the
+# ladder): the harvest rested fixed rungs losers never touched — this
+# rests AT THE TOUCH and walks DOWN, so it actually trades.
+SCALP_ENABLED = False        # ⚠ SHADOW MODE (spec rollout: 2-3 days of
+                             # signal_blob.scalp_shadow, then flip on the
+                             # user's review — his call to shorten).
+_SCALP_MAX_PLACE = 2         # fresh asks per tick (creates — no cancel leg)
+_SCALP_MAX_WALKS = 1         # cancel→verify→create walks per tick (spec:
+                             # serial writes, 1 sell walk/tick beside the
+                             # buy repeg's budget)
+_SCALP_BUDGET_S = 12.0       # wall clock, checked BEFORE each write
+_SCALP_SHADOW_CAP = 30       # shadow entries kept per pick blob
+
+
+def _scalp_lanes(b: dict, mt: str) -> bool:
+    """Is this pick RENT-LANE inventory? (spec Policy 1)"""
+    if bool(b.get("gridiron_autobet")):
+        return True                      # football spread/total/ML — all rent
+    return bool(b.get("autobet")) and mt == "moneyline"   # MLB ML
+
+
+def _scalp_entry_c(r, b) -> float | None:
+    """The pick's own-side entry in cents — the floor's anchor. entry_price
+    auto-syncs to the real fill average, so the floor tracks venue truth."""
+    try:
+        ep = float(r.get("entry_price"))
+        return (10000.0 / (ep + 100.0) if ep > 0
+                else 100.0 * (-ep) / ((-ep) + 100.0))
+    except (TypeError, ValueError):
+        return None
+
+
+def _scalp_tick(sb, now) -> dict:
+    """One scalp pass — rides inside the repeg lease (order mutation stays
+    serial; the 'overlapping topup batches' duplicate incident is why).
+    Per rent-lane pick whose BUY has filled (position on our side):
+    - no working ask → place one: JOIN the best competitor ask, never
+      cross, never below floor = entry+1¢ (maker fee ≈0.44¢ at 50¢, so +1¢
+      is always a baby profit). No competitor ask at all → entry+10¢ start
+      (spec-silent default; the walk brings it down from there).
+    - working ask, unfilled → WALK: join a lower competitor ask, or when
+      alone at the touch step DOWN 1¢/pass toward the floor (never below
+      best_bid+1 — post-only would reject the cross anyway). Up-moves
+      happen naturally on re-place after a venue kill (join the new touch).
+    - GTD event_start+7h — the ask works IN-PLAY through resolution (spec
+      Policy 6: pick-six risk accepted, NO jump-guard in v1).
+    Every walk is cancel → position re-read → create fresh (orders.modify
+    BANNED). One sell per slug — ANY existing sell (manual included) means
+    skip. SHADOW MODE (SCALP_ENABLED=False): compute the would-ask and
+    stamp signal_blob.scalp_shadow on change, including whether the tape
+    crossed it. Never raises."""
+    res = {"cands": 0, "placed": 0, "walked": 0, "shadow": 0}
+    _t0 = _time.time()
+    owner = _kalshi_owner_uid()
+    if not owner:
+        return {"gate": "no_owner"}
+    try:
+        rows = (sb.table("bot_picks")
+                .select("id,event_name,event_start,entry_price,market_type,"
+                        "side,signal_blob")
+                .eq("status", "pending").eq("asked_by", owner)
+                .gte("event_start", (now - timedelta(hours=12)).isoformat())
+                .limit(300).execute().data) or []
+    except Exception as e:
+        return {"gate": ("picks_err: " + str(e))[:100]}
+    cands = []
+    for r in rows:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        mt = (r.get("market_type") or "").lower()
+        if mt in ("nrfi", "prop"):
+            continue                     # edge lanes NEVER sell (spec)
+        if not _scalp_lanes(b, mt):
+            continue
+        ex = b.get("execution") if isinstance(b.get("execution"), dict) else {}
+        slug = b.get("pmm_slug") or ex.get("pmm_slug")
+        if not slug:
+            continue
+        synth = bool(b.get("pmm_synthetic") or ex.get("pmm_synthetic"))
+        cands.append((r, b, slug, synth))
+    if not cands:
+        return {"gate": "no_cands"}
+    try:
+        client = get_client()
+    except Exception:
+        return {"gate": "no_client"}
+    orders = _pmm_open_orders_raw(client)
+    positions = _pmm_positions_raw(client)
+    if orders is None or positions is None:
+        return {"gate": "venue_read"}    # venue dark — never act blind
+    for r, b, slug, synth in cands:
+        if _time.time() - _t0 > _SCALP_BUDGET_S:
+            res["gate"] = "budget"
+            break
+        net = float((positions.get(slug) or {}).get("net") or 0.0)
+        held = (-net) if synth else net
+        if held < 1.0:
+            continue                     # buy hasn't filled — no inventory
+        res["cands"] += 1
+        entry_c = _scalp_entry_c(r, b)
+        if entry_c is None:
+            continue
+        floor_c = min(99.0, float(int(entry_c)) + 1.0)
+        sell_intent = ("ORDER_INTENT_SELL_SHORT" if synth
+                       else "ORDER_INTENT_SELL_LONG")
+        mine = [o for o in orders
+                if o.get("slug") == slug and o.get("intent") == sell_intent]
+        our_ask = None
+        our_ask_qty = 0.0
+        if mine:
+            o0 = mine[0]
+            if not o0.get("auto"):
+                continue                 # a MANUAL ask owns this slug — skip
+            py = o0.get("price_yes")
+            if py is not None:
+                our_ask = (100.0 - py * 100.0) if synth else py * 100.0
+            our_ask_qty = float(o0.get("leaves") or o0.get("qty") or 0.0)
+        book = _pmm_book(client, slug)
+        if synth:
+            book = _invert_book(book)
+        if not book:
+            continue
+        best_bid = book.get("best_bid")
+        # best COMPETITOR ask — subtract our own resting qty at our level
+        comp_ask = None
+        for c, q in (book.get("asks") or []):
+            if (our_ask is not None and abs(c - our_ask) < 0.26
+                    and q <= our_ask_qty + 0.5):
+                continue                 # that level is (only) us
+            comp_ask = c
+            break
+        if not mine:
+            # ── PLACE: join the top of the book, never cross, floor binds
+            if comp_ask is not None:
+                tgt = max(floor_c, float(int(comp_ask)))
+            else:
+                tgt = max(floor_c, entry_c + 10.0)
+            tgt = min(99.0, float(int(round(tgt))))
+            if best_bid is not None and tgt <= best_bid:
+                tgt = float(int(best_bid)) + 1.0   # post-only: never cross
+            if tgt < floor_c:
+                continue
+            if not SCALP_ENABLED:
+                _scalp_shadow(sb, r, b, now, tgt, best_bid, comp_ask,
+                              held, res)
+                continue
+            if res["placed"] >= _SCALP_MAX_PLACE:
+                continue
+            if _scalp_create(client, sb, r, b, slug, synth, sell_intent,
+                             tgt, int(held), now):
+                res["placed"] += 1
+            continue
+        # ── WALK: down to a lower competitor ask, or 1¢/pass when alone
+        if our_ask is None:
+            continue
+        tgt = None
+        if comp_ask is not None and float(int(comp_ask)) < our_ask - 0.26:
+            tgt = max(floor_c, float(int(comp_ask)))      # join the lower ask
+        elif our_ask > floor_c:
+            tgt = max(floor_c, our_ask - 1.0)             # alone → step down
+        if tgt is not None and best_bid is not None and tgt <= best_bid:
+            tgt = float(int(best_bid)) + 1.0
+        if tgt is None or tgt >= our_ask - 0.26 or tgt < floor_c:
+            continue                     # nothing to do this pass
+        if not SCALP_ENABLED:
+            _scalp_shadow(sb, r, b, now, tgt, best_bid, comp_ask, held, res)
+            continue
+        if res["walked"] >= _SCALP_MAX_WALKS:
+            continue
+        if _time.time() - _t0 > _SCALP_BUDGET_S:
+            res["gate"] = "budget"
+            break
+        # cancel → position re-read (a fill won the race → done, never
+        # re-place) → create fresh at the walk target
+        try:
+            client.orders.cancel(mine[0].get("id"), {"marketSlug": slug})
+        except Exception:
+            continue
+        _time.sleep(0.8)
+        pos2 = _pmm_positions_raw(client)
+        if pos2 is None:
+            _send_fill_telegram(
+                f"🚨 SCALP LIMBO — {r.get('event_name')}: ask canceled, "
+                f"venue went dark before the re-place ({slug}). Check it.",
+                urgent=True)
+            break
+        net2 = float((pos2.get(slug) or {}).get("net") or 0.0)
+        held2 = (-net2) if synth else net2
+        if held2 < 1.0:
+            continue                     # the cancel raced a fill — sold
+        if _scalp_create(client, sb, r, b, slug, synth, sell_intent,
+                         tgt, int(held2), now, walked_from=our_ask):
+            res["walked"] += 1
+    return res
+
+
+def _scalp_create(client, sb, r, b, slug, synth, sell_intent, tgt_c, qty,
+                  now, walked_from=None) -> bool:
+    """Rest one post-only scalp ask + verify it exists (orders.list is the
+    only truthful read) + stamp signal_blob.scalp. Returns True on a
+    verified working ask."""
+    try:
+        dt = datetime.fromisoformat(
+            str(r.get("event_start")).replace("Z", "+00:00"))
+        gtt = ((dt + timedelta(hours=7)).astimezone(timezone.utc)
+               .strftime("%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        return False
+    canon = ((100.0 - tgt_c) / 100.0) if synth else (tgt_c / 100.0)
+    params = {"marketSlug": slug, "intent": sell_intent,
+              "type": "ORDER_TYPE_LIMIT",
+              "price": {"value": f"{canon:.3f}", "currency": "USD"},
+              "quantity": max(1, int(qty)),
+              "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
+              "goodTillTime": gtt,
+              "participateDontInitiate": True,
+              "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
+    try:
+        client.orders.create(params)
+    except Exception as e:
+        _send_fill_telegram(
+            f"🤖 SCALP CREATE FAILED — {r.get('event_name')}: "
+            f"{round(tgt_c)}¢ ask errored ({e})"[:240])
+        return False
+    _time.sleep(1.5)
+    try:
+        resp = client.orders.list({"slugs": [slug]})
+        raw = (resp.get("orders") if isinstance(resp, dict)
+               else getattr(resp, "orders", [])) or []
+        ok = any(((o.get("intent") if isinstance(o, dict)
+                   else getattr(o, "intent", "")) == sell_intent
+                  and ((o.get("state") if isinstance(o, dict)
+                        else getattr(o, "state", "")) in _OPEN_ORDER_STATES))
+                 for o in raw)
+    except Exception:
+        ok = True                        # create succeeded; verify read
+                                         # failed — assume alive, next pass
+                                         # heals (never double-create blind)
+    if not ok:
+        _send_fill_telegram(
+            f"🚨 SCALP ASK LOST — {r.get('event_name')}: create returned ok "
+            f"but no working ask on {slug}. Check it.", urgent=True)
+        return False
+    try:
+        nb = dict(b)
+        hist = nb.get("scalp") if isinstance(nb.get("scalp"), list) else []
+        hist = (hist + [{"at": now.isoformat(), "ask_c": round(tgt_c, 1),
+                         "qty": max(1, int(qty)),
+                         **({"from_c": round(walked_from, 1)}
+                            if walked_from is not None else {})}])[-20:]
+        nb["scalp"] = hist
+        (sb.table("bot_picks").update({"signal_blob": nb})
+         .eq("id", r["id"]).execute())
+    except Exception:
+        pass
+    return True
+
+
+def _scalp_shadow(sb, r, b, now, tgt_c, best_bid, comp_ask, held, res):
+    """SHADOW MODE tape: stamp the ask the scalp WOULD rest, on CHANGE
+    only (a 2-min lane tick would bloat the blob otherwise), plus whether
+    the tape crossed it (bid ≥ would-ask = it would have filled)."""
+    try:
+        hist = (b.get("scalp_shadow")
+                if isinstance(b.get("scalp_shadow"), list) else [])
+        last = hist[-1] if hist else {}
+        crossed = bool(best_bid is not None and best_bid >= tgt_c)
+        if (last.get("ask_c") == round(tgt_c, 1)
+                and bool(last.get("crossed")) == crossed):
+            return                       # unchanged — no write
+        hist = (hist + [{"at": now.isoformat(), "ask_c": round(tgt_c, 1),
+                         "bid_c": best_bid, "comp_ask_c": comp_ask,
+                         "held": round(held, 1),
+                         "crossed": crossed}])[-_SCALP_SHADOW_CAP:]
+        nb = dict(b)
+        nb["scalp_shadow"] = hist
+        (sb.table("bot_picks").update({"signal_blob": nb})
+         .eq("id", r["id"]).execute())
+        b.clear()
+        b.update(nb)                     # keep caller's view fresh
+        res["shadow"] += 1
+    except Exception:
+        pass
+
+
 def _repeg_tick(sb, now, *, force: bool = False) -> dict:
     """One re-peg pass, riding the paperlog tick (every _OUTBID_TICK_MOD
     minutes, same throttle + blackout as the outbid ping; runs BEFORE
@@ -19410,6 +19702,12 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
         # never cost a chase.
         try:
             res["reconcile"] = _reconcile_tick(sb, now)
+        except Exception:
+            pass
+        # THE SCALP SELL ARM rides the same lease (spec: serial writes,
+        # beside the buy repeg's budget). Shadow-only until SCALP_ENABLED.
+        try:
+            res["scalp"] = _scalp_tick(sb, now)
         except Exception:
             pass
     except Exception:
