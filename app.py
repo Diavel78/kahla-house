@@ -10321,7 +10321,7 @@ def api_poly_topup():
             break
         b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         if not (b.get("autobet") or b.get("whiff_autobet")
-                or b.get("ou_trader")):
+                or b.get("ou_trader") or b.get("gridiron_autobet")):
             continue                       # model bets only — never manual
         mt = r.get("market_type") or ""
         # ⚠ K PROPS ARE EXEMPT FROM THE BOOK-WIDE STAKE (Aug 16 2026). A K
@@ -10329,10 +10329,21 @@ def api_poly_topup():
         # up to 10 and silently undo the decision to hold that lane at 4 —
         # the lane that fills 73.4% of the time and whose fills win 43%.
         # Size there buys mostly the adversely-selected half.
+        # ⚠ GRIDIRON PICKS HAVE THEIR OWN STAKES (Aug 27 2026, found while
+        # staging the Thursday double): a football spread/total pick would
+        # otherwise fall into the plain else-branch and get topped to
+        # _AUTOBET_CONTRACTS (20) instead of its lane stake (10/4). The
+        # gridiron_autobet flag routes to _GRIDIRON_CONTRACTS /
+        # _GRIDIRON_TOTAL_CONTRACTS; before this, topup skipped football
+        # entirely (the blob-flag filter above), so the bug was latent —
+        # it goes live the moment the flag joins the filter, which is now.
         _fam = ((b.get("whiff") or {}).get("ptype")
                 if isinstance(b.get("whiff"), dict) else None)
+        _grid = bool(b.get("gridiron_autobet"))
         target = (_AUTOBET_CONTRACTS_NRFI if mt == "nrfi"
                   else _WHIFF_CONTRACTS_K if (_fam or "") in _JOIN_TOUCH_FAMS
+                  else (_GRIDIRON_TOTAL_CONTRACTS if mt == "total"
+                        else _GRIDIRON_CONTRACTS) if _grid
                   else _AUTOBET_CONTRACTS)
         have = int(b.get("contracts") or 0)
         if have >= target:
@@ -10371,9 +10382,10 @@ def api_poly_topup():
             _skip("no_price")
             continue
         side_c = (100.0 - canon * 100.0) if synthetic else canon * 100.0
-        if side_c > _REPEG_NRFI_PRICE_CAP_C:
-            _skip("over_price_cap")         # 54¢ — never re-place above it
-            continue
+        _cap_c = _GRIDIRON_MAX_ENTRY_C if _grid else _REPEG_NRFI_PRICE_CAP_C
+        if side_c > _cap_c:
+            _skip("over_price_cap")         # 64¢ (60¢ gridiron) — never
+            continue                        # re-place above it
         if target * side_c / 100.0 > _REPEG_MAX_COST_USD:
             _skip("master_rule")            # ⚠ $6/order
             continue
@@ -10446,6 +10458,8 @@ def api_poly_topup():
                 pass
     out = {"ok": True, "dry": dry, "acted": len(done), "actions": done,
            "skipped": skipped, "targets": {"nrfi": _AUTOBET_CONTRACTS_NRFI,
+                                           "grid_spread": _GRIDIRON_CONTRACTS,
+                                           "grid_total": _GRIDIRON_TOTAL_CONTRACTS,
                                            "other": _AUTOBET_CONTRACTS}}
     _probe_log(out)
     return jsonify(out)
@@ -13738,7 +13752,13 @@ AUTOBET_MAX_BETS = 10000  # CAP KILLED Aug 4 ~10pm AZ (user: "kill that 40
                           # Sentinel not deletion: the counter still runs
                           # (the "N/cap this slate" ping + a re-cap later
                           # need only this constant changed back).
-_AUTOBET_CONTRACTS_NRFI = 5   # 2→5 Aug 16 2026 (user). NRFI earned $0.01
+_AUTOBET_CONTRACTS_NRFI = 10  # 5→10 Aug 27 2026 (user: "we are doubling the
+                              # contracts, it's time to make some fucking
+                              # money" — the Thursday unfreeze double, held
+                              # for the box pull per "No… Thursday").
+                              # 10 × 64¢ cap = $6.40, needs the $13 Master
+                              # Rule below. Prior: 2→5 Aug 16 2026 (user).
+                              # NRFI earned $0.01
                               # of liquidity rent EVER while resting an
                               # average 36.5h out — the player-prop
                               # programs have NO early period, so those
@@ -13758,7 +13778,12 @@ _AUTOBET_CONTRACTS_NRFI = 5   # 2→5 Aug 16 2026 (user). NRFI earned $0.01
                           # legacy 2-contract NRFI positions cleared
                           # min_held and got sells re-placed). ⏰ The
                           # calibration audit is still owed.
-_AUTOBET_CONTRACTS = 10  # 4→10 Aug 16 2026 (user). Reward score is
+_AUTOBET_CONTRACTS = 20  # 10→20 Aug 27 2026 (user: the Thursday unfreeze
+                         # double — "Everything ×2, Master Rule → $13",
+                         # approved with arithmetic Aug 25/27, staged for
+                         # the box pull). 20 × 60¢ = $12, inside the $13
+                         # Master Rule. Prior: 4→10 Aug 16 2026 (user).
+                         # Reward score is
                          # DF^ticks × SIZE and our 4 contracts were 0.08%
                          # of a 5,000 target — rent is linear in size at
                          # this scale, so size is the lever. K props are
@@ -15607,8 +15632,12 @@ _GRIDIRON_MIN_START = {"NFL": "2026-09-08", "NCAAF": "2026-08-29"}
 # user go-order over the shadow-record earn-in — tiny stakes, same
 # per-bet fences as MLB (rent gate, $6 Master Rule, entry cap,
 # junk-edge cliff).
-_GRIDIRON_CONTRACTS = 5           # user cap; 5 × ≤60¢ = ≤$3, under the $6 rule
-_GRIDIRON_TOTAL_CONTRACTS = 2     # totals stake (user, Aug 22 2026: "Turn on
+_GRIDIRON_CONTRACTS = 10          # 5→10 Aug 27 2026 (the Thursday unfreeze
+                                  # double — user: "Everything ×2"). 10 ×
+                                  # ≤60¢ = ≤$6, inside the $13 Master Rule.
+                                  # Prior: user cap 5 (Aug 22).
+_GRIDIRON_TOTAL_CONTRACTS = 4     # 2→4 Aug 27 2026 (same double). Prior:
+                                  # totals stake (user, Aug 22 2026: "Turn on
                                   # totals, 2 contracts... spread for both 5
                                   # contracts max, totals 2 max for now")
 _GRIDIRON_ML_MAX_SPREAD = 2.5     # football IS spreads and totals (user,
@@ -18039,13 +18068,18 @@ _REPEG_MAX_ACTIONS = 6    # re-pegs per tick. Was an implicit 1, justified in
 _REPEG_BUDGET_S = 20.0    # hard wall clock for the chase loop. Stops mid-pass
                           # rather than risk a platform kill between a cancel
                           # and its create — that gap IS the ORDER LOST state.
-_REPEG_MAX_COST_USD = 6.50   # ⚠ THE MASTER RULE — never raise casually.
-                             # 6.00→6.50 Aug 16 2026 (user, explicitly, after
-                             # being shown the arithmetic): the 10-contract
-                             # stake at the new 64¢ entry cap costs $6.40, so
-                             # a $6.00 rule would have SILENTLY SKIPPED every
-                             # bet in the 60-64¢ band and stopped the re-peg
-                             # chase there. $6.50 leaves a dime of headroom.
+_REPEG_MAX_COST_USD = 13.00  # ⚠ THE MASTER RULE — never raise casually.
+                             # 6.50→13.00 Aug 27 2026 (user, explicitly, via
+                             # AskUserQuestion: "Everything ×2, Master Rule →
+                             # $13" — the Thursday unfreeze double). Same
+                             # arithmetic as the Aug 16 raise, doubled: the
+                             # 20-contract stake at the 64¢ NRFI/prop entry
+                             # cap costs $12.80; a $6.50 rule would have
+                             # SILENTLY SKIPPED every doubled bet above
+                             # 32.5¢ and stopped the re-peg chase there.
+                             # $13.00 leaves the same dime of headroom.
+                             # Prior: 6.00→6.50 Aug 16 2026 (user, after
+                             # being shown the arithmetic).
 
 
 def _repeg_verify_or_recreate(client, slug, intent, canon, qty, orig_tif,
