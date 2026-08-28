@@ -1,5 +1,26 @@
 # Thursday Aug 27 box-unfreeze punch list
 
+> ## ✅ STATUS (Aug 28): EVERYTHING BELOW IS BUILT AND ON `main`.
+> **THE PULL + DAEMON RESTART IS THE ONLY REMAINING STEP** (Rob runs it).
+> Items 1 (scalp arm, shadow), 1b (the double + topup fix), 2 (sweep in
+> lane_opener) and 3 (reconcile pass) all shipped Aug 28;
+> `fbprop_config.contracts` is already 4 in the DB. Items 4-8 stay open
+> as normal work; item 9 stays parked. After the pull:
+> - the box starts placing at DOUBLED stakes under the $13 Master Rule;
+> - the football chase (`_REPEG_MARKET_TYPES` spread/total, shipped
+>   Aug 26) goes live for the first time — the box owns the repeg lease;
+> - the week-of sweep finally runs somewhere while the box is healthy;
+> - the reconcile pass runs every 15 min inside the repeg lane
+>   (ghost-order self-heal; `reconcile_bak` DDL already applied);
+> - the scalp arm shadows every rent-lane fill
+>   (`signal_blob.scalp_shadow`) — 2-3 days of tape, then Rob's call to
+>   flip `SCALP_ENABLED=True`;
+> - then run `/api/polymarket/topup` (dry first) to resize the resting
+>   unfilled book to the new stakes.
+> NOTE: trading was still PAUSED venue-wide when this staged (Aug 27
+> night incident) — if it's still paused at pull time everything simply
+> idles until the venue returns; nothing here needs babysitting.
+
 The box has been frozen on `21316dd` since Aug 22 19:49 UTC. Step zero is
 the pull + daemon restart (Rob runs it); everything below assumes the box
 is then on current `main`, which already carries: the ha (hits) kill, the
@@ -7,14 +28,16 @@ K kill, the gridiron join-peg fix, executor `fail_tag`s, sweep gate
 tallies, `/api/gridiron/sweep-now` (+`force=1`), `/api/polymarket/orders?all=1`,
 and the manual-order endpoint. Ordered by money-at-risk:
 
-1. **BUILD THE SCALP SELL ARM** — `docs/scalp-sell-arm-spec.md`. The
+1. ✅ **BUILT Aug 28 (`app.py:_scalp_tick`, rides the repeg lease,
+   `SCALP_ENABLED=False` = shadow).** **BUILD THE SCALP SELL ARM** — `docs/scalp-sell-arm-spec.md`. The
    session's centerpiece. Shadow 2-3 days (`signal_blob.scalp_shadow`),
    then Rob's call to arm. **CONFIRMED THE DAY'S HEADLINE (user, Aug 25
    night, watching a wave of fills land): "Thursday is going to be a
    phase 2 day… this is no longer about betting, we are gonna be the
    bookie!" Every fill on a rent lane is the scalp arm's inventory —
    build this first, everything else waits behind it.**
-1b. **DOUBLE THE CONTRACTS — everything ×2, Master Rule → $13 (user,
+1b. ✅ **SHIPPED Aug 28 (constants on main + topup taught gridiron
+   targets + fbprop_config.contracts=4 in the DB).** **DOUBLE THE CONTRACTS — everything ×2, Master Rule → $13 (user,
    Aug 25 night: "we are doubling the contracts, it's time to make some
    fucking money"; scope + rule confirmed by explicit choice, then held
    for Thursday: "No… Thursday…"). Ship WITH the box pull so both sides
@@ -35,12 +58,14 @@ and the manual-order endpoint. Ordered by money-at-risk:
      gridiron_autobet picks BEFORE running it; then topup resizes the
      resting unfilled book to the new stakes (cancel → verify → create
      at the SAME price; filled positions stay untouched by design).
-2. **Wire `_gridiron_bet_sweep` into `cellar/lanes.py:lane_opener`** — the
+2. ✅ **WIRED Aug 28.** **Wire `_gridiron_bet_sweep` into `cellar/lanes.py:lane_opener`** — the
    sweep currently runs NOWHERE while the box is healthy (its only call
    site is the Vercel paperlog route behind `_own_opener`). One call after
    `_gridiron_opener_pass`, same lease, small budget. Then the sweep-now
    bridge endpoint demotes to a manual tool.
-3. **THE RECONCILE PASS — user doctrine, Aug 25, final form:** monitor
+3. ✅ **BUILT Aug 28 (`app.py:_reconcile_tick`, 15-min cadence inside the
+   repeg lane; both Aug-26 additions included; `reconcile_bak` DDL
+   applied).** **THE RECONCILE PASS — user doctrine, Aug 25, final form:** monitor
    every resting machine order; when it leaves the book, exactly two
    cases (the user cancels nothing, so there is no third):
    - **Filled** (TRADE row / position on the slug) → never re-bet; the
