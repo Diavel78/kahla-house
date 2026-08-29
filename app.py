@@ -1040,6 +1040,37 @@ def get_client():
     return PolymarketUS(key_id=POLYMARKET_KEY_ID, secret_key=POLYMARKET_SECRET_KEY)
 
 
+# FAST-FAIL BULK READS (Aug 29 2026 — the repeg-lap anatomy: laps ran
+# 160-220s of which real work was 25-80s, and the gap was bulk orders/
+# positions reads dying SLOWLY against the SDK's global 30s httpx timeout
+# during the venue's post-outage wobble — a dead read burned 30-60s to
+# produce nothing). The trading client keeps its 30s (a short timeout on a
+# WRITE could abandon a create that actually landed — the ORDER LOST
+# class); bulk READS go through this twin with a tight timeout instead.
+# Failure semantics are unchanged: reader returns None, callers gate
+# venue_read and act on nothing — we just learn we're blind in 8s, not 60.
+_PMM_READ_TIMEOUT_S = 8.0
+_PMM_READ_CLIENT = None
+
+
+def _pmm_read_client(fallback=None):
+    """Short-timeout twin of the trading client, for bulk reads ONLY.
+    Module-cached (httpx.Client is thread-safe for requests). Falls back to
+    the caller's client if construction fails — never a new failure mode."""
+    global _PMM_READ_CLIENT
+    if _PMM_READ_CLIENT is None:
+        try:
+            from polymarket_us import PolymarketUS
+            if POLYMARKET_KEY_ID and POLYMARKET_SECRET_KEY:
+                _PMM_READ_CLIENT = PolymarketUS(
+                    key_id=POLYMARKET_KEY_ID,
+                    secret_key=POLYMARKET_SECRET_KEY,
+                    timeout=_PMM_READ_TIMEOUT_S)
+        except Exception:
+            _PMM_READ_CLIENT = None
+    return _PMM_READ_CLIENT or fallback
+
+
 def _safe_float(val):
     """Extract a float from a value, handling Amount dicts."""
     if val is None:
@@ -10861,11 +10892,17 @@ def _pmm_open_orders_raw(client) -> list | None:
     so callers can degrade a resting bet to 'unknown' instead of a false 'no
     order' (and a false TAKE-NOW warning) while Poly is dark."""
     out: list = []
-    try:
-        resp = client.orders.list()
-        raw = (resp.get("orders") if isinstance(resp, dict)
-               else getattr(resp, "orders", [])) or []
-    except Exception:
+    rc = _pmm_read_client(client)     # 8s read twin — writes keep their 30s
+    raw = None
+    for _attempt in (1, 2):           # one retry: transient reset ≠ dark venue
+        try:
+            resp = rc.orders.list()
+            raw = (resp.get("orders") if isinstance(resp, dict)
+                   else getattr(resp, "orders", [])) or []
+            break
+        except Exception:
+            continue
+    if raw is None:
         return None                              # read failed → not "no orders"
     for o in raw:
         def _g(k, d=None):
@@ -10894,10 +10931,25 @@ def _pmm_positions_raw(client) -> dict | None:
     net<0 = NO held; avg_price = cost/qty = the held side's own entry price
     (no YES-flip — cost is already what was paid for the held side). Returns
     None on a READ FAILURE (vs {} for read-OK-empty) so the autolog removal
-    never treats a failed read as "no positions" and wipes real bets."""
+    never treats a failed read as "no positions" and wipes real bets.
+    ⚠ Calls the SDK DIRECTLY, not fetch_positions() — that helper swallows
+    its own errors and returns [], which silently converted every read
+    FAILURE here into a read-OK-empty {} and made the None guard above a
+    dead letter (found Aug 29 2026 while wiring the fast-fail reads)."""
     out: dict = {}
+    rc = _pmm_read_client(client)     # 8s read twin — writes keep their 30s
+    items = None
+    for _attempt in (1, 2):           # one retry: transient reset ≠ dark venue
+        try:
+            resp = rc.portfolio.positions()
+            items = list((resp.get("positions", {}) or {}).items())
+            break
+        except Exception:
+            continue
+    if items is None:
+        return None                              # read failed → not "no positions"
     try:
-        for slug, pos in fetch_positions(client):
+        for slug, pos in items:
             if pos.get("expired"):
                 continue
             net = _safe_float(pos.get("netPosition")) or 0.0
@@ -11040,7 +11092,7 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict) -> dict
     return entry
 
 
-def _compute_fill_status(sb, uid: str) -> dict:
+def _compute_fill_status(sb, uid: str, poly_snap=None) -> dict:
     """DUAL-VENUE fill state for one user's pending picks (July 2026 revert):
     each pick is tracked on the venue its make/take verdict routed it to —
     Kalshi picks via the user's Kalshi account, Polymarket picks via
@@ -11098,12 +11150,20 @@ def _compute_fill_status(sb, uid: str) -> dict:
             pass
 
     # ── Polymarket venue data (only when a Poly-executed pick is pending) ──
+    # poly_snap = (client, orders, positions) — the repeg lap's SHARED
+    # snapshot (Aug 29 2026): repeg, reconcile and scalp used to each pull
+    # their own bulk orders+positions, up to 6 venue reads per lap answering
+    # one question. Callers without a snapshot (the route, cron alerts)
+    # self-read exactly as before.
     poly_client = poly_orders = poly_positions = None
     if has_poly:
         try:
-            poly_client = get_client()
-            poly_orders = _pmm_open_orders_raw(poly_client)
-            poly_positions = _pmm_positions_raw(poly_client)
+            if poly_snap is not None:
+                poly_client, poly_orders, poly_positions = poly_snap
+            else:
+                poly_client = get_client()
+                poly_orders = _pmm_open_orders_raw(poly_client)
+                poly_positions = _pmm_positions_raw(poly_client)
             # Book-of-record: log any resting order OR held position not yet a
             # pick (the COLD start — first-ever Poly pick — is the cron
             # autolog; this is the fast reconcile while the page is open).
@@ -19075,7 +19135,7 @@ _RECON_MAX_CLEARS = 12         # per pass — bounded; the next pass continues
 _RECON_START_GUARD_MIN = 30.0  # never touch a pick this close to kickoff
 
 
-def _reconcile_tick(sb, now) -> dict:
+def _reconcile_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     """Order-book truth per pending machine pick. Three verdicts:
     - open order on (slug, our intent) → healthy (clears any miss stamp);
     - no order but the POSITION is held on our side → it rides (plus the
@@ -19130,12 +19190,19 @@ def _reconcile_tick(sb, now) -> dict:
         cands.append((r, b, slug, synth))
     if not cands:
         return {"gate": "no_cands"}
-    try:
-        client = get_client()
-    except Exception:
-        return {"gate": "no_client"}
-    orders = _pmm_open_orders_raw(client)
-    positions = _pmm_positions_raw(client)
+    # Shared-snapshot path (Aug 29): the repeg lap hands down the bulk
+    # orders+positions it already read. Staleness is bounded by the lap and
+    # benign here — repeg only replaces BUY orders slug-for-slug, and the
+    # two-strike stamp absorbs a one-lap lag by design. No snapshot →
+    # self-read exactly as before.
+    if orders is None or positions is None:
+        if client is None:
+            try:
+                client = get_client()
+            except Exception:
+                return {"gate": "no_client"}
+        orders = _pmm_open_orders_raw(client)
+        positions = _pmm_positions_raw(client)
     if orders is None or positions is None:
         return {"gate": "venue_read"}      # default-deny: dark venue = no-op
                                            # (and the slot is NOT consumed —
@@ -19388,7 +19455,7 @@ def _scalp_entry_c(r, b) -> float | None:
         return None
 
 
-def _scalp_tick(sb, now) -> dict:
+def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     """One scalp pass — rides inside the repeg lease (order mutation stays
     serial; the 'overlapping topup batches' duplicate incident is why).
     Per rent-lane pick whose BUY has filled (position on our side):
@@ -19438,12 +19505,19 @@ def _scalp_tick(sb, now) -> dict:
         cands.append((r, b, slug, synth))
     if not cands:
         return {"gate": "no_cands"}
-    try:
-        client = get_client()
-    except Exception:
-        return {"gate": "no_client"}
-    orders = _pmm_open_orders_raw(client)
-    positions = _pmm_positions_raw(client)
+    # Shared-snapshot path (Aug 29): repeg hands down its bulk read. Safe
+    # here — repeg only moves BUY orders and the scalp reads SELLs +
+    # positions; the pre-create position re-read below stays FRESH (it is
+    # the cancel→recheck→create safety read, never the snapshot). Writes
+    # keep the full-timeout trading client. No snapshot → self-read.
+    if client is None:
+        try:
+            client = get_client()
+        except Exception:
+            return {"gate": "no_client"}
+    if orders is None or positions is None:
+        orders = _pmm_open_orders_raw(client)
+        positions = _pmm_positions_raw(client)
     if orders is None or positions is None:
         return {"gate": "venue_read"}    # venue dark — never act blind
 
@@ -19756,6 +19830,22 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
         _owner = _kalshi_owner_uid()
         if _owner:
             admins.add(_owner)
+        # ONE VENUE SNAPSHOT PER LAP (Aug 29 2026 — the lap anatomy: repeg's
+        # fill-status, reconcile and scalp each pulled their own bulk
+        # orders+positions, up to 6 reads answering one question, and on a
+        # wobbly venue each failure burned its own timeout). Read once here,
+        # hand it to all three. A failed snapshot degrades exactly like the
+        # old per-engine failures: fill-status marks Poly picks 'unknown',
+        # reconcile/scalp gate venue_read — never act blind, just fail FAST.
+        lap_client = lap_orders = lap_positions = None
+        try:
+            lap_client = get_client()
+            lap_orders = _pmm_open_orders_raw(lap_client)
+            lap_positions = _pmm_positions_raw(lap_client)
+        except Exception:
+            lap_client = None
+        lap_snap = ((lap_client, lap_orders, lap_positions)
+                    if lap_client is not None else None)
         for uid in admins:
             try:
                 near = (sb.table("bot_picks").select("id")
@@ -19768,7 +19858,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
             if not near:
                 continue
             try:
-                fs = _compute_fill_status(sb, uid)
+                fs = _compute_fill_status(sb, uid, poly_snap=lap_snap)
             except Exception:
                 continue
             if not fs.get("configured"):
@@ -19792,7 +19882,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
             except Exception:
                 continue
             byid = {r["id"]: r for r in rows}
-            client = None
+            client = lap_client          # the lap's trading client, if it built
             for f in cands:
                 r = byid.get(f["id"])
                 if not r:
@@ -20129,13 +20219,17 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
         # Own 15-min cadence inside; its own try so a reconcile fault can
         # never cost a chase.
         try:
-            res["reconcile"] = _reconcile_tick(sb, now)
+            res["reconcile"] = _reconcile_tick(sb, now, client=lap_client,
+                                               orders=lap_orders,
+                                               positions=lap_positions)
         except Exception:
             pass
         # THE SCALP SELL ARM rides the same lease (spec: serial writes,
         # beside the buy repeg's budget). Shadow-only until SCALP_ENABLED.
         try:
-            res["scalp"] = _scalp_tick(sb, now)
+            res["scalp"] = _scalp_tick(sb, now, client=lap_client,
+                                       orders=lap_orders,
+                                       positions=lap_positions)
         except Exception:
             pass
     except Exception:
