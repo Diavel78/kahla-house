@@ -71,6 +71,15 @@ sudo launchctl load /Library/LaunchDaemons/com.kahla.dbbackup.plist
 echo "   installed ✓"
 
 echo "== 4/4 firing backup #1 now =="
-bash kahla-scanner/scripts/db_backup.sh \
-  && echo "ALL DONE — dump + shadow restore verified. The daily check watches it from here." \
-  || { echo "Backup #1 FAILED — read the message above (most likely the connection string)."; exit 1; }
+if ! bash kahla-scanner/scripts/db_backup.sh; then
+  echo "Backup #1 FAILED — read the message above (most likely the connection string)."
+  exit 1
+fi
+# Say what actually happened — the restore test only runs when the local
+# server is up, and "verified" must never print for a skipped test.
+if psql -d kahla_shadow -Atc 'select 1' >/dev/null 2>&1; then
+  echo "ALL DONE — dump taken AND shadow restore verified. The daily check watches it from here."
+else
+  echo "DUMP DONE (a real backup). Shadow-restore test SKIPPED — start Postgres.app"
+  echo "and run 'bash kahla-scanner/scripts/db_backup.sh' once to verify a restore."
+fi
