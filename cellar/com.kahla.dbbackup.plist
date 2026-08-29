@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Nightly DB backup + tested restore (the local-Postgres shadow).
+     Runs kahla-scanner/scripts/db_backup.sh at 03:30 Arizona daily.
+     Install (adjust the two robkahla paths if the checkout ever moves):
+       sudo cp cellar/com.kahla.dbbackup.plist /Library/LaunchDaemons/
+       sudo launchctl load /Library/LaunchDaemons/com.kahla.dbbackup.plist
+     Kick one off now to verify:
+       sudo launchctl start com.kahla.dbbackup
+     Result lands in exec_probe_runs (kind=db_backup) either way. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kahla.dbbackup</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/robkahla/dev/kahla-house/kahla-scanner/scripts/db_backup.sh</string>
+    </array>
+    <key>UserName</key>
+    <string>robkahla</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/robkahla/kahla-backups/db_backup.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/robkahla/kahla-backups/db_backup.log</string>
+</dict>
+</plist>

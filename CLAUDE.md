@@ -849,6 +849,16 @@ suppressing a real outage later.
 > LAST** (§12c) — after the cellar is sole writer and has been boring for 30
 > days, and not before a `pg_dump` restore has actually been TESTED (§12e:
 > repatriation is done when a restore works, not when Postgres runs locally).
+> **§12e IS IN MOTION (Aug 28 2026, user: "build it now… as a backup… run in
+> parallel"):** `kahla-scanner/scripts/db_backup.sh` + launchd plist
+> `cellar/com.kahla.dbbackup.plist` run nightly ON THE BOX at 3:30am AZ —
+> pg_dump the live Supabase DB to `~/kahla-backups/` (14 kept) AND restore it
+> into local Postgres as `kahla_shadow`, so the restore test runs EVERY night.
+> Outcome stamps to `exec_probe_runs` (kind=db_backup — the daily check reads
+> it; ok=false or a missing stamp = backups broken, tell the user). The
+> Supabase connection string lives only in `~/.kahla/db_url` on the box
+> (session-pooler URI — the direct db.<ref> host is IPv6-only). Cutover day
+> is then: final dump, repoint the daemon at the local socket.
 >
 > **Two corrections a session got wrong on Aug 20, both already answered in
 > the spec:**
