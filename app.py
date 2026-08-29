@@ -16110,6 +16110,55 @@ def _gridiron_opener_pass(sb, now, deadline):
     return rows, stats
 
 
+def _sheet_watchdog(sb, now_utc) -> int:
+    """FOOTBALL WEEKLY SHEETS alarm (docs/football-sheet-runbook.md).
+
+    If the Monday sheet pack isn't published by 7:30pm AZ Monday, or the
+    Friday update by 5:30pm AZ Friday, queue a 🚨 Telegram row — once per
+    evening. This is the belt under the Routine layer: both scheduled runs
+    have died silently once (container restart; GitHub cron skip), and the
+    only invariant that matters to the reader is "PDF by evening or an
+    alarm". In-season gate = any active NFL/NCAAF game in the next 8 days,
+    so the off-season stays quiet. Cheap: instant no-op outside the two
+    evening windows and off the 10-minute modulo."""
+    if now_utc.minute % 10:
+        return 0
+    az = now_utc.astimezone(ZoneInfo("America/Phoenix"))
+    wd, hm = az.weekday(), az.hour * 60 + az.minute
+    if wd == 0 and hm >= 19 * 60 + 30:
+        mode, col = "Monday sheets", "published_at"
+    elif wd == 4 and hm >= 17 * 60 + 30:
+        mode, col = "Friday update", "friday_published_at"
+    else:
+        return 0
+    season = (sb.table("markets").select("id").in_("sport", ["NFL", "NCAAF"])
+              .eq("status", "active")
+              .gte("event_start", now_utc.isoformat())
+              .lte("event_start", (now_utc + timedelta(days=8)).isoformat())
+              .limit(1).execute().data) or []
+    if not season:
+        return 0
+    wk = (az.date() - timedelta(days=wd)).isoformat()
+    rows = (sb.table("football_sheet_weeks").select(f"sport,{col}")
+            .eq("week_key", wk).execute().data) or []
+    missing = [r["sport"] for r in rows if not r.get(col)]
+    if rows and not missing:
+        return 0
+    if not rows:
+        missing = ["everything — no data build at all"]
+    text = (f"🚨 FOOTBALL SHEETS NOT PUBLISHED — {mode}, week {wk}: "
+            f"missing {', '.join(missing)}. The scheduled run died; "
+            f"poke Claude to run the recovery (runbook has it resumable).")
+    dup = (sb.table("telegram_queue").select("id").eq("text", text)
+           .gte("created_at", (now_utc - timedelta(hours=10)).isoformat())
+           .limit(1).execute().data) or []
+    if dup:
+        return 0
+    sb.table("telegram_queue").insert(
+        {"text": text, "created_at": now_utc.isoformat()}).execute()
+    return 1
+
+
 @app.route("/api/handicapper/paperlog")
 def api_handicapper_paperlog():
     """Cron-pinged ~1/min. Auto-logs every GATE-CLEARED Pick Bot suggestion
@@ -16131,6 +16180,16 @@ def api_handicapper_paperlog():
     sb = get_supabase()
     if sb is None:
         return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+    # FOOTBALL-SHEET WATCHDOG — deliberately BEFORE the cellar-ownership
+    # gate: this line runs on Vercel every minute no matter who owns the
+    # lanes, which is exactly what an alarm needs. Both scheduled sheet
+    # runs have now died silently once each (Mon: the Routine's container
+    # restarted mid-run; Fri: GitHub's cron never fired) — this is the
+    # layer that cannot be taken down by either failure mode.
+    try:
+        _sheet_watchdog(sb, datetime.now(timezone.utc))
+    except Exception:
+        pass
     # THE CELLAR: standby no-op when the house box owns this lane. Shadow
     # (returns True regardless) until CELLAR_LEASE_ENFORCED is set in the
     # Vercel env. Vercel keeps getting curled every minute either way, so when
