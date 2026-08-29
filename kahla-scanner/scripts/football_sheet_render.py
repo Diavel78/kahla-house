@@ -126,6 +126,11 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .vplay { background: #103c2c; color: #7ce6b2; }
 .vlean { background: #4a3a10; color: #ffd27a; }
 .vpass { background: #e6ecf2; color: #5a6b7f; }
+.since { background: #fff6e6; border: 1px solid #ecd9ad;
+         border-left: 4px solid #e8a13c; border-radius: 6px;
+         padding: 8px 12px; margin: 10px 0 4px; font-size: 9.5pt; }
+.since > b { font-size: 8.5pt; letter-spacing: .08em; color: #9a6a14; }
+.since ul { margin: 4px 0 2px 18px; }
 pre.mdfallback { white-space: pre-wrap; font: inherit; }
 .footer { margin-top: 14px; padding-top: 6px; border-top: 1px solid #d8e0e8;
           font-size: 8pt; color: #98a6b6; }
@@ -452,47 +457,67 @@ def _index_table(rows: list[dict]) -> str:
             "<th>Deep</th></tr>" + body + "</table>")
 
 
+def _friday_blob(blob: dict) -> dict:
+    """The game's blob AT FRIDAY'S NUMBERS: overlay the friday refresh
+    (lines/splits/book/injuries/model) onto the Monday blob so every
+    section of the full page renders current. Monday values remain the
+    fallback for anything the Friday assembly didn't carry."""
+    fri = blob.get("friday") or {}
+    eb = dict(blob)
+    for k in ("lines", "splits", "book_odds", "injuries", "model"):
+        if fri.get(k):
+            eb[k] = fri[k]
+    return eb
+
+
+def _since_monday(r: dict, blob: dict) -> str:
+    fri = (blob.get("friday") or {})
+    changes = fri.get("changes") or []
+    note = r.get("friday_md")
+    if not changes and not note:
+        return ("<div class='since'><b>SINCE MONDAY</b> — no line movement, "
+                "no injury changes.</div>")
+    out = "<div class='since'><b>SINCE MONDAY</b>"
+    if changes:
+        out += "<ul>" + "".join(f"<li>{_e(c)}</li>" for c in changes) + "</ul>"
+    if note:
+        out += f"<div class='narrative'>{_md(note)}</div>"
+    return out + "</div>"
+
+
 def render_week_html(week_key: str, sport: str, rows: list[dict],
                      mode: str) -> str:
+    """One printable pack. BOTH modes render the FULL per-game pages —
+    the Friday sheet is the game-day sheet (Rob, Aug 28 2026: a
+    changes-only list was 'trash'; the reader forwards ONE PDF and it has
+    to carry everything). Friday differs only in that every section
+    renders at Friday's refreshed numbers and each game leads with a
+    highlighted SINCE MONDAY box (line moves, injury changes, the updated
+    play call)."""
     rows = sorted(rows, key=lambda r: (r.get("event_start") or "",
                                        r.get("event_name") or ""))
+    friday = mode == "friday"
     built = datetime.now(AZ).strftime("%b %-d, %Y %-I:%M %p AZ")
-    title = f"{sport} Week Sheets — week of {week_key}"
-    if mode == "friday":
-        title = f"{sport} Friday Update — week of {week_key}"
+    title = (f"{sport} Game-Day Sheets — week of {week_key}" if friday
+             else f"{sport} Week Sheets — week of {week_key}")
     head = (f"<div class='page cover'><h1>🏈 {title}</h1>"
             f"<div class='sub'>The Kahla House · Gridiron IQ model + market "
-            f"tape · generated {built}. Analysis only — bet at your own "
-            f"judgment.</div>")
-    if mode == "friday":
-        body = head
-        any_changes = False
-        for r in rows:
-            blob = r.get("data_blob") or {}
-            fri = blob.get("friday") or {}
-            changes = fri.get("changes") or []
-            note = r.get("friday_md")
-            if not changes and not note:
-                continue
-            any_changes = True
-            body += (f"<h3>{_e(r['event_name'])} · "
-                     f"{_az(r.get('event_start'))}</h3>")
-            if changes:
-                body += "<ul>" + "".join(f"<li>{_e(c)}</li>" for c in changes) \
-                        + "</ul>"
-            if note:
-                body += f"<div class='narrative'>{_md(note)}</div>"
-        if not any_changes:
-            body += "<p>No material changes since Monday.</p>"
-        return f"<style>{_CSS}</style><title>{_e(title)}</title>" + body + \
-               "</div>"
+            f"tape · generated {built}"
+            + (" · Friday refresh — all numbers current, SINCE MONDAY box "
+               "per game" if friday else "")
+            + ". Analysis only — bet at your own judgment.</div>")
 
-    out = head + "<h3>The board</h3>" + _index_table(rows) + "</div>"
-    for r in rows:
+    view = [{**r, "data_blob": _friday_blob(r.get("data_blob") or {})}
+            for r in rows] if friday else rows
+
+    out = head + "<h3>The board</h3>" + _index_table(view) + "</div>"
+    for r in view:
         blob = r.get("data_blob") or {}
         if not blob:
             continue
         out += "<div class='page game'>" + _game_header(r, blob)
+        if friday:
+            out += _since_monday(r, blob)
         out += _ournum(blob)
         out += "<h3>Lines & splits</h3>" + _lines_table(blob)
         if r.get("tier") == "deep":
