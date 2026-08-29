@@ -1189,38 +1189,150 @@ _ACTS_DEEP_TYPES = ("ACTIVITY_TYPE_TRANSFER",
                     "ACTIVITY_TYPE_TAKER_FEE_REBATE")
 
 
+# A scalp position can sit open for days before it exits, and the running
+# average cost is ORDER-DEPENDENT (a sell leaves the average alone, but a
+# later buy re-blends against the reduced quantity), so pricing one sell
+# means walking that slug's trades from the position's real opening — not
+# from the edge of the day window.
+_VENUE_TRADE_LOOKBACK_D = 45
+
+
+def _venue_day_map(sb, days: int = 4) -> dict:
+    """AZ day -> realized BETS P&L, by the one proven Polymarket math.
+
+    ⚠ THE RULE THIS EXISTS TO OBEY (Aug 28 2026, after the day card read
+    +$8.21 for a night the Closed Positions table totalled +$4.39): per-leg
+    P&L is computed the way `parse_activities` has computed it since the
+    dashboard was built. It NEVER reads `afterPosition.realized`,
+    `trade.costBasis` or `trade.realizedPnl` — all three are either
+    complement-poisoned on SHORT positions or populated late by the venue,
+    and every one of them has now put a wrong number on this dashboard
+    (gotchas #7/#8). `afterPosition.realized` sat at 0.0000 for 7 of 11
+    Aug 27 legs, hiding $33.10 of settled cost; `cost - costBasis` reported
+    a +$0.21 scalp exit as -$1.27.
+
+        resolution : qty = |before.netPosition| ; cost = before.cost
+                     won = (held long & side LONG) or (held short & side SHORT)
+                     pnl = qty - cost   if won   else   -cost
+        sell       : price = trade.cost / trade.qty      (never trade.price)
+                     pnl   = (price - running_avg_cost) * qty
+
+    IF A DAY TOTAL EVER DISAGREES WITH CLOSED POSITIONS AGAIN, THAT TABLE
+    IS RIGHT AND THIS IS WRONG — it runs this same arithmetic.
+
+    Bucketing is deliberately SPLIT, because the two kinds of money are
+    earned at different moments and each single-key scheme has already
+    shipped a bug:
+      * a RESOLUTION is the game's result   -> AZ day of gameStartTime.
+        (Keying it on payout time is the Aug 15 2026 bug: a game settling
+        12:20am read as the next day's profit before anything was played.)
+      * a SELL is a completed trade         -> AZ day it was traded.
+        (Keying it on game start is the Aug 28 2026 bug: last night's
+        scalp exits on today's games made the card read -$1.53 at 12:04am
+        with no game started.)
+
+    Rewards are EXCLUDED — the cards report rent separately, and folding
+    it in here would double-count it."""
+    az = ZoneInfo("America/Phoenix")
+
+    def _v(x):
+        """{'value': '1.23'} | '1.23' | 1.23 -> float, else None."""
+        if isinstance(x, dict):
+            x = x.get("value")
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+
+    def _day(ts):
+        if not ts:
+            return None
+        # A bare YYYY-MM-DD (the RPC's az_day) is ALREADY an Arizona day.
+        # Parsing it as a timestamp makes it UTC midnight and the AZ
+        # conversion then walks it back to the previous day.
+        s = str(ts)
+        if len(s) == 10 and s[4] == "-":
+            try:
+                return datetime.strptime(s, "%Y-%m-%d").date()
+            except ValueError:
+                return None
+        try:
+            d = datetime.fromisoformat(
+                str(ts).replace("Z", "+00:00").replace(" ", "T"))
+        except ValueError:
+            return None
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return d.astimezone(az).date()
+
+    acc: dict = {}
+
+    # ---- resolutions: set-based dedupe + win math in SQL --------------
+    # poly_gameday_pnl runs exactly the beforePosition formula above. It
+    # lives in SQL because the dedupe is set-based (the mirror keeps ~19
+    # copies of every resolution) and a YTD window is hundreds of
+    # thousands of raw rows — but only a few thousand real legs.
+    for r in (sb.rpc("poly_gameday_pnl", {"p_days": days}).execute().data) or []:
+        d = _day(r.get("az_day"))
+        if d is not None:
+            acc[d] = acc.get(d, 0.0) + float(r.get("realized_usd") or 0)
+
+    # ---- sells: self-tracked average cost, walked oldest -> newest ----
+    t_since = (datetime.now(timezone.utc) - timedelta(
+        days=days + _VENUE_TRADE_LOOKBACK_D)).isoformat()
+    trows = _sb_paged(
+        lambda: sb.table("poly_activities").select("payload,at")
+        .eq("type", "ACTIVITY_TYPE_TRADE").gte("at", t_since).order("at"),
+        max_pages=15)
+    pos: dict = {}
+    for r in trows:
+        t = ((r.get("payload") or {}).get("trade") or {})
+        slug, qty = t.get("marketSlug"), _v(t.get("qty"))
+        if not slug or not qty:
+            continue
+        cost = _v(t.get("cost"))
+        price = (cost / qty) if cost is not None else _v(t.get("price"))
+        if price is None:
+            continue
+        bq = abs(_v((t.get("beforePosition") or {}).get("netPosition")) or 0)
+        aq = abs(_v((t.get("afterPosition") or {}).get("netPosition")) or 0)
+        p = pos.setdefault(slug, {"qty": 0.0, "cost": 0.0})
+        if not (t.get("realizedPnl") is not None or bq > aq):
+            p["qty"] += qty                      # a BUY opens/adds
+            p["cost"] += price * qty
+            continue
+        if p["qty"] <= 0:
+            continue                             # sell with no tracked buys
+        avg = p["cost"] / p["qty"]
+        d = _day(t.get("updateTime") or r.get("at"))
+        if d is not None:
+            acc[d] = acc.get(d, 0.0) + (price - avg) * qty
+        sold = min(qty, p["qty"])
+        p["cost"] -= avg * sold
+        p["qty"] -= sold
+
+    return acc
+
+
 def _gameday_pnl(sb) -> dict:
-    """Today / yesterday by ARIZONA GAME DAY, from the venue ledger.
+    """Today / yesterday in ARIZONA, by the proven per-leg math.
 
-    ⚠ NOT by payout timestamp, and NOT by the browser's timezone (Aug 15
-    2026). The dashboard used to bucket on when Polymarket credited the
-    money, so a Friday night game resolving at 12:20am counted as
-    Saturday — at 7am Saturday, with nothing played, the card read
-    +$7.22 "today". It also asked the browser what timezone it was in.
     Arizona is the only timezone this machine has ever needed; MST, no
-    DST, hardcoded.
+    DST, hardcoded — the card never asks the browser what zone it is in.
 
-    Settled bets only — an unplayed game's `realized_usd` is just the
-    cash deployed, so counting it would show tonight's slate as a loss
-    before first pitch."""
+    Settled bets only. See `_venue_day_map` for the arithmetic, the three
+    venue fields that must never be trusted, and why resolutions and sells
+    bucket on different clocks."""
     out = {"today": None, "yesterday": None}
     az = ZoneInfo("America/Phoenix")
     today = datetime.now(timezone.utc).astimezone(az).date()
-    # PRIMARY: the venue's own ledger via poly_gameday_pnl (WRITTEN AND
-    # APPLIED Aug 21 2026 — the operating rules named this function as the
-    # source while it did not exist, and the night it finally bit, the
-    # fallback chain showed ~$76 for a -$0.98 night). Resolution rows,
-    # deduped per (market, leg, side), bucketed by AZ GAME day.
     try:
-        rows = (sb.rpc("poly_gameday_pnl", {"p_days": 3}).execute().data) or []
-        by_day = {str(r.get("az_day")): float(r.get("realized_usd") or 0)
-                  for r in rows}
-        out["today"] = round(by_day.get(today.isoformat(), 0.0), 2)
-        out["yesterday"] = round(
-            by_day.get((today - timedelta(days=1)).isoformat(), 0.0), 2)
+        acc = _venue_day_map(sb, days=4)
+        out["today"] = round(acc.get(today, 0.0), 2)
+        out["yesterday"] = round(acc.get(today - timedelta(days=1), 0.0), 2)
         return out
     except Exception:
-        pass                     # RPC unreachable → the bot_picks fallback
+        pass                     # mirror unreachable → the bot_picks fallback
     # FALLBACK ONLY: the per-pick ledger, final-gated (the gate is the
     # price of this path — pre-final realized_usd is just cash deployed).
     # Disconnect-retried: a dropped read here used to silently null the
@@ -1636,9 +1748,11 @@ def _pnl_stack(sb) -> dict | None:
     """The P&L stack (mockup E, Aug 22 2026): Today/Yesterday bets-only,
     then 7d / 30d / YTD all-in with the bets-vs-rent split per window.
 
-    ONE venue read for every bets number: poly_gameday_pnl walked back to
-    Jan 1 gives per-AZ-game-day realized USD, and the windows are sums
-    over the same rows the day cards read — no second accounting basis.
+    ONE basis for every bets number: `_venue_day_map` walked back to Jan 1,
+    the same per-day map the day cards read — resolutions AND sell-to-close
+    exits. (Before Aug 28 2026 this read the resolution-only RPC directly,
+    which is why the note below says the settle basis "can't see
+    sell-to-close profits" — it can now.)
     Rent buckets by EARN date (the day the resting orders earned it), so
     a window answers "how did the machine do", not "when did the venue
     pay" — the payout lag is why the day cards say bets-only.
@@ -1650,15 +1764,10 @@ def _pnl_stack(sb) -> dict | None:
     jan1 = today.replace(month=1, day=1)
     ytd_days = (today - jan1).days + 1
     try:
-        rows = (sb.rpc("poly_gameday_pnl",
-                       {"p_days": ytd_days}).execute().data) or []
+        by_day = {d.isoformat(): v
+                  for d, v in _venue_day_map(sb, days=ytd_days).items()}
     except Exception:
         return None
-    by_day: dict = {}
-    for r in rows:
-        d = str(r.get("az_day") or "")[:10]
-        if d:
-            by_day[d] = by_day.get(d, 0.0) + float(r.get("realized_usd") or 0)
     rent = _rent_by_day(sb, jan1)
 
     def _win(days: int) -> dict:
@@ -7093,7 +7202,10 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
             # Manual user-logged picks are still never touched.
             if not (a.get("query_text") == "auto-logged from Polymarket"
                     or blob.get("autobet") or blob.get("whiff_autobet")
-                    or blob.get("ou_trader")):
+                    or blob.get("ou_trader") or blob.get("gridiron_autobet")):
+                # gridiron joined Aug 27 2026 (the rinse-repeat wire): a
+                # scalped-out football pick must clear its row or the
+                # executor dedup blocks the sweep's re-buy forever.
                 continue
             try:
                 if (now_dt - datetime.fromisoformat(
@@ -7142,6 +7254,25 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                 # (Props have no opener row — no-op there.)
                 if ((blob.get("autobet") or blob.get("ou_trader"))
                         and a.get("market_id") and a.get("market_type")):
+                    # RINSE-REPEAT vs USER-EXIT — the pick's own scalp
+                    # stamp tells them apart (Aug 27 2026, minutes after
+                    # the first live round trip; user, watching PIT
+                    # buy $10.04 → sell $10.26 in 20 min: "Now buy it
+                    # again if it still clears, gimme gimme gimme… buy
+                    # sell buy sell, rent rent rent"). A MACHINE scalp
+                    # exit (blob.scalp stamped by _scalp_create) re-arms
+                    # the game as dayof_wait — the 20-min in-window
+                    # re-check runs the FULL gauntlet (rent → model at
+                    # the CURRENT book) and re-buys only if it still
+                    # clears; swept is NOT bumped, because the two-strike
+                    # latch means "the user canceled deliberately" and a
+                    # scalp exit is the machine doing its job. A sold
+                    # pick with NO scalp stamp = the user exited by hand
+                    # → the original cool-off (would_bet=false, swept+1,
+                    # 4h expiry, permanent at swept>=2) stands.
+                    _scalped = (reason == "sold pre-game"
+                                and isinstance(blob.get("scalp"), list)
+                                and len(blob.get("scalp") or []) > 0)
                     try:
                         _op = (sb.table("pickbot_paperlog")
                                .select("id,signal_blob")
@@ -7155,13 +7286,19 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                                    if isinstance(_op[0].get("signal_blob"),
                                                  dict) else {}) or {}
                             _ob["would_bet"] = False
-                            _ob["swept"] = int(_ob.get("swept") or 0) + 1
+                            if _scalped:
+                                _ob["dayof_wait"] = True
+                            else:
+                                _ob["swept"] = int(_ob.get("swept") or 0) + 1
                             (sb.table("pickbot_paperlog")
                              .update({"signal_blob": _ob,
                                       "logged_at": now_dt.isoformat()})
                              .eq("id", _op[0]["id"]).execute())
                     except Exception:
                         pass
+                # (Gridiron picks need no latch release — the week-of
+                # sweep's only dedup is the pick row just deleted, so the
+                # re-buy evaluation happens on its next hourly visit.)
             except Exception:
                 pass
 
@@ -7942,8 +8079,13 @@ def api_docs_fetch():
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
     url = (request.args.get("url") or "").strip()
+    # Kalshi joined the allowlist Aug 26 2026 — same reason Polymarket
+    # did: the sandbox is egress-blocked, Vercel is not, and this repo
+    # had been ASSUMING Kalshi's incentive terms from its own silence.
     allow = ("docs.polymarket.us", "polymarket.us", "docs.polymarket.com",
-             "help.polymarket.com", "learn.polymarket.com")
+             "help.polymarket.com", "learn.polymarket.com",
+             "docs.kalshi.com", "help.kalshi.com", "kalshi.com",
+             "www.kalshi.com", "trading-api.readme.io")
     try:
         from urllib.parse import urlparse as _up
         host = (_up(url).hostname or "").lower()
@@ -7960,14 +8102,498 @@ def api_docs_fetch():
         })
         out["status"] = r.status_code
         body = r.text or ""
-        # strip script/style then collapse tags — we want the prose+tables,
-        # not the SPA shell
-        body = _html_to_text(body)          # ONE implementation (shared
+        # ?raw=1 skips the HTML->text pass. Needed for text/markdown
+        # sources (docs.kalshi.com/llms.txt): the collapser eats newlines,
+        # which is right for an SPA shell and destroys a markdown index.
+        if (request.args.get("raw") or "") in ("1", "true", "yes"):
+            out["mode"] = "raw"
+        else:
+            # strip script/style then collapse tags — we want the
+            # prose+tables, not the SPA shell
+            body = _html_to_text(body)      # ONE implementation (shared
                                             # with the rewards sync)
+            out["mode"] = "text"
         out["chars"] = len(body)
         out["text"] = body[:14000]
     except Exception as e:
         out.update(ok=False, error=f"{type(e).__name__}: {e}"[:300])
+    _probe_log(out)
+    return jsonify(out)
+
+
+# ─────────── KALSHI INCENTIVE PROGRAMS, READ FROM THE VENUE ───────────
+# Aug 26 2026. Rule #1 (rent) has a Polymarket answer (_rent_ok +
+# /v1/incentives) and, until tonight, an ASSUMED Kalshi answer: this repo
+# said Kalshi had no sports liquidity program, inferred purely from its
+# own silence. That is the poly_incentive_programs blindness trap in a
+# different coat — "no rows for X" means we never bet X, never "X pays
+# nothing". Kalshi publishes GET /trade-api/v2/incentive_programs.
+#
+# ASSUMES NO FIELD NAMES and no path (the docs render two spellings), so
+# it walks candidate paths across every base, unauthed first then signed,
+# and dumps the FULL first row. A KNOWN-GOOD CONTROL rides along: if the
+# control also returns nothing, the reader is broken and a zero here
+# means nothing. Read-only; never raises.
+_KALSHI_INCENTIVE_PATHS = ("/incentive_programs", "/incentives",
+                           "/incentive-programs", "/liquidity_incentives")
+
+
+def _kalshi_pub_get(path: str, params: dict | None = None) -> dict:
+    """Unauthed GET across _KALSHI_BASES. {ok, base, status, data|error}."""
+    headers = {"Accept": "application/json", "User-Agent": "kahla-house/1.0"}
+    last = None
+    for base in _KALSHI_BASES:
+        try:
+            r = _http.get(base + path, params=params or {},
+                          headers=headers, timeout=15)
+            if r.status_code == 200:
+                try:
+                    return {"ok": True, "base": base, "status": 200,
+                            "data": r.json()}
+                except Exception:
+                    last = f"HTTP 200 @ {base} but body is not JSON: {(r.text or '')[:160]}"
+                    continue
+            last = f"HTTP {r.status_code} @ {base}: {(r.text or '')[:200]}"
+            # 401/403 = exists but needs auth; report it rather than
+            # burning the other bases on the same answer.
+            if r.status_code in (401, 403):
+                return {"ok": False, "base": base, "status": r.status_code,
+                        "error": last, "needs_auth": True}
+        except Exception as e:
+            last = f"{type(e).__name__} @ {base}: {str(e)[:140]}"
+    return {"ok": False, "error": last}
+
+
+_KALSHI_INC_MAX_PAGES = 40      # 40 x 200 = 8,000 program rows
+_KALSHI_INC_CENSUS_PAGES = 400  # ?census=1 — walk the whole catalogue,
+                                # keeping ONLY prefix counts + sports rows.
+                                # Proving a series is ABSENT needs the whole
+                                # list: the venue silently IGNORES
+                                # ?series_ticker= (verified — the filtered
+                                # response came back byte-identical to the
+                                # unfiltered one), so there is no cheap ask.
+
+
+def _kalshi_next_cursor(data):
+    """next_cursor off a paged Kalshi response, without assuming the key.
+    Kalshi returns '' (not null) at the end — treat empty as done."""
+    if not isinstance(data, dict):
+        return None
+    for k in ("next_cursor", "cursor", "nextCursor"):
+        v = data.get(k)
+        if isinstance(v, str) and v.strip():
+            return v
+    return None
+
+
+def _kalshi_rows_from(data):
+    """Pull the row list out of a response without assuming the key."""
+    if isinstance(data, list):
+        return data, "<root list>"
+    if not isinstance(data, dict):
+        return [], None
+    for k in ("incentive_programs", "incentives", "programs",
+              "liquidity_incentives", "markets", "data", "results"):
+        v = data.get(k)
+        if isinstance(v, list):
+            return v, k
+    # last resort: the sole list value on the object
+    lists = [(k, v) for k, v in data.items() if isinstance(v, list)]
+    if len(lists) == 1:
+        return lists[0][1], lists[0][0]
+    return [], None
+
+
+_KALSHI_SPORT_PREFIXES = ("KXMLB", "KXNFL", "KXNBA", "KXNHL", "KXUFC",
+                          "KXNCAA", "KXCFB", "KXCBB", "KXWNBA")
+
+
+def _inc_active(rows: list) -> list:
+    """Programs whose window contains NOW (UTC). A program row is not
+    permission; its window is."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    out = []
+    for r in rows or []:
+        try:
+            sd = (r or {}).get("start_date") or ""
+            ed = (r or {}).get("end_date") or ""
+            s0 = datetime.fromisoformat(sd.replace("Z", "+00:00"))
+            e0 = datetime.fromisoformat(ed.replace("Z", "+00:00"))
+            if s0 <= now <= e0:
+                out.append(r)
+        except Exception:
+            continue
+    return out
+
+
+def _census_add(acc: dict, rows: list):
+    for r in rows or []:
+        t = str((r or {}).get("market_ticker") or "")
+        pre = t.split("-", 1)[0] if "-" in t else (t or "?")
+        acc[pre] = acc.get(pre, 0) + 1
+
+
+def _sports_rows(rows: list) -> list:
+    return [r for r in rows or []
+            if str((r or {}).get("market_ticker") or "")
+            .upper().startswith(_KALSHI_SPORT_PREFIXES)]
+
+
+@app.route("/api/kalshi/incentives")
+def api_kalshi_incentives():
+    """Kalshi's live incentive programs — the Kalshi twin of the
+    Polymarket reward-schedule read.
+
+    Params: ?type=liquidity|volume|all (default liquidity), ?ticker=SUBSTR
+    to filter rows, ?raw=1 to dump full rows (default: 3 samples + a
+    ticker roll-up), ?limit=N page size.
+
+    Reports per candidate path: the HTTP status, which base answered, the
+    row key it found, the row count, and the FULL first row so the field
+    names are read off reality rather than off a help-centre paraphrase.
+    Sports roll-up buckets rows by our known series prefixes."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+
+    # ?verify=1 — is this even the right API? Three ORTHOGONAL checks, so
+    # the negative does not rest on one endpoint, one base and one string
+    # match: (1) every base compared head-to-head, (2) the FULL raw live
+    # MLB market object scanned for any reward/incentive field of its own,
+    # (3) the series object, and (4) the live market's market_id looked up
+    # against the program list by ID rather than by ticker text.
+    if (request.args.get("verify") or "") in ("1", "true", "yes"):
+        v: dict = {"ok": True, "check": "kalshi-incentives-verification"}
+        # (1) base-by-base, same query
+        v["bases"] = {}
+        for base in _KALSHI_BASES:
+            try:
+                r = _http.get(base + "/incentive_programs",
+                              params={"limit": 5},
+                              headers={"Accept": "application/json",
+                                       "User-Agent": "kahla-house/1.0"},
+                              timeout=15)
+                d = r.json() if r.status_code == 200 else {}
+                rr, kk = _kalshi_rows_from(d)
+                v["bases"][base] = {
+                    "status": r.status_code, "row_key": kk, "n": len(rr),
+                    "first_ticker": (rr[0] or {}).get("market_ticker") if rr else None,
+                    "top_keys": list(d.keys())[:8] if isinstance(d, dict) else None}
+            except Exception as e:
+                v["bases"][base] = {"error": f"{type(e).__name__}: {e}"[:160]}
+        # (2) the live MLB game market, FULL object
+        mk = _kalshi_pub_get("/markets", {"series_ticker": "KXMLBGAME",
+                                          "status": "open", "limit": 1})
+        mrows, _ = _kalshi_rows_from(mk.get("data")) if mk.get("ok") else ([], None)
+        m0 = mrows[0] if mrows else None
+        v["live_mlb_market"] = {
+            "found": bool(m0),
+            "ticker": (m0 or {}).get("ticker"),
+            "series_segment": str((m0 or {}).get("ticker") or "").split("-", 1)[0],
+            "all_field_names": sorted((m0 or {}).keys()) if isinstance(m0, dict) else None,
+            "reward_ish_fields": {k: vv for k, vv in (m0 or {}).items()
+                                  if any(w in k.lower() for w in
+                                         ("incent", "reward", "liquid", "rebate",
+                                          "maker", "target", "discount"))}
+            if isinstance(m0, dict) else None,
+        }
+        # (3) the series object
+        sr = _kalshi_pub_get("/series/KXMLBGAME")
+        v["series_object"] = (sr.get("data") if sr.get("ok")
+                              else {"error": (sr.get("error") or "")[:200]})
+        # (4) by market_id, not by ticker text
+        mid = (m0 or {}).get("market_id") or (m0 or {}).get("id")
+        v["market_id_probed"] = mid
+        if mid:
+            hit, scanned, cur, pages = None, 0, None, 0
+            import time as _t2
+            dl = _t2.time() + 40.0
+            q = {"limit": 200, "type": "all"}
+            while pages < 5000:
+                if cur:
+                    q["cursor"] = cur
+                res = _kalshi_pub_get("/incentive_programs", q)
+                if not res.get("ok"):
+                    break
+                rws, _ = _kalshi_rows_from(res.get("data"))
+                if not rws:
+                    break
+                scanned += len(rws)
+                pages += 1
+                for row in rws:
+                    if str((row or {}).get("market_id") or "") == str(mid):
+                        hit = row
+                        break
+                cur = _kalshi_next_cursor(res.get("data"))
+                if hit or not cur or _t2.time() > dl:
+                    break
+            v["by_market_id"] = {"hit": hit, "scanned": scanned,
+                                 "pages": pages, "exhausted": not cur,
+                                 "verdict": ("PROGRAM EXISTS for this market_id"
+                                             if hit else
+                                             ("no program for this market_id "
+                                              "(cursor exhausted)" if not cur else
+                                              "no program yet (cursor still open)"))}
+        _probe_log(v)
+        return jsonify(v)
+
+    typ = (request.args.get("type") or "liquidity").strip().lower()
+    tick_f = (request.args.get("ticker") or "").strip().upper()
+    raw = (request.args.get("raw") or "") in ("1", "true", "yes")
+    try:
+        limit = max(1, min(1000, int(request.args.get("limit") or 200)))
+    except Exception:
+        limit = 200
+
+    out: dict = {"ok": True, "type": typ, "paths_tried": [],
+                 "found_path": None, "rows": 0,
+                 "venue_params": None}
+
+    params = {"limit": limit}
+    if typ and typ != "none":
+        params["type"] = typ
+    # SERVER-SIDE passthrough: any ?q_<name>= rides to Kalshi as <name>.
+    # Client-side filtering can only ever filter what a truncated page walk
+    # already returned — useless for proving a series is ABSENT. Ask the
+    # venue about the exact series instead (the /api/rent-check lesson).
+    for k, v in request.args.items():
+        if k.startswith("q_") and len(k) > 2 and v:
+            params[k[2:]] = v
+
+    out["venue_params"] = {k: v for k, v in params.items()}
+    rows, src, _last_page_data = [], None, None
+    census_pre: dict = {}
+    sports_seen: list = []
+    census_n = 0
+    find_hits: list = []
+    find_scanned = 0
+    # Two passes: filtered, then BARE. An unsupported ?type=/?limit= 400s
+    # every path and reads exactly like "this venue has no programs" —
+    # the same false zero the control below guards against.
+    attempts = [(p, params, "filtered") for p in _KALSHI_INCENTIVE_PATHS] + \
+               [(p, {}, "bare") for p in _KALSHI_INCENTIVE_PATHS]
+    for path, q, pass_name in attempts:
+        res = _kalshi_pub_get(path, q)
+        att = {"path": path, "pass": pass_name, "status": res.get("status"),
+               "base": res.get("base"), "ok": res.get("ok"),
+               "error": (res.get("error") or "")[:200] or None}
+        if not res.get("ok") and res.get("needs_auth"):
+            # documented endpoint that wants a signature — retry signed
+            sres = _kalshi_authed_get(path, q)
+            att["authed_retry"] = {"ok": sres.get("ok"),
+                                   "status": sres.get("status"),
+                                   "error": (sres.get("error") or "")[:200] or None}
+            if sres.get("ok"):
+                res = {"ok": True, "base": sres.get("base"),
+                       "status": 200, "data": sres.get("data")}
+        if res.get("ok"):
+            r, k = _kalshi_rows_from(res.get("data"))
+            att["row_key"] = k
+            att["row_count"] = len(r)
+            att["top_keys"] = (list(res["data"].keys())[:12]
+                               if isinstance(res.get("data"), dict) else None)
+            if r and not rows:
+                rows, src = r, path
+                out["found_path"] = path
+                out["base_used"] = res.get("base")
+                _last_page_data = res.get("data")
+        out["paths_tried"].append(att)
+        if rows:
+            break
+
+    # ---- PAGE IT. The first response carried next_cursor and 200 rows
+    # that were ALL 15-minute crypto/commodity periods — one page reads
+    # exactly like "Kalshi has no sports programs" when it only means
+    # "page 1 is sorted by something else". Same false-floor class as
+    # gotcha #40 (PostgREST's 1,000-row cap): a capped read is not an
+    # answer. Bounded so a cursor that never terminates cannot spin.
+    # ?find=KXMLBGAME,KXNFLGAME — walk until one of these prefixes appears.
+    # Early-exits on the first hit and, on a wall-clock deadline, hands back
+    # resume_cursor so the walk CONTINUES on the next call instead of
+    # restarting. A capped walk answers "not in the first N"; only an
+    # exhausted cursor answers "not on the list".
+    find_pre = tuple(p.strip().upper()
+                     for p in (request.args.get("find") or "").split(",")
+                     if p.strip())
+    resume = (request.args.get("cursor") or "").strip() or None
+    # ?resume=auto — pick the cursor up from THIS probe's own last run for
+    # the same prefixes. Lets site-curl's `repeat` chain the walk across
+    # calls; without it each call restarts at page 1 and the walk can never
+    # finish, which is how "not found yet" masquerades as an answer.
+    prior_scanned = 0
+    if not resume and (request.args.get("resume") or "") == "auto" and find_pre:
+        try:
+            pr = get_supabase().table("exec_probe_runs") \
+                .select("result").order("id", desc=True).limit(25).execute()
+            for row in (pr.data or []):
+                f = ((row.get("result") or {}).get("find") or {})
+                if (tuple(f.get("prefixes") or []) == find_pre
+                        and f.get("resume_cursor")):
+                    resume = f["resume_cursor"]
+                    prior_scanned = int(f.get("rows_scanned_total")
+                                        or f.get("rows_scanned_this_call") or 0)
+                    break
+        except Exception:
+            pass
+    import time as _tt
+    _deadline = _tt.time() + 50.0
+    census = (request.args.get("census") or "") in ("1", "true", "yes")
+    max_pages = (5000 if find_pre else
+                 (_KALSHI_INC_CENSUS_PAGES if census
+                  else _KALSHI_INC_MAX_PAGES))
+    pages, cursor, truncated = 1, None, False
+    if rows and out.get("found_path"):
+        q0 = dict(params)
+        cursor = resume or _kalshi_next_cursor(_last_page_data)
+        while cursor and pages < max_pages:
+            q0["cursor"] = cursor
+            res = _kalshi_pub_get(out["found_path"], q0)
+            if not res.get("ok"):
+                out["page_error"] = (res.get("error") or "")[:200]
+                break
+            r, _k = _kalshi_rows_from(res.get("data"))
+            if not r:
+                break
+            if find_pre:
+                hits = [x for x in r
+                        if str((x or {}).get("market_ticker") or "")
+                        .upper().split("-", 1)[0] in find_pre]
+                find_scanned += len(r)
+                if hits:
+                    find_hits.extend(hits)
+                    cursor = _kalshi_next_cursor(res.get("data"))
+                    pages += 1
+                    break
+                pages += 1
+                cursor = _kalshi_next_cursor(res.get("data"))
+                if _tt.time() > _deadline:
+                    break
+                continue
+            if census:
+                # keep only what the census answers: the prefix histogram
+                # and any row on a sports series. Holding 80k rows to count
+                # them is how a probe OOMs a serverless function.
+                _census_add(census_pre, r)
+                sports_seen.extend(_sports_rows(r))
+                census_n += len(r)
+            else:
+                rows.extend(r)
+            pages += 1
+            cursor = _kalshi_next_cursor(res.get("data"))
+        truncated = bool(cursor) and pages >= max_pages
+    out["pages"] = pages
+    out["page_truncated"] = truncated
+    if truncated:
+        out["page_warning"] = ("hit the page cap with a cursor still open — "
+                               "counts below are a FLOOR, not a total")
+
+    # ---- KNOWN-GOOD CONTROL: an empty program list is only meaningful
+    # if the reader can reach Kalshi at all (this repo's standing rule).
+    ctl = _kalshi_pub_get("/markets", {"series_ticker": "KXMLBGAME",
+                                       "status": "open", "limit": 1})
+    cr, _ck = _kalshi_rows_from(ctl.get("data")) if ctl.get("ok") else ([], None)
+    out["control"] = {"ok": ctl.get("ok"), "status": ctl.get("status"),
+                      "mlb_markets_seen": len(cr),
+                      "error": (ctl.get("error") or "")[:200] or None}
+    out["control_verdict"] = ("reader OK — a zero above is a real venue zero"
+                              if cr else
+                              "READER BROKEN — a zero above means NOTHING")
+
+    if tick_f:
+        rows = [r for r in rows
+                if tick_f in str((r or {}).get("market_ticker")
+                                 or (r or {}).get("ticker") or "").upper()]
+    out["rows"] = len(rows)
+
+    if find_pre:
+        pg1 = [x for x in rows
+               if str((x or {}).get("market_ticker") or "")
+               .upper().split("-", 1)[0] in find_pre]
+        if pg1:
+            find_hits = pg1 + find_hits
+        find_scanned += len(rows)
+        exhausted = not cursor
+        out["find"] = {
+            "prefixes": list(find_pre),
+            "found": len(find_hits),
+            "rows_scanned_this_call": find_scanned,
+            "rows_scanned_total": prior_scanned + find_scanned,
+            "resumed_from_prior": bool(prior_scanned),
+            "pages_this_call": pages,
+            "exhausted": exhausted,
+            "resume_cursor": None if exhausted else cursor,
+            "hits": find_hits[:40],
+            "active_hits": _inc_active(find_hits)[:40],
+        }
+        out["verdict"] = (
+            f"FOUND {len(find_hits)} program(s) on {'/'.join(find_pre)}"
+            if find_hits else
+            (f"NOT ON THE LIST — cursor exhausted after "
+             f"{prior_scanned + find_scanned:,} programs walked"
+             if exhausted else
+             "not found YET — cursor still open, resume with ?cursor="))
+        out["rows"] = find_scanned
+        _probe_log(out)
+        return jsonify(out)
+
+    if census:
+        _census_add(census_pre, rows)          # page 1
+        sports_seen.extend(_sports_rows(rows))
+        census_n += len(rows)
+        out["census"] = {
+            "programs_total": census_n,
+            "distinct_series": len(census_pre),
+            "complete": not truncated,
+            "sports_game_series_found": sorted({
+                str((r or {}).get("market_ticker") or "").split("-", 1)[0]
+                for r in sports_seen}),
+            "sports_rows": len(sports_seen),
+            # the rows themselves, ACTIVE ones first — a series appearing in
+            # the census says nothing about whether it pays TODAY (the dead
+            # poly_reward_schedule lesson: a retired program that still reads
+            # as permission). Callers must see start/end, not just a name.
+            "sports_active_now": _inc_active(sports_seen)[:250],
+            "sports_sample": sports_seen[:60],
+            "top_series": dict(sorted(census_pre.items(),
+                                      key=lambda kv: -kv[1])[:60]),
+        }
+        out["rows"] = census_n
+        _probe_log(out)
+        return jsonify(out)
+
+    if rows:
+        out["first_row_full"] = rows[0]
+        out["field_names"] = sorted((rows[0] or {}).keys()) \
+            if isinstance(rows[0], dict) else None
+        # sports roll-up by our known series prefixes
+        buckets: dict = {}
+        for r in rows:
+            t = str((r or {}).get("market_ticker")
+                    or (r or {}).get("ticker") or "")
+            pre = t.split("-", 1)[0] if "-" in t else (t or "?")
+            b = buckets.setdefault(pre, {"n": 0, "sample": t})
+            b["n"] += 1
+        out["by_series_prefix"] = dict(
+            sorted(buckets.items(), key=lambda kv: -kv[1]["n"])[:40])
+        # Explicit sports roll-up — the prefix histogram buries a handful
+        # of game rows under thousands of 15-minute crypto periods.
+        sports_pre = ("KXMLBGAME", "KXNFLGAME", "KXNBA", "KXNHL", "KXUFC",
+                      "KXNCAAF", "KXCFBGAME", "KXMLB", "KXNFL")
+        sp = [r for r in rows
+              if str((r or {}).get("market_ticker") or "").upper()
+              .startswith(sports_pre)]
+        out["sports"] = {
+            "n": len(sp),
+            "tickers": sorted({str((r or {}).get("market_ticker") or "")
+                               for r in sp})[:60],
+            "sample_row": sp[0] if sp else None,
+        }
+        out["samples"] = rows[:3]
+        if raw:
+            out["all_rows"] = rows[:200]
+
     _probe_log(out)
     return jsonify(out)
 
@@ -9832,7 +10458,7 @@ def api_poly_topup():
             break
         b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         if not (b.get("autobet") or b.get("whiff_autobet")
-                or b.get("ou_trader")):
+                or b.get("ou_trader") or b.get("gridiron_autobet")):
             continue                       # model bets only — never manual
         mt = r.get("market_type") or ""
         # ⚠ K PROPS ARE EXEMPT FROM THE BOOK-WIDE STAKE (Aug 16 2026). A K
@@ -9840,10 +10466,21 @@ def api_poly_topup():
         # up to 10 and silently undo the decision to hold that lane at 4 —
         # the lane that fills 73.4% of the time and whose fills win 43%.
         # Size there buys mostly the adversely-selected half.
+        # ⚠ GRIDIRON PICKS HAVE THEIR OWN STAKES (Aug 27 2026, found while
+        # staging the Thursday double): a football spread/total pick would
+        # otherwise fall into the plain else-branch and get topped to
+        # _AUTOBET_CONTRACTS (20) instead of its lane stake (10/4). The
+        # gridiron_autobet flag routes to _GRIDIRON_CONTRACTS /
+        # _GRIDIRON_TOTAL_CONTRACTS; before this, topup skipped football
+        # entirely (the blob-flag filter above), so the bug was latent —
+        # it goes live the moment the flag joins the filter, which is now.
         _fam = ((b.get("whiff") or {}).get("ptype")
                 if isinstance(b.get("whiff"), dict) else None)
+        _grid = bool(b.get("gridiron_autobet"))
         target = (_AUTOBET_CONTRACTS_NRFI if mt == "nrfi"
                   else _WHIFF_CONTRACTS_K if (_fam or "") in _JOIN_TOUCH_FAMS
+                  else (_GRIDIRON_TOTAL_CONTRACTS if mt == "total"
+                        else _GRIDIRON_CONTRACTS) if _grid
                   else _AUTOBET_CONTRACTS)
         have = int(b.get("contracts") or 0)
         if have >= target:
@@ -9882,9 +10519,10 @@ def api_poly_topup():
             _skip("no_price")
             continue
         side_c = (100.0 - canon * 100.0) if synthetic else canon * 100.0
-        if side_c > _REPEG_NRFI_PRICE_CAP_C:
-            _skip("over_price_cap")         # 54¢ — never re-place above it
-            continue
+        _cap_c = _GRIDIRON_MAX_ENTRY_C if _grid else _REPEG_NRFI_PRICE_CAP_C
+        if side_c > _cap_c:
+            _skip("over_price_cap")         # 64¢ (60¢ gridiron) — never
+            continue                        # re-place above it
         if target * side_c / 100.0 > _REPEG_MAX_COST_USD:
             _skip("master_rule")            # ⚠ $6/order
             continue
@@ -9957,6 +10595,8 @@ def api_poly_topup():
                 pass
     out = {"ok": True, "dry": dry, "acted": len(done), "actions": done,
            "skipped": skipped, "targets": {"nrfi": _AUTOBET_CONTRACTS_NRFI,
+                                           "grid_spread": _GRIDIRON_CONTRACTS,
+                                           "grid_total": _GRIDIRON_TOTAL_CONTRACTS,
                                            "other": _AUTOBET_CONTRACTS}}
     _probe_log(out)
     return jsonify(out)
@@ -13249,7 +13889,13 @@ AUTOBET_MAX_BETS = 10000  # CAP KILLED Aug 4 ~10pm AZ (user: "kill that 40
                           # Sentinel not deletion: the counter still runs
                           # (the "N/cap this slate" ping + a re-cap later
                           # need only this constant changed back).
-_AUTOBET_CONTRACTS_NRFI = 5   # 2→5 Aug 16 2026 (user). NRFI earned $0.01
+_AUTOBET_CONTRACTS_NRFI = 10  # 5→10 Aug 27 2026 (user: "we are doubling the
+                              # contracts, it's time to make some fucking
+                              # money" — the Thursday unfreeze double, held
+                              # for the box pull per "No… Thursday").
+                              # 10 × 64¢ cap = $6.40, needs the $13 Master
+                              # Rule below. Prior: 2→5 Aug 16 2026 (user).
+                              # NRFI earned $0.01
                               # of liquidity rent EVER while resting an
                               # average 36.5h out — the player-prop
                               # programs have NO early period, so those
@@ -13269,7 +13915,12 @@ _AUTOBET_CONTRACTS_NRFI = 5   # 2→5 Aug 16 2026 (user). NRFI earned $0.01
                           # legacy 2-contract NRFI positions cleared
                           # min_held and got sells re-placed). ⏰ The
                           # calibration audit is still owed.
-_AUTOBET_CONTRACTS = 10  # 4→10 Aug 16 2026 (user). Reward score is
+_AUTOBET_CONTRACTS = 20  # 10→20 Aug 27 2026 (user: the Thursday unfreeze
+                         # double — "Everything ×2, Master Rule → $13",
+                         # approved with arithmetic Aug 25/27, staged for
+                         # the box pull). 20 × 60¢ = $12, inside the $13
+                         # Master Rule. Prior: 4→10 Aug 16 2026 (user).
+                         # Reward score is
                          # DF^ticks × SIZE and our 4 contracts were 0.08%
                          # of a 5,000 target — rent is linear in size at
                          # this scale, so size is the lever. K props are
@@ -15118,8 +15769,12 @@ _GRIDIRON_MIN_START = {"NFL": "2026-09-08", "NCAAF": "2026-08-29"}
 # user go-order over the shadow-record earn-in — tiny stakes, same
 # per-bet fences as MLB (rent gate, $6 Master Rule, entry cap,
 # junk-edge cliff).
-_GRIDIRON_CONTRACTS = 5           # user cap; 5 × ≤60¢ = ≤$3, under the $6 rule
-_GRIDIRON_TOTAL_CONTRACTS = 2     # totals stake (user, Aug 22 2026: "Turn on
+_GRIDIRON_CONTRACTS = 10          # 5→10 Aug 27 2026 (the Thursday unfreeze
+                                  # double — user: "Everything ×2"). 10 ×
+                                  # ≤60¢ = ≤$6, inside the $13 Master Rule.
+                                  # Prior: user cap 5 (Aug 22).
+_GRIDIRON_TOTAL_CONTRACTS = 4     # 2→4 Aug 27 2026 (same double). Prior:
+                                  # totals stake (user, Aug 22 2026: "Turn on
                                   # totals, 2 contracts... spread for both 5
                                   # contracts max, totals 2 max for now")
 _GRIDIRON_ML_MAX_SPREAD = 2.5     # football IS spreads and totals (user,
@@ -15604,14 +16259,43 @@ def _gridiron_bet_sweep(sb, now, deadline, stats):
                 if gg.get("event_name") and key not in seen:
                     seen.add(key)
                     cands.append(gg)
+        # NEAREST KICKOFF FIRST (Aug 27 2026 — the user's 5th ask for a
+        # college bet: "Remember that one time we bet college football?
+        # Me either…"). The sport loop assembled NFL before NCAAF, so a
+        # boot that reset the sweep stamps spent its 4 builds/tick on
+        # Sep-10 NFL games — dedup-bouncing off the already-bet wall —
+        # while Week 0 college, kicking off IN TWO DAYS, waited ~45 min
+        # for a slot. Soonest game first is the right rule always: its
+        # books are the most real and its betting windows close first.
+        cands.sort(key=lambda gg: str(gg.get("event_start") or ""))
         nowt = _time.time()
         cands = [gg for gg in cands
                  if nowt - _GRIDIRON_SWEEP_TS.get(gg["id"], 0.0)
                  >= _GRIDIRON_SWEEP_S]
+        # FULLY-BET GAMES DON'T EAT BUILD SLOTS (same night): a game with
+        # pending picks on BOTH spread and total can only bounce off the
+        # executor's dedup — a full build_dossier per bounce is why the
+        # NFL backlog took ticks to drain instead of seconds.
+        try:
+            _pk = (sb.table("bot_picks").select("market_id,market_type")
+                   .eq("status", "pending")
+                   .in_("market_type", ["spread", "total"])
+                   .gt("event_start", now.isoformat())
+                   .limit(500).execute().data) or []
+            _bet_mt: dict = {}
+            for _p in _pk:
+                _bet_mt.setdefault(str(_p.get("market_id")), set()).add(
+                    _p.get("market_type"))
+        except Exception:
+            _bet_mt = {}
         built = 0
         for gg in cands:
             if _time.time() >= deadline - 1.0 or built >= _GRIDIRON_SWEEP_CAP:
                 break
+            if {"spread", "total"} <= _bet_mt.get(str(gg["id"]), set()):
+                _GRIDIRON_SWEEP_TS[gg["id"]] = _time.time()
+                stats["g_skip_bet"] = stats.get("g_skip_bet", 0) + 1
+                continue
             gp = _gridiron_proj(sb, gg["sport"], gg.get("event_name"))
             if not gp:
                 _GRIDIRON_SWEEP_TS[gg["id"]] = _time.time()
@@ -17582,9 +18266,19 @@ REPEG_ENABLED = True         # LIVE (2nd time) Aug 2 2026 — probe run 2
                              # 404s live orders) → recreate on venue-kill →
                              # position check so a raced fill is never
                              # re-placed → 🚨 ORDER LOST ping as last resort.
-_REPEG_MARKET_TYPES = {"nrfi", "prop"}   # activation trigger — a pending
+_REPEG_MARKET_TYPES = {"nrfi", "prop",
+                       "spread", "total"}  # activation trigger — a pending
                                          # K-prop alone wakes the pass
-                                         # (Aug 3: props chase like Y/NRFI)
+                                         # (Aug 3: props chase like Y/NRFI).
+                                         # spread/total added Aug 26 2026 —
+                                         # FOOTBALL CHASES NOW (user, at
+                                         # volume, on finding the M-OH +16.5
+                                         # order 24¢ behind a re-centered
+                                         # book: "the god damn repeg isn't
+                                         # turned on for football!!"). Only
+                                         # gridiron_autobet picks chase;
+                                         # manual football bets stay the
+                                         # user's to move, like manual ML.
 _REPEG_MAX_MOVES = 2         # lifetime cancel-replace cap per bet
 _REPEG_MAX_ACTIONS = 6    # re-pegs per tick. Was an implicit 1, justified in
                           # comment by "Vercel's 10s budget" — a HOBBY-tier
@@ -17599,13 +18293,18 @@ _REPEG_MAX_ACTIONS = 6    # re-pegs per tick. Was an implicit 1, justified in
 _REPEG_BUDGET_S = 20.0    # hard wall clock for the chase loop. Stops mid-pass
                           # rather than risk a platform kill between a cancel
                           # and its create — that gap IS the ORDER LOST state.
-_REPEG_MAX_COST_USD = 6.50   # ⚠ THE MASTER RULE — never raise casually.
-                             # 6.00→6.50 Aug 16 2026 (user, explicitly, after
-                             # being shown the arithmetic): the 10-contract
-                             # stake at the new 64¢ entry cap costs $6.40, so
-                             # a $6.00 rule would have SILENTLY SKIPPED every
-                             # bet in the 60-64¢ band and stopped the re-peg
-                             # chase there. $6.50 leaves a dime of headroom.
+_REPEG_MAX_COST_USD = 13.00  # ⚠ THE MASTER RULE — never raise casually.
+                             # 6.50→13.00 Aug 27 2026 (user, explicitly, via
+                             # AskUserQuestion: "Everything ×2, Master Rule →
+                             # $13" — the Thursday unfreeze double). Same
+                             # arithmetic as the Aug 16 raise, doubled: the
+                             # 20-contract stake at the 64¢ NRFI/prop entry
+                             # cap costs $12.80; a $6.50 rule would have
+                             # SILENTLY SKIPPED every doubled bet above
+                             # 32.5¢ and stopped the re-peg chase there.
+                             # $13.00 leaves the same dime of headroom.
+                             # Prior: 6.00→6.50 Aug 16 2026 (user, after
+                             # being shown the arithmetic).
 
 
 def _repeg_verify_or_recreate(client, slug, intent, canon, qty, orig_tif,
@@ -17708,6 +18407,41 @@ def _fresh_fair_for_repeg(sb, r, mt, market_id):
     try:
         if mt == "nrfi":
             return _nrfi_fair_from_paperlog(sb, market_id, r.get("side"))
+        if mt in ("spread", "total"):
+            # Football (Gridiron IQ, Aug 26 2026) — re-price the pick's own
+            # rung off TODAY'S power_ratings snapshot, exactly the numbers
+            # _gridiron_try_bet placed it with. Ratings refresh daily, so a
+            # chase two days later runs on fresher form than the entry.
+            # Non-gridiron spread/total picks have no model → None (the
+            # caller then stops on "no model fair" rather than chase blind).
+            blob = (r.get("signal_blob")
+                    if isinstance(r.get("signal_blob"), dict) else {})
+            if not blob.get("gridiron_autobet"):
+                return None
+            got = _gridiron_proj(sb, (r.get("sport") or "").upper(),
+                                 r.get("event_name") or "")
+            if not got:
+                return None
+            mg, tt, pm = got
+            side = (r.get("side") or "").lower()
+            if mt == "spread":
+                lh = _safe_float(blob.get("line_home"))
+                if lh is None:
+                    el = _safe_float(r.get("entry_line"))
+                    if el is None:
+                        return None
+                    lh = el if side == "home" else -el
+                ph = _gridiron_cover_p(pm, mg, lh)
+                if ph is None:
+                    return None
+                return ph if side == "home" else 1.0 - ph
+            ln = _safe_float(r.get("entry_line"))
+            if ln is None:
+                return None
+            po = _gridiron_over_p(pm, tt, ln)
+            if po is None:
+                return None
+            return po if side == "over" else 1.0 - po
         if mt != "moneyline":
             return None
         ev = r.get("event_name") or ""
@@ -18292,6 +19026,669 @@ def _poly_ledger_tick(sb, now, *, force: bool = False) -> dict:
     return res
 
 
+# ── VENUE-TRUTH RECONCILE (built Aug 28 2026, staged for the Thursday
+# unfreeze — the automated version of the Aug 27 fire drill). THE GHOST-
+# ORDER CLASS: the venue cancels resting orders when it re-provisions a
+# ladder's books (20 of 26 Week-1 football orders died over one weekend),
+# and the Aug 27 platform incident ended in an ACCOUNT-WIDE purge of every
+# resting order. A pick row whose order died blocks the executor's dedup
+# forever — the machine believes it is bet and never re-bets. Invariant:
+# pending machine picks = resting orders + fills. This pass enforces it.
+_RECON_LAST_TS = 0.0           # in-memory cadence — per process
+_RECON_EVERY_S = 420.0         # one pass per 7 min; the repeg lane hosts it
+                               # (900→420 first armed night — 15 min was
+                               # Vercel-budget deference; the two-strike
+                               # CONFIRM window below is the safety, not
+                               # the cadence)
+_RECON_CONFIRM_MIN = 12.0      # two-strike: a miss must persist this long
+                               # (orders.list is one read — a transient gap
+                               # must never read as a purge; create is async)
+_RECON_MAX_CLEARS = 12         # per pass — bounded; the next pass continues
+                               # (6→12 first armed night: a purge-scale
+                               # event is exactly when you want the heal
+                               # to finish in one pass, and every clear is
+                               # backup-gated anyway)
+_RECON_START_GUARD_MIN = 30.0  # never touch a pick this close to kickoff
+
+
+def _reconcile_tick(sb, now) -> dict:
+    """Order-book truth per pending machine pick. Three verdicts:
+    - open order on (slug, our intent) → healthy (clears any miss stamp);
+    - no order but the POSITION is held on our side → it rides (plus the
+      orphan-order size check: position >> pick contracts = the double-fill
+      class, lad-det 20-on-10 Aug 27 — warn once, never auto-fix);
+    - no order, no position, AND no evidence it ever filled (poly_pnl buys,
+      poly_activities TRADE with our intent — a filled-then-SOLD pick is the
+      autolog's to remove, not ours) → ZOMBIE: two-strike stamp, then backup
+      to reconcile_bak → delete the row → the opener/sweep re-bets through
+      the FULL gauntlet (rent → model → bet at current books; never a blind
+      re-place — user, Aug 27: 'model, RENT, bet'). For MLB opener rows the
+      paperlog latch is released via dayof_wait=true (a would-bet whose
+      order died IS unfinished work — the done-set semantic, exactly).
+    Default-deny everywhere: a failed venue read does nothing; a failed
+    backup insert never deletes."""
+    global _RECON_LAST_TS
+    res = {"checked": 0, "healthy": 0, "filled": 0, "stamped": 0,
+           "cleared": 0, "sold_skip": 0, "size_warn": 0}
+    if _time.time() - _RECON_LAST_TS < _RECON_EVERY_S:
+        return {"gate": "cadence"}
+    # ⚠ The cadence slot is consumed only AFTER a pass that actually got
+    # venue reads (set below). First live night (Aug 27, the venue
+    # flapping through its own incident): the timer was stamped up top,
+    # so every attempt that landed on a dark moment burned a full 15-min
+    # slot doing nothing — the purge clears crawled behind a venue that
+    # was up 80% of the time. Cheap gates below (owner, one DB read) are
+    # fine to retry every tick.
+    owner = _kalshi_owner_uid()
+    if not owner:
+        return {"gate": "no_owner"}
+    lo = (now + timedelta(minutes=_RECON_START_GUARD_MIN)).isoformat()
+    try:
+        rows = (sb.table("bot_picks")
+                .select("id,event_name,event_start,market_type,side,"
+                        "market_id,sport,signal_blob,poly_pnl")
+                .eq("asked_by", owner).eq("status", "pending")
+                .gt("event_start", lo).limit(400).execute().data) or []
+    except Exception as e:
+        return {"gate": ("picks_err: " + str(e))[:100]}
+    cands = []
+    for r in rows:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if not (b.get("autobet") or b.get("whiff_autobet")
+                or b.get("gridiron_autobet") or b.get("fbprop_autobet")
+                or b.get("ou_trader")):
+            continue                       # machine picks only — never manual
+        ex = b.get("execution") if isinstance(b.get("execution"), dict) else {}
+        slug = b.get("pmm_slug") or ex.get("pmm_slug")
+        if not slug:
+            continue                       # no venue identity → nothing to check
+        synth = bool(b.get("pmm_synthetic") or ex.get("pmm_synthetic"))
+        cands.append((r, b, slug, synth))
+    if not cands:
+        return {"gate": "no_cands"}
+    try:
+        client = get_client()
+    except Exception:
+        return {"gate": "no_client"}
+    orders = _pmm_open_orders_raw(client)
+    positions = _pmm_positions_raw(client)
+    if orders is None or positions is None:
+        return {"gate": "venue_read"}      # default-deny: dark venue = no-op
+                                           # (and the slot is NOT consumed —
+                                           # retry next tick)
+    _RECON_LAST_TS = _time.time()          # reads OK — this pass counts
+    open_keys = {(o["slug"], o["intent"]) for o in orders
+                 if str(o.get("intent") or "").startswith("ORDER_INTENT_BUY")}
+    # expected size per (slug, side) — the orphan-order check compares the
+    # POSITION (per slug-side) against the SUM of pick stakes on that side
+    exp_by_key: dict = {}
+    for r, b, slug, synth in cands:
+        exp_by_key[(slug, synth)] = (exp_by_key.get((slug, synth), 0.0)
+                                     + float(b.get("contracts") or 0))
+    warned_keys = set()
+    cleared_lbl = []
+    for r, b, slug, synth in cands:
+        res["checked"] += 1
+        intent = "ORDER_INTENT_BUY_SHORT" if synth else "ORDER_INTENT_BUY_LONG"
+        if (slug, intent) in open_keys:
+            res["healthy"] += 1
+            if b.get("recon_miss"):        # order came back — clear the strike
+                try:
+                    nb = dict(b)
+                    nb.pop("recon_miss", None)
+                    (sb.table("bot_picks").update({"signal_blob": nb})
+                     .eq("id", r["id"]).execute())
+                except Exception:
+                    pass
+            continue
+        pos = positions.get(slug) or {}
+        net = float(pos.get("net") or 0.0)
+        on_side = (net < 0) if synth else (net > 0)
+        if on_side:
+            res["filled"] += 1
+            exp = exp_by_key.get((slug, synth)) or 0.0
+            if (exp > 0 and abs(net) > exp * 1.25 + 0.5
+                    and (slug, synth) not in warned_keys
+                    and not b.get("recon_size_warned")):
+                warned_keys.add((slug, synth))
+                res["size_warn"] += 1
+                try:
+                    nb = dict(b)
+                    nb["recon_size_warned"] = now.isoformat()
+                    (sb.table("bot_picks").update({"signal_blob": nb})
+                     .eq("id", r["id"]).execute())
+                except Exception:
+                    pass
+                _send_fill_telegram(
+                    f"⚠️ RECONCILE — position bigger than the pick: "
+                    f"{r.get('event_name')} {r.get('market_type')} "
+                    f"{r.get('side')} holds {abs(net):g} vs {exp:g} logged "
+                    f"({slug}). The orphan-order double-fill class — "
+                    f"check the venue.")
+            continue
+        # no order, no position — but did it ever FILL? (filled-then-sold
+        # is the autolog's SOLD-removal, not a zombie; poly_pnl lags ~5min
+        # and the activities mirror a beat more — the two-strike delay
+        # below outwaits both)
+        pnl = r.get("poly_pnl") if isinstance(r.get("poly_pnl"), dict) else {}
+        if float(pnl.get("buy_usd") or 0.0) > 0.0:
+            res["sold_skip"] += 1
+            continue
+        traded = False
+        try:
+            acts = (sb.table("poly_activities").select("payload")
+                    .eq("type", "ACTIVITY_TYPE_TRADE").eq("slug", slug)
+                    .limit(60).execute().data) or []
+            want = "BUY_SHORT" if synth else "BUY_LONG"
+            traded = any(want in json.dumps(a.get("payload") or {})
+                         for a in acts)
+        except Exception:
+            traded = True                  # read failed → assume filled → skip
+        if traded:
+            res["sold_skip"] += 1
+            continue
+        miss = b.get("recon_miss")
+        if not miss:
+            try:
+                nb = dict(b)
+                nb["recon_miss"] = now.isoformat()
+                (sb.table("bot_picks").update({"signal_blob": nb})
+                 .eq("id", r["id"]).execute())
+                res["stamped"] += 1
+            except Exception:
+                pass
+            continue
+        try:
+            aged = ((now - datetime.fromisoformat(
+                str(miss).replace("Z", "+00:00"))).total_seconds()
+                / 60.0) >= _RECON_CONFIRM_MIN
+        except Exception:
+            aged = False
+        if not aged or res["cleared"] >= _RECON_MAX_CLEARS:
+            continue
+        # ZOMBIE CONFIRMED — backup, delete, release the opener latch.
+        try:
+            (sb.table("reconcile_bak")
+             .insert({"pick_id": r["id"], "reason": "venue_killed_order",
+                      "row": r}).execute())
+        except Exception:
+            continue                       # no backup → never delete
+        try:
+            (sb.table("bot_picks").delete().eq("id", r["id"]).execute())
+        except Exception:
+            continue
+        res["cleared"] += 1
+        cleared_lbl.append(f"{r.get('event_name')} "
+                           f"{r.get('market_type')} {r.get('side')}")
+        # MLB opener lanes latch on their paperlog opener rows (would_bet
+        # stays permanently done) — flip dayof_wait so the game re-enters
+        # the pool. Football/props dedup lives on bot_picks alone (the row
+        # we just deleted), so the sweep / whiff pass re-bets on its own.
+        if b.get("autobet") and r.get("market_id"):
+            try:
+                prows = (sb.table("pickbot_paperlog")
+                         .select("id,signal_blob")
+                         .eq("market_id", r["market_id"])
+                         .eq("market_type", r.get("market_type"))
+                         .filter("signal_blob->>opener_shadow", "eq", "true")
+                         .limit(5).execute().data) or []
+                for pr in prows:
+                    pb = (pr.get("signal_blob")
+                          if isinstance(pr.get("signal_blob"), dict) else {})
+                    if pb.get("dayof_wait") in (True, "true"):
+                        continue
+                    (sb.table("pickbot_paperlog")
+                     .update({"signal_blob": dict(pb, dayof_wait=True)})
+                     .eq("id", pr["id"]).execute())
+            except Exception:
+                pass
+    if cleared_lbl:
+        _send_fill_telegram(
+            f"🧹 RECONCILE — venue killed {len(cleared_lbl)} resting "
+            f"order(s), no fill: " + "; ".join(cleared_lbl[:8])
+            + (" …" if len(cleared_lbl) > 8 else "")
+            + ". Rows cleared; the opener/sweep re-bets through the full "
+              "gauntlet (rent → model) on its next pass.")
+    return res
+
+
+# ── THE SCALP SELL ARM — Market Maker Phase 2 v1 (built Aug 28 2026 per
+# docs/scalp-sell-arm-spec.md; user-designed Aug 24: "every time an order
+# fills, we automatically put in a sell order to take profit... Take
+# profits, collect rent, move on"). RENT LANES ONLY — MLB moneyline +
+# football spreads/totals (gridiron). EDGE LANES NEVER SELL: NRFI (0/46
+# losers touched), walks/outs/K props, any lane whose model prints on its
+# own. Doctrine: model lanes ride, rent lanes scalp. Manual bets untouched
+# (machine-flag filter + any existing sell on the slug is respected).
+# NOT the dead harvest (_HARVEST_ENABLED stays dead; git keeps the
+# ladder): the harvest rested fixed rungs losers never touched — this
+# rests AT THE TOUCH and walks DOWN, so it actually trades.
+SCALP_ENABLED = True         # ARMED Aug 27 2026 night, ~40 min into shadow,
+                             # by explicit user order (the spec reserved the
+                             # shortening to him): "ARE WE READY OR NOT...
+                             # Start at the maker, you can't go below my
+                             # cost +1. And it runs until it sells or
+                             # finalizes." Mechanics confirmed = the built
+                             # engine: join-the-touch ask, floor entry+1¢,
+                             # GTD through resolution. First live cycle is
+                             # the probe (the harvest precedent) — verify
+                             # the first asks via orders.list/the app.
+_SCALP_MAX_PLACE = 5         # fresh asks per tick (creates — no cancel leg).
+                             # 2→5 first armed night (user: "why is
+                             # everything so slow"): the 2-cap was sized for
+                             # a shared Vercel request; on the box the only
+                             # real limits are SERIAL writes (kept — the
+                             # Aug 16 duplicate/Cloudflare lesson) and the
+                             # wall clock below.
+_SCALP_MAX_WALKS = 5         # cancel→verify→create walks per tick (1→2→5
+                             # first armed night; still serial, wall-clock
+                             # guarded — each walk ≈4s, 5 fits the 30s
+                             # budget. With every pre-game ask stepping
+                             # toward its floor by design, 2/tick made the
+                             # queue drain take hours).
+_SCALP_BUDGET_S = 30.0       # wall clock, checked BEFORE each write (12→30
+                             # on the box — nothing kills the pass here)
+_SCALP_SHADOW_CAP = 30       # shadow entries kept per pick blob
+
+
+def _scalp_lanes(b: dict, mt: str) -> bool:
+    """Is this pick RENT-LANE inventory? (spec Policy 1)"""
+    if bool(b.get("gridiron_autobet")):
+        return True                      # football spread/total/ML — all rent
+    return bool(b.get("autobet")) and mt == "moneyline"   # MLB ML
+
+
+_SCALP_RENT_SLUGS = ("aec-mlb-", "asc-nfl-", "tsc-nfl-",
+                     "asc-cfb-", "tsc-cfb-", "asc-ncaaf-", "tsc-ncaaf-")
+
+
+def _scalp_adopted_ok(sb, r, b, slug, synth) -> bool:
+    """ADOPTED machine inventory qualifies too (Aug 27 night — user,
+    staring at an uncovered +$1.03 Padres ML: "This is money staring at
+    me… I see no sell order"). A pick the autolog re-created after its
+    original row was lost (the purge/ghost era) carries NO machine flags,
+    so the flag-based lane filter skipped real rent-lane positions. The
+    truth is on the tape: rent lanes are defined by the MARKET FAMILY,
+    and whose buy it was is stamped on the fill itself. Qualifies when
+    (a) the slug is a rent-lane family AND (b) the position's BUY trade
+    was MANUAL_ORDER_INDICATOR_AUTOMATIC — a hand-placed buy stays the
+    user's to sell, exactly per spec ("manual bets untouched"). Verdict
+    cached on the blob so the tape read runs once per pick; a failed
+    read caches nothing and retries next pass (default-deny)."""
+    if b.get("source") != "pmm_autolog":
+        return False
+    if not str(slug or "").startswith(_SCALP_RENT_SLUGS):
+        return False
+    cached = b.get("scalp_adopted")
+    if cached is not None:
+        return bool(cached)
+    verdict = None
+    try:
+        acts = (sb.table("poly_activities").select("payload")
+                .eq("type", "ACTIVITY_TYPE_TRADE").eq("slug", slug)
+                .limit(60).execute().data) or []
+        want = ("ORDER_INTENT_BUY_SHORT" if synth
+                else "ORDER_INTENT_BUY_LONG")
+        for a in acts:
+            t = (a.get("payload") or {}).get("trade") or {}
+            mo = (t.get("aggressor")
+                  if t.get("isAggressor") else t.get("passive")) or {}
+            if mo.get("intent") != want:
+                continue
+            verdict = (mo.get("manualOrderIndicator")
+                       == "MANUAL_ORDER_INDICATOR_AUTOMATIC")
+            break
+    except Exception:
+        return False                     # read failed — retry next pass
+    if verdict is None:
+        return False                     # no buy trade visible yet
+    try:
+        nb = dict(b)
+        nb["scalp_adopted"] = bool(verdict)
+        (sb.table("bot_picks").update({"signal_blob": nb})
+         .eq("id", r["id"]).execute())
+        b["scalp_adopted"] = bool(verdict)
+    except Exception:
+        pass
+    return bool(verdict)
+
+
+def _scalp_entry_c(r, b) -> float | None:
+    """The pick's own-side entry in cents — the floor's anchor. entry_price
+    auto-syncs to the real fill average, so the floor tracks venue truth."""
+    try:
+        ep = float(r.get("entry_price"))
+        return (10000.0 / (ep + 100.0) if ep > 0
+                else 100.0 * (-ep) / ((-ep) + 100.0))
+    except (TypeError, ValueError):
+        return None
+
+
+def _scalp_tick(sb, now) -> dict:
+    """One scalp pass — rides inside the repeg lease (order mutation stays
+    serial; the 'overlapping topup batches' duplicate incident is why).
+    Per rent-lane pick whose BUY has filled (position on our side):
+    - no working ask → place one: JOIN the best competitor ask, never
+      cross, never below floor = entry+1¢ (maker fee ≈0.44¢ at 50¢, so +1¢
+      is always a baby profit). No competitor ask at all → entry+10¢ start
+      (spec-silent default; the walk brings it down from there).
+    - working ask, unfilled → WALK: join a lower competitor ask, or when
+      alone at the touch step DOWN 1¢/pass toward the floor (never below
+      best_bid+1 — post-only would reject the cross anyway). Up-moves
+      happen naturally on re-place after a venue kill (join the new touch).
+    - GTD event_start+7h — the ask works IN-PLAY through resolution (spec
+      Policy 6: pick-six risk accepted, NO jump-guard in v1).
+    Every walk is cancel → position re-read → create fresh (orders.modify
+    BANNED). One sell per slug — ANY existing sell (manual included) means
+    skip. SHADOW MODE (SCALP_ENABLED=False): compute the would-ask and
+    stamp signal_blob.scalp_shadow on change, including whether the tape
+    crossed it. Never raises."""
+    res = {"cands": 0, "placed": 0, "walked": 0, "shadow": 0}
+    _t0 = _time.time()
+    owner = _kalshi_owner_uid()
+    if not owner:
+        return {"gate": "no_owner"}
+    try:
+        rows = (sb.table("bot_picks")
+                .select("id,event_name,event_start,entry_price,market_type,"
+                        "side,signal_blob")
+                .eq("status", "pending").eq("asked_by", owner)
+                .gte("event_start", (now - timedelta(hours=12)).isoformat())
+                .limit(300).execute().data) or []
+    except Exception as e:
+        return {"gate": ("picks_err: " + str(e))[:100]}
+    cands = []
+    for r in rows:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        mt = (r.get("market_type") or "").lower()
+        if mt in ("nrfi", "prop"):
+            continue                     # edge lanes NEVER sell (spec)
+        ex = b.get("execution") if isinstance(b.get("execution"), dict) else {}
+        slug = b.get("pmm_slug") or ex.get("pmm_slug")
+        if not slug:
+            continue
+        synth = bool(b.get("pmm_synthetic") or ex.get("pmm_synthetic"))
+        if not (_scalp_lanes(b, mt)
+                or _scalp_adopted_ok(sb, r, b, slug, synth)):
+            continue
+        cands.append((r, b, slug, synth))
+    if not cands:
+        return {"gate": "no_cands"}
+    try:
+        client = get_client()
+    except Exception:
+        return {"gate": "no_client"}
+    orders = _pmm_open_orders_raw(client)
+    positions = _pmm_positions_raw(client)
+    if orders is None or positions is None:
+        return {"gate": "venue_read"}    # venue dark — never act blind
+
+    # FLOOR VIOLATIONS FIRST (Aug 27 night): with every pre-game ask
+    # stepping toward its floor by design, all 30+ candidates want a walk
+    # every tick and the per-tick cap kept handing its slots to the front
+    # of a stable list — an ask resting BELOW its floor (fee-eating if
+    # lifted) sat queued for hours behind routine 1¢ steps. Repairs are
+    # correctness, steps are optimization: repairs jump the line.
+    def _floor_viol(c4):
+        r4, b4, slug4, synth4 = c4
+        e4 = _scalp_entry_c(r4, b4)
+        if e4 is None:
+            return 1
+        si4 = ("ORDER_INTENT_SELL_SHORT" if synth4
+               else "ORDER_INTENT_SELL_LONG")
+        a4 = None
+        for o4 in orders:
+            if (o4.get("slug") == slug4 and o4.get("intent") == si4
+                    and o4.get("auto") and o4.get("price_yes") is not None):
+                a4 = ((100.0 - o4["price_yes"] * 100.0) if synth4
+                      else o4["price_yes"] * 100.0)
+                break
+        if a4 is None:
+            return 1
+        f4 = min(99.0, float(math.ceil(e4 - 1e-9)) + 1.0)
+        return 0 if a4 < f4 - 0.26 else 1
+    cands.sort(key=_floor_viol)
+    for r, b, slug, synth in cands:
+        if _time.time() - _t0 > _SCALP_BUDGET_S:
+            res["gate"] = "budget"
+            break
+        net = float((positions.get(slug) or {}).get("net") or 0.0)
+        held = (-net) if synth else net
+        if held < 1.0:
+            continue                     # buy hasn't filled — no inventory
+        res["cands"] += 1
+        entry_c = _scalp_entry_c(r, b)
+        if entry_c is None:
+            continue
+        # FLOOR = ceil(real cost) + 1 (Aug 27 night — user caught an ask
+        # at 52¢ on a 51.7¢ cost: int(entry)+1 floored a FRACTIONAL entry
+        # at +0.3¢/share, which the ~0.4¢ maker fee eats. "Cost +1" means
+        # one whole cent over the real cost, rounded up — 51.7¢ → 53¢.
+        # A whole-cent entry is unchanged: 35.0¢ → 36¢.)
+        floor_c = min(99.0, float(math.ceil(entry_c - 1e-9)) + 1.0)
+        # IN-PLAY = DUMP AT MONEY-BACK (user policy, Aug 27 night: "The
+        # only thing that survives a game going live is the scalp...
+        # Dump it as soon as we get our money back"). Pre-game the ask
+        # captures spread (join the touch, walk down 1¢/pass); the moment
+        # the game is LIVE the goal flips to exit — the ask goes STRAIGHT
+        # to max(floor, bid+1): money back plus the baby profit, resting
+        # as tight to the bid as post-only allows, no 15-minute walk.
+        try:
+            _inplay = (datetime.fromisoformat(
+                str(r.get("event_start")).replace("Z", "+00:00")) <= now)
+        except Exception:
+            _inplay = False
+        sell_intent = ("ORDER_INTENT_SELL_SHORT" if synth
+                       else "ORDER_INTENT_SELL_LONG")
+        mine = [o for o in orders
+                if o.get("slug") == slug and o.get("intent") == sell_intent]
+        our_ask = None
+        our_ask_qty = 0.0
+        if mine:
+            o0 = mine[0]
+            if not o0.get("auto"):
+                continue                 # a MANUAL ask owns this slug — skip
+            py = o0.get("price_yes")
+            if py is not None:
+                our_ask = (100.0 - py * 100.0) if synth else py * 100.0
+            our_ask_qty = float(o0.get("leaves") or o0.get("qty") or 0.0)
+        book = _pmm_book(client, slug)
+        if synth:
+            book = _invert_book(book)
+        if not book:
+            continue
+        best_bid = book.get("best_bid")
+        # best COMPETITOR ask — subtract our own resting qty at our level
+        comp_ask = None
+        for c, q in (book.get("asks") or []):
+            if (our_ask is not None and abs(c - our_ask) < 0.26
+                    and q <= our_ask_qty + 0.5):
+                continue                 # that level is (only) us
+            comp_ask = c
+            break
+        if not mine:
+            # ── PLACE: join the top of the book, never cross, floor binds
+            if _inplay:
+                tgt = max(floor_c, (float(int(best_bid)) + 1.0
+                                    if best_bid is not None else floor_c))
+            elif comp_ask is not None:
+                # LEAD the ask by 1¢ — be THE maker, front of the queue,
+                # not a joiner (user, Aug 27 night: "we are THE maker on
+                # the sell right? Not joining the Queue? following the
+                # rule of my cost +1" — supersedes the spec's join rule).
+                # The floor still wins: never under cost+1.
+                tgt = max(floor_c, float(int(comp_ask)) - 1.0)
+            else:
+                tgt = max(floor_c, entry_c + 10.0)
+            tgt = min(99.0, float(int(round(tgt))))
+            if best_bid is not None and tgt <= best_bid:
+                tgt = float(int(best_bid)) + 1.0   # post-only: never cross
+            if tgt < floor_c:
+                continue
+            if not SCALP_ENABLED:
+                _scalp_shadow(sb, r, b, now, tgt, best_bid, comp_ask,
+                              held, res)
+                continue
+            if res["placed"] >= _SCALP_MAX_PLACE:
+                continue
+            if _scalp_create(client, sb, r, b, slug, synth, sell_intent,
+                             tgt, int(held), now):
+                res["placed"] += 1
+            continue
+        # ── WALK: down to a lower competitor ask, or 1¢/pass when alone;
+        # in-play there is no walk — one jump straight to money-back
+        if our_ask is None:
+            continue
+        tgt = None
+        if our_ask < floor_c - 0.26:
+            # FLOOR REPAIR — an ask resting below its true floor (placed
+            # under the old int()+1 rounding) is the one legal UP-move:
+            # lift it to cost+1 proper.
+            tgt = floor_c
+            if best_bid is not None and tgt <= best_bid:
+                tgt = float(int(best_bid)) + 1.0
+            if tgt <= our_ask + 0.26:
+                tgt = None
+        elif _inplay:
+            _dump = max(floor_c, (float(int(best_bid)) + 1.0
+                                  if best_bid is not None else floor_c))
+            if _dump < our_ask - 0.26:
+                tgt = _dump
+        elif (comp_ask is not None
+              and float(int(comp_ask)) - 1.0 < our_ask - 0.26):
+            # a competitor is at or inside our ask → retake the front:
+            # LEAD them by 1¢ (never join), floored at cost+1
+            tgt = max(floor_c, float(int(comp_ask)) - 1.0)
+        elif our_ask > floor_c:
+            tgt = max(floor_c, our_ask - 1.0)             # alone → step down
+        _repair = tgt is not None and our_ask < floor_c - 0.26
+        if tgt is not None and best_bid is not None and tgt <= best_bid:
+            tgt = float(int(best_bid)) + 1.0
+        # down-moves only — EXCEPT the floor repair, the one legal up-move
+        if (tgt is None or tgt < floor_c
+                or (not _repair and tgt >= our_ask - 0.26)):
+            continue                     # nothing to do this pass
+        if not SCALP_ENABLED:
+            _scalp_shadow(sb, r, b, now, tgt, best_bid, comp_ask, held, res)
+            continue
+        if res["walked"] >= _SCALP_MAX_WALKS:
+            continue
+        if _time.time() - _t0 > _SCALP_BUDGET_S:
+            res["gate"] = "budget"
+            break
+        # cancel → position re-read (a fill won the race → done, never
+        # re-place) → create fresh at the walk target
+        try:
+            client.orders.cancel(mine[0].get("id"), {"marketSlug": slug})
+        except Exception:
+            continue
+        _time.sleep(0.8)
+        pos2 = _pmm_positions_raw(client)
+        if pos2 is None:
+            _send_fill_telegram(
+                f"🚨 SCALP LIMBO — {r.get('event_name')}: ask canceled, "
+                f"venue went dark before the re-place ({slug}). Check it.",
+                urgent=True)
+            break
+        net2 = float((pos2.get(slug) or {}).get("net") or 0.0)
+        held2 = (-net2) if synth else net2
+        if held2 < 1.0:
+            continue                     # the cancel raced a fill — sold
+        if _scalp_create(client, sb, r, b, slug, synth, sell_intent,
+                         tgt, int(held2), now, walked_from=our_ask):
+            res["walked"] += 1
+    return res
+
+
+def _scalp_create(client, sb, r, b, slug, synth, sell_intent, tgt_c, qty,
+                  now, walked_from=None) -> bool:
+    """Rest one post-only scalp ask + verify it exists (orders.list is the
+    only truthful read) + stamp signal_blob.scalp. Returns True on a
+    verified working ask."""
+    try:
+        dt = datetime.fromisoformat(
+            str(r.get("event_start")).replace("Z", "+00:00"))
+        gtt = ((dt + timedelta(hours=7)).astimezone(timezone.utc)
+               .strftime("%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        return False
+    canon = ((100.0 - tgt_c) / 100.0) if synth else (tgt_c / 100.0)
+    params = {"marketSlug": slug, "intent": sell_intent,
+              "type": "ORDER_TYPE_LIMIT",
+              "price": {"value": f"{canon:.3f}", "currency": "USD"},
+              "quantity": max(1, int(qty)),
+              "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
+              "goodTillTime": gtt,
+              "participateDontInitiate": True,
+              "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
+    try:
+        client.orders.create(params)
+    except Exception as e:
+        _send_fill_telegram(
+            f"🤖 SCALP CREATE FAILED — {r.get('event_name')}: "
+            f"{round(tgt_c)}¢ ask errored ({e})"[:240])
+        return False
+    _time.sleep(1.5)
+    try:
+        resp = client.orders.list({"slugs": [slug]})
+        raw = (resp.get("orders") if isinstance(resp, dict)
+               else getattr(resp, "orders", [])) or []
+        ok = any(((o.get("intent") if isinstance(o, dict)
+                   else getattr(o, "intent", "")) == sell_intent
+                  and ((o.get("state") if isinstance(o, dict)
+                        else getattr(o, "state", "")) in _OPEN_ORDER_STATES))
+                 for o in raw)
+    except Exception:
+        ok = True                        # create succeeded; verify read
+                                         # failed — assume alive, next pass
+                                         # heals (never double-create blind)
+    if not ok:
+        _send_fill_telegram(
+            f"🚨 SCALP ASK LOST — {r.get('event_name')}: create returned ok "
+            f"but no working ask on {slug}. Check it.", urgent=True)
+        return False
+    try:
+        nb = dict(b)
+        hist = nb.get("scalp") if isinstance(nb.get("scalp"), list) else []
+        hist = (hist + [{"at": now.isoformat(), "ask_c": round(tgt_c, 1),
+                         "qty": max(1, int(qty)),
+                         **({"from_c": round(walked_from, 1)}
+                            if walked_from is not None else {})}])[-20:]
+        nb["scalp"] = hist
+        (sb.table("bot_picks").update({"signal_blob": nb})
+         .eq("id", r["id"]).execute())
+    except Exception:
+        pass
+    return True
+
+
+def _scalp_shadow(sb, r, b, now, tgt_c, best_bid, comp_ask, held, res):
+    """SHADOW MODE tape: stamp the ask the scalp WOULD rest, on CHANGE
+    only (a 2-min lane tick would bloat the blob otherwise), plus whether
+    the tape crossed it (bid ≥ would-ask = it would have filled)."""
+    try:
+        hist = (b.get("scalp_shadow")
+                if isinstance(b.get("scalp_shadow"), list) else [])
+        last = hist[-1] if hist else {}
+        crossed = bool(best_bid is not None and best_bid >= tgt_c)
+        if (last.get("ask_c") == round(tgt_c, 1)
+                and bool(last.get("crossed")) == crossed):
+            return                       # unchanged — no write
+        hist = (hist + [{"at": now.isoformat(), "ask_c": round(tgt_c, 1),
+                         "bid_c": best_bid, "comp_ask_c": comp_ask,
+                         "held": round(held, 1),
+                         "crossed": crossed}])[-_SCALP_SHADOW_CAP:]
+        nb = dict(b)
+        nb["scalp_shadow"] = hist
+        (sb.table("bot_picks").update({"signal_blob": nb})
+         .eq("id", r["id"]).execute())
+        b.clear()
+        b.update(nb)                     # keep caller's view fresh
+        res["shadow"] += 1
+    except Exception:
+        pass
+
+
 def _repeg_tick(sb, now, *, force: bool = False) -> dict:
     """One re-peg pass, riding the paperlog tick (every _OUTBID_TICK_MOD
     minutes, same throttle + blackout as the outbid ping; runs BEFORE
@@ -18338,7 +19735,8 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
             cands = [f for f in (fs.get("fills") or [])
                      if f.get("outbid") and f.get("venue") == "POLYMARKET"
                      and (f.get("market_type") or "") in ("nrfi", "moneyline",
-                                                          "prop")
+                                                          "prop", "spread",
+                                                          "total")
                      and (f.get("mins_to_start") or 0) > 0
                      and f.get("best_bid_c") is not None]
             if not cands:
@@ -18347,7 +19745,8 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
             try:
                 rows = (sb.table("bot_picks")
                         .select("id,event_name,event_start,market_type,side,"
-                                "units,entry_price,fair_prob,signal_blob")
+                                "units,entry_price,entry_line,fair_prob,"
+                                "sport,signal_blob")
                         .in_("id", ids).execute().data) or []
             except Exception:
                 continue
@@ -18366,9 +19765,13 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 side = (r.get("side") or "").upper()
                 mlbl = ("ML" if (f.get("market_type") == "moneyline")
                         else "K-PROP" if (f.get("market_type") == "prop")
+                        else "SPR" if (f.get("market_type") == "spread")
+                        else "TOT" if (f.get("market_type") == "total")
                         else "NRFI")
+                _is_gridiron = bool(blob.get("gridiron_autobet"))
                 is_model_bet = (bool(blob.get("autobet"))
-                                or bool(blob.get("whiff_autobet")))
+                                or bool(blob.get("whiff_autobet"))
+                                or _is_gridiron)
                 # ⚠ NEVER CHASE A LIVE GAME (Aug 12 2026 — the CIN@CWS
                 # YRFI filled 13 minutes after first pitch). Every model
                 # buy is a PRE-GAME bet: the model prices a game that
@@ -18385,10 +19788,12 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                         continue
                 except Exception:
                     pass          # unparseable start ⇒ fall through
-                if (f.get("market_type") in ("moneyline", "prop")
+                if (f.get("market_type") in ("moneyline", "prop",
+                                             "spread", "total")
                         and not is_model_bet):
-                    continue    # manual ML/prop bets stay the user's to
-                                # move — only the model's own bets chase
+                    continue    # manual ML/prop/football bets stay the
+                                # user's to move — only the model's own
+                                # bets chase
                 if is_model_bet and new_c is not None:
                     # peg law for the model's own bets: chase to one CENT
                     # OVER the new make (front of the queue), never at it —
@@ -18440,13 +19845,17 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                     return True
 
                 # -- stop conditions (once-per-level Telegram, order stays) --
-                if new_c is not None and new_c > _REPEG_NRFI_PRICE_CAP_C:
+                # football holds the machine-wide 60¢ entry cap; everything
+                # else keeps the Y/NRFI 64¢ guardrail
+                _cap_c = (_GRIDIRON_MAX_ENTRY_C if _is_gridiron
+                          else _REPEG_NRFI_PRICE_CAP_C)
+                if new_c is not None and new_c > _cap_c:
                     # price-cap guardrail — overrides even move 1's
-                    # unconditional chase: the bot never places above 54¢
+                    # unconditional chase
                     if _mark("repeg_stop", {"reason": "price cap"},
                              tg=(f"🤖 REPEG STOP — {ev} {mlbl} {side}: book is "
                                  f"{round(new_c)}¢ — past your "
-                                 f"{round(_REPEG_NRFI_PRICE_CAP_C)}¢ price "
+                                 f"{round(_cap_c)}¢ price "
                                  f"cap, not chasing; resting at "
                                  f"{round(old_c) if old_c else '?'}¢")):
                         res["stopped"] += 1
@@ -18483,9 +19892,11 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                             sb, r, f.get("market_type"), f.get("market_id"))
                         if fresh is not None:
                             fair = fresh
-                    if fair is None and f.get("market_type") != "prop":
+                    if fair is None and f.get("market_type") not in (
+                            "prop", "spread", "total"):
                         # NRFI paperlog fallback is a GAME-level fair —
-                        # never apply it to a prop on the same market_id
+                        # never apply it to a prop or a football rung on
+                        # the same market_id
                         fair = _nrfi_fair_from_paperlog(sb, f.get("market_id"),
                                                         r.get("side"))
                     ok, edge = _repeg_edge_ok(fair, new_c)
@@ -18672,6 +20083,20 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                     f"{contracts:g} contracts, ${cost:.2f}, verified{note}). "
                     f"Check it.")
                 res["acted"] += 1
+        # VENUE-TRUTH RECONCILE rides here — inside the repeg lease (the
+        # lane that already owns order mutation), after the chase work.
+        # Own 15-min cadence inside; its own try so a reconcile fault can
+        # never cost a chase.
+        try:
+            res["reconcile"] = _reconcile_tick(sb, now)
+        except Exception:
+            pass
+        # THE SCALP SELL ARM rides the same lease (spec: serial writes,
+        # beside the buy repeg's budget). Shadow-only until SCALP_ENABLED.
+        try:
+            res["scalp"] = _scalp_tick(sb, now)
+        except Exception:
+            pass
     except Exception:
         pass
     # MEASURED, not assumed. The 1-per-tick cap was justified by a 10s

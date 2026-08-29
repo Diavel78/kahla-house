@@ -455,6 +455,66 @@ A **completely separate, non-betting** surface for the family's book club. Lives
 - **`POST /api/polymarket/manual-order`** (`@admin_required` — Firebase, NOT shared-secret: a human on the site) — **MANUAL BET FROM THE WEBSITE (Aug 22 2026).** The 💰 Bet button on `/handicapper`'s market grid (admin-only) places a REAL post-only Polymarket order under `MANUAL_ORDER_INDICATOR_MANUAL` — every machine sweep gates on AUTOMATIC, so hand bets are structurally untouchable — then auto-logs the pick (`signal_blob.manual_web_bet`, order_id, contracts). Rails: preview mode returns the side's live book + suggested peg (floor(bid)+1, join on one-tick books); placement requires half-cent grid, non-crossing price (post-only would reject — fail loud), 1-250 contracts, ≤$500 cost, GTD=kickoff. RENT RULE does NOT gate it (it governs computer bets; a human clicking is the human's call). Frontend: `openBetPoly`/`betPolyPlace` in `handicapper.html`. v1 = ML/SPR/TOT grid sides with a PMM slug; NRFI card + prop board buttons are the follow-up.
 - **Venue-truth admin endpoints** (all shared-secret, fire via the `site-curl` bridge, results persisted to `exec_probe_runs` — read them back with `run_sql.sh`, never by screenshot): `/api/polymarket/last-reward` (newest maker-reward/rebate credits WITH raw payload descriptions — "liquidity reward payout" is the real thing; round-number "remediation"/"promotional credit" rows are outage compensation, not earnings), `/api/polymarket/daily-volume?from=&to=` (per-ET-day trades / distinct markets / buy / sell / payout from the activities feed — the maker-reward denominator; the feed does NOT flag maker vs taker, so hand-placed fills are an upper bound while machine orders are post-only by construction), `/api/polymarket/reset-sells` (+`&dry=1`) (**cancel-only** sweep of resting BOT sells so a changed harvest policy applies to already-filled positions — `_harvest_tick` re-places at current policy on its next tick because its dedup is venue-state; three required gates: SELL intent + AUTOMATIC flag + slug belongs to one of our model picks, so hand-placed orders can never be touched; its **`&dry=1` lists every resting bot sell as entry→ask→ROI**, which is how you PROVE the harvest target is live instead of counting orders and inferring it), `/api/polymarket/topup` (+`&dry=1`) (raise already-placed model bets to the current `_AUTOBET_CONTRACTS` after a stake change — **UNFILLED orders only**, via cancel → verify-no-fill → create fresh at the SAME price, the re-peg's proven sequence; never `orders.modify`. FILLED/partial positions are skipped BY DESIGN: topping one up means buying at today's book, which makes the stored `entry_price` stop describing the position — the harvest sell price, CLV and to-WIN grading all key off that one number — and bumping `contracts` while the extra hasn't filled pushes the bet under the harvest's `min_held` so a leg that sells today stops selling. **One order per slug is an INVARIANT**: the re-peg cancels a single `order_id` per bet, so adding a second order strands it at the old price the first time the book moves — hence replace, never add. LIVE runs are bounded to 2/call AND a 5s wall clock checked BEFORE each cancel — this function has no `maxDuration`, and a platform kill between the cancel and the create IS the ORDER LOST state. A `state:"unknown"` (verify read failed) never recreates blind and never stamps `contracts`, so the bet stays eligible and the next pass heals it — observed live Aug 10, healed 19s later), `/api/polymarket/roi-baseline` (monthly buys/sells/payouts/ROI — the pre-machine baseline: June+July 2026 = −0.62% ROI, ~48% win rate, 48.5¢ avg entries).
 - **THE PROGRAM TABLE, READ FROM THE VENUE (Aug 18 2026, `/api/football/recon` — per-market-family, not inferred from earnings).** Per game, `/v1/incentives?symbols=<slug>` returns: **ML (`aec-`) early $225/df 0.40 + day_of $500/df 0.35 + live $2,500/df 0.30, target 20-25k**; **spread (`asc-`) early $75 + day_of $225 + live $1,200, target 15k**; **player props + first-inning (`astatc-`/`atc-`) day_of $750 + live $750, target 5k and NO `early` period** (the $0.01-NRFI finding, confirmed at the source); **totals (`tsc-`) NOTHING but a closed legacy $25 row** — which is why the O/U lane earns ~$0.016/order. Two landmines: (a) **`starts_at`/`ends_at` on a program are the CATALOG LIFECYCLE, not that event's paying window** — every MLB game reads `T-960h`, i.e. 40 days, because the program spans many events; the only truth about when a period actually pays for one game is the `period` LABEL plus our own earnings ledger (that is why the real MLB answer — rent lands 2-3 days pre-game — came from `poly_incentive_earnings`, never from here). (b) **`poly_incentive_programs` is STRUCTURALLY BLIND to any sport we have never bet**: `_incentives_sync` seeds its `symbols` filter from our own earnings + picks because the unfiltered catalog does not list game/prop markets, so "no rows for sport X" means "we have never bet X", never "X has no rent". Ask the venue with `symbols=`, and always run a KNOWN-GOOD control (an MLB game slug) through the same code path before believing a zero.
+- **KALSHI RENT — ASKED THE VENUE, Aug 26 2026 (`/api/kalshi/incentives`).**
+  This repo asserted Kalshi had "no sports liquidity program". **That was
+  wrong, and wrong by inference from our own silence** — the same
+  `poly_incentive_programs` blindness the rent section already warns about.
+  Kalshi publishes it, PUBLIC and unauthed:
+  `GET https://api.elections.kalshi.com/trade-api/v2/incentive_programs`
+  → `{incentive_programs[], next_cursor}`, fields `id, market_id,
+  market_ticker, incentive_type, incentive_description, period_reward,
+  target_size_fp, discount_factor_bps, start_date, end_date, paid_out`.
+  Structurally the twin of Polymarket's `/v1/incentives` — a per-MARKET
+  window, which is what rule #1 needs.
+  **THE ANSWER THAT MATTERS: Kalshi pays NO rent on GAME markets.** Census
+  of 80,000 programs / 2,414 series found **118 ACTIVE sports programs and
+  not one game market** — no `KXMLBGAME`, no `KXNFLGAME`. What pays is
+  futures + novelty: `KXMLBPLAYOFFS` (x30), `KXNFLWEEKCOMPETE` (x21),
+  `KXNFLT100`/`T100TOP`, `KXNCAAFPAC12`/`TFUT`, `KXMLBDEBUT`, stadium /
+  sellout / team-sale props. So a Kalshi leg on an MLB moneyline earns
+  ZERO and pays the maker fee (`1.75·p(1−p)`¢) — the cross-venue
+  two-sided-quote idea gets no rent on the lane that matters.
+  ✅ **SETTLED, NOT A FLOOR (`?find=` walked the cursor to EXHAUSTION):**
+  **132,966 liquidity programs — ZERO on any game series.** Then `type=all`
+  over **155,284** programs found exactly **32**, every one of them
+  `KXNFLGAME` and every one `incentive_type=volume`, windowed
+  **2025-09-18 → 2025-09-25**: a one-week NFL promo from LAST season,
+  expired, **0 active now**, and `target_size_fp`/`discount_factor_bps`
+  both NULL because volume programs pay for TRADING, not for resting. So
+  Kalshi has never paid resting-order rent on a game market. A Kalshi leg
+  on an MLB moneyline earns nothing and pays the maker fee — the
+  cross-venue two-sided quote is DEAD on the game lanes (user call, Aug 26:
+  "if Kalshi ain't paying rent, then this is dead").
+  ⚠ **TWO LANDMINES THIS COST.** (a) `?type=` DEFAULTS to liquidity-only in
+  our probe, and the game-market programs are `volume` — a type-scoped walk
+  that says "nothing" is answering a narrower question than it looks like;
+  always close with `type=all`. (b) **Match the SERIES SEGMENT, not a
+  prefix**: `KXUFCFIGHTOCCUR` ("will the fight happen", expired, paid_out)
+  starts with `KXUFCFIGHT`, invented a hit, and halted the walk 48,400 rows
+  in — a false POSITIVE that read as "Kalshi pays on fights". `market_ticker`
+  is `SERIES-<rest>`; compare the segment before the first dash.
+  **THE ONE LIVE THREAD:** `KXNFLPASSYDS` / `RECYDS` / `RSHYDS` / `PASSTDS` /
+  `KXNFLTD` carry real **liquidity** programs in the catalogue — none active
+  tonight because Week 1 has not listed. Player props are the only family
+  where Kalshi might pay us to rest, so re-run `?census=1` the day Week 1
+  lists; that is the read that says whether the props lane can earn on both
+  venues. Game lines never will.
+  Two dials, uniform on every row seen: **`discount_factor_bps` = 5000
+  (0.5)** — each step off the touch HALVES the score, which independently
+  confirms the lead-the-touch peg and answers for Kalshi the question still
+  open on Polymarket ("does cheap-pegging away from the mid narrow the
+  share?" — on Kalshi, brutally yes); and **`target_size_fp` = "1000.00"**
+  (string decimal, the `position_fp` convention), so 10 contracts is ~1% of
+  target vs ~0.07% against Polymarket's 15-25k — **~14× the share per
+  contract on the markets that DO pay.**
+  ⚠ **`period_reward` UNITS ARE UNRESOLVED** (500,000-5,000,000 on sports;
+  200,000 on a 15-minute crypto period, which is absurd as cents). Do not
+  quote a dollar figure off it until a payout or the docs confirm the scale.
+  ⚠ **LANDMINE: `?series_ticker=` is SILENTLY IGNORED** — the filtered
+  response came back byte-identical to the unfiltered one. A filter that
+  does nothing reads exactly like a real answer. Only `?type=` is honoured;
+  everything else needs the full walk (`?census=1`).
+  Fire it via the site-curl bridge; results land in `exec_probe_runs`.
 - **MAKER-REWARD DATA (Aug 2026, measured not assumed).** Payments: May 11 $1.03, Jun 4 $2.72, **Aug 6 $7.06** — the gap is NOT a missed payment, it's the Kalshi routing detour (the feed shows **July 13-21 completely dark, zero Polymarket trades**). ~~"$7.06 = July's check → 1.10% of volume"~~ **DEAD (Aug 9): there are no monthly periods.** The program's periods are per-event-day (Early listing→T-6h / Day-of T-6h→start / Live start→settlement), paid ~5-7 business days after period end — and the schedule's program IDs are DATE-SUFFIXED (`*_20260712`, `*_20260727`, `*_20260805`), i.e. the current program regime launched ~Jul 12. So $7.06 ≈ late-July period batch at hand scale; attribute every payment to the event days ~5-7 business days back via `/api/polymarket/daily-volume`. July context: 224 trades / $640.91 buys / $2.86 avg fill. August at machine scale inverted the shape: **$0.70 avg fill, 4× the count, up to 107 distinct markets touched in a day** (vs 10-20 in July). The two reward models diverge ~5× on that shape — dollar-weighted ≈ $14/month, per-fill/per-market ≈ $66 — and real LP programs usually score per-market time-weighted share near the mid, which would favor our many-tiny-orders posture. **PAYOUTS WENT ROLLING (Aug 9 2026): three same-morning "liquidity reward payout" credits ($2.27 + $2.46 + $8.39 = $13.12, seven-minute batch spacing) landed three days after the $7.06, then **$4.13 + $2.24 = $6.37 on Aug 11** in the same seven-minute shape — **$26.55 of verified real rewards Aug 6-11, ~$5.30/day ≈ $160/month at the current pace, and still paying for PRE-double volume** (payouts lag event days ~5-7 business days). The wait-for-September plan is obsolete: measure the rate from payment history week-over-week (`/api/polymarket/last-reward` via site-curl; real payouts say "liquidity reward payout", round-number "remediation"/promo credits are NOT rewards).** Observed pace implies $60-130/month at machine scale — the same order as the lanes' weekly bleed, i.e. a first-order term in the maker-vs-taker economics, likely per-market time-weighted share favoring the many-tiny-orders posture. **THE ACCRUAL WINDOW IS ANSWERED (Aug 24 2026, record batch $87.96 = $21.94 + $37.33 + $28.69): ONE CREDIT PER EVENT-DAY, and each matched its `poly_incentive_earnings` earn-date accrual within pennies ($21.96 / $36.97 / $29.17 for Aug 20/21/22) — the scrape ledger IS the venue's math; attribute payouts by matching credit ≈ earn-date total, and the lag is now ~2 BUSINESS DAYS (Fri earnings paid Monday), not 5-7.** Weekly accrual pace at Aug-24 scale: ~$180-200/wk (~$800/mo), almost all MLB moneyline; ML rent ~2× the ML lane's betting bleed in its worst week. ⚠ The Aug 24 credits arrived typed `ACTIVITY_TYPE_TRANSFER` again (the pre-May-2026 name) — the parse keeps all three names in `_REWARD_TYPE_LABELS`, so this is informational, but it's the second rename-class event on this feed. Still unknown: whether cheap-pegging AWAY from the mid narrows the reward share.
 - `.claude/hooks/session-start.sh` — **Claude Code Web SessionStart hook**. Installs kahla-scanner Python deps in the sandbox and plumbs `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` / `ODDS_API_KEY` (each set as Claude Code secrets) through `$CLAUDE_ENV_FILE` so the in-chat `/handicap` flow can run the dossier CLI directly. Also forwards `SUPABASE_ACCESS_TOKEN` + `SUPABASE_PROJECT_REF` when set, which enable `run_sql.sh` (see below); logs `run_sql.sh enabled`/`disabled` at session start so you can tell at a glance whether direct-SQL is wired. Local sessions short-circuit (`CLAUDE_CODE_REMOTE != true`). Skips Flask deps — `firebase-admin` pulls a PyJWT version that fights with the sandbox system Python, and Flask runs on Vercel anyway.
 - `kahla-scanner/scripts/run_sql.sh` — **run SQL / migrations against Supabase from a Claude Code session** (so DDL changes no longer have to be hand-typed into the mobile Supabase SQL editor). Hits the **Management API** (`POST https://api.supabase.com/v1/projects/{ref}/database/query`) over HTTPS — the only path that works from the cloud sandbox, since the security proxy blocks raw Postgres port 5432. Runs anything the dashboard SQL editor can, **including `CREATE TABLE` / `ALTER`**. Usage: `run_sql.sh "select count(*) from bot_picks;"` (inline), `run_sql.sh -f path/to/migration.sql` (file), or pipe SQL via stdin. `jq`-escapes the body so quotes/newlines/semicolons are safe. **Requires** the cloud env to (a) set `SUPABASE_ACCESS_TOKEN` (account-level personal token, `sbp_…`) + `SUPABASE_PROJECT_REF` (the project subdomain) as **environment variables** — there's no encrypted secrets store, they're stored plaintext in the env config, so this is fine for a solo account; rotate/revoke the token anytime in Supabase → Account → Access Tokens — and (b) allowlist `api.supabase.com` under **Network access → Custom**. Without those it exits 2 with instructions. **All `bot_picks_migrations/*`, `power_ratings.sql`, `odds_ingest_runs.sql`, `bot_picks.sql`, `paper_bets.sql`, and `polymarket_fill_alerts.sql` are already applied to the live DB as of May 2026** (verified via this helper); future migrations can just be run with it.
@@ -1223,7 +1283,7 @@ The phased UFC model (plan artifact "Fight IQ", July 2026). Targeting: **the DUR
 
 - **Detection:** MLB games 6-72h out, one-shot per (game, market) via `pickbot_paperlog` opener rows (variant `'opener'` — in `_variant()` AND `_is_shadow_blob`, the June-28-flood rule); a game not yet PRICED retries every tick until it lists — with an in-memory per-game probe backoff (`_OPENER_PROBE_TS`, 420s, stamped only AFTER a completed build) so the unlisted tail doesn't eat the budget. Per-game rows persist IMMEDIATELY (`_opener_persist`) so a mid-tick crash loses nothing. **DEDUP LANDMINE (Aug 3 2026 — the "11 orders forever" all-nighter):** the market-row dedup key MUST be `(event_name, ET date)` (`_et_day`), never bare `event_name` — a multi-day window spans whole MLB series, and a bare-name dedup keeps only the EARLIEST row per matchup, silently deleting every next-day series game before the model runs (cands=0 → the lane bets NOTHING while lines sit posted). Same rule in `_gridiron_opener_pass` (168h NFL window = a week of name collisions). The bare-name dedup is correct ONLY in short windows (the 5h live paperlog loop) where a repeated name really is a dup row (gotcha #30). The tick's response JSON carries `opener`/`repeg` stats incl. a `gate` field naming every early return — read it from the scanner-poll job log (the workflow echoes the paperlog response body) before theorizing.
 - **CAP KILLED + CAP-LATCH PROTOCOL (Aug 4 night — the watchdog's first catch):** `AUTOBET_MAX_BETS` is a 10000 sentinel (user: "kill that 40 cap") — the fences are per-bet (MASTER RULE $6, 60¢, the model). The cap machinery survives for a future re-cap and now counts **status='pending' ONLY** (settled games were holding slots — the lane sat 40/40 on dead bets while 14 would-bet Friday games latched). Protocol at every opener persist site: **BET BEFORE PERSIST, and a cap-blocked bet (`_autobet_execute` returns `"cap"`) NEVER persists** — the game retries when slots free. **WALL WATCHDOG** (`_opener_watchdog`, rides the tick): PMM lists 6+ future-day games but <6 standing future-day model bets → 🚨 urgent ping (quiet 10pm-7am AZ, 4h cooldown). Read-only by design — the user is not the alarm anymore. **PER-DAY HOLE check added Aug 10 2026** — the total-count rule missed the six-day spine outage entirely: the wall read a healthy 10 while all 10 sat on ONE date and every day behind it was empty. Now ANY listed ET date with ≥5 PMM-priced games and <2 standing bets trips it, whatever the total says.
-- **STAKE + HARVEST — THE SELL ARM IS DEAD (killed Aug 19 2026, `_HARVEST_ENABLED=False`).** All lanes bet `_AUTOBET_CONTRACTS`=10, NRFI 5. Every position now rides to resolution; the 40 resting asks were swept with `/api/polymarket/reset-sells` and verified not to return. **The Aug 3 paired test answered over 161 fills and four target regimes: RIDING WINS, narrowly.** Lifetime the sell arm was **−$7.17** vs holding the same contracts, and every dollar of that sat in lanes that had already stopped selling (O/U −2.56, outs −2.13, unclassified props −2.41, K −0.70, hits −1.18). What was still running — ML only — was **+$1.81 over 91 sells**, about $0.13/day. Three things decided it: (1) every ladder rung sat BELOW its break-even touch bar at the lane's real 43.7% win rate / 45.5¢ entry (+40% touched 40.0 vs 44.1 needed, +50% 27.8 vs 36.0, **+65% 0/10 vs 25.7** — no loser ever touched the top rung, so it was winner-only by construction, and winners fill EVERY rung); (2) **a resting sell earns NO RENT — measured, not assumed**: on market-days where the harvest ask was the only order working, rent ran **$0.054/mkt-day vs $0.075 on markets with no ask at all** ($1.61 all-time). That was the open question that could have flipped the sign; it doesn't; (3) it was the buggiest surface per line in the machine — two defects in one review, one of them silently rewriting `entry_price`. **Killed because it does nothing and costs correctness, NOT because it bled** — the lanes that bled had already stopped selling. Code is dormant behind the flag (`OU_TRADER_ENABLED` pattern); flipping it back restores the ladder exactly. If it ever returns it should be the sell-at-MODEL-fair version, which needs a model worth quoting around. **NRFI never sold at all** (0 of 46 losers touched).
+- **STAKE — DOUBLED Aug 27/28 2026 (user: "Everything ×2, Master Rule → $13", staged for the box pull): all lanes bet `_AUTOBET_CONTRACTS`=20, NRFI 10, gridiron 10 spread / 4 total, fbprop 4 (DB config); `_REPEG_MAX_COST_USD`=13.00 (required — the old $6.50 rule would have silently refused every doubled entry above 32.5¢); `_WHIFF_CONTRACTS_K` stays 4 (lane killed anyway). Topup knows the gridiron targets now — it would have topped football picks to 20.** **HARVEST — THE OLD SELL LADDER IS DEAD (killed Aug 19 2026, `_HARVEST_ENABLED=False`); its successor is the SCALP SELL ARM (Aug 28, `_scalp_tick` riding the repeg lease, `SCALP_ENABLED=False` shadow — see docs/scalp-sell-arm-spec.md: rent lanes only, join-ask walk-down, floor entry+1¢, GTD in-play).** Every position now rides to resolution; the 40 resting asks were swept with `/api/polymarket/reset-sells` and verified not to return. **The Aug 3 paired test answered over 161 fills and four target regimes: RIDING WINS, narrowly.** Lifetime the sell arm was **−$7.17** vs holding the same contracts, and every dollar of that sat in lanes that had already stopped selling (O/U −2.56, outs −2.13, unclassified props −2.41, K −0.70, hits −1.18). What was still running — ML only — was **+$1.81 over 91 sells**, about $0.13/day. Three things decided it: (1) every ladder rung sat BELOW its break-even touch bar at the lane's real 43.7% win rate / 45.5¢ entry (+40% touched 40.0 vs 44.1 needed, +50% 27.8 vs 36.0, **+65% 0/10 vs 25.7** — no loser ever touched the top rung, so it was winner-only by construction, and winners fill EVERY rung); (2) **a resting sell earns NO RENT — measured, not assumed**: on market-days where the harvest ask was the only order working, rent ran **$0.054/mkt-day vs $0.075 on markets with no ask at all** ($1.61 all-time). That was the open question that could have flipped the sign; it doesn't; (3) it was the buggiest surface per line in the machine — two defects in one review, one of them silently rewriting `entry_price`. **Killed because it does nothing and costs correctness, NOT because it bled** — the lanes that bled had already stopped selling. Code is dormant behind the flag (`OU_TRADER_ENABLED` pattern); flipping it back restores the ladder exactly. If it ever returns it should be the sell-at-MODEL-fair version, which needs a model worth quoting around. **NRFI never sold at all** (0 of 46 losers touched).
 - **THE TWO BUGS THE HARVEST LEFT BEHIND (Aug 19 2026 — both fixed, both worth remembering).** (a) **A truncated ladder was truncated FOREVER.** `_HARVEST_MAX_ORDERS` was checked per ORDER inside the rung loop, so the second position in a tick got its +40% rung and nothing else — and the venue-state dedup (any resting sell ⇒ skip the position) then blocked the missing rungs permanently. The general lesson: **when a dedup keys on venue state, a partial write is a permanent write.** (b) **The harvest's own fills were rewriting `entry_price`.** Once a rung fills the venue nets the proceeds out of the position's `cost`, so `cost/qty` collapses — the fill tracker's auto-sync read a 51.7¢ ML back as 33¢ and stamped the pick +202. **18 of 140 sold positions drifted, all but one CHEAPER, up to 32¢.** That number drives to-WIN grading, the CLV stamp, and any future rung price. The sync now skips a position holding less than its own stake. Same invariant the topup endpoint protects: **entry_price must keep describing the position.** Corrupted rows were NOT backfilled — ~+1.4u of understated losses on 5 settled picks (wins are +1u at any price under to-WIN), and `clv_pp` on those rows is unreliable.
 - **⚠ THE PROP LANES: WHAT IS ACTUALLY MEASURED (Aug 19 2026 — supersedes the Aug 8 "adverse selection" headline, which was an ARTIFACT. Read this before re-running any prop review).** Two traps burned a whole session; both are about the RULER, not the model. **(1) SHADOW PRICES ARE NOT TRADEABLE PRICES.** `_whiff_shadow_pass` prices every captured prop at `cents` = the mid of the embedded `bestBidQuote`/`bestAskQuote`. Across the whole prop universe the median book is **37¢ wide** and 70% are wider than 10¢ — junk rungs and freshly-listed ladders nobody quotes — so that "mid" is arithmetic, not a price, and the books do NOT tighten before first pitch (26-32¢ even at T-1.3h). Any shadow aggregate is therefore a claim about markets we cannot trade. **Filter shadows to `ask−bid ≤ 6¢`** (the median real book on bets we place is 4¢) before drawing ANY conclusion. Done that way the same calls read: K −7.7pp at the mid / −9.1 at the take; outs −4.0 / −6.1; hits +10.4 / +7.8; walks +8.4 / +5.8 — which AGREES with the filled record per family, so on tradeable books there is no "model calls good, fills bad" gap at all. The Aug 8 "+7.6/+8.0pp shadows vs negative fills" was the unfiltered universe compared against filtered fills. **(2) THE QUOTE FEED IS FINE — don't chase it.** On 525 placed picks the embedded quote mid and a live `_pmm_book` read differ by a median 0.5¢ (2% differ by >5¢). The wide books are real markets nobody is quoting, not a broken capture. **What survives from Aug 8-9:** TAKE IS DEAD (crossing the spread loses on every lane — don't re-litigate paying up), and we still do NOT log fill time vs placement time, which is the one measurement that would settle whether a long rest is what poisons a fill.
 - **PROP-LANE REGIME CUT POINTS — any aggregate spanning these is MEANINGLESS (Aug 19 2026).** Placement moved from listing to **day-of (T-6h) on Aug 9**; **K joined the touch (`_JOIN_TOUCH_FAMS`) ~Aug 13**. K's damning-looking lifetime −6.2pp is almost entirely the 4-day window BETWEEN them (day-of gate on, peg still a cent in front): **41 bets, 29.3%, −43.8% ROI, −$21.57** — a configuration that no longer exists. Detect regimes from the DATA, not git (history is squashed): avg `event_start − picked_at` per day (18h → 5h at Aug 9) and avg `entry cents − book_bid_c` per day (3-7¢ → 0.3-1¢ at Aug 13). **Current-regime baselines to beat, Aug 13-19, cost-weighted venue truth + per-market rent:** K n=59, 50.8% won, −12.2% ROI, rent **+$0.29**, net −$9.23 · outs n=62, 30.6% won, −43.2% ROI, rent **+$9.30**, net −$23.03. K trades its rent away by design (rent = score × TIME; joining the touch means it doesn't rest, so it earns ~nothing and stops taking the fills it didn't want — 29.3% → 50.8%); outs still pegs behind, earns real rent, and eats the fills. **THE WEEK'S VERDICTS LANDED Aug 24 (venue truth, week of Aug 18-24): K KILLED Aug 22 (`_WHIFF_FAM_KILLED`), HITS KILLED Aug 24** (4W/15, −$36.07 bets, $0.43 rent — the user's bar, now doctrine: **a lane with no rent program must be a profitable betting machine on its own; no rent + no edge = no lane**). walks (+$16.80) and outs (+$26.86) passed the same bar and keep their seats; NRFI +$30.05. **THE YES/NO SIDE SPLIT (Aug 24, T-6h era, venue truth) — the retail-can-only-buy-YES structure is real but NOT a blanket rule:** K-YES −$36.55 vs K-NO −$2.32, hits-YES −$35.38 vs hits-NO −$5.04 (buying YES where retail overprices it = trading against computers), BUT **walks earns ON the YES side (+$13.23)** and outs-YES is fine — each family's value seat follows its own measured bias (K/TB YES rich, walks YES cheap). NO-only would have cost walks its profit engine; both YES-bleeders were already dead. Don't ship side rules per-posture — measure per-family. **ML weekly baseline for the same review: −$1.28 / −$2.73 / −$98.15 bets against ~$197/wk rent** — two breakeven weeks then one 31% week (~1.6σ), the rent-vehicle design target holding; a second 31% week reopens the model question. Hits kill mechanics during the freeze: `_WHIFF_FAM_KILLED={"k","ha"}` on main (box gets it Aug 27); until then the daily check re-strips `ha_m`/`ha_s` from `whiff_iq_snapshot.state->lg` after each ~10:55 UTC rebuild (missing lg keys = documented quiet no-op; bak in `whiff_snapshot_bak_0824`).
@@ -1259,7 +1319,8 @@ The phased UFC model (plan artifact "Fight IQ", July 2026). Targeting: **the DUR
   totals, 2 contracts... it all gets turned on")** — priced off the
   snapshot's `total_fit` via `_gridiron_over_p` (the cover model's twin:
   shrink β≈0.36, normal tail, refuse whole-number lines); stakes are
-  **spreads 5 / totals 2 contracts** (`_GRIDIRON_TOTAL_CONTRACTS`), both
+  **spreads 10 / totals 4 contracts** (doubled Aug 27/28 with the book-wide
+  ×2; was 5/2 from Aug 22), both
   sports. Gate 2 (vs market prices) never ran for any football market —
   user override; the fills + `bet_gate` tape ARE the gate-2 dataset now.
   Done-set rule extended to every market: spread rows need `cover_p` **AND
@@ -1276,13 +1337,12 @@ The phased UFC model (plan artifact "Fight IQ", July 2026). Targeting: **the DUR
   hourly per-game, no tape rows; the executor's per-(market,type) dedup is
   the one-bet guard). Real Week-1 bets come from the sweep when real lines
   post, not from listing day. Both passes share `_gridiron_try_bet`.
-  **⚠ THE SWEEP'S ONLY CALL SITE IS THE VERCEL PAPERLOG ROUTE, gated
-  `_own_opener` — `cellar/lanes.py:lane_opener` NEVER CALLS IT (found Aug
-  23: with the box healthy the sweep runs NOWHERE; it only ever fired
-  during a box outage). Wire it into lane_opener at the Aug 27 unfreeze.**
-  Interim: `/api/gridiron/sweep-now` (shared-secret, `force=1` clears the
-  hourly per-game backoff in that container) runs one bounded pass on
-  Vercel via the site-curl bridge. **THE GHOST-ORDER CLASS (Aug 23, cost a
+  **The sweep is wired into `cellar/lanes.py:lane_opener` (Aug 28 —
+  before that its only call site was the Vercel paperlog route gated
+  `_own_opener`, so with the box healthy it ran NOWHERE; it only ever
+  fired during a box outage).** `/api/gridiron/sweep-now` (shared-secret,
+  `force=1` clears the hourly per-game backoff in that container) stays
+  as a manual tool via the site-curl bridge. **THE GHOST-ORDER CLASS (Aug 23, cost a
   day): the venue CANCELS resting football orders when it re-provisions a
   ladder's books** — 20 of 26 Week-1 orders died over a weekend (they HAD
   rested; one filled first), no fill, no our-side cancel, and every pick
@@ -1290,8 +1350,14 @@ The phased UFC model (plan artifact "Fight IQ", July 2026). Targeting: **the DUR
   back up + delete the order-less rows (`gridiron_ghosts_bak_0823`), refire
   the sweep, VERIFY ON THE VENUE (`/api/polymarket/orders?slug=-nfl-`;
   `all=1` includes terminal states) — a create that returns an order id is
-  a claim, not a fact. The daily check now reconciles picks vs the venue's
-  own list (invariant: pending picks = resting orders + fills). Slow
+  a claim, not a fact. **The reconcile is AUTOMATED (Aug 28 —
+  `app.py:_reconcile_tick`, every 15 min inside the repeg lane): the
+  invariant pending machine picks = resting orders + fills, enforced with
+  a two-strike miss stamp (`recon_miss`), fill-truth backstops (poly_pnl
+  buys + poly_activities TRADE by INTENT, never side — BUY_SHORT shows
+  as side=SELL), backup to `reconcile_bak` before any delete, MLB opener
+  re-entry via dayof_wait, and the orphan double-fill size check
+  (position >> pick contracts → warn, the lad-det 20-on-10 class).** Slow
   attrition (a rung's book re-centers, its order dies) is normal — heal
   quietly; a mass kill = investigate first. Tooling that came out of it:
   executor `fail_tag` (every silent `return False` names its exit →
@@ -1303,8 +1369,23 @@ The phased UFC model (plan artifact "Fight IQ", July 2026). Targeting: **the DUR
   and unders... if the spread is like 1.5 or 2.5, then you can look"):**
   the ML is evaluated/taped/bet ONLY when the posted spread's |line| ≤
   `_GRIDIRON_ML_MAX_SPREAD` (2.5), during a spread/total visit — `_WANT`
-  is spread+total only, so ML never holds a game in the pool. **NOT in
-  `_REPEG_MARKET_TYPES`** — v1 rests at its peg, no chasing. `bet_gate` in
+  is spread+total only, so ML never holds a game in the pool. **FOOTBALL
+  CHASES (Aug 26 2026 — the v1 "rests at its peg, no chasing" scope cut
+  survived 4 days before the user found the M-OH +16.5 order 24¢ behind a
+  re-centered book: "the god damn repeg isn't turned on for football!!"):**
+  spread/total are in `_REPEG_MARKET_TYPES`; ONLY `gridiron_autobet` picks
+  chase (manual football bets stay the user's to move), model-is-the-wall
+  regime — `_fresh_fair_for_repeg` re-runs `_gridiron_cover_p`/`_over_p`
+  off TODAY's ratings snapshot at the pick's own rung (fallback: stamped
+  `fair_prob`), 2.5pp floor per move, the 60¢ football entry cap
+  (`_GRIDIRON_MAX_ENTRY_C`) instead of the Y/NRFI 64¢, lead-by-1¢ peg with
+  the ask-join guard. The NRFI-paperlog fair fallback is blocked for
+  spread/total (game-level number). ⚠ **THE BOX OWNS THE `repeg` LEASE**
+  (cellar_lease Aug 26 — the old "repeg runs on Vercel" split note was
+  stale and cost a wrong "live at deploy" claim): the chase code is
+  INERT until the box pulls, so football chasing starts at the Thursday
+  Aug 27 unfreeze, not at the Aug 26 deploy. Check `cellar_lease` before
+  ever claiming a lane-side deploy is live. `bet_gate` in
   every gridiron shadow blob names why a game did or didn't bet.
 - **GRIDIRON OPENER SHADOWS (Aug 3 2026 — football, NO bets):** `_gridiron_opener_pass` rides the same tick after the MLB pass — prices each NFL/NCAAF ML at first Polymarket listing via `_gridiron_ml` (the EXACT team-core projection the backtest graded: `power_ratings` snapshot off/def cross + fitted hfa → logistic at the fitted scale; team unmatched → no row, never a guess) and shadow-logs the edge (`signal_blob.gridiron_ml`, same `opener_shadow` dedup/variant). Windows NFL 168h / NCAAF 96h; **PRESEASON NO-FLY via `_GRIDIRON_MIN_START` date floors (NFL 2026-09-08, NCAAF 2026-08-29 Week 0) — UPDATE YEARLY**, the ESPN spine lists preseason but ratings exclude it. Shadow-only ON PURPOSE: Gridiron IQ (NFL 66.5%/NCAAF 71.2%) was validated vs FINALS, never vs virgin openers, and Aug/Sep ratings are decayed-2025 data (40d half-life) — the shadow record IS the promotion gate for a real 1-contract football lane (the MLB skeleton).
 - **Backtest honesty (Aug 2 iteration night — walk-forward, eval 2026 n=1,667):** Diamond IQ climbed ITER1 (park/opp-adjusted, pyth, hr-shrink) 54.6% → **ITER3 CHAMPION (lineup-wOBA batter offense b=1.0 + bullpen fatigue) 55.7% / Brier 0.2489 — LIVE** (`compute_diamond_iq.py` serializes exactly this config; snapshot `engine` tag says so) vs the market's ~57-58% at CLOSES. The lane's bar is OPENERS (virgin lines) at 1-contract stakes, self-grading via shadows+CLV. Spines: `mlb_batter_games` (daily 10:40 UTC) + `mlb_xwoba_batter_days` (Savant Statcast, 378 days backfilled, daily 10:45 UTC). **ITER4 VERDICT — xwOBA luck-regression GRADED OUT, don't re-try blind:** blending batter quality toward expected wOBA was MONOTONICALLY worse (blend 0.5 → 55.3%, 0.75 → 54.9%, 1.0 → 54.3%) — at a 240-day half-life + 120-PA prior, realized wOBA has already washed its luck and xwOBA just discards real skill (speed/park). The Savant spine stays (props fuel — its CSV carries `stand`/`p_throws`). **ITER5 VERDICT (Aug 3) — PLATOON graded out the same way, don't re-try on single-season data:** vs-hand splits (`mlb_platoon_batter_days` + `mlb_pitcher_throws`, DDL applied, fed by the same Savant fetch via `--platoon` — the daily delta now writes BOTH spines in one pass) were MONOTONICALLY worse (blend 0.35 → 55.2%, 0.7 → 55.1%, 1.0 → 54.6%; lighter 300-PA shrink worse still at 54.5%) even with the delta shrunk 600 PA toward each batter's tilt-scaled overall — ~150 PA/season vs LHP can't identify platoon skill (the classic multi-season-sample result), and lineup selection already embeds it. Batter-level offense is at its ceiling with day-grain single-season data; remaining levers are pitcher-side (umpire, weather, framing) + projection priors. **ENGINE LANDMINE (cost a run):** `DiamondState.__init__`'s state dicts once got silently indented into a new method body — an AttributeError only at project time; when adding methods to the engine, re-run the backtest control and check it reproduces the champion number exactly.
@@ -1668,28 +1749,57 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 > the MODEL's shadow scoreboard (calibration; shadows hold no venue
 > position), not the answer to "how did we do".
 >
-> **THE SOURCE IS `poly_gameday_pnl(p_days)`** — **WRITTEN AND APPLIED Aug 21
-> 2026** (DDL `kahla-scanner/supabase/poly_gameday_pnl.sql`), the night the gap
-> finally bit: a Supabase disconnect silently nulled the bot_picks-side compute,
-> the API fell back to the tick summary's CREDIT-TIME number, and the "Last
-> night" card showed ~$76 for a night the venue settled at **−$0.98** (the
-> final-gated path had been showing −$5.10 — wrong in the other direction).
-> `_gameday_pnl` is now RPC-first; the final-gated bot_picks compute survives
-> only as its disconnect-retried fallback (the `final` gate is that path's
-> price, not a virtue), and the API's credit-time fallback is DELETED — a
-> day card with no truthful number shows a dash, never an invented figure.
-> The METHOD below is the applied one and reproduces by hand → realized USD
-> per **Arizona game day**, read by `app.py:_venue_gameday_map` and
-> through it by the dashboard's day cards and 7-day window. It reads
-> Polymarket's own `ACTIVITY_TYPE_POSITION_RESOLUTION` rows in
-> `poly_activities`: `afterPosition.realized` is the venue's CUMULATIVE
-> P&L for that (market, leg) — cost, harvest sells and payout already
-> netted, nothing for us to recompute. Dedup key is **(marketSlug,
-> outcome)** — the mirror stores ~90 identical copies of every
-> resolution, each with its own row key, and the slug alone would
-> collapse a both-legs-held market into one side. Day is the AZ date of
-> `market.gameStartTime` (eventSlug's date as fallback; on 217 markets
-> they never disagreed).
+> **THE SOURCE IS `app.py:_venue_day_map(sb, days)`** — AZ day → realized
+> bets USD, read by `_gameday_pnl` (today/yesterday cards) and `_pnl_stack`
+> (7d/30d/YTD). ONE basis for every bets number on the dashboard.
+>
+> ⚠ **THE MATH IS `parse_activities`'s, AND ONLY EVER THAT** (rewritten Aug
+> 28 2026, after the day card read **+$8.21 for a night the dashboard's own
+> Closed Positions table totalled +$4.39**). Per leg:
+>
+> ```
+> resolution : qty = |beforePosition.netPosition| ; cost = beforePosition.cost
+>              won = (held long & side LONG) or (held short & side SHORT)
+>              pnl = qty - cost   if won   else   -cost
+> sell       : price = trade.cost / trade.qty       (never trade.price)
+>              pnl   = (price - running_avg_cost) * qty, avg self-tracked
+>                      per slug oldest→newest across ALL its trades
+> ```
+>
+> ⚠⚠ **NEVER READ `afterPosition.realized`, `trade.costBasis`, OR
+> `trade.realizedPnl`** (gotchas #7/#8). All three are complement-poisoned
+> on SHORT positions or populated late by the venue, and every one has now
+> put a wrong number on this dashboard: `afterPosition.realized` sat at
+> `0.0000` for **7 of 11 Aug 27 legs** (hiding $33.10 of settled cost) while
+> those same legs read −$5.20/−$5.00/−$3.80 in Closed Positions; and
+> `cost − costBasis` reported a **+$0.21 scalp exit as −$1.27**, which got
+> escalated as a fake "the scalp arm is dumping below its floor" money bug.
+> The venue does not hand you a P&L number — the dashboard has computed its
+> own since it was built, and that is why it has been right for a year.
+>
+> ✅ **IF A DAY TOTAL EVER DISAGREES WITH CLOSED POSITIONS, THAT TABLE IS
+> RIGHT.** It is the same arithmetic; check the day math, never the table.
+>
+> **Two clocks, deliberately** — each single-key scheme has shipped a bug:
+> a **RESOLUTION** buckets on the AZ day of `market.gameStartTime` (keying
+> it on payout time is the Aug 15 2026 bug: a game settling 12:20am read as
+> the next day's profit before anything was played); a **SELL** buckets on
+> the AZ day it was TRADED (keying it on game start is the Aug 28 2026 bug:
+> last night's scalp exits on today's games made the card read −$1.53 at
+> 12:04am with nothing started).
+>
+> **Split by design:** `poly_gameday_pnl(p_days)` (DDL
+> `kahla-scanner/supabase/poly_gameday_pnl.sql`, applied) does RESOLUTIONS
+> ONLY — the dedupe is set-based and a YTD window is hundreds of thousands
+> of raw rows for a few thousand real legs. Sells stay in Python because the
+> running average is ORDER-DEPENDENT (a sell leaves the average alone; a
+> later buy re-blends it against the reduced quantity), which no window
+> function expresses. Two mirror artifacts the RPC must keep handling:
+> resolutions carry no id, so `_act_key` hashes the whole activity and a
+> nested market `updatedAt` mints **~19 copies** per leg (the live feed
+> returns one); and some settlements emit an **UNDEFINED-side twin** of a
+> real leg, which doubles the day AND books a WINNING leg as a full loss.
+> Trades carry a real id and never duplicate.
 >
 > ⚠ **NEVER GATE A RESULT ON `poly_pnl.final`.** That flag is written by
 > OUR ledger tick, and the whole reason this rule keeps getting repeated
@@ -1699,12 +1809,11 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 > +$6.85**. A reading that one of our own background jobs can silently
 > zero is the wrong reading. `poly_pnl` stays as the PER-PICK ledger
 > (`_poly_ledger_tick` owns it, additive, never touches
-> status/pnl_units); the DAY/WINDOW numbers come from the venue directly.
-> `_gameday_pnl_legacy` exists only as an RPC-unreachable fallback —
-> never promote it back. Known gap, benign today: a position fully closed
-> before resolution emits no resolution row, and the harvest always rides
-> at least one contract (`min_held`), so 109 of 109 recent settlements
-> were still long.
+> status/pnl_units); the DAY/WINDOW numbers are computed from the venue's
+> raw activities. It is also NOT a cross-check to trust blindly — its own
+> per-leg figures drift a few cents from the venue's (−4.97 vs −5.00,
+> +5.43 vs +5.40), and trusting it over Closed Positions produced a
+> confidently wrong "+$4.04 truth" on the Aug 27 night.
 
 ## Known Issues & Gotchas
 1. **The Odds API auth is `?api_key=` query param** — NOT a Bearer header. Easy to copy from one provider's pattern (Owls used Bearer) and break.
