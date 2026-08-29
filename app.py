@@ -2370,8 +2370,32 @@ def _cellar_health(sb) -> dict:
                     "stale": bool(_sha and _mine and _sha[:12] != _mine[:12])}
     except Exception:
         boot = {}
+    # NIGHTLY DB BACKUP (Aug 28 2026 — the local-Postgres shadow, §12e in
+    # motion): the box stamps kind=db_backup after each 3:30am AZ dump +
+    # shadow-restore. Surfaced here so backup health is on the phone, not
+    # only in the daily check. No stamp ever = setup not done yet — omit
+    # rather than alarm (the daily check does the reminding).
+    backup = {}
+    try:
+        r = (sb.table("exec_probe_runs").select("at,result")
+             .filter("params->>kind", "eq", "db_backup")
+             .order("at", desc=True).limit(1).execute().data) or []
+        if r:
+            res0 = r[0].get("result") or {}
+            age_s = None
+            try:
+                age_s = int((datetime.now(timezone.utc) - _parse_iso(
+                    r[0].get("at"))).total_seconds())
+            except Exception:
+                pass
+            backup = {"ok": bool(res0.get("ok")), "age_s": age_s,
+                      "shadow_picks": res0.get("shadow_picks"),
+                      # >26h since last stamp = last night's run never fired
+                      "stale": bool(age_s is not None and age_s > 26 * 3600)}
+    except Exception:
+        backup = {}
     return {
-        "lanes": lanes, "bad": bad, "boot": boot,
+        "lanes": lanes, "bad": bad, "boot": boot, "backup": backup,
         # Counted separately from `bad` so an intentional kill is VISIBLE
         # without being an alarm — "off" should read as a decision someone
         # made, not as something to go fix.

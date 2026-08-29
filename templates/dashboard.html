@@ -338,10 +338,17 @@
         const codeFrag = b.stale ? ' · ⚠ cellar on ' + b.sha + ', site on '
                                    + b.site_sha + ' — pull + restart'
                        : (b.sha ? ' · code ' + b.sha : '');
+        // Nightly DB backup + shadow-restore stamp (kind=db_backup). No
+        // stamp yet = setup pending on the box — say nothing, don't alarm.
+        const bk = c.backup || {};
+        const bkFrag = !('ok' in bk) ? ''
+            : !bk.ok ? ' · ⚠ backup FAILED ' + ago(bk.age_s)
+            : bk.stale ? ' · ⚠ backup stale (' + ago(bk.age_s) + ')'
+            : ' · backup ✓ ' + ago(bk.age_s);
         sub.textContent = c.on_cellar + ' on the cellar · ' + c.on_vercel
             + ' on vercel' + (c.off ? ' · ' + c.off + ' off' : '')
             + (c.bad ? ' · ' + c.bad + ' need a look' : ' · all working')
-            + codeFrag;
+            + codeFrag + bkFrag;
     }
 
     // Top strip: number + dot. Green = holding/quoting (n>0), muted = a
