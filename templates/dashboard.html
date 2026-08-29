@@ -303,11 +303,15 @@
             sub.textContent = 'lane · owner · last work';
             return;
         }
-        box.innerHTML = c.lanes.map(l => {
+        // RETIRED lanes don't get a row (Aug 28, user: "what's the harvest?
+        // It's always 'off'"). A lane killed at the source is a decision,
+        // not a status to re-read daily — it collapses into the footer by
+        // name. The moment its flag flips back on, its state stops being
+        // 'off' and the full row returns with monitoring intact.
+        box.innerHTML = c.lanes.filter(l => l.state !== 'off').map(l => {
             const dead = (l.state === 'stale' || l.state === 'error');
             const cls = dead ? 'lane dead'
-                : (l.state === 'idle' ? 'lane bad'
-                   : (l.state === 'off' ? 'lane off' : 'lane'));
+                : (l.state === 'idle' ? 'lane bad' : 'lane');
             // Vercel writes no tick history, so its lanes are judged on
             // heartbeat alone and say so rather than showing a false zero.
             // A lane switched off at the source reports that instead of a
@@ -345,8 +349,16 @@
             : !bk.ok ? ' · ⚠ backup FAILED ' + ago(bk.age_s)
             : bk.stale ? ' · ⚠ backup stale (' + ago(bk.age_s) + ')'
             : ' · backup ✓ ' + ago(bk.age_s);
-        sub.textContent = c.on_cellar + ' on the cellar · ' + c.on_vercel
-            + ' on vercel' + (c.off ? ' · ' + c.off + ' off' : '')
+        const offNames = c.lanes.filter(l => l.state === 'off')
+                                .map(l => l.lane).join(', ');
+        // Count only LIVE lanes — the dead harvest was the whole "1 on
+        // vercel" in the footer, which read like something still ran there.
+        const live = c.lanes.filter(l => l.state !== 'off');
+        const nCel = live.filter(l => l.owner === 'cellar').length;
+        const nVer = live.length - nCel;
+        sub.textContent = nCel + ' on the cellar'
+            + (nVer ? ' · ' + nVer + ' on vercel' : '')
+            + (offNames ? ' · retired: ' + offNames : '')
             + (c.bad ? ' · ' + c.bad + ' need a look' : ' · all working')
             + codeFrag + bkFrag;
     }
