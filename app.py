@@ -19445,6 +19445,9 @@ def _scalp_tick(sb, now) -> dict:
                 break
         if a4 is None:
             return 1
+        _vc4 = (positions.get(slug4) or {}).get("avg_price")
+        if _vc4 is not None and _vc4 > 0:
+            e4 = max(e4, float(_vc4) * 100.0)   # venue-cost floor, mirrored
         f4 = min(99.0, float(math.ceil(e4 - 1e-9)) + 1.0)
         return 0 if a4 < f4 - 0.26 else 1
     cands.sort(key=_floor_viol)
@@ -19465,6 +19468,20 @@ def _scalp_tick(sb, now) -> dict:
         # at +0.3¢/share, which the ~0.4¢ maker fee eats. "Cost +1" means
         # one whole cent over the real cost, rounded up — 51.7¢ → 53¢.
         # A whole-cent entry is unchanged: 35.0¢ → 36¢.)
+        # VENUE-COST FLOOR (Aug 28 — the SEA@TOR adopted-lot gap, user:
+        # "cost at 71, sell at 69…. So again… EXPLAIN"): on machine buys
+        # the stamp IS the fill price, but ADOPTED legacy positions were
+        # built from mixed hand lots and the stamp can sit BELOW the
+        # venue's true blended cost — the fence then honestly stands in
+        # the wrong place. The floor is the HIGHER of stamp and the
+        # venue's own avg_price (cost/qty, side-oriented, read every
+        # pass anyway), so a bad stamp can never lower it. max() also
+        # absorbs the partial-sell cost-collapse landmine (a profitable
+        # partial sell makes the venue's cost/qty UNDERSTATE — the stamp
+        # floor still stands). avg_price None → stamp floor, unchanged.
+        _vc = (positions.get(slug) or {}).get("avg_price")
+        if _vc is not None and _vc > 0:
+            entry_c = max(entry_c, float(_vc) * 100.0)
         floor_c = min(99.0, float(math.ceil(entry_c - 1e-9)) + 1.0)
         # IN-PLAY = DUMP AT MONEY-BACK (user policy, Aug 27 night: "The
         # only thing that survives a game going live is the scalp...
