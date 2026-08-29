@@ -2509,6 +2509,11 @@ def _lifetime_venue(sb, balance) -> dict | None:
         return None
 
 
+_DASH_ORDERS_EVERY_S = 170     # >= ~3 min between orders-count reads
+_DASH_ORDERS_TS = 0.0          # last ATTEMPT (module state; box lane is
+                               # long-lived, Vercel cold starts just read once)
+
+
 def _dash_cache_refresh(sb, client) -> dict:
     """Compute the dashboard summary ONCE on the tick and park the result.
 
@@ -2540,11 +2545,21 @@ def _dash_cache_refresh(sb, client) -> dict:
         # ⚠ RATE-LIMIT DISCIPLINE (Aug 22 2026, caught within the hour of
         # the every-tick refresh): stacking the orders read onto every
         # minute's refresh drew a Cloudflare RateLimitError and the strip
-        # dashed. Read orders every 3rd minute only, and CARRY FORWARD the
+        # dashed. Space the orders reads ~3 min apart and CARRY FORWARD the
         # last good count between reads and across failures — a count a
         # couple minutes old is truth; a dash for a rate limit is noise.
         # (The dedup-orders lesson: never let call volume creep up on the
         # venue.)
+        # ⚠ ELAPSED TIME, NEVER WALL-MINUTE (Aug 29 2026 — the Orders card
+        # dashed after the morning reboot): the original `minute % 3` gate
+        # was written for Vercel's every-minute tick. The box's ledger lane
+        # ticks every ~3 minutes, so the wall minute advances ≡0 (mod 3)
+        # per tick and the gate PHASE-LOCKS on whatever minute the daemon
+        # booted — this boot landed on minutes ≡2 and the read NEVER fired,
+        # carrying null forever. The _OUTBID_TICK_MOD landmine class, third
+        # sighting; every engine-level modulo has force=True from the lane,
+        # this inner one needed the elapsed-time form instead.
+        global _DASH_ORDERS_TS
         _prev_oc = None
         try:
             _pr = (sb.table("poly_dash_cache").select("order_count")
@@ -2552,9 +2567,12 @@ def _dash_cache_refresh(sb, client) -> dict:
             _prev_oc = _pr[0].get("order_count") if _pr else None
         except Exception:
             pass
-        if datetime.now(timezone.utc).minute % 3:
-            order_count = _prev_oc            # off-minute: carry forward
+        if _time.time() - _DASH_ORDERS_TS < _DASH_ORDERS_EVERY_S:
+            order_count = _prev_oc            # inside the spacing: carry
         else:
+            # The ATTEMPT consumes the slot — rate-limit discipline is
+            # about call volume, so a failed call spaces the next one too.
+            _DASH_ORDERS_TS = _time.time()
             try:
                 _resp = client.orders.list()
                 _raw = (_resp.get("orders") if isinstance(_resp, dict)
