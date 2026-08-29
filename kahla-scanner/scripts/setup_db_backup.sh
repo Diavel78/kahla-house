@@ -14,22 +14,36 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."          # repo root, wherever the checkout lives
 
 echo "== 1/4 local Postgres =="
-if ! command -v brew >/dev/null; then
-  echo "Homebrew not found — install it first (https://brew.sh)"; exit 1
-fi
-brew list postgresql@17 >/dev/null 2>&1 || brew install postgresql@17
-brew services start postgresql@17 >/dev/null
-for p in /opt/homebrew/opt/postgresql@17/bin /usr/local/opt/postgresql@17/bin; do
+# Postgres.app FIRST — this box runs macOS 13, which Homebrew dropped (the
+# postgresql@17 source build died Aug 29 after a 40-min compile). Download
+# https://postgresapp.com → drag to Applications → open it → "Initialize".
+for p in /Applications/Postgres.app/Contents/Versions/latest/bin \
+         /Applications/Postgres.app/Contents/Versions/17/bin \
+         /opt/homebrew/opt/postgresql@17/bin /usr/local/opt/postgresql@17/bin; do
   [ -d "$p" ] && PATH="$p:$PATH"
 done
 export PATH
-# give the server a moment on first boot
+if ! command -v pg_dump >/dev/null; then
+  echo "   No Postgres tools found. On this Mac (macOS 13) use Postgres.app:"
+  echo "   1. Download https://postgresapp.com (latest with PostgreSQL 17)"
+  echo "   2. Drag to Applications, open it, click 'Initialize'"
+  echo "   3. In Postgres.app preferences: enable 'Start at login'"
+  echo "   4. Re-run this script."
+  exit 1
+fi
+# give the server a moment
 for i in 1 2 3 4 5 6 7 8 9 10; do
   psql -d postgres -c 'select 1' >/dev/null 2>&1 && break
   sleep 2
 done
-psql -d postgres -c 'select 1' >/dev/null 2>&1 \
-  && echo "   postgres up ✓" || { echo "   postgres did not come up"; exit 1; }
+if psql -d postgres -c 'select 1' >/dev/null 2>&1; then
+  echo "   postgres up ✓ ($(command -v psql))"
+else
+  echo "   pg tools found but no server running — open Postgres.app and"
+  echo "   click Start (and enable 'Start at login'), then re-run."
+  echo "   (Continuing anyway: dumps still work without the local server —"
+  echo "    the shadow-restore test just gets skipped until it's up.)"
+fi
 
 echo "== 2/4 connection string =="
 mkdir -p "$HOME/.kahla" && chmod 700 "$HOME/.kahla"

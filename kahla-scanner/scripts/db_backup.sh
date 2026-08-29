@@ -31,8 +31,13 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 DUMP="$BACKUP_DIR/kahla-$STAMP.dump"
 mkdir -p "$BACKUP_DIR"
 
-# Homebrew postgres tools (postgresql@17 is keg-only) ahead of any system stubs.
-for p in /opt/homebrew/opt/postgresql@17/bin /usr/local/opt/postgresql@17/bin; do
+# Postgres tools ahead of any system stubs. Postgres.app FIRST — the box
+# runs macOS 13, which Homebrew dropped (the postgresql@17 source build
+# died Aug 29 after a 40-minute compile); Postgres.app ships prebuilt
+# binaries and supports 13. Brew paths kept for a future newer Mac.
+for p in /Applications/Postgres.app/Contents/Versions/latest/bin \
+         /Applications/Postgres.app/Contents/Versions/17/bin \
+         /opt/homebrew/opt/postgresql@17/bin /usr/local/opt/postgresql@17/bin; do
   [ -d "$p" ] && PATH="$p:$PATH"
 done
 export PATH
