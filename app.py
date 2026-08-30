@@ -2315,6 +2315,39 @@ def _lane_disabled(lane: str) -> bool:
             "ou_trader": not OU_TRADER_ENABLED}.get(lane, False)
 
 
+def _ws_feed_health(sb) -> dict:
+    """WS WAKE FEED state (docs/ws-feed-spec.md). The box stamps
+    kind=ws_feed on lifecycle TRANSITIONS only (started / connected /
+    disconnected / connect_failed / disabled:*), so the LATEST stamp IS
+    the current state — "connected 3h ago" means connected FOR 3h, not
+    stale. No stamp ever = feed predates the box's code — {} (omit,
+    don't alarm). Standalone helper (not inlined in _cellar_health)
+    because the dashboard's cellar block usually arrives via the BOX's
+    5-min cache tick — a box on older code ships the block without a ws
+    key, and the serve path patches it in with this. One tiny limit-1
+    read; never raises."""
+    try:
+        r = (sb.table("exec_probe_runs").select("at,result")
+             .filter("params->>kind", "eq", "ws_feed")
+             .order("at", desc=True).limit(1).execute().data) or []
+        if not r:
+            return {}
+        res0 = r[0].get("result") or {}
+        age_s = None
+        try:
+            age_s = int((datetime.now(timezone.utc) - _parse_iso(
+                r[0].get("at"))).total_seconds())
+        except Exception:
+            pass
+        st = str(res0.get("state") or "")
+        return {"state": st, "age_s": age_s,
+                "up": st in ("connected", "started"),
+                "off": st.startswith("disabled"),
+                "err": (res0.get("err") or "")[:120]}
+    except Exception:
+        return {}
+
+
 def _cellar_health(sb) -> dict:
     """Per-lane vitals for the dashboard: who owns it, is it alive, and
     IS IT ACTUALLY DOING ANYTHING.
@@ -2425,31 +2458,7 @@ def _cellar_health(sb) -> dict:
                       "stale": bool(age_s is not None and age_s > 26 * 3600)}
     except Exception:
         backup = {}
-    # WS WAKE FEED (Aug 30 2026 — docs/ws-feed-spec.md): the box stamps
-    # kind=ws_feed on lifecycle TRANSITIONS only (started / connected /
-    # disconnected / connect_failed / disabled:*), so the LATEST stamp is
-    # the current state — "connected 3h ago" means connected for 3h, not
-    # stale. No stamp ever = feed predates this box's code — omit.
-    ws = {}
-    try:
-        r = (sb.table("exec_probe_runs").select("at,result")
-             .filter("params->>kind", "eq", "ws_feed")
-             .order("at", desc=True).limit(1).execute().data) or []
-        if r:
-            res0 = r[0].get("result") or {}
-            age_s = None
-            try:
-                age_s = int((datetime.now(timezone.utc) - _parse_iso(
-                    r[0].get("at"))).total_seconds())
-            except Exception:
-                pass
-            st = str(res0.get("state") or "")
-            ws = {"state": st, "age_s": age_s,
-                  "up": st in ("connected", "started"),
-                  "off": st.startswith("disabled"),
-                  "err": (res0.get("err") or "")[:120]}
-    except Exception:
-        ws = {}
+    ws = _ws_feed_health(sb)
     return {
         "lanes": lanes, "bad": bad, "boot": boot, "backup": backup, "ws": ws,
         # Counted separately from `bad` so an intentional kill is VISIBLE
@@ -21726,6 +21735,16 @@ def api_data():
                 except Exception:
                     return dflt
 
+            def _ws_ensure(cel):
+                # See the "cellar" line below: box-cached blobs from older
+                # code lack the ws key — add it live (one limit-1 read).
+                try:
+                    if isinstance(cel, dict) and "ws" not in cel:
+                        cel["ws"] = _ws_feed_health(get_supabase())
+                except Exception:
+                    pass
+                return cel
+
             _gd = _blk("gameday_pnl", lambda: _gameday_pnl(get_supabase()),
                        {"today": None, "yesterday": None})
             # A cached dict with null MEMBERS is a failed compute wearing a
@@ -21818,8 +21837,12 @@ def api_data():
                 # numbers. Computed live if the tick has not run since a
                 # deploy — a health surface that goes blank exactly when
                 # something is wrong would be worse than none.
-                "cellar": _blk("cellar",
-                               lambda: _cellar_health(get_supabase()), {}),
+                # The ws block is patched in AT SERVE TIME when the cached
+                # blob lacks it: the cache is computed by the BOX, which
+                # can run older code than the site — the split-brain that
+                # made the ws footer silently render nothing on day one.
+                "cellar": _ws_ensure(_blk(
+                    "cellar", lambda: _cellar_health(get_supabase()), {})),
                 "positions": [], "closed_positions": [], "activities": [],
                 "errors": [],
             })
