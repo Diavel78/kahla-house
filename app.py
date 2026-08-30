@@ -1853,14 +1853,18 @@ def _pnl_stack(sb) -> dict | None:
     return out
 
 
-def _rent_days_recent(sb, n_days: int = 5) -> list:
-    """RENT BY DAY (user, Aug 25 2026: "I ask this every day, lol") — the
-    last N earn-days with the paid/pending split, straight off the
-    ledger. A day with no rows is None (the venue posts earn-days ~a
-    day behind; "not posted yet" must render as a dash, never $0.00).
+def _rent_days_recent(sb, n_days: int = 7) -> list:
+    """THE DAY LEDGER (rev Aug 30 2026, user: the bookie question is "how
+    much did we lose on positions vs how much rent", per day) — the last
+    N days (yesterday back, 7 now), each row bets + rent + TOTAL. Bets
+    from `_venue_day_map` (the one proven basis, AZ game day); rent off
+    the earnings ledger by earn date with the paid/pending split. The
+    newest day or two's rent is still filling in at the venue, so their
+    totals run LOW by design — labeled on the card, never withheld.
+    A rent day with no rows is None ("not posted yet" renders as a dash,
+    never $0.00); a dead venue feed leaves bets None the same way.
     Own helper because the cached pnl_stack is computed by the BOX —
-    frozen code through Aug 27 — so /api/data patches this key into a
-    cached stack that predates it."""
+    /api/data patches this key fresh into the cached stack every serve."""
     az = ZoneInfo("America/Phoenix")
     today = datetime.now(timezone.utc).astimezone(az).date()
     since = (today - timedelta(days=n_days)).isoformat()
@@ -1878,16 +1882,24 @@ def _rent_days_recent(sb, n_days: int = 5) -> list:
         a = agg.setdefault(d, {"paid": 0.0, "pending": 0.0})
         a["pending" if st == "PENDING" else "paid"] += (
             _safe_float(r.get("reward")) or 0.0)
+    try:
+        bets_map = {d.isoformat(): v
+                    for d, v in _venue_day_map(sb, days=n_days + 1).items()}
+    except Exception:
+        bets_map = None      # venue feed down → bets dash, rent still shows
     days = []
     # Starting with YESTERDAY (user, Aug 25): today's earn-day is never
     # posted while the day is still being played — an all-dash row.
     for i in range(1, n_days + 1):
         d = (today - timedelta(days=i)).isoformat()
         a = agg.get(d)
-        days.append({"d": d,
-                     "paid": None if a is None else round(a["paid"], 2),
-                     "pending": (None if a is None
-                                 else round(a["pending"], 2))})
+        paid = None if a is None else round(a["paid"], 2)
+        pend = None if a is None else round(a["pending"], 2)
+        bets = None if bets_map is None else round(bets_map.get(d, 0.0), 2)
+        total = (None if (bets is None and a is None) else
+                 round((bets or 0.0) + (paid or 0.0) + (pend or 0.0), 2))
+        days.append({"d": d, "paid": paid, "pending": pend,
+                     "bets": bets, "total": total})
     return days
 
 

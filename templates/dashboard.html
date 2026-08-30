@@ -210,24 +210,22 @@
                 <div class="value skel" id="vToday">—</div>
                 <div class="sub" id="subToday">settled · AZ</div>
             </div>
-            <div class="card">
-                <div class="label">Last night <span class="tag">position only</span></div>
-                <div class="value skel" id="vYest">—</div>
-                <div class="sub" id="subYest">settled · AZ</div>
-            </div>
-            <!-- RENT BY DAY (user, Aug 25: "I ask this every day, lol") —
-                 the last 5 earn-days straight off the venue's ledger,
-                 pending included. A day the venue hasn't posted yet says
-                 so — never $0.00 (the ledger runs ~a day behind). ABOVE
-                 the rolling windows (user, Aug 30): this card is LIVE
-                 (~10-min venue mirror) while the windows below refresh
-                 at midnight or on the button — live before frozen. -->
+<!-- LAST NIGHT card removed (user, Aug 30): the bookie read is
+                 per-day totals below — yesterday lives there with its rent. -->
+            <!-- THE DAY LEDGER (rev Aug 30, user: "how much did we lose on
+                 positions vs how much rent" is THE number now) — last 7
+                 days, TOTAL (bets + rent) per row with the split beneath.
+                 Rent for the newest day or two is still filling in at the
+                 venue, so those totals run low — labeled, not withheld.
+                 ABOVE the rolling windows (user, Aug 30): this card is
+                 LIVE (~10-min venue mirror) while the windows below
+                 refresh at midnight or on the button. -->
             <div class="card wide">
-                <div class="label">Rent by day <span class="tag" style="color:var(--green)">paid</span> <span class="tag" style="color:#fbbf24">pending</span></div>
+                <div class="label">By day — bets + rent <span class="tag" style="color:var(--green)">paid</span> <span class="tag" style="color:#fbbf24">pending</span></div>
                 <div id="rentDays">
                     <div class="sub" style="margin:0">loading…</div>
                 </div>
-                <div class="sub">by earn date · newest days still filling in at the venue</div>
+                <div class="sub">bets by AZ game day · rent by earn date — newest days still filling in at the venue</div>
             </div>
             <!-- THE LEDGER: 7d / 30d / YTD all-in, one row each, with the
                  bets-vs-rent split bar (cyan = bets, gold = rent). Rent by
@@ -457,10 +455,8 @@
             // it lives in the windows below by earn date.
             const st = s.pnl_stack || null;
             paint('vToday', st ? st.today : s.today_pnl, true);
-            paint('vYest', st ? st.yesterday : s.yesterday_pnl, true);
             document.getElementById('subToday').textContent =
                 'settled · AZ · rent lands in ~5 days';
-            document.getElementById('subYest').textContent = 'venue-settled · AZ';
             paint('vMaker', s.maker_rewards, false);
             // THE LEDGER — 7d / 30d / YTD, big all-in number per row plus
             // the bets-vs-rent split bar. Bar widths are each half's share
@@ -525,8 +521,9 @@
                 } else {
                     ytdRow = row('YTD', st.ytd);
                 }
-                led.innerHTML = row('7 days', st.d7) + row('30 days', st.d30)
-                              + ytdRow;
+                // 7d row dropped (user, Aug 30) — the day ledger above IS
+                // the week; windows are 30d + YTD.
+                led.innerHTML = row('30 days', st.d30) + ytdRow;
                 // Windows recompute at midnight AZ or on ↻ — show their age
                 // so a stale-on-purpose number never reads as a live one.
                 if (st.computed_at) {
@@ -554,27 +551,39 @@
                     const dn = iso => new Date(iso + 'T12:00:00')
                         .toLocaleDateString('en-US',
                             { weekday: 'short', month: 'short', day: 'numeric' });
-                    // Color IS the status (user, Aug 25): green = paid,
-                    // gold = pending, split day = green / gold. No words.
-                    const G = v => '<span class="rnum pos">' + money(v) + '</span>';
-                    const Y = v => '<span class="rnum" style="color:#fbbf24">'
-                        + money(v) + '</span>';
+                    // TOTAL (bets + rent) is the headline (user, Aug 30 —
+                    // the bookie read); the split lives beneath. Rent
+                    // colors stay the status language (Aug 25): green =
+                    // paid, gold = pending, split day = green / gold; an
+                    // unposted rent day is a dash, so its total runs low
+                    // on bets alone — labeled on the card footer.
+                    const G = v => '<span style="color:var(--green)">' + money(v) + '</span>';
+                    const Y = v => '<span style="color:#fbbf24">' + money(v) + '</span>';
                     rdEl.innerHTML = rds.map(r => {
-                        let right;
+                        let rent;
                         if (r.paid === null && r.pending === null) {
-                            right = '<span class="rnum" style="color:#8b93a7">—</span>';
+                            rent = '<span style="color:#8b93a7">—</span>';
                         } else if ((r.paid || 0) > 0 && (r.pending || 0) > 0) {
-                            right = G(r.paid)
+                            rent = G(r.paid)
                                 + '<span style="color:#8b93a7"> / </span>'
                                 + Y(r.pending);
                         } else if ((r.pending || 0) > 0) {
-                            right = Y(r.pending);
+                            rent = Y(r.pending);
                         } else {
-                            right = G(r.paid || 0);
+                            rent = G(r.paid || 0);
                         }
+                        const tot = r.total === null || r.total === undefined
+                            ? '<span class="rnum" style="color:#8b93a7">—</span>'
+                            : '<span class="rnum ' + (r.total >= 0 ? 'pos' : 'neg')
+                              + '">' + money(r.total) + '</span>';
                         return '<div class="erow" style="padding:9px 0 8px">'
                             + '<div class="etop"><span class="rlbl">' + dn(r.d)
-                            + '</span><span>' + right + '</span></div></div>';
+                            + '</span>' + tot + '</div>'
+                            + '<div class="keys">'
+                            + '<span>bets ' + (r.bets === null || r.bets === undefined
+                                ? '—' : money(r.bets)) + '</span>'
+                            + '<span>rent ' + rent + '</span>'
+                            + '</div></div>';
                     }).join('');
                 } else {
                     rdEl.innerHTML = '<div class="sub" style="margin:0">'
