@@ -7346,6 +7346,23 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                     _scalped = (reason == "sold pre-game"
                                 and isinstance(blob.get("scalp"), list)
                                 and len(blob.get("scalp") or []) > 0)
+                    # THE 30-MINUTE RULE (user, Aug 29 2026: "If the sell
+                    # occurs within a half hour of start time, do NOT
+                    # rebet it. We collected our rent, and I don't need
+                    # the game back. The goal is to never make it to the
+                    # game start holding a contract."): a scalp exit this
+                    # close to first pitch LATCHES the game (swept=2, the
+                    # permanent form) instead of re-arming — cycle closed,
+                    # rent banked, walk away. ev_dt is non-None here (the
+                    # sold-pre-game branch already required it).
+                    _late_exit = (_scalped and ev_dt is not None
+                                  and (ev_dt - now_dt)
+                                  < timedelta(minutes=30))
+                    if _late_exit:
+                        _scalped = False
+                        app.logger.info(
+                            "PMM-AUTOLOG 30-min rule: scalp exit inside "
+                            "T-30 on %s — latched, no re-bet", slug)
                     try:
                         _op = (sb.table("pickbot_paperlog")
                                .select("id,signal_blob")

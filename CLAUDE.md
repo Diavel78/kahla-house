@@ -1018,6 +1018,11 @@ sport the machine ever adds:
   contract** — every rent-lane fill gets an ask on the next pass, cost+1
   floor. New lanes join by adding their flag to `_scalp_lanes` and their
   family to `_SCALP_RENT_SLUGS` (the O/U revival is the worked example).
+- **THE 30-MINUTE RULE (user, Aug 29 2026):** a scalp exit inside T-30min
+  does NOT rinse-repeat — "we collected our rent, and I don't need the
+  game back. The goal is to never make it to the game start holding a
+  contract." Enforced in `_pmm_autolog`'s scalp-exit branch (`_late_exit`
+  routes to the cool-off instead of `dayof_wait`).
 - **"Everything should be bettered, then sold" (user, same night,
   rejecting no-model-forever):** the end state is a MODEL gate on every
   entry, rent lanes included. The gate goes in per lane when a model has
