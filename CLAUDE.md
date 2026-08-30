@@ -1034,6 +1034,20 @@ sport the machine ever adds:
   contracts=5, applied to the DB). Topup knows every target and never
   shrinks a resting order — legacy 10-lot NRFIs ride out. This paragraph
   supersedes the stake numbers in the Aug-27 double note above.
+- **EARLY NO-VETO (user, Aug 29 2026 night: "If it's 3 days to the game…
+  EVERY o/u and ML (or spread) should be bet. It's massive rent… I say
+  go. Early market rent collectors get bet, the end"):** beyond
+  `_NOVETO_EARLY_MIN_H` (36h — Polymarket lists MLB only ~44h ahead, so
+  48 would nullify baseball) the model EDGE FLOOR stops vetoing the
+  rent-collector lanes; the model still picks the side/rung (tiebreaker),
+  and on ML a Master-Rule-capped favorite falls through to the dog side
+  (rent vehicle, no view). Standing guards ALL survive: cheap peg, entry
+  caps, junk cliff, football tail gate, per-market rent at placement,
+  scalp exits, 30-min rule. Inside 36h the old model gates apply
+  unchanged. Such bets stamp `signal_blob.early_noveto` — the two-week
+  venue-truth review dataset. Rationale measured, not vibed: early rent
+  ran 26× day-of, realized entry edge WITH the veto was ~zero, and the
+  machine no longer holds to the whistle.
 - **"Everything should be bettered, then sold" (user, same night,
   rejecting no-model-forever):** the end state is a MODEL gate on every
   entry, rent lanes included. The gate goes in per lane when a model has

@@ -14013,6 +14013,38 @@ AUTOBET_MAX_BETS = 10000  # CAP KILLED Aug 4 ~10pm AZ (user: "kill that 40
                           # Sentinel not deletion: the counter still runs
                           # (the "N/cap this slate" ping + a re-cap later
                           # need only this constant changed back).
+# EARLY NO-VETO (user, Aug 29 2026 night, minutes after the stake split:
+# "If it's 3 days to the game… EVERY o/u and ML (or spread) should be
+# bet. It's massive rent. I don't know if it's acceptable to say 'well
+# the model says no edge' anymore… who cares" → "I say go. Early market
+# rent collectors get bet, the end"). Beyond this many hours to start,
+# the MODEL EDGE FLOOR stops being a veto on the RENT-COLLECTOR lanes
+# (MLB ML, MLB O/U, football spread/total) — the model still picks the
+# side/rung (tiebreaker), the cheap peg + entry caps + junk guard + rent
+# gate all stand, and the scalp arm exits every fill. The measured why:
+# rent at 3 days out ran 26× day-of ($2.19 vs $0.08/mkt-day), the lanes'
+# realized entry edge was ~zero WITH the veto, and the machine no longer
+# holds to the whistle — so the veto was costing rent and buying almost
+# nothing. Bets that ride through only on this rule stamp
+# signal_blob.early_noveto for the two-week venue-truth review.
+# Bets-to-win (props, NRFI) keep their model gates untouched.
+# 36h, not 48: Polymarket lists MLB only ~44h ahead (next-day games post
+# the evening before — the pm-snapshot window's own calibration), so 48h
+# would nullify the rule for baseball entirely. Beyond-tomorrow = early;
+# tomorrow and day-of keep the model gate.
+_NOVETO_EARLY_MIN_H = 36.0
+
+
+def _early_noveto(event_start, now) -> bool:
+    """True when the game is far enough out that rent-collector lanes bet
+    without the model edge floor (see the doctrine above)."""
+    try:
+        dt = datetime.fromisoformat(str(event_start).replace("Z", "+00:00"))
+        return (dt - now) >= timedelta(hours=_NOVETO_EARLY_MIN_H)
+    except Exception:
+        return False
+
+
 # ⚠ THE STAKE SPLIT — HARD RULE (user, Aug 29 2026): "Rent collectors are
 # 20 contracts, the bets we bet to win, 5. Spread, ML, and O/U are 20.
 # MLB props, NFL props, etc — 5. The props ain't really paying rent, and
@@ -15168,6 +15200,11 @@ def _ou_trader_eval(sb, g, d, now, done):
             str(es).replace("Z", "+00:00")) - now).total_seconds() / 60.0)
     except Exception:
         sim = None
+    # EARLY NO-VETO (doctrine at _NOVETO_EARLY_MIN_H): far out, the 3pp
+    # mid-distance floor stops vetoing — every O/U with a two-sided book
+    # in the entry band gets bet on its cheaper-vs-mid side. Band, junk
+    # guard, master rule and the per-market rent gate all stand.
+    _noveto = _early_noveto(es, now)
     best = None
     for side, blk, q in (("over", over, qo), ("under", under, qu)):
         bid, mid = q.get("bid"), q.get("mid")
@@ -15183,7 +15220,7 @@ def _ou_trader_eval(sb, g, d, now, done):
         edge = mid * 100.0 - target
         if not (_OU_TRADER_MIN_ENTRY_C <= target <= _OU_TRADER_MAX_ENTRY_C):
             continue
-        if edge < _OU_TRADER_MIN_EDGE_PP:
+        if edge < _OU_TRADER_MIN_EDGE_PP and not _noveto:
             continue
         if best is None or edge > best["edge"]:
             best = {"side": side, "blk": blk, "target": target,
@@ -15201,7 +15238,9 @@ def _ou_trader_eval(sb, g, d, now, done):
             b["mid"], b["edge"], round(b["edge"], 1),
             b["bid_c"], b["ask_c"],
             extra_blob={"ou_trader": True, "line": line,
-                        "proj_total": _proj_total},
+                        "proj_total": _proj_total,
+                        "early_noveto": (_noveto and
+                                         b["edge"] < _OU_TRADER_MIN_EDGE_PP)},
             cap_flag="ou_trader",
             query_text="auto-bet: O/U trader",
             reason=(f"O/U TRADER — {b['side']} {line} pegged "
@@ -15488,28 +15527,59 @@ def _opener_pass(sb, now, deadline):
                             sim0 = None
                         if edge0 >= _OPENER_JUNK_EDGE_PP:
                             continue      # newborn junk book — never latch
-                        # BET BEFORE PERSIST (Aug 4 — the CAP LATCH, the
-                        # watchdog's first night: 14 would-bet Friday
-                        # games persisted DONE while the cap was full of
-                        # settled bets, so they were never retried). A
-                        # cap-blocked bet skips the persist entirely —
-                        # the game re-enters the pool when slots free.
+                        # EARLY NO-VETO (doctrine at _NOVETO_EARLY_MIN_H):
+                        # far out, every ML gets bet — the model picks the
+                        # side, it no longer vetoes the game. If the
+                        # model's side pegs over the entry cap (a fav past
+                        # 60¢), the OTHER side is the rent vehicle — no
+                        # view is the design, so the dog is fine.
+                        _noveto0 = _early_noveto(es0, now)
+                        _bet_ok0 = edge0 >= 2.5 or _noveto0
                         res0 = None
-                        if (AUTOBET_ENABLED and edge0 >= 2.5
+                        if (AUTOBET_ENABLED and _bet_ok0
                                 and e0.get("slug")):
-                            side_c0, entry_e0 = _peg_target(
-                                bid0, ask0, fairs[s] * 100.0)
-                            if side_c0 is not None:
-                                res0 = _autobet_execute(
-                                    sb, g, es0, "moneyline", s,
-                                    f"ML {s.upper()}", e0["slug"],
-                                    bool(e0.get("synthetic")), side_c0,
-                                    fairs[s], entry_e0, round(edge0, 1),
-                                    bid0, ask0,
-                                    {"diamond_ml": True,
-                                     "p_home": round(p_home, 4)})
+                            _cands0 = [(s, edge0, e0, q0)]
+                            if _noveto0:
+                                _o = "home" if s == "away" else "away"
+                                _eo = mlp.get(_o) or {}
+                                _qo = _eo.get("quote") or {}
+                                if _qo.get("bid") is not None and _eo.get("slug"):
+                                    _cands0.append(
+                                        (_o,
+                                         fairs[_o] * 100.0
+                                         - float(_qo["bid"]) * 100.0,
+                                         _eo, _qo))
+                            for _s1, _ed1, _e1, _q1 in _cands0:
+                                _b1 = float(_q1["bid"]) * 100.0
+                                _a1 = (float(_q1["ask"]) * 100.0
+                                       if _q1.get("ask") is not None else None)
+                                side_c0, entry_e0 = _peg_target(
+                                    _b1, _a1, fairs[_s1] * 100.0)
+                                _ft0: list = []
+                                if side_c0 is not None:
+                                    res0 = _autobet_execute(
+                                        sb, g, es0, "moneyline", _s1,
+                                        f"ML {_s1.upper()}", _e1["slug"],
+                                        bool(_e1.get("synthetic")), side_c0,
+                                        fairs[_s1], entry_e0, round(_ed1, 1),
+                                        _b1, _a1,
+                                        {"diamond_ml": True,
+                                         "p_home": round(p_home, 4),
+                                         "early_noveto": (_noveto0
+                                                          and _ed1 < 2.5)},
+                                        fail_tag=_ft0)
                                 if res0 == "placed":
                                     stats["opener_bets"] += 1
+                                    break
+                                if res0 == "cap":
+                                    break     # slate full — game-level
+                                # Fall through to the OTHER side only on a
+                                # PRICE-shaped refusal (no valid peg, or
+                                # the Master Rule capping a heavy fav) —
+                                # rent/dedup refusals bind the whole game.
+                                if not (_noveto0 and (side_c0 is None
+                                                      or "master6" in _ft0)):
+                                    break
                         if res0 == "cap":
                             continue      # slate full — don't latch, retry
                         _ea = _prob_to_amer_py(bid0 / 100.0)
@@ -15532,7 +15602,9 @@ def _opener_pass(sb, now, deadline):
                             "signal_blob": {"opener_shadow": True,
                                             "diamond_ml": True,
                                             "p_home": round(p_home, 4),
-                                            "would_bet": edge0 >= 2.5,
+                                            "early_noveto": (_noveto0
+                                                             and edge0 < 2.5),
+                                            "would_bet": _bet_ok0,
                                             # A would-bet that produced NO
                                             # order must not latch. The
                                             # done-set treats would_bet=true
@@ -15549,7 +15621,7 @@ def _opener_pass(sb, now, deadline):
                                             # window arrives with nobody
                                             # watching. Exactly the NRFI hole
                                             # of Aug 16, one lane over.
-                                            "dayof_wait": (edge0 >= 2.5
+                                            "dayof_wait": (_bet_ok0
                                                            and res0 != "placed"),
                                             "opener_unclamped": True},
                             "logged_at": now.isoformat(),
@@ -16333,7 +16405,14 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
     if bc is None:
         return "no_book"
     sn, e, peg, pblk, ps, q, dist = bc
-    if e < _GRIDIRON_MIN_EDGE_PP:
+    # EARLY NO-VETO (doctrine at _NOVETO_EARLY_MIN_H): far out, the model
+    # stops vetoing rent-collector football bets — it still picked the
+    # rung and side above (tiebreaker). The tail gate STAYS (a rung 10+
+    # pts off projection is where the cover model's own backtest says its
+    # tails lie), as do the junk cliff, entry cap, and the executor's
+    # rent gate.
+    _noveto = _early_noveto(es0, datetime.now(timezone.utc))
+    if e < _GRIDIRON_MIN_EDGE_PP and not _noveto:
         return "edge"
     if e >= _OPENER_JUNK_EDGE_PP:
         return "junk"
@@ -16343,7 +16422,8 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
         return "entry_cap"
     xb = {"gridiron_autobet": True,
           "gridiron_margin": round(mg, 2),
-          "gridiron_total": round(tt, 2)}
+          "gridiron_total": round(tt, 2),
+          "early_noveto": bool(_noveto and e < _GRIDIRON_MIN_EDGE_PP)}
     if mt == "spread":
         xb["cover_p"] = round(ps, 4)
         xb["line_home"] = (float(pblk["line"]) if sn == "home"
