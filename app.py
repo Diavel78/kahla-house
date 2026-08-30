@@ -19852,11 +19852,24 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         elif our_ask > floor_c:
             tgt = max(floor_c, our_ask - 1.0)             # alone → step down
         _repair = tgt is not None and our_ask < floor_c - 0.26
+        # QTY TOP-UP (Aug 29 night — the MIL@CHC 0/5-on-20 catch): the ask
+        # was placed while the buy was only PARTIALLY filled (int(held) at
+        # that moment), the rest filled later, and an ask already sitting
+        # at its floor never triggers a walk — so the sell covered 5 of 20
+        # FOREVER. The harvest truncated-ladder lesson again: a dedup
+        # keyed on venue state makes a partial write permanent. More
+        # inventory than the resting ask covers → re-create at the SAME
+        # price with full held (the create below always uses int(held2)).
+        _resize = (tgt is None and our_ask >= floor_c - 0.26
+                   and held > our_ask_qty + 0.5)
+        if _resize:
+            tgt = our_ask
         if tgt is not None and best_bid is not None and tgt <= best_bid:
             tgt = float(int(best_bid)) + 1.0
-        # down-moves only — EXCEPT the floor repair, the one legal up-move
+        # down-moves only — EXCEPT floor repair + qty top-up, the two
+        # legal not-down moves
         if (tgt is None or tgt < floor_c
-                or (not _repair and tgt >= our_ask - 0.26)):
+                or (not _repair and not _resize and tgt >= our_ask - 0.26)):
             continue                     # nothing to do this pass
         if not SCALP_ENABLED:
             _scalp_shadow(sb, r, b, now, tgt, best_bid, comp_ask, held, res)
