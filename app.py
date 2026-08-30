@@ -15271,6 +15271,15 @@ def _ou_trader_eval(sb, g, d, now, done):
         "signal_blob": {"opener_shadow": True, "ou_trader": True,
                         "would_bet": best is not None,
                         "bet_placed": placed,
+                        # A would-bet with no order is UNFINISHED WORK —
+                        # without this the done-set latches it forever
+                        # (would_bet=true + no dayof_wait = permanently
+                        # done). Bit us live Aug 29: six shadow rows
+                        # written while OU_TRADER_ENABLED was still False
+                        # latched tomorrow's whole value slate. Same rule
+                        # as the ML persist (the RENT-REFUSAL-MUST-NOT-
+                        # LATCH landmine).
+                        "dayof_wait": (best is not None and not placed),
                         "proj_total": _proj_total,
                         "book_mid_c": (round(best["mid"] * 100, 1)
                                        if best else
