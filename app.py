@@ -4906,7 +4906,13 @@ _PM_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF", "UFC"]
 # have kept the whole slate off the tape (and the fbprop lane blind)
 # until Sep 3. 21 days adds ~16 games to the budgeted rotation; the
 # near-game priority tier keeps in-prime freshness safe.
-_PM_WINDOW_H = {"MLB": 36, "NBA": 96, "NHL": 96, "NFL": 504, "NCAAF": 72,
+# MLB 36→120 (Aug 29 night): Polymarket stretched its MLB listing to
+# ~3.5 days and the opener now bets to the venue's own horizon
+# (_pmm_venue_horizon) — a 36h tape window left every early bet's cent
+# history dark. 120h covers the observed horizon with pad; this is a
+# snapshot-ROTATION budget (staler cents per game when wide), never a
+# bettability gate — the opener does not read it.
+_PM_WINDOW_H = {"MLB": 120, "NBA": 96, "NHL": 96, "NFL": 504, "NCAAF": 72,
                 "UFC": 168}
 _KALSHI_CACHE: dict[str, tuple[float, dict]] = {}
 _KALSHI_TTL = 30  # seconds
@@ -14124,15 +14130,21 @@ _OPENER_DAYOF_LO_MIN = 3        # POOL floor = effectively first pitch.
 # devigged mid). A tight late book fails those tests on its own, so the
 # clock guard only ever removed the late games that were STILL mispriced
 # — exactly the ones worth having.
-_OPENER_HI_H = 96               # pool bound = the MINT bound (_pmm_ensure_
-                                # markets runs to _OPENER_HI_H, and the pool
-                                # must never be shallower than the thing
-                                # that creates rows — a market we mint and
-                                # never evaluate is invisible, which is the
-                                # exact shape of the two-day NRFI hole).
-                                # 72 -> 96 Aug 18 2026: Poly's furthest
-                                # listing sat EXACTLY on the old 72h bound,
-                                # so it could not be told apart from a clip.
+_OPENER_HI_H = 96               # FALLBACK-ONLY since Aug 29 2026. The real
+                                # bound is _pmm_venue_horizon (the furthest
+                                # start on Polymarket's own list) — this
+                                # constant serves only when the list is
+                                # unreadable. FOURTH bite of the same fence
+                                # forced that: 40h ignored posted Aug-4
+                                # lines (Aug 2, user: "Why have a fence at
+                                # all??"), 14d→72h diluted rotation, 72h→96h
+                                # Aug 18 when Poly's furthest listing sat
+                                # exactly ON the bound, and Aug 29 the venue
+                                # stretched to ~3.5 days and Wednesday's
+                                # slate sat invisible again. Widening a
+                                # timer four times IS the proof it should
+                                # not exist: mint and pool both follow the
+                                # venue's list now.
 # (14d → 72h Aug 2 ~12:25am AZ: Poly lists MLB ~T+2 evenings, so games
 # beyond 3 days CANNOT be listed yet — carrying 90 rotation candidates
 # when only ~35 can possibly be bettable diluted every tick's one
@@ -14955,6 +14967,34 @@ def _pmm_listed_mlb_keys():
         return None
 
 
+def _pmm_venue_horizon(now):
+    """THE VENUE'S OWN LISTING HORIZON — the furthest event_start on
+    Polymarket's MLB list, +2h pad. NO TIMER (user, Aug 29 night, on
+    catching Wednesday's games listed Saturday with nothing standing on
+    them: "if Polymarket offers it, you can see it. Why in the fuck would
+    you build a timer when you know exactly what games Polymarket has on
+    the ledger") — the old fixed _OPENER_HI_H (96h) was built when the
+    venue listed ~44h ahead, and the moment Polymarket stretched to ~3.5
+    days the whole early-rent bucket (the measured 26x money) sat
+    invisible. _OPENER_HI_H survives ONLY as the floor/fallback when the
+    list is unreadable. Call AFTER _pmm_listed_mlb_keys has run (the
+    opener pass does — the mint fills the cache first)."""
+    fallback = now + timedelta(hours=_OPENER_HI_H)
+    try:
+        starts = []
+        for ev in (_PMM_LISTED_CACHE.get("evs") or []):
+            try:
+                starts.append(datetime.fromisoformat(
+                    str(ev.get("start")).replace("Z", "+00:00")))
+            except Exception:
+                pass
+        if starts:
+            return max(max(starts) + timedelta(hours=2), fallback)
+    except Exception:
+        pass
+    return fallback
+
+
 def _pmm_ensure_markets(sb, now) -> dict:
     """POLYMARKET IS THE SCHEDULE (Aug 10 2026 — user, for the Nth time:
     "I don't give a flying fuck what ESPN does... get the fucking list
@@ -14984,10 +15024,12 @@ def _pmm_ensure_markets(sb, now) -> dict:
         evs = _PMM_LISTED_CACHE.get("evs") or []
         st["pmm_sched_listed"] = len(evs)
         lo = now - timedelta(hours=6)
-        # Mint exactly as deep as the pool evaluates, never deeper. The old
-        # +24 created a band of markets rows that existed but were never
-        # looked at — invisible inventory, the same shape as the NRFI hole.
-        hi = now + timedelta(hours=_OPENER_HI_H)
+        # Mint exactly as deep as the pool evaluates, never deeper — and
+        # both now run to the VENUE'S OWN horizon (_pmm_venue_horizon),
+        # not a timer. The old +24 created a band of markets rows that
+        # existed but were never looked at — invisible inventory, the
+        # same shape as the NRFI hole.
+        hi = _pmm_venue_horizon(now)
         try:
             have = (sb.table("markets")
                     .select("event_name,event_start")
@@ -15308,7 +15350,9 @@ def _opener_pass(sb, now, deadline):
         # no third-party spine in the path. (See _pmm_ensure_markets.)
         stats.update(_pmm_ensure_markets(sb, now))
         lo = (now + timedelta(minutes=_OPENER_DAYOF_LO_MIN)).isoformat()
-        hi = (now + timedelta(hours=_OPENER_HI_H)).isoformat()
+        # Pool bound = the venue's listing horizon (the mint call above
+        # just refreshed the list cache), never a fixed timer.
+        hi = _pmm_venue_horizon(now).isoformat()
         try:
             raw = (sb.table("markets").select("id,event_name,event_start,sport")
                    .eq("sport", "MLB").eq("status", "active")
@@ -16292,17 +16336,14 @@ def _opener_watchdog(sb, now, opener_stats):
         # Aug 11. A full slate PMM prices with nothing standing on it is
         # an outage no matter how good the total looks.
         # ⚠ ONLY DATES THE LANE CAN ACTUALLY BUY (Aug 11 2026 — this check
-        # cried wolf its first night). Polymarket lists further out than
-        # the opener's `_OPENER_HI_H` window, so a date whose games are
-        # 90h away legitimately has zero bets and always will until it
-        # enters the pool. Counting it as a hole made the watchdog fire
-        # on a perfectly healthy lane. Use the listing's own start times
-        # (`evs`), not the key set, so the window is real rather than
-        # inferred from the ET date.
-        horizon = now + timedelta(hours=_OPENER_HI_H)
+        # cried wolf its first night). Since Aug 29 the pool runs to the
+        # VENUE's listing horizon (_pmm_venue_horizon — no timer), so
+        # every future listed date is buyable and every one counts here.
+        # Use the listing's own start times (`evs`), not the key set, so
+        # the window is real rather than inferred from the ET date.
         day_games: dict = {}
         for st in listed_starts:
-            if not (now < st <= horizon):
+            if st <= now:
                 continue
             d0 = _et_day(st.isoformat())
             if d0 > et_today:
@@ -19876,13 +19917,20 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # oversell risk) trims down. Re-create at the SAME price; the
         # create below always uses int(held2), the fresh post-cancel
         # read, so the size written is the venue's truth at write time.
-        _resize = (tgt is None and our_ask >= floor_c - 0.26
-                   and abs(held - our_ask_qty) > 0.5)
-        if _resize:
-            tgt = our_ask
+        # ⚠ v1 of this fired only on `tgt is None` — a COMPETITOR SHARING
+        # OUR LEVEL makes the lead-branch compute tgt == our own price,
+        # which suppressed the resize on every one of the six live
+        # mismatches (they all sat at the touch). The mismatch now forces
+        # the re-create whenever no legal DOWN-move exists this pass.
+        _mismatch = abs(held - our_ask_qty) > 0.5
+        _resize = False
+        if (_mismatch and not _repair and our_ask >= floor_c - 0.26
+                and (tgt is None or tgt >= our_ask - 0.26)):
+            tgt = our_ask if (tgt is None or tgt > our_ask) else tgt
+            _resize = True
         if tgt is not None and best_bid is not None and tgt <= best_bid:
             tgt = float(int(best_bid)) + 1.0
-        # down-moves only — EXCEPT floor repair + qty top-up, the two
+        # down-moves only — EXCEPT floor repair + qty resize, the two
         # legal not-down moves
         if (tgt is None or tgt < floor_c
                 or (not _repair and not _resize and tgt >= our_ask - 0.26)):
