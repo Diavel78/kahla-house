@@ -6004,6 +6004,54 @@ def _pmm_book(client, slug: str) -> dict | None:
             "best_ask": asks[0][0] if asks else None}
 
 
+# ── THE MARKET'S OWN PRICE GRID (Aug 30 2026, user: "In the world of
+# APIs… why are we still doing whole cents??") ──────────────────────────
+# The venue publishes the tick per market: `orderPriceMinTickSize` on the
+# market object — 0.005 (half-cent) on game books, 0.01 on innings/prop
+# books, both seen live in one probe. The published scoring formula makes
+# the grid load-bearing: score = df^(ticks from best), so quoting whole
+# cents on a half-cent book voluntarily rests one tick behind anyone on
+# the true grid (df 0.40 → they score 2.5× our size). The old blanket
+# WHOLE-CENTS rule was a scar from the innings books, where sub-tick
+# prices are silently rounded down — with the tick read from the market
+# itself, that landmine is unreachable by construction: innings books
+# SAY 0.01. (The Aug-era "app displays whole cents so the bot bets whole
+# cents" display-ambiguity decision is superseded by the user's explicit
+# Go — the app truncates 47.5 to 47 on screen; our own records stay
+# exact.) Tick cached per slug forever (it never changes); unknown or
+# unreadable → 1.0¢, the grid that is valid everywhere.
+_TICK_CACHE: dict[str, float] = {}
+
+
+def _pmm_tick_c(client, slug: str) -> float:
+    """orderPriceMinTickSize in CENTS (0.5 or 1.0). Never raises; a
+    failed read returns 1.0 WITHOUT caching so the next call retries."""
+    t = _TICK_CACHE.get(slug)
+    if t:
+        return t
+    try:
+        m = client.markets.retrieve_by_slug(slug) or {}
+        if isinstance(m, dict):
+            m = m.get("market") or m
+        v = float(m.get("orderPriceMinTickSize") or 0)
+        if 0.001 <= v <= 0.02:
+            _TICK_CACHE[slug] = v * 100.0
+            return _TICK_CACHE[slug]
+    except Exception:
+        pass
+    return 1.0
+
+
+def _grid_dn(c: float, tick: float) -> float:
+    """Snap a cents price DOWN onto the market's grid."""
+    return math.floor(c / tick + 1e-9) * tick
+
+
+def _grid_up(c: float, tick: float) -> float:
+    """Snap a cents price UP onto the market's grid."""
+    return math.ceil(c / tick - 1e-9) * tick
+
+
 def _kalshi_book(ticker: str) -> dict | None:
     """Kalshi orderbook for one side -> normalized book in cents. yes_dollars
     = bids for this side; no_dollars = the other side's bids, which become
@@ -13269,7 +13317,8 @@ def _whiff_autobet(sb, bet_cands, ginfo, now):
             continue
         bid_c, ask_c = book.get("best_bid"), book.get("best_ask")
         _join = (ptype or '') in _JOIN_TOUCH_FAMS
-        peg_c, entry_edge = _peg_target(bid_c, ask_c, fair_c, join=_join)
+        peg_c, entry_edge = _peg_target(bid_c, ask_c, fair_c, join=_join,
+                                        tick=_pmm_tick_c(bclient, key))
         if peg_c is None or entry_edge < _WHIFF_BET_MIN_PP:
             continue                           # whiff bar (4pp), not 2.5
         # PEG-STAGE GATES (Aug 5 2026 — the first Outs IQ bet pegged 12¢
@@ -14415,24 +14464,29 @@ def _diamond_ml(sb, event_name, away_sp_name, home_sp_name):
     return (xh ** k) / (xh ** k + xa ** k)
 
 
-def _peg_target(bid_c, ask_c, fair_c, join=False):
-    """(side_c, entry_edge) — the cheap-first whole-cent peg with every
-    gate applied (floor(bid)+1¢; one-cent book → join; virgin book →
+def _peg_target(bid_c, ask_c, fair_c, join=False, tick=1.0):
+    """(side_c, entry_edge) — the cheap-first GRID-NATIVE peg with every
+    gate applied (bid + one tick; one-tick book → join; virgin book →
     fair−6 anchor; entry cap; ≥2.5pp edge floor). (None, None) = pass.
 
-    join=True pegs AT the touch instead of a cent over it. Both positions
+    tick = the market's own orderPriceMinTickSize in cents (Aug 30 2026
+    — 0.5 on game books, 1.0 on innings; _pmm_tick_c). Leading by the
+    TRUE tick is the whole point: df^ticks means a whole-cent lead on a
+    half-cent book concedes the touch to anyone quoting the finer grid.
+
+    join=True pegs AT the touch instead of a tick over it. Both positions
     score DF^0 for our own order, but leading also pushes every other
     resting order down a tick, which is worth ~2.85× the rent per second.
     You trade that away for TIME on the book — the right trade only where
     we'd rather not be filled at all (see _JOIN_TOUCH_FAMS)."""
     if bid_c is not None and bid_c > 0:
-        t = float(int(bid_c)) + (0.0 if join else 1.0)
+        t = _grid_dn(bid_c, tick) + (0.0 if join else tick)
         if ask_c is not None and t >= ask_c:
-            t = float(int(bid_c))
+            t = _grid_dn(bid_c, tick)
     else:
-        t = float(int(fair_c - 6.0))
+        t = _grid_dn(fair_c - 6.0, tick)
         if ask_c is not None and t >= ask_c:
-            t = float(int(ask_c - 1.0))
+            t = _grid_up(ask_c, tick) - tick
     e = fair_c - t
     if t <= 0 or t > _REPEG_NRFI_PRICE_CAP_C or e < 2.5:
         return None, None
@@ -15354,9 +15408,13 @@ def _ou_trader_eval(sb, g, d, now, done):
         ask_c = q.get("ask") * 100.0 if q.get("ask") is not None else None
         if bid_c <= 0:
             continue
-        target = float(int(bid_c)) + 1.0     # whole-cent cheap-first peg
+        try:                                 # grid-native peg (Aug 30)
+            _tk = _pmm_tick_c(get_client(), blk["slug"])
+        except Exception:
+            _tk = 1.0
+        target = _grid_dn(bid_c, _tk) + _tk  # cheap-first, lead by one tick
         if ask_c is not None and target >= ask_c:
-            target = float(int(bid_c))       # one-tick book → join the bid
+            target = _grid_dn(bid_c, _tk)    # one-tick book → join the bid
         edge = mid * 100.0 - target
         if not (_OU_TRADER_MIN_ENTRY_C <= target <= _OU_TRADER_MAX_ENTRY_C):
             continue
@@ -15703,8 +15761,13 @@ def _opener_pass(sb, now, deadline):
                                 _b1 = float(_q1["bid"]) * 100.0
                                 _a1 = (float(_q1["ask"]) * 100.0
                                        if _q1.get("ask") is not None else None)
+                                try:      # grid-native (Aug 30)
+                                    _tk1 = _pmm_tick_c(
+                                        get_client(), _e1["slug"])
+                                except Exception:
+                                    _tk1 = 1.0
                                 side_c0, entry_e0 = _peg_target(
-                                    _b1, _a1, fairs[_s1] * 100.0)
+                                    _b1, _a1, fairs[_s1] * 100.0, tick=_tk1)
                                 _ft0: list = []
                                 if side_c0 is not None:
                                     res0 = _autobet_execute(
@@ -15971,27 +16034,26 @@ def _opener_pass(sb, now, deadline):
             ask_c = (book or {}).get("best_ask")
             if bid_c is None and bid is not None:
                 bid_c = float(bid) * 100.0
-            # WHOLE CENTS ONLY (Padres 47.5¢ incident, Aug 2): the first
-            # half-cent peg made every display disagree — the ping rounded
-            # 47.5 up to "48", the Poly app truncated it down to "47", and
-            # the user read "you bet WITH the market". The app displays
-            # whole cents, so the bot bets whole cents: peg = floor(best
-            # bid) + 1¢. The half-cent of cheapness isn't worth a single
-            # ambiguous screenshot.
+            # GRID-NATIVE since Aug 30 2026 (user Go — supersedes the
+            # Aug-2 "whole cents only" rule from the Padres 47.5¢ display
+            # incident; the app still truncates half-cents on screen, our
+            # records stay exact). On THIS lane it changes nothing in
+            # practice: first-inning books tick 0.01 per their own
+            # orderPriceMinTickSize, so the grid snap lands on whole
+            # cents — but by metadata now, not by blanket rule.
+            _tk = _pmm_tick_c(pclient, slug)
             if bid_c is not None and bid_c > 0:
                 # JOIN THE TOUCH, don't lead it (Aug 16 2026, user). Leading
                 # is worth ~2.85× the rent per second because it demotes the
                 # whole queue a tick — but it also puts us first in line for
                 # every seller, and rent is score × TIME. At a 78.2% fill rate
                 # the time term is what we were losing. Joining also enters a
-                # cent cheaper on the fills we do get.
-                target = float(int(bid_c))
-                if ask_c is not None and target >= ask_c:
-                    target = float(int(bid_c))
+                # tick cheaper on the fills we do get.
+                target = _grid_dn(bid_c, _tk)
             else:
-                target = float(int(fair_c - 6.0))     # virgin book → anchor cheap
+                target = _grid_dn(fair_c - 6.0, _tk)  # virgin book → anchor cheap
                 if ask_c is not None and target >= ask_c:
-                    target = float(int(ask_c - 1.0))
+                    target = _grid_up(ask_c, _tk) - _tk
             side_c = target
             entry_edge = fair_c - side_c
             if (side_c <= 0 or side_c > _REPEG_NRFI_PRICE_CAP_C
@@ -16535,7 +16597,11 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
         if (q.get("bid") is None or ln is None or not pblk.get("slug")
                 or float(q["bid"]) <= 0):
             continue
-        peg = float(int(float(q["bid"]) * 100.0)) + 1.0
+        try:                              # grid-native peg (Aug 30)
+            _tk = _pmm_tick_c(get_client(), pblk.get("slug") or "")
+        except Exception:
+            _tk = 1.0
+        peg = _grid_dn(float(q["bid"]) * 100.0, _tk) + _tk
         # ONE-TICK BOOK → JOIN, don't jump (_peg_target's rule; this leg
         # re-implemented the peg raw and missed it). On the tight books
         # the venue re-provisioned Aug 23, floor(bid)+1 lands ON the ask,
@@ -16546,7 +16612,7 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
         _askc = (float(q["ask"]) * 100.0
                  if q.get("ask") is not None else None)
         if _askc is not None and peg >= _askc:
-            peg = float(q["bid"]) * 100.0
+            peg = _grid_dn(float(q["bid"]) * 100.0, _tk)
         if mt == "spread":
             lh = float(ln) if sn == "home" else -float(ln)
             ph = _gridiron_cover_p(pm, mg, lh)
@@ -16998,7 +17064,12 @@ def _gridiron_opener_pass(sb, now, deadline):
                 # means a market that pays only LATER (day_of) is missed by
                 # this pass — the football dayof_wait wire comes when
                 # bet_gate="rent" rows show that actually happening.
-                _peg0 = float(int(bid0)) + 1.0
+                try:              # grid-native peg (Aug 30)
+                    _tk0 = _pmm_tick_c(
+                        get_client(), (mlp.get(s) or {}).get("slug") or "")
+                except Exception:
+                    _tk0 = 1.0
+                _peg0 = _grid_dn(bid0, _tk0) + _tk0
                 _epeg0 = fairs[s] * 100.0 - _peg0
                 _mblk0 = mlp.get(s) or {}
                 if (_epeg0 >= _GRIDIRON_MIN_EDGE_PP and not junk0
@@ -17101,7 +17172,8 @@ def _gridiron_opener_pass(sb, now, deadline):
                     _bid, _mid = _q.get("bid"), _q.get("mid")
                     if _bid is None or _mid is None or _bid <= 0:
                         continue
-                    _tgt = float(int(_bid * 100.0)) + 1.0
+                    _tks = _TICK_CACHE.get(_pblk.get("slug") or "", 1.0)
+                    _tgt = _grid_dn(_bid * 100.0, _tks) + _tks
                     _e = _mid * 100.0 - _tgt
                     if _cheap is None or _e > _cheap[1]:
                         _cheap = (_sn, _e, _tgt, _pblk.get("line"))
@@ -19883,7 +19955,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         _vc4 = (positions.get(slug4) or {}).get("avg_price")
         if _vc4 is not None and _vc4 > 0:
             e4 = max(e4, float(_vc4) * 100.0)   # venue-cost floor, mirrored
-        f4 = min(99.0, float(math.ceil(e4 - 1e-9)))   # cost base (Aug 30)
+        f4 = min(99.0, _grid_up(e4, _TICK_CACHE.get(slug4, 1.0)))  # cost base
         return 0 if a4 < f4 - 0.26 else 1
     cands.sort(key=_floor_viol)
     for r, b, slug, synth in cands:
@@ -19924,7 +19996,12 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         _vc = (positions.get(slug) or {}).get("avg_price")
         if _vc is not None and _vc > 0:
             entry_c = max(entry_c, float(_vc) * 100.0)
-        floor_c = min(99.0, float(math.ceil(entry_c - 1e-9)))
+        # GRID-NATIVE (Aug 30): floor/steps/leads on the market's OWN tick
+        # (orderPriceMinTickSize — 0.5c game books, 1c innings). A
+        # half-cent book floored to whole cents gave away up to a full
+        # extra tick of exit price and rested a tick behind the true grid.
+        tick = _pmm_tick_c(client, slug)
+        floor_c = min(99.0, _grid_up(entry_c, tick))
         # IN-PLAY = DUMP AT MONEY-BACK (user policy, Aug 27 night: "The
         # only thing that survives a game going live is the scalp...
         # Dump it as soon as we get our money back"). Pre-game the ask
@@ -19968,7 +20045,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         if not mine:
             # ── PLACE: join the top of the book, never cross, floor binds
             if _inplay:
-                tgt = max(floor_c, (float(int(best_bid)) + 1.0
+                tgt = max(floor_c, (_grid_dn(best_bid, tick) + tick
                                     if best_bid is not None else floor_c))
             elif comp_ask is not None:
                 # LEAD the ask by 1¢ — be THE maker, front of the queue,
@@ -19976,12 +20053,12 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 # the sell right? Not joining the Queue? following the
                 # rule of my cost +1" — supersedes the spec's join rule).
                 # The floor still wins: never under cost.
-                tgt = max(floor_c, float(int(comp_ask)) - 1.0)
+                tgt = max(floor_c, _grid_up(comp_ask, tick) - tick)
             else:
                 tgt = max(floor_c, entry_c + 10.0)
-            tgt = min(99.0, float(int(round(tgt))))
+            tgt = min(99.0, _grid_up(tgt, tick))
             if best_bid is not None and tgt <= best_bid:
-                tgt = float(int(best_bid)) + 1.0   # post-only: never cross
+                tgt = _grid_dn(best_bid, tick) + tick  # post-only: never cross
             if tgt < floor_c:
                 continue
             if not SCALP_ENABLED:
@@ -20005,21 +20082,21 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             # lift it to the cost floor proper.
             tgt = floor_c
             if best_bid is not None and tgt <= best_bid:
-                tgt = float(int(best_bid)) + 1.0
+                tgt = _grid_dn(best_bid, tick) + tick
             if tgt <= our_ask + 0.26:
                 tgt = None
         elif _inplay:
-            _dump = max(floor_c, (float(int(best_bid)) + 1.0
+            _dump = max(floor_c, (_grid_dn(best_bid, tick) + tick
                                   if best_bid is not None else floor_c))
             if _dump < our_ask - 0.26:
                 tgt = _dump
         elif (comp_ask is not None
-              and float(int(comp_ask)) - 1.0 < our_ask - 0.26):
+              and _grid_up(comp_ask, tick) - tick < our_ask - 0.26):
             # a competitor is at or inside our ask → retake the front:
             # LEAD them by 1¢ (never join), floored at cost
-            tgt = max(floor_c, float(int(comp_ask)) - 1.0)
+            tgt = max(floor_c, _grid_up(comp_ask, tick) - tick)
         elif our_ask > floor_c:
-            tgt = max(floor_c, our_ask - 1.0)             # alone → step down
+            tgt = max(floor_c, our_ask - tick)            # alone → step down
         _repair = tgt is not None and our_ask < floor_c - 0.26
         # QTY INVARIANT (Aug 29 night — the MIL@CHC 0/5-on-20 catch; user
         # rule: "the sell order should ALWAYS match the owned position"):
@@ -20046,7 +20123,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             tgt = our_ask if (tgt is None or tgt > our_ask) else tgt
             _resize = True
         if tgt is not None and best_bid is not None and tgt <= best_bid:
-            tgt = float(int(best_bid)) + 1.0
+            tgt = _grid_dn(best_bid, tick) + tick
         # down-moves only — EXCEPT floor repair + qty resize, the two
         # legal not-down moves
         if (tgt is None or tgt < floor_c
@@ -20325,7 +20402,11 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                                 if isinstance(blob.get("whiff"), dict) else None)
                     _join_lane = (f.get("market_type") == "nrfi"
                                   or (_blobfam or "") in _JOIN_TOUCH_FAMS)
-                    _t = float(int(new_c)) + (0.0 if _join_lane else 1.0)
+                    try:              # grid-native chase (Aug 30)
+                        _tkr = _pmm_tick_c(client, f.get("slug") or "")
+                    except Exception:
+                        _tkr = 1.0
+                    _t = _grid_dn(new_c, _tkr) + (0.0 if _join_lane else _tkr)
                     _a = f.get("best_ask_c")
                     if _a is None or _t < _a:
                         new_c = _t
