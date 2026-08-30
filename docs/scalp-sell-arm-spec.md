@@ -39,9 +39,16 @@ THE TOUCH and walks DOWN, so it actually trades.
 4. **Walk DOWN when unfilled**, on the repeg cadence, toward the floor.
    Walking UP is allowed when the book rises (stay at the touch); the floor
    only binds the bottom.
-5. **Floor = entry + 1¢** ("that way it's always a baby profit if nothing
-   else"). Maker fee at worst 1.75·p(1−p) ≈ 0.44¢/share at 50¢, so +1¢
-   stays net-positive at every price on the grid. Never rest below floor.
+5. **Floor = ceil(cost) — MONEY BACK (revised Aug 30 2026; was entry+1¢).**
+   User: "Instead of cost +1, it's just cost at the base." The scalp is an
+   exit/recycle mechanism, not a profit center: a filled exit puts a fresh
+   BID back to work earning bid-side rent, and per the venue's published
+   scoring formula the resting ask earns its own side while it waits. A
+   flat round trip eats ~2 maker fees (~17¢ on 20 contracts) — accepted,
+   small against $1-2/mkt-day rent. The degenerate same-price churn loop
+   is blocked structurally by the never-cross rule (an ask can't rest
+   at/below best bid, so the floor only binds after the book moves down
+   from entry). Never rest below floor.
 6. **GTD through resolution — the ask stays working in-play** until it
    fills or the contract settles. The pick-six risk (live fair gaps past a
    resting ask before a tick can move it) is ACCEPTED by the user: unwinds

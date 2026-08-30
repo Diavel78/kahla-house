@@ -15257,7 +15257,7 @@ def _et_day(iso: str | None) -> str:
 # MOVE, only the live per-market ask counts — and the executor still asks
 # it at every placement, so if the venue pulls totals again the lane goes
 # quiet on its own. What changed since the Aug-18 era: exits are the
-# SCALP ARM now (cost+1 floor, walk, in-play money-back dump — the dead
+# SCALP ARM now (cost-base floor, walk, in-play money-back dump — the dead
 # harvest's +60% ladder is gone), and scalp-outs rinse-repeat through the
 # dayof_wait re-entry like ML.
 OU_TRADER_ENABLED = True
@@ -15271,7 +15271,7 @@ def _ou_trader_eval(sb, g, d, now, done):
     badly"; killed Aug 18 with the rent program; REVIVED Aug 29 when the
     venue re-enrolled MLB totals — see the flag's comment). Buys CHEAP on
     whichever total side pegs ≥3pp under the book's OWN devigged mid; the
-    SCALP ARM exits (cost+1 floor, walk, in-play money-back dump — the
+    SCALP ARM exits (cost-base floor, walk, in-play money-back dump — the
     harvest-era +60% half-sell is dead), and a scalp-out rinse-repeats
     through dayof_wait like ML. ⚠ NO MODEL TOTAL ANYWHERE:
     the July 4 2026 totals blacklist (model O/U −13.7u lifetime) stays
@@ -15354,7 +15354,7 @@ def _ou_trader_eval(sb, g, d, now, done):
                     f"{round(b['mid'] * 100)}¢ mid "
                     f"({round(b['edge'], 1)}pp cheap); "
                     f"{_AUTOBET_CONTRACTS} contracts, scalp arm exits at "
-                    f"cost+1 or better — touch-curve bet, no model"),
+                    f"cost or better — touch-curve bet, no model"),
             contracts=_AUTOBET_CONTRACTS, entry_line=line)
         if res == "cap":
             return None            # slate full — don't latch, retry
@@ -19647,9 +19647,9 @@ SCALP_ENABLED = True         # ARMED Aug 27 2026 night, ~40 min into shadow,
                              # by explicit user order (the spec reserved the
                              # shortening to him): "ARE WE READY OR NOT...
                              # Start at the maker, you can't go below my
-                             # cost +1. And it runs until it sells or
+                             # cost base. And it runs until it sells or
                              # finalizes." Mechanics confirmed = the built
-                             # engine: join-the-touch ask, floor entry+1¢,
+                             # engine: join-the-touch ask, floor = cost,
                              # GTD through resolution. First live cycle is
                              # the probe (the harvest precedent) — verify
                              # the first asks via orders.list/the app.
@@ -19751,8 +19751,9 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     serial; the 'overlapping topup batches' duplicate incident is why).
     Per rent-lane pick whose BUY has filled (position on our side):
     - no working ask → place one: JOIN the best competitor ask, never
-      cross, never below floor = entry+1¢ (maker fee ≈0.44¢ at 50¢, so +1¢
-      is always a baby profit). No competitor ask at all → entry+10¢ start
+      cross, never below floor = ceil(cost) — MONEY BACK, the Aug 30 rev
+      (a flat trip eats ~2 maker fees; the recycle + ask-side rent pay for
+      it). No competitor ask at all → entry+10¢ start
       (spec-silent default; the walk brings it down from there).
     - working ask, unfilled → WALK: join a lower competitor ask, or when
       alone at the touch step DOWN 1¢/pass toward the floor (never below
@@ -19848,7 +19849,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         _vc4 = (positions.get(slug4) or {}).get("avg_price")
         if _vc4 is not None and _vc4 > 0:
             e4 = max(e4, float(_vc4) * 100.0)   # venue-cost floor, mirrored
-        f4 = min(99.0, float(math.ceil(e4 - 1e-9)) + 1.0)
+        f4 = min(99.0, float(math.ceil(e4 - 1e-9)))   # cost base (Aug 30)
         return 0 if a4 < f4 - 0.26 else 1
     cands.sort(key=_floor_viol)
     for r, b, slug, synth in cands:
@@ -19863,11 +19864,18 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         entry_c = _scalp_entry_c(r, b)
         if entry_c is None:
             continue
-        # FLOOR = ceil(real cost) + 1 (Aug 27 night — user caught an ask
-        # at 52¢ on a 51.7¢ cost: int(entry)+1 floored a FRACTIONAL entry
-        # at +0.3¢/share, which the ~0.4¢ maker fee eats. "Cost +1" means
-        # one whole cent over the real cost, rounded up — 51.7¢ → 53¢.
-        # A whole-cent entry is unchanged: 35.0¢ → 36¢.)
+        # FLOOR = ceil(real cost) — MONEY BACK, not cost+1 (user, Aug 30
+        # morning: "Instead of cost +1, it's just cost at the base" — the
+        # scalp is an exit/recycle mechanism, not a profit center; the +1
+        # optimized a ~breakeven penny while a filled exit puts a fresh
+        # BID back to work earning the bid-side rent, and per the venue's
+        # published formula the resting ask earns its own side meanwhile.
+        # A flat round trip eats ~2 maker fees (~17¢ on 20s) — accepted,
+        # small vs $1-2/mkt-day rent. The degenerate same-price churn
+        # loop is blocked by the never-cross rule below: an ask can't
+        # rest at/below best bid, so the floor only binds once the book
+        # has moved DOWN from our entry. ceil keeps a fractional cost
+        # whole-cent honest: 51.7¢ → 52¢; whole-cent 51.0¢ → 51¢.)
         # VENUE-COST FLOOR (Aug 28 — the SEA@TOR adopted-lot gap, user:
         # "cost at 71, sell at 69…. So again… EXPLAIN"): on machine buys
         # the stamp IS the fill price, but ADOPTED legacy positions were
@@ -19882,7 +19890,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         _vc = (positions.get(slug) or {}).get("avg_price")
         if _vc is not None and _vc > 0:
             entry_c = max(entry_c, float(_vc) * 100.0)
-        floor_c = min(99.0, float(math.ceil(entry_c - 1e-9)) + 1.0)
+        floor_c = min(99.0, float(math.ceil(entry_c - 1e-9)))
         # IN-PLAY = DUMP AT MONEY-BACK (user policy, Aug 27 night: "The
         # only thing that survives a game going live is the scalp...
         # Dump it as soon as we get our money back"). Pre-game the ask
@@ -19933,7 +19941,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 # not a joiner (user, Aug 27 night: "we are THE maker on
                 # the sell right? Not joining the Queue? following the
                 # rule of my cost +1" — supersedes the spec's join rule).
-                # The floor still wins: never under cost+1.
+                # The floor still wins: never under cost.
                 tgt = max(floor_c, float(int(comp_ask)) - 1.0)
             else:
                 tgt = max(floor_c, entry_c + 10.0)
@@ -19960,7 +19968,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         if our_ask < floor_c - 0.26:
             # FLOOR REPAIR — an ask resting below its true floor (placed
             # under the old int()+1 rounding) is the one legal UP-move:
-            # lift it to cost+1 proper.
+            # lift it to the cost floor proper.
             tgt = floor_c
             if best_bid is not None and tgt <= best_bid:
                 tgt = float(int(best_bid)) + 1.0
@@ -19974,7 +19982,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         elif (comp_ask is not None
               and float(int(comp_ask)) - 1.0 < our_ask - 0.26):
             # a competitor is at or inside our ask → retake the front:
-            # LEAD them by 1¢ (never join), floored at cost+1
+            # LEAD them by 1¢ (never join), floored at cost
             tgt = max(floor_c, float(int(comp_ask)) - 1.0)
         elif our_ask > floor_c:
             tgt = max(floor_c, our_ask - 1.0)             # alone → step down
