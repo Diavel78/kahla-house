@@ -349,6 +349,14 @@
             : !bk.ok ? ' · ⚠ backup FAILED ' + ago(bk.age_s)
             : bk.stale ? ' · ⚠ backup stale (' + ago(bk.age_s) + ')'
             : ' · backup ✓ ' + ago(bk.age_s);
+        // WS wake feed (kind=ws_feed, TRANSITION stamps — the latest one IS
+        // the current state, so "ws ✓ 3h" means connected FOR 3h, healthy).
+        // No stamp ever = feature predates the box's code — say nothing.
+        const w = c.ws || {};
+        const wsFrag = !w.state ? ''
+            : w.up ? ' · ws ✓ ' + ago(w.age_s)
+            : w.off ? ' · ws off (' + w.state.replace('disabled:', '') + ')'
+            : ' · ⚠ ws DOWN ' + ago(w.age_s);
         const offNames = c.lanes.filter(l => l.state === 'off')
                                 .map(l => l.lane).join(', ');
         // Count only LIVE lanes — the dead harvest was the whole "1 on
@@ -360,7 +368,7 @@
             + (nVer ? ' · ' + nVer + ' on vercel' : '')
             + (offNames ? ' · retired: ' + offNames : '')
             + (c.bad ? ' · ' + c.bad + ' need a look' : ' · all working')
-            + codeFrag + bkFrag;
+            + codeFrag + bkFrag + wsFrag;
     }
 
     // Top strip: number + dot. Green = holding/quoting (n>0), muted = a

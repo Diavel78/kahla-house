@@ -2425,8 +2425,33 @@ def _cellar_health(sb) -> dict:
                       "stale": bool(age_s is not None and age_s > 26 * 3600)}
     except Exception:
         backup = {}
+    # WS WAKE FEED (Aug 30 2026 — docs/ws-feed-spec.md): the box stamps
+    # kind=ws_feed on lifecycle TRANSITIONS only (started / connected /
+    # disconnected / connect_failed / disabled:*), so the LATEST stamp is
+    # the current state — "connected 3h ago" means connected for 3h, not
+    # stale. No stamp ever = feed predates this box's code — omit.
+    ws = {}
+    try:
+        r = (sb.table("exec_probe_runs").select("at,result")
+             .filter("params->>kind", "eq", "ws_feed")
+             .order("at", desc=True).limit(1).execute().data) or []
+        if r:
+            res0 = r[0].get("result") or {}
+            age_s = None
+            try:
+                age_s = int((datetime.now(timezone.utc) - _parse_iso(
+                    r[0].get("at"))).total_seconds())
+            except Exception:
+                pass
+            st = str(res0.get("state") or "")
+            ws = {"state": st, "age_s": age_s,
+                  "up": st in ("connected", "started"),
+                  "off": st.startswith("disabled"),
+                  "err": (res0.get("err") or "")[:120]}
+    except Exception:
+        ws = {}
     return {
-        "lanes": lanes, "bad": bad, "boot": boot, "backup": backup,
+        "lanes": lanes, "bad": bad, "boot": boot, "backup": backup, "ws": ws,
         # Counted separately from `bad` so an intentional kill is VISIBLE
         # without being an alarm — "off" should read as a decision someone
         # made, not as something to go fix.
