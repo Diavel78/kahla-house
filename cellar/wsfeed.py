@@ -74,16 +74,19 @@ class WsFeed:
             log.error("ws feed DISABLED: websocket-client not installed "
                       "(python3 -m pip install websocket-client). "
                       "Lanes run on schedule as before.")
+            self._stamp("disabled:no_lib")
             return False
         if not (os.environ.get("POLYMARKET_KEY_ID")
                 and os.environ.get("POLYMARKET_SECRET_KEY")):
             log.error("ws feed DISABLED: POLYMARKET_KEY_ID/SECRET_KEY not in "
                       "env. Lanes run on schedule as before.")
+            self._stamp("disabled:no_creds")
             return False
         self._thread = threading.Thread(target=self._run, name="cellar-ws",
                                         daemon=True)
         self._thread.start()
         log.info("ws feed started (%s)", WS_URL)
+        self._stamp("started")
         return True
 
     def shutdown(self) -> None:
@@ -110,7 +113,12 @@ class WsFeed:
         if self.sb is None:
             return
         now = time.time()
-        if state != "connected":
+        # Rate-limit only the FAILURE states — one-shot lifecycle stamps
+        # (started / disabled:*) and the connected transition must always
+        # land, and must not consume the failure budget (a "started" stamp
+        # eating the only disconnected stamp of the hour hid the very
+        # signal this table exists for).
+        if state in ("disconnected", "connect_failed"):
             if now - self._last_fail_stamp < FAIL_STAMP_MIN_S:
                 return
             self._last_fail_stamp = now
@@ -209,6 +217,13 @@ class WsFeed:
                 if self._was_connected:
                     self._was_connected = False
                     self._stamp("disconnected", err=repr(e))
+                else:
+                    # NEVER-CONNECTED failures must stamp too (v1 only
+                    # stamped transitions, so a feed that never got its
+                    # first connection wrote NOTHING — indistinguishable
+                    # from healthy silence, the exact hole this table
+                    # exists to close). Rate-limited like disconnects.
+                    self._stamp("connect_failed", err=repr(e))
                 wait = BACKOFF_S[min(backoff_i, len(BACKOFF_S) - 1)]
                 backoff_i += 1
                 log.warning("ws down (%s) — reconnect in %ss", e, wait)
