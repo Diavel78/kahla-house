@@ -2493,12 +2493,42 @@ def _dash_derived(sb) -> dict:
                     ("gameday_rewards", lambda: _gameday_rewards(sb)),
                     ("rent_7d", lambda: _rent_window(sb, 7)),
                     ("pnl_7d", lambda: _window_pnl(sb, 7)),
-                    ("pnl_stack", lambda: _pnl_stack(sb))):
+                    ("pnl_stack", lambda: _pnl_stack_memo(sb, out))):
         try:
             out[key] = fn()
         except Exception:
             out[key] = None
     return out
+
+
+# THE YTD WALK GOES HOURLY (Aug 30 2026 — Supabase Micro at 85% compute /
+# 85% memory, and pg_stat_statements put ~70% of ALL db time on exactly
+# two shapes: the poly_gameday_pnl RPC at YTD depth and the sells walk
+# paging every TRADE payload since Jan 1 — both inside _pnl_stack, which
+# the 5-min cache tick recomputed in full 12x an hour for numbers (7d/
+# 30d/YTD) that change once a DAY). The memo serves the heavy windows
+# for an hour; the LIVE numbers (today/yesterday) are refreshed on every
+# tick from the small 3-day gameday walk — same _venue_day_map basis, so
+# the one-basis rule holds. Memo only stores SUCCESSFUL stacks; a None
+# never latches. Process-local: a restart just recomputes once.
+_PNL_STACK_MEMO: dict = {"at": 0.0, "v": None}
+_PNL_STACK_TTL_S = 3600
+
+
+def _pnl_stack_memo(sb, derived_so_far: dict):
+    m = _PNL_STACK_MEMO
+    if m["v"] is not None and _time.time() - m["at"] < _PNL_STACK_TTL_S:
+        stk = dict(m["v"])
+        gd = derived_so_far.get("gameday_pnl") or {}
+        for k in ("today", "yesterday"):
+            if gd.get(k) is not None:
+                stk[k] = gd[k]
+        return stk
+    v = _pnl_stack(sb)
+    if v is not None:
+        m["v"] = dict(v)
+        m["at"] = _time.time()
+    return v
 
 
 def _lifetime_venue(sb, balance) -> dict | None:
