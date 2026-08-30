@@ -15390,11 +15390,19 @@ def _ou_trader_eval(sb, g, d, now, done):
            .get("polymarket") or {})
     over, under = tot.get("over") or {}, tot.get("under") or {}
     qo, qu = over.get("quote") or {}, under.get("quote") or {}
-    line = over.get("line")
-    if line is None or line != under.get("line"):
-        return None                # not listed / mismatched lines → retry
-    if qo.get("mid") is None or qu.get("mid") is None:
-        return None                # no two-sided book yet → retry
+    # THE LADDER (Aug 30 2026 — the "why don't we have an O/U bet"
+    # catch): MLB totals are ONE MARKET PER RUNG now (MIA@WSH at T-29h
+    # listed 3.5 through 13.5, eleven markets, all quoted), so the
+    # dossier's over and under blocks legitimately sit on DIFFERENT
+    # rungs — and the single-line-era equality check below skipped
+    # every far game silently, which emptied the lane's whole no-veto
+    # window. Each side is evaluated AT ITS OWN RUNG: every rung is its
+    # own market with its own slug and its own mid, so "cheap vs the
+    # book's own mid" is per-rung arithmetic. The 25-64¢ entry band is
+    # the natural rung selector (extreme rungs price out of band).
+    if (over.get("line") is None or qo.get("mid") is None) and \
+       (under.get("line") is None or qu.get("mid") is None):
+        return None                # nothing quoted yet → retry
     es = g.get("event_start")
     try:
         sim = round((datetime.fromisoformat(
@@ -15409,7 +15417,9 @@ def _ou_trader_eval(sb, g, d, now, done):
     best = None
     for side, blk, q in (("over", over, qo), ("under", under, qu)):
         bid, mid = q.get("bid"), q.get("mid")
-        if bid is None or mid is None or not blk.get("slug"):
+        s_line = blk.get("line")
+        if bid is None or mid is None or s_line is None \
+                or not blk.get("slug"):
             continue
         bid_c = bid * 100.0
         ask_c = q.get("ask") * 100.0 if q.get("ask") is not None else None
@@ -15430,7 +15440,7 @@ def _ou_trader_eval(sb, g, d, now, done):
         if best is None or edge > best["edge"]:
             best = {"side": side, "blk": blk, "target": target,
                     "edge": edge, "bid_c": bid_c, "ask_c": ask_c,
-                    "mid": mid}
+                    "mid": mid, "line": s_line}
     if best is not None and best["edge"] >= _OPENER_JUNK_EDGE_PP:
         return None                # newborn junk book — never latch, retry
     placed = False
@@ -15438,23 +15448,23 @@ def _ou_trader_eval(sb, g, d, now, done):
         b = best
         res = _autobet_execute(
             sb, g, es, "total", b["side"],
-            f"O/U {b['side'].upper()} {line}", b["blk"]["slug"],
+            f"O/U {b['side'].upper()} {b['line']}", b["blk"]["slug"],
             bool(b["blk"].get("synthetic")), b["target"],
             b["mid"], b["edge"], round(b["edge"], 1),
             b["bid_c"], b["ask_c"],
-            extra_blob={"ou_trader": True, "line": line,
+            extra_blob={"ou_trader": True, "line": b["line"],
                         "proj_total": _proj_total,
                         "early_noveto": (_noveto and
                                          b["edge"] < _OU_TRADER_MIN_EDGE_PP)},
             cap_flag="ou_trader",
             query_text="auto-bet: O/U trader",
-            reason=(f"O/U TRADER — {b['side']} {line} pegged "
-                    f"{round(b['target'])}¢ vs the book's own "
+            reason=(f"O/U TRADER — {b['side']} {b['line']} pegged "
+                    f"{round(b['target'])}¢ vs its own rung's "
                     f"{round(b['mid'] * 100)}¢ mid "
                     f"({round(b['edge'], 1)}pp cheap); "
                     f"{_AUTOBET_CONTRACTS} contracts, scalp arm exits at "
                     f"cost or better — touch-curve bet, no model"),
-            contracts=_AUTOBET_CONTRACTS, entry_line=line)
+            contracts=_AUTOBET_CONTRACTS, entry_line=b["line"])
         if res == "cap":
             return None            # slate full — don't latch, retry
         placed = (res == "placed")
@@ -15465,7 +15475,9 @@ def _ou_trader_eval(sb, g, d, now, done):
         "event_start": es, "sport": "MLB",
         "market_type": "total",
         "side": (best["side"] if best else "over"),
-        "line": line,
+        "line": (best["line"] if best
+                 else (over.get("line") if over.get("line") is not None
+                       else under.get("line"))),
         "entry_price": int(ea) if ea is not None else None,
         "units": 1, "confidence": "low",
         "timing_window": "opener", "prime_core": False,
