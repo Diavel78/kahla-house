@@ -140,8 +140,19 @@ class WsFeed:
             os.environ["POLYMARKET_KEY_ID"].strip(),
             os.environ["POLYMARKET_SECRET_KEY"].strip(),
             "GET", WS_PATH)
+        # macOS venv pythons ship a bare ssl module with NO CA roots (the
+        # REST side never sees this — requests/httpx carry certifi
+        # themselves). First live connect died exactly there:
+        # CERTIFICATE_VERIFY_FAILED, unable to get local issuer. Hand the
+        # socket the same certifi bundle; NEVER disable verification.
+        sslopt = None
+        try:
+            import certifi
+            sslopt = {"ca_certs": certifi.where()}
+        except Exception:
+            pass
         ws = websocket.create_connection(
-            WS_URL, timeout=RECV_TIMEOUT_S,
+            WS_URL, timeout=RECV_TIMEOUT_S, sslopt=sslopt,
             header=[f"{k}: {v}" for k, v in hdrs.items()])
         for rid, sub in (("cellar-order", SUB_ORDER),
                          ("cellar-position", SUB_POSITION)):

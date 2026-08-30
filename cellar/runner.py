@@ -228,10 +228,15 @@ class Runner:
                 sha = ""
         log.info("cellar code: %s", sha[:12] or "UNKNOWN (git unreadable)")
         try:
+            import sys
             self.sb.table("exec_probe_runs").insert(
                 {"params": {"kind": "cellar_boot"},
                  "result": {"sha": sha, "lanes": sorted(enabled),
-                            "side": config.OWNER}}).execute()
+                            "side": config.OWNER,
+                            # which-python archaeology cost three rounds on
+                            # Aug 30 (user pip vs framework vs the venv the
+                            # plist actually runs) — stamp it forever
+                            "python": sys.executable}}).execute()
         except Exception as e:
             log.warning("boot stamp write failed: %s", e)
 
