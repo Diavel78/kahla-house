@@ -1033,11 +1033,15 @@ sport the machine ever adds:
   contract** — every rent-lane fill gets an ask on the next pass, cost-base
   floor (money-back; Aug 30). New lanes join by adding their flag to `_scalp_lanes` and their
   family to `_SCALP_RENT_SLUGS` (the O/U revival is the worked example).
-- **THE 30-MINUTE RULE (user, Aug 29 2026):** a scalp exit inside T-30min
-  does NOT rinse-repeat — "we collected our rent, and I don't need the
-  game back. The goal is to never make it to the game start holding a
-  contract." Enforced in `_pmm_autolog`'s scalp-exit branch (`_late_exit`
-  routes to the cool-off instead of `dayof_wait`).
+- **THE NO-REBUY WINDOW — 60 MIN (user, Aug 29 2026 as the 30-minute
+  rule; WIDENED to 60 Aug 30, the day the scalp floor dropped to cost:
+  "Lots of movement in that hour, and I don't want the contract,
+  especially if we are selling at my cost now"):** a scalp exit inside
+  T-60min does NOT rinse-repeat — "we collected our rent, and I don't
+  need the game back. The goal is to never make it to the game start
+  holding a contract." `_SCALP_NO_REBUY_MIN`, enforced in
+  `_pmm_autolog`'s scalp-exit branch (`_late_exit` routes to the
+  cool-off instead of `dayof_wait`).
 - **THE STAKE SPLIT — HARD RULE (user, Aug 29 2026): rent collectors 20,
   bets-to-win 5.** "Spread, ML, and O/U are 20 contracts. MLB props, NFL
   props, etc — 5. The props ain't really paying rent, and we don't scalp

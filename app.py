@@ -7498,23 +7498,30 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                     _scalped = (reason == "sold pre-game"
                                 and isinstance(blob.get("scalp"), list)
                                 and len(blob.get("scalp") or []) > 0)
-                    # THE 30-MINUTE RULE (user, Aug 29 2026: "If the sell
-                    # occurs within a half hour of start time, do NOT
-                    # rebet it. We collected our rent, and I don't need
-                    # the game back. The goal is to never make it to the
-                    # game start holding a contract."): a scalp exit this
+                    # THE NO-REBUY WINDOW (born as the 30-MINUTE RULE,
+                    # user Aug 29 2026: "If the sell occurs within a half
+                    # hour of start time, do NOT rebet it. We collected
+                    # our rent, and I don't need the game back. The goal
+                    # is to never make it to the game start holding a
+                    # contract." WIDENED to 60 MIN Aug 30, the day the
+                    # scalp floor dropped to cost: "Lots of movement in
+                    # that hour, and I don't want the contract, especially
+                    # if we are selling at my cost now" — a last-hour
+                    # rebuy can only end as a fee-loss flat exit or a
+                    # contract held into the whistle): a scalp exit this
                     # close to first pitch LATCHES the game (swept=2, the
                     # permanent form) instead of re-arming — cycle closed,
                     # rent banked, walk away. ev_dt is non-None here (the
                     # sold-pre-game branch already required it).
                     _late_exit = (_scalped and ev_dt is not None
                                   and (ev_dt - now_dt)
-                                  < timedelta(minutes=30))
+                                  < timedelta(minutes=_SCALP_NO_REBUY_MIN))
                     if _late_exit:
                         _scalped = False
                         app.logger.info(
-                            "PMM-AUTOLOG 30-min rule: scalp exit inside "
-                            "T-30 on %s — latched, no re-bet", slug)
+                            "PMM-AUTOLOG no-rebuy window: scalp exit inside "
+                            "T-%dmin on %s — latched, no re-bet",
+                            _SCALP_NO_REBUY_MIN, slug)
                     try:
                         _op = (sb.table("pickbot_paperlog")
                                .select("id,signal_blob")
@@ -19772,6 +19779,9 @@ _SCALP_MAX_WALKS = 5         # cancel→verify→create walks per tick (1→2→
                              # budget. With every pre-game ask stepping
                              # toward its floor by design, 2/tick made the
                              # queue drain take hours).
+# No-rebuy window: a scalp exit inside T-this latches the game instead of
+# rinse-repeating (30→60 min Aug 30 2026, user — see the autolog comment).
+_SCALP_NO_REBUY_MIN = 60
 _SCALP_BUDGET_S = 30.0       # wall clock, checked BEFORE each write (12→30
                              # on the box — nothing kills the pass here)
 _SCALP_SHADOW_CAP = 30       # shadow entries kept per pick blob
