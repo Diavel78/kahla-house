@@ -2501,24 +2501,48 @@ def _dash_derived(sb) -> dict:
     return out
 
 
-# THE YTD WALK GOES HOURLY (Aug 30 2026 — Supabase Micro at 85% compute /
-# 85% memory, and pg_stat_statements put ~70% of ALL db time on exactly
-# two shapes: the poly_gameday_pnl RPC at YTD depth and the sells walk
-# paging every TRADE payload since Jan 1 — both inside _pnl_stack, which
-# the 5-min cache tick recomputed in full 12x an hour for numbers (7d/
-# 30d/YTD) that change once a DAY). The memo serves the heavy windows
-# for an hour; the LIVE numbers (today/yesterday) are refreshed on every
-# tick from the small 3-day gameday walk — same _venue_day_map basis, so
-# the one-basis rule holds. Memo only stores SUCCESSFUL stacks; a None
-# never latches. Process-local: a restart just recomputes once.
-_PNL_STACK_MEMO: dict = {"at": 0.0, "v": None}
-_PNL_STACK_TTL_S = 3600
+# THE YTD WALK RUNS AT MIDNIGHT OR ON THE BUTTON — NEVER ON A TIMER
+# (user, Aug 30: "hourly is too often... 2 or 3 times a day... when I
+# look, I want it right now. Midnight or when I click the button").
+# Background: Supabase Micro hit 85% compute / 85% memory and
+# pg_stat_statements put ~70% of ALL db time on the two shapes inside
+# _pnl_stack — the poly_gameday_pnl RPC at YTD depth and the sells walk
+# paging every TRADE payload since Jan 1 — recomputed in FULL by the
+# 5-min cache tick, 144x a day, for 7d/30d/YTD windows that change once
+# a day. Now the heavy walk runs when: (a) no prior stack exists, (b)
+# the AZ date rolled since it was computed, or (c) the dashboard's ↻
+# button stamped poly_dash_cache.stack_req_at after the last compute
+# (the button ALSO computes inline on Vercel for the right-now feel —
+# this tick-side path is its backstop if that times out). Every tick
+# still refreshes today/yesterday from the small 3-day gameday walk —
+# same _venue_day_map basis, so the one-basis rule holds. State lives
+# IN the cached blob (az_day/computed_at), so restarts don't recompute.
 
 
 def _pnl_stack_memo(sb, derived_so_far: dict):
-    m = _PNL_STACK_MEMO
-    if m["v"] is not None and _time.time() - m["at"] < _PNL_STACK_TTL_S:
-        stk = dict(m["v"])
+    az_today = datetime.now(timezone.utc).astimezone(
+        ZoneInfo("America/Phoenix")).date().isoformat()
+    prior, req_at = None, None
+    try:
+        r = (sb.table("poly_dash_cache").select("derived,stack_req_at")
+             .eq("id", 1).limit(1).execute().data) or []
+        if r:
+            prior = (r[0].get("derived") or {}).get("pnl_stack")
+            req_at = r[0].get("stack_req_at")
+        if not isinstance(prior, dict):
+            prior = None
+    except Exception:
+        prior = None
+    stale = True
+    if prior is not None and prior.get("az_day") == az_today:
+        stale = False
+        if req_at and prior.get("computed_at"):
+            try:
+                stale = _parse_iso(req_at) > _parse_iso(prior["computed_at"])
+            except Exception:
+                stale = False          # unreadable stamps → keep serving
+    if not stale:
+        stk = dict(prior)
         gd = derived_so_far.get("gameday_pnl") or {}
         for k in ("today", "yesterday"):
             if gd.get(k) is not None:
@@ -2526,9 +2550,10 @@ def _pnl_stack_memo(sb, derived_so_far: dict):
         return stk
     v = _pnl_stack(sb)
     if v is not None:
-        m["v"] = dict(v)
-        m["at"] = _time.time()
-    return v
+        v["az_day"] = az_today
+        v["computed_at"] = datetime.now(timezone.utc).isoformat()
+        return v
+    return prior                       # compute failed → last good stack
 
 
 def _lifetime_venue(sb, balance) -> dict | None:
@@ -21736,6 +21761,52 @@ def debug_splits_page():
 # ---------------------------------------------------------------------------
 # API routes — Dashboard
 # ---------------------------------------------------------------------------
+
+@app.route("/api/dashboard/refresh-stack", methods=["POST"])
+@admin_required
+def api_refresh_stack():
+    """The ↻ button on the Rolling Windows card (user, Aug 30: the heavy
+    7d/30d/YTD walk runs at midnight or when I click — and when I click,
+    "I want it right now"). Stamps stack_req_at (the durable request —
+    the box's next cache tick honors it even if everything below fails),
+    then attempts the compute INLINE so the page can repaint fresh in
+    one round trip. Inline overrun/failure degrades to queued: the tick
+    picks it up within ~5 min. 2-3 clicks a day is nothing; the load
+    problem was this walk running 144x/day on a timer."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "supabase unavailable"}), 503
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        sb.table("poly_dash_cache").update(
+            {"stack_req_at": now_iso}).eq("id", 1).execute()
+    except Exception:
+        pass                           # inline attempt below still counts
+    try:
+        v = _pnl_stack(sb)
+        if v is None:
+            raise RuntimeError("stack compute returned None")
+        v["az_day"] = datetime.now(timezone.utc).astimezone(
+            ZoneInfo("America/Phoenix")).date().isoformat()
+        v["computed_at"] = datetime.now(timezone.utc).isoformat()
+        # Merge into the cached blob so every reader (and the box tick's
+        # prior-read) sees it. Read-modify-write; a tick racing us just
+        # serves this same stack next lap (az_day fresh, req_at older).
+        try:
+            r = (sb.table("poly_dash_cache").select("derived")
+                 .eq("id", 1).limit(1).execute().data) or []
+            d = (r[0].get("derived") if r else None) or {}
+            d["pnl_stack"] = v
+            sb.table("poly_dash_cache").update(
+                {"derived": d}).eq("id", 1).execute()
+        except Exception:
+            pass                       # page still gets the fresh copy
+        return jsonify({"ok": True, "fresh": True, "stack": v})
+    except Exception as e:
+        return jsonify({"ok": True, "fresh": False, "queued": True,
+                        "note": f"inline compute failed ({str(e)[:80]}) — "
+                                f"the box tick refreshes it within ~5 min"})
+
 
 @app.route("/api/data")
 @admin_required

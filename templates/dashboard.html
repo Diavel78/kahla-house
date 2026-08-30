@@ -220,7 +220,16 @@
                  earn date is a FLOOR — the newest day or two are always
                  still filling in at the venue. -->
             <div class="card wide">
-                <div class="label">Rolling windows — all in</div>
+                <div class="label" style="display:flex;justify-content:space-between;align-items:center">
+                    <span>Rolling windows — all in</span>
+                    <!-- The heavy 7d/30d/YTD walk runs at midnight AZ or on
+                         this button — never on a timer (it was 144x/day and
+                         cooked the Micro instance). Click = compute NOW. -->
+                    <button id="stackRefresh" onclick="refreshStack()"
+                            style="background:none;border:1px solid rgba(255,255,255,.18);
+                                   color:inherit;border-radius:6px;padding:2px 10px;
+                                   font:inherit;font-size:12px;cursor:pointer;opacity:.75">↻</button>
+                </div>
                 <div id="ledger">
                     <div class="sub" style="margin:0">loading…</div>
                 </div>
@@ -394,6 +403,29 @@
         if (signed) n.classList.add(v >= 0 ? 'pos' : 'neg');
     }
 
+    // ↻ on the Rolling Windows card: compute the heavy 7d/30d/YTD walk NOW
+    // (inline on the server), repaint on return. If the server couldn't
+    // finish inline it queued the box tick — say so instead of pretending.
+    async function refreshStack() {
+        const b = document.getElementById('stackRefresh');
+        const sub = document.getElementById('subLedger');
+        if (b) { b.disabled = true; b.textContent = '…'; }
+        try {
+            const r = await authFetch('/api/dashboard/refresh-stack',
+                                      { method: 'POST' });
+            const j = await r.json();
+            if (j.fresh) {
+                sub.textContent = 'refreshed just now';
+                await load();
+            } else {
+                sub.textContent = 'refresh queued — updates within ~5 min';
+            }
+        } catch (e) {
+            sub.textContent = 'refresh failed — try again';
+        }
+        if (b) { b.disabled = false; b.textContent = '↻'; }
+    }
+
     async function load() {
         // Never sit silently on "loading…" — a slow or dead upstream has
         // to say so. The activities walk can take tens of seconds on a
@@ -492,6 +524,17 @@
                 }
                 led.innerHTML = row('7 days', st.d7) + row('30 days', st.d30)
                               + ytdRow;
+                // Windows recompute at midnight AZ or on ↻ — show their age
+                // so a stale-on-purpose number never reads as a live one.
+                if (st.computed_at) {
+                    const mins = Math.max(0, Math.round(
+                        (Date.now() - new Date(st.computed_at)) / 60000));
+                    const age = mins < 2 ? 'just now'
+                              : mins < 90 ? mins + 'm ago'
+                              : Math.round(mins / 60) + 'h ago';
+                    document.getElementById('subLedger').textContent =
+                        'bets + rent · windows as of ' + age + ' · ↻ recomputes now';
+                }
             } else {
                 // No stack = the venue RPC was unreachable. Dashes, never
                 // a partial or invented figure on a money surface.
