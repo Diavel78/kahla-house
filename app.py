@@ -20012,6 +20012,20 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
             lap_client = None
         lap_snap = ((lap_client, lap_orders, lap_positions)
                     if lap_client is not None else None)
+        # FREE ORDERS COUNT (Aug 29 night — user: the dashboard count is
+        # "slow to fill"): this lap ALREADY holds the full open-orders
+        # list, so stamp the count into the dash cache here — the card
+        # then refreshes every lap (~2-3 min) with ZERO added venue
+        # traffic, instead of waiting on the ledger lane's own spaced
+        # read. Best-effort; a failed stamp costs nothing (the ledger
+        # path still refreshes it on its cadence).
+        if lap_orders is not None:
+            try:
+                (sb.table("poly_dash_cache")
+                 .update({"order_count": len(lap_orders)})
+                 .eq("id", 1).execute())
+            except Exception:
+                pass
         for uid in admins:
             try:
                 near = (sb.table("bot_picks").select("id")
