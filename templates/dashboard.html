@@ -210,8 +210,20 @@
                 <div class="value skel" id="vToday">—</div>
                 <div class="sub" id="subToday">settled · AZ</div>
             </div>
-<!-- LAST NIGHT card removed (user, Aug 30): the bookie read is
-                 per-day totals below — yesterday lives there with its rent. -->
+<!-- THE MACHINE light (user, Aug 30, filling the old Last-night
+                 slot): one glance — green running / yellow degraded /
+                 red needs a look. Same signals as the lane card at the
+                 bottom (c.bad, code drift, backup, ws); this is just the
+                 rollup. Painted by paintLanes. -->
+            <div class="card">
+                <div class="label">The Machine</div>
+                <div class="value" style="display:flex;align-items:center;gap:12px">
+                    <i id="machineLight" style="width:18px;height:18px;border-radius:50%;
+                        background:#4b5563;flex:none;box-shadow:0 0 12px rgba(0,0,0,0)"></i>
+                    <span id="machineWord" style="font-size:22px">—</span>
+                </div>
+                <div class="sub" id="subMachine">checking…</div>
+            </div>
             <!-- THE DAY LEDGER (rev Aug 30, user: "how much did we lose on
                  positions vs how much rent" is THE number now) — last 7
                  days, TOTAL (bets + rent) per row with the split beneath.
@@ -305,12 +317,32 @@
         return Math.round(sec / 86400) + 'd';
     }
 
+    // THE MACHINE light — the one-glance rollup of the lane card's own
+    // signals. RED = a lane needs a look (or no lane data at all: "can't
+    // see the machine" is never green, the paintQuick doctrine). YELLOW =
+    // lanes fine but something's degraded (code drift, backup, ws feed).
+    // GREEN = running clean.
+    function setMachineLight(color, word, reason) {
+        const dot = document.getElementById('machineLight');
+        const w = document.getElementById('machineWord');
+        const s = document.getElementById('subMachine');
+        if (!dot) return;
+        const c = color === 'green' ? '#34d399'
+                : color === 'yellow' ? '#fbbf24' : '#f87171';
+        dot.style.background = c;
+        dot.style.boxShadow = '0 0 14px ' + c;
+        w.textContent = word;
+        w.style.color = c;
+        s.textContent = reason;
+    }
+
     function paintLanes(c) {
         const box = document.getElementById('lanes');
         const sub = document.getElementById('subLanes');
         if (!c || !c.lanes || !c.lanes.length) {
             box.innerHTML = '<div class="sub" style="margin:0">no lane data</div>';
             sub.textContent = 'lane · owner · last work';
+            setMachineLight('red', 'NO SIGNAL', 'no lane data — is the box up?');
             return;
         }
         // RETIRED lanes don't get a row (Aug 28, user: "what's the harvest?
@@ -379,6 +411,25 @@
             + (offNames ? ' · retired: ' + offNames : '')
             + (c.bad ? ' · ' + c.bad + ' need a look' : ' · all working')
             + codeFrag + bkFrag + wsFrag;
+        // Roll the same signals up into the traffic light at the top.
+        if (c.bad) {
+            const names = live.filter(l => l.state === 'stale' || l.state === 'error')
+                              .map(l => l.lane).join(', ');
+            setMachineLight('red', 'CHECK', (names || c.bad + ' lanes') + ' need a look');
+        } else {
+            const warns = [];
+            if (b.stale) warns.push('code behind — pull the box');
+            if ('ok' in bk && (!bk.ok || bk.stale)) warns.push('backup issue');
+            if (w.state && !w.up && !w.off) warns.push('ws feed down');
+            if (warns.length) {
+                setMachineLight('yellow', 'DEGRADED', warns.join(' · '));
+            } else {
+                setMachineLight('green', 'RUNNING',
+                    live.length + ' lanes working'
+                    + (w.up ? ' · ws ✓' : '')
+                    + (b.sha ? ' · code current' : ''));
+            }
+        }
     }
 
     // Top strip: number + dot. Green = holding/quoting (n>0), muted = a
