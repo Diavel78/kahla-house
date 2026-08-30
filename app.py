@@ -2547,6 +2547,15 @@ def _pnl_stack_memo(sb, derived_so_far: dict):
         for k in ("today", "yesterday"):
             if gd.get(k) is not None:
                 stk[k] = gd[k]
+        # RENT BY DAY stays LIVE (user: "I ask this every day, lol" — and
+        # the venue mirror behind it refreshes every 10 min). It rode the
+        # stack blob for plumbing convenience, not because it's heavy: a
+        # 5-day slice, nothing like the YTD walk. Freezing it to
+        # midnight-or-button was collateral damage — refresh per tick.
+        try:
+            stk["rent_days"] = _rent_days_recent(sb)
+        except Exception:
+            pass                       # keep the prior slice
         return stk
     v = _pnl_stack(sb)
     if v is not None:
@@ -21894,9 +21903,12 @@ def api_data():
                     _stk = _pnl_stack(get_supabase())
                 except Exception:
                     pass
-            # The box computes the cached stack on frozen code (no
-            # rent_days until the Aug 27 pull) — patch the key in here.
-            if _stk and "rent_days" not in _stk:
+            # RENT BY DAY refreshes on EVERY serve (Aug 30 — the stack
+            # blob went midnight-or-button and this key froze with it by
+            # accident; it's a cheap 5-day slice over a mirror that
+            # updates every 10 min, and it's the card the user actually
+            # watches all day). Failure keeps the cached slice.
+            if _stk:
                 try:
                     _stk["rent_days"] = _rent_days_recent(get_supabase())
                 except Exception:
