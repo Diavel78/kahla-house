@@ -215,6 +215,20 @@
                 <div class="value skel" id="vYest">—</div>
                 <div class="sub" id="subYest">settled · AZ</div>
             </div>
+            <!-- RENT BY DAY (user, Aug 25: "I ask this every day, lol") —
+                 the last 5 earn-days straight off the venue's ledger,
+                 pending included. A day the venue hasn't posted yet says
+                 so — never $0.00 (the ledger runs ~a day behind). ABOVE
+                 the rolling windows (user, Aug 30): this card is LIVE
+                 (~10-min venue mirror) while the windows below refresh
+                 at midnight or on the button — live before frozen. -->
+            <div class="card wide">
+                <div class="label">Rent by day <span class="tag" style="color:var(--green)">paid</span> <span class="tag" style="color:#fbbf24">pending</span></div>
+                <div id="rentDays">
+                    <div class="sub" style="margin:0">loading…</div>
+                </div>
+                <div class="sub">by earn date · newest days still filling in at the venue</div>
+            </div>
             <!-- THE LEDGER: 7d / 30d / YTD all-in, one row each, with the
                  bets-vs-rent split bar (cyan = bets, gold = rent). Rent by
                  earn date is a FLOOR — the newest day or two are always
@@ -234,17 +248,6 @@
                     <div class="sub" style="margin:0">loading…</div>
                 </div>
                 <div class="sub" id="subLedger">bets + rent · rent counts on the day it was earned</div>
-            </div>
-            <!-- RENT BY DAY (user, Aug 25: "I ask this every day, lol") —
-                 the last 5 earn-days straight off the venue's ledger,
-                 pending included. A day the venue hasn't posted yet says
-                 so — never $0.00 (the ledger runs ~a day behind). -->
-            <div class="card wide">
-                <div class="label">Rent by day <span class="tag" style="color:var(--green)">paid</span> <span class="tag" style="color:#fbbf24">pending</span></div>
-                <div id="rentDays">
-                    <div class="sub" style="margin:0">loading…</div>
-                </div>
-                <div class="sub">by earn date · newest days still filling in at the venue</div>
             </div>
             <div class="card wide">
                 <div class="label">Lifetime</div>
