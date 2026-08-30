@@ -10569,6 +10569,10 @@ def api_poly_topup():
         _grid = bool(b.get("gridiron_autobet"))
         target = (_AUTOBET_CONTRACTS_NRFI if mt == "nrfi"
                   else _WHIFF_CONTRACTS_K if (_fam or "") in _JOIN_TOUCH_FAMS
+                  # any other prop = bet-to-win, sized _PROP_CONTRACTS (the
+                  # Aug 29 stake-split rule) — without this branch a
+                  # walks/outs pick fell to the rent-lane 20 below
+                  else _PROP_CONTRACTS if (_fam or mt == "prop")
                   else (_GRIDIRON_TOTAL_CONTRACTS if mt == "total"
                         else _GRIDIRON_CONTRACTS) if _grid
                   else _AUTOBET_CONTRACTS)
@@ -13194,10 +13198,11 @@ def _whiff_autobet(sb, bet_cands, ginfo, now):
                                       else 100 - side_c,
                                       "edge_pp": round(edge, 2)}},
                 cap_flag="whiff_autobet", cap_max=WHIFF_AUTOBET_MAX_BETS,
-                # K stays at 4 while the other pstat families go to 10 —
-                # size on K buys mostly the adversely-selected half.
+                # Props are BETS-TO-WIN, sized 5 (the Aug 29 stake-split
+                # hard rule — no rent pre-game, never scalped); K stays at
+                # _WHIFF_CONTRACTS_K (adversely-selected half, lane killed).
                 contracts=(_WHIFF_CONTRACTS_K if ptype in _JOIN_TOUCH_FAMS
-                           else _AUTOBET_CONTRACTS),
+                           else _PROP_CONTRACTS),
                 query_text=q,
                 reason=(f"Pitcher-prop [{_unit}]"
                         f" — model {round(side_p * 100)}% on "
@@ -14008,7 +14013,20 @@ AUTOBET_MAX_BETS = 10000  # CAP KILLED Aug 4 ~10pm AZ (user: "kill that 40
                           # Sentinel not deletion: the counter still runs
                           # (the "N/cap this slate" ping + a re-cap later
                           # need only this constant changed back).
-_AUTOBET_CONTRACTS_NRFI = 10  # 5→10 Aug 27 2026 (user: "we are doubling the
+# ⚠ THE STAKE SPLIT — HARD RULE (user, Aug 29 2026): "Rent collectors are
+# 20 contracts, the bets we bet to win, 5. Spread, ML, and O/U are 20.
+# MLB props, NFL props, etc — 5. The props ain't really paying rent, and
+# we don't scalp them. Too much risk… and adding nothing to the Bookie
+# model." Rent collectors (pay rent + scalp): MLB ML, MLB O/U, football
+# spread/total → 20 (_AUTOBET_CONTRACTS / _GRIDIRON_*). Bets-to-win (no
+# rent pre-game, never scalped): NRFI, pitcher props, NFL player props →
+# 5 (_AUTOBET_CONTRACTS_NRFI / _PROP_CONTRACTS / fbprop_config). K props
+# stay at _WHIFF_CONTRACTS_K (lane killed anyway).
+_PROP_CONTRACTS = 5           # bets-to-win prop stake (outs/walks/ha lanes)
+_AUTOBET_CONTRACTS_NRFI = 5   # 10→5 Aug 29 2026 (the stake-split hard rule
+                              # above: NRFI collects no rent and never
+                              # sells → it is a bet-to-win, sized 5).
+                              # Prior: 5→10 Aug 27 2026 (user: "we are doubling the
                               # contracts, it's time to make some fucking
                               # money" — the Thursday unfreeze double, held
                               # for the box pull per "No… Thursday").
@@ -15912,14 +15930,21 @@ _GRIDIRON_MIN_START = {"NFL": "2026-09-08", "NCAAF": "2026-08-29"}
 # user go-order over the shadow-record earn-in — tiny stakes, same
 # per-bet fences as MLB (rent gate, $6 Master Rule, entry cap,
 # junk-edge cliff).
-_GRIDIRON_CONTRACTS = 10          # 5→10 Aug 27 2026 (the Thursday unfreeze
-                                  # double — user: "Everything ×2"). 10 ×
-                                  # ≤60¢ = ≤$6, inside the $13 Master Rule.
-                                  # Prior: user cap 5 (Aug 22).
-_GRIDIRON_TOTAL_CONTRACTS = 4     # 2→4 Aug 27 2026 (same double). Prior:
-                                  # totals stake (user, Aug 22 2026: "Turn on
-                                  # totals, 2 contracts... spread for both 5
-                                  # contracts max, totals 2 max for now")
+_GRIDIRON_CONTRACTS = 20          # 10→20 Aug 29 2026 (the stake-split hard
+                                  # rule: "Rent collectors are 20 contracts
+                                  # … that's spread, ML, and O/U" — football
+                                  # spreads pay rent and scalp, so they are
+                                  # rent collectors). 20 × ≤60¢ = ≤$12,
+                                  # inside the $13 Master Rule. Prior: 5→10
+                                  # Aug 27 (the Thursday double); cap 5
+                                  # (Aug 22).
+_GRIDIRON_TOTAL_CONTRACTS = 20    # 4→20 Aug 29 2026 (the stake-split hard
+                                  # rule: football totals pay rent — venue-
+                                  # verified per-market that night, early/
+                                  # day_of/live — and scalp, so they are
+                                  # rent collectors at 20). Prior: 2→4
+                                  # Aug 27 (the double); 2 (Aug 22: "Turn on
+                                  # totals, 2 contracts").
 _GRIDIRON_ML_MAX_SPREAD = 2.5     # football IS spreads and totals (user,
                                   # Aug 22 2026: "Why the fuck would you even
                                   # look at a money line? Obviously, if the

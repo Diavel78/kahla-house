@@ -1023,6 +1023,17 @@ sport the machine ever adds:
   game back. The goal is to never make it to the game start holding a
   contract." Enforced in `_pmm_autolog`'s scalp-exit branch (`_late_exit`
   routes to the cool-off instead of `dayof_wait`).
+- **THE STAKE SPLIT — HARD RULE (user, Aug 29 2026): rent collectors 20,
+  bets-to-win 5.** "Spread, ML, and O/U are 20 contracts. MLB props, NFL
+  props, etc — 5. The props ain't really paying rent, and we don't scalp
+  them." Rent collectors = MLB ML/O-U (`_AUTOBET_CONTRACTS`=20), football
+  spread/total (`_GRIDIRON_CONTRACTS`=20 / `_GRIDIRON_TOTAL_CONTRACTS`=20 —
+  raised from the Aug-27 10/4 by this rule). Bets-to-win = NRFI
+  (`_AUTOBET_CONTRACTS_NRFI` 10→5), pitcher props (`_PROP_CONTRACTS`=5;
+  K stays `_WHIFF_CONTRACTS_K`, lane killed), NFL props (fbprop_config
+  contracts=5, applied to the DB). Topup knows every target and never
+  shrinks a resting order — legacy 10-lot NRFIs ride out. This paragraph
+  supersedes the stake numbers in the Aug-27 double note above.
 - **"Everything should be bettered, then sold" (user, same night,
   rejecting no-model-forever):** the end state is a MODEL gate on every
   entry, rent lanes included. The gate goes in per lane when a model has
