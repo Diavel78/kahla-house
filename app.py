@@ -15071,21 +15071,36 @@ def _et_day(iso: str | None) -> str:
 # The SHADOW row still logs — it costs nothing and NFL totals DO carry
 # programs (Live $900 / Day-of $225 / Early $75), so if a totals lane
 # ever returns it will be for football, and it should return with a tape.
-OU_TRADER_ENABLED = False
+#
+# ✅ REVIVED Aug 29 2026 (user: "We killed totals because we lost money…
+# not due to rent. I can't think of a single reason not to hammer the
+# shit out of O/U, with the exact same design as ML… rent, buy, rent on
+# sell, rinse of repeat with repeg"). Two corrections to the tombstone
+# above, both re-measured that night: (a) the money-loser was the MODEL
+# totals lane (July 4 blacklist — still dead; this lane takes no view);
+# (b) THE VENUE RE-ENROLLED MLB TOTALS — /api/rent-check on tomorrow's
+# SEA@TOR rungs 7.5/8.5/9.5 returned market_pays [early, day_of, live],
+# bettable_now:true. The program-table lesson, third sighting: programs
+# MOVE, only the live per-market ask counts — and the executor still asks
+# it at every placement, so if the venue pulls totals again the lane goes
+# quiet on its own. What changed since the Aug-18 era: exits are the
+# SCALP ARM now (cost+1 floor, walk, in-play money-back dump — the dead
+# harvest's +60% ladder is gone), and scalp-outs rinse-repeat through the
+# dayof_wait re-entry like ML.
+OU_TRADER_ENABLED = True
 _OU_TRADER_MIN_EDGE_PP = 3.0    # peg must sit ≥3pp under the book's own mid
 _OU_TRADER_MIN_ENTRY_C = 25.0   # fill-viability floor (whiff lane's lesson)
 _OU_TRADER_MAX_ENTRY_C = 64.0   # the user's universal entry cap
 
 
 def _ou_trader_eval(sb, g, d, now, done):
-    """MLB O/U TRADER lane (Aug 4 2026 ~10pm AZ, user: "we need O/U on
-    baseball, badly"). Buys CHEAP on whichever total side pegs ≥3pp
-    under the book's OWN devigged mid; the harvest tick then rests a
-    sell on HALF the position at +60% ROI. Started sell-only at 1
-    contract ("Why keep the one we lose on average") and joined the
-    paired shape at `_AUTOBET_CONTRACTS` on Aug 10 2026 — same split as
-    ML: sell half, ride half. The thesis is still the TOUCH CURVE, not
-    the final score; the ridden half is the change. ⚠ NO MODEL TOTAL ANYWHERE:
+    """MLB O/U TRADER lane (Aug 4 2026, user: "we need O/U on baseball,
+    badly"; killed Aug 18 with the rent program; REVIVED Aug 29 when the
+    venue re-enrolled MLB totals — see the flag's comment). Buys CHEAP on
+    whichever total side pegs ≥3pp under the book's OWN devigged mid; the
+    SCALP ARM exits (cost+1 floor, walk, in-play money-back dump — the
+    harvest-era +60% half-sell is dead), and a scalp-out rinse-repeats
+    through dayof_wait like ML. ⚠ NO MODEL TOTAL ANYWHERE:
     the July 4 2026 totals blacklist (model O/U −13.7u lifetime) stays
     in force — this lane's edge is microstructure (cheap vs the book's
     own mid). Same opener protocols: junk guard ≥15pp = newborn
@@ -15149,9 +15164,8 @@ def _ou_trader_eval(sb, g, d, now, done):
                     f"{round(b['target'])}¢ vs the book's own "
                     f"{round(b['mid'] * 100)}¢ mid "
                     f"({round(b['edge'], 1)}pp cheap); "
-                    f"{_AUTOBET_CONTRACTS} contracts, half rests at "
-                    f"+{round(_HARVEST_ROI * 100)}% — touch-curve bet, "
-                    f"no model"),
+                    f"{_AUTOBET_CONTRACTS} contracts, scalp arm exits at "
+                    f"cost+1 or better — touch-curve bet, no model"),
             contracts=_AUTOBET_CONTRACTS, entry_line=line)
         if res == "cap":
             return None            # slate full — don't latch, retry
@@ -19404,10 +19418,12 @@ def _scalp_lanes(b: dict, mt: str) -> bool:
     """Is this pick RENT-LANE inventory? (spec Policy 1)"""
     if bool(b.get("gridiron_autobet")):
         return True                      # football spread/total/ML — all rent
+    if bool(b.get("ou_trader")) and mt == "total":
+        return True                      # MLB O/U trader (revived Aug 29)
     return bool(b.get("autobet")) and mt == "moneyline"   # MLB ML
 
 
-_SCALP_RENT_SLUGS = ("aec-mlb-", "asc-nfl-", "tsc-nfl-",
+_SCALP_RENT_SLUGS = ("aec-mlb-", "tsc-mlb-", "asc-nfl-", "tsc-nfl-",
                      "asc-cfb-", "tsc-cfb-", "asc-ncaaf-", "tsc-ncaaf-")
 
 
