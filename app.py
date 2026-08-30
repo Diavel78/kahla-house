@@ -19709,15 +19709,26 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             return 1
         si4 = ("ORDER_INTENT_SELL_SHORT" if synth4
                else "ORDER_INTENT_SELL_LONG")
-        a4 = None
+        a4 = q4 = None
         for o4 in orders:
             if (o4.get("slug") == slug4 and o4.get("intent") == si4
                     and o4.get("auto") and o4.get("price_yes") is not None):
                 a4 = ((100.0 - o4["price_yes"] * 100.0) if synth4
                       else o4["price_yes"] * 100.0)
+                q4 = float(o4.get("leaves") or o4.get("qty") or 0.0)
                 break
         if a4 is None:
             return 1
+        # QTY MISMATCH IS A REPAIR TOO (Aug 29 night, second lesson of the
+        # 0/5-on-20 catch): the resize sat starved behind routine 1¢
+        # step-downs for 10 straight minutes — with a 30s budget and one
+        # book read per candidate, the tail of a stable list is never
+        # reached. Same starvation the floor sort was built for; an ask
+        # covering 5 of 20 held is uncovered inventory, not optimization.
+        n4 = float((positions.get(slug4) or {}).get("net") or 0.0)
+        h4 = (-n4) if synth4 else n4
+        if h4 >= 1.0 and abs(h4 - q4) > 0.5:
+            return 0
         _vc4 = (positions.get(slug4) or {}).get("avg_price")
         if _vc4 is not None and _vc4 > 0:
             e4 = max(e4, float(_vc4) * 100.0)   # venue-cost floor, mirrored
