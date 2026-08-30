@@ -65,6 +65,7 @@ class Runner:
         self._started: dict[str, float] = {}     # lane -> t0 of the live run
         self._stuck: set[str] = set()            # lanes already reported stuck
         self._renewer: threading.Thread | None = None
+        self._wsfeed = None                      # cellar.wsfeed.WsFeed | None
 
     # -- validation ---------------------------------------------------------
 
@@ -278,6 +279,18 @@ class Runner:
         except Exception as e:
             log.warning("stuck-lane ping failed: %s", e)
 
+    def wake(self, lane: str) -> None:
+        """Pull a lane's next tick forward to NOW (docs/ws-feed-spec.md).
+
+        The whole websocket integration is this one line: the 1s serve loop
+        sees next_due=0 and runs the lane through the exact same path as a
+        scheduled tick — lease claim, write lock, skip-if-already-running.
+        A wake can therefore never stack a second copy or bypass a guard;
+        it can only make the machine less late. Cross-thread safety is the
+        GIL on a float store — worst case a wake lands a second late.
+        """
+        self._next_due[lane] = 0.0
+
     def _tick(self, now: float, enabled: list[str]) -> None:
         for name in enabled:
             spec = config.ALL_LANES[name]
@@ -374,12 +387,28 @@ class Runner:
                                          name="cellar-renew", daemon=True)
         self._renewer.start()
 
+        # WS wake feed (docs/ws-feed-spec.md): venue push -> repeg lane runs
+        # NOW instead of at its next 120s tick. Started only when repeg is
+        # enabled here (there is nothing else to wake in v1), and start()
+        # self-disables loudly on a missing lib or creds — the daemon then
+        # runs exactly as it did before this feature existed.
+        if config.WS_FEED and "repeg" in enabled:
+            try:
+                from .wsfeed import WsFeed
+                self._wsfeed = WsFeed(lambda: self.wake("repeg"), sb=self.sb)
+                self._wsfeed.start()
+            except Exception as e:
+                log.error("ws feed failed to start (%s) — lanes run on "
+                          "schedule as before", e)
+
         log.info("%s", config.summary())
         while not self.stop.is_set():
             self._tick(time.time(), enabled)
             self.stop.wait(1.0)
 
         log.info("shutting down — releasing lanes so the standby can resume")
+        if self._wsfeed is not None:
+            self._wsfeed.shutdown()
         for t in self._threads.values():
             if t.is_alive():
                 t.join(timeout=15)

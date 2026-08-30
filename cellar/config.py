@@ -51,6 +51,13 @@ def _flag(name: str, default: bool) -> bool:
 # WOULD do, but no venue write and no DB mutation from a write engine.
 DRY_RUN = _flag("CELLAR_DRY_RUN", True)
 
+# WS WAKE FEED (docs/ws-feed-spec.md). Default ON, and safe to be: the feed
+# is a pure HINT — it only pulls the repeg lane's next-due forward, and it
+# disables itself loudly when websocket-client or the API creds are missing.
+# It never carries state into an engine, so there is no risk knob here worth
+# a second switch. Off only for debugging the socket itself.
+WS_FEED = _flag("CELLAR_WS", True)
+
 # NO LANE_TIMEOUT_S (removed Aug 20 2026). It existed here for weeks as a
 # "wall-clock ceiling for a single lane invocation" that NOTHING READ -- the
 # runner never wrapped a lane call in it, so the reassurance was fictional.
