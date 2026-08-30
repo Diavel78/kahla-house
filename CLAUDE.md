@@ -1001,6 +1001,35 @@ rent-lane entries at ~zero edge, so the spread capture is the product.
   is a capital problem; expect to peel back `_AUTOBET_CONTRACTS` as breadth
   grows. That is a feature of going wide, not a retreat.
 
+## THE SPORT MAP (user doctrine, Aug 29 2026 — the bookie-machine shape)
+
+Stated the night the O/U trader was revived, as the template for every
+sport the machine ever adds:
+
+- **Every sport except football (and maybe NBA): ML + O/U — rent, buy,
+  rent on sell, rinse-repeat with repeg.** MLB runs it today (ML +
+  revived O/U trader). **NHL gets the exact same lanes the day it lists**
+  ("Rest on ML, OU, if it fills instantly list it for sell") — the
+  Kalshi/PMM NHL readers already exist; the work is cloning the opener
+  pass and asking the venue's per-market rent answer when October slates
+  post, never assuming it. Football = spreads + totals (live). NBA =
+  probably spreads, decided at the season.
+- **"If it fills, instantly list it for sell" is the scalp arm's standing
+  contract** — every rent-lane fill gets an ask on the next pass, cost+1
+  floor. New lanes join by adding their flag to `_scalp_lanes` and their
+  family to `_SCALP_RENT_SLUGS` (the O/U revival is the worked example).
+- **"Everything should be bettered, then sold" (user, same night,
+  rejecting no-model-forever):** the end state is a MODEL gate on every
+  entry, rent lanes included. The gate goes in per lane when a model has
+  EARNED it — Diamond IQ gates ML, the Gridiron fits gate football; the
+  MLB totals model is barred not by philosophy but by its own backtest
+  (directionally INVERTED at its loudest — 42% where it disagrees hardest
+  with the line — so gating on it makes entries WORSE). The revived O/U
+  lane logs the model's opinion beside every entry; the ~2-week venue-truth
+  review (model-agree vs model-disagree fills, the VSiN methodology)
+  decides whether the gate ships. Measure, then promote — never gate on a
+  model that failed its physical.
+
 ## TWO LANES: the model bets, and the market maker (direction, Aug 19 2026)
 
 The user's split, stated after the rent rework: **the ACTUAL bets come from

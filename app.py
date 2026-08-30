@@ -15110,6 +15110,14 @@ def _ou_trader_eval(sb, g, d, now, done):
     the ML and NRFI sections and must never skip them."""
     if (g["id"], "total") in done:
         return None
+    # The model's opinion rides on every row (user doctrine, Aug 29:
+    # "everything should be bettered, then sold") — NOT a gate yet: the
+    # MLB totals model failed its backtest as a side-picker, so it earns
+    # the gate only if the venue-truth review (model-agree vs disagree
+    # fills) says agreement prints. This stamp IS that dataset.
+    _proj_total = (((d or {}).get("power_rating") or {}).get("proj_total")
+                   if isinstance((d or {}).get("power_rating"), dict)
+                   else None)
     tot = ((((d or {}).get("odds") or {}).get("total") or {})
            .get("polymarket") or {})
     over, under = tot.get("over") or {}, tot.get("under") or {}
@@ -15157,7 +15165,8 @@ def _ou_trader_eval(sb, g, d, now, done):
             bool(b["blk"].get("synthetic")), b["target"],
             b["mid"], b["edge"], round(b["edge"], 1),
             b["bid_c"], b["ask_c"],
-            extra_blob={"ou_trader": True, "line": line},
+            extra_blob={"ou_trader": True, "line": line,
+                        "proj_total": _proj_total},
             cap_flag="ou_trader",
             query_text="auto-bet: O/U trader",
             reason=(f"O/U TRADER — {b['side']} {line} pegged "
@@ -15188,6 +15197,7 @@ def _ou_trader_eval(sb, g, d, now, done):
         "signal_blob": {"opener_shadow": True, "ou_trader": True,
                         "would_bet": best is not None,
                         "bet_placed": placed,
+                        "proj_total": _proj_total,
                         "book_mid_c": (round(best["mid"] * 100, 1)
                                        if best else
                                        round((qo.get("mid") or 0) * 100, 1)),
