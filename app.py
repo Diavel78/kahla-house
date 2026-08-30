@@ -15356,6 +15356,9 @@ def _et_day(iso: str | None) -> str:
 # harvest's +60% ladder is gone), and scalp-outs rinse-repeat through the
 # dayof_wait re-entry like ML.
 OU_TRADER_ENABLED = True
+_OU_NOVETO_MIN_MIN = 360        # O/U no-veto = the venue's EARLY period
+                                # (listing→T-6h); totals list T-18..24h so
+                                # the 36h wall clock never reached them
 _OU_TRADER_MIN_EDGE_PP = 3.0    # peg must sit ≥3pp under the book's own mid
 _OU_TRADER_MIN_ENTRY_C = 25.0   # fill-viability floor (whiff lane's lesson)
 _OU_TRADER_MAX_ENTRY_C = 64.0   # the user's universal entry cap
@@ -15409,11 +15412,18 @@ def _ou_trader_eval(sb, g, d, now, done):
             str(es).replace("Z", "+00:00")) - now).total_seconds() / 60.0)
     except Exception:
         sim = None
-    # EARLY NO-VETO (doctrine at _NOVETO_EARLY_MIN_H): far out, the 3pp
-    # mid-distance floor stops vetoing — every O/U with a two-sided book
-    # in the entry band gets bet on its cheaper-vs-mid side. Band, junk
-    # guard, master rule and the per-market rent gate all stand.
-    _noveto = _early_noveto(es, now)
+    # EARLY NO-VETO — O/U keys on the VENUE'S OWN EARLY PERIOD, not the
+    # 36h wall clock (Aug 30 2026, user Go): MLB total ladders LIST at
+    # T-18..24h (measured across the whole slate), so the ML-era 36h
+    # boundary could structurally never touch a total — the lane sat
+    # empty by venue schedule. A total's early rent period is its whole
+    # listing→T-6h life ($75 early / $225 day_of pools, same as
+    # spreads), so: listed + more than 6h out = bet the cheap side of
+    # the money rung, no edge floor. Inside T-6h the 3pp floor returns
+    # (day-of tight books). Band, junk guard, master rule and the
+    # per-market rent gate all stand; the 60-min no-rebuy latch too.
+    _noveto = (_early_noveto(es, now)
+               or (sim is not None and sim > _OU_NOVETO_MIN_MIN))
     best = None
     for side, blk, q in (("over", over, qo), ("under", under, qu)):
         bid, mid = q.get("bid"), q.get("mid")
