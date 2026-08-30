@@ -19852,16 +19852,21 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         elif our_ask > floor_c:
             tgt = max(floor_c, our_ask - 1.0)             # alone → step down
         _repair = tgt is not None and our_ask < floor_c - 0.26
-        # QTY TOP-UP (Aug 29 night — the MIL@CHC 0/5-on-20 catch): the ask
-        # was placed while the buy was only PARTIALLY filled (int(held) at
-        # that moment), the rest filled later, and an ask already sitting
-        # at its floor never triggers a walk — so the sell covered 5 of 20
-        # FOREVER. The harvest truncated-ladder lesson again: a dedup
-        # keyed on venue state makes a partial write permanent. More
-        # inventory than the resting ask covers → re-create at the SAME
-        # price with full held (the create below always uses int(held2)).
+        # QTY INVARIANT (Aug 29 night — the MIL@CHC 0/5-on-20 catch; user
+        # rule: "the sell order should ALWAYS match the owned position"):
+        # the ask was placed while the buy was only PARTIALLY filled
+        # (int(held) at that moment), the rest filled later, and an ask
+        # already sitting at its floor never triggers a walk — so the
+        # sell covered 5 of 20 FOREVER. The harvest truncated-ladder
+        # lesson again: a dedup keyed on venue state makes a partial
+        # write permanent. Enforced EVERY pass, BOTH directions: held >
+        # ask (late fill, rinse-repeat rebuy) tops up; held < ask
+        # (external sell shrank the position under a resting ask —
+        # oversell risk) trims down. Re-create at the SAME price; the
+        # create below always uses int(held2), the fresh post-cancel
+        # read, so the size written is the venue's truth at write time.
         _resize = (tgt is None and our_ask >= floor_c - 0.26
-                   and held > our_ask_qty + 0.5)
+                   and abs(held - our_ask_qty) > 0.5)
         if _resize:
             tgt = our_ask
         if tgt is not None and best_bid is not None and tgt <= best_bid:
