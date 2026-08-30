@@ -15410,18 +15410,9 @@ def _opener_pass(sb, now, deadline):
         # anyway; a would-bet that failed placement latches as before —
         # the cap path never persists at all). Parse-failure ⇒ fresh ⇒
         # done (fail-safe: never re-eval on bad data).
-        # Paid-window map: a dayof_wait row inside T-6h is rent we are NOT
-        # collecting this minute, so it re-checks on a 20-min cadence
-        # instead of the 4h one. Outside the window the 4h cadence stands —
-        # a game 40h out has nothing to gain from being re-priced.
-        _dayof_cut = now + timedelta(minutes=_WHIFF_DAYOF_MIN)
-        _start_by_mid = {}
-        for g in games:
-            try:
-                _start_by_mid[g["id"]] = datetime.fromisoformat(
-                    str(g.get("event_start")).replace("Z", "+00:00"))
-            except Exception:
-                pass
+        # dayof_wait rows re-check on the 20-min cadence ALWAYS (Aug 30 —
+        # the T-6h gate on the fast lane dated from the no-early-rent era;
+        # a would-bet with no order is unfinished work at any distance).
         done = set()
         for r in done_rows:
             # Row is either the narrowed projection (flags at top level,
@@ -15436,8 +15427,15 @@ def _opener_pass(sb, now, deadline):
             # UNFINISHED WORK, not a completed evaluation — see the
             # landmine note at the NRFI blob.
             _wait = _b.get("dayof_wait") in (True, "true")
-            _st = _start_by_mid.get(r["market_id"])
-            _inwin = bool(_wait and _st is not None and _st <= _dayof_cut)
+            # A dayof_wait row retries on the FAST cadence ALWAYS (Aug 30
+            # — the NYY@LAA hole: a no-veto would-bet whose order didn't
+            # land sat parked 4 HOURS on a market the venue was paying
+            # early rent on RIGHT THEN. The T-6h gate on the fast lane
+            # dated from the era when early paid nothing; now a would-bet
+            # with no order is unfinished work whatever the clock says —
+            # rent-refused games re-ask a 10-min-cached answer, transient
+            # create failures re-place within the next pass or two).
+            _inwin = _wait
             fresh = True
             try:
                 _ts = datetime.fromisoformat(
@@ -15589,6 +15587,7 @@ def _opener_pass(sb, now, deadline):
                         _noveto0 = _early_noveto(es0, now)
                         _bet_ok0 = edge0 >= 2.5 or _noveto0
                         res0 = None
+                        _gate0_l: list = []   # per-attempt refusal reasons
                         if (AUTOBET_ENABLED and _bet_ok0
                                 and e0.get("slug")):
                             _cands0 = [(s, edge0, e0, q0)]
@@ -15621,6 +15620,13 @@ def _opener_pass(sb, now, deadline):
                                          "early_noveto": (_noveto0
                                                           and _ed1 < 2.5)},
                                         fail_tag=_ft0)
+                                # WHY, always (Aug 30 — the NYY@LAA "order
+                                # didn't land and nobody can say why" hole;
+                                # football stamps bet_gate, ML never did).
+                                _gate0_l.append(_s1 + ":" + (
+                                    "placed" if res0 == "placed"
+                                    else "no_peg" if side_c0 is None
+                                    else (",".join(_ft0) or str(res0))))
                                 if res0 == "placed":
                                     stats["opener_bets"] += 1
                                     break
@@ -15676,6 +15682,11 @@ def _opener_pass(sb, now, deadline):
                                             # of Aug 16, one lane over.
                                             "dayof_wait": (_bet_ok0
                                                            and res0 != "placed"),
+                                            "bet_gate": (
+                                                "; ".join(_gate0_l)[:120]
+                                                if _gate0_l else
+                                                ("model" if not _bet_ok0
+                                                 else "no_attempt")),
                                             "opener_unclamped": True},
                             "logged_at": now.isoformat(),
                         })
