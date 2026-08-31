@@ -78,6 +78,16 @@ _MATCH_WINDOW: dict[str, timedelta] = {
 }
 _DEFAULT_WINDOW = timedelta(hours=12)
 
+# Per-sport lookahead FLOOR (Aug 31 2026, the Temple@PSU invisible-game
+# bug). Polymarket lists — and pays early rent on — football spreads ~2
+# weeks ahead, but the spine's default 8-day window meant week-after-next
+# games had NO markets row, so no lane (opener, sweep, rent check) could
+# even see them while their richest early-rent window burned. The venue's
+# list is the schedule (the Aug 10 MLB lesson); ESPN covers the whole
+# season, so the fence was only ever this constant. Floor, not override:
+# an explicit --days larger than this still wins (backfills).
+_MIN_DAYS: dict[str, int] = {"NFL": 21, "NCAAF": 21}
+
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
@@ -111,10 +121,21 @@ def _espn_games(grp: str, league: str, days: int) -> list[dict]:
     now = datetime.now(timezone.utc)
     dates = f"{now:%Y%m%d}-{(now + timedelta(days=days)):%Y%m%d}"
     url = f"https://site.api.espn.com/apis/site/v2/sports/{grp}/{league}/scoreboard"
+    # CFB FEATURED-SLATE LANDMINE (Aug 31 2026, the Temple@PSU invisible-
+    # game bug): without groups=80&limit=400 the college-football scoreboard
+    # returns only the FEATURED slate for non-current weeks — Sep 12 came
+    # back as 6 games while Polymarket priced (and paid rent on) the full
+    # week-two board. Same fix football_sheet_data._espn_slate has carried
+    # since Aug 22; it was never applied here, and the spine is what every
+    # bet lane can see. Harmless for leagues that ignore the params.
+    base_params: dict = {}
+    if league == "college-football":
+        base_params = {"groups": "80", "limit": "400"}
 
     def _get(params) -> list | None:
         try:
-            r = httpx.get(url, params=params, headers={"User-Agent": _UA},
+            r = httpx.get(url, params={**base_params, **params},
+                          headers={"User-Agent": _UA},
                           timeout=15)
             r.raise_for_status()
             return (r.json() or {}).get("events", []) or []
@@ -493,7 +514,8 @@ def main(argv: list[str] | None = None) -> int:
     totals = {"games": 0, "create": 0, "reuse": 0, "pruned": 0}
     for sport in sports:
         try:
-            r = ingest_sport(sport, args.days, args.commit, prune=args.prune)
+            days = max(args.days, _MIN_DAYS.get(sport, 0))
+            r = ingest_sport(sport, days, args.commit, prune=args.prune)
             for k in totals:
                 totals[k] += r.get(k, 0)
         except Exception as e:
