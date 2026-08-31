@@ -92,12 +92,40 @@ wake on new listings (markets socket), acting on socket payloads
 Missing library or missing POLYMARKET_KEY_ID/POLYMARKET_SECRET_KEY →
 the feed logs WHY and stays off; the daemon is otherwise unchanged.
 
-## v2 candidates (build only when the need is measured)
+## v2 — BUILT Aug 31 2026 (user: "anything that increases our speed
+pays better money"; items 1+3 shipped together, parallel writes next)
 
-1. Markets socket on slugs with resting orders → instant outbid → wake.
-2. Per-slug parallel writes: the serial-writes invariant is PER-SLUG
-   (cancel→verify→create must never interleave on one slug — the Aug 16
-   duplicate incident); global one-at-a-time is a convenience. Scale-up
-   is per-slug locks + bounded concurrency behind one venue rate
-   limiter. Do it when lap length actually hurts (NFL Sundays), not
-   before.
+1. **Markets socket (`MarketsFeed`) — the outbid hint. LIVE.**
+   `wss://api.polymarket.us/v1/ws/markets`, same signed handshake (path
+   `/v1/ws/markets`), subscription type 2 = MARKET_DATA_LITE. Watch
+   list = slugs harvested from the private feed's ORDER snapshot ∪
+   order events since (`_harvest_slugs`, tolerant snake/camel keys —
+   zero extractable slugs self-reports, private feed unaffected);
+   refreshed whole on every private reconnect, adds-only between, cap
+   400 (stale extras cost a throttled hint, never a bet). Subscription
+   rotates whole on change: subscribe new set under a fresh request id,
+   THEN unsubscribe the old id (the venue unsubscribes by original
+   request id); 15s recv timeout is the rotation latency bound, 75s
+   silence = dead socket. Frames from a superseded request id are
+   dropped. Post-snapshot news on a watched market → wake `repeg`
+   (10s cooldown). Same doctrine: no price is ever read out of it.
+   Stamps under **kind=ws_mkts** (NOT ws_feed — the dashboard footer
+   reads the latest ws_feed stamp and must not see this socket's
+   lifecycle). Flag `CELLAR_WS_MKTS` (default on) — a bad night is one
+   env var, not a revert.
+
+2. **Position event → opener wake — the rebuy hint. LIVE.** Any
+   post-snapshot POSITION frame also wakes `opener` (60s cooldown,
+   only when the opener lane is enabled on this side): a scalp exit is
+   a position change, and the opener's dayof_wait rows are what
+   rinse-repeat rides — turnaround drops from next-pass to seconds.
+   No frame parsing to guess "flat"; the opener pass is idempotent and
+   the 60-min no-rebuy rule stays the policy.
+
+3. **Per-slug parallel writes — NEXT, its own commit.** The
+   serial-writes invariant is PER-SLUG (cancel→verify→create must
+   never interleave on one slug — the Aug 16 duplicate incident);
+   global one-at-a-time is a convenience. Scale-up is per-slug work
+   items + bounded concurrency (max ~3, the Cloudflare lesson) behind
+   the shared snapshot. Money-write surface: reviewed alone, shipped
+   alone.

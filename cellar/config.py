@@ -58,6 +58,14 @@ DRY_RUN = _flag("CELLAR_DRY_RUN", True)
 # a second switch. Off only for debugging the socket itself.
 WS_FEED = _flag("CELLAR_WS", True)
 
+# The markets socket (v2 — the OUTBID hint): MARKET_DATA_LITE on every
+# market we quote, waking repeg the second a watched book moves. Same
+# hint-only doctrine; its own flag because it is a second connection
+# with its own failure modes — a bad first night is one env var
+# (CELLAR_WS_MKTS=0), never a revert. Requires WS_FEED (it rides the
+# private feed's watch list).
+WS_MKTS = _flag("CELLAR_WS_MKTS", True)
+
 # NO LANE_TIMEOUT_S (removed Aug 20 2026). It existed here for weeks as a
 # "wall-clock ceiling for a single lane invocation" that NOTHING READ -- the
 # runner never wrapped a lane call in it, so the reassurance was fictional.

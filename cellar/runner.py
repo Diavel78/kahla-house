@@ -392,15 +392,19 @@ class Runner:
                                          name="cellar-renew", daemon=True)
         self._renewer.start()
 
-        # WS wake feed (docs/ws-feed-spec.md): venue push -> repeg lane runs
-        # NOW instead of at its next 120s tick. Started only when repeg is
-        # enabled here (there is nothing else to wake in v1), and start()
+        # WS wake feed (docs/ws-feed-spec.md): venue push -> the lane runs
+        # NOW instead of at its next tick. v2 wakes by LANE — order/book
+        # events wake repeg, position events also wake the opener (the
+        # rebuy hint) — restricted to lanes enabled on THIS side. start()
         # self-disables loudly on a missing lib or creds — the daemon then
         # runs exactly as it did before this feature existed.
         if config.WS_FEED and "repeg" in enabled:
             try:
                 from .wsfeed import WsFeed
-                self._wsfeed = WsFeed(lambda: self.wake("repeg"), sb=self.sb)
+                self._wsfeed = WsFeed(
+                    self.wake, sb=self.sb,
+                    lanes={ln for ln in ("repeg", "opener")
+                           if ln in enabled})
                 self._wsfeed.start()
             except Exception as e:
                 log.error("ws feed failed to start (%s) — lanes run on "
