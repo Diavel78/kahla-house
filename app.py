@@ -20424,6 +20424,15 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                      and f.get("best_bid_c") is not None]
             if not cands:
                 continue
+            # BUDGET CLOCKS THE CHASE, NOT THE BOOKKEEPING (Aug 31 2026 —
+            # the acted=0-forever bug): _t0 started at the top of the tick,
+            # BEFORE the shared snapshot and the fill-status walk (one
+            # _pmm_book read per resting pick — 60-90s at 133 pending), so
+            # the 20s budget was always spent before the first candidate
+            # and every chase deferred, every lap, silently. The budget's
+            # purpose is bounding the cancel→create window mid-pass; the
+            # reads above it are not that risk. Clock restarts here.
+            _t0 = _time.time()
             ids = [f["id"] for f in cands]
             try:
                 rows = (sb.table("bot_picks")
