@@ -164,6 +164,14 @@ class WsFeed:
         self._snap_slugs: set[str] = set()   # slugs seen inside a snapshot
         self._snap_keys: str | None = None   # first order's key names (recon)
         self._recon_done = False             # one recon stamp per process
+        # DIRTY SET (Aug 31 2026, user: "if the websocket is telling you
+        # what just moved, why the hell are you reading 130 slugs") —
+        # market slugs named by socket events since the last drain. The
+        # repeg lap reads books ONLY for these (plus a 10-min full-sweep
+        # backstop on the app side). Still a HINT: it scopes which REST
+        # reads happen sooner; no price ever leaves the socket.
+        self.dirty: set[str] = set()
+        self._dirty_lock = threading.Lock()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -196,7 +204,8 @@ class WsFeed:
         try:
             from . import config as _cfg
             if getattr(_cfg, "WS_MKTS", True):
-                self.mkts = MarketsFeed(self._wake, sb=self.sb)
+                self.mkts = MarketsFeed(self._wake, sb=self.sb,
+                                        dirty_add=self.add_dirty)
                 self.mkts.start()
         except Exception as e:
             log.error("markets feed failed to start (%s) — private feed "
@@ -209,6 +218,22 @@ class WsFeed:
             self.mkts.stop.set()
 
     # -- plumbing ------------------------------------------------------------
+
+    def add_dirty(self, slugs: set) -> None:
+        with self._dirty_lock:
+            self.dirty |= slugs
+
+    def drain_dirty(self):
+        """Pop-and-return the moved-market set — or None when the markets
+        socket can't vouch for completeness (never connected / currently
+        down), which tells the caller to FULL-sweep instead. A dead
+        socket therefore degrades to today's behavior, never to
+        blindness."""
+        if not (self.mkts and self.mkts._was_connected):
+            return None
+        with self._dirty_lock:
+            d, self.dirty = self.dirty, set()
+        return d
 
     def _wake(self, lane: str, why: str, min_s: float = WAKE_MIN_S) -> None:
         if lane not in self.lanes:
@@ -398,6 +423,12 @@ class WsFeed:
                     kset = set(msg) - {"requestId", "request_id",
                                        "subscriptionType"}
                     why = "event:" + ",".join(kset)[:60]
+                    # An order/position event names its market — that
+                    # market's book is worth a fresh read.
+                    _ev_slugs: set[str] = set()
+                    _harvest_slugs(msg, _ev_slugs)
+                    if _ev_slugs:
+                        self.add_dirty(_ev_slugs)
                     self._wake("repeg", why)
                     if (rid == "cellar-position"
                             or any("position" in k for k in kset)):
@@ -413,10 +444,8 @@ class WsFeed:
                         # watched. Adds only; removals ride the next
                         # snapshot / REST push (a stale watch costs a
                         # hint, nothing more; the cooldown absorbs it).
-                        ev: set[str] = set()
-                        _harvest_slugs(msg, ev)
-                        if ev:
-                            self.mkts.set_slugs(ev, replace=False)
+                        if _ev_slugs:
+                            self.mkts.set_slugs(_ev_slugs, replace=False)
             except Exception as e:
                 if self.stop.is_set():
                     break
@@ -466,8 +495,9 @@ class MarketsFeed:
     RECV_S = 15.0            # short recv timeout = subscription-rotation
                              # latency bound; silence watchdog is separate
 
-    def __init__(self, wake, sb=None):
+    def __init__(self, wake, sb=None, dirty_add=None):
         self._wake = wake                    # WsFeed._wake (lane, why, min_s)
+        self._dirty_add = dirty_add          # WsFeed.add_dirty — moved slugs
         self.sb = sb
         self.stop = threading.Event()
         self._lock = threading.Lock()
@@ -622,7 +652,20 @@ class MarketsFeed:
                         continue             # tail of an unsubscribed batch
                     # NEWS on a market we quote (marketDataLite / trade):
                     # the book moved. Whether we were outbid is the lap's
-                    # question, not ours.
+                    # question, not ours — but WHICH market moved scopes
+                    # the lap's reads (the dirty set).
+                    if self._dirty_add is not None:
+                        _sl = None
+                        for _pk in ("marketDataLite", "marketData", "trade"):
+                            _pv = msg.get(_pk)
+                            if isinstance(_pv, dict):
+                                _sl = _pv.get("marketSlug")
+                                break
+                        if isinstance(_sl, str) and _sl:
+                            try:
+                                self._dirty_add({_sl})
+                            except Exception:
+                                pass
                     self._wake("repeg", "mkts:" + ",".join(
                         k for k in msg
                         if k not in ("requestId", "request_id",

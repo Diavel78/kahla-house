@@ -417,6 +417,10 @@ class Runner:
                         _app._WS_WATCHLIST_CB = (
                             lambda slugs: _mkts.set_slugs(set(slugs),
                                                           replace=True))
+                        # Targeted laps: the repeg reads books only for
+                        # markets the socket named (None = socket can't
+                        # vouch → full sweep, today's behavior).
+                        _app._WS_DIRTY_CB = self._wsfeed.drain_dirty
                     except Exception as e:
                         log.warning("ws watchlist hook failed: %s", e)
             except Exception as e:

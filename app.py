@@ -11302,7 +11302,8 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict) -> dict
     return entry
 
 
-def _compute_fill_status(sb, uid: str, poly_snap=None) -> dict:
+def _compute_fill_status(sb, uid: str, poly_snap=None,
+                         only_slugs=None) -> dict:
     """DUAL-VENUE fill state for one user's pending picks (July 2026 revert):
     each pick is tracked on the venue its make/take verdict routed it to —
     Kalshi picks via the user's Kalshi account, Polymarket picks via
@@ -11395,6 +11396,17 @@ def _compute_fill_status(sb, uid: str, poly_snap=None) -> dict:
 
     fills = []
     for p in pending:
+        # TARGETED LAP (Aug 31 2026): when the caller passes the socket's
+        # moved-market set, skip Poly picks whose KNOWN slug didn't move —
+        # their book read would answer a question nobody asked. Picks with
+        # no stamped slug stay in (they're the ones needing resolution),
+        # and the caller's periodic full sweep (only_slugs=None) is the
+        # staleness backstop. The route and cron alerts never pass this.
+        if only_slugs is not None and _is_poly(p):
+            _kslug = (p.get("signal_blob") or {}).get("pmm_slug") \
+                if isinstance(p.get("signal_blob"), dict) else None
+            if _kslug and _kslug not in only_slugs:
+                continue
         # Poly-executed pick → the Poly tracker; everything else → Kalshi.
         if _is_poly(p):
             if poly_orders is None:
@@ -18868,6 +18880,15 @@ _REPEG_BUDGET_S = 20.0    # hard wall clock for the chase loop. Stops mid-pass
 # the private ORDER snapshot came up empty/uncharted on night one — the
 # lap's list is authoritative and refreshes every ~2 min regardless.
 _WS_WATCHLIST_CB = None
+# TARGETED LAPS (Aug 31 2026, user: "if the websocket is telling you what
+# just moved, why the hell are you reading 130 slugs"): drain_dirty hands
+# the lap the set of markets the socket saw move since last lap; the
+# fill-status walk reads books ONLY for those, and a FULL sweep runs
+# every _REPEG_FULL_SWEEP_S as the backstop (a dead socket returns None
+# → every lap full-sweeps, exactly the pre-socket behavior).
+_WS_DIRTY_CB = None
+_REPEG_FULL_SWEEP_S = 600.0
+_REPEG_LAST_FULL_TS = 0.0
 _REPEG_MAX_COST_USD = 13.00  # ⚠ THE MASTER RULE — never raise casually.
                              # 6.50→13.00 Aug 27 2026 (user, explicitly, via
                              # AskUserQuestion: "Everything ×2, Master Rule →
@@ -20356,6 +20377,22 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
     Returns counters for the tick log. Never raises."""
     res = {"acted": 0, "shadow": 0, "stopped": 0}
     _t0 = _time.time()          # measured, so the cap stops being a guess
+    # TARGETED vs FULL lap (see _WS_DIRTY_CB above): when the markets
+    # socket can vouch, this lap's fill/outbid walk reads books only for
+    # the markets that actually moved since the last lap.
+    global _REPEG_LAST_FULL_TS
+    _dirty = None
+    if _WS_DIRTY_CB is not None:
+        try:
+            _dirty = _WS_DIRTY_CB()
+        except Exception:
+            _dirty = None
+    _targeted = (_dirty is not None
+                 and _time.time() - _REPEG_LAST_FULL_TS
+                 < _REPEG_FULL_SWEEP_S)
+    if not _targeted:
+        _REPEG_LAST_FULL_TS = _time.time()
+    res["mode"] = (f"targeted:{len(_dirty)}" if _targeted else "full")
     try:
         # No blackout gate (user call Aug 2: "the repeg bot can fire during
         # rest hours — my phone's silenced anyway"). Overnight management is
@@ -20425,7 +20462,9 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
             if not near:
                 continue
             try:
-                fs = _compute_fill_status(sb, uid, poly_snap=lap_snap)
+                fs = _compute_fill_status(
+                    sb, uid, poly_snap=lap_snap,
+                    only_slugs=(_dirty if _targeted else None))
             except Exception:
                 continue
             if not fs.get("configured"):
