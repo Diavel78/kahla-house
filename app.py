@@ -1465,22 +1465,54 @@ def _incentives_sync(sb, client) -> dict:
         # The venue's own response is the authority: whatever statuses it
         # returned for a (slug, day, program) this pull are the only ones
         # that exist. Anything else we hold for that key is stale.
+        # READ-THEN-DIFF (Aug 31 2026 — the Friday-double-count incident).
+        # The old form issued one blind DELETE per response key: ~870
+        # sequential round trips per sync, nearly all no-ops. On a day of
+        # flaky PostgREST connections the storm died partway ("Server
+        # disconnected"), the failure landed in stale_err — which the sync
+        # stamp has NO column for, so it was invisible — and the payout
+        # flip left every Aug-28 market holding BOTH its PAID row and its
+        # superseded PENDING twin through clean run after clean run: the
+        # day card read $136 rent on a $68 day. Now: one paged read of
+        # what the DB holds in the response's date range, diff against the
+        # venue's statuses, and delete ONLY rows that are actually stale
+        # (a few dozen on payout-flip days, zero otherwise), batched.
         try:
             keys: dict = {}
             for p in payload:
                 keys.setdefault((p["market_slug"], p["earn_date"],
                                  p["program_type"]), set()).add(p["status"])
             stale = 0
-            for (slug, day, ptype), live in keys.items():
-                dead = [s for s in ("PAID", "PENDING", "SKIPPED")
-                        if s not in live]
-                if not dead:
-                    continue
-                r = (sb.table("poly_incentive_earnings").delete()
-                     .eq("market_slug", slug).eq("earn_date", day)
-                     .eq("program_type", ptype).in_("status", dead)
-                     .execute())
-                stale += len(getattr(r, "data", None) or [])
+            if keys:
+                lo = min(k[1] for k in keys)
+                held: list = []
+                pg = 0
+                while True:
+                    page = (sb.table("poly_incentive_earnings")
+                            .select("market_slug,earn_date,program_type,status")
+                            .gte("earn_date", lo)
+                            .range(pg * 1000, pg * 1000 + 999)
+                            .execute().data) or []
+                    held.extend(page)
+                    if len(page) < 1000:
+                        break
+                    pg += 1
+                groups: dict = {}
+                for h in held:
+                    day = str(h.get("earn_date") or "")[:10]
+                    live = keys.get((h.get("market_slug"), day,
+                                     h.get("program_type")))
+                    if live and h.get("status") not in live:
+                        groups.setdefault((day, h["program_type"],
+                                           h["status"]), []).append(
+                            h["market_slug"])
+                for (day, ptype, st), slugs in groups.items():
+                    for i in range(0, len(slugs), 100):
+                        (sb.table("poly_incentive_earnings").delete()
+                         .eq("earn_date", day).eq("program_type", ptype)
+                         .eq("status", st)
+                         .in_("market_slug", slugs[i:i + 100]).execute())
+                    stale += len(slugs)
             res["stale_removed"] = stale
         except Exception as e:
             res["stale_err"] = f"{type(e).__name__}: {e}"[:120]
@@ -1621,10 +1653,17 @@ def _incentives_sync(sb, client) -> dict:
                       f" | programs: {type(e).__name__}: {e}")[:300]
 
     try:
+        _note = res["err"] or "ok"
+        # stale_err had no column and failed INVISIBLY for weeks (the
+        # Friday-double-count incident) — surface both outcomes in note.
+        if res.get("stale_err"):
+            _note += f" · stale_err={res['stale_err']}"
+        elif "stale_removed" in res:
+            _note += f" · stale_removed={res['stale_removed']}"
         (sb.table("poly_incentive_sync").upsert({
             "id": 1, "ran_at": datetime.now(timezone.utc).isoformat(),
             "earnings_rows": res["earnings"], "program_rows": res["programs"],
-            "note": res["err"] or "ok"}).execute())
+            "note": _note[:300]}).execute())
     except Exception:
         pass
     return res
