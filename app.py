@@ -16794,6 +16794,84 @@ _GRIDIRON_TAIL_PTS = 10.0   # bet only rungs within this many points of the
                             # ±21.5 junk — exactly what this refuses.
 
 
+def _gridiron_seed_virgin(sb, g, es0, mt, gp, virgin, proj, now_utc):
+    """FIRST QUOTE ON A PAYING VIRGIN RUNG (Aug 31 2026, user: "if we
+    are first on it… can't we start our own line?"). Grounded on OUR
+    number, never a book: the cover/total model prices the rung, we
+    rest at model fair − 6¢ (the same virgin-book anchor the MLB peg
+    law has always used — a fill is a discount to our own fair). Guards
+    beyond the executor's own: the TAIL GATE ALWAYS applies (the
+    model's tails are 5-10pp miscalibrated and with no book nothing
+    else grounds the price — never seed junk rungs), the 25-60¢ band,
+    and per-rung rent at placement. Nearest-to-projection rung wins
+    (most model-competent, most likely to develop a book to chase).
+    Returns a gate string when a seed was attempted, None when nothing
+    was seedable (caller falls back to its old verdicts)."""
+    if not virgin or not gp:
+        return None
+    mg, tt, pm = gp
+    cands = []
+    for sn, pblk, ln in virgin:
+        sl = pblk.get("slug")
+        try:
+            if not _rent_ok(sl, es0, now_utc, sb)[0]:
+                continue
+        except Exception:
+            continue
+        if mt == "spread":
+            lh = float(ln) if sn == "home" else -float(ln)
+            ph = _gridiron_cover_p(pm, mg, lh)
+            ps = None if ph is None else (ph if sn == "home" else 1.0 - ph)
+            thr = -lh
+        else:
+            po = _gridiron_over_p(pm, tt, float(ln))
+            ps = None if po is None else (po if sn == "over" else 1.0 - po)
+            thr = float(ln)
+        if ps is None:
+            continue
+        dist = abs(thr - proj)
+        if dist > _GRIDIRON_TAIL_PTS:
+            continue
+        try:
+            _tk = _pmm_tick_c(get_client(), sl or "")
+        except Exception:
+            _tk = 1.0
+        peg = _grid_dn(ps * 100.0 - 6.0, _tk)
+        if not (_OU_TRADER_MIN_ENTRY_C <= peg <= _GRIDIRON_MAX_ENTRY_C):
+            continue
+        cands.append((dist, sn, peg, pblk, ps, ln))
+    if not cands:
+        return None
+    cands.sort(key=lambda c: c[0])
+    dist, sn, peg, pblk, ps, ln = cands[0]
+    xb = {"gridiron_autobet": True, "seed_quote": True,
+          "gridiron_margin": round(mg, 2), "gridiron_total": round(tt, 2),
+          "rent_first": True, "rung_dist": round(dist, 1)}
+    if mt == "spread":
+        xb["cover_p"] = round(ps, 4)
+        xb["line_home"] = (float(ln) if sn == "home" else -float(ln))
+    else:
+        xb["total_p"] = round(ps, 4)
+    _ftag: list = []
+    r = _autobet_execute(
+        sb, g, es0, mt, sn, f"{sn} {ln}", pblk["slug"],
+        bool(pblk.get("synthetic")), peg, ps,
+        ps * 100.0 - peg, round(ps * 100.0 - peg, 1),
+        None, None, extra_blob=xb,
+        cap_flag="gridiron_autobet", cap_max=10000,
+        query_text="auto-bet: gridiron virgin seed",
+        reason=(f"SEED QUOTE — virgin book, {sn} {ln} rested "
+                f"{round(peg)}¢ vs model {round(ps * 100)}¢ (fair−6)"),
+        contracts=(_GRIDIRON_CONTRACTS if mt == "spread"
+                   else _GRIDIRON_TOTAL_CONTRACTS),
+        entry_line=ln, sport=g.get("sport"), fail_tag=_ftag)
+    if r in ("cap", "rent"):
+        return r
+    if r is True:
+        return "seeded"
+    return "failed:" + (_ftag[0] if _ftag else "?")
+
+
 def _gridiron_try_bet(sb, g, es0, d, mt, gp):
     """ONE football bet attempt (spread or total) — the shared leg behind
     the opener tape AND the week-of sweep.
@@ -16843,12 +16921,21 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
     _noveto = (_early_noveto(es0, now_utc)
                or (_sim is not None and _sim > _OU_NOVETO_MIN_MIN))
     viable = []
+    virgin = []   # enrolled rungs with NO book — seed candidates (below)
     for pblk in raw:
         sn = pblk.get("side")
         q = pblk.get("quote") or {}
         ln = pblk.get("line")
-        if (sn not in (ka, kb) or q.get("bid") is None or ln is None
-                or not pblk.get("slug") or float(q["bid"]) <= 0):
+        if sn not in (ka, kb) or ln is None or not pblk.get("slug"):
+            continue
+        if q.get("bid") is None or float(q["bid"]) <= 0:
+            # SEED CANDIDATE (Aug 31 2026, user: "if we are first on it…
+            # can't we start our own line?"). A virgin enrolled rung is
+            # the alone-in-the-window jackpot (the $9.63/day-on-1.5-shares
+            # measurement); the MLB lanes already anchor virgin books at
+            # fair−6 and only this leg demanded someone else quote first.
+            # Grounded on OUR number (the cover model), never a book.
+            virgin.append((sn, pblk, ln))
             continue
         try:                              # grid-native peg (Aug 30)
             _tk = _pmm_tick_c(get_client(), pblk.get("slug") or "")
@@ -16869,7 +16956,7 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
         if not (_OU_TRADER_MIN_ENTRY_C <= peg <= _GRIDIRON_MAX_ENTRY_C):
             continue
         viable.append((sn, peg, pblk, q, ln))
-    if not viable:
+    if not viable and not virgin:
         return "no_book"
     # ── RENT FIRST ── one venue ask per unique slug (10-min cached; a
     # synthetic side shares its twin's slug so pairs cost one read).
@@ -16880,7 +16967,13 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
             rent_by_slug[sl] = _rent_ok(sl, es0, now_utc, sb)[0]
     paying = [c for c in viable if rent_by_slug.get(c[2]["slug"])]
     if not paying:
-        return "rent"
+        # No BOOKED paying rung — try seeding a virgin paying one (our
+        # own line at model fair−6; the no_book group's answer).
+        seeded = _gridiron_seed_virgin(sb, g, es0, mt, gp, virgin,
+                                       proj, now_utc)
+        if seeded is not None:
+            return seeded
+        return "rent" if viable else "no_book"
     bc = None
     for sn, peg, pblk, q, ln in paying:
         if mt == "spread":
@@ -17336,10 +17429,10 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
                     verdict = v
                     retry_min = _OMS_RETRY_MIN.get(
                         v, _OMS_RETRY_MIN.get("none", 30))
-        if verdict == "placed":
+        if verdict in ("placed", "seeded"):
             creates += 1
             st["oms_placed"] = st.get("oms_placed", 0) + 1
-            upd = {"state": "placed", "detail": "placed"}
+            upd = {"state": "placed", "detail": verdict}
         elif verdict == "failed:dedup":
             upd = {"state": "placed", "detail": "bet_exists"}
         else:
