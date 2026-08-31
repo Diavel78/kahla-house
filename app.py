@@ -22319,6 +22319,36 @@ def api_data():
                         cel["ws"] = _ws_feed_health(get_supabase())
                 except Exception:
                     pass
+                # STALE TRIPWIRE VERDICT REPAIR (Aug 31 2026 — the user
+                # was at work with a known-false CHASE DEAD burning red
+                # all day): the box computes the cached blob on ITS code,
+                # and a tripwire refinement deployed to Vercel can't
+                # reach the card until someone pulls. When the cached
+                # verdict says CHASE DEAD, re-run THIS code's tripwire
+                # over the same journal; if it no longer trips, restore
+                # the lane and the bad count. Idempotent and harmless
+                # once the box catches up.
+                try:
+                    if isinstance(cel, dict):
+                        for _l in (cel.get("lanes") or []):
+                            if (_l.get("lane") == "repeg"
+                                    and _l.get("state") == "error"
+                                    and str(_l.get("error") or "")
+                                    .startswith("CHASE DEAD")):
+                                _fresh = _cellar_health(get_supabase())
+                                _fl = next(
+                                    (x for x in (_fresh.get("lanes") or [])
+                                     if x.get("lane") == "repeg"), None)
+                                if _fl is not None and not str(
+                                        _fl.get("error") or "").startswith(
+                                        "CHASE DEAD"):
+                                    _l["state"] = _fl["state"]
+                                    _l["error"] = _fl.get("error")
+                                    cel["bad"] = max(
+                                        0, int(cel.get("bad") or 1) - 1)
+                                break
+                except Exception:
+                    pass
                 return cel
 
             _gd = _blk("gameday_pnl", lambda: _gameday_pnl(get_supabase()),
