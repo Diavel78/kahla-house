@@ -56,7 +56,24 @@ WAKE_OPENER_MIN_S = 60.0  # position-event wake throttle (rebuy after exit)
 BACKOFF_S = (2, 4, 8, 15, 30, 60)   # reconnect ladder, then stays at the cap
 FAIL_STAMP_MIN_S = 3600  # at most one failure stamp per hour to exec_probe_runs
 
-_SLUG_KEYS = ("market_slug", "marketSlug", "slug", "symbol")
+_SLUG_KEYS = ("market_slug", "marketSlug", "slug", "symbol",
+              "market", "ticker", "market_ticker")
+_UUID_RE = None
+
+
+def _slugish(v) -> bool:
+    """A market slug, not a UUID and not a short token. UUIDs pass the
+    dash test (36 hex chars, 4 dashes) and would subscribe to nothing —
+    exclude them by shape."""
+    global _UUID_RE
+    if not (isinstance(v, str) and "-" in v and 8 < len(v) < 120):
+        return False
+    if _UUID_RE is None:
+        import re
+        _UUID_RE = re.compile(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+    return not _UUID_RE.match(v)
 
 
 def _harvest_slugs(obj, out: set, depth: int = 0) -> None:
@@ -70,7 +87,7 @@ def _harvest_slugs(obj, out: set, depth: int = 0) -> None:
     if isinstance(obj, dict):
         for k in _SLUG_KEYS:
             v = obj.get(k)
-            if isinstance(v, str) and "-" in v and 8 < len(v) < 120:
+            if _slugish(v):
                 out.add(v)
         for v in obj.values():
             if isinstance(v, (dict, list)):
@@ -78,6 +95,31 @@ def _harvest_slugs(obj, out: set, depth: int = 0) -> None:
     elif isinstance(obj, list):
         for v in obj[:500]:
             _harvest_slugs(v, out, depth + 1)
+
+
+def _recon_keys(obj, depth: int = 0) -> str | None:
+    """Key names (never values) of the first order-shaped dict in a
+    frame — the self-diagnosis for a harvest miss, so a field-name
+    mismatch reports the REAL schema instead of just watching nothing.
+    First live night proved the need: 130 resting orders, watched=0,
+    and no way to see why from off the box."""
+    if depth > 3:
+        return None
+    if isinstance(obj, dict):
+        ks = [k for k in obj if isinstance(k, str)]
+        if len(ks) >= 3 and not any(
+                k.endswith("_subscription_snapshot") for k in ks):
+            return ",".join(sorted(ks))[:280]
+        for v in obj.values():
+            r = _recon_keys(v, depth + 1)
+            if r:
+                return r
+    elif isinstance(obj, list):
+        for v in obj[:5]:
+            r = _recon_keys(v, depth + 1)
+            if r:
+                return r
+    return None
 
 
 class WsFeed:
@@ -110,6 +152,7 @@ class WsFeed:
         self._seen_keys: set[str] = set()
         self.mkts: "MarketsFeed | None" = None
         self._snap_slugs: set[str] = set()   # slugs seen inside a snapshot
+        self._snap_keys: str | None = None   # first order's key names (recon)
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -275,10 +318,21 @@ class WsFeed:
                         # refreshed on every reconnect.
                         if rid == "cellar-order":
                             _harvest_slugs(body, self._snap_slugs)
+                            if self._snap_keys is None:
+                                self._snap_keys = _recon_keys(body)
                         if isinstance(body, dict) and body.get("eof"):
                             snap_open.discard(rid)
                             log.info("ws snapshot complete: %s", rid)
                             if rid == "cellar-order" and self.mkts:
+                                if (not self._snap_slugs
+                                        and self._snap_keys):
+                                    # Orders exist, zero slugs found —
+                                    # the field-name miss. Report the
+                                    # REAL keys so the fix is one word.
+                                    self.mkts._stamp(
+                                        "no_slug_field",
+                                        err="order keys: "
+                                            + self._snap_keys)
                                 self.mkts.set_slugs(self._snap_slugs,
                                                     replace=True)
                                 self._snap_slugs = set()
