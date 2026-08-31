@@ -44,6 +44,21 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 > reason the bet is placed. A market with no liquidity program is a market
 > where we take adverse selection for free.
 >
+> **THE RULE RUNS FORWARD, NOT AS A VETO (user, Aug 30 2026: "The basic
+> fundamental rule for deciding to bet a game: hey, it's on the rent
+> list… how can I bet this").** The rent list is the SOURCE of the bet
+> universe, not a final check on bets chosen some other way. Rent-as-
+> last-veto is how Ohio@Nebraska +24.5 sat unbet inside the venue's own
+> CFB T1 Spreads Early program: the dossier narrowed the ladder to the
+> model's money rung, the model gates refused it, and the enrolled rung
+> was never even a candidate — rent was consulted dead last, about a rung
+> nobody was paying on. Football spreads/totals now run RENT-FIRST
+> (`_gridiron_try_bet`, Aug 30: full ladder → viable books (25-60¢) →
+> `_rent_ok` per rung → the PAYING rungs are the candidates; the model
+> only picks the side and breaks ties; >6h out no model gate can veto a
+> payer). When adding any lane, start from "which markets pay?" — never
+> from "which markets does the model like?".
+>
 > Enforced in code, DEFAULT-DENY, by `_rent_ok(slug, event_start, now)` at
 > **both** placement paths — `_autobet_execute` (ML, O/U, whiff/props) and
 > the NRFI section's own `orders.create` (**NRFI does NOT go through
