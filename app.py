@@ -20444,8 +20444,14 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                         else "TOT" if (f.get("market_type") == "total")
                         else "NRFI")
                 _is_gridiron = bool(blob.get("gridiron_autobet"))
+                # ou_trader added Aug 31 2026 — the revived O/U lane's
+                # picks carry ou_trader, NOT autobet, so the manual-bet
+                # filter below was silently exempting every O/U bet from
+                # the chase ("same design as ML… rinse-repeat with repeg"
+                # was the lane's spec; the repeg leg was never flagged in).
                 is_model_bet = (bool(blob.get("autobet"))
                                 or bool(blob.get("whiff_autobet"))
+                                or bool(blob.get("ou_trader"))
                                 or _is_gridiron)
                 # ⚠ NEVER CHASE A LIVE GAME (Aug 12 2026 — the CIN@CWS
                 # YRFI filled 13 minutes after first pitch). Every model
@@ -20559,9 +20565,33 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                                  f"{round(new_c)}¢")):
                         res["stopped"] += 1
                     continue
+                # RENT-COLLECTOR CHASE NO-VETO (Aug 31 2026 — user, on a
+                # LAD ML the repeg parked at 53¢ under a 66¢ touch,
+                # stamped "model limit": "if it pays rent, I want it
+                # bet"). A rent vehicle 13 ticks off the touch earns ~zero
+                # (df^ticks) and only fills if the market crashes through
+                # it — the worst of both. Beyond T-6h the model is NOT the
+                # wall on the rent lanes (autobet ML, O/U + gridiron
+                # totals, gridiron spreads): the chase follows the touch
+                # and only the price cap (64¢ ML / 60¢ football, above)
+                # and the Master Rule bound it — the same shape as the
+                # entry no-veto. Inside T-6h the model wall returns.
+                # Props (bets-to-win) and NRFI keep their walls always.
+                _noveto_chase = False
+                if (is_model_bet
+                        and f.get("market_type") in ("moneyline", "total",
+                                                     "spread")
+                        and not blob.get("whiff_autobet")):
+                    try:
+                        _noveto_chase = ((datetime.fromisoformat(
+                            str(r.get("event_start")).replace("Z", "+00:00"))
+                            - now).total_seconds() / 60.0
+                            > _OU_NOVETO_MIN_MIN)
+                    except Exception:
+                        _noveto_chase = False
                 move_n = len(moves) + 1
                 edge = None
-                if is_autobet or move_n > 1:
+                if (is_autobet or move_n > 1) and not _noveto_chase:
                     fair = r.get("fair_prob")
                     if is_autobet:
                         # ALWAYS re-run the model before chasing — the fair
