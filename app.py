@@ -2390,6 +2390,17 @@ def _cellar_health(sb) -> dict:
         fails = int(r.get("fails_1h") or 0)
         stale = hb is not None and hb > ttl
         warn_s = _LANE_WORK_WARN_S.get(lane, 21_600)
+        if lane == "vsin":
+            # VSiN is dormant overnight BY ITS SOURCE'S SCHEDULE (last
+            # splits land ~7-8pm AZ, next slate ~6-7am) — user, Aug 31
+            # 2026: "VSIN dormant should be green… it's as intended."
+            # The 3h idle warn applies only while VSiN publishes; a
+            # nightly amber is the off-is-not-broken disease — a light
+            # that cries on schedule trains you to skip the panel.
+            _azh = datetime.now(timezone.utc).astimezone(
+                ZoneInfo("America/Phoenix")).hour
+            if _azh >= 20 or _azh < 8:
+                warn_s = None
         # RED MEANS FAILING NOW, not "hiccuped once since an hour ago". A
         # lane ticking 60×/h over a network takes the occasional dropped
         # connection; its work is idempotent and the next tick catches up.
