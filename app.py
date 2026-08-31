@@ -20439,6 +20439,15 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                      and f.get("best_bid_c") is not None]
             if not cands:
                 continue
+            # WORST-PARKED FIRST (Aug 31 2026): cands inherited the pending
+            # list's event_start order, so a far-out order 15¢ off the
+            # touch (the deadest money on the board) waited behind a
+            # rotating front of near-game 1¢ re-pegs and never got a turn
+            # inside the budget. Rent recovered per action is the gap
+            # closed — chase the biggest gap first.
+            cands.sort(key=lambda f: ((f.get("best_bid_c") or 0.0)
+                                      - (f.get("my_price_c") or 0.0)),
+                       reverse=True)
             # BUDGET CLOCKS THE CHASE, NOT THE BOOKKEEPING (Aug 31 2026 —
             # the acted=0-forever bug): _t0 started at the top of the tick,
             # BEFORE the shared snapshot and the fill-status walk (one
