@@ -406,6 +406,19 @@ class Runner:
                     lanes={ln for ln in ("repeg", "opener")
                            if ln in enabled})
                 self._wsfeed.start()
+                # Watch list from VENUE TRUTH: every repeg lap pushes its
+                # open-orders slug set into the markets socket, so the
+                # outbid hint works even if the private ORDER snapshot
+                # stays uncharted (night one: watched=0, total silence).
+                if getattr(self._wsfeed, "mkts", None) is not None:
+                    try:
+                        import app as _app
+                        _mkts = self._wsfeed.mkts
+                        _app._WS_WATCHLIST_CB = (
+                            lambda slugs: _mkts.set_slugs(set(slugs),
+                                                          replace=True))
+                    except Exception as e:
+                        log.warning("ws watchlist hook failed: %s", e)
             except Exception as e:
                 log.error("ws feed failed to start (%s) — lanes run on "
                           "schedule as before", e)

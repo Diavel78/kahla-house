@@ -18861,6 +18861,13 @@ _REPEG_MAX_ACTIONS = 6    # re-pegs per tick. Was an implicit 1, justified in
 _REPEG_BUDGET_S = 20.0    # hard wall clock for the chase loop. Stops mid-pass
                           # rather than risk a platform kill between a cancel
                           # and its create — that gap IS the ORDER LOST state.
+# WS markets-feed watch list, from VENUE TRUTH (Aug 31 2026): the cellar
+# runner plants a callback here after starting the feed; every repeg lap
+# then pushes its own open-orders slug set (the REST read it already
+# paid for) into the markets socket's subscription list. Exists because
+# the private ORDER snapshot came up empty/uncharted on night one — the
+# lap's list is authoritative and refreshes every ~2 min regardless.
+_WS_WATCHLIST_CB = None
 _REPEG_MAX_COST_USD = 13.00  # ⚠ THE MASTER RULE — never raise casually.
                              # 6.50→13.00 Aug 27 2026 (user, explicitly, via
                              # AskUserQuestion: "Everything ×2, Master Rule →
@@ -20396,6 +20403,14 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 (sb.table("poly_dash_cache")
                  .update({"order_count": len(lap_orders)})
                  .eq("id", 1).execute())
+            except Exception:
+                pass
+            # Feed the markets socket its watch list from this lap's own
+            # venue read — replace-whole, so cancels fall off too.
+            try:
+                if _WS_WATCHLIST_CB is not None:
+                    _WS_WATCHLIST_CB({o.get("slug") for o in lap_orders
+                                      if o.get("slug")})
             except Exception:
                 pass
         for uid in admins:

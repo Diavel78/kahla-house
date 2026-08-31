@@ -36,8 +36,18 @@ log = logging.getLogger("cellar.wsfeed")
 
 WS_URL = "wss://api.polymarket.us/v1/ws/private"
 WS_PATH = "/v1/ws/private"
-SUB_ORDER = 1        # private-channel subscription types, from the venue's
-SUB_POSITION = 3     # websocket overview doc (fetched Aug 30 2026)
+# ⚠ THE WIRE IS THE SDK'S, NOT THE PROSE DOC'S (Aug 31 2026, the user's
+# catch after a night of silence: "READ THE INSTRUCTIONS"). The
+# websocket overview page says snake_case fields and INTEGER
+# subscription types — the vendor's own client
+# (polymarket_us/websocket/{base,private,markets,types}.py) sends
+# camelCase (`requestId`, `subscriptionType`, `marketSlugs`) and STRING
+# enums, and parses camelCase response keys (orderSubscriptionSnapshot,
+# positionSubscriptionUpdate, marketDataLite). Frames built from the
+# prose doc were silently ignored — a "connected" socket that only ever
+# heard heartbeats. When these disagree again, the SDK source wins.
+SUB_ORDER = "SUBSCRIPTION_TYPE_ORDER"
+SUB_POSITION = "SUBSCRIPTION_TYPE_POSITION"
 
 # Markets socket (v2, Aug 30 2026 — user: "anything that increases our
 # speed pays better money"). Same auth scheme, own path; subscription
@@ -46,7 +56,7 @@ SUB_POSITION = 3     # websocket overview doc (fetched Aug 30 2026)
 # overview, fetched via /api/docs-fetch Aug 31 2026.
 WS_MKTS_URL = "wss://api.polymarket.us/v1/ws/markets"
 WS_MKTS_PATH = "/v1/ws/markets"
-SUB_MARKET_LITE = 2
+SUB_MARKET_LITE = "SUBSCRIPTION_TYPE_MARKET_DATA_LITE"
 MKTS_MAX_SLUGS = 400     # venue best practice: only subscribe what you need
 
 RECV_TIMEOUT_S = 75.0    # heartbeat watchdog: silence this long = dead socket
@@ -153,6 +163,7 @@ class WsFeed:
         self.mkts: "MarketsFeed | None" = None
         self._snap_slugs: set[str] = set()   # slugs seen inside a snapshot
         self._snap_keys: str | None = None   # first order's key names (recon)
+        self._recon_done = False             # one recon stamp per process
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -213,6 +224,26 @@ class WsFeed:
         except Exception as e:      # a wake must never kill the feed
             log.warning("wake callback failed: %s", e)
 
+    def _recon(self) -> None:
+        """One self-documentation stamp per process, fired the moment the
+        snapshot phase settles (or the first news frame, for a venue that
+        never lets snap_open empty): rid present or not, every frame key
+        seen, the first order's field names, slugs harvested. Exists
+        because the first live night was UNDIAGNOSABLE from off the box —
+        watched=0 and total silence."""
+        if self._recon_done:
+            return
+        self._recon_done = True
+        try:                       # NEVER let recon kill the live socket
+            watched = (len(getattr(self.mkts, "_slugs", ()))
+                       if self.mkts else -1)
+            self._stamp("recon",
+                        err=(f"keys={sorted(self._seen_keys)[:14]} "
+                             f"snap_keys={self._snap_keys or '-'} "
+                             f"watched={watched}")[:290])
+        except Exception:
+            pass
+
     def _stamp(self, state: str, err: str | None = None) -> None:
         """Connect/disconnect transitions to exec_probe_runs (kind=ws_feed)
         so socket health is visible OFF the box. Best-effort; failure
@@ -264,7 +295,7 @@ class WsFeed:
         for rid, sub in (("cellar-order", SUB_ORDER),
                          ("cellar-position", SUB_POSITION)):
             ws.send(json.dumps({"subscribe": {
-                "request_id": rid, "subscription_type": sub}}))
+                "requestId": rid, "subscriptionType": sub}}))
         return ws
 
     # -- the loop ------------------------------------------------------------
@@ -308,22 +339,40 @@ class WsFeed:
                     if "error" in msg:
                         log.warning("ws error frame: %s", str(msg)[:300])
                         continue
-                    rid = msg.get("request_id")
-                    snap = [k for k in msg
-                            if k.endswith("_subscription_snapshot")]
+                    rid = msg.get("requestId") or msg.get("request_id")
+                    # Schema recon on EVERY frame kind (key names only).
+                    for k in msg:
+                        if (k not in self._seen_keys
+                                and k not in ("requestId", "request_id")):
+                            self._seen_keys.add(k)
+                            log.info("ws first sighting of key %r", k)
+                    # Snapshot keys per the SDK: orderSubscriptionSnapshot /
+                    # positionSubscriptionSnapshot (alt: ordersSnapshot /
+                    # positionsSnapshot). endswith covers all four.
+                    snap = [k for k in msg if k.endswith("Snapshot")
+                            or k.endswith("_subscription_snapshot")]
                     if snap:
+                        # CHANNEL FROM THE KEY NAME, rid secondary — the
+                        # snapshot key itself says which channel this is
+                        # and cannot be absent.
+                        _kl = snap[0].lower()
+                        chan = ("cellar-order" if _kl.startswith("order")
+                                else "cellar-position"
+                                if _kl.startswith("position")
+                                else (rid or snap[0]))
                         body = msg.get(snap[0]) or {}
                         # The ORDER snapshot is the complete standing
                         # order book — the markets watch list, for free,
                         # refreshed on every reconnect.
-                        if rid == "cellar-order":
+                        if chan == "cellar-order":
                             _harvest_slugs(body, self._snap_slugs)
                             if self._snap_keys is None:
                                 self._snap_keys = _recon_keys(body)
                         if isinstance(body, dict) and body.get("eof"):
+                            snap_open.discard(chan)
                             snap_open.discard(rid)
-                            log.info("ws snapshot complete: %s", rid)
-                            if rid == "cellar-order" and self.mkts:
+                            log.info("ws snapshot complete: %s", chan)
+                            if chan == "cellar-order" and self.mkts:
                                 if (not self._snap_slugs
                                         and self._snap_keys):
                                     # Orders exist, zero slugs found —
@@ -336,32 +385,34 @@ class WsFeed:
                                 self.mkts.set_slugs(self._snap_slugs,
                                                     replace=True)
                                 self._snap_slugs = set()
+                            if not snap_open:
+                                self._recon()
                         continue            # standing state — never a wake
-                    if rid in snap_open:
+                    if rid is not None and rid in snap_open:
                         continue            # still inside that snapshot
-                    # Log each new message SHAPE once — free schema recon
-                    # for v2 without parsing anything now.
-                    for k in msg:
-                        if k not in self._seen_keys and k != "request_id":
-                            self._seen_keys.add(k)
-                            log.info("ws first sighting of key %r", k)
+                    self._recon()           # news before snapshots settle →
+                                            # recon fires anyway (rid-less
+                                            # venues never empty snap_open)
                     # Anything else after the snapshots is NEWS: an order
                     # changed, a position changed. That is the whole hint.
-                    why = "event:" + ",".join(
-                        k for k in msg if k != "request_id")[:60]
+                    kset = set(msg) - {"requestId", "request_id",
+                                       "subscriptionType"}
+                    why = "event:" + ",".join(kset)[:60]
                     self._wake("repeg", why)
-                    if rid == "cellar-position":
+                    if (rid == "cellar-position"
+                            or any("position" in k for k in kset)):
                         # A position changed — a fill or an exit. The
                         # opener's dayof_wait rows are what rinse-repeat
                         # rides; waking it turns the rebuy lag from
                         # next-pass into seconds. The 60-min no-rebuy
                         # rule stays the policy — this is only speed.
                         self._wake("opener", why, WAKE_OPENER_MIN_S)
-                    elif rid == "cellar-order" and self.mkts:
+                    elif (rid == "cellar-order"
+                          or any("order" in k for k in kset)) and self.mkts:
                         # New/changed order → make sure its market is
                         # watched. Adds only; removals ride the next
-                        # snapshot (a stale watch costs a hint, nothing
-                        # more, and the cooldown absorbs it).
+                        # snapshot / REST push (a stale watch costs a
+                        # hint, nothing more; the cooldown absorbs it).
                         ev: set[str] = set()
                         _harvest_slugs(msg, ev)
                         if ev:
@@ -514,14 +565,20 @@ class MarketsFeed:
                     if dirty and slugs:
                         sub_n += 1
                         rid = f"cellar-mkts-{sub_n}"
+                        # Wire per the SDK (camelCase, STRING enum) — the
+                        # prose doc's snake_case/int frames are ignored.
                         ws.send(json.dumps({"subscribe": {
-                            "request_id": rid,
-                            "subscription_type": SUB_MARKET_LITE,
-                            "market_slugs": slugs}}))
-                        snap_open.add(rid)
+                            "requestId": rid,
+                            "subscriptionType": SUB_MARKET_LITE,
+                            "marketSlugs": slugs}}))
+                        # NO snap_open.add here: the SDK's markets socket
+                        # has no snapshot phase — pre-adding the rid meant
+                        # nothing ever cleared it and every frame was
+                        # suppressed as "inside the snapshot" (caught by
+                        # the scripted test, would have been live bug #5).
                         if cur_rid:
                             ws.send(json.dumps({"unsubscribe": {
-                                "request_id": cur_rid}}))
+                                "requestId": cur_rid}}))
                         cur_rid = rid
                         log.info("ws mkts watching %d markets", len(slugs))
                     try:
@@ -549,22 +606,27 @@ class MarketsFeed:
                     if "error" in msg:
                         log.warning("ws mkts error frame: %s", str(msg)[:300])
                         continue
-                    rid = msg.get("request_id")
-                    snap = [k for k in msg
-                            if k.endswith("_subscription_snapshot")]
+                    rid = msg.get("requestId") or msg.get("request_id")
+                    # The SDK's markets handler has NO snapshot branch —
+                    # market subs stream directly. Tolerate one anyway.
+                    snap = [k for k in msg if k.endswith("Snapshot")
+                            or k.endswith("_subscription_snapshot")]
                     if snap:
                         body = msg.get(snap[0]) or {}
                         if isinstance(body, dict) and body.get("eof"):
                             snap_open.discard(rid)
                         continue             # standing state — never a wake
-                    if rid in snap_open:
+                    if rid is not None and rid in snap_open:
                         continue
                     if rid is not None and rid != cur_rid:
                         continue             # tail of an unsubscribed batch
-                    # NEWS on a market we quote: the book moved. Whether
-                    # we were outbid is the lap's question, not ours.
+                    # NEWS on a market we quote (marketDataLite / trade):
+                    # the book moved. Whether we were outbid is the lap's
+                    # question, not ours.
                     self._wake("repeg", "mkts:" + ",".join(
-                        k for k in msg if k != "request_id")[:50],
+                        k for k in msg
+                        if k not in ("requestId", "request_id",
+                                     "subscriptionType"))[:50],
                         WAKE_MKTS_MIN_S)
             except Exception as e:
                 if self.stop.is_set():
