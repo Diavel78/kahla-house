@@ -142,8 +142,10 @@ def _espn_get(url: str, params: dict | None = None) -> dict | None:
     for u in (url, url.replace("://site.api.espn.com/",
                                "://site.web.api.espn.com/")):
         try:
-            r = httpx.get(u, params=params or {}, headers={"User-Agent": _UA},
-                          timeout=20)
+            # No spoofed UA at ESPN — Akamai 403s a fake Chrome UA while
+            # httpx's honest default passes (Aug 31 2026, the dark-spine
+            # root cause; see ingest_espn_markets._espn_games).
+            r = httpx.get(u, params=params or {}, timeout=20)
             r.raise_for_status()
             return r.json() or {}
         except Exception as e:

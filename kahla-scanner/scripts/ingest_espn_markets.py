@@ -132,10 +132,16 @@ def _espn_games(grp: str, league: str, days: int) -> list[dict]:
     if league == "college-football":
         base_params = {"groups": "80", "limit": "400"}
 
+    # NO SPOOFED USER-AGENT AT ESPN (Aug 31 2026 — the dark-spine root
+    # cause). ESPN/Akamai now 403s a Chrome UA that doesn't come with a
+    # Chrome TLS fingerprint, while httpx's honest default UA passes —
+    # proven by a same-runner, same-minute A/B: this ingest (fake UA) got
+    # 403 on EVERY sport and date while bot_picks_resolver (no UA header)
+    # got 200s from the same ESPN host. The spine had been dark from
+    # Actions since ~July 29 (NFL) / June 9 (NCAAF) behind exactly this.
     def _get(params) -> list | None:
         try:
             r = httpx.get(url, params={**base_params, **params},
-                          headers={"User-Agent": _UA},
                           timeout=15)
             r.raise_for_status()
             return (r.json() or {}).get("events", []) or []
