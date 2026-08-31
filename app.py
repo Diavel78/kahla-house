@@ -20639,20 +20639,66 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 # else keeps the Y/NRFI 64¢ guardrail
                 _cap_c = (_GRIDIRON_MAX_ENTRY_C if _is_gridiron
                           else _REPEG_NRFI_PRICE_CAP_C)
+                _flipped, _flip_to = False, None
                 if new_c is not None and new_c > _cap_c:
+                    # SIDE FLIP AT THE CAP (Aug 31 2026, user: "we hit the
+                    # cap — if it's that high, wouldn't the other side be
+                    # cheap and pay the same rent??"). Yes: one market, two
+                    # sides, both scored independently by the venue's own
+                    # formula — a favorite past the cap means the dog side
+                    # of the SAME slug sits cheap, in band, with Master
+                    # Rule headroom to spare. Chasing the favorite into
+                    # the cap is paying more for the same rent ticket.
+                    # ML + O/U only for v1 (football spread mirrors get
+                    # daylight); one flip per bet per hour so a game
+                    # hovering at the boundary can't seesaw; new-side peg
+                    # must clear the 25¢ fill-viability floor or we fall
+                    # back to the clamp.
+                    if (_noveto_chase and old_c is not None
+                            and f.get("market_type") in ("moneyline", "total")
+                            and f.get("best_ask_c") is not None):
+                        _fl_prev = blob.get("side_flip") or {}
+                        _fl_ok = True
+                        try:
+                            if _fl_prev.get("at") and (
+                                    now - datetime.fromisoformat(
+                                        str(_fl_prev["at"]))
+                                    ) < timedelta(hours=1):
+                                _fl_ok = False
+                        except Exception:
+                            pass
+                        _flip_to = {("moneyline", "home"): "away",
+                                    ("moneyline", "away"): "home",
+                                    ("total", "over"): "under",
+                                    ("total", "under"): "over"}.get(
+                            (f.get("market_type"),
+                             (r.get("side") or "").lower()))
+                        _nb_bid = 100.0 - float(f["best_ask_c"])
+                        _nb_ask = (100.0 - float(f["best_bid_c"])
+                                   if f.get("best_bid_c") is not None
+                                   else None)
+                        _pt = _grid_dn(_nb_bid, _tkr) + _tkr
+                        if _nb_ask is not None and _pt >= _nb_ask:
+                            _pt = _grid_dn(_nb_bid, _tkr)
+                        if (_fl_ok and _flip_to
+                                and _OU_TRADER_MIN_ENTRY_C <= _pt <= _cap_c):
+                            new_c = _pt
+                            f["synthetic"] = not f.get("synthetic")
+                            _flipped = True
                     # A touch above the cap used to FREEZE the order
                     # wherever it sat (the LAD ML: bid 66, cap 64, order
                     # parked at 53 — 13 ticks of dead rest). On a no-veto
-                    # rent chase the cap CLAMPS instead: rest at the
-                    # highest grid price the cap allows and let the stop
-                    # ping fire only when there is truly nothing to do.
+                    # rent chase that can't flip, the cap CLAMPS instead:
+                    # rest at the highest grid price the cap allows and let
+                    # the stop ping fire only when there is truly nothing
+                    # to do.
                     _clamped = False
-                    if _noveto_chase and old_c is not None:
+                    if not _flipped and _noveto_chase and old_c is not None:
                         _cc = _grid_dn(_cap_c, _tkr)
                         if _cc > old_c + 0.26:
                             new_c = _cc
                             _clamped = True
-                    if not _clamped:
+                    if not _flipped and not _clamped:
                         # price-cap guardrail — overrides even move 1's
                         # unconditional chase
                         if _mark("repeg_stop", {"reason": "price cap"},
@@ -20861,11 +20907,33 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 nb["repeg"] = moves + [{"from_c": old_c, "to_c": new_c,
                                         "at": now.isoformat(),
                                         "order_id": new_oid or oid,
-                                        "edge_pp": edge, "verify": state}]
+                                        "edge_pp": edge, "verify": state,
+                                        **({"flip": True} if _flipped
+                                           else {})}]
                 upd = {"signal_blob": nb}
                 new_amer = _prob_to_amer_py(new_c / 100.0)
                 if new_amer is not None:
                     upd["entry_price"] = new_amer   # rest the bid, log the bid
+                if _flipped:
+                    # The pick row follows the money: grading, the scalp
+                    # arm and the autolog must all see the NEW side.
+                    upd["side"] = _flip_to
+                    try:
+                        _ofp = (float(r.get("fair_prob"))
+                                if r.get("fair_prob") is not None else None)
+                        if _ofp is not None:
+                            upd["fair_prob"] = round(1.0 - _ofp, 4)
+                    except (TypeError, ValueError):
+                        pass
+                    nb["pmm_synthetic"] = bool(f.get("synthetic"))
+                    nb["side_flip"] = {"at": now.isoformat(),
+                                       "from": (r.get("side") or ""),
+                                       "to": _flip_to}
+                    _send_fill_telegram(
+                        f"🔁 SIDE FLIP — {ev} {mlbl}: {side} hit the "
+                        f"{round(_cap_c)}¢ cap → now {_flip_to.upper()} at "
+                        f"{round(new_c)}¢. Same market, same rent, "
+                        f"cheaper seat.")
                 try:
                     (sb.table("bot_picks").update(upd)
                      .eq("id", r["id"]).execute())
