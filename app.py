@@ -2450,6 +2450,12 @@ def _cellar_health(sb) -> dict:
               .gte("started_at", (datetime.now(timezone.utc)
                                   - timedelta(hours=2)).isoformat())
               .limit(200).execute().data) or []
+        # Judge only rows that carry the walled stamp — pre-deploy rows
+        # have cands but no walls and would hold the alarm red for up to
+        # 2h after the pull that fixed it.
+        rt = [t for t in rt
+              if isinstance(t.get("detail"), dict)
+              and "walled" in t["detail"]]
         c2 = sum(int((t.get("detail") or {}).get("cands") or 0) for t in rt)
         a2 = sum(int((t.get("detail") or {}).get("acted") or 0) for t in rt)
         # WALLED candidates don't count against the chase (Aug 31 morning
@@ -20459,7 +20465,11 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
     minutes, same throttle + blackout as the outbid ping; runs BEFORE
     _outbid_alerts so a live amend clears the outbid before it would ping).
     Returns counters for the tick log. Never raises."""
-    res = {"acted": 0, "shadow": 0, "stopped": 0}
+    # "walled" initialized here, not lazily: the health tripwire judges
+    # only rows carrying the key (pre-deploy rows would hold it red), so
+    # a lap with zero walls must still say so — a starved lap with cands
+    # and no walls is exactly the case the tripwire exists to catch.
+    res = {"acted": 0, "shadow": 0, "stopped": 0, "walled": 0}
     _t0 = _time.time()          # measured, so the cap stops being a guess
     # TARGETED vs FULL lap (see _WS_DIRTY_CB above): when the markets
     # socket can vouch, this lap's fill/outbid walk reads books only for
