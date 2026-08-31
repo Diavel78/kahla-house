@@ -503,6 +503,9 @@ class MarketsFeed:
         self._lock = threading.Lock()
         self._slugs: set[str] = set()
         self._dirty = False
+        self._base_seen: set[str] = set()   # slugs whose baseline frame
+                                            # arrived since the current
+                                            # subscription (burst filter)
         self._no_slugs_logged = False
         self._last_fail_stamp = 0.0
         self._was_connected = False
@@ -610,6 +613,13 @@ class MarketsFeed:
                             ws.send(json.dumps({"unsubscribe": {
                                 "requestId": cur_rid}}))
                         cur_rid = rid
+                        # Each (re)subscription replays one baseline frame
+                        # per market — state, not news. Reset the filter so
+                        # the burst neither wakes nor dirties (first live
+                        # night: every rotation drained targeted:101 ≈ a
+                        # full walk, and back-to-back full walks are what
+                        # overran the repeg lane).
+                        self._base_seen = set()
                         log.info("ws mkts watching %d markets", len(slugs))
                     try:
                         raw = ws.recv()
@@ -654,14 +664,22 @@ class MarketsFeed:
                     # the book moved. Whether we were outbid is the lap's
                     # question, not ours — but WHICH market moved scopes
                     # the lap's reads (the dirty set).
-                    if self._dirty_add is not None:
-                        _sl = None
-                        for _pk in ("marketDataLite", "marketData", "trade"):
-                            _pv = msg.get(_pk)
-                            if isinstance(_pv, dict):
-                                _sl = _pv.get("marketSlug")
-                                break
-                        if isinstance(_sl, str) and _sl:
+                    _sl = None
+                    for _pk in ("marketDataLite", "marketData", "trade"):
+                        _pv = msg.get(_pk)
+                        if isinstance(_pv, dict):
+                            _sl = _pv.get("marketSlug")
+                            break
+                    if isinstance(_sl, str) and _sl:
+                        if _sl not in self._base_seen:
+                            # First frame for this market since the
+                            # subscription = the baseline replay. State,
+                            # not news: no dirty, no wake. Cost of being
+                            # wrong (a real move as first frame): one
+                            # missed hint, caught by the 10-min sweep.
+                            self._base_seen.add(_sl)
+                            continue
+                        if self._dirty_add is not None:
                             try:
                                 self._dirty_add({_sl})
                             except Exception:

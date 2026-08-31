@@ -2426,6 +2426,31 @@ def _cellar_health(sb) -> dict:
             "ticks_1h": int(r.get("ticks_1h") or 0), "fails_1h": fails,
             "error": r.get("last_error"),
         })
+    # ── DEAD-CHASE TRIPWIRE (Aug 31 2026 — the $100 lesson) ─────────────
+    # The chase ran acted=0 for SEVEN DAYS while green on every dashboard:
+    # laps completed, heartbeats fresh, and nobody was ever amended because
+    # the budget was pre-spent. Liveness and usefulness are separate
+    # clocks (this function's founding rule) — this is the chase's
+    # usefulness clock: outbid candidates seen with ZERO amends across 2h
+    # of laps means the chase is dead whatever else looks healthy.
+    try:
+        rt = (sb.table("cellar_ticks").select("detail")
+              .eq("lane", "repeg")
+              .gte("started_at", (datetime.now(timezone.utc)
+                                  - timedelta(hours=2)).isoformat())
+              .limit(200).execute().data) or []
+        c2 = sum(int((t.get("detail") or {}).get("cands") or 0) for t in rt)
+        a2 = sum(int((t.get("detail") or {}).get("acted") or 0) for t in rt)
+        if c2 >= 10 and a2 == 0:
+            for _l in lanes:
+                if _l["lane"] == "repeg" and _l["state"] in ("ok", "idle",
+                                                             "vercel"):
+                    _l["state"] = "error"
+                    _l["error"] = (f"CHASE DEAD: {c2} outbid seen, "
+                                   f"0 amends in 2h")
+                    bad += 1
+    except Exception:
+        pass
     # WHICH CODE IS THE CELLAR RUNNING? Since the opener moved to the house
     # box, a fix pushed to main is inert there until someone pulls and
     # restarts — silent, and indistinguishable from a fix that didn't work.
@@ -20478,6 +20503,9 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                      and f.get("best_bid_c") is not None]
             if not cands:
                 continue
+            # Outbid candidates seen this tick — the tripwire's denominator
+            # (a chase that sees work and does none is the $100 failure).
+            res["cands"] = res.get("cands", 0) + len(cands)
             # WORST-PARKED FIRST (Aug 31 2026): cands inherited the pending
             # list's event_start order, so a far-out order 15¢ off the
             # touch (the deadest money on the board) waited behind a
