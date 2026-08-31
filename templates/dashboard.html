@@ -411,16 +411,24 @@
             + (offNames ? ' · retired: ' + offNames : '')
             + (c.bad ? ' · ' + c.bad + ' need a look' : ' · all working')
             + codeFrag + bkFrag + wsFrag;
-        // Roll the same signals up into the traffic light at the top.
-        if (c.bad) {
-            const names = live.filter(l => l.state === 'stale' || l.state === 'error')
-                              .map(l => l.lane).join(', ');
-            setMachineLight('red', 'CHECK', (names || c.bad + ' lanes') + ' need a look');
+        // Roll the same signals up into the traffic light at the top —
+        // with the CARD's own color semantics (Aug 31: a merely-IDLE lane
+        // renders AMBER on the card but was painting the light RED, so
+        // vsin going quiet overnight — normal, VSiN stops updating — read
+        // as a machine fault). RED = dead lanes only (stale/error);
+        // idle joins the yellow reasons.
+        const deadL = live.filter(l => l.state === 'stale' || l.state === 'error')
+                          .map(l => l.lane);
+        const idleL = live.filter(l => l.state === 'idle').map(l => l.lane);
+        if (deadL.length) {
+            setMachineLight('red', 'CHECK', deadL.join(', ')
+                + (deadL.length === 1 ? ' needs a look' : ' need a look'));
         } else {
             const warns = [];
             if (b.stale) warns.push('code behind — pull the box');
             if ('ok' in bk && (!bk.ok || bk.stale)) warns.push('backup issue');
             if (w.state && !w.up && !w.off) warns.push('ws feed down');
+            if (idleL.length) warns.push(idleL.join(', ') + ' quiet');
             if (warns.length) {
                 setMachineLight('yellow', 'DEGRADED', warns.join(' · '));
             } else {
