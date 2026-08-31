@@ -16443,7 +16443,12 @@ _GRIDIRON_MAX_ENTRY_C = 60.0      # the standing machine-wide entry cap
 _GRIDIRON_MIN_EDGE_PP = 2.5       # same floor as the MLB opener
 # Seconds guaranteed to the football pass after the MLB opener has had its
 # fill. See the call site for why 6 (a Vercel-era number) starved it to zero.
-_GRIDIRON_BUDGET_S = float(os.environ.get("GRIDIRON_BUDGET_S") or 30.0)
+# 30→45 (Aug 31 2026): 30s funded ~3 dossier builds per tick against a
+# pool that gained 198 games when the ESPN spine came back — the rent-
+# listed head of the queue needs to actually get built, not just sorted
+# first. Box laps run ~200-260s against stuck_s=600; 15 more seconds is
+# safely inside the lane's headroom.
+_GRIDIRON_BUDGET_S = float(os.environ.get("GRIDIRON_BUDGET_S") or 45.0)
 _PWR_CACHE: dict = {}                          # sport → {at, snap}
 
 
@@ -16926,6 +16931,234 @@ _GRIDIRON_SWEEP_DAYS = 25         # 8→25 within the hour (user: "let's bet
                                   # re-sweeps free.
 _GRIDIRON_SWEEP_CAP = 4           # dossier builds per tick — budget courtesy
 
+# ── THE RENT LIST AS THE WORK QUEUE (user, Aug 31 2026: "The rent API IS
+# THE LIST... it's literally the bible... if it's on there, it's bet.")
+# poly_incentive_programs mirrors the venue's FULL paginated /v1/incentives
+# catalog every ~10 min, and it names every enrolled football game market
+# by slug — week-two CFB spreads sat in it WITH programs while the opener
+# walked the pool in schedule order and never reached them. These helpers
+# turn that mirror into the queue: enrolled games go FIRST in the opener
+# walk and are sweep-eligible immediately, whatever the calendar distance.
+# An enrolled slug we cannot map to a markets row is surfaced in stats
+# (g_rent_unmatched) — a game we can't bet must be visible, never silent.
+_RENTLIST_CACHE: dict = {"at": 0.0, "val": ({}, [])}
+_RENTLIST_TTL_S = 600.0
+_RENTLIST_SEEN: dict = {}          # market_id → first-seen-unbet ts
+_RENTLIST_WD_TS = 0.0              # last alarm ts (4h cooldown)
+_RENTLIST_WD_GRACE_S = 2 * 3600.0  # enrolled+matched+unbet this long → ping
+_RENT_SLUG_RE = re.compile(
+    r"^(asc|tsc)-(nfl|cfb)-([a-z0-9]+)-([a-z0-9]+)-(\d{4}-\d{2}-\d{2})-")
+
+
+def _rent_code_match(code: str, name: str) -> bool:
+    """Does a venue slug code ('nebr', 'aubrn', 'okst', 'psu', 'kc') name
+    this team? Venue football codes are irregular — prefixes, dropped
+    vowels ('aubrn'), compounds ('oregst', length 6) — so no fixed map:
+    accept a word prefix, word initials (with optional trailing 'u' for
+    the PSU/LSU class), or a first-letter-anchored subsequence. A loose
+    accept is defused by the caller: BOTH teams must match on the same
+    game+date, and an ambiguous slug (2+ games) is refused, never
+    guessed (the poly_trades matcher rule)."""
+    n = re.sub(r"[^a-z0-9 ]", "", (name or "").lower())
+    words = n.split()
+    code = (code or "").lower()
+    if not code or not words:
+        return False
+    for w in words:
+        if w.startswith(code):
+            return True
+    inits = "".join(w[0] for w in words)
+    if inits.startswith(code):
+        return True
+    # PSU/LSU class: initials of the first k words + trailing 'u'
+    # ("Penn State ..." → 'ps'+'u'). Checked at every word count so the
+    # mascot tail can't hide the school ('psnl' ≠ 'psu').
+    for k in range(2, len(words) + 1):
+        ik = "".join(w[0] for w in words[:k])
+        if code in (ik, ik + "u"):
+            return True
+    # Subsequence needs ≥4 chars: at 3 it false-matched 'psu' into
+    # 'PittSbUrgh'. The 4+ codes are the dropped-vowel/compound class
+    # ('aubrn', 'missr', 'okst', 'oregst', 'flst') where it is safe.
+    flat = "".join(words)
+    if len(code) < 4 or code[0] != flat[0]:
+        return False
+    it = iter(flat)
+    return all(ch in it for ch in code)
+
+
+def _rent_team_match(code: str, name: str, sport: str, pmk) -> bool:
+    if pmk is not None:
+        try:
+            if code in pmk._team_code_cands(name, sport):
+                return True     # exact tricode via the Kalshi map (NFL)
+        except Exception:
+            pass
+    return _rent_code_match(code, name)
+
+
+def _rent_enrolled_football(sb):
+    """({market_id: {'spread','total'}}, [unmatched slug keys]) for every
+    football game market the venue's incentives catalog currently enrolls
+    (asc-/tsc- slugs synced in the last 24h — the window unions partial
+    catalog walks on flaky days). 10-min cache; ANY failure degrades to
+    empty (queue falls back to schedule order, never breaks the pass)."""
+    nowt = _time.time()
+    c = _RENTLIST_CACHE
+    if nowt - c["at"] < _RENTLIST_TTL_S:
+        return c["val"]
+    rmap: dict = {}
+    unmatched: list = []
+    try:
+        cut = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        raw: list = []
+        for fam in ("asc-", "tsc-"):
+            pg = 0
+            while True:      # gotcha #40 — page, never trust one response
+                page = (sb.table("poly_incentive_programs")
+                        .select("market_slug").gte("synced_at", cut)
+                        .like("market_slug", fam + "%")
+                        .range(pg * 1000, pg * 1000 + 999)
+                        .execute().data) or []
+                raw.extend(page)
+                if len(page) < 1000:
+                    break
+                pg += 1
+        slugs: dict = {}
+        for r in raw:
+            m = _RENT_SLUG_RE.match(str(r.get("market_slug") or ""))
+            if m:
+                slugs.setdefault(
+                    (m.group(2), m.group(3), m.group(4), m.group(5)),
+                    set()).add("spread" if m.group(1) == "asc" else "total")
+        if slugs:
+            try:
+                import pmm_markets as _pmk
+            except Exception:
+                _pmk = None
+            mrows: list = []
+            for sport in ("NFL", "NCAAF"):
+                mrows.extend((sb.table("markets")
+                              .select("id,event_name,event_start,sport")
+                              .eq("sport", sport).eq("status", "active")
+                              .gte("event_start",
+                                   (datetime.now(timezone.utc)
+                                    - timedelta(days=1)).isoformat())
+                              .order("event_start").limit(900)
+                              .execute().data) or [])
+            by_day: dict = {}
+            for g in mrows:
+                by_day.setdefault(_et_day(g.get("event_start")), []).append(g)
+            for (lg, ac, hc, day), mts in slugs.items():
+                sport = "NFL" if lg == "nfl" else "NCAAF"
+                try:
+                    d0 = datetime.strptime(day, "%Y-%m-%d").date()
+                    days_try = [day, (d0 + timedelta(days=1)).isoformat(),
+                                (d0 - timedelta(days=1)).isoformat()]
+                except Exception:
+                    days_try = [day]
+                hits: list = []
+                for dd in days_try:
+                    for g in by_day.get(dd, []):
+                        if g.get("sport") != sport:
+                            continue
+                        en = g.get("event_name") or ""
+                        if " @ " not in en:
+                            continue
+                        aw, hm = en.split(" @ ", 1)
+                        if ((_rent_team_match(ac, aw, sport, _pmk)
+                             and _rent_team_match(hc, hm, sport, _pmk))
+                            or (_rent_team_match(ac, hm, sport, _pmk)
+                                and _rent_team_match(hc, aw, sport, _pmk))):
+                            hits.append(g["id"])
+                    if hits:
+                        break        # exact/nearest day wins — don't widen
+                hits = list(dict.fromkeys(hits))
+                if len(hits) == 1:
+                    rmap.setdefault(hits[0], set()).update(mts)
+                else:
+                    unmatched.append(f"{lg}-{ac}-{hc}-{day}"
+                                     + (f"·ambig{len(hits)}" if hits else ""))
+        c["at"] = nowt
+        c["val"] = (rmap, unmatched)
+    except Exception:
+        return rmap, unmatched       # partial, uncached — retried next call
+    return c["val"]
+
+
+def _rentlist_watchdog(sb, now):
+    """RULE 1'S OWN TRIPWIRE (Aug 31 2026 — user, after the third silent
+    schedule fence in one day: "there is shit on the rent list, we aren't
+    betting... there is no excuse"). Read-only, like the wall alarm: an
+    enrolled football market that is MATCHED to a game, more than 36h from
+    kickoff (the no-veto zone — nothing but a missing book should stop it)
+    and still carries NO pending pick of its enrolled type after a 2h
+    grace, pings 🚨. The grace absorbs normal queue latency; the 36h floor
+    keeps the model's inside-window vetoes out of it. Process-local
+    first-seen stamps (a box restart just restarts the grace clock)."""
+    global _RENTLIST_WD_TS
+    try:
+        az = now.astimezone(ZoneInfo("America/Phoenix"))
+        if az.hour < 7 or az.hour >= 22:
+            return None
+        rmap, unm = _rent_enrolled_football(sb)
+        if not rmap:
+            return None
+        ids = list(rmap.keys())
+        mrows: list = []
+        for i in range(0, len(ids), 100):
+            mrows.extend((sb.table("markets")
+                          .select("id,event_name,event_start")
+                          .in_("id", ids[i:i + 100]).execute().data) or [])
+        far = {m["id"]: m for m in mrows
+               if str(m.get("event_start") or "")
+               and datetime.fromisoformat(str(m["event_start"])
+                                          .replace("Z", "+00:00"))
+               > now + timedelta(hours=36)}
+        if not far:
+            return None
+        pend: dict = {}
+        fids = list(far.keys())
+        for i in range(0, len(fids), 100):
+            for p in ((sb.table("bot_picks")
+                       .select("market_id,market_type")
+                       .eq("status", "pending")
+                       .in_("market_type", ["spread", "total"])
+                       .in_("market_id", fids[i:i + 100])
+                       .execute().data) or []):
+                pend.setdefault(str(p["market_id"]), set()).add(
+                    p["market_type"])
+        nowt = _time.time()
+        naughty: list = []
+        for mid, m in far.items():
+            missing = set(rmap.get(mid) or ()) - pend.get(str(mid), set())
+            if not missing:
+                _RENTLIST_SEEN.pop(mid, None)
+                continue
+            first = _RENTLIST_SEEN.setdefault(mid, nowt)
+            if nowt - first >= _RENTLIST_WD_GRACE_S:
+                naughty.append(f"{(m.get('event_name') or '?')[:34]}"
+                               f" ({'/'.join(sorted(missing))})")
+        summary = {"rent_far": len(far), "unbet_aged": len(naughty),
+                   "unmatched": len(unm)}
+        if not naughty:
+            return summary
+        if nowt - _RENTLIST_WD_TS < _WATCHDOG_COOLDOWN_S:
+            return summary
+        _RENTLIST_WD_TS = nowt
+        try:
+            _send_fill_telegram(
+                "🚨 RENT-LISTED, UNBET >2h (rule 1): "
+                + f"{len(naughty)} market(s) — "
+                + "; ".join(naughty[:8])
+                + (f" · +{len(unm)} enrolled slugs unmatched" if unm else ""),
+                urgent=True)
+        except Exception:
+            pass
+        return summary
+    except Exception:
+        return None
+
 
 def _gridiron_bet_sweep(sb, now, deadline, stats):
     """WEEK-OF BET SWEEP (Aug 22 2026) — the second visit the one-shot
@@ -16949,11 +17182,16 @@ def _gridiron_bet_sweep(sb, now, deadline, stats):
                       + "T00:00:00+00:00"
                       if _GRIDIRON_MIN_START.get(sport) else lo)
             try:
+                # 400, not 120: a 25-day window holds ~250 NCAAF games and
+                # the old nearest-first .limit(120) silently truncated the
+                # slate BEFORE week two loaded — the third schedule-shaped
+                # fence found on the Temple@PSU day (Aug 31). Must exceed
+                # the slate; PostgREST caps at 1000 (gotcha #40).
                 raw = (sb.table("markets")
                        .select("id,event_name,event_start,sport")
                        .eq("sport", sport).eq("status", "active")
                        .gte("event_start", slo).lte("event_start", hi)
-                       .order("event_start").limit(120).execute().data) or []
+                       .order("event_start").limit(400).execute().data) or []
             except Exception:
                 continue
             seen: set = set()
@@ -16962,15 +17200,23 @@ def _gridiron_bet_sweep(sb, now, deadline, stats):
                 if gg.get("event_name") and key not in seen:
                     seen.add(key)
                     cands.append(gg)
-        # NEAREST KICKOFF FIRST (Aug 27 2026 — the user's 5th ask for a
-        # college bet: "Remember that one time we bet college football?
-        # Me either…"). The sport loop assembled NFL before NCAAF, so a
-        # boot that reset the sweep stamps spent its 4 builds/tick on
-        # Sep-10 NFL games — dedup-bouncing off the already-bet wall —
-        # while Week 0 college, kicking off IN TWO DAYS, waited ~45 min
-        # for a slot. Soonest game first is the right rule always: its
-        # books are the most real and its betting windows close first.
-        cands.sort(key=lambda gg: str(gg.get("event_start") or ""))
+        # RENT-LISTED FIRST, then nearest kickoff (Aug 31 2026 — rule 1
+        # run forward: "The rent API IS THE LIST"). Games the venue's own
+        # incentives catalog enrolls jump the whole queue — they are the
+        # markets being PAID for right now, and every hour they wait is
+        # early rent burned. Within each tier, soonest game first (the
+        # Aug 27 lesson: its books are the most real and its windows
+        # close first). Rent-listed games self-clear fast — once bet on
+        # both markets the fully-bet skip stops charging builds for them.
+        try:
+            _rmap, _runm = _rent_enrolled_football(sb)
+        except Exception:
+            _rmap, _runm = {}, []
+        stats["g_rent_listed"] = len(_rmap)
+        if _runm:
+            stats["g_rent_unmatched"] = _runm[:6]
+        cands.sort(key=lambda gg: (0 if gg["id"] in _rmap else 1,
+                                   str(gg.get("event_start") or "")))
         nowt = _time.time()
         cands = [gg for gg in cands
                  if nowt - _GRIDIRON_SWEEP_TS.get(gg["id"], 0.0)
@@ -17194,6 +17440,23 @@ def _gridiron_opener_pass(sb, now, deadline):
                 g.get("sport"),
                 _sport_pays_game_markets(sb, g.get("sport"))) else 1,
             str(g.get("event_start") or "")))
+        # THE RENT LIST JUMPS THE QUEUE AND NEVER ROTATES OUT (Aug 31
+        # 2026, rule 1 run forward — "if it's on there, it's bet"). The
+        # rotation below exists so no game can poison the walk, but it
+        # also rotated ENROLLED games out of the window while unpaying
+        # ones burned the budget: week-two CFB spreads sat in the venue's
+        # own catalog with programs while the walk did schedule order.
+        # Enrolled games go first every tick; they self-clear via the
+        # one-shot tape + bet dedup, so they cannot poison anything.
+        try:
+            _grmap, _grunm = _rent_enrolled_football(sb)
+        except Exception:
+            _grmap, _grunm = {}, []
+        stats["g_rent_listed"] = len(_grmap)
+        if _grunm:
+            stats["g_rent_unmatched"] = _grunm[:6]
+        _rent_c = [g for g in cands if g["id"] in _grmap]
+        cands = [g for g in cands if g["id"] not in _grmap]
         # STRIDE BY THE WINDOW, not by one. `% len(cands)` advanced the start
         # a single game per minute while taking 8, so consecutive passes
         # overlapped by seven and a full cycle took ~150 MINUTES. Striding by
@@ -17201,6 +17464,7 @@ def _gridiron_opener_pass(sb, now, deadline):
         _gwin = 8
         _grot = ((int(_gnow // 60) * _gwin) % max(1, len(cands)))
         cands = cands[_grot:] + cands[:_grot]   # same anti-poison rotation
+        cands = _rent_c + cands                 # rent list first, always
         import handicapper_web
         for g in cands[:_gwin]:           # per-tick cap — budget courtesy
             if _time.time() >= deadline - 1.0:
@@ -18034,6 +18298,11 @@ def api_handicapper_paperlog():
     wd = _opener_watchdog(sb, now, opener_stats)
     if wd is not None:
         opener_stats["watchdog"] = wd
+    # RENT-LIST ALARM — rule 1's own tripwire: enrolled + matched + far
+    # out + still unbet after 2h = scream, don't wait for the user.
+    rw = _rentlist_watchdog(sb, now)
+    if rw is not None:
+        opener_stats["rent_watchdog"] = rw
     # Bet-time Pinnacle stamp (parlay-api.com) — runs BEFORE the insert so
     # the stamp rides each new bet row. No-op without a key / over budget.
     pin_stamped = _pin_stamp_rows(sb, rows, now)
