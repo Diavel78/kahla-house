@@ -2288,6 +2288,13 @@ def api_poly_incentives_sync():
         out = _incentives_sync(get_supabase(), get_client())
     except Exception as e:
         out = {"err": f"{type(e).__name__}: {e}"[:200]}
+    try:
+        # The rewards-page slug harvest rides the same trigger — the page
+        # is the only complete per-market rent list (the API catalog is
+        # symbols-gated; the Temple@PSU lesson, Aug 31 2026).
+        out["schedule"] = _reward_schedule_sync(get_supabase())
+    except Exception as e:
+        out["schedule"] = {"err": f"{type(e).__name__}: {e}"[:140]}
     _probe_log(out)
     return jsonify(out)
 
@@ -14778,6 +14785,30 @@ def _reward_schedule_sync(sb) -> dict:
             return res
         rows, bad = _reward_rows_parse(_html_to_text(r.text))
         res["unparsed"] = bad[:8]
+        # THE SHEET ITSELF (Aug 31 2026 — the Temple@PSU sighting: the
+        # user found the game's whole ladder enrolled on THIS page while
+        # the machine said "not enrolled"). The page carries every
+        # program's MARKET SLUGS; this parser kept the family headline
+        # rows and discarded them — while the API catalog only answers
+        # symbols= for markets we've already bet (the documented
+        # structural blindness). Harvest every game-market slug from the
+        # RAW response (catches text nodes AND embedded __NEXT_DATA__
+        # JSON alike) into rent_list_slugs; the rent-list lane reads the
+        # union. A page render that hides collapsed sections client-side
+        # harvests zero — res['slugs'] makes that visible, never silent.
+        try:
+            _sl = set(re.findall(
+                r"\b(?:asc|tsc|aec)-[a-z0-9]+(?:-[a-z0-9]+)*"
+                r"-\d{4}-\d{2}-\d{2}(?:-[a-z0-9]+)*\b", r.text))
+            res["slugs"] = len(_sl)
+            if _sl:
+                _nowi = datetime.now(timezone.utc).isoformat()
+                _slp = [{"slug": s, "last_seen": _nowi} for s in _sl]
+                for i in range(0, len(_slp), 300):
+                    (sb.table("rent_list_slugs")
+                     .upsert(_slp[i:i + 300], on_conflict="slug").execute())
+        except Exception as e:
+            res["slugs_err"] = f"{type(e).__name__}: {e}"[:100]
         if not rows:
             res["err"] = "no rows parsed"      # never wipe on a bad read
             return res
@@ -17021,6 +17052,23 @@ def _rent_enrolled_football(sb):
                         .range(pg * 1000, pg * 1000 + 999)
                         .execute().data) or []
                 raw.extend(page)
+                if len(page) < 1000:
+                    break
+                pg += 1
+        # UNION the rewards-PAGE harvest (rent_list_slugs). The API
+        # catalog is symbols-gated — blind to never-bet markets — while
+        # the page lists every enrolled slug; the Temple@PSU ladder was
+        # on the page and nowhere in the catalog mirror. Both sources,
+        # always: either alone has a documented blind spot.
+        for fam in ("asc-", "tsc-"):
+            pg = 0
+            while True:
+                page = (sb.table("rent_list_slugs")
+                        .select("slug").gte("last_seen", cut)
+                        .like("slug", fam + "%")
+                        .range(pg * 1000, pg * 1000 + 999)
+                        .execute().data) or []
+                raw.extend({"market_slug": p.get("slug")} for p in page)
                 if len(page) < 1000:
                     break
                 pg += 1
