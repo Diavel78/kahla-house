@@ -368,7 +368,12 @@
                 : l.owner !== 'cellar'
                 ? ('beat ' + ago(l.hb_age_s))
                 : (l.state === 'stale' ? 'no beat ' + ago(l.hb_age_s)
-                   : l.state === 'error' ? l.fails_1h + ' fails/1h'
+                   // An error row with zero failed ticks is a health-rule
+                   // verdict (the dead-chase tripwire) — show its reason,
+                   // not a baffling "0 fails/1h".
+                   : l.state === 'error' ? (l.fails_1h
+                        ? l.fails_1h + ' fails/1h'
+                        : (l.error || 'flagged').slice(0, 26))
                    : 'work ' + ago(l.last_work_s)
                      + (l.work_1h ? ' · ' + l.work_1h + '/1h' : '')
                      + (l.fails_1h ? ' · ' + l.fails_1h + ' retr' : ''));

@@ -2452,13 +2452,22 @@ def _cellar_health(sb) -> dict:
               .limit(200).execute().data) or []
         c2 = sum(int((t.get("detail") or {}).get("cands") or 0) for t in rt)
         a2 = sum(int((t.get("detail") or {}).get("acted") or 0) for t in rt)
-        if c2 >= 10 and a2 == 0:
+        # WALLED candidates don't count against the chase (Aug 31 morning
+        # — the tripwire's first false alarm, hours after it shipped): as
+        # the day's slate slides inside T-6h the no-veto expires and the
+        # model wall returns BY DESIGN, so every candidate can be a
+        # deliberate refusal and zero amends is discipline, not death.
+        # The engine stamps `walled` at each doctrine-stop (price cap,
+        # move cap, model/edge, master rule — failure stops deliberately
+        # NOT included); only unwalled candidates accuse the chase.
+        w2 = sum(int((t.get("detail") or {}).get("walled") or 0) for t in rt)
+        if (c2 - w2) >= 10 and a2 == 0:
             for _l in lanes:
                 if _l["lane"] == "repeg" and _l["state"] in ("ok", "idle",
                                                              "vercel"):
                     _l["state"] = "error"
-                    _l["error"] = (f"CHASE DEAD: {c2} outbid seen, "
-                                   f"0 amends in 2h")
+                    _l["error"] = (f"CHASE DEAD: {c2 - w2} chaseable "
+                                   f"outbid seen, 0 amends in 2h")
                     bad += 1
     except Exception:
         pass
@@ -20779,6 +20788,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                     if not _flipped and not _clamped:
                         # price-cap guardrail — overrides even move 1's
                         # unconditional chase
+                        res["walled"] = res.get("walled", 0) + 1
                         if _mark("repeg_stop", {"reason": "price cap"},
                                  tg=(f"🤖 REPEG STOP — {ev} {mlbl} {side}: book is "
                                      f"{round(new_c)}¢ — past your "
@@ -20800,6 +20810,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 #   walking up our own edge curve, not chasing news.
                 is_autobet = is_model_bet
                 if not is_autobet and len(moves) >= _REPEG_MAX_MOVES:
+                    res["walled"] = res.get("walled", 0) + 1
                     if _mark("repeg_stop", {"reason": "move_cap"},
                              tg=(f"🤖 REPEG STOP — {ev} {mlbl} {side}: move cap "
                                  f"({_REPEG_MAX_MOVES}) reached; resting at "
@@ -20835,6 +20846,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                     if not ok:
                         why = (("model limit" if is_autobet else "edge gone")
                                if ok is False else "no model fair on pick")
+                        res["walled"] = res.get("walled", 0) + 1
                         if _mark("repeg_stop", {"reason": why, "edge_pp": edge},
                                  tg=(f"🤖 REPEG STOP — {ev} {mlbl} {side}: "
                                      f"{why} at {round(new_c)}¢"
@@ -20851,6 +20863,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 contracts = (f.get("order_cum") or 0) + (f.get("order_leaves") or 0)
                 cost = contracts * new_c / 100.0
                 if not contracts or cost > _REPEG_MAX_COST_USD:
+                    res["walled"] = res.get("walled", 0) + 1
                     if _mark("repeg_stop",
                              {"reason": "master_rule", "cost": round(cost, 2)},
                              tg=(f"🤖 REPEG STOP — {ev} {mlbl} {side}: ${cost:.2f} "
