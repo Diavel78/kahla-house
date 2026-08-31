@@ -11313,12 +11313,20 @@ def _compute_fill_status(sb, uid: str, poly_snap=None) -> dict:
     carries `venue`. SHARED by the /api/handicapper/fill-status page poll AND
     the cron take-warning alert, so both see identical fill state. May raise
     on a DB error (callers handle)."""
-    pending = (sb.table("bot_picks")
-               .select("id,market_id,market_type,side,entry_book,entry_line,"
-                       "entry_price,event_name,event_start,sport,signal_blob")
-               .eq("status", "pending").eq("asked_by", uid)
-               .order("event_start", desc=False)
-               .limit(100).execute().data) or []
+    # PAGED, not limited (Aug 31 2026 — the LAD-parked-at-53¢ chain's last
+    # link): .limit(100) ordered by event_start meant pick #101+ — the
+    # FURTHEST-OUT games, exactly where the early-rent orders rest — got
+    # no fill status at all, so they were never flagged outbid and the
+    # chase never saw them. 133 pending broke it; an NFL Sunday would
+    # have buried it. Gotcha #40's shape on the money path.
+    def _pend_q():
+        return (sb.table("bot_picks")
+                .select("id,market_id,market_type,side,entry_book,"
+                        "entry_line,entry_price,event_name,event_start,"
+                        "sport,signal_blob")
+                .eq("status", "pending").eq("asked_by", uid)
+                .order("event_start", desc=False))
+    pending = _sb_paged(_pend_q, max_pages=3)
 
     # DUAL-VENUE dispatch (July 2026 revert): each pending pick is tracked on
     # the venue its make/take verdict routed it to (entry_book).
