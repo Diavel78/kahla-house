@@ -16611,13 +16611,26 @@ _GRIDIRON_TAIL_PTS = 10.0   # bet only rungs within this many points of the
 
 def _gridiron_try_bet(sb, g, es0, d, mt, gp):
     """ONE football bet attempt (spread or total) — the shared leg behind
-    the opener tape AND the week-of sweep. Model's best side at its own
-    cheap peg; gates in order: no_book / edge (<2.5pp) / junk (≥15pp) /
-    tail (rung >10 pts off the shrunk projection) / entry_cap (>60¢);
-    then _autobet_execute runs rent + the $6 Master Rule per market.
-    Returns the gate string ("placed" = an order is resting). The
-    executor's per-(market, type) dedup is the one-bet-per-game guard, so
-    calling this twice is safe."""
+    the opener tape AND the week-of sweep.
+
+    RENT-FIRST (rewritten Aug 30 2026, user: "The fucking problem is you
+    aren't reading the damn rent table… RENT table is all that matters,
+    if it ain't there, skip it. If it is, BET IT"): the old flow walked
+    Polymarket first — the model chose ONE rung, then the executor asked
+    rent last, so a rung the venue was PAYING on (Ohio@Nebraska +24.5,
+    sitting in CFB T1 Spreads Early) was never even a candidate while the
+    model's preferred rung wasn't enrolled. Now: the game's WHOLE ladder
+    (dossier `ladder`, every listed rung) is filtered to fill-viable
+    books (real bid, peg in the 25-60¢ band), THOSE slugs are asked
+    against the venue's rent list (`_rent_ok`, 10-min cache), and the
+    PAYING rungs are the only candidates. The model just picks the side
+    and breaks ties (best edge among payers). >6h out no gate vetoes a
+    paying rung — no edge floor, no tail gate, no junk cliff (rent
+    decided; we're a rent vehicle, not a view). Inside T-6h the 2.5pp
+    floor + tail gate return, same shape as the ML/O-U lanes. Master
+    Rule + the executor's own rent re-check (cached, harmless) stand.
+    Returns the gate string ("placed" = an order is resting); executor
+    per-(market, type) dedup keeps it one bet per game per market."""
     if not gp:
         return None
     mg, tt, pm = gp
@@ -16630,13 +16643,27 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
     blkx = ((((d or {}).get("odds") or {}).get(mt) or {})
             .get("polymarket") or {})
     ka, kb = (("over", "under") if mt == "total" else ("away", "home"))
-    bc = None
-    for sn in (ka, kb):
-        pblk = blkx.get(sn) or {}
+    # Candidate rungs: the FULL ladder when the dossier carries it (new
+    # `ladder` key), else the legacy per-side money-rung blocks (an old
+    # cached dossier — degrade, don't stall).
+    raw = blkx.get("ladder")
+    if not raw:
+        raw = [dict((blkx.get(sn) or {}), side=sn) for sn in (ka, kb)]
+    now_utc = datetime.now(timezone.utc)
+    try:
+        _sim = (datetime.fromisoformat(
+            str(es0).replace("Z", "+00:00")) - now_utc).total_seconds() / 60.0
+    except (TypeError, ValueError):
+        _sim = None
+    _noveto = (_early_noveto(es0, now_utc)
+               or (_sim is not None and _sim > _OU_NOVETO_MIN_MIN))
+    viable = []
+    for pblk in raw:
+        sn = pblk.get("side")
         q = pblk.get("quote") or {}
         ln = pblk.get("line")
-        if (q.get("bid") is None or ln is None or not pblk.get("slug")
-                or float(q["bid"]) <= 0):
+        if (sn not in (ka, kb) or q.get("bid") is None or ln is None
+                or not pblk.get("slug") or float(q["bid"]) <= 0):
             continue
         try:                              # grid-native peg (Aug 30)
             _tk = _pmm_tick_c(get_client(), pblk.get("slug") or "")
@@ -16654,6 +16681,23 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
                  if q.get("ask") is not None else None)
         if _askc is not None and peg >= _askc:
             peg = _grid_dn(float(q["bid"]) * 100.0, _tk)
+        if not (_OU_TRADER_MIN_ENTRY_C <= peg <= _GRIDIRON_MAX_ENTRY_C):
+            continue
+        viable.append((sn, peg, pblk, q, ln))
+    if not viable:
+        return "no_book"
+    # ── RENT FIRST ── one venue ask per unique slug (10-min cached; a
+    # synthetic side shares its twin's slug so pairs cost one read).
+    rent_by_slug: dict = {}
+    for sn, peg, pblk, q, ln in viable:
+        sl = pblk["slug"]
+        if sl not in rent_by_slug:
+            rent_by_slug[sl] = _rent_ok(sl, es0, now_utc, sb)[0]
+    paying = [c for c in viable if rent_by_slug.get(c[2]["slug"])]
+    if not paying:
+        return "rent"
+    bc = None
+    for sn, peg, pblk, q, ln in paying:
         if mt == "spread":
             lh = float(ln) if sn == "home" else -float(ln)
             ph = _gridiron_cover_p(pm, mg, lh)
@@ -16671,24 +16715,20 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
     if bc is None:
         return "no_book"
     sn, e, peg, pblk, ps, q, dist = bc
-    # EARLY NO-VETO (doctrine at _NOVETO_EARLY_MIN_H): far out, the model
-    # stops vetoing rent-collector football bets — it still picked the
-    # rung and side above (tiebreaker). The tail gate STAYS (a rung 10+
-    # pts off projection is where the cover model's own backtest says its
-    # tails lie), as do the junk cliff, entry cap, and the executor's
-    # rent gate.
-    _noveto = _early_noveto(es0, datetime.now(timezone.utc))
-    if e < _GRIDIRON_MIN_EDGE_PP and not _noveto:
-        return "edge"
-    if e >= _OPENER_JUNK_EDGE_PP:
-        return "junk"
-    if dist > _GRIDIRON_TAIL_PTS:
-        return "tail"
-    if peg > _GRIDIRON_MAX_ENTRY_C:
-        return "entry_cap"
+    # Inside T-6h the model gates return (the O/U lane's shape): the
+    # edge floor and the tail gate. Beyond it a PAYING rung is bet, the
+    # end (user doctrine, Aug 29/30) — the model already picked the side.
+    if not _noveto:
+        if e < _GRIDIRON_MIN_EDGE_PP:
+            return "edge"
+        if dist > _GRIDIRON_TAIL_PTS:
+            return "tail"
     xb = {"gridiron_autobet": True,
           "gridiron_margin": round(mg, 2),
           "gridiron_total": round(tt, 2),
+          "rent_first": True,             # candidates = the venue's payers
+          "rungs_paying": len(paying),
+          "rung_dist": round(dist, 1),    # pts off the shrunk projection
           "early_noveto": bool(_noveto and e < _GRIDIRON_MIN_EDGE_PP)}
     if mt == "spread":
         xb["cover_p"] = round(ps, 4)

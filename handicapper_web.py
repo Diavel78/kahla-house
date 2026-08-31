@@ -639,6 +639,21 @@ def _attach_pmm_to_odds(odds: dict, pmm: dict, sport: str,
                 "meta":          proj_meta,
             }
             out[side] = block
+        # THE FULL LADDER (Aug 30 2026, user: "RENT table is all that
+        # matters — if it ain't there, skip it; if it is, BET IT").
+        # best_line_for narrows to ONE rung per side — the money rung —
+        # which made the venue's ENROLLED rungs invisible to the football
+        # bet leg (Ohio@Nebraska +24.5 sat in CFB T1 Spreads Early while
+        # the model stared at a rung nobody was paying on). Every rung
+        # rides along so the rent-first bet leg can candidate the paying
+        # ones. Spread/total only — ML has no ladder.
+        if pmm_key in ("spread", "total"):
+            out["ladder"] = [
+                {"side": e.get("side"), "line": e.get("line"),
+                 "slug": e.get("slug"), "quote": e.get("quote"),
+                 "synthetic": bool(e.get("synthetic"))}
+                for e in (pmm.get(pmm_key) or [])
+                if e.get("slug") and e.get("line") is not None]
         blk["polymarket"] = out
 
 
