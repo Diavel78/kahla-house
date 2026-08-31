@@ -16981,6 +16981,21 @@ _RENT_SLUG_RE = re.compile(
     r"^(asc|tsc)-(nfl|cfb)-([a-z0-9]+)-([a-z0-9]+)-(\d{4}-\d{2}-\d{2})-")
 
 
+# Exact aliases for venue codes the heuristics can't derive — state
+# abbreviations with letters the school name doesn't contain in order
+# ('tx', 'nmx') and compounds ('ntx', 'sfl'). Learned from live
+# g_rent_unmatched entries, never guessed; the pair+date+ambiguity veto
+# still applies on top.
+_RENT_CODE_ALIAS = {
+    # values are UNIQUE leading prefixes of the ESPN displayName — a bare
+    # state ('texas') would swallow Texas State/A&M/Tech; pin the mascot.
+    "tx": "texas longhorns", "ntx": "north texas",
+    "nmx": "new mexico lobos", "sfl": "south florida",
+    "flatl": "florida atlantic", "fl": "florida gators",
+    "msst": "mississippi state", "olem": "ole miss",
+}
+
+
 def _rent_code_match(code: str, name: str) -> bool:
     """Does a venue slug code ('nebr', 'aubrn', 'okst', 'psu', 'kc') name
     this team? Venue football codes are irregular — prefixes, dropped
@@ -16995,6 +17010,9 @@ def _rent_code_match(code: str, name: str) -> bool:
     code = (code or "").lower()
     if not code or not words:
         return False
+    ali = _RENT_CODE_ALIAS.get(code)
+    if ali is not None:
+        return n.startswith(ali)
     for w in words:
         if w.startswith(code):
             return True
@@ -17187,7 +17205,7 @@ def _gridiron_price_game(sb, g):
         return None
 
 
-def _oms_pass(sb, now, deadline):
+def _oms_pass(sb, now, deadline, skip_producer=False):
     """Producer + executor for desired_orders (lane='rentlist').
 
     PRODUCER: every enrolled football market from the venue's own
@@ -17204,13 +17222,20 @@ def _oms_pass(sb, now, deadline):
     st: dict = {}
     if not OMS_ENABLED:
         return st
-    try:
-        rmap, unm = _rent_enrolled_football(sb)
-    except Exception:
-        return st
-    st["oms_rent"] = len(rmap)
     nowiso = now.isoformat()
     mrows: dict = {}
+    if skip_producer:
+        # Bridge drain mode (Aug 31): a cold Vercel container pays the
+        # full 13k-slug match + three paged queries EVERY pass — the
+        # producer ate the slice and the executor placed ~2/pass. The
+        # desired rows already exist; executor-only passes drain them.
+        rmap = {}
+    else:
+        try:
+            rmap, unm = _rent_enrolled_football(sb)
+        except Exception:
+            return st
+        st["oms_rent"] = len(rmap)
     try:
         ids = list(rmap.keys())
         for i in range(0, len(ids), 100):
@@ -17572,11 +17597,20 @@ def api_gridiron_sweep_now():
         now = datetime.now(timezone.utc)
         # OMS first (Phase 1): converge the rent list's desired rows —
         # typed retries + soonest-first beats the sweep's 1-build crawl.
+        # prod=0 = executor-only drain (cold containers pay the full
+        # producer match every pass otherwise); with the producer
+        # skipped the OMS gets the sweep's slice too.
         if OMS_ENABLED:
+            _skip_prod = (request.args.get("prod") or "") in ("0", "no")
             try:
-                stats.update(_oms_pass(sb, now, _time.time() + 12.0))
+                stats.update(_oms_pass(
+                    sb, now,
+                    _time.time() + (22.0 if _skip_prod else 12.0),
+                    skip_producer=_skip_prod))
             except Exception as e:
                 stats["oms_err"] = f"{type(e).__name__}: {e}"[:120]
+            if _skip_prod:
+                return jsonify({"ok": True, **stats})
         _gridiron_bet_sweep(sb, now, _time.time() + 6.0, stats)
         return jsonify({"ok": True, **stats})
     except Exception as e:
