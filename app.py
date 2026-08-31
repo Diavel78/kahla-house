@@ -20529,22 +20529,60 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                         pass
                     return True
 
+                # RENT-COLLECTOR CHASE NO-VETO (Aug 31 2026 — user, on a
+                # LAD ML the repeg parked at 53¢ under a 66¢ touch,
+                # stamped "model limit": "if it pays rent, I want it
+                # bet"). A rent vehicle 13 ticks off the touch earns ~zero
+                # (df^ticks) and only fills if the market crashes through
+                # it — the worst of both. Beyond T-6h the model is NOT the
+                # wall on the rent lanes (autobet ML, O/U + gridiron
+                # totals, gridiron spreads): the chase follows the touch,
+                # bounded only by the price cap and the Master Rule — the
+                # same shape as the entry no-veto. Inside T-6h the model
+                # wall returns. Props (bets-to-win) and NRFI keep their
+                # walls always. Computed BEFORE the cap stop because the
+                # cap CLAMPS a no-veto chase instead of freezing it.
+                _noveto_chase = False
+                if (is_model_bet
+                        and f.get("market_type") in ("moneyline", "total",
+                                                     "spread")
+                        and not blob.get("whiff_autobet")):
+                    try:
+                        _noveto_chase = ((datetime.fromisoformat(
+                            str(r.get("event_start")).replace("Z", "+00:00"))
+                            - now).total_seconds() / 60.0
+                            > _OU_NOVETO_MIN_MIN)
+                    except Exception:
+                        _noveto_chase = False
                 # -- stop conditions (once-per-level Telegram, order stays) --
                 # football holds the machine-wide 60¢ entry cap; everything
                 # else keeps the Y/NRFI 64¢ guardrail
                 _cap_c = (_GRIDIRON_MAX_ENTRY_C if _is_gridiron
                           else _REPEG_NRFI_PRICE_CAP_C)
                 if new_c is not None and new_c > _cap_c:
-                    # price-cap guardrail — overrides even move 1's
-                    # unconditional chase
-                    if _mark("repeg_stop", {"reason": "price cap"},
-                             tg=(f"🤖 REPEG STOP — {ev} {mlbl} {side}: book is "
-                                 f"{round(new_c)}¢ — past your "
-                                 f"{round(_cap_c)}¢ price "
-                                 f"cap, not chasing; resting at "
-                                 f"{round(old_c) if old_c else '?'}¢")):
-                        res["stopped"] += 1
-                    continue
+                    # A touch above the cap used to FREEZE the order
+                    # wherever it sat (the LAD ML: bid 66, cap 64, order
+                    # parked at 53 — 13 ticks of dead rest). On a no-veto
+                    # rent chase the cap CLAMPS instead: rest at the
+                    # highest grid price the cap allows and let the stop
+                    # ping fire only when there is truly nothing to do.
+                    _clamped = False
+                    if _noveto_chase and old_c is not None:
+                        _cc = _grid_dn(_cap_c, _tkr)
+                        if _cc > old_c + 0.26:
+                            new_c = _cc
+                            _clamped = True
+                    if not _clamped:
+                        # price-cap guardrail — overrides even move 1's
+                        # unconditional chase
+                        if _mark("repeg_stop", {"reason": "price cap"},
+                                 tg=(f"🤖 REPEG STOP — {ev} {mlbl} {side}: book is "
+                                     f"{round(new_c)}¢ — past your "
+                                     f"{round(_cap_c)}¢ price "
+                                     f"cap, not chasing; resting at "
+                                     f"{round(old_c) if old_c else '?'}¢")):
+                            res["stopped"] += 1
+                        continue
                 # TWO RE-PEG REGIMES (user, Aug 2 evening):
                 # - MANUAL bets (the user's 10-contract orders): move 1
                 #   unconditional ("I bet the game, I want it bet"), move
@@ -20565,30 +20603,6 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                                  f"{round(new_c)}¢")):
                         res["stopped"] += 1
                     continue
-                # RENT-COLLECTOR CHASE NO-VETO (Aug 31 2026 — user, on a
-                # LAD ML the repeg parked at 53¢ under a 66¢ touch,
-                # stamped "model limit": "if it pays rent, I want it
-                # bet"). A rent vehicle 13 ticks off the touch earns ~zero
-                # (df^ticks) and only fills if the market crashes through
-                # it — the worst of both. Beyond T-6h the model is NOT the
-                # wall on the rent lanes (autobet ML, O/U + gridiron
-                # totals, gridiron spreads): the chase follows the touch
-                # and only the price cap (64¢ ML / 60¢ football, above)
-                # and the Master Rule bound it — the same shape as the
-                # entry no-veto. Inside T-6h the model wall returns.
-                # Props (bets-to-win) and NRFI keep their walls always.
-                _noveto_chase = False
-                if (is_model_bet
-                        and f.get("market_type") in ("moneyline", "total",
-                                                     "spread")
-                        and not blob.get("whiff_autobet")):
-                    try:
-                        _noveto_chase = ((datetime.fromisoformat(
-                            str(r.get("event_start")).replace("Z", "+00:00"))
-                            - now).total_seconds() / 60.0
-                            > _OU_NOVETO_MIN_MIN)
-                    except Exception:
-                        _noveto_chase = False
                 move_n = len(moves) + 1
                 edge = None
                 if (is_autobet or move_n > 1) and not _noveto_chase:
