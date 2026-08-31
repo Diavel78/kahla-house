@@ -129,12 +129,13 @@ ALL_LANES: dict[str, Lane] = {
         # Worse than the ledger's silent zero, because the tick count lies.
         # Enforcement means Vercel stands down, so that is a total betting
         # blackout that reads healthy on every dashboard. Refuse to start.
-        # stuck_s=420: the designed workload is ~120s MLB pass + in-flight
-        # game overshoot + the football pass — healthy ticks run ~180-200s.
-        # 420 is 2x that: a real hang, not a full slate. Lease ttl stays 180
-        # (daemon-death failover speed; the renewer covers live execution).
+        # stuck_s=540 (Aug 31 2026, was 420): the designed workload grew —
+        # ~120s MLB pass + 25s OMS slice + 45s gridiron tape + sweep —
+        # healthy ticks now run ~210-260s. 540 ≈ 2x that: a real hang,
+        # not a full slate. Lease ttl stays 180 (daemon-death failover
+        # speed; the renewer covers live execution).
         Lane("opener",          60,   180, writes_money=True, needs_owner=True,
-             stuck_s=420, note="opener lane + autobet (NEW MONEY)"),
+             stuck_s=540, note="opener lane + autobet (NEW MONEY)"),
         # stuck_s=600 (Aug 31 2026): the chase-night rework made a BUSY
         # full-sweep lap legitimately ~300-330s (10-min full sweep over a
         # 130-pick book + up to 6 real amends + scalp + reconcile), and

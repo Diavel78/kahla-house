@@ -998,6 +998,35 @@ once enforcement is on, and silently stop running the lane it was moved there
 to run). NOT YET GATED and still riding the paperlog route body: `_tg_flush`,
 `_bet_alerts`, `_opener_watchdog`.
 
+## THE OMS — desired-state betting (Phase 1 live Aug 31 2026)
+
+User, after a day of budget/rotation/limit fences: "We are clearly
+hitting limits… how is a professional system built." The lap model does
+O(board) work per pass under a time budget, so every fence (budget,
+sort, row limit) becomes a missed bet. The OMS inverts it: producers
+WRITE desired state (`desired_orders` table — DDL
+`kahla-scanner/supabase/desired_orders.sql`, applied); one executor
+converges pending rows. A market can be pending / placed / blocked-
+with-a-reason — **"not reached yet" is no longer a state.** v1 scope =
+the football RENT LIST (`_oms_pass`, rides the opener lane first-slice
++ the sweep-now bridge): producer maps every enrolled asc-/tsc- slug
+(`_rent_enrolled_football` — the venue's own catalog mirror) to a
+desired row in one tick; executor runs `_gridiron_try_bet` via the
+**Phase-1.5 slim pricer** (`_gridiron_price_game` — pmm lookup → ladder
+only, ~2s vs build_dossier's ~8s; the bet leg needs BOOKS, not the UI
+dossier), ≤6 serial creates/tick, typed retry backoffs in `detail`
+(rent 30m / edge 60m / no_model 6h / cap 10m). Placed picks carry
+`gridiron_autobet` — repeg chases them, scalp covers them, nothing else
+changes. A placed row whose pick VANISHES (venue kill → reconcile)
+flips back to pending: the ghost-order class self-heals. When
+`OMS_ENABLED`, the week-of sweep SKIPS enrolled games (OMS owns them)
+and spends its builds on the unlisted remainder. Migration direction:
+every lane becomes a producer; parallel per-slug workers come later
+(writes stay SERIAL until deliberately reviewed — the Cloudflare
+lesson). Phase 2 (local Postgres, kills the PostgREST round-trip tax +
+the "Server disconnected" class) is a ready runbook:
+`docs/local-postgres-runbook.md`.
+
 ## THE ORDER OF WORK (user, Aug 21 2026 — do not reorder)
 
 **1. The Cellar goes live. 2. FOOTBALL. 3. The Market Maker.**

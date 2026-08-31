@@ -17086,6 +17086,205 @@ def _rent_enrolled_football(sb):
     return c["val"]
 
 
+# ── PHASE 1: THE OMS — desired-state betting (Aug 31 2026; user, after
+# a day of budget/rotation/limit fences: "We are clearly hitting
+# limits... how is a professional system built"). The lap model does
+# O(board) work per pass under a time budget, so every fence becomes a
+# missed bet. Desired state inverts it: producers WRITE what should
+# exist (milliseconds, full coverage instantly); one executor converges
+# pending rows through the proven placement path. A game can be
+# pending, placed, or blocked-with-a-reason — "not reached yet" is no
+# longer a state. v1 scope: the football rent list (the bible lane).
+# Chasing stays with the repeg — placed picks carry gridiron_autobet
+# like any other. Writes stay SERIAL (the Cloudflare lesson); the win
+# tonight is coverage, not parallelism.
+OMS_ENABLED = True
+_OMS_BUDGET_S = float(os.environ.get("OMS_BUDGET_S") or 25.0)
+_OMS_MAX_CREATES = 6          # real orders per tick — serial-write bound
+_OMS_RETRY_MIN = {"rent": 30, "no_pmm": 30, "no_book": 30, "none": 30,
+                  "edge": 60, "tail": 60, "no_model": 360, "cap": 10}
+
+
+def _gridiron_price_game(sb, g):
+    """PHASE 1.5 SLIM PRICER: the football bet leg needs ONLY the
+    spread/total ladders — books per rung. build_dossier spends ~8s on
+    ESPN records, splits, weather, injuries and the sharp score to make
+    a UI page; the bet leg reads none of it. One pmm_markets.lookup
+    (the exact call the dossier itself makes) → the exact ladder shape
+    _attach_pmm_to_odds builds → a d-alike dict _gridiron_try_bet reads
+    unchanged. ~2s/game instead of ~8s; None on any miss (caller backs
+    off, never guesses)."""
+    try:
+        import pmm_markets
+        en = g.get("event_name") or ""
+        if " @ " not in en:
+            return None
+        away, home = en.split(" @ ", 1)
+        pmm = pmm_markets.lookup(get_client(), g.get("sport"), away, home,
+                                 str(g.get("event_start") or ""))
+        if not pmm:
+            return None
+        d: dict = {"odds": {}}
+        for mt in ("spread", "total"):
+            rungs = [
+                {"side": e.get("side"), "line": e.get("line"),
+                 "slug": e.get("slug"), "quote": e.get("quote"),
+                 "synthetic": bool(e.get("synthetic"))}
+                for e in (pmm.get(mt) or [])
+                if e.get("slug") and e.get("line") is not None]
+            if rungs:
+                d["odds"][mt] = {"polymarket": {"ladder": rungs}}
+        return d if d["odds"] else None
+    except Exception:
+        return None
+
+
+def _oms_pass(sb, now, deadline):
+    """Producer + executor for desired_orders (lane='rentlist').
+
+    PRODUCER: every enrolled football market from the venue's own
+    incentives catalog gets a desired row — new games in one tick,
+    however many. A placed row whose pick has VANISHED (venue kill →
+    reconcile clear) flips back to pending: the ghost-order class
+    self-heals here instead of waiting for a human refire.
+
+    EXECUTOR: pending rows soonest-first through _gridiron_try_bet
+    (rent re-check, Master Rule, band, model side-pick, executor dedup
+    all inside). Every verdict lands in `detail` with a typed retry
+    backoff — a blocked market is visible and scheduled, never lost.
+    ≤_OMS_MAX_CREATES real orders per tick, serial."""
+    st: dict = {}
+    if not OMS_ENABLED:
+        return st
+    try:
+        rmap, unm = _rent_enrolled_football(sb)
+    except Exception:
+        return st
+    st["oms_rent"] = len(rmap)
+    nowiso = now.isoformat()
+    mrows: dict = {}
+    try:
+        ids = list(rmap.keys())
+        for i in range(0, len(ids), 100):
+            for m in ((sb.table("markets")
+                       .select("id,event_name,event_start,sport")
+                       .in_("id", ids[i:i + 100]).execute().data) or []):
+                mrows[m["id"]] = m
+        pend: set = set()
+        for i in range(0, len(ids), 100):
+            for p in ((sb.table("bot_picks")
+                       .select("market_id,market_type")
+                       .eq("status", "pending")
+                       .in_("market_type", ["spread", "total"])
+                       .in_("market_id", ids[i:i + 100])
+                       .execute().data) or []):
+                pend.add((str(p["market_id"]), p["market_type"]))
+        drows: dict = {}
+        for i in range(0, len(ids), 100):
+            for r in ((sb.table("desired_orders")
+                       .select("id,market_id,market_type,state")
+                       .eq("lane", "rentlist")
+                       .in_("market_id", ids[i:i + 100])
+                       .execute().data) or []):
+                drows[(str(r["market_id"]), r["market_type"])] = r
+        ups: list = []
+        for mid, mts in rmap.items():
+            m = mrows.get(mid)
+            if not m or str(m.get("event_start") or "") <= nowiso:
+                continue
+            for mt in mts:
+                if mt not in ("spread", "total"):
+                    continue
+                key = (str(mid), mt)
+                have = drows.get(key)
+                is_bet = key in pend
+                if have is None:
+                    ups.append({"market_id": mid, "market_type": mt,
+                                "lane": "rentlist",
+                                "state": "placed" if is_bet else "pending",
+                                "event_start": m.get("event_start"),
+                                "detail": ("adopted:bet" if is_bet
+                                           else "enrolled"),
+                                "updated_at": nowiso})
+                elif have["state"] == "placed" and not is_bet:
+                    (sb.table("desired_orders").update(
+                        {"state": "pending", "detail": "reentry:pick_gone",
+                         "next_try_at": nowiso, "updated_at": nowiso})
+                     .eq("id", have["id"]).execute())
+                    st["oms_reentry"] = st.get("oms_reentry", 0) + 1
+                elif have["state"] != "placed" and is_bet:
+                    (sb.table("desired_orders").update(
+                        {"state": "placed", "detail": "bet_seen",
+                         "updated_at": nowiso})
+                     .eq("id", have["id"]).execute())
+        if ups:
+            st["oms_new"] = len(ups)
+            for i in range(0, len(ups), 200):
+                (sb.table("desired_orders")
+                 .upsert(ups[i:i + 200],
+                         on_conflict="market_id,market_type,lane")
+                 .execute())
+    except Exception as e:
+        st["oms_prod_err"] = f"{type(e).__name__}: {e}"[:100]
+    # ── executor ──
+    try:
+        rows = (sb.table("desired_orders").select("*")
+                .eq("state", "pending").eq("lane", "rentlist")
+                .lte("next_try_at", nowiso).gt("event_start", nowiso)
+                .order("event_start").limit(200).execute().data) or []
+    except Exception:
+        return st
+    st["oms_pend"] = len(rows)
+    creates = 0
+    d_cache: dict = {}
+    for r in rows:
+        if _time.time() >= deadline - 2.0 or creates >= _OMS_MAX_CREATES:
+            break
+        mid = str(r["market_id"])
+        g = mrows.get(r["market_id"]) or mrows.get(mid)
+        if g is None:
+            try:
+                g = ((sb.table("markets")
+                      .select("id,event_name,event_start,sport")
+                      .eq("id", mid).limit(1).execute().data) or [None])[0]
+            except Exception:
+                g = None
+        verdict, retry_min = "no_model", _OMS_RETRY_MIN["no_model"]
+        if g:
+            gp = _gridiron_proj(sb, g.get("sport"), g.get("event_name"))
+            if gp:
+                d = d_cache.get(mid) if mid in d_cache \
+                    else d_cache.setdefault(mid, _gridiron_price_game(sb, g))
+                if not d or r["market_type"] not in (d.get("odds") or {}):
+                    verdict, retry_min = "no_pmm", _OMS_RETRY_MIN["no_pmm"]
+                else:
+                    v = _gridiron_try_bet(sb, g, g.get("event_start"), d,
+                                          r["market_type"], gp) or "none"
+                    verdict = v
+                    retry_min = _OMS_RETRY_MIN.get(
+                        v, _OMS_RETRY_MIN.get("none", 30))
+        if verdict == "placed":
+            creates += 1
+            st["oms_placed"] = st.get("oms_placed", 0) + 1
+            upd = {"state": "placed", "detail": "placed"}
+        elif verdict == "failed:dedup":
+            upd = {"state": "placed", "detail": "bet_exists"}
+        else:
+            st["oms_" + verdict.split(":")[0]] = \
+                st.get("oms_" + verdict.split(":")[0], 0) + 1
+            upd = {"state": "pending", "detail": verdict[:80],
+                   "tries": int(r.get("tries") or 0) + 1,
+                   "next_try_at": (now + timedelta(
+                       minutes=retry_min)).isoformat()}
+        upd["updated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            (sb.table("desired_orders").update(upd)
+             .eq("id", r["id"]).execute())
+        except Exception:
+            pass
+    return st
+
+
 def _rentlist_watchdog(sb, now):
     """RULE 1'S OWN TRIPWIRE (Aug 31 2026 — user, after the third silent
     schedule fence in one day: "there is shit on the rent list, we aren't
@@ -17215,8 +17414,18 @@ def _gridiron_bet_sweep(sb, now, deadline, stats):
         stats["g_rent_listed"] = len(_rmap)
         if _runm:
             stats["g_rent_unmatched"] = _runm[:6]
-        cands.sort(key=lambda gg: (0 if gg["id"] in _rmap else 1,
-                                   str(gg.get("event_start") or "")))
+        if OMS_ENABLED:
+            # The OMS owns enrolled games now — desired rows cover them
+            # with typed retries, so the sweep spends its 4 builds on the
+            # UNLISTED remainder instead of re-walking the rent board.
+            _skip = sum(1 for gg in cands if gg["id"] in _rmap)
+            if _skip:
+                stats["g_skip_oms"] = _skip
+            cands = [gg for gg in cands if gg["id"] not in _rmap]
+            cands.sort(key=lambda gg: str(gg.get("event_start") or ""))
+        else:
+            cands.sort(key=lambda gg: (0 if gg["id"] in _rmap else 1,
+                                       str(gg.get("event_start") or "")))
         nowt = _time.time()
         cands = [gg for gg in cands
                  if nowt - _GRIDIRON_SWEEP_TS.get(gg["id"], 0.0)
@@ -17313,7 +17522,14 @@ def api_gridiron_sweep_now():
             stats["forced"] = True
         sb = get_supabase()
         now = datetime.now(timezone.utc)
-        _gridiron_bet_sweep(sb, now, _time.time() + 8.0, stats)
+        # OMS first (Phase 1): converge the rent list's desired rows —
+        # typed retries + soonest-first beats the sweep's 1-build crawl.
+        if OMS_ENABLED:
+            try:
+                stats.update(_oms_pass(sb, now, _time.time() + 12.0))
+            except Exception as e:
+                stats["oms_err"] = f"{type(e).__name__}: {e}"[:120]
+        _gridiron_bet_sweep(sb, now, _time.time() + 6.0, stats)
         return jsonify({"ok": True, **stats})
     except Exception as e:
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"[:220],
@@ -18282,9 +18498,21 @@ def api_handicapper_paperlog():
     # market tape needs. Still idle-cheap -- with no candidates the pass
     # exits in well under a second, and the one-shot dedup makes the capture
     # a bounded burst.
+    # PHASE 1 OMS — the rent list as DESIRED STATE, converged first.
+    # Runs before the tape pass because it is the money leg: producers
+    # cover the whole enrolled board in one tick; the executor places a
+    # bounded, serial handful per tick until pending drains to zero.
+    if _own_opener and OMS_ENABLED:
+        try:
+            oms_stats = _oms_pass(sb, now, _time.time() + _OMS_BUDGET_S)
+        except Exception as e:
+            oms_stats = {"oms_err": f"{type(e).__name__}: {e}"[:100]}
+    else:
+        oms_stats = {}
     g_deadline = max(opener_deadline, _time.time() + _GRIDIRON_BUDGET_S)
     g_rows, g_stats = (_gridiron_opener_pass(sb, now, g_deadline)
                        if _own_opener else ([], {}))
+    g_stats = {**g_stats, **oms_stats}
     rows.extend(g_rows)
     # WEEK-OF BET SWEEP — the taped-but-unbet second look (real football
     # lines post days after listing; the tape is one-shot). Same lease,
