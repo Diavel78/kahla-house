@@ -11199,7 +11199,8 @@ def _pmm_positions_raw(client) -> dict | None:
     return out
 
 
-def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict) -> dict:
+def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict,
+                    book_cache: dict | None = None) -> dict:
     """Fill state for ONE pending Polymarket-executed pick — mirrors the Kalshi
     per-pick block (resting/partial/filled/none/unknown + warn + outbid + entry
     auto-sync). Matches by the pick's resolved Poly market slug; our side =
@@ -11249,7 +11250,12 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict) -> dict
             entry["status"], entry["pct"] = "resting", 0.0
         if mins is None or mins > 0:                 # outbid (pre-game only)
             try:
-                book = _pmm_book(client, slug)
+                # Prefetched by the caller's concurrent warm-up when
+                # available (the full-sweep lap fat); the self-read stays
+                # as the fallback so every other caller is unchanged.
+                book = (book_cache.get(slug)
+                        if book_cache is not None and slug in book_cache
+                        else _pmm_book(client, slug))
                 if synthetic and book:
                     book = _invert_book(book)
                 myp = None
@@ -11419,6 +11425,38 @@ def _compute_fill_status(sb, uid: str, poly_snap=None,
         except Exception:
             poly_client = poly_orders = poly_positions = None
 
+    # CONCURRENT BOOK WARM-UP (Aug 31 2026 — the full-sweep lap fat):
+    # a full sweep reads one book per resting pick, serially ~1s each ×
+    # 130 picks = the 300s+ laps the stuck-line watchdog kept flagging on
+    # a HEALTHY machine. Threads here do venue GETs ONLY (httpx client is
+    # thread-safe; no DB, no state) and results are collected in this
+    # thread; any miss falls back to the entry's own serial read.
+    book_cache = None
+    if poly_orders is not None and poly_client is not None:
+        try:
+            _oslugs = {o.get("slug") for o in poly_orders}
+            _need = set()
+            for p in pending:
+                if not _is_poly(p):
+                    continue
+                _b = (p.get("signal_blob")
+                      if isinstance(p.get("signal_blob"), dict) else {})
+                _s = (_b or {}).get("pmm_slug")
+                if only_slugs is not None and _s and _s not in only_slugs:
+                    continue
+                if _s and _s in _oslugs:
+                    _need.add(_s)
+            if len(_need) > 3:
+                from concurrent.futures import ThreadPoolExecutor
+                _nl = sorted(_need)
+                book_cache = {}
+                with ThreadPoolExecutor(max_workers=6) as _ex:
+                    for _s, _bk in zip(_nl, _ex.map(
+                            lambda s: _pmm_book(poly_client, s), _nl)):
+                        if _bk is not None:
+                            book_cache[_s] = _bk
+        except Exception:
+            book_cache = None       # warm-up is an optimization, never a gate
     fills = []
     for p in pending:
         # TARGETED LAP (Aug 31 2026): when the caller passes the socket's
@@ -11441,8 +11479,9 @@ def _compute_fill_status(sb, uid: str, poly_snap=None,
                               "venue": "POLYMARKET", "mins_to_start": None})
             else:
                 try:
-                    fills.append(_pmm_fill_entry(poly_client, p, now,
-                                                 poly_orders, poly_positions or {}))
+                    fills.append(_pmm_fill_entry(
+                        poly_client, p, now, poly_orders,
+                        poly_positions or {}, book_cache=book_cache))
                 except Exception:
                     # One bad pick must never crash the whole compute (which
                     # would also kill the cron take-warning). Degrade to unknown.

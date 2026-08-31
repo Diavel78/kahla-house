@@ -135,8 +135,16 @@ ALL_LANES: dict[str, Lane] = {
         # (daemon-death failover speed; the renewer covers live execution).
         Lane("opener",          60,   180, writes_money=True, needs_owner=True,
              stuck_s=420, note="opener lane + autobet (NEW MONEY)"),
+        # stuck_s=600 (Aug 31 2026): the chase-night rework made a BUSY
+        # full-sweep lap legitimately ~300-330s (10-min full sweep over a
+        # 130-pick book + up to 6 real amends + scalp + reconcile), and
+        # the default stuck line (=ttl 300) was stamping healthy laps as
+        # failed — the permanent-red-on-a-healthy-machine disease, third
+        # sighting. 600 ≈ 2× the designed workload (the opener's own
+        # precedent); lease ttl stays 300 — the renewer covers execution,
+        # so failover speed is unchanged.
         Lane("repeg",          120,   300, writes_money=True, needs_owner=True,
-             note="maker order chase"),
+             stuck_s=600, note="maker order chase"),
         Lane("harvest",        120,   300, writes_money=True, needs_owner=True,
              note="take-profit sells"),
         Lane("ledger",         300,   900, needs_owner=True,
