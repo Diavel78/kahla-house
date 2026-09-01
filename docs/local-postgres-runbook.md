@@ -27,6 +27,42 @@ the tax is ~0.1ms and the disconnect class disappears.
 
 ## The plan (strangler pattern, reversible at every step)
 
+## ✅ STEP A EXECUTED — Aug 31 2026, FULL PASS
+
+The production client stack (supabase-py → Caddy shim → PostgREST 16.2
++ JWT → local Postgres 18/Postgres.app) returned live picks + the
+restore-moment snapshot timestamp off the box's SSD. Cutover night is
+now paint-by-numbers. **Four findings, all solved and parked on the box:**
+
+1. **Binaries, not brew.** brew wanted to COMPILE both (GHC + Go
+   toolchains) and upgrade openssl on the production box — refused.
+   Official release binaries live in `~/kahla-rehearsal/`
+   (postgrest v16.2 macos-x86-64, caddy 2.11.4 mac_amd64). PostgREST
+   needs `DYLD_FALLBACK_LIBRARY_PATH=/Applications/Postgres.app/
+   Contents/Versions/latest/lib` (Postgres.app's libpq — there is no
+   brew libpq on the box); the "built for macOS 15" warning is benign.
+2. **The /rest/v1 shim is mandatory.** supabase-py hardwires
+   `{url}/rest/v1/...`; Caddy `handle_path /rest/v1/*` →
+   `reverse_proxy 127.0.0.1:3010` solves it (`~/.kahla/Caddyfile`,
+   serving :3011 — the URL the app gets is `http://localhost:3011`).
+3. **jwt-secret is REQUIRED** — a secretless PostgREST rejects every
+   Bearer token (`PGRST300 Server lacks JWT secret`), and the client
+   always sends one. Secret is appended to `~/.kahla/postgrest.conf`;
+   the signed token (HS256, `{"role":"robkahla"}`, minted with the
+   stdlib snippet below) is at `~/.kahla/rehearsal.jwt` — it IS the
+   `SUPABASE_SERVICE_KEY` value on cutover night.
+4. **Bind loopback in the real config**: PostgREST defaulted to
+   `0.0.0.0:3010` — add `server-host = "127.0.0.1"` (and keep Caddy
+   on `:3011` loopback via `bind 127.0.0.1` if exposing anything).
+
+Cutover night therefore reduces to: final dump → restore into a new
+`kahla` db → point db-uri at it → two launchd plists (postgrest with
+the DYLD var, caddy) → `.env`: `SUPABASE_URL=http://localhost:3011`,
+`SUPABASE_SERVICE_KEY=<the jwt>` → restart daemon → watch. Rollback =
+revert `.env`, restart. The split-brain caveat below (Actions +
+Vercel still write Supabase) REMAINS the blocker for doing this while
+anyone is away — it is why Step C waits for a watched evening.
+
 ### Step A — local PostgREST in front of the shadow (read-only rehearsal)
 1. `brew install postgrest` (single binary).
 2. Config `~/.kahla/postgrest.conf`:
