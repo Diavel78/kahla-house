@@ -17515,17 +17515,45 @@ def _rentlist_watchdog(sb, now):
                        .execute().data) or []):
                 pend.setdefault(str(p["market_id"]), set()).add(
                     p["market_type"])
+        # POST-OMS SEMANTICS (Sep 1 2026 — caught in the pre-absence
+        # audit, hours before it would have paged the user's trip every
+        # 4h): "unbet after 2h" is NORMAL now — the rent/no_book groups
+        # sit unbet legitimately with a written cause and a scheduled
+        # retry. The alarm's job is the OMS going DEAD: an enrolled
+        # market with NO desired row at all (producer broken — it covers
+        # new enrollments within one lap), or a pending row the executor
+        # hasn't touched in 2h (retries are ≤60min, so 2h stale means
+        # the executor stopped).
+        dstate: dict = {}
+        for i in range(0, len(fids), 100):
+            for dr in ((sb.table("desired_orders")
+                        .select("market_id,market_type,state,updated_at")
+                        .eq("lane", "rentlist")
+                        .in_("market_id", fids[i:i + 100])
+                        .execute().data) or []):
+                dstate[(str(dr["market_id"]), dr["market_type"])] = dr
+        stale_cut = (now - timedelta(
+            seconds=_RENTLIST_WD_GRACE_S)).isoformat()
         nowt = _time.time()
         naughty: list = []
         for mid, m in far.items():
-            missing = set(rmap.get(mid) or ()) - pend.get(str(mid), set())
-            if not missing:
+            bad_mts = []
+            for mt in sorted(rmap.get(mid) or ()):
+                if mt in pend.get(str(mid), set()):
+                    continue                     # bet standing — healthy
+                dr = dstate.get((str(mid), mt))
+                if dr is None:
+                    bad_mts.append(mt + ":no_row")
+                elif (dr.get("state") == "pending"
+                        and str(dr.get("updated_at") or "") < stale_cut):
+                    bad_mts.append(mt + ":stale")
+            if not bad_mts:
                 _RENTLIST_SEEN.pop(mid, None)
                 continue
             first = _RENTLIST_SEEN.setdefault(mid, nowt)
             if nowt - first >= _RENTLIST_WD_GRACE_S:
                 naughty.append(f"{(m.get('event_name') or '?')[:34]}"
-                               f" ({'/'.join(sorted(missing))})")
+                               f" ({'/'.join(bad_mts)})")
         summary = {"rent_far": len(far), "unbet_aged": len(naughty),
                    "unmatched": len(unm)}
         if not naughty:
