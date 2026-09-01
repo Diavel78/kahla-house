@@ -14772,6 +14772,10 @@ def _reward_rows_parse(text: str) -> tuple[list, list]:
     return out, bad
 
 
+_RENT_SLUG_BUMP: dict = {}       # slug → last rent_list_slugs upsert ts
+_RENT_SLUG_BUMP_S = 6 * 3600.0   # bump cadence (reader tolerates 24h)
+
+
 def _reward_schedule_sync(sb) -> dict:
     """Mirror polymarket.us/rewards into poly_reward_schedule. Never
     raises. Returns counts + any unparsed labels + programs NEWLY seen
@@ -14802,11 +14806,27 @@ def _reward_schedule_sync(sb) -> dict:
                 r"-\d{4}-\d{2}-\d{2}(?:-[a-z0-9]+)*\b", r.text))
             res["slugs"] = len(_sl)
             if _sl:
-                _nowi = datetime.now(timezone.utc).isoformat()
-                _slp = [{"slug": s, "last_seen": _nowi} for s in _sl]
+                # WRITE-DEDUP (Sep 1 2026, caught in the pre-absence
+                # audit): the page carries ~13k slugs and this sync runs
+                # every ~10 min — blanket upserts were ~1.9M no-op row
+                # writes/day of last_seen bumps (the dedup-map disk-IO
+                # class, gotcha #40's cousin). Bump each slug at most
+                # every 6h via a process-local stamp (the box daemon is
+                # long-lived; a restart costs one full write pass). The
+                # union reader tolerates 24h staleness, so 6h is triple
+                # margin.
+                _nowt = _time.time()
+                _slp = [{"slug": s,
+                         "last_seen": datetime.now(timezone.utc).isoformat()}
+                        for s in _sl
+                        if _nowt - _RENT_SLUG_BUMP.get(s, 0.0)
+                        > _RENT_SLUG_BUMP_S]
+                res["slugs_new"] = len(_slp)
                 for i in range(0, len(_slp), 300):
                     (sb.table("rent_list_slugs")
                      .upsert(_slp[i:i + 300], on_conflict="slug").execute())
+                for p in _slp:
+                    _RENT_SLUG_BUMP[p["slug"]] = _nowt
         except Exception as e:
             res["slugs_err"] = f"{type(e).__name__}: {e}"[:100]
         if not rows:
