@@ -79,3 +79,20 @@ db_backup.sh: terminate shadow connections before the restore
 datname='kahla_shadow'") or stop/start the postgrest LaunchAgent around
 it — then remove the display special-case. Post-cutover this reshapes
 anyway (backup source repoints to local per the runbook).
+
+## 6. Ghost-position adoption for football (added Sep 1 midday — the
+## Fresno State +3.5 case)
+The Sep 1 maintenance storm proved the class: reconcile false-kills a
+pick during a venue wobble, the order fills AFTER the kill, and the
+position rides naked — no pick, no scalp ask, no grading. The MLB
+autolog (`_pmm_autolog`) adopts orderless positions and caught the ML
+shorts within the hour; football positions are OUTSIDE its scope, so
+Fresno sat invisible for 8 hours until a human query found it. Interim
+(absence week): the daily check runs a positions-vs-book audit every
+morning and adopts ghosts by hand (proven recipe → pick 4879; source
+'pmm_autolog' so _scalp_adopted_ok qualifies it off the tape). ROOT FIX
+on return: extend position→pick adoption to the football families
+(asc-/tsc- cfb+nfl, astatc-nfl) — either widen _pmm_autolog's slug
+index past MLB or add the venue-position sweep to _reconcile_tick,
+which already reads positions. Then delete the manual recipe from the
+daily-check prompt.
