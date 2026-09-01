@@ -130,3 +130,21 @@ the box is no longer "the copy").
    first OMS ticks (`desired_orders` filling, `oms_*` tick stats).
 2. Step A (~20 min, zero risk).
 3. Step C scheduled for a quiet evening this week, Rob present.
+
+## ✅ SOAK + WRITE PATH + THE RECEIPT (Aug 31 night, after Step A)
+
+- **launchd soak RUNNING**: `com.kahla.postgrest` + `com.kahla.caddy`
+  (user LaunchAgents, KeepAlive, logs in `~/.kahla/logs/`) serve the
+  shadow all week — cutover night inherits proven plists; the DYLD var
+  works under launchd. Unload with `launchctl unload` if ever needed.
+- **Write path proven**: insert/update/delete on exec_probe_runs and
+  the `poly_gameday_pnl` RPC all correct through the full client stack.
+  Finding #5: the shadow is yesterday's copy, so tables created TODAY
+  don't exist in it until the next 3:30am restore — harmless for the
+  real flip (it starts from a fresh final dump).
+- **THE LATENCY RECEIPT (30-call bench, same library, same query):**
+  LOCAL 3.9 ms/call vs SUPABASE 121.1 ms/call — **31×**. A 300-call
+  lap: 36.3s of DB wire → 1.2s. This is the measured source of the
+  ~200s repeg laps and the quantified prize of Step C.
+- dotenv gotcha: `load_dotenv()` asserts under stdin scripts — pass the
+  .env path explicitly.
