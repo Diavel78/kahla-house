@@ -115,6 +115,16 @@ re-derive.
 - **`data`** — 2-4 sentences in the same voice: the bet (or the pass) +
   the one roster/situational thing that matters.
 
+**EVERY GAME GETS A SPREAD READ (Rob, Sep 1 2026: "I don't give a fuck if
+the NCAA are cupcake matches — we bet SPREADS").** A bare "pass" is not an
+acceptable bottom line just because the visitor is FCS or our number is
+blind to their roster. Keep the honesty about a model gap being noise —
+then handicap the MARKET line anyway, like a capper (starters-pull vs
+style-points, new-QB debuts, last week's film, blowout management), and
+end every game — deep or data tier — with a side of the posted spread and
+a confidence. Lean is the floor; "pass" is reserved for a game with no
+posted line in the blob.
+
 **Guardrails for the narrative:**
 - Every STAT/NUMBER you cite must exist in the blob (roster facts are
   the exception above — hedged, never fabricated).
