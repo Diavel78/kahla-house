@@ -2574,8 +2574,29 @@ def _cellar_health(sb) -> dict:
                     r[0].get("at"))).total_seconds())
             except Exception:
                 pass
-            backup = {"ok": bool(res0.get("ok")), "age_s": age_s,
+            ok0 = bool(res0.get("ok"))
+            # SOAK COLLISION IS NOT A BACKUP FAILURE (Sep 1 2026): the
+            # Step-A rehearsal parks PostgREST on kahla_shadow all week
+            # (launchd, KeepAlive), so the nightly restore-test cannot
+            # drop/recreate the shadow — msg "createdb kahla_shadow" —
+            # while the DUMP HALF completed at full size. An amber
+            # "backup issue" every morning of the trip for a known,
+            # deliberate condition is the skip-the-panel disease. Treat
+            # as ok WITH a note when the dump is demonstrably healthy
+            # (≥50MB — real dumps run ~98MB, a failed one is tiny);
+            # any other failure shape stays a real alarm. Root fix on
+            # return (docket): db_backup.sh drops shadow connections
+            # before the restore, or skips the shadow while the soak
+            # runs. The stamp itself stays ok:false — venue truth; only
+            # this display verdict knows about the soak.
+            note = None
+            if (not ok0
+                    and str(res0.get("msg") or "") == "createdb kahla_shadow"
+                    and (res0.get("dump_kb") or 0) >= 50_000):
+                ok0, note = True, "dump ok; restore-test paused by soak"
+            backup = {"ok": ok0, "age_s": age_s,
                       "shadow_picks": res0.get("shadow_picks"),
+                      **({"note": note} if note else {}),
                       # >26h since last stamp = last night's run never fired
                       "stale": bool(age_s is not None and age_s > 26 * 3600)}
     except Exception:
@@ -23293,6 +23314,32 @@ def api_data():
                 try:
                     if isinstance(cel, dict) and "ws" not in cel:
                         cel["ws"] = _ws_feed_health(get_supabase())
+                except Exception:
+                    pass
+                # BACKUP VERDICT REPAIR (Sep 1 2026 — the soak-collision
+                # note in _cellar_health): the box's cached blob is
+                # computed on pre-fix code, so its backup block says
+                # ok:false all week while the dump half is healthy.
+                # When the cached verdict is bad, re-read the stamp with
+                # THIS code's soak-aware verdict (one limit-1 read; only
+                # fires while the cached verdict shows failed). Same
+                # split-brain class as the ws key and CHASE DEAD above.
+                try:
+                    _bk = (cel or {}).get("backup") if isinstance(cel, dict) \
+                        else None
+                    if isinstance(_bk, dict) and _bk and not _bk.get("ok"):
+                        _r = (get_supabase().table("exec_probe_runs")
+                              .select("result")
+                              .filter("params->>kind", "eq", "db_backup")
+                              .order("at", desc=True).limit(1)
+                              .execute().data) or []
+                        _res = (_r[0].get("result") or {}) if _r else {}
+                        if (str(_res.get("msg") or "")
+                                == "createdb kahla_shadow"
+                                and (_res.get("dump_kb") or 0) >= 50_000):
+                            cel["backup"] = dict(
+                                _bk, ok=True,
+                                note="dump ok; restore-test paused by soak")
                 except Exception:
                     pass
                 # STALE TRIPWIRE VERDICT REPAIR (Aug 31 2026 — the user

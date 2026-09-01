@@ -67,3 +67,15 @@ backoff; producer throttle; per-rung tick/rent HTTP tax removed), the
 dashboard NO SIGNAL flicker was root-caused (empty-block cache poisoning,
 fixed three layers deep), and NFL props went live at 5 contracts under
 the turn-rate experiment. CLAUDE.md's OMS section has the durable map.
+
+## 5. db_backup.sh vs the soak (added Sep 1 morning)
+The nightly restore-test fails while the rehearsal soak's PostgREST holds
+kahla_shadow open ("createdb kahla_shadow" — cannot drop a DB with live
+connections). The DUMP half stays healthy (~98MB); the dashboard verdict
+knows the signature and shows ok+note instead of a week of false amber
+(app.py backup block + the serve-time repair). ROOT FIX on return, in
+db_backup.sh: terminate shadow connections before the restore
+(psql -c "select pg_terminate_backend(pid) from pg_stat_activity where
+datname='kahla_shadow'") or stop/start the postgrest LaunchAgent around
+it — then remove the display special-case. Post-cutover this reshapes
+anyway (backup source repoints to local per the runbook).
