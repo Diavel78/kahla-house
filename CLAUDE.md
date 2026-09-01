@@ -1025,7 +1025,31 @@ every lane becomes a producer; parallel per-slug workers come later
 (writes stay SERIAL until deliberately reviewed — the Cloudflare
 lesson). Phase 2 (local Postgres, kills the PostgREST round-trip tax +
 the "Server disconnected" class) is a ready runbook:
-`docs/local-postgres-runbook.md`.
+`docs/local-postgres-runbook.md`. **Companion pieces (Sep 1 2026):**
+(a) **THE SHEET HARVEST** — the API incentives catalog is symbols-gated
+(blind to never-bet markets; Temple@PSU's whole enrolled ladder was
+invisible to it), but polymarket.us/rewards lists EVERY enrolled slug
+and `_reward_schedule_sync` fetches it every ~10 min — it now
+regex-harvests all game slugs into `rent_list_slugs`, and
+`_rent_enrolled_football` reads the UNION of both sources (either alone
+has a proven blind spot). (b) **VIRGIN SEEDING** (`_gridiron_seed_virgin`,
+flag `seed_quotes`): a paying rung with NO book gets OUR first quote at
+model fair−6¢ (the MLB virgin-anchor rule), tail gate ALWAYS, band +
+per-rung rent + Master Rule — alone-in-the-window is 100% share.
+(c) **`machine_flags`** — DB kill-switches polled live (60s cache,
+fail-OPEN to code constants): `oms_enabled`, `seed_quotes`; flip via
+run_sql, no deploy, no box trip. (d) **Route-vs-lane wiring is a
+SELFTEST now**: the lease-gate contract line names every engine and
+`test_lane_covers_its_documented_engines` enforces it — the OMS was the
+THIRD engine shipped route-only while the box owned the lane; a fourth
+cannot compile past the selftest. (e) **_rentlist_watchdog speaks OMS**:
+unbet-with-written-cause is healthy; the alarm is a missing desired row
+or a pending row untouched >2h (executor dead). (f) **NFL props LIVE
+(Sep 1, 5 contracts, cap 30)**: fbprop_config patterns are REAL-shape
+(`Will {Name} record {N}+ passing yards?` — the enabled config had
+carried guessed patterns that matched nothing); fbprop fills join the
+scalp arm (cost-floor asks) so TURN RATE — can props exit — is a
+measured sells/fills number, the user's explicit experiment.
 
 ## THE ORDER OF WORK (user, Aug 21 2026 — do not reorder)
 
