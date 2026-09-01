@@ -17313,6 +17313,7 @@ _OMS_RETRY_MIN = {"rent": 30, "no_pmm": 30, "no_book": 30, "none": 30,
 # (a restart just re-pays one search per game); keeps a missed event-search
 # from re-costing 15-20s every retry inside its 20-min window.
 _OMS_LOOKUP_TS: dict = {}
+_OMS_PROD_TS: float = 0.0     # last completed producer pass (throttle)
 
 
 def _gridiron_price_game(sb, g):
@@ -17368,6 +17369,18 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
         return st
     nowiso = now.isoformat()
     mrows: dict = {}
+    global _OMS_PROD_TS
+    if not skip_producer and _time.time() - _OMS_PROD_TS < 540.0:
+        # PRODUCER THROTTLE (Sep 1 2026, watched on the box the night it
+        # moved into the lane): the producer's input is the 600s-cached
+        # rent list, so re-running it every lap is duplicate work — and
+        # on the cache-expiry lap it re-pays the 13k-slug match INSIDE
+        # the OMS slice, leaving the executor zero rows (two consecutive
+        # ticks, no verdicts). Once per ~9 min matches the input's own
+        # cadence; every other lap the executor gets the whole slice.
+        # Ghost-heal (reentry:pick_gone) rides the producer, so it lags
+        # ≤9 min — inside every retry backoff anyway.
+        skip_producer = True
     if skip_producer:
         # Bridge drain mode (Aug 31): a cold Vercel container pays the
         # full 13k-slug match + three paged queries EVERY pass — the
@@ -17379,7 +17392,12 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
             rmap, unm = _rent_enrolled_football(sb)
         except Exception:
             return st
-        st["oms_rent"] = len(rmap)
+        _OMS_PROD_TS = _time.time()
+        # oms_list = enrolled-market count. NOT oms_rent — that key is
+        # the executor's per-tick rent-VERDICT counter, and the producer
+        # writing the list size into it made the journal unreadable on
+        # the one number the daily check needs.
+        st["oms_list"] = len(rmap)
     try:
         ids = list(rmap.keys())
         for i in range(0, len(ids), 100):
@@ -17497,6 +17515,7 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
                     verdict = v
                     retry_min = _OMS_RETRY_MIN.get(
                         v, _OMS_RETRY_MIN.get("none", 30))
+        st["oms_touch"] = st.get("oms_touch", 0) + 1
         if verdict in ("placed", "seeded"):
             creates += 1
             st["oms_placed"] = st.get("oms_placed", 0) + 1
