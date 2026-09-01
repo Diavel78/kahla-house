@@ -1025,7 +1025,11 @@ every lane becomes a producer; parallel per-slug workers come later
 (writes stay SERIAL until deliberately reviewed — the Cloudflare
 lesson). Phase 2 (local Postgres, kills the PostgREST round-trip tax +
 the "Server disconnected" class) is a ready runbook:
-`docs/local-postgres-runbook.md`. **Companion pieces (Sep 1 2026):**
+`docs/local-postgres-runbook.md`. **The post-trip work queue (cutover →
+WS cap probe → quote table, plus the week's read-back) is
+`docs/return-docket.md`; the WS quote-table design (Rob's "why can't
+that be websocket?" — 400-slug cap is OUR constant, venue documents
+none) is `docs/ws-quote-table-spec.md`.** **Companion pieces (Sep 1 2026):**
 (a) **THE SHEET HARVEST** — the API incentives catalog is symbols-gated
 (blind to never-bet markets; Temple@PSU's whole enrolled ladder was
 invisible to it), but polymarket.us/rewards lists EVERY enrolled slug
