@@ -16807,7 +16807,7 @@ def _gridiron_seed_virgin(sb, g, es0, mt, gp, virgin, proj, now_utc):
     (most model-competent, most likely to develop a book to chase).
     Returns a gate string when a seed was attempted, None when nothing
     was seedable (caller falls back to its old verdicts)."""
-    if not virgin or not gp:
+    if not virgin or not gp or not _machine_flag("seed_quotes"):
         return None
     mg, tt, pm = gp
     cands = []
@@ -17258,6 +17258,28 @@ def _rent_enrolled_football(sb):
 # like any other. Writes stay SERIAL (the Cloudflare lesson); the win
 # tonight is coverage, not parallelism.
 OMS_ENABLED = True
+# REMOTE KILL-SWITCH (Sep 1 2026 — built the night before the user left
+# for several days): machine_flags is a DB row polled live (60s cache),
+# the fbprop_config pattern — a session can disable the new lanes via
+# run_sql with NO deploy and NO box trip. Fail-OPEN to the constants: an
+# unreadable flags table must not silently kill a healthy lane.
+_MFLAGS_CACHE: dict = {"at": 0.0, "map": {}}
+
+
+def _machine_flag(key: str, default: bool = True) -> bool:
+    try:
+        c = _MFLAGS_CACHE
+        if _time.time() - c["at"] > 60.0:
+            rows = (get_supabase().table("machine_flags")
+                    .select("key,value").limit(50).execute().data) or []
+            c["map"] = {r["key"]: r.get("value") for r in rows}
+            c["at"] = _time.time()
+        v = c["map"].get(key)
+        return default if v is None else bool(v)
+    except Exception:
+        return default
+
+
 _OMS_BUDGET_S = float(os.environ.get("OMS_BUDGET_S") or 25.0)
 _OMS_MAX_CREATES = 6          # real orders per tick — serial-write bound
 _OMS_RETRY_MIN = {"rent": 30, "no_pmm": 30, "no_book": 30, "none": 30,
@@ -17313,7 +17335,7 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
     backoff — a blocked market is visible and scheduled, never lost.
     ≤_OMS_MAX_CREATES real orders per tick, serial."""
     st: dict = {}
-    if not OMS_ENABLED:
+    if not OMS_ENABLED or not _machine_flag("oms_enabled"):
         return st
     nowiso = now.isoformat()
     mrows: dict = {}
