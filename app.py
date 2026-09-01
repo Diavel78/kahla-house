@@ -21051,6 +21051,44 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         cands.append((r, b, slug, synth))
     if not cands:
         return {"gate": "no_cands"}
+    # Remote kill (Sep 1 2026): flag off ⇒ shadow mode, exactly like
+    # SCALP_ENABLED=False — flippable via run_sql with no deploy/box.
+    scalp_live = SCALP_ENABLED and _machine_flag("scalp_enabled")
+    # ── THE MIRROR CLAMP (Sep 1 2026 — the maintenance-morning shorts).
+    # The venue's position read went STALE through its maintenance
+    # restart: the scalp's ask FILLED, the next lap still read the
+    # pre-fill position with no resting ask, so it re-listed and sold a
+    # FLAT position short — 20 short on NYY-LAA, 19 on ATH-TEX, one
+    # fresh 20-lot ask per lap until stopped. "Venue dark ⇒ never act
+    # blind" only guarded None reads, not stale ones. Our OWN activities
+    # mirror (synced every tick) had every sell the whole time — so held
+    # is clamped to open−close qty from poly_activities. Mirror lag can
+    # cost at most one cycle; mirror absence degrades to venue truth;
+    # pre-mirror history missing only UNDERcounts (skips a sell — safe).
+    mirror_net: dict = {}
+    try:
+        _slugs = list({c[2] for c in cands})
+        for _i in range(0, len(_slugs), 25):
+            for _a in ((sb.table("poly_activities")
+                        .select("slug,payload")
+                        .eq("type", "ACTIVITY_TYPE_TRADE")
+                        .in_("slug", _slugs[_i:_i + 25])
+                        .limit(1000).execute().data) or []):
+                _t = ((_a.get("payload") or {}).get("trade")
+                      if isinstance(_a.get("payload"), dict) else None) or {}
+                try:
+                    _q = float(_t.get("qty") or 0)
+                except (TypeError, ValueError):
+                    _q = 0.0
+                _k = _a.get("slug")
+                mirror_net[_k] = mirror_net.get(_k, 0.0) + (
+                    -_q if _t.get("realizedPnl") is not None else _q)
+    except Exception:
+        mirror_net = {}      # mirror unreadable → no clamp (venue rules)
+
+    def _mirror_clamp(slug5, held5):
+        _mn = mirror_net.get(slug5)
+        return held5 if _mn is None else min(held5, max(0.0, _mn))
     # Shared-snapshot path (Aug 29): repeg hands down its bulk read. Safe
     # here — repeg only moves BUY orders and the scalp reads SELLs +
     # positions; the pre-create position re-read below stays FRESH (it is
@@ -21111,7 +21149,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             res["gate"] = "budget"
             break
         net = float((positions.get(slug) or {}).get("net") or 0.0)
-        held = (-net) if synth else net
+        held = _mirror_clamp(slug, (-net) if synth else net)
         if held < 1.0:
             continue                     # buy hasn't filled — no inventory
         res["cands"] += 1
@@ -21209,7 +21247,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 tgt = _grid_dn(best_bid, tick) + tick  # post-only: never cross
             if tgt < floor_c:
                 continue
-            if not SCALP_ENABLED:
+            if not scalp_live:
                 _scalp_shadow(sb, r, b, now, tgt, best_bid, comp_ask,
                               held, res)
                 continue
@@ -21277,7 +21315,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         if (tgt is None or tgt < floor_c
                 or (not _repair and not _resize and tgt >= our_ask - 0.26)):
             continue                     # nothing to do this pass
-        if not SCALP_ENABLED:
+        if not scalp_live:
             _scalp_shadow(sb, r, b, now, tgt, best_bid, comp_ask, held, res)
             continue
         if res["walked"] >= _SCALP_MAX_WALKS:
@@ -21300,7 +21338,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 urgent=True)
             break
         net2 = float((pos2.get(slug) or {}).get("net") or 0.0)
-        held2 = (-net2) if synth else net2
+        held2 = _mirror_clamp(slug, (-net2) if synth else net2)
         if held2 < 1.0:
             continue                     # the cancel raced a fill — sold
         if _scalp_create(client, sb, r, b, slug, synth, sell_intent,
