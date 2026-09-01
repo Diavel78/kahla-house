@@ -17309,6 +17309,10 @@ _OMS_BUDGET_S = float(os.environ.get("OMS_BUDGET_S") or 40.0)
 _OMS_MAX_CREATES = 6          # real orders per tick — serial-write bound
 _OMS_RETRY_MIN = {"rent": 30, "no_pmm": 30, "no_book": 30, "none": 30,
                   "edge": 60, "tail": 60, "no_model": 360, "cap": 10}
+# market_id -> monotonic ts of the last FAILED venue lookup. Process-local
+# (a restart just re-pays one search per game); keeps a missed event-search
+# from re-costing 15-20s every retry inside its 20-min window.
+_OMS_LOOKUP_TS: dict = {}
 
 
 def _gridiron_price_game(sb, g):
@@ -17441,10 +17445,16 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
         st["oms_prod_err"] = f"{type(e).__name__}: {e}"[:100]
     # ── executor ──
     try:
+        # NEVER-TRIED ROWS FIRST (Sep 1 2026, watched live): soonest-first
+        # alone put the no_pmm retry group at the head — each one costs a
+        # full 15-20s venue event-search, so the whole slice burned on
+        # re-failing the same lookups every 30 min while 135 fresh rows
+        # sat untouched. tries=0 first, soonest within each tier.
         rows = (sb.table("desired_orders").select("*")
                 .eq("state", "pending").eq("lane", "rentlist")
                 .lte("next_try_at", nowiso).gt("event_start", nowiso)
-                .order("event_start").limit(200).execute().data) or []
+                .order("tries").order("event_start")
+                .limit(200).execute().data) or []
     except Exception:
         return st
     st["oms_pend"] = len(rows)
@@ -17466,8 +17476,19 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
         if g:
             gp = _gridiron_proj(sb, g.get("sport"), g.get("event_name"))
             if gp:
-                d = d_cache.get(mid) if mid in d_cache \
-                    else d_cache.setdefault(mid, _gridiron_price_game(sb, g))
+                # Failed-lookup backoff (module-level, survives laps): a
+                # game whose venue event-search just missed is not retried
+                # at venue cost for 20 min — the requeue is free.
+                _lts = _OMS_LOOKUP_TS.get(mid, 0.0)
+                if mid not in d_cache and _time.time() - _lts < 1200.0:
+                    verdict, retry_min = "no_pmm", _OMS_RETRY_MIN["no_pmm"]
+                    d = None
+                else:
+                    d = d_cache.get(mid) if mid in d_cache \
+                        else d_cache.setdefault(
+                            mid, _gridiron_price_game(sb, g))
+                    if not d:
+                        _OMS_LOOKUP_TS[mid] = _time.time()
                 if not d or r["market_type"] not in (d.get("odds") or {}):
                     verdict, retry_min = "no_pmm", _OMS_RETRY_MIN["no_pmm"]
                 else:
