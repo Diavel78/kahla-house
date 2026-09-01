@@ -687,6 +687,10 @@ def _market_to_dict(m: Any) -> dict:
         "bestAskQuote":        g("bestAskQuote"),
         "active":              g("active"),
         "closed":              g("closed"),
+        # Kept so callers can seed their tick cache instead of re-buying
+        # one markets.retrieve_by_slug per rung (a CFB ladder = 10-20
+        # rungs; dropping this field cost that many HTTP calls per game).
+        "orderPriceMinTickSize": g("orderPriceMinTickSize"),
     }
 
 
@@ -1053,6 +1057,7 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
             "slug":  m.get("slug"),
             "title": m.get("question"),
             "quote": quote,
+            "tick":  m.get("orderPriceMinTickSize"),
         })
         # Synthesized inverse entry — derive the NO side's pricing
         # from this same market. PMM doesn't publish a separate market
@@ -1066,6 +1071,7 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
                 "slug":      m.get("slug"),
                 "title":     m.get("question"),
                 "quote":     _inverse_quote(quote),
+                "tick":      m.get("orderPriceMinTickSize"),
                 "synthetic": True,
             })
 

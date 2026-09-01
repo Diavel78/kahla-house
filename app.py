@@ -14979,6 +14979,65 @@ def _rent_family(slug: str):
 
 _RENT_MKT_CACHE: dict = {}   # slug -> {"at": ts, "periods": set|None}
 _RENT_MKT_TTL = 600          # 10 min — the venue re-provisions on its own
+# Set True the first time a batched /v1/incentives response answers for
+# ≥2 requested slugs — proof the venue honours multi-symbol queries.
+# Until then a batch caches only slugs PRESENT in the response, so a
+# silently-ignored filter (the Kalshi ?series_ticker= lesson: a filter
+# that does nothing reads exactly like an answer) can never cache a
+# false "pays nothing" for 10 minutes across a whole ladder.
+_RENT_BULK_OK: bool = False
+
+
+def _rent_prewarm_periods(slugs):
+    """ONE incentives call per ~20 uncached slugs → _RENT_MKT_CACHE, so a
+    ladder's per-rung _rent_ok walk becomes cache hits. Before this,
+    _gridiron_try_bet paid one HTTP round trip PER RUNG (10-20 per CFB
+    game) — with the per-rung tick reads, the reason the OMS executor
+    priced ~2 markets per lap. Failure of any chunk is harmless: those
+    slugs just fall back to the per-slug read."""
+    global _RENT_BULK_OK
+    now_t = _time.time()
+    want = []
+    for s in dict.fromkeys(slugs):
+        if not s:
+            continue
+        c = _RENT_MKT_CACHE.get(s)
+        if c and now_t - c["at"] < _RENT_MKT_TTL:
+            continue
+        want.append(s)
+    if len(want) < 2:
+        return
+    try:
+        client = get_client()
+    except Exception:
+        return
+    for i in range(0, len(want), 20):
+        chunk = want[i:i + 20]
+        try:
+            r = client.get("/v1/incentives", query={"symbols": chunk},
+                           authenticated=True) or {}
+        except Exception:
+            continue
+        per: dict = {s: set() for s in chunk}
+        for m in (r.get("programs") or []):
+            ms = str(m.get("marketSlug") or "").strip()
+            if ms not in per:
+                continue
+            for tp in (m.get("timePeriods") or []):
+                if str(tp.get("status") or "").strip().lower() != "active":
+                    continue
+                p = str(tp.get("period") or "").strip()
+                if p:
+                    per[ms].add(p)
+        answered = sum(1 for s in chunk
+                       if any(str(m.get("marketSlug") or "").strip() == s
+                              for m in (r.get("programs") or [])))
+        if answered >= 2:
+            _RENT_BULK_OK = True
+        now_t = _time.time()
+        for s, ps in per.items():
+            if ps or _RENT_BULK_OK:
+                _RENT_MKT_CACHE[s] = {"at": now_t, "periods": ps}
                              # clock and a game crossing T-6h must be able
                              # to flip within one cadence, not one deploy.
 
@@ -16978,8 +17037,13 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
         viable.append((sn, peg, pblk, q, ln))
     if not viable and not virgin:
         return "no_book"
-    # ── RENT FIRST ── one venue ask per unique slug (10-min cached; a
-    # synthetic side shares its twin's slug so pairs cost one read).
+    # ── RENT FIRST ── the whole ladder's uncached slugs pre-warmed in
+    # one batched incentives call (virgin rungs included — the seeder
+    # rent-checks them too); the per-slug asks below are then cache
+    # hits. Synthetic sides share their twin's slug so pairs are free.
+    _rent_prewarm_periods(
+        [c[2].get("slug") for c in viable]
+        + [vb[1].get("slug") for vb in virgin])
     rent_by_slug: dict = {}
     for sn, peg, pblk, q, ln in viable:
         sl = pblk["slug"]
@@ -17337,12 +17401,25 @@ def _gridiron_price_game(sb, g):
             return None
         d: dict = {"odds": {}}
         for mt in ("spread", "total"):
-            rungs = [
-                {"side": e.get("side"), "line": e.get("line"),
-                 "slug": e.get("slug"), "quote": e.get("quote"),
-                 "synthetic": bool(e.get("synthetic"))}
-                for e in (pmm.get(mt) or [])
-                if e.get("slug") and e.get("line") is not None]
+            rungs = []
+            for e in (pmm.get(mt) or []):
+                if not e.get("slug") or e.get("line") is None:
+                    continue
+                rungs.append(
+                    {"side": e.get("side"), "line": e.get("line"),
+                     "slug": e.get("slug"), "quote": e.get("quote"),
+                     "synthetic": bool(e.get("synthetic"))})
+                # Seed the tick cache from the lookup's own market
+                # metadata — before this, _gridiron_try_bet re-bought
+                # the tick via one retrieve_by_slug PER RUNG (10-20
+                # HTTP calls per CFB game; the reason the OMS executor
+                # priced ~2 markets per lap).
+                try:
+                    tv = float(e.get("tick") or 0)
+                    if 0.001 <= tv <= 0.02:
+                        _TICK_CACHE.setdefault(e["slug"], tv * 100.0)
+                except (TypeError, ValueError):
+                    pass
             if rungs:
                 d["odds"][mt] = {"polymarket": {"ladder": rungs}}
         return d if d["odds"] else None
