@@ -17300,7 +17300,12 @@ def _machine_flag(key: str, default: bool = True) -> bool:
         return default
 
 
-_OMS_BUDGET_S = float(os.environ.get("OMS_BUDGET_S") or 25.0)
+# 25→40 (Sep 1 2026, the last pull before the absence): on the cloud
+# wire the 25s slice funded 2-3 executor attempts/lap and a 135-market
+# backlog needed ~5h to walk once. 40s ≈ 2× the attempts; opener laps
+# go ~331→~350s avg against the 540s stuck line — margin holds. Revisit
+# (probably shrink) after the Postgres cutover makes attempts ~free.
+_OMS_BUDGET_S = float(os.environ.get("OMS_BUDGET_S") or 40.0)
 _OMS_MAX_CREATES = 6          # real orders per tick — serial-write bound
 _OMS_RETRY_MIN = {"rent": 30, "no_pmm": 30, "no_book": 30, "none": 30,
                   "edge": 60, "tail": 60, "no_model": 360, "cap": 10}
