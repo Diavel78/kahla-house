@@ -2421,10 +2421,23 @@ def _cellar_health(sb) -> dict:
     of anything and must never paint red — those lanes report state
     'vercel' and are judged on heartbeat alone.
 
-    Never raises; an unreachable DB returns {} and the card hides."""
-    try:
-        rows = sb.rpc("cellar_health", {}).execute().data or []
-    except Exception:
+    Never raises; an unreachable DB returns the LAST GOOD read (≤5 min
+    old) before giving up with {} — one dropped connection on one tick
+    was poisoning the dashboard cache with an empty block and the card
+    flashed NO SIGNAL once a minute for a day and a half (Sep 1 2026,
+    user report). A real outage still goes dark within 5 minutes."""
+    global _CELLAR_HEALTH_LAST
+    rows = None
+    for _ in range(2):                      # one retry — transient wire
+        try:
+            rows = sb.rpc("cellar_health", {}).execute().data or []
+            break
+        except Exception:
+            continue
+    if rows is None:
+        lg = _CELLAR_HEALTH_LAST
+        if lg and _time.time() - lg["at"] < 300:
+            return lg["out"]
         return {}
     lanes, bad = [], 0
     for r in rows:
@@ -2567,8 +2580,11 @@ def _cellar_health(sb) -> dict:
                       "stale": bool(age_s is not None and age_s > 26 * 3600)}
     except Exception:
         backup = {}
-    ws = _ws_feed_health(sb)
-    return {
+    try:
+        ws = _ws_feed_health(sb)            # footer garnish — never fatal
+    except Exception:
+        ws = {}
+    out_h = {
         "lanes": lanes, "bad": bad, "boot": boot, "backup": backup, "ws": ws,
         # Counted separately from `bad` so an intentional kill is VISIBLE
         # without being an alarm — "off" should read as a decision someone
@@ -2577,7 +2593,13 @@ def _cellar_health(sb) -> dict:
         "on_cellar": sum(1 for l in lanes if l["owner"] == "cellar"),
         "on_vercel": sum(1 for l in lanes if l["owner"] != "cellar"),
     }
+    _CELLAR_HEALTH_LAST = {"at": _time.time(), "out": out_h}
+    return out_h
 
+
+# last successful _cellar_health result — the ≤5-min bridge over a
+# dropped connection (process-local; a cold container just reads live).
+_CELLAR_HEALTH_LAST: dict = {}
 
 _DASH_CACHE_MAX_AGE_S = 900     # 15 min — the tick refreshes every 5
 
@@ -2596,8 +2618,11 @@ def _dash_derived(sb) -> dict:
     Never raises; a block that fails comes back None and the page falls
     back to computing that one live."""
     out: dict = {}
+    # `or None` on cellar: an empty {} stored here reads as "present" to
+    # the serve path's _blk and gets SERVED — the NO SIGNAL flicker. None
+    # makes the serve path recompute live (which now carries last-good).
     for key, fn in (("gameday_pnl", lambda: _gameday_pnl(sb)),
-                    ("cellar", lambda: _cellar_health(sb)),
+                    ("cellar", lambda: _cellar_health(sb) or None),
                     ("maker_split", lambda: _maker_rewards_split(sb)),
                     ("gameday_rewards", lambda: _gameday_rewards(sb)),
                     ("rent_7d", lambda: _rent_window(sb, 7)),
