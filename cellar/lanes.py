@@ -182,7 +182,22 @@ def lane_opener(ctx: Ctx) -> int:
     # Here nothing kills us, so give the pass room to finish the pool. Kept as
     # a stuck-lane backstop, not a throughput limit.
     deadline = _t.time() + 120.0
+    # THE OMS RUNS HERE — FIRST (Sep 1 2026). Third instance of the same
+    # lesson this file already documents twice below: a pass wired only
+    # into the Vercel route body runs NOWHERE while the box holds this
+    # lease. The OMS shipped in the route (where the bridge could
+    # exercise it pre-pull) and the box's first post-pull laps ran
+    # healthy with no OMS at all — caught within two ticks because its
+    # stats were missing from the tick detail. Money leg first: the
+    # rent list converges before the tape/sweep spend budget.
+    try:
+        oms_stats = _app._oms_pass(ctx.sb, ctx.now,
+                                   _t.time() + _app._OMS_BUDGET_S)
+    except Exception:
+        log.exception("opener: oms pass failed")
+        oms_stats = {"oms_err": "exception"}
     rows, stats = _app._opener_pass(ctx.sb, ctx.now, deadline)
+    stats = {**stats, **oms_stats}
 
     # THE FOOTBALL PASS RUNS HERE TOO, and forgetting it orphaned the lane.
     #

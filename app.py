@@ -20047,7 +20047,7 @@ _CELLAR_LEASE_ENFORCED = (os.environ.get("CELLAR_LEASE_ENFORCED") or "").strip()
 
 
 # GATED SO FAR (lane in quotes):
-#   "opener"  -> _opener_pass + _gridiron_opener_pass (one claim, both passes)
+#   "opener"  -> _oms_pass + _opener_pass + _gridiron_opener_pass (one claim, all passes)
 #   "repeg"   -> _repeg_tick
 #   "harvest" -> _harvest_tick
 #   "ledger"  -> _poly_ledger_tick
@@ -20726,11 +20726,21 @@ def _scalp_lanes(b: dict, mt: str) -> bool:
         return True                      # football spread/total/ML — all rent
     if bool(b.get("ou_trader")) and mt == "total":
         return True                      # MLB O/U trader (revived Aug 29)
+    if bool(b.get("fbprop_autobet")):
+        # NFL props — the TURN-RATE experiment (user, Sep 1 2026: "hard
+        # to sell might be an issue... lock those down to 5 contracts
+        # for now, and look at our turn rate — on fills, can we get
+        # out"). MLB props were never scalped by doctrine; NFL props get
+        # cost-floor asks at 5-contract stakes precisely SO the exit
+        # question gets a measured answer (sells/fills off the venue
+        # tape) instead of an assumption. Review in ~a week.
+        return True
     return bool(b.get("autobet")) and mt == "moneyline"   # MLB ML
 
 
 _SCALP_RENT_SLUGS = ("aec-mlb-", "tsc-mlb-", "asc-nfl-", "tsc-nfl-",
-                     "asc-cfb-", "tsc-cfb-", "asc-ncaaf-", "tsc-ncaaf-")
+                     "asc-cfb-", "tsc-cfb-", "asc-ncaaf-", "tsc-ncaaf-",
+                     "astatc-nfl-")   # NFL props — turn-rate experiment
 
 
 def _scalp_adopted_ok(sb, r, b, slug, synth) -> bool:
