@@ -301,25 +301,43 @@ def espn_injuries(sport: str) -> dict[str, list] | None:
 
 
 def espn_ap_ranks() -> dict[str, int] | None:
-    """AP Top 25 → {team displayName: rank}. NCAAF tiering input."""
+    """AP Top 25 → {FOLDED team alias: rank}. NCAAF tiering input.
+
+    Keys are _fold()ed aliases (displayName, location, location+name,
+    location+nickname) — the join in build_blob looks up _fold(our name).
+    The original displayName-keyed join matched ZERO games in every build
+    through Aug 31 2026 (the ranked-matchup tier never fired once; deep
+    slots went to FCS rating-artifact 'edges' instead of Clemson@LSU) and
+    nothing logged it. Exact-fold equality only — prefix matching would
+    let a bare 'Miami' claim Miami (OH)."""
     d = _espn_get("https://site.api.espn.com/apis/site/v2/sports/football/"
                   "college-football/rankings")
     if d is None:
         return None
     out: dict[str, int] = {}
+    polls = []
     for poll in d.get("rankings") or []:
-        if "ap" not in (poll.get("shortName") or poll.get("name") or "").lower():
+        pname = poll.get("shortName") or poll.get("name") or ""
+        polls.append(pname)
+        if "ap" not in pname.lower():
             continue
         for rk in poll.get("ranks") or []:
             t = rk.get("team") or {}
-            name = t.get("displayName") or t.get("nickname") or ""
             try:
                 cur = int(rk.get("current"))
             except (TypeError, ValueError):
                 continue
-            if name:
-                out[name] = cur
+            loc = t.get("location") or ""
+            aliases = [t.get("displayName") or "", loc,
+                       f"{loc} {t.get('name') or ''}",
+                       f"{loc} {t.get('nickname') or ''}"]
+            for a in aliases:
+                fa = _fold(a)
+                if fa:
+                    out.setdefault(fa, cur)
         break
+    log.info("ap_ranks: polls=%s keys=%d sample=%s",
+             polls, len(out), sorted(out)[:4])
     return out or None
 
 
@@ -759,7 +777,8 @@ def build_game_blob(g: dict, sport: str, model: dict | None,
     if injuries is None:
         unavailable.append("injuries")
     if ranks is not None:
-        r = {k: ranks.get(g[k]) for k in ("away", "home") if ranks.get(g[k])}
+        r = {k: ranks.get(_fold(g[k]))
+             for k in ("away", "home") if ranks.get(_fold(g[k]))}
         if r:
             blob["ap_ranks"] = r
     elif sport == "NCAAF":
@@ -1010,6 +1029,8 @@ def run(mode: str, sports: list[str], days: int, week_key: str,
                              if r["data_blob"].get("lines")),
             "with_vsin": sum(1 for r in rows
                              if r["data_blob"].get("splits")),
+            "with_ranks": sum(1 for r in rows
+                              if r["data_blob"].get("ap_ranks")),
             "espn_dark": all(r["espn_id"] is None for r in rows) if rows else None,
         }
         log.info("%s: %s", sport, summary[sport])
