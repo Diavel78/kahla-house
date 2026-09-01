@@ -87,23 +87,45 @@ one-night staleness of the shadow. But DON'T bother building split-brain
 plumbing — Step C is close enough that a partial cutover only adds a
 seam to debug. Skip B unless C gets delayed by weeks.
 
-### Step C — the real cutover (one evening, spec §12c)
-Preconditions (all already true or nightly-verified):
+### Step C — the real cutover (REWRITTEN Aug 31 post-rehearsal — this
+### is the exact procedure; everything named here already exists and
+### was proven that night)
+Preconditions:
 - [x] Cellar is sole writer for every money lane
 - [x] Nightly pg_dump + restore test green (check the stamp first!)
-- [ ] Rob says go
-1. Stop the daemon + pause cron writers (scanner-poll fill_ping is
-   Vercel-side — leave it; its endpoints will fail loudly against the
-   old URL for the ~20 min window, self-heal after).
-2. Final `pg_dump` from Supabase → restore into a NEW local db
-   `kahla` (not the shadow — the shadow keeps being the backup target).
-3. Start PostgREST against `kahla` (port 3010).
-4. `~/dev/kahla-house/.env`: `SUPABASE_URL=http://localhost:3010`,
-   `SUPABASE_SERVICE_KEY=<local jwt>`. Restart daemon.
-5. **Vercel keeps pointing at Supabase** during the trial window — the
-   site reads slightly stale data (dash cache is box-written… see the
-   caveat below). Watch one full evening of laps.
-6. Rollback = revert `.env`, restart. Nothing else moved.
+- [x] Step A rehearsal full pass (client stack, writes, RPC, launchd,
+      31× receipt)
+- [ ] Rob present for the evening; says go
+1. Stop the daemon (`sudo launchctl kickstart` is the restart later;
+   stop via `sudo launchctl bootout system/com.kahlahouse.cellard` or
+   just leave it — the ~20 min of failed laps self-heal, Vercel
+   standby covers).
+2. Final dump → new local db (NOT the shadow — it stays the backup
+   target):
+   `bash kahla-scanner/scripts/db_backup.sh` (fresh dump), then
+   `createdb kahla && pg_restore --no-owner --no-privileges -d kahla
+   ~/kahla-backups/<newest>.dump`
+   (psql/createdb come from Postgres.app's bin if not on PATH:
+   `/Applications/Postgres.app/Contents/Versions/latest/bin`).
+3. Repoint PostgREST: edit `~/.kahla/postgrest.conf` db-uri →
+   `postgres://robkahla@localhost:5432/kahla`, then
+   `launchctl kickstart -k gui/$(id -u)/com.kahla.postgrest`.
+   (Both services already run under launchd from the Aug 31 soak —
+   nothing to install or start.)
+4. `~/dev/kahla-house/.env`:
+   `SUPABASE_URL=http://localhost:3011`   ← the CADDY SHIM port, NOT
+   3010 — supabase-py needs the /rest/v1 rewrite (rehearsal finding #2)
+   `SUPABASE_SERVICE_KEY=<contents of ~/.kahla/rehearsal.jwt>`
+   Restart daemon: `sudo launchctl kickstart -k system/com.kahlahouse.cellard`.
+5. Watch one evening: boot banner, lap times collapsing (~200s → tens),
+   `oms_*`/repeg stats flowing, zero PGRST errors in
+   `~/.kahla/logs/postgrest.log`.
+6. **Vercel + Actions keep writing Supabase** during the trial — the
+   split-brain window. Acceptable for ONE watched evening only; the
+   C1/C2 decision below closes it. Rollback at any moment = revert the
+   two `.env` lines, restart the daemon. Nothing else moved.
+7. Also flip ON: Postgres.app "Start on login" (post-cutover it is
+   load-bearing, not just the backup target).
 
 ### The Vercel caveat (the real design decision left)
 After C, box and Vercel write DIFFERENT databases. That's fine for a
