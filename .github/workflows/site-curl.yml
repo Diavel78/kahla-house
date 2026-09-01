@@ -49,7 +49,7 @@ jobs:
             [ "$N" -gt 1 ] && echo "=== pass $i/$N ==="
             curl -sSL --max-time 120 \
               "https://www.thekahlahouse.com/${{ inputs.path }}?key=${KEY}${Q}" \
-              | head -c 6000
+              | head -c 60000
             echo
             [ "$i" -lt "$N" ] && sleep 6
           done
