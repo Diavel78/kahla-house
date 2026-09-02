@@ -110,3 +110,17 @@ claimed, ~+$0.97 real), then defended a "36c true basis" on the Angels
 short against the venue's own $14.45 card. Rule going forward: mirror
 = quantities and timestamps; venue card/settlement credits = money.
 The final incident total gets read from settlement credits only.
+
+## 8. OMS executor ordering: tries-first starves the retry tail (Sep 2)
+The tries-first fix (3e0c059) let never-tried rows drain but STARVED
+high-tries retries — BAL-IND's rent rows sat 12h overdue while fresh
+rows ate every slice. Proper fix (box): order the due-row fetch by
+next_try_at ASC NULLS FIRST (the natural due queue; tries as tiebreak).
+Interim all week: the daily check resets tries=0 on pending rows >1h
+overdue (reorders only — next_try_at still gates, so no early retries).
+Also confirmed Sep 2 with rent-check + a known-good control: the NFL
+Week-1 rungs' catalog rows (synced Aug 31, early-active) are STALE —
+the venue's LIVE answer is market_pays [] on the same rung while the
+MLB control reads early/day_of/live. The catalog is a map, never the
+verdict; placement's live per-market read is the only truth (rule #1's
+default-deny was RIGHT for all 11 refusals).
