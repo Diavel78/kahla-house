@@ -17096,13 +17096,55 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
         if sl not in rent_by_slug:
             rent_by_slug[sl] = _rent_ok(sl, es0, now_utc, sb)[0]
     paying = [c for c in viable if rent_by_slug.get(c[2]["slug"])]
+    # ── RUNG WINDOW (user, Sep 2 2026: "if multiple paying rungs are
+    # available, you can only select the middle or 1 to either side of
+    # middle… delta +/- 1"). The best-edge tie-break systematically
+    # picked the FARTHEST paying rung — the model's tails claim the
+    # biggest edges, which is exactly the zone its own backtest says is
+    # 5-10pp miscalibrated (Furman@Tenn Under 80.5: rung_dist 21,
+    # claimed 40.4pp, flipped and now held to the whistle). The venue
+    # enrolls rungs centered on the real line, so the middle of the
+    # PAYING ladder is the market's center. Ladder = ALL paying rungs,
+    # booked AND virgin, so one booked tail can't masquerade as the
+    # middle of a ladder whose center just has no book yet — in that
+    # shape the windowed booked set goes empty and the SEEDER quotes
+    # the middle instead (our line at model fair−6).
+    pay_virgin = []
+    for vsn, vpblk, vln in virgin:
+        sl = vpblk.get("slug")
+        if sl not in rent_by_slug:
+            try:
+                rent_by_slug[sl] = _rent_ok(sl, es0, now_utc, sb)[0]
+            except Exception:
+                rent_by_slug[sl] = False
+        if rent_by_slug.get(sl):
+            pay_virgin.append((vsn, vpblk, vln))
+
+    def _rungv(sn2, ln2):
+        # one value per RUNG: totals share the line across sides;
+        # spread sides mirror, so normalize to the home-perspective line
+        if mt == "spread":
+            return round(float(ln2) if sn2 == "home" else -float(ln2), 1)
+        return round(float(ln2), 1)
+    rungs = sorted({_rungv(c[0], c[4]) for c in paying}
+                   | {_rungv(v[0], v[2]) for v in pay_virgin})
+    virgin_w = pay_virgin
+    pre_window = bool(paying)
+    n_paying_pre = len(paying)
+    if len(rungs) > 1:
+        _ctr = (len(rungs) - 1) / 2.0
+        allowed = {v for i, v in enumerate(rungs) if abs(i - _ctr) <= 1.5}
+        paying = [c for c in paying if _rungv(c[0], c[4]) in allowed]
+        virgin_w = [v for v in pay_virgin if _rungv(v[0], v[2]) in allowed]
     if not paying:
-        # No BOOKED paying rung — try seeding a virgin paying one (our
-        # own line at model fair−6; the no_book group's answer).
-        seeded = _gridiron_seed_virgin(sb, g, es0, mt, gp, virgin,
+        # No BOOKED paying rung inside the window — try seeding a
+        # windowed virgin one (our own line at model fair−6).
+        seeded = _gridiron_seed_virgin(sb, g, es0, mt, gp, virgin_w,
                                        proj, now_utc)
         if seeded is not None:
             return seeded
+        if pre_window:
+            return "rung_window"    # payers exist, all outside mid±1
         return "rent" if viable else "no_book"
     bc = None
     for sn, peg, pblk, q, ln in paying:
@@ -17135,7 +17177,9 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
           "gridiron_margin": round(mg, 2),
           "gridiron_total": round(tt, 2),
           "rent_first": True,             # candidates = the venue's payers
-          "rungs_paying": len(paying),
+          "rungs_paying": n_paying_pre,   # BOOKED payers pre-window
+          "rung_ladder": len(rungs),      # distinct paying rungs (± virgin)
+          "rung_window": len(rungs) > 1,  # mid±1 selection applied
           "rung_dist": round(dist, 1),    # pts off the shrunk projection
           "early_noveto": bool(_noveto and e < _GRIDIRON_MIN_EDGE_PP)}
     if mt == "spread":
@@ -17418,7 +17462,10 @@ def _machine_flag(key: str, default: bool = True) -> bool:
 _OMS_BUDGET_S = float(os.environ.get("OMS_BUDGET_S") or 40.0)
 _OMS_MAX_CREATES = 6          # real orders per tick — serial-write bound
 _OMS_RETRY_MIN = {"rent": 30, "no_pmm": 30, "no_book": 30, "none": 30,
-                  "edge": 60, "tail": 60, "no_model": 360, "cap": 10}
+                  "edge": 60, "tail": 60, "no_model": 360, "cap": 10,
+                  "rung_window": 60}   # payers exist but all outside mid±1
+                                       # — books grow toward the middle as
+                                       # kickoff nears, so re-visit hourly
 # market_id -> monotonic ts of the last FAILED venue lookup. Process-local
 # (a restart just re-pays one search per game); keeps a missed event-search
 # from re-costing 15-20s every retry inside its 20-min window.

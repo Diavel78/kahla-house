@@ -111,6 +111,17 @@ short against the venue's own $14.45 card. Rule going forward: mirror
 = quantities and timestamps; venue card/settlement credits = money.
 The final incident total gets read from settlement credits only.
 
+## 8b. RUNG WINDOW shipped Sep 2 — INERT UNTIL THE BOX PULLS
+Rob's rule from the road (after seeing Furman@Tenn Over 80.5 held to the
+whistle): "if multiple paying rungs are available, you can only select
+the middle or 1 to either side of middle… delta +/- 1". Implemented in
+`_gridiron_try_bet` (mid±1 over the paying ladder, booked+virgin; empty
+windowed booked set → seeder quotes a windowed virgin rung; else verdict
+`rung_window`, hourly retry) — pushed to main, but the executor runs on
+the BOX, so far-rung bets continue until the next pull. On pull day:
+verify new gridiron picks stamp `rung_window: true` and that
+`desired_orders` grows `rung_window` verdicts instead of tail bets.
+
 ## 8. OMS executor ordering: tries-first starves the retry tail (Sep 2)
 The tries-first fix (3e0c059) let never-tried rows drain but STARVED
 high-tries retries — BAL-IND's rent rows sat 12h overdue while fresh

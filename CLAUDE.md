@@ -56,7 +56,15 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 > (`_gridiron_try_bet`, Aug 30: full ladder → viable books (25-60¢) →
 > `_rent_ok` per rung → the PAYING rungs are the candidates; the model
 > only picks the side and breaks ties; >6h out no model gate can veto a
-> payer). When adding any lane, start from "which markets pay?" — never
+> payer). **RUNG WINDOW (user, Sep 2 2026): with multiple paying rungs,
+> only the MIDDLE of the paying ladder ±1 rung is selectable** — the
+> best-edge tie-break was systematically picking the farthest payer
+> (the model tails' claimed-edge zone; Furman@Tenn Under 80.5 at
+> rung_dist 21 / 40.4pp claimed, flipped at the cap and held to the
+> whistle). Ladder middle is computed over booked+virgin payers; if the
+> windowed booked set is empty the SEEDER quotes a windowed virgin rung,
+> else verdict `rung_window` (hourly retry — books grow toward the
+> middle). When adding any lane, start from "which markets pay?" — never
 > from "which markets does the model like?".
 >
 > Enforced in code, DEFAULT-DENY, by `_rent_ok(slug, event_start, now)` at
