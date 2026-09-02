@@ -135,19 +135,38 @@ def _name_match(haystack: str, needle: str) -> bool:
 
 def _team_mention_pos(q_norm: str, team: str) -> int:
     """Earliest position in the normalized question where this team is
-    identifiable, trying full name → city/region → mascot last-token.
-    Returns -1 if none of the variants appear.
+    identifiable, trying full name → city/region → mascot last-token →
+    school-name prefixes. Returns -1 if none of the variants appear.
 
     The city variant is essential: PMM titles many NBA/NFL markets by
     city ("Spread: Oklahoma City (-3)", "Oklahoma City to win"), where
     neither the full name "oklahoma city thunder" nor the mascot
     "thunder" appears — so without it ML/spread markets fail side
-    detection and get silently dropped."""
+    detection and get silently dropped.
+
+    The PREFIX variant is the CFB fix (Sep 2 2026 — the no_pmm class
+    that blinded ~65 enrolled Week-1 games): PMM titles college events
+    and questions by SCHOOL only ("Merrimack vs. Delaware", "Spread:
+    Delaware (-7.5)") while our names carry multi-word mascots
+    ("Delaware Blue Hens"), so the city variant ("delaware blue")
+    misses. Progressive leading prefixes are tried TOKEN-BOUNDED
+    (never bare substring — "new" must not fire inside "new orleans"
+    when matching New York), with a ≥6-char substring fallback for
+    PMM's compounds ("UAlbany" ⊃ "albany")."""
     best = -1
     for cand in (_norm(team), _city_tokens(team), _last_token(team)):
         if not cand:
             continue
         p = q_norm.find(cand)
+        if p >= 0 and (best < 0 or p < best):
+            best = p
+    padded_q = " " + q_norm + " "
+    for cand in _name_prefix_cands(team):
+        p = padded_q.find(" " + cand + " ")
+        if p < 0 and len(cand) >= 6:
+            p = q_norm.find(cand)          # compound fallback (UAlbany)
+        elif p >= 0:
+            p = min(p, len(q_norm) - 1)    # padded offset → raw-ish pos
         if p >= 0 and (best < 0 or p < best):
             best = p
     # Tricode as a whole TOKEN ('nym', 'phi') — PMM's July 2026 abbreviated
@@ -203,6 +222,26 @@ def _city_tokens(team_name: str) -> str:
     both-cities-present pass catches those."""
     parts = [p for p in _norm(team_name).split() if len(p) >= 3]
     return " ".join(parts[:-1]) if len(parts) >= 2 else ""
+
+
+def _name_prefix_cands(team_name: str) -> list[str]:
+    """Progressive leading-token prefixes of a team name, longest first,
+    excluding the full name itself. 'Delaware Blue Hens' →
+    ['delaware blue', 'delaware']; 'Georgia Tech Yellow Jackets' →
+    ['georgia tech yellow', 'georgia tech', 'georgia']. Candidates
+    shorter than 5 chars are dropped ('new', 'san', 'los' — generic
+    city words that collide across teams). The CFB matcher fix
+    (Sep 2 2026): _city_tokens assumes a ONE-word mascot, so every
+    two-word-mascot school ('Blue Hens', 'Yellow Jackets', 'Demon
+    Deacons') produced a city string PMM's school-only titles never
+    contain."""
+    parts = _norm(team_name).split()
+    out = []
+    for k in range(len(parts) - 1, 0, -1):
+        cand = " ".join(parts[:k])
+        if len(cand) >= 5:
+            out.append(cand)
+    return out
 
 
 
@@ -390,6 +429,19 @@ def _match_event_to_game(events: list, away: str, home: str,
             t_norm = _norm(title)
             if away_city in t_norm and home_city in t_norm:
                 return ev
+    # Pass 2.6: BOTH teams identifiable via _team_mention_pos, which now
+    # includes school-name prefixes (Sep 2 2026 — the CFB no_pmm class:
+    # 'Merrimack vs. Delaware' vs our 'Delaware Blue Hens'; two-word
+    # mascots defeat the city pass above). Date guard + nearest-start
+    # pre-sort keep prefix cousins (Georgia / Georgia Tech) safe: both
+    # teams must hit the SAME title on the right date.
+    for ev in events:
+        if not _ev_date_ok(ev, bet_dt):
+            continue
+        t_norm = _norm(_ev_get(ev, "title") or "")
+        if (t_norm and _team_mention_pos(t_norm, away) >= 0
+                and _team_mention_pos(t_norm, home) >= 0):
+            return ev
     for ev in events:
         if not _ev_date_ok(ev, bet_dt):
             continue
