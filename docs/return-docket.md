@@ -96,3 +96,17 @@ on return: extend position→pick adoption to the football families
 index past MLB or add the venue-position sweep to _reconcile_tick,
 which already reads positions. Then delete the manual recipe from the
 daily-check prompt.
+
+## 7. Sep 1 incident — closing lessons (written after Rob won two
+## arguments against the trade mirror)
+The venue POSITION CARD is settlement truth for any position born from
+the over-sell class. The trade mirror's cost field on overflow/short-
+crossing rows is CORRUPTED (proven: a 97.68c-per-contract "fill" on a
+~34c market) — gotchas #7/#8's complement poisoning extends to `cost`
+on these rows, so no cash reconstruction from the mirror is valid for
+short-side economics. Sequence of my errors, both caught by Rob from
+his phone: read his STL-LAD close in the wrong side's currency (+$3.90
+claimed, ~+$0.97 real), then defended a "36c true basis" on the Angels
+short against the venue's own $14.45 card. Rule going forward: mirror
+= quantities and timestamps; venue card/settlement credits = money.
+The final incident total gets read from settlement credits only.
