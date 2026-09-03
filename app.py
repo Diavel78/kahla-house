@@ -13304,7 +13304,7 @@ def _fbprop_pass(sb, prop_rows, all_games, now) -> dict:
                 contracts=int(conf.get("contracts") or 1),
                 entry_line=line,
                 sport=g.get("sport") or "NFL")
-            if r is True:
+            if r == "placed":
                 placed += 1
                 st["fbp_bets"] += 1
     except Exception:
@@ -15262,7 +15262,13 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
     Master Rule → post-only create (1 contract, GTD first pitch,
     AUTOMATIC) → pick insert (the cap counter — inserted the moment
     create returns so an ambiguous verify can't double-bet) → verify →
-    ping. Returns True when an order was placed. cap_flag/cap_max let a
+    ping. ⚠ RETURNS THE STRING "placed" on success — NEVER True ("rent"
+    and "cap" name those refusals, False everything else). This line
+    used to say "Returns True", and FOUR call sites compared `r is
+    True`: the fbprop per-tick bound never counted, the virgin seeder
+    and the ML lane reported successful placements as "failed:?" (the
+    return-docket mystery rows), and the two-rung loop never counted
+    its spend. Compare r == "placed". cap_flag/cap_max let a
     sibling lane (Whiff IQ K props) run its OWN slate cap without eating
     the opener lane's; skip_game_dedup is for prop lanes whose caller
     dedups per-pitcher (a game legitimately carries 2 starter bets)."""
@@ -17043,7 +17049,7 @@ def _gridiron_seed_virgin(sb, g, es0, mt, gp, virgin, proj, now_utc):
         entry_line=ln, sport=g.get("sport"), fail_tag=_ftag)
     if r in ("cap", "rent"):
         return r
-    if r is True:
+    if r == "placed":
         return "seeded"
     return "failed:" + (_ftag[0] if _ftag else "?")
 
@@ -17322,7 +17328,7 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
             entry_line=pblk.get("line"),
             sport=g["sport"], fail_tag=_ftag,
             skip_game_dedup=True)
-        if r is True:
+        if r == "placed":
             placed_n += 1
             spent += cost
             held_slugs.add(pblk["slug"])
@@ -17449,7 +17455,7 @@ def _gridiron_try_ml(sb, g, es0, d):
         entry_line=None, sport=g.get("sport"), fail_tag=_ftag)
     if r in ("cap", "rent"):
         return r
-    if r is True:
+    if r == "placed":
         return "placed"
     return "failed:" + (_ftag[0] if _ftag else "?")
 
@@ -18707,8 +18713,9 @@ def _gridiron_opener_pass(sb, now, deadline):
                         contracts=_GRIDIRON_CONTRACTS,
                         sport=g["sport"])
                     _mlgate = (_r0 if _r0 in ("cap", "rent")
-                               else ("placed" if _r0 is True else "failed"))
-                    if _r0 is True:
+                               else ("placed" if _r0 == "placed"
+                                     else "failed"))
+                    if _r0 == "placed":
                         stats["g_bets"] = stats.get("g_bets", 0) + 1
             # A cap refusal must not latch as taped (slot frees → retry);
             # a RENT refusal persists — the tape must keep accruing, and

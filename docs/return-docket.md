@@ -48,8 +48,14 @@ only because it's finished engineering.
 - Executor throughput after the quote table: `_OMS_MAX_CREATES` and the
   serial-writes review (parallel per-slug VENUE READS are fine; writes
   stay serial — the Cloudflare lesson).
-- The two `failed:?` desired rows if still recurring — name the exit
-  (executor fail_tag came back "?", meaning an unnamed return path).
+- ~~The two `failed:?` desired rows~~ SOLVED Sep 3: `_autobet_execute`
+  returns the STRING "placed" but its docstring said "Returns True" —
+  FIVE call sites compared `r is True`, so successful placements read
+  as failures (the seeder's "failed:?" rows WERE seeded bets), the
+  fbprop per-tick bound never counted, the two-rung loop never counted
+  its spend against the $20 cap, and the ML side-glance stamped
+  bet_gate="failed" on bets it placed (DET@BUF). All five fixed + the
+  docstring corrected; live at the pull.
 
 ## 4. Standing questions Rob never answered (ask, don't assume)
 - Gridiron stakes: 20 spread / 20 total contracts at tripled market
