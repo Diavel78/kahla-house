@@ -5188,8 +5188,12 @@ _PM_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF", "UFC"]
 # history dark. 120h covers the observed horizon with pad; this is a
 # snapshot-ROTATION budget (staler cents per game when wide), never a
 # bettability gate — the opener does not read it.
-_PM_WINDOW_H = {"MLB": 120, "NBA": 96, "NHL": 96, "NFL": 504, "NCAAF": 72,
+_PM_WINDOW_H = {"MLB": 120, "NBA": 96, "NHL": 96, "NFL": 504, "NCAAF": 168,
                 "UFC": 168}
+# NCAAF 72→168 (Rob, Sep 2 2026: "if you're only looking at college
+# football three days out, you're fucking failing"): Saturday games now
+# tape a full week of cent history + prop captures. Rotation budget
+# only — staler cents per game on the big slate, never a betting gate.
 _KALSHI_CACHE: dict[str, tuple[float, dict]] = {}
 _KALSHI_TTL = 30  # seconds
 
@@ -17408,7 +17412,7 @@ def _rent_enrolled_football(sb):
             mrows: list = []
             for sport in ("NFL", "NCAAF"):
                 mrows.extend((sb.table("markets")
-                              .select("id,event_name,event_start,sport")
+                              .select("id,event_name,event_start,sport,notes")
                               .eq("sport", sport).eq("status", "active")
                               .gte("event_start",
                                    (datetime.now(timezone.utc)
@@ -17416,9 +17420,20 @@ def _rent_enrolled_football(sb):
                               .order("event_start").limit(900)
                               .execute().data) or [])
             by_day: dict = {}
+            key2id: dict = {}
             for g in mrows:
                 by_day.setdefault(_et_day(g.get("event_start")), []).append(g)
+                # rent_key fast path (Sep 2 2026, venue-is-the-schedule):
+                # a row stamped/minted by _gridiron_ensure_markets maps
+                # its rent key EXACTLY — no code decoding, ever again.
+                _nt = g.get("notes")
+                if isinstance(_nt, dict) and _nt.get("rent_key"):
+                    key2id[str(_nt["rent_key"])] = g["id"]
             for (lg, ac, hc, day), mts in slugs.items():
+                kstr = f"{lg}-{ac}-{hc}-{day}"
+                if kstr in key2id:
+                    rmap.setdefault(key2id[kstr], set()).update(mts)
+                    continue
                 sport = "NFL" if lg == "nfl" else "NCAAF"
                 try:
                     d0 = datetime.strptime(day, "%Y-%m-%d").date()
@@ -17453,6 +17468,111 @@ def _rent_enrolled_football(sb):
     except Exception:
         return rmap, unmatched       # partial, uncached — retried next call
     return c["val"]
+
+
+_RENT_ENSURE_TS: dict = {}        # rent_key -> monotonic ts of last attempt
+_RENT_ENSURE_BACKOFF_S = 21_600   # 6h — a slug PMM won't serve stays quiet
+_RENT_ENSURE_PER_CALL = 4         # bounded venue reads per producer pass
+
+
+def _gridiron_ensure_markets(sb, unmatched, now) -> dict:
+    """VENUE-IS-THE-SCHEDULE for football (Rob, Sep 2 2026: "Absolutely
+    fix it. Go" — closing the Rule-1 audit's biggest hole: 111 of 254
+    enrolled CFB games never reached the OMS board).
+
+    For each rent key the code-match join could not place, fetch the PMM
+    EVENT by its own slug ({lg}-{away}-{home}-{date}) — the venue's
+    title and start time are the identity we were trying to reconstruct
+    from codes. Then:
+      - if an EXISTING row matches the title by NAME (the 'uk' class —
+        Alabama@Kentucky was always on the board, the CODE was
+        undecodable), STAMP notes.rent_key on it: the join is exact
+        forever and no duplicate row is ever minted (a dup here would
+        double-bet the game — executor dedup is per market_id);
+      - only when NO row matches by name (the FCS class — ESPN's FBS
+        scoreboard never lists the game) MINT one from the venue's own
+        data, the _pmm_ensure_markets doctrine ("Polymarket's list IS
+        the schedule — a third-party spine can only subtract").
+
+    Bounded per call; failures back off 6h; never raises. The stamped/
+    minted rows are picked up by _rent_enrolled_football's rent_key
+    fast path on its next cache refresh (≤10 min)."""
+    st = {"ensure_stamped": 0, "ensure_minted": 0, "ensure_fail": 0}
+    try:
+        import pmm_markets as _pmk
+        client = get_client()
+    except Exception:
+        return st
+    tried = 0
+    for u in unmatched or []:
+        if tried >= _RENT_ENSURE_PER_CALL:
+            break
+        key = str(u)
+        if "·ambig" in key:
+            continue                 # rows exist — ambiguity is a match
+                                     # problem, not a missing-row problem
+        ts0 = _RENT_ENSURE_TS.get(key)
+        if ts0 is not None and _time.time() - ts0 < _RENT_ENSURE_BACKOFF_S:
+            continue
+        _RENT_ENSURE_TS[key] = _time.time()
+        tried += 1
+        try:
+            parts = key.split("-")
+            if len(parts) != 6:
+                continue
+            lg, ac, hc = parts[0], parts[1], parts[2]
+            day = "-".join(parts[3:6])
+            sport = "NFL" if lg == "nfl" else "NCAAF"
+            ev = client.events.retrieve_by_slug(key)
+            title = str(_pmk._ev_get(ev, "title") or "")
+            start_raw = str(_pmk._ev_get(ev, "startTime") or "")
+            m_vs = re.split(r"\s+vs\.?\s+", title, maxsplit=1,
+                            flags=re.IGNORECASE)
+            if len(m_vs) != 2 or not start_raw:
+                st["ensure_fail"] += 1
+                continue
+            away_t, home_t = m_vs[0].strip(), m_vs[1].strip()
+            start = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            t_norm = _pmk._norm(title)
+            cand = (sb.table("markets")
+                    .select("id,event_name,notes")
+                    .eq("sport", sport).eq("status", "active")
+                    .gte("event_start",
+                         (start - timedelta(hours=36)).isoformat())
+                    .lte("event_start",
+                         (start + timedelta(hours=36)).isoformat())
+                    .limit(300).execute().data) or []
+            hit = None
+            for g in cand:
+                en = g.get("event_name") or ""
+                if " @ " not in en:
+                    continue
+                aw, hm = en.split(" @ ", 1)
+                if (_pmk._team_mention_pos(t_norm, aw) >= 0
+                        and _pmk._team_mention_pos(t_norm, hm) >= 0):
+                    hit = g
+                    break
+            if hit is not None:
+                nt = hit.get("notes") if isinstance(hit.get("notes"), dict) \
+                    else {}
+                nt["rent_key"] = key
+                sb.table("markets").update({"notes": nt}) \
+                    .eq("id", hit["id"]).execute()
+                st["ensure_stamped"] += 1
+            else:
+                sb.table("markets").insert({
+                    "sport": sport,
+                    "event_name": f"{away_t} @ {home_t}",
+                    "event_start": start.isoformat(),
+                    "status": "active",
+                    "notes": {"src": "rent_schedule", "rent_key": key},
+                }).execute()
+                st["ensure_minted"] += 1
+        except Exception:
+            st["ensure_fail"] += 1
+    return st
 
 
 # ── PHASE 1: THE OMS — desired-state betting (Aug 31 2026; user, after
@@ -17599,6 +17719,15 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
         except Exception:
             return st
         _OMS_PROD_TS = _time.time()
+        # Venue-is-the-schedule (Sep 2 2026): every key the join could
+        # not place gets its identity from the venue itself — stamp the
+        # existing row or mint one. Bounded per pass; the rent_key fast
+        # path picks the fixes up on the next list refresh.
+        if unm:
+            try:
+                st.update(_gridiron_ensure_markets(sb, unm, now))
+            except Exception:
+                pass
         # oms_list = enrolled-market count. NOT oms_rent — that key is
         # the executor's per-tick rent-VERDICT counter, and the producer
         # writing the list size into it made the journal unreadable on
