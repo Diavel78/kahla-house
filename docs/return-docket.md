@@ -111,6 +111,47 @@ short against the venue's own $14.45 card. Rule going forward: mirror
 = quantities and timestamps; venue card/settlement credits = money.
 The final incident total gets read from settlement credits only.
 
+## 8c. THE RULE-1 VISIBILITY AUDIT (Sep 2 night — Rob: "if it's paying
+## rent, I want it bet… are we seeing it, or are we missing it?")
+Walked every layer between "the venue pays it" and "the machine sees
+it." Findings, biggest first:
+1. **CFB rent-join blindness** — of 254 enrolled CFB games, only 143
+   reached the OMS board. Fixed in two parts: 13 code aliases
+   (92ff424, +18 games incl Alabama@Kentucky — venue codes the popular
+   abbreviation, ESPN short-names the school) and the STRUCTURAL rest:
+   ~92 games, mostly FCS-vs-FCS, have NO ESPN `markets` row at all
+   (groups=80 = FBS scoreboard only). **ROOT FIX (build on return, or
+   bless remotely): VENUE-IS-THE-SCHEDULE for football** — mint
+   `markets` rows from rent_list_slugs exactly as `_pmm_ensure_markets`
+   does for MLB (Rob's own Aug-10 doctrine: "Polymarket's list IS the
+   schedule — a third-party spine can only subtract"). Kills the
+   code-decode problem too (slug becomes the identity).
+2. **~2,900 enrolled slugs in families with ZERO machinery**: aec-cfb
+   CFB moneylines (254), asc-mlb RUN LINES (212 rungs — MLB spreads,
+   never had a lane), aec-ufc UFC MLs (40), tennis ATP/WTA/ITF
+   (~1,240), soccer EPL/UCL/LaLiga/SerieA/Bundes/Ligue1 (~1,486),
+   Setka table tennis (~317), CS2 (59), Modus darts (50). Caveat:
+   enrolled ≠ paying NOW (the NFL catalog-stale lesson) — live
+   rent-check probes per family are the first step before building
+   anything. MLB run lines are the nearest-in: same sport, same spine,
+   same scalp machinery; the July spread-model shadow verdict barred
+   the MODEL, not a rent vehicle.
+3. **Single-rung occupancy**: one bet per (game, market_type) while
+   EVERY paying rung is its own reward pool — on a mid±1 window of 3
+   paying rungs we occupy 1 and leave 2 pools empty. Multi-rung needs
+   a Master-Rule call (3×20×~50¢ ≈ $30/event vs the $13 cap).
+4. **fbprop vs Rule-1**: when NFL prop rent flips on, the 4-10pp model
+   band bets ~9 of 540 paying props. If astatc-nfl really pays EARLY
+   (the recon's "largest early pool"), that's 98% of a paying pool
+   unquoted — Rob decides: rent-first props (rest on all payers, model
+   picks side) vs keep the betting gate.
+5. Smaller fences: pm-snapshot NCAAF watch window 72h (CFB tape/props
+   only inside 3 days; Saturday slate swamp was the reason); the PMM
+   event search returned exactly 200 events in a 1-day window on the
+   Merrimack probe — POSSIBLE page cap; verify Saturday that big-slate
+   lookups aren't truncated (a truncated page defeats any matcher).
+NFL game lanes verified CLEAN: all 16 Week-1 games on the board.
+
 ## 8b. RUNG WINDOW shipped Sep 2 — INERT UNTIL THE BOX PULLS
 Rob's rule from the road (after seeing Furman@Tenn Over 80.5 held to the
 whistle): "if multiple paying rungs are available, you can only select
