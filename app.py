@@ -16624,6 +16624,13 @@ _GRIDIRON_ML_MAX_SPREAD = 2.5     # football IS spreads and totals (user,
                                   # game's ML is not looked at, at all.
 _GRIDIRON_MAX_ENTRY_C = 60.0      # the standing machine-wide entry cap
 _GRIDIRON_MIN_EDGE_PP = 2.5       # same floor as the MLB opener
+_GRIDIRON_EVENT_CAP_USD = 20.0    # Sep 2 2026 (Rob): two rungs per ladder
+                                  # need ~$20 at 20 contracts each — the
+                                  # event-total cap for a (game, market
+                                  # type)'s PENDING book, checked before
+                                  # every rung placement. Per-ORDER Master
+                                  # Rule stays $13 (never binds under the
+                                  # 60¢ entry cap × 20 = $12).
 # Seconds guaranteed to the football pass after the MLB opener has had its
 # fill. See the call site for why 6 (a Vercel-era number) starved it to zero.
 # 30→45 (Aug 31 2026): 30s funded ~3 dossier builds per tick against a
@@ -17173,7 +17180,14 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
         if pre_window:
             return "rung_window"    # payers exist, all outside mid±1
         return "rent" if viable else "no_book"
-    bc = None
+    # Score every windowed paying candidate, then pick RUNG TARGETS
+    # (user, Sep 2 2026, upgrading one-bet-per-ladder: "limit it to two
+    # rungs" — middle + the model's pick of neighbor). Every paying rung
+    # is its own reward pool; one seat left the window's other pools
+    # empty. Two seats per (game, market type), funded by the $20/event
+    # cap (raised from $13 for the pair — the 60¢ entry cap still binds
+    # each single order at ≤$12).
+    scored = []
     for sn, peg, pblk, q, ln in paying:
         if mt == "spread":
             lh = float(ln) if sn == "home" else -float(ln)
@@ -17186,59 +17200,125 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
             thr = float(ln)
         if ps is None:
             continue
-        e = ps * 100.0 - peg
-        if bc is None or e > bc[1]:
-            bc = (sn, e, peg, pblk, ps, q, abs(thr - proj))
-    if bc is None:
+        scored.append({"rv": _rungv(sn, ln), "sn": sn,
+                       "e": ps * 100.0 - peg, "peg": peg, "pblk": pblk,
+                       "ps": ps, "q": q, "dist": abs(thr - proj)})
+    if not scored:
         return "no_book"
-    sn, e, peg, pblk, ps, q, dist = bc
-    # Inside T-6h the model gates return (the O/U lane's shape): the
-    # edge floor and the tail gate. Beyond it a PAYING rung is bet, the
-    # end (user doctrine, Aug 29/30) — the model already picked the side.
-    if not _noveto:
-        if e < _GRIDIRON_MIN_EDGE_PP:
-            return "edge"
-        if dist > _GRIDIRON_TAIL_PTS:
-            return "tail"
-    xb = {"gridiron_autobet": True,
-          "gridiron_margin": round(mg, 2),
-          "gridiron_total": round(tt, 2),
-          "rent_first": True,             # candidates = the venue's payers
-          "rungs_paying": n_paying_pre,   # BOOKED payers pre-window
-          "rung_ladder": len(rungs),      # distinct paying rungs (± virgin)
-          "rung_window": len(rungs) > 1,  # mid±1 selection applied
-          "rung_dist": round(dist, 1),    # pts off the shrunk projection
-          "early_noveto": bool(_noveto and e < _GRIDIRON_MIN_EDGE_PP)}
-    if mt == "spread":
-        xb["cover_p"] = round(ps, 4)
-        xb["line_home"] = (float(pblk["line"]) if sn == "home"
-                           else -float(pblk["line"]))
+    # Middle of the paying ladder. Even ladder → the two central rungs
+    # ARE middle+neighbor; odd → middle plus the best-model-edge other
+    # windowed rung. (A virgin middle simply yields no booked candidate
+    # here — the seeder path above owns the nothing-booked case.)
+    n_l = len(rungs)
+    if n_l >= 2 and n_l % 2 == 0:
+        targets = [rungs[n_l // 2 - 1], rungs[n_l // 2]]
+    elif n_l >= 1:
+        mid_v = rungs[n_l // 2]
+        nb = [s for s in scored if s["rv"] != mid_v]
+        targets = [mid_v] + ([max(nb, key=lambda s: s["e"])["rv"]]
+                             if nb else [])
     else:
-        xb["total_p"] = round(ps, 4)
-    _ftag: list = []
-    r = _autobet_execute(
-        sb, g, es0, mt, sn, f"{sn} {pblk.get('line')}",
-        pblk["slug"], bool(pblk.get("synthetic")),
-        peg, ps, e, round(e, 1),
-        round(float(q["bid"]) * 100.0, 1),
-        (round(float(q["ask"]) * 100.0, 1)
-         if q.get("ask") is not None else None),
-        extra_blob=xb,
-        cap_flag="gridiron_autobet", cap_max=10000,
-        query_text="auto-bet: gridiron opener",
-        reason=(f"GRIDIRON AUTO-BET — {sn} {pblk.get('line')} pegged "
-                f"{round(peg)}¢, model {round(ps * 100)}¢ → "
-                f"{round(e, 1)}pp edge"),
-        # user stakes, Aug 22 2026: spreads 5, totals 2, both sports.
-        contracts=(_GRIDIRON_CONTRACTS if mt == "spread"
-                   else _GRIDIRON_TOTAL_CONTRACTS),
-        entry_line=pblk.get("line"),
-        sport=g["sport"], fail_tag=_ftag)
-    if r in ("cap", "rent"):
-        return r
-    if r is True:
+        targets = sorted({s["rv"] for s in scored})[:2]
+    # ONE ORDER PER SLUG stays the invariant: a rung already carrying a
+    # pending pick is occupied, not a candidate. The executor's
+    # per-(market, type) dedup is bypassed below (it allows only one bet
+    # per market type), so THIS is the re-visit guard — and the pending
+    # book's cost counts against the event cap.
+    held_slugs: set = set()
+    spent = 0.0
+    try:
+        for p in ((sb.table("bot_picks")
+                   .select("entry_price,signal_blob")
+                   .eq("market_id", g["id"]).eq("status", "pending")
+                   .eq("market_type", mt).limit(20).execute().data) or []):
+            blb = p.get("signal_blob") or {}
+            if blb.get("pmm_slug"):
+                held_slugs.add(blb["pmm_slug"])
+            try:
+                epr = float(p.get("entry_price") or 0)
+                cts = float(blb.get("contracts") or 0)
+                cc = (100.0 / (1.0 + epr / 100.0) if epr > 0
+                      else (-epr) / (1.0 + (-epr) / 100.0))
+                spent += cts * cc / 100.0
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+    except Exception:
+        return "failed:pend_read"
+    placed_n = 0
+    verdicts: list = []
+    for ti, tv in enumerate(targets[:2]):
+        cands = [s for s in scored
+                 if s["rv"] == tv
+                 and s["pblk"].get("slug") not in held_slugs]
+        if not cands:
+            continue
+        s = max(cands, key=lambda c: c["e"])
+        # Inside T-6h the model gates return (the O/U lane's shape):
+        # edge floor + tail gate, per bet. Beyond it a PAYING rung is
+        # bet, the end (user doctrine, Aug 29/30).
+        if not _noveto:
+            if s["e"] < _GRIDIRON_MIN_EDGE_PP:
+                verdicts.append("edge")
+                continue
+            if s["dist"] > _GRIDIRON_TAIL_PTS:
+                verdicts.append("tail")
+                continue
+        contracts = (_GRIDIRON_CONTRACTS if mt == "spread"
+                     else _GRIDIRON_TOTAL_CONTRACTS)
+        cost = contracts * s["peg"] / 100.0
+        if spent + cost > _GRIDIRON_EVENT_CAP_USD:
+            verdicts.append("event_cap")
+            continue
+        xb = {"gridiron_autobet": True,
+              "gridiron_margin": round(mg, 2),
+              "gridiron_total": round(tt, 2),
+              "rent_first": True,           # candidates = the venue's payers
+              "rungs_paying": n_paying_pre,  # BOOKED payers pre-window
+              "rung_ladder": len(rungs),    # distinct paying rungs (± virgin)
+              "rung_window": len(rungs) > 1,
+              "rung_role": "middle" if ti == 0 else "neighbor",
+              "rung_dist": round(s["dist"], 1),
+              "early_noveto": bool(_noveto
+                                   and s["e"] < _GRIDIRON_MIN_EDGE_PP)}
+        pblk, ps, q = s["pblk"], s["ps"], s["q"]
+        if mt == "spread":
+            xb["cover_p"] = round(ps, 4)
+            xb["line_home"] = (float(pblk["line"]) if s["sn"] == "home"
+                               else -float(pblk["line"]))
+        else:
+            xb["total_p"] = round(ps, 4)
+        _ftag: list = []
+        r = _autobet_execute(
+            sb, g, es0, mt, s["sn"], f"{s['sn']} {pblk.get('line')}",
+            pblk["slug"], bool(pblk.get("synthetic")),
+            s["peg"], ps, s["e"], round(s["e"], 1),
+            round(float(q["bid"]) * 100.0, 1),
+            (round(float(q["ask"]) * 100.0, 1)
+             if q.get("ask") is not None else None),
+            extra_blob=xb,
+            cap_flag="gridiron_autobet", cap_max=10000,
+            query_text="auto-bet: gridiron opener",
+            reason=(f"GRIDIRON AUTO-BET — {s['sn']} {pblk.get('line')} "
+                    f"({xb['rung_role']}) pegged {round(s['peg'])}¢, "
+                    f"model {round(ps * 100)}¢ → {round(s['e'], 1)}pp"),
+            contracts=contracts,
+            entry_line=pblk.get("line"),
+            sport=g["sport"], fail_tag=_ftag,
+            skip_game_dedup=True)
+        if r is True:
+            placed_n += 1
+            spent += cost
+            held_slugs.add(pblk["slug"])
+        elif r in ("cap", "rent"):
+            verdicts.append(r)
+        else:
+            verdicts.append("failed:" + (_ftag[0] if _ftag else "?"))
+    if placed_n:
         return "placed"
-    return "failed:" + (_ftag[0] if _ftag else "?")
+    for v in ("rent", "cap", "event_cap", "edge", "tail"):
+        if v in verdicts:
+            return v
+    return verdicts[0] if verdicts else "no_book"
 
 
 _GRIDIRON_SWEEP_TS: dict = {}     # per-game last sweep-eval, in-memory
@@ -17619,9 +17699,12 @@ _OMS_BUDGET_S = float(os.environ.get("OMS_BUDGET_S") or 40.0)
 _OMS_MAX_CREATES = 6          # real orders per tick — serial-write bound
 _OMS_RETRY_MIN = {"rent": 30, "no_pmm": 30, "no_book": 30, "none": 30,
                   "edge": 60, "tail": 60, "no_model": 360, "cap": 10,
-                  "rung_window": 60}   # payers exist but all outside mid±1
+                  "rung_window": 60,   # payers exist but all outside mid±1
                                        # — books grow toward the middle as
                                        # kickoff nears, so re-visit hourly
+                  "event_cap": 240}    # the (game, mt) pending book already
+                                       # holds ~$20 — frees only on a fill
+                                       # repricing or a reconcile clear
 # market_id -> monotonic ts of the last FAILED venue lookup. Process-local
 # (a restart just re-pays one search per game); keeps a missed event-search
 # from re-costing 15-20s every retry inside its 20-min window.
