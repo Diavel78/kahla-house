@@ -111,6 +111,22 @@ short against the venue's own $14.45 card. Rule going forward: mirror
 = quantities and timestamps; venue card/settlement credits = money.
 The final incident total gets read from settlement credits only.
 
+## 8c-DECIDED (Sep 2 late night — Rob ruled on every audit item, built
+## same night, ALL box-side → live at the pull):
+- #1 venue-is-the-schedule: BUILT (a3e0f04) — stamp-or-mint from the
+  PMM event, rent_key fast path.
+- #2 new families: CFB ML + UFC ML BUILT (d8f8b7f, `_gridiron_try_ml`);
+  Rob explicitly REFUSED MLB run lines, NFL ML, tennis/soccer/table-
+  tennis/esports/darts. Live rent on aec-cfb/aec-ufc still unverified —
+  placement gate decides.
+- #3 two rungs: middle + model's neighbor, $20/event pending-book cap
+  (e8f8197). Known v1 edge: a 1-of-2 placement marks the OMS row placed.
+- #4 NFL props: model gate STAYS until first fills prove turn rate.
+- #5 CFB tape window 72h→168h (a3e0f04).
+PULL-DAY VERIFICATION adds: ML desired rows appear (market_type
+moneyline) with sane verdicts; ensure_stamped/ensure_minted in opener
+stats; two-rung picks stamp rung_role; no dup rows for stamped games.
+
 ## 8c. THE RULE-1 VISIBILITY AUDIT (Sep 2 night — Rob: "if it's paying
 ## rent, I want it bet… are we seeing it, or are we missing it?")
 Walked every layer between "the venue pays it" and "the machine sees
