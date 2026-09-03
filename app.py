@@ -11470,7 +11470,30 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict,
     # resting order at one price, which entry_price already carries.)
     _stake = _safe_float(pblob.get("contracts"))
     _sold_into = bool(_stake and pos_qty and pos_qty < _stake - 0.01)
+    # SIDE-SWITCH BASIS POISON (Sep 3 2026 — the MIL@CIN "Cost 93%" card).
+    # The venue's per-market cost ledger BLENDS a closed round trip on the
+    # OTHER side into a fresh lot's avg_price: a 20-lot CIN buy that
+    # rested at 40¢ (limit — it cannot fill higher) read back as 92.5¢
+    # after the morning's MIL lot was scalped out, and this sync stamped
+    # entry_price −1233 onto the pick — poisoning the app card (fake
+    # −$10.60), to-WIN grading, CLV, and the scalp floor (exit parked at
+    # 92.5 on a 40¢ book). The Aug-19 harvest guard caught the collapse-
+    # DOWN direction; this is the same ledger disease collapsing UP. Our
+    # own cash ledger (poly_pnl buy_usd/open_qty — the dashboard's
+    # cost/qty math, right for a year) is the arbiter: when it covers the
+    # WHOLE held lot and disagrees with the venue avg by >3¢, the venue
+    # number is blended garbage — never write it.
+    _pnl = p.get("poly_pnl") if isinstance(p.get("poly_pnl"), dict) else {}
+    _pnl_bu = _safe_float(_pnl.get("buy_usd")) or 0.0
+    _pnl_oq = _safe_float(_pnl.get("open_qty")) or 0.0
+    _blend_poison = False
+    if (have_pos and pos.get("avg_price") and _pnl_bu > 0 and _pnl_oq > 0
+            and abs(_pnl_oq - (pos_qty or 0)) <= 0.5):
+        if abs(pos["avg_price"] * 100.0 - _pnl_bu / _pnl_oq * 100.0) > 3.0:
+            _blend_poison = True
+            entry["sync_veto"] = "venue_avg_vs_cash"
     if (have_pos and pos.get("avg_price") and not _sold_into
+            and not _blend_poison
             and entry["status"] in ("filled", "partial")):
         fill_c = pos["avg_price"] * 100.0
         new_amer = _prob_to_amer_py(pos["avg_price"])
@@ -11514,7 +11537,7 @@ def _compute_fill_status(sb, uid: str, poly_snap=None,
         return (sb.table("bot_picks")
                 .select("id,market_id,market_type,side,entry_book,"
                         "entry_line,entry_price,event_name,event_start,"
-                        "sport,signal_blob")
+                        "sport,signal_blob,poly_pnl")
                 .eq("status", "pending").eq("asked_by", uid)
                 .order("event_start", desc=False))
     pending = _sb_paged(_pend_q, max_pages=3)
@@ -21619,6 +21642,36 @@ def _scalp_entry_c(r, b) -> float | None:
         return None
 
 
+def _scalp_venue_cost_c(pick_row, avg_price, held_qty):
+    """The scalp's venue-cost floor input, guarded against SIDE-SWITCH
+    BASIS POISON (Sep 3 2026, MIL@CIN): the venue's per-market cost
+    ledger blends a closed other-side round trip into a fresh lot's
+    avg_price (a 40¢-limit CIN fill read back as 92.5¢), and max(stamp,
+    venue) then parks the exit ask at an unfillable price — or worse,
+    the floor-repair branch LIFTS an honest ask up to the poisoned
+    floor. When our own cash ledger (poly_pnl buy_usd/open_qty — the
+    dashboard's proven cost/qty math) covers the WHOLE held lot and
+    disagrees with the venue avg by >3¢, the cash number is the floor.
+    Partial ledger coverage (adopted lots, pre-mirror history) keeps the
+    venue number — the SEA@TOR adopted-lot rule stands there."""
+    if avg_price is None or avg_price <= 0:
+        return None
+    vc_c = float(avg_price) * 100.0
+    pnl = (pick_row.get("poly_pnl")
+           if isinstance(pick_row.get("poly_pnl"), dict) else {})
+    try:
+        bu = float(pnl.get("buy_usd") or 0.0)
+        oq = float(pnl.get("open_qty") or 0.0)
+    except (TypeError, ValueError):
+        return vc_c
+    if (bu > 0 and oq > 0 and held_qty is not None
+            and abs(oq - held_qty) <= 0.5):
+        cash_c = bu / oq * 100.0
+        if abs(vc_c - cash_c) > 3.0:
+            return cash_c
+    return vc_c
+
+
 def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     """One scalp pass — rides inside the repeg lease (order mutation stays
     serial; the 'overlapping topup batches' duplicate incident is why).
@@ -21647,7 +21700,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     try:
         rows = (sb.table("bot_picks")
                 .select("id,event_name,event_start,entry_price,market_type,"
-                        "side,signal_blob")
+                        "side,signal_blob,poly_pnl")
                 .eq("status", "pending").eq("asked_by", owner)
                 .gte("event_start", (now - timedelta(hours=12)).isoformat())
                 .limit(300).execute().data) or []
@@ -21773,9 +21826,10 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         h4 = (-n4) if synth4 else n4
         if h4 >= 1.0 and abs(h4 - q4) > 0.5:
             return 0
-        _vc4 = (positions.get(slug4) or {}).get("avg_price")
+        _vc4 = _scalp_venue_cost_c(
+            r4, (positions.get(slug4) or {}).get("avg_price"), h4)
         if _vc4 is not None and _vc4 > 0:
-            e4 = max(e4, float(_vc4) * 100.0)   # venue-cost floor, mirrored
+            e4 = max(e4, _vc4)                  # venue-cost floor, mirrored
         f4 = min(99.0, _grid_up(e4, _TICK_CACHE.get(slug4, 1.0)))  # cost base
         return 0 if a4 < f4 - 0.26 else 1
     cands.sort(key=_floor_viol)
@@ -21814,9 +21868,10 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # absorbs the partial-sell cost-collapse landmine (a profitable
         # partial sell makes the venue's cost/qty UNDERSTATE — the stamp
         # floor still stands). avg_price None → stamp floor, unchanged.
-        _vc = (positions.get(slug) or {}).get("avg_price")
+        _vc = _scalp_venue_cost_c(
+            r, (positions.get(slug) or {}).get("avg_price"), held)
         if _vc is not None and _vc > 0:
-            entry_c = max(entry_c, float(_vc) * 100.0)
+            entry_c = max(entry_c, _vc)
         # GRID-NATIVE (Aug 30): floor/steps/leads on the market's OWN tick
         # (orderPriceMinTickSize — 0.5c game books, 1c innings). A
         # half-cent book floored to whole cents gave away up to a full
