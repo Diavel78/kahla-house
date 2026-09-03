@@ -2439,6 +2439,26 @@ def _cellar_health(sb) -> dict:
         if lg and _time.time() - lg["at"] < 300:
             return lg["out"]
         return {}
+    # OVERRUNS ARE SLOW, NOT SICK (Sep 2 2026 — half the card lit red on
+    # the Week-1 slate: alerts/kalshi_autolog/paperlog/opener all showed
+    # "N fails/1h" and every single one was 'overrun: NNNs' — the lane
+    # finished its work PAST its schedule slot. The pass completed, the
+    # work counted, nothing errored; painting that red is the off-is-not-
+    # broken disease with a new face — a card that cries on busy slates
+    # trains you to skip it. Split them: real errors keep the red rules,
+    # overruns render as a muted 'slow' note on a green row.)
+    over: dict = {}
+    try:
+        _ot = (sb.table("cellar_ticks").select("lane,error")
+               .eq("ok", False)
+               .gte("started_at", (datetime.now(timezone.utc)
+                                   - timedelta(hours=1)).isoformat())
+               .limit(1000).execute().data) or []
+        for _t in _ot:
+            if str(_t.get("error") or "").startswith("overrun"):
+                over[_t.get("lane")] = over.get(_t.get("lane"), 0) + 1
+    except Exception:
+        over = {}
     lanes, bad = [], 0
     for r in rows:
         lane = r.get("lane") or ""
@@ -2447,6 +2467,8 @@ def _cellar_health(sb) -> dict:
         ttl = r.get("ttl_seconds") or 180
         work_s = r.get("last_work_s")
         fails = int(r.get("fails_1h") or 0)
+        ov = min(int(over.get(lane, 0)), fails)
+        fails_real = fails - ov
         stale = hb is not None and hb > ttl
         warn_s = _LANE_WORK_WARN_S.get(lane, 21_600)
         if lane == "vsin":
@@ -2471,8 +2493,8 @@ def _cellar_health(sb) -> dict:
         # Old RPC without last_fail_s/last_ok_s degrades to the old
         # any-fail-is-red behavior rather than hiding failures.
         lf, lo = r.get("last_fail_s"), r.get("last_ok_s")
-        failing_now = fails > 0 and (lf is None or lo is None or lf <= lo)
-        heavy = fails >= max(3, int(r.get("ticks_1h") or 0) // 3)
+        failing_now = fails_real > 0 and (lf is None or lo is None or lf <= lo)
+        heavy = fails_real >= max(3, int(r.get("ticks_1h") or 0) // 3)
         if _lane_disabled(lane):
             state = "off"                  # killed on purpose — not a fault
         elif owner != "cellar":
@@ -2481,7 +2503,7 @@ def _cellar_health(sb) -> dict:
             state = "stale" if stale else "vercel"
         elif stale:
             state = "stale"
-        elif fails and (failing_now or heavy):
+        elif fails_real and (failing_now or heavy):
             state = "error"
         elif warn_s is not None and (work_s is None or work_s > warn_s):
             state = "idle"
@@ -2494,6 +2516,7 @@ def _cellar_health(sb) -> dict:
             "hb_age_s": hb, "last_tick_s": r.get("last_tick_s"),
             "last_work_s": work_s, "work_1h": int(r.get("work_1h") or 0),
             "ticks_1h": int(r.get("ticks_1h") or 0), "fails_1h": fails,
+            "fails_real": fails_real, "over_1h": ov,
             "error": r.get("last_error"),
         })
     # ── DEAD-CHASE TRIPWIRE (Aug 31 2026 — the $100 lesson) ─────────────

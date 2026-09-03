@@ -216,7 +216,7 @@
                  bottom (c.bad, code drift, backup, ws); this is just the
                  rollup. Painted by paintLanes. -->
             <div class="card">
-                <div class="label">The Machine</div>
+                <div class="label">The Engine</div>
                 <div class="value" style="display:flex;align-items:center;gap:12px">
                     <i id="machineLight" style="width:18px;height:18px;border-radius:50%;
                         background:#4b5563;flex:none;box-shadow:0 0 12px rgba(0,0,0,0)"></i>
@@ -264,12 +264,14 @@
                 <div class="value skel" id="vTotal">—</div>
                 <div class="sub" id="subTotal">cash out vs cash in — venue ledger</div>
             </div>
-            <!-- THE MACHINE. A heartbeat is not health: the ledger lane
+            <!-- THE ENGINE (renamed from The machine, Rob, Sep 2 2026:
+                 "when it throws a check light, it's a check engine
+                 light"). A heartbeat is not health: the ledger lane
                  renewed its lease every five seconds for twenty-two hours
                  while doing nothing at all, and that was found by noticing
                  a P&L number looked wrong. The right column is WORK. -->
             <div class="card wide">
-                <div class="label">The machine</div>
+                <div class="label">The engine</div>
                 <div class="lanes" id="lanes">
                     <div class="sub" style="margin:0">loading…</div>
                 </div>
@@ -371,12 +373,20 @@
                    // An error row with zero failed ticks is a health-rule
                    // verdict (the dead-chase tripwire) — show its reason,
                    // not a baffling "0 fails/1h".
-                   : l.state === 'error' ? (l.fails_1h
-                        ? l.fails_1h + ' fails/1h'
+                   // Overruns (a lap finishing past its schedule slot on a
+                   // busy slate) are SLOW, not sick — the server splits
+                   // them out of fails_real, and they render as a muted
+                   // 'slow' count on a green row instead of a red light
+                   // (Sep 2 2026: half the card lit red on Week-1 volume
+                   // and every "fail" was an overrun).
+                   : l.state === 'error' ? ((l.fails_real ?? l.fails_1h)
+                        ? (l.fails_real ?? l.fails_1h) + ' fails/1h'
                         : (l.error || 'flagged').slice(0, 26))
                    : 'work ' + ago(l.last_work_s)
                      + (l.work_1h ? ' · ' + l.work_1h + '/1h' : '')
-                     + (l.fails_1h ? ' · ' + l.fails_1h + ' retr' : ''));
+                     + ((l.fails_real ?? l.fails_1h)
+                        ? ' · ' + (l.fails_real ?? l.fails_1h) + ' retr' : '')
+                     + (l.over_1h ? ' · ' + l.over_1h + ' slow' : ''));
             return '<div class="' + cls + '">'
                  + '<span class="dot ' + l.state + '"></span>'
                  + '<span class="nm">' + l.lane + '<span>' + l.owner + '</span></span>'
@@ -414,7 +424,7 @@
         sub.textContent = nCel + ' on the cellar'
             + (nVer ? ' · ' + nVer + ' on vercel' : '')
             + (offNames ? ' · retired: ' + offNames : '')
-            + (c.bad ? ' · ' + c.bad + ' need a look' : ' · all working')
+            + (c.bad ? ' · ' + c.bad + ' check engine' : ' · running clean')
             + codeFrag + bkFrag + wsFrag;
         // Roll the same signals up into the traffic light at the top —
         // with the CARD's own color semantics (Aug 31: a merely-IDLE lane
@@ -426,7 +436,7 @@
                           .map(l => l.lane);
         const idleL = live.filter(l => l.state === 'idle').map(l => l.lane);
         if (deadL.length) {
-            setMachineLight('red', 'CHECK', deadL.join(', ')
+            setMachineLight('red', 'CHECK ENGINE', deadL.join(', ')
                 + (deadL.length === 1 ? ' needs a look' : ' need a look'));
         } else {
             const warns = [];
