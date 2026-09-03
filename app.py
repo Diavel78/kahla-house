@@ -17260,6 +17260,19 @@ _RENT_CODE_ALIAS = {
     "nmx": "new mexico lobos", "sfl": "south florida",
     "flatl": "florida atlantic", "fl": "florida gators",
     "msst": "mississippi state", "olem": "ole miss",
+    # Sep 2 2026 Rule-1 audit: reproduced the producer join over ALL
+    # 254 enrolled CFB games — 111 never reached the board. Each alias
+    # below was confirmed against a real ESPN `markets` row (game +
+    # date + opponent), never guessed. The class: the venue codes the
+    # POPULAR abbreviation ('uk' = Kentucky) or ESPN uses a short name
+    # ('App State', 'UAlbany') the heuristics can't reach.
+    "uk": "kentucky wildcats", "ga": "georgia bulldogs",
+    "arz": "arizona wildcats", "narz": "northern arizona",
+    "applst": "app state", "albny": "ualbany",
+    "cah": "california golden", "gas": "georgia southern",
+    "mst": "michigan state", "txs": "texas southern",
+    "smho": "sam houston", "jaxst": "jacksonville state",
+    "cita": "the citadel",
 }
 
 
