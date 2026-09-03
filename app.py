@@ -13173,6 +13173,9 @@ def _fbprop_tail_p(snap, name, line, fam):
         return None
 
 
+_FBPROP_TRACE_TS: dict = {}
+
+
 def _fbprop_pass(sb, prop_rows, all_games, now) -> dict:
     """NFL props AUTO-BET pass — dormant until fbprop_config arms it.
 
@@ -13265,6 +13268,27 @@ def _fbprop_pass(sb, prop_rows, all_games, now) -> dict:
                 break                       # one family per question
         if not best:
             return st
+        st["fbp_cands"] = len(best)
+        # one live bet per (game, player) — rungs/fams correlated. ONE
+        # plain read for all candidates: the old per-candidate
+        # `.filter("signal_blob->fbprop->>player", …)` JSON-path filter
+        # was the only such shape in the codebase and its `except:
+        # continue` turned any client-version quirk into every candidate
+        # silently skipped, every tick, forever — the shape of the
+        # zero-bets-on-green-rent day (Sep 3 2026). A failed read now
+        # counts + aborts the pass loudly instead of skipping quietly.
+        try:
+            _pend = (sb.table("bot_picks")
+                     .select("market_id,signal_blob")
+                     .eq("status", "pending")
+                     .filter("signal_blob->>source", "eq", "fbprop_autobet")
+                     .limit(200).execute().data) or []
+            _have = {(p.get("market_id"),
+                      ((p.get("signal_blob") or {}).get("fbprop")
+                       or {}).get("player")) for p in _pend}
+        except Exception as e:
+            st["fbp_dedup_err"] = str(e)[:80]
+            return st
         placed = 0
         for (mid, name), cand in sorted(best.items(),
                                         key=lambda kv: -kv[1][0]):
@@ -13273,17 +13297,11 @@ def _fbprop_pass(sb, prop_rows, all_games, now) -> dict:
             edge, fam, pk, q, name2, line, side, side_c, model_p, \
                 bid_c, ask_c = cand
             g = ginfo.get(mid) or {}
-            # one live bet per (game, player) — rungs/fams correlated
-            try:
-                have = (sb.table("bot_picks").select("id")
-                        .eq("market_id", mid).eq("status", "pending")
-                        .filter("signal_blob->fbprop->>player", "eq", name2)
-                        .limit(1).execute().data) or []
-            except Exception:
-                continue
-            if have:
+            if (mid, name2) in _have:
+                st["fbp_dedup"] = st.get("fbp_dedup", 0) + 1
                 continue
             fair = model_p if side == "yes" else 1.0 - model_p
+            _ftag: list = []
             r = _autobet_execute(
                 sb, g, g.get("event_start"), "prop", side,
                 f"{name2} {fam} {line} {side.upper()}", pk,
@@ -13303,10 +13321,36 @@ def _fbprop_pass(sb, prop_rows, all_games, now) -> dict:
                 skip_game_dedup=True,
                 contracts=int(conf.get("contracts") or 1),
                 entry_line=line,
-                sport=g.get("sport") or "NFL")
+                sport=g.get("sport") or "NFL",
+                fail_tag=_ftag)
             if r == "placed":
                 placed += 1
                 st["fbp_bets"] += 1
+            else:
+                # name every refusal — "rent"/"cap" strings, or the
+                # executor's fail_tag ("owner"/"gtd"/"master6"/
+                # "create:…"); the zero-bet day was unreadable because
+                # these vanished with the tick response.
+                _k = ("fbp_" + (r if isinstance(r, str)
+                                else (_ftag[0].split(":")[0] if _ftag
+                                      else "fail")))[:40]
+                st[_k] = st.get(_k, 0) + 1
+        # ANOMALY TRACER: candidates cleared every model gate but nothing
+        # placed → persist one funnel row (30-min throttle) so the next
+        # session reads WHY from exec_probe_runs instead of re-deriving
+        # the whole day offline.
+        if st.get("fbp_cands") and not st["fbp_bets"]:
+            if _time.time() - _FBPROP_TRACE_TS.get("ts", 0) > 1800:
+                _FBPROP_TRACE_TS["ts"] = _time.time()
+                try:
+                    _probe_log(dict(st, kind="fbprop_funnel",
+                                    top=[f"{c[4]} {c[1]} {c[5]} {c[6]} "
+                                         f"{round(c[0], 1)}pp@{round(c[7])}c"
+                                         for c in sorted(
+                                             best.values(),
+                                             key=lambda x: -x[0])[:3]]))
+                except Exception:
+                    pass
     except Exception:
         pass
     return st
