@@ -17321,6 +17321,122 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
     return verdicts[0] if verdicts else "no_book"
 
 
+def _gridiron_try_ml(sb, g, es0, d):
+    """CFB + UFC MONEYLINE rent lane (Rob, Sep 2 2026: "we do college
+    football money lines… I do want UFC money lines. Again, as long as
+    they maintain the caps"). Rent-first, one bet per game:
+
+    - the venue's PAYING ML market is the candidate (live per-slug
+      _rent_ok, default-deny, exactly like every lane);
+    - the MODEL picks the side when it has one (Gridiron IQ win prob —
+      football only); a side whose peg is outside the 25-60¢ band falls
+      through to the OTHER side — the MLB "capped favorite → dog" rule
+      (rent vehicle, no view; Rob: "I don't wanna own anything for
+      eighty five cents");
+    - NO model at all (UFC — Fight IQ is veto-grade, never an entry
+      signal; unrated FCS) → the CHEAP side in the band, but only
+      beyond the no-veto horizon. Inside it the 2.5pp edge floor
+      returns, which needs a model — no model inside parks at no_model.
+
+    Executor's per-(market, type) dedup stays ON (one ML bet per game).
+    Standard family: 20 contracts, scalp exits, repeg chase, resolver
+    grades (UFC ML auto-grades via ESPN MMA)."""
+    blk = ((((d or {}).get("odds") or {}).get("moneyline") or {})
+           .get("polymarket") or {})
+    raw = blk.get("ladder") or []
+    now_utc = datetime.now(timezone.utc)
+    try:
+        _sim = (datetime.fromisoformat(
+            str(es0).replace("Z", "+00:00")) - now_utc).total_seconds() / 60.0
+    except (TypeError, ValueError):
+        _sim = None
+    _noveto = (_early_noveto(es0, now_utc)
+               or (_sim is not None and _sim > _OU_NOVETO_MIN_MIN))
+    viable = []
+    for pblk in raw:
+        sn = pblk.get("side")
+        q = pblk.get("quote") or {}
+        if sn not in ("away", "home") or not pblk.get("slug"):
+            continue
+        if q.get("bid") is None or float(q["bid"]) <= 0:
+            continue
+        try:
+            _tk = _pmm_tick_c(get_client(), pblk.get("slug") or "")
+        except Exception:
+            _tk = 1.0
+        peg = _grid_dn(float(q["bid"]) * 100.0, _tk) + _tk
+        _askc = (float(q["ask"]) * 100.0
+                 if q.get("ask") is not None else None)
+        if _askc is not None and peg >= _askc:
+            peg = _grid_dn(float(q["bid"]) * 100.0, _tk)
+        if not (_OU_TRADER_MIN_ENTRY_C <= peg <= _GRIDIRON_MAX_ENTRY_C):
+            continue
+        viable.append((sn, peg, pblk, q))
+    if not viable:
+        return "no_book"
+    _rent_prewarm_periods([c[2].get("slug") for c in viable])
+    paying = []
+    for c in viable:
+        try:
+            if _rent_ok(c[2]["slug"], es0, now_utc, sb)[0]:
+                paying.append(c)
+        except Exception:
+            continue
+    if not paying:
+        return "rent"
+    p_home = None
+    if g.get("sport") in ("NFL", "NCAAF"):
+        try:
+            p_home = _gridiron_ml(sb, g.get("sport"), g.get("event_name"))
+        except Exception:
+            p_home = None
+    if p_home is not None:
+        want = "home" if p_home >= 0.5 else "away"
+        prim = [c for c in paying if c[0] == want]
+        alt = [c for c in paying if c[0] != want]
+        pick = prim[0] if prim else (alt[0] if alt else None)
+    else:
+        if not _noveto:
+            return "no_model"
+        pick = min(paying, key=lambda c: c[1])   # cheap side, no view
+    if pick is None:
+        return "no_book"
+    sn, peg, pblk, q = pick
+    ps = None if p_home is None else (p_home if sn == "home"
+                                      else 1.0 - p_home)
+    e = None if ps is None else ps * 100.0 - peg
+    if not _noveto and (e is None or e < _GRIDIRON_MIN_EDGE_PP):
+        return "no_model" if e is None else "edge"
+    xb = {"gridiron_autobet": True, "rent_first": True,
+          "ml_rent_lane": True,
+          "ml_model_p": (round(ps, 4) if ps is not None else None),
+          "early_noveto": bool(_noveto and (e is None
+                                            or e < _GRIDIRON_MIN_EDGE_PP))}
+    _ftag: list = []
+    r = _autobet_execute(
+        sb, g, es0, "moneyline", sn, f"{sn} ML",
+        pblk["slug"], bool(pblk.get("synthetic")),
+        peg, (ps if ps is not None else peg / 100.0),
+        (e if e is not None else 0.0),
+        (round(e, 1) if e is not None else None),
+        round(float(q["bid"]) * 100.0, 1),
+        (round(float(q["ask"]) * 100.0, 1)
+         if q.get("ask") is not None else None),
+        extra_blob=xb,
+        cap_flag="gridiron_autobet", cap_max=10000,
+        query_text="auto-bet: gridiron ML rent",
+        reason=(f"ML RENT LANE — {sn} pegged {round(peg)}¢"
+                + (f", model {round(ps * 100)}¢ → {round(e, 1)}pp"
+                   if ps is not None else " (no view — rent vehicle)")),
+        contracts=_GRIDIRON_CONTRACTS,
+        entry_line=None, sport=g.get("sport"), fail_tag=_ftag)
+    if r in ("cap", "rent"):
+        return r
+    if r is True:
+        return "placed"
+    return "failed:" + (_ftag[0] if _ftag else "?")
+
+
 _GRIDIRON_SWEEP_TS: dict = {}     # per-game last sweep-eval, in-memory
 _GRIDIRON_SWEEP_S = 3600.0        # re-eval cadence inside the sweep window
 _GRIDIRON_SWEEP_DAYS = 25         # 8→25 within the hour (user: "let's bet
@@ -17352,7 +17468,12 @@ _RENTLIST_SEEN: dict = {}          # market_id → first-seen-unbet ts
 _RENTLIST_WD_TS = 0.0              # last alarm ts (4h cooldown)
 _RENTLIST_WD_GRACE_S = 2 * 3600.0  # enrolled+matched+unbet this long → ping
 _RENT_SLUG_RE = re.compile(
-    r"^(asc|tsc)-(nfl|cfb)-([a-z0-9]+)-([a-z0-9]+)-(\d{4}-\d{2}-\d{2})-")
+    r"^(asc|tsc|aec)-(nfl|cfb|ufc)-([a-z0-9]+)-([a-z0-9]+)"
+    r"-(\d{4}-\d{2}-\d{2})(?:-|$)")
+# aec (moneyline) slugs END at the date — no rung suffix — hence (?:-|$).
+# Which aec families are HARVESTED is decided at the fetch prefixes
+# below (aec-cfb + aec-ufc only, per Rob Sep 2 2026: CFB ML yes, UFC ML
+# yes, NFL ML no, MLB run lines no).
 
 
 # Exact aliases for venue codes the heuristics can't derive — state
@@ -17423,7 +17544,32 @@ def _rent_code_match(code: str, name: str) -> bool:
     return all(ch in it for ch in code)
 
 
+def _rent_ufc_code_match(code: str, name: str) -> bool:
+    """UFC fighter codes are first-name + last-name prefixes glued
+    ('walcor' = WALdo CORtes-Acosta, 'tommcm' = TOMmy McMillen class).
+    Try the 3+3 split first, then 4+n / 2+n; a ≥4-char whole-name
+    prefix is the fallback. Loose accepts are defused the same way the
+    school codes are: BOTH fighters must match the same row+date, and
+    ambiguity is refused."""
+    n = re.sub(r"[^a-z0-9 ]", "", (name or "").lower())
+    words = n.split()
+    code = (code or "").lower()
+    if not code or not words:
+        return False
+    for k in (3, 4, 2):
+        a, b = code[:k], code[k:]
+        if not a or not b:
+            continue
+        if words[0].startswith(a) and any(w.startswith(b)
+                                          for w in words[1:]):
+            return True
+    flat = "".join(words)
+    return len(code) >= 4 and flat.startswith(code)
+
+
 def _rent_team_match(code: str, name: str, sport: str, pmk) -> bool:
+    if sport == "UFC":
+        return _rent_ufc_code_match(code, name)
     if pmk is not None:
         try:
             if code in pmk._team_code_cands(name, sport):
@@ -17447,8 +17593,12 @@ def _rent_enrolled_football(sb):
     unmatched: list = []
     try:
         cut = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        # aec-cfb + aec-ufc joined Sep 2 2026 (Rob: CFB + UFC moneylines
+        # yes with the standing caps; NFL ML no, MLB run lines no) —
+        # prefixes stay SPECIFIC so aec-mlb/atp/soccer never leak in.
+        _fams = ("asc-", "tsc-", "aec-cfb", "aec-ufc")
         raw: list = []
-        for fam in ("asc-", "tsc-"):
+        for fam in _fams:
             pg = 0
             while True:      # gotcha #40 — page, never trust one response
                 page = (sb.table("poly_incentive_programs")
@@ -17465,7 +17615,7 @@ def _rent_enrolled_football(sb):
         # the page lists every enrolled slug; the Temple@PSU ladder was
         # on the page and nowhere in the catalog mirror. Both sources,
         # always: either alone has a documented blind spot.
-        for fam in ("asc-", "tsc-"):
+        for fam in _fams:
             pg = 0
             while True:
                 page = (sb.table("rent_list_slugs")
@@ -17477,20 +17627,21 @@ def _rent_enrolled_football(sb):
                 if len(page) < 1000:
                     break
                 pg += 1
+        _FAM_MT = {"asc": "spread", "tsc": "total", "aec": "moneyline"}
         slugs: dict = {}
         for r in raw:
             m = _RENT_SLUG_RE.match(str(r.get("market_slug") or ""))
             if m:
                 slugs.setdefault(
                     (m.group(2), m.group(3), m.group(4), m.group(5)),
-                    set()).add("spread" if m.group(1) == "asc" else "total")
+                    set()).add(_FAM_MT[m.group(1)])
         if slugs:
             try:
                 import pmm_markets as _pmk
             except Exception:
                 _pmk = None
             mrows: list = []
-            for sport in ("NFL", "NCAAF"):
+            for sport in ("NFL", "NCAAF", "UFC"):
                 mrows.extend((sb.table("markets")
                               .select("id,event_name,event_start,sport,notes")
                               .eq("sport", sport).eq("status", "active")
@@ -17514,7 +17665,7 @@ def _rent_enrolled_football(sb):
                 if kstr in key2id:
                     rmap.setdefault(key2id[kstr], set()).update(mts)
                     continue
-                sport = "NFL" if lg == "nfl" else "NCAAF"
+                sport = {"nfl": "NFL", "ufc": "UFC"}.get(lg, "NCAAF")
                 try:
                     d0 = datetime.strptime(day, "%Y-%m-%d").date()
                     days_try = [day, (d0 + timedelta(days=1)).isoformat(),
@@ -17602,7 +17753,7 @@ def _gridiron_ensure_markets(sb, unmatched, now) -> dict:
                 continue
             lg, ac, hc = parts[0], parts[1], parts[2]
             day = "-".join(parts[3:6])
-            sport = "NFL" if lg == "nfl" else "NCAAF"
+            sport = {"nfl": "NFL", "ufc": "UFC"}.get(lg, "NCAAF")
             ev = client.events.retrieve_by_slug(key)
             title = str(_pmk._ev_get(ev, "title") or "")
             start_raw = str(_pmk._ev_get(ev, "startTime") or "")
@@ -17754,6 +17905,23 @@ def _gridiron_price_game(sb, g):
                     pass
             if rungs:
                 d["odds"][mt] = {"polymarket": {"ladder": rungs}}
+        # Moneyline sides (Sep 2 2026 — the CFB/UFC ML rent lane). Same
+        # ladder shape, line-less; _gridiron_try_ml reads it.
+        ml_sides = []
+        for e in (pmm.get("ml") or []):
+            if not e.get("slug"):
+                continue
+            ml_sides.append({"side": e.get("side"), "line": None,
+                             "slug": e.get("slug"), "quote": e.get("quote"),
+                             "synthetic": bool(e.get("synthetic"))})
+            try:
+                tv = float(e.get("tick") or 0)
+                if 0.001 <= tv <= 0.02:
+                    _TICK_CACHE.setdefault(e["slug"], tv * 100.0)
+            except (TypeError, ValueError):
+                pass
+        if ml_sides:
+            d["odds"]["moneyline"] = {"polymarket": {"ladder": ml_sides}}
         return d if d["odds"] else None
     except Exception:
         return None
@@ -17828,7 +17996,7 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
             for p in ((sb.table("bot_picks")
                        .select("market_id,market_type")
                        .eq("status", "pending")
-                       .in_("market_type", ["spread", "total"])
+                       .in_("market_type", ["spread", "total", "moneyline"])
                        .in_("market_id", ids[i:i + 100])
                        .execute().data) or []):
                 pend.add((str(p["market_id"]), p["market_type"]))
@@ -17846,7 +18014,7 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
             if not m or str(m.get("event_start") or "") <= nowiso:
                 continue
             for mt in mts:
-                if mt not in ("spread", "total"):
+                if mt not in ("spread", "total", "moneyline"):
                     continue
                 key = (str(mid), mt)
                 have = drows.get(key)
@@ -17910,7 +18078,13 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
                 g = None
         verdict, retry_min = "no_model", _OMS_RETRY_MIN["no_model"]
         if g:
-            gp = _gridiron_proj(sb, g.get("sport"), g.get("event_name"))
+            mtype = r["market_type"]
+            # ML rows don't need the football fit — the ML leg computes
+            # its own model prob (and has the no-view cheap-side path
+            # beyond the no-veto horizon, so no_model can't park UFC).
+            gp = (True if mtype == "moneyline"
+                  else _gridiron_proj(sb, g.get("sport"),
+                                      g.get("event_name")))
             if gp:
                 # Failed-lookup backoff (module-level, survives laps): a
                 # game whose venue event-search just missed is not retried
@@ -17925,11 +18099,15 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
                             mid, _gridiron_price_game(sb, g))
                     if not d:
                         _OMS_LOOKUP_TS[mid] = _time.time()
-                if not d or r["market_type"] not in (d.get("odds") or {}):
+                if not d or mtype not in (d.get("odds") or {}):
                     verdict, retry_min = "no_pmm", _OMS_RETRY_MIN["no_pmm"]
                 else:
-                    v = _gridiron_try_bet(sb, g, g.get("event_start"), d,
-                                          r["market_type"], gp) or "none"
+                    if mtype == "moneyline":
+                        v = _gridiron_try_ml(
+                            sb, g, g.get("event_start"), d) or "none"
+                    else:
+                        v = _gridiron_try_bet(sb, g, g.get("event_start"),
+                                              d, mtype, gp) or "none"
                     verdict = v
                     retry_min = _OMS_RETRY_MIN.get(
                         v, _OMS_RETRY_MIN.get("none", 30))
@@ -17993,7 +18171,7 @@ def _rentlist_watchdog(sb, now):
             for p in ((sb.table("bot_picks")
                        .select("market_id,market_type")
                        .eq("status", "pending")
-                       .in_("market_type", ["spread", "total"])
+                       .in_("market_type", ["spread", "total", "moneyline"])
                        .in_("market_id", fids[i:i + 100])
                        .execute().data) or []):
                 pend.setdefault(str(p["market_id"]), set()).add(
