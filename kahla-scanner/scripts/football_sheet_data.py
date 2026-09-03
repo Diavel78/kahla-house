@@ -58,6 +58,21 @@ _EDGE_SPREAD_PTS = 1.5
 _EDGE_SPREAD_RANKED_PTS = 1.0
 _EDGE_TOTAL_PTS = 1.5
 
+# Reliability floor (added Sep 3 2026 — Rob: "if no model, say excluded").
+# `compute_ratings` will happily hand a team an off/def number off ONE
+# game (gp=1) — that's not a rating, it's that game's score. Two straight
+# "deep" tier sheets (Bethune-Cookman @ UCF, Merrimack @ Delaware) got
+# built on gp=1 teams: the model's fabricated 20-36pt "edge" against the
+# market was the LOUDEST signal in the pipeline, which is exactly what
+# pushed both into the deep-dive cap ahead of games with a real number.
+# Same claimed-edge-cliff lesson as NRFI/Diamond IQ/UFC duration —
+# a huge edge off a team the model barely knows is noise, not signal.
+# A team under this floor gets treated exactly like a team missing from
+# ratings entirely: price_game() returns None, no bet_spread/bet_total
+# enters the blob, decide_tiers can't be fooled by a fake edge, and the
+# narrative rule ("every number must exist in the blob") can't cite one.
+_MIN_TEAM_GP = 2
+
 # Season floors — NO PRESEASON SHEETS (mirror of app.py _GRIDIRON_MIN_START;
 # ⚠ UPDATE YEARLY). Without this the first shakedown run built 27 preseason
 # NFL sheets priced off regular-season ratings — garbage projections for
@@ -424,6 +439,11 @@ def price_game(model: dict, home: str, away: str, neutral: bool) -> dict | None:
     proj = pr.project(model["R"], _resolve_team(home, teams),
                       _resolve_team(away, teams), hfa=hfa)
     if not proj:
+        return None
+    if proj["home_gp"] < _MIN_TEAM_GP or proj["away_gp"] < _MIN_TEAM_GP:
+        # A gp=1 team's "rating" is just that one game's score reshuffled
+        # through the solver — not a number worth projecting a line off.
+        # Treat exactly like a team missing from ratings entirely.
         return None
     sf, tf = params.get("spread_fit"), params.get("total_fit")
     m_raw, t_raw = proj["margin"], proj["total"]
