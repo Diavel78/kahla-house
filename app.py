@@ -23815,6 +23815,26 @@ def api_data():
                                 note="dump ok; restore-test paused by soak")
                 except Exception:
                     pass
+                # OVERRUN VERDICT REPAIR (Sep 2 2026 — Rob: "check
+                # engine light still on"): the box's cached blob counts
+                # overruns as fails (pre-split code), so busy-slate
+                # lanes burn red until the pull. A cached ERROR lane
+                # that predates the split (no fails_real key) triggers
+                # ONE fresh compute with THIS code's overrun-aware rule,
+                # which replaces the lane block. Stops firing on its own
+                # the moment the box catches up — the fourth member of
+                # this split-brain repair family.
+                try:
+                    if isinstance(cel, dict) and any(
+                            _l.get("state") == "error"
+                            and _l.get("fails_1h")
+                            and "fails_real" not in _l
+                            for _l in (cel.get("lanes") or [])):
+                        _fr = _cellar_health(get_supabase())
+                        if _fr and _fr.get("lanes"):
+                            cel = dict(cel, **_fr)
+                except Exception:
+                    pass
                 # STALE TRIPWIRE VERDICT REPAIR (Aug 31 2026 — the user
                 # was at work with a known-false CHASE DEAD burning red
                 # all day): the box computes the cached blob on ITS code,
