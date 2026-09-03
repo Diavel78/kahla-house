@@ -11063,6 +11063,10 @@ def api_poly_reset_sells():
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
     dry = request.args.get("dry") == "1"
+    # ?slug= substring filter (Sep 3 2026 — the tenst-ga 4×-duplicate-
+    # sell cleanup): target one market's sells without churning every
+    # healthy ask on the book. Empty = all, the original behavior.
+    slug_f = (request.args.get("slug") or "").strip()
     try:
         sb, client = get_supabase(), get_client()
     except Exception as e:
@@ -11078,8 +11082,12 @@ def api_poly_reset_sells():
                 .limit(500).execute().data) or []
         for r in rows:
             b = r.get("signal_blob") or {}
+            # gridiron_autobet joined Sep 3 2026 — the football scalp
+            # asks were invisible to this sweep ("skipped_not_ours"),
+            # which is how 4 duplicate sells on one CFB total had no
+            # cleanup tool.
             if not (b.get("autobet") or b.get("whiff_autobet")
-                    or b.get("ou_trader")):
+                    or b.get("ou_trader") or b.get("gridiron_autobet")):
                 continue
             slug = b.get("pmm_slug")
             if slug:
@@ -11101,6 +11109,9 @@ def api_poly_reset_sells():
     killed, failed, skipped = [], [], 0
     for o in orders:
         if "SELL" not in (o.get("intent") or ""):
+            continue
+        if slug_f and slug_f not in (o.get("slug") or ""):
+            skipped += 1
             continue
         if not o.get("auto") or o.get("slug") not in mine:
             skipped += 1
