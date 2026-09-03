@@ -11313,7 +11313,10 @@ def _pmm_open_orders_raw(client) -> list | None:
                     "id": _g("id"), "tif": _g("tif") or "",
                     "auto": (_g("manualOrderIndicator")
                              == "MANUAL_ORDER_INDICATOR_AUTOMATIC"),
-                    "good_till": _g("goodTillTime")})
+                    "good_till": _g("goodTillTime"),
+                    # dup-order sweeps keep the OLDEST of a group (queue
+                    # position + matches the logged entry)
+                    "created": str(_g("createTime") or "")})
     return out
 
 
@@ -15364,9 +15367,12 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
         # wa-gercol-gte2 orphan (Aug 20 14:01): a dropped connection here
         # left a filled, resolved, PAID position with no book entry — and
         # props sit outside the autolog's adoption net, so nothing ever
-        # healed it. Retry once (safe: bot_picks_machine_slug_uniq makes a
-        # double-commit impossible — a duplicate-key error means the first
-        # insert landed and IS success), and if the book write still can't
+        # healed it. Retry once (safe: bot_picks_machine_slug_uniq +
+        # bot_picks_football_slug_uniq make a double-commit impossible for
+        # EVERY machine source — the tenst-ga twins came through this very
+        # retry while gridiron sat outside the old index's source list; a
+        # duplicate-key error means the first insert landed and IS
+        # success), and if the book write still can't
         # land, page the human with the exact slug and order id. A bet the
         # book doesn't know about is never allowed to be silent again.
         try:
@@ -21243,6 +21249,63 @@ def _reconcile_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                                            # (and the slot is NOT consumed —
                                            # retry next tick)
     _RECON_LAST_TS = _time.time()          # reads OK — this pass counts
+    # ── DUP-ORDER SWEEP (Sep 3 2026, the tenst-ga stack — Rob: "gotta put
+    # an end of these duplicates. That's a huge risk for buying and
+    # selling."): one AUTOMATIC order per (slug, intent) is an INVARIANT
+    # on BOTH sides now — the harvest ladder (the old three-sells-by-
+    # design exception) is dead, and the scalp rests exactly one ask
+    # sized to the position. Any AUTO group >1 on a slug we have a
+    # pending pick on gets canceled down to the OLDEST (queue position,
+    # matches the logged entry) — the automated twin of the manual
+    # dedup-orders/reset-sells sweeps, so a dup never waits for a human.
+    # Three gates as always: AUTOMATIC flag, our own pick's slug, and a
+    # per-pass cancel cap. MANUAL orders are untouchable, ever.
+    _my_slugs = set()
+    for _r0 in rows:                       # ALL pending picks (adopted too)
+        _b0 = (_r0.get("signal_blob")
+               if isinstance(_r0.get("signal_blob"), dict) else {})
+        _ex0 = (_b0.get("execution")
+                if isinstance(_b0.get("execution"), dict) else {})
+        _sl0 = _b0.get("pmm_slug") or _ex0.get("pmm_slug")
+        if _sl0:
+            _my_slugs.add(str(_sl0))
+    _grp: dict = {}
+    for o in orders:
+        if o.get("auto") and o.get("slug") in _my_slugs:
+            _grp.setdefault((o["slug"], o.get("intent")), []).append(o)
+    _dup_cancels = 0
+    for (_sl, _it), _lst in _grp.items():
+        if len(_lst) < 2 or _dup_cancels >= 6:
+            continue
+        _lst.sort(key=lambda o: o.get("created") or "")   # oldest = keeper
+        if client is None:                 # snapshot path — writes need one
+            try:
+                client = get_client()
+            except Exception:
+                break
+        _kill = []
+        for _x in _lst[1:]:
+            try:
+                client.orders.cancel(_x.get("id"), {"marketSlug": _sl})
+                _dup_cancels += 1
+                _kill.append(f"{_x.get('leaves') or _x.get('qty'):g}")
+            except Exception:
+                pass
+            _time.sleep(0.25)              # venue rate limit (Cloudflare)
+        if _kill:
+            _send_fill_telegram(
+                f"🧹 RECONCILE dup-order sweep — {_sl} "
+                f"{'SELL' if 'SELL' in str(_it) else 'BUY'}: canceled "
+                f"{len(_kill)} duplicate(s) ({', '.join(_kill)} qty), "
+                f"kept the oldest of {len(_lst)}.")
+    if _dup_cancels:
+        res["dup_canceled"] = _dup_cancels
+        # canceled orders are gone from the venue but still in THIS pass's
+        # stale snapshot — re-read so the zombie logic below can't act on
+        # a fiction; a failed re-read ends the pass (default-deny).
+        orders = _pmm_open_orders_raw(client)
+        if orders is None:
+            return res
     open_keys = {(o["slug"], o["intent"]) for o in orders
                  if str(o.get("intent") or "").startswith("ORDER_INTENT_BUY")}
     # expected size per (slug, side) — the orphan-order check compares the
@@ -21554,6 +21617,22 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 or _scalp_adopted_ok(sb, r, b, slug, synth)):
             continue
         cands.append((r, b, slug, synth))
+    # ONE CANDIDATE PER (slug, side) — the tenst-ga stack (Sep 2-3 2026):
+    # twin pick rows put the same slug in this list twice, and both
+    # iterations read the START-OF-TICK orders snapshot ("no ask yet"), so
+    # both placed — 2 sells per lap, 4 after two laps, 80 contracts of ask
+    # against a 20-lot position. The DB unique index now blocks twin picks
+    # at the source; this is the belt for any future two-picks-one-slug
+    # shape. First row wins (they are twins — interchangeable).
+    _seen_sl: set = set()
+    _uniq = []
+    for c in cands:
+        _k = (c[2], c[3])
+        if _k in _seen_sl:
+            continue
+        _seen_sl.add(_k)
+        _uniq.append(c)
+    cands = _uniq
     if not cands:
         return {"gate": "no_cands"}
     # Remote kill (Sep 1 2026): flag off ⇒ shadow mode, exactly like
@@ -21712,9 +21791,31 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         our_ask = None
         our_ask_qty = 0.0
         if mine:
-            o0 = mine[0]
-            if not o0.get("auto"):
+            if any(not o.get("auto") for o in mine):
                 continue                 # a MANUAL ask owns this slug — skip
+            if len(mine) > 1:
+                # DUP-SELL REPAIR (the tenst-ga stack): multiple AUTOMATIC
+                # asks on one slug is always a defect — the scalp's design
+                # is ONE ask sized to the position. Cancel all but the
+                # oldest (queue position), then leave the survivor to the
+                # next pass (its resize invariant re-sizes it to held).
+                # Correctness beats optimization: repairs happen even in
+                # shadow mode — an over-sell is live risk either way.
+                mine.sort(key=lambda o: o.get("created") or "")
+                for _x in mine[1:]:
+                    try:
+                        client.orders.cancel(_x.get("id"),
+                                             {"marketSlug": slug})
+                        res["dup_canceled"] = res.get("dup_canceled", 0) + 1
+                    except Exception:
+                        pass
+                    _time.sleep(0.25)    # venue rate limit (Cloudflare)
+                _send_fill_telegram(
+                    f"🧹 SCALP DUP-SELL repaired — {r.get('event_name')}: "
+                    f"{len(mine) - 1} extra ask(s) canceled on {slug}, "
+                    f"kept the oldest. Over-sell class blocked.")
+                continue
+            o0 = mine[0]
             py = o0.get("price_yes")
             if py is not None:
                 our_ask = (100.0 - py * 100.0) if synth else py * 100.0

@@ -127,6 +127,28 @@ PULL-DAY VERIFICATION adds: ML desired rows appear (market_type
 moneyline) with sane verdicts; ensure_stamped/ensure_minted in opener
 stats; two-rung picks stamp rung_role; no dup rows for stamped games.
 
+## 8d. DUPLICATE-KILL, three layers (Sep 3 — Rob: "gotta put an end of
+## these duplicates. That's a huge risk for buying and selling.")
+Root cause found: the tenst-ga twin picks came through _autobet_execute's
+pick-insert RETRY (first insert times out client-side but commits; retry
+books a copy — same order_id, 0.8s apart), and the scalp then placed one
+ask PER PICK ROW per lap off its stale start-of-tick orders snapshot
+(2/lap × 2 laps = the 4 stacked 20-lot sells = naked-short risk). Fixes:
+1. DB (LIVE NOW, blocks even the old box code): migration 018 —
+   `bot_picks_football_slug_uniq` (gridiron_autobet + fbprop_autobet,
+   pending, slug-keyed) replaces the ad-hoc gridiron index; with the
+   existing machine_slug_uniq every machine source is now covered.
+2. Scalp (live at pull): in-pass (slug, side) candidate dedup + DUP-SELL
+   REPAIR — >1 AUTO ask on a slug cancels down to the oldest, even in
+   shadow mode, and the survivor re-sizes to held next pass.
+3. Reconcile (live at pull): automated dup-order sweep BOTH intents,
+   every 15 min — AUTO + own-pick-slug + 6-cancel cap, keeps oldest,
+   re-reads orders after canceling so the zombie logic can't act on the
+   stale snapshot. The manual dedup-orders/reset-sells become forensics
+   tools, not the healer.
+Pull-day check: reconcile stats show `dup_canceled` only if something
+was actually stacked (expect absent/0 on a healthy day); no 🧹 pings.
+
 ## 8c. THE RULE-1 VISIBILITY AUDIT (Sep 2 night — Rob: "if it's paying
 ## rent, I want it bet… are we seeing it, or are we missing it?")
 Walked every layer between "the venue pays it" and "the machine sees
