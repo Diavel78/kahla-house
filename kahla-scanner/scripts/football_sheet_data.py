@@ -58,6 +58,58 @@ _EDGE_SPREAD_PTS = 1.5
 _EDGE_SPREAD_RANKED_PTS = 1.0
 _EDGE_TOTAL_PTS = 1.5
 
+# Reliability floor (added Sep 3 2026 — Rob: "if no model, say excluded",
+# then "Vegas doesn't miss a line by 9.3 million points").
+# `compute_ratings` will happily hand a team an off/def number off ONE
+# game — that's not a rating, it's that game's score. Two "deep" tier
+# sheets (Bethune-Cookman @ UCF, Merrimack @ Delaware) were built on such
+# teams: the fabricated 20-36pt "edge" against the market was the LOUDEST
+# signal in the pipeline, which is exactly what pushed them into the
+# deep-dive cap ahead of games with a real number. Same claimed-edge-cliff
+# lesson as NRFI/Diamond IQ/UFC duration.
+#
+# MEASURED, not guessed (Sep 3 2026, this week's 91-game board vs the
+# market's posted lines — the market is the sanity bar, since Vegas does
+# not miss a P4-vs-G5 number by 20):
+#     gp floor      games kept    mean gap vs market    worst
+#        2              86              6.6pt          26.2pt
+#        6              59              4.8pt          19.3pt
+#       10              44              4.6pt          18.6pt
+# 10 is the cliff: an FBS team plays 12-13 games a season, an FCS visitor
+# turns up once or twice, so this cleanly separates the two populations
+# (140 of 249 rated teams clear it; FBS is ~134 programs). Under the floor
+# a team is treated exactly like one missing from ratings: price_game()
+# returns None, no bet_spread/bet_total enters the blob, decide_tiers
+# can't be fooled by a fake edge, and the narrative rule ("every number
+# must exist in the blob") can't cite one.
+_MIN_TEAM_GP = 10
+
+# Ratings decay for the SHEET's own model — see build_sheet_model().
+# The live power_ratings snapshot uses a 40-day CALENDAR half-life, which
+# football's 7-month offseason turns into a trap: by Week 1 a team that has
+# played its opener carries ~92% of its weight in that ONE game while its
+# entire prior season sits at ~0.5% apiece. USC's rating this week was 93%
+# a single 42-26 win over San José State, which is how the model came to
+# say "USC by 5" against a market of USC -22.5. Walk-forward over 1,825
+# games, 40 days was the WORST setting tested (MAE 13.00 / RMSE 16.25 vs
+# 12.17 / 15.30 at 120 days); 180 is near-optimal on outcomes AND halves
+# the disagreement with the market.
+_SHEET_HALF_LIFE_DAYS = 180
+
+# "Vegas doesn't miss a line by 9.3 million points" (Rob, Sep 3 2026) —
+# encoded. Once both teams clear _MIN_TEAM_GP and the decay is sane, the
+# model sits close to the market: measured on this week's 44 rated games,
+# spread gaps run p50 3.1 / p90 9.4 / p95 11.6 / max 16.7, totals p50 1.7 /
+# p90 5.6 / p95 6.2 / max 8.9. Past the p95 the honest reading is not "the
+# market blew a number" — it is that something real (a portal class, a new
+# coordinator, a QB the ratings never saw) is invisible to a model built
+# only on results. So beyond these the play is downgraded to a PASS and
+# flagged, rather than printed as the biggest edge on the card. This is the
+# claimed-edge cliff the rest of the machine already respects (the NRFI 6pp
+# clamp, the UFC 8pp duration cap, the gridiron ±10pt tail gate).
+_MAX_MARKET_GAP_SPREAD_PTS = 12.0
+_MAX_MARKET_GAP_TOTAL_PTS = 7.0
+
 # Season floors — NO PRESEASON SHEETS (mirror of app.py _GRIDIRON_MIN_START;
 # ⚠ UPDATE YEARLY). Without this the first shakedown run built 27 preseason
 # NFL sheets priced off regular-season ratings — garbage projections for
@@ -399,17 +451,126 @@ def _resolve_team(name: str, teams: dict) -> str:
 
 
 def load_model(sport: str) -> dict | None:
+    """The sheet's model. Prefers ratings built HERE (see build_sheet_model)
+    over the live power_ratings snapshot — the snapshot's 40-day half-life
+    is calibrated for the Cellar's in-season betting and collapses to
+    single-game noise at a season boundary, which is precisely when these
+    sheets are written. Falls back to the snapshot if the local build can't
+    run, so a sheet is never blocked on it."""
+    local = build_sheet_model(sport)
+    if local:
+        return local
     rows = sb_select("power_ratings", {
         "select": "computed_at,league_avg,n_games,ratings,params",
         "sport": f"eq.{sport}", "order": "computed_at.desc", "limit": "1"})
     if not rows:
         return None
     row = rows[0]
+    log.warning("%s: local model unavailable — falling back to the live "
+                "snapshot (40-day half-life; expect season-boundary noise)", sport)
     return {
         "R": {"teams": row["ratings"] or {}, "league_avg": row["league_avg"]},
         "params": row["params"] or {},
         "computed_at": row["computed_at"], "n_games": row["n_games"],
     }
+
+
+def _walk_forward_pairs(games: list[dict], hl: float) -> tuple[list, list]:
+    """(projected, actual) pairs for margin and total, recomputing ratings
+    week by week from prior games only. Restricted to the population the
+    sheet actually prices (both teams over _MIN_TEAM_GP) so the shrinkage
+    is fit on the same games it will be applied to."""
+    sp, tot = [], []
+    cursor = datetime(2024, 9, 1, tzinfo=timezone.utc)
+    end = games[-1]["_dt"]
+    while cursor <= end:
+        nxt = cursor + timedelta(days=7)
+        week = [g for g in games if cursor <= g["_dt"] < nxt]
+        prior = [g for g in games if g["_dt"] < cursor]
+        if week and len(prior) >= 150:
+            R = pr.compute_ratings(prior, half_life_days=hl, as_of=cursor)
+            if R:
+                res = []
+                for g in prior:
+                    p = pr.project(R, g["home"], g["away"], hfa=0.0)
+                    if p:
+                        res.append((g["home_score"] - g["away_score"]) - p["margin"])
+                hfa = (sum(res) / len(res)) if res else 0.0
+                for g in week:
+                    p = pr.project(R, g["home"], g["away"], hfa=hfa)
+                    if (not p or p.get("home_gp", 0) < _MIN_TEAM_GP
+                            or p.get("away_gp", 0) < _MIN_TEAM_GP):
+                        continue
+                    sp.append((p["margin"], g["home_score"] - g["away_score"]))
+                    tot.append((p["total"], g["home_score"] + g["away_score"]))
+        cursor = nxt
+    return sp, tot
+
+
+def build_sheet_model(sport: str) -> dict | None:
+    """Ratings + shrinkage fits computed from game_results for this sheet.
+
+    Why not just read power_ratings: that snapshot's fits were regressed
+    against 40-day-half-life margins and do not transfer to a different
+    decay — changing the half-life without refitting alpha/beta would price
+    every spread off a mis-scaled projection. So ratings and fits are built
+    together here, from the same window, and travel together.
+    """
+    rows = sb_select("game_results", {
+        "select": "game_date,home,away,home_score,away_score",
+        "sport": f"eq.{sport}", "order": "game_date.asc"})
+    games = []
+    for r in rows:
+        try:
+            dt = datetime.fromisoformat(r["game_date"]).replace(tzinfo=timezone.utc)
+            games.append({
+                # `date` must carry the tz — compute_ratings compares it to a
+                # tz-aware as_of, and a bare 'YYYY-MM-DD' parses naive.
+                "_dt": dt, "date": dt.isoformat(),
+                "home": r["home"], "away": r["away"],
+                "home_score": float(r["home_score"]), "away_score": float(r["away_score"])})
+        except (TypeError, ValueError):
+            continue
+    if len(games) < 400:
+        return None
+
+    hl = _SHEET_HALF_LIFE_DAYS
+    sp_pairs, tot_pairs = _walk_forward_pairs(games, hl)
+    spread_fit, total_fit = gsp.fit(sp_pairs), gsp.fit(tot_pairs)
+    if not (spread_fit and total_fit):
+        return None
+
+    R = pr.compute_ratings(games, half_life_days=hl)
+    if not R:
+        return None
+    # HFA is the mean margin REMAINING after the opponent adjustment — the
+    # raw mean home margin double-counts schedule strength (the Aug-20 bug).
+    res = []
+    for g in games:
+        p = pr.project(R, g["home"], g["away"], hfa=0.0)
+        if p:
+            res.append((g["home_score"] - g["away_score"]) - p["margin"])
+    hfa = round(sum(res) / len(res), 3) if res else 0.0
+
+    best, best_brier = 7.25, None
+    for step in range(16, 61):
+        s = step * 0.25
+        b = sum((pr.margin_to_prob(spread_fit["alpha"] + spread_fit["beta"] * p, s)
+                 - (1.0 if a > 0 else 0.0)) ** 2 for p, a in sp_pairs) / len(sp_pairs)
+        if best_brier is None or b < best_brier:
+            best, best_brier = s, b
+
+    rated = sum(1 for v in (R["teams"] or {}).values() if v.get("gp", 0) >= _MIN_TEAM_GP)
+    log.info("%s sheet model: hl=%s n=%s hfa=%.2f scale=%.2f brier=%.4f "
+             "spread_beta=%.3f rated>=%s: %s/%s", sport, hl, R["n_games"], hfa,
+             best, best_brier or 0, spread_fit["beta"], _MIN_TEAM_GP, rated,
+             len(R["teams"] or {}))
+    return {"R": R,
+            "params": {"hfa": hfa, "scale": best, "half_life_days": hl,
+                       "gp_min": _MIN_TEAM_GP, "spread_fit": spread_fit,
+                       "total_fit": total_fit},
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+            "n_games": R["n_games"]}
 
 
 def price_game(model: dict, home: str, away: str, neutral: bool) -> dict | None:
@@ -424,6 +585,11 @@ def price_game(model: dict, home: str, away: str, neutral: bool) -> dict | None:
     proj = pr.project(model["R"], _resolve_team(home, teams),
                       _resolve_team(away, teams), hfa=hfa)
     if not proj:
+        return None
+    if proj["home_gp"] < _MIN_TEAM_GP or proj["away_gp"] < _MIN_TEAM_GP:
+        # A gp=1 team's "rating" is just that one game's score reshuffled
+        # through the solver — not a number worth projecting a line off.
+        # Treat exactly like a team missing from ratings entirely.
         return None
     sf, tf = params.get("spread_fit"), params.get("total_fit")
     m_raw, t_raw = proj["margin"], proj["total"]
@@ -693,10 +859,14 @@ def _bet_spread(model: dict, priced: dict, away: str, home: str,
         return None
     verdict = ("play" if abs(edge) >= _PLAY_SPREAD_PTS
                else "lean" if abs(edge) >= _LEAN_SPREAD_PTS else "pass")
+    implausible = abs(edge) > _MAX_MARKET_GAP_SPREAD_PTS
+    if implausible:
+        verdict = "pass"
     return {"side": side, "team": team, "line": ladder[0]["line"],
             "fair": ladder[0]["fair"], "ladder": ladder,
             "market_home_line": line, "src": node["src"],
-            "edge_pts": edge, "verdict": verdict}
+            "edge_pts": edge, "verdict": verdict,
+            "model_gap_implausible": implausible}
 
 
 def _bet_total(model: dict, priced: dict, mkt: dict) -> dict | None:
@@ -723,9 +893,13 @@ def _bet_total(model: dict, priced: dict, mkt: dict) -> dict | None:
         return None
     verdict = ("play" if abs(edge) >= _PLAY_TOTAL_PTS
                else "lean" if abs(edge) >= _LEAN_TOTAL_PTS else "pass")
+    implausible = abs(edge) > _MAX_MARKET_GAP_TOTAL_PTS
+    if implausible:
+        verdict = "pass"
     return {"side": side, "line": ladder[0]["line"],
             "fair": ladder[0]["fair"], "ladder": ladder, "src": node["src"],
-            "edge_pts": edge, "verdict": verdict}
+            "edge_pts": edge, "verdict": verdict,
+            "model_gap_implausible": implausible}
 
 
 def build_game_blob(g: dict, sport: str, model: dict | None,

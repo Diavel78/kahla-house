@@ -201,6 +201,8 @@ def project(ratings: dict, home: str, away: str, *,
         "total":    round(exp_home + exp_away, 2),
         "home_net": h["net"],
         "away_net": a["net"],
+        "home_gp":  h.get("gp", 0),
+        "away_gp":  a.get("gp", 0),
     }
 
 
