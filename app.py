@@ -1544,6 +1544,65 @@ def _incentives_sync(sb, client) -> dict:
             res["stale_removed"] = stale
         except Exception as e:
             res["stale_err"] = f"{type(e).__name__}: {e}"[:120]
+
+        # ── SITE MIRROR for rent (Sep 4 2026 — "My Thursday rent isn't on
+        # the dashboard?"). The rent cards are served by Vercel against the
+        # CLOUD copy of poly_incentive_earnings — and the rent-by-day card
+        # deliberately recomputes from it on EVERY page load (the Aug 30
+        # serve-fresh fix), so after the cutover it froze at the flip
+        # moment and overwrote the box's good numbers on every serve.
+        # Same cure as the dash cache: the box (the single writer) pushes
+        # the table upward — BOTH halves of the sync, upserts AND the
+        # stale-status deletes, or the cloud copy re-grows the payout-flip
+        # double-count this sync exists to prevent. Best-effort: a mirror
+        # failure never touches the local result.
+        try:
+            _msb = get_supabase_mirror()
+            if _msb is not None and payload:
+                for i in range(0, len(payload), 300):
+                    (_msb.table("poly_incentive_earnings").upsert(
+                        payload[i:i + 300],
+                        on_conflict="market_slug,earn_date,program_type,status")
+                     .execute())
+                mkeys: dict = {}
+                for p in payload:
+                    mkeys.setdefault((p["market_slug"], p["earn_date"],
+                                      p["program_type"]), set()).add(p["status"])
+                mlo = min(k[1] for k in mkeys)
+                mheld: list = []
+                mpg = 0
+                while True:
+                    page = (_msb.table("poly_incentive_earnings")
+                            .select("market_slug,earn_date,program_type,status")
+                            .gte("earn_date", mlo)
+                            .range(mpg * 1000, mpg * 1000 + 999)
+                            .execute().data) or []
+                    mheld.extend(page)
+                    if len(page) < 1000:
+                        break
+                    mpg += 1
+                mgroups: dict = {}
+                for h in mheld:
+                    day = str(h.get("earn_date") or "")[:10]
+                    live = mkeys.get((h.get("market_slug"), day,
+                                      h.get("program_type")))
+                    if live and h.get("status") not in live:
+                        mgroups.setdefault((day, h["program_type"],
+                                            h["status"]), []).append(
+                            h["market_slug"])
+                mstale = 0
+                for (day, ptype, st), slugs in mgroups.items():
+                    for i in range(0, len(slugs), 100):
+                        (_msb.table("poly_incentive_earnings").delete()
+                         .eq("earn_date", day).eq("program_type", ptype)
+                         .eq("status", st)
+                         .in_("market_slug", slugs[i:i + 100]).execute())
+                    mstale += len(slugs)
+                res["mirrored"] = len(payload)
+                if mstale:
+                    res["mirror_stale_removed"] = mstale
+        except Exception as e:
+            res["mirror_err"] = f"{type(e).__name__}: {e}"[:120]
     except Exception as e:
         res["err"] = f"earnings: {type(e).__name__}: {e}"[:200]
 
