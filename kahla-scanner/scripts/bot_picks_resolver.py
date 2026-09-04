@@ -654,14 +654,25 @@ def _mlb_makeup_remap(sb, bet: dict) -> bool:
 # shadow bets, which have no venue outcome to read.
 #
 # Mirror landmines (the poly_gameday_pnl lessons, dodged by construction):
-# resolutions dedup poorly (~19 copies of one leg) and some settlements emit
-# an UNDEFINED-side twin that books a WINNING leg as a loss — so rows key on
-# (slug, held-side) and UNDEFINED rows are skipped outright. A settle price
-# not at 0/1 (a voided market settled at last fair price) is left for
+# resolutions dedup poorly (~19 copies of one leg), some settlements emit an
+# UNDEFINED-side twin, and — the first-night lesson (Sep 3, caught because
+# the Gausman/Henderson LOSERS stayed pending while every winner graded) —
+# `positionResolution.side` is the side that WON the market, NOT the side
+# we held. v1 keyed on (slug, assumed-held-side), which structurally could
+# only ever match winners. The dashboard's year-proven settlement rule
+# already knew: won = (held long AND side LONG) or (held short AND side
+# SHORT), with held direction from beforePosition.netPosition. So: outcome
+# comes from the marketSides settle prices (which side ended at 1), held
+# direction from the netPosition sign, and the pick's own synthetic flag
+# must AGREE with the held direction or the row is left alone. A settle
+# price not at 0/1 (voided market settled at last fair price) is left for
 # ESPN/manual — never guessed into won/lost.
 
 def _venue_resolutions(sb, slugs: list) -> dict:
-    """{(slug, 'LONG'|'SHORT'): settle_price_of_that_held_side}."""
+    """{slug: {"long_settle": price_of_YES_side, "net": netPosition_before}}.
+    Copies of the same leg collapse (identical content); UNDEFINED-side
+    twins only fill in when no real-sided row exists AND they carry a
+    usable net — otherwise ignored."""
     out: dict = {}
     for i in range(0, len(slugs), 25):
         try:
@@ -676,32 +687,39 @@ def _venue_resolutions(sb, slugs: list) -> dict:
             pr = ((r.get("payload") or {}).get("positionResolution")
                   if isinstance(r.get("payload"), dict) else None) or {}
             side = str(pr.get("side") or "")
-            if side.endswith("_LONG"):
-                held = "LONG"
-            elif side.endswith("_SHORT"):
-                held = "SHORT"
-            else:
-                continue                # the UNDEFINED-side twin — poison
-            want_long = (held == "LONG")
-            price = None
+            real_side = side.endswith("_LONG") or side.endswith("_SHORT")
+            long_settle = None
             for ms in ((pr.get("market") or {}).get("marketSides") or []):
-                if bool(ms.get("long")) == want_long:
+                if bool(ms.get("long")):
                     try:
-                        price = float(ms.get("price"))
+                        long_settle = float(ms.get("price"))
                     except (TypeError, ValueError):
-                        price = None
+                        long_settle = None
                     break
-            if price is not None:
-                out[(r.get("slug"), held)] = price
-    return out
+            if long_settle is None:
+                continue
+            net = None
+            try:
+                bp = pr.get("beforePosition") or {}
+                if bp.get("netPosition") is not None:
+                    net = float(bp.get("netPosition"))
+            except (TypeError, ValueError):
+                net = None
+            slug = r.get("slug")
+            prev = out.get(slug)
+            # prefer real-sided rows with a usable net over twins
+            rank = (0 if real_side else 1, 0 if net is not None else 1)
+            if prev is None or rank < prev[0]:
+                out[slug] = (rank, {"long_settle": long_settle, "net": net})
+    return {k: v[1] for k, v in out.items()}
 
 
 def _resolve_venue(sb, bets: list) -> tuple[set, int, int]:
     """Grade every pending pick whose held position the venue has resolved.
     Returns (graded ids, won, lost). Skips picks with no pmm_slug (nothing
-    to look up), no resolution row for OUR held side (never filled, sold
-    flat, or we hold the other side — all cases where guessing is worse
-    than waiting), and odd settle prices."""
+    to look up), no resolution row (never filled / sold flat), a held
+    direction that contradicts the pick's own side flag (grade nothing on
+    a disagreement), and odd settle prices."""
     graded: set = set()
     won = lost = 0
     cand = []
@@ -711,22 +729,34 @@ def _resolve_venue(sb, bets: list) -> tuple[set, int, int]:
         slug = blob.get("pmm_slug") or ex.get("pmm_slug")
         if slug:
             synth = bool(blob.get("pmm_synthetic") or ex.get("pmm_synthetic"))
-            cand.append((b, str(slug), "SHORT" if synth else "LONG"))
+            cand.append((b, str(slug), synth))
     if not cand:
         return graded, 0, 0
     res = _venue_resolutions(sb, sorted({c[1] for c in cand}))
     if not res:
         return graded, 0, 0
-    for b, slug, held in cand:
-        price = res.get((slug, held))
-        if price is None:
+    for b, slug, synth in cand:
+        ent = res.get(slug)
+        if ent is None:
             continue
-        if price >= 0.99:
+        # held-direction guard: net<0 = we held NO (short), net>0 = YES.
+        # A pick whose synthetic flag disagrees with what the account
+        # actually held is a bookkeeping mismatch — skip, never guess.
+        net = ent.get("net")
+        if net is not None and abs(net) >= 0.5:
+            if (net < 0) != synth:
+                continue
+        ls = ent.get("long_settle")
+        if ls is None:
+            continue
+        ours = (1.0 - ls) if synth else ls   # settle price of OUR side
+        if ours >= 0.99:
             status = "won"
-        elif price <= 0.01:
+        elif ours <= 0.01:
             status = "lost"
         else:
             continue                    # voided-at-price class — not ours
+        price = ours
         units = b.get("units") or 1
         try:
             pnl = _pnl_units(status, b["entry_price"], units)
@@ -746,7 +776,8 @@ def _resolve_venue(sb, bets: list) -> tuple[set, int, int]:
             except Exception:
                 cv = None
         result = {"graded_by": "venue", "slug": slug,
-                  "held": held, "settle": price}
+                  "held": "SHORT" if synth else "LONG",
+                  "settle": price, "long_settle": ls}
         if _update(sb, b["id"], status, pnl, result, clv, cv):
             graded.add(b["id"])
             if status == "won":

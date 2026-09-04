@@ -2377,7 +2377,13 @@ def _maker_rewards_split(sb) -> dict:
 # never done a unit of work in its life.
 _LANE_WORK_WARN_S = {
     "pm_snapshot":     1_800,      # logs cents nearly every tick
-    "paperlog":        3_600,
+    # paperlog was 3_600 — which flagged "quiet" EVERY night around 10pm,
+    # because its 5h-to-kickoff window empties when the slate goes live
+    # and stays empty until tomorrow's games approach (caught by Rob on
+    # cutover night, Sep 3). The opener's rule applies verbatim: a quiet
+    # slate is real. A light that lies nightly is a light you learn to
+    # skip — the exact disease this card exists to prevent.
+    "paperlog":       21_600,
     "opener":         21_600,      # a quiet slate is real
     "ledger":         21_600,      # 22h of silence is what we missed
     "harvest":        86_400,
