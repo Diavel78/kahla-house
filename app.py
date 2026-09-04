@@ -183,6 +183,34 @@ def get_supabase():
         return None
 
 
+_mirror_client = None
+
+
+def get_supabase_mirror():
+    """THE SITE MIRROR (Sep 3 2026, cutover night — Rob: "pointless to be
+    frozen"). After the box moved to local Postgres, the website (Vercel
+    → cloud Supabase) stopped seeing the box's dashboard cache. Until
+    C1/C2 closes the split, the box PUSHES `poly_dash_cache` up to the
+    cloud after every local write — one table, one writer (the box), so
+    no split-brain: the cloud copy is a display mirror, never read back
+    by the box. Env-gated: SUPABASE_MIRROR_URL/_KEY are set ONLY in the
+    box's .env (the old cloud credentials); everywhere else this returns
+    None and the mirror pushes no-op. Lazy-init, never raises."""
+    global _mirror_client
+    if _mirror_client is not None:
+        return _mirror_client
+    url = os.getenv("SUPABASE_MIRROR_URL", "").strip()
+    key = os.getenv("SUPABASE_MIRROR_KEY", "").strip()
+    if not url or not key or url == os.getenv("SUPABASE_URL", "").strip():
+        return None
+    try:
+        from supabase import create_client
+        _mirror_client = create_client(url, key)
+        return _mirror_client
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Auth decorators
 # ---------------------------------------------------------------------------
@@ -2865,7 +2893,7 @@ def _dash_cache_refresh(sb, client) -> dict:
                 # failed so a persistent problem is diagnosable.
                 order_count = _prev_oc
                 order_err = f"{type(e).__name__}: {e}"[:140]
-        (sb.table("poly_dash_cache").upsert({
+        _dash_payload = {
             "id": 1, "summary": summary,
             "derived": _dash_derived(sb),
             "balance": bal.get("current_balance"),
@@ -2873,7 +2901,16 @@ def _dash_cache_refresh(sb, client) -> dict:
             "order_count": order_count,
             "computed_at": datetime.now(timezone.utc).isoformat(),
             "note": "ok" if order_err is None
-                    else f"ok; orders_err: {order_err}"}).execute())
+                    else f"ok; orders_err: {order_err}"}
+        sb.table("poly_dash_cache").upsert(_dash_payload).execute()
+        # SITE MIRROR push (cutover-night bridge): the website reads the
+        # cloud copy — keep it live. Best-effort, never fails the lap.
+        try:
+            _msb = get_supabase_mirror()
+            if _msb is not None:
+                _msb.table("poly_dash_cache").upsert(_dash_payload).execute()
+        except Exception:
+            pass
         res = {"ok": True, "acts": len(parsed)}
     except Exception as e:
         res["err"] = f"{type(e).__name__}: {e}"[:160]
@@ -22222,6 +22259,14 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 (sb.table("poly_dash_cache")
                  .update({"order_count": len(lap_orders)})
                  .eq("id", 1).execute())
+            except Exception:
+                pass
+            try:
+                _msb = get_supabase_mirror()
+                if _msb is not None:
+                    (_msb.table("poly_dash_cache")
+                     .update({"order_count": len(lap_orders)})
+                     .eq("id", 1).execute())
             except Exception:
                 pass
             # Feed the markets socket its watch list from this lap's own
