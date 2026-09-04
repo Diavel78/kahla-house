@@ -532,7 +532,8 @@ def _fetch_pending(sb) -> list[dict]:
     try:
         return (sb.table("bot_picks")
                 .select("id,market_id,sport,event_name,event_start,market_type,"
-                        "side,entry_book,entry_price,entry_line,units,clv_pp,closing_vsin")
+                        "side,entry_book,entry_price,entry_line,units,clv_pp,"
+                        "closing_vsin,signal_blob")
                 .eq("status", "pending")
                 .lt("event_start", cutoff)
                 .order("event_start")
@@ -641,6 +642,121 @@ def _mlb_makeup_remap(sb, bet: dict) -> bool:
              bet["id"], bet.get("event_name"), bet.get("event_start"),
              mk["event_start"], target[1])
     return True
+
+
+# ───────────────── Venue-resolution grading (Sep 3 2026) ─────────────────
+# Cutover night, Rob: "Who cares what ESPN thinks? Polymarket decided."
+# For any pending pick that HELD a position at settlement, the venue's own
+# POSITION_RESOLUTION activity (mirrored into poly_activities by the ledger
+# tick) is the authoritative outcome — it grades props/distance/FCS games
+# ESPN can never grade, and it grades everything else minutes sooner. ESPN
+# stays for what only it can do: picks that never filled and the paperlog's
+# shadow bets, which have no venue outcome to read.
+#
+# Mirror landmines (the poly_gameday_pnl lessons, dodged by construction):
+# resolutions dedup poorly (~19 copies of one leg) and some settlements emit
+# an UNDEFINED-side twin that books a WINNING leg as a loss — so rows key on
+# (slug, held-side) and UNDEFINED rows are skipped outright. A settle price
+# not at 0/1 (a voided market settled at last fair price) is left for
+# ESPN/manual — never guessed into won/lost.
+
+def _venue_resolutions(sb, slugs: list) -> dict:
+    """{(slug, 'LONG'|'SHORT'): settle_price_of_that_held_side}."""
+    out: dict = {}
+    for i in range(0, len(slugs), 25):
+        try:
+            rows = (sb.table("poly_activities").select("slug,payload")
+                    .eq("type", "ACTIVITY_TYPE_POSITION_RESOLUTION")
+                    .in_("slug", slugs[i:i + 25])
+                    .limit(1000).execute().data) or []
+        except Exception as e:
+            log.warning("venue resolutions fetch failed: %s", e)
+            continue
+        for r in rows:
+            pr = ((r.get("payload") or {}).get("positionResolution")
+                  if isinstance(r.get("payload"), dict) else None) or {}
+            side = str(pr.get("side") or "")
+            if side.endswith("_LONG"):
+                held = "LONG"
+            elif side.endswith("_SHORT"):
+                held = "SHORT"
+            else:
+                continue                # the UNDEFINED-side twin — poison
+            want_long = (held == "LONG")
+            price = None
+            for ms in ((pr.get("market") or {}).get("marketSides") or []):
+                if bool(ms.get("long")) == want_long:
+                    try:
+                        price = float(ms.get("price"))
+                    except (TypeError, ValueError):
+                        price = None
+                    break
+            if price is not None:
+                out[(r.get("slug"), held)] = price
+    return out
+
+
+def _resolve_venue(sb, bets: list) -> tuple[set, int, int]:
+    """Grade every pending pick whose held position the venue has resolved.
+    Returns (graded ids, won, lost). Skips picks with no pmm_slug (nothing
+    to look up), no resolution row for OUR held side (never filled, sold
+    flat, or we hold the other side — all cases where guessing is worse
+    than waiting), and odd settle prices."""
+    graded: set = set()
+    won = lost = 0
+    cand = []
+    for b in bets:
+        blob = b.get("signal_blob") if isinstance(b.get("signal_blob"), dict) else {}
+        ex = blob.get("execution") if isinstance(blob.get("execution"), dict) else {}
+        slug = blob.get("pmm_slug") or ex.get("pmm_slug")
+        if slug:
+            synth = bool(blob.get("pmm_synthetic") or ex.get("pmm_synthetic"))
+            cand.append((b, str(slug), "SHORT" if synth else "LONG"))
+    if not cand:
+        return graded, 0, 0
+    res = _venue_resolutions(sb, sorted({c[1] for c in cand}))
+    if not res:
+        return graded, 0, 0
+    for b, slug, held in cand:
+        price = res.get((slug, held))
+        if price is None:
+            continue
+        if price >= 0.99:
+            status = "won"
+        elif price <= 0.01:
+            status = "lost"
+        else:
+            continue                    # voided-at-price class — not ours
+        units = b.get("units") or 1
+        try:
+            pnl = _pnl_units(status, b["entry_price"], units)
+        except (TypeError, ValueError):
+            continue                    # no entry price — manual territory
+        clv = None
+        if b.get("clv_pp") is None and b.get("market_type") in (
+                "moneyline", "spread", "total"):
+            try:
+                clv = _compute_clv(sb, b)
+            except Exception:
+                clv = None
+        cv = None
+        if not b.get("closing_vsin"):
+            try:
+                cv = _closing_vsin(sb, b)
+            except Exception:
+                cv = None
+        result = {"graded_by": "venue", "slug": slug,
+                  "held": held, "settle": price}
+        if _update(sb, b["id"], status, pnl, result, clv, cv):
+            graded.add(b["id"])
+            if status == "won":
+                won += 1
+            else:
+                lost += 1
+            log.info("VENUE-graded pick %s %s %s → %s (%+.2fu, settle %s)",
+                     b.get("id"), b.get("event_name"),
+                     b.get("market_type"), status, pnl, price)
+    return graded, won, lost
 
 
 def _update(sb, pick_id: int, status: str, pnl: float,
@@ -823,6 +939,22 @@ def main(argv: list[str] | None = None) -> int:
         # `remapped` is log-only — resolver_runs has fixed columns, and an
         # unknown key in the heartbeat insert would kill the whole heartbeat.
         won = lost = push = unmatched = not_final = unsupported = remapped = 0
+
+        # VENUE PASS FIRST — Polymarket's own settlement outranks ESPN
+        # wherever money actually moved (and is the ONLY grader for props
+        # and venue-minted FCS games). Whatever it grades leaves the ESPN
+        # loop's plate. Venue count is log-only (fixed heartbeat columns).
+        try:
+            v_ids, v_won, v_lost = _resolve_venue(sb, bets)
+        except Exception:
+            log.exception("venue-resolution pass failed — ESPN pass continues")
+            v_ids, v_won, v_lost = set(), 0, 0
+        if v_ids:
+            won += v_won
+            lost += v_lost
+            bets = [b for b in bets if b.get("id") not in v_ids]
+            log.info("venue pass graded %d (%dW/%dL); %d left for ESPN",
+                     len(v_ids), v_won, v_lost, len(bets))
 
         for bet in bets:
             sport = bet.get("sport") or ""
