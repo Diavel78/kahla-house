@@ -162,6 +162,10 @@ ALL_LANES: dict[str, Lane] = {
         # ACTS when something is due (see cellar/batch.py). Long TTL because
         # a model compute can legitimately run for tens of minutes.
         Lane("batch",           60,  3600, note="daily ingests + model computes"),
+        # Cutover night (Sep 3 2026): the per-minute Actions jobs that
+        # never moved — resolver grading every tick, ESPN markets spine
+        # every 5 min inside the lane. Subprocess pattern (batch.py's).
+        Lane("grader",          60,   300, note="pick grading + espn spine"),
     ]
 }
 

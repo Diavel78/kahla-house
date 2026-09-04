@@ -307,6 +307,41 @@ def lane_batch(ctx: Ctx) -> int:
     return _impl(ctx)
 
 
+# The two PER-MINUTE Actions jobs that never moved (cutover night, Sep 3
+# 2026): with the box on local Postgres, scanner-poll's resolver + ESPN
+# ingest write the FROZEN cloud — local picks never grade (cap slots
+# never free, dayof_wait rebets stall) and the schedule spine stops.
+# Same subprocess pattern as batch.py (own sys.path, a hang can't take
+# the daemon down, invocation byte-identical to the workflow it
+# replaces); the subprocess inherits the daemon's env, so it runs
+# against the same local PostgREST as everything else.
+_GRADER_ESPN_TS = {"ts": 0.0}
+
+
+def lane_grader(ctx: Ctx) -> int:
+    import time as _t
+    from .batch import _run_one
+    n = 0
+    ok, out = _run_one(["scripts.bot_picks_resolver"], 240)
+    if ok:
+        n += 1
+    else:
+        log.warning("grader: resolver failed: %s", out[-400:])
+    # ESPN markets spine every ~5 min — the workflow ran it every minute
+    # but the ingest itself is a light idempotent upsert; 5 min matches
+    # how fast schedules actually move. Failure logs and retries next
+    # window (the ESPN-403 class shows up here as repeated warnings, not
+    # a silent green — the whole reason the batch lane exists).
+    if _t.time() - _GRADER_ESPN_TS["ts"] >= 300:
+        _GRADER_ESPN_TS["ts"] = _t.time()
+        ok2, out2 = _run_one(["scripts.ingest_espn_markets", "--commit"], 300)
+        if ok2:
+            n += 1
+        else:
+            log.warning("grader: espn ingest failed: %s", out2[-400:])
+    return n
+
+
 def lane_alerts(ctx: Ctx) -> int:
     import app as _app
     n = 0
@@ -332,6 +367,7 @@ REGISTRY: dict[str, Callable[[Ctx], int]] = {
     "ledger":         lane_ledger,
     "alerts":         lane_alerts,
     "batch":          lane_batch,
+    "grader":         lane_grader,
 }
 
 

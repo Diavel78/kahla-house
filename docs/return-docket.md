@@ -43,6 +43,34 @@ with Rob (close the split, kill Supabase Pro ~$25/mo); sheets pipeline
 + resolver + paperlog/alerts Vercel jobs still point at frozen Supabase
 until then.
 
+SAME-NIGHT FOLLOW-UPS (Sep 3 evening, Rob: "pointless to be frozen" /
+"I got hours"):
+- **SITE MIRROR live** (1567861): the box pushes poly_dash_cache to the
+  cloud after every local write (get_supabase_mirror, env-gated via
+  SUPABASE_MIRROR_URL/_KEY in the box .env — the old cloud creds). One
+  table, one writer, display-only. Dashboard confirmed live again at
+  17:56 (fresh balance/orders on the cloud row). Also restores session
+  observability of the box (derived.cellar rides the mirror).
+- **GRADER LANE built** (this commit): the two per-minute Actions jobs
+  that never moved — `python -m scripts.bot_picks_resolver` every tick
+  + `ingest_espn_markets --commit` every 5 min — as a cellar lane using
+  batch.py's subprocess pattern, inheriting the daemon's LOCAL env.
+  Enable: add `,grader` to CELLAR_LANES in the box .env + pull +
+  kickstart. Without it, local picks never grade (cap slots never free,
+  dayof_wait rebets stall) and the ESPN spine freezes.
+- Batch lane already owned every DAILY ingest/compute (diamond 3:50am,
+  whiff, football props, power ratings, spines) and its subprocesses
+  inherit the daemon env — those went local automatically at cutover.
+  The Actions twins now run harmlessly against the frozen cloud; disable
+  their schedules at C1/C2 proper (spec §8: disable, never delete).
+- Still open after grader: site PICK-BOT pages (games list/pending/
+  dossiers read frozen cloud bot_picks/markets), resolver_runs header
+  on /handicapper reads cloud (stale "graded Nm ago" — cosmetic), Rob
+  must NOT log picks / use the 💰 Bet button on the site until C2 (they
+  write the frozen cloud; the box would never see them). Friday sheets
+  read frozen cloud data (power ratings frozen at Sep 3 — acceptable
+  for one week or C2 lands first).
+
 ## 1-old. STEP C — the Postgres cutover (original plan, executed above)
 `docs/local-postgres-runbook.md` Step C is paint-by-numbers: fresh dump →
 `createdb kahla` + restore → repoint PostgREST db-uri → launchd kickstart
