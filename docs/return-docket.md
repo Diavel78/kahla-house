@@ -21,7 +21,29 @@ then; its milestones feed item 0.
 - First seed_quote fills (signal_blob->>'seed_quote') — alone-in-window
   pricing sanity.
 
-## 1. STEP C — the Postgres cutover (first watched evening)
+## 1. ✅ STEP C EXECUTED — Sep 3 2026, ~5:00-5:30pm AZ, FULL PASS
+Rob's first night home. Fresh dump 16:57 (92MB, verified fresh via
+max(cellar_ticks)=16:56:29), restored into `kahla` (8 ignored errors =
+vault extension ×3 + anon-role policies ×5, all expected), PostgREST
+repointed, .env flipped (backup at .env.bak-supabase), daemon
+re-bootstrapped (⚠ bootout UNLOADS — kickstart can't restart it;
+`launchctl bootstrap system /Library/LaunchDaemons/com.kahlahouse.cellard.plist`).
+RECEIPT: pm_snapshot laps 60s+overruns → completes EVERY minute;
+paperlog 181-190s overruns → green; repeg 607s first lap → GREEN second
+lap (acted=1 through the full local stack); alerts+kalshi_autolog green
+round two. NEW OPS FACTS: (a) Supabase cellar_lease rows PINNED
+(heartbeat now()+7d, note says why) so Vercel NEVER claims the money
+lanes against the frozen Supabase — unpin ONLY on rollback or at C1/C2;
+(b) ~/.kahla/db_url repointed to the local socket (Supabase URI
+preserved at ~/.kahla/db_url.supabase — needed for the farewell dump);
+(c) SUPABASE IS FROZEN as of ~16:56 Sep 3 — run_sql.sh reads STALE
+state for cellar_ticks/bot_picks/poly_activities/exec_probe_runs; box
+observability is psql-on-the-box until C2. NEXT: the C1/C2 decision
+with Rob (close the split, kill Supabase Pro ~$25/mo); sheets pipeline
++ resolver + paperlog/alerts Vercel jobs still point at frozen Supabase
+until then.
+
+## 1-old. STEP C — the Postgres cutover (original plan, executed above)
 `docs/local-postgres-runbook.md` Step C is paint-by-numbers: fresh dump →
 `createdb kahla` + restore → repoint PostgREST db-uri → launchd kickstart
 → two `.env` lines (SUPABASE_URL=http://localhost:3011 — the CADDY SHIM,
