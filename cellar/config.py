@@ -166,6 +166,15 @@ ALL_LANES: dict[str, Lane] = {
         # never moved — resolver grading every tick, ESPN markets spine
         # every 5 min inside the lane. Subprocess pattern (batch.py's).
         Lane("grader",          60,   300, note="pick grading + espn spine"),
+        # Sep 4 2026 — the scalp starvation (Rob: "nothing was for
+        # sale"). Riding inside the repeg lap, the chase pre-spent the
+        # shared budget and the scalp exited `gate: budget` every lap
+        # for 30+ hours: sells flat at ~58 while positions climbed
+        # 75 → 135. Its own lane = its own budget; the in-repeg call
+        # stands down when this lane is in CELLAR_LANES (env gate in
+        # _repeg_tick), so the one-scalp-at-a-time invariant holds.
+        Lane("scalp",          120,   300, writes_money=True,
+             needs_owner=True, stuck_s=600, note="exit asks (sell arm)"),
     ]
 }
 

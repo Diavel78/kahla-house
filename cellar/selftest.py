@@ -156,8 +156,9 @@ def test_lane_registry_matches_config() -> None:
     extra = [n for n in lanes.REGISTRY if n not in config.ALL_LANES]
     check("no orphan lane implementations", not extra, f"orphans {extra}")
     money = {n for n, l in config.ALL_LANES.items() if l.writes_money}
-    check("money lanes are exactly opener/repeg/harvest",
-          money == {"opener", "repeg", "harvest"}, f"got {sorted(money)}")
+    check("money lanes are exactly opener/repeg/harvest/scalp",
+          money == {"opener", "repeg", "harvest", "scalp"},
+          f"got {sorted(money)}")
     bad = [n for n, l in config.ALL_LANES.items() if l.ttl_s <= l.every_s]
     check("every TTL exceeds its cadence", not bad, f"too tight: {bad}")
 
@@ -280,16 +281,16 @@ def test_owner_dependent_lanes() -> None:
     """
     from cellar import config
     need = {n for n, l in config.ALL_LANES.items() if l.needs_owner}
-    check("owner-dependent lanes are exactly the six that need a uid",
+    check("owner-dependent lanes are exactly the seven that need a uid",
           need == {"repeg", "harvest", "ledger", "kalshi_autolog", "alerts",
-                   "opener"},
+                   "opener", "scalp"},
           f"got {sorted(need)}")
     # A money lane failing this way is the dangerous case: healthy-looking
     # while real orders go unmanaged (or never placed at all).
     money_needing = {n for n, l in config.ALL_LANES.items()
                      if l.needs_owner and l.writes_money}
     check("every money lane is owner-covered",
-          money_needing == {"repeg", "harvest", "opener"},
+          money_needing == {"repeg", "harvest", "opener", "scalp"},
           f"got {sorted(money_needing)}")
 
 

@@ -2451,6 +2451,11 @@ _LANE_WORK_WARN_S = {
     "batch":         100_800,      # daily jobs; 28h covers a late run
     "alerts":         86_400,
     "kalshi_autolog":   None,      # dormant by design — see above
+    # scalp: zero work on a settled overnight book is real (asks rest,
+    # nothing walks). The STARVATION detector is the dead-scalp tripwire
+    # in _cellar_health, which reads outcomes (asks placed vs candidates
+    # seen) — not this quiet-clock. 6h covers the overnight lull.
+    "scalp":          21_600,
 }
 
 
@@ -2649,6 +2654,66 @@ def _cellar_health(sb) -> dict:
                     _l["state"] = "error"
                     _l["error"] = (f"CHASE DEAD: {c2 - w2} chaseable "
                                    f"outbid seen, 0 amends in 2h")
+                    bad += 1
+    except Exception:
+        pass
+    # ── DEAD-SCALP TRIPWIRE (Sep 4 2026 — Rob's lightbulb lesson) ────────
+    # The scalp ran 30+ HOURS with zero asks placed while every dashboard
+    # (and two of this session's own checks) read green: it ticked inside
+    # the repeg lap, the lap's chase work pre-spent the budget, and the
+    # scalp exited `gate: budget` every single lap. Sells sat flat at ~58
+    # while open positions climbed 75 → 135 — the merchandise was never on
+    # the shelf, and the health card counted lightbulbs. Rob: "your check
+    # didn't realize that nothing was for sale?" Same disease as CHASE
+    # DEAD, one arm over: this is the SCALP's usefulness clock. Two
+    # accusations, either turns the lane red:
+    #  - STARVED: most laps budget-gated with zero scalp actions in 3h
+    #  - DEAD: candidates seen, zero actions (place/walk/repair) in 3h
+    try:
+        st3 = (sb.table("cellar_ticks").select("lane,detail")
+               .in_("lane", ["repeg", "scalp"])
+               .gte("started_at", (datetime.now(timezone.utc)
+                                   - timedelta(hours=3)).isoformat())
+               .limit(300).execute().data) or []
+        laps = 0
+        budg = 0
+        sc_unc = 0
+        sc_act = 0
+        for t in st3:
+            d = t.get("detail") if isinstance(t.get("detail"), dict) else {}
+            s = (d.get("scalp") if t.get("lane") == "repeg" else d) or {}
+            if not isinstance(s, dict) or ("cands" not in s
+                                           and "gate" not in s):
+                continue
+            if s.get("gate") == "own_lane":
+                continue        # repeg stood down — the scalp lane owns it
+            laps += 1
+            if s.get("gate") == "budget":
+                budg += 1
+            # uncovered = inventory with NO resting ask, stamped by the
+            # scalp walk itself. cands is the wrong key — a healthy quiet
+            # book (every ask at its floor) has high cands and zero
+            # actions, which is fine. Naked inventory is not.
+            sc_unc += int(s.get("uncovered") or 0)
+            sc_act += (int(s.get("placed") or 0) + int(s.get("walked") or 0)
+                       + int(s.get("dup_canceled") or 0)
+                       + int(s.get("shadow") or 0))
+        _accuse = None
+        if laps >= 6 and sc_act == 0:
+            if budg >= laps / 2:
+                _accuse = (f"SCALP STARVED: budget-gated {budg}/{laps} "
+                           f"laps, 0 asks in 3h")
+            elif sc_unc >= 10:
+                _accuse = (f"SCALP DEAD: {sc_unc} uncovered positions "
+                           f"seen, 0 asks in 3h")
+        if _accuse:
+            _tgt = ("scalp" if any(_l["lane"] == "scalp" for _l in lanes)
+                    else "repeg")
+            for _l in lanes:
+                if _l["lane"] == _tgt and _l["state"] in ("ok", "idle",
+                                                          "vercel"):
+                    _l["state"] = "error"
+                    _l["error"] = _accuse
                     bad += 1
     except Exception:
         pass
@@ -20934,6 +20999,8 @@ _CELLAR_LEASE_ENFORCED = (os.environ.get("CELLAR_LEASE_ENFORCED") or "").strip()
 #   "harvest" -> _harvest_tick
 #   "ledger"  -> _poly_ledger_tick
 #   "alerts"  -> _outbid_alerts
+#   "scalp"   -> _scalp_tick (Sep 4 2026 — own lane, own budget; the
+#                in-repeg call stands down via the CELLAR_LANES env gate)
 # NOT YET GATED (all on the "alerts" lane, all in the paperlog route body):
 #   _tg_flush, _bet_alerts, _opener_watchdog. Each is individually near-
 #   idempotent (per-bet markers, send-and-mark, cooldowns) so double-running
@@ -22043,6 +22110,11 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             comp_ask = c
             break
         if not mine:
+            # UNCOVERED = inventory with no resting ask. The dead-scalp
+            # tripwire keys on THIS, not on cands: a healthy quiet book
+            # (every ask resting at its floor) has high cands and zero
+            # actions — that's fine. Inventory sitting naked is not.
+            res["uncovered"] = res.get("uncovered", 0) + 1
             # ── PLACE: join the top of the book, never cross, floor binds
             if _inplay:
                 tgt = max(floor_c, (_grid_dn(best_bid, tick) + tick
@@ -22863,12 +22935,22 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                                                positions=lap_positions)
         except Exception:
             pass
-        # THE SCALP SELL ARM rides the same lease (spec: serial writes,
-        # beside the buy repeg's budget). Shadow-only until SCALP_ENABLED.
+        # THE SCALP SELL ARM rode this lease from Aug 28 to Sep 4 2026 —
+        # and starved to death here: the chase work pre-spends the shared
+        # budget, so the scalp exited `gate: budget` every lap for 30+
+        # hours while fills piled up with no exit asks (sells flat at ~58
+        # as positions climbed 75 → 135; Rob caught it, two health checks
+        # didn't). When the box enables the dedicated `scalp` lane this
+        # call stands down — one scalp, its own budget, never the
+        # leftovers. Kept as the fallback so a box without the lane
+        # configured still scalps the old way.
         try:
-            res["scalp"] = _scalp_tick(sb, now, client=lap_client,
-                                       orders=lap_orders,
-                                       positions=lap_positions)
+            if "scalp" in (os.environ.get("CELLAR_LANES") or ""):
+                res["scalp"] = {"gate": "own_lane"}
+            else:
+                res["scalp"] = _scalp_tick(sb, now, client=lap_client,
+                                           orders=lap_orders,
+                                           positions=lap_positions)
         except Exception:
             pass
     except Exception:

@@ -356,6 +356,20 @@ def lane_alerts(ctx: Ctx) -> int:
     return n
 
 
+def lane_scalp(ctx: Ctx) -> int:
+    """The sell arm, freed from the repeg lap's leftovers (Sep 4 2026 —
+    the starvation Rob caught: `gate: budget` every lap for 30+ hours,
+    zero exit asks while fills piled up). Own lane, own budget; the
+    in-repeg scalp call stands down via the CELLAR_LANES env gate, so
+    exactly one scalp runs. Self-reads client/orders/positions."""
+    import app as _app
+    stats = _app._scalp_tick(ctx.sb, ctx.now) or {}
+    log.info("scalp: %s", stats)
+    return (int(stats.get("placed") or 0) + int(stats.get("walked") or 0)
+            + int(stats.get("dup_canceled") or 0)
+            + int(stats.get("shadow") or 0))
+
+
 REGISTRY: dict[str, Callable[[Ctx], int]] = {
     "pm_snapshot":    lane_pm_snapshot,
     "paperlog":       lane_paperlog,
@@ -368,6 +382,7 @@ REGISTRY: dict[str, Callable[[Ctx], int]] = {
     "alerts":         lane_alerts,
     "batch":          lane_batch,
     "grader":         lane_grader,
+    "scalp":          lane_scalp,
 }
 
 
