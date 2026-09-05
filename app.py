@@ -7970,7 +7970,25 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
     # canceled everything → clear the phantoms). Guard: ONLY when BOTH Poly
     # reads SUCCEEDED (orders/positions not None) — a failed read must never
     # look like "nothing on Poly" and wipe the book. Only auto-logged rows.
-    if orders is not None and positions is not None:
+    # POSITIONS-EMPTY SANITY (Sep 5 2026, the venue trading-halt day): a
+    # degraded venue can answer 200 with an EMPTY positions map while the
+    # account holds ~130 positions — every filled pick then reads "sold
+    # pre-game" and is deleted (8 football positions were re-booked bare
+    # by ghost adoption that afternoon). An empty map while the book says
+    # it holds many filled bets is not truth; skip removals this call.
+    _suspect_empty = False
+    if orders is not None and positions is not None and not positions:
+        try:
+            _fk = (sb.table("bot_picks").select("id")
+                   .eq("asked_by", owner_uid).eq("status", "pending")
+                   .filter("signal_blob->>filled", "eq", "true")
+                   .limit(6).execute().data) or []
+            _suspect_empty = len(_fk) >= 5
+        except Exception:
+            _suspect_empty = True
+        if _suspect_empty:
+            out["removal_skipped"] = "positions_empty_suspect"
+    if orders is not None and positions is not None and not _suspect_empty:
         backed = {o["slug"] for o in orders if o.get("slug")}
         backed |= set(positions.keys())
         try:
