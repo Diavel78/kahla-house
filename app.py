@@ -6376,9 +6376,26 @@ KALSHI_EXECUTION = False
 # _ws_quote. On Vercel nothing ever writes it, so every read misses and
 # callers take their REST path — zero behavioral change off the box.
 WS_QUOTES: dict = {}          # slug -> (bid_c|None, ask_c|None, mono_ts)
-WS_QUOTE_FRESH_S = 90.0       # staleness doctrine: older than this is a
-                              # MISS, never a guess — REST decides (the
-                              # "socket as hint" rule, one level deeper)
+WS_QUOTE_FRESH_S = 90.0       # age rule: a row this young is fresh whatever
+                              # the socket says (covers a just-dropped slug)
+# PRESENCE FRESHNESS (Sep 5 2026 — the 30-minute-lap root cause). The
+# markets socket sends a LITE frame only when a book CHANGES, so under an
+# age-only rule every QUIET market (a Week-3 total nobody touches for
+# hours) expired at 90s and paid a REST read: the fill-status walk ran
+# fs_hit 867 / fs_rest 2005 per lap, three lanes did it at once, and the
+# JSON of 2,000 REST bodies under one GIL turned 33s of chase work into a
+# 1,898s lap — overnight too (20-min laps at 3am with no slate). A quiet
+# book's last frame IS its current state for as long as (a) the socket
+# has stayed connected since the row was written (same epoch), (b) the
+# slug is still subscribed (dropped/evicted slugs are forgotten by the
+# feed), and (c) the socket has spoken within WS_MKTS_ALIVE_S (heartbeats
+# count). Any of those fails → the age rule → REST decides. The feed
+# thread owns every write here; lane threads only read (GIL-atomic).
+WS_MKTS_EPOCH = 0             # +1 per markets-socket connect (never reset)
+WS_MKTS_UP = False            # False from disconnect until the next connect
+WS_MKTS_LAST_RX = 0.0         # monotonic ts of the last frame (any kind)
+WS_MKTS_ALIVE_S = 120.0       # silence past this = the socket can't vouch
+WS_QUOTE_EPOCH: dict = {}     # slug -> epoch its row was written under
 
 
 class _WsNotOutbid(Exception):
@@ -6395,9 +6412,16 @@ def _ws_quote(slug: str):
     if not t:
         return None
     bid, ask, ts = t
-    if _time.monotonic() - ts > WS_QUOTE_FRESH_S:
-        return None
-    return bid, ask
+    now = _time.monotonic()
+    if now - ts <= WS_QUOTE_FRESH_S:
+        return bid, ask
+    # presence rule: quiet-since-written on a live, still-subscribed slug
+    if (WS_MKTS_UP and WS_MKTS_EPOCH > 0
+            and WS_QUOTE_EPOCH.get(slug) == WS_MKTS_EPOCH
+            and now - WS_MKTS_LAST_RX <= WS_MKTS_ALIVE_S):
+        _WS_PRICE_STATS["presence"] = _WS_PRICE_STATS.get("presence", 0) + 1
+        return bid, ask
+    return None
 
 
 def _pmm_book(client, slug: str) -> dict | None:

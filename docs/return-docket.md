@@ -201,6 +201,30 @@ env paste; nothing started):**
    §12c once the farewell dump is verified.
 Trade-off Rob accepted Fri: site up only while box + home internet up.
 
+**✅ C2 EXECUTED Sat Sep 5 ~9:00-9:15am AZ (Rob at the terminal).** Steps
+1-4 done: cloudflared 2026.8.3 (prebuilt binary — brew wanted to compile
+Go from source for 30 min mid-slate, killed), tunnel `kahla-db`
+(c4cfd1f5…), CNAME routed, LaunchAgent up (4 edge connections PHX/LAX),
+Vercel env swapped + redeployed (`dpl_HKoW3K…`). PROOF: Caddy access log
+shows Vercel's per-minute `cellar_claim` calls arriving with `Cf-Ray`.
+⚠ THE HOLE WE CLOSED FIRST: unauthed GET through the tunnel returned 200
+— PostgREST's `db-anon-role` was `robkahla` (superuser). Fixed with a
+grant-less `web_anon` role + SIGUSR2 config reload (no restart); unauthed
+now 401 locally and publicly. Step 5 (cron-job.org `scanner-poll` off)
+still Rob's. Also: box → GitHub over SSH now (keychain had no credential).
+
+**✅ SPEED ROOT CAUSE FOUND (queue #3) — not the GIL per se, the quote
+table's 90s AGE rule.** Journal proof: repeg `ms: 33569` (its chase work)
+inside a 1,898s lap; opener `fs_hit 867 / fs_rest 2005` per lap. Every
+QUIET market missed the table at 90s and paid a REST book read; 3 lanes ×
+~700 REST bodies parsing under one GIL = 30-min laps — 20-min laps at 3am
+with no slate were the tell. Single REST read measured 0.08-0.22s
+standalone; ~1s under the thrash. Fix (73/73 selftests): PRESENCE
+freshness — socket epoch + liveness + still-subscribed ⇒ a quiet row is
+current. Expect fs_rest → ~0 and laps → minutes at the next restart;
+the OMS executor (2 touches in 120s) should stop starving for the same
+reason — measure `oms_touch` per lap after.
+
 
 ## 0. First hour back — read the week
 - `desired_orders`: never_tried should have hit ~0 within a day of

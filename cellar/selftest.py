@@ -322,6 +322,40 @@ def test_lane_covers_its_documented_engines() -> None:
                   f"app.py says {lane} owns {eng}; {fn.__name__} never calls it")
 
 
+def test_ws_quote_presence() -> None:
+    """Quote-table freshness (Sep 5 2026): a quiet row stays valid while the
+    markets socket is up, in the epoch that wrote it, and recently heard;
+    any of those failing falls back to the 90s age rule."""
+    import time as _t
+    import app as _app
+    slug = "__selftest-slug__"
+    saved = (_app.WS_MKTS_EPOCH, _app.WS_MKTS_UP, _app.WS_MKTS_LAST_RX)
+    try:
+        old_ts = _t.monotonic() - (_app.WS_QUOTE_FRESH_S + 30.0)
+        _app.WS_QUOTES[slug] = (41.0, 43.0, old_ts)
+        _app.WS_MKTS_EPOCH, _app.WS_MKTS_UP = 7, True
+        _app.WS_MKTS_LAST_RX = _t.monotonic()
+        _app.WS_QUOTE_EPOCH[slug] = 7
+        check("old row + live socket + same epoch => fresh",
+              _app._ws_quote(slug) == (41.0, 43.0))
+        _app.WS_QUOTE_EPOCH[slug] = 6
+        check("old row from a previous epoch => miss", _app._ws_quote(slug) is None)
+        _app.WS_QUOTE_EPOCH[slug] = 7
+        _app.WS_MKTS_UP = False
+        check("socket down => miss", _app._ws_quote(slug) is None)
+        _app.WS_MKTS_UP = True
+        _app.WS_MKTS_LAST_RX = _t.monotonic() - (_app.WS_MKTS_ALIVE_S + 5.0)
+        check("silent socket => miss", _app._ws_quote(slug) is None)
+        _app.WS_MKTS_LAST_RX = _t.monotonic()
+        _app.WS_QUOTE_EPOCH.pop(slug, None)          # unsubscribed (forgotten)
+        check("forgotten slug => miss", _app._ws_quote(slug) is None)
+        _app.WS_QUOTES[slug] = (41.0, 43.0, _t.monotonic())
+        check("young row => fresh regardless", _app._ws_quote(slug) == (41.0, 43.0))
+    finally:
+        _app.WS_QUOTES.pop(slug, None); _app.WS_QUOTE_EPOCH.pop(slug, None)
+        _app.WS_MKTS_EPOCH, _app.WS_MKTS_UP, _app.WS_MKTS_LAST_RX = saved
+
+
 def test_dry_run_blackout() -> None:
     """A money lane enabled under DRY_RUN must refuse the boot.
 
@@ -521,6 +555,7 @@ def main() -> int:
               test_batch_commands_exist, test_batch_flags_are_real,
               test_batch_blocked_deps, test_owner_dependent_lanes,
               test_dry_run_blackout, test_overrun_detector,
+              test_ws_quote_presence,
               test_lane_covers_its_documented_engines,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()

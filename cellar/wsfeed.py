@@ -99,6 +99,36 @@ def _write_quote(slug: str, pv: dict) -> None:
             return round(v * 200) / 2.0 if 0 < v < 1 else None
         _app.WS_QUOTES[slug] = (_c(pv.get("bestBid")), _c(pv.get("bestAsk")),
                                 time.monotonic())
+        # presence freshness: the row belongs to THIS connection epoch
+        _app.WS_QUOTE_EPOCH[slug] = _app.WS_MKTS_EPOCH
+    except Exception:
+        pass
+
+
+def _forget_quotes(slugs) -> None:
+    """Slugs we no longer subscribe to can go quiet without meaning
+    'unchanged' — drop their epoch so the readers fall back to the age
+    rule (the row itself stays; a <90s row is still fresh)."""
+    try:
+        import app as _app
+        for sl in slugs or ():
+            _app.WS_QUOTE_EPOCH.pop(sl, None)
+    except Exception:
+        pass
+
+
+def _mkts_presence(up: bool | None = None, rx: bool = False) -> None:
+    """Feed-thread-only writes of the socket's liveness for _ws_quote."""
+    try:
+        import app as _app
+        if rx:
+            _app.WS_MKTS_LAST_RX = time.monotonic()
+        if up is True:
+            _app.WS_MKTS_EPOCH += 1
+            _app.WS_MKTS_LAST_RX = time.monotonic()
+            _app.WS_MKTS_UP = True
+        elif up is False:
+            _app.WS_MKTS_UP = False
     except Exception:
         pass
 
@@ -669,6 +699,7 @@ class MarketsFeed:
                 self._covered -= old
                 self._base_seen -= old
                 self._expiry.pop(gid, None)
+                _forget_quotes(old)
                 changed = changed or bool(old)
                 continue
             # add: delta only — the venue rejects overlapping subscribes
@@ -693,6 +724,7 @@ class MarketsFeed:
                         self._covered -= o2
                         self._base_seen -= o2
                         self._expiry.pop(g2, None)
+                        _forget_quotes(o2)
                 if len(self._covered) + len(new) > MKTS_MAX_SLUGS:
                     log.warning("ws mkts budget full (%d) — group %s not "
                                 "subscribed", len(self._covered), gid)
@@ -752,6 +784,7 @@ class MarketsFeed:
                     self._covered = set()
                     self._base_seen = set()
                     self._ops = prev + self._ops
+                _mkts_presence(up=True)      # new epoch: old rows age out
                 if not self._was_connected:
                     self._was_connected = True
                     self._stamp("connected")
@@ -767,6 +800,7 @@ class MarketsFeed:
                     if raw is None or raw == "":
                         raise ConnectionError("empty frame")
                     last_rx = time.time()
+                    _mkts_presence(rx=True)      # any frame = socket alive
                     self.msgs += 1
                     try:
                         msg = json.loads(raw)
@@ -836,6 +870,7 @@ class MarketsFeed:
                                      "subscriptionType"))[:50],
                         WAKE_MKTS_MIN_S)
             except Exception as e:
+                _mkts_presence(up=False)     # readers fall back to the age rule
                 if self.stop.is_set():
                     break
                 if self._was_connected:
