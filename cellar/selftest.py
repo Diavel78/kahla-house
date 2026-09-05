@@ -392,9 +392,13 @@ def test_ws_mkts_request_budget() -> None:
     check("a rejected core request un-covers its slugs", "core-1" not in mf._covered)
     check("and re-queues core", any(op[1] == "core" for op in mf._ops))
     mf._ops = []
-    mf.set_slugs({"core-1", "core-2"}, replace=True); mf._apply_ops(ws)
-    mf.set_slugs({"core-1", "core-3"}, replace=True); mf._apply_ops(ws)   # core-2 fell off
-    check("a dropped core slug triggers a one-request rebuild",
+    big = {f"core-{i}" for i in range(40)}
+    mf.set_slugs(big, replace=True); mf._apply_ops(ws)
+    mf.set_slugs(big - {"core-0"}, replace=True); mf._apply_ops(ws)   # one fell off
+    check("one fallen-off core slug does NOT rebuild (cheap to keep)",
+          "core" in mf._groups)
+    mf.set_slugs({f"core-{i}" for i in range(5)}, replace=True); mf._apply_ops(ws)  # 35 fell off
+    check("real core drift (>20 fallen off) triggers a one-request rebuild",
           "core" not in mf._groups and any(op[1] == "core" for op in mf._ops))
     unsubs = [m for m in ws.sent if "unsubscribe" in m]
     check("rebuild unsubscribed the old core request(s)", len(unsubs) >= 1)
