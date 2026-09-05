@@ -65,6 +65,17 @@ SUB_MARKET_LITE = "SUBSCRIPTION_TYPE_MARKET_DATA_LITE"
 # itself), so the budget stays at the measured-good size and groups
 # keep every individual subscribe small.
 MKTS_MAX_SLUGS = 4000
+# REQUEST budget per connection (Sep 5 2026, found in the log, not the
+# probe): the venue rejects the 13th+ live subscription REQUEST with
+# "max subscriptions per connection reached" — the cap probe fired a few
+# huge requests and never saw it, while group subscriptions (one request
+# per football ladder) sailed past it and the rejected request at 10:09
+# was g16-CORE, the group carrying our own order slugs. Core lost its
+# quotes, the fill-status walk paid ~1,000 REST reads a lap. Budget 10;
+# core is first-class (ladders are evicted to seat it) and is rebuilt as
+# ONE request whenever it has accumulated deltas or dropped slugs.
+MKTS_MAX_RIDS = 10
+CORE_REBUILD_RIDS = 2
 
 RECV_TIMEOUT_S = 75.0    # heartbeat watchdog: silence this long = dead socket
 WAKE_MIN_S = 15.0        # private-event wake throttle (repeg)
@@ -574,6 +585,7 @@ class MarketsFeed:
         # one rid per group, adds deduped against the covered set,
         # drops by original rid.
         self._groups: dict[str, tuple[str, frozenset]] = {}  # gid->(rid,slugs)
+        self._rid_slugs: dict[str, frozenset] = {}   # rid -> the slugs IT carries
         self._covered: set[str] = set()      # union of all group slugs
         self._ops: list = []                 # queued (verb, gid, slugs, exp)
         self._expiry: dict[str, float] = {}  # gid -> epoch expiry (eviction)
@@ -678,6 +690,59 @@ class MarketsFeed:
     # (the overlap-rejection lesson, applied to ourselves).
     _GROUP_REBUILD_RIDS = 20
 
+    def _evict_one(self, ws, protect: str) -> bool:
+        """Drop the non-core ladder group with the FARTHEST expiry (least
+        urgent for the pricer; REST covers its rungs). True if one went."""
+        cands = [(g, self._expiry.get(g)) for g in self._groups
+                 if g not in ("core", protect)]
+        if not cands:
+            return False
+        cands.sort(key=lambda kv: (kv[1] is None, kv[1] or 0), reverse=True)
+        g2 = cands[0][0]
+        r2, o2 = self._groups.pop(g2, (None, frozenset()))
+        for r in (r2 or []):
+            try:
+                ws.send(json.dumps({"unsubscribe": {"requestId": r}}))
+            except Exception:
+                pass
+            self._rid_slugs.pop(r, None)
+        self._covered -= o2
+        self._base_seen -= o2
+        self._expiry.pop(g2, None)
+        _forget_quotes(o2)
+        log.info("ws mkts evicted ladder %s (%d slugs) to seat %s",
+                 g2, len(o2), protect)
+        return True
+
+    def _on_rejected(self, rid: str) -> None:
+        """The venue refused subscription request `rid`: its slugs are NOT
+        covered, whatever we recorded. Un-cover them so a later add can
+        retry; if it was core, re-queue core right away (the request
+        budget path evicts a ladder for it)."""
+        gone = set(self._rid_slugs.pop(rid, frozenset()))
+        gid = None
+        for g, (rids, sl) in list(self._groups.items()):
+            if rid in rids:
+                gid = g
+                rids2 = [r for r in rids if r != rid]
+                keep = frozenset(set(sl) - gone)
+                if rids2:
+                    self._groups[g] = (rids2, keep)
+                else:
+                    self._groups.pop(g, None)
+                    self._expiry.pop(g, None)
+                break
+        self._covered -= gone
+        self._base_seen -= gone
+        _forget_quotes(gone)
+        if gid == "core" and gone:
+            with self._lock:
+                self._ops.append(("add", "core", gone, None,
+                                  time.time() + 1.0))
+        log.warning("ws mkts subscription %s REJECTED (%s, %d slugs)%s",
+                    rid, gid, len(gone),
+                    " — core re-queued" if gid == "core" else "")
+
     def _apply_ops(self, ws) -> None:
         ripe = []
         requeue = []
@@ -696,18 +761,51 @@ class MarketsFeed:
                 rids, old = self._groups.pop(gid, (None, frozenset()))
                 for r in (rids or []):
                     ws.send(json.dumps({"unsubscribe": {"requestId": r}}))
+                    self._rid_slugs.pop(r, None)
                 self._covered -= old
                 self._base_seen -= old
                 self._expiry.pop(gid, None)
                 _forget_quotes(old)
                 changed = changed or bool(old)
                 continue
+            # CORE HYGIENE: the repeg lap pushes the WHOLE current order
+            # set. Slugs that fell off (cancels/fills) and accumulated
+            # delta-requests both mean: tear core down and re-add it as
+            # one clean request (2s later, after the unsubscribes land).
+            if gid == "core" and gid in self._groups:
+                c_rids, c_old = self._groups[gid]
+                stale = set(c_old) - set(slugs)
+                if stale or len(c_rids) >= CORE_REBUILD_RIDS:
+                    for r in c_rids:
+                        ws.send(json.dumps({"unsubscribe": {"requestId": r}}))
+                        self._rid_slugs.pop(r, None)
+                    self._groups.pop(gid, None)
+                    self._covered -= set(c_old)
+                    self._base_seen -= set(c_old)
+                    _forget_quotes(stale)
+                    with self._lock:
+                        self._ops.append(("add", gid, set(slugs), exp,
+                                          time.time() + 2.0))
+                    changed = True
+                    continue
             # add: delta only — the venue rejects overlapping subscribes
             new = set(slugs) - self._covered
             if exp is not None:
                 self._expiry[gid] = exp
             if not new:
                 continue
+            # REQUEST budget: core evicts ladders to seat itself; a ladder
+            # that finds no room is skipped (its rungs price via REST).
+            while (sum(len(r) for r, _s in self._groups.values())
+                   >= MKTS_MAX_RIDS):
+                if gid != "core" or not self._evict_one(ws, protect=gid):
+                    break
+            if (sum(len(r) for r, _s in self._groups.values())
+                    >= MKTS_MAX_RIDS):
+                if gid != "core":
+                    log.info("ws mkts request budget full — ladder %s "
+                             "not subscribed (REST prices it)", gid)
+                    continue
             # budget: evict expired ladder groups first, then refuse
             if len(self._covered) + len(new) > MKTS_MAX_SLUGS:
                 for g2, e2 in sorted(self._expiry.items(),
@@ -738,6 +836,7 @@ class MarketsFeed:
             rids, old = self._groups.get(gid, ([], frozenset()))
             rids = list(rids) + [rid]
             self._groups[gid] = (rids, frozenset(old | new))
+            self._rid_slugs[rid] = frozenset(new)
             self._covered |= new
             self._base_seen -= new       # their next frame = the baseline
             changed = True
@@ -746,6 +845,7 @@ class MarketsFeed:
                 cur = set(self._groups[gid][1])
                 for r in rids:
                     ws.send(json.dumps({"unsubscribe": {"requestId": r}}))
+                    self._rid_slugs.pop(r, None)
                 self._groups.pop(gid, None)
                 self._covered -= cur
                 self._base_seen -= cur
@@ -781,6 +881,7 @@ class MarketsFeed:
                     prev = [("add", g, set(s), self._expiry.get(g))
                             for g, (r, s) in self._groups.items()]
                     self._groups = {}
+                    self._rid_slugs = {}
                     self._covered = set()
                     self._base_seen = set()
                     self._ops = prev + self._ops
@@ -815,7 +916,11 @@ class MarketsFeed:
                             raise ConnectionError("heartbeat echo failed")
                         continue
                     if "error" in msg:
-                        log.warning("ws mkts error frame: %s", str(msg)[:300])
+                        _erid = msg.get("requestId") or msg.get("request_id")
+                        if _erid and "subscription" in str(msg.get("error", "")).lower():
+                            self._on_rejected(str(_erid))
+                        else:
+                            log.warning("ws mkts error frame: %s", str(msg)[:300])
                         continue
                     rid = msg.get("requestId") or msg.get("request_id")
                     # The SDK's markets handler has NO snapshot branch —

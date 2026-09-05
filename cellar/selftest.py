@@ -356,6 +356,50 @@ def test_ws_quote_presence() -> None:
         _app.WS_MKTS_EPOCH, _app.WS_MKTS_UP, _app.WS_MKTS_LAST_RX = saved
 
 
+def test_ws_mkts_request_budget() -> None:
+    """Markets-feed request budget (Sep 5 2026): core evicts a ladder to
+    seat itself, a ladder past the budget is skipped, core rebuilds as one
+    request, and a venue rejection un-covers the request's slugs."""
+    import json as _json
+    import time as _t
+    from cellar import wsfeed as W
+
+    class FakeWS:
+        def __init__(self): self.sent = []
+        def send(self, raw): self.sent.append(_json.loads(raw))
+    mf = W.MarketsFeed.__new__(W.MarketsFeed)
+    import threading as _th
+    mf._lock = _th.Lock(); mf._groups = {}; mf._rid_slugs = {}
+    mf._covered = set(); mf._ops = []; mf._expiry = {}; mf._gseq = 0
+    mf._base_seen = set(); mf._dirty_add = None
+    ws = FakeWS()
+    for i in range(W.MKTS_MAX_RIDS):
+        mf.add_group(f"lad{i}", {f"l{i}-a", f"l{i}-b"}, _t.time() + 3600 * (i + 1))
+    mf._apply_ops(ws)
+    check("ten ladders fill the request budget",
+          sum(len(r) for r, _ in mf._groups.values()) == W.MKTS_MAX_RIDS)
+    mf.add_group("lad_extra", {"x-a"}, _t.time() + 99)
+    mf._apply_ops(ws)
+    check("an 11th ladder is skipped, not subscribed", "lad_extra" not in mf._groups)
+    mf.set_slugs({"core-1", "core-2"}, replace=True)
+    mf._apply_ops(ws)
+    check("core evicted a ladder and subscribed", "core" in mf._groups
+          and sum(len(r) for r, _ in mf._groups.values()) <= W.MKTS_MAX_RIDS)
+    farthest = f"lad{W.MKTS_MAX_RIDS - 1}"
+    check("the evicted ladder was the farthest-expiring one", farthest not in mf._groups)
+    core_rid = mf._groups["core"][0][0]
+    mf._on_rejected(core_rid)
+    check("a rejected core request un-covers its slugs", "core-1" not in mf._covered)
+    check("and re-queues core", any(op[1] == "core" for op in mf._ops))
+    mf._ops = []
+    mf.set_slugs({"core-1", "core-2"}, replace=True); mf._apply_ops(ws)
+    mf.set_slugs({"core-1", "core-3"}, replace=True); mf._apply_ops(ws)   # core-2 fell off
+    check("a dropped core slug triggers a one-request rebuild",
+          "core" not in mf._groups and any(op[1] == "core" for op in mf._ops))
+    unsubs = [m for m in ws.sent if "unsubscribe" in m]
+    check("rebuild unsubscribed the old core request(s)", len(unsubs) >= 1)
+
+
 def test_dry_run_blackout() -> None:
     """A money lane enabled under DRY_RUN must refuse the boot.
 
@@ -555,7 +599,7 @@ def main() -> int:
               test_batch_commands_exist, test_batch_flags_are_real,
               test_batch_blocked_deps, test_owner_dependent_lanes,
               test_dry_run_blackout, test_overrun_detector,
-              test_ws_quote_presence,
+              test_ws_quote_presence, test_ws_mkts_request_budget,
               test_lane_covers_its_documented_engines,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()

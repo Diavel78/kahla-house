@@ -255,6 +255,17 @@ scalp/OMS see them), then build football ghost adoption by slug→market
 (the slug names the game + date; no venue lookup needed) into
 `_reconcile_tick` or the autolog.
 
+**✅ 09:57 restart receipts:** opener 278→366s, repeg 309→376s, scalp
+405s, alerts 21-84s, kalshi_autolog 2s (from 30-40 min). Zero errors.
+Remaining cost = fill-status REST (`fs_rest 1031` vs `presence 443` per
+opener window) — ROOT: the log said `max subscriptions per connection
+reached` for g13..g16 and **g16 was CORE**: the venue caps subscription
+REQUESTS (~12/conn), not slugs; football ladder groups took the seats
+and our order slugs never subscribed. Fix (81/81 selftests): request
+budget 10, core-first eviction, core one-request rebuild, rejection
+frames handled. Expect fs_rest → ~0 and laps ~1-2 min at the next
+restart. Ghost adoption of the 6 strays awaits Rob's go.
+
 
 ## 0. First hour back — read the week
 - `desired_orders`: never_tried should have hit ~0 within a day of
