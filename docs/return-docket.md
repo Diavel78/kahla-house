@@ -5,6 +5,138 @@ item is READY — spec'd or scripted, no design left, just watched hands.
 The daily check (9am AZ Routine, absence mode) owns the machine until
 then; its milestones feed item 0.
 
+---
+
+# ⚡ SESSION HANDOFF — Sat Sep 5 2026, ~8am AZ (read this FIRST)
+
+Written closing the GIL-cliff-Friday session (Rob at the box all
+evening + Saturday morning status). Everything below was verified this
+morning unless marked open. CFB Saturday slate starts ~9am AZ.
+
+## Where the machine is (verified ~7:50am AZ)
+- **Box on LOCAL Postgres since Thu ~5pm (Step C full pass, §1).
+  Cloud Supabase is FROZEN** except two mirrored tables
+  (`poly_dash_cache`, `poly_incentive_earnings`). ⚠ `run_sql.sh` reads
+  STALE state for everything else (cellar_ticks, bot_picks,
+  poly_activities, pm_snapshots, desired_orders…) — box truth is
+  `psql kahla` ONLY, until C2. A session that forgets this will
+  mis-diagnose exactly like Fri night's Reds story (below).
+- **All 11 lanes completing** (roster restored 22:12 Fri:
+  batch,pm_snapshot,vsin,kalshi_autolog,ledger,opener,paperlog,repeg,
+  alerts,grader,scalp). Nothing wedged overnight. Lap times **17-28
+  min** at Saturday inventory — the GIL ceiling, fixes queued (#8/#9),
+  not a fire. Grader grades every minute; repeg acting (work=2);
+  vsin caught up (work=172).
+- **Scalp coverage: backlog DEAD.** 28 naked at Fri bedtime → 0
+  backlog; steady state 1-4/lap with `naked == placed` every lap
+  (same-lap coverage of new fills). Dead-scalp tripwire armed on
+  `uncovered`. Gap: a new fill can sit naked up to one lap (~26 min
+  today) — levers are #8 and the WS POSITION wake, which still pokes
+  repeg only (scalp is its own lane now; re-wire the wake).
+- **Repeg accounting honest** (8677b58): every silent continue counts
+  as `skipped`; tripwire chaseable = cands − walled − skipped;
+  `deferred` separate and NOT subtracted (all-deferred+acted=0 = the
+  $100 starve). Fri false CHASE DEAD alarm was ~3 phantom skips/lap.
+- **Quote table LIVE** (phases 1-2, ws-quote-table-spec.md): opener
+  962s→253s measured Fri night; MKTS_MAX_SLUGS=4000 probe-measured.
+- **DNS is on Cloudflare** (Fri night, watched): zone ACTIVE,
+  nameservers bill/paityn.ns.cloudflare.com, ALL records grey-cloud
+  (DNS-only — orange breaks Vercel SSL), site serving all-200s.
+  Rollback = GoDaddy NS ns21/ns22.domaincontrol.com. Resend email
+  records imported intact.
+- **Rent: record days.** Sep 3 accrued **$416.82**/137 markets (top:
+  Week-3 NFL totals seeded ALONE — NO-BAL 45.5 $31.74, DET-BUF 52.5
+  $28.40…), Sep 4 $155.81+. ~$570 pending. Rob doubts it; the verify
+  is Monday's payout credits (the ledger has matched credits within
+  pennies 3-for-3). Sep 4 bets-day was −$40 (−$18.56 Reds), net
+  ~+$115 with rent.
+- ⚠ **Venue 1015 bans Fri:** home IP (two manual 25-page activities
+  walks — NEVER bulk-walk the venue by hand again) and Vercel IPs
+  (earlier). Both lifted. Venue forensics go through the box's LOCAL
+  poly_activities (ledger lane mirrors it), never live walks.
+
+## The split-brain wrinkle (audit finding, Sat am — contained)
+Vercel request-path helpers the dashboard polls (fill-status →
+`_pmm_autolog` + entry auto-sync) READ THE LIVE VENUE and WRITE the
+frozen cloud bot_picks — creating/adopting rows, syncing entries. No
+orders place from that side (lease pins hold, +7d, until C2). So the
+cloud copy is a half-alive zombie: it fooled two reads Fri night. The
+"corrupted −1233 entry" on the lost Reds pick was actually this sync
+writing the venue's REAL 92.8¢ basis (matches the app's "93%"). C2
+closes the whole class.
+
+## Fri-night facts a fresh session needs
+- **Reds Sep 4 game: Rob won the $100 argument.** Venue: −$18.56 at a
+  93% cost basis. My −$7.84 came from the frozen cloud blob. HOW a
+  ~40¢ dog reached a 93¢ avg basis is UNRESOLVED (in-play buys would
+  violate the live-game guard — root-cause from LOCAL poly_activities
+  when Rob cares; he said "fuck the reds" but the guard question is
+  real). Today's MIL@CIN (Sep 5): 20 CIN ML @ 49.7¢ filled — the
+  challenge bet, settles tonight.
+- A's@SEA: side-flip left an away+127 live pick (order 44¢ rests) and
+  a home−156 orphan (no order) — reconcile should have swept the
+  orphan; verify via local psql.
+- Rob hand-cancelled some NCAAF orders Fri night before the rent data
+  landed — self-heal (reconcile+OMS) re-places them; verify happened.
+- Manual asks resting = user takeover: Furman O80.5, WAS-DAL U34.5.
+- OSU rung challenge answered with data: all 4 OSU bets enrolled but
+  earning $0.05-$0.39 vs Missouri@Kansas's $11.87 — "enrolled ≠
+  earning" is the cull criterion (below), never ladder geometry
+  (convicted twice Fri: TSU-UGA −46.5 and NT-Indiana −39.5 were real
+  lines; OU-Mich U39.5 was flagged junk and is the best open winner).
+
+## TODAY'S QUEUE (Rob-ordered, Sat)
+1. **Rent-per-bet cull**: rank ALL pending football bets by rent
+   earned (join `poly_incentive_earnings` on `signal_blob->>'pmm_slug'`,
+   LOCAL db) + capital tied; kill the bottom at CONFIG level
+   (machine_flags / lane config) so it stays dead. NEVER hand-cancel
+   in the app — self-heal re-places.
+2. **C2 — the swap. Rob ruled Fri: TODAY, not Sunday** ("we keep
+   pushing shit off... shit is broken anyway"). Build: cloudflared on
+   the box → tunnel `db.thekahlahouse.com` → localhost:3011 (the Caddy
+   shim, same JWT). Swap: Vercel env SUPABASE_URL → tunnel URL; disable
+   the Actions twins' cloud writes (disable, never delete); unpin the
+   cloud cellar_lease rows AT the swap per §1. Swap in a slate lull,
+   rollback one paste away. Trade-off Rob accepted: site up only when
+   box+home internet up.
+3. **#8 WS phase 3**: repeg pegging + scalp walk from the quote table
+   (the 28-min-lap fix) + re-wire the WS POSITION wake to poke scalp.
+4. **Scalp coverage invariant** (Rob's Sat-morning demand, design
+   agreed): scalp lap stamps `coverage {positions, covered, exempt:
+   {nrfi, props, manual}, naked, naked_slugs}` from the venue snapshot
+   (venue = denominator, never pick rows); health card prints it; RED
+   when non-exempt naked survives 2 consecutive laps; one batched TG
+   line when naked RISES. Exemptions = doctrine: NRFI never sells,
+   pitcher props don't scalp, manual ask = user takeover.
+5. **#9 remainder — memory diet**: daemon RSS 1.5-1.8GB on the 8GB
+   box; unbounded caches to bound/evict (_LADDER_STRUCT, WS_QUOTES,
+   _base_seen, book caches). Subprocess isolation LAST — re-measure
+   after #8+C2 before deciding how much is still needed.
+6. **#7 close-out**: OMS ordering premise stale (tries-first shipped
+   Sep 1); enrolled backlog was draining 148→130 Fri night — confirm
+   ~0 via LOCAL psql and close. Also: `oms_pend` gauge echoes its own
+   limit(200) — cosmetic fix; 5 `failed:*` desired rows (mine_q 2,
+   ? 2, cap_q 1) worth one look.
+
+## Watches
+- Monday: payout credits ≈ $570 accrual (the mother-lode verify).
+- Tonight: MIL@CIN settles (Rob's challenge bet).
+- Fri sheets: NCAAF Friday update published (91 games, 80 diffs);
+  NFL update presence unverified. Mon Sep 7 full build is the second
+  unattended Routine test.
+- fbprop turn-rate read (exec_probe_runs kind=fbprop_funnel, local).
+
+## Box crib sheet
+venv `/Users/robkahla/dev/kahla-house/.venv/bin/python`; restart
+`sudo -v && cd ~/dev/kahla-house && git pull && sudo launchctl
+kickstart -k system/com.kahlahouse.cellard`; log
+`/usr/local/var/log/cellard.log`; stack dump `sudo kill -USR1
+$(pgrep -f "m cellar")`; local truth `psql kahla`; ⚠ bootout UNLOADS
+(re-bootstrap per §1). One command at a time at Rob's terminal. Rob
+must NOT log picks / 💰 Bet on the site until C2.
+
+---
+
 ## 0. First hour back — read the week
 - `desired_orders`: never_tried should have hit ~0 within a day of
   departure and stayed there as new enrollments land (left at 150 and
