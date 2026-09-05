@@ -1,13 +1,27 @@
 # WS QUOTE TABLE — pricing the whole board without round trips
 
-Status: **SPEC — written Sep 1 2026 (the night before Rob's trip), build
-deferred to the first watched evening after the Postgres cutover.** The
-user's framing, verbatim: *"Why can't that be websocket? Instead of round
-trips to Polymarket?"* — and he's right: this is worth more than the
-cutover. It waits only because it rewires the money path's data source and
-shares machinery with the LIVE repeg wake feed, a surface that produced
-two watched-live-only defect classes in its first 72 hours (the frame-
-shape night, the baseline-flood overrun). Nothing here ships unwatched.
+Status: **PHASES 1-2 LIVE (built Sep 4 2026 — the GIL-cliff night, watched
+with Rob at the box).** Probe verdicts that now bind the design:
+- **Cap: 4,000 slugs accepted on one connection** (MKTS_MAX_SLUGS set from
+  measurement). Above ~4k the venue **fails SILENTLY** (28,651 subscribed
+  "OK", zero frames ever — suspect the ~1MB subscribe message). Never send
+  one giant subscribe; groups keep each message small.
+- **Overlapping subscribes are REJECTED** ("slug already subscribed", per
+  connection) — which convicted the old whole-set rotation of dead-airing
+  the feed on every watch-list change. Groups are disjoint by construction.
+- Live LITE rate at 4k slugs, Friday peak: ~190 frames/s — parse pennies.
+- Measured payoff night one: opener lap **962s → 253s** (its designed
+  workload again) with the table still mostly cold.
+Built: group-subscription MarketsFeed (delta adds, per-group baselines,
+kickoff-expiry eviction), app.WS_QUOTES + _ws_quote (90s staleness),
+table-first `_gridiron_price_game` with the `_LADDER_STRUCT` cache,
+`ws_price {hit, rest}` stamped on every opener tick. **Phase 3 (next,
+watched): repeg/scalp pegging from the table; paperlog/pm_snapshot
+adoption.** Original spec below, kept for the design rationale.
+
+The user's framing, verbatim: *"Why can't that be websocket? Instead of
+round trips to Polymarket?"* — and he's right: this is worth more than the
+cutover.
 
 ## What it replaces
 
