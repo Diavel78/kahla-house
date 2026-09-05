@@ -1143,6 +1143,16 @@ Un-dead = delete the `rent_dead_slugs` row + flip the desired row to
 junk rungs (totals 79.5/75.5/73.5/22.5, spreads −34.5/−27.5), ~$180
 tied earning $0.43. DDL `kahla-scanner/supabase/rent_dead_slugs.sql`
 (applied LOCAL; new table ⇒ `notify pgrst, 'reload schema'`).
+⚠ **A CANCEL THAT RETURNS IS A CLAIM (first live pass, Sep 5 2026, during
+a venue trading halt):** `orders.cancel` returned without error for 16
+orders across two passes and the venue executed NONE; the picks were
+deleted anyway → 16 live orders with no pick (the ghost class), 6 of them
+re-adopted as bare `pmm_autolog` picks by the old autolog. The cull now
+verifies every cancel against the re-listed book before touching a pick,
+ENFORCES the dead list each pass (cancels any AUTOMATIC bid still resting
+on a dead slug, pick or no pick), and ghost adoption skips dead slugs.
+Rule for every write surface: reads coming back does NOT mean the venue
+executes — check that the book CHANGES before trusting a cancel or create.
 
 ## THE ORDER OF WORK (user, Aug 21 2026 — do not reorder)
 

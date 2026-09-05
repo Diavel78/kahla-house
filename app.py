@@ -8188,6 +8188,8 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
     for (slug, syn), prob in list(unknown.items()):
         if not _RENT_SLUG_RE.match(slug or ""):
             continue
+        if _rent_dead(slug, sb):
+            continue                            # marked for cancel, not for booking
         is_pos = slug in filled_slugs
         o = _auto_ord.get(slug)
         if not is_pos and o is None:
@@ -22497,6 +22499,33 @@ def _rent_cull_tick(sb, now, client=None, orders=None) -> dict:
             continue                    # partial → a position exists → rides
         resting.setdefault(o.get("slug") or "", []).append(o)
     res["resting"] = len(resting)
+    # ENFORCE THE DEAD LIST (Sep 5 2026): a slug judged dead stays dead —
+    # any AUTOMATIC bid still resting on it is cancelled here whether or
+    # not its pick survives. The first live passes ran during a venue
+    # trading halt: cancels were acknowledged and never executed, the
+    # picks were deleted, and 16 orders lived on with no pick — a class
+    # the judge below can never see again (it judges PICKS). Verified
+    # against the re-listed book like every cancel; dry mode only counts.
+    _dead_now = _rent_dead_set(sb)
+    _enf = [(sl, os_) for sl, os_ in resting.items() if sl in _dead_now]
+    res["enforce"] = len(_enf)
+    if _enf and not dry:
+        for sl, os_ in _enf[:max_kills]:
+            try:
+                for o in os_:
+                    client.orders.cancel(o["id"], {"marketSlug": sl})
+            except Exception as e:
+                res["failed"] += 1
+                res.setdefault("errors", []).append({"slug": sl, "err": str(e)[:100]})
+                continue
+            _time.sleep(0.5)
+            _chk = _pmm_open_orders_raw(client)
+            if _chk is None or any(x.get("slug") == sl and "BUY" in (x.get("intent") or "")
+                                   for x in _chk):
+                res["unconfirmed"] = res.get("unconfirmed", 0) + 1
+            else:
+                res["enforced"] = res.get("enforced", 0) + 1
+                resting.pop(sl, None)
     try:
         picks = (sb.table("bot_picks")
                  .select("id,sport,market_id,market_type,event_name,"
