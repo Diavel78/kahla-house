@@ -169,6 +169,21 @@ def main(argv: list[str]) -> int:
     if "--batch-status" in argv:
         return cmd_batch_status()
 
+    # THE STACK DUMPER (Sep 4 2026 — the GIL-cliff night, where every
+    # "which thread is burning" question ran on guesswork because py-spy
+    # can't attach to the hardened framework Python under SIP). One
+    # signal, every thread's exact Python stack, straight into the log:
+    #     sudo kill -USR1 $(pgrep -f "m cellar")
+    #     grep -A6 "Thread" /usr/local/var/log/cellard.log | tail -80
+    # faulthandler is stdlib and the handler costs nothing until poked.
+    try:
+        import faulthandler
+        import signal as _signal
+        faulthandler.register(_signal.SIGUSR1, all_threads=True,
+                              chain=False)
+    except Exception as e:
+        print(f"warning: faulthandler not registered ({e})", file=sys.stderr)
+
     from . import config
     from .journal import Journal
     from .lease import Lease
