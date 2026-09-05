@@ -2661,12 +2661,22 @@ def _cellar_health(sb) -> dict:
         # move cap, model/edge, master rule — failure stops deliberately
         # NOT included); only unwalled candidates accuse the chase.
         w2 = sum(int((t.get("detail") or {}).get("walled") or 0) for t in rt)
-        if (c2 - w2) >= 10 and a2 == 0:
+        # SKIPPED candidates don't count either (Sep 4 2026 — the
+        # tripwire's second false alarm, same night the scalp's taught
+        # this lesson): structurally unactionable rows (game live, manual
+        # bet, no order id, zero leaves, fill won the race) exit the walk
+        # on silent continues at ~3/lap, and over 2h of laps those
+        # phantoms alone crossed the ≥10 bar and accused a chase that was
+        # acting 1-2/lap. An accusation is only as good as its
+        # accounting. Budget-DEFERRED rows are deliberately NOT
+        # subtracted — all-deferred with acted=0 IS the $100 starve.
+        s2 = sum(int((t.get("detail") or {}).get("skipped") or 0) for t in rt)
+        if (c2 - w2 - s2) >= 10 and a2 == 0:
             for _l in lanes:
                 if _l["lane"] == "repeg" and _l["state"] in ("ok", "idle",
                                                              "vercel"):
                     _l["state"] = "error"
-                    _l["error"] = (f"CHASE DEAD: {c2 - w2} chaseable "
+                    _l["error"] = (f"CHASE DEAD: {c2 - w2 - s2} chaseable "
                                    f"outbid seen, 0 amends in 2h")
                     bad += 1
     except Exception:
@@ -22690,7 +22700,17 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
     # only rows carrying the key (pre-deploy rows would hold it red), so
     # a lap with zero walls must still say so — a starved lap with cands
     # and no walls is exactly the case the tripwire exists to catch.
-    res = {"acted": 0, "shadow": 0, "stopped": 0, "walled": 0}
+    # "skipped" (Sep 4 2026 — the tripwire's second false alarm, hours
+    # after the scalp's taught the same lesson): a candidate the walk
+    # cannot act on for STRUCTURAL reasons — game already live, manual
+    # bet, no order id, zero leaves, fill won the race — is not a chase
+    # the engine failed to make. Counted so the CHASE DEAD tripwire can
+    # subtract them; ~3/lap of these accrued 14 phantoms over 2h and
+    # accused a chase that was in fact acting 1-2/lap. "deferred"
+    # (budget-gated) is DELIBERATELY separate and NOT subtracted: a lap
+    # that defers everything with acted=0 is the original $100 starve.
+    res = {"acted": 0, "shadow": 0, "stopped": 0, "walled": 0,
+           "skipped": 0, "deferred": 0}
     _t0 = _time.time()          # measured, so the cap stops being a guess
     # TARGETED vs FULL lap (see _WS_DIRTY_CB above): when the markets
     # socket can vouch, this lap's fill/outbid walk reads books only for
@@ -22836,6 +22856,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
             for f in cands:
                 r = byid.get(f["id"])
                 if not r:
+                    res["skipped"] += 1
                     continue
                 blob = (r.get("signal_blob")
                         if isinstance(r.get("signal_blob"), dict) else {})
@@ -22872,12 +22893,14 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                     if datetime.fromisoformat(
                             str(r.get("event_start")).replace("Z", "+00:00")
                     ) <= now:
+                        res["skipped"] += 1
                         continue
                 except Exception:
                     pass          # unparseable start ⇒ fall through
                 if (f.get("market_type") in ("moneyline", "prop",
                                              "spread", "total")
                         and not is_model_bet):
+                    res["skipped"] += 1
                     continue    # manual ML/prop/football bets stay the
                                 # user's to move — only the model's own
                                 # bets chase
@@ -23135,6 +23158,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 # raced fill impossible to double-bet.
                 oid, slug = f.get("order_id"), f.get("slug")
                 if not oid or not slug:
+                    res["skipped"] += 1
                     continue
                 intent = ("ORDER_INTENT_BUY_SHORT" if f.get("synthetic")
                           else "ORDER_INTENT_BUY_LONG")
@@ -23143,9 +23167,11 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 leaves = f.get("order_leaves") or 0
                 qty = max(1, int(leaves)) if leaves >= 1 else 0
                 if not qty:
+                    res["skipped"] += 1
                     continue
                 if (res["acted"] >= _REPEG_MAX_ACTIONS
                         or (_time.time() - _t0) > _REPEG_BUDGET_S):
+                    res["deferred"] += 1
                     continue    # budget spent — remaining chases defer
                                 # candidates re-enter next tick (2 min)
                 if client is None:
@@ -23170,6 +23196,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                     continue
                 pos_net = (positions.get(slug) or {}).get("net") or 0.0
                 if (pos_net < 0 if f.get("synthetic") else pos_net > 0):
+                    res["skipped"] += 1
                     continue                           # fill won — done
                 cparams = {"marketSlug": slug, "intent": intent,
                            "type": "ORDER_TYPE_LIMIT",
