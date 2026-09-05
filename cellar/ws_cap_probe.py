@@ -152,12 +152,19 @@ def main() -> int:
         prev_rid = None
         for n in sizes:
             rid = f"capprobe-{n}"
+            # UNSUBSCRIBE FIRST, then subscribe — the first probe run
+            # proved the venue tracks subscribed slugs per connection
+            # and REJECTS an overlapping subscribe outright ("slug
+            # already subscribed"). Same finding indicts the daemon's
+            # own rotation order (subscribe-new-then-drop-old); group
+            # subscriptions with disjoint membership are the fix there.
+            if prev_rid:
+                ws.send(json.dumps({"unsubscribe": {"requestId": prev_rid}}))
+                _drain(ws, prev_rid, 1.5)      # let the venue process it
             ws.send(json.dumps({"subscribe": {
                 "requestId": rid,
                 "subscriptionType": SUB_MARKET_LITE,
                 "marketSlugs": pool[:n]}}))
-            if prev_rid:
-                ws.send(json.dumps({"unsubscribe": {"requestId": prev_rid}}))
             prev_rid = rid
             r = _drain(ws, rid, LISTEN_S)
             r["n"] = n
@@ -172,6 +179,22 @@ def main() -> int:
                 break
         rate = None
         if best_ok:
+            if attempts and attempts[-1]["err"] is not None:
+                # last attempt was rejected — nothing is subscribed now
+                # (run 1 read 0.0 fps for exactly this reason). Re-arm
+                # the biggest ACCEPTED size before measuring the rate.
+                try:
+                    ws.send(json.dumps(
+                        {"unsubscribe": {"requestId": prev_rid}}))
+                except Exception:
+                    pass
+                _drain(ws, prev_rid, 1.5)
+                prev_rid = f"capprobe-rate-{best_ok}"
+                ws.send(json.dumps({"subscribe": {
+                    "requestId": prev_rid,
+                    "subscriptionType": SUB_MARKET_LITE,
+                    "marketSlugs": pool[:best_ok]}}))
+                _drain(ws, prev_rid, LISTEN_S)   # swallow the baselines
             r2 = _drain(ws, prev_rid, RATE_S)
             rate = round(r2["lite"] / max(r2["secs"], 0.1), 1)
             print(f"steady-state at n={best_ok}: {r2['lite']} frames "
