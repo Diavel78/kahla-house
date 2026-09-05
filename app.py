@@ -17958,6 +17958,120 @@ def _rent_enrolled_football(sb):
     return c["val"]
 
 
+# Rung suffix on football ladder slugs: pos-3pt5 (away +3.5), neg-21pt5
+# (away −21.5), total-47pt5. Whole-number rungs (no ptX) tolerated.
+_RUNG_SUFFIX_RE = re.compile(r"-(pos|neg|total)-(\d+)(?:pt(\d+))?$")
+
+
+def _slug_rung_scalar(slug: str):
+    """One ordering scalar per rung, home-perspective for spreads —
+    the same normalization as _gridiron_try_bet's _rungv (pos-X is the
+    AWAY team +X, i.e. home −X). Ordering is all the window needs."""
+    m = _RUNG_SUFFIX_RE.search(slug or "")
+    if not m:
+        return None
+    v = float(m.group(2)) + (float(m.group(3)) / 10.0 if m.group(3) else 0.0)
+    return {"pos": -v, "neg": v, "total": v}[m.group(1)]
+
+
+def gridiron_rung_audit(sb=None, verbose=True):
+    """BOX TOOL (Sep 5 2026, read-only) — the Fresno+3.5-at-40¢ leftover
+    hunt. Lists every pending football spread/total pick and grades its
+    rung against TODAY'S paying ladder using the executor's own window
+    rule (sorted enrolled rungs, index within 1.5 of center). Verdicts:
+      OUTSIDE   — rung sits outside mid±1 of the current paying ladder
+                  (the pre-Sep-2 shit-line class; kill/ride call per row)
+      NO_LADDER — the game has NO enrolled rungs in the last 24h: the
+                  seat earns nothing right now, whatever it once paid
+      in_window — conforming; summarized, not itemized
+    Approximation, stated honestly: the ladder here is ALL enrolled
+    rungs (catalog ∪ rewards page, 24h), while the executor also drops
+    booked rungs pegging outside 25-60¢ — close, and errs symmetric.
+    Run on the box (local DB): python3 -c
+    'import app; app.gridiron_rung_audit()'"""
+    sb = sb or get_supabase()
+    cut = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    ladders: dict = {}          # (lg, away, home, date, mt) -> set(rungs)
+    for tbl, col, tcol in (("poly_incentive_programs", "market_slug",
+                            "synced_at"),
+                           ("rent_list_slugs", "slug", "last_seen")):
+        for fam in ("asc-", "tsc-"):
+            pg = 0
+            while True:          # gotcha #40 — page, never trust one response
+                try:
+                    page = (sb.table(tbl).select(col).gte(tcol, cut)
+                            .like(col, fam + "%")
+                            .range(pg * 1000, pg * 1000 + 999)
+                            .execute().data) or []
+                except Exception:
+                    page = []
+                for r in page:
+                    sl = str(r.get(col) or "")
+                    m = _RENT_SLUG_RE.match(sl)
+                    rv = _slug_rung_scalar(sl)
+                    if m and rv is not None:
+                        mt = "spread" if m.group(1) == "asc" else "total"
+                        ladders.setdefault(
+                            (m.group(2), m.group(3), m.group(4),
+                             m.group(5), mt), set()).add(round(rv, 1))
+                if len(page) < 1000:
+                    break
+                pg += 1
+    rows = (sb.table("bot_picks")
+            .select("id,event_name,event_start,market_type,side,"
+                    "entry_price,signal_blob,poly_pnl")
+            .eq("status", "pending")
+            .in_("market_type", ["spread", "total"])
+            .limit(500).execute().data) or []
+    out = []
+    n_in = 0
+    for r in rows:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) \
+            else {}
+        sl = str(b.get("pmm_slug") or "")
+        m = _RENT_SLUG_RE.match(sl)
+        rv = _slug_rung_scalar(sl)
+        if not m or rv is None:        # not a football ladder slug (MLB O/U)
+            continue
+        mt = "spread" if m.group(1) == "asc" else "total"
+        key = (m.group(2), m.group(3), m.group(4), m.group(5), mt)
+        rungs = sorted(ladders.get(key) or set())
+        if not rungs:
+            verdict = "NO_LADDER"
+        elif len(rungs) <= 1 or round(rv, 1) not in set(rungs):
+            # a single-rung ladder is trivially its own middle; a pick
+            # rung the venue no longer lists at all reads OUTSIDE too
+            verdict = ("in_window" if len(rungs) <= 1
+                       and round(rv, 1) in set(rungs) else "OUTSIDE")
+        else:
+            ctr = (len(rungs) - 1) / 2.0
+            allowed = {v for i, v in enumerate(rungs)
+                       if abs(i - ctr) <= 1.5}
+            verdict = "in_window" if round(rv, 1) in allowed else "OUTSIDE"
+        pnl = r.get("poly_pnl") if isinstance(r.get("poly_pnl"), dict) else {}
+        filled = bool(b.get("filled")) or float(pnl.get("open_qty") or 0) >= 1
+        if verdict == "in_window":
+            n_in += 1
+            continue
+        out.append({"id": r.get("id"), "game": r.get("event_name"),
+                    "mt": mt, "side": r.get("side"), "rung": rv,
+                    "entry": r.get("entry_price"),
+                    "cost_usd": pnl.get("buy_usd"),
+                    "filled": filled, "verdict": verdict,
+                    "ladder": rungs[:12],
+                    "start": str(r.get("event_start") or "")[:16]})
+    out.sort(key=lambda x: (x["verdict"] != "OUTSIDE", not x["filled"]))
+    if verbose:
+        print(f"in_window (ok, not listed): {n_in}")
+        for x in out:
+            print(f"[{x['verdict']}{' FILLED' if x['filled'] else ' resting'}]"
+                  f" #{x['id']} {x['game']} {x['mt']}/{x['side']}"
+                  f" rung {x['rung']} entry {x['entry']}"
+                  f" cost ${x['cost_usd']} start {x['start']}\n"
+                  f"    ladder {x['ladder']}")
+    return {"flagged": out, "in_window": n_in}
+
+
 _RENT_ENSURE_TS: dict = {}        # rent_key -> monotonic ts of last attempt
 _RENT_ENSURE_BACKOFF_S = 21_600   # 6h — a slug PMM won't serve stays quiet
 _RENT_ENSURE_PER_CALL = 4         # bounded venue reads per producer pass
