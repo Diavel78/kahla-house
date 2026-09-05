@@ -21947,8 +21947,13 @@ _SCALP_MAX_WALKS = 5         # cancel→verify→create walks per tick (1→2→
 # No-rebuy window: a scalp exit inside T-this latches the game instead of
 # rinse-repeating (30→60 min Aug 30 2026, user — see the autolog comment).
 _SCALP_NO_REBUY_MIN = 60
-_SCALP_BUDGET_S = 30.0       # wall clock, checked BEFORE each write (12→30
-                             # on the box — nothing kills the pass here)
+_SCALP_BUDGET_S = 90.0       # wall clock on the WRITE WALK (clock restarts
+                             # after setup — the chase-night rule). 12→30
+                             # on the box; 30→90 Sep 4 night one as its own
+                             # lane: at ~2.5s of REST per candidate, 30s
+                             # bought ~11 candidates and the backlog never
+                             # drained (gate:budget with placed:0). 90s ≈
+                             # ~35 candidates inside the 120s cadence.
 _SCALP_SHADOW_CAP = 30       # shadow entries kept per pick blob
 
 
@@ -22195,10 +22200,16 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     # lifted) sat queued for hours behind routine 1¢ steps. Repairs are
     # correctness, steps are optimization: repairs jump the line.
     def _floor_viol(c4):
+        # 3-tier walk order (Sep 4 night one as own lane): 0 = repairs
+        # (below-floor ask, qty mismatch — correctness), 1 = NAKED
+        # inventory (position, no ask — the starvation the lane exists
+        # to end; before this tier naked sorted WITH covered positions
+        # and the budget burned on book reads for asks that needed
+        # nothing), 2 = covered-and-fine (step-down optimization).
         r4, b4, slug4, synth4 = c4
         e4 = _scalp_entry_c(r4, b4)
         if e4 is None:
-            return 1
+            return 2
         si4 = ("ORDER_INTENT_SELL_SHORT" if synth4
                else "ORDER_INTENT_SELL_LONG")
         a4 = q4 = None
@@ -22210,7 +22221,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 q4 = float(o4.get("leaves") or o4.get("qty") or 0.0)
                 break
         if a4 is None:
-            return 1
+            return 1                        # naked — place before optimizing
         # QTY MISMATCH IS A REPAIR TOO (Aug 29 night, second lesson of the
         # 0/5-on-20 catch): the resize sat starved behind routine 1¢
         # step-downs for 10 straight minutes — with a 30s budget and one
@@ -22226,7 +22237,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         if _vc4 is not None and _vc4 > 0:
             e4 = max(e4, _vc4)                  # venue-cost floor, mirrored
         f4 = min(99.0, _grid_up(e4, _TICK_CACHE.get(slug4, 1.0)))  # cost base
-        return 0 if a4 < f4 - 0.26 else 1
+        return 0 if a4 < f4 - 0.26 else 2
     cands.sort(key=_floor_viol)
     # BUDGET CLOCK RESTARTS HERE — the chase-night bug's THIRD sighting
     # (Sep 4 2026, first night as its own lane): _t0 at function top
