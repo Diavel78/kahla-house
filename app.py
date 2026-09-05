@@ -18135,6 +18135,13 @@ def gridiron_rung_audit(sb=None, verbose=True):
             verdict = "in_window" if round(rv, 1) in allowed else "OUTSIDE"
         pnl = r.get("poly_pnl") if isinstance(r.get("poly_pnl"), dict) else {}
         filled = bool(b.get("filled")) or float(pnl.get("open_qty") or 0) >= 1
+        # ⚠ THE GEOMETRY VERDICT MISLABELS LOPSIDED GAMES (Rob caught it
+        # live on TSU-UGA -46.5 night one: the venue provisions a DENSE
+        # rung cluster at the real line on top of sparse early rungs, so
+        # the index-middle of the enrolled list lands in the stale sparse
+        # zone and flags the at-the-money rungs as junk). Kept only as a
+        # coarse pre-filter for which FILLED rows get a mark below; the
+        # MARK is the verdict, geometry never is.
         if verdict == "in_window":
             n_in += 1
             continue
@@ -18143,17 +18150,65 @@ def gridiron_rung_audit(sb=None, verbose=True):
                     "entry": r.get("entry_price"),
                     "cost_usd": pnl.get("buy_usd"),
                     "filled": filled, "verdict": verdict,
-                    "ladder": rungs[:12],
+                    "slug": sl,
+                    "synth": bool(b.get("pmm_synthetic")),
                     "start": str(r.get("event_start") or "")[:16]})
-    out.sort(key=lambda x: (x["verdict"] != "OUTSIDE", not x["filled"]))
+    # ── MARK TO MARKET (v2, the honest classifier): every flagged FILLED
+    # position gets the live book's value next to its entry. WS quote
+    # table first (free), REST book fallback. Sorted by unrealized
+    # damage; kill/ride runs on marks, never on ladder math.
+    _cl = None
+    for x in out:
+        if not x["filled"]:
+            continue
+        mid = None
+        q = _ws_quote(x["slug"])
+        if q is not None and (q[0] is not None or q[1] is not None):
+            _b0 = q[0] if q[0] is not None else q[1]
+            _a0 = q[1] if q[1] is not None else q[0]
+            mid = (_b0 + _a0) / 2.0
+        else:
+            try:
+                if _cl is None:
+                    _cl = get_client()
+                bk = _pmm_book(_cl, x["slug"]) or {}
+                _bb, _ba = bk.get("best_bid"), bk.get("best_ask")
+                if _bb is not None or _ba is not None:
+                    _b0 = _bb if _bb is not None else _ba
+                    _a0 = _ba if _ba is not None else _bb
+                    mid = (_b0 + _a0) / 2.0
+            except Exception:
+                mid = None
+        if mid is not None and x["synth"]:
+            mid = 100.0 - mid
+        x["mark_c"] = None if mid is None else round(mid, 1)
+        try:
+            ec = _amer_to_prob_py(float(x["entry"])) * 100.0
+        except Exception:
+            ec = None
+        x["entry_c"] = None if ec is None else round(ec, 1)
+        x["unreal"] = (None if (mid is None or ec is None)
+                       else round((mid - ec) / 100.0
+                                  * float(x.get("cost_usd") or 0)
+                                  / max(ec / 100.0, 0.01), 2))
+    out.sort(key=lambda x: (not x["filled"],
+                            x.get("unreal") if x.get("unreal") is not None
+                            else 0))
     if verbose:
         print(f"in_window (ok, not listed): {n_in}")
+        print("MARKS decide — geometry is only the pre-filter. "
+              "unreal ≈ $ gain/loss if sold at the mark now.")
         for x in out:
-            print(f"[{x['verdict']}{' FILLED' if x['filled'] else ' resting'}]"
-                  f" #{x['id']} {x['game']} {x['mt']}/{x['side']}"
-                  f" rung {x['rung']} entry {x['entry']}"
-                  f" cost ${x['cost_usd']} start {x['start']}\n"
-                  f"    ladder {x['ladder']}")
+            if x["filled"]:
+                print(f"[FILLED] #{x['id']} {x['game']} "
+                      f"{x['mt']}/{x['side']} rung {x['rung']} "
+                      f"entry {x.get('entry_c')}c -> mark {x.get('mark_c')}c"
+                      f"  cost ${x['cost_usd']}  unreal "
+                      f"{x.get('unreal')}  start {x['start']}")
+            else:
+                print(f"[resting] #{x['id']} {x['game']} "
+                      f"{x['mt']}/{x['side']} rung {x['rung']} "
+                      f"entry {x['entry']} start {x['start']}")
     return {"flagged": out, "in_window": n_in}
 
 
