@@ -374,6 +374,12 @@ def lane_scalp(ctx: Ctx) -> int:
     import app as _app
     stats = _app._scalp_tick(ctx.sb, ctx.now) or {}
     log.info("scalp: %s", stats)
+    # Journal the stats — night one shipped without this and the tick
+    # rows read detail=NULL while the lane zeroed: every diagnosis ran
+    # on log greps instead of the tick row (the repeg lane's own lesson,
+    # quoted twenty lines up, relearned same-file).
+    if ctx.detail is not None and isinstance(stats, dict):
+        ctx.detail.update(stats)
     return (int(stats.get("placed") or 0) + int(stats.get("walked") or 0)
             + int(stats.get("dup_canceled") or 0)
             + int(stats.get("shadow") or 0))
