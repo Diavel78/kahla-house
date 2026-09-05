@@ -15911,6 +15911,14 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
     sibling lane (Whiff IQ K props) run its OWN slate cap without eating
     the opener lane's; skip_game_dedup is for prop lanes whose caller
     dedups per-pitcher (a game legitimately carries 2 starter bets)."""
+    # ⚠ REOPEN POSTURE (Sep 5 2026, the venue trading-halt day — Rob:
+    # "when polymarket comes back online we need to be VERY careful…
+    # hold making bets until we confirm what got cancelled, what is
+    # still out there, what exactly the book looks like"). One DB flag
+    # refuses EVERY machine BUY here — the single door — with no deploy.
+    # Default False (fail-open to betting); `bets_paused` true = hold.
+    if _machine_flag("bets_paused", False):
+        return "paused"
     # ⚠ THE RENT RULE, FIRST AND UNCONDITIONAL (user, Aug 18 2026): no
     # computer bet at all unless this market pays rent AND we are inside
     # its paying window. Checked before the cap, before the dedup, before
@@ -17121,6 +17129,8 @@ def _opener_pass(sb, now, deadline):
             _rgo, _rwhy = _rent_ok(slug, es, now, sb)
             if not _rgo:
                 app.logger.info("RENT-GATE refused nrfi %s: %s", slug, _rwhy)
+                continue
+            if _machine_flag("bets_paused", False):   # reopen posture (Sep 5)
                 continue
             gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             canon = ((100.0 - side_c) / 100.0 if synthetic
@@ -18385,6 +18395,79 @@ def _slug_rung_scalar(slug: str):
         return None
     v = float(m.group(2)) + (float(m.group(3)) / 10.0 if m.group(3) else 0.0)
     return {"pos": -v, "neg": v, "total": v}[m.group(1)]
+
+
+def book_audit(sb=None, client=None, verbose=True):
+    """BOX TOOL (Sep 5 2026, read-only) — the post-outage reopen audit:
+    what the venue holds vs what the book says. Sections:
+      GHOST ORDERS   venue BUY orders with no pending pick on their slug
+      ZOMBIE PICKS   pending machine picks whose order_id is not on the
+                     venue and whose slug holds no position
+      NAKED POSITIONS positions with no pending pick on their slug
+      DEAD-SLUG ORDERS bids still resting on rent_dead_slugs (live rows)
+    Run: python3 -c 'import app; app.book_audit()'"""
+    sb = sb or get_supabase()
+    client = client or get_client()
+    orders = _pmm_open_orders_raw(client)
+    positions = _pmm_positions_raw(client)
+    out = {"orders": None if orders is None else len(orders),
+           "positions": None if positions is None else len(positions)}
+    if orders is None or positions is None:
+        out["gate"] = "venue_read"
+        if verbose:
+            print("VENUE READ FAILED — audit not possible", out)
+        return out
+    picks = _sb_paged(lambda: sb.table("bot_picks")
+                      .select("id,event_name,market_type,side,entry_price,"
+                              "signal_blob").eq("status", "pending"), 3)
+    by_slug: dict = {}
+    for p in picks:
+        b = p.get("signal_blob") if isinstance(p.get("signal_blob"), dict) else {}
+        if (b or {}).get("pmm_slug"):
+            by_slug.setdefault(b["pmm_slug"], []).append(p)
+    oid_on_venue = {o.get("id") for o in orders}
+    buys = [o for o in orders if "BUY" in (o.get("intent") or "")]
+    ghosts = [o for o in buys if o.get("slug") not in by_slug]
+    zombies = []
+    for p in picks:
+        b = p.get("signal_blob") if isinstance(p.get("signal_blob"), dict) else {}
+        b = b or {}
+        sl = b.get("pmm_slug")
+        if not sl or not (b.get("autobet") or b.get("gridiron_autobet")
+                          or b.get("whiff_autobet") or b.get("ou_trader")
+                          or b.get("fbprop_autobet")):
+            continue
+        held = abs(float((positions.get(sl) or {}).get("net") or 0)) > 0.01
+        if b.get("order_id") and b["order_id"] not in oid_on_venue and not held:
+            zombies.append((p, sl))
+    naked = [(sl, ps) for sl, ps in positions.items()
+             if abs(float(ps.get("net") or 0)) > 0.01 and sl not in by_slug]
+    dead = _rent_dead_set(sb)
+    dead_orders = [o for o in buys if o.get("slug") in dead]
+    out.update({"ghost_orders": len(ghosts), "zombie_picks": len(zombies),
+                "naked_positions": len(naked), "dead_slug_orders": len(dead_orders),
+                "pending_picks": len(picks),
+                "buys": len(buys), "sells": len(orders) - len(buys)})
+    if verbose:
+        print(f"venue: {len(orders)} orders ({len(buys)} buys / "
+              f"{len(orders)-len(buys)} sells), {len(positions)} positions; "
+              f"book: {len(picks)} pending picks")
+        print(f"\nGHOST ORDERS ({len(ghosts)}) — venue BUY, no pick:")
+        for o in ghosts:
+            print(f"  {o.get('slug'):48} {'AUTO' if o.get('auto') else 'MANUAL':6} "
+                  f"qty {o.get('qty'):>5} leaves {o.get('leaves'):>6} "
+                  f"py {o.get('price_yes')} {o.get('id')}")
+        print(f"\nZOMBIE PICKS ({len(zombies)}) — machine pick, order gone, no position:")
+        for p, sl in zombies:
+            print(f"  #{p['id']} {p.get('event_name')} {p.get('market_type')}/"
+                  f"{p.get('side')} {sl}")
+        print(f"\nNAKED POSITIONS ({len(naked)}) — held, no pick:")
+        for sl, ps in naked:
+            print(f"  {sl:48} net {ps.get('net')} avg {ps.get('avg_price')}")
+        print(f"\nDEAD-SLUG ORDERS ({len(dead_orders)}) — still resting on culled rungs:")
+        for o in dead_orders:
+            print(f"  {o.get('slug'):48} {o.get('id')} leaves {o.get('leaves')}")
+    return out
 
 
 def gridiron_rung_audit(sb=None, verbose=True):
@@ -23355,6 +23438,12 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
     # that defers everything with acted=0 is the original $100 starve.
     res = {"acted": 0, "shadow": 0, "stopped": 0, "walled": 0,
            "skipped": 0, "deferred": 0}
+    # REOPEN POSTURE (Sep 5 2026): `repeg_enabled` false parks the chase —
+    # its cancel→create is the one write that can LOSE an order on a
+    # half-up venue — and, riding with it, the reconcile + cull.
+    if not _machine_flag("repeg_enabled", True):
+        res["gate"] = "paused"
+        return res
     _t0 = _time.time()          # measured, so the cap stops being a guess
     # TARGETED vs FULL lap (see _WS_DIRTY_CB above): when the markets
     # socket can vouch, this lap's fill/outbid walk reads books only for
