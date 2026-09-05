@@ -283,6 +283,13 @@ design (needs the ask ladder to skip our own level — table-first there
 is a careful change, not a swap). OMS: never-tried 135 → 39, pending
 mix is honest verdicts (151 rent / 93 no_book / 30 no_model).
 
+**✅ #6 BUILT (11:00am): football ghost adoption** — `_football_ghost_row`
++ autolog hook (AUTOMATIC orders + positions on football/UFC slugs, venue
+question for side/line, slug convention fallback verified against 6 live
+picks both orientations; hand bids never adopted; position with your own
+ask = takeover, skipped). Rent cull flipped LIVE at 10:47 (Rob: "let's
+roll") — first kill pass due ~11:25, max 10, then 6.
+
 
 ## 0. First hour back — read the week
 - `desired_orders`: never_tried should have hit ~0 within a day of

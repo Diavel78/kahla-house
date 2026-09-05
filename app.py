@@ -7792,6 +7792,110 @@ def _whiff_name_key(nm: str) -> str:
     return (parts[0][:3] + parts[-1][:3]) if len(parts) >= 2 else ""
 
 
+def _football_slug_market(sb, slug: str):
+    """Market row for a football/UFC venue slug WITHOUT a venue lookup: the
+    slug names the game (league-away-home-date) and the rent list already
+    resolved that key to a market row (`_RENTLIST_CACHE['keys']`). None
+    when the key is unresolved — the caller leaves the stray to backoff."""
+    m = _RENT_SLUG_RE.match(slug or "")
+    if not m:
+        return None
+    key = f"{m.group(2)}-{m.group(3)}-{m.group(4)}-{m.group(5)}"
+    try:
+        _rent_enrolled_football(sb)            # warms / refreshes the cache
+    except Exception:
+        pass
+    mid = (_RENTLIST_CACHE.get("keys") or {}).get(key)
+    if not mid:
+        return None
+    try:
+        rows = (sb.table("markets")
+                .select("id,sport,event_name,event_start")
+                .eq("id", mid).limit(1).execute().data) or []
+    except Exception:
+        return []
+    return rows[0] if rows else None
+
+
+def _football_ghost_row(sb, client, owner_uid, slug, syn, prob, qty,
+                        order_id=None, is_pos=False):
+    """Executor-shaped bot_picks row for a football/UFC order or position
+    the book lost (the reconcile false-kill class — 5 live orders + 1
+    position found Sep 5 2026 with no pick: no chase, no scalp cover, and
+    the OMS re-bet the games). Side/line come from the VENUE's own market
+    question via pmm_markets._classify_market (one read; adoption is
+    rare); the slug convention (pos-X = away +X, neg-X = away −X, SHORT
+    mirrors to home) is the fallback when that read fails. None = can't
+    book it safely — leave the stray to backoff, never guess a side."""
+    mk = _football_slug_market(sb, slug)
+    if not mk:
+        return None
+    m = _RENT_SLUG_RE.match(slug)
+    fam = m.group(1)
+    mt = {"asc": "spread", "tsc": "total", "aec": "moneyline"}[fam]
+    ev = mk.get("event_name") or ""
+    if " @ " not in ev:
+        return None
+    away, home = [x.strip() for x in ev.split(" @ ", 1)]
+    side = line = None
+    try:                                     # venue truth first
+        import pmm_markets as _pm
+        md = client.markets.retrieve_by_slug(slug) if client else None
+        md = (md or {}).get("market") if isinstance(md, dict) and "market" in (md or {}) else md
+        cl = _pm._classify_market(md, away, home) if md else None
+        if cl:
+            _mt, line, side = cl
+            if syn:
+                side, line = _pm._inverse_side(_mt, side, line)
+    except Exception:
+        side = line = None
+    if side is None:                         # slug-convention fallback
+        if mt == "total":
+            sfx = _RUNG_SUFFIX_RE.search(slug)
+            if not sfx:
+                return None
+            line = float(sfx.group(2)) + (float(sfx.group(3)) / 10.0 if sfx.group(3) else 0.0)
+            side = "under" if syn else "over"
+        elif mt == "spread":
+            sfx = _RUNG_SUFFIX_RE.search(slug)
+            if not sfx or sfx.group(1) == "total":
+                return None
+            v = float(sfx.group(2)) + (float(sfx.group(3)) / 10.0 if sfx.group(3) else 0.0)
+            away_line = v if sfx.group(1) == "pos" else -v
+            side, line = (("home", -away_line) if syn else ("away", away_line))
+        else:
+            side, line = (("home", None) if syn else ("away", None))
+    if prob is None or not (0 < prob < 1):
+        return None
+    amer = _prob_to_amer_py(prob)
+    if amer is None:
+        return None
+    kind = "position" if is_pos else "order"
+    blob = {"gridiron_autobet": True, "contracts": float(qty or 0),
+            "pmm_slug": slug, "pmm_synthetic": bool(syn),
+            "source": "pmm_autolog", "ghost_adopt": kind,
+            "filled": bool(is_pos), "rent_first": True,
+            "adopt_note": ("book lost this machine bet (reconcile "
+                           "false-kill class); adopted so the chase/scalp/"
+                           "OMS see it")}
+    if order_id:
+        blob["order_id"] = order_id
+    if is_pos:
+        blob["scalp_adopted"] = True
+    return {
+        "asked_by": owner_uid,
+        "query_text": f"ghost adopt: football {kind} lost by the book",
+        "market_id": mk["id"], "sport": mk.get("sport") or "NCAAF",
+        "event_name": ev, "event_start": mk.get("event_start"),
+        "market_type": mt, "side": side, "entry_book": "POLYMARKET",
+        "entry_price": int(amer), "entry_line": line, "units": 1,
+        "confidence": "low",
+        "reasons": [f"GHOST ADOPT — {kind} on {slug} had no pick; "
+                    f"{float(qty or 0):g} contracts @ {round(prob*100,1)}¢"],
+        "signal_blob": blob,
+    }
+
+
 _AUTOLOG_INDEX_LOCK = threading.Lock()     # one slug-index builder at a time
 _AUTOLOG_UNMATCHED: dict = {}              # slug -> monotonic ts of last miss
 _AUTOLOG_UNMATCHED_S = 1800.0              # a stray retries every 30 min
@@ -8066,6 +8170,49 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                     pass
     unknown = {k: v for k, v in intended.items() if k[0] not in pick_by_slug}
     out["unknown"] = len(unknown)
+    # ── FOOTBALL GHOST ADOPTION (Sep 5 2026, docket #6 root fix) ──
+    # AUTOMATIC orders (never a hand-placed bid) and held positions on
+    # football/UFC slugs with no pick are booked from the slug + venue
+    # question — no venue event search, no window. A position that already
+    # carries a resting ask is the user's takeover: left alone.
+    _auto_ord: dict = {}
+    _sell_slugs: set = set()
+    for o in (orders or []):
+        _sl = o.get("slug")
+        if not _sl:
+            continue
+        if (o.get("intent") or "").startswith("ORDER_INTENT_SELL"):
+            _sell_slugs.add(_sl)
+        elif o.get("auto"):
+            _auto_ord[_sl] = o
+    for (slug, syn), prob in list(unknown.items()):
+        if not _RENT_SLUG_RE.match(slug or ""):
+            continue
+        is_pos = slug in filled_slugs
+        o = _auto_ord.get(slug)
+        if not is_pos and o is None:
+            continue                            # manual bid → not ours
+        if is_pos and slug in _sell_slugs and o is None:
+            continue                            # user's ask rests → takeover
+        qty = (abs(float((positions or {}).get(slug, {}).get("net") or 0))
+               if is_pos else float(o.get("qty") or 0))
+        try:
+            row = _football_ghost_row(sb, client, owner_uid, slug, syn, prob,
+                                      qty, order_id=(o or {}).get("id"),
+                                      is_pos=is_pos)
+        except Exception:
+            row = None
+        if not row:
+            continue                            # unresolved → backoff path
+        try:
+            sb.table("bot_picks").insert(row).execute()
+            out["ghost_adopted"] = out.get("ghost_adopted", 0) + 1
+            unknown.pop((slug, syn), None)
+            app.logger.info("PMM-AUTOLOG ghost-adopted %s %s/%s %s (%s)",
+                            row["event_name"], row["market_type"],
+                            row["side"], row["entry_price"], slug)
+        except Exception as e:
+            app.logger.warning("PMM-AUTOLOG ghost adopt failed %s: %s", slug, e)
     _nowm = _time.monotonic()
     # OUT-OF-WINDOW SHORT-CIRCUIT: the index only holds games from −12h to
     # +48h, and every slug carries its ET game date — a stray on a game 5-15
@@ -17979,7 +18126,7 @@ _GRIDIRON_SWEEP_CAP = 4           # dossier builds per tick — budget courtesy
 # walk and are sweep-eligible immediately, whatever the calendar distance.
 # An enrolled slug we cannot map to a markets row is surfaced in stats
 # (g_rent_unmatched) — a game we can't bet must be visible, never silent.
-_RENTLIST_CACHE: dict = {"at": 0.0, "val": ({}, [])}
+_RENTLIST_CACHE: dict = {"at": 0.0, "val": ({}, []), "keys": {}}
 _RENTLIST_TTL_S = 600.0
 _RENTLIST_SEEN: dict = {}          # market_id → first-seen-unbet ts
 _RENTLIST_WD_TS = 0.0              # last alarm ts (4h cooldown)
@@ -18177,6 +18324,7 @@ def _rent_enrolled_football(sb):
                 _nt = g.get("notes")
                 if isinstance(_nt, dict) and _nt.get("rent_key"):
                     key2id[str(_nt["rent_key"])] = g["id"]
+            keymap: dict = dict(key2id)      # every resolved key → market id
             for (lg, ac, hc, day), mts in slugs.items():
                 kstr = f"{lg}-{ac}-{hc}-{day}"
                 if kstr in key2id:
@@ -18208,11 +18356,13 @@ def _rent_enrolled_football(sb):
                 hits = list(dict.fromkeys(hits))
                 if len(hits) == 1:
                     rmap.setdefault(hits[0], set()).update(mts)
+                    keymap[kstr] = hits[0]
                 else:
                     unmatched.append(f"{lg}-{ac}-{hc}-{day}"
                                      + (f"·ambig{len(hits)}" if hits else ""))
         c["at"] = nowt
         c["val"] = (rmap, unmatched)
+        c["keys"] = keymap
     except Exception:
         return rmap, unmatched       # partial, uncached — retried next call
     return c["val"]

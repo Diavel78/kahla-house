@@ -1109,6 +1109,21 @@ or a pending row untouched >2h (executor dead). (f) **NFL props LIVE
 carried guessed patterns that matched nothing); fbprop fills join the
 scalp arm (cost-floor asks) so TURN RATE — can props exit — is a
 measured sells/fills number, the user's explicit experiment.
+(h) **FOOTBALL GHOST ADOPTION (Sep 5 2026, docket #6 root fix):** the
+reconcile's two-strike delete can false-kill a pick during a venue wobble
+while the ORDER stays alive (found live: 5 AUTOMATIC 20-lot orders + 1
+position with no pick — no chase, no scalp cover, and the OMS re-bet 4 of
+the games on another rung). `_pmm_autolog` now books AUTOMATIC-order and
+position strays on asc-/tsc-/aec- football/UFC slugs from the slug itself
+(`_football_slug_market` via the rent list's cached key→market map, no
+venue event search, no −12h..+48h window) with side/line from the venue's
+own market question (`_classify_market`, slug convention as fallback:
+pos-X = away +X, neg-X = away −X, SHORT mirrors to home). Never a
+hand-placed bid; a position already carrying your ask is your takeover.
+Rows are executor-shaped (`gridiron_autobet`, `ghost_adopt`), so chase,
+scalp and OMS dedup see them. The same autolog got its fixed 20-min cost
+removed the same day (known-slug fast lane; index only unknown slugs;
+out-of-window strays never look up) — >10 min → 0.2 s per call.
 (g) **THE RENT CULL (Sep 5 2026 — Rob: "kill the bottom at CONFIG
 level so it stays dead; NEVER hand-cancel in the app, self-heal
 re-places")**: `_rent_cull_tick` rides the repeg lease hourly after the
