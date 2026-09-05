@@ -1060,12 +1060,26 @@ def grocery_page():
 # Polymarket SDK client
 # ---------------------------------------------------------------------------
 
+_PMM_TRADE_CLIENT = None
+
+
 def get_client():
-    """Return an authenticated PolymarketUS client."""
+    """Return an authenticated PolymarketUS client. MODULE-CACHED (Sep 4
+    2026, the stack-dump night): every call built a fresh PolymarketUS →
+    fresh httpx.Client → fresh SSL context, and the sample profiler
+    caught the x509/EVP_RAND churn live inside _gridiron_try_bet's
+    per-rung tick reads — hundreds of TLS-context builds per lap, pure
+    CPU on the GIL. The read twin below has been safely module-cached
+    since Aug 29 ("httpx.Client is thread-safe for requests"); the
+    trading client shares the same shape."""
+    global _PMM_TRADE_CLIENT
     from polymarket_us import PolymarketUS
     if not POLYMARKET_KEY_ID or not POLYMARKET_SECRET_KEY:
         raise RuntimeError("Polymarket API credentials not configured")
-    return PolymarketUS(key_id=POLYMARKET_KEY_ID, secret_key=POLYMARKET_SECRET_KEY)
+    if _PMM_TRADE_CLIENT is None:
+        _PMM_TRADE_CLIENT = PolymarketUS(key_id=POLYMARKET_KEY_ID,
+                                         secret_key=POLYMARKET_SECRET_KEY)
+    return _PMM_TRADE_CLIENT
 
 
 # FAST-FAIL BULK READS (Aug 29 2026 — the repeg-lap anatomy: laps ran
@@ -2806,6 +2820,26 @@ _CELLAR_HEALTH_LAST: dict = {}
 _DASH_CACHE_MAX_AGE_S = 900     # 15 min — the tick refreshes every 5
 
 
+# The day-card recompute walks the whole recent activities window
+# through _venue_day_map — pydantic-validating thousands of rows. Cheap
+# on a 5-minute Vercel cadence; on the box's EVERY-TICK dash refresh
+# (Rob, Aug 22: "can't we refresh it way faster??") the Sep-4 stack dump
+# caught it as THE hot JSON parser pinning the GIL. Memoized 240s at the
+# refresh site only — balance/orders/positions stay per-tick fresh, the
+# day cards lag ≤4 min, and page-load fallbacks still compute live.
+_GAMEDAY_PNL_MEMO: dict = {"at": 0.0, "out": None}
+
+
+def _gameday_pnl_memo(sb):
+    if (_GAMEDAY_PNL_MEMO["out"] is not None
+            and _time.time() - _GAMEDAY_PNL_MEMO["at"] < 240.0):
+        return _GAMEDAY_PNL_MEMO["out"]
+    out = _gameday_pnl(sb)
+    if out is not None:
+        _GAMEDAY_PNL_MEMO.update(at=_time.time(), out=out)
+    return out
+
+
 def _dash_derived(sb) -> dict:
     """Every DB-derived block the slim dashboard shows, computed once.
 
@@ -2823,7 +2857,7 @@ def _dash_derived(sb) -> dict:
     # `or None` on cellar: an empty {} stored here reads as "present" to
     # the serve path's _blk and gets SERVED — the NO SIGNAL flicker. None
     # makes the serve path recompute live (which now carries last-good).
-    for key, fn in (("gameday_pnl", lambda: _gameday_pnl(sb)),
+    for key, fn in (("gameday_pnl", lambda: _gameday_pnl_memo(sb)),
                     ("cellar", lambda: _cellar_health(sb) or None),
                     ("maker_split", lambda: _maker_rewards_split(sb)),
                     ("gameday_rewards", lambda: _gameday_rewards(sb)),
@@ -6334,6 +6368,12 @@ WS_QUOTES: dict = {}          # slug -> (bid_c|None, ask_c|None, mono_ts)
 WS_QUOTE_FRESH_S = 90.0       # staleness doctrine: older than this is a
                               # MISS, never a guess — REST decides (the
                               # "socket as hint" rule, one level deeper)
+
+
+class _WsNotOutbid(Exception):
+    """Control-flow sentinel for the fill-status outbid check: a fresh
+    table quote proved nobody outbid us, so the whole REST-book branch
+    is skipped via the block's existing except-pass. Never escapes."""
 
 
 def _ws_quote(slug: str):
@@ -11602,14 +11642,6 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict,
             entry["status"], entry["pct"] = "resting", 0.0
         if mins is None or mins > 0:                 # outbid (pre-game only)
             try:
-                # Prefetched by the caller's concurrent warm-up when
-                # available (the full-sweep lap fat); the self-read stays
-                # as the fallback so every other caller is unchanged.
-                book = (book_cache.get(slug)
-                        if book_cache is not None and slug in book_cache
-                        else _pmm_book(client, slug))
-                if synthetic and book:
-                    book = _invert_book(book)
                 myp = None
                 for o in my_orders:
                     py = o.get("price_yes")
@@ -11623,6 +11655,33 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict,
                     # never flags.
                     c = round((1 - py if synthetic else py) * 200.0) / 2.0
                     myp = c if myp is None else max(myp, c)
+                # WS QUOTE TABLE FIRST (phase 3, Sep 4 2026): the common
+                # answer is "nobody outbid you", and a fresh LITE row
+                # answers it for free — the REST book (depth, ahead_qty)
+                # is paid for ONLY on a table-confirmed outbid or a
+                # table miss. This walk was the repeg lap's whale: one
+                # REST read per resting pick per lap, mostly to learn
+                # nothing changed.
+                if myp is not None:
+                    _wsq = _ws_quote(slug)
+                    if _wsq is not None:
+                        _wb = ((100.0 - _wsq[1])
+                               if synthetic and _wsq[1] is not None
+                               else (None if synthetic else _wsq[0]))
+                        if _wb is None or _wb <= myp + 0.25:
+                            _WS_PRICE_STATS["fs_hit"] = \
+                                _WS_PRICE_STATS.get("fs_hit", 0) + 1
+                            raise _WsNotOutbid()
+                _WS_PRICE_STATS["fs_rest"] = \
+                    _WS_PRICE_STATS.get("fs_rest", 0) + 1
+                # Prefetched by the caller's concurrent warm-up when
+                # available (the full-sweep lap fat); the self-read stays
+                # as the fallback so every other caller is unchanged.
+                book = (book_cache.get(slug)
+                        if book_cache is not None and slug in book_cache
+                        else _pmm_book(client, slug))
+                if synthetic and book:
+                    book = _invert_book(book)
                 if (book and myp is not None
                         and book.get("best_bid") is not None
                         and book["best_bid"] > myp + 0.25):
