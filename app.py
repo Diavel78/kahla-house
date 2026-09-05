@@ -22228,6 +22228,14 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         f4 = min(99.0, _grid_up(e4, _TICK_CACHE.get(slug4, 1.0)))  # cost base
         return 0 if a4 < f4 - 0.26 else 1
     cands.sort(key=_floor_viol)
+    # BUDGET CLOCK RESTARTS HERE — the chase-night bug's THIRD sighting
+    # (Sep 4 2026, first night as its own lane): _t0 at function top
+    # meant the setup reads (picks, mirror, orders, positions) pre-spent
+    # the 30s under GIL contention, the walk's first budget check said
+    # "spent", and the lane completed 17-minute laps with work=0 — the
+    # exact starvation it was built to end, one layer down. The budget
+    # governs the WRITE WALK, never the setup.
+    _t0 = _time.time()
     for r, b, slug, synth in cands:
         if _time.time() - _t0 > _SCALP_BUDGET_S:
             res["gate"] = "budget"
