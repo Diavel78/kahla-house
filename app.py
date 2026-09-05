@@ -6323,6 +6323,32 @@ _TAKE_IMB = 1.5          # top-row bid size ≥ this × top-row ask size ⇒ TAK
 KALSHI_EXECUTION = False
 
 
+# ── THE WS QUOTE TABLE (docs/ws-quote-table-spec.md, Sep 4 2026 — built
+# the night the box hit its GIL cliff: the REST megapayload parsing IS
+# the interpreter bill; a table fed by the markets socket deletes it).
+# Written ONLY by cellar/wsfeed._write_quote (feed thread, GIL-atomic
+# single-key stores of immutable tuples); read by the money lanes via
+# _ws_quote. On Vercel nothing ever writes it, so every read misses and
+# callers take their REST path — zero behavioral change off the box.
+WS_QUOTES: dict = {}          # slug -> (bid_c|None, ask_c|None, mono_ts)
+WS_QUOTE_FRESH_S = 90.0       # staleness doctrine: older than this is a
+                              # MISS, never a guess — REST decides (the
+                              # "socket as hint" rule, one level deeper)
+
+
+def _ws_quote(slug: str):
+    """(bid_c, ask_c) if the table has a FRESH row for this slug, else
+    None. bid/ask may individually be None (an empty book side is a
+    real state). Callers must treat None as 'go ask REST'."""
+    t = WS_QUOTES.get(slug)
+    if not t:
+        return None
+    bid, ask, ts = t
+    if _time.monotonic() - ts > WS_QUOTE_FRESH_S:
+        return None
+    return bid, ask
+
+
 def _pmm_book(client, slug: str) -> dict | None:
     """Polymarket markets.book(slug) -> normalized side book in cents.
     bids = buyers of this side, asks (offers) = sellers of this side."""

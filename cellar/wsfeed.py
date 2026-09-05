@@ -71,6 +71,31 @@ _SLUG_KEYS = ("market_slug", "marketSlug", "slug", "symbol",
 _UUID_RE = None
 
 
+def _write_quote(slug: str, pv: dict) -> None:
+    """One LITE frame → one quote-table row (app.WS_QUOTES[slug] =
+    (bid_c, ask_c, monotonic_ts)). Values are immutable tuples and the
+    write is a single GIL-atomic dict store — feed thread writes, lane
+    threads read, no lock. Amounts arrive as {value, currency} dollars;
+    stored as half-cent-rounded cents (the _pmm_book convention — the
+    half-cent is load-bearing on game books). A side with no quote
+    stores None; the timestamp still advances (an empty side is real
+    news). Never raises — a bad frame is a skipped write, and the
+    readers' staleness rule turns absence into a REST fallback."""
+    try:
+        import app as _app
+
+        def _c(a):
+            try:
+                v = float((a or {}).get("value"))
+            except (TypeError, ValueError, AttributeError):
+                return None
+            return round(v * 200) / 2.0 if 0 < v < 1 else None
+        _app.WS_QUOTES[slug] = (_c(pv.get("bestBid")), _c(pv.get("bestAsk")),
+                                time.monotonic())
+    except Exception:
+        pass
+
+
 def _slugish(v) -> bool:
     """A market slug, not a UUID and not a short token. UUIDs pass the
     dash test (36 hex chars, 4 dashes) and would subscribe to nothing —
@@ -592,9 +617,14 @@ class MarketsFeed:
                     log.info("ws mkts connected")
                 while not self.stop.is_set():
                     # Rotate the subscription when the watch list moved.
+                    # Sort ONLY on rotation — v1 sorted the whole watch
+                    # list on EVERY received frame (400 slugs × Friday
+                    # frame rates = a real slice of the interpreter,
+                    # found the night the box hit its GIL cliff).
                     with self._lock:
-                        dirty, slugs = self._dirty, sorted(self._slugs)
+                        dirty = self._dirty
                         self._dirty = False
+                        slugs = sorted(self._slugs) if dirty else ()
                     if dirty and slugs:
                         sub_n += 1
                         rid = f"cellar-mkts-{sub_n}"
@@ -671,6 +701,14 @@ class MarketsFeed:
                             _sl = _pv.get("marketSlug")
                             break
                     if isinstance(_sl, str) and _sl:
+                        # THE QUOTE TABLE (docs/ws-quote-table-spec.md):
+                        # every LITE frame — baselines INCLUDED, they are
+                        # a free snapshot — lands bid/ask in app.WS_QUOTES
+                        # so the money lanes can price without a REST
+                        # round trip. Write-only from here; freshness and
+                        # fallback live with the readers (_ws_quote).
+                        if _pk == "marketDataLite":
+                            _write_quote(_sl, _pv)
                         if _sl not in self._base_seen:
                             # First frame for this market since the
                             # subscription = the baseline replay. State,
