@@ -12155,7 +12155,8 @@ def _compute_fill_status(sb, uid: str, poly_snap=None,
             try:
                 if poly_orders is not None and _WS_WATCHLIST_CB is not None:
                     _WS_WATCHLIST_CB({o.get("slug") for o in poly_orders
-                                      if o.get("slug")})
+                                      if o.get("slug")}
+                                     | set((poly_positions or {}).keys()))
             except Exception:
                 pass
             # Book-of-record: log any resting order OR held position not yet a
@@ -23047,7 +23048,22 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             if py is not None:
                 our_ask = (100.0 - py * 100.0) if synth else py * 100.0
             our_ask_qty = float(o0.get("leaves") or o0.get("qty") or 0.0)
-        book = _pmm_book(client, slug)
+        # TABLE-FIRST (Sep 5 2026, WS phase 3 for the sell arm): the LITE
+        # quote is the canonical YES top-of-book, which is all the walk
+        # reads — best bid to join, best competitor ask to lead. A table
+        # level that is not ours is a competitor; one AT our level steps a
+        # tick exactly as the alone-at-the-top rule would, so every branch
+        # lands where the REST read would have. Miss → REST, unchanged.
+        book = None
+        _wsq = _ws_quote(slug)
+        if _wsq is not None and (_wsq[0] is not None or _wsq[1] is not None):
+            book = {"bids": ([(_wsq[0], 1e6)] if _wsq[0] is not None else []),
+                    "asks": ([(_wsq[1], 1e6)] if _wsq[1] is not None else []),
+                    "best_bid": _wsq[0], "best_ask": _wsq[1]}
+            _WS_PRICE_STATS["sc_hit"] = _WS_PRICE_STATS.get("sc_hit", 0) + 1
+        else:
+            book = _pmm_book(client, slug)
+            _WS_PRICE_STATS["sc_rest"] = _WS_PRICE_STATS.get("sc_rest", 0) + 1
         if synth:
             book = _invert_book(book)
         if not book:
