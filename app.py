@@ -15,6 +15,7 @@ import random as _random
 import secrets
 import functools
 import time as _time
+import threading
 import requests as _http  # module-level HTTP client — ESPN scoreboard + Kalshi
                           # fetches use it. (Was accidentally dropped with the
                           # Odds Board removal, which NameError'd every _http.get
@@ -7791,6 +7792,13 @@ def _whiff_name_key(nm: str) -> str:
     return (parts[0][:3] + parts[-1][:3]) if len(parts) >= 2 else ""
 
 
+_AUTOLOG_INDEX_LOCK = threading.Lock()     # one slug-index builder at a time
+_AUTOLOG_UNMATCHED: dict = {}              # slug -> monotonic ts of last miss
+_AUTOLOG_UNMATCHED_S = 1800.0              # a stray retries every 30 min
+_SLUG_SPORT_TOKENS = (("-mlb-", "MLB"), ("-nfl-", "NFL"), ("-cfb-", "NCAAF"),
+                      ("-nba-", "NBA"), ("-nhl-", "NHL"), ("-ufc-", "UFC"))
+
+
 def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dict:
     """Reconcile the admin's POLYMARKET book into bot_picks — the Poly analog
     of `_kalshi_autolog` (dual-venue, July 2026 revert). USER RULE: "I bet on
@@ -7844,6 +7852,7 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
         filled_slugs.add(slug)
     out["intended"] = len(intended)
     now_dt = datetime.now(timezone.utc)
+    autos: list = []
 
     # Removal — FILL-BASED, NOT time-based (your rule: "if it fills it counts,
     # if it doesn't it doesn't; never kill a bet because I *guessed* the start
@@ -7863,9 +7872,9 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
         try:
             autos = (sb.table("bot_picks")
                      .select("id,event_start,signal_blob,query_text,"
-                             "picked_at,market_id,market_type")
+                             "picked_at,market_id,market_type,entry_price")
                      .eq("asked_by", owner_uid).eq("status", "pending")
-                     .limit(300).execute().data) or []
+                     .limit(1000).execute().data) or []
         except Exception:
             autos = []
         for a in autos:
@@ -8003,13 +8012,100 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
 
     if not intended:
         return out                              # nothing new to log
-    want_slugs = {s for (s, _y) in intended}
+    # ── KNOWN-SLUG FAST LANE (Sep 5 2026 — the fixed 20-minute lap cost).
+    # Before this, EVERY call rebuilt the slug index with a venue lookup
+    # per active market in every sport (−12h..+48h, ~200 rows on a CFB
+    # Saturday; misses — FCS games the venue never lists — re-pay the
+    # venue every time), in three lanes at once, even though ~all of the
+    # 200+ intended slugs already had picks. One stray (a hand-placed bid
+    # with no pick) kept it firing forever — 20-min laps at 3am. Measured
+    # live Sep 5: one call of the old shape ran past 10 minutes. Now: a
+    # slug a pending pick already carries gets its `filled` stamp + entry
+    # sync straight from the pick row; only UNKNOWN slugs go through the
+    # index, over the sports they name, one builder at a time, and a slug
+    # that stays unmatched backs off for _AUTOLOG_UNMATCHED_S.
+    pick_by_slug: dict = {}
+    for a in autos:
+        _b = a.get("signal_blob") if isinstance(a.get("signal_blob"), dict) else {}
+        _sl = (_b or {}).get("pmm_slug")
+        if _sl:
+            pick_by_slug.setdefault(_sl, []).append(a)
+    for (slug, syn), prob in intended.items():
+        rows = [a for a in pick_by_slug.get(slug, [])
+                if (a.get("signal_blob") or {}).get("pmm_synthetic") in (None, syn)]
+        if not rows:
+            continue
+        out["exists"] += 1
+        is_filled = slug in filled_slugs
+        for ex in rows:
+            b = ex.get("signal_blob") if isinstance(ex.get("signal_blob"), dict) else {}
+            b = b or {}
+            nb = {**b, "pmm_slug": slug, "pmm_synthetic": syn,
+                  "filled": bool(b.get("filled")) or is_filled}
+            upd = {}
+            if nb != b:
+                upd["signal_blob"] = nb
+            if is_filled and prob is not None and 0 < prob < 1:
+                new_amer = _prob_to_amer_py(prob)
+                cur_amer = ex.get("entry_price")
+                cur_prob = _amer_to_prob_py(cur_amer)
+                cur_c = (cur_prob * 100.0) if cur_prob is not None else None
+                if (new_amer is not None and new_amer != cur_amer
+                        and (cur_c is None or abs(prob * 100.0 - cur_c) >= 0.5)):
+                    upd["entry_price"] = new_amer
+            if upd:
+                try:
+                    (sb.table("bot_picks").update(upd)
+                     .eq("id", ex["id"]).execute())
+                    if "entry_price" in upd:
+                        out["synced"] = out.get("synced", 0) + 1
+                        app.logger.info(
+                            "PMM-AUTOLOG synced entry %s -> %s (%s)",
+                            ex.get("entry_price"), upd["entry_price"], slug)
+                except Exception:
+                    pass
+    unknown = {k: v for k, v in intended.items() if k[0] not in pick_by_slug}
+    out["unknown"] = len(unknown)
+    _nowm = _time.monotonic()
+    # OUT-OF-WINDOW SHORT-CIRCUIT: the index only holds games from −12h to
+    # +48h, and every slug carries its ET game date — a stray on a game 5-15
+    # days out (the Sep 5 case: five false-killed football orders) can never
+    # match, so it never earns a lookup. Backed off like any other miss.
+    _lo_d = (now_dt - timedelta(hours=12)).date()
+    _hi_d = (now_dt + timedelta(hours=48)).date()
+    for (s_, _y) in list(unknown):
+        _m = re.search(r"(\d{4}-\d{2}-\d{2})", s_ or "")
+        if _m:
+            try:
+                _d = datetime.strptime(_m.group(1), "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if _d < _lo_d or _d > _hi_d:
+                _AUTOLOG_UNMATCHED[s_] = _nowm
+                out["out_of_window"] = out.get("out_of_window", 0) + 1
+    to_index = {k: v for k, v in unknown.items()
+                if _nowm - _AUTOLOG_UNMATCHED.get(k[0], 0.0) > _AUTOLOG_UNMATCHED_S}
+    out["backoff"] = len(unknown) - len(to_index)
+    if not unknown:
+        return out                              # every intended slug is booked
+    want_slugs = {s for (s, _y) in to_index}
+    # only the sports the unknown slugs name (fallback: all)
+    _sports: set = set()
+    for (s_, _y) in unknown:
+        for _tok, _sp in _SLUG_SPORT_TOKENS:
+            if _tok in s_:
+                _sports.add(_sp)
+                break
+        else:
+            _sports = set(_PM_SPORTS)
+            break
+    _sports = _sports or set(_PM_SPORTS)
     lo = (now_dt - timedelta(hours=12)).isoformat()   # −12h → catch live bets
     hi = (now_dt + timedelta(hours=48)).isoformat()
     try:
         markets = (sb.table("markets")
                    .select("id,sport,event_name,event_start")
-                   .in_("sport", list(_PM_SPORTS)).eq("status", "active")
+                   .in_("sport", sorted(_sports)).eq("status", "active")
                    .gte("event_start", lo).lte("event_start", hi)
                    .limit(200).execute().data) or []
     except Exception:
@@ -8018,11 +8114,16 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
         import pmm_markets as _pm
     except Exception:
         return out
+    if want_slugs and not _AUTOLOG_INDEX_LOCK.acquire(blocking=False):
+        out["gate"] = "busy"                    # another lane is indexing
+        want_slugs = set()
+        to_index = {}
+    _index_held = bool(want_slugs)
     # slug → list of (market, market_type, side, line, synthetic). A slug's
     # YES entry (non-synthetic) and synthesized NO share the slug, so it
     # carries both sides — the bet's synthetic flag picks which.
     slug_index: dict = {}
-    for mk in markets:
+    for mk in (markets if want_slugs else []):
         ev = mk.get("event_name") or ""
         if " @ " not in ev:
             continue
@@ -8063,12 +8164,19 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                     slug_index.setdefault(slug, []).append(
                         (mk, mt, e.get("side"), e.get("line"),
                          bool(e.get("synthetic"))))
-    for (slug, syn), prob in intended.items():
+    if _index_held:
+        try:
+            _AUTOLOG_INDEX_LOCK.release()
+        except Exception:
+            pass
+    for (slug, syn), prob in to_index.items():
         cands = [c for c in (slug_index.get(slug) or []) if c[4] == syn]
         uniq = {(c[0]["id"], c[1], c[2]) for c in cands}
         if len(uniq) != 1:
             out["unmatched"] += 1                # 0 or ambiguous → skip
+            _AUTOLOG_UNMATCHED[slug] = _time.monotonic()   # stray: back off
             continue
+        _AUTOLOG_UNMATCHED.pop(slug, None)
         mk, mt, side, line, synth = cands[0]
         try:
             existing = (sb.table("bot_picks").select("id,signal_blob,entry_price")
@@ -11918,7 +12026,14 @@ def _compute_fill_status(sb, uid: str, poly_snap=None,
                 _s = (_b or {}).get("pmm_slug")
                 if only_slugs is not None and _s and _s not in only_slugs:
                     continue
-                if _s and _s in _oslugs:
+                # PRESENCE-AWARE (Sep 5 2026): a slug the quote table can
+                # vouch for gets no prefetch — _pmm_fill_entry answers
+                # "not outbid" from the table and self-reads the book only
+                # on a table-confirmed outbid. Before this the warm-up
+                # read EVERY resting pick's book on every full lap (~200
+                # REST GETs × 2 lanes), ahead of the table it was built
+                # to spare.
+                if _s and _s in _oslugs and _ws_quote(_s) is None:
                     _need.add(_s)
             if len(_need) > 3:
                 from concurrent.futures import ThreadPoolExecutor

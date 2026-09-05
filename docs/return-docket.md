@@ -225,6 +225,36 @@ current. Expect fs_rest → ~0 and laps → minutes at the next restart;
 the OMS executor (2 touches in 120s) should stop starving for the same
 reason — measure `oms_touch` per lap after.
 
+**✅ THE REAL WHALE (found 9:35am, after the presence fix alone left laps
+at 24 min): `_pmm_autolog`.** Second SIGUSR1 dump: repeg, alerts AND the
+kalshi_autolog lane all inside `_pmm_autolog` ← `_compute_fill_status`.
+Every call rebuilt the slug index with a `pmm_markets.lookup` per active
+market in EVERY sport (−12h..+48h ≈ 200 rows on a CFB Saturday; venue
+misses re-pay every call), three lanes concurrently, though 225 of 232
+intended slugs already had picks. Measured live: one call of the old
+shape ran >10 min. Restructured (73/73): known-slug fast lane (stamp +
+entry sync straight from the pick row), index ONLY unknown slugs over the
+sports they name, one builder at a time (lock), 30-min backoff per
+unmatched slug, and an OUT-OF-WINDOW short-circuit (slug date outside
+−12h..+48h never earns a lookup). Result: **0.2 s per call** (233
+intended / 220 exists / 7 unknown, all out-of-window). Also: the
+fill-status book warm-up now skips slugs the quote table vouches for.
+
+**⚠ THE 7 STRAYS ARE A MONEY BUG (open):** 5 AUTOMATIC BUY orders
+(20 contracts each, one partially filled) + 1 position (ore-okst total
+80.5) are alive on the venue with NO pick — reconcile deleted the picks
+as `venue_killed_order` (Sep 2-4; `orders.list` has no pagination —
+221 returned, no cursor — so these were transient venue reads surviving
+the 12-min two-strike). Consequences: no chase, no scalp cover on fill,
+and the OMS re-bet 4 of the 5 games on another rung (reentry:pick_gone →
+dedup saw no pick). The autolog can never adopt them: its window is
+MLB-shaped (−12h..+48h) and these games are 5-15 days out — docket #6
+exactly. NEXT: adopt the 6 via the pick-4879 recipe (source pmm_autolog,
+manual_adopt, pmm_slug, order_id, contracts, gridiron_autobet so repeg/
+scalp/OMS see them), then build football ghost adoption by slug→market
+(the slug names the game + date; no venue lookup needed) into
+`_reconcile_tick` or the autolog.
+
 
 ## 0. First hour back — read the week
 - `desired_orders`: never_tried should have hit ~0 within a day of
