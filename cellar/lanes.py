@@ -198,6 +198,15 @@ def lane_opener(ctx: Ctx) -> int:
         oms_stats = {"oms_err": "exception"}
     rows, stats = _app._opener_pass(ctx.sb, ctx.now, deadline)
     stats = {**stats, **oms_stats}
+    # Quote-table hit rate — "measurable from day one" is the spec's own
+    # rule. Cumulative counters snapshotted into every opener tick's
+    # stats: ws_price {hit: N, rest: M} rising hit-share is the table
+    # working; all-rest with the mkts feed up means groups aren't
+    # forming (subscribe path broken — look at 'ws mkts watching' logs).
+    try:
+        stats["ws_price"] = dict(_app._WS_PRICE_STATS)
+    except Exception:
+        pass
 
     # THE FOOTBALL PASS RUNS HERE TOO, and forgetting it orphaned the lane.
     #
