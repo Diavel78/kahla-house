@@ -22600,7 +22600,14 @@ def _rent_cull_tick(sb, now, client=None, orders=None) -> dict:
             except Exception:
                 pass
             continue
-        # KILL — cancel every resting order on the slug (one, by invariant).
+        # KILL — cancel every resting order on the slug (one, by invariant),
+        # then VERIFY against a fresh order list before touching the pick.
+        # LANDMINE (Sep 5 2026, first live pass, during a venue trading
+        # halt): `orders.cancel` returned without error for 10 orders and
+        # the venue executed NONE of them — the cull deleted 10 picks whose
+        # orders lived on (ghosts), and the autolog re-adopted 6 as bare
+        # picks. Same doctrine as the re-peg and the create path: a cancel
+        # that returns is a claim; only the re-listed book is a fact.
         ok = True
         for o in resting.get(sl, []):
             try:
@@ -22613,6 +22620,15 @@ def _rent_cull_tick(sb, now, client=None, orders=None) -> dict:
                 break
         if not ok:
             continue                    # order may still rest → pick stays
+        _time.sleep(0.5)
+        _chk = _pmm_open_orders_raw(client)
+        if _chk is None or any(x.get("slug") == sl and "BUY" in (x.get("intent") or "")
+                               for x in _chk):
+            res["unconfirmed"] = res.get("unconfirmed", 0) + 1
+            res.setdefault("errors", []).append(
+                {"slug": sl, "err": ("verify read failed" if _chk is None
+                                     else "order still resting after cancel")})
+            continue                    # NOT cancelled → pick stays, retry next pass
         try:                            # archive, then delete — never blind
             (sb.table("reconcile_bak")
              .insert({"pick_id": p["id"], "reason": "rent_cull", "row": p})
