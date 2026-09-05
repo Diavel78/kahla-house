@@ -27,6 +27,7 @@ from firebase_admin import auth as fb_auth, credentials, firestore
 
 from dotenv import load_dotenv
 from flask import (
+    has_request_context,
     Flask, render_template, redirect, request,
     jsonify, g, make_response, send_file,
 )
@@ -8508,8 +8509,13 @@ def _probe_log(out: dict):
     read from the DB (run_sql.sh) instead of relayed by screenshot — the
     go-live gate reads this table. Never raises."""
     try:
-        # never persist the shared secret into the table we read back
-        pr = {k: v for k, v in request.args.items() if k != "key"}
+        # never persist the shared secret into the table we read back.
+        # Box-side callers (cellar lanes) have no request context — the
+        # fbprop funnel stamped nothing from the daemon until Sep 5 2026.
+        pr = ({k: v for k, v in request.args.items() if k != "key"}
+              if has_request_context() else {"ctx": "cellar"})
+        if isinstance(out, dict) and out.get("kind"):
+            pr.setdefault("kind", out["kind"])
         get_supabase().table("exec_probe_runs").insert(
             {"params": pr, "result": out}).execute()
     except Exception:
@@ -17480,7 +17486,10 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
     for sn, peg, pblk, q, ln in viable:
         sl = pblk["slug"]
         if sl not in rent_by_slug:
-            rent_by_slug[sl] = _rent_ok(sl, es0, now_utc, sb)[0]
+            # RENT CULL veto (Sep 5 2026): a rung the ledger convicted of
+            # earning nothing stays dead here, whatever the venue enrolls.
+            rent_by_slug[sl] = (_rent_ok(sl, es0, now_utc, sb)[0]
+                                and not _rent_dead(sl, sb))
     paying = [c for c in viable if rent_by_slug.get(c[2]["slug"])]
     # ── RUNG WINDOW (user, Sep 2 2026: "if multiple paying rungs are
     # available, you can only select the middle or 1 to either side of
@@ -17500,7 +17509,8 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
         sl = vpblk.get("slug")
         if sl not in rent_by_slug:
             try:
-                rent_by_slug[sl] = _rent_ok(sl, es0, now_utc, sb)[0]
+                rent_by_slug[sl] = (_rent_ok(sl, es0, now_utc, sb)[0]
+                                    and not _rent_dead(sl, sb))
             except Exception:
                 rent_by_slug[sl] = False
         if rent_by_slug.get(sl):
@@ -17730,7 +17740,8 @@ def _gridiron_try_ml(sb, g, es0, d):
     paying = []
     for c in viable:
         try:
-            if _rent_ok(c[2]["slug"], es0, now_utc, sb)[0]:
+            if (_rent_ok(c[2]["slug"], es0, now_utc, sb)[0]
+                    and not _rent_dead(c[2]["slug"], sb)):
                 paying.append(c)
         except Exception:
             continue
@@ -18358,6 +18369,18 @@ def _machine_flag(key: str, default: bool = True) -> bool:
             c["at"] = _time.time()
         v = c["map"].get(key)
         return default if v is None else bool(v)
+    except Exception:
+        return default
+
+
+def _machine_flag_val(key: str, default=None):
+    """The raw jsonb value of a machine_flags row (same 60s cache as
+    `_machine_flag`) — for flags that carry a CONFIG dict, not a bool
+    (`rent_cull` thresholds, Sep 5 2026). Fail-open to `default`."""
+    try:
+        _machine_flag(key)                      # refreshes the shared cache
+        v = _MFLAGS_CACHE["map"].get(key)
+        return default if v is None else v
     except Exception:
         return default
 
@@ -22081,6 +22104,262 @@ _SCALP_BUDGET_S = 90.0       # wall clock on the WRITE WALK (clock restarts
 _SCALP_SHADOW_CAP = 30       # shadow entries kept per pick blob
 
 
+# ── THE RENT CULL (Sat Sep 5 2026 — Rob: "rank ALL pending football bets by
+# rent earned + capital tied; kill the bottom at CONFIG level so it stays
+# dead. NEVER hand-cancel in the app — self-heal re-places") ──────────────
+# The OSU lesson: all four OSU bets were ENROLLED and earned $0.05-$0.39
+# while Missouri@Kansas earned $11.87 the same day. Enrollment is the
+# venue's promise; the ledger is the truth. So the criterion is MEASURED
+# rent per resting day on OUR slug — never ladder geometry (which convicted
+# two real lines Friday: TSU-UGA −46.5 and NT-Indiana −39.5).
+#   1. JUDGE — a pending gridiron pick whose order is RESTING UNFILLED on
+#      the venue (venue orders are the denominator; a filled position earns
+#      nothing because it FILLED, not because the rung is dead), with
+#      >= min_days of ledger opportunity (picked_at → the ledger's newest
+#      earn_date, whole AZ days) and rent/day < floor, is DEAD.
+#   2. KILL — cancel the resting BUY (AUTOMATIC gate; manual never touched),
+#      archive the pick to reconcile_bak (reason rent_cull), delete it,
+#      record the slug in rent_dead_slugs.
+#   3. STAY DEAD — `_rent_dead(slug)` vetoes the slug in every gridiron
+#      candidate filter (booked, virgin, ML) so no lane re-quotes it, and
+#      the (game, mt) desired_orders row parks in state 'dead' when its
+#      LAST pending bet was culled (a surviving sibling rung keeps the row
+#      placed — the executor never revisits placed rows). Un-dead = delete
+#      the rent_dead_slugs row + flip the desired row to pending; the
+#      executor re-runs the full gauntlet at current books.
+# Thresholds are machine_flags['rent_cull'] (jsonb, 60s poll, no deploy):
+# {"enabled", "dry", "min_days", "min_usd_per_day", "max_kills"}. dry=true
+# judges + stamps exec_probe_runs (kind=rent_cull) and cancels nothing.
+# Rides the repeg lease after the reconcile (the lane that owns order
+# mutation), hourly, writes SERIAL, <= max_kills per pass.
+_RENT_DEAD_CACHE: dict = {"at": 0.0, "set": set()}
+_CULL_LAST_TS = 0.0
+_CULL_EVERY_S = 3600.0
+
+
+def _rent_dead_set(sb=None) -> set:
+    c = _RENT_DEAD_CACHE
+    if _time.time() - c["at"] > 300.0:
+        try:
+            rows = ((sb or get_supabase()).table("rent_dead_slugs")
+                    .select("slug").eq("dry", False).limit(1000)
+                    .execute().data) or []
+            c["set"] = {r["slug"] for r in rows if r.get("slug")}
+            c["at"] = _time.time()
+        except Exception:
+            c["at"] = _time.time() - 240.0    # keep the last set, retry in 1m
+    return c["set"]
+
+
+def _rent_dead(slug, sb=None) -> bool:
+    """True when the cull convicted this exact market slug."""
+    return bool(slug) and slug in _rent_dead_set(sb)
+
+
+def _rent_cull_tick(sb, now, client=None, orders=None) -> dict:
+    global _CULL_LAST_TS
+    cfg = _machine_flag_val("rent_cull") or {}
+    if not isinstance(cfg, dict) or not cfg.get("enabled"):
+        return {"gate": "off"}
+    if _time.time() - _CULL_LAST_TS < _CULL_EVERY_S:
+        return {"gate": "cadence"}
+    dry = bool(cfg.get("dry", True))
+    min_days = float(cfg.get("min_days") or 2.0)
+    floor_pd = float(cfg.get("min_usd_per_day") or 0.05)
+    max_kills = int(cfg.get("max_kills") or 10)
+    owner = _kalshi_owner_uid()
+    if not owner:
+        return {"gate": "no_owner"}
+    if orders is None:
+        try:
+            client = client or get_client()
+            orders = _pmm_open_orders_raw(client)
+        except Exception:
+            orders = None
+    if orders is None:
+        return {"gate": "venue_read"}
+    _CULL_LAST_TS = _time.time()
+    res: dict = {"dry": dry, "resting": 0, "judged": 0, "dead": 0,
+                 "killed": 0, "failed": 0, "oms_dead": 0, "floor": floor_pd,
+                 "min_days": min_days}
+    # Resting, UNFILLED, AUTOMATIC BUYs per slug — the judge's denominator.
+    resting: dict = {}
+    for o in orders:
+        if "BUY" not in (o.get("intent") or "") or not o.get("auto"):
+            continue
+        q, lv = float(o.get("qty") or 0), float(o.get("leaves") or 0)
+        if q <= 0 or lv <= 0 or abs(q - lv) > 1e-6:
+            continue                    # partial → a position exists → rides
+        resting.setdefault(o.get("slug") or "", []).append(o)
+    res["resting"] = len(resting)
+    try:
+        picks = (sb.table("bot_picks")
+                 .select("id,sport,market_id,market_type,event_name,"
+                         "event_start,picked_at,entry_price,signal_blob")
+                 .eq("asked_by", owner).eq("status", "pending")
+                 .in_("sport", ["NFL", "NCAAF"])
+                 .gte("event_start", now.isoformat())
+                 .limit(1000).execute().data) or []
+    except Exception as e:
+        return dict(res, gate="picks_read", err=str(e)[:80])
+    cands = []
+    for p in picks:
+        b = p.get("signal_blob") or {}
+        sl = b.get("pmm_slug")
+        if not b.get("gridiron_autobet") or not sl or sl not in resting:
+            continue
+        cands.append((p, sl, b))
+    if not cands:
+        return res
+    # Ledger: newest earn day + rent per candidate slug.
+    try:
+        top = (sb.table("poly_incentive_earnings").select("earn_date")
+               .order("earn_date", desc=True).limit(1).execute().data) or []
+        if not top:
+            return dict(res, gate="no_ledger")
+        max_day = datetime.fromisoformat(
+            str(top[0]["earn_date"])[:10]).date()
+    except Exception as e:
+        return dict(res, gate="ledger_read", err=str(e)[:80])
+    rent: dict = {}
+    slugs = sorted({c[1] for c in cands})
+    for i in range(0, len(slugs), 100):
+        try:
+            for r in ((sb.table("poly_incentive_earnings")
+                       .select("market_slug,reward")
+                       .in_("market_slug", slugs[i:i + 100])
+                       .limit(1000).execute().data) or []):
+                rent[r["market_slug"]] = (rent.get(r["market_slug"], 0.0)
+                                          + float(r.get("reward") or 0))
+        except Exception as e:
+            return dict(res, gate="ledger_read", err=str(e)[:80])
+    az = ZoneInfo("America/Phoenix")
+    end = datetime.combine(max_day + timedelta(days=1), datetime.min.time(),
+                           tzinfo=az)          # ledger covers through max_day
+    dead = []
+    for p, sl, b in cands:
+        try:
+            pa = datetime.fromisoformat(
+                str(p["picked_at"]).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        days = (end - pa).total_seconds() / 86400.0
+        if days < min_days:
+            continue
+        res["judged"] += 1
+        earned = rent.get(sl, 0.0)
+        upd = earned / days
+        if upd >= floor_pd:
+            continue
+        k = float(b.get("contracts") or 0)
+        ep = p.get("entry_price")
+        try:
+            ep = float(ep)
+            ec = (100.0 * (-ep) / ((-ep) + 100.0) if ep < 0
+                  else 100.0 * 100.0 / (ep + 100.0))
+        except Exception:
+            ec = 0.0
+        dead.append({"pick": p, "slug": sl, "rent": round(earned, 2),
+                     "days": round(days, 2), "upd": round(upd, 4),
+                     "contracts": k, "entry_c": round(ec, 1),
+                     "capital": round(k * ec / 100.0, 2)})
+    dead.sort(key=lambda d: (d["upd"], -d["capital"]))
+    res["dead"] = len(dead)
+    res["detail"] = [{"slug": d["slug"], "rent": d["rent"], "days": d["days"],
+                      "upd": d["upd"], "cap": d["capital"],
+                      "kick": str(d["pick"].get("event_start") or "")[:16]}
+                     for d in dead[:40]]
+    nowiso = now.isoformat()
+    remaining = {}
+    for p, sl, b in [(pp, ss, bb) for pp, ss, bb in cands]:
+        remaining.setdefault((str(p["market_id"]), p["market_type"]), set()).add(p["id"])
+    for p in picks:
+        remaining.setdefault((str(p["market_id"]), p["market_type"]), set()).add(p["id"])
+    kills = []
+    for d in dead[:max_kills]:
+        p, sl = d["pick"], d["slug"]
+        row = {"slug": sl, "sport": p.get("sport"),
+               "market_type": p.get("market_type"),
+               "event_name": p.get("event_name"),
+               "event_start": p.get("event_start"), "pick_id": p["id"],
+               "contracts": d["contracts"], "entry_c": d["entry_c"],
+               "capital_usd": d["capital"], "rent_usd": d["rent"],
+               "days": d["days"], "usd_per_day": d["upd"],
+               "reason": f"rent {d['rent']:.2f}/{d['days']:.1f}d < "
+                         f"{floor_pd:.2f}/d", "dry": dry,
+               "killed_at": nowiso}
+        if dry:
+            try:
+                (sb.table("rent_dead_slugs").upsert(row, on_conflict="slug")
+                 .execute())
+            except Exception:
+                pass
+            continue
+        # KILL — cancel every resting order on the slug (one, by invariant).
+        ok = True
+        for o in resting.get(sl, []):
+            try:
+                client.orders.cancel(o["id"], {"marketSlug": sl})
+            except Exception as e:
+                ok = False
+                res["failed"] += 1
+                res.setdefault("errors", []).append(
+                    {"slug": sl, "err": str(e)[:100]})
+                break
+        if not ok:
+            continue                    # order may still rest → pick stays
+        try:                            # archive, then delete — never blind
+            (sb.table("reconcile_bak")
+             .insert({"pick_id": p["id"], "reason": "rent_cull", "row": p})
+             .execute())
+        except Exception:
+            res["failed"] += 1
+            continue
+        try:
+            sb.table("bot_picks").delete().eq("id", p["id"]).execute()
+        except Exception:
+            res["failed"] += 1
+            continue
+        try:
+            (sb.table("rent_dead_slugs").upsert(row, on_conflict="slug")
+             .execute())
+        except Exception:
+            pass
+        res["killed"] += 1
+        kills.append(d)
+        key = (str(p["market_id"]), p["market_type"])
+        remaining.get(key, set()).discard(p["id"])
+        if not remaining.get(key):
+            try:
+                (sb.table("desired_orders")
+                 .update({"state": "dead",
+                          "detail": f"rent_dead:{d['upd']:.3f}/d",
+                          "updated_at": nowiso})
+                 .eq("market_id", p["market_id"])
+                 .eq("market_type", p["market_type"])
+                 .eq("lane", "rentlist").execute())
+                res["oms_dead"] += 1
+            except Exception:
+                pass
+    if kills:
+        _RENT_DEAD_CACHE["at"] = 0.0
+        cap = sum(k["capital"] for k in kills)
+        rent_sum = sum(k["rent"] for k in kills)
+        _send_fill_telegram(
+            f"\U0001f9f9 RENT CULL — canceled {len(kills)} resting football "
+            f"bet(s) earning < ${floor_pd:.2f}/day (${rent_sum:.2f} rent on "
+            f"${cap:.0f} tied, {res['judged']} judged); {res['oms_dead']} "
+            f"(game, market) rows parked dead. Slugs stay dead in "
+            f"rent_dead_slugs.")
+    try:
+        sb.table("exec_probe_runs").insert(
+            {"params": {"kind": "rent_cull", "dry": dry}, "result": res}
+        ).execute()
+    except Exception:
+        pass
+    return res
+
+
 def _scalp_lanes(b: dict, mt: str) -> bool:
     """Is this pick RENT-LANE inventory? (spec Policy 1)"""
     if bool(b.get("gridiron_autobet")):
@@ -23319,6 +23598,13 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
             res["reconcile"] = _reconcile_tick(sb, now, client=lap_client,
                                                orders=lap_orders,
                                                positions=lap_positions)
+        except Exception:
+            pass
+        # THE RENT CULL rides the same lease (Sep 5 2026): hourly, after
+        # the reconcile, its own try — a cull fault can never cost a chase.
+        try:
+            res["rent_cull"] = _rent_cull_tick(sb, now, client=lap_client,
+                                               orders=lap_orders)
         except Exception:
             pass
         # THE SCALP SELL ARM rode this lease from Aug 28 to Sep 4 2026 —

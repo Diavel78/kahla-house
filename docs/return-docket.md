@@ -137,6 +137,71 @@ must NOT log picks / 💰 Bet on the site until C2.
 
 ---
 
+## ⚡ Sat Sep 5 — SESSION PROGRESS (fresh window, ~8-9am AZ)
+Verified from LOCAL psql (`/Applications/Postgres.app/Contents/Versions/
+latest/bin/psql kahla` — not on PATH): all 11 lanes ticking, opener/scalp
+laps 27-28 min, grader every minute, ledger mirror current (32,406
+activities, newest 08:06).
+
+**Queue #1 — RENT CULL: BUILT, DRY, awaiting pull+restart** (see
+CLAUDE.md OMS §(g)). The ranking (156 pending football bets, $1,441 tied,
+$474 rent): NFL totals = 32 bets / $371 (78% of all football rent); NCAAF
+spreads 47 / $34; NCAAF totals 46 / $48; NFL spreads 30 / $17. Dry judge
+convicted 16 (all NCAAF junk rungs, ~$180, $0.43 rent). To go live after
+the restart: `update machine_flags set value = value || '{"dry": false}'
+where key='rent_cull'` — first kill pass within the hour (max_kills 10,
+then 6 more the next hour). Not judged: bets placed Sep 4-5 (< 2 ledger
+days) and FILLED positions (they earn nothing because they filled).
+
+**Rob's two flags, answered:** (a) "Friday bets 0.00" — local AND cloud
+mirror both read Sep 4 bets **−$39.29** as of the 08:11 compute; the
+day map is local-only (`poly_gameday_pnl` RPC + local poly_activities),
+so an earlier 0.00 = the ledger mirror hadn't caught up on Sep 4
+resolutions during Friday's 1015 ban window. Not a bug in the math.
+(b) Thu/Fri rent ($414.61 + $2.21 paid Sep 3; $155.81 Sep 4) is the
+VENUE's own `/v1/incentives/earnings` PENDING rows, re-synced 07:53 —
+not our arithmetic. $308 of Sep 3 is 29 Week-3 NFL totals (NO-BAL 45.5
+$31.74 …) whose books are empty near the touch (0.4 shares within 3¢ on
+the bid side at 8am Sat). The one Sep 3 market that already went
+PENDING→PAID (idaho-utah +31.5) paid $0.39 against $0.08 pending — the
+venue revised UP, not down. Monday's payout credits are the proof.
+
+**Finding — OMS backlog NOT draining:** 135 never-tried desired rows
+(120 of them Sep 12 CFB: 48 ML / 34 spread / 34 total), executor did 179
+touches / 37 placed in 12h ≈ 3 touches per 27-min lap. Budget-bound, not
+broken. Interim lever at the restart: `OMS_BUDGET_S=120` in the box .env
+(docket §3) — 3× throughput inside the same lap.
+
+**Fix riding along:** `_probe_log` required a Flask request context, so
+every box-side stamp through it (the fbprop funnel) silently never landed
+— now stamps `{"ctx":"cellar","kind":…}`.
+
+**C2 — READY TO EXECUTE WITH ROB (needs his Cloudflare login + Vercel
+env paste; nothing started):**
+1. `brew install cloudflared` on the box; `cloudflared tunnel login`
+   (browser, Rob's Cloudflare account — the zone moved there Fri).
+2. `cloudflared tunnel create kahla-db` → `cloudflared tunnel route dns
+   kahla-db db.thekahlahouse.com` (tunnel CNAMEs are proxied by design;
+   the grey-cloud rule is for the Vercel records only).
+3. `~/.cloudflared/config.yml`: ingress `db.thekahlahouse.com →
+   http://localhost:3011` (the Caddy shim — strips `/rest/v1`, proxies
+   PostgREST 3010, same JWT as the box: `~/.kahla/rehearsal.jwt`),
+   catch-all 404. Run as a user LaunchAgent (KeepAlive) like postgrest/
+   caddy; verify `curl https://db.thekahlahouse.com/rest/v1/machine_flags
+   -H "apikey: $(cat ~/.kahla/rehearsal.jwt)"`.
+4. Slate lull: Vercel env `SUPABASE_URL=https://db.thekahlahouse.com`,
+   `SUPABASE_SERVICE_KEY=<rehearsal.jwt>` → redeploy. Rollback = paste
+   the old two values back.
+5. Silence the cloud writers: cron-job.org's 1-min `scanner-poll`
+   dispatch (its resolver/ESPN steps are the grader lane now) and the
+   `football-sheets-data` Mon schedule (reads DB — fine through the
+   tunnel). Every other workflow schedule is already commented out.
+6. Unpin nothing: after C2 the "cloud" IS the box DB; the pinned rows
+   live in frozen Supabase and stop mattering. Supabase Pro dies per
+   §12c once the farewell dump is verified.
+Trade-off Rob accepted Fri: site up only while box + home internet up.
+
+
 ## 0. First hour back — read the week
 - `desired_orders`: never_tried should have hit ~0 within a day of
   departure and stayed there as new enrollments land (left at 150 and

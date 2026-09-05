@@ -1094,6 +1094,25 @@ or a pending row untouched >2h (executor dead). (f) **NFL props LIVE
 carried guessed patterns that matched nothing); fbprop fills join the
 scalp arm (cost-floor asks) so TURN RATE — can props exit — is a
 measured sells/fills number, the user's explicit experiment.
+(g) **THE RENT CULL (Sep 5 2026 — Rob: "kill the bottom at CONFIG
+level so it stays dead; NEVER hand-cancel in the app, self-heal
+re-places")**: `_rent_cull_tick` rides the repeg lease hourly after the
+reconcile. Judge = MEASURED rent on OUR slug (never ladder geometry — it
+convicted two real lines Fri): a pending gridiron pick whose order is
+resting UNFILLED on the venue, ≥`min_days` of ledger opportunity
+(picked_at → newest earn_date, AZ days), rent/day < `min_usd_per_day` →
+cancel (AUTOMATIC only) → archive to `reconcile_bak` (reason rent_cull) →
+delete pick → `rent_dead_slugs` row. `_rent_dead(slug)` vetoes the slug in
+every gridiron candidate filter (booked/virgin/ML) and the (game, mt)
+`desired_orders` row parks `state='dead'` when its last bet dies (the
+executor only reads `pending`). Config = `machine_flags['rent_cull']`
+jsonb `{enabled, dry, min_days, min_usd_per_day, max_kills}`; `dry=true`
+judges + stamps `exec_probe_runs` kind=rent_cull, cancels nothing.
+Un-dead = delete the `rent_dead_slugs` row + flip the desired row to
+`pending`. First dry run (Sat Sep 5): 16 dead of 31 judged, all NCAAF
+junk rungs (totals 79.5/75.5/73.5/22.5, spreads −34.5/−27.5), ~$180
+tied earning $0.43. DDL `kahla-scanner/supabase/rent_dead_slugs.sql`
+(applied LOCAL; new table ⇒ `notify pgrst, 'reload schema'`).
 
 ## THE ORDER OF WORK (user, Aug 21 2026 — do not reorder)
 
