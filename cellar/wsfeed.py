@@ -57,7 +57,14 @@ SUB_POSITION = "SUBSCRIPTION_TYPE_POSITION"
 WS_MKTS_URL = "wss://api.polymarket.us/v1/ws/markets"
 WS_MKTS_PATH = "/v1/ws/markets"
 SUB_MARKET_LITE = "SUBSCRIPTION_TYPE_MARKET_DATA_LITE"
-MKTS_MAX_SLUGS = 400     # venue best practice: only subscribe what you need
+# MEASURED, not vibes (ws_cap_probe, Sep 4 2026): 4,000 slugs accepted
+# cleanly on one connection (~5.6k baseline frames in 8s, live rate
+# ~190/s at Friday peak — parse pennies). The old 400 was one
+# best-practice sentence. Above ~4k the venue FAILS SILENTLY (28,651
+# subscribed OK, zero frames ever — likely the ~1MB subscribe message
+# itself), so the budget stays at the measured-good size and groups
+# keep every individual subscribe small.
+MKTS_MAX_SLUGS = 4000
 
 RECV_TIMEOUT_S = 75.0    # heartbeat watchdog: silence this long = dead socket
 WAKE_MIN_S = 15.0        # private-event wake throttle (repeg)
@@ -526,26 +533,67 @@ class MarketsFeed:
         self.sb = sb
         self.stop = threading.Event()
         self._lock = threading.Lock()
-        self._slugs: set[str] = set()
-        self._dirty = False
+        # GROUP SUBSCRIPTIONS (Sep 4 2026 — the cap probe's real find):
+        # the venue tracks subscribed slugs PER CONNECTION and REJECTS
+        # any subscribe that overlaps one ("slug already subscribed").
+        # The old whole-set rotation (subscribe new rid, then drop the
+        # old) therefore FAILED on every watch-list change — the new
+        # subscribe bounced off its own predecessor, the unsubscribe
+        # then landed, and the feed sat on DEAD AIR until the next
+        # rotation. Groups keep membership disjoint by construction:
+        # one rid per group, adds deduped against the covered set,
+        # drops by original rid.
+        self._groups: dict[str, tuple[str, frozenset]] = {}  # gid->(rid,slugs)
+        self._covered: set[str] = set()      # union of all group slugs
+        self._ops: list = []                 # queued (verb, gid, slugs, exp)
+        self._expiry: dict[str, float] = {}  # gid -> epoch expiry (eviction)
+        self._gseq = 0
         self._base_seen: set[str] = set()   # slugs whose baseline frame
-                                            # arrived since the current
-                                            # subscription (burst filter)
+                                            # arrived since THEIR group's
+                                            # subscription (burst filter —
+                                            # per-group now, never a global
+                                            # reset: the full-board replay
+                                            # drain was the overrun class)
         self._no_slugs_logged = False
         self._last_fail_stamp = 0.0
         self._was_connected = False
         self.msgs = 0
         self.reconnects = 0
 
+    # ── public API (lane threads queue; the feed thread executes) ──
     def set_slugs(self, slugs: set, replace: bool) -> None:
+        """Back-compat entry for the repeg lap's watch-list push: the
+        whole set lands as the reserved 'core' group (replace = re-add;
+        dedup against ladder groups happens at execution)."""
+        self.add_group("core", set(slugs), None)
+
+    def add_group(self, gid: str, slugs: set, expire_ts=None) -> None:
         with self._lock:
-            new = set(list(slugs)[:MKTS_MAX_SLUGS]) if replace \
-                else (self._slugs | slugs)
-            if len(new) > MKTS_MAX_SLUGS:
-                new = set(sorted(new)[:MKTS_MAX_SLUGS])
-            if new != self._slugs:
-                self._slugs = new
-                self._dirty = True
+            self._ops.append(("add", str(gid), set(slugs), expire_ts))
+
+    def drop_group(self, gid: str) -> None:
+        with self._lock:
+            self._ops.append(("drop", str(gid), None, None))
+
+    def _take_ops(self) -> list:
+        with self._lock:
+            ops, self._ops = self._ops, []
+        # collapse repeated adds of the same gid (the core push comes
+        # every lap; only the newest membership matters)
+        seen: dict = {}
+        out = []
+        for op in reversed(ops):
+            key = (op[0], op[1])
+            if op[0] == "add" and key in seen:
+                continue
+            seen[key] = True
+            out.append(op)
+        out.reverse()
+        return out
+
+    @property
+    def _slugs(self) -> set:
+        return self._covered
 
     def start(self) -> None:
         threading.Thread(target=self._run, name="cellar-ws-mkts",
@@ -589,15 +637,102 @@ class MarketsFeed:
             header=[f"{k}: {v}" for k, v in hdrs.items()])
         return ws
 
+    # ── group bookkeeping (feed thread only) ──────────────────────────
+    # A "group" is one logical membership (the repeg watch list = 'core',
+    # a ladder = its market id) carried by one or more rids: adds are
+    # DELTA-subscribed (new slugs only — the venue rejects overlap), so
+    # a changing group accumulates rids; stale extras just cost frames.
+    # When a group's rid count passes _GROUP_REBUILD_RIDS, it is torn
+    # down (unsubscribe every rid) and re-queued as a pure add with a
+    # not-before delay so the venue finishes processing the drops first
+    # (the overlap-rejection lesson, applied to ourselves).
+    _GROUP_REBUILD_RIDS = 20
+
+    def _apply_ops(self, ws) -> None:
+        ripe = []
+        requeue = []
+        nowt = time.time()
+        for op in self._take_ops():
+            (requeue if len(op) > 4 and op[4] and op[4] > nowt
+             else ripe).append(op)
+        if requeue:
+            with self._lock:
+                self._ops = requeue + self._ops
+        changed = False
+        for op in ripe:
+            verb, gid, slugs = op[0], op[1], op[2]
+            exp = op[3] if len(op) > 3 else None
+            if verb == "drop":
+                rids, old = self._groups.pop(gid, (None, frozenset()))
+                for r in (rids or []):
+                    ws.send(json.dumps({"unsubscribe": {"requestId": r}}))
+                self._covered -= old
+                self._base_seen -= old
+                self._expiry.pop(gid, None)
+                changed = changed or bool(old)
+                continue
+            # add: delta only — the venue rejects overlapping subscribes
+            new = set(slugs) - self._covered
+            if exp is not None:
+                self._expiry[gid] = exp
+            if not new:
+                continue
+            # budget: evict expired ladder groups first, then refuse
+            if len(self._covered) + len(new) > MKTS_MAX_SLUGS:
+                for g2, e2 in sorted(self._expiry.items(),
+                                     key=lambda kv: kv[1] or 0):
+                    if g2 == gid or g2 == "core":
+                        continue
+                    if len(self._covered) + len(new) <= MKTS_MAX_SLUGS:
+                        break
+                    if e2 and e2 < nowt:
+                        r2, o2 = self._groups.pop(g2, (None, frozenset()))
+                        for r in (r2 or []):
+                            ws.send(json.dumps(
+                                {"unsubscribe": {"requestId": r}}))
+                        self._covered -= o2
+                        self._base_seen -= o2
+                        self._expiry.pop(g2, None)
+                if len(self._covered) + len(new) > MKTS_MAX_SLUGS:
+                    log.warning("ws mkts budget full (%d) — group %s not "
+                                "subscribed", len(self._covered), gid)
+                    continue
+            self._gseq += 1
+            rid = f"g{self._gseq}-{gid[:32]}"
+            ws.send(json.dumps({"subscribe": {
+                "requestId": rid,
+                "subscriptionType": SUB_MARKET_LITE,
+                "marketSlugs": sorted(new)}}))
+            rids, old = self._groups.get(gid, ([], frozenset()))
+            rids = list(rids) + [rid]
+            self._groups[gid] = (rids, frozenset(old | new))
+            self._covered |= new
+            self._base_seen -= new       # their next frame = the baseline
+            changed = True
+            if len(rids) > self._GROUP_REBUILD_RIDS:
+                # hygiene: too many delta-rids → tear down + re-add clean
+                cur = set(self._groups[gid][1])
+                for r in rids:
+                    ws.send(json.dumps({"unsubscribe": {"requestId": r}}))
+                self._groups.pop(gid, None)
+                self._covered -= cur
+                self._base_seen -= cur
+                with self._lock:
+                    self._ops.append(("add", gid, cur,
+                                      self._expiry.get(gid),
+                                      time.time() + 2.0))
+        if changed:
+            log.info("ws mkts watching %d markets in %d groups",
+                     len(self._covered), len(self._groups))
+
     def _run(self) -> None:
         import websocket
         backoff_i = 0
-        sub_n = 0
         while not self.stop.is_set():
             # Nothing to watch → nothing to connect to. Poll cheaply
-            # until the private feed hands us a watch list.
+            # until someone queues a group.
             with self._lock:
-                have = bool(self._slugs)
+                have = bool(self._covered) or bool(self._ops)
             if not have:
                 self.stop.wait(5.0)
                 continue
@@ -606,51 +741,23 @@ class MarketsFeed:
                 ws = self._connect()
                 backoff_i = 0
                 self.reconnects += 1
-                cur_rid = None
                 snap_open: set = set()
                 last_rx = time.time()
+                # Fresh connection = the venue holds no subscriptions:
+                # re-queue every group we believe in as a clean add.
                 with self._lock:
-                    self._dirty = True       # (re)subscribe on every connect
+                    prev = [("add", g, set(s), self._expiry.get(g))
+                            for g, (r, s) in self._groups.items()]
+                    self._groups = {}
+                    self._covered = set()
+                    self._base_seen = set()
+                    self._ops = prev + self._ops
                 if not self._was_connected:
                     self._was_connected = True
                     self._stamp("connected")
                     log.info("ws mkts connected")
                 while not self.stop.is_set():
-                    # Rotate the subscription when the watch list moved.
-                    # Sort ONLY on rotation — v1 sorted the whole watch
-                    # list on EVERY received frame (400 slugs × Friday
-                    # frame rates = a real slice of the interpreter,
-                    # found the night the box hit its GIL cliff).
-                    with self._lock:
-                        dirty = self._dirty
-                        self._dirty = False
-                        slugs = sorted(self._slugs) if dirty else ()
-                    if dirty and slugs:
-                        sub_n += 1
-                        rid = f"cellar-mkts-{sub_n}"
-                        # Wire per the SDK (camelCase, STRING enum) — the
-                        # prose doc's snake_case/int frames are ignored.
-                        ws.send(json.dumps({"subscribe": {
-                            "requestId": rid,
-                            "subscriptionType": SUB_MARKET_LITE,
-                            "marketSlugs": slugs}}))
-                        # NO snap_open.add here: the SDK's markets socket
-                        # has no snapshot phase — pre-adding the rid meant
-                        # nothing ever cleared it and every frame was
-                        # suppressed as "inside the snapshot" (caught by
-                        # the scripted test, would have been live bug #5).
-                        if cur_rid:
-                            ws.send(json.dumps({"unsubscribe": {
-                                "requestId": cur_rid}}))
-                        cur_rid = rid
-                        # Each (re)subscription replays one baseline frame
-                        # per market — state, not news. Reset the filter so
-                        # the burst neither wakes nor dirties (first live
-                        # night: every rotation drained targeted:101 ≈ a
-                        # full walk, and back-to-back full walks are what
-                        # overran the repeg lane).
-                        self._base_seen = set()
-                        log.info("ws mkts watching %d markets", len(slugs))
+                    self._apply_ops(ws)
                     try:
                         raw = ws.recv()
                     except websocket.WebSocketTimeoutException:
@@ -688,8 +795,9 @@ class MarketsFeed:
                         continue             # standing state — never a wake
                     if rid is not None and rid in snap_open:
                         continue
-                    if rid is not None and rid != cur_rid:
-                        continue             # tail of an unsubscribed batch
+                    # (no per-rid tail filter anymore: many rids live at
+                    # once under group subscriptions; a frame from a rid
+                    # we just dropped is still a real quote — write it)
                     # NEWS on a market we quote (marketDataLite / trade):
                     # the book moved. Whether we were outbid is the lap's
                     # question, not ours — but WHICH market moved scopes

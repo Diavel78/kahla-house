@@ -18260,6 +18260,49 @@ _OMS_LOOKUP_TS: dict = {}
 _OMS_PROD_TS: float = 0.0     # last completed producer pass (throttle)
 
 
+# Ladder STRUCTURE cache (docs/ws-quote-table-spec.md §3 — discovery is
+# REST, once): slugs/lines/sides/synthetic per market, so a revisit can
+# be priced entirely from WS_QUOTES with zero venue calls. Structure is
+# stable (rungs only ever get ADDED, and an added rung shows up as a
+# table miss → REST refresh). TTL is a backstop, not the mechanism.
+_LADDER_STRUCT: dict = {}          # market_id -> {"at": mono, "odds": {...}}
+_LADDER_STRUCT_TTL_S = 10_800.0
+_WS_LADDER_CB = None               # runner plants: (gid, slugs, expire_ts)
+                                   # -> MarketsFeed.add_group
+_WS_PRICE_STATS = {"hit": 0, "rest": 0}   # table-first hit rate (journal)
+
+
+def _price_from_table(struct):
+    """Rebuild the pricer's d-dict from WS_QUOTES alone. None the moment
+    ANY rung lacks a fresh table row — partial pricing is guessing, and
+    the REST path both prices and re-baselines. Synthetic sides invert
+    their twin's canonical book exactly like _inverse_quote."""
+    d: dict = {"odds": {}}
+    for mt, rungs in (struct.get("odds") or {}).items():
+        out = []
+        for e in rungs:
+            q = _ws_quote(e["slug"])
+            if q is None:
+                return None
+            bid_c, ask_c = q
+            if e.get("synthetic"):
+                quote = {"bid": ((100.0 - ask_c) / 100.0
+                                 if ask_c is not None else None),
+                         "ask": ((100.0 - bid_c) / 100.0
+                                 if bid_c is not None else None)}
+            else:
+                quote = {"bid": (bid_c / 100.0 if bid_c is not None
+                                 else None),
+                         "ask": (ask_c / 100.0 if ask_c is not None
+                                 else None)}
+            out.append({"side": e.get("side"), "line": e.get("line"),
+                        "slug": e["slug"], "quote": quote,
+                        "synthetic": bool(e.get("synthetic"))})
+        if out:
+            d["odds"][mt] = {"polymarket": {"ladder": out}}
+    return d if d["odds"] else None
+
+
 def _gridiron_price_game(sb, g):
     """PHASE 1.5 SLIM PRICER: the football bet leg needs ONLY the
     spread/total ladders — books per rung. build_dossier spends ~8s on
@@ -18268,7 +18311,21 @@ def _gridiron_price_game(sb, g):
     (the exact call the dossier itself makes) → the exact ladder shape
     _attach_pmm_to_odds builds → a d-alike dict _gridiron_try_bet reads
     unchanged. ~2s/game instead of ~8s; None on any miss (caller backs
-    off, never guesses)."""
+    off, never guesses).
+
+    PHASE 2 (Sep 4 2026, the GIL-cliff night): TABLE-FIRST. A market
+    already discovered prices from WS_QUOTES when every rung is fresh —
+    zero REST, zero megapayload parse. Any gap → this REST path, which
+    re-caches the structure and re-subscribes the ladder. A dead socket
+    degrades to exactly the old behavior."""
+    gid = str(g.get("id") or "")
+    st0 = _LADDER_STRUCT.get(gid)
+    if st0 and _time.monotonic() - st0["at"] < _LADDER_STRUCT_TTL_S:
+        d0 = _price_from_table(st0)
+        if d0 is not None:
+            _WS_PRICE_STATS["hit"] += 1
+            return d0
+    _WS_PRICE_STATS["rest"] += 1
     try:
         import pmm_markets
         en = g.get("event_name") or ""
@@ -18319,7 +18376,36 @@ def _gridiron_price_game(sb, g):
                 pass
         if ml_sides:
             d["odds"]["moneyline"] = {"polymarket": {"ladder": ml_sides}}
-        return d if d["odds"] else None
+        if not d["odds"]:
+            return None
+        # PHASE 2: cache the STRUCTURE (everything but the quotes) and
+        # hand the ladder's slugs to the markets feed as a group, so the
+        # next visit prices from the table. Expire at kickoff — the
+        # feed evicts started games first when the budget fills.
+        if gid:
+            try:
+                struct = {"at": _time.monotonic(), "odds": {}}
+                slugs: set = set()
+                for mt2, blk2 in d["odds"].items():
+                    rungs2 = (blk2.get("polymarket") or {}).get("ladder") or []
+                    struct["odds"][mt2] = [
+                        {"side": e2.get("side"), "line": e2.get("line"),
+                         "slug": e2.get("slug"),
+                         "synthetic": bool(e2.get("synthetic"))}
+                        for e2 in rungs2 if e2.get("slug")]
+                    slugs |= {e2["slug"] for e2 in rungs2 if e2.get("slug")}
+                _LADDER_STRUCT[gid] = struct
+                if _WS_LADDER_CB is not None and slugs:
+                    try:
+                        exp = datetime.fromisoformat(
+                            str(g.get("event_start"))
+                            .replace("Z", "+00:00")).timestamp()
+                    except Exception:
+                        exp = _time.time() + 86_400
+                    _WS_LADDER_CB(gid, slugs, exp)
+            except Exception:
+                pass
+        return d
     except Exception:
         return None
 

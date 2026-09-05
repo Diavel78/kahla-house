@@ -421,6 +421,12 @@ class Runner:
                         # markets the socket named (None = socket can't
                         # vouch → full sweep, today's behavior).
                         _app._WS_DIRTY_CB = self._wsfeed.drain_dirty
+                        # QUOTE TABLE (phase 2): the pricer hands each
+                        # discovered ladder to the feed as a GROUP so
+                        # revisits price from app.WS_QUOTES — zero REST.
+                        _app._WS_LADDER_CB = (
+                            lambda gid, slugs, exp=None:
+                            _mkts.add_group(gid, set(slugs), exp))
                     except Exception as e:
                         log.warning("ws watchlist hook failed: %s", e)
             except Exception as e:
