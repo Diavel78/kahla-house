@@ -290,6 +290,42 @@ picks both orientations; hand bids never adopted; position with your own
 ask = takeover, skipped). Rent cull flipped LIVE at 10:47 (Rob: "let's
 roll") — first kill pass due ~11:25, max 10, then 6.
 
+## ⚠ THE VENUE HALT — Sat Sep 5, 10:40am → (ongoing at 2:20pm AZ)
+Polymarket US: "Trading is temporarily paused while we fix an issue."
+Reads recovered 12:09 (orders) / 12:51 (positions); the TRADING ENGINE
+did not — the book is frozen at 247 orders, newest created 10:35, every
+create 500s, every cancel acknowledged and never executed. NOT a ban.
+**What it did to us:** (1) the unverified cull "cancelled" 16 junk-rung
+orders in two passes (12:09, 13:15), deleted their picks, and none of the
+cancels executed → 16 live orders with no pick, 6 re-adopted bare by the
+old autolog. (2) 8 filled football positions lost their picks (most
+likely a 200-with-empty-positions answer making them read "sold pre-game")
+and were re-booked by ghost adoption on the 13:55 boot (bare rows: no
+fair/edge/order history). (3) 12 phantom creates got order ids the book
+never listed; the autolog removed those picks as sold. Zero real money
+lost; the 16 dead-rung orders sit where they sat this morning.
+**Fixes shipped (all pushed, 82/82):** cull verifies every cancel against
+the re-listed book (0b0e81e) and ENFORCES the dead list each pass
+(07eaf73); ghost adoption skips dead slugs; `bets_paused` + `repeg_enabled`
+machine_flags = the REOPEN POSTURE (2673b95) — every machine BUY refused
+at `_autobet_execute` + the NRFI create, chase/reconcile/cull parked;
+`book_audit()` read-only reopen tool; autolog ignores an empty positions
+map while the book holds ≥5 filled picks (9250739).
+**Flags right now:** bets_paused=true, repeg_enabled=false,
+oms_enabled=false, seed_quotes=false, rent_cull.dry=true, scalp_enabled=true.
+Daemon on 2673b95 (13:55 boot) honoring the posture: 0 venue writes.
+**REOPEN CHECKLIST (Rob: "VERY VERY careful"):** the watcher fires when
+the venue book CHANGES (an execute, not a read). Then: (1) restart onto
+9250739; (2) `python3 -c 'import app; app.book_audit()'` — ghosts /
+zombies / naked / dead-slug orders, venue vs book counts; review with
+Rob; (3) `repeg_enabled=true` → chase + reconcile + cull enforcement
+resume; verify the 16 dead-slug orders actually leave the book; re-audit;
+(4) `rent_cull.dry=false`; (5) `bets_paused=false`, `oms_enabled=true`,
+`seed_quotes=true`. One flag per step, re-audit between. LESSON: a read
+recovering does not mean the venue executes — trust only a CHANGED book.
+Also noted: box .env has no FILLS_CRON_SECRET → the route-driven lanes
+(vsin 401, kalshi_autolog 403) fail on their drive some ticks; fix later.
+
 
 ## 0. First hour back — read the week
 - `desired_orders`: never_tried should have hit ~0 within a day of
