@@ -82,14 +82,31 @@ Receipt to expect: 121ms → 4ms per DB call (measured 31×); repeg/opener
 laps collapse; the disconnect class (incl. the NO SIGNAL flicker's root)
 dies. Then the C1/C2 Vercel decision per the runbook.
 
-## 2. WS cap probe + quote table (same week, after cutover)
-`docs/ws-quote-table-spec.md` — Rob's call ("why can't that be
-websocket?"), researched Sep 1: the 400-slug cap is OUR constant, venue
-documents no limit; concurrent per-requestId group subscriptions kill the
-rotation/baseline-flood machinery. Order: 15-min cap probe (standalone
-connection, procedure in the spec) → quote table → executor prices from
-memory. This is the bigger prize than the cutover; cutover goes first
-only because it's finished engineering.
+## 2. ✅ WS cap probe + quote table — PHASES 1-3a EXECUTED Sep 4 2026
+## (the GIL-cliff Friday, watched with Rob 5pm-9pm+)
+The whole arc ran in one night, forced by the box wedging at peak-Friday
+inventory (132 pos/157 orders — every venue-REST lane starved under one
+GIL; sample profiler: one hot JSON parser, 26k cvwait). Landed, in order:
+- **scalp = its own lane** + dead-scalp tripwire (uncovered-keyed) +
+  budget-clock restart (chase-night bug 3rd sighting) + naked-first walk
+  + 90s budget + ctx.detail journal stamp.
+- **cap probe** (`cellar/ws_cap_probe.py`): 4,000 slugs OK on one
+  connection; >~4k venue fails SILENTLY; **overlapping subscribes
+  REJECTED per-connection** — convicted the old rotation of dead-airing
+  the feed on every watch-list change. MKTS_MAX_SLUGS=4000 measured.
+- **quote table + group subscriptions** (`c151e34`): WS_QUOTES,
+  _ws_quote 90s staleness, table-first `_gridiron_price_game` +
+  `_LADDER_STRUCT`; opener lap **962s → 253s** measured night one.
+- **SIGUSR1 stack dumper** (py-spy can't attach under SIP) — dump named
+  three whales, all cut in `28f152f`: get_client() fresh-TLS-per-call
+  (now module-cached), fill-status outbid walk (now WS-quote-first —
+  repeg AND alerts both ride it; fs_hit/fs_rest in _WS_PRICE_STATS),
+  dash day-card pydantic scan every 60s (memoized 240s).
+- Triage that saved the evening: tape lanes (pm_snapshot/vsin/
+  kalshi_autolog) BENCHED from CELLAR_LANES during game hours — restore
+  when the slate quiets (task #9); the day's CLV closes are lost.
+Remaining phase 3: repeg PEG targets + scalp walk from the table
+(task #8, watched); paperlog/pm_snapshot adoption; parallel writes.
 
 ## 3. Dials to revisit once 1-2 land
 - `_OMS_BUDGET_S` (40): after cutover, laps shrink — likely SHRINK the
