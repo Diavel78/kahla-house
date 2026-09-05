@@ -11810,6 +11810,7 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict,
                 # table miss. This walk was the repeg lap's whale: one
                 # REST read per resting pick per lap, mostly to learn
                 # nothing changed.
+                _why = "fs_rest_miss"          # table had no fresh row
                 if myp is not None:
                     _wsq = _ws_quote(slug)
                     if _wsq is not None:
@@ -11820,8 +11821,10 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict,
                             _WS_PRICE_STATS["fs_hit"] = \
                                 _WS_PRICE_STATS.get("fs_hit", 0) + 1
                             raise _WsNotOutbid()
+                        _why = "fs_rest_outbid"  # table says outbid → depth
                 _WS_PRICE_STATS["fs_rest"] = \
                     _WS_PRICE_STATS.get("fs_rest", 0) + 1
+                _WS_PRICE_STATS[_why] = _WS_PRICE_STATS.get(_why, 0) + 1
                 # Prefetched by the caller's concurrent warm-up when
                 # available (the full-sweep lap fat); the self-read stays
                 # as the fallback so every other caller is unchanged.
@@ -23184,6 +23187,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
         # hand it to all three. A failed snapshot degrades exactly like the
         # old per-engine failures: fill-status marks Poly picks 'unknown',
         # reconcile/scalp gate venue_read — never act blind, just fail FAST.
+        _tp = _time.time()                 # phase clock (journal: t_setup/t_fs)
         lap_client = lap_orders = lap_positions = None
         try:
             lap_client = get_client()
@@ -23235,6 +23239,8 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
             if not near:
                 continue
             try:
+                res["t_setup"] = round(_time.time() - _tp, 1)
+                _tp = _time.time()
                 fs = _compute_fill_status(
                     sb, uid, poly_snap=lap_snap,
                     only_slugs=(_dirty if _targeted else None))
@@ -23271,6 +23277,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
             # and every chase deferred, every lap, silently. The budget's
             # purpose is bounding the cancel→create window mid-pass; the
             # reads above it are not that risk. Clock restarts here.
+            res["t_fs"] = round(_time.time() - _tp, 1)
             _t0 = _time.time()
             ids = [f["id"] for f in cands]
             try:

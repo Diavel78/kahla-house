@@ -266,6 +266,23 @@ budget 10, core-first eviction, core one-request rebuild, rejection
 frames handled. Expect fs_rest → ~0 and laps ~1-2 min at the next
 restart. Ghost adoption of the 6 strays awaits Rob's go.
 
+**✅ 10:24 boot (cb83388) receipts — core subscribed FIRST (232 slugs in
+1 group, 16s after boot).** repeg lap 1 **44s** (8am: 31-36 min), alerts
+8-58s, kalshi_autolog 0-3s, opener 264s, scalp 359s; fill-status now
+316 hit + 175 presence vs 140 REST. Boot hole found + fixed on the way:
+the private ORDER snapshot has NEVER completed (no "snapshot complete"
+in the whole log) and the repeg lap's boot-time orders read can fail in
+the 11-lane burst, so core had no pusher on the first lap — now any lane
+holding a fresh orders read pushes it (alerts every minute). Rob
+cancelled the 5 ghost orders and hand-asked the Oregon position himself.
+OPEN after this: repeg lap 2 = 334s in `targeted:209` mode with 9s of
+chase — fill-status over 209 dirty slugs; `fs_rest_miss`/`fs_rest_outbid`
+counters + `t_setup`/`t_fs` journal timers added (observability only,
+next restart) to say which. Scalp 359s = REST book per position by
+design (needs the ask ladder to skip our own level — table-first there
+is a careful change, not a swap). OMS: never-tried 135 → 39, pending
+mix is honest verdicts (151 rent / 93 no_book / 30 no_model).
+
 
 ## 0. First hour back — read the week
 - `desired_orders`: never_tried should have hit ~0 within a day of
