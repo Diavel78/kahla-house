@@ -775,7 +775,9 @@ class MarketsFeed:
             if gid == "core" and gid in self._groups:
                 c_rids, c_old = self._groups[gid]
                 stale = set(c_old) - set(slugs)
-                if stale or len(c_rids) >= CORE_REBUILD_RIDS:
+                # a few fallen-off slugs cost nothing subscribed; rebuild
+                # on real drift or on accumulated delta requests
+                if len(stale) > 20 or len(c_rids) >= CORE_REBUILD_RIDS:
                     for r in c_rids:
                         ws.send(json.dumps({"unsubscribe": {"requestId": r}}))
                         self._rid_slugs.pop(r, None)

@@ -11996,6 +11996,18 @@ def _compute_fill_status(sb, uid: str, poly_snap=None,
                 poly_client = get_client()
                 poly_orders = _pmm_open_orders_raw(poly_client)
                 poly_positions = _pmm_positions_raw(poly_client)
+            # CORE WATCH LIST FROM ANY FRESH ORDERS READ (Sep 5 2026): the
+            # repeg lap was the ONLY pusher, and its boot-time venue read
+            # can fail in the 11-lane burst — this boot core never
+            # subscribed, so every fill-status walk paid REST for every
+            # pick. The alerts lane walks every minute; whoever holds the
+            # list feeds the socket (set_slugs is idempotent — deltas only).
+            try:
+                if poly_orders is not None and _WS_WATCHLIST_CB is not None:
+                    _WS_WATCHLIST_CB({o.get("slug") for o in poly_orders
+                                      if o.get("slug")})
+            except Exception:
+                pass
             # Book-of-record: log any resting order OR held position not yet a
             # pick (the COLD start — first-ever Poly pick — is the cron
             # autolog; this is the fast reconcile while the page is open).
