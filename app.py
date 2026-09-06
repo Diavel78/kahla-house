@@ -7978,7 +7978,23 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
     # by ghost adoption that afternoon). An empty map while the book says
     # it holds many filled bets is not truth; skip removals this call.
     _suspect_empty = False
-    if orders is not None and positions is not None and not positions:
+    if orders is not None and positions is not None and not orders:
+        # same rule for ORDERS (maintenance-window shape, Sep 5 2026): a
+        # 200-with-empty order list while the book holds many resting
+        # picks would read every one as never-filled → deleted → re-
+        # adopted as ghosts when the list returns, racing the OMS.
+        try:
+            _rk = (sb.table("bot_picks").select("id")
+                   .eq("asked_by", owner_uid).eq("status", "pending")
+                   .not_.is_("signal_blob->>order_id", "null")
+                   .limit(6).execute().data) or []
+            _suspect_empty = len(_rk) >= 5
+        except Exception:
+            _suspect_empty = True
+        if _suspect_empty:
+            out["removal_skipped"] = "orders_empty_suspect"
+    if (orders is not None and positions is not None and not positions
+            and not _suspect_empty):
         try:
             _fk = (sb.table("bot_picks").select("id")
                    .eq("asked_by", owner_uid).eq("status", "pending")
@@ -22577,6 +22593,14 @@ def _reconcile_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         return {"gate": "venue_read"}      # default-deny: dark venue = no-op
                                            # (and the slot is NOT consumed —
                                            # retry next tick)
+    # EMPTY IS NOT TRUTH (Sep 5 2026, the maintenance-window shape): the
+    # venue can answer 200 with an empty order list while the book holds
+    # dozens of resting picks. Every one would strike as "no order" and
+    # be deleted twelve minutes later — the mass false-kill class. An
+    # empty list against a book with >=5 order-carrying candidates is a
+    # dark venue for this pass.
+    if not orders and sum(1 for _r, _b, _s, _y in cands if _b.get("order_id")) >= 5:
+        return {"gate": "orders_empty_suspect"}
     _RECON_LAST_TS = _time.time()          # reads OK — this pass counts
     # ── DUP-ORDER SWEEP (Sep 3 2026, the tenst-ga stack — Rob: "gotta put
     # an end of these duplicates. That's a huge risk for buying and
