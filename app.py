@@ -11989,17 +11989,6 @@ def _pmm_open_orders_raw(client) -> list | None:
             continue
     if raw is None:
         return None                              # read failed → not "no orders"
-    _last_amend: dict = {}
-    try:
-        _sb0 = get_supabase()
-        if _sb0 is not None:
-            for _r0 in (_sb0.table("scalp_snipes").select("oid,at")
-                        .eq("ok", True).order("at", desc=True).limit(600)
-                        .execute().data) or []:
-                if _r0.get("oid") and _r0["oid"] not in _last_amend:
-                    _last_amend[_r0["oid"]] = _r0["at"]
-    except Exception:
-        pass
     for o in raw:
         def _g(k, d=None):
             return o.get(k, d) if isinstance(o, dict) else getattr(o, k, d)
@@ -21746,6 +21735,19 @@ def api_my_orders():
         resp = client.orders.list()
         # SDK returns either a dict-like with .orders or a typed object
         raw = resp.get("orders") if isinstance(resp, dict) else getattr(resp, "orders", []) or []
+        # LAST MOVE per order id from our amend ledger (the venue does not
+        # restamp updateTime on an amend). Best-effort; empty on any failure.
+        _last_amend: dict = {}
+        try:
+            _sb0 = get_supabase()
+            if _sb0 is not None:
+                for _r0 in (_sb0.table("scalp_snipes").select("oid,at")
+                            .eq("ok", True).order("at", desc=True).limit(600)
+                            .execute().data) or []:
+                    if _r0.get("oid") and _r0["oid"] not in _last_amend:
+                        _last_amend[_r0["oid"]] = _r0["at"]
+        except Exception:
+            pass
         for o in raw:
             # Each SDK order may be dict or model — normalize accessor.
             def _g(key, default=None):
