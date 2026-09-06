@@ -1040,7 +1040,9 @@
         for (const c of closed) {
             let result = '';
             if (c.type === 'Transfer' || c.type === 'Liquidity Program') {
-                result = '<span class="badge badge-win">Maker</span>';
+                result = (c.market === 'Account Credit')
+                    ? '<span class="badge badge-push" title="venue goodwill credit — not rent">Credit</span>'
+                    : '<span class="badge badge-win">Maker</span>';
             } else if (c.type === 'Taker Fee Rebate') {
                 result = '<span class="badge badge-win">Rebate</span>';
             } else if (c.type === 'Trade') {

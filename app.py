@@ -3407,7 +3407,10 @@ def compute_summary(enriched, parsed_activities, tz_offset_minutes=0):
         has_pnl = act["pnl"] is not None
         is_resolution = act["type"] == "Position Resolution"
         is_trade_close = act["type"] == "Trade" and act.get("_is_close") and has_pnl
-        is_maker = act["type"] in _REWARD_TYPE_LABELS and has_pnl
+        # Account credits (remediation/promo transfers) are income, not
+        # rent: never in maker_rewards (Sep 6 2026, the $131.23 outage refund).
+        is_maker = (act["type"] in _REWARD_TYPE_LABELS and has_pnl
+                    and act.get("market") != "Account Credit")
 
         if is_maker:
             maker_rewards += act["pnl"]
@@ -3436,7 +3439,9 @@ def compute_summary(enriched, parsed_activities, tz_offset_minutes=0):
             elif act_local == yesterday_str:
                 yesterday_pnl += act["pnl"]
 
-    total_pnl = open_pnl + realized_pnl + maker_rewards
+    credits = sum(a["pnl"] for a in parsed_activities
+                  if a.get("market") == "Account Credit" and a.get("pnl") is not None)
+    total_pnl = open_pnl + realized_pnl + maker_rewards + credits
     win_rate = (resolved_wins / resolved_total * 100) if resolved_total > 0 else None
 
     return {
@@ -3612,9 +3617,18 @@ def parse_activities(client, activities):
             pnl = amount
 
         elif act_type == "ACTIVITY_TYPE_TRANSFER":
-            # Maker rewards (legacy type) — count as P&L income
+            # Maker rewards (legacy type) — count as P&L income. The SAME
+            # type also carries the venue's goodwill money ("sorry we
+            # suck" credits — Rob, Sep 6 2026, the $131.23 sep5_outage
+            # refund+bonus); only the description tells them apart, and
+            # a credit is income but never RENT (`credit` flag →
+            # excluded from maker_rewards, badged Credit).
             amount = _safe_float(detail.get("amount"))
-            market = "Maker Reward"
+            _desc = str(detail.get("description") or "").lower()
+            _is_credit = bool(_desc) and "liquidity reward" not in _desc and any(
+                k in _desc for k in ("remediation", "promotional", "refund",
+                                     "bonus", "goodwill", "compensation"))
+            market = "Account Credit" if _is_credit else "Maker Reward"
             pnl = amount
             is_close = False
 
@@ -18095,39 +18109,59 @@ def _gridiron_past_bound(mt, sn, rv, bound, ka, kb):
     return (rv < bound - eps) if sn == ka else (rv > bound + eps)
 
 
-def _gridiron_side_ok(mt, sn, rv, center, ka, kb):
-    """A seat is at the line or on ITS side's favorable side of it — for
-    every side, whatever centered the line (Sep 6 2026, WKU +17.5 under a
-    −20.5 model: in model-only mode the window was symmetric and the
-    dog took FEWER points than the line). Spread rung value = home line:
-    home (kb) needs rv >= center (fewer points to cover), away (ka) needs
-    rv <= center (more points). Total: over needs rv <= center, under
-    rv >= center."""
-    if center is None or rv is None:
-        return True
-    eps = 0.01
+def _gridiron_line_rule(sb, g, d, pm, mt, mline, proj, ladder_quotes, now_utc):
+    """ONE rule for where a football seat may sit — the executor places by
+    it and _gridiron_recenter_tick moves by it, so they can never disagree.
+
+    Returns {center, center_src, pin_line, ml_line, bounds, model_capped,
+    value_side}; a seat is legal iff it is within _GRIDIRON_TAIL_PTS of
+    `center` AND strictly past `bounds[side]` on its side's favorable
+    direction (_gridiron_past_bound — 'a minimum of 1 rung').
+
+      BOOK LINE (Pinnacle/DK/FD, 7-day memory): the line is the center AND
+      the bound for both sides — Rob, Sep 6 2026: 'move to the line, and 1
+      favorable rung to the bet (dogs go up, favorite goes down)'. The
+      model only picks the value side (bet toward the model).
+      NO BOOK LINE: market number = venue moneyline → spread (spreads) or
+      the venue's two-sided ladder mark (totals); model capped ±7 of it;
+      each side bounded by the MORE favorable of the two (Rob's rule).
+      No market number → the model bounds both sides; still bet."""
+    ka, kb = (("over", "under") if mt == "total" else ("away", "home"))
+    out = {"center": None, "center_src": None, "pin_line": None,
+           "ml_line": None, "bounds": None, "model_capped": None,
+           "value_side": None}
+    try:
+        pin_line, _bk = _book_line_center(sb, g["id"], mt, now_utc)
+    except Exception:
+        pin_line, _bk = None, None
+    if pin_line is not None:
+        out.update(center=pin_line, center_src=_bk, pin_line=pin_line,
+                   bounds={ka: pin_line, kb: pin_line}, model_capped=mline)
+        out["value_side"], _fd = _gridiron_value_side(mt, mline, pin_line, ka, kb)
+        return out
+    mkt, mkt_src = None, None
     if mt == "spread":
-        return (rv >= center - eps) if sn == kb else (rv <= center + eps)
-    return (rv <= center + eps) if sn == ka else (rv >= center - eps)
-
-
-def _gridiron_window(rungs, center, fav_dir):
-    """Allowed rung values: at the line or on the favorable side of it,
-    within _GRIDIRON_TAIL_PTS; fav_dir 0 → the rung nearest the line ±1."""
-    if not rungs or center is None:
-        return set()
-    if fav_dir == 0:
-        ci = min(range(len(rungs)), key=lambda i: abs(rungs[i] - center))
-        return {v for i, v in enumerate(rungs)
-                if abs(i - ci) <= 1 and abs(v - center) <= _GRIDIRON_TAIL_PTS}
-    near = min(rungs, key=lambda v: abs(v - center))
-    out = set()
-    for v in rungs:
-        if abs(v - center) > _GRIDIRON_TAIL_PTS:
-            continue
-        if v == near or (v - center) * fav_dir > 0:
-            out.add(v)
+        out["ml_line"] = _gridiron_ml_line(d, pm, ka, kb)
+        if out["ml_line"] is not None:
+            mkt, mkt_src = out["ml_line"], "venue_ml"
+    if mkt is None:
+        _vc, _vs = _gridiron_ladder_center(ladder_quotes or [], mt, proj)
+        if _vc is not None:
+            mkt, mkt_src = _vc, _vs
+    bounds, mc, center = _gridiron_bounds(mt, mkt, mline, ka, kb)
+    out.update(center=center, center_src=(mkt_src or "model"),
+               bounds=bounds, model_capped=mc)
+    if mkt is not None:
+        out["value_side"], _fd = _gridiron_value_side(mt, mc, mkt, ka, kb)
     return out
+
+
+def _gridiron_seat_legal(rule, mt, sn, rv):
+    if not rule or rule.get("center") is None or rv is None:
+        return False
+    ka, kb = (("over", "under") if mt == "total" else ("away", "home"))
+    return (abs(rv - rule["center"]) <= _GRIDIRON_TAIL_PTS
+            and _gridiron_past_bound(mt, sn, rv, (rule.get("bounds") or {}).get(sn), ka, kb))
 
 
 def _gridiron_try_bet(sb, g, es0, d, mt, gp):
@@ -18286,53 +18320,16 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
     # case). A real market the model disagrees with is never re-centered
     # on the model: that seated Over 55.5 against a 50 total (PSU@Temple).
     mline = (round(-float(proj), 1) if mt == "spread" else round(float(proj), 1))
-    center, center_src, pin_line = None, None, None
-    try:
-        pin_line, _bk = _book_line_center(sb, g["id"], mt, now_utc)
-        if pin_line is not None:
-            center, center_src = pin_line, _bk
-    except Exception:
-        pass
-    ml_line, bounds, model_capped = None, None, None
-    if center is not None:
-        # BOOK LINE (Pinnacle/DK/FD, 7-day memory): the line is the
-        # center; bet toward the model; at the line or favorable.
-        value_side, fav_dir = _gridiron_value_side(mt, mline, center, ka, kb)
-        allowed = _gridiron_window(rungs, center, fav_dir)
+    _rule = _gridiron_line_rule(
+        sb, g, d, pm, mt, mline, proj,
+        [(c[0], c[4], (c[3] or {}).get("bid"), (c[3] or {}).get("ask"))
+         for c in paying], now_utc)
+    center, center_src, pin_line = _rule["center"], _rule["center_src"], _rule["pin_line"]
+    ml_line, bounds, model_capped = _rule["ml_line"], _rule["bounds"], _rule["model_capped"]
+    value_side = _rule["value_side"]
 
-        def _seat_ok(sn, rv):
-            return (rv in allowed
-                    and _gridiron_side_ok(mt, sn, rv, center, ka, kb))
-    else:
-        # NO BOOK LINE YET (Rob, Sep 6 2026 — "we need to bet early,
-        # before lines, collect rent; the model is the judge... what's
-        # the safest way"): the MARKET's own number is the venue
-        # moneyline turned into a spread (within ~1 pt of Pinnacle,
-        # measured) — for totals the venue's two-sided ladder mark —
-        # and the model, CAPPED ±7 of it, is the other estimate. Every
-        # seat sits at least one rung on the favorable side of the MORE
-        # favorable of the two for its side. RENT FIRST still stands:
-        # no market number at all → the model bounds both sides and
-        # the game is still bet. The only no-bet is no rent / no model.
-        mkt, mkt_src = None, None
-        if mt == "spread":
-            ml_line = _gridiron_ml_line(d, pm, ka, kb)
-            if ml_line is not None:
-                mkt, mkt_src = ml_line, "venue_ml"
-        if mkt is None:
-            _vc, _vs = _gridiron_ladder_center(
-                [(c[0], c[4], (c[3] or {}).get("bid"), (c[3] or {}).get("ask"))
-                 for c in paying], mt, proj)
-            if _vc is not None:
-                mkt, mkt_src = _vc, _vs
-        bounds, model_capped, center = _gridiron_bounds(mt, mkt, mline, ka, kb)
-        center_src = mkt_src or "model"
-        value_side, _fd = (_gridiron_value_side(mt, model_capped, mkt, ka, kb)
-                           if mkt is not None else (None, 0))
-
-        def _seat_ok(sn, rv):
-            return (abs(rv - center) <= _GRIDIRON_TAIL_PTS
-                    and _gridiron_past_bound(mt, sn, rv, bounds.get(sn), ka, kb))
+    def _seat_ok(sn, rv):
+        return _gridiron_seat_legal(_rule, mt, sn, rv)
     paying = [c for c in paying if _seat_ok(c[0], _rungv(c[0], c[4]))
               and (value_side is None or c[0] == value_side)]
     virgin_w = [v for v in pay_virgin if _seat_ok(v[0], _rungv(v[0], v[2]))
@@ -23033,6 +23030,219 @@ _SCALP_SHADOW_CAP = 30       # shadow entries kept per pick blob
 # mutation), hourly, writes SERIAL, <= max_kills per pass.
 _RENT_DEAD_CACHE: dict = {"at": 0.0, "set": set()}
 _CULL_LAST_TS = 0.0
+_RECENTER_EVERY_S = 900.0        # rides the repeg lease every 15 min
+_RECENTER_MAX_MOVES = 6          # cancel→re-seat is two venue writes each
+_RECENTER_MAX_GAMES = 40         # games priced per pass — table-first in the
+#   daemon (the ladder cache is warm), but a COLD process would REST-price
+#   every game; Sep 6 2026 that shape earned a Cloudflare 1015 in one go.
+_RECENTER_LAST_TS = 0.0
+
+
+def _gridiron_recenter_tick(sb, now, client=None, orders=None,
+                            positions=None, max_games=None) -> dict:
+    """RECENTER (Rob, Sep 6 2026: "as long as it pays rent, AND is
+    UNFILLED, we should move to the line, and 1 favorable rung to the bet
+    — same dogs go up, favorite goes down"). Every pending football
+    spread/total seat placed by the machine is re-judged by TODAY's
+    _gridiron_line_rule (a book line that arrived since it was placed, a
+    moved venue moneyline); a seat that is no longer legal, whose order
+    is still resting UNFILLED, and whose side has a PAYING legal rung to
+    move to, is cancelled (verified against the re-listed book — a cancel
+    that returns is a claim), archived to reconcile_bak (reason
+    recenter), deleted, and its OMS row flipped pending so the executor
+    re-seats it at the proper rung on its next pass. Filled seats ride.
+    No paying legal rung on that side → the seat stays (rent first: a
+    paying wrong rung beats nothing). machine_flags recenter_enabled
+    (fail-open) is the kill switch."""
+    global _RECENTER_LAST_TS
+    if _machine_flag_val("recenter_enabled") is False:
+        return {"gate": "off"}
+    if _time.time() - _RECENTER_LAST_TS < _RECENTER_EVERY_S:
+        return {"gate": "cadence"}
+    owner = _kalshi_owner_uid()
+    if not owner:
+        return {"gate": "no_owner"}
+    lo = (now + timedelta(minutes=30)).isoformat()
+    try:
+        rows = (sb.table("bot_picks")
+                .select("id,event_name,event_start,market_type,side,"
+                        "entry_line,market_id,sport,signal_blob")
+                .eq("asked_by", owner).eq("status", "pending")
+                .in_("market_type", ["spread", "total"])
+                .in_("sport", ["NFL", "NCAAF"])
+                .gt("event_start", lo).limit(400).execute().data) or []
+    except Exception as e:
+        return {"gate": ("picks_err: " + str(e))[:100]}
+    cands = [r for r in rows
+             if isinstance(r.get("signal_blob"), dict)
+             and r["signal_blob"].get("gridiron_autobet")
+             and r["signal_blob"].get("pmm_slug")
+             and r.get("entry_line") is not None]
+    if not cands:
+        _RECENTER_LAST_TS = _time.time()
+        return {"gate": "no_cands"}
+    if orders is None or positions is None:
+        if client is None:
+            try:
+                client = get_client()
+            except Exception:
+                return {"gate": "no_client"}
+        orders = _pmm_open_orders_raw(client)
+        positions = _pmm_positions_raw(client)
+    if orders is None or positions is None:
+        return {"gate": "venue_read"}
+    if not orders and len(cands) > 5:
+        return {"gate": "orders_empty_suspect"}   # EMPTY IS NOT TRUTH
+    if client is None:
+        try:
+            client = get_client()
+        except Exception:
+            return {"gate": "no_client"}
+    _RECENTER_LAST_TS = _time.time()
+
+    def _open_buys(ol, slug):
+        return [o for o in ol if o.get("slug") == slug and o.get("auto")
+                and "BUY" in (o.get("intent") or "")]
+
+    res = {"cands": len(cands), "judged": 0, "illegal": 0, "moved": 0,
+           "filled": 0, "no_order": 0, "no_target": 0, "unconfirmed": 0,
+           "failed": 0, "games": 0}
+    by_game: dict = {}
+    for r in cands:
+        by_game.setdefault(str(r["market_id"]), []).append(r)
+    moves: list = []
+    nowiso = now.isoformat()
+    for mid, picks in by_game.items():
+        if res["moved"] >= _RECENTER_MAX_MOVES:
+            break
+        if res["games"] >= (max_games or _RECENTER_MAX_GAMES):
+            res["gate"] = "game_cap"
+            break
+        g0 = picks[0]
+        # only games with an UNFILLED seat are worth pricing
+        live = []
+        for p in picks:
+            sl = p["signal_blob"]["pmm_slug"]
+            if (positions.get(sl) or {}).get("qty", 0):
+                res["filled"] += 1
+                continue
+            ob = _open_buys(orders, sl)
+            if not ob:
+                res["no_order"] += 1     # the reconcile's case, not ours
+                continue
+            live.append((p, sl, ob))
+        if not live:
+            continue
+        g = {"id": mid, "sport": g0["sport"], "event_name": g0["event_name"],
+             "event_start": g0["event_start"]}
+        try:
+            d = _gridiron_price_game(sb, g)
+            gp = _gridiron_proj(sb, g["sport"], g["event_name"])
+        except Exception:
+            d, gp = None, None
+        if not d or not gp:
+            continue
+        res["games"] += 1
+        mg, tt, pm = gp
+        for p, sl, ob in live:
+            if res["moved"] >= _RECENTER_MAX_MOVES:
+                break
+            mt, sn = p["market_type"], p["side"]
+            fit = (pm or {}).get("spread_fit" if mt == "spread" else "total_fit") or {}
+            try:
+                proj = (float(fit["alpha"])
+                        + float(fit["beta"]) * (mg if mt == "spread" else tt))
+            except (TypeError, ValueError, KeyError):
+                continue
+            mline = (round(-float(proj), 1) if mt == "spread" else round(float(proj), 1))
+            lad = ((((d.get("odds") or {}).get(mt) or {}).get("polymarket") or {})
+                   .get("ladder") or [])
+            lq = []
+            for e in lad:
+                q = e.get("quote") or {}
+                if e.get("line") is None or q.get("bid") is None:
+                    continue
+                if _gridiron_is_placeholder(q.get("bid"), q.get("ask")):
+                    continue
+                lq.append((e.get("side"), e["line"], q.get("bid"), q.get("ask")))
+            rule = _gridiron_line_rule(sb, g, d, pm, mt, mline, proj, lq, now)
+            ln = float(p["entry_line"])
+            rv = (round(ln if sn == "home" else -ln, 1) if mt == "spread"
+                  else round(ln, 1))
+            res["judged"] += 1
+            if _gridiron_seat_legal(rule, mt, sn, rv):
+                continue
+            res["illegal"] += 1
+            # a PAYING legal rung on the SAME side to move to — else stay
+            target = None
+            for e in lad:
+                if e.get("side") != sn or e.get("line") is None or not e.get("slug"):
+                    continue
+                erv = (round(float(e["line"]) if sn == "home" else -float(e["line"]), 1)
+                       if mt == "spread" else round(float(e["line"]), 1))
+                if not _gridiron_seat_legal(rule, mt, sn, erv):
+                    continue
+                if _rent_dead(e["slug"], sb):
+                    continue
+                try:
+                    if not _rent_ok(e["slug"], g["event_start"], now, sb)[0]:
+                        continue
+                except Exception:
+                    continue
+                if target is None or abs(erv - rule["center"]) < abs(target[1] - rule["center"]):
+                    target = (e["slug"], erv)
+            if target is None:
+                res["no_target"] += 1
+                continue
+            ok = True
+            for o in ob:
+                try:
+                    client.orders.cancel(o["id"], {"marketSlug": sl})
+                except Exception as e:
+                    ok = False
+                    res.setdefault("errors", []).append(
+                        {"slug": sl, "err": str(e)[:100], "side": sn, "rv": rv,
+                         "center": rule["center"], "src": rule["center_src"],
+                         "bound": (rule.get("bounds") or {}).get(sn),
+                         "target": target[1]})
+                    break
+            if not ok:
+                continue
+            _time.sleep(0.5)
+            _chk = _pmm_open_orders_raw(client)
+            _pos = _pmm_positions_raw(client)
+            if (_chk is None or _pos is None or _open_buys(_chk, sl)
+                    or (_pos.get(sl) or {}).get("qty", 0)):
+                res["unconfirmed"] += 1     # still resting, or raced a fill → pick stays
+                continue
+            try:
+                (sb.table("reconcile_bak")
+                 .insert({"pick_id": p["id"], "reason": "recenter",
+                          "row": dict(p, recenter={"center": rule["center"],
+                                                   "center_src": rule["center_src"],
+                                                   "bound": (rule.get("bounds") or {}).get(sn),
+                                                   "was_rv": rv, "target_rv": target[1]})})
+                 .execute())
+                sb.table("bot_picks").delete().eq("id", p["id"]).execute()
+                (sb.table("desired_orders")
+                 .update({"state": "pending",
+                          "detail": f"recenter:{rule['center_src']}:{rv}->{target[1]}",
+                          "next_try_at": nowiso, "updated_at": nowiso})
+                 .eq("market_id", mid).eq("market_type", mt)
+                 .eq("lane", "rentlist").execute())
+            except Exception:
+                res["failed"] += 1
+                continue
+            res["moved"] += 1
+            moves.append(f"{(p.get('event_name') or '')[:26]} {mt} {sn} "
+                         f"{rv:+g}→{target[1]:+g} ({rule['center_src']} {rule['center']:+g})")
+    if moves:
+        _send_fill_telegram("\u2194\ufe0f RECENTER — moved " + str(len(moves))
+                            + " unfilled football seat(s) to the line:\n"
+                            + "\n".join(moves))
+    return res
+
+
 _CULL_EVERY_S = 3600.0
 
 
@@ -24572,6 +24782,14 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
         try:
             res["rent_cull"] = _rent_cull_tick(sb, now, client=lap_client,
                                                orders=lap_orders)
+        except Exception:
+            pass
+        # RECENTER rides the same lease (Sep 6 2026): every 15 min, after
+        # the reconcile — unfilled football seats follow the line.
+        try:
+            res["recenter"] = _gridiron_recenter_tick(
+                sb, now, client=lap_client, orders=lap_orders,
+                positions=lap_positions)
         except Exception:
             pass
         # THE SCALP SELL ARM rode this lease from Aug 28 to Sep 4 2026 —

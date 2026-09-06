@@ -1139,8 +1139,25 @@ use the venue's two-sided ladder mark. Then Rob's rule
 two for its side** (model +20, ML +25 → WKU +25.5 or more, Georgia −19.5
 or fewer); value side = the capped model's side of the market number. No
 market number at all → the model bounds both sides and the game is still
-bet (rent first). Blob adds `ml_line/model_capped/bound`. A book line
-arriving later centers only bets placed from then on.
+bet (rent first). Blob adds `ml_line/model_capped/bound`. **ONE RULE, TWO CONSUMERS
+(`_gridiron_line_rule` + `_gridiron_seat_legal`, Sep 6 2026):** the
+executor PLACES by it and **`_gridiron_recenter_tick` MOVES by it** —
+rides the repeg lease every 15 min after the reconcile (Rob: "as long as
+it pays rent AND is UNFILLED, move to the line, and 1 favorable rung —
+dogs go up, favorite goes down"). In book-line mode the line is the bound
+for BOTH sides (a seat AT the line is no longer legal — one rung past,
+minimum; the old `_gridiron_window`/`_gridiron_side_ok` at-the-line
+allowance is gone). An illegal seat whose order still rests unfilled and
+whose side has a PAYING legal rung is cancelled (verified on the re-listed
+book), archived (`reconcile_bak` reason `recenter`), deleted, and its OMS
+row flipped pending — the executor re-seats it under the placement rule
+(so it lands on the MODEL's value side, which may differ from the old
+seat's side). Filled seats ride; no paying legal rung → the seat stays.
+≤6 moves / ≤40 games per pass (a cold process REST-pricing every game
+earned a Cloudflare 1015 on Sep 6); kill switch `machine_flags
+recenter_enabled=false`. Dry-run: call it with a client whose
+`orders.cancel` raises — `errors[]` then lists every would-move with
+rv/center/bound/target.
 (h) **FOOTBALL GHOST ADOPTION (Sep 5 2026, docket #6 root fix):** the
 reconcile's two-strike delete can false-kill a pick during a venue wobble
 while the ORDER stays alive (found live: 5 AUTOMATIC 20-lot orders + 1

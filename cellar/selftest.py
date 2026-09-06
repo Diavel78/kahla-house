@@ -412,28 +412,50 @@ def test_gridiron_value_window() -> None:
     # favorable rungs give the dog MORE points = home line more negative.
     side, d = _app._gridiron_value_side("spread", -45.0, -51.0, "away", "home")
     check("model -45 vs Pinnacle -51 → the DOG (away) is value", side == "away" and d == -1)
-    w = _app._gridiron_window([-56.5, -52.5, -51.5, -50.5, -45.5, -35.5], -51.0, d)
-    check("dog window = at the line + bigger dog numbers, inside 10 pts",
-          w == {-51.5, -52.5, -56.5}, f"got {sorted(w)}")
-    # Pinnacle -51, model -58 → favorite covers MORE → home is value; favorable = smaller spreads
-    side, d = _app._gridiron_value_side("spread", -58.0, -51.0, "away", "home")
-    check("model -58 vs Pinnacle -51 → the FAVORITE (home) is value", side == "home" and d == +1)
-    w = _app._gridiron_window([-56.5, -52.5, -51.5, -50.5, -45.5, -35.5], -51.0, d)
-    check("favorite window = at the line + smaller spreads, inside 10 pts (−35.5 is 15.5 off → out)",
-          w == {-51.5, -50.5, -45.5}, f"got {sorted(w)}")
-    # totals: Pinnacle 51, model 56 → OVER value → lower lines favorable
-    side, d = _app._gridiron_value_side("total", 56.0, 51.0, "over", "under")
-    check("model 56 vs Pinnacle 51 → OVER is value, lower lines favorable", side == "over" and d == -1)
-    w = _app._gridiron_window([45.5, 49.5, 51.5, 53.5], 51.0, d)
-    check("over window = 51.5 (nearest) + 49.5 + 45.5", w == {51.5, 49.5, 45.5}, f"got {sorted(w)}")
-    # every seat sits at the line or on ITS side's favorable side of it
-    ok = _app._gridiron_side_ok
-    check("dog +17.5 under a -20.5 line is REFUSED", not ok("spread", "away", -17.5, -20.5, "away", "home"))
-    check("dog +24.5 over a -20.5 line is fine", ok("spread", "away", -24.5, -20.5, "away", "home"))
-    check("favorite -20.5 at the line is fine", ok("spread", "home", -20.5, -20.5, "away", "home"))
-    check("favorite -24.5 (more points) is REFUSED", not ok("spread", "home", -24.5, -20.5, "away", "home"))
-    check("over 53.5 above a 50 total is REFUSED", not ok("total", "over", 53.5, 50.0, "over", "under"))
-    check("under 53.5 above a 50 total is fine", ok("total", "under", 53.5, 50.0, "over", "under"))
+    # BOOK-LINE MODE through the shared rule (Rob, Sep 6 2026: "move to the
+    # line, and 1 favorable rung" — the line is the bound for BOTH sides)
+    _orig = _app._book_line_center
+    _app._book_line_center = lambda sb, mid, mt, now: ((-51.0, "pinnacle") if mt == "spread" else (51.0, "pinnacle"))
+    try:
+        rule = _app._gridiron_line_rule(None, {"id": "x"}, {"odds": {}}, {"spread_fit": {"sd": 16.1}},
+                                        "spread", -45.0, 45.0, [], None)
+        check("book line centers and bounds both sides at −51",
+              rule["center"] == -51.0 and rule["bounds"] == {"away": -51.0, "home": -51.0}
+              and rule["center_src"] == "pinnacle", f"got {rule}")
+        check("model −45 vs Pinnacle −51 → dog is value side", rule["value_side"] == "away")
+        leg = _app._gridiron_seat_legal
+        check("dog +51.5 (one rung past) is legal", leg(rule, "spread", "away", -51.5))
+        check("dog +50.5 (inside the line) is REFUSED", not leg(rule, "spread", "away", -50.5))
+        check("dog +51 exactly AT the line is REFUSED (one rung minimum)", not leg(rule, "spread", "away", -51.0))
+        check("favorite −50.5 (one rung past) is legal", leg(rule, "spread", "home", -50.5))
+        check("favorite −51.5 (more points laid) is REFUSED", not leg(rule, "spread", "home", -51.5))
+        check("dog +61.5 is outside the 10-pt tail → REFUSED", not leg(rule, "spread", "away", -61.5))
+        rt = _app._gridiron_line_rule(None, {"id": "x"}, {"odds": {}}, {"total_fit": {"sd": 12}},
+                                      "total", 56.0, 56.0, [], None)
+        check("total: Pinnacle 51, model 56 → OVER is value", rt["value_side"] == "over" and rt["center"] == 51.0)
+        check("over 50.5 legal, over 51.5 refused", leg(rt, "total", "over", 50.5) and not leg(rt, "total", "over", 51.5))
+        check("under 51.5 legal, under 50.5 refused", leg(rt, "total", "under", 51.5) and not leg(rt, "total", "under", 50.5))
+    finally:
+        _app._book_line_center = _orig
+    # NO BOOK LINE through the same rule: ML-implied number + capped model
+    _app._book_line_center = lambda sb, mid, mt, now: (None, None)
+    try:
+        d = {"odds": {"moneyline": {"polymarket": {"ladder": [
+            {"side": "away", "quote": {"bid": 0.015, "ask": 0.02}}]}}}}
+        rule = _app._gridiron_line_rule(None, {"id": "x"}, d, {"spread_fit": {"sd": 16.132}},
+                                        "spread", -20.5, 20.5, [], None)
+        check("no book line → venue ML centers (~−34), model capped to −27",
+              rule["center_src"] == "venue_ml" and -35.5 < rule["center"] < -32.5
+              and rule["model_capped"] == round(rule["center"] + 7.0, 1), f"got {rule}")
+        check("dog is value; +34.5 legal only if past the ML number",
+              rule["value_side"] == "away" and leg(rule, "spread", "away", round(rule["center"] - 0.5, 1))
+              and not leg(rule, "spread", "away", round(rule["center"] + 0.5, 1)))
+        rule2 = _app._gridiron_line_rule(None, {"id": "x"}, {"odds": {}}, {"spread_fit": {"sd": 16.132}},
+                                         "spread", -20.5, 20.5, [], None)
+        check("nothing but the model → model bounds both sides, still bet",
+              rule2["center_src"] == "model" and rule2["bounds"] == {"away": -20.5, "home": -20.5})
+    finally:
+        _app._book_line_center = _orig
     # model agrees with the line → symmetric ±1, side by edge
     side, d = _app._gridiron_value_side("spread", -20.5, -20.5, "away", "home")
     check("model at the line → no forced side", side is None and d == 0)
