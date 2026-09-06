@@ -240,8 +240,12 @@
                  is the human view. Sells first. -->
             <div class="card wide">
                 <div class="label">Resting orders <span class="tag" id="ordersTag">—</span></div>
-                <input id="ordersSearch" type="search" placeholder="search — eagles, auburn, 49ers, over, sell…" autocomplete="off"
-                       style="width:100%;margin-top:8px;padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:inherit;font-size:14px">
+                <div style="position:relative;margin-top:8px">
+                    <input id="ordersSearch" type="text" placeholder="search — eagles, auburn, 49ers, over, sell…" autocomplete="off" autocorrect="off" autocapitalize="off"
+                           style="width:100%;box-sizing:border-box;padding:8px 40px 8px 10px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:inherit;font-size:14px">
+                    <button id="ordersClear" type="button" aria-label="clear search" hidden
+                            style="position:absolute;right:6px;top:50%;transform:translateY(-50%);width:28px;height:28px;border-radius:50%;border:none;background:var(--line);color:inherit;font-size:16px;line-height:28px;text-align:center;padding:0;cursor:pointer">×</button>
+                </div>
                 <div id="ordersList" class="sub" style="margin-top:8px">loading…</div>
             </div>
             <div class="card wide">
@@ -798,7 +802,15 @@
                          + '<span style="color:var(--text-muted)">' + ago(o.updated_at) + '</span>';
                 }).join('') + '</div>';
         }
-        (function () { const sb = document.getElementById('ordersSearch'); if (sb) sb.addEventListener('input', renderOrders); })();
+        (function () {
+            const sb = document.getElementById('ordersSearch');
+            const cx = document.getElementById('ordersClear');
+            if (!sb) return;
+            const sync = () => { if (cx) cx.hidden = !sb.value; };
+            sb.addEventListener('input', () => { sync(); renderOrders(); });
+            if (cx) cx.addEventListener('click', () => { sb.value = ''; sync(); renderOrders(); sb.focus(); });
+            sync();
+        })();
         async function loadOrders() {
             const el = document.getElementById('ordersList');
             const tag = document.getElementById('ordersTag');
