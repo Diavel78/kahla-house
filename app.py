@@ -24263,7 +24263,13 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 urgent=True)
             break
         net2 = float((pos2.get(slug) or {}).get("net") or 0.0)
-        held2 = _mirror_clamp(slug, (-net2) if synth else net2)
+        held2 = (-net2) if synth else net2
+        if slug not in _mirror_recheck:
+            held2 = _mirror_clamp(slug, held2)
+        # (Sep 6 2026 — Rob's JAX@DEN tape: on a mirror-zero slug this
+        # clamp read 0 after every cancel, called it "raced a fill", and
+        # never re-placed; the next lap found it naked and started over
+        # at touch−1. The venue's fresh read is the truth here.)
         if held2 < 1.0:
             continue                     # the cancel raced a fill — sold
         if _scalp_create(client, sb, r, b, slug, synth, sell_intent,
