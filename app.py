@@ -18336,7 +18336,11 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
                  if q.get("ask") is not None else None)
         if _askc is not None and peg >= _askc:
             peg = _grid_dn(float(q["bid"]) * 100.0, _tk)
-        if not (_OU_TRADER_MIN_ENTRY_C <= peg <= _GRIDIRON_MAX_ENTRY_C):
+        # BE THE TOUCH (Rob, Sep 6 2026): no price floor on a football seat.
+        # touch + 1 tick, whatever the touch is; the 60¢ cap + $13 master
+        # rule are the only fences. (The 25¢ 'pricing sanity' floor left a
+        # 38¢ bid standing over a 10¢ book because 11 was 'too cheap'.)
+        if not (_tk <= peg <= _GRIDIRON_MAX_ENTRY_C):
             continue
         viable.append((sn, peg, pblk, q, ln))
     if not viable and not virgin:
@@ -18622,7 +18626,7 @@ def _gridiron_try_ml(sb, g, es0, d):
                  if q.get("ask") is not None else None)
         if _askc is not None and peg >= _askc:
             peg = _grid_dn(float(q["bid"]) * 100.0, _tk)
-        if not (_OU_TRADER_MIN_ENTRY_C <= peg <= _GRIDIRON_MAX_ENTRY_C):
+        if not (_tk <= peg <= _GRIDIRON_MAX_ENTRY_C):
             continue
         viable.append((sn, peg, pblk, q))
     if not viable:

@@ -1273,7 +1273,7 @@ sport the machine ever adds:
   books, THAT'S WHAT PAYS RENT… stay at touch +1 and chase it up to the
   model": against the venue's 1¢ placeholder bid the seat is 2¢, alone in
   the window; the chase follows real bidders up to the model wall
-  (`_gridiron_seed_virgin`, no 25¢ floor on a virgin book).
+  (`_gridiron_seed_virgin`). **And no 25¢ floor on ANY football seat (Rob, same hour: "BE THE GOD DAMN TOUCH")** — `_gridiron_try_bet`/`_gridiron_try_ml` peg touch + 1 tick with the 60¢ cap and the $13 master rule as the only fences; the 25-60¢ "pricing sanity" band is MLB O/U-trader doctrine, not football's.
 - **EVERYTHING BUT NRFI SELLS (Rob, Sep 6 2026, reading 155 positions
   vs 128 sells on the venue: "The only thing that lives is the no run
   first inning. Everything else fucking gets sold").** The scalp's
