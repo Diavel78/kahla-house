@@ -952,7 +952,7 @@ class MarketsFeed:
             changed = True
         if changed:
             log.info("ws mkts[%d] watching %d markets in %d groups",
-                     self.conn, len(self._covered), len(self._groups))
+                     getattr(self, "conn", 0), len(self._covered), len(self._groups))
 
     # ── PACK LAYER ──
     def _pack_budget_used(self) -> int:
