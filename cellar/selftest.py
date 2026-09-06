@@ -426,6 +426,10 @@ def test_gridiron_ladder_center() -> None:
           c2 == -18.3 and src2 == "model", f"got {c2} {src2}")
     c3, src3 = _app._gridiron_ladder_center([("over", 55.5, 0.43, 0.44), ("over", 45.5, 0.9, 0.99)], "total", 52.0)
     check("totals center on the 50/50 rung by line", c3 == 55.5 and src3 == "atm")
+    c4, src4 = _app._gridiron_ladder_center([("over", 35.5, 0.45, 0.49)], "total", 55.1)
+    check("a lone stray quote 20 pts off the model is NOT the line (model wins)", c4 == 55.1 and src4 == "model", f"got {c4} {src4}")
+    c5, src5 = _app._gridiron_ladder_center([("over", 59.5, 0.25, 0.29)], "total", 51.1)
+    check("a 25/29 book is not a 50/50 mark (model wins)", c5 == 51.1 and src5 == "model", f"got {c5} {src5}")
 
 
 def test_pin_line_center() -> None:

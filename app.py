@@ -17856,9 +17856,17 @@ def _gridiron_ladder_center(rows, mt, proj):
         # spread, so 43/44 (7) beats a thin 33/57 (17) as the actual line
         d = abs(mid - 50.0) + (float(ask) - float(bid)) * 50.0
         if best is None or d < best[0]:
-            best = (d, rv)
-    if best is not None:
-        return best[1], "atm"
+            best = (d, rv, mid)
+    # A lone stray quote is not a line (Sep 5 2026 report: a 45/49 quote
+    # on total 35.5 vs a model of 55; a 25/75 book at 59.5 vs 51): the
+    # at-the-money rung counts only when its mid is a real 50/50 (30-70¢)
+    # and it agrees with the model within _GRIDIRON_TAIL_PTS.
+    if best is not None and 30.0 <= best[2] <= 70.0:
+        if proj is None:
+            return best[1], "atm"
+        mline = (round(-float(proj), 1) if mt == "spread" else round(float(proj), 1))
+        if abs(best[1] - mline) <= _GRIDIRON_TAIL_PTS:
+            return best[1], "atm"
     if proj is None:
         return None, None
     return (round(-float(proj), 1) if mt == "spread" else round(float(proj), 1)), "model"
