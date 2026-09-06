@@ -19396,6 +19396,15 @@ def _machine_flag_val(key: str, default=None):
 # go ~331→~350s avg against the 540s stuck line — margin holds. Revisit
 # (probably shrink) after the Postgres cutover makes attempts ~free.
 _OMS_BUDGET_S = float(os.environ.get("OMS_BUDGET_S") or 40.0)
+# THE MLB OPENER'S GUARANTEED SLICE (Sep 6 2026): the OMS runs first in
+# the opener lane on a 40s budget it only checks BETWEEN rows, and one
+# football row (ladder pricing + per-rung book reads) runs 10-20s, so the
+# pass overran to 200-300s every lap and _opener_pass — the MLB early
+# no-veto engine — found its deadline already gone: opener_eval=0 on
+# EVERY lap from 09:41 to 16:30, 12 of tomorrow's MLB games listed and 2
+# bet, while the venue paid early rent on all of them. The lane now floors
+# the MLB pass's deadline at now+this AFTER the OMS returns.
+_OPENER_MIN_S = float(os.environ.get("OPENER_MIN_S") or 60.0)
 _OMS_MAX_CREATES = 6          # real orders per tick — serial-write bound
 _OMS_RETRY_MIN = {"rent": 30, "no_pmm": 30, "no_book": 30, "none": 30,
                   "paused": 5,         # reopen posture: bets_paused refused it
@@ -19707,6 +19716,7 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
     st["oms_pend"] = len(rows)
     creates = 0
     d_cache: dict = {}
+    _t_exec = _time.time()
     for r in rows:
         if _time.time() >= deadline - 2.0 or creates >= _OMS_MAX_CREATES:
             break
@@ -19774,6 +19784,7 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
              .eq("id", r["id"]).execute())
         except Exception:
             pass
+    st["oms_t"] = round(_time.time() - _t_exec, 1)   # the overrun, visible
     return st
 
 

@@ -220,6 +220,11 @@ def lane_opener(ctx: Ctx) -> int:
     except Exception:
         log.exception("opener: oms pass failed")
         oms_stats = {"oms_err": "exception"}
+    # The MLB pass gets a guaranteed slice AFTER the OMS returns — the OMS
+    # overran its 40s to 200s+ per lap (one football row = 10-20s of
+    # pricing) and _opener_pass ran with its deadline already gone:
+    # opener_eval=0 every lap for seven hours on Sep 6 2026.
+    deadline = max(deadline, _t.time() + _app._OPENER_MIN_S)
     rows, stats = _app._opener_pass(ctx.sb, ctx.now, deadline)
     stats = {**stats, **oms_stats}
     # Quote-table hit rate — "measurable from day one" is the spec's own
