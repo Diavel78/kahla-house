@@ -17827,8 +17827,20 @@ def _gridiron_seed_virgin(sb, g, es0, mt, gp, virgin, proj, now_utc):
             _tk = _pmm_tick_c(get_client(), sl or "")
         except Exception:
             _tk = 1.0
-        peg = _grid_dn(ps * 100.0 - 6.0, _tk)
-        if not (_OU_TRADER_MIN_ENTRY_C <= peg <= _GRIDIRON_MAX_ENTRY_C):
+        # TOUCH + 1 TICK (Rob, Sep 6 2026: "I like virgin books — THAT'S
+        # WHAT PAYS RENT… stay at touch +1 and chase it up to the model").
+        # The venue's placeholder bid (1¢, 10-20k contracts) IS the touch
+        # on a virgin book: bid one tick above it, alone in the window, and
+        # let the chase follow real bidders up to the model wall. The old
+        # fair−6 anchor parked 44¢ bids against 1¢ books — great EV and
+        # rent given away. No 25¢ floor here: the band is for real books.
+        _vb = (pblk.get("quote") or {}).get("bid")
+        try:
+            _vb_c = float(_vb) * 100.0 if _vb is not None else None
+        except (TypeError, ValueError):
+            _vb_c = None
+        peg = (_grid_dn(_vb_c, _tk) + _tk) if _vb_c is not None else _tk
+        if not (_tk <= peg <= _GRIDIRON_MAX_ENTRY_C):
             continue
         cands.append((dist, sn, peg, pblk, ps, ln))
     if not cands:
@@ -17852,7 +17864,7 @@ def _gridiron_seed_virgin(sb, g, es0, mt, gp, virgin, proj, now_utc):
         cap_flag="gridiron_autobet", cap_max=10000,
         query_text="auto-bet: gridiron virgin seed",
         reason=(f"SEED QUOTE — virgin book, {sn} {ln} rested "
-                f"{round(peg)}¢ vs model {round(ps * 100)}¢ (fair−6)"),
+                f"{round(peg)}¢ vs model {round(ps * 100)}¢ (touch+1)"),
         contracts=(_GRIDIRON_CONTRACTS if mt == "spread"
                    else _GRIDIRON_TOTAL_CONTRACTS),
         entry_line=ln, sport=g.get("sport"), fail_tag=_ftag)
@@ -23071,7 +23083,7 @@ _SCALP_MAX_PLACE = 5         # fresh asks per tick (creates — no cancel leg).
                              # wall clock below.
 _SCALP_ASK_CEIL_C = 90.0     # no scalp ask ever rests at/above this (a 99¢
 #   ask is a parked position, not a sell — Sep 6 2026)
-_SCALP_MAX_WALKS = 10        # cancel→verify→create walks per tick (5→10 Sep 6 2026;
+_SCALP_MAX_WALKS = 60        # the 90s write budget is the real bound (Rob, Sep 6 2026: the old 5-a-lap cap WAS the whole scalp failure) (1→2→5→10→60
 #   laps are ~50s now, the 90s write budget still bounds it) (1→2→5
                              # first armed night; still serial, wall-clock
                              # guarded — each walk ≈4s, 5 fits the 30s
@@ -23871,7 +23883,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         r4, b4, slug4, synth4 = c4
         e4 = _scalp_entry_c(r4, b4)
         if e4 is None:
-            return 2
+            return (2, 0.0)
         si4 = ("ORDER_INTENT_SELL_SHORT" if synth4
                else "ORDER_INTENT_SELL_LONG")
         a4 = q4 = None
@@ -23883,12 +23895,20 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 q4 = float(o4.get("leaves") or o4.get("qty") or 0.0)
                 break
         if a4 is None:
-            return 1                        # naked — place before optimizing
+            return (1, 0.0)                 # naked — place before optimizing
         # OFF-COST ASK IS A REPAIR (Sep 6 2026 — the ATL@PHI 96.5¢ and
         # DET@CLE 99¢ asks that sat through live games as "covered"): the
         # ask belongs at cost; one more than a cent off it moves first.
-        if abs(a4 - e4) > 1.26:
-            return 0
+        # PARKED OR LIVE = REPAIR FIRST (Sep 6 2026): an ask at/above the
+        # ceiling, or on a game that has started, moves before routine steps.
+        if a4 >= _SCALP_ASK_CEIL_C:
+            return (0, 0.0)
+        try:
+            if datetime.fromisoformat(
+                    str(r4.get("event_start")).replace("Z", "+00:00")) <= now:
+                return (0, 0.0)
+        except Exception:
+            pass
         # QTY MISMATCH IS A REPAIR TOO (Aug 29 night, second lesson of the
         # 0/5-on-20 catch): the resize sat starved behind routine 1¢
         # step-downs for 10 straight minutes — with a 30s budget and one
@@ -23898,13 +23918,24 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         n4 = float((positions.get(slug4) or {}).get("net") or 0.0)
         h4 = (-n4) if synth4 else n4
         if h4 >= 1.0 and abs(h4 - q4) > 0.5:
-            return 0
+            return (0, 0.0)
         _vc4 = _scalp_venue_cost_c(
             r4, (positions.get(slug4) or {}).get("avg_price"), h4)
         if _vc4 is not None and _vc4 > 0:
             e4 = max(e4, _vc4)                  # venue-cost floor, mirrored
         f4 = min(99.0, _grid_up(e4, _TICK_CACHE.get(slug4, 1.0)))  # cost base
-        return 0 if a4 < f4 - 0.26 else 2
+        if a4 < f4 - 0.26:
+            return (0, 0.0)                 # under the floor — repair
+        # FAIR ROTATION (Sep 6 2026, Rob: "each lap walked at most 5 asks…
+        # that was the entire issue"): step-downs run oldest-walk-first so
+        # every ask gets its turn, not the same ten at the front of the list.
+        try:
+            _tr = (b4.get("scalp") or [])
+            _last = (datetime.fromisoformat(str(_tr[-1]["at"])).timestamp()
+                     if _tr else 0.0)
+        except Exception:
+            _last = 0.0
+        return (2, _last)
     cands.sort(key=_floor_viol)
     # BUDGET CLOCK RESTARTS HERE — the chase-night bug's THIRD sighting
     # (Sep 4 2026, first night as its own lane): _t0 at function top
@@ -24057,17 +24088,29 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 continue                 # that level is (only) us
             comp_ask = c
             break
+        # A VENUE STUB IS NOT A TOUCH (Sep 6 2026 — the Phillies 96.5¢ and
+        # Guardians 99¢ asks through live games): on an empty or freshly
+        # re-provisioned book the only "ask" is the venue's 97-99¢
+        # placeholder. At/above the ceiling, or on a book wider than 30¢,
+        # nobody is quoting — hold at cost until someone is.
+        if comp_ask is not None and (
+                comp_ask >= _SCALP_ASK_CEIL_C
+                or (best_bid is not None and comp_ask - best_bid >= 30.0)):
+            comp_ask = None
         if not mine:
             # UNCOVERED = inventory with no resting ask. The dead-scalp
             # tripwire keys on THIS, not on cands: a healthy quiet book
             # (every ask resting at its floor) has high cands and zero
             # actions — that's fine. Inventory sitting naked is not.
             res["uncovered"] = res.get("uncovered", 0) + 1
-            # ── PLACE AT COST (Rob, Sep 6 2026: "sell shit for what I have
-            # it at"). Not the top of the book, not a lead on a competitor,
-            # not a stub: the ask IS the cost floor, post-only (never under
-            # the bid). The book decides nothing about where we sell.
-            tgt = floor_c
+            # ── PLACE: TOUCH OR COST, WHICHEVER IS HIGHER (Rob, Sep 6 2026:
+            # "if I own it for 50 and the sell touch is 54, list 53, then
+            # 52, 51, 50. Never under my cost."). Lead a REAL touch by one
+            # tick; nobody quoting → hold at cost. Post-only above the bid.
+            if comp_ask is not None:
+                tgt = max(floor_c, _grid_up(comp_ask, tick) - tick)
+            else:
+                tgt = floor_c
             if best_bid is not None and tgt <= best_bid:
                 tgt = _grid_dn(best_bid, tick) + tick  # post-only: never cross
             tgt = min(_SCALP_ASK_CEIL_C, _grid_up(tgt, tick))
@@ -24089,15 +24132,24 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # in-play there is no walk — one jump straight to money-back
         if our_ask is None:
             continue
-        # WALK TO COST (Sep 6 2026): every resting ask belongs at the cost
-        # floor (post-only above the bid). Below it = repair up; above it =
-        # move down — no 1¢ creep, no competitor-lead, no in-play special
-        # case (they all collapse to the same target).
-        tgt = floor_c
-        if best_bid is not None and tgt <= best_bid:
-            tgt = _grid_dn(best_bid, tick) + tick
-        tgt = min(_SCALP_ASK_CEIL_C, _grid_up(tgt, tick))
-        if abs(tgt - our_ask) <= 0.26:
+        # ── WALK (Rob, Sep 6 2026): lead the touch by a tick, step down
+        # ONE tick per lap while we are the touch, to the cost floor, then
+        # hold. Below cost → repair up. Above the lead target (the touch
+        # moved under us, or a parked ask) → JUMP to it, never creep.
+        # Nobody quoting → the lead target IS cost.
+        lead = (max(floor_c, _grid_up(comp_ask, tick) - tick)
+                if comp_ask is not None else floor_c)
+        if best_bid is not None and lead <= best_bid:
+            lead = _grid_dn(best_bid, tick) + tick
+        lead = min(_SCALP_ASK_CEIL_C, _grid_up(lead, tick))
+        tgt = None
+        if our_ask < floor_c - 0.26:
+            tgt = lead                                    # repair up
+        elif our_ask > lead + 0.26:
+            tgt = lead                                    # jump: touch moved under us
+        elif our_ask > floor_c + 0.26:
+            tgt = max(floor_c, our_ask - tick)            # we ARE the touch → step down
+        if tgt is not None and abs(tgt - our_ask) <= 0.26:
             res["at_cost"] = res.get("at_cost", 0) + 1
             tgt = None                   # already there
         _repair = tgt is not None and our_ask < floor_c - 0.26
