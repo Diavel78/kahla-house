@@ -820,8 +820,9 @@
                 if (!r.ok) throw new Error('HTTP ' + r.status);
                 const d = await r.json();
                 const rows = (d.orders || d.data || []).slice();
-                rows.sort((a, b) => (/SELL/.test(b.intent||'') - /SELL/.test(a.intent||''))
-                    || (new Date(b.updated_at||0) - new Date(a.updated_at||0)));
+                // NEWEST MOVE FIRST, buys and sells mixed (Rob, Sep 6 2026:
+                // "sorting them by buy and sell is silly").
+                rows.sort((a, b) => (new Date(b.updated_at||0) - new Date(a.updated_at||0)));
                 const sells = rows.filter(o => /SELL/.test(o.intent||'')).length;
                 if (tag) tag.textContent = rows.length + ' resting · ' + sells + ' sells · ' + (rows.length - sells) + ' buys';
                 _ordersRows = rows;

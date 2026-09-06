@@ -11989,6 +11989,17 @@ def _pmm_open_orders_raw(client) -> list | None:
             continue
     if raw is None:
         return None                              # read failed → not "no orders"
+    _last_amend: dict = {}
+    try:
+        _sb0 = get_supabase()
+        if _sb0 is not None:
+            for _r0 in (_sb0.table("scalp_snipes").select("oid,at")
+                        .eq("ok", True).order("at", desc=True).limit(600)
+                        .execute().data) or []:
+                if _r0.get("oid") and _r0["oid"] not in _last_amend:
+                    _last_amend[_r0["oid"]] = _r0["at"]
+    except Exception:
+        pass
     for o in raw:
         def _g(k, d=None):
             return o.get(k, d) if isinstance(o, dict) else getattr(o, k, d)
@@ -21797,11 +21808,16 @@ def api_my_orders():
                 price = raw_price
             side_label = _INTENT_LABEL.get(intent, intent.replace("ORDER_INTENT_", "").replace("_", " "))
 
+            _oid = _g("id") or ""
+            # LAST MOVE: the venue does not restamp updateTime on an amend, so
+            # an amended order read as "moved 21m ago" (its create time). Our
+            # own sniper/amend ledger knows the real moment (Rob, Sep 6 2026).
+            _mv = _last_amend.get(_oid) or _g("updateTime") or _g("createTime") or ""
             out_orders.append({
-                "id":               _g("id") or "",
+                "id":               _oid,
                 "state":            state.replace("ORDER_STATE_", ""),
                 "amended":          state == "ORDER_STATE_REPLACED",
-                "updated_at":       _g("updateTime") or _g("createTime") or "",
+                "updated_at":       _mv,
                 "market_name":      title,
                 # `outcome` is what the dashboard's buildBetSlipLabel()
                 # appends after the market title. Use `pick` (which has
