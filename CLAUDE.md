@@ -1249,6 +1249,23 @@ sport the machine ever adds:
   pass and asking the venue's per-market rent answer when October slates
   post, never assuming it. Football = spreads + totals (live). NBA =
   probably spreads, decided at the season.
+- **THE ASK IS THE COST. NOTHING ELSE (Rob, Sep 6 2026, after three
+  screenshots in an hour — a Phillies ask at 96.5¢ and a Guardians ask
+  at 99¢ sitting through LIVE games, a Nationals ask 19¢ over cost, and
+  one sell resting on a prop we did not hold: "Can you not sell shit I
+  don't have, and sell shit for what I have it at?").** The recurring
+  error had ONE root: the scalp priced asks off the BOOK (lead the
+  competitor ask by a tick, walk down 1¢ a lap, floor at cost). On an
+  empty or re-provisioned book the only "competitor" is the venue's
+  97-99¢ stub, so asks parked at 96-99¢; the 1¢ walk with 5 walks a lap
+  over 120 positions never reached them; and a parked ask ranked as
+  "covered and fine" behind the repairs. Now: every ask, pre-game or
+  in-play, sits at the cost floor (post-only: bid+tick if cost is under
+  the bid), capped `_SCALP_ASK_CEIL_C`=90; an ask more than a cent off
+  cost is a REPAIR (tier 0) and moves first; an AUTOMATIC sell on a slug
+  the venue says we do not hold is cancelled — in the candidate loop AND
+  by an orphan sweep for slugs with no pick row. Walks 10/lap. The book
+  decides nothing about where we sell. Spread capture is gone by order.
 - **EVERYTHING BUT NRFI SELLS (Rob, Sep 6 2026, reading 155 positions
   vs 128 sells on the venue: "The only thing that lives is the no run
   first inning. Everything else fucking gets sold").** The scalp's

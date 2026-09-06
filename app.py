@@ -23069,7 +23069,10 @@ _SCALP_MAX_PLACE = 5         # fresh asks per tick (creates — no cancel leg).
                              # real limits are SERIAL writes (kept — the
                              # Aug 16 duplicate/Cloudflare lesson) and the
                              # wall clock below.
-_SCALP_MAX_WALKS = 5         # cancel→verify→create walks per tick (1→2→5
+_SCALP_ASK_CEIL_C = 90.0     # no scalp ask ever rests at/above this (a 99¢
+#   ask is a parked position, not a sell — Sep 6 2026)
+_SCALP_MAX_WALKS = 10        # cancel→verify→create walks per tick (5→10 Sep 6 2026;
+#   laps are ~50s now, the 90s write budget still bounds it) (1→2→5
                              # first armed night; still serial, wall-clock
                              # guarded — each walk ≈4s, 5 fits the 30s
                              # budget. With every pre-game ask stepping
@@ -23881,6 +23884,11 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 break
         if a4 is None:
             return 1                        # naked — place before optimizing
+        # OFF-COST ASK IS A REPAIR (Sep 6 2026 — the ATL@PHI 96.5¢ and
+        # DET@CLE 99¢ asks that sat through live games as "covered"): the
+        # ask belongs at cost; one more than a cent off it moves first.
+        if abs(a4 - e4) > 1.26:
+            return 0
         # QTY MISMATCH IS A REPAIR TOO (Aug 29 night, second lesson of the
         # 0/5-on-20 catch): the resize sat starved behind routine 1¢
         # step-downs for 10 straight minutes — with a 30s budget and one
@@ -23913,6 +23921,20 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         net = float((positions.get(slug) or {}).get("net") or 0.0)
         held = _mirror_clamp(slug, (-net) if synth else net)
         if held < 1.0:
+            # NO POSITION → NO ASK (Rob, Sep 6 2026: "can you not sell shit
+            # I don't have"). A resting AUTOMATIC sell of ours on a slug the
+            # venue says we do not hold is cancelled here, first, before
+            # anything else this lap does.
+            _si0 = ("ORDER_INTENT_SELL_SHORT" if synth
+                    else "ORDER_INTENT_SELL_LONG")
+            for _o0 in [o for o in orders if o.get("slug") == slug
+                        and o.get("intent") == _si0 and o.get("auto")]:
+                try:
+                    client.orders.cancel(_o0.get("id"), {"marketSlug": slug})
+                    res["orphan_canceled"] = res.get("orphan_canceled", 0) + 1
+                    _time.sleep(0.5)
+                except Exception:
+                    pass
             continue                     # buy hasn't filled — no inventory
         res["cands"] += 1
         entry_c = _scalp_entry_c(r, b)
@@ -24034,20 +24056,14 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             # (every ask resting at its floor) has high cands and zero
             # actions — that's fine. Inventory sitting naked is not.
             res["uncovered"] = res.get("uncovered", 0) + 1
-            # ── PLACE: join the top of the book, never cross, floor binds
-            if _inplay:
-                tgt = max(floor_c, (_grid_dn(best_bid, tick) + tick
-                                    if best_bid is not None else floor_c))
-            elif comp_ask is not None:
-                # LEAD the ask by 1¢ — be THE maker, front of the queue,
-                # not a joiner (user, Aug 27 night: "we are THE maker on
-                # the sell right? Not joining the Queue? following the
-                # rule of my cost +1" — supersedes the spec's join rule).
-                # The floor still wins: never under cost.
-                tgt = max(floor_c, _grid_up(comp_ask, tick) - tick)
-            else:
-                tgt = max(floor_c, entry_c + 10.0)
-            tgt = min(99.0, _grid_up(tgt, tick))
+            # ── PLACE AT COST (Rob, Sep 6 2026: "sell shit for what I have
+            # it at"). Not the top of the book, not a lead on a competitor,
+            # not a stub: the ask IS the cost floor, post-only (never under
+            # the bid). The book decides nothing about where we sell.
+            tgt = floor_c
+            if best_bid is not None and tgt <= best_bid:
+                tgt = _grid_dn(best_bid, tick) + tick  # post-only: never cross
+            tgt = min(_SCALP_ASK_CEIL_C, _grid_up(tgt, tick))
             if best_bid is not None and tgt <= best_bid:
                 tgt = _grid_dn(best_bid, tick) + tick  # post-only: never cross
             if tgt < floor_c:
@@ -24066,28 +24082,16 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # in-play there is no walk — one jump straight to money-back
         if our_ask is None:
             continue
-        tgt = None
-        if our_ask < floor_c - 0.26:
-            # FLOOR REPAIR — an ask resting below its true floor (placed
-            # under the old int()+1 rounding) is the one legal UP-move:
-            # lift it to the cost floor proper.
-            tgt = floor_c
-            if best_bid is not None and tgt <= best_bid:
-                tgt = _grid_dn(best_bid, tick) + tick
-            if tgt <= our_ask + 0.26:
-                tgt = None
-        elif _inplay:
-            _dump = max(floor_c, (_grid_dn(best_bid, tick) + tick
-                                  if best_bid is not None else floor_c))
-            if _dump < our_ask - 0.26:
-                tgt = _dump
-        elif (comp_ask is not None
-              and _grid_up(comp_ask, tick) - tick < our_ask - 0.26):
-            # a competitor is at or inside our ask → retake the front:
-            # LEAD them by 1¢ (never join), floored at cost
-            tgt = max(floor_c, _grid_up(comp_ask, tick) - tick)
-        elif our_ask > floor_c:
-            tgt = max(floor_c, our_ask - tick)            # alone → step down
+        # WALK TO COST (Sep 6 2026): every resting ask belongs at the cost
+        # floor (post-only above the bid). Below it = repair up; above it =
+        # move down — no 1¢ creep, no competitor-lead, no in-play special
+        # case (they all collapse to the same target).
+        tgt = floor_c
+        if best_bid is not None and tgt <= best_bid:
+            tgt = _grid_dn(best_bid, tick) + tick
+        tgt = min(_SCALP_ASK_CEIL_C, _grid_up(tgt, tick))
+        if abs(tgt - our_ask) <= 0.26:
+            tgt = None                   # already there
         _repair = tgt is not None and our_ask < floor_c - 0.26
         # QTY INVARIANT (Aug 29 night — the MIL@CHC 0/5-on-20 catch; user
         # rule: "the sell order should ALWAYS match the owned position"):
@@ -24149,6 +24153,26 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         if _scalp_create(client, sb, r, b, slug, synth, sell_intent,
                          tgt, int(held2), now, walked_from=our_ask):
             res["walked"] += 1
+    # ORPHAN SWEEP (Sep 6 2026): AUTOMATIC sells on slugs the venue says
+    # we do not hold — including slugs with NO pick row, which the
+    # candidate loop never visits. Cancel, verify, count. ≤5 per lap.
+    try:
+        _held_slugs = {sl for sl, p in positions.items()
+                       if float((p or {}).get("qty") or 0) >= 1.0}
+        _orph = [o for o in orders if o.get("auto")
+                 and "SELL" in (o.get("intent") or "")
+                 and o.get("slug") not in _held_slugs][:5]
+        for _o in _orph:
+            if _time.time() - _t0 > _SCALP_BUDGET_S:
+                break
+            try:
+                client.orders.cancel(_o.get("id"), {"marketSlug": _o.get("slug")})
+                res["orphan_canceled"] = res.get("orphan_canceled", 0) + 1
+                _time.sleep(0.5)
+            except Exception:
+                res["orphan_err"] = res.get("orphan_err", 0) + 1
+    except Exception:
+        pass
     res["t_lap"] = round(_time.time() - _t0, 1)
     return res
 
