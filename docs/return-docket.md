@@ -383,6 +383,29 @@ climb; repeg/scalp/opener laps should fall from 4-6 min. Still open: the
 pricer is all-or-nothing per game (one stale rung → REST); fill-status
 depth reads on confirmed outbids.
 
+**SUNDAY AFTERNOON (Sep 6, ~11:50am AZ) — THE SCALP WAS THE RECURRING
+ERROR.** Rob's three screenshots in an hour: Phillies ask 96.5¢ and
+Guardians ask 99¢ resting THROUGH LIVE GAMES, a Nationals ask 19¢ over
+cost, and one sell on a prop we did not hold. One root: the scalp
+priced asks off the BOOK (lead the competitor ask; on a stub book that
+is the venue's 97-99¢ placeholder), walked 1¢/lap with 5 walks over 120
+positions, and ranked a parked ask as "covered". Fixed (54e044e,
+568fb77): the ask IS the cost (post-only above the bid), ceiling 90¢,
+>1¢ off cost = tier-0 repair, orphan sells (no venue position) cancelled
+in-loop + by a sweep, walks 10/lap, skip_* counters on every exit.
+Venue read at 11:35: 136 AUTOMATIC sells, 93 at cost, **43 still off
+cost** — the daemon's old code walks them 1¢/lap; the new code repairs
+them ~10/lap after the restart. Also today: props never sold (market_type
+'prop' was skipped before the lane check) — only NRFI is exempt now;
+the second markets socket sat idle for 25 min because the venue PINGs
+every 10s and ws.recv() swallowed them (idle socket never returned to
+run its op queue) — pings are the heartbeat now; the runner's whole-run
+write lock was serializing scalp (25s of work) behind the opener's
+REST reads (~250s) — venue writes serialize per call now, laps: repeg
+~300s→6-48s, scalp ~250s→~50s. ⚠ Ad-hoc venue reads from scripts
+beside the daemon drew Cloudflare 1015 twice today — stop doing that;
+instrument the daemon and read the DB instead.
+
 **SUNDAY'S WORK (Rob, Sat night, in this order):** (1) **NFL props read**
 — fills vs scalp exits on `astatc-nfl` slugs (the turn-rate experiment),
 model call vs market outcome, then a stake decision (5 contracts, cap 30
