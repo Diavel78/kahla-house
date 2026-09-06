@@ -18172,13 +18172,13 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
             placed_n += 1
             spent += cost
             held_slugs.add(pblk["slug"])
-        elif r in ("cap", "rent"):
+        elif r in ("cap", "rent", "paused"):
             verdicts.append(r)
         else:
             verdicts.append("failed:" + (_ftag[0] if _ftag else "?"))
     if placed_n:
         return "placed"
-    for v in ("rent", "cap", "event_cap", "edge", "tail"):
+    for v in ("paused", "rent", "cap", "event_cap", "edge", "tail"):
         if v in verdicts:
             return v
     return verdicts[0] if verdicts else "no_book"
@@ -18970,6 +18970,7 @@ def _machine_flag_val(key: str, default=None):
 _OMS_BUDGET_S = float(os.environ.get("OMS_BUDGET_S") or 40.0)
 _OMS_MAX_CREATES = 6          # real orders per tick — serial-write bound
 _OMS_RETRY_MIN = {"rent": 30, "no_pmm": 30, "no_book": 30, "none": 30,
+                  "paused": 5,         # reopen posture: bets_paused refused it
                   "edge": 60, "tail": 60, "no_model": 360, "cap": 10,
                   "rung_window": 60,   # payers exist but all outside mid±1
                                        # — books grow toward the middle as
