@@ -24095,7 +24095,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                        else "ORDER_INTENT_SELL_LONG")
         mine = [o for o in orders
                 if o.get("slug") == slug and o.get("intent") == sell_intent]
-        _amend = slug in _amend_set
+        _amend = (slug in _amend_set) or ("*" in _amend_set)   # "*" = every sell
         if _amend and not mine:
             # an amended order may sit in REPLACED — invisible to the
             # open-states read; look at the raw list so we never double up
