@@ -428,6 +428,21 @@ def test_gridiron_ladder_center() -> None:
     check("totals center on the 50/50 rung by line", c3 == 55.5 and src3 == "atm")
 
 
+def test_pin_line_center() -> None:
+    """Pinnacle's line in rung units from the cached slate shape (the real
+    Northern Arizona @ Arizona event, Sep 5 2026)."""
+    import app as _app
+    ev = [{"away_team": "Northern Arizona", "home_team": "Arizona",
+           "bookmakers": [{"key": "pinnacle", "markets": [
+               {"key": "totals", "outcomes": [{"name": "Over", "point": 59.0}, {"name": "Under", "point": 59.0}]},
+               {"key": "spreads", "outcomes": [{"name": "Arizona", "point": -33.0}, {"name": "Northern Arizona", "point": 33.0}]}]}]}]
+    check("spread center = Pinnacle's HOME line (-33)",
+          _app._pin_line_from_events(ev, "Northern Arizona Lumberjacks", "Arizona Wildcats", "spread") == -33.0)
+    check("total center = the Over point (59)",
+          _app._pin_line_from_events(ev, "Northern Arizona Lumberjacks", "Arizona Wildcats", "total") == 59.0)
+    check("unknown game → None", _app._pin_line_from_events(ev, "Texas Longhorns", "Ohio State Buckeyes", "spread") is None)
+
+
 def test_dry_run_blackout() -> None:
     """A money lane enabled under DRY_RUN must refuse the boot.
 
@@ -628,7 +643,7 @@ def main() -> int:
               test_batch_blocked_deps, test_owner_dependent_lanes,
               test_dry_run_blackout, test_overrun_detector,
               test_ws_quote_presence, test_ws_mkts_request_budget,
-              test_gridiron_ladder_center,
+              test_gridiron_ladder_center, test_pin_line_center,
               test_lane_covers_its_documented_engines,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()

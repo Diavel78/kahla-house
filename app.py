@@ -17760,6 +17760,76 @@ def _gridiron_is_placeholder(bid, ask) -> bool:
     return False
 
 
+_PIN_CENTER_MAX_AGE_S = 26 * 3600      # a daily pull is the design; stale = ignore
+_PIN_REFRESH_AFTER_H = 20 * 3600       # re-pull once the slate is a day old
+_PIN_REFRESH_HOUR_AZ = 6               # Rob: "every morning at six o'clock"
+
+
+def _pin_line_from_events(events, away, home, mt):
+    """Pinnacle's line for one game from a TOA-shaped slate, in the
+    executor's rung units: spread → the HOME team's point (negative when
+    home is favored, i.e. the home-perspective rung value), total → the
+    Over point. None when the game or market is absent."""
+    if not events:
+        return None
+    key = {"spread": "spreads", "total": "totals"}.get(mt)
+    if not key:
+        return None
+    pick, _opp = _pin_outcomes(events, away, home, key,
+                               "home" if mt == "spread" else "over")
+    if not pick or pick.get("point") is None:
+        return None
+    try:
+        return round(float(pick["point"]), 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pin_line_center(sb, sport, away, home, mt, now):
+    """Cache-only read (never spends a credit here): Pinnacle's line when
+    the cached slate is under _PIN_CENTER_MAX_AGE_S old."""
+    try:
+        events, age = _pin_slate_cached(sb, sport, now)
+    except Exception:
+        return None
+    if not events or age is None or age > _PIN_CENTER_MAX_AGE_S:
+        return None
+    return _pin_line_from_events(events, away, home, mt)
+
+
+_PIN_REFRESH_TS: dict = {}
+
+
+def _pin_daily_refresh(sb, now):
+    """Rob, Sep 5 2026: "pull a book, Pinnacle... every morning at six."
+    One slate pull per football sport per day (3 credits each, ~180/mo
+    inside the 900 budget), after 6am AZ, only once the cached slate is
+    a day old. The executor centers its rung window on that line."""
+    try:
+        if now.astimezone(ZoneInfo("America/Phoenix")).hour < _PIN_REFRESH_HOUR_AZ:
+            return {}
+    except Exception:
+        return {}
+    out = {}
+    for sport in ("NFL", "NCAAF"):
+        if _time.monotonic() - _PIN_REFRESH_TS.get(sport, 0.0) < 3600.0:
+            continue                             # checked this hour already
+        try:
+            _ev, age = _pin_slate_cached(sb, sport, now)
+        except Exception:
+            _ev, age = None, None
+        if _ev and age is not None and age < _PIN_REFRESH_AFTER_H:
+            _PIN_REFRESH_TS[sport] = _time.monotonic()
+            continue
+        try:
+            ev = _pin_slate(sb, sport, now)      # spends 3 credits, budget-guarded
+            out[sport] = len(ev or [])
+        except Exception:
+            out[sport] = "err"
+        _PIN_REFRESH_TS[sport] = _time.monotonic()
+    return out
+
+
 def _gridiron_ladder_center(rows, mt, proj):
     """THE ACTUAL LINE (Rob, Sep 5 2026: "the app SOMEHOW figures out
     what the actual line is... can we not?"). The venue's app sorts a
@@ -17936,6 +18006,18 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
     center, center_src = _gridiron_ladder_center(
         [(c[0], c[4], (c[3] or {}).get("bid"), (c[3] or {}).get("ask"))
          for c in paying], mt, proj)
+    # PINNACLE FIRST (Rob, Sep 5 2026): the sharpest book's own line is
+    # the actual line when we hold a fresh daily slate; the venue's
+    # at-the-money rung second; the model only when nothing else exists.
+    try:
+        _ev = g.get("event_name") or ""
+        if " @ " in _ev:
+            _aw, _hm = [x.strip() for x in _ev.split(" @ ", 1)]
+            _pc = _pin_line_center(sb, g.get("sport"), _aw, _hm, mt, now_utc)
+            if _pc is not None:
+                center, center_src = _pc, "pinnacle"
+    except Exception:
+        pass
     if len(rungs) > 1 and center is not None:
         # ±1 rung around THE ACTUAL LINE (the two-sided rung nearest
         # 50/50; the model's line only when nothing is quoted), and never
@@ -18052,6 +18134,7 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
               "rung_ladder": len(rungs),    # distinct paying rungs (± virgin)
               "rung_window": len(rungs) > 1,
               "rung_role": "middle" if ti == 0 else "neighbor",
+              "line_center": center, "center_src": center_src,
               "rung_dist": round(s["dist"], 1),
               "early_noveto": bool(_noveto
                                    and s["e"] < _GRIDIRON_MIN_EDGE_PP)}
@@ -19063,6 +19146,12 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
     st: dict = {}
     if not OMS_ENABLED or not _machine_flag("oms_enabled"):
         return st
+    try:
+        _pr = _pin_daily_refresh(sb, now)
+        if _pr:
+            st["pin_refresh"] = _pr
+    except Exception:
+        pass
     nowiso = now.isoformat()
     mrows: dict = {}
     global _OMS_PROD_TS
