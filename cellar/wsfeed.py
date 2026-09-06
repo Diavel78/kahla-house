@@ -88,7 +88,10 @@ HEARTBEAT_STAMP_S = 120.0   # per-connection state stamp (pending/packs/ladders)
 # REBUILT from the live ladder set (expired games fall out) at most every
 # REPACK_MIN_S. Core (our own orders) keeps PACK_CORE_RESERVE requests.
 PACK_SLUGS = 350
-PACK_BATCH_S = 20.0
+PACK_BATCH_S = 45.0    # 20s sent ~150-rung packs and filled the REQUEST budget
+#   with 1,550 rungs still pending (Sep 6 2026, hour-one read); wait longer,
+#   send fuller packs. Under-filled packs also trigger a consolidation repack.
+PACK_FILL_MIN = 0.6    # avg pack below this × PACK_SLUGS + rungs waiting → repack
 PACK_CORE_RESERVE = 3
 REPACK_MIN_S = 600.0
 # BASELINE AUDIT (Rob, Sep 6 2026: "how do we know if it pulled all the
@@ -1102,14 +1105,21 @@ class MarketsFeed:
                 or nowt - self._last_pack_build < REPACK_MIN_S):
             return sent
         packed = set()
+        n_packs = 0
         for g, (_r, sl) in self._groups.items():
             if g != "core":
                 packed |= set(sl)
+                n_packs += 1
         dead = packed - set(live)
         far_packed = max((live.get(s, 1e18) for s in packed), default=0)
         near_pending = min((live.get(s, 1e18) for s in self._pending),
                            default=1e18)
-        if not dead and near_pending >= far_packed:
+        # CONSOLIDATION (Sep 6 2026): small batches filled the request
+        # budget at ~150 rungs a pack while 1,550 rungs waited — packs
+        # under PACK_FILL_MIN full with rungs pending get rebuilt full.
+        underfilled = (n_packs > 0
+                       and len(packed) < n_packs * PACK_SLUGS * PACK_FILL_MIN)
+        if not dead and near_pending >= far_packed and not underfilled:
             return sent
         self._last_repack = nowt
         for g in [g for g in self._groups if g != "core"]:
