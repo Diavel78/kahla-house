@@ -2585,8 +2585,13 @@ def _ws_feed_health(sb) -> dict:
         except Exception:
             pass
         st = str(res0.get("state") or "")
+        # "recon" is the one-shot self-documentation stamp fired on the
+        # FIRST NEWS FRAME of a connected socket (Sep 6 2026: it never
+        # fired before the private feed fix, so the first time it landed
+        # the dashboard read "WebSocket feed down" on a live socket).
+        # A recon'd socket is a connected socket.
         return {"state": st, "age_s": age_s,
-                "up": st in ("connected", "started"),
+                "up": st in ("connected", "started", "recon", "heartbeat"),
                 "off": st.startswith("disabled"),
                 "err": (res0.get("err") or "")[:120]}
     except Exception:
