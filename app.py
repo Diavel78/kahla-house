@@ -7957,6 +7957,7 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
     out["intended"] = len(intended)
     now_dt = datetime.now(timezone.utc)
     autos: list = []
+    autos_ok = False                 # a failed pick-list read = do NOTHING
 
     # Removal — FILL-BASED, NOT time-based (your rule: "if it fills it counts,
     # if it doesn't it doesn't; never kill a bet because I *guessed* the start
@@ -7997,9 +7998,13 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                              "picked_at,market_id,market_type,entry_price")
                      .eq("asked_by", owner_uid).eq("status", "pending")
                      .limit(1000).execute().data) or []
+            autos_ok = True
         except Exception:
             autos = []
-        for a in autos:
+            autos_ok = False         # Sep 5 2026: an empty fallback here made
+                                     # every position look unbooked → 68 dup
+                                     # adoption rows in one afternoon
+        for a in (autos if autos_ok else []):
             blob = a.get("signal_blob") or {}
             # MACHINE rows only (Aug 5 2026 — the Wesneski/Jones gap: the
             # sweep matched query_text='auto-logged from Polymarket'
@@ -8203,11 +8208,23 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
             _sell_slugs.add(_sl)
         elif o.get("auto"):
             _auto_ord[_sl] = o
+    if not autos_ok:
+        out["ghost_adopt_skipped"] = "picks_unreadable"
+        return out                              # unknown is meaningless without the list
     for (slug, syn), prob in list(unknown.items()):
         if not _RENT_SLUG_RE.match(slug or ""):
             continue
         if _rent_dead(slug, sb):
             continue                            # marked for cancel, not for booking
+        try:                                    # belt and braces: re-ask the DB
+            _ex = (sb.table("bot_picks").select("id").eq("asked_by", owner_uid)
+                   .eq("status", "pending")
+                   .contains("signal_blob", {"pmm_slug": slug})
+                   .limit(1).execute().data) or []
+        except Exception:
+            continue                            # can't verify → don't insert
+        if _ex:
+            continue                            # already booked
         is_pos = slug in filled_slugs
         o = _auto_ord.get(slug)
         if not is_pos and o is None:
