@@ -23828,6 +23828,14 @@ def _scalp_venue_cost_c(pick_row, avg_price, held_qty):
 # sizes, orphans, cost) — the sniper only ever moves an ask the lap has
 # already vouched for, never places, never sells what the lap did not see.
 SCALP_SNAP: dict = {}
+# slug → monotonic time of the last SIZE event (fill / dead order /
+# position change) seen on the private socket. The lap publishes a
+# snapshot only from a venue read taken AFTER this — found Sep 6 2026:
+# a 12-lot filled at 15:46:29, the pop landed, and the lap already in
+# flight re-published from its 15:46:0x read; the sniper amended the
+# dead order at 15:47:48. Harmless on a full fill, an oversize on a
+# partial one.
+SCALP_POPPED: dict = {}
 SNIPE_Q: "queue.Queue" = None
 _SNIPE_THREAD = None
 _SNIPE_LAST: dict = {}          # slug -> monotonic of the last amend
@@ -23983,6 +23991,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     _ensure_snipe_worker()
     res = {"cands": 0, "placed": 0, "walked": 0, "shadow": 0}
     _t0 = _time.time()
+    _t0_mono = _time.monotonic()      # lap start, for the SCALP_POPPED guard
     owner = _kalshi_owner_uid()
     if not owner:
         return {"gate": "no_owner"}
@@ -24081,9 +24090,12 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             client = get_client()
         except Exception:
             return {"gate": "no_client"}
+    _t_read = _time.monotonic()          # when THIS lap's venue truth was read
     if orders is None or positions is None:
         orders = _pmm_open_orders_raw(client)
         positions = _pmm_positions_raw(client)
+    else:
+        _t_read = _t0_mono                # shared snapshot: no newer than lap start
     if orders is None or positions is None:
         return {"gate": "venue_read"}    # venue dark — never act blind
     res["t_setup"] = round(_time.time() - _t0, 1)   # picks + mirror + venue reads
@@ -24342,7 +24354,8 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 our_ask = (100.0 - py * 100.0) if synth else py * 100.0
             our_ask_qty = float(o0.get("leaves") or o0.get("qty") or 0.0)
             if (_amend and our_ask is not None
-                    and int(our_ask_qty or held) >= 1):   # dust lot → no sniper
+                    and int(our_ask_qty or held) >= 1      # dust lot → no sniper
+                    and SCALP_POPPED.get(slug, 0.0) <= _t_read):  # read predates a fill → don't vouch
                 # SNIPER SNAPSHOT (Sep 6 2026): everything the sniper needs
                 # to re-price this ask off a socket frame with no reads.
                 SCALP_SNAP[slug] = {"oid": o0.get("id"), "our_ask": our_ask,

@@ -634,8 +634,14 @@ class WsFeed:
                         if _size_event(msg):
                             try:
                                 import app as _app
+                                _tm = time.monotonic()
                                 for _s in _ev_slugs:
                                     _app.SCALP_SNAP.pop(_s, None)
+                                    # the lap must not re-publish from a
+                                    # venue read OLDER than this pop
+                                    _app.SCALP_POPPED[_s] = _tm
+                                log.info("ws size event %s",
+                                         ",".join(sorted(_ev_slugs))[:160])
                             except Exception:
                                 pass
                     self._wake("repeg", why)
