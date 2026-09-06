@@ -17738,6 +17738,62 @@ def _gridiron_seed_virgin(sb, g, es0, mt, gp, virgin, proj, now_utc):
     return "failed:" + (_ftag[0] if _ftag else "?")
 
 
+_GRIDIRON_PLACEHOLDER_BID_C = 2.0     # a 1¢ bid is the venue's empty-book stub
+_GRIDIRON_PLACEHOLDER_SPREAD_C = 40.0  # 1/51, 49/99: a 50¢-wide book is not a market
+
+
+def _gridiron_is_placeholder(bid, ask) -> bool:
+    """The venue seeds every enrolled rung with a 1¢ bid / 51¢ ask stub
+    (49/99 from the mirrored side). Sep 5 2026, first reopen after the
+    exchange-wide wipe: the executor read the stub's 49¢ as a real bid,
+    called the rung fill-viable, and seated USC +0.5 on a game the model
+    had USC by 18. A stub is a VIRGIN rung, never a book."""
+    try:
+        b = float(bid) * 100.0 if bid is not None else None
+        a = float(ask) * 100.0 if ask is not None else None
+    except (TypeError, ValueError):
+        return True
+    if b is None or b <= _GRIDIRON_PLACEHOLDER_BID_C:
+        return True
+    if a is not None and (a - b) >= _GRIDIRON_PLACEHOLDER_SPREAD_C:
+        return True
+    return False
+
+
+def _gridiron_ladder_center(rows, mt, proj):
+    """THE ACTUAL LINE (Rob, Sep 5 2026: "the app SOMEHOW figures out
+    what the actual line is... can we not?"). The venue's app sorts a
+    ladder by price and features the rung priced nearest 50/50 — marks
+    decide. `rows` = [(side, line, bid, ask)] for every booked rung; the
+    center is the home-perspective rung value (spread: home line; total:
+    the line) of the two-sided, non-placeholder rung whose mid is nearest
+    50¢. No such rung → the MODEL's line (−proj for spreads, proj for
+    totals). The old rule — the index-middle of the enrolled ladder —
+    centered every post-wipe symmetric −34.5…+34.5 ladder on ZERO."""
+    best = None
+    for sn, ln, bid, ask in rows or []:
+        if ln is None or bid is None or ask is None:
+            continue
+        if _gridiron_is_placeholder(bid, ask):
+            continue
+        try:
+            mid = (float(bid) + float(ask)) * 50.0
+            rv = (round(float(ln) if sn == "home" else -float(ln), 1)
+                  if mt == "spread" else round(float(ln), 1))
+        except (TypeError, ValueError):
+            continue
+        # a wide book's mid is not a mark: distance to 50 PLUS half the
+        # spread, so 43/44 (7) beats a thin 33/57 (17) as the actual line
+        d = abs(mid - 50.0) + (float(ask) - float(bid)) * 50.0
+        if best is None or d < best[0]:
+            best = (d, rv)
+    if best is not None:
+        return best[1], "atm"
+    if proj is None:
+        return None, None
+    return (round(-float(proj), 1) if mt == "spread" else round(float(proj), 1)), "model"
+
+
 def _gridiron_try_bet(sb, g, es0, d, mt, gp):
     """ONE football bet attempt (spread or total) — the shared leg behind
     the opener tape AND the week-of sweep.
@@ -17794,7 +17850,8 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
         ln = pblk.get("line")
         if sn not in (ka, kb) or ln is None or not pblk.get("slug"):
             continue
-        if q.get("bid") is None or float(q["bid"]) <= 0:
+        if (q.get("bid") is None or float(q["bid"]) <= 0
+                or _gridiron_is_placeholder(q.get("bid"), q.get("ask"))):
             # SEED CANDIDATE (Aug 31 2026, user: "if we are first on it…
             # can't we start our own line?"). A virgin enrolled rung is
             # the alone-in-the-window jackpot (the $9.63/day-on-1.5-shares
@@ -17876,9 +17933,16 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
     virgin_w = pay_virgin
     pre_window = bool(paying)
     n_paying_pre = len(paying)
-    if len(rungs) > 1:
-        _ctr = (len(rungs) - 1) / 2.0
-        allowed = {v for i, v in enumerate(rungs) if abs(i - _ctr) <= 1.5}
+    center, center_src = _gridiron_ladder_center(
+        [(c[0], c[4], (c[3] or {}).get("bid"), (c[3] or {}).get("ask"))
+         for c in paying], mt, proj)
+    if len(rungs) > 1 and center is not None:
+        # ±1 rung around THE ACTUAL LINE (the two-sided rung nearest
+        # 50/50; the model's line only when nothing is quoted), and never
+        # more than _GRIDIRON_TAIL_PTS from it, whatever the venue enrolls.
+        _ci = min(range(len(rungs)), key=lambda i: abs(rungs[i] - center))
+        allowed = {v for i, v in enumerate(rungs)
+                   if abs(i - _ci) <= 1 and abs(v - center) <= _GRIDIRON_TAIL_PTS}
         paying = [c for c in paying if _rungv(c[0], c[4]) in allowed]
         virgin_w = [v for v in pay_virgin if _rungv(v[0], v[2]) in allowed]
     if not paying:
