@@ -17797,6 +17797,111 @@ def _pin_line_center(sb, sport, away, home, mt, now):
     return _pin_line_from_events(events, away, home, mt)
 
 
+_BOOK_PRIORITY = ("pinnacle", "draftkings", "fanduel")
+_BOOK_LINE_MAX_AGE_S = 7 * 86400     # a line seen this week is still the line
+_BOOK_LINES_WRITE_TS: dict = {}
+
+
+def _book_lines_remember(sb, sport, now):
+    """Write every book's spread/total line for our upcoming football rows
+    into book_lines (keyed by OUR market id — the books' short names are
+    matched here, once, by the stamp's own matcher). The line survives the
+    book pulling it on game day (Rob, Sep 5 2026)."""
+    try:
+        events, _age = _pin_slate_cached(sb, sport, now)
+    except Exception:
+        return 0
+    if not events:
+        return 0
+    try:
+        rows = (sb.table("markets").select("id,event_name")
+                .eq("sport", sport).eq("status", "active")
+                .gte("event_start", now.isoformat())
+                .order("event_start").limit(400).execute().data) or []
+    except Exception:
+        return 0
+    by_book = {}
+    for bk in _BOOK_PRIORITY:
+        by_book[bk] = [dict(e, bookmakers=[b for b in (e.get("bookmakers") or [])
+                                           if b.get("key") == bk])
+                       for e in events
+                       if any(b.get("key") == bk for b in (e.get("bookmakers") or []))]
+    ups = []
+    for g in rows:
+        ev = g.get("event_name") or ""
+        if " @ " not in ev:
+            continue
+        aw, hm = [x.strip() for x in ev.split(" @ ", 1)]
+        for bk, evs in by_book.items():
+            for mt in ("spread", "total"):
+                ln = _pin_line_from_events(evs, aw, hm, mt)
+                if ln is None:
+                    continue
+                ups.append({"market_id": g["id"], "market_type": mt, "book": bk,
+                            "line": ln, "seen_at": now.isoformat()})
+    n = 0
+    for i in range(0, len(ups), 200):
+        try:
+            (sb.table("book_lines").upsert(ups[i:i + 200],
+                                           on_conflict="market_id,market_type,book")
+             .execute())
+            n += len(ups[i:i + 200])
+        except Exception:
+            pass
+    return n
+
+
+def _book_line_center(sb, market_id, mt, now):
+    """(line, book) — the most trusted book line REMEMBERED for this market
+    within the week: Pinnacle, then DraftKings, then FanDuel."""
+    try:
+        rows = (sb.table("book_lines").select("book,line,seen_at")
+                .eq("market_id", market_id).eq("market_type", mt)
+                .gte("seen_at", (now - timedelta(seconds=_BOOK_LINE_MAX_AGE_S)).isoformat())
+                .execute().data) or []
+    except Exception:
+        return None, None
+    for bk in _BOOK_PRIORITY:
+        for r in rows:
+            if r.get("book") == bk and r.get("line") is not None:
+                try:
+                    return round(float(r["line"]), 1), bk
+                except (TypeError, ValueError):
+                    continue
+    return None, None
+
+
+def _gridiron_ladder_center(rows, mt, proj):
+    """THE VENUE'S OWN LINE: the two-sided, non-placeholder rung priced
+    nearest 50/50 (distance to 50 plus half the spread, so a tight book
+    beats a thin one). A lone stray quote is not a line: the rung counts
+    only when its mid is a real 50/50 (30-70¢) and, when a model exists,
+    agrees with it within _GRIDIRON_TAIL_PTS. Returns (line, "venue") or
+    (None, None)."""
+    best = None
+    for sn, ln, bid, ask in rows or []:
+        if ln is None or bid is None or ask is None:
+            continue
+        if _gridiron_is_placeholder(bid, ask):
+            continue
+        try:
+            mid = (float(bid) + float(ask)) * 50.0
+            rv = (round(float(ln) if sn == "home" else -float(ln), 1)
+                  if mt == "spread" else round(float(ln), 1))
+            d = abs(mid - 50.0) + (float(ask) - float(bid)) * 50.0
+        except (TypeError, ValueError):
+            continue
+        if best is None or d < best[0]:
+            best = (d, rv, mid)
+    if best is None or not (30.0 <= best[2] <= 70.0):
+        return None, None
+    if proj is not None:
+        mline = (round(-float(proj), 1) if mt == "spread" else round(float(proj), 1))
+        if abs(best[1] - mline) > _GRIDIRON_TAIL_PTS:
+            return None, None
+    return best[1], "venue"
+
+
 _PIN_REFRESH_TS: dict = {}
 
 
@@ -17822,11 +17927,17 @@ def _pin_daily_refresh(sb, now):
             _PIN_REFRESH_TS[sport] = _time.monotonic()
             continue
         try:
-            ev = _pin_slate(sb, sport, now)      # spends 3 credits, budget-guarded
+            ev = _pin_slate(sb, sport, now)      # spends ~3 credits, budget-guarded
             out[sport] = len(ev or [])
         except Exception:
             out[sport] = "err"
         _PIN_REFRESH_TS[sport] = _time.monotonic()
+    for sport in ("NFL", "NCAAF"):
+        if _time.monotonic() - _BOOK_LINES_WRITE_TS.get(sport, 0.0) > 3600.0:
+            n = _book_lines_remember(sb, sport, now)
+            _BOOK_LINES_WRITE_TS[sport] = _time.monotonic()
+            if n:
+                out[sport + "_lines"] = n
     return out
 
 
@@ -18017,17 +18128,31 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
     # the window = paying rungs at the line or on the FAVORABLE side of it
     # for that side, within the tail gate; the 25-60¢ band (already in
     # `viable`) is what keeps "−35 when it's −51" from being a 90¢ ticket.
+    # CENTER PRIORITY (Rob, Sep 5 2026 night): a REMEMBERED book line
+    # (Pinnacle > DraftKings > FanDuel, seen this week — survives the book
+    # pulling it on game day) → the venue's own real two-sided line → the
+    # model ONLY when the ladder has no real book at all (the virgin-seed
+    # case). A real market the model disagrees with is never re-centered
+    # on the model: that seated Over 55.5 against a 50 total (PSU@Temple).
     mline = (round(-float(proj), 1) if mt == "spread" else round(float(proj), 1))
-    center, center_src, pin_line = mline, "model", None
+    center, center_src, pin_line = None, None, None
     try:
-        _ev = g.get("event_name") or ""
-        if " @ " in _ev:
-            _aw, _hm = [x.strip() for x in _ev.split(" @ ", 1)]
-            pin_line = _pin_line_center(sb, g.get("sport"), _aw, _hm, mt, now_utc)
-            if pin_line is not None:
-                center, center_src = pin_line, "pinnacle"
+        pin_line, _bk = _book_line_center(sb, g["id"], mt, now_utc)
+        if pin_line is not None:
+            center, center_src = pin_line, _bk
     except Exception:
         pass
+    if center is None:
+        _vc, _vs = _gridiron_ladder_center(
+            [(c[0], c[4], (c[3] or {}).get("bid"), (c[3] or {}).get("ask"))
+             for c in paying], mt, proj)
+        if _vc is not None:
+            center, center_src = _vc, _vs
+    if center is None:
+        if not paying:                        # virgin ladder → seed at model fair−6
+            center, center_src = mline, "model"
+        else:
+            return "no_line"                  # a real market we can't read → no bet
     # value side vs the center (rung value = home line for spreads, the
     # total for totals). None = model agrees with the line → side by edge.
     value_side, fav_dir = _gridiron_value_side(mt, mline, center, ka, kb)
@@ -18971,6 +19096,7 @@ _OMS_BUDGET_S = float(os.environ.get("OMS_BUDGET_S") or 40.0)
 _OMS_MAX_CREATES = 6          # real orders per tick — serial-write bound
 _OMS_RETRY_MIN = {"rent": 30, "no_pmm": 30, "no_book": 30, "none": 30,
                   "paused": 5,         # reopen posture: bets_paused refused it
+                  "no_line": 60,       # real books, no readable line yet (book pull 6am)
                   "edge": 60, "tail": 60, "no_model": 360, "cap": 10,
                   "rung_window": 60,   # payers exist but all outside mid±1
                                        # — books grow toward the middle as
@@ -20832,7 +20958,8 @@ def _pin_slate(sb, sport: str, now) -> list | None:
         return ((cache or {}).get("v") or {}).get("events")
     try:
         r = _http.get(f"{_PARLAY_BASE}/sports/{sk}/odds",
-                      params={"apiKey": key, "bookmakers": "pinnacle",
+                      params={"apiKey": key,
+                              "bookmakers": "pinnacle,draftkings,fanduel",
                               "markets": "h2h,spreads,totals",
                               "oddsFormat": "american", "dateFormat": "iso"},
                       timeout=6)

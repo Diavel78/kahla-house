@@ -431,6 +431,16 @@ def test_gridiron_value_window() -> None:
     check("model at the line → no forced side", side is None and d == 0)
     check("1/51 stub is a placeholder", _app._gridiron_is_placeholder(0.01, 0.51))
     check("43/44 real book is not", not _app._gridiron_is_placeholder(0.43, 0.44))
+    usc = [("away", -34.5, 0.01, 0.51), ("home", 0.5, 0.49, 0.99), ("away", 14.5, 0.11, 0.30),
+           ("away", 16.5, 0.34, 0.35), ("away", 20.5, 0.43, 0.44), ("away", 24.5, 0.33, 0.57),
+           ("home", -20.5, 0.56, 0.57), ("home", -16.5, 0.65, 0.66)]
+    c, src = _app._gridiron_ladder_center(usc, "spread", 18.34)
+    check("venue line on the USC ladder = -20.5 (tight 43/44), not the stubs, not zero",
+          c == -20.5 and src == "venue", f"got {c} {src}")
+    c2, s2 = _app._gridiron_ladder_center([("over", 35.5, 0.45, 0.49)], "total", 55.1)
+    check("a lone stray quote 20 pts off the model is not a venue line", c2 is None)
+    c3, s3 = _app._gridiron_ladder_center([("over", 59.5, 0.25, 0.29)], "total", 51.1)
+    check("a 25/29 book is not a 50/50 mark", c3 is None)
 
 
 def test_pin_line_center() -> None:
