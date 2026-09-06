@@ -12040,7 +12040,14 @@ def _pmm_positions_raw(client) -> dict | None:
         for slug, pos in items:
             if pos.get("expired"):
                 continue
-            net = _safe_float(pos.get("netPosition")) or 0.0
+            # DECIMAL FIRST (Sep 6 2026): `netPosition` is the venue's
+            # INTEGER-rounded count — a 0.94-share Tigers lot read as 1,
+            # the lap sized a 1-contract ask to it, the venue filled 1.00
+            # and booked the account −0.06 short ("sell shit I don't
+            # have", dust edition). `netPositionDecimal` is the truth.
+            net = _safe_float(pos.get("netPositionDecimal"))
+            if net is None:
+                net = _safe_float(pos.get("netPosition")) or 0.0
             if abs(net) < 0.01:
                 continue
             cost = _safe_float(pos.get("cost"))
@@ -24309,11 +24316,12 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             if py is not None:
                 our_ask = (100.0 - py * 100.0) if synth else py * 100.0
             our_ask_qty = float(o0.get("leaves") or o0.get("qty") or 0.0)
-            if _amend and our_ask is not None:
+            if (_amend and our_ask is not None
+                    and int(our_ask_qty or held) >= 1):   # dust lot → no sniper
                 # SNIPER SNAPSHOT (Sep 6 2026): everything the sniper needs
                 # to re-price this ask off a socket frame with no reads.
                 SCALP_SNAP[slug] = {"oid": o0.get("id"), "our_ask": our_ask,
-                                    "qty": int(max(1, our_ask_qty or held)),
+                                    "qty": int(our_ask_qty or held),
                                     "floor_c": floor_c, "tick": tick,
                                     "synth": synth, "intent": sell_intent,
                                     "event_start": r.get("event_start"),
@@ -24546,7 +24554,9 @@ def _scalp_amend(client, sb, r, b, slug, synth, sell_intent, oid, tgt_c, qty,
            "price": {"value": f"{canon:.3f}", "currency": "USD"},
            "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
            "participateDontInitiate": True,
-           "quantity": max(1, int(qty))}       # FULL replace, always
+           "quantity": int(qty)}               # FULL replace, always
+    if int(qty) < 1:
+        return "gone"                        # dust lot — never an ask
     try:
         client.orders.modify(oid, mod)
     except Exception as e:
@@ -24605,11 +24615,13 @@ def _scalp_create(client, sb, r, b, slug, synth, sell_intent, tgt_c, qty,
     params = {"marketSlug": slug, "intent": sell_intent,
               "type": "ORDER_TYPE_LIMIT",
               "price": {"value": f"{canon:.3f}", "currency": "USD"},
-              "quantity": max(1, int(qty)),
+              "quantity": int(qty),
               "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
               "goodTillTime": gtt,
               "participateDontInitiate": True,
               "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
+    if int(qty) < 1:
+        return False                          # dust lot — never an ask
     try:
         client.orders.create(params)
     except Exception as e:

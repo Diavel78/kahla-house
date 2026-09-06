@@ -225,6 +225,11 @@ def _harvest_slugs(obj, out: set, depth: int = 0) -> None:
             v = obj.get(k)
             if _slugish(v):
                 out.add(v)
+        pos = obj.get("positions")
+        if isinstance(pos, dict):          # positions: {slug: UserPosition}
+            for k in pos:
+                if _slugish(k):
+                    out.add(k)
         for v in obj.values():
             if isinstance(v, (dict, list)):
                 _harvest_slugs(v, out, depth + 1)
@@ -512,7 +517,8 @@ class WsFeed:
                         if (k not in self._seen_keys
                                 and k not in ("requestId", "request_id")):
                             self._seen_keys.add(k)
-                            log.info("ws first sighting of key %r", k)
+                            log.info("ws first sighting of key %r: %s",
+                                     k, str(msg)[:500])
                     # Snapshot keys per the SDK: orderSubscriptionSnapshot /
                     # positionSubscriptionSnapshot (alt: ordersSnapshot /
                     # positionsSnapshot). endswith covers all four.
@@ -555,8 +561,17 @@ class WsFeed:
                             if not snap_open:
                                 self._recon()
                         continue            # standing state — never a wake
-                    if rid is not None and rid in snap_open:
-                        continue            # still inside that snapshot
+                    # ⚠ THE VENUE NEVER SENDS A *Snapshot FRAME ON THIS FEED
+                    # (found Sep 6 2026 — a week of logs held ZERO 'snapshot
+                    # complete' lines; the keys actually seen are
+                    # orderSubscriptionUpdate + positionSubscription). The
+                    # old "rid in snap_open → still inside that snapshot"
+                    # gate therefore swallowed EVERY private event since the
+                    # Aug 30 build: no fill→scalp wake, no sniper stand-down
+                    # pop (the sniper kept amending a filled Tigers order for
+                    # 90s), no ghost hint. An Update-shaped frame is NEWS,
+                    # snapshot phase or not — only a Snapshot-keyed frame is
+                    # standing state.
                     self._recon()           # news before snapshots settle →
                                             # recon fires anyway (rid-less
                                             # venues never empty snap_open)
