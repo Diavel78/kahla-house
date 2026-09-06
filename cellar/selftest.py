@@ -388,7 +388,7 @@ def test_ws_mkts_request_budget() -> None:
         mf._ladders = {}; mf._pending = {}; mf._last_repack = 0.0; mf._pack_hold_until = 0.0
         mf._last_pack_build = 0.0; mf._pack_born = {}; mf._pack_audited = set()
         mf._miss_count = {}; mf._parked = {}; mf.audit_stats = {"packs": 0, "silent": 0, "missing": 0}
-        mf.sb = None; mf.conn = 0
+        mf.sb = None; mf.conn = 0; mf._core_rebuilt_at = 0.0; mf._last_hb = 0.0; mf.routed = 0
         return mf
     mf = fresh(); ws = FakeWS()
     for i in range(12):

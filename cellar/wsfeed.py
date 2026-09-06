@@ -76,6 +76,8 @@ MKTS_MAX_SLUGS = 4000
 # ONE request whenever it has accumulated deltas or dropped slugs.
 MKTS_MAX_RIDS = 10
 CORE_REBUILD_RIDS = 2
+CORE_REBUILD_MIN_S = 120.0
+HEARTBEAT_STAMP_S = 120.0   # per-connection state stamp (pending/packs/ladders)
 # PACKING (Sep 6 2026, Rob: "why the hell are we doing REST with a
 # websocket"): the venue's scarce resource is subscription REQUESTS (~12
 # per connection), not slugs (the probe accepted ~4,000 in one request).
@@ -665,6 +667,9 @@ class MarketsFeed:
         self._last_pack_build = 0.0
         self._pack_hold_until = 0.0
         self._pack_born: dict[str, float] = {}     # gid -> subscribe ts
+        self._core_rebuilt_at = 0.0
+        self._last_hb = 0.0
+        self.routed = 0                             # ladders handed to THIS conn
         self._pack_audited: set[str] = set()
         self._miss_count: dict[str, int] = {}
         self._parked: dict[str, float] = {}        # slug -> until ts
@@ -680,6 +685,8 @@ class MarketsFeed:
     def add_group(self, gid: str, slugs: set, expire_ts=None) -> None:
         with self._lock:
             self._ops.append(("add", str(gid), set(slugs), expire_ts))
+            if gid != "core":
+                self.routed = getattr(self, "routed", 0) + 1
 
     def drop_group(self, gid: str) -> None:
         with self._lock:
@@ -724,6 +731,8 @@ class MarketsFeed:
                 "params": {"kind": "ws_mkts"},
                 "result": {"state": state, "err": (err or "")[:300],
                            "conn": self.conn,
+                           "routed": getattr(self, "routed", 0),
+                           "ladders": len(getattr(self, "_ladders", {}) or {}),
                            "msgs": self.msgs, "watched": len(self._slugs),
                            "reconnects": self.reconnects,
                            "packs": sum(1 for g in self._groups if g != "core"),
@@ -863,7 +872,15 @@ class MarketsFeed:
                 stale = set(c_old) - set(slugs)
                 # a few fallen-off slugs cost nothing subscribed; rebuild
                 # on real drift or on accumulated delta requests
-                if len(stale) > 20 or len(c_rids) >= CORE_REBUILD_RIDS:
+                # RATE-LIMITED (Sep 6 2026): with the per-write lock the
+                # repeg lap wakes every ~25s and pushes core every time;
+                # every other push tore core down (41 rebuilds in 10 min,
+                # 2s of dead air on OUR OWN orders each). Real drift, or
+                # accumulated deltas, AND at least CORE_REBUILD_MIN_S since
+                # the last rebuild.
+                if ((len(stale) > 20 or len(c_rids) >= CORE_REBUILD_RIDS)
+                        and nowt - self._core_rebuilt_at >= CORE_REBUILD_MIN_S):
+                    self._core_rebuilt_at = nowt
                     for r in c_rids:
                         ws.send(json.dumps({"unsubscribe": {"requestId": r}}))
                         self._rid_slugs.pop(r, None)
@@ -1046,6 +1063,9 @@ class MarketsFeed:
         PACK_BATCH_S; pack budget full → REPACK from the live ladder set
         (rate-limited), leftovers stay pending (REST prices them)."""
         nowt = nowt if nowt is not None else time.time()
+        if nowt - self._last_hb >= HEARTBEAT_STAMP_S and self.sb is not None:
+            self._last_hb = nowt
+            self._stamp("heartbeat")
         if nowt < self._pack_hold_until:
             return False
         live = self._live_rungs(nowt)

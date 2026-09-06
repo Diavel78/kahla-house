@@ -1249,6 +1249,16 @@ sport the machine ever adds:
   pass and asking the venue's per-market rent answer when October slates
   post, never assuming it. Football = spreads + totals (live). NBA =
   probably spreads, decided at the season.
+- **EVERYTHING BUT NRFI SELLS (Rob, Sep 6 2026, reading 155 positions
+  vs 128 sells on the venue: "The only thing that lives is the no run
+  first inning. Everything else fucking gets sold").** The scalp's
+  candidate filter skipped `market_type in ("nrfi", "prop")` BEFORE the
+  lane check, so every NFL and MLB prop fill stayed naked whatever
+  `_scalp_lanes` said (11 naked prop positions found). Now only `nrfi`
+  is exempt; `_scalp_lanes` accepts `whiff_autobet` (MLB pitcher props)
+  and `_SCALP_RENT_SLUGS` gained `astatc-mlb-`, `aec-ufc-`, `aec-cfb-`
+  so adopted positions in those families qualify too. The Aug 29 "we
+  don't scalp props" line is superseded.
 - **"If it fills, instantly list it for sell" is the scalp arm's standing
   contract** — every rent-lane fill gets an ask on the next pass, cost-base
   floor (money-back; Aug 30). New lanes join by adding their flag to `_scalp_lanes` and their

@@ -23614,6 +23614,8 @@ def _scalp_lanes(b: dict, mt: str) -> bool:
         return True                      # football spread/total/ML — all rent
     if bool(b.get("ou_trader")) and mt == "total":
         return True                      # MLB O/U trader (revived Aug 29)
+    if bool(b.get("whiff_autobet")):
+        return True                      # MLB pitcher props — sold too (Rob, Sep 6 2026)
     if bool(b.get("fbprop_autobet")):
         # NFL props — the TURN-RATE experiment (user, Sep 1 2026: "hard
         # to sell might be an issue... lock those down to 5 contracts
@@ -23626,7 +23628,8 @@ def _scalp_lanes(b: dict, mt: str) -> bool:
     return bool(b.get("autobet")) and mt == "moneyline"   # MLB ML
 
 
-_SCALP_RENT_SLUGS = ("aec-mlb-", "tsc-mlb-", "asc-nfl-", "tsc-nfl-",
+_SCALP_RENT_SLUGS = ("astatc-mlb-", "aec-ufc-", "aec-cfb-",   # Sep 6 2026: everything but NRFI sells
+                     "aec-mlb-", "tsc-mlb-", "asc-nfl-", "tsc-nfl-",
                      "asc-cfb-", "tsc-cfb-", "asc-ncaaf-", "tsc-ncaaf-",
                      "astatc-nfl-")   # NFL props — turn-rate experiment
 
@@ -23761,8 +23764,12 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     for r in rows:
         b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         mt = (r.get("market_type") or "").lower()
-        if mt in ("nrfi", "prop"):
-            continue                     # edge lanes NEVER sell (spec)
+        if mt == "nrfi":
+            continue                     # NRFI NEVER sells (0 of 46 losers ever touched)
+        # 'prop' used to be skipped here too — which silently kept EVERY NFL
+        # and MLB prop fill naked whatever _scalp_lanes said (Sep 6 2026:
+        # 11 naked prop positions on the venue). Rob: "The only thing that
+        # lives is the no run first inning. Everything else gets sold."
         ex = b.get("execution") if isinstance(b.get("execution"), dict) else {}
         slug = b.get("pmm_slug") or ex.get("pmm_slug")
         if not slug:
