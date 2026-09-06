@@ -1438,6 +1438,13 @@ def _gameday_pnl(sb) -> dict:
 
 
 _INCENTIVE_SYNC_MOD = 10   # minutes between incentive pulls (two venue GETs)
+# WALL-CLOCK GATE, not minute-modulo (Sep 6 2026): `now.minute % 10` was
+# Vercel's per-minute-ping throttle. The box's paperlog lane laps every
+# 2-5 min and almost never lands on a :x0 minute — the rent ledger AND the
+# rent list (the OMS producer's enrolled-game universe) synced ONCE in 36h
+# (07:03 Sep 6), so post-wipe re-enrollments never reached the executor.
+# Same defect the repeg lane fixed with force=True.
+_INC_SYNC_STATE: dict = {"at": 0.0}
 _INCENTIVE_MAX_PAGES = 60  # program-catalog page cap; res['truncated'] flags
                            # a hit so a growing catalog can't silently clip
 
@@ -20859,7 +20866,8 @@ def api_handicapper_paperlog():
     # which is what the reward economics were (wrongly) inferred from for
     # weeks. Two GETs, both authenticated.
     incentives = {}
-    if not now.minute % _INCENTIVE_SYNC_MOD:
+    if _time.time() - _INC_SYNC_STATE["at"] >= _INCENTIVE_SYNC_MOD * 60:
+        _INC_SYNC_STATE["at"] = _time.time()
         try:
             incentives = _incentives_sync(sb, get_client())
         except Exception as e:
