@@ -238,6 +238,36 @@ def _harvest_slugs(obj, out: set, depth: int = 0) -> None:
             _harvest_slugs(v, out, depth + 1)
 
 
+_TERMINAL_STATES = ("FILLED", "CANCELED", "CANCELLED", "EXPIRED", "REJECTED")
+
+
+def _size_event(msg: dict) -> bool:
+    """Did this private frame change what we HOLD or what RESTS? Position
+    frames always; order frames only when something executed
+    (cumQuantity>0) or the order died (terminal state). A NEW/REPLACED
+    echo of our own amend with nothing filled is not a size event."""
+    for k, v in msg.items():
+        kl = k.lower()
+        if kl.startswith("position"):
+            return True
+        if kl.startswith("order") and isinstance(v, dict):
+            ex = v.get("execution") if isinstance(v.get("execution"), dict) else v
+            od = ex.get("order") if isinstance(ex.get("order"), dict) else ex
+            try:
+                cum = float(od.get("cumQuantity") or od.get("cum_quantity") or 0)
+            except (TypeError, ValueError):
+                cum = 0.0
+            try:
+                exq = float(ex.get("quantity") or ex.get("lastQuantity") or 0) \
+                    if ex is not od else 0.0
+            except (TypeError, ValueError):
+                exq = 0.0
+            st = str(od.get("state") or od.get("status") or "").upper()
+            if cum > 0 or exq > 0 or any(t in st for t in _TERMINAL_STATES):
+                return True
+    return False
+
+
 def _recon_keys(obj, depth: int = 0) -> str | None:
     """Key names (never values) of the first order-shaped dict in a
     frame — the self-diagnosis for a harvest miss, so a field-name
@@ -593,12 +623,21 @@ class WsFeed:
                         # ask UP past what we hold. The next lap re-reads the
                         # venue and re-vouches; until then the sniper is off
                         # that market.
-                        try:
-                            import app as _app
-                            for _s in _ev_slugs:
-                                _app.SCALP_SNAP.pop(_s, None)
-                        except Exception:
-                            pass
+                        # ...but ONLY on a frame that changed SIZE. The
+                        # venue echoes an ORDER event for our OWN amends
+                        # (first live frame after the Sep 6 fix: our
+                        # 53→58 amend, cumQuantity 0) — popping on that
+                        # would stall the sniper to one move per market
+                        # per lap. A position event, or an order event
+                        # with cumQuantity>0 / a terminal state, is a
+                        # size change; a NEW/REPLACED echo is not.
+                        if _size_event(msg):
+                            try:
+                                import app as _app
+                                for _s in _ev_slugs:
+                                    _app.SCALP_SNAP.pop(_s, None)
+                            except Exception:
+                                pass
                     self._wake("repeg", why)
                     if any("position" in k for k in kset):
                         self._wake("scalp", why)   # a fill needs an ask NOW
