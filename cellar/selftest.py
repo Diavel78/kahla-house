@@ -451,6 +451,55 @@ def test_gridiron_value_window() -> None:
     check("a 25/29 book is not a 50/50 mark", c3 is None)
 
 
+def test_gridiron_bounds() -> None:
+    """Rob's no-book-line rule (Sep 6 2026): venue ML → spread + the model
+    (capped ±7), every seat at least one rung past the MORE favorable of
+    the two for its side."""
+    import app as _app
+    pm = {"spread_fit": {"sd": 13.115}}
+    # Chicago @ Carolina: YES=away at 59.5/60 → home line ≈ +3.3 (Pinnacle +3)
+    d = {"odds": {"moneyline": {"polymarket": {"ladder": [
+        {"side": "away", "quote": {"bid": 0.595, "ask": 0.60}},
+        {"side": "home", "synthetic": True, "quote": {"bid": 0.40, "ask": 0.405}}]}}}}
+    ml = _app._gridiron_ml_line(d, pm, "away", "home")
+    check("ML 59.5/60 on the away side → home line +3.3", ml is not None and abs(ml - 3.3) < 0.15, f"got {ml}")
+    d2 = {"odds": {"moneyline": {"polymarket": {"ladder": [
+        {"side": "away", "quote": {"bid": 0.015, "ask": 0.02}}]}}}}
+    ml2 = _app._gridiron_ml_line(d2, {"spread_fit": {"sd": 16.132}}, "away", "home")
+    check("WKU 1.5/2.0 → Georgia about −34", ml2 is not None and -35.5 < ml2 < -32.5, f"got {ml2}")
+    d3 = {"odds": {"moneyline": {"polymarket": {"ladder": [
+        {"side": "away", "quote": {"bid": 0.03, "ask": 0.415}}]}}}}
+    check("a 3/41.5 ML book is not a line", _app._gridiron_ml_line(d3, pm, "away", "home") is None)
+    check("no ML ladder → None", _app._gridiron_ml_line({"odds": {}}, pm, "away", "home") is None)
+    # Rob's literal example: model +20, ML +25 → WKU +26 only, Georgia −19 only
+    b, mc, c = _app._gridiron_bounds("spread", -25.0, -20.0, "away", "home")
+    check("bounds: home −20 / away −25, center = the market", b == {"home": -20.0, "away": -25.0} and c == -25.0, f"got {b} {c}")
+    pb = _app._gridiron_past_bound
+    check("WKU +25.5 is allowed", pb("spread", "away", -25.5, b["away"], "away", "home"))
+    check("WKU +24.5 is REFUSED (inside the bound)", not pb("spread", "away", -24.5, b["away"], "away", "home"))
+    check("Georgia −19.5 is allowed", pb("spread", "home", -19.5, b["home"], "away", "home"))
+    check("Georgia −20.5 is REFUSED", not pb("spread", "home", -20.5, b["home"], "away", "home"))
+    # the cap: ML −34, model −20.5 → model capped to −27; dog is value
+    b, mc, c = _app._gridiron_bounds("spread", -34.0, -20.5, "away", "home")
+    check("model capped to −27 (7 past the market)", mc == -27.0 and b == {"home": -27.0, "away": -34.0}, f"got {mc} {b}")
+    side, _d = _app._gridiron_value_side("spread", mc, -34.0, "away", "home")
+    check("capped model −27 vs market −34 → the DOG is value", side == "away")
+    check("WKU +34.5 allowed, +33.5 refused",
+          pb("spread", "away", -34.5, b["away"], "away", "home") and not pb("spread", "away", -33.5, b["away"], "away", "home"))
+    # no market number → the model bounds both sides
+    b, mc, c = _app._gridiron_bounds("spread", None, -20.5, "away", "home")
+    check("model-only: both bounds = model, center = model", b == {"home": -20.5, "away": -20.5} and c == -20.5)
+    check("model-only: dog +21.5 ok, +20.5 (AT the model) refused",
+          pb("spread", "away", -21.5, -20.5, "away", "home") and not pb("spread", "away", -20.5, -20.5, "away", "home"))
+    # totals: venue mark 51, model 56 → over past 51 (lower), under past 56 (higher)
+    b, mc, c = _app._gridiron_bounds("total", 51.0, 56.0, "over", "under")
+    check("total bounds over 51 / under 56", b == {"over": 51.0, "under": 56.0}, f"got {b}")
+    check("over 50.5 ok, over 51.5 refused",
+          pb("total", "over", 50.5, 51.0, "over", "under") and not pb("total", "over", 51.5, 51.0, "over", "under"))
+    check("under 56.5 ok, under 55.5 refused",
+          pb("total", "under", 56.5, 56.0, "over", "under") and not pb("total", "under", 55.5, 56.0, "over", "under"))
+
+
 def test_pin_line_center() -> None:
     """Pinnacle's line in rung units from the cached slate shape (the real
     Northern Arizona @ Arizona event, Sep 5 2026)."""
@@ -667,6 +716,7 @@ def main() -> int:
               test_dry_run_blackout, test_overrun_detector,
               test_ws_quote_presence, test_ws_mkts_request_budget,
               test_gridiron_value_window, test_pin_line_center,
+              test_gridiron_bounds,
               test_lane_covers_its_documented_engines,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()

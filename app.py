@@ -17999,6 +17999,102 @@ def _gridiron_value_side(mt, mline, center, ka, kb):
     return (ka, -1) if mline > center else (kb, +1)       # ka = over, kb = under
 
 
+_GRIDIRON_MODEL_CAP_PTS = 7.0   # no-book-line mode: the model may pull a
+#   side's bound at most this far past the market's own number (Rob, Sep 6
+#   2026 — measured: venue-ML-implied spreads sit within ~1 pt of Pinnacle
+#   on 22/22 games; the model misses by 5-20 on a third of them. Past 7 the
+#   model is the wrong one and the seat would park in far junk rungs).
+_GRIDIRON_ML_MAX_SPREAD = 0.03  # a venue ML book wider than 3¢ is not a line
+
+
+def _norm_ppf(p: float) -> float:
+    """Inverse standard normal by bisection (no scipy on the box)."""
+    p = max(1e-6, min(1.0 - 1e-6, float(p)))
+    lo, hi = -6.0, 6.0
+    for _ in range(80):
+        m = (lo + hi) / 2.0
+        if 0.5 * (1.0 + math.erf(m / math.sqrt(2.0))) < p:
+            lo = m
+        else:
+            hi = m
+    return (lo + hi) / 2.0
+
+
+def _gridiron_ml_line(d, pm, ka, kb):
+    """The venue's MONEYLINE turned into a spread, in rung units (home
+    line). Rob, Sep 6 2026: 'can we use that and the model?' — measured
+    against Pinnacle on every game holding both (16 NFL + 6 CFB): median
+    miss 0.9 pts, worst 2.4, while the model line missed by 5-20 on a
+    third. P(home) = the non-synthetic ML side's book mid (YES side, its
+    own orientation), home line = −sd·Φ⁻¹(P_home) with the cover fit's
+    sd. None when the book is a stub/wide (>3¢) or unpriced — never a
+    guess. Spreads only: a moneyline says nothing about a total."""
+    try:
+        lad = ((((d or {}).get("odds") or {}).get("moneyline") or {})
+               .get("polymarket") or {}).get("ladder") or []
+        sd = float(((pm or {}).get("spread_fit") or {})["sd"])
+    except (TypeError, ValueError, KeyError):
+        return None
+    if sd <= 0:
+        return None
+    for e in lad:
+        if e.get("synthetic") or e.get("side") not in (ka, kb):
+            continue
+        q = e.get("quote") or {}
+        try:
+            bid, ask = float(q.get("bid")), float(q.get("ask"))
+        except (TypeError, ValueError):
+            continue
+        # width is the stub test here, NOT the ladder's bid≤2¢ rule: a
+        # 98¢ favorite (WKU 1.5/2.0, 1,872 contracts offered) is a real
+        # book; the venue's 1/51 and 49/99 stubs are 50¢ wide.
+        if bid <= 0 or ask <= 0 or ask - bid > _GRIDIRON_ML_MAX_SPREAD:
+            continue
+        p_side = (bid + ask) / 2.0
+        p_home = p_side if e["side"] == kb else 1.0 - p_side
+        return round(-sd * _norm_ppf(p_home), 1)
+    return None
+
+
+def _gridiron_bounds(mt, mkt, mline, ka, kb):
+    """No-book-line mode (Rob's rule, Sep 6 2026): 'model number and ML
+    spread both evaluated; you must bet a minimum of 1 rung on the
+    favorable side of the MOST favorable line.' WKU: model +20, ML +25 →
+    WKU +26 only (or more); Georgia −19 only (or fewer). The model is
+    CAPPED to ±_GRIDIRON_MODEL_CAP_PTS of the market number. No market
+    number → the model bounds both sides. Returns
+    ({side: bound}, model_capped, center) in rung units; a seat must sit
+    STRICTLY past its side's bound (see _gridiron_past_bound)."""
+    if mline is None and mkt is None:
+        return None, None, None
+    if mkt is None:
+        mc = mline
+    elif mline is None:
+        mc = mkt
+    else:
+        mc = max(mkt - _GRIDIRON_MODEL_CAP_PTS,
+                 min(mkt + _GRIDIRON_MODEL_CAP_PTS, mline))
+    center = mkt if mkt is not None else mc
+    nums = [x for x in (mkt, mc) if x is not None]
+    if mt == "spread":
+        # home favorable = larger home line; away favorable = smaller
+        return {kb: max(nums), ka: min(nums)}, mc, center
+    # over favorable = lower total; under favorable = higher
+    return {ka: min(nums), kb: max(nums)}, mc, center
+
+
+def _gridiron_past_bound(mt, sn, rv, bound, ka, kb):
+    """Strictly on the favorable side of the bound — 'a minimum of 1 rung'
+    (rungs are half-points, so past a whole-number bound means the next
+    half; past a half-point bound means the NEXT half-point)."""
+    if bound is None or rv is None:
+        return False
+    eps = 0.01
+    if mt == "spread":
+        return (rv > bound + eps) if sn == kb else (rv < bound - eps)
+    return (rv < bound - eps) if sn == ka else (rv > bound + eps)
+
+
 def _gridiron_side_ok(mt, sn, rv, center, ka, kb):
     """A seat is at the line or on ITS side's favorable side of it — for
     every side, whatever centered the line (Sep 6 2026, WKU +17.5 under a
@@ -18197,29 +18293,50 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
             center, center_src = pin_line, _bk
     except Exception:
         pass
-    if center is None:
-        _vc, _vs = _gridiron_ladder_center(
-            [(c[0], c[4], (c[3] or {}).get("bid"), (c[3] or {}).get("ask"))
-             for c in paying], mt, proj)
-        if _vc is not None:
-            center, center_src = _vc, _vs
-    if center is None:
-        # RENT FIRST (Rob, Sep 5 2026 night, the standing order): "once a
-        # game shows up paying rent and Polymarket has published it, that
-        # game gets bet — no model, no Pinnacle, DraftKings, whatever." No
-        # book line and no readable venue line → the model centers and the
-        # bet is still made. The only no-bet is no rent or no model (FCS).
-        center, center_src = mline, "model"
-    # value side vs the center (rung value = home line for spreads, the
-    # total for totals). None = model agrees with the line → side by edge.
-    value_side, fav_dir = _gridiron_value_side(mt, mline, center, ka, kb)
-    allowed = _gridiron_window(rungs, center, fav_dir)
-    paying = [c for c in paying if _rungv(c[0], c[4]) in allowed
-              and (value_side is None or c[0] == value_side)
-              and _gridiron_side_ok(mt, c[0], _rungv(c[0], c[4]), center, ka, kb)]
-    virgin_w = [v for v in pay_virgin if _rungv(v[0], v[2]) in allowed
-                and (value_side is None or v[0] == value_side)
-                and _gridiron_side_ok(mt, v[0], _rungv(v[0], v[2]), center, ka, kb)]
+    ml_line, bounds, model_capped = None, None, None
+    if center is not None:
+        # BOOK LINE (Pinnacle/DK/FD, 7-day memory): the line is the
+        # center; bet toward the model; at the line or favorable.
+        value_side, fav_dir = _gridiron_value_side(mt, mline, center, ka, kb)
+        allowed = _gridiron_window(rungs, center, fav_dir)
+
+        def _seat_ok(sn, rv):
+            return (rv in allowed
+                    and _gridiron_side_ok(mt, sn, rv, center, ka, kb))
+    else:
+        # NO BOOK LINE YET (Rob, Sep 6 2026 — "we need to bet early,
+        # before lines, collect rent; the model is the judge... what's
+        # the safest way"): the MARKET's own number is the venue
+        # moneyline turned into a spread (within ~1 pt of Pinnacle,
+        # measured) — for totals the venue's two-sided ladder mark —
+        # and the model, CAPPED ±7 of it, is the other estimate. Every
+        # seat sits at least one rung on the favorable side of the MORE
+        # favorable of the two for its side. RENT FIRST still stands:
+        # no market number at all → the model bounds both sides and
+        # the game is still bet. The only no-bet is no rent / no model.
+        mkt, mkt_src = None, None
+        if mt == "spread":
+            ml_line = _gridiron_ml_line(d, pm, ka, kb)
+            if ml_line is not None:
+                mkt, mkt_src = ml_line, "venue_ml"
+        if mkt is None:
+            _vc, _vs = _gridiron_ladder_center(
+                [(c[0], c[4], (c[3] or {}).get("bid"), (c[3] or {}).get("ask"))
+                 for c in paying], mt, proj)
+            if _vc is not None:
+                mkt, mkt_src = _vc, _vs
+        bounds, model_capped, center = _gridiron_bounds(mt, mkt, mline, ka, kb)
+        center_src = mkt_src or "model"
+        value_side, _fd = (_gridiron_value_side(mt, model_capped, mkt, ka, kb)
+                           if mkt is not None else (None, 0))
+
+        def _seat_ok(sn, rv):
+            return (abs(rv - center) <= _GRIDIRON_TAIL_PTS
+                    and _gridiron_past_bound(mt, sn, rv, bounds.get(sn), ka, kb))
+    paying = [c for c in paying if _seat_ok(c[0], _rungv(c[0], c[4]))
+              and (value_side is None or c[0] == value_side)]
+    virgin_w = [v for v in pay_virgin if _seat_ok(v[0], _rungv(v[0], v[2]))
+                and (value_side is None or v[0] == value_side)]
     if not paying:
         # No BOOKED paying rung inside the window — try seeding a
         # windowed virgin one (our own line at model fair−6).
@@ -18323,6 +18440,8 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
               "rung_role": "middle" if ti == 0 else "neighbor",
               "line_center": center, "center_src": center_src,
               "pin_line": pin_line, "model_line": mline,
+              "ml_line": ml_line, "model_capped": model_capped,
+              "bound": (bounds or {}).get(s["sn"]),
               "value_side": value_side,
               "rung_dist": round(s["dist"], 1),
               "early_noveto": bool(_noveto

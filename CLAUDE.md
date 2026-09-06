@@ -1123,7 +1123,24 @@ band doing the pricing sanity. Two seats: nearest the line, then the next
 toward the model. `_gridiron_value_side` / `_gridiron_window`, selftest
 `test_gridiron_value_window`. The venue's empty-book stub (1¢/51¢, 49/99
 mirrored) is a VIRGIN rung, never a book (`_gridiron_is_placeholder`).
-Every bet stamps `line_center/center_src/pin_line/model_line/value_side`.
+Every bet stamps `line_center/center_src/pin_line/model_line/value_side`. **NO BOOK LINE YET (Rob, Sep 6 2026 — "bet early, before lines,
+collect rent; the model is the judge; what's the safest way"):** the
+market number is the **venue MONEYLINE turned into a spread**
+(`_gridiron_ml_line`: P_home from the non-synthetic ML side's mid, home
+line = −sd·Φ⁻¹(P_home) with the cover fit's sd; book must be ≤3¢ wide —
+width, NOT the ladder's bid≤2¢ stub rule, a 98¢ favorite is a real book).
+MEASURED before it shipped: within ~1 pt of Pinnacle on all 22 games
+holding both (median 0.9, worst 2.4) while the model line missed by 5-20
+on a third of them — the venue's ML is a book line in disguise. Totals
+use the venue's two-sided ladder mark. Then Rob's rule
+(`_gridiron_bounds`/`_gridiron_past_bound`): the model is CAPPED to
+±`_GRIDIRON_MODEL_CAP_PTS`=7 of the market number, and every seat sits
+**at least one rung on the favorable side of the MORE favorable of the
+two for its side** (model +20, ML +25 → WKU +25.5 or more, Georgia −19.5
+or fewer); value side = the capped model's side of the market number. No
+market number at all → the model bounds both sides and the game is still
+bet (rent first). Blob adds `ml_line/model_capped/bound`. A book line
+arriving later centers only bets placed from then on.
 (h) **FOOTBALL GHOST ADOPTION (Sep 5 2026, docket #6 root fix):** the
 reconcile's two-strike delete can false-kill a pick during a venue wobble
 while the ORDER stays alive (found live: 5 AUTOMATIC 20-lot orders + 1
