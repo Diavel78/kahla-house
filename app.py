@@ -25799,7 +25799,18 @@ def api_data():
             # accident; it's a cheap 5-day slice over a mirror that
             # updates every 10 min, and it's the card the user actually
             # watches all day). Failure keeps the cached slice.
-            if _stk:
+            # POST-C2 (Sep 5 2026): the box recomputes this slice every
+            # ~minute into the cache row the site now reads directly, and
+            # the live refresh here re-walked 3 pages of activities through
+            # the tunnel on EVERY poll — "paged disconnected" most polls,
+            # two-minute responses, and a failed walk nulled the bets half
+            # (every day row read "bets —" while rent showed). Serve the
+            # box's slice when it has one; only compute live when it is
+            # missing or the cache row is stale.
+            _cached_rd = (_stk or {}).get("rent_days")
+            _fresh_cache = ((_c.get("age_s") is not None)
+                            and float(_c.get("age_s") or 0) < 600)
+            if _stk and not (_cached_rd and _fresh_cache):
                 try:
                     _stk["rent_days"] = _rent_days_recent(get_supabase())
                 except Exception:
