@@ -357,6 +357,20 @@ above center / under below) = a bug, show Rob; (4) scalp `uncovered` → 0;
 (6) the USC +0.5 order (CAM4QW1JAPPV) — venue ignores cancels on it,
 unfillable, expires Sep 13; (7) Monday: the $570 payout verify.
 
+**SUNDAY (1) RESULT (Sep 6, ~9:30am AZ): THE NFL PROPS LANE NEVER FIRED.**
+Zero picks, zero trades, zero rent, zero funnel stamps since Aug 22. The
+tape was fine (571 NFL player-prop markets captured; the venue pays Early
+$10.5k / day-of $28.5k / live $28.5k on them; per-market `_rent_ok` says
+`early` on the candidate slugs) and the model was fine (dry run: 114
+evaluated, 7 candidates clear every gate, executor would create 5 @ 38¢
+post-only). The pass read `g.get("sport")` on the tick's game dicts,
+which carry `_sport` → no football games → silent return every tick.
+Fixed (`_game_sport`), early exits named (`fbp_gate`), and route lanes
+now persist their route stats into cellar_ticks.detail (`_keep_body`) —
+the counters that would have shown this on day one were computed and
+thrown away. Stake decision: nothing to decide yet — the first fills
+come after this restart; read the turn rate next Sunday.
+
 **SUNDAY'S WORK (Rob, Sat night, in this order):** (1) **NFL props read**
 — fills vs scalp exits on `astatc-nfl` slugs (the turn-rate experiment),
 model call vs market outcome, then a stake decision (5 contracts, cap 30

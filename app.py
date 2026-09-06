@@ -14016,7 +14016,7 @@ def _fbprop_pass(sb, prop_rows, all_games, now) -> dict:
                 skip_game_dedup=True,
                 contracts=int(conf.get("contracts") or 1),
                 entry_line=line,
-                sport=g.get("sport") or "NFL",
+                sport=_game_sport(g) or "NFL",
                 fail_tag=_ftag)
             if r == "placed":
                 placed += 1
