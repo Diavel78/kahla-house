@@ -351,8 +351,19 @@ def test_ws_quote_presence() -> None:
         check("forgotten slug => miss", _app._ws_quote(slug) is None)
         _app.WS_QUOTES[slug] = (41.0, 43.0, _t.monotonic())
         check("young row => fresh regardless", _app._ws_quote(slug) == (41.0, 43.0))
+        # PER-CONNECTION presence (Sep 6 2026): a row written by conn 1 is
+        # vouched for by conn 1's liveness only
+        _app.WS_QUOTES[slug] = (41.0, 43.0, old_ts)
+        _app.WS_QUOTE_CONN[slug] = 1
+        _app.WS_MKTS_CONN[1] = {"epoch": 3, "up": True, "rx": _t.monotonic()}
+        _app.WS_QUOTE_EPOCH[slug] = 3
+        check("conn-1 row + conn 1 live => fresh (conn 0 state irrelevant)",
+              _app._ws_quote(slug) == (41.0, 43.0))
+        _app.WS_MKTS_CONN[1]["up"] = False
+        check("conn 1 down => its rows miss even with conn 0 up", _app._ws_quote(slug) is None)
     finally:
         _app.WS_QUOTES.pop(slug, None); _app.WS_QUOTE_EPOCH.pop(slug, None)
+        _app.WS_QUOTE_CONN.pop(slug, None); _app.WS_MKTS_CONN.pop(1, None)
         _app.WS_MKTS_EPOCH, _app.WS_MKTS_UP, _app.WS_MKTS_LAST_RX = saved
 
 

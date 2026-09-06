@@ -6475,6 +6475,18 @@ WS_MKTS_UP = False            # False from disconnect until the next connect
 WS_MKTS_LAST_RX = 0.0         # monotonic ts of the last frame (any kind)
 WS_MKTS_ALIVE_S = 120.0       # silence past this = the socket can't vouch
 WS_QUOTE_EPOCH: dict = {}     # slug -> epoch its row was written under
+# MULTI-CONNECTION (Sep 6 2026): the venue's request budget is PER
+# CONNECTION, so the markets feed runs several. Presence is tracked per
+# connection — a row is vouched for only by the socket that wrote it.
+# Conn 0 keeps the scalars above (back-compat); conn N>0 lives here.
+WS_MKTS_CONN: dict = {}       # conn -> {"epoch", "up", "rx"}
+WS_QUOTE_CONN: dict = {}      # slug -> conn that wrote its row
+
+
+def _mkts_state(conn: int) -> dict:
+    if conn == 0:
+        return {"epoch": WS_MKTS_EPOCH, "up": WS_MKTS_UP, "rx": WS_MKTS_LAST_RX}
+    return WS_MKTS_CONN.get(conn) or {"epoch": 0, "up": False, "rx": 0.0}
 
 
 class _WsNotOutbid(Exception):
@@ -6495,9 +6507,10 @@ def _ws_quote(slug: str):
     if now - ts <= WS_QUOTE_FRESH_S:
         return bid, ask
     # presence rule: quiet-since-written on a live, still-subscribed slug
-    if (WS_MKTS_UP and WS_MKTS_EPOCH > 0
-            and WS_QUOTE_EPOCH.get(slug) == WS_MKTS_EPOCH
-            and now - WS_MKTS_LAST_RX <= WS_MKTS_ALIVE_S):
+    st = _mkts_state(WS_QUOTE_CONN.get(slug, 0))
+    if (st["up"] and st["epoch"] > 0
+            and WS_QUOTE_EPOCH.get(slug) == st["epoch"]
+            and now - st["rx"] <= WS_MKTS_ALIVE_S):
         _WS_PRICE_STATS["presence"] = _WS_PRICE_STATS.get("presence", 0) + 1
         return bid, ask
     return None

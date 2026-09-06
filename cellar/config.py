@@ -73,6 +73,10 @@ WS_FEED = _flag("CELLAR_WS", True)
 # (CELLAR_WS_MKTS=0), never a revert. Requires WS_FEED (it rides the
 # private feed's watch list).
 WS_MKTS = _flag("CELLAR_WS_MKTS", True)
+# Markets-socket CONNECTIONS (Sep 6 2026): the venue's ~12-request budget
+# is per connection; one held 7 packs ≈ 2,450 rungs against 4,848 live
+# football rungs. Two connections double the pack budget.
+WS_MKTS_CONNS = int(os.environ.get("CELLAR_WS_MKTS_CONNS") or 2)
 
 # NO LANE_TIMEOUT_S (removed Aug 20 2026). It existed here for weeks as a
 # "wall-clock ceiling for a single lane invocation" that NOTHING READ -- the

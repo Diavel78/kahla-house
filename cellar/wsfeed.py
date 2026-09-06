@@ -113,7 +113,7 @@ _SLUG_KEYS = ("market_slug", "marketSlug", "slug", "symbol",
 _UUID_RE = None
 
 
-def _write_quote(slug: str, pv: dict) -> None:
+def _write_quote(slug: str, pv: dict, conn: int = 0) -> None:
     """One LITE frame → one quote-table row (app.WS_QUOTES[slug] =
     (bid_c, ask_c, monotonic_ts)). Values are immutable tuples and the
     write is a single GIL-atomic dict store — feed thread writes, lane
@@ -134,8 +134,9 @@ def _write_quote(slug: str, pv: dict) -> None:
             return round(v * 200) / 2.0 if 0 < v < 1 else None
         _app.WS_QUOTES[slug] = (_c(pv.get("bestBid")), _c(pv.get("bestAsk")),
                                 time.monotonic())
-        # presence freshness: the row belongs to THIS connection epoch
-        _app.WS_QUOTE_EPOCH[slug] = _app.WS_MKTS_EPOCH
+        # presence freshness: the row belongs to THIS connection's epoch
+        _app.WS_QUOTE_EPOCH[slug] = _app._mkts_state(conn)["epoch"]
+        _app.WS_QUOTE_CONN[slug] = conn
     except Exception:
         pass
 
@@ -148,22 +149,36 @@ def _forget_quotes(slugs) -> None:
         import app as _app
         for sl in slugs or ():
             _app.WS_QUOTE_EPOCH.pop(sl, None)
+            _app.WS_QUOTE_CONN.pop(sl, None)
     except Exception:
         pass
 
 
-def _mkts_presence(up: bool | None = None, rx: bool = False) -> None:
-    """Feed-thread-only writes of the socket's liveness for _ws_quote."""
+def _mkts_presence(up: bool | None = None, rx: bool = False,
+                   conn: int = 0) -> None:
+    """Feed-thread-only writes of ONE socket's liveness for _ws_quote.
+    Conn 0 = the module scalars (back-compat); others = WS_MKTS_CONN."""
     try:
         import app as _app
+        if conn == 0:
+            if rx:
+                _app.WS_MKTS_LAST_RX = time.monotonic()
+            if up is True:
+                _app.WS_MKTS_EPOCH += 1
+                _app.WS_MKTS_LAST_RX = time.monotonic()
+                _app.WS_MKTS_UP = True
+            elif up is False:
+                _app.WS_MKTS_UP = False
+            return
+        st = _app.WS_MKTS_CONN.setdefault(conn, {"epoch": 0, "up": False, "rx": 0.0})
         if rx:
-            _app.WS_MKTS_LAST_RX = time.monotonic()
+            st["rx"] = time.monotonic()
         if up is True:
-            _app.WS_MKTS_EPOCH += 1
-            _app.WS_MKTS_LAST_RX = time.monotonic()
-            _app.WS_MKTS_UP = True
+            st["epoch"] += 1
+            st["rx"] = time.monotonic()
+            st["up"] = True
         elif up is False:
-            _app.WS_MKTS_UP = False
+            st["up"] = False
     except Exception:
         pass
 
@@ -301,9 +316,14 @@ class WsFeed:
         try:
             from . import config as _cfg
             if getattr(_cfg, "WS_MKTS", True):
-                self.mkts = MarketsFeed(self._wake, sb=self.sb,
-                                        dirty_add=self.add_dirty)
-                self.mkts.start()
+                n = max(1, int(getattr(_cfg, "WS_MKTS_CONNS", 1) or 1))
+                self.mkts_pool = [MarketsFeed(self._wake, sb=self.sb,
+                                              dirty_add=self.add_dirty, conn=i)
+                                  for i in range(n)]
+                self.mkts = self.mkts_pool[0]     # core + watch list live here
+                for m in self.mkts_pool:
+                    m.start()
+                log.info("markets feed: %d connection(s)", n)
         except Exception as e:
             log.error("markets feed failed to start (%s) — private feed "
                       "unaffected", e)
@@ -311,8 +331,18 @@ class WsFeed:
 
     def shutdown(self) -> None:
         self.stop.set()
-        if self.mkts is not None:
-            self.mkts.stop.set()
+        for m in (getattr(self, "mkts_pool", None) or ([self.mkts] if self.mkts else [])):
+            m.stop.set()
+
+    def ladder_add(self, gid: str, slugs: set, exp=None) -> None:
+        """Route a ladder to one markets connection by a STABLE hash of its
+        gid, so every rung of a game lives on exactly one socket and a
+        revisit lands on the same one. Core stays on conn 0."""
+        pool = getattr(self, "mkts_pool", None) or ([self.mkts] if self.mkts else [])
+        if not pool:
+            return
+        import zlib
+        pool[zlib.crc32(str(gid).encode()) % len(pool)].add_group(gid, set(slugs), exp)
 
     # -- plumbing ------------------------------------------------------------
 
@@ -326,8 +356,9 @@ class WsFeed:
         down), which tells the caller to FULL-sweep instead. A dead
         socket therefore degrades to today's behavior, never to
         blindness."""
-        if not (self.mkts and self.mkts._was_connected):
-            return None
+        pool = getattr(self, "mkts_pool", None) or ([self.mkts] if self.mkts else [])
+        if not pool or not all(m._was_connected for m in pool):
+            return None                      # any socket blind → full sweep
         with self._dirty_lock:
             d, self.dirty = self.dirty, set()
         return d
@@ -592,7 +623,8 @@ class MarketsFeed:
     RECV_S = 15.0            # short recv timeout = subscription-rotation
                              # latency bound; silence watchdog is separate
 
-    def __init__(self, wake, sb=None, dirty_add=None):
+    def __init__(self, wake, sb=None, dirty_add=None, conn: int = 0):
+        self.conn = conn                     # connection index (presence, stamps)
         self._wake = wake                    # WsFeed._wake (lane, why, min_s)
         self._dirty_add = dirty_add          # WsFeed.add_dirty — moved slugs
         self.sb = sb
@@ -691,6 +723,7 @@ class MarketsFeed:
             self.sb.table("exec_probe_runs").insert({
                 "params": {"kind": "ws_mkts"},
                 "result": {"state": state, "err": (err or "")[:300],
+                           "conn": self.conn,
                            "msgs": self.msgs, "watched": len(self._slugs),
                            "reconnects": self.reconnects,
                            "packs": sum(1 for g in self._groups if g != "core"),
@@ -918,8 +951,8 @@ class MarketsFeed:
         if self._pack_flush(ws, nowt):
             changed = True
         if changed:
-            log.info("ws mkts watching %d markets in %d groups",
-                     len(self._covered), len(self._groups))
+            log.info("ws mkts[%d] watching %d markets in %d groups",
+                     self.conn, len(self._covered), len(self._groups))
 
     # ── PACK LAYER ──
     def _pack_budget_used(self) -> int:
@@ -1110,7 +1143,7 @@ class MarketsFeed:
                     self._covered = set()
                     self._base_seen = set()
                     self._ops = prev + self._ops
-                _mkts_presence(up=True)      # new epoch: old rows age out
+                _mkts_presence(up=True, conn=self.conn)   # new epoch: old rows age out
                 if not self._was_connected:
                     self._was_connected = True
                     self._stamp("connected")
@@ -1126,7 +1159,7 @@ class MarketsFeed:
                     if raw is None or raw == "":
                         raise ConnectionError("empty frame")
                     last_rx = time.time()
-                    _mkts_presence(rx=True)      # any frame = socket alive
+                    _mkts_presence(rx=True, conn=self.conn)   # any frame = socket alive
                     self.msgs += 1
                     try:
                         msg = json.loads(raw)
@@ -1180,7 +1213,7 @@ class MarketsFeed:
                         # round trip. Write-only from here; freshness and
                         # fallback live with the readers (_ws_quote).
                         if _pk == "marketDataLite":
-                            _write_quote(_sl, _pv)
+                            _write_quote(_sl, _pv, self.conn)
                         if _sl not in self._base_seen:
                             # First frame for this market since the
                             # subscription = the baseline replay. State,
@@ -1200,7 +1233,7 @@ class MarketsFeed:
                                      "subscriptionType"))[:50],
                         WAKE_MKTS_MIN_S)
             except Exception as e:
-                _mkts_presence(up=False)     # readers fall back to the age rule
+                _mkts_presence(up=False, conn=self.conn)  # readers fall back to the age rule
                 if self.stop.is_set():
                     break
                 if self._was_connected:
