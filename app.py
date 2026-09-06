@@ -21676,6 +21676,15 @@ _OPEN_ORDER_STATES = {
     "ORDER_STATE_PENDING_NEW",
     "ORDER_STATE_PENDING_REPLACE",
     "ORDER_STATE_PARTIALLY_FILLED",
+    # REPLACED IS OPEN (Rob, Sep 6 2026, after the JAX@DEN amend test): an
+    # amended order keeps its id, sits in the venue's PUBLIC BOOK at the
+    # new price (verified against the app's own order-book view, 4 at 87)
+    # and fills. Only the app's "Your orders" list drops it. With amend
+    # rolling out, every consumer of this set — fill tracker, reconcile,
+    # dedup, cancel sweeps, verify, the dashboard — must see it, or the
+    # reconcile would strike every amended pick as order-less. The
+    # dashboard's Open Orders is the human view now (tag "amended").
+    "ORDER_STATE_REPLACED",
     # ORDER_STATE_REPLACED is deliberately NOT here (added for ~1h Aug 2,
     # reverted): probe run 2's modify left a REPLACED order that the open
     # endpoint returned but the APP DID NOT SHOW — dead husk or invisible
@@ -21790,6 +21799,9 @@ def api_my_orders():
 
             out_orders.append({
                 "id":               _g("id") or "",
+                "state":            state.replace("ORDER_STATE_", ""),
+                "amended":          state == "ORDER_STATE_REPLACED",
+                "updated_at":       _g("updateTime") or _g("createTime") or "",
                 "market_name":      title,
                 # `outcome` is what the dashboard's buildBetSlipLabel()
                 # appends after the market title. Use `pick` (which has

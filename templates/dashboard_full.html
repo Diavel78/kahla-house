@@ -1163,9 +1163,18 @@
                     const fillNote = (o.fill_pct > 0 && o.fill_pct < 100)
                         ? ` <span style="color:var(--text-muted);font-size:11px">(${o.cum_quantity}/${o.quantity})</span>`
                         : '';
+                    // VENUE TRUTH VIEW (Sep 6 2026): the app's "Your orders" drops
+                    // amended (REPLACED) orders; this list reads the API and shows
+                    // every resting order — side, cents, size, state, last move.
+                    const isSell = /SELL/.test(o.intent || '');
+                    const cents = (o.price !== null && o.price !== undefined) ? Math.round(o.price * 1000) / 10 : null;
+                    const sideTag = `<span class="badge ${isSell ? 'badge-sold' : 'badge-win'}" style="margin-right:6px">${isSell ? 'SELL' : 'BUY'}</span>`;
+                    const amendTag = o.amended ? `<span class="badge badge-push" style="margin-left:6px" title="amended in place — live on the book, hidden by the app">amended</span>` : '';
+                    let ago = '';
+                    try { const ms = Date.now() - new Date(o.updated_at).getTime(); if (ms > 0 && ms < 864e5) ago = ` <span style="color:var(--text-muted);font-size:11px">moved ${ms < 6e4 ? Math.round(ms/1e3)+'s' : Math.round(ms/6e4)+'m'} ago</span>`; } catch (e) {}
                     html += `<div class="betslip-item">
-                        <div class="betslip-market">${esc(label)}${fillNote}</div>
-                        <div class="betslip-odds ${oddsClass}">${oddsStr}</div>
+                        <div class="betslip-market">${sideTag}${esc(label)}${fillNote}${amendTag}${ago}</div>
+                        <div class="betslip-odds ${oddsClass}">${cents !== null ? cents + '¢' : oddsStr} <span style="color:var(--text-muted);font-size:11px">× ${o.leaves_quantity ?? o.quantity}</span></div>
                     </div>`;
                 }
             }
