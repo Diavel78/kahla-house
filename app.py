@@ -2454,6 +2454,27 @@ def api_poly_incentives_sync():
     return jsonify(out)
 
 
+def _rent_makegood(desc: str) -> bool:
+    """A venue credit that COUNTS AS RENT by Rob's order (Sep 6 2026: "it's
+    not rent… but it's to cover all the rent they stole from me"): the
+    outage make-goods. The venue tags each credit's description with an
+    `event` (e.g. sep5_outage); machine_flags `rent_credit_events` (jsonb
+    list) names the events that count. Anything not listed stays a credit."""
+    try:
+        evs = _machine_flag_val("rent_credit_events") or []
+        if not isinstance(evs, list) or not evs:
+            return False
+        import json as _j
+        try:
+            meta = _j.loads(desc) if isinstance(desc, str) and desc.strip().startswith("{") else {}
+        except Exception:
+            meta = {}
+        ev = str((meta or {}).get("event") or "")
+        return bool(ev) and ev in {str(e) for e in evs}
+    except Exception:
+        return False
+
+
 def _maker_rewards_split(sb) -> dict:
     """Real liquidity earnings vs one-off account credits.
 
@@ -2482,7 +2503,7 @@ def _maker_rewards_split(sb) -> dict:
         except (TypeError, ValueError):
             continue
         desc = (d.get("description") or "").lower()
-        if "liquidity reward" in desc:
+        if "liquidity reward" in desc or _rent_makegood(d.get("description") or ""):
             out["rewards"] += amt
             out["n_rewards"] += 1
         else:
@@ -3672,7 +3693,8 @@ def parse_activities(client, activities):
             # excluded from maker_rewards, badged Credit).
             amount = _safe_float(detail.get("amount"))
             _desc = str(detail.get("description") or "").lower()
-            _is_credit = bool(_desc) and "liquidity reward" not in _desc and any(
+            _is_credit = (bool(_desc) and "liquidity reward" not in _desc
+                          and not _rent_makegood(detail.get("description") or "")) and any(
                 k in _desc for k in ("remediation", "promotional", "refund",
                                      "bonus", "goodwill", "compensation"))
             market = "Account Credit" if _is_credit else "Maker Reward"
