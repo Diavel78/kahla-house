@@ -23920,7 +23920,8 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             break
         net = float((positions.get(slug) or {}).get("net") or 0.0)
         held = _mirror_clamp(slug, (-net) if synth else net)
-        if held < 1.0:
+        _venue_qty = float((positions.get(slug) or {}).get("qty") or 0.0)
+        if _venue_qty < 1.0 and held < 1.0:
             # NO POSITION → NO ASK (Rob, Sep 6 2026: "can you not sell shit
             # I don't have"). A resting AUTOMATIC sell of ours on a slug the
             # venue says we do not hold is cancelled here, first, before
@@ -23935,10 +23936,15 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                     _time.sleep(0.5)
                 except Exception:
                     pass
+            res["skip_no_pos"] = res.get("skip_no_pos", 0) + 1
             continue                     # buy hasn't filled — no inventory
+        if held < 1.0:                   # venue holds it, the mirror doesn't know yet
+            res["skip_mirror0"] = res.get("skip_mirror0", 0) + 1
+            continue
         res["cands"] += 1
         entry_c = _scalp_entry_c(r, b)
         if entry_c is None:
+            res["skip_no_entry"] = res.get("skip_no_entry", 0) + 1
             continue
         # FLOOR = ceil(real cost) — MONEY BACK, not cost+1 (user, Aug 30
         # morning: "Instead of cost +1, it's just cost at the base" — the
@@ -24040,6 +24046,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         if synth:
             book = _invert_book(book)
         if not book:
+            res["skip_no_book"] = res.get("skip_no_book", 0) + 1
             continue
         best_bid = book.get("best_bid")
         # best COMPETITOR ask — subtract our own resting qty at our level
@@ -24091,6 +24098,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             tgt = _grid_dn(best_bid, tick) + tick
         tgt = min(_SCALP_ASK_CEIL_C, _grid_up(tgt, tick))
         if abs(tgt - our_ask) <= 0.26:
+            res["at_cost"] = res.get("at_cost", 0) + 1
             tgt = None                   # already there
         _repair = tgt is not None and our_ask < floor_c - 0.26
         # QTY INVARIANT (Aug 29 night — the MIL@CHC 0/5-on-20 catch; user
@@ -24123,6 +24131,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # legal not-down moves
         if (tgt is None or tgt < floor_c
                 or (not _repair and not _resize and tgt >= our_ask - 0.26)):
+            res["skip_no_move"] = res.get("skip_no_move", 0) + 1
             continue                     # nothing to do this pass
         if not scalp_live:
             _scalp_shadow(sb, r, b, now, tgt, best_bid, comp_ask, held, res)

@@ -1168,14 +1168,31 @@ class MarketsFeed:
                     self._was_connected = True
                     self._stamp("connected")
                     log.info("ws mkts connected")
+                from websocket import ABNF as _ABNF
                 while not self.stop.is_set():
                     self._apply_ops(ws)
                     try:
-                        raw = ws.recv()
+                        # CONTROL FRAMES COME BACK TO US (Sep 6 2026 — the
+                        # silent second connection): the venue PINGs every
+                        # 10.0s and ws.recv() answers them internally
+                        # without returning, so with a 15s timeout an IDLE
+                        # socket never came back to run its op queue — a
+                        # connection with nothing subscribed could never
+                        # subscribe anything. recv_data(control_frame=True)
+                        # hands the ping to this loop: it is the heartbeat.
+                        _op, _data = ws.recv_data(control_frame=True)
                     except websocket.WebSocketTimeoutException:
                         if time.time() - last_rx > RECV_TIMEOUT_S:
                             raise ConnectionError("silent socket")
                         continue             # just a rotation-check beat
+                    if _op in (_ABNF.OPCODE_PING, _ABNF.OPCODE_PONG):
+                        last_rx = time.time()
+                        _mkts_presence(rx=True, conn=self.conn)
+                        continue             # alive; ops get their turn
+                    if _op == _ABNF.OPCODE_CLOSE:
+                        raise ConnectionError("close frame")
+                    raw = (_data.decode("utf-8", "replace")
+                           if isinstance(_data, (bytes, bytearray)) else _data)
                     if raw is None or raw == "":
                         raise ConnectionError("empty frame")
                     last_rx = time.time()
