@@ -23764,7 +23764,14 @@ def _scalp_venue_cost_c(pick_row, avg_price, held_qty):
             and abs(oq - held_qty) <= 0.5):
         cash_c = bu / oq * 100.0
         if abs(vc_c - cash_c) > 3.0:
-            return cash_c
+            # THE LOWER ONE IS THE COST (Sep 6 2026 — Rob's MISS −6.5 ask
+            # parked at 99 with the venue avg at 51.2): on a rinse-and-
+            # rebought slug this ledger stacks EVERY buy ever over the
+            # current lot (103¢ here) and parked the floor above the
+            # market; the Sep 3 case was the venue blending an other-side
+            # trip HIGH. Both poisons run high; whichever is lower is the
+            # honest cost of the lot we hold.
+            return min(vc_c, cash_c)
     return vc_c
 
 
@@ -23877,6 +23884,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     def _mirror_clamp(slug5, held5):
         _mn = mirror_net.get(slug5)
         return held5 if _mn is None else min(held5, max(0.0, _mn))
+    _mirror_recheck: set = set()     # slugs the mirror zeroes but the venue holds
     # Shared-snapshot path (Aug 29): repeg hands down its bulk read. Safe
     # here — repeg only moves BUY orders and the scalp reads SELLs +
     # positions; the pre-create position re-read below stays FRESH (it is
@@ -23961,6 +23969,27 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         except Exception:
             _last = 0.0
         return (2, _last)
+    # THE VENUE KNOWS IF THERE IS A POSITION (Rob, Sep 6 2026): the mirror
+    # clamp exists for a STALE venue read (the maintenance-morning shorts);
+    # nine Week-3 totals with dozens of partial fills netted to ZERO in the
+    # mirror while the venue held them, and sat naked. One fresh venue
+    # read settles a disagreement — held on both reads = held.
+    try:
+        _dis = []
+        for _r5, _b5, _s5, _sy5 in cands:
+            _n5 = float((positions.get(_s5) or {}).get("net") or 0.0)
+            _h5 = (-_n5) if _sy5 else _n5
+            if _h5 >= 1.0 and _mirror_clamp(_s5, _h5) < 1.0:
+                _dis.append(_s5)
+        if _dis:
+            _p2 = _pmm_positions_raw(client)
+            if _p2 is not None:
+                for _s5 in _dis:
+                    if float((_p2.get(_s5) or {}).get("qty") or 0.0) >= 1.0:
+                        _mirror_recheck.add(_s5)
+                res["mirror_recheck"] = len(_mirror_recheck)
+    except Exception:
+        pass
     cands.sort(key=_floor_viol)
     # BUDGET CLOCK RESTARTS HERE — the chase-night bug's THIRD sighting
     # (Sep 4 2026, first night as its own lane): _t0 at function top
@@ -23977,6 +24006,8 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         net = float((positions.get(slug) or {}).get("net") or 0.0)
         held = _mirror_clamp(slug, (-net) if synth else net)
         _venue_qty = float((positions.get(slug) or {}).get("qty") or 0.0)
+        if _venue_qty >= 1.0 and held < 1.0 and slug in _mirror_recheck:
+            held = _venue_qty            # a second venue read confirmed it
         if _venue_qty < 1.0 and held < 1.0:
             # NO POSITION → NO ASK (Rob, Sep 6 2026: "can you not sell shit
             # I don't have"). A resting AUTOMATIC sell of ours on a slug the
