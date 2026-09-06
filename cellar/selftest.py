@@ -404,32 +404,33 @@ def test_ws_mkts_request_budget() -> None:
     check("rebuild unsubscribed the old core request(s)", len(unsubs) >= 1)
 
 
-def test_gridiron_ladder_center() -> None:
-    """The actual line (Sep 5 2026): the two-sided rung nearest 50/50,
-    placeholders (1/51 stubs) ignored, model as fallback — fed the real
-    Louisiana@USC post-wipe ladder that seated USC +0.5."""
+def test_gridiron_value_window() -> None:
+    """Rob's rule (Sep 5 2026): Pinnacle is the line; bet toward the model,
+    away from Pinnacle; favorable rungs only. Rung units = home line."""
     import app as _app
-    usc = [("away", -34.5, 0.01, 0.51), ("away", -0.5, 0.01, 0.50),
-           ("home", 0.5, 0.49, 0.99), ("home", 2.5, 0.49, 0.99),
-           ("away", 14.5, 0.11, 0.30), ("away", 16.5, 0.34, 0.35),
-           ("away", 20.5, 0.43, 0.44), ("away", 24.5, 0.33, 0.57),
-           ("home", -20.5, 0.56, 0.57), ("home", -16.5, 0.65, 0.66)]
-    c, src = _app._gridiron_ladder_center(usc, "spread", 18.34)
-    check("USC ladder centers on the -20.5 rung (USC -20.5), not zero",
-          c == -20.5 and src == "atm", f"got {c} {src}")
+    # Pinnacle USC -51, model USC -45 → model says USC covers LESS → dog (away) is value,
+    # favorable rungs give the dog MORE points = home line more negative.
+    side, d = _app._gridiron_value_side("spread", -45.0, -51.0, "away", "home")
+    check("model -45 vs Pinnacle -51 → the DOG (away) is value", side == "away" and d == -1)
+    w = _app._gridiron_window([-56.5, -52.5, -51.5, -50.5, -45.5, -35.5], -51.0, d)
+    check("dog window = at the line + bigger dog numbers, inside 10 pts",
+          w == {-51.5, -52.5, -56.5}, f"got {sorted(w)}")
+    # Pinnacle -51, model -58 → favorite covers MORE → home is value; favorable = smaller spreads
+    side, d = _app._gridiron_value_side("spread", -58.0, -51.0, "away", "home")
+    check("model -58 vs Pinnacle -51 → the FAVORITE (home) is value", side == "home" and d == +1)
+    w = _app._gridiron_window([-56.5, -52.5, -51.5, -50.5, -45.5, -35.5], -51.0, d)
+    check("favorite window = at the line + smaller spreads, inside 10 pts (−35.5 is 15.5 off → out)",
+          w == {-51.5, -50.5, -45.5}, f"got {sorted(w)}")
+    # totals: Pinnacle 51, model 56 → OVER value → lower lines favorable
+    side, d = _app._gridiron_value_side("total", 56.0, 51.0, "over", "under")
+    check("model 56 vs Pinnacle 51 → OVER is value, lower lines favorable", side == "over" and d == -1)
+    w = _app._gridiron_window([45.5, 49.5, 51.5, 53.5], 51.0, d)
+    check("over window = 51.5 (nearest) + 49.5 + 45.5", w == {51.5, 49.5, 45.5}, f"got {sorted(w)}")
+    # model agrees with the line → symmetric ±1, side by edge
+    side, d = _app._gridiron_value_side("spread", -20.5, -20.5, "away", "home")
+    check("model at the line → no forced side", side is None and d == 0)
     check("1/51 stub is a placeholder", _app._gridiron_is_placeholder(0.01, 0.51))
-    check("49/99 mirrored stub is a placeholder", _app._gridiron_is_placeholder(0.49, 0.99))
     check("43/44 real book is not", not _app._gridiron_is_placeholder(0.43, 0.44))
-    check("33/57 thin-but-real book is not", not _app._gridiron_is_placeholder(0.33, 0.57))
-    c2, src2 = _app._gridiron_ladder_center([("home", 0.5, 0.49, 0.99)], "spread", 18.34)
-    check("all-placeholder ladder falls back to the MODEL line",
-          c2 == -18.3 and src2 == "model", f"got {c2} {src2}")
-    c3, src3 = _app._gridiron_ladder_center([("over", 55.5, 0.43, 0.44), ("over", 45.5, 0.9, 0.99)], "total", 52.0)
-    check("totals center on the 50/50 rung by line", c3 == 55.5 and src3 == "atm")
-    c4, src4 = _app._gridiron_ladder_center([("over", 35.5, 0.45, 0.49)], "total", 55.1)
-    check("a lone stray quote 20 pts off the model is NOT the line (model wins)", c4 == 55.1 and src4 == "model", f"got {c4} {src4}")
-    c5, src5 = _app._gridiron_ladder_center([("over", 59.5, 0.25, 0.29)], "total", 51.1)
-    check("a 25/29 book is not a 50/50 mark (model wins)", c5 == 51.1 and src5 == "model", f"got {c5} {src5}")
 
 
 def test_pin_line_center() -> None:
@@ -647,7 +648,7 @@ def main() -> int:
               test_batch_blocked_deps, test_owner_dependent_lanes,
               test_dry_run_blackout, test_overrun_detector,
               test_ws_quote_presence, test_ws_mkts_request_budget,
-              test_gridiron_ladder_center, test_pin_line_center,
+              test_gridiron_value_window, test_pin_line_center,
               test_lane_covers_its_documented_engines,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()

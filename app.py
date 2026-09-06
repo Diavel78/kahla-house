@@ -17830,46 +17830,42 @@ def _pin_daily_refresh(sb, now):
     return out
 
 
-def _gridiron_ladder_center(rows, mt, proj):
-    """THE ACTUAL LINE (Rob, Sep 5 2026: "the app SOMEHOW figures out
-    what the actual line is... can we not?"). The venue's app sorts a
-    ladder by price and features the rung priced nearest 50/50 — marks
-    decide. `rows` = [(side, line, bid, ask)] for every booked rung; the
-    center is the home-perspective rung value (spread: home line; total:
-    the line) of the two-sided, non-placeholder rung whose mid is nearest
-    50¢. No such rung → the MODEL's line (−proj for spreads, proj for
-    totals). The old rule — the index-middle of the enrolled ladder —
-    centered every post-wipe symmetric −34.5…+34.5 ladder on ZERO."""
-    best = None
-    for sn, ln, bid, ask in rows or []:
-        if ln is None or bid is None or ask is None:
+def _gridiron_value_side(mt, mline, center, ka, kb):
+    """(value_side, fav_dir) — the model's side of the line and the
+    direction (in rung units) that is FAVORABLE to it. Rung units: spread
+    = home line (negative when home favored), total = the line.
+      spread: model home line < center → home covers more than the line
+              says → HOME is value; favorable rungs have a LARGER home
+              line (fewer points to cover): fav_dir = +1. Else AWAY,
+              favorable = smaller home line (more points for the dog): −1.
+      total:  model total > center → OVER; favorable = lower lines: −1.
+              Else UNDER; favorable = higher lines: +1.
+    Model at the line (within a quarter point) → (None, 0): side by edge,
+    window symmetric ±1 rung."""
+    if mline is None or center is None or abs(mline - center) < 0.25:
+        return None, 0
+    if mt == "spread":
+        return (kb, +1) if mline < center else (ka, -1)   # kb = home, ka = away
+    return (ka, -1) if mline > center else (kb, +1)       # ka = over, kb = under
+
+
+def _gridiron_window(rungs, center, fav_dir):
+    """Allowed rung values: at the line or on the favorable side of it,
+    within _GRIDIRON_TAIL_PTS; fav_dir 0 → the rung nearest the line ±1."""
+    if not rungs or center is None:
+        return set()
+    if fav_dir == 0:
+        ci = min(range(len(rungs)), key=lambda i: abs(rungs[i] - center))
+        return {v for i, v in enumerate(rungs)
+                if abs(i - ci) <= 1 and abs(v - center) <= _GRIDIRON_TAIL_PTS}
+    near = min(rungs, key=lambda v: abs(v - center))
+    out = set()
+    for v in rungs:
+        if abs(v - center) > _GRIDIRON_TAIL_PTS:
             continue
-        if _gridiron_is_placeholder(bid, ask):
-            continue
-        try:
-            mid = (float(bid) + float(ask)) * 50.0
-            rv = (round(float(ln) if sn == "home" else -float(ln), 1)
-                  if mt == "spread" else round(float(ln), 1))
-        except (TypeError, ValueError):
-            continue
-        # a wide book's mid is not a mark: distance to 50 PLUS half the
-        # spread, so 43/44 (7) beats a thin 33/57 (17) as the actual line
-        d = abs(mid - 50.0) + (float(ask) - float(bid)) * 50.0
-        if best is None or d < best[0]:
-            best = (d, rv, mid)
-    # A lone stray quote is not a line (Sep 5 2026 report: a 45/49 quote
-    # on total 35.5 vs a model of 55; a 25/75 book at 59.5 vs 51): the
-    # at-the-money rung counts only when its mid is a real 50/50 (30-70¢)
-    # and it agrees with the model within _GRIDIRON_TAIL_PTS.
-    if best is not None and 30.0 <= best[2] <= 70.0:
-        if proj is None:
-            return best[1], "atm"
-        mline = (round(-float(proj), 1) if mt == "spread" else round(float(proj), 1))
-        if abs(best[1] - mline) <= _GRIDIRON_TAIL_PTS:
-            return best[1], "atm"
-    if proj is None:
-        return None, None
-    return (round(-float(proj), 1) if mt == "spread" else round(float(proj), 1)), "model"
+        if v == near or (v - center) * fav_dir > 0:
+            out.add(v)
+    return out
 
 
 def _gridiron_try_bet(sb, g, es0, d, mt, gp):
@@ -18011,30 +18007,35 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
     virgin_w = pay_virgin
     pre_window = bool(paying)
     n_paying_pre = len(paying)
-    center, center_src = _gridiron_ladder_center(
-        [(c[0], c[4], (c[3] or {}).get("bid"), (c[3] or {}).get("ask"))
-         for c in paying], mt, proj)
-    # PINNACLE FIRST (Rob, Sep 5 2026): the sharpest book's own line is
-    # the actual line when we hold a fresh daily slate; the venue's
-    # at-the-money rung second; the model only when nothing else exists.
+    # ── THE LINE + THE VALUE SIDE (Rob, Sep 5 2026 reopen) ──────────────
+    # "Pinnacle when we have it. If we don't, then the model. And if we
+    # don't, I don't know." Then: "if the model differs from Pinnacle, you
+    # bet TOWARD the model, away from Pinnacle. Betting a favorite, go
+    # down (Pinnacle −51 → bet −35). Betting the dog, bet up (+45 → +52).
+    # Assuming everything's paying rent." So: center = Pinnacle's line,
+    # else the model's; the value side = the model's side of that line;
+    # the window = paying rungs at the line or on the FAVORABLE side of it
+    # for that side, within the tail gate; the 25-60¢ band (already in
+    # `viable`) is what keeps "−35 when it's −51" from being a 90¢ ticket.
+    mline = (round(-float(proj), 1) if mt == "spread" else round(float(proj), 1))
+    center, center_src, pin_line = mline, "model", None
     try:
         _ev = g.get("event_name") or ""
         if " @ " in _ev:
             _aw, _hm = [x.strip() for x in _ev.split(" @ ", 1)]
-            _pc = _pin_line_center(sb, g.get("sport"), _aw, _hm, mt, now_utc)
-            if _pc is not None:
-                center, center_src = _pc, "pinnacle"
+            pin_line = _pin_line_center(sb, g.get("sport"), _aw, _hm, mt, now_utc)
+            if pin_line is not None:
+                center, center_src = pin_line, "pinnacle"
     except Exception:
         pass
-    if len(rungs) > 1 and center is not None:
-        # ±1 rung around THE ACTUAL LINE (the two-sided rung nearest
-        # 50/50; the model's line only when nothing is quoted), and never
-        # more than _GRIDIRON_TAIL_PTS from it, whatever the venue enrolls.
-        _ci = min(range(len(rungs)), key=lambda i: abs(rungs[i] - center))
-        allowed = {v for i, v in enumerate(rungs)
-                   if abs(i - _ci) <= 1 and abs(v - center) <= _GRIDIRON_TAIL_PTS}
-        paying = [c for c in paying if _rungv(c[0], c[4]) in allowed]
-        virgin_w = [v for v in pay_virgin if _rungv(v[0], v[2]) in allowed]
+    # value side vs the center (rung value = home line for spreads, the
+    # total for totals). None = model agrees with the line → side by edge.
+    value_side, fav_dir = _gridiron_value_side(mt, mline, center, ka, kb)
+    allowed = _gridiron_window(rungs, center, fav_dir)
+    paying = [c for c in paying if _rungv(c[0], c[4]) in allowed
+              and (value_side is None or c[0] == value_side)]
+    virgin_w = [v for v in pay_virgin if _rungv(v[0], v[2]) in allowed
+                and (value_side is None or v[0] == value_side)]
     if not paying:
         # No BOOKED paying rung inside the window — try seeding a
         # windowed virgin one (our own line at model fair−6).
@@ -18074,16 +18075,10 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
     # ARE middle+neighbor; odd → middle plus the best-model-edge other
     # windowed rung. (A virgin middle simply yields no booked candidate
     # here — the seeder path above owns the nothing-booked case.)
-    n_l = len(rungs)
-    if n_l >= 2 and n_l % 2 == 0:
-        targets = [rungs[n_l // 2 - 1], rungs[n_l // 2]]
-    elif n_l >= 1:
-        mid_v = rungs[n_l // 2]
-        nb = [s for s in scored if s["rv"] != mid_v]
-        targets = [mid_v] + ([max(nb, key=lambda s: s["e"])["rv"]]
-                             if nb else [])
-    else:
-        targets = sorted({s["rv"] for s in scored})[:2]
+    # TWO SEATS: the allowed rung at/nearest the line, then the next one
+    # toward the model (further along the favorable direction).
+    _rv_order = sorted({s["rv"] for s in scored}, key=lambda v: abs(v - center))
+    targets = _rv_order[:2]
     # ONE ORDER PER SLUG stays the invariant: a rung already carrying a
     # pending pick is occupied, not a candidate. The executor's
     # per-(market, type) dedup is bypassed below (it allows only one bet
@@ -18143,6 +18138,8 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
               "rung_window": len(rungs) > 1,
               "rung_role": "middle" if ti == 0 else "neighbor",
               "line_center": center, "center_src": center_src,
+              "pin_line": pin_line, "model_line": mline,
+              "value_side": value_side,
               "rung_dist": round(s["dist"], 1),
               "early_noveto": bool(_noveto
                                    and s["e"] < _GRIDIRON_MIN_EDGE_PP)}

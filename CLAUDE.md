@@ -1109,6 +1109,21 @@ or a pending row untouched >2h (executor dead). (f) **NFL props LIVE
 carried guessed patterns that matched nothing); fbprop fills join the
 scalp arm (cost-floor asks) so TURN RATE — can props exit — is a
 measured sells/fills number, the user's explicit experiment.
+(i) **THE LINE + THE VALUE SIDE (Rob, Sep 5 2026 reopen — SUPERSEDES the
+Sep 2 "middle of the paying ladder" rule, which centered every post-wipe
+symmetric −34.5…+34.5 ladder on ZERO and seated USC +0.5 / Georgia +2.5):**
+center = **Pinnacle's line** (`_pin_line_center`, cache-only; the slate is
+re-pulled once a day after 6am AZ by `_pin_daily_refresh`, ~180 credits/mo
+of the parlay-api free tier), else the **model's** line; neither → no bet.
+Value side = the model's side of that line ("if the model differs from
+Pinnacle, bet TOWARD the model"); the window = paying rungs at the line or
+on the FAVORABLE side for that side within `_GRIDIRON_TAIL_PTS` ("betting
+a favorite, go down: −51 → −35; the dog, go up: +45 → +52"), the 25-60¢
+band doing the pricing sanity. Two seats: nearest the line, then the next
+toward the model. `_gridiron_value_side` / `_gridiron_window`, selftest
+`test_gridiron_value_window`. The venue's empty-book stub (1¢/51¢, 49/99
+mirrored) is a VIRGIN rung, never a book (`_gridiron_is_placeholder`).
+Every bet stamps `line_center/center_src/pin_line/model_line/value_side`.
 (h) **FOOTBALL GHOST ADOPTION (Sep 5 2026, docket #6 root fix):** the
 reconcile's two-strike delete can false-kill a pick during a venue wobble
 while the ORDER stays alive (found live: 5 AUTOMATIC 20-lot orders + 1
