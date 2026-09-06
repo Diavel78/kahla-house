@@ -357,6 +357,19 @@ above center / under below) = a bug, show Rob; (4) scalp `uncovered` → 0;
 (6) the USC +0.5 order (CAM4QW1JAPPV) — venue ignores cancels on it,
 unfillable, expires Sep 13; (7) Monday: the $570 payout verify.
 
+**SUNDAY'S WORK (Rob, Sat night, in this order):** (1) **NFL props read**
+— fills vs scalp exits on `astatc-nfl` slugs (the turn-rate experiment),
+model call vs market outcome, then a stake decision (5 contracts, cap 30
+today; the fbprop funnel stamp lands from the box now). (2) **Quote table
+last mile** — fill-status: `fs_rest_outbid` still pays a REST read per
+table-confirmed outbid (needs depth for the chase; decide whether depth
+can come from the table or the walk can be deferred to the chase);
+scalp: the walk is table-first now but its setup still re-reads every
+position — target repeg + scalp laps ≈ 1 min. Monday's payout verify
+"takes care of itself" (Rob). **The rent cull is OFF** (Rob: enrolled =
+paying, the chase and the side-flip do the rest); code dormant. Dashboard
+now shows "rent so far today" (venue posts the current day ~8pm AZ).
+
 
 ## 0. First hour back — read the week
 - `desired_orders`: never_tried should have hit ~0 within a day of
