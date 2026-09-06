@@ -426,6 +426,14 @@ def test_gridiron_value_window() -> None:
     check("model 56 vs Pinnacle 51 → OVER is value, lower lines favorable", side == "over" and d == -1)
     w = _app._gridiron_window([45.5, 49.5, 51.5, 53.5], 51.0, d)
     check("over window = 51.5 (nearest) + 49.5 + 45.5", w == {51.5, 49.5, 45.5}, f"got {sorted(w)}")
+    # every seat sits at the line or on ITS side's favorable side of it
+    ok = _app._gridiron_side_ok
+    check("dog +17.5 under a -20.5 line is REFUSED", not ok("spread", "away", -17.5, -20.5, "away", "home"))
+    check("dog +24.5 over a -20.5 line is fine", ok("spread", "away", -24.5, -20.5, "away", "home"))
+    check("favorite -20.5 at the line is fine", ok("spread", "home", -20.5, -20.5, "away", "home"))
+    check("favorite -24.5 (more points) is REFUSED", not ok("spread", "home", -24.5, -20.5, "away", "home"))
+    check("over 53.5 above a 50 total is REFUSED", not ok("total", "over", 53.5, 50.0, "over", "under"))
+    check("under 53.5 above a 50 total is fine", ok("total", "under", 53.5, 50.0, "over", "under"))
     # model agrees with the line → symmetric ±1, side by edge
     side, d = _app._gridiron_value_side("spread", -20.5, -20.5, "away", "home")
     check("model at the line → no forced side", side is None and d == 0)

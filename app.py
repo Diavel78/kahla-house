@@ -17993,6 +17993,22 @@ def _gridiron_value_side(mt, mline, center, ka, kb):
     return (ka, -1) if mline > center else (kb, +1)       # ka = over, kb = under
 
 
+def _gridiron_side_ok(mt, sn, rv, center, ka, kb):
+    """A seat is at the line or on ITS side's favorable side of it — for
+    every side, whatever centered the line (Sep 6 2026, WKU +17.5 under a
+    −20.5 model: in model-only mode the window was symmetric and the
+    dog took FEWER points than the line). Spread rung value = home line:
+    home (kb) needs rv >= center (fewer points to cover), away (ka) needs
+    rv <= center (more points). Total: over needs rv <= center, under
+    rv >= center."""
+    if center is None or rv is None:
+        return True
+    eps = 0.01
+    if mt == "spread":
+        return (rv >= center - eps) if sn == kb else (rv <= center + eps)
+    return (rv <= center + eps) if sn == ka else (rv >= center - eps)
+
+
 def _gridiron_window(rungs, center, fav_dir):
     """Allowed rung values: at the line or on the favorable side of it,
     within _GRIDIRON_TAIL_PTS; fav_dir 0 → the rung nearest the line ±1."""
@@ -18193,9 +18209,11 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
     value_side, fav_dir = _gridiron_value_side(mt, mline, center, ka, kb)
     allowed = _gridiron_window(rungs, center, fav_dir)
     paying = [c for c in paying if _rungv(c[0], c[4]) in allowed
-              and (value_side is None or c[0] == value_side)]
+              and (value_side is None or c[0] == value_side)
+              and _gridiron_side_ok(mt, c[0], _rungv(c[0], c[4]), center, ka, kb)]
     virgin_w = [v for v in pay_virgin if _rungv(v[0], v[2]) in allowed
-                and (value_side is None or v[0] == value_side)]
+                and (value_side is None or v[0] == value_side)
+                and _gridiron_side_ok(mt, v[0], _rungv(v[0], v[2]), center, ka, kb)]
     if not paying:
         # No BOOKED paying rung inside the window — try seeding a
         # windowed virgin one (our own line at model fair−6).
