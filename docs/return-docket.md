@@ -326,6 +326,37 @@ recovering does not mean the venue executes — trust only a CHANGED book.
 Also noted: box .env has no FILLS_CRON_SECRET → the route-driven lanes
 (vsin 401, kalshi_autolog 403) fail on their drive some ticks; fix later.
 
+## ✅ REOPEN — Sat Sep 5 evening (venue engine back ~17:44; wipe = every
+## resting order exchange-wide, positions intact, zero fills in the halt)
+Reopened 18:00 (Rob: "get the orders rolling"): 7 order-less picks cleared
+(backup venue_wipe_sep5), 175 OMS rows re-queued, flags lifted. Then the
+day's real lesson, caught by Rob on his phone: the Sep 2 "middle of the
+paying ladder" rule centered every post-wipe symmetric −34.5…+34.5 ladder
+on ZERO (USC +0.5, Georgia +2.5), and once that was fixed the model-as-
+center seated Over 53.5/55.5 against a 49-51 total (PSU@Temple). Final
+rule (6cc9681, 97/97): **RENT FIRST — a paying, published game is bet;
+the only no-bet is no rent or no model (FCS). LINE = remembered book
+line (`book_lines`: Pinnacle > DraftKings > FanDuel, three-book daily
+pull after 6am AZ, kept a week so a game-day line pull changes nothing)
+→ the venue's own real two-sided line (stray/stub guarded) → the model.
+DIRECTION = the model, always. RUNGS at the line or on its favorable side
+(dog up, favorite down, over down, under up), two seats, 25-60¢ band.**
+First seats under it (Arkansas@Utah): over 51.5 at the venue's 51.5 with
+model 60.5; Arkansas +17.5 at the venue's −17.5 with model −7.9. Correct
+both ways. 68 duplicate adoption rows (a failed pick-list read → adopt-
+everything; fixed fail-closed) deleted, book = one pick per position.
+**Flags at bedtime:** bets_paused=false, oms/seed/repeg/scalp=true,
+rent_cull.dry=TRUE (the cull's cancel-verify + dead-list enforcement are
+live code; flip dry→false when Rob wants the 16 dead rungs re-culled).
+**MORNING CHECK:** (1) book_lines has draftkings/fanduel rows (the 6am
+pull); (2) seats since 19:13 by center_src — 'model' should be rare and
+only on virgin ladders; (3) any seat on the WRONG side of its line
+(spread: dog with fewer points than center / fav with more; total: over
+above center / under below) = a bug, show Rob; (4) scalp `uncovered` → 0;
+(5) venue rent programs re-enrolled? (`oms_rent` verdicts falling);
+(6) the USC +0.5 order (CAM4QW1JAPPV) — venue ignores cancels on it,
+unfillable, expires Sep 13; (7) Monday: the $570 payout verify.
+
 
 ## 0. First hour back — read the week
 - `desired_orders`: never_tried should have hit ~0 within a day of
