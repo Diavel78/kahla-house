@@ -2923,6 +2923,16 @@ def _pnl_stack_memo(sb, derived_so_far: dict):
                 stale = _parse_iso(req_at) > _parse_iso(prior["computed_at"])
             except Exception:
                 stale = False          # unreadable stamps → keep serving
+        # HOURLY (Sep 5 2026, post-C2): the YTD walk is 61s on the local
+        # socket, so the stack refreshes every hour on its own — the
+        # midnight-or-button rule was a cloud-round-trip economy. The
+        # button still forces an immediate one.
+        if not stale and prior.get("computed_at"):
+            try:
+                stale = (datetime.now(timezone.utc)
+                         - _parse_iso(prior["computed_at"])).total_seconds() > 3600
+            except Exception:
+                pass
     if not stale:
         stk = dict(prior)
         gd = derived_so_far.get("gameday_pnl") or {}
