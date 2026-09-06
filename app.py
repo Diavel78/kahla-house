@@ -23785,6 +23785,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         positions = _pmm_positions_raw(client)
     if orders is None or positions is None:
         return {"gate": "venue_read"}    # venue dark — never act blind
+    res["t_setup"] = round(_time.time() - _t0, 1)   # picks + mirror + venue reads
 
     # FLOOR VIOLATIONS FIRST (Aug 27 night): with every pre-game ask
     # stepping toward its floor by design, all 30+ candidates want a walk
@@ -24083,6 +24084,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         if _scalp_create(client, sb, r, b, slug, synth, sell_intent,
                          tgt, int(held2), now, walked_from=our_ask):
             res["walked"] += 1
+    res["t_lap"] = round(_time.time() - _t0, 1)
     return res
 
 
@@ -24303,6 +24305,10 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                     only_slugs=(_dirty if _targeted else None))
             except Exception:
                 continue
+            # ALWAYS stamped (Sep 6 2026): the old t_fs landed only when a
+            # chase candidate existed, so a no-candidate lap hid the walk
+            # entirely — 300s laps with 24s of measured work.
+            res["t_fs"] = round(_time.time() - _tp, 1)
             if not fs.get("configured"):
                 continue
             cands = [f for f in (fs.get("fills") or [])
@@ -24809,12 +24815,15 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
         # lane that already owns order mutation), after the chase work.
         # Own 15-min cadence inside; its own try so a reconcile fault can
         # never cost a chase.
+        _tq = _time.time()
         try:
             res["reconcile"] = _reconcile_tick(sb, now, client=lap_client,
                                                orders=lap_orders,
                                                positions=lap_positions)
         except Exception:
             pass
+        res["t_recon"] = round(_time.time() - _tq, 1)
+        _tq = _time.time()
         # THE RENT CULL rides the same lease (Sep 5 2026): hourly, after
         # the reconcile, its own try — a cull fault can never cost a chase.
         try:
@@ -24822,6 +24831,8 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                                                orders=lap_orders)
         except Exception:
             pass
+        res["t_cull"] = round(_time.time() - _tq, 1)
+        _tq = _time.time()
         # RECENTER rides the same lease (Sep 6 2026): every 15 min, after
         # the reconcile — unfilled football seats follow the line.
         try:
@@ -24830,6 +24841,8 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 positions=lap_positions)
         except Exception:
             pass
+        res["t_recenter"] = round(_time.time() - _tq, 1)
+        _tq = _time.time()
         # THE SCALP SELL ARM rode this lease from Aug 28 to Sep 4 2026 —
         # and starved to death here: the chase work pre-spends the shared
         # budget, so the scalp exited `gate: budget` every lap for 30+
@@ -24849,6 +24862,8 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
         except Exception:
             pass
     except Exception:
+        res["t_scalp"] = round(_time.time() - _tq, 1)
+        res["t_lap"] = round(_time.time() - _t0, 1)
         pass
     # MEASURED, not assumed. The 1-per-tick cap was justified by a 10s
     # Hobby-tier budget this project left months ago; every tick now
