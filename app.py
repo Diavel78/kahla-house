@@ -1081,7 +1081,52 @@ def get_client():
     if _PMM_TRADE_CLIENT is None:
         _PMM_TRADE_CLIENT = PolymarketUS(key_id=POLYMARKET_KEY_ID,
                                          secret_key=POLYMARKET_SECRET_KEY)
+        _install_serial_writes(_PMM_TRADE_CLIENT)
     return _PMM_TRADE_CLIENT
+
+
+# VENUE WRITES ARE SERIAL — PER CALL, NOT PER LANE (Sep 6 2026). The
+# cellar's Invariant 2 held one process lock across a money lane's WHOLE
+# run; the lap timers showed the opener holding it 220-290s of mostly
+# REST reads while scalp (25s of work) and repeg queued behind it. What
+# the invariant protects is the venue never seeing two of our writes in
+# flight at once (the Cloudflare rate-limit lesson, the one-order-per-
+# slug invariant). That is a property of the WRITE CALLS, so the trading
+# client enforces it itself: every orders.create/cancel/modify takes
+# _VENUE_WRITE_LOCK; reads never do. One place, every call site, present
+# and future. `CELLAR_LANE_LOCK=1` restores the whole-run lock.
+_VENUE_WRITE_LOCK = threading.RLock()
+_VENUE_WRITE_STATS = {"create": 0, "cancel": 0, "modify": 0, "wait_s": 0.0}
+
+
+class _SerialOrders:
+    """orders.* proxy: writes serialized under _VENUE_WRITE_LOCK, reads
+    forwarded untouched."""
+    _WRITES = ("create", "cancel", "modify")
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getattr__(self, name):
+        fn = getattr(self._inner, name)
+        if name not in self._WRITES or not callable(fn):
+            return fn
+
+        def _serial(*a, **k):
+            t0 = _time.monotonic()
+            with _VENUE_WRITE_LOCK:
+                _VENUE_WRITE_STATS["wait_s"] += _time.monotonic() - t0
+                _VENUE_WRITE_STATS[name] = _VENUE_WRITE_STATS.get(name, 0) + 1
+                return fn(*a, **k)
+        return _serial
+
+
+def _install_serial_writes(client) -> None:
+    try:
+        if not isinstance(getattr(client, "orders", None), _SerialOrders):
+            client.orders = _SerialOrders(client.orders)
+    except Exception:
+        pass
 
 
 # FAST-FAIL BULK READS (Aug 29 2026 — the repeg-lap anatomy: laps ran

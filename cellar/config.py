@@ -50,6 +50,14 @@ def _flag(name: str, default: bool) -> bool:
 # THE MASTER SWITCH. True => every lane runs its read path and logs what it
 # WOULD do, but no venue write and no DB mutation from a write engine.
 DRY_RUN = _flag("CELLAR_DRY_RUN", True)
+# LANE-LEVEL WRITE LOCK (Invariant 2 as first written: money lanes hold one
+# process lock for their WHOLE run). Sep 6 2026 lap timers: opener held it
+# 220-290s per lap while mostly REST-READING; scalp (25s of real work) and
+# repeg (~60s) sat behind it and showed as 250-300s laps. Venue WRITES are
+# now serialized per call by the trading client itself (app._VENUE_WRITE_LOCK
+# around orders.create/cancel/modify), which is what the invariant was for.
+# Flip this on to get the old whole-run lock back instantly.
+LANE_LOCK = _flag("CELLAR_LANE_LOCK", False)
 
 # WS WAKE FEED (docs/ws-feed-spec.md). Default ON, and safe to be: the feed
 # is a pure HINT — it only pulls the repeg lane's next-due forward, and it

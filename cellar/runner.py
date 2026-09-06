@@ -181,7 +181,10 @@ class Runner:
                             detail={})
 
         # Invariant 2: serialize venue writes.
-        lock = self.write_lock if spec.writes_money else None
+        # Per-write serialization lives in the trading client now (see
+        # config.LANE_LOCK); the whole-run lock is the opt-in revert.
+        lock = (self.write_lock
+                if (spec.writes_money and config.LANE_LOCK) else None)
         if lock:
             lock.acquire()
         try:
