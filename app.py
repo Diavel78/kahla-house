@@ -18149,10 +18149,12 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
         if _vc is not None:
             center, center_src = _vc, _vs
     if center is None:
-        if not paying:                        # virgin ladder → seed at model fair−6
-            center, center_src = mline, "model"
-        else:
-            return "no_line"                  # a real market we can't read → no bet
+        # RENT FIRST (Rob, Sep 5 2026 night, the standing order): "once a
+        # game shows up paying rent and Polymarket has published it, that
+        # game gets bet — no model, no Pinnacle, DraftKings, whatever." No
+        # book line and no readable venue line → the model centers and the
+        # bet is still made. The only no-bet is no rent or no model (FCS).
+        center, center_src = mline, "model"
     # value side vs the center (rung value = home line for spreads, the
     # total for totals). None = model agrees with the line → side by edge.
     value_side, fav_dir = _gridiron_value_side(mt, mline, center, ka, kb)
