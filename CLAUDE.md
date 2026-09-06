@@ -1254,12 +1254,13 @@ sport the machine ever adds:
   through LIVE games, a Nationals ask 19¢ over cost: "if I own it for 50
   and the sell touch is 54, list 53, then 52, 51, 50. Never under my
   cost").** Lead a REAL touch by one tick, step down ONE tick per lap
-  while we are the touch, floor at cost, hold. **The recurring error had
-  two roots, neither the rule:** (1) the venue's empty-book placeholder
-  (97-99¢ ask, 1¢ bid, 10-20k contracts) was read as a touch, so asks
-  parked at 96-99¢ — now an ask at/above `_SCALP_ASK_CEIL_C`=90 or on a
-  book wider than 30¢ is nobody, and the ask holds at cost; (2) **the
-  scalp walked at most 5 asks per lap in the same order every lap**
+  while we are the touch, floor at cost, hold. **THE PLACEHOLDER IS THE TOUCH — there is NO stub guard and NO
+  ceiling (Rob, same hour, killing a 90¢ ceiling that lived two hours:
+  "if the contracts they're selling are at 99, my sell is at 98 because
+  it's the fucking touch. Somebody real comes in at 60 — then I'm at 59.
+  Same for buying: their 1¢, my 2¢; a real 25 shows up, I'm at 26").**
+  The recurring error had ONE root, not the rule: **the scalp walked at
+  most 5 asks per lap in the same order every lap**
   ("that was the entire issue" — Rob), so most asks never got a turn and
   never stepped down with the market — the cap is 60 with the 90s write
   budget as the real bound, step-downs run in FAIR ROTATION (oldest walk

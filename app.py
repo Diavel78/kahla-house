@@ -23081,8 +23081,9 @@ _SCALP_MAX_PLACE = 5         # fresh asks per tick (creates — no cancel leg).
                              # real limits are SERIAL writes (kept — the
                              # Aug 16 duplicate/Cloudflare lesson) and the
                              # wall clock below.
-_SCALP_ASK_CEIL_C = 90.0     # no scalp ask ever rests at/above this (a 99¢
-#   ask is a parked position, not a sell — Sep 6 2026)
+_SCALP_ASK_CEIL_C = 99.0     # the venue's own max — NOT a policy ceiling. (A 90¢
+#   ceiling lived here for two hours on Sep 6 2026 and was wrong: Rob — "my
+#   sell is at 98 because it's the fucking touch".)
 _SCALP_MAX_WALKS = 60        # the 90s write budget is the real bound (Rob, Sep 6 2026: the old 5-a-lap cap WAS the whole scalp failure) (1→2→5→10→60
 #   laps are ~50s now, the 90s write budget still bounds it) (1→2→5
                              # first armed night; still serial, wall-clock
@@ -23899,10 +23900,8 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # OFF-COST ASK IS A REPAIR (Sep 6 2026 — the ATL@PHI 96.5¢ and
         # DET@CLE 99¢ asks that sat through live games as "covered"): the
         # ask belongs at cost; one more than a cent off it moves first.
-        # PARKED OR LIVE = REPAIR FIRST (Sep 6 2026): an ask at/above the
-        # ceiling, or on a game that has started, moves before routine steps.
-        if a4 >= _SCALP_ASK_CEIL_C:
-            return (0, 0.0)
+        # LIVE = REPAIR FIRST (Sep 6 2026): an ask on a game that has
+        # started moves before routine steps (the touch moves fast in-play).
         try:
             if datetime.fromisoformat(
                     str(r4.get("event_start")).replace("Z", "+00:00")) <= now:
@@ -24088,15 +24087,11 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 continue                 # that level is (only) us
             comp_ask = c
             break
-        # A VENUE STUB IS NOT A TOUCH (Sep 6 2026 — the Phillies 96.5¢ and
-        # Guardians 99¢ asks through live games): on an empty or freshly
-        # re-provisioned book the only "ask" is the venue's 97-99¢
-        # placeholder. At/above the ceiling, or on a book wider than 30¢,
-        # nobody is quoting — hold at cost until someone is.
-        if comp_ask is not None and (
-                comp_ask >= _SCALP_ASK_CEIL_C
-                or (best_bid is not None and comp_ask - best_bid >= 30.0)):
-            comp_ask = None
+        # THE PLACEHOLDER IS THE TOUCH (Rob, Sep 6 2026: "if the contracts
+        # they're selling are at 99, my sell is at 98 because it's the
+        # touch. Somebody real comes in at 60 — then I'm at 59"). No stub
+        # guard, no ceiling: lead whatever is there; the walk below follows
+        # real sellers down the moment they appear.
         if not mine:
             # UNCOVERED = inventory with no resting ask. The dead-scalp
             # tripwire keys on THIS, not on cands: a healthy quiet book
