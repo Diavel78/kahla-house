@@ -375,6 +375,9 @@ def test_ws_mkts_request_budget() -> None:
         mf._covered = set(); mf._ops = []; mf._expiry = {}; mf._gseq = 0
         mf._base_seen = set(); mf._dirty_add = None
         mf._ladders = {}; mf._pending = {}; mf._last_repack = 0.0; mf._pack_hold_until = 0.0
+        mf._last_pack_build = 0.0; mf._pack_born = {}; mf._pack_audited = set()
+        mf._miss_count = {}; mf._parked = {}; mf.audit_stats = {"packs": 0, "silent": 0, "missing": 0}
+        mf.sb = None
         return mf
     mf = fresh(); ws = FakeWS()
     for i in range(12):
@@ -420,15 +423,45 @@ def test_ws_mkts_request_budget() -> None:
     mf2._pack_flush(ws2, force=True)            # budget full, packs fresh → NO repack
     check("a full budget with fresh packs and nothing dead does NOT repack",
           mf2._pack_budget_used() == budget and len(ws2.sent) == n_before)
+    mf2._base_seen |= set(mf2._covered)             # healthy packs: every baseline arrived
     later = _t.time() + 3 * 3600 + W.REPACK_MIN_S   # ~140 ladders kicked off → dead weight
     mf2._pack_flush(ws2, nowt=later, force=True)
     unsubs = [m for m in ws2.sent[n_before:] if "unsubscribe" in m]
     check("dead weight → repack unsubscribed every pack and holds 2s",
           len(unsubs) == budget and mf2._pack_budget_used() == 0 and mf2._pack_hold_until > later)
     mf2._pack_flush(ws2, nowt=later + 3.0, force=True)
+    mf2._base_seen |= set(mf2._covered)
     check("after the hold the LIVE set re-packs (dead rungs gone)",
           mf2._pack_budget_used() >= 1 and "b0-0" not in mf2._covered and "b299-0" in mf2._covered,
           f"rids {mf2._pack_budget_used()} b0 {'b0-0' in mf2._covered} b299 {'b299-0' in mf2._covered}")
+    # BASELINE AUDIT: the venue acks nothing; a rung with no baseline 30s
+    # after its pack went out was never subscribed
+    mf4 = fresh(); ws4 = FakeWS()
+    for i in range(4):
+        mf4.add_group(f"a{i}", {f"a{i}-{k}" for k in range(5)}, _t.time() + 3600)
+    mf4._apply_ops(ws4); mf4._pack_flush(ws4, force=True)
+    pk = next(g for g in mf4._groups if g.startswith("pack"))
+    all_slugs = set(mf4._groups[pk][1])
+    for s in all_slugs - {"a3-0", "a3-1"}:
+        mf4._base_seen.add(s)                      # 18 baselines arrived, 2 never did
+    mf4._pack_flush(ws4, nowt=_t.time() + 31.0)
+    check("rungs without a baseline are un-covered and re-queued",
+          "a3-0" not in mf4._covered and "a3-0" in mf4._pending and "a0-0" in mf4._covered)
+    check("audit stats count the miss", mf4.audit_stats == {"packs": 1, "silent": 0, "missing": 2}, f"got {mf4.audit_stats}")
+    mf5 = fresh(); ws5 = FakeWS()
+    mf5.add_group("z", {"z-1", "z-2", "z-3"}, _t.time() + 3600)
+    mf5._apply_ops(ws5); mf5._pack_flush(ws5, force=True)
+    n5 = len(ws5.sent)
+    mf5._pack_flush(ws5, nowt=_t.time() + 31.0)   # zero baselines → silent failure
+    check("a pack with ZERO baselines is torn down and re-queued whole",
+          mf5._pack_budget_used() == 0 and {"z-1", "z-2", "z-3"} <= set(mf5._pending)
+          and any("unsubscribe" in m for m in ws5.sent[n5:]) and mf5.audit_stats["silent"] == 1)
+    mf5._pack_flush(ws5, nowt=_t.time() + 40.0, force=True)   # re-sent
+    mf5._pack_flush(ws5, nowt=_t.time() + 80.0)               # misses again → parked
+    check("a rung that misses twice is PARKED (REST prices it) instead of churning",
+          "z-1" in mf5._parked and "z-1" not in mf5._pending and mf5._pack_budget_used() == 0)
+    mf5._pack_flush(ws5, nowt=_t.time() + 80.0 + W.PARK_S + 1, force=True)
+    check("after PARK_S it is tried again", "z-1" in mf5._covered)
     # core drift (unchanged semantics)
     mf3 = fresh(); ws3 = FakeWS()
     big = {f"core-{i}" for i in range(40)}

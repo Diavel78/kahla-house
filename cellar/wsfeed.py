@@ -89,6 +89,17 @@ PACK_SLUGS = 350
 PACK_BATCH_S = 20.0
 PACK_CORE_RESERVE = 3
 REPACK_MIN_S = 600.0
+# BASELINE AUDIT (Rob, Sep 6 2026: "how do we know if it pulled all the
+# ladder rungs? Don't they fail silently?"): the venue acks nothing per
+# slug, but it REPLAYS one baseline frame per subscribed market. A rung
+# with no baseline BASELINE_WAIT_S after its pack went out was never
+# subscribed: un-cover it (no table answer, no presence vouching) and
+# re-queue it; a pack with ZERO baselines is a silent failure → torn
+# down and re-queued whole. A rung that misses twice is PARKED for
+# PARK_S (REST prices it) so a book-less market can't churn packs.
+BASELINE_WAIT_S = 30.0
+PARK_S = 600.0
+PARK_AFTER_MISSES = 2
 
 RECV_TIMEOUT_S = 75.0    # heartbeat watchdog: silence this long = dead socket
 WAKE_MIN_S = 15.0        # private-event wake throttle (repeg)
@@ -621,6 +632,11 @@ class MarketsFeed:
         self._last_repack = 0.0
         self._last_pack_build = 0.0
         self._pack_hold_until = 0.0
+        self._pack_born: dict[str, float] = {}     # gid -> subscribe ts
+        self._pack_audited: set[str] = set()
+        self._miss_count: dict[str, int] = {}
+        self._parked: dict[str, float] = {}        # slug -> until ts
+        self.audit_stats = {"packs": 0, "silent": 0, "missing": 0}
 
     # ── public API (lane threads queue; the feed thread executes) ──
     def set_slugs(self, slugs: set, replace: bool) -> None:
@@ -676,7 +692,12 @@ class MarketsFeed:
                 "params": {"kind": "ws_mkts"},
                 "result": {"state": state, "err": (err or "")[:300],
                            "msgs": self.msgs, "watched": len(self._slugs),
-                           "reconnects": self.reconnects},
+                           "reconnects": self.reconnects,
+                           "packs": sum(1 for g in self._groups if g != "core"),
+                           "pending": len(self._pending),
+                           "parked": len(self._parked),
+                           "baselines": len(self._base_seen),
+                           "audit": dict(self.audit_stats)},
             }).execute()
         except Exception:
             pass
@@ -935,8 +956,57 @@ class MarketsFeed:
         self._expiry[gid] = max((live.get(s, 1e18) for s in slugs),
                                 default=None)
         self._last_pack_build = time.time()
+        self._pack_born[gid] = time.time()
         for s in slugs:
             self._pending.pop(s, None)
+
+    def _pack_audit(self, ws, nowt: float) -> bool:
+        """Verify each pack against the baselines the venue replayed."""
+        changed = False
+        for gid in list(self._groups):
+            if gid == "core" or gid in self._pack_audited:
+                continue
+            born = self._pack_born.get(gid)
+            if born is None or nowt - born < BASELINE_WAIT_S:
+                continue
+            rids, sl = self._groups[gid]
+            missing = set(sl) - self._base_seen
+            self._pack_audited.add(gid)
+            self.audit_stats["packs"] += 1
+            if not missing:
+                continue
+            self.audit_stats["missing"] += len(missing)
+            silent = (len(missing) == len(sl))
+            if silent:
+                self.audit_stats["silent"] += 1
+                for r in rids:
+                    try:
+                        ws.send(json.dumps({"unsubscribe": {"requestId": r}}))
+                    except Exception:
+                        pass
+                    self._rid_slugs.pop(r, None)
+                self._groups.pop(gid, None)
+                self._expiry.pop(gid, None)
+                self._pack_born.pop(gid, None)
+            self._covered -= missing
+            _forget_quotes(missing)
+            for s in missing:
+                n = self._miss_count.get(s, 0) + 1
+                self._miss_count[s] = n
+                if n >= PARK_AFTER_MISSES:
+                    self._parked[s] = nowt + PARK_S
+                else:
+                    self._pending.setdefault(s, nowt)
+            changed = True
+            log.warning("ws mkts pack %s audit: %d/%d rungs sent no baseline "
+                        "in %ds%s — un-covered, %s", gid, len(missing),
+                        len(sl), int(BASELINE_WAIT_S),
+                        " (SILENT FAILURE, pack torn down)" if silent else "",
+                        "re-queued" if not silent else "re-queued whole")
+            self._stamp("pack_audit",
+                        f"{gid} missing {len(missing)}/{len(sl)}"
+                        + (" SILENT" if silent else ""))
+        return changed
 
     def _pack_flush(self, ws, nowt=None, force: bool = False) -> bool:
         """Subscribe pending rungs as cross-game packs. Batches for
@@ -946,11 +1016,17 @@ class MarketsFeed:
         if nowt < self._pack_hold_until:
             return False
         live = self._live_rungs(nowt)
+        changed = self._pack_audit(ws, nowt)
+        for s, until in list(self._parked.items()):   # un-park when due
+            if until <= nowt:
+                self._parked.pop(s, None)
+                if s in live and s not in self._covered:
+                    self._pending.setdefault(s, nowt)
         for s in list(self._pending):
-            if s not in live or s in self._covered:
+            if s not in live or s in self._covered or s in self._parked:
                 self._pending.pop(s, None)
         if not self._pending:
-            return False
+            return changed
         oldest = min(self._pending.values())
         if (not force and len(self._pending) < PACK_SLUGS
                 and nowt - oldest < PACK_BATCH_S):
