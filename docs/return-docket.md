@@ -389,10 +389,21 @@ Guardians ask 99¢ resting THROUGH LIVE GAMES, a Nationals ask 19¢ over
 cost, and one sell on a prop we did not hold. One root: the scalp
 priced asks off the BOOK (lead the competitor ask; on a stub book that
 is the venue's 97-99¢ placeholder), walked 1¢/lap with 5 walks over 120
-positions, and ranked a parked ask as "covered". Fixed (54e044e,
-568fb77): the ask IS the cost (post-only above the bid), ceiling 90¢,
->1¢ off cost = tier-0 repair, orphan sells (no venue position) cancelled
-in-loop + by a sweep, walks 10/lap, skip_* counters on every exit.
+positions, and ranked a parked ask as "covered". FINAL RULE (85d0e29, Rob's words): SELL = lead the touch by one tick,
+whatever it is — the venue's 99¢ placeholder included ("my sell is at
+98 because it's the fucking touch"); a real seller at 60 → we're at 59
+that lap; when we ARE the touch, step one tick per lap; never under
+cost; hold at cost. BUY = touch + 1 tick (2¢ against a 1¢ placeholder),
+chase follows real bidders up; stop = the 60¢/64¢ price caps + $13
+master rule beyond 6h, the model wall (fair − 2.5pp) inside 6h — Rob:
+"those caps are perfect". THE ONLY REAL BUG: the scalp walked at most 5
+asks per lap in the same order every lap ("that was the entire issue"),
+so nothing ever stepped down with the market — cap 60 (90s write budget
+is the bound), fair rotation oldest-walk-first, in-play first, jump
+(never creep) under a new seller. Orphan sells (no venue position)
+cancelled in-loop + by a sweep; skip_* counters on every exit. A 90¢
+ceiling and a "wide book = nobody" guard lived for two hours and were
+WRONG — removed.
 Venue read at 11:35: 136 AUTOMATIC sells, 93 at cost, **43 still off
 cost** — the daemon's old code walks them 1¢/lap; the new code repairs
 them ~10/lap after the restart. Also today: props never sold (market_type
