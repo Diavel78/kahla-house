@@ -16922,10 +16922,29 @@ def _opener_pass(sb, now, deadline):
         for g in cands:
             if _time.time() >= deadline - 1.0:
                 break
+            # FULL dossier only when the NRFI section can still use it
+            # (inside the day-of window and not yet shadowed); every other
+            # visit is the slim table-first ML pricer (Sep 6 2026).
             try:
-                d = handicapper_web.build_dossier(sb, None, None,
-                                                  market_id=g["id"])
+                _h2s = (datetime.fromisoformat(
+                    str(g.get("event_start")).replace("Z", "+00:00")) - now
+                ).total_seconds() / 3600.0
             except Exception:
+                _h2s = None
+            _full = ((g["id"], "nrfi") not in done
+                     and _h2s is not None and _h2s <= _OPENER_NRFI_DOSSIER_H)
+            try:
+                if _full:
+                    d = handicapper_web.build_dossier(sb, None, None,
+                                                      market_id=g["id"])
+                    stats["opener_full"] = stats.get("opener_full", 0) + 1
+                else:
+                    d = _mlb_slim_dossier(sb, g)
+                    stats["opener_slim"] = stats.get("opener_slim", 0) + 1
+            except Exception:
+                continue
+            if d is None:
+                _OPENER_PROBE_TS[g["id"]] = _time.time()   # unlisted → backoff
                 continue
             stats["opener_eval"] += 1
             # Backoff stamp AFTER a completed build only (Aug 2 ~12:30am —
@@ -19537,6 +19556,61 @@ def _ladder_cache_load(sb) -> dict:
             out["ladder_boot_slugs"] += len(slugs)
     except Exception as e:
         out["ladder_boot_err"] = str(e)[:80]
+    return out
+
+
+# ── MLB SLIM PATH (Sep 6 2026). The MLB opener built the FULL UI dossier
+# (ESPN records, splits, weather, injuries, sharp score, lineups — ~8s,
+# 10-20s under GIL contention) for every game in a 46-game pool, three
+# days out, to read two numbers: the venue's ML book and the probable
+# starters. Three games per 60s slice; a 46-game pool swept every ~75
+# minutes. Early games (outside the NRFI day-of window) now price through
+# the same table-first, persisted-ladder pricer football uses, plus one
+# cached statsapi probables read. The full dossier runs only when the
+# NRFI section can still use it (inside _OPENER_NRFI_DOSSIER_H).
+_OPENER_NRFI_DOSSIER_H = float(os.environ.get("OPENER_NRFI_DOSSIER_H") or 12.0)
+_PROBABLES_CACHE: dict = {}          # (start, away, home) -> (mono, dict)
+_PROBABLES_TTL_S = 1200.0
+
+
+def _mlb_probables_cached(event_iso, away, home) -> dict:
+    key = (str(event_iso), away, home)
+    c = _PROBABLES_CACHE.get(key)
+    if c and _time.monotonic() - c[0] < _PROBABLES_TTL_S:
+        return c[1]
+    try:
+        import handicapper_web
+        pp = handicapper_web._mlb_probables(str(event_iso), away, home) or {}
+    except Exception:
+        pp = {}
+    if pp:                                # never cache a miss (lineups post late)
+        _PROBABLES_CACHE[key] = (_time.monotonic(), pp)
+    return pp
+
+
+def _mlb_slim_dossier(sb, g):
+    """A d-alike the opener's MONEYLINE section reads unchanged:
+    odds.moneyline.polymarket = {away: {slug, quote, synthetic}, home: …}
+    + probable_pitchers. No nrfi key, so the NRFI section self-skips."""
+    d0 = _gridiron_price_game(sb, g)
+    if not d0:
+        return None
+    lad = ((((d0.get("odds") or {}).get("moneyline") or {})
+            .get("polymarket") or {}).get("ladder") or [])
+    mlp: dict = {}
+    for e in lad:
+        if e.get("side") in ("home", "away") and e.get("slug"):
+            mlp.setdefault(e["side"], e)
+    if not mlp:
+        return None
+    out = {"odds": {"moneyline": {"polymarket": mlp}}, "slim": True,
+           "probable_pitchers": {}}
+    try:
+        away, home = (g.get("event_name") or "").split(" @ ", 1)
+        out["probable_pitchers"] = _mlb_probables_cached(
+            g.get("event_start"), away, home)
+    except Exception:
+        pass
     return out
 
 
