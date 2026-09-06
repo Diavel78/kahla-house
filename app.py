@@ -24186,6 +24186,26 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             res["gate"] = "budget"
             break
         net = float((positions.get(slug) or {}).get("net") or 0.0)
+        # THE VENUE KNOWS WHICH SIDE (Sep 6 2026): three positions sat
+        # NAKED for days because the pick's pmm_synthetic flag disagreed
+        # with the venue's position sign — a side_flip kept the stale
+        # flag (TB@ATL), a ghost-adopted +20.5 seat was labeled 'home'
+        # (WKU@GA), a manual adopt was flagged long on a NO lot (Utah
+        # St total). held came out NEGATIVE, the lap counted them as
+        # 'mirror0' every lap and never asked. The SIGN of the venue's
+        # net IS the side we hold — sell that, and correct the flag so
+        # the price/book orientation and the sell intent follow.
+        if abs(net) >= 1.0 and (net < 0) != bool(synth):
+            synth = net < 0
+            res["side_fix"] = res.get("side_fix", 0) + 1
+            try:
+                _nb = dict(b); _nb["pmm_synthetic"] = synth
+                _nb["venue_side_fix"] = now.isoformat()
+                sb.table("bot_picks").update({"signal_blob": _nb}) \
+                    .eq("id", r["id"]).execute()
+                b["pmm_synthetic"] = synth
+            except Exception:
+                pass
         held = _mirror_clamp(slug, (-net) if synth else net)
         _venue_qty = float((positions.get(slug) or {}).get("qty") or 0.0)
         if _venue_qty >= 1.0 and held < 1.0 and slug in _mirror_recheck:
