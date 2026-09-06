@@ -17809,7 +17809,7 @@ def _pin_line_from_events(events, away, home, mt):
     if not key:
         return None
     pick, _opp = _pin_outcomes(events, away, home, key,
-                               "home" if mt == "spread" else "over")
+                               "home" if mt == "spread" else "over", book=None)
     if not pick or pick.get("point") is None:
         return None
     try:
@@ -17936,6 +17936,7 @@ def _gridiron_ladder_center(rows, mt, proj):
 
 
 _PIN_REFRESH_TS: dict = {}
+_PIN_REFRESH_DAY: dict = {}
 
 
 def _pin_daily_refresh(sb, now):
@@ -17956,9 +17957,14 @@ def _pin_daily_refresh(sb, now):
             _ev, age = _pin_slate_cached(sb, sport, now)
         except Exception:
             _ev, age = None, None
-        if _ev and age is not None and age < _PIN_REFRESH_AFTER_H:
+        # ONCE PER AZ DAY after 6am (Sep 6 2026): the "older than 20h" gate
+        # skipped this morning's pull because last evening's stale
+        # Pinnacle-only slate was 12h old — DK/FD never got fetched.
+        _azd = now.astimezone(ZoneInfo("America/Phoenix")).date().isoformat()
+        if _PIN_REFRESH_DAY.get(sport) == _azd:
             _PIN_REFRESH_TS[sport] = _time.monotonic()
             continue
+        _PIN_REFRESH_DAY[sport] = _azd
         try:
             ev = _pin_slate(sb, sport, now)      # spends ~3 credits, budget-guarded
             out[sport] = len(ev or [])
@@ -21048,7 +21054,8 @@ def _pin_slate_cached(sb, sport: str, now):
     return ((row.get("v") or {}).get("events")), age
 
 
-def _pin_outcomes(events, away: str, home: str, mkt_key: str, side: str):
+def _pin_outcomes(events, away: str, home: str, mkt_key: str, side: str,
+                  book: str | None = "pinnacle"):
     """Match (game, market, side) in a TOA-shaped slate → (pick, opp)
     outcomes, or (None, None). Team match = two-way substring containment."""
     aw, hm = (away or "").strip().lower(), (home or "").strip().lower()
@@ -21058,7 +21065,7 @@ def _pin_outcomes(events, away: str, home: str, mkt_key: str, side: str):
         if not ((ea in aw or aw in ea) and (eh in hm or hm in eh)):
             continue
         bm = next((b for b in (e.get("bookmakers") or [])
-                   if b.get("key") == "pinnacle"), None)
+                   if book is None or b.get("key") == book), None)
         mkt = next((m for m in ((bm or {}).get("markets") or [])
                     if m.get("key") == mkt_key), None)
         outs = (mkt or {}).get("outcomes") or []
