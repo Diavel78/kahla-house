@@ -26645,6 +26645,19 @@ def api_data():
                 try:
                     if isinstance(cel, dict) and "ws" not in cel:
                         cel["ws"] = _ws_feed_health(get_supabase())
+                    # SPLIT-BRAIN REPAIR (Sep 6 2026): the box's cached
+                    # blob CARRIES a ws key computed by the BOX's code,
+                    # so a site-side fix to _ws_feed_health changes
+                    # nothing until the box is kicked — the light read
+                    # "ws feed down" for a live socket through two pushes
+                    # ("you said you didn't miss a switch"). When the
+                    # cached verdict says down on a state THIS code
+                    # calls up, re-judge it here (one limit-1 read).
+                    _w = cel.get("ws") if isinstance(cel, dict) else None
+                    if (isinstance(_w, dict) and _w.get("state")
+                            and not _w.get("up") and not _w.get("off")
+                            and str(_w.get("state")) in ("recon", "heartbeat")):
+                        cel["ws"] = _ws_feed_health(get_supabase())
                 except Exception:
                     pass
                 # BACKUP VERDICT REPAIR (Sep 1 2026 — the soak-collision
