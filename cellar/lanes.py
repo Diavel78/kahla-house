@@ -125,10 +125,31 @@ def _work_from(body: dict, *keys: str) -> int:
 # Lane implementations
 # ---------------------------------------------------------------------------
 
+def _keep_body(ctx: Ctx, body: dict) -> None:
+    """Route lanes: persist the route's compact stats into cellar_ticks.detail
+    (Sep 6 2026 — the NFL props pass had run 4 days with its fbp_* counters
+    computed every tick and thrown away here; the direct-call lanes had this
+    since the cutover, the route lanes never did). Scalars and small dicts
+    only; observability must never fail a lane."""
+    if ctx.detail is None or not isinstance(body, dict):
+        return
+    try:
+        for k, v in body.items():
+            if k in ("ok",):
+                continue
+            if isinstance(v, (int, float, str, bool)) or v is None:
+                ctx.detail[k] = v
+            elif isinstance(v, dict) and len(str(v)) <= 600:
+                ctx.detail[k] = v
+    except Exception:
+        pass
+
+
 def lane_pm_snapshot(ctx: Ctx) -> int:
     code, body = _drive_route("/api/pm-snapshot")
     if code != 200:
         raise RuntimeError(f"pm-snapshot HTTP {code}: {str(body)[:200]}")
+    _keep_body(ctx, body)
     return _work_from(body, "inserted", "rows", "logged")
 
 
@@ -153,6 +174,7 @@ def lane_paperlog(ctx: Ctx) -> int:
     # matched nothing, so this lane stamped work=0 forever while
     # pickbot_paperlog took 391 rows in 6 hours (the repeg counter bug's
     # second sighting; the third was the opener below, same night).
+    _keep_body(ctx, body)
     return _work_from(body, "new_rows", "logged", "rows", "inserted")
 
 
@@ -160,6 +182,7 @@ def lane_vsin(ctx: Ctx) -> int:
     code, body = _drive_route("/api/vsin-snapshot")
     if code != 200:
         raise RuntimeError(f"vsin HTTP {code}: {str(body)[:200]}")
+    _keep_body(ctx, body)
     return _work_from(body, "inserted", "rows", "logged")
 
 
@@ -167,6 +190,7 @@ def lane_kalshi_autolog(ctx: Ctx) -> int:
     code, body = _drive_route("/api/handicapper/kalshi-autolog")
     if code != 200:
         raise RuntimeError(f"kalshi-autolog HTTP {code}: {str(body)[:200]}")
+    _keep_body(ctx, body)
     return _work_from(body, "created", "logged", "rows")
 
 

@@ -522,6 +522,16 @@ def test_gridiron_bounds() -> None:
           pb("total", "under", 56.5, 56.0, "over", "under") and not pb("total", "under", 55.5, 56.0, "over", "under"))
 
 
+def test_game_sport_key() -> None:
+    """The pm-snapshot tick stamps `_sport`; markets rows say `sport`. The
+    NFL props pass read only `sport` and was blind to football for 15
+    days (Sep 6 2026)."""
+    import app as _app
+    check("tick dict (_sport) reads as NFL", _app._game_sport({"id": "x", "_sport": "NFL"}) == "NFL")
+    check("markets row (sport) reads as NFL", _app._game_sport({"id": "x", "sport": "NFL"}) == "NFL")
+    check("no key → None, not a crash", _app._game_sport({"id": "x"}) is None)
+
+
 def test_pin_line_center() -> None:
     """Pinnacle's line in rung units from the cached slate shape (the real
     Northern Arizona @ Arizona event, Sep 5 2026)."""
@@ -738,7 +748,7 @@ def main() -> int:
               test_dry_run_blackout, test_overrun_detector,
               test_ws_quote_presence, test_ws_mkts_request_budget,
               test_gridiron_value_window, test_pin_line_center,
-              test_gridiron_bounds,
+              test_gridiron_bounds, test_game_sport_key,
               test_lane_covers_its_documented_engines,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()

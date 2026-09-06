@@ -13759,6 +13759,14 @@ _FBPROP_CONF_CACHE: dict = {}     # 5-min cached fbprop_config row
 _FBPROP_SNAP_CACHE: dict = {}     # 10-min cached football_props_snapshot
 
 
+def _game_sport(g) -> str | None:
+    """A game dict's sport whichever key it rode in on: `markets` rows say
+    `sport`; the pm-snapshot tick's dicts say `_sport`."""
+    if not isinstance(g, dict):
+        return None
+    return g.get("sport") or g.get("_sport")
+
+
 def _fbprop_config(sb) -> dict:
     """fbprop_config row id=1 — THE REMOTE CONTROL for the NFL props
     lane (built Aug 22 2026, the hour before a 6-day box freeze). The
@@ -13873,15 +13881,25 @@ def _fbprop_pass(sb, prop_rows, all_games, now) -> dict:
         conf = _fbprop_config(sb)
         pats = conf.get("fams") or []
         if not conf.get("enabled") or not pats:
+            st["fbp_gate"] = "disabled"
             return st
         snap = _fbprop_snapshot()
         if not snap or not snap.get("players"):
+            st["fbp_gate"] = "no_snapshot"
             return st
         ginfo = {g["id"]: g for g in all_games}
+        # ⚠ THE TICK'S GAME DICTS CARRY THE SPORT AS `_sport` (the route
+        # selects id,event_name,event_start and stamps `_sport`=sp) — this
+        # read `sport`, got None on every game, found no football and
+        # returned silently EVERY TICK from Aug 22 to Sep 6 2026: the lane
+        # the briefing called LIVE never saw a football game. Found by
+        # dry-running the pass with hand-built rows (which carried `sport`).
         fb_mids = {mid for mid, g in ginfo.items()
-                   if g.get("sport") in ("NFL", "NCAAF")}
+                   if _game_sport(g) in ("NFL", "NCAAF")}
         if not fb_mids:
+            st["fbp_gate"] = "no_football_games"
             return st
+        st["fbp_games"] = len(fb_mids)
         compiled = []
         for p in pats:
             try:
