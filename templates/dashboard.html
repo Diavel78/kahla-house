@@ -200,15 +200,17 @@
                 <b id="qOrders">—</b></span>
         </div>
         <div class="grid">
-            <!-- DAY CARDS ARE BETS-ONLY (user, Aug 22 2026): the venue
-                 publishes a day's rent only after its reward periods end
-                 and may compute for up to 5 business days, so an "all in"
-                 day card was always half-blank. Rent lives in the windows
-                 below, bucketed by the day it was EARNED. -->
+            <!-- DAY CARD VALUE IS BETS-ONLY (user, Aug 22 2026). Rent is a
+                 separate line beneath (user, Sep 5 2026): measured, the
+                 venue publishes the CURRENT day's accrual by ~8pm AZ and
+                 keeps revising it (Sep 5 first appeared 20:21 at $22.32;
+                 Sep 4 grew by $27 the next evening), so "rent so far" is
+                 an honest running partial, labeled as such. -->
             <div class="card">
                 <div class="label">Today <span class="tag">position only</span></div>
                 <div class="value skel" id="vToday">—</div>
                 <div class="sub" id="subToday">settled · AZ</div>
+                <div class="sub" id="subTodayRent" style="color:#fbbf24">rent —</div>
             </div>
 <!-- THE MACHINE light (user, Aug 30, filling the old Last-night
                  slot): one glance — green running / yellow degraded /
@@ -529,8 +531,21 @@
             // it lives in the windows below by earn date.
             const st = s.pnl_stack || null;
             paint('vToday', st ? st.today : s.today_pnl, true);
-            document.getElementById('subToday').textContent =
-                'settled · AZ · rent lands in ~5 days';
+            document.getElementById('subToday').textContent = 'settled · AZ';
+            // RENT SO FAR TODAY (Sep 5 2026): the venue posts the current
+            // ET day's accrual by ~8pm AZ and revises it for a day or two;
+            // show the running partial, never withhold it.
+            const tr = s.today_rewards || null;
+            const trEl = document.getElementById('subTodayRent');
+            if (trEl) {
+                if (tr && tr.total) {
+                    trEl.textContent = 'rent so far ' + money(tr.total)
+                        + ((tr.pending || 0) > 0 ? ' pending' : ' paid')
+                        + ' · still accruing';
+                } else {
+                    trEl.textContent = 'rent today posts ~8pm AZ';
+                }
+            }
             paint('vMaker', s.maker_rewards, false);
             // THE LEDGER — 7d / 30d / YTD, big all-in number per row plus
             // the bets-vs-rent split bar. Bar widths are each half's share
