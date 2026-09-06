@@ -1253,8 +1253,12 @@ sport the machine ever adds:
   three screenshots in an hour — Phillies 96.5¢ and Guardians 99¢ asks
   through LIVE games, a Nationals ask 19¢ over cost: "if I own it for 50
   and the sell touch is 54, list 53, then 52, 51, 50. Never under my
-  cost").** Lead a REAL touch by one tick, step down ONE tick per lap
-  while we are the touch, floor at cost, hold. **THE PLACEHOLDER IS THE TOUCH — there is NO stub guard and NO
+  cost").** **READ THE TOUCH, every lap (Rob, same afternoon: "why not just read
+  touch"): the ask belongs at touch − 1 tick or cost, whichever is
+  higher; if it isn't there, move it, either direction. No step-down
+  logic. The quote table carries no sizes, so when the best ask on the
+  market is OUR OWN the walk takes one REST read to find the real touch
+  (`sc_rest_self`) instead of leading itself by a tick.** **THE PLACEHOLDER IS THE TOUCH — there is NO stub guard and NO
   ceiling (Rob, same hour, killing a 90¢ ceiling that lived two hours:
   "if the contracts they're selling are at 99, my sell is at 98 because
   it's the fucking touch. Somebody real comes in at 60 — then I'm at 59.

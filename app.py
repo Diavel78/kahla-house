@@ -24104,6 +24104,17 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         if not book:
             res["skip_no_book"] = res.get("skip_no_book", 0) + 1
             continue
+        # THE TABLE CAN'T SEE OURSELVES (Sep 6 2026 — Rob's MISS −6.5 ask
+        # sitting at 99): the LITE quote carries no sizes, so when the best
+        # ask on the market is OUR OWN the walk would read it as the touch
+        # and lead itself by a tick. One REST read in exactly that case.
+        if (_wsq is not None and our_ask is not None
+                and book.get("best_ask") is not None
+                and abs(float(book["best_ask"]) - our_ask) < 0.26):
+            _rb = _pmm_book(client, slug)
+            _WS_PRICE_STATS["sc_rest_self"] = _WS_PRICE_STATS.get("sc_rest_self", 0) + 1
+            if _rb:
+                book = _invert_book(_rb) if synth else _rb
         best_bid = book.get("best_bid")
         # best COMPETITOR ask — subtract our own resting qty at our level
         comp_ask = None
@@ -24153,25 +24164,18 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # in-play there is no walk — one jump straight to money-back
         if our_ask is None:
             continue
-        # ── WALK (Rob, Sep 6 2026): lead the touch by a tick, step down
-        # ONE tick per lap while we are the touch, to the cost floor, then
-        # hold. Below cost → repair up. Above the lead target (the touch
-        # moved under us, or a parked ask) → JUMP to it, never creep.
-        # Nobody quoting → the lead target IS cost.
-        lead = (max(floor_c, _grid_up(comp_ask, tick) - tick)
-                if comp_ask is not None else floor_c)
-        if best_bid is not None and lead <= best_bid:
-            lead = _grid_dn(best_bid, tick) + tick
-        lead = min(_SCALP_ASK_CEIL_C, _grid_up(lead, tick))
-        tgt = None
-        if our_ask < floor_c - 0.26:
-            tgt = lead                                    # repair up
-        elif our_ask > lead + 0.26:
-            tgt = lead                                    # jump: touch moved under us
-        elif our_ask > floor_c + 0.26:
-            tgt = max(floor_c, our_ask - tick)            # we ARE the touch → step down
-        if tgt is not None and abs(tgt - our_ask) <= 0.26:
-            res["at_cost"] = res.get("at_cost", 0) + 1
+        # ── READ THE TOUCH (Rob, Sep 6 2026: "why not just read touch"):
+        # every lap the ask belongs at touch − 1 tick, or cost, whichever is
+        # higher — post-only above the bid. If it is not there, move it,
+        # whichever direction that is. No stepping logic, no special cases.
+        # Nobody quoting → cost.
+        tgt = (max(floor_c, _grid_up(comp_ask, tick) - tick)
+               if comp_ask is not None else floor_c)
+        if best_bid is not None and tgt <= best_bid:
+            tgt = _grid_dn(best_bid, tick) + tick
+        tgt = min(_SCALP_ASK_CEIL_C, _grid_up(tgt, tick))
+        if abs(tgt - our_ask) <= 0.26:
+            res["at_touch"] = res.get("at_touch", 0) + 1
             tgt = None                   # already there
         _repair = tgt is not None and our_ask < floor_c - 0.26
         # QTY INVARIANT (Aug 29 night — the MIL@CHC 0/5-on-20 catch; user
@@ -24202,8 +24206,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             tgt = _grid_dn(best_bid, tick) + tick
         # down-moves only — EXCEPT floor repair + qty resize, the two
         # legal not-down moves
-        if (tgt is None or tgt < floor_c
-                or (not _repair and not _resize and tgt >= our_ask - 0.26)):
+        if tgt is None or tgt < floor_c - 0.26:
             res["skip_no_move"] = res.get("skip_no_move", 0) + 1
             continue                     # nothing to do this pass
         if not scalp_live:
