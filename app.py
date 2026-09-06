@@ -19466,6 +19466,80 @@ def _price_from_table(struct):
     return d if d["odds"] else None
 
 
+# ── PERSISTED LADDER CACHE (Sep 6 2026 — Rob: "we can't do that over
+# websocket??"). _LADDER_STRUCT is what lets the pricer read a game off
+# the quote table instead of REST, and it lived only in memory: every
+# restart emptied it, every game got REST-rediscovered one at a time (a
+# 2s venue event search + megapayload parse, 10-20s under GIL contention),
+# and the rent-list executor priced 6-57 of 334 due markets per lap. Now
+# each discovery is upserted to ladder_cache and reloaded at the first
+# opener lap after boot — the whole board subscribed on the socket in the
+# first pack batches, REST exactly once per game per lifetime (plus the 3h
+# in-memory TTL refresh, which re-upserts).
+_LADDER_CACHE_LOADED = False
+
+
+def _ladder_cache_put(sb, gid, g, struct, slugs) -> None:
+    try:
+        ticks = {sl: _TICK_CACHE[sl] for sl in slugs if sl in _TICK_CACHE}
+        sb.table("ladder_cache").upsert({
+            "market_id": str(gid), "sport": g.get("sport"),
+            "event_start": g.get("event_start"),
+            "struct": {"odds": struct.get("odds") or {}},
+            "ticks": ticks,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }, on_conflict="market_id").execute()
+    except Exception:
+        pass
+
+
+def _ladder_cache_load(sb) -> dict:
+    """Once per process: reload every future game's ladder structure and
+    hand each to the markets feed as a group. Idempotent; never raises."""
+    global _LADDER_CACHE_LOADED
+    if _LADDER_CACHE_LOADED:
+        return {}
+    _LADDER_CACHE_LOADED = True
+    out = {"ladder_boot": 0, "ladder_boot_slugs": 0}
+    try:
+        cut = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        rows = _sb_paged(lambda: (sb.table("ladder_cache")
+                                  .select("market_id,event_start,struct,ticks")
+                                  .gt("event_start", cut)
+                                  .order("event_start")), 10)
+        for r in rows or []:
+            gid = str(r.get("market_id") or "")
+            odds = ((r.get("struct") or {}).get("odds") or {})
+            if not gid or not odds:
+                continue
+            if gid in _LADDER_STRUCT:
+                continue                      # a live discovery already won
+            _LADDER_STRUCT[gid] = {"at": _time.monotonic(), "odds": odds}
+            for sl, tv in ((r.get("ticks") or {}).items()):
+                try:
+                    _TICK_CACHE.setdefault(sl, float(tv))
+                except (TypeError, ValueError):
+                    pass
+            slugs = {e.get("slug") for rungs in odds.values()
+                     for e in (rungs or []) if e.get("slug")}
+            if _WS_LADDER_CB is not None and slugs:
+                try:
+                    exp = datetime.fromisoformat(
+                        str(r.get("event_start")).replace("Z", "+00:00")
+                    ).timestamp()
+                except Exception:
+                    exp = _time.time() + 86_400
+                try:
+                    _WS_LADDER_CB(gid, slugs, exp)
+                except Exception:
+                    pass
+            out["ladder_boot"] += 1
+            out["ladder_boot_slugs"] += len(slugs)
+    except Exception as e:
+        out["ladder_boot_err"] = str(e)[:80]
+    return out
+
+
 def _gridiron_price_game(sb, g):
     """PHASE 1.5 SLIM PRICER: the football bet leg needs ONLY the
     spread/total ladders — books per rung. build_dossier spends ~8s on
@@ -19566,6 +19640,7 @@ def _gridiron_price_game(sb, g):
                     except Exception:
                         exp = _time.time() + 86_400
                     _WS_LADDER_CB(gid, slugs, exp)
+                _ladder_cache_put(sb, gid, g, struct, slugs)
             except Exception:
                 pass
         return d

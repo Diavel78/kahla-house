@@ -214,6 +214,12 @@ def lane_opener(ctx: Ctx) -> int:
     # healthy with no OMS at all — caught within two ticks because its
     # stats were missing from the tick detail. Money leg first: the
     # rent list converges before the tape/sweep spend budget.
+    # Board on the socket FIRST (Sep 6 2026): reload every cached ladder
+    # and subscribe it, so this and every later lap price from the table.
+    try:
+        boot_stats = _app._ladder_cache_load(ctx.sb)
+    except Exception:
+        boot_stats = {}
     try:
         oms_stats = _app._oms_pass(ctx.sb, ctx.now,
                                    _t.time() + _app._OMS_BUDGET_S)
@@ -226,7 +232,7 @@ def lane_opener(ctx: Ctx) -> int:
     # opener_eval=0 every lap for seven hours on Sep 6 2026.
     deadline = max(deadline, _t.time() + _app._OPENER_MIN_S)
     rows, stats = _app._opener_pass(ctx.sb, ctx.now, deadline)
-    stats = {**stats, **oms_stats}
+    stats = {**stats, **oms_stats, **boot_stats}
     # Quote-table hit rate — "measurable from day one" is the spec's own
     # rule. Cumulative counters snapshotted into every opener tick's
     # stats: ws_price {hit: N, rest: M} rising hit-share is the table
