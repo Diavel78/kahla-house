@@ -417,6 +417,14 @@ REST reads (~250s) — venue writes serialize per call now, laps: repeg
 beside the daemon drew Cloudflare 1015 twice today — stop doing that;
 instrument the daemon and read the DB instead.
 
+**AMEND RE-TEST (Sep 6, 13:45 AZ, JAX@DEN Under 61.5, 4 contracts):**
+orders.modify with FULL params amended in place four times (96→94→92→
+91→90), same id, state REPLACED, and the public book showed our 4 at
+each new level — LIVE, fillable, invisible in the app. Sell arm now
+wakes on socket events (32 wakes in 6 min). Open decision: roll amend
+out (one call, no cancel gap) with the dashboard as the view, or keep
+it scoped. Flag: machine_flags `amend_slugs`.
+
 **SUNDAY'S WORK (Rob, Sat night, in this order):** (1) **NFL props read**
 — fills vs scalp exits on `astatc-nfl` slugs (the turn-rate experiment),
 model call vs market outcome, then a stake decision (5 contracts, cap 30

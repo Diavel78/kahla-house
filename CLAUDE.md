@@ -1265,7 +1265,16 @@ sport the machine ever adds:
   (`mode/state/seen_px/verdict`) and pings 🧪 so Rob can check the APP
   view against the API's REPLACED state (the Aug 2/16 landmine). On
   those slugs `mine` also reads the raw list incl. REPLACED so an
-  amended order is never doubled. Empty list = off. **READ THE TOUCH, every lap (Rob, same afternoon: "why not just read
+  amended order is never doubled. Empty list = off. **RESULT (Sep 6 2026, 13:45-13:51 AZ, four amends 96→94→92→91→90):
+  amend WORKS and the amended order is LIVE ON THE BOOK — same id every
+  time, state REPLACED, and the venue's public depth showed our 4
+  contracts resting at the amended level (a penny-jumper bot sat one
+  tick under us each time, sized to our 4). The app showed NOTHING —
+  the Aug 2/16 "invisible" finding stands, but it is a DISPLAY gap in
+  the venue's app for REPLACED orders, not a dead order. The API, the
+  book and our dashboard all see it. Rollout beyond the test slug is
+  Rob's call (his app-trust rule vs one-call atomic moves with no
+  cancel gap and no sleeps). **READ THE TOUCH, every lap (Rob, same afternoon: "why not just read
   touch"): the ask belongs at touch − 1 tick or cost, whichever is
   higher; if it isn't there, move it, either direction. No step-down
   logic. The quote table carries no sizes, so when the best ask on the
