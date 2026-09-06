@@ -357,9 +357,10 @@ def test_ws_quote_presence() -> None:
 
 
 def test_ws_mkts_request_budget() -> None:
-    """Markets-feed request budget (Sep 5 2026): core evicts a ladder to
-    seat itself, a ladder past the budget is skipped, core rebuilds as one
-    request, and a venue rejection un-covers the request's slugs."""
+    """Markets-feed request budget + PACKING (Sep 6 2026): ladders pool into
+    cross-game packs (one request per PACK_SLUGS rungs), core keeps its
+    reserve and evicts a pack to seat itself, a rejection un-covers and
+    re-pends, and a full pack budget repacks from the live ladder set."""
     import json as _json
     import time as _t
     from cellar import wsfeed as W
@@ -367,41 +368,76 @@ def test_ws_mkts_request_budget() -> None:
     class FakeWS:
         def __init__(self): self.sent = []
         def send(self, raw): self.sent.append(_json.loads(raw))
-    mf = W.MarketsFeed.__new__(W.MarketsFeed)
-    import threading as _th
-    mf._lock = _th.Lock(); mf._groups = {}; mf._rid_slugs = {}
-    mf._covered = set(); mf._ops = []; mf._expiry = {}; mf._gseq = 0
-    mf._base_seen = set(); mf._dirty_add = None
-    ws = FakeWS()
-    for i in range(W.MKTS_MAX_RIDS):
-        mf.add_group(f"lad{i}", {f"l{i}-a", f"l{i}-b"}, _t.time() + 3600 * (i + 1))
+    def fresh():
+        mf = W.MarketsFeed.__new__(W.MarketsFeed)
+        import threading as _th
+        mf._lock = _th.Lock(); mf._groups = {}; mf._rid_slugs = {}
+        mf._covered = set(); mf._ops = []; mf._expiry = {}; mf._gseq = 0
+        mf._base_seen = set(); mf._dirty_add = None
+        mf._ladders = {}; mf._pending = {}; mf._last_repack = 0.0; mf._pack_hold_until = 0.0
+        return mf
+    mf = fresh(); ws = FakeWS()
+    for i in range(12):
+        mf.add_group(f"lad{i}", {f"l{i}-{k}" for k in range(3)}, _t.time() + 3600 * (i + 1))
     mf._apply_ops(ws)
-    check("ten ladders fill the request budget",
-          sum(len(r) for r, _ in mf._groups.values()) == W.MKTS_MAX_RIDS)
-    mf.add_group("lad_extra", {"x-a"}, _t.time() + 99)
-    mf._apply_ops(ws)
-    check("an 11th ladder is skipped, not subscribed", "lad_extra" not in mf._groups)
-    mf.set_slugs({"core-1", "core-2"}, replace=True)
-    mf._apply_ops(ws)
-    check("core evicted a ladder and subscribed", "core" in mf._groups
+    check("12 ladders batch — nothing subscribed before the batch window",
+          mf._pack_budget_used() == 0 and len(mf._pending) == 36)
+    mf._pack_flush(ws, force=True)
+    check("12 ladders (36 rungs) → ONE pack request", mf._pack_budget_used() == 1 and len(mf._covered) == 36,
+          f"rids {mf._pack_budget_used()} covered {len(mf._covered)}")
+    # a big board: 300 ladders × 10 rungs = 3,000 rungs
+    for i in range(300):
+        mf.add_group(f"big{i}", {f"b{i}-{k}" for k in range(10)}, _t.time() + 60 * (i + 1))
+    mf._apply_ops(ws); mf._pack_flush(ws, force=True)
+    budget = W.MKTS_MAX_RIDS - W.PACK_CORE_RESERVE
+    check("packs stop at the pack budget (core reserve kept)", mf._pack_budget_used() == budget,
+          f"got {mf._pack_budget_used()}")
+    check("covered ≈ budget × PACK_SLUGS, the rest pending (REST prices them)",
+          len(mf._covered) <= budget * W.PACK_SLUGS and len(mf._pending) > 0,
+          f"covered {len(mf._covered)} pending {len(mf._pending)}")
+    check("nearest-expiry rungs were packed first",
+          all(s in mf._covered for s in {"b0-0", "b5-3"}) and "b299-0" not in mf._covered)
+    mf.set_slugs({"core-1", "core-2"}, replace=True); mf._apply_ops(ws)
+    check("core seats inside the reserve without evicting a pack",
+          "core" in mf._groups and mf._pack_budget_used() == budget
           and sum(len(r) for r, _ in mf._groups.values()) <= W.MKTS_MAX_RIDS)
-    farthest = f"lad{W.MKTS_MAX_RIDS - 1}"
-    check("the evicted ladder was the farthest-expiring one", farthest not in mf._groups)
     core_rid = mf._groups["core"][0][0]
     mf._on_rejected(core_rid)
     check("a rejected core request un-covers its slugs", "core-1" not in mf._covered)
     check("and re-queues core", any(op[1] == "core" for op in mf._ops))
     mf._ops = []
+    prid = next(r for g, (rs, _s) in mf._groups.items() if g.startswith("pack") for r in rs)
+    pslugs = set(mf._rid_slugs[prid])
+    mf._on_rejected(prid)
+    check("a rejected pack un-covers and re-pends its rungs",
+          not (pslugs & mf._covered) and pslugs <= set(mf._pending))
+    # repack: budget full + rungs still wanting → tear packs down, re-queue live set
+    mf2 = fresh(); ws2 = FakeWS()
+    for i in range(300):
+        mf2.add_group(f"big{i}", {f"b{i}-{k}" for k in range(10)}, _t.time() + 60 * (i + 1))
+    mf2._apply_ops(ws2); mf2._pack_flush(ws2, force=True)
+    n_before = len(ws2.sent)
+    mf2._pack_flush(ws2, force=True)            # budget full, packs fresh → NO repack
+    check("a full budget with fresh packs and nothing dead does NOT repack",
+          mf2._pack_budget_used() == budget and len(ws2.sent) == n_before)
+    later = _t.time() + 3 * 3600 + W.REPACK_MIN_S   # ~140 ladders kicked off → dead weight
+    mf2._pack_flush(ws2, nowt=later, force=True)
+    unsubs = [m for m in ws2.sent[n_before:] if "unsubscribe" in m]
+    check("dead weight → repack unsubscribed every pack and holds 2s",
+          len(unsubs) == budget and mf2._pack_budget_used() == 0 and mf2._pack_hold_until > later)
+    mf2._pack_flush(ws2, nowt=later + 3.0, force=True)
+    check("after the hold the LIVE set re-packs (dead rungs gone)",
+          mf2._pack_budget_used() >= 1 and "b0-0" not in mf2._covered and "b299-0" in mf2._covered,
+          f"rids {mf2._pack_budget_used()} b0 {'b0-0' in mf2._covered} b299 {'b299-0' in mf2._covered}")
+    # core drift (unchanged semantics)
+    mf3 = fresh(); ws3 = FakeWS()
     big = {f"core-{i}" for i in range(40)}
-    mf.set_slugs(big, replace=True); mf._apply_ops(ws)
-    mf.set_slugs(big - {"core-0"}, replace=True); mf._apply_ops(ws)   # one fell off
-    check("one fallen-off core slug does NOT rebuild (cheap to keep)",
-          "core" in mf._groups)
-    mf.set_slugs({f"core-{i}" for i in range(5)}, replace=True); mf._apply_ops(ws)  # 35 fell off
+    mf3.set_slugs(big, replace=True); mf3._apply_ops(ws3)
+    mf3.set_slugs(big - {"core-0"}, replace=True); mf3._apply_ops(ws3)
+    check("one fallen-off core slug does NOT rebuild (cheap to keep)", "core" in mf3._groups)
+    mf3.set_slugs({f"core-{i}" for i in range(5)}, replace=True); mf3._apply_ops(ws3)
     check("real core drift (>20 fallen off) triggers a one-request rebuild",
-          "core" not in mf._groups and any(op[1] == "core" for op in mf._ops))
-    unsubs = [m for m in ws.sent if "unsubscribe" in m]
-    check("rebuild unsubscribed the old core request(s)", len(unsubs) >= 1)
+          "core" not in mf3._groups and any(op[1] == "core" for op in mf3._ops))
 
 
 def test_gridiron_value_window() -> None:

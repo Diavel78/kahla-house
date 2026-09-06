@@ -371,6 +371,18 @@ the counters that would have shown this on day one were computed and
 thrown away. Stake decision: nothing to decide yet — the first fills
 come after this restart; read the turn rate next Sunday.
 
+**SUNDAY (2) RESULT (Sep 6, ~10:15am AZ): the socket covered 8-10 ladders of
+100+ games (request budget), so most games priced over REST every lap;
+plus two untimed whales caught by stack sampling — paperlog ran the whole
+dashboard recompute per tick, and the new recenter tick REST-re-discovered
+ladders. Shipped: cross-game PACK subscriptions (350 rungs/request, repack
+on dead weight), dashboard recompute every 5 min, recenter hourly/cached
+ladders only. Watch after restart: "ws mkts watching N markets in M
+groups" should read ~2,000+ in ≤8 groups; opener `ws_price.hit` should
+climb; repeg/scalp/opener laps should fall from 4-6 min. Still open: the
+pricer is all-or-nothing per game (one stale rung → REST); fill-status
+depth reads on confirmed outbids.
+
 **SUNDAY'S WORK (Rob, Sat night, in this order):** (1) **NFL props read**
 — fills vs scalp exits on `astatc-nfl` slugs (the turn-rate experiment),
 model call vs market outcome, then a stake decision (5 contracts, cap 30

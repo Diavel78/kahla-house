@@ -3007,6 +3007,8 @@ def _lifetime_venue(sb, balance) -> dict | None:
 
 
 _DASH_ORDERS_EVERY_S = 170     # >= ~3 min between orders-count reads
+_DASH_REFRESH_EVERY_S = 300.0  # the whole dashboard recompute, on the paperlog tick
+_DASH_REFRESH_TS = 0.0
 _DASH_ORDERS_TS = 0.0          # last ATTEMPT (module state; box lane is
                                # long-lived, Vercel cold starts just read once)
 
@@ -21003,11 +21005,21 @@ def api_handicapper_paperlog():
     except Exception as e:
         acts_sync = {"err": str(e)[:80]}
     # …and precompute the dashboard summary while the feed is hot, so
-    # the page never pays for the walk itself.
-    try:
-        acts_sync["dash"] = _dash_cache_refresh(sb, get_client())
-    except Exception as e:
-        acts_sync["dash"] = {"err": str(e)[:80]}
+    # the page never pays for the walk itself. EVERY 5 MIN, NOT EVERY
+    # TICK (Sep 6 2026 stack samples: 10 of 12 caught this lane inside
+    # the dashboard walk — a 15-page venue feed read + REST title
+    # resolution + a paged mirror walk, per tick, on the box's hot loop;
+    # it starved the money lanes of the interpreter). The page polls a
+    # cache; five minutes of staleness on lifetime totals is nothing.
+    global _DASH_REFRESH_TS
+    if _time.time() - _DASH_REFRESH_TS >= _DASH_REFRESH_EVERY_S:
+        _DASH_REFRESH_TS = _time.time()
+        try:
+            acts_sync["dash"] = _dash_cache_refresh(sb, get_client())
+        except Exception as e:
+            acts_sync["dash"] = {"err": str(e)[:80]}
+    else:
+        acts_sync["dash"] = {"gate": "cadence"}
     # OUTBID push (every 2nd minute) — the red chip's Telegram twin: a
     # resting maker order lost the touch, re-bid or take.
     outbid_warned = _outbid_alerts(sb, now) if run_engines else 0
@@ -23048,11 +23060,16 @@ _SCALP_SHADOW_CAP = 30       # shadow entries kept per pick blob
 # mutation), hourly, writes SERIAL, <= max_kills per pass.
 _RENT_DEAD_CACHE: dict = {"at": 0.0, "set": set()}
 _CULL_LAST_TS = 0.0
-_RECENTER_EVERY_S = 900.0        # rides the repeg lease every 15 min
+_RECENTER_EVERY_S = 3600.0       # rides the repeg lease HOURLY (was 15 min —
+#   3 of 5 repeg stack samples sat in this tick on its first morning: REST
+#   re-discovery per game + cancel/verify reads per move made it the lap's
+#   whale. Lines arrive once a day; hourly is plenty.)
 _RECENTER_MAX_MOVES = 6          # cancel→re-seat is two venue writes each
-_RECENTER_MAX_GAMES = 40         # games priced per pass — table-first in the
-#   daemon (the ladder cache is warm), but a COLD process would REST-price
-#   every game; Sep 6 2026 that shape earned a Cloudflare 1015 in one go.
+_RECENTER_MAX_GAMES = 12         # games priced per pass — and ONLY games whose
+#   ladder structure is already cached (_LADDER_STRUCT): this tick never
+#   re-discovers a ladder over REST; the opener's visit does that, and the
+#   game is judged on the next pass. A COLD process REST-pricing every
+#   game earned a Cloudflare 1015 on Sep 6 2026.
 _RECENTER_LAST_TS = 0.0
 
 
@@ -23153,6 +23170,9 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
             continue
         g = {"id": mid, "sport": g0["sport"], "event_name": g0["event_name"],
              "event_start": g0["event_start"]}
+        if mid not in _LADDER_STRUCT:
+            res["uncached"] = res.get("uncached", 0) + 1
+            continue                     # no REST discovery here — ever
         try:
             d = _gridiron_price_game(sb, g)
             gp = _gridiron_proj(sb, g["sport"], g["event_name"])

@@ -76,6 +76,19 @@ MKTS_MAX_SLUGS = 4000
 # ONE request whenever it has accumulated deltas or dropped slugs.
 MKTS_MAX_RIDS = 10
 CORE_REBUILD_RIDS = 2
+# PACKING (Sep 6 2026, Rob: "why the hell are we doing REST with a
+# websocket"): the venue's scarce resource is subscription REQUESTS (~12
+# per connection), not slugs (the probe accepted ~4,000 in one request).
+# One request per football LADDER meant 8-10 ladders subscribed out of
+# 100+ games we quote — every other game priced over REST, every lap.
+# Ladders now pool into PACK requests of PACK_SLUGS rungs across games;
+# adds batch for PACK_BATCH_S; when the pack budget is full the packs are
+# REBUILT from the live ladder set (expired games fall out) at most every
+# REPACK_MIN_S. Core (our own orders) keeps PACK_CORE_RESERVE requests.
+PACK_SLUGS = 350
+PACK_BATCH_S = 20.0
+PACK_CORE_RESERVE = 3
+REPACK_MIN_S = 600.0
 
 RECV_TIMEOUT_S = 75.0    # heartbeat watchdog: silence this long = dead socket
 WAKE_MIN_S = 15.0        # private-event wake throttle (repeg)
@@ -601,6 +614,13 @@ class MarketsFeed:
         self._was_connected = False
         self.msgs = 0
         self.reconnects = 0
+        # PACKING state: desired ladders (gid -> (slugs, expiry)), the slugs
+        # desired-but-not-yet-covered (slug -> first-seen ts), repack clock.
+        self._ladders: dict[str, tuple[frozenset, float | None]] = {}
+        self._pending: dict[str, float] = {}
+        self._last_repack = 0.0
+        self._last_pack_build = 0.0
+        self._pack_hold_until = 0.0
 
     # ── public API (lane threads queue; the feed thread executes) ──
     def set_slugs(self, slugs: set, replace: bool) -> None:
@@ -710,7 +730,10 @@ class MarketsFeed:
         self._base_seen -= o2
         self._expiry.pop(g2, None)
         _forget_quotes(o2)
-        log.info("ws mkts evicted ladder %s (%d slugs) to seat %s",
+        nowt = time.time()
+        for s in o2:                      # still desired → next pack
+            self._pending.setdefault(s, nowt)
+        log.info("ws mkts evicted pack %s (%d slugs) to seat %s",
                  g2, len(o2), protect)
         return True
 
@@ -739,6 +762,10 @@ class MarketsFeed:
             with self._lock:
                 self._ops.append(("add", "core", gone, None,
                                   time.time() + 1.0))
+        elif gone:
+            nowt = time.time()
+            for s in gone:
+                self._pending.setdefault(s, nowt)
         log.warning("ws mkts subscription %s REJECTED (%s, %d slugs)%s",
                     rid, gid, len(gone),
                     " — core re-queued" if gid == "core" else "")
@@ -757,6 +784,11 @@ class MarketsFeed:
         for op in ripe:
             verb, gid, slugs = op[0], op[1], op[2]
             exp = op[3] if len(op) > 3 else None
+            if verb == "drop" and gid != "core" and gid not in self._groups:
+                sl, _e = self._ladders.pop(gid, (frozenset(), None))
+                for s in sl:
+                    self._pending.pop(s, None)
+                continue                  # subscribed rungs leave at repack
             if verb == "drop":
                 rids, old = self._groups.pop(gid, (None, frozenset()))
                 for r in (rids or []):
@@ -790,7 +822,14 @@ class MarketsFeed:
                                           time.time() + 2.0))
                     changed = True
                     continue
-            # add: delta only — the venue rejects overlapping subscribes
+            if gid != "core":
+                # LADDER → PACK LAYER: record the desire; _pack_flush
+                # subscribes rungs in batched cross-game packs.
+                self._ladders[gid] = (frozenset(slugs), exp)
+                for s in set(slugs) - self._covered:
+                    self._pending.setdefault(s, nowt)
+                continue
+            # core add: delta only — the venue rejects overlapping subscribes
             new = set(slugs) - self._covered
             if exp is not None:
                 self._expiry[gid] = exp
@@ -855,9 +894,117 @@ class MarketsFeed:
                     self._ops.append(("add", gid, cur,
                                       self._expiry.get(gid),
                                       time.time() + 2.0))
+        if self._pack_flush(ws, nowt):
+            changed = True
         if changed:
             log.info("ws mkts watching %d markets in %d groups",
                      len(self._covered), len(self._groups))
+
+    # ── PACK LAYER ──
+    def _pack_budget_used(self) -> int:
+        return sum(len(r) for g, (r, _s) in self._groups.items()
+                   if g != "core")
+
+    def _live_rungs(self, nowt: float) -> dict:
+        """slug -> nearest expiry over the desired (unexpired) ladders;
+        prunes ladders an hour past kickoff."""
+        for g, (sl, e) in list(self._ladders.items()):
+            if e is not None and e < nowt - 3600.0:
+                self._ladders.pop(g, None)
+        live: dict = {}
+        for g, (sl, e) in self._ladders.items():
+            ev = e if e is not None else 1e18
+            for s in sl:
+                if ev < live.get(s, 1e18):
+                    live[s] = ev
+        return live
+
+    def _send_pack(self, ws, slugs: list, live: dict) -> None:
+        self._gseq += 1
+        rid = f"g{self._gseq}-pack"
+        gid = f"pack{self._gseq}"
+        ws.send(json.dumps({"subscribe": {
+            "requestId": rid,
+            "subscriptionType": SUB_MARKET_LITE,
+            "marketSlugs": sorted(slugs)}}))
+        fs = frozenset(slugs)
+        self._groups[gid] = ([rid], fs)
+        self._rid_slugs[rid] = fs
+        self._covered |= fs
+        self._base_seen -= fs
+        self._expiry[gid] = max((live.get(s, 1e18) for s in slugs),
+                                default=None)
+        self._last_pack_build = time.time()
+        for s in slugs:
+            self._pending.pop(s, None)
+
+    def _pack_flush(self, ws, nowt=None, force: bool = False) -> bool:
+        """Subscribe pending rungs as cross-game packs. Batches for
+        PACK_BATCH_S; pack budget full → REPACK from the live ladder set
+        (rate-limited), leftovers stay pending (REST prices them)."""
+        nowt = nowt if nowt is not None else time.time()
+        if nowt < self._pack_hold_until:
+            return False
+        live = self._live_rungs(nowt)
+        for s in list(self._pending):
+            if s not in live or s in self._covered:
+                self._pending.pop(s, None)
+        if not self._pending:
+            return False
+        oldest = min(self._pending.values())
+        if (not force and len(self._pending) < PACK_SLUGS
+                and nowt - oldest < PACK_BATCH_S):
+            return False
+        budget = MKTS_MAX_RIDS - PACK_CORE_RESERVE
+        sent = False
+        while self._pending and self._pack_budget_used() < budget:
+            batch = sorted(self._pending,
+                           key=lambda s: live.get(s, 1e18))[:PACK_SLUGS]
+            self._send_pack(ws, batch, live)
+            sent = True
+        if not self._pending or self._pack_budget_used() < budget:
+            return sent
+        # budget full with rungs still wanting → repack from the live set,
+        # but ONLY when it frees something: packs carrying DEAD weight
+        # (rungs no longer desired — kicked-off games), or a pending rung
+        # that expires sooner than one already packed. Never within
+        # REPACK_MIN_S of the last build (a repack is 2s of dead air).
+        if (nowt - self._last_repack < REPACK_MIN_S
+                or nowt - self._last_pack_build < REPACK_MIN_S):
+            return sent
+        packed = set()
+        for g, (_r, sl) in self._groups.items():
+            if g != "core":
+                packed |= set(sl)
+        dead = packed - set(live)
+        far_packed = max((live.get(s, 1e18) for s in packed), default=0)
+        near_pending = min((live.get(s, 1e18) for s in self._pending),
+                           default=1e18)
+        if not dead and near_pending >= far_packed:
+            return sent
+        self._last_repack = nowt
+        for g in [g for g in self._groups if g != "core"]:
+            rids, old = self._groups.pop(g, ([], frozenset()))
+            for r in rids:
+                try:
+                    ws.send(json.dumps({"unsubscribe": {"requestId": r}}))
+                except Exception:
+                    pass
+                self._rid_slugs.pop(r, None)
+            self._covered -= old
+            self._base_seen -= old
+            self._expiry.pop(g, None)
+            _forget_quotes(old)
+        core_cov = self._groups.get("core", ([], frozenset()))[1]
+        for s in live:
+            if s not in core_cov:
+                self._pending.setdefault(s, nowt)
+        # the venue must see the unsubscribes land before the re-adds
+        self._pack_hold_until = nowt + 2.0
+        log.info("ws mkts REPACK — %d live rungs across %d ladders queued "
+                 "into packs of %d", len(self._pending), len(self._ladders),
+                 PACK_SLUGS)
+        return True
 
     def _run(self) -> None:
         import websocket
