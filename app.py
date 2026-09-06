@@ -23990,6 +23990,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 res["mirror_recheck"] = len(_mirror_recheck)
     except Exception:
         pass
+    _amend_set = _amend_slugs()
     cands.sort(key=_floor_viol)
     # BUDGET CLOCK RESTARTS HERE — the chase-night bug's THIRD sighting
     # (Sep 4 2026, first night as its own lane): _t0 at function top
@@ -24082,6 +24083,25 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                        else "ORDER_INTENT_SELL_LONG")
         mine = [o for o in orders
                 if o.get("slug") == slug and o.get("intent") == sell_intent]
+        _amend = slug in _amend_set
+        if _amend and not mine:
+            # an amended order may sit in REPLACED — invisible to the
+            # open-states read; look at the raw list so we never double up
+            try:
+                _resp = client.orders.list({"slugs": [slug]})
+                _raw = (_resp.get("orders") if isinstance(_resp, dict)
+                        else getattr(_resp, "orders", [])) or []
+                for _o in _raw:
+                    _g = (lambda k: _o.get(k) if isinstance(_o, dict) else getattr(_o, k, None))
+                    if (_g("intent") == sell_intent
+                            and str(_g("state") or "") in (_OPEN_ORDER_STATES | {"ORDER_STATE_REPLACED"})):
+                        _px = _g("price"); _pv = float(_px.get("value") if isinstance(_px, dict) else _px)
+                        mine.append({"id": _g("id"), "slug": slug, "intent": sell_intent,
+                                     "price_yes": _pv, "qty": float(_g("quantity") or 0),
+                                     "leaves": float(_g("leavesQuantity") or _g("quantity") or 0),
+                                     "auto": True, "state": str(_g("state") or "")})
+            except Exception:
+                pass
         our_ask = None
         our_ask_qty = 0.0
         if mine:
@@ -24250,6 +24270,17 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             break
         # cancel → position re-read (a fill won the race → done, never
         # re-place) → create fresh at the walk target
+        if _amend:
+            _v = _scalp_amend(client, sb, r, b, slug, synth, sell_intent,
+                              mine[0].get("id"), tgt, int(held), now,
+                              walked_from=our_ask)
+            res["amended"] = res.get("amended", 0) + (1 if _v == "amended" else 0)
+            if _v != "gone":
+                continue                 # amended (or unverified — never double up)
+            if _scalp_create(client, sb, r, b, slug, synth, sell_intent,
+                             tgt, int(held), now, walked_from=our_ask):
+                res["walked"] += 1       # modify killed it → fresh create
+            continue
         try:
             client.orders.cancel(mine[0].get("id"), {"marketSlug": slug})
         except Exception:
@@ -24297,6 +24328,81 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         pass
     res["t_lap"] = round(_time.time() - _t0, 1)
     return res
+
+
+def _amend_slugs() -> set:
+    """machine_flags `amend_slugs`: markets where the scalp walk uses the
+    venue's AMEND call (orders.modify, full params) instead of cancel→
+    create. A CONTROLLED RE-TEST (Rob, Sep 6 2026: "just on Jacksonville vs
+    Denver… I only own 3.9 shares anyway"): the Aug 2/16 probes found the
+    amended order in state REPLACED — live on the API, invisible in the
+    app — which is why modify is banned everywhere else. Empty = off."""
+    try:
+        v = _machine_flag_val("amend_slugs") or []
+        return {str(x) for x in v} if isinstance(v, list) else set()
+    except Exception:
+        return set()
+
+
+def _scalp_amend(client, sb, r, b, slug, synth, sell_intent, oid, tgt_c, qty,
+                 now, walked_from=None) -> str:
+    """Amend a resting ask IN PLACE (orders.modify with FULL params — a
+    partial modify killed orders on Aug 2). Returns 'amended' (same id at
+    the new price, any live state incl. REPLACED), 'gone' (no order left —
+    caller falls back to a fresh create), or 'unverified'. Stamps the
+    trail with mode/state so the test reads off the pick."""
+    try:
+        dt = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+        gtt = ((dt + timedelta(hours=7)).astimezone(timezone.utc)
+               .strftime("%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        return "gone"
+    canon = ((100.0 - tgt_c) / 100.0) if synth else (tgt_c / 100.0)
+    mod = {"marketSlug": slug,
+           "price": {"value": f"{canon:.3f}", "currency": "USD"},
+           "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
+           "participateDontInitiate": True,
+           "quantity": max(1, int(qty))}       # FULL replace, always
+    try:
+        client.orders.modify(oid, mod)
+    except Exception as e:
+        _send_fill_telegram(f"🧪 AMEND TEST — {r.get('event_name')}: modify "
+                            f"errored ({e})"[:240])
+        return "unverified"
+    _time.sleep(2.5)                          # modify is ASYNC (Aug 2 probe)
+    state, seen_px = None, None
+    try:
+        resp = client.orders.list({"slugs": [slug]})
+        raw = (resp.get("orders") if isinstance(resp, dict)
+               else getattr(resp, "orders", [])) or []
+        for o in raw:
+            g = (lambda k: o.get(k) if isinstance(o, dict) else getattr(o, k, None))
+            if g("id") != oid:
+                continue
+            state = str(g("state") or "")
+            px = g("price")
+            seen_px = float(px.get("value") if isinstance(px, dict) else px)
+    except Exception:
+        return "unverified"
+    live = state in (_OPEN_ORDER_STATES | {"ORDER_STATE_REPLACED"})
+    at_new = seen_px is not None and abs(seen_px - canon) < 0.0026
+    verdict = "amended" if (live and at_new) else ("gone" if state is None else "unverified")
+    try:
+        nb = dict(b)
+        hist = nb.get("scalp") if isinstance(nb.get("scalp"), list) else []
+        hist = (hist + [{"at": now.isoformat(), "ask_c": round(tgt_c, 1),
+                         "qty": int(qty), "from_c": walked_from,
+                         "mode": "amend", "state": state,
+                         "seen_px": seen_px, "verdict": verdict}])[-_SCALP_SHADOW_CAP:]
+        nb["scalp"] = hist
+        sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+    except Exception:
+        pass
+    _send_fill_telegram(
+        f"🧪 AMEND TEST — {r.get('event_name')}: modify {walked_from}¢ → "
+        f"{round(tgt_c)}¢ → API says {verdict} (state {state or '?'}, "
+        f"px {seen_px}). CHECK THE APP: is the {round(tgt_c)}¢ ask visible?")
+    return verdict
 
 
 def _scalp_create(client, sb, r, b, slug, synth, sell_intent, tgt_c, qty,

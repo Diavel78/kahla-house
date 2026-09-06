@@ -563,6 +563,8 @@ class WsFeed:
                     if _ev_slugs:
                         self.add_dirty(_ev_slugs)
                     self._wake("repeg", why)
+                    if any("position" in k for k in kset):
+                        self._wake("scalp", why)   # a fill needs an ask NOW
                     if (rid == "cellar-position"
                             or any("position" in k for k in kset)):
                         # A position changed — a fill or an exit. The
@@ -1279,6 +1281,11 @@ class MarketsFeed:
                         if k not in ("requestId", "request_id",
                                      "subscriptionType"))[:50],
                         WAKE_MKTS_MIN_S)
+                    # THE SELL ARM WAKES TOO (Rob, Sep 6 2026, watching a
+                    # bot re-price under our ask in a second while our lap
+                    # came round in a minute: "should have already been
+                    # done"). Same hint, same cooldown; the lap decides.
+                    self._wake("scalp", "mkts", WAKE_MKTS_MIN_S)
             except Exception as e:
                 _mkts_presence(up=False, conn=self.conn)  # readers fall back to the age rule
                 if self.stop.is_set():

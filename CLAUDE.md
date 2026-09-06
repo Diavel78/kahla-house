@@ -1253,7 +1253,19 @@ sport the machine ever adds:
   three screenshots in an hour — Phillies 96.5¢ and Guardians 99¢ asks
   through LIVE games, a Nationals ask 19¢ over cost: "if I own it for 50
   and the sell touch is 54, list 53, then 52, 51, 50. Never under my
-  cost").** **READ THE TOUCH, every lap (Rob, same afternoon: "why not just read
+  cost").** **THE SELL ARM WAKES ON SOCKET EVENTS (Sep 6 2026, Rob watching a
+  bot re-price under our ask in a second while our lap came round in a
+  minute — "should have already been done"): market news and position
+  events wake `scalp` exactly as they wake `repeg` (`lanes` includes it;
+  10s cooldown). **THE AMEND RE-TEST (same hour, scoped):** machine_flags
+  `amend_slugs` (jsonb list) names markets where the walk uses
+  `orders.modify` with FULL params (`_scalp_amend`) instead of cancel→
+  create — first slug `tsc-nfl-jax-den-2026-09-20-total-61pt5`, 4
+  contracts Rob "stole"; every amend stamps the trail
+  (`mode/state/seen_px/verdict`) and pings 🧪 so Rob can check the APP
+  view against the API's REPLACED state (the Aug 2/16 landmine). On
+  those slugs `mine` also reads the raw list incl. REPLACED so an
+  amended order is never doubled. Empty list = off. **READ THE TOUCH, every lap (Rob, same afternoon: "why not just read
   touch"): the ask belongs at touch − 1 tick or cost, whichever is
   higher; if it isn't there, move it, either direction. No step-down
   logic. The quote table carries no sizes, so when the best ask on the

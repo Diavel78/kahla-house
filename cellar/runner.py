@@ -406,7 +406,7 @@ class Runner:
                 from .wsfeed import WsFeed
                 self._wsfeed = WsFeed(
                     self.wake, sb=self.sb,
-                    lanes={ln for ln in ("repeg", "opener")
+                    lanes={ln for ln in ("repeg", "opener", "scalp")
                            if ln in enabled})
                 self._wsfeed.start()
                 # Watch list from VENUE TRUTH: every repeg lap pushes its
