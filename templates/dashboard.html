@@ -240,6 +240,8 @@
                  is the human view. Sells first. -->
             <div class="card wide">
                 <div class="label">Resting orders <span class="tag" id="ordersTag">—</span></div>
+                <input id="ordersSearch" type="search" placeholder="search — eagles, auburn, 49ers, over, sell…" autocomplete="off"
+                       style="width:100%;margin-top:8px;padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:inherit;font-size:14px">
                 <div id="ordersList" class="sub" style="margin-top:8px">loading…</div>
             </div>
             <div class="card wide">
@@ -756,7 +758,47 @@
         // 15s, not 60: the box refreshes the cache every tick now, and a
         // slim poll is one cached-row read — the page should feel live.
         setInterval(load, 15000);
-        // RESTING ORDERS — /api/my-orders (Firebase-gated), sells first.
+        // RESTING ORDERS — /api/my-orders (Firebase-gated), sells first, with a
+        // fuzzy search box: every typed word must appear somewhere in the row
+        // (market, side, slug, SELL/BUY, cents, "amended"); a word matches if
+        // its letters occur in order (so "oburn" finds Auburn, "niners" finds
+        // 49ers when the slug says "sf"… close enough for a phone thumb).
+        let _ordersRows = [];
+        function _fuzzyHit(hay, word) {
+            hay = hay.toLowerCase(); word = word.toLowerCase();
+            if (hay.includes(word)) return true;
+            let i = 0;
+            for (const ch of hay) { if (ch === word[i]) { i++; if (i === word.length) return true; } }
+            return false;
+        }
+        function renderOrders() {
+            const el = document.getElementById('ordersList');
+            const q = (document.getElementById('ordersSearch') || {}).value || '';
+            const words = q.trim().split(/\s+/).filter(Boolean);
+            const rows = _ordersRows.filter(o => {
+                if (!words.length) return true;
+                const hay = [o.market_name, o.outcome, o.pick, o.slug, o.team_name,
+                             /SELL/.test(o.intent||'') ? 'sell' : 'buy',
+                             o.amended ? 'amended' : '', o.price != null ? Math.round(o.price*100)+'¢' : '']
+                            .join(' ');
+                return words.every(w => _fuzzyHit(hay, w));
+            });
+            if (!rows.length) { el.textContent = words.length ? 'nothing matches "' + q + '"' : 'no resting orders'; return; }
+            const ago = iso => { try { const ms = Date.now() - new Date(iso).getTime();
+                return ms < 6e4 ? Math.round(ms/1e3)+'s' : ms < 36e5 ? Math.round(ms/6e4)+'m' : Math.round(ms/36e5)+'h'; } catch (e) { return '?'; } };
+            const esc = s => String(s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+            el.innerHTML = '<div style="display:grid;grid-template-columns:auto 1fr auto auto;gap:4px 10px;font-size:12px;align-items:center">'
+                + rows.map(o => {
+                    const sell = /SELL/.test(o.intent||'');
+                    const c = (o.price == null) ? '—' : (Math.round(o.price*1000)/10) + '¢';
+                    const name = ((o.market_name||'').replace(/\s+\d{4}-\d{2}-\d{2}$/, '')) + (o.outcome ? ' — ' + o.outcome : '');
+                    return '<span style="color:' + (sell ? '#60a5fa' : 'var(--green)') + ';font-weight:600">' + (sell ? 'SELL' : 'BUY') + '</span>'
+                         + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(name) + (o.amended ? ' <span class="tag" title="amended in place — live on the book, hidden by the app">amended</span>' : '') + '</span>'
+                         + '<span style="font-variant-numeric:tabular-nums">' + c + ' × ' + (o.leaves_quantity ?? o.quantity) + '</span>'
+                         + '<span style="color:var(--text-muted)">' + ago(o.updated_at) + '</span>';
+                }).join('') + '</div>';
+        }
+        (function () { const sb = document.getElementById('ordersSearch'); if (sb) sb.addEventListener('input', renderOrders); })();
         async function loadOrders() {
             const el = document.getElementById('ordersList');
             const tag = document.getElementById('ordersTag');
@@ -770,20 +812,8 @@
                     || (new Date(b.updated_at||0) - new Date(a.updated_at||0)));
                 const sells = rows.filter(o => /SELL/.test(o.intent||'')).length;
                 if (tag) tag.textContent = rows.length + ' resting · ' + sells + ' sells · ' + (rows.length - sells) + ' buys';
-                if (!rows.length) { el.textContent = 'no resting orders'; return; }
-                const ago = iso => { try { const ms = Date.now() - new Date(iso).getTime();
-                    return ms < 6e4 ? Math.round(ms/1e3)+'s' : ms < 36e5 ? Math.round(ms/6e4)+'m' : Math.round(ms/36e5)+'h'; } catch (e) { return '?'; } };
-                const esc = s => String(s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-                el.innerHTML = '<div style="display:grid;grid-template-columns:auto 1fr auto auto;gap:4px 10px;font-size:12px;align-items:center">'
-                    + rows.map(o => {
-                        const sell = /SELL/.test(o.intent||'');
-                        const c = (o.price == null) ? '—' : (Math.round(o.price*1000)/10) + '¢';
-                        const name = ((o.market_name||'').replace(/\s+\d{4}-\d{2}-\d{2}$/, '')) + (o.outcome ? ' — ' + o.outcome : '');
-                        return '<span style="color:' + (sell ? '#60a5fa' : 'var(--green)') + ';font-weight:600">' + (sell ? 'SELL' : 'BUY') + '</span>'
-                             + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(name) + (o.amended ? ' <span class="tag" title="amended in place — live on the book, hidden by the app">amended</span>' : '') + '</span>'
-                             + '<span style="font-variant-numeric:tabular-nums">' + c + ' × ' + (o.leaves_quantity ?? o.quantity) + '</span>'
-                             + '<span style="color:var(--text-muted)">' + ago(o.updated_at) + '</span>';
-                    }).join('') + '</div>';
+                _ordersRows = rows;
+                renderOrders();
             } catch (e) {
                 el.textContent = 'orders unavailable — ' + (e && e.message ? e.message : e);
             }
