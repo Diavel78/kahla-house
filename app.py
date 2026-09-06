@@ -23787,6 +23787,149 @@ def _scalp_venue_cost_c(pick_row, avg_price, held_qty):
     return vc_c
 
 
+# ── THE SELL SNIPER (Rob, Sep 6 2026: "no more laps, sniping only on the
+# sell arm"). The lap publishes a per-market snapshot (order id, resting
+# ask, cost floor, tick, size) into SCALP_SNAP; the markets socket hands
+# every LITE frame for a market in that table to SNIPE_Q; one worker
+# thread recomputes touch−1-or-cost from the frame and AMENDS in one call.
+# No reads (one book read only when the frame's best ask is our own price
+# — the table cannot tell us from a competitor). Per-slug debounce, the
+# per-write lock, and the lap every ~2 min as the reconciler (positions,
+# sizes, orphans, cost) — the sniper only ever moves an ask the lap has
+# already vouched for, never places, never sells what the lap did not see.
+SCALP_SNAP: dict = {}
+SNIPE_Q: "queue.Queue" = None
+_SNIPE_THREAD = None
+_SNIPE_LAST: dict = {}          # slug -> monotonic of the last amend
+_SNIPE_MIN_GAP_S = 1.0
+_SNIPE_STATS = {"frames": 0, "moves": 0, "skips": 0, "errors": 0}
+
+
+def _snipe_target(snap: dict, bid_c, ask_c, comp_ask_c=None):
+    """The rule, from a frame: touch − 1 tick or cost, whichever is
+    higher, post-only above the bid. bid_c/ask_c are the YES-canonical
+    frame; snap['synth'] flips them to our side. comp_ask_c overrides the
+    competitor ask (the self-ask book read). None = nothing to do."""
+    tick = float(snap.get("tick") or 1.0)
+    floor_c = float(snap["floor_c"])
+    our = float(snap["our_ask"])
+    if snap.get("synth"):
+        best_bid = (100.0 - ask_c) if ask_c is not None else None
+        best_ask = (100.0 - bid_c) if bid_c is not None else None
+    else:
+        best_bid, best_ask = bid_c, ask_c
+    comp = comp_ask_c if comp_ask_c is not None else best_ask
+    if comp is not None and abs(comp - our) < 0.26 and comp_ask_c is None:
+        return "self"                    # the frame's touch is us — need depth
+    tgt = max(floor_c, _grid_up(comp, tick) - tick) if comp is not None else floor_c
+    if best_bid is not None and tgt <= best_bid:
+        tgt = _grid_dn(best_bid, tick) + tick
+    tgt = min(99.0, _grid_up(tgt, tick))
+    return None if abs(tgt - our) <= 0.26 else tgt
+
+
+def _scalp_snipe_feed(slug: str) -> None:
+    """Feed-thread entry: a market we hold moved → queue it."""
+    try:
+        if slug in SCALP_SNAP and SNIPE_Q is not None:
+            SNIPE_Q.put_nowait(slug)
+    except Exception:
+        pass
+
+
+def _snipe_one(sb, client, slug: str) -> None:
+    snap = SCALP_SNAP.get(slug)
+    if not snap:
+        return
+    _SNIPE_STATS["frames"] += 1
+    nowm = _time.monotonic()
+    if nowm - _SNIPE_LAST.get(slug, 0.0) < _SNIPE_MIN_GAP_S:
+        _SNIPE_STATS["skips"] += 1
+        return
+    if not (SCALP_ENABLED and _machine_flag("scalp_enabled")):
+        return
+    q = WS_QUOTES.get(slug)
+    if not q:
+        return
+    bid_c, ask_c, _ts = q
+    tgt = _snipe_target(snap, bid_c, ask_c)
+    if tgt == "self":
+        try:
+            bk = _pmm_book(client, slug)
+            if snap.get("synth") and bk:
+                bk = _invert_book(bk)
+            comp = None
+            for c, qq in ((bk or {}).get("asks") or []):
+                if abs(c - float(snap["our_ask"])) < 0.26 and qq <= snap["qty"] + 0.5:
+                    continue
+                comp = c
+                break
+            tgt = _snipe_target(snap, bid_c, ask_c, comp_ask_c=(comp if comp is not None else -1.0))
+            if tgt == "self":
+                tgt = None
+        except Exception:
+            tgt = None
+    if tgt is None:
+        _SNIPE_STATS["skips"] += 1
+        return
+    try:
+        dt = datetime.fromisoformat(str(snap.get("event_start")).replace("Z", "+00:00"))
+        gtt = ((dt + timedelta(hours=7)).astimezone(timezone.utc)
+               .strftime("%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        return
+    canon = ((100.0 - tgt) / 100.0) if snap.get("synth") else (tgt / 100.0)
+    mod = {"marketSlug": slug, "price": {"value": f"{canon:.3f}", "currency": "USD"},
+           "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
+           "participateDontInitiate": True, "quantity": int(snap["qty"])}
+    frm = snap["our_ask"]
+    ok, note = True, ""
+    try:
+        client.orders.modify(snap["oid"], mod)      # serial via _SerialOrders
+    except Exception as e:
+        ok, note = False, str(e)[:120]
+        _SNIPE_STATS["errors"] += 1
+    _SNIPE_LAST[slug] = _time.monotonic()
+    if ok:
+        snap["our_ask"] = tgt                     # optimistic; the lap verifies
+        _SNIPE_STATS["moves"] += 1
+    try:
+        sb.table("scalp_snipes").insert({"slug": slug, "from_c": frm, "to_c": tgt,
+                                         "oid": snap["oid"], "ok": ok, "note": note,
+                                         "bid_c": bid_c, "ask_c": ask_c}).execute()
+    except Exception:
+        pass
+
+
+def _scalp_snipe_worker() -> None:
+    sb = get_supabase()
+    client = get_client()
+    while True:
+        try:
+            slug = SNIPE_Q.get()
+            # coalesce a burst on the same slug
+            _snipe_one(sb, client, slug)
+        except Exception:
+            _SNIPE_STATS["errors"] += 1
+            _time.sleep(0.2)
+
+
+def _ensure_snipe_worker() -> None:
+    global SNIPE_Q, _SNIPE_THREAD
+    if _SNIPE_THREAD is not None and _SNIPE_THREAD.is_alive():
+        return
+    try:
+        import queue as _queue
+        if SNIPE_Q is None:
+            SNIPE_Q = _queue.Queue(maxsize=5000)
+        _SNIPE_THREAD = threading.Thread(target=_scalp_snipe_worker,
+                                         name="scalp-sniper", daemon=True)
+        _SNIPE_THREAD.start()
+    except Exception:
+        pass
+
+
+
 def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     """One scalp pass — rides inside the repeg lease (order mutation stays
     serial; the 'overlapping topup batches' duplicate incident is why).
@@ -23807,6 +23950,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     skip. SHADOW MODE (SCALP_ENABLED=False): compute the would-ask and
     stamp signal_blob.scalp_shadow on change, including whether the tape
     crossed it. Never raises."""
+    _ensure_snipe_worker()
     res = {"cands": 0, "placed": 0, "walked": 0, "shadow": 0}
     _t0 = _time.time()
     owner = _kalshi_owner_uid()
@@ -24091,6 +24235,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 str(r.get("event_start")).replace("Z", "+00:00")) <= now)
         except Exception:
             _inplay = False
+        SCALP_SNAP.pop(slug, None)          # re-published below if an ask rests
         sell_intent = ("ORDER_INTENT_SELL_SHORT" if synth
                        else "ORDER_INTENT_SELL_LONG")
         mine = [o for o in orders
@@ -24146,6 +24291,15 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             if py is not None:
                 our_ask = (100.0 - py * 100.0) if synth else py * 100.0
             our_ask_qty = float(o0.get("leaves") or o0.get("qty") or 0.0)
+            if _amend and our_ask is not None:
+                # SNIPER SNAPSHOT (Sep 6 2026): everything the sniper needs
+                # to re-price this ask off a socket frame with no reads.
+                SCALP_SNAP[slug] = {"oid": o0.get("id"), "our_ask": our_ask,
+                                    "qty": int(max(1, our_ask_qty or held)),
+                                    "floor_c": floor_c, "tick": tick,
+                                    "synth": synth, "intent": sell_intent,
+                                    "event_start": r.get("event_start"),
+                                    "pick_id": r["id"], "at": _time.monotonic()}
         # TABLE-FIRST (Sep 5 2026, WS phase 3 for the sell arm): the LITE
         # quote is the canonical YES top-of-book, which is all the walk
         # reads — best bid to join, best competitor ask to lead. A table

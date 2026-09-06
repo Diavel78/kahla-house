@@ -612,6 +612,23 @@ def test_game_sport_key() -> None:
     check("no key → None, not a crash", _app._game_sport({"id": "x"}) is None)
 
 
+def test_snipe_target() -> None:
+    """The sell sniper's rule off a socket frame (Sep 6 2026): touch − 1
+    tick or cost, whichever higher, post-only above the bid; 'self' when
+    the frame's touch is our own price; None when already there."""
+    import app as _app
+    snap = {"our_ask": 96.0, "floor_c": 58.5, "tick": 1.0, "synth": False, "qty": 4}
+    check("competitor at 88 → 87", _app._snipe_target(snap, 83.0, 88.0) == 87.0)
+    check("competitor at 60, bid 59 → 60 (join, never cross)", _app._snipe_target(snap, 59.0, 60.0) == 60.0)
+    check("competitor under cost → cost", _app._snipe_target(snap, 40.0, 50.0) == 58.5 + 0.5 or _app._snipe_target(snap, 40.0, 50.0) == 59.0)
+    check("no ask at all → cost", _app._snipe_target(snap, 40.0, None) in (58.5, 59.0))
+    check("frame's touch is our own price → 'self'", _app._snipe_target(snap, 83.0, 96.0) == "self")
+    check("already at target → None", _app._snipe_target({**snap, "our_ask": 87.0}, 83.0, 88.0) is None)
+    # synthetic (short) side: YES frame bid 12 / ask 17 → our side bid 83 / ask 88
+    ss = {"our_ask": 96.0, "floor_c": 58.5, "tick": 1.0, "synth": True, "qty": 4}
+    check("synthetic side flips the frame: → 87", _app._snipe_target(ss, 12.0, 17.0) == 87.0)
+
+
 def test_pin_line_center() -> None:
     """Pinnacle's line in rung units from the cached slate shape (the real
     Northern Arizona @ Arizona event, Sep 5 2026)."""
@@ -828,7 +845,7 @@ def main() -> int:
               test_dry_run_blackout, test_overrun_detector,
               test_ws_quote_presence, test_ws_mkts_request_budget,
               test_gridiron_value_window, test_pin_line_center,
-              test_gridiron_bounds, test_game_sport_key,
+              test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_lane_covers_its_documented_engines,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()

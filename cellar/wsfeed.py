@@ -146,6 +146,15 @@ def _write_quote(slug: str, pv: dict, conn: int = 0) -> None:
         pass
 
 
+def _snipe_feed(slug: str) -> None:
+    """A LITE frame for a market the sell arm holds → the sniper queue."""
+    try:
+        import app as _app
+        _app._scalp_snipe_feed(slug)
+    except Exception:
+        pass
+
+
 def _forget_quotes(slugs) -> None:
     """Slugs we no longer subscribe to can go quiet without meaning
     'unchanged' — drop their epoch so the readers fall back to the age
@@ -562,6 +571,19 @@ class WsFeed:
                     _harvest_slugs(msg, _ev_slugs)
                     if _ev_slugs:
                         self.add_dirty(_ev_slugs)
+                        # SNIPER STAND-DOWN (Rob, Sep 6 2026: "what if we sold
+                        # some?"): any ORDER/POSITION event on a market drops
+                        # the sniper's snapshot for it — a fill changed the
+                        # size, and an amend at the old size would resize the
+                        # ask UP past what we hold. The next lap re-reads the
+                        # venue and re-vouches; until then the sniper is off
+                        # that market.
+                        try:
+                            import app as _app
+                            for _s in _ev_slugs:
+                                _app.SCALP_SNAP.pop(_s, None)
+                        except Exception:
+                            pass
                     self._wake("repeg", why)
                     if any("position" in k for k in kset):
                         self._wake("scalp", why)   # a fill needs an ask NOW
@@ -1263,6 +1285,7 @@ class MarketsFeed:
                         # fallback live with the readers (_ws_quote).
                         if _pk == "marketDataLite":
                             _write_quote(_sl, _pv, self.conn)
+                            _snipe_feed(_sl)         # the sell sniper (app)
                         if _sl not in self._base_seen:
                             # First frame for this market since the
                             # subscription = the baseline replay. State,

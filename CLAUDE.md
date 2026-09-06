@@ -1272,9 +1272,27 @@ sport the machine ever adds:
   tick under us each time, sized to our 4). The app showed NOTHING —
   the Aug 2/16 "invisible" finding stands, but it is a DISPLAY gap in
   the venue's app for REPLACED orders, not a dead order. The API, the
-  book and our dashboard all see it. Rollout beyond the test slug is
-  Rob's call (his app-trust rule vs one-call atomic moves with no
-  cancel gap and no sleeps). **READ THE TOUCH, every lap (Rob, same afternoon: "why not just read
+  book and our dashboard all see it. **ROLLED OUT TO EVERY SELL 14:09 AZ the same day
+  (`amend_slugs=["*"]`; 18/18 amends confirmed in five laps, one sell per
+  market, none oversized, none without a position); `_OPEN_ORDER_STATES`
+  now INCLUDES REPLACED so every consumer agrees an amended order is live;
+  the human view is the slim dashboard's "Resting orders" card (venue API,
+  sells first, "amended" tag, fuzzy search) — Rob's app "Your orders" is
+  no longer the source of truth for resting sells. BUYS STAY ON
+  CANCEL→VERIFY→CREATE (moving a bid up costs money; a night of sell data
+  first). **THE SELL SNIPER (built the same evening — Rob: "no more laps,
+  sniping only on the sell arm"):** the lap publishes a per-market
+  snapshot (`SCALP_SNAP`: order id, resting ask, cost floor, tick, size);
+  every LITE frame for a snapshotted market goes to `SNIPE_Q`; one worker
+  thread (`_scalp_snipe_worker`) recomputes touch−1-or-cost from the frame
+  (`_snipe_target`, selftest `test_snipe_target`) and AMENDS in one call —
+  no reads except one book read when the frame's touch is our own price;
+  1s per-slug debounce; ledger `scalp_snipes`. ⚠ SIZE SAFETY (Rob: "what
+  if we sold some?"): any private ORDER/POSITION event on a market POPS
+  its snapshot, so the sniper stands down until the lap re-reads the
+  venue and re-vouches the size — it never resizes an ask past what we
+  hold. The lap (every ~2 min) stays the reconciler and the only thing
+  that PLACES. **READ THE TOUCH, every lap (Rob, same afternoon: "why not just read
   touch"): the ask belongs at touch − 1 tick or cost, whichever is
   higher; if it isn't there, move it, either direction. No step-down
   logic. The quote table carries no sizes, so when the best ask on the
