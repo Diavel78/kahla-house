@@ -3113,6 +3113,8 @@ def _open_cost_mark(rows) -> tuple:
 
 _DASH_ORDERS_EVERY_S = 170     # >= ~3 min between orders-count reads
 _DASH_REFRESH_EVERY_S = 300.0  # the whole dashboard recompute, on the paperlog tick
+_PM_PMM_BUDGET_S = float(os.environ.get("PM_PMM_BUDGET_S")
+                         or (45.0 if os.environ.get("CELLAR_SIDE") == "cellar" else 7.5))
 _DASH_REFRESH_TS = 0.0
 _DASH_ORDERS_TS = 0.0          # last ATTEMPT (module state; box lane is
                                # long-lived, Vercel cold starts just read once)
@@ -15376,7 +15378,14 @@ def api_pm_snapshot():
         _pmm_client = get_client()
     except Exception:
         _pm, _pmm_client = None, None
-    pmm_deadline = _time.time() + 7.5
+    # PMM LOOKUP BUDGET (Sep 7 2026): 7.5s was Vercel's share of a 10s
+    # request — ~5 games per tick. On the box that starved the far tier:
+    # 184 games in the window, near-game MLB took all five slots every
+    # tick on Labor Day, and the NFL games (the only source of NFL prop
+    # captures, which pay early rent) were not visited for 19 hours —
+    # fbp_eval=0 with 144 props on the tape. The box gets a real budget;
+    # Vercel keeps its 7.5s.
+    pmm_deadline = _time.time() + _PM_PMM_BUDGET_S
 
     rows = []
     prop_rows = []   # props pipeline — (mid, venue, key, q, type, line,
