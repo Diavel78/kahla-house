@@ -552,7 +552,22 @@
             // $50.20 and $247.04 thirteen minutes apart — a dash while the
             // mirror finishes backfilling is honest; that number was not.
             const lt = s.lifetime_venue || null;
-            paint('vTotal', lt ? lt.lifetime : null, true);
+            // EQUITY hero (Sep 7 2026): realized = cash + open stakes at
+            // cost − deposits; moves only when money changes hands. The
+            // cash-only lifetime and the marked figure ride the sub line.
+            const eq = lt && lt.equity_realized != null ? lt.equity_realized : (lt ? lt.lifetime : null);
+            paint('vTotal', eq, true);
+            (function(){
+                const el = document.getElementById('subTotal');
+                if (!el || !lt) return;
+                if (lt.equity_realized != null) {
+                    document.querySelector('#vTotal').parentElement.querySelector('.label').textContent = 'Equity';
+                    el.textContent = 'cash + open stakes at cost − deposits · cash only ' + money(lt.lifetime)
+                        + (lt.unrealized != null ? ' · marked ' + money(lt.equity_marked) + ' (' + (lt.unrealized >= 0 ? '+' : '') + money(lt.unrealized) + ' unrealized)' : '');
+                } else {
+                    el.textContent = 'cash out vs cash in — venue ledger';
+                }
+            })();
             // DAY CARDS — bets only, venue-settled, AZ game day. Rent is
             // deliberately NOT here (the venue publishes it days late);
             // it lives in the windows below by earn date.

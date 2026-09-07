@@ -3035,7 +3035,7 @@ def _pnl_stack_memo(sb, derived_so_far: dict):
     return prior                       # compute failed → last good stack
 
 
-def _lifetime_venue(sb, balance) -> dict | None:
+def _lifetime_venue(sb, balance, open_cost=None, open_mark=None) -> dict | None:
     """LIFETIME, cash basis, from the venue ledger: balance + everything
     withdrawn − everything deposited. One equation over stored rows — no
     walk, no window, no weather (Aug 21 2026: the old walk-based number
@@ -3071,10 +3071,44 @@ def _lifetime_venue(sb, balance) -> dict | None:
                 dep += amt
             else:
                 wd += amt
-        return {"lifetime": round(float(balance) + wd - dep, 2),
-                "deposited": round(dep, 2), "withdrawn": round(wd, 2)}
+        out = {"lifetime": round(float(balance) + wd - dep, 2),
+               "deposited": round(dep, 2), "withdrawn": round(wd, 2)}
+        # EQUITY (Sep 7 2026 — Rob: the app hides sells and misprices
+        # receipts; the dashboard is his only record). Realized equity =
+        # cash + what the open positions COST − net deposits: moves only
+        # when money actually changes hands (a sell, a settlement, rent),
+        # never with a price tick. Marked equity swaps cost for the venue's
+        # current mark — what the app's bouncing number is, minus deposits.
+        # Every input is the venue's own figure.
+        if open_cost is not None:
+            out["open_cost"] = round(float(open_cost), 2)
+            out["equity_realized"] = round(out["lifetime"] + float(open_cost), 2)
+        if open_mark is not None:
+            out["open_mark"] = round(float(open_mark), 2)
+            out["equity_marked"] = round(out["lifetime"] + float(open_mark), 2)
+        if open_cost is not None and open_mark is not None:
+            out["unrealized"] = round(float(open_mark) - float(open_cost), 2)
+        return out
     except Exception:
         return None
+
+
+def _open_cost_mark(rows) -> tuple:
+    """(Σ cost, Σ venue mark) over live position rows (_position_row_fast
+    shape; dust included — it is still money on the table)."""
+    oc = om = 0.0
+    for p in rows or []:
+        if p.get("expired"):
+            continue
+        try:
+            q = float(p.get("quantity") or 0.0)
+            if p.get("entry_price") is not None:
+                oc += float(p["entry_price"]) * q
+            if p.get("current_value") is not None:
+                om += float(p["current_value"])
+        except (TypeError, ValueError):
+            continue
+    return round(oc, 2), round(om, 2)
 
 
 _DASH_ORDERS_EVERY_S = 170     # >= ~3 min between orders-count reads
@@ -3170,6 +3204,8 @@ def _dash_cache_refresh(sb, client) -> dict:
             "dust_value": round(sum((p.get("current_value") or 0)
                                     for p in rows if not p.get("expired")
                                     and (p.get("quantity") or 0) < 1.0), 2),
+            "open_cost": _open_cost_mark(rows)[0],
+            "open_mark": _open_cost_mark(rows)[1],
             "order_count": order_count,
             "computed_at": datetime.now(timezone.utc).isoformat(),
             "note": "ok" if order_err is None
@@ -27615,7 +27651,7 @@ def api_data():
                     "lifetime_venue": _blk(
                         "__never_cached__",
                         lambda: _lifetime_venue(get_supabase(),
-                                                _c.get("balance")),
+                                                _c.get("balance", _c.get("open_cost"), _c.get("open_mark"))),
                         None),
                     "maker_rewards": _mrs.get("rewards"),
                     "account_credits": _mrs.get("credits"),
@@ -27751,7 +27787,8 @@ def api_data():
         except Exception:
             _stkf = None
         try:
-            _ltf = _lifetime_venue(get_supabase(), balance)
+            _oc, _om = _open_cost_mark(_live)
+            _ltf = _lifetime_venue(get_supabase(), balance, _oc, _om)
         except Exception:
             _ltf = None
         if not _mrs.get("rewards") and not _mrs.get("n_rewards"):
