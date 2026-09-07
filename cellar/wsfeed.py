@@ -988,6 +988,15 @@ class MarketsFeed:
         if cap_hit:
             self._cap_hit_at = time.time()
             self._cap_hits = getattr(self, "_cap_hits", 0) + 1
+            # LEARN THE CAP (Sep 7 2026): the venue counts more live
+            # requests than our MKTS_MAX_RIDS budget assumes (463 cap
+            # rejections overnight at a steady ~1/min after the 60s hold —
+            # every retry re-learned the same wall). On a cap hit the
+            # connection's own budget becomes what it currently holds
+            # minus one, so the next pack/core waits for a real slot
+            # instead of asking again.
+            _live = sum(len(r) for r, _s in self._groups.values())
+            self._rid_cap = max(3, min(getattr(self, "_rid_cap", MKTS_MAX_RIDS), _live - 1))
         gone = set(self._rid_slugs.pop(rid, frozenset()))
         gid = None
         for g, (rids, sl) in list(self._groups.items()):
@@ -1118,7 +1127,7 @@ class MarketsFeed:
             # that finds no room is skipped (its rungs price via REST).
             _evicted = 0
             while (sum(len(r) for r, _s in self._groups.values())
-                   >= MKTS_MAX_RIDS):
+                   >= getattr(self, "_rid_cap", MKTS_MAX_RIDS)):
                 if gid != "core" or not self._evict_one(ws, protect=gid):
                     break
                 _evicted += 1
@@ -1130,7 +1139,7 @@ class MarketsFeed:
                 requeue.append(("add", gid, set(slugs), exp, nowt + 3.0))
                 continue
             if (sum(len(r) for r, _s in self._groups.values())
-                    >= MKTS_MAX_RIDS):
+                    >= getattr(self, "_rid_cap", MKTS_MAX_RIDS)):
                 if gid != "core":
                     log.info("ws mkts request budget full — ladder %s "
                              "not subscribed (REST prices it)", gid)
@@ -1303,7 +1312,7 @@ class MarketsFeed:
         if (not force and len(self._pending) < PACK_SLUGS
                 and nowt - oldest < PACK_BATCH_S):
             return False
-        budget = MKTS_MAX_RIDS - PACK_CORE_RESERVE
+        budget = getattr(self, "_rid_cap", MKTS_MAX_RIDS) - PACK_CORE_RESERVE
         sent = False
         while self._pending and self._pack_budget_used() < budget:
             batch = sorted(self._pending,
