@@ -3114,7 +3114,7 @@ def _open_cost_mark(rows) -> tuple:
 _DASH_ORDERS_EVERY_S = 170     # >= ~3 min between orders-count reads
 _DASH_REFRESH_EVERY_S = 300.0  # the whole dashboard recompute, on the paperlog tick
 _PM_PMM_BUDGET_S = float(os.environ.get("PM_PMM_BUDGET_S")
-                         or (45.0 if os.environ.get("CELLAR_SIDE") == "cellar" else 7.5))
+                         or (45.0 if os.environ.get("CELLAR_LANES") else 7.5))  # CELLAR_LANES = the box
 _DASH_REFRESH_TS = 0.0
 _DASH_ORDERS_TS = 0.0          # last ATTEMPT (module state; box lane is
                                # long-lived, Vercel cold starts just read once)
