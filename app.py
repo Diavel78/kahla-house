@@ -16668,6 +16668,38 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
         state = _repeg_verify_or_recreate(pclient, slug, intent, canon,
                                           0, None, None)
         ok = state in ("ok", "filled")
+    if not ok and new_oid:
+        # THE VENUE SAID NO (Sep 7 2026): a post-only create that would
+        # cross (GB@MIN Under 47.5 pegged 56c into a 55/56 book) comes back
+        # with an order id and then state REJECTED — and this function
+        # booked the pick anyway ("verify pending — sweep self-heals"),
+        # leaving a pick with a dead order for the reconcile's two strikes.
+        # Ask the venue for THAT order's state; REJECTED = undo our row now
+        # and refuse with a typed reason so the caller re-pegs next visit.
+        try:
+            _st = None
+            _resp = pclient.orders.list({"slugs": [slug]})
+            for _o in ((_resp.get("orders") if isinstance(_resp, dict)
+                        else getattr(_resp, "orders", [])) or []):
+                _gg = (lambda k: _o.get(k) if isinstance(_o, dict) else getattr(_o, k, None))
+                if _gg("id") == new_oid:
+                    _st = str(_gg("state") or "")
+                    break
+            if _st and "REJECTED" in _st:
+                try:
+                    (sb.table("bot_picks").delete()
+                     .filter("signal_blob->>order_id", "eq", new_oid)
+                     .eq("status", "pending").execute())
+                except Exception:
+                    pass
+                _send_fill_telegram(
+                    f"AUTO-BET REJECTED — {g.get('event_name')} {side_lbl} "
+                    f"{n_contracts} @ {round(side_c)}c: venue refused the "
+                    f"post-only order (book {round(bid_c) if bid_c else '?'}/"
+                    f"{round(ask_c) if ask_c else '?'}). Row undone; re-pegs next visit.")
+                return _fail("rejected")
+        except Exception:
+            pass
     _send_fill_telegram(
         f"🤖💰 AUTO-BET — {g.get('event_name')}: {side_lbl} "
         f"{n_contracts} @ {round(side_c)}¢ (book "
