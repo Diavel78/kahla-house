@@ -277,6 +277,27 @@ def _harvest_slugs(obj, out: set, depth: int = 0) -> None:
 _TERMINAL_STATES = ("FILLED", "CANCELED", "CANCELLED", "EXPIRED", "REJECTED")
 
 
+def _buy_fill(msg: dict):
+    """(slug, intent) when this order frame is a BUY of ours that executed
+    (cumQuantity > 0), else None. The sell arm's fast-ask trigger."""
+    for k, v in msg.items():
+        if not (k.lower().startswith("order") and isinstance(v, dict)):
+            continue
+        ex = v.get("execution") if isinstance(v.get("execution"), dict) else v
+        od = ex.get("order") if isinstance(ex.get("order"), dict) else ex
+        intent = str(od.get("intent") or "")
+        if "BUY" not in intent:
+            return None
+        try:
+            cum = float(od.get("cumQuantity") or 0)
+        except (TypeError, ValueError):
+            cum = 0.0
+        slug = od.get("marketSlug") or (od.get("marketMetadata") or {}).get("slug")
+        if cum > 0 and slug:
+            return (str(slug), intent)
+    return None
+
+
 def _size_event(msg: dict) -> bool:
     """Did this private frame change what we HOLD or what RESTS? Position
     frames always; order frames only when something executed
@@ -685,6 +706,10 @@ class WsFeed:
                         if _size_event(msg):
                             try:
                                 import app as _app
+                                _bf = _buy_fill(msg)
+                                if _bf:
+                                    _app._ensure_fast_ask_worker()
+                                    _app._fast_ask_feed(*_bf)   # THE FAST ASK
                                 _tm = time.monotonic()
                                 for _s in _ev_slugs:
                                     _app.SCALP_SNAP.pop(_s, None)

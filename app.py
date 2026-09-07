@@ -24238,6 +24238,145 @@ def _snipe_one(sb, client, slug: str) -> None:
         pass
 
 
+# ── THE FAST ASK (Sep 6 2026, work item #1 — Rob: "should have already
+# been done"). A BUY fill on the private socket used to wake the sell
+# lap, and the ask waited for whatever lap was already running (78s on
+# the one measured). Rent is per second and a fresh fill is exactly when
+# the touch is known. Now the fill frame itself queues the market; one
+# worker reads the venue's position + resting orders for THAT market
+# (two small reads), prices touch−1-or-cost off the depth/quote table,
+# and rests the ask through the same verified _scalp_create the lap
+# uses. The lap stays the reconciler (dup repair keeps the oldest ask).
+FAST_ASK_Q = None
+_FAST_ASK_LAST: dict = {}
+_FAST_ASK_MIN_GAP_S = 20.0
+_FAST_ASK_STATS = {"fills": 0, "asks": 0, "skips": 0, "errors": 0}
+
+
+def _fast_ask_feed(slug: str, intent: str) -> None:
+    """Feed-thread entry: a BUY of ours executed on `slug`."""
+    try:
+        if FAST_ASK_Q is not None:
+            FAST_ASK_Q.put_nowait((slug, intent))
+    except Exception:
+        pass
+
+
+def _fast_ask_one(sb, client, slug: str, buy_intent: str) -> None:
+    global _FAST_ASK_LAST
+    _FAST_ASK_STATS["fills"] += 1
+    nowm = _time.monotonic()
+    if nowm - _FAST_ASK_LAST.get(slug, 0.0) < _FAST_ASK_MIN_GAP_S:
+        _FAST_ASK_STATS["skips"] += 1
+        return
+    _FAST_ASK_LAST[slug] = nowm
+    if not (SCALP_ENABLED and _machine_flag("scalp_enabled")
+            and _machine_flag("fast_ask_enabled")):
+        return
+    synth = "SHORT" in (buy_intent or "")          # BUY_SHORT = we hold NO
+    sell_intent = "ORDER_INTENT_SELL_SHORT" if synth else "ORDER_INTENT_SELL_LONG"
+    now = datetime.now(timezone.utc)
+    try:
+        rows = (sb.table("bot_picks")
+                .select("id,event_name,event_start,entry_price,market_type,"
+                        "side,signal_blob,poly_pnl")
+                .eq("status", "pending")
+                .filter("signal_blob->>pmm_slug", "eq", slug)
+                .order("picked_at", desc=True).limit(3).execute().data) or []
+    except Exception:
+        _FAST_ASK_STATS["errors"] += 1
+        return
+    r = None
+    for cand in rows:
+        b0 = cand.get("signal_blob") if isinstance(cand.get("signal_blob"), dict) else {}
+        mt0 = cand.get("market_type") or ""
+        if mt0 == "nrfi":
+            continue                              # NRFI never sells
+        if _scalp_lanes(b0, mt0) or _scalp_adopted_ok(sb, cand, b0, slug, synth):
+            r = cand
+            break
+    if r is None:
+        _FAST_ASK_STATS["skips"] += 1
+        return
+    b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+    try:
+        # one resting ask already? then the lap/sniper own it
+        resp = client.orders.list({"slugs": [slug]})
+        raw = (resp.get("orders") if isinstance(resp, dict)
+               else getattr(resp, "orders", [])) or []
+        for o in raw:
+            g = (lambda k: o.get(k) if isinstance(o, dict) else getattr(o, k, None))
+            if g("intent") == sell_intent and str(g("state") or "") in _OPEN_ORDER_STATES:
+                _FAST_ASK_STATS["skips"] += 1
+                return
+        pos = _pmm_positions_raw(client)
+        if pos is None:
+            _FAST_ASK_STATS["errors"] += 1
+            return
+        p = pos.get(slug) or {}
+        net = float(p.get("net") or 0.0)
+        held = (-net) if synth else net
+        if held < 1.0:
+            _FAST_ASK_STATS["skips"] += 1
+            return                                # not ours / dust
+        entry_c = _scalp_entry_c(r, b)            # the lap's own stamp read
+        vc = _scalp_venue_cost_c(r, p.get("avg_price"), held)
+        if vc is not None and vc > 0:
+            entry_c = max(entry_c or 0.0, vc)
+        if not entry_c or entry_c <= 0:
+            _FAST_ASK_STATS["skips"] += 1
+            return
+        tick = _pmm_tick_c(client, slug)
+        floor_c = min(99.0, _grid_up(entry_c, tick))
+        bk = _ws_depth(slug) or _pmm_book(client, slug)
+        if synth and bk:
+            bk = _invert_book(bk)
+        best_ask = (bk or {}).get("best_ask")
+        best_bid = (bk or {}).get("best_bid")
+        tgt = (max(floor_c, _grid_up(best_ask, tick) - tick)
+               if best_ask is not None else floor_c)
+        if best_bid is not None and tgt <= best_bid:
+            tgt = _grid_dn(best_bid, tick) + tick
+        tgt = min(99.0, _grid_up(tgt, tick))
+        ok = _scalp_create(client, sb, r, b, slug, synth, sell_intent,
+                           tgt, int(held), now)
+        if ok:
+            _FAST_ASK_STATS["asks"] += 1
+            app.logger.info("FAST ASK %s: %d @ %.1f¢ (floor %.1f, touch %s)",
+                            slug, int(held), tgt, floor_c, best_ask)
+        else:
+            _FAST_ASK_STATS["errors"] += 1
+    except Exception:
+        _FAST_ASK_STATS["errors"] += 1
+
+
+def _fast_ask_worker() -> None:
+    sb = get_supabase()
+    client = get_client()
+    while True:
+        try:
+            slug, intent = FAST_ASK_Q.get()
+            _fast_ask_one(sb, client, slug, intent)
+        except Exception:
+            _FAST_ASK_STATS["errors"] += 1
+            _time.sleep(0.2)
+
+
+_FAST_ASK_THREAD = None
+
+
+def _ensure_fast_ask_worker() -> None:
+    global FAST_ASK_Q, _FAST_ASK_THREAD
+    if _FAST_ASK_THREAD is not None and _FAST_ASK_THREAD.is_alive():
+        return
+    import queue as _queue, threading as _threading
+    if FAST_ASK_Q is None:
+        FAST_ASK_Q = _queue.Queue(maxsize=500)
+    _FAST_ASK_THREAD = _threading.Thread(target=_fast_ask_worker,
+                                         name="fast-ask", daemon=True)
+    _FAST_ASK_THREAD.start()
+
+
 def _scalp_snipe_worker() -> None:
     sb = get_supabase()
     client = get_client()
@@ -24861,6 +25000,8 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     # per process; the dashboard reads the latest scalp tick
     res["snipe"] = dict(_SNIPE_STATS)
     res["buy_snipe"] = dict(_BUY_SNIPE_STATS)
+    res["fast_ask"] = dict(_FAST_ASK_STATS)
+    _ensure_fast_ask_worker()
     return res
 
 
