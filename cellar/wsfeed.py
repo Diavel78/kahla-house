@@ -80,6 +80,7 @@ CORE_REBUILD_RIDS = 2
 CORE_REBUILD_MIN_S = 120.0
 CAP_HOLD_S = 60.0            # no new subscribes for this long after the venue says the connection is full
 PACK_FLUSH_MIN_S = 2.0       # pack layer runs at most this often (it rode every frame)
+AUDIT_GRACE_S = 180.0        # no baseline audits this long after a (re)connect
 HEARTBEAT_STAMP_S = 120.0   # per-connection state stamp (pending/packs/ladders)
 # PACKING (Sep 6 2026, Rob: "why the hell are we doing REST with a
 # websocket"): the venue's scarce resource is subscription REQUESTS (~12
@@ -461,12 +462,26 @@ class WsFeed:
     # -- plumbing ------------------------------------------------------------
 
     def push_watch(self, slugs: set, replace: bool) -> None:
-        """The quoted set → the LITE core group AND the depth connection."""
+        """The quoted set → the LITE core group AND the depth connection.
+
+        A partial push (replace=False: one order event's slug) is MERGED
+        into the last full watch list before it goes down — found Sep 7
+        2026: the feed's op queue keeps only the NEWEST core membership,
+        so a single-slug order-event push that landed between a rebuild's
+        unsubscribe and its deferred re-add REPLACED the 299-slug set with
+        one slug ('watching 299 → 0 → 1 → 299' every two minutes on the
+        depth connection)."""
+        full = set(getattr(self, "_watch_full", set()))
+        if replace:
+            full = set(slugs)
+        else:
+            full |= set(slugs)
+        self._watch_full = full
         if getattr(self, "mkts", None) is not None:
-            self.mkts.set_slugs(set(slugs), replace=replace)
+            self.mkts.set_slugs(set(full), replace=True)
         d = getattr(self, "depth_feed", None)
         if d is not None:
-            d.set_slugs(set(slugs), replace=replace)
+            d.set_slugs(set(full), replace=True)
 
     def add_dirty(self, slugs: set) -> None:
         with self._dirty_lock:
@@ -1109,8 +1124,13 @@ class MarketsFeed:
                 # request, and the budget is ~12); fold them into the next
                 # whole-set rebuild, which fires when there is anything new
                 # and the rebuild clock allows.
+                # ONE REQUEST, REBUILT WHOLE (Sep 7 2026, every conn): a
+                # delta request per new order slug needed a budget slot and
+                # evicted a 350-rung pack to get it — 125 evictions in 20
+                # minutes, coverage 1051 of 2640 rungs, ladders priced over
+                # REST. New slugs now wait for the next whole-set rebuild.
                 _rebuild = ((len(stale) > 20 or len(c_rids) >= CORE_REBUILD_RIDS
-                             or (_depth and _new_d))
+                             or bool(_new_d))
                             and nowt - self._core_rebuilt_at >= CORE_REBUILD_MIN_S)
                 if _rebuild:
                     self._core_rebuilt_at = nowt
@@ -1123,11 +1143,11 @@ class MarketsFeed:
                     _forget_quotes(stale)
                     with self._lock:
                         self._ops.append(("add", gid, set(slugs), exp,
-                                          time.time() + (6.0 if _depth else 2.0)))
+                                          time.time() + 6.0))
                     changed = True
                     continue
-                if _depth and _new_d and len(_new_d) < 25:
-                    continue          # depth: wait for the whole-set rebuild
+                if _new_d and c_rids:
+                    continue          # core is seated: new slugs wait for the rebuild
             if gid != "core":
                 # LADDER → PACK LAYER: record the desire; _pack_flush
                 # subscribes rungs in batched cross-game packs.
@@ -1148,9 +1168,10 @@ class MarketsFeed:
             # REQUEST budget: core evicts ladders to seat itself; a ladder
             # that finds no room is skipped (its rungs price via REST).
             _evicted = 0
+            _core_seated = bool(self._groups.get("core", ([], frozenset()))[0])
             while (sum(len(r) for r, _s in self._groups.values())
                    >= getattr(self, "_rid_cap", MKTS_MAX_RIDS)):
-                if gid != "core" or not self._evict_one(ws, protect=gid):
+                if gid != "core" or _core_seated or not self._evict_one(ws, protect=gid):
                     break
                 _evicted += 1
             if _evicted:
@@ -1259,6 +1280,12 @@ class MarketsFeed:
             self._pending.pop(s, None)
 
     def _pack_audit(self, ws, nowt: float) -> bool:
+        # GRACE AFTER (RE)CONNECT (Sep 7 2026): a reconnect re-subscribed
+        # 2,450 rungs at once and the 30s audit tore all seven packs down
+        # as 'silent' before the venue finished replaying baselines — then
+        # re-queued, re-subscribed, re-audited: the coverage collapse.
+        if nowt < getattr(self, "_audit_grace_until", 0.0):
+            return False
         """Verify each pack against the baselines the venue replayed."""
         changed = False
         for gid in list(self._groups):
@@ -1430,6 +1457,7 @@ class MarketsFeed:
                     self._base_seen = set()
                     self._ops = prev + self._ops
                 _mkts_presence(up=True, conn=self.conn)   # new epoch: old rows age out
+                self._audit_grace_until = time.time() + AUDIT_GRACE_S
                 if not self._was_connected:
                     self._was_connected = True
                     self._stamp("connected")
