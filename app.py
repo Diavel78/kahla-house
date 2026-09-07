@@ -11515,7 +11515,8 @@ def _rent_unpaid_pass(sb, client, now, dry: bool, orders=None) -> dict:
         _rent_prewarm_periods([o["slug"] for o in cands])
     except Exception:
         pass
-    killed, kept, failed, skipped = [], [], [], 0
+    killed, kept, failed, skipped, unread = [], [], [], 0, 0
+    todo = []
     for o in orders:
         if "BUY" not in (o.get("intent") or ""):
             continue
@@ -11529,6 +11530,21 @@ def _rent_unpaid_pass(sb, client, now, dry: bool, orders=None) -> dict:
         if ok:
             kept.append(row)             # still paying — leave it alone
             continue
+        if "venue read failed" in (why or ""):
+            unread += 1                  # "we don't know" is NOT "pays nothing"
+            continue                     # (placement fails closed; a sweep must not)
+        todo.append((o, m, row))
+    # MASS-CANCEL BRAKE: a program the venue really pulled hits one family;
+    # "most of the book stopped paying at once" is a venue hiccup or a
+    # schedule-scrape gap, not a fact — report, touch nothing.
+    _n_book = len(kept) + len(todo)
+    if todo and not dry and _n_book and len(todo) / _n_book > 0.30:
+        _send_fill_telegram(
+            f"\u26a0 RENT SWEEP HELD — {len(todo)} of {_n_book} resting bids read "
+            f"unpaid at once ({todo[0][2]['why'][:60]}). Too many to be real; "
+            f"nothing cancelled. Check /api/rent-check.", urgent=True)
+        dry = True
+    for o, m, row in todo:
         if dry:
             killed.append(dict(row, dry=True))
             continue
@@ -11549,8 +11565,8 @@ def _rent_unpaid_pass(sb, client, now, dry: bool, orders=None) -> dict:
     out = {"ok": True, "dry": dry, "open_orders": len(orders),
            "model_slugs": len(mine), "canceled": len(killed),
            "kept_paying": len(kept), "failed": len(failed),
-           "skipped_not_ours": skipped, "detail": killed, "kept": kept,
-           "errors": failed}
+           "skipped_not_ours": skipped, "unreadable": unread,
+           "detail": killed, "kept": kept, "errors": failed}
     if killed and not dry:
         _send_fill_telegram(
             f"\U0001f6d1 RENT SWEEP — canceled {len(killed)} resting order(s) "
@@ -11570,8 +11586,8 @@ def _rent_unpaid_tick(sb, now, client=None, orders=None) -> dict:
     if client is None:
         client = get_client()
     out = _rent_unpaid_pass(sb, client, now, False, orders=orders)
-    return {k: out.get(k) for k in ("ok", "canceled", "kept_paying",
-                                    "failed", "model_slugs", "error")}
+    return {k: out.get(k) for k in ("ok", "canceled", "kept_paying", "unreadable",
+                                    "failed", "model_slugs", "dry", "error")}
 
 
 @app.route("/api/polymarket/cancel-unpaid")
