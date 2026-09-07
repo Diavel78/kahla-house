@@ -968,9 +968,18 @@ class MarketsFeed:
         self._base_seen -= gone
         _forget_quotes(gone)
         if gid == "core" and gone:
+            # DEPTH CONN (Sep 6 2026): a rejected core re-add right after a
+            # rebuild means the unsubscribes have not landed yet ("already
+            # subscribed") — retrying every second just spams rejections
+            # (first live minutes: 195-slug re-add rejected, then every
+            # single-slug delta). Back off 30s and let the whole set go
+            # again as ONE request.
+            _delay = 30.0 if getattr(self, "depth", False) else 1.0
+            if getattr(self, "depth", False):
+                self._core_rebuilt_at = time.time()
             with self._lock:
                 self._ops.append(("add", "core", gone, None,
-                                  time.time() + 1.0))
+                                  time.time() + _delay))
         elif gone:
             nowt = time.time()
             for s in gone:
@@ -1024,8 +1033,16 @@ class MarketsFeed:
                 # 2s of dead air on OUR OWN orders each). Real drift, or
                 # accumulated deltas, AND at least CORE_REBUILD_MIN_S since
                 # the last rebuild.
-                if ((len(stale) > 20 or len(c_rids) >= CORE_REBUILD_RIDS)
-                        and nowt - self._core_rebuilt_at >= CORE_REBUILD_MIN_S):
+                _new_d = set(slugs) - self._covered
+                _depth = getattr(self, "depth", False)
+                # depth conn: never chase single-slug deltas (each is a
+                # request, and the budget is ~12); fold them into the next
+                # whole-set rebuild, which fires when there is anything new
+                # and the rebuild clock allows.
+                _rebuild = ((len(stale) > 20 or len(c_rids) >= CORE_REBUILD_RIDS
+                             or (_depth and _new_d))
+                            and nowt - self._core_rebuilt_at >= CORE_REBUILD_MIN_S)
+                if _rebuild:
                     self._core_rebuilt_at = nowt
                     for r in c_rids:
                         ws.send(json.dumps({"unsubscribe": {"requestId": r}}))
@@ -1036,9 +1053,11 @@ class MarketsFeed:
                     _forget_quotes(stale)
                     with self._lock:
                         self._ops.append(("add", gid, set(slugs), exp,
-                                          time.time() + 2.0))
+                                          time.time() + (6.0 if _depth else 2.0)))
                     changed = True
                     continue
+                if _depth and _new_d and len(_new_d) < 25:
+                    continue          # depth: wait for the whole-set rebuild
             if gid != "core":
                 # LADDER → PACK LAYER: record the desire; _pack_flush
                 # subscribes rungs in batched cross-game packs.
@@ -1366,6 +1385,8 @@ class MarketsFeed:
                     if "error" in msg:
                         _erid = msg.get("requestId") or msg.get("request_id")
                         if _erid and "subscription" in str(msg.get("error", "")).lower():
+                            log.warning("ws mkts[%d] error frame for %s: %s",
+                                        self.conn, _erid, str(msg.get("error"))[:200])
                             self._on_rejected(str(_erid))
                         else:
                             log.warning("ws mkts error frame: %s", str(msg)[:300])
