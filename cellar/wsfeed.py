@@ -741,6 +741,8 @@ class WsFeed:
 
 
 class MarketsFeed:
+    depth = False                       # class defaults: a fixture that
+    sub_type = SUB_MARKET_LITE          # skips __init__ still subscribes LITE
     """The OUTBID hint (v2): MARKET_DATA_LITE on every market we quote.
 
     Same doctrine as the private feed — its entire output is a wake on

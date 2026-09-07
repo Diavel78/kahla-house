@@ -24692,7 +24692,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         if (_wsq is not None and our_ask is not None
                 and book.get("best_ask") is not None
                 and abs(float(book["best_ask"]) - our_ask) < 0.26):
-            _rb = _pmm_book(client, slug)
+            _rb = _ws_depth(slug) or _pmm_book(client, slug)   # depth table first
             _WS_PRICE_STATS["sc_rest_self"] = _WS_PRICE_STATS.get("sc_rest_self", 0) + 1
             if _rb:
                 book = _invert_book(_rb) if synth else _rb
