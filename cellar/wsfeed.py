@@ -1091,10 +1091,19 @@ class MarketsFeed:
                 continue                      # venue said full — hold
             # REQUEST budget: core evicts ladders to seat itself; a ladder
             # that finds no room is skipped (its rungs price via REST).
+            _evicted = 0
             while (sum(len(r) for r, _s in self._groups.values())
                    >= MKTS_MAX_RIDS):
                 if gid != "core" or not self._evict_one(ws, protect=gid):
                     break
+                _evicted += 1
+            if _evicted:
+                # SETTLE (Sep 6 2026): the venue still counts an evicted
+                # pack's request until its unsubscribe lands; sending core
+                # in the same instant got 'max subscriptions' and started
+                # the re-queue storm. Come back in 3s.
+                requeue.append(("add", gid, set(slugs), exp, nowt + 3.0))
+                continue
             if (sum(len(r) for r, _s in self._groups.values())
                     >= MKTS_MAX_RIDS):
                 if gid != "core":
