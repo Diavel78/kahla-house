@@ -16933,6 +16933,13 @@ def _opener_pass(sb, now, deadline):
                 _h2s = None
             _full = ((g["id"], "nrfi") not in done
                      and _h2s is not None and _h2s <= _OPENER_NRFI_DOSSIER_H)
+            if (not _full and (g["id"], "moneyline") in done
+                    and (g["id"], "total") in done):
+                # Nothing a slim visit could act on (ML + total already
+                # evaluated; NRFI waits for its window) — first slim lap
+                # spent 14 of 15 evaluations here.
+                stats["opener_skip_done"] = stats.get("opener_skip_done", 0) + 1
+                continue
             try:
                 if _full:
                     d = handicapper_web.build_dossier(sb, None, None,
@@ -19615,6 +19622,40 @@ def _mlb_slim_dossier(sb, g):
         return None
     out = {"odds": {"moneyline": {"polymarket": mlp}}, "slim": True,
            "probable_pitchers": {}}
+    # TOTAL block in the dossier's by-side shape for the O/U trader (its
+    # first slim night, the ladder shape left over/under empty and every
+    # early total went unbet): the at-the-money line = the one whose OVER
+    # mid sits nearest 50¢; under = its synthetic twin at the same line.
+    tl = ((((d0.get("odds") or {}).get("total") or {})
+           .get("polymarket") or {}).get("ladder") or [])
+    def _mid(q):
+        if not q:
+            return None
+        if q.get("mid") is not None:
+            return float(q["mid"])
+        if q.get("bid") is not None and q.get("ask") is not None:
+            return (float(q["bid"]) + float(q["ask"])) / 2.0
+        return None
+    best_ln, best_gap = None, None
+    for e in tl:
+        if e.get("side") != "over" or e.get("line") is None:
+            continue
+        m = _mid(e.get("quote"))
+        if m is None:
+            continue
+        gap = abs(m - 0.5)
+        if best_gap is None or gap < best_gap:
+            best_ln, best_gap = e["line"], gap
+    if best_ln is not None:
+        tot: dict = {}
+        for e in tl:
+            if e.get("line") == best_ln and e.get("side") in ("over", "under"):
+                q = dict(e.get("quote") or {})
+                if q.get("mid") is None:
+                    q["mid"] = _mid(q)
+                tot.setdefault(e["side"], {**e, "quote": q})
+        if tot:
+            out["odds"]["total"] = {"polymarket": tot}
     try:
         away, home = (g.get("event_name") or "").split(" @ ", 1)
         out["probable_pitchers"] = _mlb_probables_cached(
