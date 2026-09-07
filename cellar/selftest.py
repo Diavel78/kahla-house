@@ -649,6 +649,32 @@ def test_entry_sync_guard() -> None:
     check("no current entry → sync", _app._entry_sync_ok(None, 0.5, mach) == (True, "no_current"))
 
 
+def test_lot_ledger_floor() -> None:
+    """Sep 7 2026: the sell floor is OUR trade walk when it covers the held
+    lot — never the venue's blended avgPx (74¢ on a 39.2¢ Braves lot)."""
+    import app as _app
+    def tr(slug, qty, cost, sell=False):
+        t = {"marketSlug": slug, "qty": qty, "cost": {"value": cost}}
+        if sell:
+            t["realizedPnl"] = {"value": 0}
+        return {"payload": {"trade": t}}
+    rows = [tr("s", 20, 7.84), tr("s", 6, 2.43, sell=True)]          # the Braves lot
+    lots = _app._lot_walk(rows)
+    check("walk: 14 held after a 6-lot sell", abs(lots["s"]["qty"] - 14) < 1e-9)
+    check("walk: cost stays 39.2¢/share (sell removes at running avg)",
+          abs(lots["s"]["cost"] / lots["s"]["qty"] - 0.392) < 1e-6)
+    check("floor = lot cost when ledger covers the position",
+          abs(_app._lot_cost_c(lots["s"], 13.98) - 39.2) < 0.01)
+    check("ledger under-covers (venue holds 19.5, we saw 1) → None",
+          _app._lot_cost_c({"qty": 1.0, "cost": 0.33}, 19.5) is None)
+    check("no lot → None", _app._lot_cost_c(None, 20) is None)
+    # the real Braves history: a CLOSED 59→60¢ round trip BEFORE today's lot
+    rows2 = [tr("s", 20, 11.84), tr("s", 20, 12.06, sell=True)] + rows
+    lots2 = _app._lot_walk(rows2)
+    check("a closed earlier round trip does not blend into the held lot (venue said 74¢)",
+          abs(lots2["s"]["cost"] / lots2["s"]["qty"] - 0.392) < 1e-6)
+
+
 def test_pin_line_center() -> None:
     """Pinnacle's line in rung units from the cached slate shape (the real
     Northern Arizona @ Arizona event, Sep 5 2026)."""
@@ -866,7 +892,7 @@ def main() -> int:
               test_ws_quote_presence, test_ws_mkts_request_budget,
               test_gridiron_value_window, test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
-              test_entry_sync_guard,
+              test_entry_sync_guard, test_lot_ledger_floor,
               test_lane_covers_its_documented_engines,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()

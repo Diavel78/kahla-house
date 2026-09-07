@@ -24774,6 +24774,93 @@ def _scalp_entry_c(r, b) -> float | None:
         return None
 
 
+
+# ── THE LOT LEDGER (Sep 7 2026 — the Braves 74¢ lesson, sell-arm half) ──
+# Our own trade mirror walked oldest→newest per slug (the dashboard's
+# proven cost/qty math): what we HOLD and what we PAID for it. The venue's
+# position avgPx is a lifetime blend (60 bought / 46 sold on one slug read
+# 0.7396 for a 39.2¢ lot) and poly_pnl is a 5th-tick stamp that lags and
+# under-covers (5436 read Sep-5 buy 1.62/open 3 against a 20-lot). Neither
+# may set the exit floor when THIS ledger covers the held lot.
+_LOT_LEDGER = {"at": 0.0, "lots": {}, "lock": threading.Lock()}
+_LOT_LEDGER_TTL_S = 240.0
+_LOT_LEDGER_DAYS = 60
+
+
+def _lot_walk(trows) -> dict:
+    """{slug: {qty, cost}} — running average cost per slug from trade rows
+    (poly_activities payloads), a BUY adds at its price, a sell removes at
+    the running average. Pure; identical arithmetic to _venue_day_map."""
+    def _v(x):
+        if isinstance(x, dict):
+            x = x.get("value")
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+    lots: dict = {}
+    for r in trows or []:
+        t = ((r.get("payload") or {}).get("trade") or {})
+        slug, qty = t.get("marketSlug"), _v(t.get("qty"))
+        if not slug or not qty:
+            continue
+        cost = _v(t.get("cost"))
+        price = (cost / qty) if cost is not None else _v(t.get("price"))
+        if price is None:
+            continue
+        bq = abs(_v((t.get("beforePosition") or {}).get("netPosition")) or 0)
+        aq = abs(_v((t.get("afterPosition") or {}).get("netPosition")) or 0)
+        p = lots.setdefault(slug, {"qty": 0.0, "cost": 0.0})
+        if not (t.get("realizedPnl") is not None or bq > aq):
+            p["qty"] += qty
+            p["cost"] += price * qty
+            continue
+        if p["qty"] <= 0:
+            continue
+        avg = p["cost"] / p["qty"]
+        sold = min(qty, p["qty"])
+        p["cost"] -= avg * sold
+        p["qty"] -= sold
+    return lots
+
+
+def _lot_ledger(sb, force: bool = False) -> dict:
+    """Cached _lot_walk over the mirror's last _LOT_LEDGER_DAYS of trades.
+    A failed read keeps the last good ledger (callers fall back to the
+    venue/stamp floor when a slug is missing or under-covers)."""
+    L = _LOT_LEDGER
+    now = _time.monotonic()
+    with L["lock"]:
+        if not force and L["lots"] and now - L["at"] < _LOT_LEDGER_TTL_S:
+            return L["lots"]
+    try:
+        since = (datetime.now(timezone.utc)
+                 - timedelta(days=_LOT_LEDGER_DAYS)).isoformat()
+        rows = _sb_paged(
+            lambda: sb.table("poly_activities").select("payload")
+            .eq("type", "ACTIVITY_TYPE_TRADE").gte("at", since).order("at"),
+            max_pages=30)
+        lots = _lot_walk(rows)
+    except Exception as e:
+        app.logger.warning("lot ledger read failed: %s", e)
+        with L["lock"]:
+            return L["lots"]
+    with L["lock"]:
+        L["lots"], L["at"] = lots, now
+        return lots
+
+
+def _lot_cost_c(lot, held_qty) -> float | None:
+    """The held lot's own cost in cents when the ledger COVERS the position
+    (|ledger qty − venue qty| ≤ 0.5); None otherwise — never a guess."""
+    if not lot or held_qty is None:
+        return None
+    q = float(lot.get("qty") or 0.0)
+    if q <= 0 or abs(q - float(held_qty)) > 0.5:
+        return None
+    return float(lot.get("cost") or 0.0) / q * 100.0
+
+
 def _scalp_venue_cost_c(pick_row, avg_price, held_qty):
     """The scalp's venue-cost floor input, guarded against SIDE-SWITCH
     BASIS POISON (Sep 3 2026, MIL@CIN): the venue's per-market cost
@@ -25015,9 +25102,13 @@ def _fast_ask_one(sb, client, slug: str, buy_intent: str) -> None:
             _FAST_ASK_STATS["skips"] += 1
             return                                # not ours / dust
         entry_c = _scalp_entry_c(r, b)            # the lap's own stamp read
-        vc = _scalp_venue_cost_c(r, p.get("avg_price"), held)
-        if vc is not None and vc > 0:
-            entry_c = max(entry_c or 0.0, vc)
+        _lc = _lot_cost_c(_lot_ledger(sb).get(slug), held)
+        if _lc is not None and _lc > 0:
+            entry_c = _lc                         # our ledger covers the lot: it IS the cost
+        else:
+            vc = _scalp_venue_cost_c(r, p.get("avg_price"), held)
+            if vc is not None and vc > 0:
+                entry_c = max(entry_c or 0.0, vc)
         if not entry_c or entry_c <= 0:
             _FAST_ASK_STATS["skips"] += 1
             return
@@ -25138,6 +25229,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 .limit(300).execute().data) or []
     except Exception as e:
         return {"gate": ("picks_err: " + str(e))[:100]}
+    _lots = _lot_ledger(sb)                 # our own trade walk: the exit floor's arbiter
     cands = []
     for r in rows:
         b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
@@ -25409,10 +25501,21 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # absorbs the partial-sell cost-collapse landmine (a profitable
         # partial sell makes the venue's cost/qty UNDERSTATE — the stamp
         # floor still stands). avg_price None → stamp floor, unchanged.
-        _vc = _scalp_venue_cost_c(
-            r, (positions.get(slug) or {}).get("avg_price"), held)
-        if _vc is not None and _vc > 0:
-            entry_c = max(entry_c, _vc)
+        # LOT LEDGER FIRST (Sep 7 2026): when our own trade walk covers the
+        # held quantity, its cost/qty IS the floor — not max(stamp, venue).
+        # max() was built so a low stamp could never lower the fence; it
+        # also meant a HIGH venue blend could never be overruled, which is
+        # how the Braves ask sat at 74¢ on a 40¢ book through a 1-0 loss
+        # with the stamp already repaired underneath it.
+        _lc = _lot_cost_c(_lots.get(slug), held)
+        if _lc is not None and _lc > 0:
+            entry_c = _lc
+            res["floor_lot"] = res.get("floor_lot", 0) + 1
+        else:
+            _vc = _scalp_venue_cost_c(
+                r, (positions.get(slug) or {}).get("avg_price"), held)
+            if _vc is not None and _vc > 0:
+                entry_c = max(entry_c, _vc)
         # GRID-NATIVE (Aug 30): floor/steps/leads on the market's OWN tick
         # (orderPriceMinTickSize — 0.5c game books, 1c innings). A
         # half-cent book floored to whole cents gave away up to a full
