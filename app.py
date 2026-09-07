@@ -11469,6 +11469,111 @@ def api_rent_check():
                     "counts": diag, "n": len(out), "markets": out})
 
 
+_RENT_UNPAID_LAST = 0.0
+_RENT_UNPAID_EVERY_S = 3600.0
+
+
+def _rent_unpaid_pass(sb, client, now, dry: bool, orders=None) -> dict:
+    """RULE #1 APPLIED TO ORDERS ALREADY ON THE BOOK — the cancel-unpaid
+    sweep's core, callable from the route (manual) and from the repeg lane
+    (hourly, Sep 6 2026 — Rob: "if Polymarket took it off the API,
+    wouldn't that be the better option?" — replacing the measured-rent
+    cull, whose judge was our own earnings ledger against a payout the
+    venue does not explain). Predicate = _rent_ok per exact market, the
+    same answer the placement gate uses. Three gates: BUY intent,
+    AUTOMATIC flag, slug belongs to one of OUR pending model picks (every
+    model lane incl. football + props). Cancel-only; the reconcile /
+    opener re-enter the game when the venue lists it as paying again."""
+    owner = _kalshi_owner_uid()
+    mine: dict = {}
+    try:
+        rows = (sb.table("bot_picks")
+                .select("id,event_name,market_type,event_start,signal_blob")
+                .eq("asked_by", owner).eq("status", "pending")
+                .gte("event_start", now.isoformat())
+                .limit(1000).execute().data) or []
+        for r in rows:
+            b = r.get("signal_blob") or {}
+            if not (b.get("autobet") or b.get("whiff_autobet")
+                    or b.get("ou_trader") or b.get("gridiron_autobet")
+                    or b.get("fbprop_autobet")):
+                continue                 # model bets only — never manual
+            slug = b.get("pmm_slug")
+            if slug:
+                mine[slug] = {"event": r.get("event_name"),
+                              "mt": r.get("market_type"),
+                              "start": r.get("event_start"), "id": r.get("id")}
+    except Exception as e:
+        return {"ok": False, "error": f"picks: {e}"}
+    if orders is None:
+        orders = _pmm_open_orders_raw(client)
+    if orders is None:
+        return {"ok": False, "error": "order read failed"}
+    cands = [o for o in orders if "BUY" in (o.get("intent") or "")
+             and o.get("auto") and o.get("slug") in mine]
+    try:                                  # one batched incentives warm-up
+        _rent_prewarm_periods([o["slug"] for o in cands])
+    except Exception:
+        pass
+    killed, kept, failed, skipped = [], [], [], 0
+    for o in orders:
+        if "BUY" not in (o.get("intent") or ""):
+            continue
+        m = mine.get(o.get("slug"))
+        if not o.get("auto") or not m:
+            skipped += 1
+            continue
+        ok, why = _rent_ok(o["slug"], m["start"], now, sb)
+        row = {"slug": o["slug"], "event": m["event"], "mt": m["mt"],
+               "start": m["start"], "leaves": o.get("leaves"), "why": why}
+        if ok:
+            kept.append(row)             # still paying — leave it alone
+            continue
+        if dry:
+            killed.append(dict(row, dry=True))
+            continue
+        try:
+            client.orders.cancel(o["id"], {"marketSlug": o["slug"]})
+            killed.append(row)
+            try:                         # the pick remembers why its order left
+                _b = (sb.table("bot_picks").select("signal_blob")
+                      .eq("id", m["id"]).limit(1).execute().data or [{}])[0]
+                _nb = dict(_b.get("signal_blob") or {})
+                _nb["rent_swept"] = {"at": now.isoformat(), "why": why}
+                _nb["dayof_wait"] = True
+                sb.table("bot_picks").update({"signal_blob": _nb}).eq("id", m["id"]).execute()
+            except Exception:
+                pass
+        except Exception as e:
+            failed.append({"slug": o["slug"], "err": str(e)[:120]})
+    out = {"ok": True, "dry": dry, "open_orders": len(orders),
+           "model_slugs": len(mine), "canceled": len(killed),
+           "kept_paying": len(kept), "failed": len(failed),
+           "skipped_not_ours": skipped, "detail": killed, "kept": kept,
+           "errors": failed}
+    if killed and not dry:
+        _send_fill_telegram(
+            f"\U0001f6d1 RENT SWEEP — canceled {len(killed)} resting order(s) "
+            f"in windows that pay no rent; {len(kept)} still paying, left "
+            f"alone.")
+    _probe_log(out)
+    return out
+
+
+def _rent_unpaid_tick(sb, now, client=None, orders=None) -> dict:
+    """Hourly, inside the repeg lease: every resting model bid re-asks the
+    venue whether its market still pays; unpaid → cancelled."""
+    global _RENT_UNPAID_LAST
+    if _time.time() - _RENT_UNPAID_LAST < _RENT_UNPAID_EVERY_S:
+        return {"gate": "cadence"}
+    _RENT_UNPAID_LAST = _time.time()
+    if client is None:
+        client = get_client()
+    out = _rent_unpaid_pass(sb, client, now, False, orders=orders)
+    return {k: out.get(k) for k in ("ok", "canceled", "kept_paying",
+                                    "failed", "model_slugs", "error")}
+
+
 @app.route("/api/polymarket/cancel-unpaid")
 def api_poly_cancel_unpaid():
     """Cancel every resting model BUY that is NOT currently paying rent
@@ -11503,62 +11608,9 @@ def api_poly_cancel_unpaid():
         sb, client = get_supabase(), get_client()
     except Exception as e:
         return jsonify({"ok": False, "error": f"client: {e}"}), 500
-    now = datetime.now(timezone.utc)
-    owner = _kalshi_owner_uid()
-    mine: dict = {}
-    try:
-        rows = (sb.table("bot_picks")
-                .select("event_name,market_type,event_start,signal_blob")
-                .eq("asked_by", owner).eq("status", "pending")
-                .gte("event_start", now.isoformat())
-                .limit(500).execute().data) or []
-        for r in rows:
-            b = r.get("signal_blob") or {}
-            if not (b.get("autobet") or b.get("whiff_autobet")
-                    or b.get("ou_trader")):
-                continue                 # model bets only — never manual
-            slug = b.get("pmm_slug")
-            if slug:
-                mine[slug] = {"event": r.get("event_name"),
-                              "mt": r.get("market_type"),
-                              "start": r.get("event_start")}
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"picks: {e}"}), 500
-    orders = _pmm_open_orders_raw(client)
-    if orders is None:
-        return jsonify({"ok": False, "error": "order read failed"}), 503
-    killed, kept, failed, skipped = [], [], [], 0
-    for o in orders:
-        if "BUY" not in (o.get("intent") or ""):
-            continue
-        m = mine.get(o.get("slug"))
-        if not o.get("auto") or not m:
-            skipped += 1
-            continue
-        ok, why = _rent_ok(o["slug"], m["start"], now, sb)
-        row = {"slug": o["slug"], "event": m["event"], "mt": m["mt"],
-               "start": m["start"], "leaves": o.get("leaves"), "why": why}
-        if ok:
-            kept.append(row)             # still paying — leave it alone
-            continue
-        if dry:
-            killed.append(dict(row, dry=True))
-            continue
-        try:
-            client.orders.cancel(o["id"], {"marketSlug": o["slug"]})
-            killed.append(row)
-        except Exception as e:
-            failed.append({"slug": o["slug"], "err": str(e)[:120]})
-    out = {"ok": True, "dry": dry, "open_orders": len(orders),
-           "model_slugs": len(mine), "canceled": len(killed),
-           "kept_paying": len(kept), "failed": len(failed),
-           "skipped_not_ours": skipped, "detail": killed, "kept": kept,
-           "errors": failed}
-    if killed and not dry:
-        _send_fill_telegram(
-            f"\U0001f6d1 RENT SWEEP — canceled {len(killed)} resting order(s) "
-            f"in windows that pay no rent; {len(kept)} still paying, left "
-            f"alone.")
+    out = _rent_unpaid_pass(sb, client, datetime.now(timezone.utc), dry)
+    if not out.get("ok"):
+        return jsonify(out), 503
     _probe_log(out)
     return jsonify(out)
 
@@ -26066,6 +26118,16 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
         try:
             res["rent_cull"] = _rent_cull_tick(sb, now, client=lap_client,
                                                orders=lap_orders)
+        except Exception:
+            pass
+        # THE HOURLY RENT RE-ASK (Sep 6 2026, replaces the cull as the
+        # judge — Rob: the venue's list is the rule): every resting model
+        # bid whose market the venue no longer lists as paying is
+        # cancelled; the pick waits (dayof_wait) for the venue to list it
+        # again.
+        try:
+            res["rent_unpaid"] = _rent_unpaid_tick(sb, now, client=lap_client,
+                                                   orders=lap_orders)
         except Exception:
             pass
         res["t_cull"] = round(_time.time() - _tq, 1)
