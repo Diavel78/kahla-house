@@ -587,6 +587,11 @@ class WsFeed:
                     self._was_connected = True
                     self._stamp("connected")
                 log.info("ws connected + subscribed (order, position)")
+                try:                        # a reconnect may have missed events
+                    import app as _app
+                    _app._mirror_invalidate("reconnect")
+                except Exception:
+                    pass
                 # We may have been dark — one wake lets the lap resync now.
                 self._wake("repeg", "reconnect-resync")
                 # Snapshot phase per subscription: messages before eof
@@ -687,6 +692,22 @@ class WsFeed:
                     # market's book is worth a fresh read.
                     _ev_slugs: set[str] = set()
                     _harvest_slugs(msg, _ev_slugs)
+                    # THE VENUE MIRROR (Sep 7 2026): every order / position
+                    # frame updates the in-memory copy the lanes price from.
+                    try:
+                        import app as _app
+                        for _k, _v in msg.items():
+                            if not isinstance(_v, dict):
+                                continue
+                            _kl = _k.lower()
+                            if _kl.startswith("order"):
+                                _ex = _v.get("execution") if isinstance(_v.get("execution"), dict) else _v
+                                _od = _ex.get("order") if isinstance(_ex.get("order"), dict) else _ex
+                                _app._mirror_order_event(_od)
+                            elif _kl.startswith("position"):
+                                _app._mirror_position_event(_v)
+                    except Exception:
+                        pass
                     if _ev_slugs:
                         self.add_dirty(_ev_slugs)
                         # SNIPER STAND-DOWN (Rob, Sep 6 2026: "what if we sold

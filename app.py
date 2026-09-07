@@ -8139,9 +8139,9 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
         if client is None:
             client = get_client()
         if orders is None:
-            orders = _pmm_open_orders_raw(client)
+            orders = _pmm_open_orders_raw(clientfresh=True)
         if positions is None:
-            positions = _pmm_positions_raw(client)
+            positions = _pmm_positions_raw(clientfresh=True)
     except Exception:
         return out
     # Intended bets keyed (slug, synthetic) → our-side entry probability (0-1).
@@ -11850,7 +11850,7 @@ def api_poly_topup():
             pass            # a just-filled order errors on cancel — the
                             # position re-read below decides, not the exc
         _time.sleep(0.8)
-        pos2 = _pmm_positions_raw(client)
+        pos2 = _pmm_positions_raw(clientfresh=True)
         if pos2 is None:
             act["state"] = "unverified"     # never re-place blind
             done.append(act)
@@ -12148,14 +12148,149 @@ _FILL_STATUS_TTL = 30       # s — server cache; the page polls on its 60s load
 # bet. Same status vocabulary as Kalshi: resting / partial(pct) / filled / none
 # / unknown, + warn + outbid, + entry auto-sync from the real fill.
 
-def _pmm_open_orders_raw(client) -> list | None:
+# ── THE VENUE MIRROR (Sep 7 2026, Rob: "once seems scary… maybe once per
+# day?" → seed from REST, update from the private socket, re-read from REST
+# every 10 minutes and on every reconnect). The morning's native CPU sample
+# put ~40% of the daemon's busy time in malloc/free churn: the same 230-
+# position payload (each with a market-metadata blob) and the unfiltered
+# orders list were fetched, built into dict trees and discarded by six
+# lanes many times a minute, all under one lock. Reads that DECIDE (price,
+# outbid, coverage) come from memory; reads that DELETE a pick or follow a
+# cancel pass fresh=True and still go to the venue.
+import threading as _threading
+_VENUE_MIRROR = {"orders": {}, "positions": {}, "orders_at": 0.0,
+                 "positions_at": 0.0, "lock": _threading.Lock(),
+                 "hits": 0, "misses": 0, "ws_orders": 0, "ws_positions": 0,
+                 "invalidations": 0}
+_VENUE_MIRROR_TTL_S = float(os.environ.get("VENUE_MIRROR_TTL_S") or 600.0)
+
+
+def _norm_order(o, prev=None) -> dict | None:
+    """One venue order (REST dict or WS execution.order) → the fill-matching
+    shape. `prev` (the mirror's copy) backfills fields a WS frame omits."""
+    def _g(k, d=None):
+        return o.get(k, d) if isinstance(o, dict) else getattr(o, k, d)
+    state = _g("state") or (prev or {}).get("state") or ""
+    md = _g("marketMetadata") or {}
+    slug = (_g("marketSlug") or (md.get("slug") if isinstance(md, dict)
+                                 else getattr(md, "slug", None))
+            or (prev or {}).get("slug") or "")
+    moi = _g("manualOrderIndicator")
+    auto = ((moi == "MANUAL_ORDER_INDICATOR_AUTOMATIC") if moi is not None
+            else bool((prev or {}).get("auto")))
+    return {"slug": slug, "intent": _g("intent") or (prev or {}).get("intent") or "",
+            "state": state,
+            "qty": _safe_float(_g("quantity")) or (prev or {}).get("qty") or 0.0,
+            "cum": _safe_float(_g("cumQuantity")) or 0.0,
+            "leaves": _safe_float(_g("leavesQuantity")) or 0.0,
+            "price_yes": (_safe_float(_g("price")) if _g("price") is not None
+                          else (prev or {}).get("price_yes")),
+            "id": _g("id") or (prev or {}).get("id"),
+            "tif": _g("tif") or (prev or {}).get("tif") or "",
+            "auto": auto,
+            "good_till": _g("goodTillTime") or (prev or {}).get("good_till"),
+            "created": str(_g("createTime") or (prev or {}).get("created") or "")}
+
+
+def _mirror_order_event(od: dict) -> None:
+    """Private-socket order frame → mirror upsert (terminal state → drop)."""
+    try:
+        oid = od.get("id") if isinstance(od, dict) else None
+        if not oid:
+            return
+        m = _VENUE_MIRROR
+        with m["lock"]:
+            prev = m["orders"].get(oid)
+            n = _norm_order(od, prev)
+            if not n:
+                return
+            if n["state"] in _OPEN_ORDER_STATES:
+                m["orders"][oid] = n
+            else:
+                m["orders"].pop(oid, None)
+            m["ws_orders"] += 1
+    except Exception:
+        pass
+
+
+def _mirror_position_event(pv: dict) -> None:
+    """Private-socket position frame → mirror upsert of the AFTER state."""
+    try:
+        after = None
+        for k in ("afterPosition", "position", "after"):
+            if isinstance(pv.get(k), dict):
+                after = pv[k]
+                break
+        if after is None:
+            # no after-state in this frame → the mirror can't know the new
+            # size; force the next positions read to the venue
+            with _VENUE_MIRROR["lock"]:
+                _VENUE_MIRROR["positions_at"] = 0.0
+            return
+        md = after.get("marketMetadata") or {}
+        slug = (pv.get("marketSlug") or (md.get("slug") if isinstance(md, dict) else None)
+                or after.get("marketSlug"))
+        if not slug:
+            return
+        m = _VENUE_MIRROR
+        with m["lock"]:
+            n = _norm_position(after)
+            if n is None:
+                m["positions"].pop(slug, None)
+            else:
+                m["positions"][slug] = n
+            m["ws_positions"] += 1
+    except Exception:
+        pass
+
+
+def _mirror_invalidate(why: str = "") -> None:
+    m = _VENUE_MIRROR
+    with m["lock"]:
+        m["orders_at"] = 0.0
+        m["positions_at"] = 0.0
+        m["invalidations"] += 1
+
+
+def _venue_mirror_stats() -> dict:
+    m = _VENUE_MIRROR
+    nowm = _time.monotonic()
+    out = {k: m[k] for k in ("hits", "misses", "ws_orders", "ws_positions", "invalidations")}
+    out.update({"orders": len(m["orders"]), "positions": len(m["positions"]),
+                "orders_age_s": (round(nowm - m["orders_at"]) if m["orders_at"] else None),
+                "positions_age_s": (round(nowm - m["positions_at"]) if m["positions_at"] else None)})
+    return out
+
+
+def _mirror_fresh(key: str) -> bool:
+    at = _VENUE_MIRROR[key + "_at"]
+    if not at:
+        return False
+    try:                       # daily full re-read window (Rob: "2 am")
+        _az = datetime.now(timezone.utc).astimezone(ZoneInfo("America/Phoenix"))
+        if _az.hour == 2 and _az.minute < 11 and _time.monotonic() - at > 300.0:
+            return False
+    except Exception:
+        pass
+    return _time.monotonic() - at <= _VENUE_MIRROR_TTL_S
+
+
+def _pmm_open_orders_raw(client, fresh: bool = False) -> list | None:
     """Working Poly CLOB orders normalized for fill matching:
     [{slug, intent, state, qty, cum, leaves, price_yes}]. price_yes is the
     SDK's canonical YES-probability price — orient to our side at match time
     (BUY_SHORT / synthetic → 1−price_yes). Returns None on a READ FAILURE
     (SDK error / Poly maintenance) — distinct from [] (read OK, no orders) —
     so callers can degrade a resting bet to 'unknown' instead of a false 'no
-    order' (and a false TAKE-NOW warning) while Poly is dark."""
+    order' (and a false TAKE-NOW warning) while Poly is dark.
+
+    fresh=False serves the venue MIRROR inside its TTL (see _VENUE_MIRROR);
+    fresh=True always asks the venue and refills it."""
+    m = _VENUE_MIRROR
+    if not fresh and _mirror_fresh("orders"):
+        with m["lock"]:
+            m["hits"] += 1
+            return [dict(v) for v in m["orders"].values()]
     out: list = []
     rc = _pmm_read_client(client)     # 8s read twin — writes keep their 30s
     raw = None
@@ -12170,31 +12305,33 @@ def _pmm_open_orders_raw(client) -> list | None:
     if raw is None:
         return None                              # read failed → not "no orders"
     for o in raw:
-        def _g(k, d=None):
-            return o.get(k, d) if isinstance(o, dict) else getattr(o, k, d)
-        state = _g("state") or ""
-        if state not in _OPEN_ORDER_STATES:
+        n = _norm_order(o)
+        if not n or n["state"] not in _OPEN_ORDER_STATES:
             continue
-        md = _g("marketMetadata") or {}
-        slug = ((md.get("slug") if isinstance(md, dict)
-                 else getattr(md, "slug", None)) or "")
-        out.append({"slug": slug, "intent": _g("intent") or "", "state": state,
-                    "qty": _safe_float(_g("quantity")) or 0.0,
-                    "cum": _safe_float(_g("cumQuantity")) or 0.0,
-                    "leaves": _safe_float(_g("leavesQuantity")) or 0.0,
-                    "price_yes": _safe_float(_g("price")),
-                    # re-peg bot needs the order's identity + TIF to amend it
-                    "id": _g("id"), "tif": _g("tif") or "",
-                    "auto": (_g("manualOrderIndicator")
-                             == "MANUAL_ORDER_INDICATOR_AUTOMATIC"),
-                    "good_till": _g("goodTillTime"),
-                    # dup-order sweeps keep the OLDEST of a group (queue
-                    # position + matches the logged entry)
-                    "created": str(_g("createTime") or "")})
+        out.append(n)
+    with m["lock"]:
+        m["misses"] += 1
+        m["orders"] = {n["id"]: n for n in out if n.get("id")}
+        m["orders_at"] = _time.monotonic()
     return out
 
 
-def _pmm_positions_raw(client) -> dict | None:
+def _norm_position(pos: dict) -> dict | None:
+    """One venue position → {net, qty, avg_price}; None for expired/flat."""
+    if pos.get("expired"):
+        return None
+    net = _safe_float(pos.get("netPositionDecimal"))   # the venue's integer
+    if net is None:                                     # field rounds 0.94→1
+        net = _safe_float(pos.get("netPosition")) or 0.0
+    if abs(net) < 0.01:
+        return None
+    cost = _safe_float(pos.get("cost"))
+    qty = abs(net)
+    return {"net": net, "qty": qty,
+            "avg_price": ((cost / qty) if (cost and qty > 0) else None)}
+
+
+def _pmm_positions_raw(client, fresh: bool = False) -> dict | None:
     """{slug: {net, qty, avg_price}} of live Poly positions. net>0 = YES held,
     net<0 = NO held; avg_price = cost/qty = the held side's own entry price
     (no YES-flip — cost is already what was paid for the held side). Returns
@@ -12203,7 +12340,15 @@ def _pmm_positions_raw(client) -> dict | None:
     ⚠ Calls the SDK DIRECTLY, not fetch_positions() — that helper swallows
     its own errors and returns [], which silently converted every read
     FAILURE here into a read-OK-empty {} and made the None guard above a
-    dead letter (found Aug 29 2026 while wiring the fast-fail reads)."""
+    dead letter (found Aug 29 2026 while wiring the fast-fail reads).
+
+    fresh=False serves the venue MIRROR inside its TTL; fresh=True asks the
+    venue and refills it (every pick-deleting / post-cancel read does)."""
+    m = _VENUE_MIRROR
+    if not fresh and _mirror_fresh("positions"):
+        with m["lock"]:
+            m["hits"] += 1
+            return {k: dict(v) for k, v in m["positions"].items()}
     out: dict = {}
     rc = _pmm_read_client(client)     # 8s read twin — writes keep their 30s
     items = None
@@ -12218,24 +12363,15 @@ def _pmm_positions_raw(client) -> dict | None:
         return None                              # read failed → not "no positions"
     try:
         for slug, pos in items:
-            if pos.get("expired"):
-                continue
-            # DECIMAL FIRST (Sep 6 2026): `netPosition` is the venue's
-            # INTEGER-rounded count — a 0.94-share Tigers lot read as 1,
-            # the lap sized a 1-contract ask to it, the venue filled 1.00
-            # and booked the account −0.06 short ("sell shit I don't
-            # have", dust edition). `netPositionDecimal` is the truth.
-            net = _safe_float(pos.get("netPositionDecimal"))
-            if net is None:
-                net = _safe_float(pos.get("netPosition")) or 0.0
-            if abs(net) < 0.01:
-                continue
-            cost = _safe_float(pos.get("cost"))
-            qty = abs(net)
-            out[slug] = {"net": net, "qty": qty,
-                         "avg_price": ((cost / qty) if (cost and qty > 0) else None)}
+            n = _norm_position(pos)
+            if n is not None:
+                out[slug] = n
     except Exception:
         return None                              # read failed → not "no positions"
+    with m["lock"]:
+        m["misses"] += 1
+        m["positions"] = {k: dict(v) for k, v in out.items()}
+        m["positions_at"] = _time.monotonic()
     return out
 
 
@@ -22553,7 +22689,7 @@ def _repeg_verify_or_recreate(client, slug, intent, canon, qty, orig_tif,
         return "unknown"
     # No open order — filled or killed? The position decides (recreating a
     # FILLED bet would double it).
-    positions = _pmm_positions_raw(client)
+    positions = _pmm_positions_raw(clientfresh=True)
     if positions is None:
         return "unknown"                 # can't distinguish — don't recreate
     pos = positions.get(slug) or {}
@@ -23336,8 +23472,8 @@ def _reconcile_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 client = get_client()
             except Exception:
                 return {"gate": "no_client"}
-        orders = _pmm_open_orders_raw(client)
-        positions = _pmm_positions_raw(client)
+        orders = _pmm_open_orders_raw(clientfresh=True)
+        positions = _pmm_positions_raw(clientfresh=True)
     if orders is None or positions is None:
         return {"gate": "venue_read"}      # default-deny: dark venue = no-op
                                            # (and the slot is NOT consumed —
@@ -23405,7 +23541,7 @@ def _reconcile_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # canceled orders are gone from the venue but still in THIS pass's
         # stale snapshot — re-read so the zombie logic below can't act on
         # a fiction; a failed re-read ends the pass (default-deny).
-        orders = _pmm_open_orders_raw(client)
+        orders = _pmm_open_orders_raw(clientfresh=True)
         if orders is None:
             return res
     open_keys = {(o["slug"], o["intent"]) for o in orders
@@ -23686,8 +23822,8 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
                 client = get_client()
             except Exception:
                 return {"gate": "no_client"}
-        orders = _pmm_open_orders_raw(client)
-        positions = _pmm_positions_raw(client)
+        orders = _pmm_open_orders_raw(clientfresh=True)
+        positions = _pmm_positions_raw(clientfresh=True)
     if orders is None or positions is None:
         return {"gate": "venue_read"}
     if not orders and len(cands) > 5:
@@ -23811,8 +23947,8 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
             if not ok:
                 continue
             _time.sleep(0.5)
-            _chk = _pmm_open_orders_raw(client)
-            _pos = _pmm_positions_raw(client)
+            _chk = _pmm_open_orders_raw(clientfresh=True)
+            _pos = _pmm_positions_raw(clientfresh=True)
             if (_chk is None or _pos is None or _open_buys(_chk, sl)
                     or (_pos.get(sl) or {}).get("qty", 0)):
                 res["unconfirmed"] += 1     # still resting, or raced a fill → pick stays
@@ -24432,7 +24568,7 @@ def _fast_ask_one(sb, client, slug: str, buy_intent: str) -> None:
             if g("intent") == sell_intent and str(g("state") or "") in _OPEN_ORDER_STATES:
                 _FAST_ASK_STATS["skips"] += 1
                 return
-        pos = _pmm_positions_raw(client)
+        pos = _pmm_positions_raw(client, fresh=True)   # a fill just happened — venue truth
         if pos is None:
             _FAST_ASK_STATS["errors"] += 1
             return
@@ -24742,7 +24878,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             if _h5 >= 1.0 and _mirror_clamp(_s5, _h5) < 1.0:
                 _dis.append(_s5)
         if _dis:
-            _p2 = _pmm_positions_raw(client)
+            _p2 = _pmm_positions_raw(clientfresh=True)
             if _p2 is not None:
                 for _s5 in _dis:
                     if float((_p2.get(_s5) or {}).get("qty") or 0.0) >= 1.0:
@@ -25078,7 +25214,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         except Exception:
             continue
         _time.sleep(0.8)
-        pos2 = _pmm_positions_raw(client)
+        pos2 = _pmm_positions_raw(clientfresh=True)
         if pos2 is None:
             _send_fill_telegram(
                 f"🚨 SCALP LIMBO — {r.get('event_name')}: ask canceled, "
@@ -26042,7 +26178,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                     _time.sleep(0.8)
                     # Fill-check between the legs: if the old order filled in
                     # the race, the position exists — STOP, never re-bet it.
-                    positions = _pmm_positions_raw(client)
+                    positions = _pmm_positions_raw(client, fresh=True)
                     if positions is None:
                         _mark("repeg_stop", {"reason": "cancel state unknown"},
                               tg=(f"⚠🤖 REPEG UNVERIFIED — {ev} {mlbl} {side}: "
@@ -26239,6 +26375,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
     # Hobby-tier budget this project left months ago; every tick now
     # reports what the chase loop actually cost so the cap can be set
     # from evidence instead of folklore.
+    res["mirror"] = _venue_mirror_stats()
     res["ms"] = int((_time.time() - _t0) * 1000)
     return res
 
