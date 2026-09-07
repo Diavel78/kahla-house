@@ -13721,6 +13721,13 @@ def _prop_catalog_match(sb, question: str):
                             ln = None
                         break
                 _pl = (gd.get("name") or gd.get("pitcher") or gd.get("player") or "").strip()
+                if not _pl and m.lastindex and m.lastindex >= 1:   # positional regexes
+                    _pl = (m.group(1) or "").strip()
+                if ln is None and m.lastindex and m.lastindex >= 2:
+                    try:
+                        ln = float(m.group(2)) - 0.5
+                    except (TypeError, ValueError):
+                        ln = None
                 return fam, _pl, ln
     except Exception:
         pass
