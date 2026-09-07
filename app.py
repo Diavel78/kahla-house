@@ -13812,15 +13812,36 @@ def _prop_catalog_load(sb) -> dict:
     return out
 
 
+_PROP_WS_SEEN_TS: dict = {}       # slug -> quote-table ts last handed to the passes
+_PROP_WS_FULL_TS = 0.0
+_PROP_WS_FULL_EVERY_S = 600.0
+
+
 def _props_ws_rows(now) -> list:
     """The tape/pass input built from the quote table for every cataloged
     prop with a FRESH row: (market_id, 'polymarket', slug, question, ptype,
-    line, mid_cents, bid_c, ask_c) — the exact shape the REST path produced."""
+    line, mid_cents, bid_c, ask_c) — the exact shape the REST path produced.
+
+    CHANGED-ONLY (Sep 7 2026): with 2,300 props cataloged the passes were
+    re-evaluating ~1,500 unchanged quotes every tick (CPU 72%). A prop
+    joins the tick only when its table row advanced since it was last
+    handed over; every 10 minutes the full set goes through anyway (the
+    MLB pass has a T-6h clock the quote can't see)."""
+    global _PROP_WS_FULL_TS
+    full = _time.monotonic() - _PROP_WS_FULL_TS >= _PROP_WS_FULL_EVERY_S
+    if full:
+        _PROP_WS_FULL_TS = _time.monotonic()
     out = []
     for slug, e in list(_PROP_CATALOG.items()):
         q = _ws_quote(slug)
         if not q:
             continue
+        _row = WS_QUOTES.get(slug)
+        _ts = _row[2] if _row else None
+        if not full and _ts is not None and _PROP_WS_SEEN_TS.get(slug) == _ts:
+            continue                          # unchanged since last hand-over
+        if _ts is not None:
+            _PROP_WS_SEEN_TS[slug] = _ts
         bid_c, ask_c = q
         if bid_c is None and ask_c is None:
             continue
