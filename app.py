@@ -27651,7 +27651,9 @@ def api_data():
                     "lifetime_venue": _blk(
                         "__never_cached__",
                         lambda: _lifetime_venue(get_supabase(),
-                                                _c.get("balance", _c.get("open_cost"), _c.get("open_mark"))),
+                                                _c.get("balance"),
+                                                _c.get("open_cost"),
+                                                _c.get("open_mark")),
                         None),
                     "maker_rewards": _mrs.get("rewards"),
                     "account_credits": _mrs.get("credits"),
