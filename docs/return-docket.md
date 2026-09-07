@@ -721,3 +721,16 @@ the venue's LIVE answer is market_pays [] on the same rung while the
 MLB control reads early/day_of/live. The catalog is a map, never the
 verdict; placement's live per-market read is the only truth (rule #1's
 default-deny was RIGHT for all 11 refusals).
+
+## Sep 6 2026 — the socket night (Rob alone, "LETS GO")
+
+Result, in the order it landed:
+1. **Private WS feed was deaf since Aug 30** — the venue never sends `*Snapshot` frames; every event was dropped as "still inside the snapshot." Fixed; size events pop the sniper snapshots; the lap won't re-vouch from a pre-fill read. Fill→ask chain measured at 78s (lap-bounded).
+2. **Positions read the integer field** → a 0.94 lot sold as 1.00 (−0.06 short). Decimal now; sub-1 lots never asked.
+3. **Three positions naked for days**: pick side flag ≠ venue position sign. The venue's sign decides.
+4. **Opener lane starved**: OMS overran 40s→200-300s, MLB opener evaluated 0 games 09:41→16:30. Guaranteed 60s MLB slice; slim table-first MLB pricer (2.5s cold / ~0 warm vs 8-20s); by-side total block so the O/U trader bets early totals. Monday ML 2→10 of 12, totals 0→8.
+5. **Persisted ladder cache**: 144 ladders reloaded onto the socket at boot; `ws_price` 5/53 → 46/15 hit/rest; OMS elapsed 120s → 71s.
+6. **Buy side on amend + sniper**: repeg amends in place; buy sniper off frames, either direction (Rob: "I don't want it to fill. I wanna collect rent. I wanna stay at touch."). 109 bids snapshotted.
+7. Hygiene: dead desired rows retired (CHECK never allowed 'dead'); paperlog stuck line 360s; dashboard ws light reads recon/heartbeat as live and re-judges the box's cached verdict.
+
+Open: OMS still over its 40s budget (71s) — closes as socket coverage persists; the fill→ask latency is bounded by a lap already running (a wake should preempt, not queue); rent read tonight is a baseline only.

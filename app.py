@@ -8383,7 +8383,13 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                             row["event_name"], row["market_type"],
                             row["side"], row["entry_price"], slug)
         except Exception as e:
-            app.logger.warning("PMM-AUTOLOG ghost adopt failed %s: %s", slug, e)
+            if "duplicate key" in str(e):
+                # the machine-slug unique index doing its job — a pick for
+                # this slug already exists (twin-pick class blocked at the
+                # source). Not a fault; keep the log readable.
+                app.logger.debug("PMM-AUTOLOG ghost adopt dup %s", slug)
+            else:
+                app.logger.warning("PMM-AUTOLOG ghost adopt failed %s: %s", slug, e)
     _nowm = _time.monotonic()
     # OUT-OF-WINDOW SHORT-CIRCUIT: the index only holds games from −12h to
     # +48h, and every slug carries its ET game date — a stray on a game 5-15
