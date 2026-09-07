@@ -439,6 +439,12 @@ class WsFeed:
                                                   conn=n, depth=True)
                     self.depth_feed.start()
                     log.info("markets feed: depth connection (conn %d)", n)
+                self.props_feed = None
+                if getattr(_cfg, "WS_PROPS", True):
+                    self.props_feed = MarketsFeed(self._wake, sb=self.sb,
+                                                  dirty_add=None, conn=n + 1)
+                    self.props_feed.start()
+                    log.info("markets feed: props connection (conn %d)", n + 1)
         except Exception as e:
             log.error("markets feed failed to start (%s) — private feed "
                       "unaffected", e)
@@ -460,6 +466,13 @@ class WsFeed:
         pool[zlib.crc32(str(gid).encode()) % len(pool)].add_group(gid, set(slugs), exp)
 
     # -- plumbing ------------------------------------------------------------
+
+    def props_add(self, gid: str, slugs: set, exp=None) -> None:
+        """A game's cataloged props → the props connection (packed like
+        ladders; expires at kickoff)."""
+        pf = getattr(self, "props_feed", None)
+        if pf is not None:
+            pf.add_group(str(gid), set(slugs), exp)
 
     def push_watch(self, slugs: set, replace: bool) -> None:
         """The quoted set → the LITE core group AND the depth connection.

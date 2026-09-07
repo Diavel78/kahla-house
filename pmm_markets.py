@@ -998,7 +998,7 @@ def _inverse_side(market_type: str, side: str, line: float | None
 
 def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
            with_bbo: bool = True,
-           diag: dict | None = None) -> dict | None:
+           diag: dict | None = None, want_props: bool = True) -> dict | None:
     """Top-level: find the PMM event for a game and return its parsed
     markets with current bid/ask.
 
@@ -1095,7 +1095,7 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
             # Everything else on the event = a PROP (player props,
             # first-five, quarters/halves, team props …). Same lookup
             # call, zero extra network cost.
-            if len(out["props"]) < _PROPS_CAP:
+            if want_props and len(out["props"]) < _PROPS_CAP:
                 pe = _prop_entry(m, with_bbo)
                 if pe:
                     out["props"].append(pe)

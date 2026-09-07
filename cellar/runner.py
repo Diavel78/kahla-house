@@ -431,6 +431,11 @@ class Runner:
                         _app._WS_LADDER_CB = (
                             lambda gid, slugs, exp=None:
                             _wsf.ladder_add(gid, set(slugs), exp))
+                        # PROPS ON THE SOCKET (Sep 7 2026): the catalog
+                        # hands each game's matched props to the props conn.
+                        _app._WS_PROPS_CB = (
+                            lambda gid, slugs, exp=None:
+                            _wsf.props_add(gid, set(slugs), exp))
                     except Exception as e:
                         log.warning("ws watchlist hook failed: %s", e)
             except Exception as e:

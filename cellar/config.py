@@ -83,6 +83,10 @@ WS_MKTS_CONNS = int(os.environ.get("CELLAR_WS_MKTS_CONNS") or 2)
 # read every time (~300 per 15 min across both sniper arms). Off = the
 # snipers fall back to REST exactly as before.
 WS_DEPTH = _flag("CELLAR_WS_DEPTH", True)
+# PROPS CONNECTION (Sep 7 2026): a dedicated LITE markets socket for the
+# prop catalog (families we bet only) — the tape and the props passes read
+# frames instead of re-downloading 285-prop payloads per game per visit.
+WS_PROPS = _flag("CELLAR_WS_PROPS", True)
 
 # NO LANE_TIMEOUT_S (removed Aug 20 2026). It existed here for weeks as a
 # "wall-clock ceiling for a single lane invocation" that NOTHING READ -- the

@@ -13666,7 +13666,188 @@ def _match_kalshi_lines(tot_events, spr_events, ac, hc, our_date) -> list:
     return rows
 
 
-def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
+# ── PROPS ON THE SOCKET (Sep 7 2026, Rob: "how the fuck do we get it to
+# the WebSocket? every time we get something to the web socket, we add
+# more shit to the rest"). The REST prop path re-downloaded and re-parsed
+# a 285-prop payload per game per visit (1,600 tape rows a tick, CPU at
+# 100%). Now: DISCOVER once per game (REST, families we bet only) →
+# prop_catalog (persisted, reloaded at boot) → a dedicated LITE markets
+# connection subscribes the catalog → the tape and the props passes read
+# the quote table. The snapshot lane asks the venue for props only when a
+# game is not yet cataloged (or its catalog is >12h old).
+_PROPS_WS = bool(os.environ.get("CELLAR_LANES"))     # the box only
+_PROP_CATALOG: dict = {}          # slug -> {market_id, question, fam, player, line, ptype, event_start, sport}
+_PROP_CAT_TS: dict = {}           # market_id -> last discovery (REST) time
+_PROP_CAT_LOADED = False
+_PROP_CAT_TTL_S = 12 * 3600.0
+_WS_PROPS_CB = None               # runner plants: (gid, slugs, expire_ts)
+_PROP_LAST_CENTS: dict = {}       # (market_id, venue, prop_key) -> last tape cents (in-memory dedup)
+_PROP_LAST_SEEDED = False
+
+
+def _prop_catalog_match(sb, question: str):
+    """(fam, player, line) when this prop question is a family we bet —
+    NFL via fbprop_config patterns, MLB pitcher stats via _PSTAT_FAMS —
+    else None. The catalog holds ONLY these (Rob: rushing/passing/
+    receiving yards, receptions, "no 'TD in each quarter' bullshit")."""
+    q = question or ""
+    try:
+        for pdef in (_fbprop_config(sb).get("fams") or []):
+            try:
+                m = re.search(pdef["pattern"], q, re.I)
+            except Exception:
+                continue
+            if m:
+                ln = None
+                try:
+                    if m.groupdict().get("line") is not None:
+                        ln = float(m.group("line")) - 0.5
+                except (TypeError, ValueError):
+                    ln = None
+                return pdef.get("fam"), (m.groupdict().get("name") or "").strip(), ln
+    except Exception:
+        pass
+    try:
+        for fam, _pt, rx, _minn, _mk, _sk, _fl in _PSTAT_FAMS:
+            m = rx.search(q)
+            if m:
+                gd = m.groupdict()
+                ln = None
+                for _lk in ("n", "line", "k", "outs", "hits", "walks"):
+                    if gd.get(_lk) is not None:
+                        try:
+                            ln = float(gd[_lk]) - 0.5
+                        except (TypeError, ValueError):
+                            ln = None
+                        break
+                _pl = (gd.get("name") or gd.get("pitcher") or gd.get("player") or "").strip()
+                return fam, _pl, ln
+    except Exception:
+        pass
+    return None
+
+
+def _prop_catalog_put(sb, g, pes) -> int:
+    """Discovery: catalog every matched prop on this game, persist, and
+    hand the slugs to the props socket. Returns the number cataloged."""
+    mid = str(g.get("id") or "")
+    if not mid:
+        return 0
+    _PROP_CAT_TS[mid] = _time.time()
+    rows, slugs = [], set()
+    for p in pes or []:
+        slug, q = p.get("key") or p.get("slug"), p.get("question") or ""
+        if not slug:
+            continue
+        m = _prop_catalog_match(sb, q)
+        if not m:
+            continue
+        fam, player, line = m
+        entry = {"market_id": mid, "sport": g.get("sport"), "event_start": g.get("event_start"),
+                 "question": q, "fam": fam, "player": player, "line": line,
+                 "ptype": p.get("type")}
+        _PROP_CATALOG[slug] = entry
+        rows.append({"slug": slug, **entry, "updated_at": datetime.now(timezone.utc).isoformat()})
+        slugs.add(slug)
+    if rows:
+        try:
+            sb.table("prop_catalog").upsert(rows, on_conflict="slug").execute()
+        except Exception:
+            pass
+        if _WS_PROPS_CB is not None:
+            try:
+                exp = datetime.fromisoformat(str(g.get("event_start")).replace("Z", "+00:00")).timestamp()
+            except Exception:
+                exp = _time.time() + 7 * 86400
+            try:
+                _WS_PROPS_CB("props:" + mid, slugs, exp)
+            except Exception:
+                pass
+    return len(rows)
+
+
+def _prop_catalog_load(sb) -> dict:
+    """Once per process: every future game's cataloged props → memory + the
+    props socket (grouped per game so a kicked-off game expires as one)."""
+    global _PROP_CAT_LOADED
+    if _PROP_CAT_LOADED:
+        return {}
+    _PROP_CAT_LOADED = True
+    out = {"prop_cat_games": 0, "prop_cat_slugs": 0}
+    try:
+        cut = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        rows = _sb_paged(lambda: (sb.table("prop_catalog").select("*")
+                                  .gt("event_start", cut).order("event_start")), 20)
+        by_game: dict = {}
+        for r in rows or []:
+            slug = r.get("slug")
+            if not slug:
+                continue
+            _PROP_CATALOG[slug] = {k: r.get(k) for k in ("market_id", "sport", "event_start",
+                                                          "question", "fam", "player", "line", "ptype")}
+            by_game.setdefault(str(r.get("market_id")), (r.get("event_start"), set()))[1].add(slug)
+            _PROP_CAT_TS[str(r.get("market_id"))] = _time.time()
+        for mid, (es, slugs) in by_game.items():
+            if _WS_PROPS_CB is None:
+                break
+            try:
+                exp = datetime.fromisoformat(str(es).replace("Z", "+00:00")).timestamp()
+            except Exception:
+                exp = _time.time() + 7 * 86400
+            try:
+                _WS_PROPS_CB("props:" + mid, slugs, exp)
+            except Exception:
+                pass
+            out["prop_cat_games"] += 1
+            out["prop_cat_slugs"] += len(slugs)
+    except Exception as e:
+        out["prop_cat_err"] = str(e)[:80]
+    return out
+
+
+def _props_ws_rows(now) -> list:
+    """The tape/pass input built from the quote table for every cataloged
+    prop with a FRESH row: (market_id, 'polymarket', slug, question, ptype,
+    line, mid_cents, bid_c, ask_c) — the exact shape the REST path produced."""
+    out = []
+    for slug, e in list(_PROP_CATALOG.items()):
+        q = _ws_quote(slug)
+        if not q:
+            continue
+        bid_c, ask_c = q
+        if bid_c is None and ask_c is None:
+            continue
+        mid_c = ((bid_c + ask_c) / 2.0 if (bid_c is not None and ask_c is not None)
+                 else (bid_c if bid_c is not None else ask_c))
+        cents = int(round(mid_c))
+        if cents <= 0 or cents >= 100:
+            continue
+        out.append((e["market_id"], "polymarket", slug, e.get("question"), e.get("ptype"),
+                    e.get("line"), cents, bid_c, ask_c))
+    return out
+
+
+def _prop_last_seed(sb, now) -> None:
+    """Seed the in-memory tape dedup ONCE per process (the REST path re-read
+    up to 8,000 rows from the DB on every tick to rebuild it)."""
+    global _PROP_LAST_SEEDED
+    if _PROP_LAST_SEEDED:
+        return
+    _PROP_LAST_SEEDED = True
+    try:
+        recent = _sb_paged(lambda: (
+            sb.table("prop_snapshots").select("market_id,venue,prop_key,cents,captured_at")
+            .gte("captured_at", (now - timedelta(hours=24)).isoformat())
+            .order("captured_at", desc=True)), max_pages=12)
+        for r in recent or []:
+            k = (r["market_id"], r["venue"], r["prop_key"])
+            if k not in _PROP_LAST_CENTS:
+                _PROP_LAST_CENTS[k] = r["cents"]
+    except Exception:
+        pass
+
+
+def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB", mid=None, sb=None) -> dict:
     """Polymarket quotes for one game, all main markets, mids in int cents.
     Returns {"ml": {side: cents}, "rows": [(market_type, side, line, cents,
     bid_c, ask_c)]} or {} on any miss. bid_c/ask_c are the row's own side's
@@ -13678,7 +13859,8 @@ def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
     if not pm or not client:
         return {}
     try:
-        data = pm.lookup(client, sport, away, home, event_start)
+        _want = (not _PROPS_WS) or mid is None or (_time.time() - _PROP_CAT_TS.get(str(mid), 0.0) > _PROP_CAT_TTL_S)
+        data = pm.lookup(client, sport, away, home, event_start, want_props=_want)
     except Exception:
         return {}
     if not data:
@@ -13741,6 +13923,11 @@ def _pmm_game_quotes(pm, client, away, home, event_start, sport="MLB") -> dict:
     # non-main market with a live quote, shaped for prop_snapshots:
     # (prop_key, question, prop_type, line, yes-mid cents).
     prop_rows = []
+    if _PROPS_WS and mid is not None and sb is not None and (data.get("props") or []):
+        try:
+            _prop_catalog_put(sb, {"id": mid, "sport": sport, "event_start": event_start}, data.get("props"))
+        except Exception:
+            pass
     for p in (data.get("props") or []):
         pquote = p.get("quote") or {}
         mid_q = pquote.get("mid")
@@ -13905,19 +14092,25 @@ def _prop_insert_changed(sb, rows, now) -> int:
         return 0
     mids = list({r[0] for r in rows})
     last: dict = {}
-    try:
-        recent = _sb_paged(lambda: (
-            sb.table("prop_snapshots")
-            .select("market_id,venue,prop_key,cents,captured_at")
-            .in_("market_id", mids)
-            .gte("captured_at", (now - timedelta(hours=24)).isoformat())
-            .order("captured_at", desc=True)), max_pages=8)
-        for r in recent:
-            k = (r["market_id"], r["venue"], r["prop_key"])
-            if k not in last:               # first seen = latest (desc order)
-                last[k] = r["cents"]
-    except Exception:
-        pass
+    if _PROPS_WS:
+        # IN-MEMORY DEDUP on the box (Sep 7 2026): the per-call 24h DB
+        # re-read (up to 8,000 rows a tick) was a CPU line of its own.
+        _prop_last_seed(sb, now)
+        last = _PROP_LAST_CENTS
+    else:
+        try:
+            recent = _sb_paged(lambda: (
+                sb.table("prop_snapshots")
+                .select("market_id,venue,prop_key,cents,captured_at")
+                .in_("market_id", mids)
+                .gte("captured_at", (now - timedelta(hours=24)).isoformat())
+                .order("captured_at", desc=True)), max_pages=8)
+            for r in recent:
+                k = (r["market_id"], r["venue"], r["prop_key"])
+                if k not in last:               # first seen = latest (desc order)
+                    last[k] = r["cents"]
+        except Exception:
+            pass
     ins, seen = [], set()
     for (mid, venue, key, q, ptype, line, cents, bid_c, ask_c) in rows:
         k = (mid, venue, key)
@@ -13939,6 +14132,7 @@ def _prop_insert_changed(sb, rows, now) -> int:
                     "question": q, "prop_type": ptype, "line": line,
                     "cents": cents, "bid_c": bid_c, "ask_c": ask_c,
                     "captured_at": now.isoformat()})
+        last[k] = cents                 # in-memory dedup persists on the box
     if ins:
         try:
             sb.table("prop_snapshots").insert(ins).execute()
@@ -15448,7 +15642,8 @@ def api_pm_snapshot():
             st["pmm_backoff"] = st.get("pmm_backoff", 0) + 1
             pq = None
         elif _time.time() < pmm_deadline:
-            pq = _pmm_game_quotes(_pm, _pmm_client, away, home, g["event_start"], sport=sp)
+            pq = _pmm_game_quotes(_pm, _pmm_client, away, home, g["event_start"], sport=sp,
+                                  mid=g.get("id"), sb=sb)
             if not pq:
                 _PM_NOLIST_TS[_mid_s] = _time.time()
             if pq:
@@ -15485,6 +15680,17 @@ def api_pm_snapshot():
                         "kalshi_home": int(kc["home"]), "starts_in_min": sim}
 
     inserted = _pm_insert_changed(sb, rows, now)
+    if _PROPS_WS:
+        # SOCKET-FED TAPE: every cataloged prop with a fresh table row joins
+        # this tick's rows (REST rows only arrive on discovery visits).
+        try:
+            st.update(_prop_catalog_load(sb))
+            _ws_prop_rows = _props_ws_rows(now)
+            st["props_ws_rows"] = len(_ws_prop_rows)
+            _seen_keys = {r[2] for r in prop_rows}
+            prop_rows.extend(r for r in _ws_prop_rows if r[2] not in _seen_keys)
+        except Exception as e:
+            st["props_ws_err"] = str(e)[:80]
     props_inserted = _prop_insert_changed(sb, prop_rows, now)
     props_cleared = _prop_update_suggestions(sb, prop_rows, now)
     whiff_shadows = _whiff_shadow_pass(sb, prop_rows, all_games, now)
