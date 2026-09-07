@@ -24857,6 +24857,10 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     except Exception:
         pass
     res["t_lap"] = round(_time.time() - _t0, 1)
+    # sniper counters (frames / moves / depth_hit vs depth_rest) — cumulative
+    # per process; the dashboard reads the latest scalp tick
+    res["snipe"] = dict(_SNIPE_STATS)
+    res["buy_snipe"] = dict(_BUY_SNIPE_STATS)
     return res
 
 
