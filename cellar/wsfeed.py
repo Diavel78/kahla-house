@@ -637,6 +637,7 @@ class WsFeed:
                                 _tm = time.monotonic()
                                 for _s in _ev_slugs:
                                     _app.SCALP_SNAP.pop(_s, None)
+                                    _app.BUY_SNAP.pop(_s, None)
                                     # the lap must not re-publish from a
                                     # venue read OLDER than this pop
                                     _app.SCALP_POPPED[_s] = _tm

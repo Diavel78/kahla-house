@@ -24100,7 +24100,7 @@ def _snipe_target(snap: dict, bid_c, ask_c, comp_ask_c=None):
 def _scalp_snipe_feed(slug: str) -> None:
     """Feed-thread entry: a market we hold moved → queue it."""
     try:
-        if slug in SCALP_SNAP and SNIPE_Q is not None:
+        if (slug in SCALP_SNAP or slug in BUY_SNAP) and SNIPE_Q is not None:
             SNIPE_Q.put_nowait(slug)
     except Exception:
         pass
@@ -24178,6 +24178,7 @@ def _scalp_snipe_worker() -> None:
             slug = SNIPE_Q.get()
             # coalesce a burst on the same slug
             _snipe_one(sb, client, slug)
+            _snipe_buy_one(sb, client, slug)
         except Exception:
             _SNIPE_STATS["errors"] += 1
             _time.sleep(0.2)
@@ -24805,6 +24806,208 @@ def _amend_slugs() -> set:
         return set()
 
 
+def _amend_on(slug: str) -> bool:
+    """amend_slugs covers this market ('*' = every market)."""
+    s = _amend_slugs()
+    return "*" in s or slug in s
+
+
+def _repeg_amend(client, oid, slug, canon: float, qty: int, gtt: str) -> str:
+    """Amend a resting BUY in place — the sell arm's proven call, for bids.
+    'amended' (same id, live state incl. REPLACED, price at the new value),
+    'gone' (order not on the re-listed book), 'unverified' (read failed)."""
+    if int(qty) < 1:
+        return "gone"
+    mod = {"marketSlug": slug,
+           "price": {"value": f"{canon:.3f}", "currency": "USD"},
+           "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
+           "participateDontInitiate": True, "quantity": int(qty)}
+    try:
+        client.orders.modify(oid, mod)
+    except Exception:
+        return "unverified"
+    _time.sleep(2.0)                          # modify is ASYNC (Aug 2 probe)
+    state, seen_px = None, None
+    try:
+        resp = client.orders.list({"slugs": [slug]})
+        raw = (resp.get("orders") if isinstance(resp, dict)
+               else getattr(resp, "orders", [])) or []
+        for o in raw:
+            g = (lambda k: o.get(k) if isinstance(o, dict) else getattr(o, k, None))
+            if g("id") != oid:
+                continue
+            state = str(g("state") or "")
+            px = g("price")
+            seen_px = float(px.get("value") if isinstance(px, dict) else px)
+    except Exception:
+        return "unverified"
+    live = state in (_OPEN_ORDER_STATES | {"ORDER_STATE_REPLACED"})
+    at_new = seen_px is not None and abs(seen_px - canon) < 0.0026
+    return "amended" if (live and at_new) else ("gone" if state is None else "unverified")
+
+
+# ── THE BUY SNIPER (Sep 6 2026, Rob: "Let's go. Keep it going."). The
+# sell sniper's twin for resting model BIDS on the no-veto rent lanes
+# (>6h out: MLB ML + O/U trader, football spread/total): the repeg lap
+# publishes a per-market snapshot; every LITE frame for a snapshotted
+# market recomputes "touch + 1 tick (join on a one-tick book), never
+# above the lane's price cap or the $13 Master Rule" and AMENDS in one
+# call. Inside 6h the model wall decides, so the lap keeps those. Same
+# size safety as the sell arm: any size event pops the snapshot until the
+# lap re-vouches.
+BUY_SNAP: dict = {}
+BUY_SNIPE_ENABLED = True
+_BUY_SNIPE_STATS = {"frames": 0, "moves": 0, "skips": 0, "errors": 0}
+
+
+def _snipe_buy_target(snap: dict, bid_c, ask_c, comp_bid_c=None):
+    """From a YES-canonical frame: our-side best bid/ask; lead the best
+    competitor bid by one tick (join when that would cross the ask);
+    clamp to cap and Master Rule; move either direction. 'self' when the
+    frame's touch is us (needs depth); None when nothing to do."""
+    tick = float(snap.get("tick") or 1.0)
+    our = float(snap["our_bid"])
+    if snap.get("synth"):
+        best_bid = (100.0 - ask_c) if ask_c is not None else None
+        best_ask = (100.0 - bid_c) if bid_c is not None else None
+    else:
+        best_bid, best_ask = bid_c, ask_c
+    comp = comp_bid_c if comp_bid_c is not None else best_bid
+    if comp is None:
+        return None
+    if abs(comp - our) < 0.26 and comp_bid_c is None:
+        return "self"
+    tgt = _grid_dn(comp, tick) + tick
+    if best_ask is not None and tgt >= best_ask:
+        tgt = _grid_dn(comp, tick)               # one-tick book → join
+    tgt = min(tgt, float(snap["cap_c"]), float(snap["master_c"]))
+    tgt = _grid_dn(tgt, tick)
+    if tgt < tick:
+        return None
+    return None if abs(tgt - our) <= 0.26 else tgt
+
+
+def _snipe_buy_one(sb, client, slug: str) -> None:
+    snap = BUY_SNAP.get(slug)
+    if not snap:
+        return
+    _BUY_SNIPE_STATS["frames"] += 1
+    nowm = _time.monotonic()
+    if nowm - _SNIPE_LAST.get("buy:" + slug, 0.0) < _SNIPE_MIN_GAP_S:
+        _BUY_SNIPE_STATS["skips"] += 1
+        return
+    if not (BUY_SNIPE_ENABLED and REPEG_ENABLED
+            and _machine_flag("buy_snipe_enabled")):
+        return
+    q = WS_QUOTES.get(slug)
+    if not q:
+        return
+    bid_c, ask_c, _ts = q
+    tgt = _snipe_buy_target(snap, bid_c, ask_c)
+    if tgt == "self":
+        try:
+            bk = _pmm_book(client, slug)
+            if snap.get("synth") and bk:
+                bk = _invert_book(bk)
+            comp = None
+            for c, qq in ((bk or {}).get("bids") or []):
+                if abs(c - float(snap["our_bid"])) < 0.26 and qq <= snap["qty"] + 0.5:
+                    continue                  # our own level
+                comp = c
+                break
+            tgt = (_snipe_buy_target(snap, bid_c, ask_c, comp_bid_c=comp)
+                   if comp is not None else None)
+            if tgt == "self":
+                tgt = None
+        except Exception:
+            tgt = None
+    if tgt is None:
+        _BUY_SNIPE_STATS["skips"] += 1
+        return
+    canon = ((100.0 - tgt) / 100.0) if snap.get("synth") else (tgt / 100.0)
+    mod = {"marketSlug": slug, "price": {"value": f"{canon:.3f}", "currency": "USD"},
+           "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": snap["gtt"],
+           "participateDontInitiate": True, "quantity": int(snap["qty"])}
+    frm = snap["our_bid"]
+    ok, note = True, "buy"
+    try:
+        client.orders.modify(snap["oid"], mod)      # serial via _SerialOrders
+    except Exception as e:
+        ok, note = False, ("buy:" + str(e))[:120]
+        _BUY_SNIPE_STATS["errors"] += 1
+    _SNIPE_LAST["buy:" + slug] = _time.monotonic()
+    if ok:
+        snap["our_bid"] = tgt                     # optimistic; the lap verifies
+        _BUY_SNIPE_STATS["moves"] += 1
+    try:
+        sb.table("scalp_snipes").insert({"slug": slug, "from_c": frm, "to_c": tgt,
+                                         "oid": snap["oid"], "ok": ok, "note": note,
+                                         "bid_c": bid_c, "ask_c": ask_c}).execute()
+    except Exception:
+        pass
+
+
+def _buy_snap_publish(sb, fs: dict, now, client, full_lap: bool) -> int:
+    """Repeg lap → BUY_SNAP for every resting no-veto model bid. A full lap
+    rebuilds the dict (stale markets drop out); a targeted lap updates the
+    markets it read. Skips any market a size event popped after this
+    lap's venue read (SCALP_POPPED, shared with the sell arm)."""
+    t_read = _time.monotonic()
+    fills = [f for f in (fs.get("fills") or [])
+             if f.get("venue") == "POLYMARKET" and f.get("order_id")
+             and f.get("slug") and (f.get("order_leaves") or 0) >= 1
+             and (f.get("market_type") or "") in ("moneyline", "spread", "total")
+             and (f.get("mins_to_start") or 0) > _OU_NOVETO_MIN_MIN
+             and f.get("my_price_c") is not None]
+    if not fills:
+        if full_lap:
+            BUY_SNAP.clear()
+        return 0
+    try:
+        rows = _sb_paged(lambda: (sb.table("bot_picks")
+                                  .select("id,event_start,signal_blob")
+                                  .in_("id", [f["id"] for f in fills])), 3)
+    except Exception:
+        return 0
+    byid = {r["id"]: r for r in rows or []}
+    fresh: dict = {}
+    for f in fills:
+        r = byid.get(f["id"])
+        if not r:
+            continue
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        grid = bool(b.get("gridiron_autobet"))
+        if not (b.get("autobet") or b.get("ou_trader") or grid):
+            continue                          # model rent lanes only
+        slug = f["slug"]
+        if SCALP_POPPED.get(slug, 0.0) > t_read - 300.0 and slug not in BUY_SNAP:
+            pass                              # a recent pop: this lap's read vouches anew
+        try:
+            gtt = (datetime.fromisoformat(
+                str(r.get("event_start")).replace("Z", "+00:00"))
+                .astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        except Exception:
+            continue
+        try:
+            tick = _pmm_tick_c(client, slug)
+        except Exception:
+            tick = 1.0
+        qty = int(f.get("order_leaves") or 0)
+        if qty < 1:
+            continue
+        master_c = _grid_dn(_REPEG_MAX_COST_USD / qty * 100.0, tick)
+        fresh[slug] = {"oid": f["order_id"], "our_bid": float(f["my_price_c"]),
+                       "qty": qty, "synth": bool(f.get("synthetic")),
+                       "cap_c": (_GRIDIRON_MAX_ENTRY_C if grid
+                                 else _REPEG_NRFI_PRICE_CAP_C),
+                       "master_c": master_c, "tick": tick, "gtt": gtt,
+                       "pick_id": r["id"], "at": _time.monotonic()}
+    if full_lap:
+        BUY_SNAP.clear()
+    BUY_SNAP.update(fresh)
+    return len(fresh)
+
+
 def _scalp_amend(client, sb, r, b, slug, synth, sell_intent, oid, tgt_c, qty,
                  now, walked_from=None) -> str:
     """Amend a resting ask IN PLACE (orders.modify with FULL params — a
@@ -25093,6 +25296,12 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
             res["t_fs"] = round(_time.time() - _tp, 1)
             if not fs.get("configured"):
                 continue
+            try:
+                res["buy_snap"] = _buy_snap_publish(
+                    sb, fs, now, lap_client or get_client(), not _targeted)
+                _ensure_snipe_worker()
+            except Exception:
+                pass
             cands = [f for f in (fs.get("fills") or [])
                      if f.get("outbid") and f.get("venue") == "POLYMARKET"
                      and (f.get("market_type") or "") in ("nrfi", "moneyline",
@@ -25458,87 +25667,118 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                                 # candidates re-enter next tick (2 min)
                 if client is None:
                     client = get_client()
+                # ── BUY AMEND (Sep 6 2026 — the buy side joins the sell arm).
+                # Same venue call the sells have run all day (160+ amends,
+                # same id, live on the public book): orders.modify with FULL
+                # params, verified on the re-listed book. No cancel gap, no
+                # ORDER LOST class, one write instead of two. A side FLIP
+                # changes intent and stays on cancel→create.
+                _gtt_a = None
                 try:
-                    client.orders.cancel(oid, {"marketSlug": slug})
-                except Exception:
-                    pass        # canceling a just-filled order errors — the
-                                # position check below decides, not the exc
-                _time.sleep(0.8)
-                # Fill-check between the legs: if the old order filled in
-                # the race, the position exists — STOP, never re-bet it.
-                positions = _pmm_positions_raw(client)
-                if positions is None:
-                    _mark("repeg_stop", {"reason": "cancel state unknown"},
-                          tg=(f"⚠🤖 REPEG UNVERIFIED — {ev} {mlbl} {side}: "
-                              f"canceled your {round(old_c) if old_c else '?'}"
-                              f"¢ order but the venue reads failed before the "
-                              f"re-place. CHECK THE APP — re-bid "
-                              f"{round(new_c)}¢ if it's gone."), force=True)
-                    res["stopped"] += 1
-                    continue
-                pos_net = (positions.get(slug) or {}).get("net") or 0.0
-                if (pos_net < 0 if f.get("synthetic") else pos_net > 0):
-                    res["skipped"] += 1
-                    continue                           # fill won — done
-                cparams = {"marketSlug": slug, "intent": intent,
-                           "type": "ORDER_TYPE_LIMIT",
-                           "price": {"value": f"{canon:.3f}",
-                                     "currency": "USD"},
-                           "quantity": qty,
-                           "participateDontInitiate": True,
-                           "manualOrderIndicator":
-                               "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
-                # EXPIRY IS RECOMPUTED FROM THE PICK, NEVER ECHOED (Aug 12
-                # 2026 — the CIN@CWS YRFI). Echoing the old order's TIF
-                # means a single empty field from the SDK produces a
-                # re-placed order with NO expiry — good-till-canceled —
-                # which then rests straight through first pitch. That
-                # YRFI filled 13 MINUTES INTO THE GAME, sold to us by
-                # someone dumping a first-inning bet that was visibly
-                # dying, and lost 3 minutes later. A model BUY is always
-                # a pre-game bet, so its expiry is always first pitch;
-                # deriving it from event_start is authoritative and
-                # self-heals any order that already lost its GTD.
-                _gtt = None
-                try:
-                    _gtt = (datetime.fromisoformat(
+                    _gtt_a = (datetime.fromisoformat(
                         str(r.get("event_start")).replace("Z", "+00:00"))
                         .astimezone(timezone.utc)
                         .strftime("%Y-%m-%dT%H:%M:%SZ"))
                 except Exception:
-                    _gtt = (f.get("order_good_till")
-                            if f.get("order_tif")
-                            == "TIME_IN_FORCE_GOOD_TILL_DATE" else None)
-                if _gtt:
-                    cparams["tif"] = "TIME_IN_FORCE_GOOD_TILL_DATE"
-                    cparams["goodTillTime"] = _gtt
-                new_oid = None
-                try:
-                    cr = client.orders.create(cparams)
-                    new_oid = (cr.get("id") if isinstance(cr, dict)
-                               else getattr(cr, "id", None))
-                except Exception:
-                    pass        # verify decides — recreate is its fallback
-                _time.sleep(1.5)
-                state = _repeg_verify_or_recreate(
-                    client, slug, intent, canon, qty,
-                    f.get("order_tif"), f.get("order_good_till"))
-                if state == "filled":
-                    continue                           # fill wins — done
-                if state == "lost":
-                    _mark("repeg_stop", {"reason": "ORDER LOST on re-peg"},
-                          tg=(f"🚨 ORDER LOST — {ev} {mlbl} {side}: canceled "
-                              f"your order and the re-place failed. RE-BID "
-                              f"{round(new_c)}¢ BY HAND NOW."), force=True)
-                    res["stopped"] += 1
-                    continue
-                if state == "unknown":
-                    _mark("repeg_stop", {"reason": "re-peg unverified"},
-                          tg=(f"⚠🤖 REPEG UNVERIFIED — {ev} {mlbl} {side}: "
-                              f"re-peg to {round(new_c)}¢ sent but the verify "
-                              f"read failed. CHECK THE APP."), force=True)
-                    res["stopped"] += 1
-                    continue
+                    _gtt_a = None
+                _did_amend, state, new_oid = False, None, None
+                if (not _flipped and _gtt_a and _amend_on(slug)):
+                    _av = _repeg_amend(client, oid, slug, canon, qty, _gtt_a)
+                    if _av == "amended":
+                        _did_amend, state, new_oid = True, "amended", oid
+                        res["amended"] = res.get("amended", 0) + 1
+                    elif _av == "unverified":
+                        _mark("repeg_stop", {"reason": "amend unverified"},
+                              tg=(f"⚠🤖 REPEG UNVERIFIED — {ev} {mlbl} {side}: "
+                                  f"amend to {round(new_c)}¢ sent but the "
+                                  f"verify read failed. CHECK THE DASHBOARD."),
+                              force=True)
+                        res["stopped"] += 1
+                        continue
+                    # 'gone' → the order isn't there to amend: fall through
+                    # to cancel (harmless) → fill-check → create.
+                if not _did_amend:
+                    try:
+                        client.orders.cancel(oid, {"marketSlug": slug})
+                    except Exception:
+                        pass        # canceling a just-filled order errors — the
+                                    # position check below decides, not the exc
+                    _time.sleep(0.8)
+                    # Fill-check between the legs: if the old order filled in
+                    # the race, the position exists — STOP, never re-bet it.
+                    positions = _pmm_positions_raw(client)
+                    if positions is None:
+                        _mark("repeg_stop", {"reason": "cancel state unknown"},
+                              tg=(f"⚠🤖 REPEG UNVERIFIED — {ev} {mlbl} {side}: "
+                                  f"canceled your {round(old_c) if old_c else '?'}"
+                                  f"¢ order but the venue reads failed before the "
+                                  f"re-place. CHECK THE APP — re-bid "
+                                  f"{round(new_c)}¢ if it's gone."), force=True)
+                        res["stopped"] += 1
+                        continue
+                    pos_net = (positions.get(slug) or {}).get("net") or 0.0
+                    if (pos_net < 0 if f.get("synthetic") else pos_net > 0):
+                        res["skipped"] += 1
+                        continue                           # fill won — done
+                    cparams = {"marketSlug": slug, "intent": intent,
+                               "type": "ORDER_TYPE_LIMIT",
+                               "price": {"value": f"{canon:.3f}",
+                                         "currency": "USD"},
+                               "quantity": qty,
+                               "participateDontInitiate": True,
+                               "manualOrderIndicator":
+                                   "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
+                    # EXPIRY IS RECOMPUTED FROM THE PICK, NEVER ECHOED (Aug 12
+                    # 2026 — the CIN@CWS YRFI). Echoing the old order's TIF
+                    # means a single empty field from the SDK produces a
+                    # re-placed order with NO expiry — good-till-canceled —
+                    # which then rests straight through first pitch. That
+                    # YRFI filled 13 MINUTES INTO THE GAME, sold to us by
+                    # someone dumping a first-inning bet that was visibly
+                    # dying, and lost 3 minutes later. A model BUY is always
+                    # a pre-game bet, so its expiry is always first pitch;
+                    # deriving it from event_start is authoritative and
+                    # self-heals any order that already lost its GTD.
+                    _gtt = None
+                    try:
+                        _gtt = (datetime.fromisoformat(
+                            str(r.get("event_start")).replace("Z", "+00:00"))
+                            .astimezone(timezone.utc)
+                            .strftime("%Y-%m-%dT%H:%M:%SZ"))
+                    except Exception:
+                        _gtt = (f.get("order_good_till")
+                                if f.get("order_tif")
+                                == "TIME_IN_FORCE_GOOD_TILL_DATE" else None)
+                    if _gtt:
+                        cparams["tif"] = "TIME_IN_FORCE_GOOD_TILL_DATE"
+                        cparams["goodTillTime"] = _gtt
+                    new_oid = None
+                    try:
+                        cr = client.orders.create(cparams)
+                        new_oid = (cr.get("id") if isinstance(cr, dict)
+                                   else getattr(cr, "id", None))
+                    except Exception:
+                        pass        # verify decides — recreate is its fallback
+                    _time.sleep(1.5)
+                    state = _repeg_verify_or_recreate(
+                        client, slug, intent, canon, qty,
+                        f.get("order_tif"), f.get("order_good_till"))
+                    if state == "filled":
+                        continue                           # fill wins — done
+                    if state == "lost":
+                        _mark("repeg_stop", {"reason": "ORDER LOST on re-peg"},
+                              tg=(f"🚨 ORDER LOST — {ev} {mlbl} {side}: canceled "
+                                  f"your order and the re-place failed. RE-BID "
+                                  f"{round(new_c)}¢ BY HAND NOW."), force=True)
+                        res["stopped"] += 1
+                        continue
+                    if state == "unknown":
+                        _mark("repeg_stop", {"reason": "re-peg unverified"},
+                              tg=(f"⚠🤖 REPEG UNVERIFIED — {ev} {mlbl} {side}: "
+                                  f"re-peg to {round(new_c)}¢ sent but the verify "
+                                  f"read failed. CHECK THE APP."), force=True)
+                        res["stopped"] += 1
+                        continue
                 nb = dict(blob)
                 # A successful move re-arms the once-per-bet stop ping: if
                 # this resumed chase stops again later, that's ONE new ping.
@@ -25547,6 +25787,8 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                                         "at": now.isoformat(),
                                         "order_id": new_oid or oid,
                                         "edge_pp": edge, "verify": state,
+                                        "mode": ("amend" if _did_amend
+                                                 else "recreate"),
                                         **({"flip": True} if _flipped
                                            else {})}]
                 upd = {"signal_blob": nb}
