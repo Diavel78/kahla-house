@@ -3163,7 +3163,13 @@ def _dash_cache_refresh(sb, client) -> dict:
             "id": 1, "summary": summary,
             "derived": _dash_derived(sb),
             "balance": bal.get("current_balance"),
-            "open_count": len([p for p in rows if not p.get("expired")]),
+            "open_count": len([p for p in rows if not p.get("expired")
+                               and (p.get("quantity") or 0) >= 1.0]),
+            "dust_count": len([p for p in rows if not p.get("expired")
+                               and (p.get("quantity") or 0) < 1.0]),
+            "dust_value": round(sum((p.get("current_value") or 0)
+                                    for p in rows if not p.get("expired")
+                                    and (p.get("quantity") or 0) < 1.0), 2),
             "order_count": order_count,
             "computed_at": datetime.now(timezone.utc).isoformat(),
             "note": "ok" if order_err is None
@@ -3421,7 +3427,9 @@ def _position_row_fast(slug, pos):
     So the slim dashboard builds rows from raw data and keeps total_pnl
     honest. Same keys compute_summary indexes with [] — it uses direct
     key access, so a missing key here is a 500, not a blank card."""
-    net = _safe_float(pos.get("netPosition")) or 0
+    net = _safe_float(pos.get("netPositionDecimal"))   # the venue's integer
+    if net is None:                                     # field rounds 0.94→1
+        net = _safe_float(pos.get("netPosition")) or 0
     qty = abs(net)
     cost = _safe_float(pos.get("cost"))
     cash_value = _safe_float(pos.get("cashValue"))
@@ -27342,6 +27350,8 @@ def api_data():
                         (_rw.get("yesterday") or {}).get("total")),
                     "total_pnl": _s.get("total_pnl"),
                     "open_positions": _c.get("open_count"),
+                    "dust_count": _c.get("dust_count"),
+                    "dust_value": _c.get("dust_value"),
                     "open_orders": _c.get("order_count"),
                     "rent_7d": _r7, "pnl_7d": _p7,
                     "all_in_7d": _all_in(_p7, (_r7 or {}).get("total")),
@@ -27412,7 +27422,15 @@ def api_data():
     parsed_acts = [a for a in parsed_acts if a.get("timestamp", "") >= CUTOFF_DATE]
     parsed_acts.sort(key=lambda a: a.get("timestamp", ""), reverse=True)
 
-    open_positions = [p for p in enriched if not p.get("expired")]
+    _live = [p for p in enriched if not p.get("expired")]
+    # DUST (Rob, Sep 6 2026: "eliminate the dust ones and call it the cost of
+    # doing business"): a fraction under one contract left by a partial fill
+    # cannot be sold and rides to resolution for pennies. It is not an open
+    # bet; it is rounding. Counted and valued on its own line, never in the
+    # open-bet number.
+    dust = [p for p in _live if (p.get("quantity") or 0) < 1.0]
+    open_positions = [p for p in _live if (p.get("quantity") or 0) >= 1.0]
+    dust_value = round(sum((p.get("current_value") or 0) for p in dust), 2)
     closed_positions = [a for a in parsed_acts
                         if a["type"] == "Position Resolution"
                         or (a["type"] == "Trade" and a.get("_is_close") and a.get("pnl") is not None)
@@ -27496,6 +27514,7 @@ def api_data():
                     (_rw.get("yesterday") or {}).get("total")),
                 "total_pnl": summary.get("total_pnl"),
                 "open_positions": len(open_positions),
+                "dust_count": len(dust), "dust_value": dust_value,
                 "rent_7d": _r7f, "pnl_7d": _p7f,
                 "all_in_7d": _all_in(_p7f, (_r7f or {}).get("total")),
                 "pnl_stack": _stkf,

@@ -533,6 +533,19 @@
             if (!j.ok) { document.getElementById('stamp').textContent = 'error'; return; }
             const s = j.summary || {};
             paintQuick('qBets', 'qdBets', s.open_positions);
+            // dust = sub-contract fragments (unsellable until resolution) —
+            // out of the open-bet number, shown once, small
+            (function(){
+                let d = document.getElementById('qDust');
+                if (!d) {
+                    d = document.createElement('span'); d.id = 'qDust';
+                    d.style.cssText = 'opacity:.55;font-size:.8em;margin-left:.4em';
+                    document.getElementById('qBets').insertAdjacentElement('afterend', d);
+                }
+                d.textContent = (s.dust_count > 0)
+                    ? ('· ' + s.dust_count + ' dust' + (s.dust_value != null ? ' $' + Number(s.dust_value).toFixed(2) : ''))
+                    : '';
+            })();
             paintQuick('qOrders', 'qdOrders', s.open_orders);
             // LIFETIME reads the venue ledger ONLY (balance + withdrawn −
             // deposited, cash basis). The old walk-based total_pnl read
