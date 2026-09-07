@@ -8420,11 +8420,15 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
             if is_filled and prob is not None and 0 < prob < 1:
                 new_amer = _prob_to_amer_py(prob)
                 cur_amer = ex.get("entry_price")
-                cur_prob = _amer_to_prob_py(cur_amer)
-                cur_c = (cur_prob * 100.0) if cur_prob is not None else None
-                if (new_amer is not None and new_amer != cur_amer
-                        and (cur_c is None or abs(prob * 100.0 - cur_c) >= 0.5)):
+                _ok, _why = _entry_sync_ok(cur_amer, prob, nb)
+                if _ok and new_amer is not None and new_amer != cur_amer:
                     upd["entry_price"] = new_amer
+                elif _why == "venue_blend" and nb.get("sync_veto") != "venue_blend":
+                    # the Braves 74¢ class — stamp it, never write it
+                    nb = {**nb, "sync_veto": "venue_blend",
+                          "sync_veto_c": round(prob * 100.0, 2)}
+                    upd["signal_blob"] = nb
+                    out["sync_veto"] = out.get("sync_veto", 0) + 1
             if upd:
                 try:
                     (sb.table("bot_picks").update(upd)
@@ -8655,11 +8659,15 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
             if is_filled and prob is not None and 0 < prob < 1:
                 new_amer = _prob_to_amer_py(prob)
                 cur_amer = ex.get("entry_price")
-                cur_prob = _amer_to_prob_py(cur_amer)
-                cur_c = (cur_prob * 100.0) if cur_prob is not None else None
-                if (new_amer is not None and new_amer != cur_amer
-                        and (cur_c is None or abs(prob * 100.0 - cur_c) >= 0.5)):
+                _ok, _why = _entry_sync_ok(cur_amer, prob, nb)
+                if _ok and new_amer is not None and new_amer != cur_amer:
                     upd["entry_price"] = new_amer
+                elif _why == "venue_blend" and nb.get("sync_veto") != "venue_blend":
+                    # the Braves 74¢ class — stamp it, never write it
+                    nb = {**nb, "sync_veto": "venue_blend",
+                          "sync_veto_c": round(prob * 100.0, 2)}
+                    upd["signal_blob"] = nb
+                    out["sync_veto"] = out.get("sync_veto", 0) + 1
             if upd:
                 try:
                     (sb.table("bot_picks").update(upd)
@@ -12648,7 +12656,10 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict,
         cur_prob = _amer_to_prob_py(cur_amer)
         cur_c = cur_prob * 100.0 if cur_prob is not None else None
         entry["fill_avg_c"] = round(fill_c, 2)
-        if (new_amer is not None
+        _ok, _why = _entry_sync_ok(cur_amer, pos["avg_price"], pblob)
+        if not _ok and _why == "venue_blend":
+            entry["sync_veto"] = "venue_blend"
+        if (_ok and new_amer is not None
                 and (cur_c is None or abs(fill_c - cur_c) >= 0.5)
                 and new_amer != cur_amer):
             try:
@@ -26997,6 +27008,44 @@ def _amer_to_prob_py(p):
     if p > 0: return 100.0 / (p + 100.0)
     if p < 0: return -p / (-p + 100.0)
     return 0.5
+
+
+_ENTRY_SYNC_MAX_DRIFT_C = 3.0
+
+
+def _entry_sync_ok(cur_amer, new_prob, blob) -> tuple[bool, str]:
+    """May the venue's position avg overwrite this pick's entry_price?
+
+    THE BRAVES 74¢ LESSON (Sep 7 2026). The venue's per-market position
+    `avgPx` is a BLENDED lifetime number: on a slug we have round-tripped
+    (60 bought / 46 sold across four lots) it read 0.7396 for a lot we
+    paid 39.2¢ for. The autolog copied it into entry_price, the scalp
+    honoured it as the cost floor, the exit parked at 74¢ on a 40¢ book,
+    and the position rode a 1-0 loss to zero with a live sell order the
+    whole time. Same disease as the Aug-19 harvest collapse-DOWN and the
+    Sep-3 MIL@CIN 93% card — this is the guard the AUTOLOG path never had.
+
+    A MACHINE bet fills at its own resting limit (post-only): the venue
+    avg can never legitimately sit more than a few ticks from the price
+    the pick already carries. A drift past _ENTRY_SYNC_MAX_DRIFT_C is the
+    blend, never a fill — refuse it and say why. Hand-placed picks (no
+    order_id) keep the sync: their logged line really can differ from
+    the fill, which is what the sync was built for."""
+    if new_prob is None or not (0 < new_prob < 1):
+        return False, "no_prob"
+    b = blob if isinstance(blob, dict) else {}
+    machine = bool(b.get("order_id")) or b.get("source") in (
+        "autobet", "gridiron_autobet", "whiff_autobet", "fbprop_autobet",
+        "ou_trader", "ghost_adopt")
+    cur_prob = _amer_to_prob_py(cur_amer)
+    if cur_prob is None:
+        return True, "no_current"
+    drift = abs(new_prob - cur_prob) * 100.0
+    if drift < 0.5:
+        return False, "same"
+    if machine and drift > _ENTRY_SYNC_MAX_DRIFT_C:
+        return False, "venue_blend"
+    return True, "ok"
 
 
 def _prob_to_amer_py(prob):

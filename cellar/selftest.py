@@ -629,6 +629,26 @@ def test_snipe_target() -> None:
     check("synthetic side flips the frame: → 87", _app._snipe_target(ss, 12.0, 17.0) == 87.0)
 
 
+def test_entry_sync_guard() -> None:
+    """The Braves 74¢ lesson (Sep 7 2026): the venue's BLENDED position
+    avg may never overwrite a machine pick's entry — a post-only bid fills
+    at its own limit, so a drift past a few ticks is the blend, not a fill.
+    Hand-placed picks (no order_id) keep the sync the feature was built for."""
+    import app as _app
+    mach = {"order_id": "X", "source": "autobet"}
+    ok, why = _app._entry_sync_ok(153, 0.7396, mach)          # 39.5¢ pick, venue says 74¢
+    check("machine pick: 39.5¢ → 74¢ REFUSED as venue_blend", (ok, why) == (False, "venue_blend"))
+    ok, why = _app._entry_sync_ok(153, 0.392, mach)           # 39.5 → 39.2, a real fill
+    check("machine pick: 39.5¢ → 39.2¢ is 'same' (under the 0.5¢ gate)", (ok, why) == (False, "same"))
+    ok, why = _app._entry_sync_ok(153, 0.375, mach)           # 2¢ better fill
+    check("machine pick: 2¢ drift syncs", (ok, why) == (True, "ok"))
+    ok, why = _app._entry_sync_ok(-330, 0.541, mach)          # 76.7¢ poison → lot 54.1
+    check("collapse-UP poison refused", (ok, why) == (False, "venue_blend"))
+    ok, why = _app._entry_sync_ok(153, 0.7396, {"source": "manual"})
+    check("hand-placed pick still syncs", (ok, why) == (True, "ok"))
+    check("no current entry → sync", _app._entry_sync_ok(None, 0.5, mach) == (True, "no_current"))
+
+
 def test_pin_line_center() -> None:
     """Pinnacle's line in rung units from the cached slate shape (the real
     Northern Arizona @ Arizona event, Sep 5 2026)."""
@@ -846,6 +866,7 @@ def main() -> int:
               test_ws_quote_presence, test_ws_mkts_request_budget,
               test_gridiron_value_window, test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
+              test_entry_sync_guard,
               test_lane_covers_its_documented_engines,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
