@@ -7971,6 +7971,20 @@ def _football_slug_market(sb, slug: str):
         pass
     mid = (_RENTLIST_CACHE.get("keys") or {}).get(key)
     if not mid:
+        # FALLBACK (Sep 6 2026): 191 of the rent list's keys were UNMATCHED
+        # by the code-match join, and an unmanaged AUTOMATIC 20-lot on
+        # Louisiana @ USC +20.5 sat un-adopted while two other picks on the
+        # same game carried the market id. Any pending pick whose slug
+        # names the same game key resolves the row.
+        try:
+            _pk = (sb.table("bot_picks").select("market_id")
+                   .eq("status", "pending")
+                   .like("signal_blob->>pmm_slug", f"%-{key}-%")
+                   .limit(1).execute().data) or []
+            mid = _pk[0].get("market_id") if _pk else None
+        except Exception:
+            mid = None
+    if not mid:
         return None
     try:
         rows = (sb.table("markets")
@@ -8413,6 +8427,11 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
             continue                            # user's ask rests → takeover
         qty = (abs(float((positions or {}).get(slug, {}).get("net") or 0))
                if is_pos else float(o.get("qty") or 0))
+        if qty < 1.0:
+            # DUST IS NOT A POSITION (Sep 6 2026): 0.06- and 0.02-share
+            # fragments were re-booked every lap and hit the autolog unique
+            # index every time — 1,029 duplicate-key warnings in a day.
+            continue
         try:
             row = _football_ghost_row(sb, client, owner_uid, slug, syn, prob,
                                       qty, order_id=(o or {}).get("id"),
