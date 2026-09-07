@@ -12190,7 +12190,14 @@ def _norm_order(o, prev=None) -> dict | None:
     moi = _g("manualOrderIndicator")
     auto = ((moi == "MANUAL_ORDER_INDICATOR_AUTOMATIC") if moi is not None
             else bool((prev or {}).get("auto")))
+    _mdg = (lambda k: (md.get(k) if isinstance(md, dict) else getattr(md, k, None)))
+    _team = _mdg("team") or {}
+    _team_name = (_team.get("name") if isinstance(_team, dict) else getattr(_team, "name", None)) or ""
     return {"slug": slug, "intent": _g("intent") or (prev or {}).get("intent") or "",
+            "title": _mdg("title") or (prev or {}).get("title") or "",
+            "outcome": _mdg("outcome") or (prev or {}).get("outcome") or "",
+            "event_slug": _mdg("eventSlug") or (prev or {}).get("event_slug") or "",
+            "team": _team_name or (prev or {}).get("team") or "",
             "state": state,
             "qty": _safe_float(_g("quantity")) or (prev or {}).get("qty") or 0.0,
             "cum": _safe_float(_g("cumQuantity")) or 0.0,
@@ -12272,6 +12279,76 @@ def _venue_mirror_stats() -> dict:
                 "orders_age_s": (round(nowm - m["orders_at"]) if m["orders_at"] else None),
                 "positions_age_s": (round(nowm - m["positions_at"]) if m["positions_at"] else None)})
     return out
+
+
+_ORDERS_CACHE_LAST = 0.0
+_ORDERS_CACHE_EVERY_S = 45.0
+
+
+def _orders_cache_rows(sb) -> list:
+    """The Resting Orders card's row shape, built from the MIRROR (no venue
+    call): title/outcome/team from the order's own market metadata; a
+    total's pick line comes off the slug (…-total-45pt5 → 45.5)."""
+    last_amend: dict = {}
+    try:
+        for r0 in (sb.table("scalp_snipes").select("oid,at").eq("ok", True)
+                   .order("at", desc=True).limit(600).execute().data) or []:
+            if r0.get("oid") and r0["oid"] not in last_amend:
+                last_amend[r0["oid"]] = r0["at"]
+    except Exception:
+        pass
+    with _VENUE_MIRROR["lock"]:
+        orders = [dict(v) for v in _VENUE_MIRROR["orders"].values()]
+    out = []
+    for o in orders:
+        outcome, team, slug = o.get("outcome") or "", o.get("team") or "", o.get("slug") or ""
+        pick = ""
+        if team and outcome and re.search(r"[0-9]", outcome):
+            pick = f"{team} {outcome}"
+        elif outcome.lower() in ("over", "under"):
+            m = re.search(r"-total-(\d+)(?:pt(\d))?", slug) or re.search(r"-(\d+)pt(\d)$", slug)
+            line = (f"{m.group(1)}.{m.group(2)}" if (m and m.group(2)) else (m.group(1) if m else ""))
+            pick = f"{outcome} {line}".strip()
+        elif team:
+            pick = team
+        intent = o.get("intent") or ""
+        py = o.get("price_yes")
+        price = ((1 - py) if (py is not None and intent.endswith("_SHORT")) else py)
+        state = o.get("state") or ""
+        out.append({"id": o.get("id"), "state": state.replace("ORDER_STATE_", ""),
+                    "amended": state == "ORDER_STATE_REPLACED",
+                    "updated_at": last_amend.get(o.get("id")) or o.get("created") or "",
+                    "market_name": o.get("title") or slug, "outcome": pick or outcome,
+                    "raw_outcome": outcome, "team_name": team, "pick": pick,
+                    "slug": slug, "event_slug": o.get("event_slug") or "",
+                    "intent": intent,
+                    "side_label": _INTENT_LABEL.get(intent, intent.replace("ORDER_INTENT_", "").replace("_", " ")),
+                    "tif": o.get("tif") or "", "price": price,
+                    "quantity": o.get("qty"), "cum_quantity": o.get("cum"),
+                    "leaves_quantity": o.get("leaves"),
+                    "fill_pct": ((o.get("cum") or 0) / o["qty"] * 100) if o.get("qty") else 0,
+                    "created_at": o.get("created") or ""})
+    return out
+
+
+def _orders_cache_write(sb) -> int:
+    """Every repeg lap (rate-limited): the mirror's orders → venue_orders_cache
+    id=1 for the dashboard. Never raises."""
+    global _ORDERS_CACHE_LAST
+    if _time.time() - _ORDERS_CACHE_LAST < _ORDERS_CACHE_EVERY_S:
+        return -1
+    if not _mirror_fresh("orders"):
+        return -2
+    _ORDERS_CACHE_LAST = _time.time()
+    try:
+        rows = _orders_cache_rows(sb)
+        sb.table("venue_orders_cache").upsert(
+            {"id": 1, "computed_at": datetime.now(timezone.utc).isoformat(),
+             "orders": rows}, on_conflict="id").execute()
+        return len(rows)
+    except Exception as e:
+        app.logger.warning("ORDERS CACHE WRITE FAILED: %s", str(e)[:160])
+        return -3
 
 
 def _mirror_fresh(key: str) -> bool:
@@ -22312,6 +22389,23 @@ def api_my_orders():
         return jsonify(cached["data"])
 
     out_orders: list[dict] = []
+    # THE BOX'S SNAPSHOT FIRST (Sep 7 2026): the daemon writes the mirror's
+    # orders to venue_orders_cache every repeg lap. Serving that costs one
+    # local-DB read instead of a venue call per 30s poll — and it is
+    # FRESHER (the mirror updates within a second of any order event).
+    try:
+        _sbc = get_supabase()
+        _row = (_sbc.table("venue_orders_cache").select("computed_at,orders")
+                .eq("id", 1).limit(1).execute().data or [None])[0]
+        if _row and _row.get("orders") is not None:
+            _age = (datetime.now(timezone.utc) - _parse_iso(_row["computed_at"])).total_seconds()
+            if _age <= 150:
+                data = {"ok": True, "orders": _row["orders"], "source": "box",
+                        "computed_at": _row["computed_at"], "age_s": int(_age)}
+                _cache[cache_key] = {"ts": now, "data": data}
+                return jsonify(data)
+    except Exception:
+        pass
     try:
         client = get_client()
         resp = client.orders.list()
@@ -25784,6 +25878,10 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 res["buy_snap"] = _buy_snap_publish(
                     sb, fs, now, lap_client or get_client(), not _targeted)
                 _ensure_snipe_worker()
+            except Exception:
+                pass
+            try:
+                res["orders_cache"] = _orders_cache_write(sb)
             except Exception:
                 pass
             cands = [f for f in (fs.get("fills") or [])
