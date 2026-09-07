@@ -17107,6 +17107,16 @@ def _opener_pass(sb, now, deadline):
                                             "opener_unclamped": True},
                             "logged_at": now.isoformat(),
                         })
+                        # PER-GAME TRACE (Sep 6 2026): the shadow row only
+                        # rewrites on a CHANGED verdict, so "last row @12:37"
+                        # cannot tell a re-evaluated game from a starved
+                        # one — ten Sep-7 games looked frozen for hours with
+                        # no way to say which. Every ML visit lands here.
+                        _tr = stats.setdefault("opener_trace", [])
+                        if len(_tr) < 60:
+                            _tr.append((g.get("event_name") or "")[:22]
+                                       + ":ml:" + ("; ".join(_gate0_l)
+                                                    or "model"))
             # ---- O/U TRADER (Aug 4): 1 contract cheap vs the book's own
             # mid, sell-only via the harvest tick. Self-contained helper
             # (its skips can't swallow the NRFI section below).
