@@ -79,6 +79,7 @@ MKTS_MAX_RIDS = 10
 CORE_REBUILD_RIDS = 2
 CORE_REBUILD_MIN_S = 120.0
 CAP_HOLD_S = 60.0            # no new subscribes for this long after the venue says the connection is full
+PACK_FLUSH_MIN_S = 2.0       # pack layer runs at most this often (it rode every frame)
 HEARTBEAT_STAMP_S = 120.0   # per-connection state stamp (pending/packs/ladders)
 # PACKING (Sep 6 2026, Rob: "why the hell are we doing REST with a
 # websocket"): the venue's scarce resource is subscription REQUESTS (~12
@@ -1292,6 +1293,15 @@ class MarketsFeed:
         if nowt - self._last_hb >= HEARTBEAT_STAMP_S and self.sb is not None:
             self._last_hb = nowt
             self._stamp("heartbeat")
+        # THROTTLE (Sep 7 2026 — the 99.8% CPU morning): _apply_ops runs
+        # on the recv loop, so this ran on every frame (48/s on conn 1)
+        # and _live_rungs rebuilt the whole rung map each time — a socket
+        # thread pinned in _live_rungs on 9 of 9 stack samples while the
+        # opener and paperlog laps overran under the GIL. Once per 2s is
+        # plenty for a batch window measured in tens of seconds.
+        if not force and nowt - getattr(self, "_last_flush", 0.0) < PACK_FLUSH_MIN_S:
+            return False
+        self._last_flush = nowt
         if nowt < self._pack_hold_until:
             return False
         if nowt - getattr(self, "_cap_hit_at", 0.0) < CAP_HOLD_S:
