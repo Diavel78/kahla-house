@@ -57,6 +57,7 @@ SUB_POSITION = "SUBSCRIPTION_TYPE_POSITION"
 WS_MKTS_URL = "wss://api.polymarket.us/v1/ws/markets"
 WS_MKTS_PATH = "/v1/ws/markets"
 SUB_MARKET_LITE = "SUBSCRIPTION_TYPE_MARKET_DATA_LITE"
+SUB_MARKET_DEPTH = "SUBSCRIPTION_TYPE_MARKET_DATA"   # full book (depth conn)
 # MEASURED, not vibes (ws_cap_probe, Sep 4 2026): 4,000 slugs accepted
 # cleanly on one connection (~5.6k baseline frames in 8s, live rate
 # ~190/s at Friday peak — parse pennies). The old 400 was one
@@ -193,6 +194,40 @@ def _mkts_presence(up: bool | None = None, rx: bool = False,
             st["up"] = True
         elif up is False:
             st["up"] = False
+    except Exception:
+        pass
+
+
+def _write_depth(slug: str, pv: dict, conn: int = 0) -> None:
+    """One FULL-BOOK frame → app.WS_DEPTH[slug] = (bids, asks, mono_ts)
+    with bids/asks as [(cents, qty)] sorted best-first (the _pmm_book
+    shape, so _invert_book applies unchanged) — plus the top of book into
+    the quote table. Never raises."""
+    try:
+        import app as _app
+
+        def lv(rows):
+            out = []
+            for r in (rows or [])[:12]:
+                try:
+                    c = round(float((r.get("px") or {}).get("value")) * 200) / 2.0
+                    q = float(r.get("qty"))
+                    if 0 < c < 100 and q > 0:
+                        out.append((c, q))
+                except Exception:
+                    pass
+            return out
+        bids = sorted(lv(pv.get("bids")), key=lambda x: -x[0])
+        asks = sorted(lv(pv.get("offers")), key=lambda x: x[0])
+        ts = time.monotonic()
+        _app.WS_DEPTH[slug] = (bids, asks, ts)
+        ep = _app._mkts_state(conn)["epoch"]
+        _app.WS_DEPTH_EPOCH[slug] = ep
+        _app.WS_DEPTH_CONN[slug] = conn
+        _app.WS_QUOTES[slug] = (bids[0][0] if bids else None,
+                                asks[0][0] if asks else None, ts)
+        _app.WS_QUOTE_EPOCH[slug] = ep
+        _app.WS_QUOTE_CONN[slug] = conn
     except Exception:
         pass
 
@@ -373,6 +408,13 @@ class WsFeed:
                 for m in self.mkts_pool:
                     m.start()
                 log.info("markets feed: %d connection(s)", n)
+                self.depth_feed = None
+                if getattr(_cfg, "WS_DEPTH", True):
+                    self.depth_feed = MarketsFeed(self._wake, sb=self.sb,
+                                                  dirty_add=self.add_dirty,
+                                                  conn=n, depth=True)
+                    self.depth_feed.start()
+                    log.info("markets feed: depth connection (conn %d)", n)
         except Exception as e:
             log.error("markets feed failed to start (%s) — private feed "
                       "unaffected", e)
@@ -394,6 +436,14 @@ class WsFeed:
         pool[zlib.crc32(str(gid).encode()) % len(pool)].add_group(gid, set(slugs), exp)
 
     # -- plumbing ------------------------------------------------------------
+
+    def push_watch(self, slugs: set, replace: bool) -> None:
+        """The quoted set → the LITE core group AND the depth connection."""
+        if getattr(self, "mkts", None) is not None:
+            self.mkts.set_slugs(set(slugs), replace=replace)
+        d = getattr(self, "depth_feed", None)
+        if d is not None:
+            d.set_slugs(set(slugs), replace=replace)
 
     def add_dirty(self, slugs: set) -> None:
         with self._dirty_lock:
@@ -585,7 +635,7 @@ class WsFeed:
                                         "no_slug_field",
                                         err="order keys: "
                                             + self._snap_keys)
-                                self.mkts.set_slugs(self._snap_slugs,
+                                self.push_watch(self._snap_slugs,
                                                     replace=True)
                                 self._snap_slugs = set()
                             if not snap_open:
@@ -663,7 +713,7 @@ class WsFeed:
                         # snapshot / REST push (a stale watch costs a
                         # hint, nothing more; the cooldown absorbs it).
                         if _ev_slugs:
-                            self.mkts.set_slugs(_ev_slugs, replace=False)
+                            self.push_watch(_ev_slugs, replace=False)
             except Exception as e:
                 if self.stop.is_set():
                     break
@@ -713,8 +763,14 @@ class MarketsFeed:
     RECV_S = 15.0            # short recv timeout = subscription-rotation
                              # latency bound; silence watchdog is separate
 
-    def __init__(self, wake, sb=None, dirty_add=None, conn: int = 0):
+    def __init__(self, wake, sb=None, dirty_add=None, conn: int = 0,
+                 depth: bool = False):
         self.conn = conn                     # connection index (presence, stamps)
+        # DEPTH MODE (Sep 6 2026): full-book frames for the quoted set only
+        # (core / watch list — ladders never route here). Sizes on the
+        # frame answer "is the touch ours?" without a REST read.
+        self.depth = depth
+        self.sub_type = SUB_MARKET_DEPTH if depth else SUB_MARKET_LITE
         self._wake = wake                    # WsFeed._wake (lane, why, min_s)
         self._dirty_add = dirty_add          # WsFeed.add_dirty — moved slugs
         self.sb = sb
@@ -1031,7 +1087,7 @@ class MarketsFeed:
             rid = f"g{self._gseq}-{gid[:32]}"
             ws.send(json.dumps({"subscribe": {
                 "requestId": rid,
-                "subscriptionType": SUB_MARKET_LITE,
+                "subscriptionType": self.sub_type,
                 "marketSlugs": sorted(new)}}))
             rids, old = self._groups.get(gid, ([], frozenset()))
             rids = list(rids) + [rid]
@@ -1084,7 +1140,7 @@ class MarketsFeed:
         gid = f"pack{self._gseq}"
         ws.send(json.dumps({"subscribe": {
             "requestId": rid,
-            "subscriptionType": SUB_MARKET_LITE,
+            "subscriptionType": self.sub_type,
             "marketSlugs": sorted(slugs)}}))
         fs = frozenset(slugs)
         self._groups[gid] = ([rid], fs)
@@ -1346,7 +1402,10 @@ class MarketsFeed:
                         # fallback live with the readers (_ws_quote).
                         if _pk == "marketDataLite":
                             _write_quote(_sl, _pv, self.conn)
-                            _snipe_feed(_sl)         # the sell sniper (app)
+                            _snipe_feed(_sl)         # the snipers (app)
+                        elif _pk == "marketData":
+                            _write_depth(_sl, _pv, self.conn)
+                            _snipe_feed(_sl)
                         if _sl not in self._base_seen:
                             # First frame for this market since the
                             # subscription = the baseline replay. State,

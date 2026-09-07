@@ -6516,6 +6516,11 @@ WS_QUOTE_EPOCH: dict = {}     # slug -> epoch its row was written under
 # Conn 0 keeps the scalars above (back-compat); conn N>0 lives here.
 WS_MKTS_CONN: dict = {}       # conn -> {"epoch", "up", "rx"}
 WS_QUOTE_CONN: dict = {}      # slug -> conn that wrote its row
+# DEPTH TABLE (Sep 6 2026): full book for the quoted set from the depth
+# connection — slug -> ([(bid_c, qty)...] best-first, [(ask_c, qty)...], mono).
+WS_DEPTH: dict = {}
+WS_DEPTH_EPOCH: dict = {}
+WS_DEPTH_CONN: dict = {}
 
 
 def _mkts_state(conn: int) -> dict:
@@ -6549,6 +6554,39 @@ def _ws_quote(slug: str):
         _WS_PRICE_STATS["presence"] = _WS_PRICE_STATS.get("presence", 0) + 1
         return bid, ask
     return None
+
+
+def _ws_depth(slug: str):
+    """The depth table's FRESH book for this slug in the _pmm_book shape
+    ({bids, asks, best_bid, best_ask}), else None (→ REST). Same freshness
+    rule as _ws_quote: recent write, or quiet-since-written on a live,
+    still-subscribed connection."""
+    t = WS_DEPTH.get(slug)
+    if not t:
+        return None
+    bids, asks, ts = t
+    now = _time.monotonic()
+    ok = now - ts <= WS_QUOTE_FRESH_S
+    if not ok:
+        st = _mkts_state(WS_DEPTH_CONN.get(slug, 0))
+        ok = (st["up"] and st["epoch"] > 0
+              and WS_DEPTH_EPOCH.get(slug) == st["epoch"]
+              and now - st["rx"] <= WS_MKTS_ALIVE_S)
+    if not ok:
+        return None
+    return {"bids": list(bids), "asks": list(asks),
+            "best_bid": bids[0][0] if bids else None,
+            "best_ask": asks[0][0] if asks else None}
+
+
+def _book_for_snipe(client, slug: str):
+    """Depth table first, REST second — and count which."""
+    bk = _ws_depth(slug)
+    if bk is not None:
+        _SNIPE_STATS["depth_hit"] = _SNIPE_STATS.get("depth_hit", 0) + 1
+        return bk
+    _SNIPE_STATS["depth_rest"] = _SNIPE_STATS.get("depth_rest", 0) + 1
+    return _pmm_book(client, slug)
 
 
 def _pmm_book(client, slug: str) -> dict | None:
@@ -24154,7 +24192,7 @@ def _snipe_one(sb, client, slug: str) -> None:
     tgt = _snipe_target(snap, bid_c, ask_c)
     if tgt == "self":
         try:
-            bk = _pmm_book(client, slug)
+            bk = _book_for_snipe(client, slug)
             if snap.get("synth") and bk:
                 bk = _invert_book(bk)
             comp = None
@@ -24936,7 +24974,7 @@ def _snipe_buy_one(sb, client, slug: str) -> None:
     tgt = _snipe_buy_target(snap, bid_c, ask_c)
     if tgt == "self":
         try:
-            bk = _pmm_book(client, slug)
+            bk = _book_for_snipe(client, slug)
             if snap.get("synth") and bk:
                 bk = _invert_book(bk)
             comp = None

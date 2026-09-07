@@ -416,10 +416,10 @@ class Runner:
                 if getattr(self._wsfeed, "mkts", None) is not None:
                     try:
                         import app as _app
-                        _mkts = self._wsfeed.mkts
+                        _wsf0 = self._wsfeed
                         _app._WS_WATCHLIST_CB = (
-                            lambda slugs: _mkts.set_slugs(set(slugs),
-                                                          replace=True))
+                            lambda slugs: _wsf0.push_watch(set(slugs),
+                                                           replace=True))
                         # Targeted laps: the repeg reads books only for
                         # markets the socket named (None = socket can't
                         # vouch → full sweep, today's behavior).

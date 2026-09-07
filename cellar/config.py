@@ -77,6 +77,12 @@ WS_MKTS = _flag("CELLAR_WS_MKTS", True)
 # is per connection; one held 7 packs ≈ 2,450 rungs against 4,848 live
 # football rungs. Two connections double the pack budget.
 WS_MKTS_CONNS = int(os.environ.get("CELLAR_WS_MKTS_CONNS") or 2)
+# DEPTH CONNECTION (Sep 6 2026): a third markets socket carrying the FULL
+# order book (SUBSCRIPTION_TYPE_MARKET_DATA) for the markets we quote —
+# the LITE frame has no sizes, so "is the touch ours?" cost a REST book
+# read every time (~300 per 15 min across both sniper arms). Off = the
+# snipers fall back to REST exactly as before.
+WS_DEPTH = _flag("CELLAR_WS_DEPTH", True)
 
 # NO LANE_TIMEOUT_S (removed Aug 20 2026). It existed here for weeks as a
 # "wall-clock ceiling for a single lane invocation" that NOTHING READ -- the
