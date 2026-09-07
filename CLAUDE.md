@@ -2166,7 +2166,10 @@ Server-cached 30s in `_ESPN_CACHE`. `_merge_espn_scores` matches each Odds API e
 > Closed Positions table totalled +$4.39**). Per leg:
 >
 > ```
-> resolution : qty = |beforePosition.netPosition| ; cost = beforePosition.cost
+> resolution : qty = |beforePosition.netPosition| ; cost = OUR LOT LEDGER's cost for
+>              the held lot when it covers the quantity (±0.5), else beforePosition.cost
+>              (Sep 7 2026 — the venue's cost is a per-market lifetime BLEND; the
+>              Braves 74¢ receipt. `poly_gameday_legs` + `_resolution_lot_costs`)
 >              won = (held long & side LONG) or (held short & side SHORT)
 >              pnl = qty - cost   if won   else   -cost
 > sell       : price = trade.cost / trade.qty       (never trade.price)

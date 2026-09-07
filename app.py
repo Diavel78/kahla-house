@@ -1410,25 +1410,63 @@ def _venue_day_map(sb, days: int = 4) -> dict:
 
     acc: dict = {}
 
-    # ---- resolutions: set-based dedupe + win math in SQL --------------
-    # poly_gameday_pnl runs exactly the beforePosition formula above. It
-    # lives in SQL because the dedupe is set-based (the mirror keeps ~19
-    # copies of every resolution) and a YTD window is hundreds of
-    # thousands of raw rows — but only a few thousand real legs.
-    for r in (sb.rpc("poly_gameday_pnl", {"p_days": days}).execute().data) or []:
-        d = _day(r.get("az_day"))
-        if d is not None:
-            acc[d] = acc.get(d, 0.0) + float(r.get("realized_usd") or 0)
+    # ---- ONE time-ordered walk: trades (our running average cost per slug)
+    # and resolution legs (deduped in SQL by poly_gameday_legs). A leg's
+    # COST is OUR ledger's cost for the held lot whenever the ledger covers
+    # the held quantity (|ledger qty − venue qty| ≤ 0.5); the venue's
+    # beforePosition.cost is the fallback only. THE BRAVES 74¢ LESSON (Sep 7
+    # 2026): that venue field is a lifetime blend per market — a 39.2¢ lot
+    # on a slug round-tripped three times read $10.34 of cost for 13.98
+    # contracts, and this card said −$10.34 for a −$5.41 loss. The app's
+    # receipt says the same wrong thing; the dashboard must not.
+    def _ts(x):
+        try:
+            s = str(x).replace("Z", "+00:00")
+            d = datetime.fromisoformat(s)
+            return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
 
-    # ---- sells: self-tracked average cost, walked oldest -> newest ----
+    legs = (sb.rpc("poly_gameday_legs", {"p_days": days}).execute().data) or []
     t_since = (datetime.now(timezone.utc) - timedelta(
         days=days + _VENUE_TRADE_LOOKBACK_D)).isoformat()
     trows = _sb_paged(
         lambda: sb.table("poly_activities").select("payload,at")
         .eq("type", "ACTIVITY_TYPE_TRADE").gte("at", t_since).order("at"),
         max_pages=15)
-    pos: dict = {}
+    events = []
     for r in trows:
+        t = ((r.get("payload") or {}).get("trade") or {})
+        ts = _ts(t.get("updateTime") or r.get("at"))
+        if ts is not None:
+            events.append((ts, 0, r))
+    for L in legs:
+        ts = _ts(L.get("res_at")) or _ts(L.get("gst"))
+        if ts is not None:
+            events.append((ts, 1, L))
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    pos: dict = {}
+    for ts, kind, r in events:
+        if kind == 1:                                # a resolution leg
+            slug = r.get("slug")
+            net = _v(r.get("net")) or 0.0
+            qty = abs(net)
+            if not slug or qty < 0.005:
+                continue
+            side = str(r.get("side") or "")
+            won = ((net > 0 and side.endswith(("_LONG", "_YES")))
+                   or (net < 0 and side.endswith(("_SHORT", "_NO"))))
+            p = pos.get(slug)
+            if p and p["qty"] > 0 and abs(p["qty"] - qty) <= 0.5:
+                cost = p["cost"]                     # OUR ledger covers the lot
+            else:
+                cost = _v(r.get("cost")) or 0.0      # venue blend, last resort
+            d = _day(r.get("az_day"))
+            if d is not None:
+                acc[d] = acc.get(d, 0.0) + ((qty - cost) if won else -cost)
+            pos[slug] = {"qty": 0.0, "cost": 0.0}    # settled: the lot is gone
+            continue
         t = ((r.get("payload") or {}).get("trade") or {})
         slug, qty = t.get("marketSlug"), _trade_qty(t)
         if not slug or not qty:
@@ -3639,6 +3677,73 @@ def _activity_type_label(raw_type):
     return label or raw_type
 
 
+
+def _resolution_lot_costs(activities) -> dict:
+    """{(slug, |net| str, venue cost str): our ledger cost} for every
+    resolution in `activities`, from a chronological walk of the SAME feed.
+    parse_activities uses it so Closed Positions shows what the lot COST,
+    not the venue's per-market blend (the Braves 74¢ lesson, Sep 7 2026).
+    Only legs the ledger covers (|ledger qty − venue qty| ≤ 0.5) get a key."""
+    def _ts(x):
+        try:
+            s = str(x).replace("Z", "+00:00")
+            d = datetime.fromisoformat(s)
+            return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+    ev = []
+    for a in activities or []:
+        typ = a.get("type")
+        if typ == "ACTIVITY_TYPE_TRADE":
+            t = a.get("trade") or {}
+            ts = _ts(t.get("updateTime"))
+            if ts:
+                ev.append((ts, 0, t))
+        elif typ == "ACTIVITY_TYPE_POSITION_RESOLUTION":
+            d = a.get("positionResolution") or {}
+            bef = d.get("beforePosition") or {}
+            ts = _ts(d.get("updateTime") or bef.get("updateTime"))
+            if ts:
+                ev.append((ts, 1, d))
+    ev.sort(key=lambda e: (e[0], e[1]))
+    pos: dict = {}
+    out: dict = {}
+    for ts, kind, t in ev:
+        if kind == 1:
+            bef = t.get("beforePosition") or {}
+            slug = ((t.get("market") or {}).get("slug")
+                    or (bef.get("marketMetadata") or {}).get("slug"))
+            net = _safe_float(bef.get("netPositionDecimal")) or _safe_float(bef.get("netPosition")) or 0.0
+            qty = abs(net)
+            p = pos.get(slug) if slug else None
+            if slug and p and p["qty"] > 0 and abs(p["qty"] - qty) <= 0.5:
+                out[(slug, str(bef.get("netPosition")), str(_safe_float(bef.get("cost"))))] = p["cost"]
+            if slug:
+                pos[slug] = {"qty": 0.0, "cost": 0.0}
+            continue
+        slug, qty = t.get("marketSlug"), _trade_qty(t)
+        if not slug or not qty:
+            continue
+        cost = _safe_float(t.get("cost"))
+        price = (cost / qty) if cost is not None else _safe_float(t.get("price"))
+        if price is None:
+            continue
+        bq = abs(_safe_float((t.get("beforePosition") or {}).get("netPosition")) or 0)
+        aq = abs(_safe_float((t.get("afterPosition") or {}).get("netPosition")) or 0)
+        p = pos.setdefault(slug, {"qty": 0.0, "cost": 0.0})
+        if not (_safe_float(t.get("realizedPnl")) is not None or bq > aq):
+            p["qty"] += qty
+            p["cost"] += price * qty
+            continue
+        if p["qty"] <= 0:
+            continue
+        avg = p["cost"] / p["qty"]
+        sold = min(qty, p["qty"])
+        p["cost"] -= avg * sold
+        p["qty"] -= sold
+    return out
+
+
 def parse_activities(client, activities):
     TYPE_KEY_MAP = {
         "ACTIVITY_TYPE_POSITION_RESOLUTION": "positionResolution",
@@ -3672,6 +3777,7 @@ def parse_activities(client, activities):
 
     slug_to_title = {}
     parsed = []
+    _lot_cost = _resolution_lot_costs(activities)   # our ledger's cost per settled leg
     for act in activities:
         act_type = act.get("type", "unknown")
         detail_key = TYPE_KEY_MAP.get(act_type, "")
@@ -3750,6 +3856,11 @@ def parse_activities(client, activities):
 
             quantity = abs(_safe_float(before.get("netPosition")) or 0)
             cost = _safe_float(before.get("cost"))
+            _rslug = (market_slug or (detail.get("market") or {}).get("slug")
+                      or meta.get("slug") or "")
+            _lc = _lot_cost.get((_rslug, str(before.get("netPosition")), str(cost)))
+            if _lc is not None:
+                cost = _lc                       # what WE paid, not the venue's blend
             if cost is not None and quantity > 0:
                 price = cost / quantity
                 entry_price = price
