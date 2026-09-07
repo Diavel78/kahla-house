@@ -17132,6 +17132,14 @@ def _opener_pass(sb, now, deadline):
                 if ou_row["signal_blob"].get("bet_placed"):
                     stats["opener_bets"] += 1
                 _opener_upsert(sb, ou_row)
+            _tr = stats.setdefault("opener_trace", [])
+            if len(_tr) < 60:
+                _tr.append((g.get("event_name") or "")[:22] + ":tot:" + (
+                    "done" if (g["id"], "total") in done
+                    else "none" if ou_row is None
+                    else ("placed" if ou_row["signal_blob"].get("bet_placed")
+                          else "wait" if ou_row["signal_blob"].get("dayof_wait")
+                          else "nobet")))
             if (g["id"], "nrfi") in done:
                 continue                  # NRFI already shadowed
             nrfi = (d or {}).get("nrfi") or {}
