@@ -25155,8 +25155,11 @@ def _fast_ask_one(sb, client, slug: str, buy_intent: str) -> None:
                             slug, int(held), tgt, floor_c, best_ask)
         else:
             _FAST_ASK_STATS["errors"] += 1
-    except Exception:
+            app.logger.warning("fast ask %s: _scalp_create refused (held %s, tgt %s, floor %.1f)",
+                               slug, held, tgt, floor_c)
+    except Exception as e:
         _FAST_ASK_STATS["errors"] += 1
+        app.logger.warning("fast ask %s failed: %s", slug, e)
 
 
 def _fast_ask_worker() -> None:
@@ -25532,6 +25535,24 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # with the stamp already repaired underneath it.
         _lc = _lot_cost_c(_lots.get(slug), held)
         if _lc is not None and _lc > 0:
+            # ENTRY SELF-HEAL: the pick's stamp drives to-WIN grading and CLV;
+            # when it sits >1¢ off the ledger's cost on a machine pick, write
+            # the ledger's number (once — the ledger is stable between fills).
+            # No human runs SQL for the Braves class again.
+            if entry_c is not None and abs(entry_c - _lc) > 1.0 and b.get("order_id"):
+                _prev = (b.get("entry_repair") or {}).get("to_c")
+                if _prev is None or abs(float(_prev) - _lc) > 0.5:
+                    try:
+                        _nb = {**b, "entry_repair": {
+                            "at": now.isoformat(), "from_c": round(entry_c, 2),
+                            "to_c": round(_lc, 2), "src": "lot_ledger"}}
+                        sb.table("bot_picks").update(
+                            {"entry_price": _prob_to_amer_py(_lc / 100.0),
+                             "signal_blob": _nb}).eq("id", r["id"]).execute()
+                        b = _nb
+                        res["entry_healed"] = res.get("entry_healed", 0) + 1
+                    except Exception:
+                        pass
             entry_c = _lc
             res["floor_lot"] = res.get("floor_lot", 0) + 1
         else:

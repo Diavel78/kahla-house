@@ -1321,6 +1321,24 @@ sport the machine ever adds:
   model": against the venue's 1¢ placeholder bid the seat is 2¢, alone in
   the window; the chase follows real bidders up to the model wall
   (`_gridiron_seed_virgin`). **And no 25¢ floor on ANY football seat (Rob, same hour: "BE THE GOD DAMN TOUCH")** — `_gridiron_try_bet`/`_gridiron_try_ml` peg touch + 1 tick with the 60¢ cap and the $13 master rule as the only fences; the 25-60¢ "pricing sanity" band is MLB O/U-trader doctrine, not football's.
+- **THE COST FLOOR IS OUR OWN LOT LEDGER, NEVER THE VENUE'S AVG (the
+  Braves 74¢ lesson, Sep 7 2026).** The venue's position `avgPx` is a
+  lifetime BLEND per market: on a slug round-tripped three times it read
+  0.7396 for a lot bought at 39.2¢. The autolog copied it into
+  `entry_price` (no guard on that path), the scalp honoured
+  `max(stamp, venue)` as the floor, and the exit ask sat at 74¢ on a 40¢
+  book through a 1-0 loss with a live sell order the whole time; the twin
+  (MIN/CHI total, stamp collapsed to 4.7¢) sold 16.5 contracts UNDER cost.
+  Now: `_lot_walk`/`_lot_ledger` (the dashboard's trade-walk arithmetic,
+  cached 240s, decimal `qtyDecimal` sizes — the venue fills lots in
+  0.1-share bites that the integer `qty` rounds to ZERO, 3,012 such rows)
+  sets the floor whenever it covers the held quantity and self-heals the
+  pick's entry (`entry_repair`); `_entry_sync_ok` refuses any venue avg
+  >3¢ from a machine pick's price (`sync_veto`). A receipt's "cost %" in
+  the app is that same blend — never argue it with lot math alone, show
+  cash in/out. ⚠ The day card's RESOLUTION legs still use
+  `beforePosition.cost` (the blend) — a resolved round-tripped slug reads
+  wrong there until that leg moves onto the lot ledger too.
 - **EVERYTHING BUT NRFI SELLS (Rob, Sep 6 2026, reading 155 positions
   vs 128 sells on the venue: "The only thing that lives is the no run
   first inning. Everything else fucking gets sold").** The scalp's
