@@ -740,6 +740,31 @@ class WsFeed:
                         # per lap. A position event, or an order event
                         # with cumQuantity>0 / a terminal state, is a
                         # size change; a NEW/REPLACED echo is not.
+                        # PRIVATE EVENT TRACE (Sep 7 2026): one line per order /
+                        # position event — the fast ask went silent after a
+                        # restart with no way to say whether the fill frame
+                        # arrived, arrived late, or arrived in a shape
+                        # _buy_fill does not recognise.
+                        try:
+                            for _k, _v in msg.items():
+                                if not isinstance(_v, dict):
+                                    continue
+                                _kl = _k.lower()
+                                if _kl.startswith("order"):
+                                    _ex = _v.get("execution") if isinstance(_v.get("execution"), dict) else _v
+                                    _od = _ex.get("order") if isinstance(_ex.get("order"), dict) else _ex
+                                    log.info("ws priv ORDER %s intent=%s cum=%s leaves=%s state=%s exq=%s buyfill=%s",
+                                             _od.get("marketSlug"), str(_od.get("intent"))[-9:],
+                                             _od.get("cumQuantity"), _od.get("leavesQuantity"),
+                                             str(_od.get("state"))[-10:], _ex.get("quantity") if _ex is not _od else None,
+                                             bool(_buy_fill(msg)))
+                                elif _kl.startswith("position"):
+                                    _af = _v.get("afterPosition") if isinstance(_v.get("afterPosition"), dict) else {}
+                                    log.info("ws priv POSITION %s net=%s",
+                                             _v.get("marketSlug") or ((_af.get("marketMetadata") or {}).get("slug")),
+                                             _af.get("netPositionDecimal"))
+                        except Exception:
+                            pass
                         if _size_event(msg):
                             try:
                                 import app as _app
