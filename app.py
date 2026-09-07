@@ -12113,6 +12113,22 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict,
             entry["pct"] = round(cum / tot * 100.0, 1) if tot else None
         else:
             entry["status"], entry["pct"] = "resting", 0.0
+        # ORDER IDENTITY ON EVERY RESTING BID (Sep 6 2026): these fields
+        # were set only in the outbid branch, so the buy sniper could
+        # snapshot 9 of ~80 resting model bids — the ones already behind.
+        # The at-touch bids are exactly the ones a frame needs to move the
+        # second they are outbid.
+        try:
+            _big0 = max(my_orders, key=lambda o: o.get("leaves") or 0)
+            _py0 = _big0.get("price_yes")
+            entry.setdefault("order_id", _big0.get("id"))
+            entry.setdefault("order_leaves", _big0.get("leaves"))
+            entry.setdefault("order_cum", _big0.get("cum"))
+            if _py0 is not None:
+                entry.setdefault("my_price_c", round(
+                    (100.0 - _py0 * 100.0) if synthetic else _py0 * 100.0, 2))
+        except Exception:
+            pass
         if mins is None or mins > 0:                 # outbid (pre-game only)
             try:
                 myp = None
