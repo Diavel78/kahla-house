@@ -1317,6 +1317,29 @@ _ACTS_DEEP_TYPES = ("ACTIVITY_TYPE_TRANSFER",
 _VENUE_TRADE_LOOKBACK_D = 45
 
 
+
+def _trade_qty(t) -> float | None:
+    """A trade's size. The venue fills our lots in FRACTIONAL pieces
+    (3,012 mirror trades carry integer qty "0" with qtyDecimal "0.1000" —
+    one bot fed a 20-lot NFL total in 0.1-share bites, Sep 2026). The
+    integer `qty` rounds those to zero and every walk that read it skipped
+    them: lot ledgers under-covered, sells vanished from the day card.
+    Decimal first, integer only as the fallback."""
+    for k in ("qtyDecimal", "quantityDecimal", "qty", "quantity"):
+        v = t.get(k) if isinstance(t, dict) else None
+        if isinstance(v, dict):
+            v = v.get("value")
+        if v is None:
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if f > 0 or k in ("qty", "quantity"):
+            return f
+    return None
+
+
 def _venue_day_map(sb, days: int = 4) -> dict:
     """AZ day -> realized BETS P&L, by the one proven Polymarket math.
 
@@ -1407,7 +1430,7 @@ def _venue_day_map(sb, days: int = 4) -> dict:
     pos: dict = {}
     for r in trows:
         t = ((r.get("payload") or {}).get("trade") or {})
-        slug, qty = t.get("marketSlug"), _v(t.get("qty"))
+        slug, qty = t.get("marketSlug"), _trade_qty(t)
         if not slug or not qty:
             continue
         cost = _v(t.get("cost"))
@@ -3677,7 +3700,7 @@ def parse_activities(client, activities):
 
         if act_type == "ACTIVITY_TYPE_TRADE":
             sdk_price = _safe_float(detail.get("price"))
-            quantity = _safe_float(detail.get("qty"))
+            quantity = _trade_qty(detail)
             sdk_rpnl = _safe_float(detail.get("realizedPnl"))
             trade_cost = _safe_float(detail.get("cost"))
             pnl = None
@@ -23752,7 +23775,7 @@ def _poly_ledger_tick(sb, now, *, force: bool = False) -> dict:
                 if net_a or net_b:
                     L["qty"] = abs(net_a)
                 else:
-                    q = _safe_float(d.get("qty")) or 0.0
+                    q = _trade_qty(d) or 0.0
                     L["qty"] += (-q if (rpnl is not None) else q)
                 L["events"] += 1
             else:
@@ -24801,7 +24824,7 @@ def _lot_walk(trows) -> dict:
     lots: dict = {}
     for r in trows or []:
         t = ((r.get("payload") or {}).get("trade") or {})
-        slug, qty = t.get("marketSlug"), _v(t.get("qty"))
+        slug, qty = t.get("marketSlug"), _trade_qty(t)
         if not slug or not qty:
             continue
         cost = _v(t.get("cost"))

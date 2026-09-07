@@ -668,6 +668,14 @@ def test_lot_ledger_floor() -> None:
     check("ledger under-covers (venue holds 19.5, we saw 1) → None",
           _app._lot_cost_c({"qty": 1.0, "cost": 0.33}, 19.5) is None)
     check("no lot → None", _app._lot_cost_c(None, 20) is None)
+    # fractional fills: integer qty "0", qtyDecimal "0.1000" (3,012 such rows Sep 2026)
+    frac = [{"payload": {"trade": {"marketSlug": "f", "qty": "0", "qtyDecimal": "0.1000",
+                                    "cost": {"value": "0.055"}}}}] * 195
+    lf = _app._lot_walk(frac + [tr("f", 1, 0.55)])
+    check("fractional fills count at their decimal size (19.5 + 1 = 20.5)",
+          abs(lf["f"]["qty"] - 20.5) < 1e-6)
+    check("fractional fills price correctly (55¢)",
+          abs(lf["f"]["cost"] / lf["f"]["qty"] - 0.55) < 1e-6)
     # the real Braves history: a CLOSED 59→60¢ round trip BEFORE today's lot
     rows2 = [tr("s", 20, 11.84), tr("s", 20, 12.06, sell=True)] + rows
     lots2 = _app._lot_walk(rows2)
