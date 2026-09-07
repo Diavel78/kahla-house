@@ -134,7 +134,7 @@ class Lane:
 ALL_LANES: dict[str, Lane] = {
     l.name: l for l in [
         Lane("pm_snapshot",     60,   180, note="exchange cent logger"),
-        Lane("paperlog",        60,   180, note="suggestion + shadow logger"),
+        Lane("paperlog",        60,   180, note="suggestion + shadow logger", stuck_s=360),
         # needs_owner: _autobet_execute resolves _kalshi_owner_uid() and
         # returns False on None — so with no owner the lane still persists
         # its opener shadow rows (work>0, looks ALIVE) and places ZERO bets.

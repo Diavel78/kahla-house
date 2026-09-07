@@ -19771,6 +19771,18 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
         except Exception:
             return st
         _OMS_PROD_TS = _time.time()
+        # HYGIENE (Sep 6 2026): rows for games already started never
+        # execute (the executor query excludes them) but they piled up —
+        # 257 rows for Sep 3 games still 'pending' on Sep 6, muddying every
+        # queue read. Park them 'expired' each producer run.
+        try:
+            (sb.table("desired_orders")
+             .update({"state": "retired", "detail": "expired",
+                      "updated_at": nowiso})
+             .in_("state", ["pending", "placed"])
+             .lt("event_start", nowiso).execute())
+        except Exception:
+            pass
         # Venue-is-the-schedule (Sep 2 2026): every key the join could
         # not place gets its identity from the venue itself — stamp the
         # existing row or mint one. Bounded per pass; the rent_key fast
@@ -23824,7 +23836,7 @@ def _rent_cull_tick(sb, now, client=None, orders=None) -> dict:
         if not remaining.get(key):
             try:
                 (sb.table("desired_orders")
-                 .update({"state": "dead",
+                 .update({"state": "retired", "detail": "dead",
                           "detail": f"rent_dead:{d['upd']:.3f}/d",
                           "updated_at": nowiso})
                  .eq("market_id", p["market_id"])
