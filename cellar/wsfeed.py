@@ -78,6 +78,7 @@ MKTS_MAX_SLUGS = 4000
 MKTS_MAX_RIDS = 10
 CORE_REBUILD_RIDS = 2
 CORE_REBUILD_MIN_S = 120.0
+CAP_HOLD_S = 60.0            # no new subscribes for this long after the venue says the connection is full
 HEARTBEAT_STAMP_S = 120.0   # per-connection state stamp (pending/packs/ladders)
 # PACKING (Sep 6 2026, Rob: "why the hell are we doing REST with a
 # websocket"): the venue's scarce resource is subscription REQUESTS (~12
@@ -946,11 +947,22 @@ class MarketsFeed:
                  g2, len(o2), protect)
         return True
 
-    def _on_rejected(self, rid: str) -> None:
+    def _on_rejected(self, rid: str, err: str = "") -> None:
         """The venue refused subscription request `rid`: its slugs are NOT
         covered, whatever we recorded. Un-cover them so a later add can
-        retry; if it was core, re-queue core right away (the request
-        budget path evicts a ladder for it)."""
+        retry; if it was core, re-queue core (the request budget path
+        evicts a ladder for it).
+
+        ⚠ THE STORM (Sep 6 2026, 18:43): 'max subscriptions per connection
+        reached' + a 1s core re-queue + the pack layer's immediate retry =
+        1,942 rejected requests in two minutes on conn 0 — us hammering the
+        venue while our own rid accounting said we had room. A cap hit now
+        arms a 60s hold on EVERY new subscribe on this connection and evicts
+        one pack to make venue-side room; nothing is re-sent inside the hold."""
+        cap_hit = "max subscriptions" in (err or "").lower()
+        if cap_hit:
+            self._cap_hit_at = time.time()
+            self._cap_hits = getattr(self, "_cap_hits", 0) + 1
         gone = set(self._rid_slugs.pop(rid, frozenset()))
         gid = None
         for g, (rids, sl) in list(self._groups.items()):
@@ -975,6 +987,8 @@ class MarketsFeed:
             # single-slug delta). Back off 30s and let the whole set go
             # again as ONE request.
             _delay = 30.0 if getattr(self, "depth", False) else 1.0
+            if cap_hit:
+                _delay = max(_delay, CAP_HOLD_S)
             if getattr(self, "depth", False):
                 self._core_rebuilt_at = time.time()
             with self._lock:
@@ -1071,6 +1085,10 @@ class MarketsFeed:
                 self._expiry[gid] = exp
             if not new:
                 continue
+            if nowt - getattr(self, "_cap_hit_at", 0.0) < CAP_HOLD_S:
+                requeue.append(("add", gid, set(slugs), exp,
+                                self._cap_hit_at + CAP_HOLD_S))
+                continue                      # venue said full — hold
             # REQUEST budget: core evicts ladders to seat itself; a ladder
             # that finds no room is skipped (its rungs price via REST).
             while (sum(len(r) for r, _s in self._groups.values())
@@ -1233,6 +1251,8 @@ class MarketsFeed:
             self._stamp("heartbeat")
         if nowt < self._pack_hold_until:
             return False
+        if nowt - getattr(self, "_cap_hit_at", 0.0) < CAP_HOLD_S:
+            return False                  # venue said the connection is full — hold
         live = self._live_rungs(nowt)
         changed = self._pack_audit(ws, nowt)
         for s, until in list(self._parked.items()):   # un-park when due
@@ -1387,7 +1407,7 @@ class MarketsFeed:
                         if _erid and "subscription" in str(msg.get("error", "")).lower():
                             log.warning("ws mkts[%d] error frame for %s: %s",
                                         self.conn, _erid, str(msg.get("error"))[:200])
-                            self._on_rejected(str(_erid))
+                            self._on_rejected(str(_erid), str(msg.get("error") or ""))
                         else:
                             log.warning("ws mkts error frame: %s", str(msg)[:300])
                         continue
