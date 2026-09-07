@@ -3210,7 +3210,19 @@ def _dash_cache_refresh(sb, client) -> dict:
             "computed_at": datetime.now(timezone.utc).isoformat(),
             "note": "ok" if order_err is None
                     else f"ok; orders_err: {order_err}"}
-        sb.table("poly_dash_cache").upsert(_dash_payload).execute()
+        try:
+            sb.table("poly_dash_cache").upsert(_dash_payload).execute()
+        except Exception as _e:
+            # LOUD (Sep 7 2026): a new payload key with no table column
+            # rejected every cache write for 25 minutes and the dashboard
+            # fell back to the live walk — silently. Log + stamp, then
+            # re-raise into the lane's own handler.
+            app.logger.warning("DASH CACHE WRITE FAILED: %s", str(_e)[:200])
+            try:
+                _probe_log({"kind": "dash_cache_write_failed", "err": str(_e)[:300]})
+            except Exception:
+                pass
+            raise
         # SITE MIRROR push (cutover-night bridge): the website reads the
         # cloud copy — keep it live. Best-effort, never fails the lap.
         try:
