@@ -3113,6 +3113,7 @@ def _open_cost_mark(rows) -> tuple:
 
 _DASH_ORDERS_EVERY_S = 170     # >= ~3 min between orders-count reads
 _DASH_REFRESH_EVERY_S = 300.0  # the whole dashboard recompute, on the paperlog tick
+_PM_NOLIST_TS: dict = {}     # market_id -> last empty venue search (30-min backoff)
 _PM_PMM_BUDGET_S = float(os.environ.get("PM_PMM_BUDGET_S")
                          or (45.0 if os.environ.get("CELLAR_LANES") else 7.5))  # CELLAR_LANES = the box
 _DASH_REFRESH_TS = 0.0
@@ -15326,10 +15327,19 @@ def api_pm_snapshot():
     # stalls. Stable sorts preserved stale-first inside each tier.
     _near_l = [g for g in all_games if _near_tier(g) == 0]
     _far_l = [g for g in all_games if _near_tier(g) == 1]
+    # FAR TIER: FOOTBALL FIRST (Sep 7 2026). The far tier is where NFL/CFB
+    # props get captured (they pay early rent) and it was starved for 19h:
+    # on the box each visit costs ~9s under the GIL, so ~5 games a tick,
+    # and 3-near-then-1-far handed the far tier one slot per tick across
+    # 170 games. Football to the front of the far list (stale-first
+    # within), and on the box the tiers alternate 1:1.
+    _far_rank = {"NFL": 0, "NCAAF": 1}
+    _far_l.sort(key=lambda g: _far_rank.get(g.get("_sport") or g.get("sport"), 9))
+    _far_every = 1 if os.environ.get("CELLAR_LANES") else 3
     _merged, _fi = [], 0
     for _i, _g in enumerate(_near_l):
         _merged.append(_g)
-        if (_i + 1) % 3 == 0 and _fi < len(_far_l):
+        if (_i + 1) % _far_every == 0 and _fi < len(_far_l):
             _merged.append(_far_l[_fi])
             _fi += 1
     _merged.extend(_far_l[_fi:])
@@ -15429,8 +15439,18 @@ def api_pm_snapshot():
         # AND every prop; main lines land in pm_snapshots, props in
         # prop_snapshots (the props pipeline, July 2026).
         pmm, pmm_rows = {}, []
-        if _time.time() < pmm_deadline:
+        # UNLISTED BACKOFF (Sep 7 2026): a profiled tick spent 30 of 42
+        # venue event searches on games the venue has not listed yet.
+        # An empty answer parks the game for 30 min; a listed game is
+        # searched as before.
+        _mid_s = str(g.get("id"))
+        if _time.time() - _PM_NOLIST_TS.get(_mid_s, 0.0) < 1800.0:
+            st["pmm_backoff"] = st.get("pmm_backoff", 0) + 1
+            pq = None
+        elif _time.time() < pmm_deadline:
             pq = _pmm_game_quotes(_pm, _pmm_client, away, home, g["event_start"], sport=sp)
+            if not pq:
+                _PM_NOLIST_TS[_mid_s] = _time.time()
             if pq:
                 st["pmm_games"] += 1
                 pmm = pq.get("ml") or {}
