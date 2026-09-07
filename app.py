@@ -22461,7 +22461,31 @@ def api_my_orders():
         if _row and _row.get("orders") is not None:
             _age = (datetime.now(timezone.utc) - _parse_iso(_row["computed_at"])).total_seconds()
             if _age <= 150:
-                data = {"ok": True, "orders": _row["orders"], "source": "box",
+                _orders = _row["orders"]
+                # PROPS BY NAME (Sep 7 2026, Rob: "I see no prop bets on the
+                # dashboard"): a prop order carries the GAME title and a
+                # Yes/No outcome — 19 of 253 rows were props nobody could
+                # recognise. The tape has the question; label them with it.
+                try:
+                    _pslugs = [o.get("slug") for o in _orders
+                               if str(o.get("slug") or "").startswith("astatc-")]
+                    if _pslugs:
+                        _qrows = (_sbc.table("prop_snapshots").select("prop_key,question")
+                                  .in_("prop_key", _pslugs[:200])
+                                  .order("captured_at", desc=True).limit(1000)
+                                  .execute().data) or []
+                        _qmap: dict = {}
+                        for _q in _qrows:
+                            _qmap.setdefault(_q.get("prop_key"), _q.get("question"))
+                        for o in _orders:
+                            _qq = _qmap.get(o.get("slug"))
+                            if _qq:
+                                o["market_name"] = _qq
+                                o["pick"] = ""
+                                o["prop"] = True
+                except Exception:
+                    pass
+                data = {"ok": True, "orders": _orders, "source": "box",
                         "computed_at": _row["computed_at"], "age_s": int(_age)}
                 _cache[cache_key] = {"ts": now, "data": data}
                 return jsonify(data)

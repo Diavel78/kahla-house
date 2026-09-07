@@ -828,7 +828,7 @@
                     const c = (o.price == null) ? '—' : (Math.round(o.price*1000)/10) + '¢';
                     const name = ((o.market_name||'').replace(/\s+\d{4}-\d{2}-\d{2}$/, '')) + (o.outcome ? ' — ' + o.outcome : '');
                     return '<span style="color:' + (sell ? '#60a5fa' : 'var(--green)') + ';font-weight:600">' + (sell ? 'SELL' : 'BUY') + '</span>'
-                         + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(name) + (o.amended ? ' <span class="tag" title="amended in place — live on the book, hidden by the app">amended</span>' : '') + '</span>'
+                         + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (o.prop ? '<span class="tag" style="color:#f59e0b">prop</span> ' : '') + esc(name) + (o.amended ? ' <span class="tag" title="amended in place — live on the book, hidden by the app">amended</span>' : '') + '</span>'
                          + '<span style="font-variant-numeric:tabular-nums">' + c + ' × ' + (o.leaves_quantity ?? o.quantity) + '</span>'
                          + '<span style="color:var(--text-muted)">' + ago(o.updated_at) + '</span>';
                 }).join('') + '</div>';
