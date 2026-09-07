@@ -246,7 +246,10 @@
                     <button id="ordersClear" type="button" aria-label="clear search" hidden
                             style="position:absolute;right:6px;top:50%;transform:translateY(-50%);width:28px;height:28px;border-radius:50%;border:none;background:var(--line);color:inherit;font-size:16px;line-height:28px;text-align:center;padding:0;cursor:pointer">×</button>
                 </div>
-                <div id="ordersList" class="sub" style="margin-top:8px">loading…</div>
+                <!-- ~25 rows tall, then scroll INSIDE the card (Rob, Sep 7 2026:
+                     "it takes up my entire screen… twenty five rows, then you
+                     scroll inside the box") -->
+                <div id="ordersList" class="sub" style="margin-top:8px;max-height:520px;overflow-y:auto;overscroll-behavior:contain;padding-right:4px">loading…</div>
             </div>
             <div class="card wide">
                 <div class="label">By day — bets + rent <span class="tag" style="color:var(--green)">paid</span> <span class="tag" style="color:#fbbf24">pending</span></div>
