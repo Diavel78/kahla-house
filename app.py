@@ -25742,8 +25742,12 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                     and SCALP_POPPED.get(slug, 0.0) <= _t_read):  # read predates a fill → don't vouch
                 # SNIPER SNAPSHOT (Sep 6 2026): everything the sniper needs
                 # to re-price this ask off a socket frame with no reads.
+                # qty = what we HOLD (ledger-clamped), never the order's old
+                # size: the sniper amends with FULL params, so a snapshot
+                # carrying the stale 1-lot size undid every lap resize
+                # within a second (GB/NYJ 17→1→17→1, Sep 7 2026 log).
                 SCALP_SNAP[slug] = {"oid": o0.get("id"), "our_ask": our_ask,
-                                    "qty": int(our_ask_qty or held),
+                                    "qty": int(held),
                                     "floor_c": floor_c, "tick": tick,
                                     "synth": synth, "intent": sell_intent,
                                     "event_start": r.get("event_start"),
@@ -25889,12 +25893,19 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                               mine[0].get("id"), tgt, int(held), now,
                               walked_from=our_ask)
             res["amended"] = res.get("amended", 0) + (1 if _v == "amended" else 0)
-            if _v != "gone":
+            if _v == "amended" and slug in SCALP_SNAP:
+                SCALP_SNAP[slug]["our_ask"] = tgt     # the sniper prices from here now
+                SCALP_SNAP[slug]["qty"] = int(held)
+            if _v == "gone":
+                if _scalp_create(client, sb, r, b, slug, synth, sell_intent,
+                                 tgt, int(held), now, walked_from=our_ask):
+                    res["walked"] += 1   # modify killed it → fresh create
+                continue
+            if _v != "qty_stuck":
                 continue                 # amended (or unverified — never double up)
-            if _scalp_create(client, sb, r, b, slug, synth, sell_intent,
-                             tgt, int(held), now, walked_from=our_ask):
-                res["walked"] += 1       # modify killed it → fresh create
-            continue
+            # qty_stuck: the venue took the price but not the size —
+            # resize the honest way, cancel → recheck → create at int(held2)
+            res["qty_stuck"] = res.get("qty_stuck", 0) + 1
         try:
             client.orders.cancel(mine[0].get("id"), {"marketSlug": slug})
         except Exception:
@@ -26206,18 +26217,23 @@ def _scalp_amend(client, sb, r, b, slug, synth, sell_intent, oid, tgt_c, qty,
             state = str(g("state") or "")
             px = g("price")
             seen_px = float(px.get("value") if isinstance(px, dict) else px)
+            seen_qty = _safe_float(g("quantity"))
     except Exception:
         return "unverified"
     live = state in (_OPEN_ORDER_STATES | {"ORDER_STATE_REPLACED"})
     at_new = seen_px is not None and abs(seen_px - canon) < 0.0026
-    verdict = "amended" if (live and at_new) else ("gone" if state is None else "unverified")
+    at_qty = seen_qty is None or abs(seen_qty - int(qty)) <= 0.5
+    verdict = ("amended" if (live and at_new and at_qty)
+               else "gone" if state is None
+               else "qty_stuck" if (live and at_new) else "unverified")
     try:
         nb = dict(b)
         hist = nb.get("scalp") if isinstance(nb.get("scalp"), list) else []
         hist = (hist + [{"at": now.isoformat(), "ask_c": round(tgt_c, 1),
                          "qty": int(qty), "from_c": walked_from,
                          "mode": "amend", "state": state,
-                         "seen_px": seen_px, "verdict": verdict}])[-_SCALP_SHADOW_CAP:]
+                         "seen_px": seen_px, "seen_qty": seen_qty,
+                         "verdict": verdict}])[-_SCALP_SHADOW_CAP:]
         nb["scalp"] = hist
         sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
     except Exception:
