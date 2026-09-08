@@ -25418,24 +25418,16 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     # is clamped to open−close qty from poly_activities. Mirror lag can
     # cost at most one cycle; mirror absence degrades to venue truth;
     # pre-mirror history missing only UNDERcounts (skips a sell — safe).
+    # (Sep 7 2026) The clamp reads the LOT LEDGER — the same decimal-size
+    # walk that sets the floor. The inline read it replaces summed the
+    # INTEGER `qty` (fractional 0.1-share fills counted ZERO) under a
+    # 1,000-row cap (gotcha #40): on NFL totals fed in bites it said we
+    # held 1 of 19.5, so the ask was sized 1 (GB/NYJ, PIT/NE) or the
+    # position sat NAKED as "skip_mirror0" for hours (SEA/ARI 16, MIN/CHI).
     mirror_net: dict = {}
     try:
-        _slugs = list({c[2] for c in cands})
-        for _i in range(0, len(_slugs), 25):
-            for _a in ((sb.table("poly_activities")
-                        .select("slug,payload")
-                        .eq("type", "ACTIVITY_TYPE_TRADE")
-                        .in_("slug", _slugs[_i:_i + 25])
-                        .limit(1000).execute().data) or []):
-                _t = ((_a.get("payload") or {}).get("trade")
-                      if isinstance(_a.get("payload"), dict) else None) or {}
-                try:
-                    _q = float(_t.get("qty") or 0)
-                except (TypeError, ValueError):
-                    _q = 0.0
-                _k = _a.get("slug")
-                mirror_net[_k] = mirror_net.get(_k, 0.0) + (
-                    -_q if _t.get("realizedPnl") is not None else _q)
+        _lots_now = _lots if _lots else _lot_ledger(sb)
+        mirror_net = {s: float(L.get("qty") or 0.0) for s, L in _lots_now.items()}
     except Exception:
         mirror_net = {}      # mirror unreadable → no clamp (venue rules)
 
