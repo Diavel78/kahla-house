@@ -1430,10 +1430,7 @@ def _venue_day_map(sb, days: int = 4) -> dict:
     legs = (sb.rpc("poly_gameday_legs", {"p_days": days}).execute().data) or []
     t_since = (datetime.now(timezone.utc) - timedelta(
         days=days + _VENUE_TRADE_LOOKBACK_D)).isoformat()
-    trows = _sb_paged(
-        lambda: sb.table("poly_activities").select("payload,at")
-        .eq("type", "ACTIVITY_TYPE_TRADE").gte("at", t_since).order("at"),
-        max_pages=15)
+    trows = _trade_rows(sb, since_iso=t_since, max_pages=15)
     events = []
     for r in trows:
         t = ((r.get("payload") or {}).get("trade") or {})
@@ -24916,12 +24913,53 @@ def _scalp_entry_c(r, b) -> float | None:
 # 0.7396 for a 39.2¢ lot) and poly_pnl is a 5th-tick stamp that lags and
 # under-covers (5436 read Sep-5 buy 1.62/open 3 against a 20-lot). Neither
 # may set the exit floor when THIS ledger covers the held lot.
-_LOT_LEDGER = {"at": 0.0, "lots": {}, "lock": threading.Lock()}
+_LOT_LEDGER = {"at": 0.0, "lots": {}, "last_at": None, "full_at": 0.0,
+               "lock": threading.Lock()}
 _LOT_LEDGER_TTL_S = 240.0
+_LOT_LEDGER_FULL_S = 1800.0        # full rebuild cadence; deltas in between
 _LOT_LEDGER_DAYS = 60
 
 
-def _lot_walk(trows) -> dict:
+# SLIM TRADE ROWS (Sep 8 2026): a full poly_activities payload is ~3.5 KB of
+# market metadata per trade; the lot ledger walked 7k of them every 240s
+# (20s per refresh — the scalp's setup time climbed 6s → 210s across one
+# day). Select only the nine fields the walks read, re-shape to the
+# payload/trade layout so _lot_walk / _venue_day_map stay unchanged.
+_TRADE_SLIM_SELECT = (
+    "at,s:payload->trade->>marketSlug,q:payload->trade->>qty,"
+    "qd:payload->trade->>qtyDecimal,c:payload->trade->cost->>value,"
+    "p:payload->trade->price->>value,r:payload->trade->>realizedPnl,"
+    "b:payload->trade->beforePosition->>netPosition,"
+    "a:payload->trade->afterPosition->>netPosition,u:payload->trade->>updateTime")
+
+
+def _slim_to_trade_rows(rows) -> list:
+    out = []
+    for r in rows or []:
+        t = {"marketSlug": r.get("s"), "qty": r.get("q"), "qtyDecimal": r.get("qd"),
+             "cost": ({"value": r.get("c")} if r.get("c") is not None else None),
+             "price": ({"value": r.get("p")} if r.get("p") is not None else None),
+             "realizedPnl": r.get("r"), "updateTime": r.get("u"),
+             "beforePosition": {"netPosition": r.get("b")},
+             "afterPosition": {"netPosition": r.get("a")}}
+        out.append({"at": r.get("at"), "payload": {"trade": t}})
+    return out
+
+
+def _trade_rows(sb, since_iso=None, after_iso=None, max_pages: int = 30) -> list:
+    """Trades from the mirror, oldest→newest, slim columns, payload-shaped."""
+    def _build():
+        q = (sb.table("poly_activities").select(_TRADE_SLIM_SELECT)
+             .eq("type", "ACTIVITY_TYPE_TRADE"))
+        if since_iso:
+            q = q.gte("at", since_iso)
+        if after_iso:
+            q = q.gt("at", after_iso)
+        return q.order("at")
+    return _slim_to_trade_rows(_sb_paged(_build, max_pages=max_pages))
+
+
+def _lot_walk(trows, lots: dict | None = None) -> dict:
     """{slug: {qty, cost}} — running average cost per slug from trade rows
     (poly_activities payloads), a BUY adds at its price, a sell removes at
     the running average. Pure; identical arithmetic to _venue_day_map."""
@@ -24932,7 +24970,7 @@ def _lot_walk(trows) -> dict:
             return float(x)
         except (TypeError, ValueError):
             return None
-    lots: dict = {}
+    lots = ({k: dict(v) for k, v in lots.items()} if lots else {})
     for r in trows or []:
         t = ((r.get("payload") or {}).get("trade") or {})
         slug, qty = t.get("marketSlug"), _trade_qty(t)
@@ -24960,27 +24998,39 @@ def _lot_walk(trows) -> dict:
 
 def _lot_ledger(sb, force: bool = False) -> dict:
     """Cached _lot_walk over the mirror's last _LOT_LEDGER_DAYS of trades.
-    A failed read keeps the last good ledger (callers fall back to the
-    venue/stamp floor when a slug is missing or under-covers)."""
+    INCREMENTAL (Sep 8 2026): trades are append-only, so a refresh folds
+    only rows newer than the last one seen; a full rebuild every
+    _LOT_LEDGER_FULL_S catches late-arriving backfills. A failed read keeps
+    the last good ledger (callers fall back to the venue/stamp floor when a
+    slug is missing or under-covers)."""
     L = _LOT_LEDGER
     now = _time.monotonic()
     with L["lock"]:
         if not force and L["lots"] and now - L["at"] < _LOT_LEDGER_TTL_S:
             return L["lots"]
+        base, last_at, full_at = L["lots"], L["last_at"], L["full_at"]
     try:
-        since = (datetime.now(timezone.utc)
-                 - timedelta(days=_LOT_LEDGER_DAYS)).isoformat()
-        rows = _sb_paged(
-            lambda: sb.table("poly_activities").select("payload")
-            .eq("type", "ACTIVITY_TYPE_TRADE").gte("at", since).order("at"),
-            max_pages=30)
-        lots = _lot_walk(rows)
+        incremental = bool(base and last_at and not force
+                           and now - full_at < _LOT_LEDGER_FULL_S)
+        if incremental:
+            rows = _trade_rows(sb, after_iso=last_at, max_pages=5)
+            lots = _lot_walk(rows, lots=base)
+        else:
+            since = (datetime.now(timezone.utc)
+                     - timedelta(days=_LOT_LEDGER_DAYS)).isoformat()
+            rows = _trade_rows(sb, since_iso=since, max_pages=30)
+            lots = _lot_walk(rows)
+        newest = max((str(r.get("at") or "") for r in rows), default="") or None
     except Exception as e:
         app.logger.warning("lot ledger read failed: %s", e)
         with L["lock"]:
             return L["lots"]
     with L["lock"]:
         L["lots"], L["at"] = lots, now
+        if newest and (not L["last_at"] or newest > L["last_at"]):
+            L["last_at"] = newest
+        if not incremental:
+            L["full_at"] = now
         return lots
 
 
@@ -26205,7 +26255,7 @@ def _scalp_amend(client, sb, r, b, slug, synth, sell_intent, oid, tgt_c, qty,
                             f"errored ({e})"[:240])
         return "unverified"
     _time.sleep(2.5)                          # modify is ASYNC (Aug 2 probe)
-    state, seen_px = None, None
+    state, seen_px, seen_qty = None, None, None
     try:
         resp = client.orders.list({"slugs": [slug]})
         raw = (resp.get("orders") if isinstance(resp, dict)
