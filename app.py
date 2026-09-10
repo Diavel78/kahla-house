@@ -18830,6 +18830,28 @@ def _gridiron_seed_virgin(sb, g, es0, mt, gp, virgin, proj, now_utc):
 
 
 _GRIDIRON_PLACEHOLDER_BID_C = 2.0     # a 1¢ bid is the venue's empty-book stub
+# JOIN THE TOUCH ON FOOTBALL SEATS (Rob, Sep 9 2026: "better to be in the
+# touch pool and collect smaller rent than sit on positions that pay
+# NOTHING"). Since Sep 4, 147 of 157 football seats filled, median 3.3h
+# after placement — a seat that leads the touch by a tick collects rent
+# for an afternoon and then holds a lot that earns nothing on either
+# side. AT the best price the bid scores DF^0 exactly like the leader;
+# leading only buys queue priority, which is the fill. Virgin books keep
+# touch + 1 (joining the venue's penny stub is nothing). MLB unchanged —
+# its lots rinse the same day.
+GRIDIRON_JOIN_TOUCH = True
+
+
+def _gridiron_join_touch(slug: str, bid_c) -> bool:
+    """True when a football spread/total bid should rest AT the touch."""
+    if not GRIDIRON_JOIN_TOUCH or not slug:
+        return False
+    if not slug.startswith(("asc-nfl-", "tsc-nfl-", "asc-cfb-", "tsc-cfb-")):
+        return False
+    try:
+        return bid_c is not None and float(bid_c) > _GRIDIRON_PLACEHOLDER_BID_C
+    except (TypeError, ValueError):
+        return False
 _GRIDIRON_PLACEHOLDER_SPREAD_C = 40.0  # 1/51, 49/99: a 50¢-wide book is not a market
 
 
@@ -19279,6 +19301,8 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
         except Exception:
             _tk = 1.0
         peg = _grid_dn(float(q["bid"]) * 100.0, _tk) + _tk
+        if _gridiron_join_touch(pblk.get("slug"), float(q["bid"]) * 100.0):
+            peg = _grid_dn(float(q["bid"]) * 100.0, _tk)     # AT the touch (Sep 9)
         # ONE-TICK BOOK → JOIN, don't jump (_peg_target's rule; this leg
         # re-implemented the peg raw and missed it). On the tight books
         # the venue re-provisioned Aug 23, floor(bid)+1 lands ON the ask,
@@ -19576,6 +19600,8 @@ def _gridiron_try_ml(sb, g, es0, d):
         except Exception:
             _tk = 1.0
         peg = _grid_dn(float(q["bid"]) * 100.0, _tk) + _tk
+        if _gridiron_join_touch(pblk.get("slug"), float(q["bid"]) * 100.0):
+            peg = _grid_dn(float(q["bid"]) * 100.0, _tk)     # AT the touch (Sep 9)
         _askc = (float(q["ask"]) * 100.0
                  if q.get("ask") is not None else None)
         if _askc is not None and peg >= _askc:
@@ -26184,9 +26210,12 @@ def _snipe_buy_target(snap: dict, bid_c, ask_c, comp_bid_c=None):
         return None
     if abs(comp - our) < 0.26 and comp_bid_c is None:
         return "self"
-    tgt = _grid_dn(comp, tick) + tick
-    if best_ask is not None and tgt >= best_ask:
-        tgt = _grid_dn(comp, tick)               # one-tick book → join
+    if snap.get("join") and comp > _GRIDIRON_PLACEHOLDER_BID_C:
+        tgt = _grid_dn(comp, tick)               # football: AT the touch (Sep 9 2026)
+    else:
+        tgt = _grid_dn(comp, tick) + tick
+        if best_ask is not None and tgt >= best_ask:
+            tgt = _grid_dn(comp, tick)           # one-tick book → join
     tgt = min(tgt, float(snap["cap_c"]), float(snap["master_c"]))
     tgt = _grid_dn(tgt, tick)
     if tgt < tick:
@@ -26305,6 +26334,7 @@ def _buy_snap_publish(sb, fs: dict, now, client, full_lap: bool) -> int:
         master_c = _grid_dn(_REPEG_MAX_COST_USD / qty * 100.0, tick)
         fresh[slug] = {"oid": f["order_id"], "our_bid": float(f["my_price_c"]),
                        "qty": qty, "synth": bool(f.get("synthetic")),
+                       "join": _gridiron_join_touch(slug, 50.0),   # football: AT the touch
                        "cap_c": (_GRIDIRON_MAX_ENTRY_C if grid
                                  else _REPEG_NRFI_PRICE_CAP_C),
                        "master_c": master_c, "tick": tick, "gtt": gtt,
@@ -26727,7 +26757,8 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                     _blobfam = ((blob.get("whiff") or {}).get("ptype")
                                 if isinstance(blob.get("whiff"), dict) else None)
                     _join_lane = (f.get("market_type") == "nrfi"
-                                  or (_blobfam or "") in _JOIN_TOUCH_FAMS)
+                                  or (_blobfam or "") in _JOIN_TOUCH_FAMS
+                                  or _gridiron_join_touch(f.get("slug"), new_c))
                     try:              # grid-native chase (Aug 30)
                         _tkr = _pmm_tick_c(client, f.get("slug") or "")
                     except Exception:

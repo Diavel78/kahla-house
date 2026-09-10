@@ -716,6 +716,20 @@ def test_snipe_target_at_cost() -> None:
     check("flag off keeps touch − 1", _app._snipe_target({**snap, "at_cost": False}, 83.0, 88.0) == 87.0)
 
 
+def test_gridiron_join_touch() -> None:
+    """Rob, Sep 9 2026: football seats rest AT the touch, not a tick over
+    it (147/157 leaders filled in a median 3.3h and then earned nothing).
+    Virgin books keep touch + 1; MLB is untouched."""
+    import app as _app
+    check("NFL spread with a real bid → join", _app._gridiron_join_touch("asc-nfl-mia-lv-2026-09-13-pos-14pt5", 45.0))
+    check("CFB total with a real bid → join", _app._gridiron_join_touch("tsc-cfb-usc-rutge-2026-09-19-total-53pt5", 52.0))
+    check("penny stub → NOT join (virgin rule keeps touch+1)", not _app._gridiron_join_touch("asc-nfl-mia-lv-2026-09-13-pos-14pt5", 1.0))
+    check("MLB moneyline → NOT join", not _app._gridiron_join_touch("aec-mlb-nym-mia-2026-09-10", 45.0))
+    snap = {"our_bid": 46.0, "qty": 20, "synth": False, "cap_c": 60.0, "master_c": 65.0, "tick": 1.0, "join": True}
+    check("buy sniper on football: competitor bid 44 → 44, not 45", _app._snipe_buy_target(snap, 44.0, 50.0) == 44.0)
+    check("buy sniper without join: competitor bid 44 → 45", _app._snipe_buy_target({**snap, "join": False}, 44.0, 50.0) == 45.0)
+
+
 def test_pin_line_center() -> None:
     """Pinnacle's line in rung units from the cached slate shape (the real
     Northern Arizona @ Arizona event, Sep 5 2026)."""
@@ -933,7 +947,7 @@ def main() -> int:
               test_ws_quote_presence, test_ws_mkts_request_budget,
               test_gridiron_value_window, test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
-              test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost,
+              test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch,
               test_lane_covers_its_documented_engines,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
