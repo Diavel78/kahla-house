@@ -1321,7 +1321,7 @@ sport the machine ever adds:
   books, THAT'S WHAT PAYS RENT… stay at touch +1 and chase it up to the
   model": against the venue's 1¢ placeholder bid the seat is 2¢, alone in
   the window; the chase follows real bidders up to the model wall
-  (`_gridiron_seed_virgin`). **And no 25¢ floor on ANY football seat (Rob, same hour: "BE THE GOD DAMN TOUCH")** — `_gridiron_try_bet`/`_gridiron_try_ml` peg touch + 1 tick with the 60¢ cap and the $13 master rule as the only fences; the 25-60¢ "pricing sanity" band is MLB O/U-trader doctrine, not football's.
+  (`_gridiron_seed_virgin`). **FOOTBALL SEATS JOIN THE TOUCH, NEVER LEAD IT (Rob, Sep 9 2026: "better to be in the touch pool and collect smaller rent than sit on positions that pay NOTHING" — 147 of 157 leading seats filled in a median 3.3h since Sep 4 and then earned nothing on either side; `GRIDIRON_JOIN_TOUCH`/`_gridiron_join_touch` at the seat peg, the chase and the buy sniper; virgin books keep touch + 1; MLB unchanged). Before that: no 25¢ floor on ANY football seat (Rob, Sep 6: "BE THE GOD DAMN TOUCH")** — `_gridiron_try_bet`/`_gridiron_try_ml` peg touch + 1 tick with the 60¢ cap and the $13 master rule as the only fences; the 25-60¢ "pricing sanity" band is MLB O/U-trader doctrine, not football's.
 - **THE COST FLOOR IS OUR OWN LOT LEDGER, NEVER THE VENUE'S AVG (the
   Braves 74¢ lesson, Sep 7 2026).** The venue's position `avgPx` is a
   lifetime BLEND per market: on a slug round-tripped three times it read
