@@ -2879,6 +2879,29 @@ def _cellar_health(sb) -> dict:
                     bad += 1
     except Exception:
         pass
+    # ── OMS-DEAD TRIPWIRE (Sep 9 2026 — the clientfresh miss). The opener
+    # lane read green for 2.5 days while its OMS executor threw on its
+    # first bet every tick: `oms_err` sat in every tick's detail and no
+    # card, check or human read it. A lane whose bet-placing engine
+    # raised is not "ok". Three consecutive opener ticks carrying
+    # `oms_err` (or `g_err`/`opener_err`) flip the lane red with the text.
+    try:
+        st4 = (sb.table("cellar_ticks").select("detail")
+               .eq("lane", "opener").order("started_at", desc=True)
+               .limit(3).execute().data) or []
+        errs = [((t.get("detail") or {}).get("oms_err")
+                 or (t.get("detail") or {}).get("g_err")
+                 or (t.get("detail") or {}).get("opener_err"))
+                for t in st4 if isinstance(t.get("detail"), dict)]
+        if len(errs) == 3 and all(errs):
+            for _l in lanes:
+                if _l["lane"] == "opener" and _l["state"] in ("ok", "idle",
+                                                               "vercel"):
+                    _l["state"] = "error"
+                    _l["error"] = f"OMS DEAD: opener engine raising ({errs[0]})"
+                    bad += 1
+    except Exception:
+        pass
     # WHICH CODE IS THE CELLAR RUNNING? Since the opener moved to the house
     # box, a fix pushed to main is inert there until someone pulls and
     # restarts — silent, and indistinguishable from a fix that didn't work.
