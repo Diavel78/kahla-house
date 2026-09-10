@@ -25553,7 +25553,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # covering 5 of 20 held is uncovered inventory, not optimization.
         n4 = float((positions.get(slug4) or {}).get("net") or 0.0)
         h4 = (-n4) if synth4 else n4
-        if h4 >= 1.0 and abs(h4 - q4) > 0.5:
+        if h4 >= 1.0 and (q4 > h4 + 0.01 or h4 - q4 >= 1.0):
             return (0, 0.0)
         _vc4 = _scalp_venue_cost_c(
             r4, (positions.get(slug4) or {}).get("avg_price"), h4)
@@ -25787,6 +25787,14 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             if py is not None:
                 our_ask = (100.0 - py * 100.0) if synth else py * 100.0
             our_ask_qty = float(o0.get("leaves") or o0.get("qty") or 0.0)
+            # FRACTIONAL FILLS (Sep 9 2026): the venue nibbles asks in 0.1-share
+            # bites, so leaves = qty − cum carries a fraction. Sizing the order
+            # to int(held) re-created the same gap every lap (18.99 held vs
+            # 17.6 leaves → resize to 18 → leaves 17.6 → …, 17 no-op amends per
+            # lap, the budget gone, six naked positions never reached). The
+            # order is sized so LEAVES ≈ held: qty = floor(held + cum).
+            our_cum = float(o0.get("cum") or 0.0)
+            _ask_qty = max(1, int(held + our_cum))
             if (_amend and our_ask is not None
                     and int(our_ask_qty or held) >= 1      # dust lot → no sniper
                     and SCALP_POPPED.get(slug, 0.0) <= _t_read):  # read predates a fill → don't vouch
@@ -25797,7 +25805,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 # carrying the stale 1-lot size undid every lap resize
                 # within a second (GB/NYJ 17→1→17→1, Sep 7 2026 log).
                 SCALP_SNAP[slug] = {"oid": o0.get("id"), "our_ask": our_ask,
-                                    "qty": int(held),
+                                    "qty": max(1, int(held + float(o0.get("cum") or 0.0))),
                                     "floor_c": floor_c, "tick": tick,
                                     "synth": synth, "intent": sell_intent,
                                     "event_start": r.get("event_start"),
@@ -25915,7 +25923,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # which suppressed the resize on every one of the six live
         # mismatches (they all sat at the touch). The mismatch now forces
         # the re-create whenever no legal DOWN-move exists this pass.
-        _mismatch = abs(held - our_ask_qty) > 0.5
+        _mismatch = (our_ask_qty > held + 0.01) or (held - our_ask_qty >= 1.0)
         _resize = False
         if (_mismatch and not _repair and our_ask >= floor_c - 0.26
                 and (tgt is None or tgt >= our_ask - 0.26)):
@@ -25940,12 +25948,12 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # re-place) → create fresh at the walk target
         if _amend:
             _v = _scalp_amend(client, sb, r, b, slug, synth, sell_intent,
-                              mine[0].get("id"), tgt, int(held), now,
+                              mine[0].get("id"), tgt, _ask_qty, now,
                               walked_from=our_ask)
             res["amended"] = res.get("amended", 0) + (1 if _v == "amended" else 0)
             if _v == "amended" and slug in SCALP_SNAP:
                 SCALP_SNAP[slug]["our_ask"] = tgt     # the sniper prices from here now
-                SCALP_SNAP[slug]["qty"] = int(held)
+                SCALP_SNAP[slug]["qty"] = _ask_qty
             if _v == "gone":
                 if _scalp_create(client, sb, r, b, slug, synth, sell_intent,
                                  tgt, int(held), now, walked_from=our_ask):
