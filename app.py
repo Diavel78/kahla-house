@@ -24043,6 +24043,7 @@ _RECON_START_GUARD_MIN = 30.0  # never touch a pick this close to kickoff
 _SEAT_TOPUP_EVERY_S = 900.0
 _SEAT_TOPUP_LAST_TS = 0.0
 _SEAT_TOPUP_MAX_CREATES = 6
+_SEAT_TOPUP_MAX_READS = 15
 _SEAT_TOPUP_SOURCES = {"gridiron_autobet", "autobet", "ou_trader",
                        "pmm_autolog", "fbprop_autobet"}
 
@@ -24150,15 +24151,19 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         if placed >= _SEAT_TOPUP_MAX_CREATES:
             st["gate"] = "max_creates"
             break
-        if slug in sold_since:
-            st["skip_rinse"] = st.get("skip_rinse", 0) + 1
-            continue
         es = p.get("event_start")
         try:
             dt = datetime.fromisoformat(str(es).replace("Z", "+00:00"))
-            if (dt - now).total_seconds() < 600:
+            # a seat we have SOLD on is a rinse: re-bid it too (that is
+            # the dust seat Rob wants refilled), but never inside the
+            # 60-minute no-rebuy window; a never-sold seat only needs
+            # the game not to be starting.
+            _min_s = _SCALP_NO_REBUY_MIN * 60 if slug in sold_since else 600
+            if (dt - now).total_seconds() < _min_s:
                 st["skip_late"] = st.get("skip_late", 0) + 1
                 continue
+            if slug in sold_since:
+                st["rinse_reseat"] = st.get("rinse_reseat", 0) + 1
             gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         except Exception:
             continue
@@ -24192,6 +24197,13 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # ONE ORDER PER SLUG: the lap's order snapshot can trail a seat the
         # executor placed seconds ago — re-list this slug fresh before
         # writing (the Aug 16 duplicate lesson).
+        # REST BUDGET: one re-list per candidate reached the venue's rate
+        # limit on the first pass (42 "unreadable" reads in 40s) — at most
+        # _SEAT_TOPUP_MAX_READS guard reads per pass; the rest wait 15 min.
+        if st.get("reads", 0) >= _SEAT_TOPUP_MAX_READS:
+            st["gate"] = "read_budget"
+            break
+        st["reads"] = st.get("reads", 0) + 1
         try:
             _resp = client.orders.list({"slugs": [slug]})
             _raw = (_resp.get("orders") if isinstance(_resp, dict)
@@ -24201,7 +24213,8 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 and str((o.get("state") if isinstance(o, dict) else getattr(o, "state", "")) or "") in _OPEN_ORDER_STATES
                 for o in _raw)
         except Exception:
-            _has_buy = True                  # unreadable → never write blind
+            st["skip_unreadable"] = st.get("skip_unreadable", 0) + 1
+            continue                         # unreadable → never write blind
         if _has_buy:
             st["skip_has_bid"] = st.get("skip_has_bid", 0) + 1
             continue
@@ -24219,18 +24232,21 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             st["create_err"] = st.get("create_err", 0) + 1
             app.logger.warning("seat topup %s create failed: %s", slug, e)
             continue
-        _time.sleep(0.8)
         live = False
-        try:
-            resp = client.orders.list({"slugs": [slug]})
-            raw = (resp.get("orders") if isinstance(resp, dict)
-                   else getattr(resp, "orders", [])) or []
-            for o in raw:
-                g = (lambda k: o.get(k) if isinstance(o, dict) else getattr(o, k, None))
-                if g("id") == new_oid and str(g("state") or "") in _OPEN_ORDER_STATES:
-                    live = True
-        except Exception:
-            pass
+        for _wait in (1.0, 2.5):                 # create is ASYNC (Aug 2 probe)
+            _time.sleep(_wait)
+            try:
+                resp = client.orders.list({"slugs": [slug]})
+                raw = (resp.get("orders") if isinstance(resp, dict)
+                       else getattr(resp, "orders", [])) or []
+                for o in raw:
+                    g = (lambda k: o.get(k) if isinstance(o, dict) else getattr(o, k, None))
+                    if g("id") == new_oid and str(g("state") or "") in _OPEN_ORDER_STATES:
+                        live = True
+            except Exception:
+                pass
+            if live:
+                break
         if not live:
             st["unverified"] = st.get("unverified", 0) + 1
             app.logger.warning("seat topup %s: create returned %s but the book does not show it live",
