@@ -698,6 +698,18 @@ def test_no_mangled_fresh_kwarg() -> None:
         check(f"{fn.__name__} takes (client, fresh)", list(params)[:2] == ["client", "fresh"])
 
 
+def test_snipe_target_at_cost() -> None:
+    """Rob, Sep 9 2026: sell at cost or one tick higher, immediately — the
+    ask is the FLOOR, not touch − 1; one tick over the bid when the bid is
+    at or above cost. Never under cost."""
+    import app as _app
+    snap = {"our_ask": 96.0, "floor_c": 58.5, "tick": 1.0, "synth": False, "qty": 4, "at_cost": True}
+    check("at cost: competitor at 88 → the floor (59)", _app._snipe_target(snap, 50.0, 88.0) == 59.0)
+    check("at cost: bid 60 sits over cost → 61, never crossing", _app._snipe_target(snap, 60.0, 62.0) == 61.0)
+    check("at cost: already at floor → None", _app._snipe_target({**snap, "our_ask": 59.0}, 50.0, 88.0) is None)
+    check("flag off keeps touch − 1", _app._snipe_target({**snap, "at_cost": False}, 83.0, 88.0) == 87.0)
+
+
 def test_pin_line_center() -> None:
     """Pinnacle's line in rung units from the cached slate shape (the real
     Northern Arizona @ Arizona event, Sep 5 2026)."""
@@ -915,7 +927,7 @@ def main() -> int:
               test_ws_quote_presence, test_ws_mkts_request_budget,
               test_gridiron_value_window, test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
-              test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg,
+              test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost,
               test_lane_covers_its_documented_engines,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()

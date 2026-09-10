@@ -25116,6 +25116,14 @@ def _scalp_venue_cost_c(pick_row, avg_price, held_qty):
 # sizes, orphans, cost) — the sniper only ever moves an ask the lap has
 # already vouched for, never places, never sells what the lap did not see.
 SCALP_SNAP: dict = {}
+# SELL AT COST (Rob, Sep 9 2026: "get back to holding lines, not positions.
+# All positions bought, sell at cost or 1 cent higher, immediately. Sell and
+# get back to rent collecting"). A filled football seat earns nothing on
+# either side (the ask side of a rung never reaches target size), so the
+# exit is the FLOOR itself — cost gridded up one tick — resting one tick
+# above the bid when the bid is at or over cost. Not touch − 1. Kill switch
+# machine_flags sell_at_cost=false restores the lead-the-touch walk.
+SCALP_SELL_AT_COST = True
 # slug → monotonic time of the last SIZE event (fill / dead order /
 # position change) seen on the private socket. The lap publishes a
 # snapshot only from a venue read taken AFTER this — found Sep 6 2026:
@@ -25147,7 +25155,10 @@ def _snipe_target(snap: dict, bid_c, ask_c, comp_ask_c=None):
     comp = comp_ask_c if comp_ask_c is not None else best_ask
     if comp is not None and abs(comp - our) < 0.26 and comp_ask_c is None:
         return "self"                    # the frame's touch is us — need depth
-    tgt = max(floor_c, _grid_up(comp, tick) - tick) if comp is not None else floor_c
+    if snap.get("at_cost"):
+        tgt = floor_c                    # sell at cost, immediately (Sep 9 2026)
+    else:
+        tgt = max(floor_c, _grid_up(comp, tick) - tick) if comp is not None else floor_c
     if best_bid is not None and tgt <= best_bid:
         tgt = _grid_dn(best_bid, tick) + tick
     tgt = min(99.0, _grid_up(tgt, tick))
@@ -25326,8 +25337,11 @@ def _fast_ask_one(sb, client, slug: str, buy_intent: str) -> None:
             bk = _invert_book(bk)
         best_ask = (bk or {}).get("best_ask")
         best_bid = (bk or {}).get("best_bid")
-        tgt = (max(floor_c, _grid_up(best_ask, tick) - tick)
-               if best_ask is not None else floor_c)
+        if SCALP_SELL_AT_COST and _machine_flag("sell_at_cost"):
+            tgt = floor_c                        # sell at cost, immediately
+        else:
+            tgt = (max(floor_c, _grid_up(best_ask, tick) - tick)
+                   if best_ask is not None else floor_c)
         if best_bid is not None and tgt <= best_bid:
             tgt = _grid_dn(best_bid, tick) + tick
         tgt = min(99.0, _grid_up(tgt, tick))
@@ -25480,6 +25494,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     # Remote kill (Sep 1 2026): flag off ⇒ shadow mode, exactly like
     # SCALP_ENABLED=False — flippable via run_sql with no deploy/box.
     scalp_live = SCALP_ENABLED and _machine_flag("scalp_enabled")
+    _at_cost = SCALP_SELL_AT_COST and _machine_flag("sell_at_cost")
     # ── THE MIRROR CLAMP (Sep 1 2026 — the maintenance-morning shorts).
     # The venue's position read went STALE through its maintenance
     # restart: the scalp's ask FILLED, the next lap still read the
@@ -25830,6 +25845,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 SCALP_SNAP[slug] = {"oid": o0.get("id"), "our_ask": our_ask,
                                     "qty": max(1, int(held + float(o0.get("cum") or 0.0))),
                                     "floor_c": floor_c, "tick": tick,
+                                    "at_cost": _at_cost,
                                     "synth": synth, "intent": sell_intent,
                                     "event_start": r.get("event_start"),
                                     "pick_id": r["id"], "at": _time.monotonic()}
@@ -25919,8 +25935,9 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # higher — post-only above the bid. If it is not there, move it,
         # whichever direction that is. No stepping logic, no special cases.
         # Nobody quoting → cost.
-        tgt = (max(floor_c, _grid_up(comp_ask, tick) - tick)
-               if comp_ask is not None else floor_c)
+        tgt = (floor_c if _at_cost else
+               (max(floor_c, _grid_up(comp_ask, tick) - tick)
+                if comp_ask is not None else floor_c))
         if best_bid is not None and tgt <= best_bid:
             tgt = _grid_dn(best_bid, tick) + tick
         tgt = min(_SCALP_ASK_CEIL_C, _grid_up(tgt, tick))
