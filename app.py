@@ -2879,7 +2879,7 @@ def _cellar_health(sb) -> dict:
                     bad += 1
     except Exception:
         pass
-    # ── OMS-DEAD TRIPWIRE (Sep 9 2026 — the clientfresh miss). The opener
+    # ── OMS-DEAD TRIPWIRE (Sep 9 2026 — the mangled-kwarg miss). The opener
     # lane read green for 2.5 days while its OMS executor threw on its
     # first bet every tick: `oms_err` sat in every tick's detail and no
     # card, check or human read it. A lane whose bet-placing engine
