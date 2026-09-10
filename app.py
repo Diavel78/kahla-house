@@ -24082,6 +24082,46 @@ def _seat_topup_plan(stake, held, our_bid_c, our_ask_c, tick, football,
     return need, peg
 
 
+def _gridiron_seat_legal_now(sb, g, mt, sn, entry_line, now, _cache: dict):
+    """(legal: bool | None, why) for a football spread/total seat under the
+    PLACEMENT rule — the recenter's exact recipe (price the game off the
+    cached ladder, project, build the rule, test this rung). None = could
+    not judge (no cached ladder / no projection) — callers must NOT act.
+    _cache is per-pass, keyed by market id, so a game prices once."""
+    try:
+        mid = g.get("id")
+        if mid not in _LADDER_STRUCT:
+            return None, "uncached"
+        ent = _cache.get(mid)
+        if ent is None:
+            d = _gridiron_price_game(sb, g)
+            gp = _gridiron_proj(sb, g["sport"], g["event_name"])
+            ent = _cache[mid] = (d, gp)
+        d, gp = ent
+        if not d or not gp:
+            return None, "no_model"
+        mg, tt, pm = gp
+        fit = (pm or {}).get("spread_fit" if mt == "spread" else "total_fit") or {}
+        proj = float(fit["alpha"]) + float(fit["beta"]) * (mg if mt == "spread" else tt)
+        mline = (round(-float(proj), 1) if mt == "spread" else round(float(proj), 1))
+        lad = ((((d.get("odds") or {}).get(mt) or {}).get("polymarket") or {})
+               .get("ladder") or [])
+        lq = []
+        for e in lad:
+            q = e.get("quote") or {}
+            if e.get("line") is None or q.get("bid") is None:
+                continue
+            if _gridiron_is_placeholder(q.get("bid"), q.get("ask")):
+                continue
+            lq.append((e.get("side"), e["line"], q.get("bid"), q.get("ask")))
+        rule = _gridiron_line_rule(sb, g, d, pm, mt, mline, proj, lq, now)
+        ln = float(entry_line)
+        rv = (round(ln if sn == "home" else -ln, 1) if mt == "spread" else round(ln, 1))
+        return bool(_gridiron_seat_legal(rule, mt, sn, rv)), "judged"
+    except Exception as e:
+        return None, ("err: " + str(e))[:60]
+
+
 def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     global _SEAT_TOPUP_LAST_TS
     st: dict = {"cands": 0, "placed": 0}
@@ -24109,12 +24149,13 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     try:
         picks = _sb_paged(
             lambda: sb.table("bot_picks")
-            .select("id,event_start,market_type,signal_blob,picked_at")
+            .select("id,event_start,market_type,side,entry_line,market_id,sport,event_name,signal_blob,picked_at")
             .eq("status", "pending").gt("event_start", now.isoformat())
             .order("event_start"), max_pages=3)
     except Exception as e:
         return {"gate": ("picks_err: " + str(e))[:80]}
     buy_slugs = {o.get("slug") for o in orders if "BUY" in (o.get("intent") or "")}
+    _rule_cache: dict = {}
     cands = []
     for p in picks:
         b = p.get("signal_blob") if isinstance(p.get("signal_blob"), dict) else {}
@@ -24179,6 +24220,23 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         if not ok:
             st["skip_rent"] = st.get("skip_rent", 0) + 1
             continue
+        # THE PLACEMENT RULE APPLIES TO A TOP-UP (Sep 10 2026 — WKU +17.5 at
+        # 3¢ on a Georgia −39 line, topped up overnight: "why are we still
+        # continuing to be dumb NOW??"). A football spread/total seat gets
+        # more contracts only if the rung is one the executor would seat
+        # today: line-anchored, inside the tail, on the favorable side of
+        # the bound. Can't judge → don't top up.
+        if slug.startswith(("asc-nfl-", "tsc-nfl-", "asc-cfb-", "tsc-cfb-")) and p.get("market_type") in ("spread", "total"):
+            g = {"id": p.get("market_id"), "sport": p.get("sport"),
+                 "event_name": p.get("event_name"), "event_start": es}
+            legal, jw = _gridiron_seat_legal_now(sb, g, p.get("market_type"), p.get("side"),
+                                                 p.get("entry_line"), now, _rule_cache)
+            if legal is None:
+                st["skip_unjudged"] = st.get("skip_unjudged", 0) + 1
+                continue
+            if not legal:
+                st["skip_illegal"] = st.get("skip_illegal", 0) + 1
+                continue
         q = _ws_quote(slug)
         if q is not None:
             bid_y, ask_y = q
