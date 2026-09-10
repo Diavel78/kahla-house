@@ -24044,6 +24044,8 @@ _SEAT_TOPUP_EVERY_S = 900.0
 _SEAT_TOPUP_LAST_TS = 0.0
 _SEAT_TOPUP_MAX_CREATES = 6
 _SEAT_TOPUP_MAX_READS = 15
+_SEAT_TOPUP_BOOT_GRACE_S = 480.0
+_PROCESS_T0 = _time.monotonic()
 _SEAT_TOPUP_SOURCES = {"gridiron_autobet", "autobet", "ou_trader",
                        "pmm_autolog", "fbprop_autobet"}
 
@@ -24089,6 +24091,12 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         return {"gate": "bets_paused"}
     if _time.time() - _SEAT_TOPUP_LAST_TS < _SEAT_TOPUP_EVERY_S:
         return {"gate": "cadence"}
+    # BOOT GRACE: the first pass after a kick ran inside the boot storm
+    # (mirror seed, ladder reload, props discovery, socket resubscribes)
+    # and every guard re-list came back unreadable — the venue throttles
+    # a cold process. Let the storm pass first.
+    if _time.monotonic() - _PROCESS_T0 < _SEAT_TOPUP_BOOT_GRACE_S:
+        return {"gate": "boot_grace"}
     _SEAT_TOPUP_LAST_TS = _time.time()
     if client is None:
         client = get_client()
@@ -24212,8 +24220,11 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 "BUY" in str((o.get("intent") if isinstance(o, dict) else getattr(o, "intent", "")) or "")
                 and str((o.get("state") if isinstance(o, dict) else getattr(o, "state", "")) or "") in _OPEN_ORDER_STATES
                 for o in _raw)
-        except Exception:
+        except Exception as e:
             st["skip_unreadable"] = st.get("skip_unreadable", 0) + 1
+            if st["skip_unreadable"] <= 2:
+                app.logger.warning("seat topup %s: guard re-list failed: %s: %s",
+                                   slug, type(e).__name__, str(e)[:160])
             continue                         # unreadable → never write blind
         if _has_buy:
             st["skip_has_bid"] = st.get("skip_has_bid", 0) + 1
