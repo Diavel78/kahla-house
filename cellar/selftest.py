@@ -730,6 +730,21 @@ def test_gridiron_join_touch() -> None:
     check("buy sniper without join: competitor bid 44 → 45", _app._snipe_buy_target({**snap, "join": False}, 44.0, 50.0) == 45.0)
 
 
+def test_seat_topup_plan() -> None:
+    """Rob, Sep 9 2026: always 20 combined between held and open. A dust or
+    partial seat re-bids the remainder at the lane's peg; football joins
+    the touch, MLB leads by a tick; caps and the master rule hold."""
+    import app as _app
+    check("dust 0.3 of 20, football, bid 45 → 19 @ 45 (join)", _app._seat_topup_plan(20, 0.3, 45.0, 46.0, 1.0, True, 60.0, 13.0) == (19, 45.0))
+    check("partial 12 of 20, MLB, bid 44/ask 46 → 8 @ 45 (lead)", _app._seat_topup_plan(20, 12.0, 44.0, 46.0, 1.0, False, 60.0, 13.0) == (8, 45.0))
+    check("MLB one-tick book → join", _app._seat_topup_plan(20, 12.0, 44.0, 45.0, 1.0, False, 60.0, 13.0) == (8, 44.0))
+    check("full seat → nothing", _app._seat_topup_plan(20, 19.6, 45.0, 46.0, 1.0, True, 60.0, 13.0)[0] is None)
+    check("football penny stub → virgin, not ours", _app._seat_topup_plan(20, 0.3, 1.0, 51.0, 1.0, True, 60.0, 13.0) == (None, "virgin"))
+    check("over the 60¢ cap → no bid", _app._seat_topup_plan(20, 0.3, 66.0, 67.0, 1.0, True, 60.0, 13.0) == (None, "cap"))
+    check("master rule trims the size: 19 @ 60 = $11.40 ok; 20 @ 65 → 20 (13/0.65=20)", _app._seat_topup_plan(20, 0.0, 60.0, 61.0, 1.0, True, 60.0, 13.0) == (20, 60.0))
+    check("master rule trims: 20 @ 60.0 on MLB → peg 61 > cap → cap", _app._seat_topup_plan(20, 0.0, 60.0, 62.0, 1.0, False, 60.0, 13.0) == (None, "cap"))
+
+
 def test_pin_line_center() -> None:
     """Pinnacle's line in rung units from the cached slate shape (the real
     Northern Arizona @ Arizona event, Sep 5 2026)."""
@@ -947,7 +962,7 @@ def main() -> int:
               test_ws_quote_presence, test_ws_mkts_request_budget,
               test_gridiron_value_window, test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
-              test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch,
+              test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan,
               test_lane_covers_its_documented_engines,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()

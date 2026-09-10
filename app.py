@@ -24022,6 +24022,236 @@ _RECON_MAX_CLEARS = 12         # per pass — bounded; the next pass continues
 _RECON_START_GUARD_MIN = 30.0  # never touch a pick this close to kickoff
 
 
+# ═══════════ SEAT TOP-UP — "always 20 combined" (Rob, Sep 9 2026) ═══════════
+# "If we hold .02 shares, we are positioning for more, correct? Always
+# trying to get to 20 combined between held and open?" It was not: the
+# venue nibbles a bid for 0.01-0.3 shares, the pick latches `filled`, the
+# seat is now a dust lot with no bid and no ask (dust never gets one) and
+# nothing ever re-bids the remainder. Measured Sep 9 night: 81 seats held
+# by dust with no bid, 59 partial with no bid — 117 football seats 1,643
+# contracts short of stake. "OMG… THAT'S the issue… we hold .3 shares, so
+# we just let it go." This pass rides the repeg lease every
+# _SEAT_TOPUP_EVERY_S: a machine rent-lane pick holding LESS than its
+# stake with no resting bid gets a post-only bid for the remainder at the
+# lane's peg (football joins the touch; MLB touch + 1), under the same
+# fences as a fresh seat (rent per market, 60¢ cap, $13 master rule,
+# pre-game, bets_paused). A slug we have SOLD on since the pick was
+# placed is a rinse — the rebuy flow owns it, never this. The old reason
+# not to top up a partial (a second fill corrupts entry_price) died with
+# the lot ledger as the cost arbiter. Verified on the re-listed book: a
+# create that returns is a claim. Kill switch machine_flags seat_topup.
+_SEAT_TOPUP_EVERY_S = 900.0
+_SEAT_TOPUP_LAST_TS = 0.0
+_SEAT_TOPUP_MAX_CREATES = 6
+_SEAT_TOPUP_SOURCES = {"gridiron_autobet", "autobet", "ou_trader",
+                       "pmm_autolog", "fbprop_autobet"}
+
+
+def _seat_topup_plan(stake, held, our_bid_c, our_ask_c, tick, football,
+                     cap_c, master_usd):
+    """(need, peg_c) or (None, reason). Pure — selftested."""
+    try:
+        stake = float(stake or 0); held = max(0.0, float(held or 0))
+    except (TypeError, ValueError):
+        return None, "bad_stake"
+    need = int(stake - held + 1e-9)
+    if stake <= 0 or need < 1:
+        return None, "full"
+    if our_bid_c is None or our_bid_c <= 0:
+        return None, "no_book"
+    tick = float(tick or 1.0)
+    if football and our_bid_c <= _GRIDIRON_PLACEHOLDER_BID_C:
+        return None, "virgin"                    # the seeder's job, not ours
+    if football:
+        peg = _grid_dn(our_bid_c, tick)          # JOIN the touch (Sep 9)
+    else:
+        peg = _grid_dn(our_bid_c, tick) + tick
+        if our_ask_c is not None and peg >= our_ask_c:
+            peg = _grid_dn(our_bid_c, tick)      # one-tick book → join
+    if peg <= 0:
+        return None, "no_book"
+    if peg > cap_c + 1e-9:
+        return None, "cap"
+    if need * peg / 100.0 > master_usd:
+        need = int(master_usd * 100.0 / peg)
+        if need < 1:
+            return None, "master"
+    return need, peg
+
+
+def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
+    global _SEAT_TOPUP_LAST_TS
+    st: dict = {"cands": 0, "placed": 0}
+    if not _machine_flag("seat_topup", True):
+        return {"gate": "off"}
+    if _machine_flag("bets_paused", False):
+        return {"gate": "bets_paused"}
+    if _time.time() - _SEAT_TOPUP_LAST_TS < _SEAT_TOPUP_EVERY_S:
+        return {"gate": "cadence"}
+    _SEAT_TOPUP_LAST_TS = _time.time()
+    if client is None:
+        client = get_client()
+    if orders is None:
+        orders = _pmm_open_orders_raw(client, fresh=True)
+    if positions is None:
+        positions = _pmm_positions_raw(client, fresh=True)
+    if orders is None or positions is None:
+        return {"gate": "venue_read"}
+    try:
+        picks = _sb_paged(
+            lambda: sb.table("bot_picks")
+            .select("id,event_start,market_type,signal_blob,picked_at")
+            .eq("status", "pending").gt("event_start", now.isoformat())
+            .order("event_start"), max_pages=3)
+    except Exception as e:
+        return {"gate": ("picks_err: " + str(e))[:80]}
+    buy_slugs = {o.get("slug") for o in orders if "BUY" in (o.get("intent") or "")}
+    cands = []
+    for p in picks:
+        b = p.get("signal_blob") if isinstance(p.get("signal_blob"), dict) else {}
+        slug = (b or {}).get("pmm_slug")
+        if (not slug or not b.get("order_id") or b.get("source") not in _SEAT_TOPUP_SOURCES
+                or (p.get("market_type") or "") == "nrfi" or slug in buy_slugs):
+            continue
+        synth = bool(b.get("pmm_synthetic"))
+        net = float((positions.get(slug) or {}).get("net") or 0.0)
+        held = (-net) if synth else net
+        if held < 0.01:
+            continue                     # nothing held: the reconcile's case, not a top-up
+        stake = float(b.get("contracts") or 0)
+        if held >= stake - 0.5:
+            continue
+        cands.append((p, b, slug, synth, held, stake))
+    st["cands"] = len(cands)
+    if not cands:
+        return st
+    # RINSE GUARD: any SELL on the slug since the pick was placed → the
+    # rebuy flow owns it (60-min no-rebuy, dayof_wait) — skip.
+    sold_since: set = set()
+    try:
+        slugs = list({c[2] for c in cands})
+        earliest = min(str(c[0].get("picked_at") or now.isoformat()) for c in cands)
+        rows = _sb_paged(
+            lambda: sb.table("poly_activities").select("slug,at,payload->trade->>realizedPnl")
+            .eq("type", "ACTIVITY_TYPE_TRADE").in_("slug", slugs[:200])
+            .gte("at", earliest).order("at"), max_pages=5)
+        by_slug: dict = {}
+        for r in rows:
+            if r.get("realizedPnl") is not None:
+                by_slug.setdefault(r.get("slug"), []).append(str(r.get("at")))
+        for p, b, slug, synth, held, stake in cands:
+            pa = str(p.get("picked_at") or "")
+            if any(a > pa for a in by_slug.get(slug, [])):
+                sold_since.add(slug)
+    except Exception:
+        pass                             # unreadable → no guard → still gated by rent/caps
+    placed = 0
+    for p, b, slug, synth, held, stake in cands:
+        if placed >= _SEAT_TOPUP_MAX_CREATES:
+            st["gate"] = "max_creates"
+            break
+        if slug in sold_since:
+            st["skip_rinse"] = st.get("skip_rinse", 0) + 1
+            continue
+        es = p.get("event_start")
+        try:
+            dt = datetime.fromisoformat(str(es).replace("Z", "+00:00"))
+            if (dt - now).total_seconds() < 600:
+                st["skip_late"] = st.get("skip_late", 0) + 1
+                continue
+            gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            continue
+        ok, why = _rent_ok(slug, es, now, sb)
+        if not ok:
+            st["skip_rent"] = st.get("skip_rent", 0) + 1
+            continue
+        q = _ws_quote(slug)
+        if q is not None:
+            bid_y, ask_y = q
+        else:
+            bk = _pmm_book(client, slug) or {}
+            bid_y, ask_y = bk.get("best_bid"), bk.get("best_ask")
+        if synth:
+            our_bid = (100.0 - ask_y) if ask_y is not None else None
+            our_ask = (100.0 - bid_y) if bid_y is not None else None
+        else:
+            our_bid, our_ask = bid_y, ask_y
+        try:
+            tick = _pmm_tick_c(client, slug)
+        except Exception:
+            tick = 1.0
+        football = slug.startswith(("asc-nfl-", "tsc-nfl-", "asc-cfb-", "tsc-cfb-"))
+        need, peg = _seat_topup_plan(stake, held, our_bid, our_ask, tick, football,
+                                     _GRIDIRON_MAX_ENTRY_C, _REPEG_MAX_COST_USD)
+        if need is None:
+            st["skip_" + str(peg)] = st.get("skip_" + str(peg), 0) + 1
+            continue
+        canon = (100.0 - peg) / 100.0 if synth else peg / 100.0
+        intent = "ORDER_INTENT_BUY_SHORT" if synth else "ORDER_INTENT_BUY_LONG"
+        # ONE ORDER PER SLUG: the lap's order snapshot can trail a seat the
+        # executor placed seconds ago — re-list this slug fresh before
+        # writing (the Aug 16 duplicate lesson).
+        try:
+            _resp = client.orders.list({"slugs": [slug]})
+            _raw = (_resp.get("orders") if isinstance(_resp, dict)
+                    else getattr(_resp, "orders", [])) or []
+            _has_buy = any(
+                "BUY" in str((o.get("intent") if isinstance(o, dict) else getattr(o, "intent", "")) or "")
+                and str((o.get("state") if isinstance(o, dict) else getattr(o, "state", "")) or "") in _OPEN_ORDER_STATES
+                for o in _raw)
+        except Exception:
+            _has_buy = True                  # unreadable → never write blind
+        if _has_buy:
+            st["skip_has_bid"] = st.get("skip_has_bid", 0) + 1
+            continue
+        params = {"marketSlug": slug, "intent": intent,
+                  "type": "ORDER_TYPE_LIMIT",
+                  "price": {"value": f"{canon:.3f}", "currency": "USD"},
+                  "quantity": int(need),
+                  "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
+                  "participateDontInitiate": True,
+                  "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
+        try:
+            cr = client.orders.create(params)
+            new_oid = (cr.get("id") if isinstance(cr, dict) else getattr(cr, "id", None))
+        except Exception as e:
+            st["create_err"] = st.get("create_err", 0) + 1
+            app.logger.warning("seat topup %s create failed: %s", slug, e)
+            continue
+        _time.sleep(0.8)
+        live = False
+        try:
+            resp = client.orders.list({"slugs": [slug]})
+            raw = (resp.get("orders") if isinstance(resp, dict)
+                   else getattr(resp, "orders", [])) or []
+            for o in raw:
+                g = (lambda k: o.get(k) if isinstance(o, dict) else getattr(o, k, None))
+                if g("id") == new_oid and str(g("state") or "") in _OPEN_ORDER_STATES:
+                    live = True
+        except Exception:
+            pass
+        if not live:
+            st["unverified"] = st.get("unverified", 0) + 1
+            app.logger.warning("seat topup %s: create returned %s but the book does not show it live",
+                               slug, new_oid)
+            continue
+        placed += 1
+        try:
+            nb = dict(b)
+            nb["order_id"] = new_oid
+            nb["topup"] = (nb.get("topup") if isinstance(nb.get("topup"), list) else [])[-5:] + [
+                {"at": now.isoformat(), "qty": int(need), "price_c": peg,
+                 "held": round(held, 2), "oid": new_oid}]
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", p["id"]).execute()
+        except Exception as e:
+            app.logger.warning("seat topup %s: order %s live but pick stamp failed: %s", slug, new_oid, e)
+        app.logger.info("SEAT TOPUP %s: +%d @ %.1f¢ (held %.2f of %g)", slug, need, peg, held, stake)
+        _time.sleep(0.5)
+    st["placed"] = placed
+    return st
+
+
 def _reconcile_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     """Order-book truth per pending machine pick. Three verdicts:
     - open order on (slug, our intent) → healthy (clears any miss stamp);
@@ -27194,6 +27424,15 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
         except Exception:
             pass
         res["t_recon"] = round(_time.time() - _tq, 1)
+        _tq = _time.time()
+        # SEAT TOP-UP (Sep 9 2026): "always 20 combined" — its own try.
+        try:
+            res["seat_topup"] = _seat_topup_tick(sb, now, client=lap_client,
+                                                 orders=lap_orders,
+                                                 positions=lap_positions)
+        except Exception as e:
+            res["seat_topup"] = {"gate": ("err: " + str(e))[:80]}
+        res["t_topup"] = round(_time.time() - _tq, 1)
         _tq = _time.time()
         # THE RENT CULL rides the same lease (Sep 5 2026): hourly, after
         # the reconcile, its own try — a cull fault can never cost a chase.

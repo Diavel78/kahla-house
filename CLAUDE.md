@@ -1340,6 +1340,7 @@ sport the machine ever adds:
   cash in/out. ⚠ The day card's RESOLUTION legs still use
   `beforePosition.cost` (the blend) — a resolved round-tripped slug reads
   wrong there until that leg moves onto the lot ledger too.
+- **ALWAYS 20 COMBINED — THE SEAT TOP-UP (Rob, Sep 9 2026: "if we hold .02 shares, we are positioning for more, correct?… OMG, THAT'S the issue… we hold .3 shares, so we just let it go").** The venue nibbles a bid for 0.01-0.3 shares, the pick latches `filled`, and the seat became a dust lot with no bid and no ask — 81 dust seats + 59 partials with no bid, 117 football seats 1,643 contracts short, the night it was found. `_seat_topup_tick` rides the repeg lease every 15 min: a machine rent-lane pick holding less than its stake with no resting bid gets a post-only bid for the remainder at the lane's peg (football joins the touch, MLB touch + 1; `_seat_topup_plan` is the pure, selftested planner), same fences as a fresh seat (per-market rent, 60¢ cap, $13 master rule, pre-game, `bets_paused`), slug re-listed fresh before the write (one order per slug), create verified on the book. A slug SOLD on since the pick was placed is a rinse — the rebuy flow owns it. Kill switch `machine_flags seat_topup`. The old "never top up a partial" rule (entry_price integrity) is dead: the lot ledger is the cost.
 - **EVERYTHING BUT NRFI SELLS (Rob, Sep 6 2026, reading 155 positions
   vs 128 sells on the venue: "The only thing that lives is the no run
   first inning. Everything else fucking gets sold").** The scalp's
