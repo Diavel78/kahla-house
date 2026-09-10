@@ -703,10 +703,13 @@ def test_snipe_target_at_cost() -> None:
     ask is the FLOOR, not touch − 1; one tick over the bid when the bid is
     at or above cost. Never under cost."""
     import app as _app
-    snap = {"our_ask": 96.0, "floor_c": 58.5, "tick": 1.0, "synth": False, "qty": 4, "at_cost": True}
-    check("at cost: competitor at 88 → the floor (59)", _app._snipe_target(snap, 50.0, 88.0) == 59.0)
-    check("at cost: bid 60 sits over cost → 61, never crossing", _app._snipe_target(snap, 60.0, 62.0) == 61.0)
-    check("at cost: already at floor → None", _app._snipe_target({**snap, "our_ask": 59.0}, 50.0, 88.0) is None)
+    snap = {"our_ask": 96.0, "floor_c": 59.0, "tick": 1.0, "synth": False, "qty": 4, "at_cost": True}
+    check("cost+1 when that leads the book: competitor at 88 → 60", _app._snipe_target(snap, 50.0, 88.0) == 60.0)
+    check("competitor already at 60 → we would not be the touch → cost (59)", _app._snipe_target(snap, 50.0, 60.0) == 59.0)
+    check("competitor under cost → cost, never under", _app._snipe_target(snap, 50.0, 55.0) == 59.0)
+    check("bid 60 sits over cost → 61, never crossing", _app._snipe_target(snap, 60.0, 62.0) == 61.0)
+    check("already at cost+1 with the book clear → None", _app._snipe_target({**snap, "our_ask": 60.0}, 50.0, 88.0) is None)
+    check("helper: no competitor → cost+1", _app._cost_plus_target(59.0, None, 1.0) == 60.0)
     check("flag off keeps touch − 1", _app._snipe_target({**snap, "at_cost": False}, 83.0, 88.0) == 87.0)
 
 

@@ -25124,6 +25124,17 @@ SCALP_SNAP: dict = {}
 # above the bid when the bid is at or over cost. Not touch − 1. Kill switch
 # machine_flags sell_at_cost=false restores the lead-the-touch walk.
 SCALP_SELL_AT_COST = True
+
+
+def _cost_plus_target(floor_c: float, comp_ask_c, tick: float) -> float:
+    """Rob, Sep 9 2026 (refined): "sell at our cost + 1 cent if that puts us
+    at the touch. If it doesn't, sell at cost." cost+1 tick is the ask when
+    no one is offering at or below it (we lead the book alone); otherwise
+    the ask is the floor itself. Never under cost either way."""
+    lead = _grid_up(floor_c + tick, tick)
+    if comp_ask_c is None or float(comp_ask_c) > lead + 0.26:
+        return lead
+    return floor_c
 # slug → monotonic time of the last SIZE event (fill / dead order /
 # position change) seen on the private socket. The lap publishes a
 # snapshot only from a venue read taken AFTER this — found Sep 6 2026:
@@ -25156,7 +25167,7 @@ def _snipe_target(snap: dict, bid_c, ask_c, comp_ask_c=None):
     if comp is not None and abs(comp - our) < 0.26 and comp_ask_c is None:
         return "self"                    # the frame's touch is us — need depth
     if snap.get("at_cost"):
-        tgt = floor_c                    # sell at cost, immediately (Sep 9 2026)
+        tgt = _cost_plus_target(floor_c, comp, tick)   # cost+1 if that is the touch, else cost
     else:
         tgt = max(floor_c, _grid_up(comp, tick) - tick) if comp is not None else floor_c
     if best_bid is not None and tgt <= best_bid:
@@ -25338,7 +25349,7 @@ def _fast_ask_one(sb, client, slug: str, buy_intent: str) -> None:
         best_ask = (bk or {}).get("best_ask")
         best_bid = (bk or {}).get("best_bid")
         if SCALP_SELL_AT_COST and _machine_flag("sell_at_cost"):
-            tgt = floor_c                        # sell at cost, immediately
+            tgt = _cost_plus_target(floor_c, best_ask, tick)
         else:
             tgt = (max(floor_c, _grid_up(best_ask, tick) - tick)
                    if best_ask is not None else floor_c)
@@ -25935,7 +25946,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # higher — post-only above the bid. If it is not there, move it,
         # whichever direction that is. No stepping logic, no special cases.
         # Nobody quoting → cost.
-        tgt = (floor_c if _at_cost else
+        tgt = (_cost_plus_target(floor_c, comp_ask, tick) if _at_cost else
                (max(floor_c, _grid_up(comp_ask, tick) - tick)
                 if comp_ask is not None else floor_c))
         if best_bid is not None and tgt <= best_bid:

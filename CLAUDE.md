@@ -1253,7 +1253,7 @@ sport the machine ever adds:
   pass and asking the venue's per-market rent answer when October slates
   post, never assuming it. Football = spreads + totals (live). NBA =
   probably spreads, decided at the season.
-- **SUPERSEDED Sep 9 2026 — THE ASK IS COST (Rob: "get back to holding lines, not positions. All positions bought, sell at cost or 1 cent higher, immediately"):** `SCALP_SELL_AT_COST` — lap, sniper and fast ask all rest the FLOOR (cost gridded up one tick; one tick over the bid when the bid is at or above cost), never touch − 1. Why: 207 of 217 executor seats were filled football lots earning nothing on either side (a football rung's ask side never reaches target size — 173 such markets earned $1.88 over Sep 7-8), and rent lives on the bid. Kill switch `machine_flags sell_at_cost=false` restores the paragraph below.
+- **SUPERSEDED Sep 9 2026 — THE ASK IS COST (Rob: "get back to holding lines, not positions. All positions bought, sell at cost or 1 cent higher, immediately"):** `SCALP_SELL_AT_COST` — lap, sniper and fast ask rest cost + 1 tick when that alone leads the book, else the floor (cost); one tick over the bid when the bid is at or above cost; never touch − 1, never under cost. Why: 207 of 217 executor seats were filled football lots earning nothing on either side (a football rung's ask side never reaches target size — 173 such markets earned $1.88 over Sep 7-8), and rent lives on the bid. Kill switch `machine_flags sell_at_cost=false` restores the paragraph below.
 - **THE ASK: TOUCH OR COST, WHICHEVER IS HIGHER (Rob, Sep 6 2026, after
   three screenshots in an hour — Phillies 96.5¢ and Guardians 99¢ asks
   through LIVE games, a Nationals ask 19¢ over cost: "if I own it for 50
