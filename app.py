@@ -8285,9 +8285,9 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
         if client is None:
             client = get_client()
         if orders is None:
-            orders = _pmm_open_orders_raw(clientfresh=True)
+            orders = _pmm_open_orders_raw(client, fresh=True)
         if positions is None:
-            positions = _pmm_positions_raw(clientfresh=True)
+            positions = _pmm_positions_raw(client, fresh=True)
     except Exception:
         return out
     # Intended bets keyed (slug, synthetic) → our-side entry probability (0-1).
@@ -12004,7 +12004,7 @@ def api_poly_topup():
             pass            # a just-filled order errors on cancel — the
                             # position re-read below decides, not the exc
         _time.sleep(0.8)
-        pos2 = _pmm_positions_raw(clientfresh=True)
+        pos2 = _pmm_positions_raw(client, fresh=True)
         if pos2 is None:
             act["state"] = "unverified"     # never re-place blind
             done.append(act)
@@ -23256,7 +23256,7 @@ def _repeg_verify_or_recreate(client, slug, intent, canon, qty, orig_tif,
         return "unknown"
     # No open order — filled or killed? The position decides (recreating a
     # FILLED bet would double it).
-    positions = _pmm_positions_raw(clientfresh=True)
+    positions = _pmm_positions_raw(client, fresh=True)
     if positions is None:
         return "unknown"                 # can't distinguish — don't recreate
     pos = positions.get(slug) or {}
@@ -24039,8 +24039,8 @@ def _reconcile_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 client = get_client()
             except Exception:
                 return {"gate": "no_client"}
-        orders = _pmm_open_orders_raw(clientfresh=True)
-        positions = _pmm_positions_raw(clientfresh=True)
+        orders = _pmm_open_orders_raw(client, fresh=True)
+        positions = _pmm_positions_raw(client, fresh=True)
     if orders is None or positions is None:
         return {"gate": "venue_read"}      # default-deny: dark venue = no-op
                                            # (and the slot is NOT consumed —
@@ -24108,7 +24108,7 @@ def _reconcile_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # canceled orders are gone from the venue but still in THIS pass's
         # stale snapshot — re-read so the zombie logic below can't act on
         # a fiction; a failed re-read ends the pass (default-deny).
-        orders = _pmm_open_orders_raw(clientfresh=True)
+        orders = _pmm_open_orders_raw(client, fresh=True)
         if orders is None:
             return res
     open_keys = {(o["slug"], o["intent"]) for o in orders
@@ -24389,8 +24389,8 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
                 client = get_client()
             except Exception:
                 return {"gate": "no_client"}
-        orders = _pmm_open_orders_raw(clientfresh=True)
-        positions = _pmm_positions_raw(clientfresh=True)
+        orders = _pmm_open_orders_raw(client, fresh=True)
+        positions = _pmm_positions_raw(client, fresh=True)
     if orders is None or positions is None:
         return {"gate": "venue_read"}
     if not orders and len(cands) > 5:
@@ -24514,8 +24514,8 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
             if not ok:
                 continue
             _time.sleep(0.5)
-            _chk = _pmm_open_orders_raw(clientfresh=True)
-            _pos = _pmm_positions_raw(clientfresh=True)
+            _chk = _pmm_open_orders_raw(client, fresh=True)
+            _pos = _pmm_positions_raw(client, fresh=True)
             if (_chk is None or _pos is None or _open_buys(_chk, sl)
                     or (_pos.get(sl) or {}).get("qty", 0)):
                 res["unconfirmed"] += 1     # still resting, or raced a fill → pick stays
@@ -25585,7 +25585,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             if _h5 >= 1.0 and _mirror_clamp(_s5, _h5) < 1.0:
                 _dis.append(_s5)
         if _dis:
-            _p2 = _pmm_positions_raw(clientfresh=True)
+            _p2 = _pmm_positions_raw(client, fresh=True)
             if _p2 is not None:
                 for _s5 in _dis:
                     if float((_p2.get(_s5) or {}).get("qty") or 0.0) >= 1.0:
@@ -25969,7 +25969,7 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         except Exception:
             continue
         _time.sleep(0.8)
-        pos2 = _pmm_positions_raw(clientfresh=True)
+        pos2 = _pmm_positions_raw(client, fresh=True)
         if pos2 is None:
             _send_fill_telegram(
                 f"🚨 SCALP LIMBO — {r.get('event_name')}: ask canceled, "

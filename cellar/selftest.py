@@ -683,6 +683,21 @@ def test_lot_ledger_floor() -> None:
           abs(lots2["s"]["cost"] / lots2["s"]["qty"] - 0.392) < 1e-6)
 
 
+def test_no_mangled_fresh_kwarg() -> None:
+    """Sep 9 2026: a regex patch turned `_pmm_positions_raw(client, fresh=True)`
+    into `(clientfresh=True)` at the OMS executor's verify step — every
+    football create crashed AFTER the order was placed (ghost orders, no
+    pick) and the OMS pass died on its first bet for two days (217 ticks).
+    The venue-read helpers must never be called with a mangled kwarg."""
+    import inspect, re
+    import app as _app
+    src = inspect.getsource(_app)
+    check("no `clientfresh=` anywhere in app.py", "clientfresh" not in src)
+    for fn in (_app._pmm_positions_raw, _app._pmm_open_orders_raw):
+        params = inspect.signature(fn).parameters
+        check(f"{fn.__name__} takes (client, fresh)", list(params)[:2] == ["client", "fresh"])
+
+
 def test_pin_line_center() -> None:
     """Pinnacle's line in rung units from the cached slate shape (the real
     Northern Arizona @ Arizona event, Sep 5 2026)."""
@@ -900,7 +915,7 @@ def main() -> int:
               test_ws_quote_presence, test_ws_mkts_request_budget,
               test_gridiron_value_window, test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
-              test_entry_sync_guard, test_lot_ledger_floor,
+              test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg,
               test_lane_covers_its_documented_engines,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
