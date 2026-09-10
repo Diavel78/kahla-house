@@ -710,6 +710,9 @@ def test_snipe_target_at_cost() -> None:
     check("bid 60 sits over cost → 61, never crossing", _app._snipe_target(snap, 60.0, 62.0) == 61.0)
     check("already at cost+1 with the book clear → None", _app._snipe_target({**snap, "our_ask": 60.0}, 50.0, 88.0) is None)
     check("helper: no competitor → cost+1", _app._cost_plus_target(59.0, None, 1.0) == 60.0)
+    check("sniper never steps UP to cost+1 on its own (lap's call)", _app._snipe_target({**snap, "our_ask": 59.0}, 50.0, 88.0) is None)
+    check("sniper still steps DOWN to cost", _app._snipe_target({**snap, "our_ask": 70.0}, 50.0, 60.0) == 59.0)
+    check("sniper still follows a bid over cost UP", _app._snipe_target({**snap, "our_ask": 59.0}, 60.0, 62.0) == 61.0)
     check("flag off keeps touch − 1", _app._snipe_target({**snap, "at_cost": False}, 83.0, 88.0) == 87.0)
 
 

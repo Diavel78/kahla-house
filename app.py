@@ -25170,10 +25170,19 @@ def _snipe_target(snap: dict, bid_c, ask_c, comp_ask_c=None):
         tgt = _cost_plus_target(floor_c, comp, tick)   # cost+1 if that is the touch, else cost
     else:
         tgt = max(floor_c, _grid_up(comp, tick) - tick) if comp is not None else floor_c
-    if best_bid is not None and tgt <= best_bid:
+    bid_forced = best_bid is not None and tgt <= best_bid
+    if bid_forced:
         tgt = _grid_dn(best_bid, tick) + tick
     tgt = min(99.0, _grid_up(tgt, tick))
-    return None if abs(tgt - our) <= 0.26 else tgt
+    if abs(tgt - our) <= 0.26:
+        return None
+    # at-cost mode: the sniper moves DOWN (to cost) or where the bid forces
+    # it UP; the one-tick step up to cost+1 is the lap's call off a REST
+    # read, never a frame's (the depth conn's view of "is that level ours"
+    # lagged and the two arms flapped the ask every ten seconds).
+    if snap.get("at_cost") and tgt > our and not bid_forced:
+        return None
+    return tgt
 
 
 def _scalp_snipe_feed(slug: str) -> None:
@@ -25987,6 +25996,26 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         if tgt is None or tgt < floor_c - 0.26:
             res["skip_no_move"] = res.get("skip_no_move", 0) + 1
             continue                     # nothing to do this pass
+        # ANTI-FLAP (Sep 9 2026): the lap and the sniper read the touch
+        # from different sources (REST vs the depth conn) and disagreed by
+        # one tick on whether the level at cost was ours alone — 55→56→55→56
+        # every ten seconds, eight amends in a minute on one prop. An UP
+        # move of one tick, back to a price this pick walked DOWN from
+        # inside the last 120s, waits; the next lap re-reads and decides.
+        if (our_ask is not None and tgt > our_ask + 0.26
+                and tgt <= our_ask + tick + 0.26):
+            _tr = b.get("scalp") if isinstance(b.get("scalp"), list) else []
+            _last = _tr[-1] if _tr else {}
+            try:
+                _age = (now - datetime.fromisoformat(
+                    str(_last.get("at")).replace("Z", "+00:00"))).total_seconds()
+            except Exception:
+                _age = 1e9
+            if (_age < 120 and _last.get("from_c") is not None
+                    and abs(float(_last["from_c"]) - tgt) < 0.26
+                    and abs(float(_last.get("ask_c") or -1) - our_ask) < 0.26):
+                res["skip_flap"] = res.get("skip_flap", 0) + 1
+                continue
         if not scalp_live:
             _scalp_shadow(sb, r, b, now, tgt, best_bid, comp_ask, held, res)
             continue
