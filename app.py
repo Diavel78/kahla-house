@@ -24225,6 +24225,9 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             if st["skip_unreadable"] <= 2:
                 app.logger.warning("seat topup %s: guard re-list failed: %s: %s",
                                    slug, type(e).__name__, str(e)[:160])
+            if "RateLimit" in type(e).__name__ or "1015" in str(e):
+                st["gate"] = "rate_limited"     # the venue is throttling the box — stop the pass
+                break
             continue                         # unreadable → never write blind
         if _has_buy:
             st["skip_has_bid"] = st.get("skip_has_bid", 0) + 1
@@ -24274,7 +24277,7 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         except Exception as e:
             app.logger.warning("seat topup %s: order %s live but pick stamp failed: %s", slug, new_oid, e)
         app.logger.info("SEAT TOPUP %s: +%d @ %.1f¢ (held %.2f of %g)", slug, need, peg, held, stake)
-        _time.sleep(0.5)
+        _time.sleep(2.0)                     # spread the writes — the venue throttles bursts
     st["placed"] = placed
     return st
 
