@@ -24792,11 +24792,21 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
         live = []
         for p in picks:
             sl = p["signal_blob"]["pmm_slug"]
-            if (positions.get(sl) or {}).get("qty", 0):
-                res["filled"] += 1
-                continue
+            _q0 = float((positions.get(sl) or {}).get("qty", 0) or 0)
             ob = _open_buys(orders, sl)
+            if _q0 >= 1.0:
+                res["filled"] += 1       # a real lot rides
+                continue
             if not ob:
+                # DUST SEAT (Sep 10 2026 — the WKU +17.5 shape): under one
+                # share held, no bid. Judge it: an illegal dust seat is
+                # VACATED (pick archived, executor row back to pending) so
+                # the game-type re-seats on the legal rung. Nothing held at
+                # all is the reconcile's case.
+                if 0.0 < _q0 < 1.0:
+                    res["dust_seats"] = res.get("dust_seats", 0) + 1
+                    live.append((p, sl, []))
+                    continue
                 res["no_order"] += 1     # the reconcile's case, not ours
                 continue
             live.append((p, sl, ob))
@@ -24845,6 +24855,35 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
             if _gridiron_seat_legal(rule, mt, sn, rv):
                 continue
             res["illegal"] += 1
+            if not ob:                   # dust seat, no bid → VACATE, no cancel needed
+                _pos = _pmm_positions_raw(client, fresh=True)
+                _chk = _pmm_open_orders_raw(client, fresh=True)
+                if (_pos is None or _chk is None or _open_buys(_chk, sl)
+                        or float((_pos.get(sl) or {}).get("qty", 0) or 0) >= 1.0):
+                    res["unconfirmed"] += 1
+                    continue
+                try:
+                    (sb.table("reconcile_bak")
+                     .insert({"pick_id": p["id"], "reason": "recenter_vacate",
+                              "row": dict(p, recenter={"center": rule["center"],
+                                                       "center_src": rule["center_src"],
+                                                       "bound": (rule.get("bounds") or {}).get(sn),
+                                                       "was_rv": rv, "dust": True})})
+                     .execute())
+                    sb.table("bot_picks").delete().eq("id", p["id"]).execute()
+                    (sb.table("desired_orders")
+                     .update({"state": "pending",
+                              "detail": f"vacate:dust:{rule['center_src']}:{rv}",
+                              "next_try_at": nowiso, "updated_at": nowiso})
+                     .eq("market_id", mid).eq("market_type", mt)
+                     .eq("lane", "rentlist").execute())
+                except Exception:
+                    res["failed"] += 1
+                    continue
+                res["vacated"] = res.get("vacated", 0) + 1
+                moves.append(f"{(p.get('event_name') or '')[:26]} {mt} {sn} "
+                             f"{rv:+g} VACATED dust seat ({rule['center_src']} {rule['center']:+g})")
+                continue
             # a PAYING legal rung on the SAME side to move to — else stay
             target = None
             for e in lad:
