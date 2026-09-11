@@ -6066,8 +6066,47 @@ def _vsin_num(s: str):
 
 
 # VSiN sport → ?view= code (extend as we add sports). MLB confirmed live.
-_VSIN_VIEW = {"mlb": "mlb", "nba": "nba", "nhl": "nhl",
-              "nfl": "nfl", "ncaaf": "cfb", "ncaab": "cbb"}
+# VSiN MOVED EACH SPORT ONTO ITS OWN PAGE (found Sep 10 2026): the old
+# `/{book}/betting-splits/?view={sport}` form now IGNORES `view` and serves
+# the default page (today's MLB) for every sport — zero football splits
+# were captured from Sep 5 on, NFL never, and the lane went blind every
+# evening once today's slate started. `?bookid=` and `?source=` are
+# ignored too (the page's Circa toggle is client-side). So: DraftKings
+# reads `/{sport-path}/betting-splits/` (every sport, today + tomorrow);
+# Circa reads the old `/circa/betting-splits/` default page and keeps only
+# the sport that page is showing. Every game carries the date from its
+# section header ("MLB - Friday, Sep 11") — the matcher requires it.
+_VSIN_PATH = {"mlb": "mlb", "nfl": "nfl", "ncaaf": "college-football",
+              "cfb": "college-football", "nba": "nba", "nhl": "nhl",
+              "ncaab": "college-basketball", "cbb": "college-basketball"}
+_VSIN_HDR_SPORT = {"mlb": "MLB", "nfl": "NFL", "ncaaf": "CFB", "cfb": "CFB",
+                   "nba": "NBA", "nhl": "NHL", "ncaab": "CBB", "cbb": "CBB"}
+_VSIN_MON = {m: i for i, m in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct",
+     "nov", "dec"), start=1)}
+
+
+def _vsin_group_header(cell: str, today=None):
+    """('MLB', 'YYYY-MM-DD') from a VSiN section header cell like
+    'MLB - Friday, Sep 11 Sep 11', else (None, None). The year is the one
+    that puts the date nearest today (a January game listed in late
+    December reads as next year)."""
+    m = re.match(r"\s*([A-Za-z]+)\s*-\s*[A-Za-z]+,\s*([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})",
+                 cell or "")
+    if not m or m.group(2).lower() not in _VSIN_MON:
+        return None, None
+    from datetime import date as _date
+    today = today or datetime.now(ZoneInfo("America/New_York")).date()
+    mon, day = _VSIN_MON[m.group(2).lower()], int(m.group(3))
+    best = None
+    for y in (today.year - 1, today.year, today.year + 1):
+        try:
+            d = _date(y, mon, day)
+        except ValueError:
+            continue
+        if best is None or abs((d - today).days) < abs((best - today).days):
+            best = d
+    return m.group(1).upper(), (best.isoformat() if best else None)
 
 
 def _fetch_vsin_splits(sport: str = "mlb", book: str = "draftkings") -> dict:
@@ -6077,13 +6116,18 @@ def _fetch_vsin_splits(sport: str = "mlb", book: str = "draftkings") -> dict:
     slate even behind VSiN's CSS paywall (it only clips visually)."""
     from bs4 import BeautifulSoup as _BS
     import time as _time
-    view = _VSIN_VIEW.get(sport.lower(), sport.lower())
-    cache_key = f"vsin:{book}:{view}"
+    sp = sport.lower()
+    path = _VSIN_PATH.get(sp, sp)
+    want = _VSIN_HDR_SPORT.get(sp)
+    if book == "circa":
+        url = "https://data.vsin.com/circa/betting-splits/"
+    else:
+        url = f"https://data.vsin.com/{path}/betting-splits/"
+    cache_key = f"vsin:{book}:{url}:{want}"
     _now = _time.time()
     _c = _cache.get(cache_key)
     if _c and (_now - _c["ts"]) < 900:        # 15-min cache (slow-moving %s)
         return _c["data"]
-    url = f"https://data.vsin.com/{book}/betting-splits/?view={view}"
     debug = {"url": url, "ok": False}
     try:
         r = _http.get(url, headers={
@@ -6114,8 +6158,14 @@ def _fetch_vsin_splits(sport: str = "mlb", book: str = "draftkings") -> dict:
 
     # Collect valid team rows: [team, spr, spr_h, spr_b, tot, tot_h, tot_b, ml, ml_h, ml_b]
     team_rows = []
+    cur_sport, cur_date = None, None
     for tr in best.find_all("tr"):
         c = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
+        if c and len(c) < 11:
+            hs, hd = _vsin_group_header(c[0])   # "MLB - Friday, Sep 11" section row
+            if hs:
+                cur_sport, cur_date = hs, hd
+            continue
         if len(c) < 11:
             continue
         team = c[1].strip()
@@ -6123,7 +6173,7 @@ def _fetch_vsin_splits(sport: str = "mlb", book: str = "draftkings") -> dict:
         if not team or _vsin_pct(c[9]) is None or "handle" in team.lower():
             continue
         team_rows.append({
-            "team": team,
+            "team": team, "vsin_sport": cur_sport, "date": cur_date,
             "spr_line": _vsin_num(c[2]), "spr_h": _vsin_pct(c[3]), "spr_b": _vsin_pct(c[4]),
             "tot_line": _vsin_num(c[5]), "tot_h": _vsin_pct(c[6]), "tot_b": _vsin_pct(c[7]),
             "ml_line": _vsin_num(c[8]),  "ml_h": _vsin_pct(c[9]),  "ml_b": _vsin_pct(c[10]),
@@ -6133,8 +6183,10 @@ def _fetch_vsin_splits(sport: str = "mlb", book: str = "draftkings") -> dict:
     events = []
     for i in range(0, len(team_rows) - 1, 2):
         a, h = team_rows[i], team_rows[i + 1]
+        if want and a.get("vsin_sport") and a["vsin_sport"] != want:
+            continue                        # Circa's default page: other sport
         events.append({
-            "book": book,
+            "book": book, "date": a.get("date"), "vsin_sport": a.get("vsin_sport"),
             "away_team": a["team"], "home_team": h["team"],
             "ml": {"away_line": a["ml_line"], "home_line": h["ml_line"],
                    "away_handle": a["ml_h"], "away_bets": a["ml_b"],
@@ -16034,7 +16086,8 @@ def api_vsin_snapshot():
         except ValueError:
             continue
         try:
-            vsin = handicapper_web._vsin_for_game(g.get("sport") or "", away, home)
+            vsin = handicapper_web._vsin_for_game(g.get("sport") or "", away, home,
+                                                  g.get("event_start"))
         except Exception:
             vsin = None
         if vsin and vsin.get("matched"):

@@ -4396,30 +4396,103 @@ _VSIN_SHARP_GAP_MIN  = 8    # Circa money exceeds blended tickets by ≥ this (s
 _VSIN_OPP = {"away": "home", "home": "away", "over": "under", "under": "over"}
 
 
-def _vsin_for_game(sport: str, away: str, home: str) -> dict:
+_VSIN_PHRASE = (("ul monroe", "louisiana monroe"), ("la monroe", "louisiana monroe"),
+                ("ul lafayette", "louisiana lafayette"), ("la lafayette", "louisiana lafayette"),
+                ("ut martin", "tennessee martin"), ("utsa", "texas san antonio"),
+                ("app state", "appalachian state"), ("uconn", "connecticut"),
+                ("miami fl", "miami"), ("fiu", "florida international"),
+                ("fau", "florida atlantic"), ("intl", "international"))
+_VSIN_TOK = {"st": "state", "e": "east", "eastern": "east", "w": "west",
+             "western": "west", "n": "north", "northern": "north", "s": "south",
+             "southern": "south", "c": "central", "wash": "washington"}
+
+
+def _vsin_canon(s: str) -> list:
+    """Tokens in one dialect for BOTH our names and VSiN's (Sep 10 2026:
+    42 of 85 college games missed on 'Iowa ST Cyclones', 'W Kentucky',
+    'LA Monroe', 'Texas-San Antonio', 'Wash Commanders'). Poll ranks and
+    apostrophes dropped ('Hawai'i' = 'Hawaii')."""
+    import re as _re
+    import unicodedata
+    s = "".join(ch for ch in unicodedata.normalize("NFKD", s or "")
+                if unicodedata.category(ch) != "Mn").lower()
+    s = _re.sub(r"^\s*\(\d+\)\s*", "", s).replace("'", "").replace("\u2019", "")
+    s = " " + _re.sub(r"\s+", " ", _re.sub(r"[^a-z0-9 ]", " ", s)).strip() + " "
+    for a, b in _VSIN_PHRASE:
+        s = s.replace(f" {a} ", f" {b} ")
+    return [_VSIN_TOK.get(t, t) for t in s.split()]
+
+
+def _vsin_team_match(home: str, away: str, ev_home: str, ev_away: str) -> bool:
+    """VSiN-only name match. A side is STRONG when one canonical token set
+    contains the other ('Miami Hurricanes' in 'Miami FL Hurricanes', never
+    'Miami (OH) RedHawks'); WEAK when VSiN's school words (all but the last,
+    the mascot) are all in ours — that absorbs VSiN typos ('Iowa Hawkies',
+    'Army Black Nights') and is only accepted when the OTHER side is strong.
+    The shared substring rule is tried first, unchanged."""
+    import re as _re
+    strip = lambda s: _re.sub(r"^\s*\(\d+\)\s*", "", s or "")
+    if _team_match(home, away, strip(ev_home), strip(ev_away)):
+        return True
+    def strong(ours, theirs):
+        a, b = set(_vsin_canon(ours)), set(_vsin_canon(theirs))
+        if not a or not b:
+            return False
+        return a <= b or b <= a
+    def weak(ours, theirs):
+        t = _vsin_canon(theirs)
+        school = set(t[:-1]) if len(t) >= 2 else set()
+        return bool(school) and school <= set(_vsin_canon(ours))
+    sh, sa = strong(home, ev_home), strong(away, ev_away)
+    return ((sh and sa) or (sh and weak(away, ev_away))
+            or (sa and weak(home, ev_home)))
+
+
+def _vsin_pick_event(evs, away: str, home: str, game_date: str | None):
+    """The VSiN event for this game, or None. When both sides carry a date
+    they MUST agree (Eastern game date) — team names alone matched
+    tomorrow's same-series game to today's row every series night."""
+    for e in evs or []:
+        ed = e.get("date")
+        if game_date and ed and ed != game_date:
+            continue
+        if _vsin_team_match(home, away, e.get("home_team", ""), e.get("away_team", "")):
+            return e
+    return None
+
+
+def _vsin_for_game(sport: str, away: str, home: str, event_start=None) -> dict:
     """Match this game to VSiN's slate for BOTH books. Late-imports app.py's
     scraper (cached 15 min there). Returns {matched, books:{circa:ev,...},
     slate:{circa:[...],...}} — `slate` is the full list of games VSiN returned
     per book (for the no-match diagnostic: lets us see WHAT VSiN had so a miss
-    self-explains as a name mismatch vs VSiN not carrying the game)."""
+    self-explains as a name mismatch vs VSiN not carrying the game).
+    `event_start` (ISO) gates on the Eastern game date."""
     out = {"matched": False, "books": {}, "slate": {}}
     try:
         from app import _fetch_vsin_splits as _vf  # late import (circular-safe)
     except Exception:
         return out
+    game_date = None
+    if event_start:
+        try:
+            from zoneinfo import ZoneInfo as _ZI
+            game_date = (datetime.fromisoformat(str(event_start).replace("Z", "+00:00"))
+                         .astimezone(_ZI("America/New_York")).date().isoformat())
+        except Exception:
+            game_date = None
     for book in ("circa", "draftkings"):
         try:
             res = _vf(sport, book) or {}
         except Exception:
             continue
         evs = res.get("events") or []
-        out["slate"][book] = [f"{e.get('away_team','?')} @ {e.get('home_team','?')}"
+        out["slate"][book] = [f"{e.get('away_team','?')} @ {e.get('home_team','?')} {e.get('date') or ''}".strip()
                               for e in evs]
-        for e in evs:
-            if _team_match(home, away, e.get("home_team", ""), e.get("away_team", "")):
-                out["books"][book] = e
-                out["matched"] = True
-                break
+        e = _vsin_pick_event(evs, away, home, game_date)
+        if e:
+            out["books"][book] = e
+            out["matched"] = True
     return out
 
 
@@ -5310,7 +5383,7 @@ def build_dossier(sb, query: str | None, sport_hint: str | None,
     # contradicted Circa on live games). `vsin` (full per-market) feeds the
     # sharp-money veto; `splits` (ML-shaped, Circa-preferred) feeds the reason
     # bullet + _splits_signal_pp, and is surfaced read-only on the dossier.
-    vsin = _vsin_for_game(sport, away, home) if (away and home) else None
+    vsin = _vsin_for_game(sport, away, home, event_start) if (away and home) else None
     splits = _vsin_to_ml_splits(vsin)
 
     # Polymarket lookup — the user bets on Polymarket, so we want the

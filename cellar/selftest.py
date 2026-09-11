@@ -745,6 +745,38 @@ def test_seat_topup_plan() -> None:
     check("master rule trims: 20 @ 60.0 on MLB → peg 61 > cap → cap", _app._seat_topup_plan(20, 0.0, 60.0, 62.0, 1.0, False, 60.0, 13.0) == (None, "cap"))
 
 
+def test_vsin_dates_and_names() -> None:
+    """Sep 10 2026: VSiN games carry their section date; the matcher
+    requires it, strips poll ranks, and takes 'Miami FL Hurricanes' for
+    'Miami Hurricanes' but never 'Miami (OH) RedHawks'."""
+    import app as _app
+    import handicapper_web as hw
+    from datetime import date
+    check("header parse", _app._vsin_group_header("MLB - Friday, Sep 11 Sep 11", date(2026, 9, 10)) == ("MLB", "2026-09-11"))
+    check("header year rollover", _app._vsin_group_header("NFL - Sunday, Jan 3 Jan 3", date(2026, 12, 28)) == ("NFL", "2027-01-03"))
+    check("non-header cell", _app._vsin_group_header("Tampa Bay Rays") == (None, None))
+    check("rank + FL", hw._vsin_team_match("Miami Hurricanes", "Florida A&M Rattlers", "(7) Miami FL Hurricanes", "Florida A&M"))
+    check("Miami OH is not Miami FL", not hw._vsin_team_match("Miami Hurricanes", "Florida A&M Rattlers", "Miami (OH) RedHawks", "Florida A&M"))
+    evs = [{"away_team": "Colorado Rockies", "home_team": "New York Yankees", "date": "2026-09-10"},
+           {"away_team": "Colorado Rockies", "home_team": "Detroit Tigers", "date": "2026-09-11"}]
+    check("date gate: series game on the wrong day is not matched",
+          hw._vsin_pick_event(evs, "Colorado Rockies", "New York Yankees", "2026-09-11") is None)
+    check("date gate: same day matches",
+          hw._vsin_pick_event(evs, "Colorado Rockies", "New York Yankees", "2026-09-10") is evs[0])
+    check("no game date falls back to names", hw._vsin_pick_event(evs, "Colorado Rockies", "Detroit Tigers", None) is evs[1])
+    m = hw._vsin_team_match
+    check("ST = State", m("Oklahoma State Cowboys", "Oregon Ducks", "Oklahoma ST Cowboys", "(6) Oregon Ducks"))
+    check("VSiN typo absorbed when the other side is exact", m("Iowa Hawkeyes", "Iowa State Cyclones", "(21) Iowa Hawkies", "Iowa ST Cyclones"))
+    check("directions: E Tennessee ST", m("North Carolina Tar Heels", "East Tennessee State Buccaneers", "North Carolina Tar Heels", "E Tennessee ST"))
+    check("directions: C Michigan", m("Central Michigan Chippewas", "Colgate Raiders", "C Michigan Chippewas", "Colgate"))
+    check("aliases: UL Monroe / LA Monroe", m("UAB Blazers", "UL Monroe Warhawks", "UAB Blazers", "LA Monroe Warhawks"))
+    check("aliases: UTSA / Texas-San Antonio", m("Texas State Bobcats", "UTSA Roadrunners", "Texas ST Bobcats", "Texas-San Antonio Roadrunners"))
+    check("aliases: Wash Commanders", m("Philadelphia Eagles", "Washington Commanders", "Philadelphia Eagles", "Wash Commanders"))
+    check("apostrophe: Hawai'i", m("Hawai'i Rainbow Warriors", "New Mexico State Aggies", "Hawaii Rainbow Warriors", "New Mexico ST Aggies"))
+    check("weak side alone never matches", not m("Iowa Hawkeyes", "Kansas Jayhawks", "Iowa ST Cyclones", "(23) Missouri Tigers"))
+    check("Miami OH still not Miami FL", not m("Miami Hurricanes", "Florida A&M Rattlers", "Miami (OH) RedHawks", "Florida A&M"))
+
+
 def test_pin_line_center() -> None:
     """Pinnacle's line in rung units from the cached slate shape (the real
     Northern Arizona @ Arizona event, Sep 5 2026)."""
@@ -962,7 +994,7 @@ def main() -> int:
               test_ws_quote_presence, test_ws_mkts_request_budget,
               test_gridiron_value_window, test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
-              test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan,
+              test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
               test_lane_covers_its_documented_engines,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
