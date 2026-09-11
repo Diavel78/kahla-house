@@ -775,6 +775,9 @@ def test_vsin_dates_and_names() -> None:
     check("apostrophe: Hawai'i", m("Hawai'i Rainbow Warriors", "New Mexico State Aggies", "Hawaii Rainbow Warriors", "New Mexico ST Aggies"))
     check("weak side alone never matches", not m("Iowa Hawkeyes", "Kansas Jayhawks", "Iowa ST Cyclones", "(23) Missouri Tigers"))
     check("Miami OH still not Miami FL", not m("Miami Hurricanes", "Florida A&M Rattlers", "Miami (OH) RedHawks", "Florida A&M"))
+    check("Middle Tenn ST", m("Marshall Thundering Herd", "Middle Tennessee Blue Raiders", "Marshall Thundering Herd", "Middle Tenn ST Blue Raiders"))
+    check("FL Atlantic", m("Florida Atlantic Owls", "Navy Midshipmen", "FL Atlantic Owls", "Navy Midshipmen"))
+    check("C Conn ST (school fallback)", m("Toledo Rockets", "Central Connecticut Blue Devils", "Toledo Rockets", "C Conn ST"))
 
 
 def test_pin_line_center() -> None:

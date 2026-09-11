@@ -4404,7 +4404,8 @@ _VSIN_PHRASE = (("ul monroe", "louisiana monroe"), ("la monroe", "louisiana monr
                 ("fau", "florida atlantic"), ("intl", "international"))
 _VSIN_TOK = {"st": "state", "e": "east", "eastern": "east", "w": "west",
              "western": "west", "n": "north", "northern": "north", "s": "south",
-             "southern": "south", "c": "central", "wash": "washington"}
+             "southern": "south", "c": "central", "wash": "washington",
+             "tenn": "tennessee", "fl": "florida", "conn": "connecticut"}
 
 
 def _vsin_canon(s: str) -> list:
