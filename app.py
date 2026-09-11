@@ -19230,7 +19230,7 @@ def _gridiron_seat_legal(rule, mt, sn, rv):
             and _gridiron_past_bound(mt, sn, rv, (rule.get("bounds") or {}).get(sn), ka, kb))
 
 
-def _gridiron_try_bet(sb, g, es0, d, mt, gp):
+def _gridiron_try_bet(sb, g, es0, d, mt, gp, contracts=None):
     """ONE football bet attempt (spread or total) — the shared leg behind
     the opener tape AND the week-of sweep.
 
@@ -19493,8 +19493,10 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
             if s["dist"] > _GRIDIRON_TAIL_PTS:
                 verdicts.append("tail")
                 continue
-        contracts = (_GRIDIRON_CONTRACTS if mt == "spread"
-                     else _GRIDIRON_TOTAL_CONTRACTS)
+        _c_override = int(contracts) if contracts else 0
+        contracts = (_c_override if _c_override
+                     else (_GRIDIRON_CONTRACTS if mt == "spread"
+                           else _GRIDIRON_TOTAL_CONTRACTS))
         cost = contracts * s["peg"] / 100.0
         if spent + cost > _GRIDIRON_EVENT_CAP_USD:
             verdicts.append("event_cap")
@@ -19543,6 +19545,8 @@ def _gridiron_try_bet(sb, g, es0, d, mt, gp):
         if r == "placed":
             placed_n += 1
             spent += cost
+            if _c_override:
+                break                    # a REMAINDER seat is one seat
             held_slugs.add(pblk["slug"])
         elif r in ("cap", "rent", "paused"):
             verdicts.append(r)
@@ -24220,23 +24224,15 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         if not ok:
             st["skip_rent"] = st.get("skip_rent", 0) + 1
             continue
-        # THE PLACEMENT RULE APPLIES TO A TOP-UP (Sep 10 2026 — WKU +17.5 at
-        # 3¢ on a Georgia −39 line, topped up overnight: "why are we still
-        # continuing to be dumb NOW??"). A football spread/total seat gets
-        # more contracts only if the rung is one the executor would seat
-        # today: line-anchored, inside the tail, on the favorable side of
-        # the bound. Can't judge → don't top up.
+        # FOOTBALL IS PER CONTEST (Rob, Sep 10 2026: "20 contracts PER
+        # contest… I had it for +17.5, now the line is +42.5… I guess since
+        # I have 2 of 17.5 I can't bet 18 at 42.5? DUMB"). A football
+        # spread/total remainder is NOT topped up on the pick's own rung —
+        # the group pass below hands (stake − held − resting) across the
+        # whole game-type to the EXECUTOR's placement rule, which seats it
+        # on today's legal rung.
         if slug.startswith(("asc-nfl-", "tsc-nfl-", "asc-cfb-", "tsc-cfb-")) and p.get("market_type") in ("spread", "total"):
-            g = {"id": p.get("market_id"), "sport": p.get("sport"),
-                 "event_name": p.get("event_name"), "event_start": es}
-            legal, jw = _gridiron_seat_legal_now(sb, g, p.get("market_type"), p.get("side"),
-                                                 p.get("entry_line"), now, _rule_cache)
-            if legal is None:
-                st["skip_unjudged"] = st.get("skip_unjudged", 0) + 1
-                continue
-            if not legal:
-                st["skip_illegal"] = st.get("skip_illegal", 0) + 1
-                continue
+            continue
         q = _ws_quote(slug)
         if q is not None:
             bid_y, ask_y = q
@@ -24336,6 +24332,71 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             app.logger.warning("seat topup %s: order %s live but pick stamp failed: %s", slug, new_oid, e)
         app.logger.info("SEAT TOPUP %s: +%d @ %.1f¢ (held %.2f of %g)", slug, need, peg, held, stake)
         _time.sleep(2.0)                     # spread the writes — the venue throttles bursts
+    # ── FOOTBALL GROUP PASS: 20 combined per (game, market type) ──────────
+    # held across every rung + resting bids across every rung; the
+    # remainder goes through _gridiron_try_bet (rent-first, line-anchored,
+    # value side, join-the-touch) as ONE seat sized to the remainder.
+    fb: dict = {}
+    for p in picks:
+        b = p.get("signal_blob") if isinstance(p.get("signal_blob"), dict) else {}
+        slug = (b or {}).get("pmm_slug")
+        mt = p.get("market_type")
+        if (not slug or not b.get("order_id") or mt not in ("spread", "total")
+                or b.get("source") not in _SEAT_TOPUP_SOURCES
+                or not slug.startswith(("asc-nfl-", "tsc-nfl-", "asc-cfb-", "tsc-cfb-"))):
+            continue
+        key = (str(p.get("market_id")), mt)
+        grp = fb.setdefault(key, {"p": p, "slugs": set(), "stake": 0.0})
+        grp["slugs"].add(slug)
+        grp["stake"] = max(grp["stake"], float(b.get("contracts") or 0))
+    st["fb_groups"] = len(fb)
+    for key, grp in fb.items():
+        if placed >= _SEAT_TOPUP_MAX_CREATES:
+            st["gate"] = "max_creates"
+            break
+        p = grp["p"]
+        held = 0.0
+        for s in grp["slugs"]:
+            held += abs(float((positions.get(s) or {}).get("net") or 0.0))
+        resting = sum(float(o.get("leaves") or o.get("qty") or 0.0) for o in orders
+                      if o.get("slug") in grp["slugs"] and "BUY" in (o.get("intent") or ""))
+        need = int(grp["stake"] - held - resting + 1e-9)
+        if grp["stake"] <= 0 or need < 1:
+            st["fb_full"] = st.get("fb_full", 0) + 1
+            continue
+        es = p.get("event_start")
+        try:
+            dt = datetime.fromisoformat(str(es).replace("Z", "+00:00"))
+            if (dt - now).total_seconds() < _SCALP_NO_REBUY_MIN * 60:
+                st["fb_late"] = st.get("fb_late", 0) + 1
+                continue
+        except Exception:
+            continue
+        g = {"id": p.get("market_id"), "sport": p.get("sport"),
+             "event_name": p.get("event_name"), "event_start": es}
+        if g["id"] not in _LADDER_STRUCT:
+            st["fb_uncached"] = st.get("fb_uncached", 0) + 1
+            continue
+        try:
+            ent = _rule_cache.get(g["id"])
+            if ent is None:
+                ent = _rule_cache[g["id"]] = (_gridiron_price_game(sb, g),
+                                              _gridiron_proj(sb, g["sport"], g["event_name"]))
+            d, gp = ent
+            if not d or not gp:
+                st["fb_no_model"] = st.get("fb_no_model", 0) + 1
+                continue
+            v = _gridiron_try_bet(sb, g, es, d, key[1], gp, contracts=need) or "none"
+        except Exception as e:
+            st["fb_err"] = st.get("fb_err", 0) + 1
+            app.logger.warning("seat topup group %s %s failed: %s", g.get("event_name"), key[1], e)
+            continue
+        st["fb_" + str(v)[:20]] = st.get("fb_" + str(v)[:20], 0) + 1
+        if v == "placed":
+            placed += 1
+            app.logger.info("SEAT TOPUP (contest) %s %s: +%d at the rule's rung (held %.2f, resting %.0f of %g)",
+                            g.get("event_name"), key[1], need, held, resting, grp["stake"])
+            _time.sleep(2.0)
     st["placed"] = placed
     return st
 
