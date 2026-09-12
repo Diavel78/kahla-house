@@ -27245,6 +27245,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
             try:
                 res["t_setup"] = round(_time.time() - _tp, 1)
                 _tp = _time.time()
+                app.logger.info("repeg phase: fill-status uid=%s mode=%s", uid, res.get("mode"))
                 fs = _compute_fill_status(
                     sb, uid, poly_snap=lap_snap,
                     only_slugs=(_dirty if _targeted else None))
@@ -27254,6 +27255,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
             # chase candidate existed, so a no-candidate lap hid the walk
             # entirely — 300s laps with 24s of measured work.
             res["t_fs"] = round(_time.time() - _tp, 1)
+            app.logger.info("repeg phase: fill-status done in %ss", res.get("t_fs"))
             if not fs.get("configured"):
                 continue
             try:
@@ -27806,6 +27808,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
         # never cost a chase.
         _tq = _time.time()
         try:
+            app.logger.info("repeg phase: reconcile")
             res["reconcile"] = _reconcile_tick(sb, now, client=lap_client,
                                                orders=lap_orders,
                                                positions=lap_positions)
@@ -27815,6 +27818,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
         _tq = _time.time()
         # SEAT TOP-UP (Sep 9 2026): "always 20 combined" — its own try.
         try:
+            app.logger.info("repeg phase: seat_topup")
             res["seat_topup"] = _seat_topup_tick(sb, now, client=lap_client,
                                                  orders=lap_orders,
                                                  positions=lap_positions)
@@ -27825,6 +27829,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
         # THE RENT CULL rides the same lease (Sep 5 2026): hourly, after
         # the reconcile, its own try — a cull fault can never cost a chase.
         try:
+            app.logger.info("repeg phase: rent_cull")
             res["rent_cull"] = _rent_cull_tick(sb, now, client=lap_client,
                                                orders=lap_orders)
         except Exception:
@@ -27835,6 +27840,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
         # cancelled; the pick waits (dayof_wait) for the venue to list it
         # again.
         try:
+            app.logger.info("repeg phase: rent_unpaid")
             res["rent_unpaid"] = _rent_unpaid_tick(sb, now, client=lap_client,
                                                    orders=lap_orders)
         except Exception:
@@ -27844,6 +27850,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
         # RECENTER rides the same lease (Sep 6 2026): every 15 min, after
         # the reconcile — unfilled football seats follow the line.
         try:
+            app.logger.info("repeg phase: recenter")
             res["recenter"] = _gridiron_recenter_tick(
                 sb, now, client=lap_client, orders=lap_orders,
                 positions=lap_positions)
@@ -27879,6 +27886,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
     # from evidence instead of folklore.
     res["mirror"] = _venue_mirror_stats()
     res["ms"] = int((_time.time() - _t0) * 1000)
+    app.logger.info("repeg phase: done ms=%s", res["ms"])
     return res
 
 
