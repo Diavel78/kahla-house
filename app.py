@@ -22043,6 +22043,14 @@ def api_handicapper_paperlog():
     # one cold overnight dossier costs 6-10s, so 8s = at most one and
     # often zero. Fluid billing charges compute, not the I/O wait these
     # builds mostly are.
+    # PHASE TIMERS (Sep 12 2026): the lane ran ~500s/lap while processing
+    # ONE game and nothing said where the seconds went. Journaled as
+    # `phases` through _keep_body; read them before theorising.
+    _ph: dict = {}
+    _pm = [_time.time()]
+    def _pmark(k):
+        _t = _time.time(); _ph[k] = round(_t - _pm[0], 1); _pm[0] = _t
+    _pmark("prep")
     deadline = _time.time() + (8.0 if games else 25.0)
     rows, processed, with_pick = [], 0, 0
     for g in games:
@@ -22344,6 +22352,7 @@ def api_handicapper_paperlog():
     opener_stats = {**opener_stats, **g_stats}
     # WALL ALARM — read-only tripwire: PMM has priced future games but the
     # standing future-day wall is thin → 🚨 ping. The user is not the alarm.
+    _pmark("logger")
     wd = _opener_watchdog(sb, now, opener_stats)
     if wd is not None:
         opener_stats["watchdog"] = wd
@@ -22354,7 +22363,9 @@ def api_handicapper_paperlog():
         opener_stats["rent_watchdog"] = rw
     # Bet-time Pinnacle stamp (parlay-api.com) — runs BEFORE the insert so
     # the stamp rides each new bet row. No-op without a key / over budget.
+    _pmark("watchdogs")
     pin_stamped = _pin_stamp_rows(sb, rows, now)
+    _pmark("pin")
     # Alert pass runs BEFORE the insert so a brand-new bet's dedup marker
     # can ride its own insert row (no read-back needed).
     bets_alerted = _bet_alerts(sb, now, alert_cands, recent, rows)
@@ -22375,7 +22386,9 @@ def api_handicapper_paperlog():
     # the start. Rather than trust any timestamp, we cancel on the clock
     # ourselves. BUYS ONLY — the harvest's sells rest through the game on
     # purpose.
+    _pmark("alerts_repeg")
     live_swept = _cancel_live_buys_tick(sb, now)
+    _pmark("live_sweep")
     # ACTIVITIES MIRROR — keep poly_activities caught up (every 5th min).
     # Normally one page: the feed only grows by what we just did. This is
     # what lets the dashboard read complete history locally instead of
@@ -22434,6 +22447,7 @@ def api_handicapper_paperlog():
     # accrual; the activities feed shows PAID lumps 5-7 business days late,
     # which is what the reward economics were (wrongly) inferred from for
     # weeks. Two GETs, both authenticated.
+    _pmark("acts_dash_ledger")
     incentives = {}
     if _time.time() - _INC_SYNC_STATE["at"] >= _INCENTIVE_SYNC_MOD * 60:
         _INC_SYNC_STATE["at"] = _time.time()
@@ -22466,6 +22480,7 @@ def api_handicapper_paperlog():
     # TELEGRAM BATCH FLUSH — everything above queued into telegram_queue;
     # at most ONE 📬 summary per _TG_BATCH_MIN minutes (urgent 🚨 sends
     # bypassed the queue at send time). Nothing queued → no message.
+    _pmark("incentives")
     tg_flushed = _tg_flush(sb, now) if run_engines else 0
     # stdout → Vercel runtime logs: the alert pipeline's only observability
     # (the JSON response is visible only in cron-job.org history).
@@ -22481,7 +22496,9 @@ def api_handicapper_paperlog():
         except Exception as e:
             return jsonify({"ok": False, "error": f"insert: {e}",
                             "processed": processed}), 500
-    return jsonify({"ok": True, "games": len(games), "processed": processed,
+    _pmark("tg")
+    _ph["total"] = round(sum(v for v in _ph.values()), 1)
+    return jsonify({"ok": True, "games": len(games), "processed": processed, "phases": _ph,
                     "with_pick": with_pick, "new_rows": new_rows,
                     "bets_alerted": bets_alerted, "pin_stamped": pin_stamped,
                     "opener": opener_stats, "repeg": repeg,
