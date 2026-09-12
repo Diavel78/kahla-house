@@ -106,7 +106,11 @@ REPACK_MIN_S = 600.0
 # re-queue it; a pack with ZERO baselines is a silent failure → torn
 # down and re-queued whole. A rung that misses twice is PARKED for
 # PARK_S (REST prices it) so a book-less market can't churn packs.
-BASELINE_WAIT_S = 30.0
+# 30s → 120s (Sep 12 2026): on a CFB Saturday the venue replays a 350-rung
+# pack's baselines over more than 30s, so packs 8-17 were audited as
+# 50-99% missing, un-covered and re-queued in a loop — 1,700-1,800 rungs
+# per connection with no coverage and every pricer on REST.
+BASELINE_WAIT_S = 120.0
 PARK_S = 600.0
 PARK_AFTER_MISSES = 2
 
@@ -1461,6 +1465,9 @@ class MarketsFeed:
                 self._pending.setdefault(s, nowt)
         # the venue must see the unsubscribes land before the re-adds
         self._pack_hold_until = nowt + 2.0
+        # A repack re-subscribes thousands of rungs at once — the same
+        # replay storm as a reconnect; give the audit the same grace.
+        self._audit_grace_until = nowt + AUDIT_GRACE_S
         log.info("ws mkts REPACK — %d live rungs across %d ladders queued "
                  "into packs of %d", len(self._pending), len(self._ladders),
                  PACK_SLUGS)
