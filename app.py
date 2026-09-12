@@ -12366,6 +12366,48 @@ def api_kalshi_probe():
 # chips still work, sync quietly skips (Edit modal remains the manual
 # override).
 _FILL_STATUS_TTL = 30       # s — server cache; the page polls on its 60s loadData
+
+# LAST FILL-STATUS WALK, per uid, merged by pick id (Sep 12 2026 — the
+# alerts-lane balloon). `_outbid_alerts` used to call the walk itself with
+# no snapshot and no slug filter: a FULL venue sweep every minute — fresh
+# orders + positions read, the autolog, then a serial book read per
+# pending pick — on a lane whose only job is to word a ping. On a Saturday
+# CFB book (390 pending) that walk grew 13 min → 130 min across two days
+# and tripped STUCK LANE ten times; the tenth never came back. The repeg
+# lap already walks the same picks on a shared snapshot every lap, so the
+# walk stashes its result here and the alerts lane READS it. Targeted laps
+# cover only the socket's dirty slugs, hence merge-by-id: an entry keeps
+# the last verdict anyone computed for it until the 10-min full sweep.
+_FS_LAST: dict = {}
+_FS_LAST_LOCK = threading.Lock()
+
+
+def _fs_last_stash(uid: str, fills: list, full: bool) -> None:
+    try:
+        with _FS_LAST_LOCK:
+            cur = _FS_LAST.get(uid) or {"fills": {}}
+            byid = dict(cur.get("fills") or {})
+            for f in fills or []:
+                if f.get("id") is not None:
+                    byid[f["id"]] = f
+            _FS_LAST[uid] = {"ts": _time.time(), "fills": byid,
+                             "full_ts": (_time.time() if full
+                                         else (cur.get("full_ts") or 0.0))}
+    except Exception:
+        pass
+
+
+def _fs_last_read(uid: str, max_age_s: float):
+    """The last walk's per-pick entries for uid, or None when nothing fresh
+    enough exists. Never walks the venue."""
+    try:
+        with _FS_LAST_LOCK:
+            cur = _FS_LAST.get(uid)
+            if not cur or _time.time() - float(cur.get("ts") or 0) > max_age_s:
+                return None
+            return list((cur.get("fills") or {}).values())
+    except Exception:
+        return None
 # (_FS_TAKE_WARN_MIN + the whole TAKE-NOW surface: KILLED Aug 2 2026.)
 
 
@@ -13196,6 +13238,7 @@ def _compute_fill_status(sb, uid: str, poly_snap=None,
                     print(f"fill-sync failed pick {p['id']}: {e}")
         fills.append(entry)
 
+    _fs_last_stash(uid, fills, full=(only_slugs is None))
     return {"ok": True, "configured": True, "api_ok": api_ok, "fills": fills}
 
 
@@ -23138,6 +23181,7 @@ def _outbid_line(f: dict, r: dict) -> str:
 
 
 _OUTBID_TICK_MOD = 2   # run the (venue-API-hitting) check every 2nd minute
+_OUTBID_FS_MAX_AGE_S = 900   # a walk older than this is not worth a ping
 
 
 def _outbid_alerts(sb, now, *, force: bool = False) -> int:
@@ -23185,13 +23229,14 @@ def _outbid_alerts(sb, now, *, force: bool = False) -> int:
                 near = []
             if not near:
                 continue
-            try:
-                res = _compute_fill_status(sb, uid)
-            except Exception:
+            # READ the repeg lap's last walk — never re-walk the venue from
+            # here (Sep 12 2026; see _FS_LAST). No fresh walk = no ping this
+            # tick; the chase and the buy sniper are already re-pricing the
+            # bid, the ping is a courtesy, not a control.
+            fills_last = _fs_last_read(uid, _OUTBID_FS_MAX_AGE_S)
+            if fills_last is None:
                 continue
-            if not res.get("configured"):
-                continue
-            hits = [f for f in (res.get("fills") or []) if f.get("outbid")]
+            hits = [f for f in fills_last if f.get("outbid")]
             if not hits:
                 continue
             ids = [f["id"] for f in hits]
