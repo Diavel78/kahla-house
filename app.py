@@ -22237,9 +22237,9 @@ def api_handicapper_paperlog():
     # ONE game and nothing said where the seconds went. Journaled as
     # `phases` through _keep_body; read them before theorising.
     _ph: dict = {}
-    _pm = [_time.time()]
+    _ph_t0 = [_time.time()]        # NOT `_pm` — the totals-shadow block below rebinds that name
     def _pmark(k):
-        _t = _time.time(); _ph[k] = round(_t - _pm[0], 1); _pm[0] = _t
+        _t = _time.time(); _ph[k] = round(_t - _ph_t0[0], 1); _ph_t0[0] = _t
     _pmark("prep")
     deadline = _time.time() + (8.0 if games else 25.0)
     rows, processed, with_pick = [], 0, 0
