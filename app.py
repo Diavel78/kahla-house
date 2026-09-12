@@ -14072,6 +14072,124 @@ def _prop_catalog_load(sb) -> dict:
     return out
 
 
+# ── TAPE-PROCESS SPLIT (Sep 12 2026, docs/tape-process-split-spec.md) ──
+# CELLAR_TAPE_SPLIT=1 = two daemons: the money process (opener/repeg/scalp/
+# alerts/ledger + the sockets) and the tape process (pm_snapshot/paperlog/
+# vsin/kalshi_autolog/batch/grader). The two prop passes below PLACE BETS
+# and price off the props socket, so under the split they run from the
+# opener lane (_prop_passes_tick) and the pm-snapshot route skips them.
+# Unset = today's single process, byte-for-byte the old behavior.
+_TAPE_SPLIT = (os.environ.get("CELLAR_TAPE_SPLIT") or "").strip() == "1"
+
+
+def _lookup_db_put(key: str, out: dict) -> None:
+    """Persist a lookup result (props dropped) so the OTHER process can read
+    it: the tape fetches, the money pricer reads. Best-effort."""
+    global _LOOKUP_DB_PUT_N
+    try:
+        sb = get_supabase()
+        if sb is None:
+            return
+        payload = {k: out.get(k) for k in ("event_slug", "event_title", "event_start",
+                                             "ml", "spread", "total", "nrfi", "ufc_distance")}
+        payload["props"] = []
+        sb.table("lookup_cache").upsert(
+            {"key": key, "sport": key.split(":", 1)[0],
+             "fetched_at": datetime.now(timezone.utc).isoformat(),
+             "payload": payload}).execute()
+        _LOOKUP_DB_PUT_N += 1
+        if _LOOKUP_DB_PUT_N % 200 == 0:
+            sb.table("lookup_cache").delete().lt(
+                "fetched_at", (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()).execute()
+    except Exception:
+        pass
+
+
+_LOOKUP_DB_PUT_N = 0
+
+
+def _lookup_db_get(key: str, max_age_s: float):
+    try:
+        sb = get_supabase()
+        if sb is None:
+            return None
+        r = (sb.table("lookup_cache").select("fetched_at,payload")
+             .eq("key", key).limit(1).execute().data) or []
+        if not r:
+            return None
+        at = datetime.fromisoformat(str(r[0]["fetched_at"]).replace("Z", "+00:00"))
+        if (datetime.now(timezone.utc) - at).total_seconds() > max_age_s:
+            return None
+        return r[0].get("payload") or None
+    except Exception:
+        return None
+
+
+try:
+    import pmm_markets as _pmm_hooks
+    _pmm_hooks._LOOKUP_DB_PUT = _lookup_db_put
+    _pmm_hooks._LOOKUP_DB_GET = _lookup_db_get
+except Exception:
+    pass
+
+
+def _prop_passes_tick(sb, now) -> dict:
+    """Money-process side of the props pipeline under the split: the same
+    games window the tape uses, prop rows from the props socket plus the
+    newest prop_snapshots rows the tape wrote (props not on the socket),
+    then the whiff shadow pass and the NFL-props bet pass — exactly the
+    two calls the pm-snapshot route makes, minus the megapayload downloads."""
+    st: dict = {}
+    try:
+        games = []
+        for sp in _PM_SPORTS:
+            hi = (now + timedelta(hours=_PM_WINDOW_H.get(sp, 12))).isoformat()
+            try:
+                rows_sp = (sb.table("markets").select("id,event_name,event_start")
+                           .eq("sport", sp).eq("status", "active")
+                           .gte("event_start", now.isoformat()).lte("event_start", hi)
+                           .order("event_start").execute().data) or []
+            except Exception:
+                rows_sp = []
+            seen = set()
+            for g in rows_sp:
+                n = g.get("event_name") or ""
+                if " @ " in n and n not in seen:
+                    seen.add(n)
+                    g["_sport"] = sp
+                    games.append(g)
+        st["games"] = len(games)
+        if not games:
+            return st
+        st.update(_prop_catalog_load(sb))
+        rows = _props_ws_rows(now)
+        st["ws_rows"] = len(rows)
+        seen_keys = {r[2] for r in rows}
+        try:
+            cut = (now - timedelta(minutes=20)).isoformat()
+            mids = [g["id"] for g in games]
+            db = _sb_paged(lambda: (sb.table("prop_snapshots")
+                                    .select("market_id,venue,prop_key,question,prop_type,line,cents,bid_c,ask_c,captured_at")
+                                    .in_("market_id", mids).gte("captured_at", cut)
+                                    .order("captured_at", desc=True)), max_pages=10)
+            for r in db or []:
+                k = r.get("prop_key")
+                if not k or k in seen_keys:
+                    continue                     # newest first: first seen wins
+                seen_keys.add(k)
+                rows.append((r.get("market_id"), r.get("venue") or "polymarket", k,
+                             r.get("question"), r.get("prop_type"), r.get("line"),
+                             r.get("cents"), r.get("bid_c"), r.get("ask_c")))
+        except Exception as e:
+            st["db_err"] = str(e)[:80]
+        st["rows"] = len(rows)
+        st["whiff_shadows"] = _whiff_shadow_pass(sb, rows, games, now)
+        st["fbprop"] = _fbprop_pass(sb, rows, games, now)
+    except Exception as e:
+        st["err"] = str(e)[:100]
+    return st
+
+
 _PROP_WS_SEEN_TS: dict = {}       # slug -> quote-table ts last handed to the passes
 _PROP_WS_FULL_TS = 0.0
 _PROP_WS_FULL_EVERY_S = 600.0
@@ -15981,10 +16099,15 @@ def api_pm_snapshot():
             st["props_ws_err"] = str(e)[:80]
     props_inserted = _prop_insert_changed(sb, prop_rows, now)
     props_cleared = _prop_update_suggestions(sb, prop_rows, now)
-    whiff_shadows = _whiff_shadow_pass(sb, prop_rows, all_games, now)
-    # NFL props lane — dormant until fbprop_config arms it (remote-
-    # controllable via SQL through the 6-day box freeze, Aug 22 2026).
-    fbprop = _fbprop_pass(sb, prop_rows, all_games, now)
+    if _TAPE_SPLIT:
+        # Under the split the money process runs both from the opener lane
+        # (_prop_passes_tick) — this route is the tape and never places.
+        whiff_shadows, fbprop = 0, {"fbp_gate": "tape_split"}
+    else:
+        whiff_shadows = _whiff_shadow_pass(sb, prop_rows, all_games, now)
+        # NFL props lane — dormant until fbprop_config arms it (remote-
+        # controllable via SQL through the 6-day box freeze, Aug 22 2026).
+        fbprop = _fbprop_pass(sb, prop_rows, all_games, now)
     # Trade tape (whale flow) — ONE poll of the public tape, matched against
     # the same upcoming-games index this tick already built. ~1-2s of I/O.
     tt = _poly_trades_ingest(sb, all_games, now)

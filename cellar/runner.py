@@ -92,7 +92,11 @@ class Runner:
         #
         # `harvest` is deliberately absent: its engine is off at the source
         # (_HARVEST_ENABLED=False), so it has nothing to keep running.
-        if "paperlog" in enabled:
+        # Under the tape-process split the money lanes run in the OTHER
+        # daemon (same box, same DB, the lease arbitrates) — the rule
+        # below is about ONE process owning paperlog and nothing else.
+        _split = (os.environ.get("CELLAR_TAPE_SPLIT") or "").strip() == "1"
+        if "paperlog" in enabled and not _split:
             need = [n for n in ("opener", "repeg", "alerts", "ledger")
                     if n not in enabled]
             if need:
@@ -236,6 +240,7 @@ class Runner:
                 {"params": {"kind": "cellar_boot"},
                  "result": {"sha": sha, "lanes": sorted(enabled),
                             "side": config.OWNER,
+                            "proc": os.environ.get("CELLAR_PROC") or "money",
                             # which-python archaeology cost three rounds on
                             # Aug 30 (user pip vs framework vs the venv the
                             # plist actually runs) — stamp it forever

@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  THE CELLAR — TAPE PROCESS (docs/tape-process-split-spec.md, Sep 12 2026).
+  The parse-heavy lanes (pm_snapshot, paperlog, vsin, kalshi_autolog, batch,
+  grader) in their own interpreter, so the money process's venue reads and
+  socket readers stop sharing a GIL with megapayload parsing. No sockets
+  here (CELLAR_WS=0), no venue writes (the prop passes run in the money
+  process under CELLAR_TAPE_SPLIT=1).
+
+  INSTALL:
+    sudo cp scripts/com.kahlahouse.cellard-tape.plist /Library/LaunchDaemons/
+    sudo chown root:wheel /Library/LaunchDaemons/com.kahlahouse.cellard-tape.plist
+    sudo chmod 644        /Library/LaunchDaemons/com.kahlahouse.cellard-tape.plist
+    sudo launchctl load -w /Library/LaunchDaemons/com.kahlahouse.cellard-tape.plist
+  CONTROL:
+    sudo launchctl kickstart -k system/com.kahlahouse.cellard-tape
+    tail -f /usr/local/var/log/cellard-tape.log
+
+  CUTOVER ORDER: (1) .env: CELLAR_TAPE_SPLIT=1 and drop the tape lanes from
+  CELLAR_LANES; (2) kickstart the money daemon; (3) load this plist.
+  Rollback: unload this plist, restore .env, kickstart the money daemon.
+
+  Plist env wins over .env (load_dotenv never overrides), so CELLAR_LANES
+  here is authoritative for this process.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kahlahouse.cellard-tape</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/robkahla/dev/kahla-house/.venv/bin/python</string>
+        <string>-m</string>
+        <string>cellar</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/robkahla/dev/kahla-house</string>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/cellard-tape.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/cellard-tape.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TZ</key>
+        <string>America/Phoenix</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <key>CELLAR_PROC</key>
+        <string>tape</string>
+        <!-- own intent journal: two daemons must not share one sqlite file -->
+        <key>CELLAR_STATE_DIR</key>
+        <string>/Users/robkahla/.cellar-tape</string>
+        <key>CELLAR_TAPE_SPLIT</key>
+        <string>1</string>
+        <key>CELLAR_LANES</key>
+        <string>pm_snapshot,paperlog,vsin,kalshi_autolog,batch,grader</string>
+        <key>CELLAR_WS</key>
+        <string>0</string>
+        <key>CELLAR_WS_MKTS</key>
+        <string>0</string>
+        <key>CELLAR_WS_DEPTH</key>
+        <string>0</string>
+        <key>CELLAR_WS_PROPS</key>
+        <string>0</string>
+    </dict>
+    <key>UserName</key>
+    <string>robkahla</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

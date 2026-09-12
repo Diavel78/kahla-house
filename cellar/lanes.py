@@ -233,6 +233,13 @@ def lane_opener(ctx: Ctx) -> int:
     deadline = max(deadline, _t.time() + _app._OPENER_MIN_S)
     rows, stats = _app._opener_pass(ctx.sb, ctx.now, deadline)
     stats = {**stats, **oms_stats, **boot_stats}
+    # TAPE SPLIT: the two prop passes (one of them places NFL-props bets)
+    # left the pm-snapshot route and run here, on the socket's prop rows.
+    if os.environ.get("CELLAR_TAPE_SPLIT", "").strip() == "1":
+        try:
+            stats["props"] = _app._prop_passes_tick(ctx.sb, ctx.now)
+        except Exception as e:
+            stats["props"] = {"err": str(e)[:80]}
     # Quote-table hit rate — "measurable from day one" is the spec's own
     # rule. Cumulative counters snapshotted into every opener tick's
     # stats: ws_price {hit: N, rest: M} rising hit-share is the table

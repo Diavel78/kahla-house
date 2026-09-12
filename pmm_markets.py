@@ -1006,6 +1006,10 @@ def _inverse_side(market_type: str, side: str, line: float | None
 # exactly as before, and every fetch fills the cache.
 _LOOKUP_CACHE: dict[str, tuple[float, dict]] = {}
 _LOOKUP_CACHE_MAX = 800
+# Cross-process handoff (the tape-process split): app plants these. PUT
+# after every fetch; GET on an in-process miss when max_age_s is given.
+_LOOKUP_DB_PUT = None
+_LOOKUP_DB_GET = None
 
 
 def _lookup_key(sport, away, home, event_start_iso, want_props):
@@ -1060,6 +1064,17 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
             if diag is not None:
                 diag["lookup_cache_hit"] = True
             return copy.deepcopy(_c[1])
+        if _LOOKUP_DB_GET is not None:
+            try:
+                _dbr = _LOOKUP_DB_GET(_lk, max_age_s)
+            except Exception:
+                _dbr = None
+            if _dbr:
+                if diag is not None:
+                    diag["lookup_cache_hit"] = True
+                    diag["lookup_cache_db"] = True
+                _LOOKUP_CACHE[_lk] = (time.time(), copy.deepcopy(_dbr))
+                return _dbr
     ev = _search_event(client, sport, away, home, event_start_iso, diag=diag)
     if not ev or not ev.get("markets"):
         return None
@@ -1164,6 +1179,11 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
         diag["counts"] = {k: len(out.get(k, []))
                           for k in ("ml", "spread", "total", "nrfi", "props")}
     if _lk:
+        if _LOOKUP_DB_PUT is not None:
+            try:
+                _LOOKUP_DB_PUT(_lk, out)
+            except Exception:
+                pass
         try:
             _LOOKUP_CACHE[_lk] = (time.time(), copy.deepcopy(out))
             if len(_LOOKUP_CACHE) > _LOOKUP_CACHE_MAX:
