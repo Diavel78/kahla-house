@@ -1540,7 +1540,7 @@ def _gameday_pnl(sb) -> dict:
     return out
 
 
-_INCENTIVE_SYNC_MOD = 10   # minutes between incentive pulls (two venue GETs)
+_INCENTIVE_SYNC_MOD = 20   # minutes between incentive pulls (two venue GETs)   # 10→20 Sep 12 2026: 140s contended per sync, ran every lap
 # WALL-CLOCK GATE, not minute-modulo (Sep 6 2026): `now.minute % 10` was
 # Vercel's per-minute-ping throttle. The box's paperlog lane laps every
 # 2-5 min and almost never lands on a :x0 minute — the rent ledger AND the
@@ -3193,7 +3193,7 @@ def _open_cost_mark(rows) -> tuple:
 
 
 _DASH_ORDERS_EVERY_S = 170     # >= ~3 min between orders-count reads
-_DASH_REFRESH_EVERY_S = 300.0  # the whole dashboard recompute, on the paperlog tick
+_DASH_REFRESH_EVERY_S = 600.0  # the whole dashboard recompute, on the paperlog tick (300→600 Sep 12 2026: 164s contended, ran every lap)
 _PM_NOLIST_TS: dict = {}     # market_id -> last empty venue search (30-min backoff)
 _PM_PMM_BUDGET_S = float(os.environ.get("PM_PMM_BUDGET_S")
                          or (45.0 if os.environ.get("CELLAR_LANES") else 7.5))  # CELLAR_LANES = the box
