@@ -455,7 +455,7 @@ def test_ws_mkts_request_budget() -> None:
     all_slugs = set(mf4._groups[pk][1])
     for s in all_slugs - {"a3-0", "a3-1"}:
         mf4._base_seen.add(s)                      # 18 baselines arrived, 2 never did
-    mf4._pack_flush(ws4, nowt=_t.time() + 31.0)
+    mf4._pack_flush(ws4, nowt=_t.time() + W.BASELINE_WAIT_S + 1.0)
     check("rungs without a baseline are un-covered and re-queued",
           "a3-0" not in mf4._covered and "a3-0" in mf4._pending and "a0-0" in mf4._covered)
     check("audit stats count the miss", mf4.audit_stats == {"packs": 1, "silent": 0, "missing": 2}, f"got {mf4.audit_stats}")
@@ -463,15 +463,15 @@ def test_ws_mkts_request_budget() -> None:
     mf5.add_group("z", {"z-1", "z-2", "z-3"}, _t.time() + 3600)
     mf5._apply_ops(ws5); mf5._pack_flush(ws5, force=True)
     n5 = len(ws5.sent)
-    mf5._pack_flush(ws5, nowt=_t.time() + 31.0)   # zero baselines → silent failure
+    mf5._pack_flush(ws5, nowt=_t.time() + W.BASELINE_WAIT_S + 1.0)   # zero baselines → silent failure
     check("a pack with ZERO baselines is torn down and re-queued whole",
           mf5._pack_budget_used() == 0 and {"z-1", "z-2", "z-3"} <= set(mf5._pending)
           and any("unsubscribe" in m for m in ws5.sent[n5:]) and mf5.audit_stats["silent"] == 1)
-    mf5._pack_flush(ws5, nowt=_t.time() + 40.0, force=True)   # re-sent
-    mf5._pack_flush(ws5, nowt=_t.time() + 80.0)               # misses again → parked
+    mf5._pack_flush(ws5, nowt=_t.time() + W.BASELINE_WAIT_S + 10.0, force=True)   # re-sent
+    mf5._pack_flush(ws5, nowt=_t.time() + 2 * W.BASELINE_WAIT_S + 20.0)          # misses again → parked
     check("a rung that misses twice is PARKED (REST prices it) instead of churning",
           "z-1" in mf5._parked and "z-1" not in mf5._pending and mf5._pack_budget_used() == 0)
-    mf5._pack_flush(ws5, nowt=_t.time() + 80.0 + W.PARK_S + 1, force=True)
+    mf5._pack_flush(ws5, nowt=_t.time() + 2 * W.BASELINE_WAIT_S + 20.0 + W.PARK_S + 1, force=True)
     check("after PARK_S it is tried again", "z-1" in mf5._covered)
     # core drift (unchanged semantics)
     mf3 = fresh(); ws3 = FakeWS()
