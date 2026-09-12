@@ -32,6 +32,7 @@ back to PIN fair at PIN's line in that case (current behavior).
 """
 from __future__ import annotations
 
+import copy
 import logging
 import re
 import time
@@ -996,9 +997,33 @@ def _inverse_side(market_type: str, side: str, line: float | None
 
 # ──────────────────────────── Public entry point ────────────────────────────
 
+# LOOKUP RESULT CACHE (Sep 12 2026): the tape lane (pm_snapshot) downloads
+# every in-window game's full event payload every ~90s; the opener, the
+# recenter and the seat top-up then downloaded the same payload again — a
+# 2s idle / 13-27s contended megapayload parse per game per lane. A caller
+# passing max_age_s reads the newest result any lane fetched inside that
+# age (deep-copied; callers mutate their dict). Default None = fetch,
+# exactly as before, and every fetch fills the cache.
+_LOOKUP_CACHE: dict[str, tuple[float, dict]] = {}
+_LOOKUP_CACHE_MAX = 800
+
+
+def _lookup_key(sport, away, home, event_start_iso, want_props):
+    try:
+        bet_dt = datetime.fromisoformat(str(event_start_iso).replace("Z", "+00:00"))
+        if bet_dt.tzinfo is None:
+            bet_dt = bet_dt.replace(tzinfo=timezone.utc)
+        return (f"{sport}:{_norm(away)}:{_norm(home)}:"
+                f"{(_bet_et_date(bet_dt) or bet_dt.date()).isoformat()}:"
+                f"{bet_dt.strftime('%H')}:{int(bool(want_props))}")
+    except Exception:
+        return None
+
+
 def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
            with_bbo: bool = True,
-           diag: dict | None = None, want_props: bool = True) -> dict | None:
+           diag: dict | None = None, want_props: bool = True,
+           max_age_s: float | None = None) -> dict | None:
     """Top-level: find the PMM event for a game and return its parsed
     markets with current bid/ask.
 
@@ -1027,6 +1052,13 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
     """
     if not client:
         return None
+    _lk = _lookup_key(sport, away, home, event_start_iso, want_props)
+    if max_age_s is not None and _lk:
+        _c = _LOOKUP_CACHE.get(_lk)
+        if _c and time.time() - _c[0] <= max_age_s:
+            if diag is not None:
+                diag["lookup_cache_hit"] = True
+            return copy.deepcopy(_c[1])
     ev = _search_event(client, sport, away, home, event_start_iso, diag=diag)
     if not ev or not ev.get("markets"):
         return None
@@ -1130,6 +1162,14 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
     if diag is not None:
         diag["counts"] = {k: len(out.get(k, []))
                           for k in ("ml", "spread", "total", "nrfi", "props")}
+    if _lk:
+        try:
+            _LOOKUP_CACHE[_lk] = (time.time(), copy.deepcopy(out))
+            if len(_LOOKUP_CACHE) > _LOOKUP_CACHE_MAX:
+                for _k in sorted(_LOOKUP_CACHE, key=lambda k: _LOOKUP_CACHE[k][0])[:100]:
+                    _LOOKUP_CACHE.pop(_k, None)
+        except Exception:
+            pass
     return out
 
 

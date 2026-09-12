@@ -20488,6 +20488,53 @@ _OMS_PROD_TS: float = 0.0     # last completed producer pass (throttle)
 # table miss → REST refresh). TTL is a backstop, not the mechanism.
 _LADDER_STRUCT: dict = {}          # market_id -> {"at": mono, "odds": {...}}
 _LADDER_STRUCT_TTL_S = 10_800.0
+# Sep 12 2026 — two dials of the "get off REST" work:
+# _LOOKUP_REUSE_S: the pricer's REST path reads pm_snapshot's lookup result
+#   when it is younger than this instead of re-downloading the event.
+# _LADDER_SUB_HALF_PTS: a CFB ladder is 40-60 rungs; we quote two seats near
+#   the line and the tail gate refuses rungs >10 pts from projection, so the
+#   pricer keeps (and the socket seats) only rungs within this many points
+#   of the at-the-money rung. Every rung subscribed was what overflowed the
+#   socket request budget (~9,100 live rungs vs ~7,350 seats).
+_LOOKUP_REUSE_S = 150.0
+_LADDER_SUB_HALF_PTS = 12.0
+
+
+def _ladder_window(rungs: list) -> list:
+    """Trim a spread/total ladder to the rungs within _LADDER_SUB_HALF_PTS
+    of the at-the-money rung (the real quote whose mid is nearest 50¢).
+    Away-perspective rung value: a synthetic (home) side's line is
+    mirrored so both sides of one market share a value. Placeholder
+    books (≤2¢ bid / ≥98¢ ask) never elect the ATM; no real quote at all
+    → untrimmed (a virgin ladder is priced whole)."""
+    def _rv(e):
+        try:
+            ln = float(e.get("line"))
+        except (TypeError, ValueError):
+            return None
+        return -ln if e.get("synthetic") else ln
+    best = None
+    for e in rungs:
+        q = e.get("quote") or {}
+        b, a = q.get("bid"), q.get("ask")
+        rv = _rv(e)
+        if rv is None or b is None or a is None:
+            continue
+        try:
+            b, a = float(b), float(a)
+        except (TypeError, ValueError):
+            continue
+        if b <= 0.02 or a >= 0.98 or a <= b:
+            continue
+        dm = abs((b + a) / 2.0 - 0.5)
+        if best is None or dm < best[0]:
+            best = (dm, rv)
+    if best is None:
+        return rungs
+    rv0 = best[1]
+    out = [e for e in rungs
+           if _rv(e) is not None and abs(_rv(e) - rv0) <= _LADDER_SUB_HALF_PTS]
+    return out if out else rungs
 _WS_LADDER_CB = None               # runner plants: (gid, slugs, expire_ts)
                                    # -> MarketsFeed.add_group
 _WS_PRICE_STATS = {"hit": 0, "rest": 0}   # table-first hit rate (journal)
@@ -20762,8 +20809,12 @@ def _gridiron_price_game_impl(sb, g):
         if " @ " not in en:
             return None
         away, home = en.split(" @ ", 1)
+        _dg: dict = {}
         pmm = pmm_markets.lookup(get_client(), g.get("sport"), away, home,
-                                 str(g.get("event_start") or ""))
+                                 str(g.get("event_start") or ""),
+                                 diag=_dg, max_age_s=_LOOKUP_REUSE_S)
+        if _dg.get("lookup_cache_hit"):
+            _WS_PRICE_STATS["rest_cached"] = _WS_PRICE_STATS.get("rest_cached", 0) + 1
         if not pmm:
             return None
         d: dict = {"odds": {}}
@@ -20788,6 +20839,7 @@ def _gridiron_price_game_impl(sb, g):
                 except (TypeError, ValueError):
                     pass
             if rungs:
+                rungs = _ladder_window(rungs)
                 d["odds"][mt] = {"polymarket": {"ladder": rungs}}
         # Moneyline sides (Sep 2 2026 — the CFB/UFC ML rent lane). Same
         # ladder shape, line-less; _gridiron_try_ml reads it.
