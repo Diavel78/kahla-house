@@ -19327,6 +19327,18 @@ def _gridiron_seat_legal(rule, mt, sn, rv):
 
 
 def _gridiron_try_bet(sb, g, es0, d, mt, gp, contracts=None):
+    """Timed wrapper (Sep 12 2026): `gtb` calls / `gtb_s` seconds in
+    _WS_PRICE_STATS so the executor's own cost is a journaled number."""
+    t = _time.monotonic()
+    try:
+        return _gridiron_try_bet_impl(sb, g, es0, d, mt, gp, contracts=contracts)
+    finally:
+        _WS_PRICE_STATS["gtb"] = _WS_PRICE_STATS.get("gtb", 0) + 1
+        _WS_PRICE_STATS["gtb_s"] = round(
+            _WS_PRICE_STATS.get("gtb_s", 0.0) + _time.monotonic() - t, 1)
+
+
+def _gridiron_try_bet_impl(sb, g, es0, d, mt, gp, contracts=None):
     """ONE football bet attempt (spread or total) — the shared leg behind
     the opener tape AND the week-of sweep.
 
@@ -20481,16 +20493,48 @@ _WS_LADDER_CB = None               # runner plants: (gid, slugs, expire_ts)
 _WS_PRICE_STATS = {"hit": 0, "rest": 0}   # table-first hit rate (journal)
 
 
-def _price_from_table(struct):
-    """Rebuild the pricer's d-dict from WS_QUOTES alone. None the moment
-    ANY rung lacks a fresh table row — partial pricing is guessing, and
-    the REST path both prices and re-baselines. Synthetic sides invert
-    their twin's canonical book exactly like _inverse_quote."""
+_TABLE_FILL_MAX_RUNGS = 8
+
+
+def _price_from_table(struct, client=None):
+    """Rebuild the pricer's d-dict from WS_QUOTES, filling the FEW rungs
+    the table cannot vouch for with one cheap per-rung book read each.
+    Was all-or-nothing (Sep 4): ONE stale rung sent the whole game down
+    the REST path — a venue event search + a megapayload parse, 5-25s
+    under contention — and with ~20% of football rungs never seated on
+    the sockets (request budget), 75% of pricings went REST all day
+    (`ws_price` 6,956 rest / 2,286 hit, Sep 12). A missing rung is a
+    0.2s markets.book read; more than _TABLE_FILL_MAX_RUNGS missing means
+    the ladder really is uncovered → None → REST (which re-baselines).
+    Synthetic sides invert their twin's canonical book exactly like
+    _inverse_quote."""
     d: dict = {"odds": {}}
+    missing = []
+    for mt, rungs in (struct.get("odds") or {}).items():
+        for e in rungs:
+            if _ws_quote(e["slug"]) is None:
+                missing.append(e["slug"])
+    if len(missing) > _TABLE_FILL_MAX_RUNGS:
+        return None
+    filled: dict = {}
+    if missing:
+        try:
+            cl = client or get_client()
+            for s in missing:
+                bk = _pmm_book(cl, s)
+                if bk is None:
+                    return None                  # unreadable → REST path
+                filled[s] = (bk.get("best_bid"), bk.get("best_ask"))
+            _WS_PRICE_STATS["fill"] = _WS_PRICE_STATS.get("fill", 0) + len(missing)
+            _WS_PRICE_STATS["hit_partial"] = _WS_PRICE_STATS.get("hit_partial", 0) + 1
+        except Exception:
+            return None
     for mt, rungs in (struct.get("odds") or {}).items():
         out = []
         for e in rungs:
             q = _ws_quote(e["slug"])
+            if q is None:
+                q = filled.get(e["slug"])
             if q is None:
                 return None
             bid_c, ask_c = q
@@ -20676,6 +20720,20 @@ def _mlb_slim_dossier(sb, g):
 
 
 def _gridiron_price_game(sb, g):
+    """Timed wrapper (Sep 12 2026): `rest_s` = seconds spent on the REST
+    path, cumulative, next to the hit/rest counts the opener journals —
+    the number that says what the megapayload path actually costs."""
+    r0 = _WS_PRICE_STATS.get("rest", 0)
+    t = _time.monotonic()
+    try:
+        return _gridiron_price_game_impl(sb, g)
+    finally:
+        if _WS_PRICE_STATS.get("rest", 0) > r0:
+            _WS_PRICE_STATS["rest_s"] = round(
+                _WS_PRICE_STATS.get("rest_s", 0.0) + _time.monotonic() - t, 1)
+
+
+def _gridiron_price_game_impl(sb, g):
     """PHASE 1.5 SLIM PRICER: the football bet leg needs ONLY the
     spread/total ladders — books per rung. build_dossier spends ~8s on
     ESPN records, splits, weather, injuries and the sharp score to make
@@ -24147,6 +24205,13 @@ _SEAT_TOPUP_LAST_TS = 0.0
 _SEAT_TOPUP_MAX_CREATES = 6
 _SEAT_TOPUP_MAX_READS = 15
 _SEAT_TOPUP_BOOT_GRACE_S = 480.0
+# WALL-CLOCK BUDGET (Sep 12 2026): the pass ran 490-900s on a CFB Saturday
+# — longer than its own 15-min cadence, so it fired on nearly every repeg
+# lap and the chase queued behind it (laps 300-1100s). Whatever the pass
+# does not reach in this budget waits for the next pass, exactly like the
+# read/create caps; cadence is measured from COMPLETION so a long pass
+# cannot re-fire the moment it ends.
+_SEAT_TOPUP_BUDGET_S = 120.0
 _PROCESS_T0 = _time.monotonic()
 _SEAT_TOPUP_SOURCES = {"gridiron_autobet", "autobet", "ou_trader",
                        "pmm_autolog", "fbprop_autobet"}
@@ -24240,6 +24305,7 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     if _time.monotonic() - _PROCESS_T0 < _SEAT_TOPUP_BOOT_GRACE_S:
         return {"gate": "boot_grace"}
     _SEAT_TOPUP_LAST_TS = _time.time()
+    _t0 = _time.monotonic()
     if client is None:
         client = get_client()
     if orders is None:
@@ -24298,9 +24364,13 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     except Exception:
         pass                             # unreadable → no guard → still gated by rent/caps
     placed = 0
+    st["t_setup"] = round(_time.monotonic() - _t0, 1)
     for p, b, slug, synth, held, stake in cands:
         if placed >= _SEAT_TOPUP_MAX_CREATES:
             st["gate"] = "max_creates"
+            break
+        if _time.monotonic() - _t0 > _SEAT_TOPUP_BUDGET_S:
+            st["gate"] = "budget"
             break
         es = p.get("event_start")
         try:
@@ -24434,6 +24504,7 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     # held across every rung + resting bids across every rung; the
     # remainder goes through _gridiron_try_bet (rent-first, line-anchored,
     # value side, join-the-touch) as ONE seat sized to the remainder.
+    st["t_cands"] = round(_time.monotonic() - _t0, 1)
     fb: dict = {}
     for p in picks:
         b = p.get("signal_blob") if isinstance(p.get("signal_blob"), dict) else {}
@@ -24451,6 +24522,9 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     for key, grp in fb.items():
         if placed >= _SEAT_TOPUP_MAX_CREATES:
             st["gate"] = "max_creates"
+            break
+        if _time.monotonic() - _t0 > _SEAT_TOPUP_BUDGET_S:
+            st["gate"] = "budget"
             break
         p = grp["p"]
         held = 0.0
@@ -24475,6 +24549,7 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         if g["id"] not in _LADDER_STRUCT:
             st["fb_uncached"] = st.get("fb_uncached", 0) + 1
             continue
+        _tg = _time.monotonic()
         try:
             ent = _rule_cache.get(g["id"])
             if ent is None:
@@ -24490,12 +24565,15 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             app.logger.warning("seat topup group %s %s failed: %s", g.get("event_name"), key[1], e)
             continue
         st["fb_" + str(v)[:20]] = st.get("fb_" + str(v)[:20], 0) + 1
+        st["fb_max_s"] = round(max(st.get("fb_max_s", 0.0), _time.monotonic() - _tg), 1)
         if v == "placed":
             placed += 1
             app.logger.info("SEAT TOPUP (contest) %s %s: +%d at the rule's rung (held %.2f, resting %.0f of %g)",
                             g.get("event_name"), key[1], need, held, resting, grp["stake"])
             _time.sleep(2.0)
     st["placed"] = placed
+    st["t_total"] = round(_time.monotonic() - _t0, 1)
+    _SEAT_TOPUP_LAST_TS = _time.time()      # cadence from completion
     return st
 
 
@@ -24864,6 +24942,7 @@ _RECENTER_MAX_GAMES = 12         # games priced per pass — and ONLY games whos
 #   game is judged on the next pass. A COLD process REST-pricing every
 #   game earned a Cloudflare 1015 on Sep 6 2026.
 _RECENTER_LAST_TS = 0.0
+_RECENTER_BUDGET_S = 120.0       # wall clock per pass (Sep 12 2026: 260-500s passes)
 
 
 def _gridiron_recenter_tick(sb, now, client=None, orders=None,
@@ -24927,6 +25006,7 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
         except Exception:
             return {"gate": "no_client"}
     _RECENTER_LAST_TS = _time.time()
+    _t0 = _time.monotonic()
 
     def _open_buys(ol, slug):
         return [o for o in ol if o.get("slug") == slug and o.get("auto")
@@ -24942,6 +25022,9 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
     nowiso = now.isoformat()
     for mid, picks in by_game.items():
         if res["moved"] >= _RECENTER_MAX_MOVES:
+            break
+        if _time.monotonic() - _t0 > _RECENTER_BUDGET_S:
+            res["gate"] = "budget"
             break
         if res["games"] >= (max_games or _RECENTER_MAX_GAMES):
             res["gate"] = "game_cap"
@@ -25106,6 +25189,8 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
             res["moved"] += 1
             moves.append(f"{(p.get('event_name') or '')[:26]} {mt} {sn} "
                          f"{rv:+g}→{target[1]:+g} ({rule['center_src']} {rule['center']:+g})")
+    res["t_s"] = round(_time.monotonic() - _t0, 1)
+    _RECENTER_LAST_TS = _time.time()         # cadence from completion
     if moves:
         _send_fill_telegram("\u2194\ufe0f RECENTER — moved " + str(len(moves))
                             + " unfilled football seat(s) to the line:\n"
