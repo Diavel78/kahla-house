@@ -1013,6 +1013,7 @@ def _lookup_key(sport, away, home, event_start_iso, want_props):
         bet_dt = datetime.fromisoformat(str(event_start_iso).replace("Z", "+00:00"))
         if bet_dt.tzinfo is None:
             bet_dt = bet_dt.replace(tzinfo=timezone.utc)
+        bet_dt = bet_dt.astimezone(timezone.utc)   # '+00:00' and '-07:00' spellings of one kickoff share a key
         return (f"{sport}:{_norm(away)}:{_norm(home)}:"
                 f"{(_bet_et_date(bet_dt) or bet_dt.date()).isoformat()}:"
                 f"{bet_dt.strftime('%H')}:{int(bool(want_props))}")

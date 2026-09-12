@@ -20488,6 +20488,7 @@ _OMS_PROD_TS: float = 0.0     # last completed producer pass (throttle)
 # table miss → REST refresh). TTL is a backstop, not the mechanism.
 _LADDER_STRUCT: dict = {}          # market_id -> {"at": mono, "odds": {...}}
 _LADDER_STRUCT_TTL_S = 10_800.0
+_LADDER_STRUCT_TTL_FAR_S = 43_200.0   # >72h to kickoff (see _gridiron_price_game_impl)
 # Sep 12 2026 — two dials of the "get off REST" work:
 # _LOOKUP_REUSE_S: the pricer's REST path reads pm_snapshot's lookup result
 #   when it is younger than this instead of re-downloading the event.
@@ -20797,7 +20798,21 @@ def _gridiron_price_game_impl(sb, g):
     degrades to exactly the old behavior."""
     gid = str(g.get("id") or "")
     st0 = _LADDER_STRUCT.get(gid)
-    if st0 and _time.monotonic() - st0["at"] < _LADDER_STRUCT_TTL_S:
+    # Struct TTL by horizon (Sep 12 2026): a ladder more than 72h from
+    # kickoff is outside the tape lane's window, so its only refresh is
+    # this REST path — every 3h per game, for rung sets that barely move
+    # that far out. 12h there; 3h inside the tape's window, where the
+    # lookup cache makes the refresh nearly free.
+    _ttl = _LADDER_STRUCT_TTL_S
+    try:
+        _ko = datetime.fromisoformat(str(g.get("event_start")).replace("Z", "+00:00"))
+        if _ko.tzinfo is None:
+            _ko = _ko.replace(tzinfo=timezone.utc)
+        if (_ko - datetime.now(timezone.utc)).total_seconds() > 72 * 3600:
+            _ttl = _LADDER_STRUCT_TTL_FAR_S
+    except Exception:
+        pass
+    if st0 and _time.monotonic() - st0["at"] < _ttl:
         d0 = _price_from_table(st0)
         if d0 is not None:
             _WS_PRICE_STATS["hit"] += 1
