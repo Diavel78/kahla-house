@@ -8675,6 +8675,7 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
     if not autos_ok:
         out["ghost_adopt_skipped"] = "picks_unreadable"
         return out                              # unknown is meaningless without the list
+    app.logger.info("autolog: removals/syncs done, unknown=%d", len(unknown))
     _al_deadline = _time.monotonic() + _AUTOLOG_UNKNOWN_BUDGET_S
     for (slug, syn), prob in list(unknown.items()):
         if _time.monotonic() > _al_deadline:
@@ -13049,6 +13050,7 @@ def _compute_fill_status(sb, uid: str, poly_snap=None,
             # pick. The alerts lane walks every minute; whoever holds the
             # list feeds the socket (set_slugs is idempotent — deltas only).
             try:
+                app.logger.info("fs walk: watch push at %.1fs", _time.monotonic() - _fs_t)
                 if poly_orders is not None and _WS_WATCHLIST_CB is not None:
                     _WS_WATCHLIST_CB({o.get("slug") for o in poly_orders
                                       if o.get("slug")}
@@ -13058,6 +13060,7 @@ def _compute_fill_status(sb, uid: str, poly_snap=None,
             # Book-of-record: log any resting order OR held position not yet a
             # pick (the COLD start — first-ever Poly pick — is the cron
             # autolog; this is the fast reconcile while the page is open).
+            app.logger.info("fs walk: autolog start at %.1fs", _time.monotonic() - _fs_t)
             try:
                 _pmm_autolog(sb, uid, client=poly_client, orders=poly_orders,
                              positions=poly_positions)
