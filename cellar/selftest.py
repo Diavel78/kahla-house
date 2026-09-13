@@ -484,6 +484,44 @@ def test_ws_mkts_request_budget() -> None:
           "core" not in mf3._groups and any(op[1] == "core" for op in mf3._ops))
 
 
+def test_gridiron_qb_adjust() -> None:
+    """The QB adjustment (Sep 13 2026): _gridiron_proj adds each side's
+    football_qb_adj points to its expected score, stamps the note every
+    football bet carries, applies NOTHING when the rows are stale, and
+    matches team names the way the ratings lookup does."""
+    import app as _app
+    snap = {"league_avg": 24.0, "params": {"hfa": 2.0},
+            "ratings": {"Atlanta Falcons": {"off": 26.0, "def": 22.0},
+                        "Tampa Bay Buccaneers": {"off": 24.0, "def": 24.0}}}
+    _o_snap, _o_adj = _app._power_snapshot, _app._football_qb_adj
+    _app._power_snapshot = lambda sb, sport: snap
+    try:
+        _app._football_qb_adj = lambda sb, sport: ({}, False)
+        m0, t0, _ = _app._gridiron_proj(None, "NFL", "Tampa Bay Buccaneers @ Atlanta Falcons")
+        adj = {"Atlanta Falcons": {"adj": -3.8, "starter": "Cooper Rush", "src": "depth_chart",
+                                   "rated_on": "Kirk Cousins"},
+               "Tampa Bay Buccaneers": {"adj": 1.0, "starter": "X", "src": "depth_chart",
+                                        "rated_on": "X"}}
+        _app._football_qb_adj = lambda sb, sport: (adj, False)
+        m1, t1, _ = _app._gridiron_proj(None, "NFL", "Tampa Bay Buccaneers @ Atlanta Falcons")
+        check("home QB dock + away QB bump move the margin by their sum",
+              abs((m1 - m0) - (-3.8 - 1.0)) < 1e-9, f"{m0} → {m1}")
+        check("the total moves by the net points", abs((t1 - t0) - (-2.8)) < 1e-9)
+        note = _app._gridiron_qb_note("NFL", "Tampa Bay Buccaneers @ Atlanta Falcons")
+        check("the bet stamp names the starter and who the rating was built on",
+              bool(note) and note["home"] == -3.8 and note["home_qb"] == "Cooper Rush"
+              and note["home_rated_on"] == "Kirk Cousins" and note["stale"] is False)
+        _app._football_qb_adj = lambda sb, sport: ({}, True)
+        m2, _, _ = _app._gridiron_proj(None, "NFL", "Tampa Bay Buccaneers @ Atlanta Falcons")
+        note2 = _app._gridiron_qb_note("NFL", "Tampa Bay Buccaneers @ Atlanta Falcons")
+        check("stale rows apply nothing and say so", m2 == m0 and note2 and note2["stale"] is True)
+        check("substring team match (the ratings' own rule)",
+              _app._fb_adj_for({"Atlanta Falcons": {"adj": 1}}, "Atlanta")["adj"] == 1
+              and _app._fb_adj_for({"Atlanta Falcons": {"adj": 1}}, "Tampa") is None)
+    finally:
+        _app._power_snapshot, _app._football_qb_adj = _o_snap, _o_adj
+
+
 def test_gridiron_value_window() -> None:
     """Rob's rule (Sep 5 2026): Pinnacle is the line; bet toward the model,
     away from Pinnacle; favorable rungs only. Rung units = home line."""
@@ -995,7 +1033,8 @@ def main() -> int:
               test_batch_blocked_deps, test_owner_dependent_lanes,
               test_dry_run_blackout, test_overrun_detector,
               test_ws_quote_presence, test_ws_mkts_request_budget,
-              test_gridiron_value_window, test_pin_line_center,
+              test_gridiron_value_window, test_gridiron_qb_adjust,
+              test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
               test_lane_covers_its_documented_engines,

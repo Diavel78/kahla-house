@@ -18813,6 +18813,72 @@ _GRIDIRON_EVENT_CAP_USD = 20.0    # Sep 2 2026 (Rob): two rungs per ladder
 # safely inside the lane's headroom.
 _GRIDIRON_BUDGET_S = float(os.environ.get("GRIDIRON_BUDGET_S") or 45.0)
 _PWR_CACHE: dict = {}                          # sport → {at, snap}
+# THE QB ADJUSTMENT (Sep 13 2026 — docs/football-qb-adjust-spec.md). The
+# ratings rate a team as a bundle of past points; Week 1 seated money on
+# Arizona/Miami/Atlanta priced off quarterbacks who were gone. One row per
+# (sport, team) from scripts/compute_football_qb.py: who throws the next
+# game vs who threw the rated games, in ANY/A × a fitted k (NFL 4.84,
+# t=4.5). Read here, applied in _gridiron_proj to that team's expected
+# points, so every consumer (seat, recenter, repeg fair, ML lane,
+# shadows) inherits it. Rows older than _FBQB_STALE_S apply 0 and stamp
+# stale — a dead batch job degrades to today's model, never to a stale
+# roster. Kill switch: machine_flags football_qb_adj.
+_FBQB_CACHE: dict = {}                         # sport → {at, map, stale}
+_FBQB_STALE_S = 8 * 86400.0
+_GRIDIRON_QB_NOTE: dict = {}                   # event_name → last stamp
+
+
+def _football_qb_adj(sb, sport):
+    """team → {adj, starter, src, rated_on} for a sport; {} when off,
+    missing or stale (cache 10 min)."""
+    c = _FBQB_CACHE.get(sport)
+    if c and _time.time() - c["at"] < 600:
+        return c["map"], c["stale"]
+    out, stale = {}, False
+    try:
+        if _machine_flag("football_qb_adj", True):
+            rows = (sb.table("football_qb_adj")
+                    .select("team,adj_pts,starter_name,starter_src,baseline_qb,computed_at")
+                    .eq("sport", sport).limit(400).execute().data) or []
+            newest = 0.0
+            for r in rows:
+                try:
+                    ts = datetime.fromisoformat(
+                        str(r.get("computed_at")).replace("Z", "+00:00")).timestamp()
+                except (TypeError, ValueError):
+                    ts = 0.0
+                newest = max(newest, ts)
+            stale = bool(rows) and (_time.time() - newest > _FBQB_STALE_S)
+            if rows and not stale:
+                out = {r["team"]: {"adj": float(r.get("adj_pts") or 0.0),
+                                   "starter": r.get("starter_name"),
+                                   "src": r.get("starter_src"),
+                                   "rated_on": r.get("baseline_qb")}
+                       for r in rows if r.get("team")}
+    except Exception:
+        out, stale = {}, False
+    _FBQB_CACHE[sport] = {"at": _time.time(), "map": out, "stale": stale}
+    return out, stale
+
+
+def _fb_adj_for(adjmap, nm):
+    """The same exact-then-substring match _gridiron_proj uses for ratings."""
+    if not adjmap or not nm:
+        return None
+    if nm in adjmap:
+        return adjmap[nm]
+    nl = nm.lower()
+    for k, v in adjmap.items():
+        kl = (k or "").lower()
+        if kl and (nl in kl or kl in nl):
+            return v
+    return None
+
+
+def _gridiron_qb_note(sport, event_name):
+    """The stamp every football bet/shadow carries: what the pricer added
+    for each side's quarterback (None when nothing was applied)."""
+    return _GRIDIRON_QB_NOTE.get(f"{sport}|{event_name}")
 
 
 def _power_snapshot(sb, sport):
@@ -18871,6 +18937,24 @@ def _gridiron_proj(sb, sport, event_name):
         return None
     exp_home = h_off + (a_def - lg) + hfa / 2.0
     exp_away = a_off + (h_def - lg) - hfa / 2.0
+    # THE QB ADJUSTMENT — the one roster term the ratings carry.
+    try:
+        adjmap, stale = _football_qb_adj(sb, sport)
+        ah, aa = _fb_adj_for(adjmap, home_n), _fb_adj_for(adjmap, away_n)
+        if ah or aa or stale:
+            exp_home += float((ah or {}).get("adj") or 0.0)
+            exp_away += float((aa or {}).get("adj") or 0.0)
+            _GRIDIRON_QB_NOTE[f"{sport}|{event_name}"] = {
+                "home": round(float((ah or {}).get("adj") or 0.0), 2),
+                "away": round(float((aa or {}).get("adj") or 0.0), 2),
+                "home_qb": (ah or {}).get("starter"), "away_qb": (aa or {}).get("starter"),
+                "home_rated_on": (ah or {}).get("rated_on"),
+                "away_rated_on": (aa or {}).get("rated_on"),
+                "stale": bool(stale)}
+        else:
+            _GRIDIRON_QB_NOTE.pop(f"{sport}|{event_name}", None)
+    except Exception:
+        pass
     return exp_home - exp_away, exp_home + exp_away, params
 
 
@@ -19913,6 +19997,7 @@ def _gridiron_try_bet_impl(sb, g, es0, d, mt, gp, contracts=None):
               "ml_line": ml_line, "model_capped": model_capped,
               "bound": (bounds or {}).get(s["sn"]),
               "value_side": value_side,
+              "qb_adj": _gridiron_qb_note(g.get("sport"), g.get("event_name")),
               "rung_dist": round(s["dist"], 1),
               "early_noveto": bool(_noveto
                                    and s["e"] < _GRIDIRON_MIN_EDGE_PP)}
@@ -20050,6 +20135,7 @@ def _gridiron_try_ml(sb, g, es0, d):
         return "no_model" if e is None else "edge"
     xb = {"gridiron_autobet": True, "rent_first": True,
           "ml_rent_lane": True,
+          "qb_adj": _gridiron_qb_note(g.get("sport"), g.get("event_name")),
           "ml_model_p": (round(ps, 4) if ps is not None else None),
           "early_noveto": bool(_noveto and (e is None
                                             or e < _GRIDIRON_MIN_EDGE_PP))}
@@ -21978,7 +22064,9 @@ def _gridiron_opener_pass(sb, now, deadline):
                          if q0.get("ask") is not None else None),
                         extra_blob={"gridiron_autobet": True,
                                     "gridiron_ml": True,
-                                    "p_home": round(p_home, 4)},
+                                    "p_home": round(p_home, 4),
+                                    "qb_adj": _gridiron_qb_note(
+                                        g["sport"], g.get("event_name"))},
                         cap_flag="gridiron_autobet", cap_max=10000,
                         query_text="auto-bet: gridiron opener",
                         reason=(f"GRIDIRON AUTO-BET — {s} ML pegged "

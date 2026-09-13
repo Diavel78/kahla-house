@@ -110,7 +110,11 @@ JOBS: tuple[Job, ...] = (
     # spine the morning after each slate.
     Job("football_players",
         ["scripts.ingest_football_players", "--delta", "--commit"],
-        hour=3, minute=48, note="NFL player game lines (football prop spine)"),
+        hour=3, minute=48, note="NFL + NCAAF player game lines (prop spine + QB adjust)",
+        # NCAAF joined Sep 13 2026 (backfilled 2025-08 →) — the QB
+        # adjustment needs college passers too. Same script, second sport.
+        then=(("scripts.ingest_football_players", "--delta", "--sport", "NCAAF",
+               "--commit"),)),
 
     # -- daily model computes (order matters: after their spines) ----------
     Job("diamond_iq", ["scripts.compute_diamond_iq"],
@@ -127,6 +131,14 @@ JOBS: tuple[Job, ...] = (
     Job("power_ratings", ["scripts.ingest_results", "--days", "2"],
         hour=4, minute=0, note="ESPN finals -> game_results, then ratings",
         then=(("scripts.compute_power_ratings",),)),
+    # THE QB ADJUSTMENT (Sep 13 2026, docs/football-qb-adjust-spec.md):
+    # after the ratings, same window/half-life, so the baseline weights
+    # the games the rating did. Reads ESPN depth charts + rosters; writes
+    # football_qb_adj, which app._gridiron_proj applies. Stale >8d ⇒ the
+    # pricer applies 0, so a failure here is a quiet fallback, not a lie.
+    Job("football_qb", ["scripts.compute_football_qb", "--commit"],
+        hour=4, minute=10, timeout_s=900,
+        note="football QB adjustment (who throws the next game vs who threw the rated games)"),
 
     # -- weekly ------------------------------------------------------------
     # NOT --delta: this script has no such flag. Its delta mode is
