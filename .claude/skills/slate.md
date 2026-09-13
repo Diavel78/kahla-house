@@ -172,3 +172,92 @@ separately and never folded into the play record.
 - Exchange lines in older blobs go stale and produce impossible numbers
   (a 16.5 or 20.5 NFL total). If a number fails the smell test, it is a
   data artifact — say so and pass rather than "finding" a huge edge.
+
+## FULL-BOARD mode (Rob, Sep 13 2026: "All of them… every single college
+## and nfl game that has at least 1 FBS team")
+
+The standing ask is now the WHOLE board, not a narrowed card. A normal
+September weekend measured live: **NCAAF 75 games** (1 Thu + 3 Fri + 71 Sat)
+**+ NFL 16** = **~91 games / 182 legs**. "At least one FBS team" is exactly
+what the ESPN `groups=80` scoreboard returns (FBS-vs-FCS included), which is
+what `markets` already holds — so the board needs no extra filter.
+
+Nothing about §2 changes. What changes is that a 91-game board cannot be
+researched by reading 30 subagent essays into one context. Two rules make it
+fit:
+
+### Rule A — the model board is ONE query, not 91 blobs
+
+`football_sheets.data_blob` is large per row. Never read the blobs. Pull the
+whole board as one compact line per game:
+
+```sql
+select event_name || ' | ' ||
+  coalesce(data_blob->'model'->'bet_spread'->>'team','?') || ' ' ||
+  coalesce(data_blob->'model'->'bet_spread'->>'line','?') || ' (e' ||
+  coalesce(data_blob->'model'->'bet_spread'->>'edge_pts','?') || ') | ' ||
+  coalesce(data_blob->'model'->'bet_total'->>'side','?') || ' ' ||
+  coalesce(data_blob->'model'->'bet_total'->>'line','?') || ' (e' ||
+  coalesce(data_blob->'model'->'bet_total'->>'edge_pts','?') || ') | marg ' ||
+  coalesce(data_blob->'model'->>'margin_cal','?') || ' tot ' ||
+  coalesce(data_blob->'model'->>'total_cal','?') as row
+from football_sheets where week_key='<WEEK>' and sport='<SPORT>'
+order by event_name;
+```
+
+~30 tokens per game — the entire board lands in ~3k. A row with `?` in the
+spread fields is a game the model could not price (`_MIN_TEAM_GP`, usually an
+FCS visitor); it still gets a card line, handicapped off the market number.
+
+### Rule B — researchers WRITE, they do not REPORT
+
+Each subagent gets 3-4 games and **writes one file** to
+`<scratchpad>/slate/<YYYY-MM-DD>/batch-<k>.md`, then returns **≤150 words**.
+Never let them return the research itself — 30 essays is 90k of context and
+the merge dies. Give every researcher this exact block format, one per game:
+
+```
+GAME: Away @ Home | Sat 9/19 1:30p AZ
+QB: away=<name|UNKNOWN, confirmed|unconfirmed> home=<same>
+OUT: <≤3 that move the number, or NONE>
+STALE: <what our rating still credits that is gone, or NONE>
+CUT: AWAY|HOME|OVER|UNDER|NEUTRAL — <≤12 words>
+CONF: HIGH|MED|LOW   (LOW = little public info found)
+```
+
+`CUT` is the only field the merge consumes; the rest is the evidence trail
+and the reason Rob can audit an override. Tell them plainly: **write UNKNOWN
+and CONF: LOW rather than guess** — a confident wrong QB is worse than an
+admitted gap, and the tail of a 71-game Saturday genuinely has thin public
+info.
+
+### Rule C — merge is mechanical
+
+For each game: model gives side+total, the file gives `CUT`.
+
+| CUT vs model side | Result |
+|---|---|
+| agrees, or NEUTRAL | model stands |
+| disagrees, CONF HIGH/MED | **override**, print the one-line reason |
+| disagrees, CONF LOW | model stands, print the caveat inline |
+| model unpriced (`?`) | take the CUT side; no CUT → handicap the market line on game shape |
+
+Mark every LOW-confidence game on the card. Rob writes the tickets; he needs
+to know which legs are vetted and which are the model alone.
+
+### Running it
+
+Timing: college depth charts firm up Monday-Tuesday, injury reports land
+Wed-Fri, NFL inactives 90 min pre-kick. **Research Thursday night for the
+Friday/Saturday college board; Friday-Saturday for the NFL Sunday board.**
+Researching a Saturday board on Sunday is stale by kickoff.
+
+Order of operations:
+1. Refresh data (§1) — `football-sheets-data.yml`, both sports.
+2. Pull the board (Rule A), one query per sport.
+3. Fan out researchers in waves of ~8 agents × 3-4 games, NCAAF first (bigger
+   and it kicks first). Each writes its file, returns a stub.
+4. `cat` the batch files, merge (Rule C), write the card.
+5. Card is grouped by kickoff, one line per game, both legs, overrides inline
+   — §4 format, unchanged. At 91 games ALSO give the copy-paste block split
+   by day so a single iMessage isn't 182 lines.
