@@ -8878,14 +8878,23 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
     # YES entry (non-synthetic) and synthesized NO share the slug, so it
     # carries both sides — the bet's synthetic flag picks which.
     slug_index: dict = {}
+    # THE INDEX WAS THE WEDGE (Sep 12 2026): to map ~20 stray slugs it
+    # downloaded EVERY game in the window fresh — 100+ games on a CFB
+    # Saturday, ~5 venue reads each, every walk — and that held the repeg
+    # lane's fill-status walk 10-20 min at a time. Identity needs no fresh
+    # quotes: read the lookup cache (the tape fills it), and stop at the
+    # section's wall clock — the rest is next call's work.
     for mk in (markets if want_slugs else []):
+        if _time.monotonic() > _al_deadline:
+            out["budget"] = "index_loop"
+            break
         ev = mk.get("event_name") or ""
         if " @ " not in ev:
             continue
         away, home = [s.strip() for s in ev.split(" @ ", 1)]
         try:
             data = _pm.lookup(client, mk["sport"], away, home,
-                              mk.get("event_start"))
+                              mk.get("event_start"), max_age_s=900.0)
         except Exception:
             continue
         # Slug-date VETO (the trade-tape rule, July 29 Braves@Mets zombie):
