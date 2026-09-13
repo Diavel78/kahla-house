@@ -12375,8 +12375,8 @@ _FILL_STATUS_TTL = 30       # s — server cache; the page polls on its 60s load
 # this lap (the buy sniper works off frames regardless) and the next lap —
 # targeted, seconds — picks them up. Warm-up prefetch capped the same way.
 _FS_WALK_BUDGET_S = 150.0
-_FS_WALK_REST_MAX = 80
-_FS_WARM_MAX = 120
+_FS_WALK_REST_MAX = 20
+_FS_WARM_MAX = 24        # 6 threads × 4 rounds; a REST read is 10-35s at Saturday peak
 _FS_WALK = {"deadline": 0.0, "rest_left": 0}
 
 # LAST FILL-STATUS WALK, per uid, merged by pick id (Sep 12 2026 — the
@@ -13079,11 +13079,20 @@ def _compute_fill_status(sb, uid: str, poly_snap=None,
                 from concurrent.futures import ThreadPoolExecutor
                 _nl = sorted(_need)[:_FS_WARM_MAX]
                 book_cache = {}
+                # Chunked and deadline-aware (Sep 12 2026): the whole
+                # prefetch used to run before the walk's clock was ever
+                # consulted; at peak that alone was 8+ minutes.
                 with ThreadPoolExecutor(max_workers=6) as _ex:
-                    for _s, _bk in zip(_nl, _ex.map(
-                            lambda s: _pmm_book(poly_client, s), _nl)):
-                        if _bk is not None:
-                            book_cache[_s] = _bk
+                    for _i in range(0, len(_nl), 6):
+                        if _time.monotonic() > _FS_WALK["deadline"]:
+                            _WS_PRICE_STATS["fs_warm_cut"] = \
+                                _WS_PRICE_STATS.get("fs_warm_cut", 0) + len(_nl) - _i
+                            break
+                        _chunk = _nl[_i:_i + 6]
+                        for _s, _bk in zip(_chunk, _ex.map(
+                                lambda s: _pmm_book(poly_client, s), _chunk)):
+                            if _bk is not None:
+                                book_cache[_s] = _bk
         except Exception:
             book_cache = None       # warm-up is an optimization, never a gate
     fills = []
