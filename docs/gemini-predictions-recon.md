@@ -237,3 +237,11 @@ the payout down per event. Sunday's pools pay Monday 5:30pm ET (2:30pm AZ); Mond
 Tuesday. Kickoff cancel: launchd `com.kahlahouse.gemini-cancel` (plist in `cellar/`,
 every 300s, log `~/.kahla/logs/gemini-cancel.log`) — cancels only `kh-seed-*` orders on
 games whose start has passed; hand-placed orders are never touched.
+
+## Kickoff rule (Rob, Sep 13 2026)
+
+**Props: every order, bid OR ask, cancels at kickoff** — they resolve yes/no, nothing to
+manage in-play. **ML / spread / O-U asks on held positions should stay live in-play, at
+cost, exactly like Polymarket — but ONLY once a repeg exists on this venue.** With no
+repeg (today) everything cancels at kickoff; a stale in-play ask with nothing chasing it is
+the risk. `gemini_probe.py cancel-started` implements "everything cancels" for now.
