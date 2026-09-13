@@ -32,6 +32,14 @@ CORRECTION (venue per-fill ledger, same day): 34 of his 36 hand fills were MAKER
 LAST TWO maker fills before it (3:39pm + 3:58pm ET, $2.40 + $2.10 = $4.50 → 5¢); five earlier
 same-day maker fills were NOT in it — the rebate window/lag is unresolved until the next payout
 (Sep 13 5pm ET should carry ~27 maker fills ≈ $0.70 if it is a rolling 24h window).
+**RESOLVED Sep 13 5pm ET: it is NOT a window.** That payout counted 6 fills / $13.89 / $0.15;
+lifetime 8 of 34 maker fills are credited (~25%). The two Friday fills that paid were the LAST
+two before the cutoff (3:39pm + 3:58pm ET) while five earlier same-day maker fills never paid
+in either payout. Best reading: the rebate is a share of the taker fee ACTUALLY COLLECTED on
+the fill, and most takers on this book (the contracted 250-lot maker re-centering, promo-cash
+users) pay none — so ~3 in 4 maker fills earn $0. Treat the rebate as noise; the pool is the
+only rent that matters. There is no per-fill rebate endpoint (payouts/{id}, /fills, summary/daily
+all 404), so this can't be proven from the API.
 **Maker fee actually charged: $0.00 on every one of the 34 maker fills** — the schedule says
 0.0175 but the account is being charged nothing (promo or waiver); a maker fill is strictly
 positive right now.
