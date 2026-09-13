@@ -549,6 +549,9 @@ def _search_event(client, sport: str, away: str, home: str,
     used_attempt = None
     matched = None
     for i, params in enumerate(attempts):
+        if _RL_GATE is not None and not _RL_GATE():
+            last_error = "paced out"
+            break
         try:
             resp = client.events.list(params)
         except Exception as e:
@@ -604,6 +607,8 @@ def _search_event(client, sport: str, away: str, home: str,
             try:
                 seen_pg: set = set()
                 for _pg in range(6):        # 600 markets/event ceiling
+                    if _RL_GATE is not None and not _RL_GATE():
+                        break
                     mresp = client.markets.list({
                         "eventSlug": [slug],
                         "closed":    False,
@@ -1017,6 +1022,7 @@ _LOOKUP_DB_GET = None
 # venue read breaker hooks (app plants): _RL_ACTIVE() -> bool, _RL_TRIP(exc)
 _RL_ACTIVE = None
 _RL_TRIP = None
+_RL_GATE = None      # app plants: pace one venue read; False = skip
 
 
 def _lookup_key(sport, away, home, event_start_iso, want_props):

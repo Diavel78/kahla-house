@@ -1152,6 +1152,39 @@ _VENUE_RL = {"until": 0.0, "trips": 0, "skipped": 0}
 _VENUE_RL_HOLD_S = 20.0
 
 
+# VENUE READ PACING (Sep 12 2026): the money process tripped the venue's
+# rate limit within a second of any burst (20 book reads in 1s). A token
+# bucket paces every venue read in the process to _VENUE_READ_RPS; a caller
+# waits for a token (bounded) instead of firing into a 429. Env-tunable per
+# process (CELLAR_VENUE_READ_RPS); the tape process runs its own bucket.
+_VENUE_READ_RPS = float(os.environ.get("CELLAR_VENUE_READ_RPS") or 6.0)
+_VENUE_READ_BURST = 6.0
+_VENUE_BUCKET = {"tokens": 6.0, "at": _time.monotonic(), "waits": 0, "wait_s": 0.0}
+_VENUE_BUCKET_LOCK = threading.Lock()
+
+
+def _venue_read_gate(max_wait_s: float = 3.0) -> bool:
+    """Take a read token, waiting up to max_wait_s for one. False = give up
+    (the caller returns None as if the venue were unreadable)."""
+    deadline = _time.monotonic() + max_wait_s
+    while True:
+        with _VENUE_BUCKET_LOCK:
+            now = _time.monotonic()
+            b = _VENUE_BUCKET
+            b["tokens"] = min(_VENUE_READ_BURST, b["tokens"] + (now - b["at"]) * _VENUE_READ_RPS)
+            b["at"] = now
+            if b["tokens"] >= 1.0:
+                b["tokens"] -= 1.0
+                return True
+            need = (1.0 - b["tokens"]) / max(_VENUE_READ_RPS, 0.1)
+        if _time.monotonic() + need > deadline:
+            _VENUE_BUCKET["waits"] += 1
+            return False
+        _VENUE_BUCKET["waits"] += 1
+        _VENUE_BUCKET["wait_s"] += need
+        _time.sleep(need)
+
+
 def _venue_rl_active() -> bool:
     if _time.monotonic() < _VENUE_RL["until"]:
         _VENUE_RL["skipped"] += 1
@@ -6883,7 +6916,7 @@ def _book_for_snipe(client, slug: str):
 def _pmm_book(client, slug: str) -> dict | None:
     """Polymarket markets.book(slug) -> normalized side book in cents.
     bids = buyers of this side, asks (offers) = sellers of this side."""
-    if _venue_rl_active():
+    if _venue_rl_active() or not _venue_read_gate():
         return None
     _tb = _time.monotonic()
     try:
@@ -8318,7 +8351,7 @@ def _football_ghost_row(sb, client, owner_uid, slug, syn, prob, qty,
     try:                                     # venue truth first
         import pmm_markets as _pm
         _tr = _time.monotonic()
-        if _venue_rl_active():
+        if _venue_rl_active() or not _venue_read_gate():
             return None
         try:
             md = client.markets.retrieve_by_slug(slug) if client else None
@@ -12723,7 +12756,7 @@ def _pmm_open_orders_raw(client, fresh: bool = False) -> list | None:
     rc = _pmm_read_client(client)     # 8s read twin — writes keep their 30s
     raw = None
     for _attempt in (1, 2):           # one retry: transient reset ≠ dark venue
-        if _venue_rl_active():
+        if _venue_rl_active() or not _venue_read_gate(6.0):
             break
         try:
             resp = rc.orders.list()
@@ -14246,6 +14279,7 @@ try:
     _pmm_hooks._LOOKUP_DB_GET = _lookup_db_get
     _pmm_hooks._RL_ACTIVE = _venue_rl_active
     _pmm_hooks._RL_TRIP = _venue_rl_trip
+    _pmm_hooks._RL_GATE = _venue_read_gate
 except Exception:
     pass
 

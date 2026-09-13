@@ -53,6 +53,8 @@
         <string>1</string>
         <key>CELLAR_PROC</key>
         <string>tape</string>
+        <key>CELLAR_VENUE_READ_RPS</key>
+        <string>4</string>
         <!-- own intent journal: two daemons must not share one sqlite file -->
         <key>CELLAR_STATE_DIR</key>
         <string>/Users/robkahla/.cellar-tape</string>
