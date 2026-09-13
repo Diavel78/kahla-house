@@ -65,6 +65,24 @@ mcp__github__actions_run_trigger: football-sheets-data.yml, ref main,
 Then wait for fresh `data_blob->'friday'->>'built_at'` on the week's rows.
 `week_key` = that week's Monday (`week_key_default()` — don't hand-derive).
 
+⚠ **A Routine-fired session has NO GitHub MCP tools** (triggers created from
+a CCR session store no connectors), so `actions_run_trigger` is not available
+there. That is not a blocker — the assembly runs locally:
+
+```bash
+cd kahla-scanner && python -m scripts.football_sheet_data --mode friday --commit
+```
+
+Everything except the ESPN sections builds fine from the sandbox (ESPN is
+blocked at the egress proxy; the script falls back to the markets spine for
+the game list and marks ESPN sections unavailable). Lines and the model come
+from the DB either way, which is what a picks card needs.
+
+**Check the age before you trust it.** `football-sheets-data.yml` is scheduled
+Mon 5pm + Fri 2pm AZ. The college board fires Fri 3:30pm AZ, right after that
+Friday run; the NFL board fires Sat 5pm AZ, by which time Friday's numbers are
+~27h old — **re-run the assembly locally for the NFL board, always.**
+
 ### 2. RESEARCH THE LINEUPS — this is the job, not a garnish
 
 For every game carrying a candidate pick, establish:
