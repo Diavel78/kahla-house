@@ -277,7 +277,7 @@ ML 12/12, spreads 294/363 (Gemini skips the 0.5 and 8.5 rungs and stops ~±17.5�
 totals 122/210, team totals 72/173 (Gemini's TT and total ladders are shorter). 250 paying
 pairs total. Rebuild any time; it upserts.
 
-## The Gemini tape (Sep 13 2026 evening, `scripts/gemini_tape.py`, launchd `com.kahlahouse.gemini-tape` every 120s)
+## The Gemini tape (Sep 13 2026 evening — SOCKET since ~4:50pm AZ: `scripts/gemini_ws_tape.py`, launchd `com.kahlahouse.gemini-wstape`, KeepAlive, nice 5; `gemini_tape.py` survives as its pool-census/registry helper and 10-min REST refresh)
 
 One public events request returns every active contract's best bid/ask, so a full-board
 snapshot is free. Tables (local Postgres): `gemini_snapshots` (changed-only bid/ask per
@@ -289,3 +289,9 @@ the "Gemini lists later than Poly" question). The map rebuild runs hourly
 (name + line + stat join): 5,141 Poly slugs, 2,892 paying now, **998 paying pairs** (250
 main-line + 748 player-prop). Three launchd jobs total: gemini-cancel (300s), gemini-tape
 (120s), gemini-map (3600s); plists in `cellar/`, logs in `~/.kahla/logs/gemini-*.log`.
+
+**Socket tape facts:** one connection holds the whole board (4,784 subs measured, 3,947
+live at install); a subscribe frame >~100 symbols closes the socket with 1009 (message too
+big) — 25 per request; ~1,500 frames/min steady Sunday evening, 0.4% CPU / 87 MB in its own
+process; quotes normalized to 2dp on ingest ('0.4600' vs REST's '0.46' otherwise re-writes
+the whole board on the first flush); one changed quote per symbol per minute persisted.

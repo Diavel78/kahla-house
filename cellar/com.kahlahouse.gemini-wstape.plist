@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.kahlahouse.gemini-wstape</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/robkahla/dev/kahla-house/.venv/bin/python</string>
+    <string>/Users/robkahla/dev/kahla-house/kahla-scanner/scripts/gemini_ws_tape.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/robkahla/dev/kahla-house</string>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>ThrottleInterval</key><integer>15</integer>
+  <key>Nice</key><integer>5</integer>
+  <key>StandardOutPath</key><string>/Users/robkahla/.kahla/logs/gemini-wstape.log</string>
+  <key>StandardErrorPath</key><string>/Users/robkahla/.kahla/logs/gemini-wstape.log</string>
+</dict></plist>
