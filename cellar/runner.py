@@ -433,9 +433,17 @@ class Runner:
                         # discovered ladder to the feed as a GROUP so
                         # revisits price from app.WS_QUOTES — zero REST.
                         _wsf = self._wsfeed
-                        _app._WS_LADDER_CB = (
-                            lambda gid, slugs, exp=None:
-                            _wsf.ladder_add(gid, set(slugs), exp))
+                        # CELLAR_WS_LADDERS=0 (Sep 12 2026): no ladder packs
+                        # on the sockets — core + depth only (the snipers'
+                        # markets). The pricer serves ladders from the
+                        # tape's lookup_cache instead; 7,000 rungs of LITE
+                        # frames were starving every REST read in here.
+                        if (os.environ.get("CELLAR_WS_LADDERS") or "1").strip() != "0":
+                            _app._WS_LADDER_CB = (
+                                lambda gid, slugs, exp=None:
+                                _wsf.ladder_add(gid, set(slugs), exp))
+                        else:
+                            log.info("ws ladders OFF (CELLAR_WS_LADDERS=0) — pricer reads lookup_cache")
                         # PROPS ON THE SOCKET (Sep 7 2026): the catalog
                         # hands each game's matched props to the props conn.
                         _app._WS_PROPS_CB = (

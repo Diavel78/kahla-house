@@ -5719,8 +5719,10 @@ _PM_SPORTS = ["MLB", "NBA", "NHL", "NFL", "NCAAF", "UFC"]
 # history dark. 120h covers the observed horizon with pad; this is a
 # snapshot-ROTATION budget (staler cents per game when wide), never a
 # bettability gate — the opener does not read it.
-_PM_WINDOW_H = {"MLB": 120, "NBA": 96, "NHL": 96, "NFL": 504, "NCAAF": 168,
+_PM_WINDOW_H = {"MLB": 120, "NBA": 96, "NHL": 96, "NFL": 504, "NCAAF": 336,
                 "UFC": 168}
+# NCAAF 168→336 (Sep 12 2026): the tape's lookups now feed lookup_cache for
+# the money pricer, and the OMS prices every enrolled game two weeks out.
 # NCAAF 72→168 (Rob, Sep 2 2026: "if you're only looking at college
 # football three days out, you're fucking failing"): Saturday games now
 # tape a full week of cent history + prop captures. Rotation budget
@@ -8338,6 +8340,13 @@ _SLUG_SPORT_TOKENS = (("-mlb-", "MLB"), ("-nfl-", "NFL"), ("-cfb-", "NCAAF"),
                       ("-nba-", "NBA"), ("-nhl-", "NHL"), ("-ufc-", "UFC"))
 
 
+# AUTOLOG WALL CLOCK (Sep 12 2026): the unknown-slug section does a venue
+# read per stray (retrieve_by_slug / an event search) and at Saturday peak
+# each cost 10-35s inside the money process — the fill-status walk sat in
+# here 17+ minutes and the repeg lane completed no lap for over an hour.
+_AUTOLOG_UNKNOWN_BUDGET_S = 45.0
+
+
 def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dict:
     """Reconcile the admin's POLYMARKET book into bot_picks — the Poly analog
     of `_kalshi_autolog` (dual-venue, July 2026 revert). USER RULE: "I bet on
@@ -8666,7 +8675,11 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
     if not autos_ok:
         out["ghost_adopt_skipped"] = "picks_unreadable"
         return out                              # unknown is meaningless without the list
+    _al_deadline = _time.monotonic() + _AUTOLOG_UNKNOWN_BUDGET_S
     for (slug, syn), prob in list(unknown.items()):
+        if _time.monotonic() > _al_deadline:
+            out["budget"] = "ghost"
+            break                                # the rest next call
         if not _RENT_SLUG_RE.match(slug or ""):
             continue
         if _rent_dead(slug, sb):
@@ -8738,6 +8751,9 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
     out["backoff"] = len(unknown) - len(to_index)
     if not unknown:
         return out                              # every intended slug is booked
+    if _time.monotonic() > _al_deadline:
+        out["budget"] = "index"
+        return out
     want_slugs = {s for (s, _y) in to_index}
     # only the sports the unknown slugs name (fallback: all)
     _sports: set = set()
@@ -20662,7 +20678,7 @@ _LADDER_STRUCT_TTL_FAR_S = 43_200.0   # >72h to kickoff (see _gridiron_price_gam
 #   pricer keeps (and the socket seats) only rungs within this many points
 #   of the at-the-money rung. Every rung subscribed was what overflowed the
 #   socket request budget (~9,100 live rungs vs ~7,350 seats).
-_LOOKUP_REUSE_S = 150.0
+_LOOKUP_REUSE_S = 400.0     # the tape lap runs 1-4 min; a rung's quote that old still beats a 35s download
 _LADDER_SUB_HALF_PTS = 12.0
 
 
