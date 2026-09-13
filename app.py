@@ -12366,6 +12366,18 @@ def api_kalshi_probe():
 # chips still work, sync quietly skips (Edit modal remains the manual
 # override).
 _FILL_STATUS_TTL = 30       # s — server cache; the page polls on its 60s loadData
+# FILL-STATUS WALK BUDGET (Sep 12 2026 — the evening-slate lap that never
+# ends): a FULL walk does one REST book read per resting pick the quote
+# table can't vouch for, and at Saturday peak each read costs seconds under
+# the GIL convoy — ~300 reads = a 30-50 min repeg lap, i.e. no chase, no
+# top-up, no recenter all evening. The walk now carries a wall clock and a
+# REST-read allowance; past either, remaining picks answer "not outbid"
+# this lap (the buy sniper works off frames regardless) and the next lap —
+# targeted, seconds — picks them up. Warm-up prefetch capped the same way.
+_FS_WALK_BUDGET_S = 150.0
+_FS_WALK_REST_MAX = 80
+_FS_WARM_MAX = 120
+_FS_WALK = {"deadline": 0.0, "rest_left": 0}
 
 # LAST FILL-STATUS WALK, per uid, merged by pick id (Sep 12 2026 — the
 # alerts-lane balloon). `_outbid_alerts` used to call the walk itself with
@@ -12828,9 +12840,16 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict,
                 # Prefetched by the caller's concurrent warm-up when
                 # available (the full-sweep lap fat); the self-read stays
                 # as the fallback so every other caller is unchanged.
-                book = (book_cache.get(slug)
-                        if book_cache is not None and slug in book_cache
-                        else _pmm_book(client, slug))
+                if book_cache is not None and slug in book_cache:
+                    book = book_cache.get(slug)
+                elif (_time.monotonic() > _FS_WALK["deadline"]
+                        or _FS_WALK["rest_left"] <= 0):
+                    _WS_PRICE_STATS["fs_rest_skipped"] = \
+                        _WS_PRICE_STATS.get("fs_rest_skipped", 0) + 1
+                    raise _WsNotOutbid()          # budget spent: answer next lap
+                else:
+                    _FS_WALK["rest_left"] -= 1
+                    book = _pmm_book(client, slug)
                 if synthetic and book:
                     book = _invert_book(book)
                 if (book and myp is not None
@@ -12947,6 +12966,8 @@ def _compute_fill_status(sb, uid: str, poly_snap=None,
                 .eq("status", "pending").eq("asked_by", uid)
                 .order("event_start", desc=False))
     pending = _sb_paged(_pend_q, max_pages=3)
+    _FS_WALK["deadline"] = _time.monotonic() + _FS_WALK_BUDGET_S
+    _FS_WALK["rest_left"] = _FS_WALK_REST_MAX
 
     # DUAL-VENUE dispatch (July 2026 revert): each pending pick is tracked on
     # the venue its make/take verdict routed it to (entry_book).
@@ -13056,7 +13077,7 @@ def _compute_fill_status(sb, uid: str, poly_snap=None,
                     _need.add(_s)
             if len(_need) > 3:
                 from concurrent.futures import ThreadPoolExecutor
-                _nl = sorted(_need)
+                _nl = sorted(_need)[:_FS_WARM_MAX]
                 book_cache = {}
                 with ThreadPoolExecutor(max_workers=6) as _ex:
                     for _s, _bk in zip(_nl, _ex.map(
