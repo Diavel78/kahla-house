@@ -24,7 +24,10 @@ on (the MLB and NFL books were live mid-game during the probe).
 Maker FEE is `0.0175 × C × P(1−P)`, rounded UP to the cent. The rebate
 (0.021) exceeds the fee (0.0175), so a filled maker order nets about
 +0.0035·C·P(1−P): at 20 contracts and 50¢ that is roughly +1.5¢. Fills are
-free; the rent is the Liquidity Rewards pool.
+free at 20 contracts; the rent is the Liquidity Rewards pool. ⚠ At 5 contracts the fee ROUNDS UP
+(2.19¢ → 3¢) while the rebate does not (2.6¢), so tiny lots net slightly negative — the
+rebate paid on Rob's Sep 12 fills was exactly this: 2 maker fills ≈ 2.6¢ each → $0.05.
+The other 33 of his 35 hand fills were TAKER (crossed in the app: 7% fee, no rebate).
 
 ## Liquidity Rewards — the rent machine
 
