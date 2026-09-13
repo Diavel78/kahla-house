@@ -120,6 +120,8 @@ WebSocket `wss://ws.gemini.com?snapshot=-1` (verified live):
 - `contractStatus` (no symbol) streams every contract lifecycle change venue-wide — new listings arrive live (`Awaiting Approval → Approved → Active`), which is the rent-list feed.
 - private (auth at handshake, same HMAC headers, cannot auth after connect): `orders@account`, `balances@account`, position updates; WS trading methods `order.place / order.cancel / order.cancel_all / order.cancel_session`; `?cancelOnDisconnect=true`.
 - add `snapshot=-1` to get a full book on subscribe.
+- trading methods (playground, verified Sep 13): `order.place` `{symbol, side: BUY|SELL, type: LIMIT|MARKET, timeInForce: GTC|IOC|FOK|MOC, price, quantity, clientOrderId, eventOutcome: YES|NO}` — **`MOC` (maker-or-cancel) is post-only on the socket**; `order.cancel {orderId}`, `order.cancel_all`, `order.cancel_session`; `depth {symbol, limit≤5000}` returns an on-demand L2 snapshot. Method names are accepted lowercase.
+- REST vs socket body shape: the generic Gemini rule is an empty body with everything in `X-GEMINI-PAYLOAD`; the prediction-markets place-order example sends the JSON body as well. `gemini_pm.detect_body_mode()` tries the header-only shape on the read-only `orders/active` POST first and remembers what worked, so a mutating call is never retried in a second shape.
 
 ## Landmines found
 

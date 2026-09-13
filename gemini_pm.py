@@ -19,6 +19,13 @@ Venue facts baked in (verified Sep 13 2026):
   * timeInForce is GTC/IOC/FOK only — NO good-till-date; kickoff cancel is ours
   * `outcome` is a native yes/no side; `makerOrCancel: true` = post-only
   * WS: wss://ws.gemini.com?snapshot=-1 ; SUBSCRIBE params is an ARRAY of "symbol@stream"
+  * WS trading (playground, Sep 13 2026): method `order.place` params {symbol, side BUY|SELL,
+    type LIMIT|MARKET, timeInForce GTC|IOC|FOK|MOC (MOC = maker-or-cancel = post-only),
+    price, quantity, clientOrderId, eventOutcome YES|NO}; `order.cancel` {orderId};
+    `order.cancel_all`; `order.cancel_session`; `depth` {symbol, limit≤5000} = on-demand
+    L2 snapshot. Auth headers go on the upgrade only (browsers can't; a daemon can).
+  * REST place-order: the generic Gemini rule is empty body + payload header, but the PM
+    spec's own curl sends the JSON body too — `detect_body_mode()` settles it per process.
 """
 from __future__ import annotations
 
@@ -199,21 +206,48 @@ def _signed_headers(path: str, params: Optional[dict] = None) -> dict:
     }
 
 
+_BODY_MODE: Optional[str] = None   # "header" | "json" — detected on the first private POST
+
+
 def _private(method: str, path: str, params: Optional[dict] = None,
-             query: Optional[dict] = None) -> Any:
-    """Private call. `params` ride in the signed payload (and, for GETs, also as the
-    query string — the spec documents query params on the rewards GETs)."""
+             query: Optional[dict] = None, mode: Optional[str] = None) -> Any:
+    """Private call. `params` always ride in the signed X-GEMINI-PAYLOAD (the generic
+    Gemini rule: empty body, text/plain). The prediction-markets spec's own curl example
+    ALSO sends the params as a JSON body with the same three headers, so the body mode is
+    detected once on a non-mutating POST (orders/active) and remembered — a mutating call
+    is never retried in another mode. GET params ride as the query string too."""
+    global _BODY_MODE
+    m = mode or _BODY_MODE or "header"
     h = _signed_headers(path, params)
     q = dict(query or {})
+    data: Any = b""
     if method == "GET" and params:
         q.update(params)
-    r = requests.request(method, REST + path, headers=h, params=q or None, data=b"",
+    if method != "GET" and m == "json":
+        h["Content-Type"] = "application/json"
+        data = json.dumps(params or {})
+    r = requests.request(method, REST + path, headers=h, params=q or None, data=data,
                          timeout=_TIMEOUT)
     if r.status_code >= 400:
         raise GeminiError(f"{method} {path} -> {r.status_code}: {r.text[:400]}")
     if not r.text:
         return None
     return r.json()
+
+
+def detect_body_mode() -> str:
+    """Find which POST shape the venue accepts using a read-only POST, cache it."""
+    global _BODY_MODE
+    if _BODY_MODE:
+        return _BODY_MODE
+    for m in ("header", "json"):
+        try:
+            _private("POST", f"{PM}/orders/active", {"limit": 1}, mode=m)
+            _BODY_MODE = m
+            return m
+        except GeminiError as ex:
+            last = ex
+    raise last  # type: ignore[name-defined]
 
 
 def terms_status() -> dict:
@@ -272,6 +306,11 @@ def balances() -> Any:
     return _private("POST", "/v1/balances")
 
 
+def _ensure_mode() -> None:
+    if _BODY_MODE is None:
+        detect_body_mode()
+
+
 def place_order(symbol: str, side: str, outcome: str, quantity: float | str,
                 price: float | str, post_only: bool = True,
                 tif: str = "good-til-cancel", client_order_id: Optional[str] = None) -> dict:
@@ -284,19 +323,23 @@ def place_order(symbol: str, side: str, outcome: str, quantity: float | str,
     }
     if client_order_id:
         p["clientOrderId"] = client_order_id
+    _ensure_mode()
     return _private("POST", f"{PM}/order", p)
 
 
 def place_batch(orders: Iterable[dict]) -> Any:
     """1-20 orders, each the same fields as place_order's payload (already-built dicts)."""
+    _ensure_mode()
     return _private("POST", f"{PM}/order/batch", {"orders": list(orders)})
 
 
 def cancel_order(order_id: int | str) -> Any:
+    _ensure_mode()
     return _private("POST", f"{PM}/order/cancel", {"orderId": int(order_id)})
 
 
 def cancel_batch(order_ids: Iterable[int | str]) -> Any:
+    _ensure_mode()
     return _private("POST", f"{PM}/order/batch/cancel",
                     {"orderIds": [int(x) for x in order_ids]})
 
