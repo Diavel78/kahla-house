@@ -1158,15 +1158,19 @@ _VENUE_RL_HOLD_S = 20.0
 # waits for a token (bounded) instead of firing into a 429. Env-tunable per
 # process (CELLAR_VENUE_READ_RPS); the tape process runs its own bucket.
 _VENUE_READ_RPS = float(os.environ.get("CELLAR_VENUE_READ_RPS") or 6.0)
+# How long a caller waits for a token before giving up. The money process
+# skips fast (a lap must not stall); the tape process queues (a lookup
+# dropped is a tape gap and an empty lookup_cache row for the pricer).
+_VENUE_GATE_WAIT_S = float(os.environ.get("CELLAR_VENUE_GATE_WAIT_S") or 3.0)
 _VENUE_READ_BURST = 6.0
 _VENUE_BUCKET = {"tokens": 6.0, "at": _time.monotonic(), "waits": 0, "wait_s": 0.0}
 _VENUE_BUCKET_LOCK = threading.Lock()
 
 
-def _venue_read_gate(max_wait_s: float = 3.0) -> bool:
+def _venue_read_gate(max_wait_s: float | None = None) -> bool:
     """Take a read token, waiting up to max_wait_s for one. False = give up
     (the caller returns None as if the venue were unreadable)."""
-    deadline = _time.monotonic() + max_wait_s
+    deadline = _time.monotonic() + (max_wait_s if max_wait_s is not None else _VENUE_GATE_WAIT_S)
     while True:
         with _VENUE_BUCKET_LOCK:
             now = _time.monotonic()
