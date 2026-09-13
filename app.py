@@ -12966,6 +12966,9 @@ def _compute_fill_status(sb, uid: str, poly_snap=None,
                 .eq("status", "pending").eq("asked_by", uid)
                 .order("event_start", desc=False))
     pending = _sb_paged(_pend_q, max_pages=3)
+    _fs_t = _time.monotonic()
+    app.logger.info("fs walk: %d pending (uid=%s only_slugs=%s snap=%s)", len(pending), uid[-6:],
+                    (len(only_slugs) if only_slugs is not None else None), poly_snap is not None)
     _FS_WALK["deadline"] = _time.monotonic() + _FS_WALK_BUDGET_S
     _FS_WALK["rest_left"] = _FS_WALK_REST_MAX
 
@@ -13044,6 +13047,7 @@ def _compute_fill_status(sb, uid: str, poly_snap=None,
                              positions=poly_positions)
             except Exception:
                 pass
+            app.logger.info("fs walk: autolog done at %.1fs", _time.monotonic() - _fs_t)
         except Exception:
             poly_client = poly_orders = poly_positions = None
 
@@ -13095,8 +13099,15 @@ def _compute_fill_status(sb, uid: str, poly_snap=None,
                                 book_cache[_s] = _bk
         except Exception:
             book_cache = None       # warm-up is an optimization, never a gate
+    app.logger.info("fs walk: warm-up done at %.1fs (%d books)", _time.monotonic() - _fs_t,
+                    len(book_cache or {}))
     fills = []
+    _fs_i = 0
     for p in pending:
+        _fs_i += 1
+        if _fs_i % 100 == 0:
+            app.logger.info("fs walk: %d picks at %.1fs (rest_left=%s)", _fs_i,
+                            _time.monotonic() - _fs_t, _FS_WALK["rest_left"])
         # TARGETED LAP (Aug 31 2026): when the caller passes the socket's
         # moved-market set, skip Poly picks whose KNOWN slug didn't move —
         # their book read would answer a question nobody asked. Picks with
@@ -13268,6 +13279,7 @@ def _compute_fill_status(sb, uid: str, poly_snap=None,
                     print(f"fill-sync failed pick {p['id']}: {e}")
         fills.append(entry)
 
+    app.logger.info("fs walk: done %d entries in %.1fs", len(fills), _time.monotonic() - _fs_t)
     _fs_last_stash(uid, fills, full=(only_slugs is None))
     return {"ok": True, "configured": True, "api_ok": api_ok, "fills": fills}
 
