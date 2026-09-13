@@ -12948,7 +12948,11 @@ def _pmm_fill_entry(client, p: dict, now, orders: list, positions: dict,
                 # Prefetched by the caller's concurrent warm-up when
                 # available (the full-sweep lap fat); the self-read stays
                 # as the fallback so every other caller is unchanged.
-                if book_cache is not None and slug in book_cache:
+                _dbk = _ws_depth(slug)          # depth socket carries our own order slugs
+                if _dbk is not None:
+                    book = _dbk
+                    _WS_PRICE_STATS["fs_depth"] = _WS_PRICE_STATS.get("fs_depth", 0) + 1
+                elif book_cache is not None and slug in book_cache:
                     book = book_cache.get(slug)
                 elif (_time.monotonic() > _FS_WALK["deadline"]
                         or _FS_WALK["rest_left"] <= 0):
@@ -20776,6 +20780,7 @@ _LADDER_STRUCT_TTL_FAR_S = 43_200.0   # >72h to kickoff (see _gridiron_price_gam
 #   of the at-the-money rung. Every rung subscribed was what overflowed the
 #   socket request budget (~9,100 live rungs vs ~7,350 seats).
 _LOOKUP_REUSE_S = 400.0     # the tape lap runs 1-4 min; a rung's quote that old still beats a 35s download
+_LOOKUP_REUSE_FAR_S = 900.0 # >72h to kickoff (see _gridiron_price_game_impl)
 _LADDER_SUB_HALF_PTS = 12.0
 
 
@@ -21103,9 +21108,14 @@ def _gridiron_price_game_impl(sb, g):
             return None
         away, home = en.split(" @ ", 1)
         _dg: dict = {}
+        # Far games (>72h) reuse a cached payload longer: with the ladder
+        # packs off the sockets nothing else refreshes their quotes, and a
+        # rung two weeks out barely moves (the buy sniper re-prices a
+        # resting bid off frames anyway).
+        _reuse = _LOOKUP_REUSE_S if _ttl == _LADDER_STRUCT_TTL_S else _LOOKUP_REUSE_FAR_S
         pmm = pmm_markets.lookup(get_client(), g.get("sport"), away, home,
                                  str(g.get("event_start") or ""),
-                                 diag=_dg, max_age_s=_LOOKUP_REUSE_S)
+                                 diag=_dg, max_age_s=_reuse)
         if _dg.get("lookup_cache_hit"):
             _WS_PRICE_STATS["rest_cached"] = _WS_PRICE_STATS.get("rest_cached", 0) + 1
         if not pmm:
