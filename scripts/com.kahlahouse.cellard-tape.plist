@@ -63,7 +63,7 @@
         <key>CELLAR_TAPE_SPLIT</key>
         <string>1</string>
         <key>CELLAR_LANES</key>
-        <string>pm_snapshot,paperlog,vsin,kalshi_autolog,batch,grader</string>
+        <string>pm_snapshot,paperlog,vsin,batch,grader</string>
         <key>CELLAR_WS</key>
         <string>0</string>
         <key>CELLAR_WS_MKTS</key>
