@@ -27,7 +27,19 @@ Maker FEE is `0.0175 × C × P(1−P)`, rounded UP to the cent. The rebate
 free at 20 contracts; the rent is the Liquidity Rewards pool. ⚠ At 5 contracts the fee ROUNDS UP
 (2.19¢ → 3¢) while the rebate does not (2.6¢), so tiny lots net slightly negative — the
 rebate paid on Rob's Sep 12 fills was exactly this: 2 maker fills ≈ 2.6¢ each → $0.05.
-The other 33 of his 35 hand fills were TAKER (crossed in the app: 7% fee, no rebate).
+CORRECTION (venue per-fill ledger, same day): 34 of his 36 hand fills were MAKER (`/v1/mytrades`
+`aggressor:false`), only 2 were taker (9¢ fee each). The Sep 12 5pm ET payout counted just the
+LAST TWO maker fills before it (3:39pm + 3:58pm ET, $2.40 + $2.10 = $4.50 → 5¢); five earlier
+same-day maker fills were NOT in it — the rebate window/lag is unresolved until the next payout
+(Sep 13 5pm ET should carry ~27 maker fills ≈ $0.70 if it is a rolling 24h window).
+**Maker fee actually charged: $0.00 on every one of the 34 maker fills** — the schedule says
+0.0175 but the account is being charged nothing (promo or waiver); a maker fill is strictly
+positive right now.
+
+Per-fill truth endpoints (the spot API works on GEMI- symbols): `POST /v1/mytrades
+{symbol, limit_trades}` → `aggressor`, `fee_amount`, `order_id`, `tid`; `POST /v1/tradevolume`
+→ per-symbol per-day maker/taker counts + notional; `POST /v1/transfers` → the credit ledger
+(`purpose: "Predictions maker rebate"`, deposits).
 
 ## Liquidity Rewards — the rent machine
 
