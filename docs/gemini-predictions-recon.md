@@ -170,3 +170,55 @@ what the two programs paid per day and per event.
   policy before enabling it.
 - Public data (events, book, socket) needs no key; a rent tape can start
   today. Orders need an account-scoped key + terms acceptance.
+
+## Live venue truth (first authenticated read, Sep 13 2026 ~11:15 AZ)
+
+- Key works (account-scoped, Trader, time-based nonce). Terms already accepted. Body mode
+  detected = `header` (empty body), exactly the official signer.
+- **Liquidity Rewards lifetime: $0.00. Maker rebate lifetime: $0.05** (2 fills, $4.50
+  volume, paid Sep 12 5pm ET). The ~$5 "promo cash returned" was a promo credit, not rent.
+- Balance frame: `available` is the spendable cash; `amount`/`c` read NEGATIVE (−39.87 with
+  60.13 available) — the venue nets open positions into it. Use `available`.
+- **Position sign: a NO holding is a NEGATIVE quantity** (`positionReport` … `"v":"-5"`,
+  REST `outcome:"no"`), the Kalshi/Poly short convention.
+- Order life on the socket: REST create → `orderUpdate X=NEW` (fields `i` id, `c` client id,
+  `S` BUY, `O` YES, `p` price, `q` qty, `z` remaining) + a `balanceUpdate` + a
+  `depthUpdate` showing our level, all within ~1s. Book read confirms the same second.
+- `orders@account` snapshot arrives as `{"e":"orderSnapshot","orders":[...]}`.
+
+### Depth census, every NFL pool rung (3,795 rungs, 125 events)
+
+1,374 rungs have a two-sided book. Median spread 8¢ (q1 4, q3 12). Median 1 bid level,
+2 ask levels. Dollars resting within 10¢ of mid across the whole NFL board ≈ $409k.
+
+| kind | rungs | two-sided | med spread | med bid in-window | med ask in-window | med $ in-window per event |
+|---|---|---|---|---|---|---|
+| M (moneyline) | 28 | 26 | 3¢ | 4,557 | 4,557 | $5,289 |
+| S (spread) | 354 | 266 | 4¢ | 1,056 | 381 | $5,604 |
+| T (total) | 266 | 203 | 4¢ | 493 | 527 | $4,253 |
+| **TT (team total)** | 355 | 112 | 11¢ | **10** | **10** | $821 |
+| PPTD | 601 | 169 | 8¢ | 250 | 45 | $1,405 |
+| PPRECY | 1,157 | 334 | 12¢ | 25 | 35 | $1,088 |
+| PPRYDS | 667 | 152 | 12¢ | 12 | 35 | $182 |
+| PPYDS | 252 | 78 | 12¢ | 36 | 35 | $682 |
+| PPPASSTD | 115 | 34 | 11¢ | 35 | 35 | $228 |
+
+Reading: **the main lines are NOT tiny** — a professional maker rests 250-lot two-sided
+quotes 3-4¢ wide, thousands of contracts inside the window, and the pool is the same $200.
+**Team totals and props ARE tiny** — the typical rung carries exactly one 10-lot bid and
+one 10-lot ask 11-12¢ wide (the program minimum, quoted by 2-4 makers), so a 10-lot seat
+is a meaningful fraction of the same $200 pool. That is where the experiment sits.
+
+### The $10 experiment (resting now; ledger `~/.kahla/gemini_orders.json`, 12 orders)
+
+| group | seats | what | pool-day uptime expected |
+|---|---|---|---|
+| 4:25pm ET games (today) | 8 × 10 @ 5¢ virgin rungs | TT / prop rungs with no book | ~2h before the kickoff cancel → likely fails the 50% rule |
+| SNF DAL–NYG | 2 × 10 @ 5¢ virgin | PPTD, TT | ~6h |
+| MNF DEN–KC | 1 × 10 @ 5¢ virgin (`DENO3`) + **1 × 10 @ 45¢ in-window** (`DENO20`, bid+1 tick, 4.5¢ from mid, against a single 10-lot two-sided incumbent) | full Monday pool day |
+
+Read the answer with `gemini_probe.py status`: `liquidity-rewards/summary/daily` breaks
+the payout down per event. Sunday's pools pay Monday 5:30pm ET (2:30pm AZ); Monday's pay
+Tuesday. Kickoff cancel: launchd `com.kahlahouse.gemini-cancel` (plist in `cellar/`,
+every 300s, log `~/.kahla/logs/gemini-cancel.log`) — cancels only `kh-seed-*` orders on
+games whose start has passed; hand-placed orders are never touched.

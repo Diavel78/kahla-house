@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.kahlahouse.gemini-cancel</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/robkahla/dev/kahla-house/.venv/bin/python</string>
+    <string>/Users/robkahla/dev/kahla-house/kahla-scanner/scripts/gemini_probe.py</string>
+    <string>cancel-started</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/robkahla/dev/kahla-house</string>
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/robkahla/.kahla/logs/gemini-cancel.log</string>
+  <key>StandardErrorPath</key><string>/Users/robkahla/.kahla/logs/gemini-cancel.log</string>
+</dict></plist>
