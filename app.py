@@ -6851,10 +6851,15 @@ def _book_for_snipe(client, slug: str):
 def _pmm_book(client, slug: str) -> dict | None:
     """Polymarket markets.book(slug) -> normalized side book in cents.
     bids = buyers of this side, asks (offers) = sellers of this side."""
+    _tb = _time.monotonic()
     try:
         md = (client.markets.book(slug) or {}).get("marketData") or {}
-    except Exception:
+    except Exception as _e:
+        app.logger.warning("slow/failed venue read book %s %.1fs %s: %s", slug,
+                           _time.monotonic() - _tb, type(_e).__name__, str(_e)[:80])
         return None
+    if _time.monotonic() - _tb > 5.0:
+        app.logger.warning("slow venue read book %s %.1fs", slug, _time.monotonic() - _tb)
 
     def lv(rows):
         out = []
@@ -8277,7 +8282,15 @@ def _football_ghost_row(sb, client, owner_uid, slug, syn, prob, qty,
     side = line = None
     try:                                     # venue truth first
         import pmm_markets as _pm
-        md = client.markets.retrieve_by_slug(slug) if client else None
+        _tr = _time.monotonic()
+        try:
+            md = client.markets.retrieve_by_slug(slug) if client else None
+        except Exception as _e:
+            app.logger.warning("slow/failed venue read retrieve %s %.1fs %s: %s", slug,
+                               _time.monotonic() - _tr, type(_e).__name__, str(_e)[:80])
+            raise
+        if _time.monotonic() - _tr > 5.0:
+            app.logger.warning("slow venue read retrieve %s %.1fs", slug, _time.monotonic() - _tr)
         md = (md or {}).get("market") if isinstance(md, dict) and "market" in (md or {}) else md
         cl = _pm._classify_market(md, away, home) if md else None
         if cl:
