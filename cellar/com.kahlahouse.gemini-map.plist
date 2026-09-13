@@ -7,7 +7,7 @@
     <string>/Users/robkahla/dev/kahla-house/kahla-scanner/scripts/build_venue_map.py</string>
   </array>
   <key>WorkingDirectory</key><string>/Users/robkahla/dev/kahla-house</string>
-  <key>StartInterval</key><integer>3600</integer>
+  <key>StartInterval</key><integer>14400</integer>
   <key>RunAtLoad</key><false/>
   <key>StandardOutPath</key><string>/Users/robkahla/.kahla/logs/gemini-map.log</string>
   <key>StandardErrorPath</key><string>/Users/robkahla/.kahla/logs/gemini-map.log</string>

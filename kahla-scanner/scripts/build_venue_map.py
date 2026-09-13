@@ -249,7 +249,7 @@ def poly_rent_periods(slugs: list[str]) -> dict[str, list[str] | None]:
                     seen[s].add(str(tp["period"]))
         for s in batch:
             out[s] = sorted(seen[s])
-        time.sleep(0.25)
+        time.sleep(1.0)   # Ferrari guard: 1 req/s against Polymarket from this side process, never a burst
     return out
 
 
