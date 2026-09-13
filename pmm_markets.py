@@ -553,6 +553,8 @@ def _search_event(client, sport: str, away: str, home: str,
             resp = client.events.list(params)
         except Exception as e:
             last_error = f"events.list attempt {i} failed: {str(e)[:200]}"
+            if _RL_TRIP is not None and _RL_TRIP(e):
+                break
             continue
         evs = resp.get("events") if isinstance(resp, dict) else getattr(resp, "events", None)
         evs = evs or []
@@ -622,6 +624,8 @@ def _search_event(client, sport: str, away: str, home: str,
                     if len(ms) < 100 or not fresh:
                         break
             except Exception as e:
+                if _RL_TRIP is not None:
+                    _RL_TRIP(e)
                 if diag is not None:
                     diag["markets_list_error"] = str(e)[:200]
             # Secondary fallback: events.retrieve_by_slug. Rarely needed
@@ -1010,6 +1014,9 @@ _LOOKUP_CACHE_MAX = 800
 # after every fetch; GET on an in-process miss when max_age_s is given.
 _LOOKUP_DB_PUT = None
 _LOOKUP_DB_GET = None
+# venue read breaker hooks (app plants): _RL_ACTIVE() -> bool, _RL_TRIP(exc)
+_RL_ACTIVE = None
+_RL_TRIP = None
 
 
 def _lookup_key(sport, away, home, event_start_iso, want_props):
@@ -1056,6 +1063,8 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
     that want to inspect classification without burning BBO calls.
     """
     if not client:
+        return None
+    if _RL_ACTIVE is not None and _RL_ACTIVE():
         return None
     _lk = _lookup_key(sport, away, home, event_start_iso, want_props)
     if max_age_s is not None and _lk:

@@ -1142,6 +1142,38 @@ _PMM_READ_TIMEOUT_S = 8.0
 _PMM_READ_CLIENT = None
 
 
+# VENUE READ BREAKER (Sep 12 2026 — found by instrumenting the walk: every
+# read in the money process was failing `RateLimitError: <!doctype html>`,
+# Cloudflare's 429 page, while a lone probe from another process passed).
+# The first 429 holds ALL venue reads in this process for _VENUE_RL_HOLD_S:
+# no calls, no retries, callers get None and move on. A limit trip then
+# costs seconds, not a storm of failing calls and the back-offs behind them.
+_VENUE_RL = {"until": 0.0, "trips": 0, "skipped": 0}
+_VENUE_RL_HOLD_S = 20.0
+
+
+def _venue_rl_active() -> bool:
+    if _time.monotonic() < _VENUE_RL["until"]:
+        _VENUE_RL["skipped"] += 1
+        _WS_PRICE_STATS["rl_skipped"] = _WS_PRICE_STATS.get("rl_skipped", 0) + 1
+        return True
+    return False
+
+
+def _venue_rl_trip(e) -> bool:
+    """Call from an except block; True if e was the venue's rate limit."""
+    if type(e).__name__ != "RateLimitError":
+        return False
+    first = _time.monotonic() >= _VENUE_RL["until"]
+    _VENUE_RL["until"] = _time.monotonic() + _VENUE_RL_HOLD_S
+    _VENUE_RL["trips"] += 1
+    _WS_PRICE_STATS["rl_trips"] = _WS_PRICE_STATS.get("rl_trips", 0) + 1
+    if first:
+        app.logger.warning("VENUE RATE LIMIT — holding all venue reads %ss (trip #%d)",
+                           int(_VENUE_RL_HOLD_S), _VENUE_RL["trips"])
+    return True
+
+
 def _pmm_read_client(fallback=None):
     """Short-timeout twin of the trading client, for bulk reads ONLY.
     Module-cached (httpx.Client is thread-safe for requests). Falls back to
@@ -6851,12 +6883,15 @@ def _book_for_snipe(client, slug: str):
 def _pmm_book(client, slug: str) -> dict | None:
     """Polymarket markets.book(slug) -> normalized side book in cents.
     bids = buyers of this side, asks (offers) = sellers of this side."""
+    if _venue_rl_active():
+        return None
     _tb = _time.monotonic()
     try:
         md = (client.markets.book(slug) or {}).get("marketData") or {}
     except Exception as _e:
-        app.logger.warning("slow/failed venue read book %s %.1fs %s: %s", slug,
-                           _time.monotonic() - _tb, type(_e).__name__, str(_e)[:80])
+        if not _venue_rl_trip(_e):
+            app.logger.warning("slow/failed venue read book %s %.1fs %s: %s", slug,
+                               _time.monotonic() - _tb, type(_e).__name__, str(_e)[:80])
         return None
     if _time.monotonic() - _tb > 5.0:
         app.logger.warning("slow venue read book %s %.1fs", slug, _time.monotonic() - _tb)
@@ -8283,11 +8318,14 @@ def _football_ghost_row(sb, client, owner_uid, slug, syn, prob, qty,
     try:                                     # venue truth first
         import pmm_markets as _pm
         _tr = _time.monotonic()
+        if _venue_rl_active():
+            return None
         try:
             md = client.markets.retrieve_by_slug(slug) if client else None
         except Exception as _e:
-            app.logger.warning("slow/failed venue read retrieve %s %.1fs %s: %s", slug,
-                               _time.monotonic() - _tr, type(_e).__name__, str(_e)[:80])
+            if not _venue_rl_trip(_e):
+                app.logger.warning("slow/failed venue read retrieve %s %.1fs %s: %s", slug,
+                                   _time.monotonic() - _tr, type(_e).__name__, str(_e)[:80])
             raise
         if _time.monotonic() - _tr > 5.0:
             app.logger.warning("slow venue read retrieve %s %.1fs", slug, _time.monotonic() - _tr)
@@ -12685,12 +12723,15 @@ def _pmm_open_orders_raw(client, fresh: bool = False) -> list | None:
     rc = _pmm_read_client(client)     # 8s read twin — writes keep their 30s
     raw = None
     for _attempt in (1, 2):           # one retry: transient reset ≠ dark venue
+        if _venue_rl_active():
+            break
         try:
             resp = rc.orders.list()
             raw = (resp.get("orders") if isinstance(resp, dict)
                    else getattr(resp, "orders", [])) or []
             break
-        except Exception:
+        except Exception as _e:
+            _venue_rl_trip(_e)
             continue
     if raw is None:
         return None                              # read failed → not "no orders"
@@ -14203,6 +14244,8 @@ try:
     import pmm_markets as _pmm_hooks
     _pmm_hooks._LOOKUP_DB_PUT = _lookup_db_put
     _pmm_hooks._LOOKUP_DB_GET = _lookup_db_get
+    _pmm_hooks._RL_ACTIVE = _venue_rl_active
+    _pmm_hooks._RL_TRIP = _venue_rl_trip
 except Exception:
     pass
 
