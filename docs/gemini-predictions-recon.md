@@ -253,3 +253,26 @@ manage in-play. **ML / spread / O-U asks on held positions should stay live in-p
 cost, exactly like Polymarket — but ONLY once a repeg exists on this venue.** With no
 repeg (today) everything cancels at kickoff; a stale in-play ask with nothing chasing it is
 the risk. `gemini_probe.py cancel-started` implements "everything cancels" for now.
+
+## The contract map (Sep 13 2026, `scripts/build_venue_map.py` → table `venue_contract_map`)
+
+Polymarket-first, per Rob: the universe is Poly's NFL rent-list slugs (full game
+spread / total / team total / ML; no props, no quarters/halves), each stamped with the
+venue's per-market rent answer (`/v1/incentives?symbols=`, batched 40), each joined to the
+Gemini contract that settles on the same event. One row per (poly_slug, poly_side).
+
+Side algebra (Gemini has one contract PER TEAM per spread rung; NO is native):
+`pos-L` YES (away +L) ⇔ Gemini `S-<HOME><L−.5>` **NO**; `neg-L` YES ⇔ `S-<AWAY><L−.5>` YES;
+`total-L` YES ⇔ `T-O<L−.5>` YES; `tt-<team>-L` YES ⇔ `TT-<TEAM>O<L−.5>` YES; ML YES-team
+(from `pmm_markets.lookup`'s non-synthetic entry) ⇔ `M-<TEAM>` YES, ML NO ⇔ `M-<OTHER>` YES.
+Team codes are identical on both venues (Poly lowercase); away-home order matches; Gemini's
+ticker date code is UTC and must be converted to the ET game date to join.
+
+First build (Sun Sep 13, ~3pm AZ): 2,830 Poly full-game NFL slugs, **1,969 paying now**;
+Gemini listed only 6 of Poly's 30 rent-list games (Sunday-late + MNF — the 1pm games had
+already settled off Gemini's active list, and **Gemini had not yet listed Week 2 while Poly
+already pays `early` on it**: Gemini lists later than Poly, so Poly's early window has no
+Gemini leg for its first days). On the 6 shared games, paying Poly rungs with a Gemini twin:
+ML 12/12, spreads 294/363 (Gemini skips the 0.5 and 8.5 rungs and stops ~±17.5–20.5),
+totals 122/210, team totals 72/173 (Gemini's TT and total ladders are shorter). 250 paying
+pairs total. Rebuild any time; it upserts.
