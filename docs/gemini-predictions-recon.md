@@ -276,3 +276,16 @@ Gemini leg for its first days). On the 6 shared games, paying Poly rungs with a 
 ML 12/12, spreads 294/363 (Gemini skips the 0.5 and 8.5 rungs and stops ~±17.5–20.5),
 totals 122/210, team totals 72/173 (Gemini's TT and total ladders are shorter). 250 paying
 pairs total. Rebuild any time; it upserts.
+
+## The Gemini tape (Sep 13 2026 evening, `scripts/gemini_tape.py`, launchd `com.kahlahouse.gemini-tape` every 120s)
+
+One public events request returns every active contract's best bid/ask, so a full-board
+snapshot is free. Tables (local Postgres): `gemini_snapshots` (changed-only bid/ask per
+symbol, the pm_snapshots pattern — first pass 4,840 rows, second pass 79 changes),
+`gemini_pools` (per ET day: pool $, qualifying makers, ends_at — 567 pools / $198k today),
+`gemini_contracts` (symbol registry with first_seen/last_seen — LISTING TIMES, the input to
+the "Gemini lists later than Poly" question). The map rebuild runs hourly
+(`com.kahlahouse.gemini-map`) so twins appear as Gemini lists. Props are back in the map
+(name + line + stat join): 5,141 Poly slugs, 2,892 paying now, **998 paying pairs** (250
+main-line + 748 player-prop). Three launchd jobs total: gemini-cancel (300s), gemini-tape
+(120s), gemini-map (3600s); plists in `cellar/`, logs in `~/.kahla/logs/gemini-*.log`.

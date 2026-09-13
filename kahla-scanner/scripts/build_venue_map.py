@@ -46,7 +46,7 @@ import gemini_pm as g  # noqa: E402
 PSQL = "/Applications/Postgres.app/Contents/Versions/latest/bin/psql"
 DB = "kahla"
 ET = ZoneInfo("America/New_York")
-INCLUDE_PROPS = False   # Rob, Sep 13 2026: "no props" — ML / spread / O-U (incl. team totals) only
+INCLUDE_PROPS = True    # Rob, Sep 13 2026 evening: "found them… keep building" — props back in (name+line+stat join)
 
 SEG_SKIP = re.compile(r"-(1h|2h|1q|2q|3q|4q|tt2h|tt1h|f5|ot)-")
 ASC_RE = re.compile(r"^asc-nfl-([a-z]+)-([a-z]+)-(\d{4}-\d{2}-\d{2})-(pos|neg)-(\d+)(?:pt(\d+))?$")

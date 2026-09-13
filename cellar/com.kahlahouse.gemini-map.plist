@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.kahlahouse.gemini-map</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/robkahla/dev/kahla-house/.venv/bin/python</string>
+    <string>/Users/robkahla/dev/kahla-house/kahla-scanner/scripts/build_venue_map.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/robkahla/dev/kahla-house</string>
+  <key>StartInterval</key><integer>3600</integer>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>/Users/robkahla/.kahla/logs/gemini-map.log</string>
+  <key>StandardErrorPath</key><string>/Users/robkahla/.kahla/logs/gemini-map.log</string>
+</dict></plist>
