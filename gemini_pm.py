@@ -189,6 +189,12 @@ def current_rebate_mult(category: str = "Sports", now: Optional[float] = None) -
 
 
 # --------------------------------------------------------------------------- private
+# Recipe VERIFIED against Gemini's own client (github.com/gemini/developer-platform,
+# packages/mcp-server/src/auth/signer.ts, read Sep 13 2026): nonce = floor(epoch seconds);
+# payload = {"request": path, "nonce": nonce, ...fields}; base64; hex HMAC-SHA384 of the
+# base64 string; POST with NO body, Content-Type text/plain, Content-Length 0. That client
+# places prediction-market orders this way, so "header" is the default body mode below.
+# ⚠ orderId is a 17-18 digit int64 — fine in Python, but never round-trip it through JS.
 def _signed_headers(path: str, params: Optional[dict] = None) -> dict:
     key, secret = _creds()
     payload = {"request": path, "nonce": int(time.time())}
@@ -233,6 +239,30 @@ def _private(method: str, path: str, params: Optional[dict] = None,
     if not r.text:
         return None
     return r.json()
+
+
+def ws_auth_headers() -> dict:
+    """Headers for the PRIVATE websocket upgrade (samples/python/pm_order.py): the payload
+    is just base64(nonce-seconds), signed the same way. Public streams need none of this."""
+    key, secret = _creds()
+    nonce = str(int(time.time()))
+    payload = base64.b64encode(nonce.encode()).decode()
+    sig = hmac.new(secret.encode(), payload.encode(), hashlib.sha384).hexdigest()
+    return {"X-GEMINI-APIKEY": key, "X-GEMINI-NONCE": nonce,
+            "X-GEMINI-PAYLOAD": payload, "X-GEMINI-SIGNATURE": sig}
+
+
+def ws_order_place_msg(req_id: str, symbol: str, side: str, outcome: str, quantity, price,
+                       post_only: bool = True, client_order_id: Optional[str] = None) -> dict:
+    """The socket's order.place frame (playground + samples): side BUY|SELL, type LIMIT,
+    timeInForce MOC = maker-or-cancel (post-only) else GTC, eventOutcome YES|NO."""
+    p: dict[str, Any] = {"symbol": symbol, "side": side.upper(), "type": "LIMIT",
+                         "timeInForce": "MOC" if post_only else "GTC",
+                         "price": f"{float(price):.2f}", "quantity": f"{float(quantity):g}",
+                         "eventOutcome": outcome.upper()}
+    if client_order_id:
+        p["clientOrderId"] = client_order_id
+    return {"id": req_id, "method": "order.place", "params": p}
 
 
 def detect_body_mode() -> str:

@@ -123,6 +123,16 @@ WebSocket `wss://ws.gemini.com?snapshot=-1` (verified live):
 - trading methods (playground, verified Sep 13): `order.place` `{symbol, side: BUY|SELL, type: LIMIT|MARKET, timeInForce: GTC|IOC|FOK|MOC, price, quantity, clientOrderId, eventOutcome: YES|NO}` — **`MOC` (maker-or-cancel) is post-only on the socket**; `order.cancel {orderId}`, `order.cancel_all`, `order.cancel_session`; `depth {symbol, limit≤5000}` returns an on-demand L2 snapshot. Method names are accepted lowercase.
 - REST vs socket body shape: the generic Gemini rule is an empty body with everything in `X-GEMINI-PAYLOAD`; the prediction-markets place-order example sends the JSON body as well. `gemini_pm.detect_body_mode()` tries the header-only shape on the read-only `orders/active` POST first and remembers what worked, so a mutating call is never retried in a second shape.
 
+**Official code exists — read it before guessing (Sep 13 2026):**
+`github.com/gemini/developer-platform` carries Python/TS/Go samples (`samples/python/pm_order.py`
+= a prediction-market order over the socket, `balances.py` = REST HMAC), an MCP server with
+prediction-market tools (`packages/mcp-server/src/auth/signer.ts` is the authoritative REST
+signing recipe: nonce SECONDS, `{request, nonce, ...fields}` payload, header-only POST,
+`text/plain`), and a TypeScript SDK `@gemini-markets/sdk`. No official Python SDK.
+`gemini_pm.py` mirrors the signer exactly. The MCP client parses `orderId` with a big-int
+parser because the venue emits 17-18 digit ids that JavaScript truncates — irrelevant in
+Python, fatal in the browser.
+
 ## Landmines found
 
 1. **No good-till-date.** `timeInForce` is GTC / IOC / FOK only. A resting bid lives through kickoff and the whole game unless we cancel it. Kickoff cancel is OUR job (or `cancelOnDisconnect` on the socket).
