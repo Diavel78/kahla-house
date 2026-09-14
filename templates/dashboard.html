@@ -657,12 +657,14 @@
                 }
                 // 7d row dropped (user, Aug 30) — the day ledger above IS
                 // the week; windows are 30d + YTD.
-                // MTD (user, Sep 13 2026) sits between 30d and YTD: calendar
+                // MTD (user, Sep 13 2026) leads the ledger: calendar
                 // month, AZ. Missing until the stack is recomputed on code
                 // that knows it (↻, midnight, or the box's next pull) — row()
                 // renders nothing for an absent window, never a zero.
-                led.innerHTML = row('30 days', st.d30)
-                    + row('MTD · ' + new Date().toLocaleString('en-US', {month: 'short', timeZone: 'America/Phoenix'}), st.mtd)
+                // Order is shortest window first: MTD is ≤ 30 days on all
+                // but the 31st (user, Sep 13) — it sits ABOVE 30 days.
+                led.innerHTML = row('MTD · ' + new Date().toLocaleString('en-US', {month: 'short', timeZone: 'America/Phoenix'}), st.mtd)
+                    + row('30 days', st.d30)
                     + ytdRow;
                 // Windows recompute at midnight AZ or on ↻ — show their age
                 // so a stale-on-purpose number never reads as a live one.
