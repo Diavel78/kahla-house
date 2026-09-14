@@ -2133,7 +2133,10 @@ def _pnl_stack(sb) -> dict | None:
     out = {"today": round(by_day.get(today.isoformat(), 0.0), 2),
            "yesterday": round(
                by_day.get((today - timedelta(days=1)).isoformat(), 0.0), 2),
-           "d7": _win(7), "d30": _win(30), "ytd": _win(ytd_days)}
+           "d7": _win(7), "d30": _win(30),
+           # MTD (user, Sep 13 2026): calendar month to date, AZ month — the
+           # same settle-basis walk as 30d, just anchored on the 1st.
+           "mtd": _win(today.day), "ytd": _win(ytd_days)}
     # YTD's headline is the CASH EQUATION, not the settle-basis sum (user,
     # Aug 22 2026: "Cash ledger 12/31/25. Cash ledger today. Tada.") — the
     # settle basis read -$256 for a year the cash ledger closes at ~+$95,
