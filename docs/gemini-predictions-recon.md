@@ -295,3 +295,35 @@ live at install); a subscribe frame >~100 symbols closes the socket with 1009 (m
 big) — 25 per request; ~1,500 frames/min steady Sunday evening, 0.4% CPU / 87 MB in its own
 process; quotes normalized to 2dp on ingest ('0.4600' vs REST's '0.46' otherwise re-writes
 the whole board on the first flush); one changed quote per symbol per minute persisted.
+
+## THE NUMBER (Mon Sep 14 2026, first liquidity payout covering our seats)
+
+`liquidity-rewards/summary/daily`, payout_date 2026-09-14:
+
+| event | our seats | qualifying snapshots | normalized score | reward |
+|---|---|---|---|---|
+| DEN–KC Team Total | 10 @ 5¢ (virgin rung) + 10 @ 45¢ (bid+1 in-window) | **1440 / 1440** | 0.000101 | **$0.02** |
+| DAL–NYG Team Total | 10 @ 5¢ virgin | 28 / 328 | 0 | $0.00 |
+| DAL–NYG Player TDs | 10 @ 5¢ virgin | 203 / 1280 | 0 | $0.00 |
+
+Total $0.02 → `BELOW_THRESHOLD`, not paid. Lifetime liquidity rewards still $0.00.
+
+What it settles:
+- **The pool day is 5:30pm ET → 5:30pm ET** (the DEN–KC seats placed Sunday 2:15pm ET
+  qualified for exactly 1440 snapshots = the full window). Sunday's 4:25pm seats fell in the
+  PRIOR window and never appear. Uptime is `snapshot_count / total_snapshots` and DAL–NYG
+  (28/328, 203/1280) confirms <50% ⇒ zero.
+- **A 10-lot seat is invisible in a $200 pool.** Two seats, full uptime, one of them one tick
+  inside a 10-lot incumbent quote, earned one hundredth of one percent. The "2 qualifying
+  makers" are not two 10-lots: by Monday the DEN–KC ladder carried **250-lot walls inside the
+  10¢ window on most rungs — 5,548 contracts inside the window across the ladder** (the
+  Sunday-morning 10×10 books were the resting state between the walls, not the competition).
+  The size cap (250) × two-sided × 27 rungs is the whole pool.
+- **The lone-bid theory is dead.** The 5¢ "virgin" seat did not stay alone: the venue's own
+  250-lot 0.99 ask makes every empty rung two-sided with a mid near 50¢, so a 5¢ bid is 45¢
+  from mid and scores nothing. There is no free full-weight seat on an empty rung.
+- Scale math for the record: to hold ~30% of a $200 pool you must match the wall — 250
+  contracts two-sided on ~20 rungs ≈ $5,000 of resting capital per event for ~$60/day.
+  Unhedged that is inventory; hedged across venues (the pairs idea) it is ~1.2%/day on locked
+  capital, on the events where a Polymarket twin exists. That is a design question, not a
+  seat-size question. **Nothing about a 10-contract seat on this venue earns rent.**
