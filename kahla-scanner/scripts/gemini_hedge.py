@@ -193,6 +193,26 @@ def gem_sync(pair: dict, want_rest_qty: float, rest_px, urgent_qty: float, cap_p
         _place("flat", int(flat_qty), flat_px, True, side="sell")   # maker only — never cross
 
 
+PSQL = "/Applications/Postgres.app/Contents/Versions/latest/bin/psql"
+
+
+def _write_hedge_pair(poly_slug: str, gemini_symbol: str, paired_qty: float, poly_filled: float,
+                      gemini_held: float, kickoff) -> None:
+    """Upsert (paired ≥ 1) or delete (paired < 1) the slug's hedge_pairs row. The Ferrari reads it."""
+    import subprocess
+    if paired_qty >= 1:
+        sql = ("insert into hedge_pairs (poly_slug,gemini_symbol,paired_qty,poly_filled,gemini_held,kickoff,updated_at) "
+               f"values ('{poly_slug}','{gemini_symbol}',{paired_qty},{poly_filled},{gemini_held},"
+               + (f"'{kickoff}'" if kickoff else "null") + ",now()) "
+               "on conflict (poly_slug) do update set paired_qty=excluded.paired_qty, poly_filled=excluded.poly_filled, "
+               "gemini_held=excluded.gemini_held, gemini_symbol=excluded.gemini_symbol, kickoff=excluded.kickoff, updated_at=now();")
+    else:
+        sql = f"delete from hedge_pairs where poly_slug='{poly_slug}';"
+    out = subprocess.run([PSQL, "kahla", "-v", "ON_ERROR_STOP=1", "-At", "-c", sql], capture_output=True, text=True, timeout=20)
+    if out.returncode:
+        raise RuntimeError(out.stderr[:200])
+
+
 # ------------------------------------------------------------------ loop
 def run(live: bool, once: bool):
     pc = _poly_client()
@@ -270,6 +290,13 @@ def run(live: bool, once: bool):
                 h_bid, h_ask = hc.mirror_book(gs["yes_bid"], gs["yes_ask"], pair["hedge_outcome"])
                 lead = hc.rest_quote(h_bid, h_ask, join=False)
                 urgent_px = None if lead is None else round(min(cap, lead), 2)
+                # tell the Ferrari (hedge_pairs): which Poly slugs carry a HELD Gemini leg — its scalp arm
+                # drops its ask on those inside T-60 (Rob: both sells off, hedge rides). Box-local psql.
+                try:
+                    _pq = min(gs["held"], ps["filled_qty"])
+                    _write_hedge_pair(pair["poly_slug"], pair["gemini_symbol"], _pq, ps["filled_qty"], gs["held"], pair.get("kickoff"))
+                except Exception as ex:
+                    log.warning("hedge_pairs write failed: %s", str(ex)[:120])
                 gem_sync(pair, want_rest, pl.rest_price, urgent, urgent_px, live, flat_qty, flat_px)
             except Exception as ex:
                 log.exception("pair %s failed: %s", pair.get("poly_slug"), str(ex)[:200])

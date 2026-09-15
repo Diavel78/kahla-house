@@ -378,3 +378,22 @@ Second pair (live 7:05pm AZ, two legs only): Poly `asc-nfl-gb-nyj-2026-09-20-neg
 `GEMI-NFL-2609201700-GB-NYJ-S-GB5` **YES** (GB −5.5) bid 20 @ 44¢ = Gemini's touch. Both
 fill → 98.5¢, +1.5¢/contract locked, rent on both; Poly first → take Gemini at 45; Gemini
 first → GB −5.5 held at 44 until the Poly leg fills. Kickoff Sun 10am AZ.
+
+### Pair rules as of Sep 14 night (Rob), and where each lives
+
+- **Maker only, both venues, always.** Lambo's urgent leg LEADS the bid by a tick up to the pair cap
+  (never at/above the ask); its ask leg rests at cost+1 if that leads, else cost. `max_pair_cost`
+  1.005 — ten cents on 20 buys room to stay on the touch longer, never a take.
+- **Both held, game days away → sells on both** (Ferrari scalp ask on Poly, Lambo ask on Gemini);
+  a sale rinses (Lambo re-bids under the cap).
+- **T-60 with BOTH held → both sells come off, hedge rides to settlement.** Lambo: its own ask.
+  Ferrari: `app._hedged_ask_off` — reads `hedge_pairs` (table the Lambo writes ONLY for its
+  configured pairs, ONLY when both legs are held, `paired_qty ≥ 1`); inside T-60 the scalp arm
+  cancels its AUTOMATIC ask on that slug, pops the sniper snapshot, and stops re-placing.
+  **Empty table ⇒ zero change to any scalp ask anywhere** (proven with a throwaway row: fires
+  only for the paired slug, only inside T-60). Tune/kill: `machine_flags hedge_ask_off_min`
+  (0 disables). Fail-closed (unreadable table ⇒ no guard).
+- **Lone leg (never paired):** its ask stays; from T-30 the un-paired Gemini surplus sits at
+  exactly cost through the game. Unfilled bids die at kickoff on both venues.
+- ⚠ The Ferrari half is INERT until the money daemon restarts on ≥ this commit (its lanes are
+  untouched otherwise). First pair that can hit T-60 is GB–NYJ, Sun Sep 20 9:00am AZ.

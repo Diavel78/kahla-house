@@ -25939,6 +25939,38 @@ def _rent_cull_tick(sb, now, client=None, orders=None) -> dict:
     return res
 
 
+_HEDGE_PAIRS_CACHE: dict = {"at": 0.0, "map": {}}
+_HEDGE_ASK_OFF_MIN = 60          # Rob, Sep 14 2026: both sells off at T-60, hedge rides
+
+
+def _hedged_ask_off(sb, slug: str, event_start, now) -> bool:
+    """True when this Poly slug carries a HELD Gemini hedge leg (hedge_pairs, written by the
+    Lambo — kahla-scanner/scripts/gemini_hedge.py) and we are inside T-60 of kickoff. The scalp
+    arm then rests NO ask on it and cancels any it has: selling one leg late wrecks the pair
+    (Rob: "they both cancel sell, maintain hedge"). Fail-CLOSED to False — an unreadable table
+    must never silence every ask on the book. 60s cache. Kill/tune: machine_flags
+    `hedge_ask_off_min` (minutes; 0 disables)."""
+    try:
+        if _time.time() - _HEDGE_PAIRS_CACHE["at"] > 60:
+            rows = (sb.table("hedge_pairs").select("poly_slug,paired_qty")
+                    .gte("paired_qty", 1).limit(500).execute().data) or []
+            _HEDGE_PAIRS_CACHE["map"] = {r["poly_slug"]: float(r.get("paired_qty") or 0) for r in rows}
+            _HEDGE_PAIRS_CACHE["at"] = _time.time()
+        if slug not in _HEDGE_PAIRS_CACHE["map"]:
+            return False
+        mins = _machine_flag_val("hedge_ask_off_min", _HEDGE_ASK_OFF_MIN)
+        try:
+            mins = float(mins)
+        except (TypeError, ValueError):
+            mins = _HEDGE_ASK_OFF_MIN
+        if mins <= 0:
+            return False
+        es = _parse_iso(event_start) if isinstance(event_start, str) else event_start
+        return bool(es) and now >= es - timedelta(minutes=mins)
+    except Exception:
+        return False
+
+
 def _scalp_lanes(b: dict, mt: str) -> bool:
     """Is this pick RENT-LANE inventory? (spec Policy 1)"""
     if bool(b.get("gridiron_autobet")):
@@ -26417,6 +26449,9 @@ def _fast_ask_one(sb, client, slug: str, buy_intent: str) -> None:
     if r is None:
         _FAST_ASK_STATS["skips"] += 1
         return
+    if _hedged_ask_off(sb, slug, r.get("event_start"), datetime.now(timezone.utc)):
+        _FAST_ASK_STATS["skips"] += 1
+        return                                    # hedged pair inside T-60: no ask (Rob, Sep 14 2026)
     b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
     try:
         # one resting ask already? then the lap/sniper own it
@@ -26808,6 +26843,21 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             continue                     # buy hasn't filled — no inventory
         if held < 1.0:                   # venue holds it, the mirror doesn't know yet
             res["skip_mirror0"] = res.get("skip_mirror0", 0) + 1
+            continue
+        if _hedged_ask_off(sb, slug, r.get("event_start"), now):
+            # HEDGED PAIR INSIDE T-60 (Rob, Sep 14 2026): no ask on either venue — the Lambo
+            # pulls its own; this pulls ours and stops re-placing. The hedge rides to settlement.
+            _sih = ("ORDER_INTENT_SELL_SHORT" if synth else "ORDER_INTENT_SELL_LONG")
+            for _oh in [o for o in orders if o.get("slug") == slug
+                        and o.get("intent") == _sih and o.get("auto")]:
+                try:
+                    client.orders.cancel(_oh.get("id"), {"marketSlug": slug})
+                    res["hedge_ask_canceled"] = res.get("hedge_ask_canceled", 0) + 1
+                    _time.sleep(0.5)
+                except Exception:
+                    pass
+            SCALP_SNAP.pop(slug, None)          # the sniper must not re-price a dead ask
+            res["skip_hedged"] = res.get("skip_hedged", 0) + 1
             continue
         res["cands"] += 1
         entry_c = _scalp_entry_c(r, b)
