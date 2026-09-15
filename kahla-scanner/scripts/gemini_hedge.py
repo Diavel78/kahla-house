@@ -71,7 +71,7 @@ def _led(**kw):
 # position — so a long-UNDER leg was read as long-OVER and the "hedge" bought 19 more UNDER.
 # Rules now: (1) a resting BID is ONLY intent BUY_LONG (yes) / BUY_SHORT (no); SELL_* are exits
 # and are ignored; (2) the held side comes from netPosition's SIGN, never from an order;
-# (3) a short's cost is 1 − avgPx (avgPx is yes-canonical); (4) if a resting bid's side disagrees
+# (3) avgPx is in OUR side's terms for longs and shorts alike (verified against pick rows); (4) if a resting bid's side disagrees
 # with the held side the pair is SKIPPED with an error — never guessed.
 def parse_poly(orders: list, position: dict | None, slug: str) -> dict:
     out = {"resting_qty": 0.0, "resting_px_own": None, "resting_side": None, "held_side": None,
@@ -96,9 +96,9 @@ def parse_poly(orders: list, position: dict | None, slug: str) -> dict:
         if abs(net) >= 1:
             out["filled_qty"] = abs(net)
             out["held_side"] = "yes" if net > 0 else "no"
-            try:
+            try:   # avgPx is ALREADY in our side's terms for longs AND shorts (CIN-HOU: short, avgPx 0.60, pick paid 59.7¢)
                 avg = float((position.get("avgPx") or {}).get("value"))
-                out["held_avg_own"] = round(avg if net > 0 else 1 - avg, 4)
+                out["held_avg_own"] = round(avg, 4)
             except (TypeError, ValueError):
                 out["held_avg_own"] = None
     if out["held_side"] and out["resting_side"] and out["held_side"] != out["resting_side"]:
@@ -217,6 +217,14 @@ def run(live: bool, once: bool):
                     want_rest, urgent = pl.hedge_qty_rest, pl.hedge_qty_now
                 if not pair.get("rent_leg", False):
                     want_rest = 0.0   # Rob, Sep 14: hedge what is FILLED. Mirroring a parked Poly bid is a new bet, not a hedge.
+                elif want_rest >= 1 and gs["yes_bid"] is not None and gs["yes_ask"] is not None and ps["resting_px_own"] is not None:
+                    # at-the-money guard: the Poly bid (in Gemini-YES terms) must sit near Gemini's mid, else it is a
+                    # parked seat and its mirror would be a naked bet on the other venue
+                    poly_yes_equiv = ps["resting_px_own"] if match_out == "yes" else 1 - ps["resting_px_own"]
+                    gap = abs(poly_yes_equiv - (gs["yes_bid"] + gs["yes_ask"]) / 2)
+                    if gap > float(pair.get("max_rest_gap", 0.03)):
+                        log.info("%s: Poly bid is %.3f off Gemini's mid — parked seat, no rent leg", pair["poly_slug"][-28:], gap)
+                        want_rest = 0.0
                 log.info("%s | poly %s@%.3f (held avg %s) rest %g filled %g | gemini %s book %s/%s held %g | rest %g@%s lock %s | urgent %g cap %.2f take %s | %s",
                          pair["poly_slug"][-28:], poly_side, poly_px, ps["held_avg_own"], ps["resting_qty"], ps["filled_qty"], pair["hedge_outcome"].upper(),
                          gs["yes_bid"], gs["yes_ask"], gs["held"], want_rest, pl.rest_price, pl.locked_if_rest_fills, urgent, cap, pl.take_price, "KICKED" if started else pl.note)
@@ -244,7 +252,7 @@ def _selftest():
     r = parse_poly(orders, pos, "tsc-nfl-min-chi-2026-09-20-total-45pt5")
     assert r["side"] == "no" and r["held_side"] == "no", r            # long UNDER
     assert r["resting_qty"] == 0 and r["resting_side"] is None, r    # the SELL_SHORT ask is NOT a seat
-    assert abs(r["held_avg_own"] - 0.708) < 1e-9, r
+    assert abs(r["held_avg_own"] - 0.292) < 1e-9, r   # short: avgPx as-is (cost 5.627/19 = 0.296 agrees)
     # a real BUY_SHORT bid on the same side is a seat
     orders2 = [dict(orders[0], intent="ORDER_INTENT_BUY_SHORT", price={"value": "0.55"})]
     r2 = parse_poly(orders2, pos, orders[0]["marketSlug"])

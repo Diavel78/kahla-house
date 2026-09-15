@@ -355,3 +355,26 @@ priced the over 57/63 vs Poly ~45, so: **urgent 19 NO filled at 43¢ in one shot
 "10-lot" top of book had 446 behind it — thin at the touch only), pair locked ≈ +27¢ ×
 19 ≈ +$5 either way; rent leg 19 NO resting at 37¢ (pair would lock +18¢ if both fill).
 Gemini spend after this: ~$15 of the $100.
+
+### ⚠ INCIDENT, same evening (Sep 14 ~7pm AZ): the first pair DOUBLED instead of hedging
+
+The MIN–CHI "pair" above was wrong. Poly `netPosition` was **−19** (long UNDER), and the
+"resting 19 at 45¢" was the scalp arm's ASK (`intent SELL_SHORT`, yes-canonical 0.45 = sell
+the NO at 0.55), not a bid. The runner read the side off that order ("not BUY_SHORT ⇒ yes"),
+called the leg long OVER, and the Gemini "hedge" bought 19 more UNDER. Rob caught it from
+the app; the table itself should have — the Ferrari never bids for 19 more of a rung it
+already holds 19 of (its rule is 20 combined), so "held 19 + resting 19" could only be an
+ask. Unwound: Gemini 19 NO exit resting at 44¢ (cost 43¢); runner stopped; pair disabled.
+
+Fixes (with the exact payload as a selftest, `gemini_hedge.py --selftest`): side comes ONLY
+from netPosition's sign; only `BUY_LONG`/`BUY_SHORT` are seats, `SELL_*` are exits;
+**avgPx is in OUR side's terms for longs AND shorts** (CIN–HOU short: avgPx 0.60, pick paid
+59.7¢ — the "1 − avgPx" flip was a second bug caught in the rescan); any disagreement
+between held side, resting side and config refuses the pair; the rent leg mirrors a Poly
+bid only when it sits within 3¢ of Gemini's mid (a parked seat's mirror is a naked bet).
+
+Second pair (live 7:05pm AZ, two legs only): Poly `asc-nfl-gb-nyj-2026-09-20-neg-5pt5`
+**NO** (NYJ +5.5) bid 20 @ 54.5¢ = the NO-side touch, the Ferrari's seat ⇔ Gemini
+`GEMI-NFL-2609201700-GB-NYJ-S-GB5` **YES** (GB −5.5) bid 20 @ 44¢ = Gemini's touch. Both
+fill → 98.5¢, +1.5¢/contract locked, rent on both; Poly first → take Gemini at 45; Gemini
+first → GB −5.5 held at 44 until the Poly leg fills. Kickoff Sun 10am AZ.
