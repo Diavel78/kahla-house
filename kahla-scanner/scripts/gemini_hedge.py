@@ -225,6 +225,7 @@ def run(live: bool, once: bool):
                 cap = round(min(float(pair.get("max_pair_cost", 1.00)) - held_px, 0.99), 2)   # urgent leg prices off the HELD cost
                 started = kick is not None and now >= kick
                 t30 = kick is not None and now >= kick - dt.timedelta(minutes=int(pair.get("flatten_min", 30)))
+                t60 = kick is not None and now >= kick - dt.timedelta(minutes=int(pair.get("ask_off_min", 60)))
                 flat_qty, flat_px = 0.0, None
                 if started:
                     want_rest, urgent = 0.0, 0.0     # kickoff: unfilled bids come off; held hedges ride
@@ -242,15 +243,28 @@ def run(live: bool, once: bool):
                     h_bid, h_ask = hc.mirror_book(gs["yes_bid"], gs["yes_ask"], pair["hedge_outcome"])
                     cost = round(gs["held_avg"] + 1e-9, 2)
                     surplus = gs["held"] - ps["filled_qty"]
-                    if t30 and surplus > 0.5:
+                    paired_qty = min(gs["held"], ps["filled_qty"])
+                    if t60 and surplus <= 0.5:
+                        # Rob, Sep 14 (T-60 rule): both legs held → the ask comes OFF at T-60 and the hedge rides.
+                        # Never sell one side late and wreck the pair. (Only the un-paired surplus keeps an ask.)
+                        cost = None
+                    elif t30 and surplus > 0.5:
                         px = cost
                     else:
                         px = round(cost + 0.01, 2) if (h_ask is None or cost + 0.01 < h_ask - 1e-9) else cost
-                    if h_bid is not None and px <= h_bid + 1e-9:
-                        px = round(h_bid + 0.01, 2)                 # bid at/above cost → one tick over it (maker)
-                    if h_ask is not None and px > h_ask + 1e-9:
-                        px = round(h_ask, 2)                          # never lead through the ask; join it
-                    flat_qty, flat_px = round(gs["held"], 4), px
+                    if cost is not None:
+                        if h_bid is not None and px <= h_bid + 1e-9:
+                            px = round(h_bid + 0.01, 2)             # bid at/above cost → one tick over it (maker)
+                        if h_ask is not None and px > h_ask + 1e-9:
+                            px = round(h_ask, 2)                      # never lead through the ask; join it
+                        # after T-60 only the un-paired surplus may carry an ask; before it, everything held does
+                        ask_qty = round(gs["held"] - paired_qty, 4) if t60 else round(gs["held"], 4)
+                        if ask_qty >= 1:
+                            flat_qty, flat_px = ask_qty, px
+                log.info("%s | poly %s@%.3f (held avg %s) rest %g filled %g | gemini %s book %s/%s held %g | rest %g@%s lock %s | urgent %g cap %.2f | ask %g@%s | %s",
+                         pair["poly_slug"][-28:], poly_side, poly_px, ps["held_avg_own"], ps["resting_qty"], ps["filled_qty"], pair["hedge_outcome"].upper(),
+                         gs["yes_bid"], gs["yes_ask"], gs["held"], want_rest, pl.rest_price, pl.locked_if_rest_fills, urgent, cap, flat_qty, flat_px,
+                         "KICKED" if started else ("T-30" if t30 else ("T-60" if t60 else pl.note)))
                 # urgent leg (Rob, Sep 14: "We never cross… we don't take"): a POST-ONLY bid that LEADS the
                 # bid side by one tick (joins on a one-tick book), capped at the pair cap — never at/above the ask.
                 h_bid, h_ask = hc.mirror_book(gs["yes_bid"], gs["yes_ask"], pair["hedge_outcome"])
