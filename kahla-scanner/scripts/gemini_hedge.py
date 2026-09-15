@@ -122,24 +122,28 @@ def gem_state(symbol: str, outcome: str) -> dict:
     yb = float(bk["bids"][0]["price"]) if bk.get("bids") else None
     ya = float(bk["asks"][0]["price"]) if bk.get("asks") else None
     ours = [o for o in g.active_orders(symbol=symbol) if str(o.get("clientOrderId") or "").startswith(CID)]
-    held = 0.0
+    held, held_cost = 0.0, 0.0
     for p in g.positions(limit=100):
         if p.get("symbol") == symbol:
             q = float(p.get("totalQuantity") or 0)
             if (p.get("outcome") or "").lower() == outcome:
                 held += q
-    return {"yes_bid": yb, "yes_ask": ya, "orders": ours, "held": held}
+                held_cost += q * float(p.get("avgPrice") or 0)
+    return {"yes_bid": yb, "yes_ask": ya, "orders": ours, "held": held,
+            "held_avg": round(held_cost / held, 4) if held else None}
 
 
-def gem_sync(pair: dict, want_rest_qty: float, rest_px, urgent_qty: float, cap_px, live: bool) -> None:
+def gem_sync(pair: dict, want_rest_qty: float, rest_px, urgent_qty: float, cap_px, live: bool,
+             flat_qty: float = 0.0, flat_px=None) -> None:
     sym, out = pair["gemini_symbol"], pair["hedge_outcome"]
     st = pair["_gem"]
     rest_orders = [o for o in st["orders"] if str(o.get("clientOrderId")).startswith(CID + "rest")]
     urg_orders = [o for o in st["orders"] if str(o.get("clientOrderId")).startswith(CID + "urg")]
+    flat_orders = [o for o in st["orders"] if str(o.get("clientOrderId")).startswith(CID + "flat")]
     budget = float(pair.get("budget_usd", 15.0))
 
-    def _place(role, qty, px, post_only):
-        cost = qty * px
+    def _place(role, qty, px, post_only, side="buy"):
+        cost = qty * px if side == "buy" else 0.0
         if cost > budget:
             log.warning("%s %s: $%.2f exceeds pair budget $%.2f — capping qty", sym, role, cost, budget)
             qty = int(budget / px)
@@ -147,11 +151,11 @@ def gem_sync(pair: dict, want_rest_qty: float, rest_px, urgent_qty: float, cap_p
             return
         cid = f"{CID}{role}-{int(time.time())}"
         if not live:
-            log.info("DRY %s %s: would place BUY %s %g @ %.2f (post_only=%s)", sym, role, out.upper(), qty, px, post_only)
+            log.info("DRY %s %s: would place %s %s %g @ %.2f (post_only=%s)", sym, role, side.upper(), out.upper(), qty, px, post_only)
             return
-        r = g.place_order(sym, "buy", out, qty, px, post_only=post_only, client_order_id=cid)
-        log.info("%s %s: placed %s %g @ %.2f → %s", sym, role, out.upper(), qty, px, r.get("status"))
-        _led(kind="place", role=role, symbol=sym, outcome=out, qty=qty, px=px, order_id=r.get("orderId"), status=r.get("status"), pair=pair["poly_slug"])
+        r = g.place_order(sym, side, out, qty, px, post_only=post_only, client_order_id=cid)
+        log.info("%s %s: placed %s %s %g @ %.2f → %s", sym, role, side.upper(), out.upper(), qty, px, r.get("status"))
+        _led(kind="place", role=role, side=side, symbol=sym, outcome=out, qty=qty, px=px, order_id=r.get("orderId"), status=r.get("status"), pair=pair["poly_slug"])
 
     def _cancel(o, why):
         if not live:
@@ -178,6 +182,15 @@ def gem_sync(pair: dict, want_rest_qty: float, rest_px, urgent_qty: float, cap_p
             urg_orders = []
     if urgent_qty >= 1 and not urg_orders and cap_px is not None and cap_px > 0:
         _place("urg", int(urgent_qty), cap_px, False)
+    # --- flat leg (Rob, Sep 14: "T-30, sell it, hold that sell open for the entire game, sell it at cost"):
+    # one plain limit SELL at our Gemini cost for the un-paired surplus. Fills at once if the bid is at or
+    # above cost, otherwise rests. Never touched by the kickoff logic; re-sized if the surplus changes.
+    for o in flat_orders:
+        if flat_qty < 1 or flat_px is None or abs(float(o["price"]) - flat_px) > 1e-9 or abs(float(o["remainingQuantity"]) - flat_qty) > 0.5:
+            _cancel(o, "flat leg re-size" if flat_qty >= 1 else "nothing left to flatten")
+            flat_orders = []
+    if flat_qty >= 1 and flat_px is not None and not flat_orders:
+        _place("flat", int(flat_qty), flat_px, False, side="sell")
 
 
 # ------------------------------------------------------------------ loop
@@ -211,10 +224,17 @@ def run(live: bool, once: bool):
                 held_px = ps["held_avg_own"] if ps["held_avg_own"] is not None else poly_px
                 cap = round(min(float(pair.get("max_pair_cost", 1.00)) - held_px, 0.99), 2)   # urgent leg prices off the HELD cost
                 started = kick is not None and now >= kick
+                t30 = kick is not None and now >= kick - dt.timedelta(minutes=int(pair.get("flatten_min", 30)))
+                flat_qty, flat_px = 0.0, None
                 if started:
                     want_rest, urgent = 0.0, 0.0     # kickoff: unfilled bids come off; held hedges ride
+                elif t30:
+                    want_rest, urgent = 0.0, pl.hedge_qty_now   # T-30: rent bid off; a Poly-filled leg still closes
                 else:
                     want_rest, urgent = pl.hedge_qty_rest, pl.hedge_qty_now
+                if t30 and gs["held"] > ps["filled_qty"] + 0.5 and gs["held_avg"]:
+                    flat_qty = round(gs["held"] - ps["filled_qty"], 4)      # the un-paired surplus
+                    flat_px = round(gs["held_avg"] + 1e-9, 2)                # AT COST, held open through the game
                 if not pair.get("rent_leg", False):
                     want_rest = 0.0   # Rob, Sep 14: hedge what is FILLED. Mirroring a parked Poly bid is a new bet, not a hedge.
                 elif want_rest >= 1 and gs["yes_bid"] is not None and gs["yes_ask"] is not None and ps["resting_px_own"] is not None:
@@ -225,9 +245,9 @@ def run(live: bool, once: bool):
                     if gap > float(pair.get("max_rest_gap", 0.03)):
                         log.info("%s: Poly bid is %.3f off Gemini's mid — parked seat, no rent leg", pair["poly_slug"][-28:], gap)
                         want_rest = 0.0
-                log.info("%s | poly %s@%.3f (held avg %s) rest %g filled %g | gemini %s book %s/%s held %g | rest %g@%s lock %s | urgent %g cap %.2f take %s | %s",
+                log.info("%s | poly %s@%.3f (held avg %s) rest %g filled %g | gemini %s book %s/%s held %g | rest %g@%s lock %s | urgent %g cap %.2f take %s | flat %g@%s | %s",
                          pair["poly_slug"][-28:], poly_side, poly_px, ps["held_avg_own"], ps["resting_qty"], ps["filled_qty"], pair["hedge_outcome"].upper(),
-                         gs["yes_bid"], gs["yes_ask"], gs["held"], want_rest, pl.rest_price, pl.locked_if_rest_fills, urgent, cap, pl.take_price, "KICKED" if started else pl.note)
+                         gs["yes_bid"], gs["yes_ask"], gs["held"], want_rest, pl.rest_price, pl.locked_if_rest_fills, urgent, cap, pl.take_price, flat_qty, flat_px, "KICKED" if started else ("T-30" if t30 else pl.note))
                 # urgent leg: take at the ask if the ask is under the cap; otherwise rest AT the cap
                 # only if the cap is not above the touch — never rest above the market (a giveaway).
                 if pl.take_price is not None and pl.take_price <= cap:
@@ -236,7 +256,7 @@ def run(live: bool, once: bool):
                     urgent_px = min(cap, pl.rest_price)
                 else:
                     urgent_px = None
-                gem_sync(pair, want_rest, pl.rest_price, urgent, urgent_px, live)
+                gem_sync(pair, want_rest, pl.rest_price, urgent, urgent_px, live, flat_qty, flat_px)
             except Exception as ex:
                 log.exception("pair %s failed: %s", pair.get("poly_slug"), str(ex)[:200])
         if once:
