@@ -251,6 +251,11 @@ def run(live: bool, once: bool):
                     if h_ask is not None and px > h_ask + 1e-9:
                         px = round(h_ask, 2)                          # never lead through the ask; join it
                     flat_qty, flat_px = round(gs["held"], 4), px
+                # urgent leg (Rob, Sep 14: "We never cross… we don't take"): a POST-ONLY bid that LEADS the
+                # bid side by one tick (joins on a one-tick book), capped at the pair cap — never at/above the ask.
+                h_bid, h_ask = hc.mirror_book(gs["yes_bid"], gs["yes_ask"], pair["hedge_outcome"])
+                lead = hc.rest_quote(h_bid, h_ask, join=False)
+                urgent_px = None if lead is None else round(min(cap, lead), 2)
                 gem_sync(pair, want_rest, pl.rest_price, urgent, urgent_px, live, flat_qty, flat_px)
             except Exception as ex:
                 log.exception("pair %s failed: %s", pair.get("poly_slug"), str(ex)[:200])
