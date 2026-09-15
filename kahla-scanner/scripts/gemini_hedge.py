@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""gemini_hedge — the mirror leg. One Polymarket seat, one Gemini twin, kept in sync.
+
+Rob, Sep 14 2026: "a hedge machine that collects rent on both sides… the only way it works is
+if you do the repeg on Gemini as well… repeg might have to adjust contract sizes."
+
+Per configured pair (~/.kahla/gemini_hedges.json):
+  * READ Polymarket (SDK, 2 light reads per loop): our resting order on the slug (leaves qty,
+    price, intent) and our net position. Never writes to Polymarket. The Ferrari owns that leg.
+  * READ Gemini: the twin's book, our resting order, our position.
+  * COMPUTE (hedge_calc): hedge outcome = opposite of what the Poly leg is/gets long of;
+      rest_qty   = Poly leaves (still-resting)  → ONE post-only Gemini bid at Gemini's touch (join)
+      urgent_qty = Poly filled − Gemini held    → exposure exists NOW: a limit at the pair cap
+                                                 (crosses if the ask allows, else rests there)
+  * REPEG: if the resting bid's price ≠ current touch or qty ≠ rest_qty → cancel, verify off
+    the book, re-place. One order per symbol per role. Never lead the touch, never cross on
+    the rent leg (makerOrCancel).
+  * KICKOFF: unfilled Gemini bids cancel at kickoff (same rule as gemini-cancel); filled
+    hedge positions ride with the Poly leg.
+  * DRY by default: logs every would-do. `--live` places. Budget cap per pair in the config.
+
+FERRARI RULE: separate process, read-only on Polymarket (≤4 REST reads/min across all pairs
+at a 30s loop), its own ledger + log. Kill it and nothing else changes.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import logging
+import os
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from dotenv import load_dotenv  # noqa: E402
+load_dotenv(ROOT / ".env")
+import gemini_pm as g  # noqa: E402
+import hedge_calc as hc  # noqa: E402
+
+log = logging.getLogger("gemini_hedge")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+CFG = Path(os.path.expanduser("~/.kahla/gemini_hedges.json"))
+LEDGER = Path(os.path.expanduser("~/.kahla/gemini_hedge_ledger.jsonl"))
+CID = "kh-hedge-"
+
+
+def _poly_client():
+    from polymarket_us import PolymarketUS
+    return PolymarketUS(key_id=os.getenv("POLYMARKET_KEY_ID"), secret_key=os.getenv("POLYMARKET_SECRET_KEY"))
+
+
+def _iso(s):
+    try:
+        return dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _led(**kw):
+    kw["at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    with LEDGER.open("a") as f:
+        f.write(json.dumps(kw, default=str) + "\n")
+
+
+# ------------------------------------------------------------------ Polymarket read
+def poly_state(pc, slug: str) -> dict:
+    """{'resting_qty','resting_px_own','side','filled_qty'} for OUR leg on the slug.
+    side = 'yes'|'no' in the market's own frame; prices in OUR side's terms."""
+    out = {"resting_qty": 0.0, "resting_px_own": None, "side": None, "filled_qty": 0.0, "held_avg_own": None}
+    r = pc.orders.list(); orders = r.get("orders") if isinstance(r, dict) else r
+    for o in orders or []:
+        if o.get("marketSlug") != slug or o.get("side") != "ORDER_SIDE_BUY":
+            continue
+        if o.get("state") not in ("ORDER_STATE_NEW", "ORDER_STATE_PARTIALLY_FILLED", "ORDER_STATE_REPLACED"):
+            continue
+        short = o.get("intent") == "ORDER_INTENT_BUY_SHORT"
+        yes_px = float(o["price"]["value"])
+        out["side"] = "no" if short else "yes"
+        out["resting_px_own"] = round(1 - yes_px, 4) if short else yes_px
+        out["resting_qty"] += float(o.get("leavesQuantity") or 0)
+    r = pc.portfolio.positions(); pos = r.get("positions") if isinstance(r, dict) and "positions" in r else r
+    p = pos.get(slug) if isinstance(pos, dict) else None
+    if isinstance(pos, list):
+        p = next((x for x in pos if (x.get("marketMetadata") or {}).get("slug") == slug), None)
+    if p:
+        net = float(p.get("netPosition") or 0)
+        if abs(net) >= 1:
+            out["filled_qty"] = abs(net)
+            out["side"] = out["side"] or ("yes" if net > 0 else "no")
+            try:   # venue cost is in OUR side's terms already (dollars paid for the held lot)
+                out["held_avg_own"] = round(float((p.get("cost") or {}).get("value")) / abs(net), 4)
+            except (TypeError, ValueError, ZeroDivisionError):
+                out["held_avg_own"] = None
+    return out
+
+
+# ------------------------------------------------------------------ Gemini read/write
+def gem_state(symbol: str, outcome: str) -> dict:
+    bk = g.book(symbol)
+    yb = float(bk["bids"][0]["price"]) if bk.get("bids") else None
+    ya = float(bk["asks"][0]["price"]) if bk.get("asks") else None
+    ours = [o for o in g.active_orders(symbol=symbol) if str(o.get("clientOrderId") or "").startswith(CID)]
+    held = 0.0
+    for p in g.positions(limit=100):
+        if p.get("symbol") == symbol:
+            q = float(p.get("totalQuantity") or 0)
+            if (p.get("outcome") or "").lower() == outcome:
+                held += q
+    return {"yes_bid": yb, "yes_ask": ya, "orders": ours, "held": held}
+
+
+def gem_sync(pair: dict, want_rest_qty: float, rest_px, urgent_qty: float, cap_px, live: bool) -> None:
+    sym, out = pair["gemini_symbol"], pair["hedge_outcome"]
+    st = pair["_gem"]
+    rest_orders = [o for o in st["orders"] if str(o.get("clientOrderId")).startswith(CID + "rest")]
+    urg_orders = [o for o in st["orders"] if str(o.get("clientOrderId")).startswith(CID + "urg")]
+    budget = float(pair.get("budget_usd", 15.0))
+
+    def _place(role, qty, px, post_only):
+        cost = qty * px
+        if cost > budget:
+            log.warning("%s %s: $%.2f exceeds pair budget $%.2f — capping qty", sym, role, cost, budget)
+            qty = int(budget / px)
+        if qty < 1:
+            return
+        cid = f"{CID}{role}-{int(time.time())}"
+        if not live:
+            log.info("DRY %s %s: would place BUY %s %g @ %.2f (post_only=%s)", sym, role, out.upper(), qty, px, post_only)
+            return
+        r = g.place_order(sym, "buy", out, qty, px, post_only=post_only, client_order_id=cid)
+        log.info("%s %s: placed %s %g @ %.2f → %s", sym, role, out.upper(), qty, px, r.get("status"))
+        _led(kind="place", role=role, symbol=sym, outcome=out, qty=qty, px=px, order_id=r.get("orderId"), status=r.get("status"), pair=pair["poly_slug"])
+
+    def _cancel(o, why):
+        if not live:
+            log.info("DRY %s: would cancel %s (%s @ %s) — %s", sym, o.get("orderId"), o.get("quantity"), o.get("price"), why); return
+        g.cancel_order(o["orderId"])
+        time.sleep(0.6)
+        still = [x for x in g.active_orders(symbol=sym) if x.get("orderId") == o["orderId"]]
+        log.info("%s: cancelled %s — %s (verified gone=%s)", sym, o.get("orderId"), why, not still)
+        _led(kind="cancel", symbol=sym, order_id=o.get("orderId"), why=why, verified=not still)
+
+    # --- rent leg: exactly one resting post-only bid for want_rest_qty at rest_px
+    keep = None
+    for o in rest_orders:
+        if keep is None and rest_px is not None and abs(float(o["price"]) - rest_px) < 1e-9 and abs(float(o["remainingQuantity"]) - want_rest_qty) < 0.5:
+            keep = o
+        else:
+            _cancel(o, "repeg" if rest_px is not None else "no book")
+    if keep is None and want_rest_qty >= 1 and rest_px is not None:
+        _place("rest", int(want_rest_qty), rest_px, True)
+    # --- urgent leg: exposure exists now → one limit at the cap (crosses if it can)
+    for o in urg_orders:
+        if urgent_qty < 1 or abs(float(o["price"]) - cap_px) > 1e-9:
+            _cancel(o, "urgent leg re-price" if urgent_qty >= 1 else "exposure closed")
+            urg_orders = []
+    if urgent_qty >= 1 and not urg_orders and cap_px is not None and cap_px > 0:
+        _place("urg", int(urgent_qty), cap_px, False)
+
+
+# ------------------------------------------------------------------ loop
+def run(live: bool, once: bool):
+    pc = _poly_client()
+    while True:
+        try:
+            pairs = json.loads(CFG.read_text()) if CFG.exists() else []
+        except Exception as ex:
+            log.error("config unreadable: %s", ex); pairs = []
+        now = dt.datetime.now(dt.timezone.utc)
+        for pair in pairs:
+            try:
+                kick = _iso(pair.get("kickoff"))
+                ps = poly_state(pc, pair["poly_slug"])
+                gs = gem_state(pair["gemini_symbol"], pair["hedge_outcome"])
+                pair["_gem"] = gs
+                poly_side = pair.get("poly_side") or ps["side"]
+                if poly_side is None:
+                    log.info("%s: no Poly leg (no order, no position) — nothing to mirror", pair["poly_slug"]); continue
+                poly_px = ps["resting_px_own"] if ps["resting_px_own"] is not None else float(pair.get("poly_cost", 0.5))
+                # the map's gemini_outcome is the Gemini side that MATCHES the Poly side; hedge = its opposite
+                prim = hc.Leg("poly", pair["gemini_match_outcome"], poly_px, qty_filled=ps["filled_qty"], qty_resting=ps["resting_qty"])
+                pl = hc.plan(prim, gs["yes_bid"], gs["yes_ask"], join=True, mirror_filled=gs["held"])
+                assert pl.hedge_outcome == pair["hedge_outcome"], (pl.hedge_outcome, pair["hedge_outcome"])
+                held_px = ps["held_avg_own"] if ps["held_avg_own"] is not None else poly_px
+                cap = round(min(float(pair.get("max_pair_cost", 1.00)) - held_px, 0.99), 2)   # urgent leg prices off the HELD cost
+                started = kick is not None and now >= kick
+                if started:
+                    want_rest, urgent = 0.0, 0.0     # kickoff: unfilled bids come off; held hedges ride
+                else:
+                    want_rest, urgent = pl.hedge_qty_rest, pl.hedge_qty_now
+                log.info("%s | poly %s@%.3f (held avg %s) rest %g filled %g | gemini %s book %s/%s held %g | rest %g@%s lock %s | urgent %g cap %.2f take %s | %s",
+                         pair["poly_slug"][-28:], poly_side, poly_px, ps["held_avg_own"], ps["resting_qty"], ps["filled_qty"], pair["hedge_outcome"].upper(),
+                         gs["yes_bid"], gs["yes_ask"], gs["held"], want_rest, pl.rest_price, pl.locked_if_rest_fills, urgent, cap, pl.take_price, "KICKED" if started else pl.note)
+                # urgent leg: take at the ask if the ask is under the cap; otherwise rest AT the cap
+                # only if the cap is not above the touch — never rest above the market (a giveaway).
+                if pl.take_price is not None and pl.take_price <= cap:
+                    urgent_px = pl.take_price
+                elif pl.rest_price is not None:
+                    urgent_px = min(cap, pl.rest_price)
+                else:
+                    urgent_px = None
+                gem_sync(pair, want_rest, pl.rest_price, urgent, urgent_px, live)
+            except Exception as ex:
+                log.exception("pair %s failed: %s", pair.get("poly_slug"), str(ex)[:200])
+        if once:
+            return
+        time.sleep(int(os.getenv("GEMINI_HEDGE_LOOP_S", "30")))
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--live", action="store_true"); ap.add_argument("--once", action="store_true")
+    a = ap.parse_args()
+    run(a.live, a.once)

@@ -1,0 +1,13 @@
+[
+ {
+  "poly_slug": "tsc-nfl-min-chi-2026-09-20-total-45pt5",
+  "poly_side": "yes",
+  "gemini_symbol": "GEMI-NFL-2609201700-MIN-CHI-T-O45",
+  "gemini_match_outcome": "yes",
+  "hedge_outcome": "no",
+  "kickoff": "2026-09-20T17:00:00Z",
+  "max_pair_cost": 1.0,
+  "budget_usd": 25.0,
+  "note": "TEST PAIR Sep 14: Poly Over 45.5 bid 45c x19 (rent seat) \u21d4 Gemini Under 45.5 (NO on O45) at Gemini touch"
+ }
+]

@@ -327,3 +327,31 @@ What it settles:
   Unhedged that is inventory; hedged across venues (the pairs idea) it is ~1.2%/day on locked
   capital, on the events where a Polymarket twin exists. That is a design question, not a
   seat-size question. **Nothing about a 10-contract seat on this venue earns rent.**
+
+## THE HEDGE MACHINE — first live pair (Mon Sep 14 2026, 6:51pm AZ)
+
+Rob's synthesis after the number: "it pays rent… we can hedge… stay at touch with repeg on
+both, keep them in sync… a hedge machine that collects rent on both sides." Build:
+
+- `hedge_calc.py` — pure pair math. **For $1 binaries the even hedge is 1:1 in contracts;
+  prices set the locked P&L, never the ratio.** `plan()` returns the hedge outcome, the
+  rest price (join Gemini's touch), locked $/contract if the rest fills or if we take,
+  breakeven, and the un-hedged shortfall. `size_for_fill()` is the repeg's sizing rule:
+  HOLD what the primary has FILLED, REST what the primary is still RESTING.
+- `kahla-scanner/scripts/gemini_hedge.py` — the mirror leg, launchd `com.kahlahouse.gemini-hedge`
+  (KeepAlive, `--live`), config `~/.kahla/gemini_hedges.json` (example in `cellar/`), ledger
+  `~/.kahla/gemini_hedge_ledger.jsonl`, log `~/.kahla/logs/gemini-hedge.log`. Every 30s per
+  pair: read Poly (order + position, 2 reads, READ-ONLY — the Ferrari owns that leg), read
+  Gemini, compute, then keep exactly one post-only rent bid at Gemini's touch sized to Poly's
+  resting qty (cancel → verify → replace on any move = the Gemini repeg) and one urgent order
+  sized to Poly's filled − Gemini held, priced min(cap, Gemini ask) — takes when the ask is
+  under the cap, otherwise rests at the touch, NEVER above it (a 70¢ NO bid on a 43¢ ask is
+  a giveaway; caught in dry-run). Unfilled bids cancel at kickoff; filled hedges ride.
+  The urgent cap prices off the Poly lot's HELD average, the rent leg off its resting bid.
+
+First pair: Poly `tsc-nfl-min-chi-2026-09-20-total-45pt5` Over — 19 HELD (venue avg 29.6¢)
++ 19 RESTING at 45¢ ⇔ Gemini `GEMI-NFL-2609201700-MIN-CHI-T-O45` (NO = Under 45.5). Gemini
+priced the over 57/63 vs Poly ~45, so: **urgent 19 NO filled at 43¢ in one shot** (the
+"10-lot" top of book had 446 behind it — thin at the touch only), pair locked ≈ +27¢ ×
+19 ≈ +$5 either way; rent leg 19 NO resting at 37¢ (pair would lock +18¢ if both fill).
+Gemini spend after this: ~$15 of the $100.
