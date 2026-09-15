@@ -1,15 +1,15 @@
 [
-  {
-    "poly_slug": "asc-nfl-gb-nyj-2026-09-20-neg-5pt5",
-    "poly_side": "no",
-    "gemini_symbol": "GEMI-NFL-2609201700-GB-NYJ-S-GB5",
-    "gemini_match_outcome": "no",
-    "hedge_outcome": "yes",
-    "rent_leg": true,
-    "max_rest_gap": 0.03,
-    "kickoff": "2026-09-20T17:00:00Z",
-    "max_pair_cost": 1.00,
-    "budget_usd": 12.0,
-    "note": "TEST PAIR 2 (Sep 14 eve): Poly NYJ +5.5 bid 54.5c x20 (BUY_SHORT, the Ferrari's seat) <-> Gemini GB -5.5 (YES on GB5) bid at Gemini's touch 44c"
-  }
+ {
+  "poly_slug": "asc-nfl-gb-nyj-2026-09-20-neg-5pt5",
+  "poly_side": "no",
+  "gemini_symbol": "GEMI-NFL-2609201700-GB-NYJ-S-GB5",
+  "gemini_match_outcome": "no",
+  "hedge_outcome": "yes",
+  "rent_leg": true,
+  "max_rest_gap": 0.03,
+  "kickoff": "2026-09-20T17:00:00Z",
+  "max_pair_cost": 1.005,
+  "budget_usd": 12.0,
+  "note": "TEST PAIR 2 (Sep 14 eve): Poly NYJ +5.5 bid 54.5c x20 (BUY_SHORT, the Ferrari's seat) <-> Gemini GB -5.5 (YES on GB5) bid at Gemini's touch 44c"
+ }
 ]
