@@ -82,10 +82,13 @@ def plan(primary: Leg, mirror_yes_bid: Optional[float], mirror_yes_ask: Optional
     fees = primary.fee_per_contract + mirror_fee
     be = round(1.0 - primary.price - fees, 4)
     rp = rest_quote(bb, ba, tick, join)
+    # The mirror's TOTAL target is primary filled + primary resting. Whatever the mirror already
+    # holds counts against that total first (the mirror filled first ⇒ surplus ⇒ rest LESS, never more).
+    surplus = max(0.0, mirror_filled - primary.qty_filled)
     plan_ = PairPlan(
         hedge_outcome=h_out,
         hedge_qty_now=max(0.0, round(primary.qty_filled - mirror_filled, 4)),
-        hedge_qty_rest=round(primary.qty_resting, 4),
+        hedge_qty_rest=max(0.0, round(primary.qty_resting - surplus, 4)),
         breakeven_price=be,
         rest_price=rp,
         locked_if_rest_fills=None if rp is None else locked_pnl(primary.price, rp, fees),
@@ -128,6 +131,15 @@ if __name__ == "__main__":
     P3 = plan(Leg("poly", "no", 0.49, qty_resting=20), 0.53, 0.54)
     assert P3.hedge_outcome == "yes" and P3.rest_price == 0.53 and P3.locked_if_rest_fills < 0
     assert "LOSS" in P3.note
+    # mirror filled FIRST: Poly still resting 20, Gemini already holds 20 → rest NOTHING more
+    P4 = plan(Leg("poly", "no", 0.545, qty_filled=0, qty_resting=20), 0.44, 0.45, mirror_filled=20)
+    assert P4.hedge_qty_now == 0 and P4.hedge_qty_rest == 0, P4
+    # partial both ways: Poly filled 8 / resting 12, Gemini holds 5 → urgent 3, rest 12 (total 20)
+    P5 = plan(Leg("poly", "no", 0.545, qty_filled=8, qty_resting=12), 0.44, 0.45, mirror_filled=5)
+    assert P5.hedge_qty_now == 3 and P5.hedge_qty_rest == 12, P5
+    # Gemini over-filled vs Poly partial: Poly filled 8 / resting 12, Gemini holds 15 → urgent 0, rest 5
+    P6 = plan(Leg("poly", "no", 0.545, qty_filled=8, qty_resting=12), 0.44, 0.45, mirror_filled=15)
+    assert P6.hedge_qty_now == 0 and P6.hedge_qty_rest == 5, P6
     # 1:1 invariance: locked pnl identical on both outcomes by construction
     q, p1, p2 = 20, 0.593, 0.35
     assert abs((q - q*p1 - q*p2) - (q*locked_pnl(p1, p2))) < 1e-9
