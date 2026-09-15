@@ -146,21 +146,185 @@ def poly_state(pc, slug: str) -> dict:
     return parse_poly(orders or [], p, slug)
 
 
+# ------------------------------------------------------------------ Gemini socket (Rob, Sep 15: "thought we used websocket")
+# One authenticated connection: {sym}@bookTicker for every configured pair + orders@account +
+# positions@account. The loop WAKES on frames (1s debounce) and REST is only the 5-minute reconcile
+# or the fallback when the socket is down/stale. Frame shapes verified live Sep 13-14:
+#   bookTicker  {"s":sym(lower),"b":bid,"B":qty,"a":ask,"A":qty}
+#   orderUpdate {"e":"orderUpdate","s":SYM,"i":id,"c":clientId,"S":"BUY|SELL","X":status,"p":px,"q":qty,"z":remaining,"O":"YES|NO"}
+#   orderSnapshot {"e":"orderSnapshot","orders":[...]}      positionReport {"e":"positionReport","P":[{"s":SYM,"a":[{"t":"position","v":qty}]}]}
+import threading
+import ssl
+import websocket  # noqa: E402
+
+class GemSocket:
+    STALE_S = 120
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.books: dict[str, tuple] = {}          # SYM → (bid, ask)
+        self.orders: dict[str, dict] = {}          # orderId → {symbol, clientOrderId, side, outcome, price, remainingQuantity, status}
+        self.pos: dict[str, float] = {}            # SYM → signed qty (+YES / −NO), from positionReport
+        self.snap_ok = False                       # orderSnapshot received this connection
+        self.last_rx = 0.0
+        self.connected = False
+        self.symbols: set[str] = set()
+        self.ws = None
+        threading.Thread(target=self._run, daemon=True).start()
+
+    # ---- public reads
+    def fresh(self) -> bool:
+        return self.connected and self.snap_ok and (time.monotonic() - self.last_rx) < self.STALE_S
+
+    def book(self, sym: str):
+        with self.lock:
+            return self.books.get(sym)
+
+    def our_orders(self, sym: str) -> list[dict]:
+        with self.lock:
+            return [dict(o) for o in self.orders.values()
+                    if o.get("symbol") == sym and str(o.get("clientOrderId") or "").startswith(CID)
+                    and o.get("status") in ("open", "NEW", "OPEN", "PARTIALLY_FILLED", "partially_filled")]
+
+    def held(self, sym: str, outcome: str) -> float:
+        with self.lock:
+            v = self.pos.get(sym, 0.0)
+        return max(0.0, v) if outcome == "yes" else max(0.0, -v)
+
+    def want(self, symbols: set[str]):
+        new = symbols - self.symbols
+        self.symbols |= symbols
+        if new and self.connected and self.ws:
+            self._sub(new)
+
+    # ---- internals
+    def _sub(self, syms):
+        try:
+            self.ws.send(json.dumps({"id": f"bt{int(time.time())}", "method": "subscribe",
+                                     "params": [f"{s.lower()}@bookTicker" for s in syms]}))
+        except Exception as ex:
+            log.warning("ws subscribe failed: %s", ex)
+
+    def _on_open(self, ws):
+        self.connected = True; self.snap_ok = False
+        ws.send(json.dumps({"id": "acct", "method": "subscribe", "params": ["orders@account", "positions@account"]}))
+        if self.symbols:
+            self._sub(self.symbols)
+        log.info("gemini socket open (%d symbols)", len(self.symbols))
+
+    def _norm_order(self, o: dict) -> dict | None:
+        """Both REST-shaped (orderId/clientOrderId/…) and stream-shaped (i/c/…) orders."""
+        oid = o.get("orderId") or o.get("i")
+        if oid is None:
+            return None
+        st = o.get("status") or o.get("X") or ""
+        return {"orderId": oid, "clientOrderId": o.get("clientOrderId") or o.get("c") or "",
+                "symbol": (o.get("symbol") or o.get("s") or "").upper(),
+                "side": (o.get("side") or o.get("S") or "").lower(), "outcome": (o.get("outcome") or o.get("O") or "").lower(),
+                "price": o.get("price") or o.get("p"), "quantity": o.get("quantity") or o.get("q"),
+                "remainingQuantity": o.get("remainingQuantity") if o.get("remainingQuantity") is not None else o.get("z"),
+                "status": st}
+
+    def _on_msg(self, ws, m):
+        self.last_rx = time.monotonic()
+        try:
+            d = json.loads(m)
+        except Exception:
+            return
+        e = d.get("e")
+        woke = False
+        with self.lock:
+            if e is None and "s" in d and "b" in d and "a" in d:
+                sym = str(d["s"]).upper()
+                if sym in self.symbols:
+                    self.books[sym] = (float(d["b"]) if d.get("b") else None, float(d["a"]) if d.get("a") else None); woke = True
+            elif e == "orderSnapshot":
+                self.orders = {}
+                for o in d.get("orders") or []:
+                    n = self._norm_order(o)
+                    if n: self.orders[n["orderId"]] = n
+                self.snap_ok = True; woke = True
+            elif e == "orderUpdate":
+                n = self._norm_order(d)
+                if n:
+                    if n["status"] in ("FILLED", "CANCELED", "CANCELLED", "REJECTED", "EXPIRED", "filled", "cancelled", "canceled"):
+                        self.orders.pop(n["orderId"], None)
+                    else:
+                        self.orders[n["orderId"]] = n
+                    woke = True
+            elif e == "positionReport":
+                for row in d.get("P") or []:
+                    sym = str(row.get("s") or "").upper()
+                    for a in row.get("a") or []:
+                        if a.get("t") == "position":
+                            try: self.pos[sym] = float(a.get("v") or 0)
+                            except (TypeError, ValueError): pass
+                woke = True
+            elif d.get("id") and d.get("status") not in (None, 200):
+                log.warning("ws error: %s", m[:160])
+        if woke:
+            self.wake.set()
+
+    def _run(self):
+        backoff = 2
+        while True:
+            try:
+                self.ws = websocket.WebSocketApp("wss://ws.gemini.com", header=g.ws_auth_headers(), on_open=self._on_open,
+                                                 on_message=self._on_msg, on_error=lambda w, e: log.warning("ws error cb: %s", e),
+                                                 on_close=lambda w, a, b: log.info("gemini socket closed %s %s", a, b))
+                self.ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
+            except Exception as ex:
+                log.warning("ws run: %s", ex)
+            self.connected = False
+            time.sleep(backoff); backoff = min(backoff * 2, 60)
+
+
+SOCK: GemSocket | None = None
+
+
 # ------------------------------------------------------------------ Gemini read/write
-def gem_state(symbol: str, outcome: str) -> dict:
+_LAST_REST_RECON: dict[str, float] = {}
+RECON_S = 300
+
+
+def gem_state(symbol: str, outcome: str, force_rest: bool = False) -> dict:
+    """Socket-fed state; REST only when the socket is down/stale, when a reconcile is due (every
+    RECON_S), or when `force_rest` (after our own writes, before anything that deletes/decides)."""
+    use_rest = force_rest or SOCK is None or not SOCK.fresh() or (time.monotonic() - _LAST_REST_RECON.get(symbol, 0.0)) > RECON_S
+    if not use_rest:
+        b = SOCK.book(symbol)
+        if b is not None:
+            held = SOCK.held(symbol, outcome)
+            st = {"yes_bid": b[0], "yes_ask": b[1], "orders": SOCK.our_orders(symbol), "held": held,
+                  "held_avg": _HELD_AVG_CACHE.get((symbol, outcome)) if held else None, "src": "ws"}
+            if held and st["held_avg"] is None:
+                use_rest = True                       # need the venue's avg once per new position
+            else:
+                return st
     bk = g.book(symbol)
     yb = float(bk["bids"][0]["price"]) if bk.get("bids") else None
     ya = float(bk["asks"][0]["price"]) if bk.get("asks") else None
     ours = [o for o in g.active_orders(symbol=symbol) if str(o.get("clientOrderId") or "").startswith(CID)]
     held, held_cost = 0.0, 0.0
     for p in g.positions(limit=100):
-        if p.get("symbol") == symbol:
-            q = float(p.get("totalQuantity") or 0)
-            if (p.get("outcome") or "").lower() == outcome:
-                held += q
-                held_cost += q * float(p.get("avgPrice") or 0)
-    return {"yes_bid": yb, "yes_ask": ya, "orders": ours, "held": held,
-            "held_avg": round(held_cost / held, 4) if held else None}
+        if p.get("symbol") == symbol and (p.get("outcome") or "").lower() == outcome:
+            q = float(p.get("totalQuantity") or 0); held += q; held_cost += q * float(p.get("avgPrice") or 0)
+    avg = round(held_cost / held, 4) if held else None
+    if avg is not None:
+        _HELD_AVG_CACHE[(symbol, outcome)] = avg
+    _LAST_REST_RECON[symbol] = time.monotonic()
+    if SOCK is not None:                               # re-seed the socket's view from truth
+        with SOCK.lock:
+            SOCK.books[symbol] = (yb, ya)
+            for o in ours:
+                n = SOCK._norm_order(o)
+                if n: SOCK.orders[n["orderId"]] = n
+            SOCK.pos[symbol] = held if outcome == "yes" else -held
+    return {"yes_bid": yb, "yes_ask": ya, "orders": ours, "held": held, "held_avg": avg, "src": "rest"}
+
+
+_HELD_AVG_CACHE: dict[tuple, float] = {}
 
 
 def gem_sync(pair: dict, want_rest_qty: float, rest_px, urgent_qty: float, cap_px, live: bool,
@@ -184,6 +348,7 @@ def gem_sync(pair: dict, want_rest_qty: float, rest_px, urgent_qty: float, cap_p
             log.info("DRY %s %s: would place %s %s %g @ %.2f (post_only=%s)", sym, role, side.upper(), out.upper(), qty, px, post_only)
             return
         r = g.place_order(sym, side, out, qty, px, post_only=post_only, client_order_id=cid)
+        _LAST_REST_RECON[sym] = 0.0                    # verify our own write on REST next loop
         log.info("%s %s: placed %s %s %g @ %.2f → %s", sym, role, side.upper(), out.upper(), qty, px, r.get("status"))
         _led(kind="place", role=role, side=side, symbol=sym, outcome=out, qty=qty, px=px, order_id=r.get("orderId"), status=r.get("status"), pair=pair["poly_slug"])
 
@@ -191,6 +356,7 @@ def gem_sync(pair: dict, want_rest_qty: float, rest_px, urgent_qty: float, cap_p
         if not live:
             log.info("DRY %s: would cancel %s (%s @ %s) — %s", sym, o.get("orderId"), o.get("quantity"), o.get("price"), why); return
         g.cancel_order(o["orderId"])
+        _LAST_REST_RECON[sym] = 0.0
         time.sleep(0.6)
         still = [x for x in g.active_orders(symbol=sym) if x.get("orderId") == o["orderId"]]
         log.info("%s: cancelled %s — %s (verified gone=%s)", sym, o.get("orderId"), why, not still)
@@ -244,17 +410,25 @@ def _write_hedge_pair(poly_slug: str, gemini_symbol: str, paired_qty: float, pol
 
 # ------------------------------------------------------------------ loop
 def run(live: bool, once: bool):
+    global SOCK
     pc = _poly_client()
+    SOCK = GemSocket()
+    time.sleep(3)
+    _poly_cache: dict = {"at": 0.0, "by_slug": {}}
     while True:
         try:
             pairs = json.loads(CFG.read_text()) if CFG.exists() else []
         except Exception as ex:
             log.error("config unreadable: %s", ex); pairs = []
         now = dt.datetime.now(dt.timezone.utc)
+        SOCK.want({p["gemini_symbol"] for p in pairs})
+        poly_due = (time.monotonic() - _poly_cache["at"]) > int(os.getenv("GEMINI_HEDGE_POLY_S", "60"))
         for pair in pairs:
             try:
                 kick = _iso(pair.get("kickoff"))
-                ps = poly_state(pc, pair["poly_slug"])
+                if poly_due or pair["poly_slug"] not in _poly_cache["by_slug"]:
+                    _poly_cache["by_slug"][pair["poly_slug"]] = poly_state(pc, pair["poly_slug"])
+                ps = _poly_cache["by_slug"][pair["poly_slug"]]
                 gs = gem_state(pair["gemini_symbol"], pair["hedge_outcome"])
                 pair["_gem"] = gs
                 if ps.get("error"):
@@ -319,10 +493,10 @@ def run(live: bool, once: bool):
                         ask_qty = round(gs["held"] - paired_qty, 4) if t60 else round(gs["held"], 4)
                         if ask_qty >= 1:
                             flat_qty, flat_px = ask_qty, px
-                log.info("%s | poly %s@%.3f (cost %s, venue avg %s) rest %g filled %g | gemini %s book %s/%s held %g | rest %g@%s lock %s | urgent %g cap %.2f | ask %g@%s | %s",
+                log.info("%s | poly %s@%.3f (cost %s, venue avg %s) rest %g filled %g | gemini %s book %s/%s held %g | rest %g@%s lock %s | urgent %g cap %.2f | ask %g@%s | %s [%s]",
                          pair["poly_slug"][-28:], poly_side, poly_px, cost_own, ps["held_avg_own"], ps["resting_qty"], ps["filled_qty"], pair["hedge_outcome"].upper(),
                          gs["yes_bid"], gs["yes_ask"], gs["held"], want_rest, pl.rest_price, pl.locked_if_rest_fills, urgent, cap, flat_qty, flat_px,
-                         "KICKED" if started else ("T-30" if t30 else ("T-60" if t60 else pl.note)))
+                         "KICKED" if started else ("T-30" if t30 else ("T-60" if t60 else pl.note)), gs.get("src"))
                 # urgent leg (Rob, Sep 14: "We never cross… we don't take"): a POST-ONLY bid that LEADS the
                 # bid side by one tick (joins on a one-tick book), capped at the pair cap — never at/above the ask.
                 h_bid, h_ask = hc.mirror_book(gs["yes_bid"], gs["yes_ask"], pair["hedge_outcome"])
@@ -338,9 +512,14 @@ def run(live: bool, once: bool):
                 gem_sync(pair, want_rest, pl.rest_price, urgent, urgent_px, live, flat_qty, flat_px)
             except Exception as ex:
                 log.exception("pair %s failed: %s", pair.get("poly_slug"), str(ex)[:200])
+        if poly_due:
+            _poly_cache["at"] = time.monotonic()
         if once:
             return
-        time.sleep(int(os.getenv("GEMINI_HEDGE_LOOP_S", "30")))
+        # wake on a socket frame (1s debounce) or on the heartbeat, whichever first
+        SOCK.wake.wait(timeout=int(os.getenv("GEMINI_HEDGE_LOOP_S", "30")))
+        time.sleep(1.0)
+        SOCK.wake.clear()
 
 
 def _selftest():
