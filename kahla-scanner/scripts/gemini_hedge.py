@@ -66,35 +66,54 @@ def _led(**kw):
 
 
 # ------------------------------------------------------------------ Polymarket read
-def poly_state(pc, slug: str) -> dict:
-    """{'resting_qty','resting_px_own','side','filled_qty'} for OUR leg on the slug.
-    side = 'yes'|'no' in the market's own frame; prices in OUR side's terms."""
-    out = {"resting_qty": 0.0, "resting_px_own": None, "side": None, "filled_qty": 0.0, "held_avg_own": None}
-    r = pc.orders.list(); orders = r.get("orders") if isinstance(r, dict) else r
+# ⚠ THE SEP 14 2026 BUG (cost a doubled position): the side was read off the resting ORDER's
+# intent with "not BUY_SHORT ⇒ yes". The order was SELL_SHORT — the scalp arm's ASK on a NO
+# position — so a long-UNDER leg was read as long-OVER and the "hedge" bought 19 more UNDER.
+# Rules now: (1) a resting BID is ONLY intent BUY_LONG (yes) / BUY_SHORT (no); SELL_* are exits
+# and are ignored; (2) the held side comes from netPosition's SIGN, never from an order;
+# (3) a short's cost is 1 − avgPx (avgPx is yes-canonical); (4) if a resting bid's side disagrees
+# with the held side the pair is SKIPPED with an error — never guessed.
+def parse_poly(orders: list, position: dict | None, slug: str) -> dict:
+    out = {"resting_qty": 0.0, "resting_px_own": None, "resting_side": None, "held_side": None,
+           "filled_qty": 0.0, "held_avg_own": None, "side": None, "error": None}
     for o in orders or []:
-        if o.get("marketSlug") != slug or o.get("side") != "ORDER_SIDE_BUY":
+        if o.get("marketSlug") != slug:
             continue
         if o.get("state") not in ("ORDER_STATE_NEW", "ORDER_STATE_PARTIALLY_FILLED", "ORDER_STATE_REPLACED"):
             continue
-        short = o.get("intent") == "ORDER_INTENT_BUY_SHORT"
+        intent = o.get("intent")
+        if intent not in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"):
+            continue                      # SELL_LONG / SELL_SHORT = asks (exits), not seats
         yes_px = float(o["price"]["value"])
-        out["side"] = "no" if short else "yes"
-        out["resting_px_own"] = round(1 - yes_px, 4) if short else yes_px
+        side = "yes" if intent == "ORDER_INTENT_BUY_LONG" else "no"
+        if out["resting_side"] not in (None, side):
+            out["error"] = "bids on both sides"; return out
+        out["resting_side"] = side
+        out["resting_px_own"] = yes_px if side == "yes" else round(1 - yes_px, 4)
         out["resting_qty"] += float(o.get("leavesQuantity") or 0)
+    if position:
+        net = float(position.get("netPosition") or 0)
+        if abs(net) >= 1:
+            out["filled_qty"] = abs(net)
+            out["held_side"] = "yes" if net > 0 else "no"
+            try:
+                avg = float((position.get("avgPx") or {}).get("value"))
+                out["held_avg_own"] = round(avg if net > 0 else 1 - avg, 4)
+            except (TypeError, ValueError):
+                out["held_avg_own"] = None
+    if out["held_side"] and out["resting_side"] and out["held_side"] != out["resting_side"]:
+        out["error"] = f"held {out['held_side']} but bidding {out['resting_side']} — refusing to mirror"
+    out["side"] = out["held_side"] or out["resting_side"]
+    return out
+
+
+def poly_state(pc, slug: str) -> dict:
+    r = pc.orders.list(); orders = r.get("orders") if isinstance(r, dict) else r
     r = pc.portfolio.positions(); pos = r.get("positions") if isinstance(r, dict) and "positions" in r else r
     p = pos.get(slug) if isinstance(pos, dict) else None
     if isinstance(pos, list):
         p = next((x for x in pos if (x.get("marketMetadata") or {}).get("slug") == slug), None)
-    if p:
-        net = float(p.get("netPosition") or 0)
-        if abs(net) >= 1:
-            out["filled_qty"] = abs(net)
-            out["side"] = out["side"] or ("yes" if net > 0 else "no")
-            try:   # venue cost is in OUR side's terms already (dollars paid for the held lot)
-                out["held_avg_own"] = round(float((p.get("cost") or {}).get("value")) / abs(net), 4)
-            except (TypeError, ValueError, ZeroDivisionError):
-                out["held_avg_own"] = None
-    return out
+    return parse_poly(orders or [], p, slug)
 
 
 # ------------------------------------------------------------------ Gemini read/write
@@ -176,12 +195,17 @@ def run(live: bool, once: bool):
                 ps = poly_state(pc, pair["poly_slug"])
                 gs = gem_state(pair["gemini_symbol"], pair["hedge_outcome"])
                 pair["_gem"] = gs
-                poly_side = pair.get("poly_side") or ps["side"]
+                if ps.get("error"):
+                    log.error("%s: %s — pair skipped", pair["poly_slug"], ps["error"]); continue
+                poly_side = ps["side"]
                 if poly_side is None:
-                    log.info("%s: no Poly leg (no order, no position) — nothing to mirror", pair["poly_slug"]); continue
+                    log.info("%s: no Poly leg (no bid, no position) — nothing to mirror", pair["poly_slug"]); continue
+                if pair.get("poly_side") and pair["poly_side"] != poly_side:
+                    log.error("%s: config says poly_side=%s but the venue says %s — pair skipped", pair["poly_slug"], pair["poly_side"], poly_side); continue
                 poly_px = ps["resting_px_own"] if ps["resting_px_own"] is not None else float(pair.get("poly_cost", 0.5))
                 # the map's gemini_outcome is the Gemini side that MATCHES the Poly side; hedge = its opposite
-                prim = hc.Leg("poly", pair["gemini_match_outcome"], poly_px, qty_filled=ps["filled_qty"], qty_resting=ps["resting_qty"])
+                match_out = pair["gemini_match_outcome"] if poly_side == pair.get("poly_side", poly_side) else hc.opposite(pair["gemini_match_outcome"])
+                prim = hc.Leg("poly", match_out, poly_px, qty_filled=ps["filled_qty"], qty_resting=ps["resting_qty"])
                 pl = hc.plan(prim, gs["yes_bid"], gs["yes_ask"], join=True, mirror_filled=gs["held"])
                 assert pl.hedge_outcome == pair["hedge_outcome"], (pl.hedge_outcome, pair["hedge_outcome"])
                 held_px = ps["held_avg_own"] if ps["held_avg_own"] is not None else poly_px
@@ -191,6 +215,8 @@ def run(live: bool, once: bool):
                     want_rest, urgent = 0.0, 0.0     # kickoff: unfilled bids come off; held hedges ride
                 else:
                     want_rest, urgent = pl.hedge_qty_rest, pl.hedge_qty_now
+                if not pair.get("rent_leg", False):
+                    want_rest = 0.0   # Rob, Sep 14: hedge what is FILLED. Mirroring a parked Poly bid is a new bet, not a hedge.
                 log.info("%s | poly %s@%.3f (held avg %s) rest %g filled %g | gemini %s book %s/%s held %g | rest %g@%s lock %s | urgent %g cap %.2f take %s | %s",
                          pair["poly_slug"][-28:], poly_side, poly_px, ps["held_avg_own"], ps["resting_qty"], ps["filled_qty"], pair["hedge_outcome"].upper(),
                          gs["yes_bid"], gs["yes_ask"], gs["held"], want_rest, pl.rest_price, pl.locked_if_rest_fills, urgent, cap, pl.take_price, "KICKED" if started else pl.note)
@@ -210,7 +236,28 @@ def run(live: bool, once: bool):
         time.sleep(int(os.getenv("GEMINI_HEDGE_LOOP_S", "30")))
 
 
+def _selftest():
+    orders = [{"marketSlug": "tsc-nfl-min-chi-2026-09-20-total-45pt5", "side": "ORDER_SIDE_BUY",
+               "intent": "ORDER_INTENT_SELL_SHORT", "price": {"value": "0.45"}, "quantity": 19,
+               "leavesQuantity": 19, "state": "ORDER_STATE_NEW"}]
+    pos = {"netPosition": "-19", "avgPx": {"value": "0.2920"}, "cost": {"value": "5.6270"}}
+    r = parse_poly(orders, pos, "tsc-nfl-min-chi-2026-09-20-total-45pt5")
+    assert r["side"] == "no" and r["held_side"] == "no", r            # long UNDER
+    assert r["resting_qty"] == 0 and r["resting_side"] is None, r    # the SELL_SHORT ask is NOT a seat
+    assert abs(r["held_avg_own"] - 0.708) < 1e-9, r
+    # a real BUY_SHORT bid on the same side is a seat
+    orders2 = [dict(orders[0], intent="ORDER_INTENT_BUY_SHORT", price={"value": "0.55"})]
+    r2 = parse_poly(orders2, pos, orders[0]["marketSlug"])
+    assert r2["resting_side"] == "no" and r2["resting_qty"] == 19 and abs(r2["resting_px_own"] - 0.45) < 1e-9, r2
+    # a bid on the OPPOSITE side of a held position is refused
+    orders3 = [dict(orders[0], intent="ORDER_INTENT_BUY_LONG")]
+    assert parse_poly(orders3, pos, orders[0]["marketSlug"])["error"], "must refuse"
+    print("gemini_hedge parse_poly selftest ok")
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        _selftest(); sys.exit(0)
     ap = argparse.ArgumentParser()
     ap.add_argument("--live", action="store_true"); ap.add_argument("--once", action="store_true")
     a = ap.parse_args()
