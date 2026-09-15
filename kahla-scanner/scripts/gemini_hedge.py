@@ -226,6 +226,13 @@ class GemSocket:
                 "remainingQuantity": o.get("remainingQuantity") if o.get("remainingQuantity") is not None else o.get("z"),
                 "status": st}
 
+    def _on_ping(self, ws, m):
+        self.last_rx = time.monotonic()
+
+    def why_not_fresh(self) -> str:
+        return (f"connected={self.connected} snap_ok={self.snap_ok} "
+                f"age={time.monotonic() - self.last_rx:.0f}s books={sorted(self.books)} subs={sorted(self.symbols)}")
+
     def _on_msg(self, ws, m):
         self.last_rx = time.monotonic()
         try:
@@ -272,7 +279,8 @@ class GemSocket:
             try:
                 self.ws = websocket.WebSocketApp("wss://ws.gemini.com", header=g.ws_auth_headers(), on_open=self._on_open,
                                                  on_message=self._on_msg, on_error=lambda w, e: log.warning("ws error cb: %s", e),
-                                                 on_close=lambda w, a, b: log.info("gemini socket closed %s %s", a, b))
+                                                 on_close=lambda w, a, b: log.info("gemini socket closed %s %s", a, b),
+                                                 on_ping=self._on_ping)      # the venue pings every ~10s — that IS liveness
                 self.ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
             except Exception as ex:
                 log.warning("ws run: %s", ex)
@@ -292,6 +300,8 @@ def gem_state(symbol: str, outcome: str, force_rest: bool = False) -> dict:
     """Socket-fed state; REST only when the socket is down/stale, when a reconcile is due (every
     RECON_S), or when `force_rest` (after our own writes, before anything that deletes/decides)."""
     use_rest = force_rest or SOCK is None or not SOCK.fresh() or (time.monotonic() - _LAST_REST_RECON.get(symbol, 0.0)) > RECON_S
+    if use_rest and SOCK is not None and not force_rest and (time.monotonic() - _LAST_REST_RECON.get(symbol, 0.0)) <= RECON_S:
+        log.info("socket not trusted → REST: %s", SOCK.why_not_fresh())
     if not use_rest:
         b = SOCK.book(symbol)
         if b is not None:
@@ -317,10 +327,13 @@ def gem_state(symbol: str, outcome: str, force_rest: bool = False) -> dict:
     if SOCK is not None:                               # re-seed the socket's view from truth
         with SOCK.lock:
             SOCK.books[symbol] = (yb, ya)
+            for oid in [k for k, v in SOCK.orders.items() if v.get("symbol") == symbol]:
+                SOCK.orders.pop(oid, None)               # REST is the truth for this symbol's orders
             for o in ours:
                 n = SOCK._norm_order(o)
                 if n: SOCK.orders[n["orderId"]] = n
             SOCK.pos[symbol] = held if outcome == "yes" else -held
+            SOCK.snap_ok = True                          # the venue does not always send orderSnapshot; REST seeded it
     return {"yes_bid": yb, "yes_ask": ya, "orders": ours, "held": held, "held_avg": avg, "src": "rest"}
 
 
