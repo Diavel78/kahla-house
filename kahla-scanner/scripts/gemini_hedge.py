@@ -183,9 +183,8 @@ def gem_sync(pair: dict, want_rest_qty: float, rest_px, urgent_qty: float, cap_p
             urg_orders = []
     if urgent_qty >= 1 and not urg_orders and cap_px is not None and cap_px > 0:
         _place("urg", int(urgent_qty), cap_px, True)          # maker only — never cross
-    # --- flat leg (Rob, Sep 14: "T-30, sell it, hold that sell open for the entire game, sell it at cost"):
-    # one plain limit SELL at our Gemini cost for the un-paired surplus. Fills at once if the bid is at or
-    # above cost, otherwise rests. Never touched by the kickoff logic; re-sized if the surplus changes.
+    # --- ask leg: one post-only SELL for everything the Lambo holds (see run() for the price rule).
+    # Never touched by the kickoff logic; re-priced / re-sized whenever the rule's answer changes.
     for o in flat_orders:
         if flat_qty < 1 or flat_px is None or abs(float(o["price"]) - flat_px) > 1e-9 or abs(float(o["remainingQuantity"]) - flat_qty) > 0.5:
             _cancel(o, "flat leg re-size" if flat_qty >= 1 else "nothing left to flatten")
@@ -233,33 +232,25 @@ def run(live: bool, once: bool):
                     want_rest, urgent = 0.0, pl.hedge_qty_now   # T-30: rent bid off; a Poly-filled leg still closes
                 else:
                     want_rest, urgent = pl.hedge_qty_rest, pl.hedge_qty_now
-                if t30 and gs["held"] > ps["filled_qty"] + 0.5 and gs["held_avg"]:
-                    flat_qty = round(gs["held"] - ps["filled_qty"], 4)      # the un-paired surplus
-                    # sell AT COST or better, maker only: never below cost, never crossing the bid
+                # THE ASK LEG (Rob, Sep 14: "Both filled, game hours/days away… sell orders on both. RENT above
+                # all."): whenever the Lambo HOLDS its leg, one post-only SELL rests for the whole held qty —
+                # cost + 1 tick when that alone leads the ask side, else cost; never below cost, never through
+                # the bid — and it stays working through the game (the Poly leg's scalp ask does the same).
+                # If it sells, the runner re-bids under the cap next loop: rinse, repeat, rent on every seat.
+                # From T-30 the un-paired surplus goes to EXACTLY cost (Rob: "sell it at cost T-30").
+                if gs["held"] >= 1 and gs["held_avg"]:
                     h_bid, h_ask = hc.mirror_book(gs["yes_bid"], gs["yes_ask"], pair["hedge_outcome"])
-                    flat_px = round(gs["held_avg"] + 1e-9, 2)
-                    if h_bid is not None and flat_px <= h_bid:
-                        flat_px = round(h_bid + 0.01, 2)                      # bid is at/above cost → one tick over it
-                    if h_ask is not None and flat_px >= h_ask:
-                        flat_px = round(h_ask, 2)                              # join the ask, never lead through it
-                if not pair.get("rent_leg", False):
-                    want_rest = 0.0   # Rob, Sep 14: hedge what is FILLED. Mirroring a parked Poly bid is a new bet, not a hedge.
-                elif want_rest >= 1 and gs["yes_bid"] is not None and gs["yes_ask"] is not None and ps["resting_px_own"] is not None:
-                    # at-the-money guard: the Poly bid (in Gemini-YES terms) must sit near Gemini's mid, else it is a
-                    # parked seat and its mirror would be a naked bet on the other venue
-                    poly_yes_equiv = ps["resting_px_own"] if match_out == "yes" else 1 - ps["resting_px_own"]
-                    gap = abs(poly_yes_equiv - (gs["yes_bid"] + gs["yes_ask"]) / 2)
-                    if gap > float(pair.get("max_rest_gap", 0.03)):
-                        log.info("%s: Poly bid is %.3f off Gemini's mid — parked seat, no rent leg", pair["poly_slug"][-28:], gap)
-                        want_rest = 0.0
-                log.info("%s | poly %s@%.3f (held avg %s) rest %g filled %g | gemini %s book %s/%s held %g | rest %g@%s lock %s | urgent %g cap %.2f take %s | flat %g@%s | %s",
-                         pair["poly_slug"][-28:], poly_side, poly_px, ps["held_avg_own"], ps["resting_qty"], ps["filled_qty"], pair["hedge_outcome"].upper(),
-                         gs["yes_bid"], gs["yes_ask"], gs["held"], want_rest, pl.rest_price, pl.locked_if_rest_fills, urgent, cap, pl.take_price, flat_qty, flat_px, "KICKED" if started else ("T-30" if t30 else pl.note))
-                # urgent leg (Rob, Sep 14: "We never cross… we don't take"): a POST-ONLY bid that LEADS the
-                # bid side by one tick (joins on a one-tick book), capped at the pair cap — never at/above the ask.
-                h_bid, h_ask = hc.mirror_book(gs["yes_bid"], gs["yes_ask"], pair["hedge_outcome"])
-                lead = hc.rest_quote(h_bid, h_ask, join=False)
-                urgent_px = None if lead is None else round(min(cap, lead), 2)
+                    cost = round(gs["held_avg"] + 1e-9, 2)
+                    surplus = gs["held"] - ps["filled_qty"]
+                    if t30 and surplus > 0.5:
+                        px = cost
+                    else:
+                        px = round(cost + 0.01, 2) if (h_ask is None or cost + 0.01 < h_ask - 1e-9) else cost
+                    if h_bid is not None and px <= h_bid + 1e-9:
+                        px = round(h_bid + 0.01, 2)                 # bid at/above cost → one tick over it (maker)
+                    if h_ask is not None and px > h_ask + 1e-9:
+                        px = round(h_ask, 2)                          # never lead through the ask; join it
+                    flat_qty, flat_px = round(gs["held"], 4), px
                 gem_sync(pair, want_rest, pl.rest_price, urgent, urgent_px, live, flat_qty, flat_px)
             except Exception as ex:
                 log.exception("pair %s failed: %s", pair.get("poly_slug"), str(ex)[:200])
