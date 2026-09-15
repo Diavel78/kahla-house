@@ -45,6 +45,35 @@ log = logging.getLogger("gemini_hedge")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 CFG = Path(os.path.expanduser("~/.kahla/gemini_hedges.json"))
 LEDGER = Path(os.path.expanduser("~/.kahla/gemini_hedge_ledger.jsonl"))
+STATE = Path(os.path.expanduser("~/.kahla/gemini_hedge_state.json"))   # per pair: last resting Poly price (= fill price for a maker)
+
+
+def _state_load() -> dict:
+    try:
+        return json.loads(STATE.read_text()) if STATE.exists() else {}
+    except Exception:
+        return {}
+
+
+def _state_save(d: dict) -> None:
+    STATE.write_text(json.dumps(d, indent=1, default=str))
+
+
+def held_cost(pair: dict, ps: dict, state: dict) -> float | None:
+    """The Poly leg's cost, in OUR side's terms. ⚠ NEVER the venue's avgPx alone — it is a lifetime
+    per-market BLEND (CLAUDE.md, the Braves 74¢ lesson; here GB–NYJ read 0.917 on a 55.5¢ fill and
+    the hedge got capped at 9¢). Order of truth: (1) the price we were RESTING at when the leg
+    flipped to filled (a maker fills at its own price) — tracked in STATE; (2) config `poly_cost`;
+    (3) venue avgPx ONLY if it agrees with (1)/(2) within 3¢. Nothing trustworthy → None → the
+    urgent leg refuses to place (no guessing a cap)."""
+    st = state.get(pair["poly_slug"], {})
+    ref = st.get("last_rest_px_own") or pair.get("poly_cost")
+    venue = ps.get("held_avg_own")
+    if ref is not None:
+        if venue is not None and abs(float(venue) - float(ref)) > 0.03:
+            log.warning("%s: venue avgPx %.3f disagrees with our fill price %.3f — using ours", pair["poly_slug"][-28:], venue, float(ref))
+        return round(float(ref), 4)
+    return None
 CID = "kh-hedge-"
 
 
@@ -235,14 +264,23 @@ def run(live: bool, once: bool):
                     log.info("%s: no Poly leg (no bid, no position) — nothing to mirror", pair["poly_slug"]); continue
                 if pair.get("poly_side") and pair["poly_side"] != poly_side:
                     log.error("%s: config says poly_side=%s but the venue says %s — pair skipped", pair["poly_slug"], pair["poly_side"], poly_side); continue
-                poly_px = ps["resting_px_own"] if ps["resting_px_own"] is not None else float(pair.get("poly_cost", 0.5))
+                state = _state_load()
+                if ps["resting_px_own"] is not None and ps["resting_qty"] >= 1:
+                    state.setdefault(pair["poly_slug"], {})["last_rest_px_own"] = ps["resting_px_own"]
+                    state[pair["poly_slug"]]["last_rest_at"] = now.isoformat()
+                    _state_save(state)
+                cost_own = held_cost(pair, ps, state) if ps["filled_qty"] >= 1 else None
+                poly_px = ps["resting_px_own"] if ps["resting_px_own"] is not None else (cost_own if cost_own is not None else float(pair.get("poly_cost", 0.5)))
                 # the map's gemini_outcome is the Gemini side that MATCHES the Poly side; hedge = its opposite
                 match_out = pair["gemini_match_outcome"] if poly_side == pair.get("poly_side", poly_side) else hc.opposite(pair["gemini_match_outcome"])
                 prim = hc.Leg("poly", match_out, poly_px, qty_filled=ps["filled_qty"], qty_resting=ps["resting_qty"])
                 pl = hc.plan(prim, gs["yes_bid"], gs["yes_ask"], join=True, mirror_filled=gs["held"])
                 assert pl.hedge_outcome == pair["hedge_outcome"], (pl.hedge_outcome, pair["hedge_outcome"])
-                held_px = ps["held_avg_own"] if ps["held_avg_own"] is not None else poly_px
-                cap = round(min(float(pair.get("max_pair_cost", 1.00)) - held_px, 0.99), 2)   # urgent leg prices off the HELD cost
+                if ps["filled_qty"] >= 1 and cost_own is None:
+                    log.error("%s: Poly leg filled but its cost is unknown (no tracked resting price, no poly_cost) — urgent leg REFUSED", pair["poly_slug"][-28:])
+                    pl.hedge_qty_now = 0.0
+                held_px = cost_own if cost_own is not None else poly_px
+                cap = round(min(float(pair.get("max_pair_cost", 1.00)) - held_px, 0.99), 2)   # urgent leg prices off OUR fill price, never the venue blend
                 started = kick is not None and now >= kick
                 t30 = kick is not None and now >= kick - dt.timedelta(minutes=int(pair.get("flatten_min", 30)))
                 t60 = kick is not None and now >= kick - dt.timedelta(minutes=int(pair.get("ask_off_min", 60)))
@@ -281,8 +319,8 @@ def run(live: bool, once: bool):
                         ask_qty = round(gs["held"] - paired_qty, 4) if t60 else round(gs["held"], 4)
                         if ask_qty >= 1:
                             flat_qty, flat_px = ask_qty, px
-                log.info("%s | poly %s@%.3f (held avg %s) rest %g filled %g | gemini %s book %s/%s held %g | rest %g@%s lock %s | urgent %g cap %.2f | ask %g@%s | %s",
-                         pair["poly_slug"][-28:], poly_side, poly_px, ps["held_avg_own"], ps["resting_qty"], ps["filled_qty"], pair["hedge_outcome"].upper(),
+                log.info("%s | poly %s@%.3f (cost %s, venue avg %s) rest %g filled %g | gemini %s book %s/%s held %g | rest %g@%s lock %s | urgent %g cap %.2f | ask %g@%s | %s",
+                         pair["poly_slug"][-28:], poly_side, poly_px, cost_own, ps["held_avg_own"], ps["resting_qty"], ps["filled_qty"], pair["hedge_outcome"].upper(),
                          gs["yes_bid"], gs["yes_ask"], gs["held"], want_rest, pl.rest_price, pl.locked_if_rest_fills, urgent, cap, flat_qty, flat_px,
                          "KICKED" if started else ("T-30" if t30 else ("T-60" if t60 else pl.note)))
                 # urgent leg (Rob, Sep 14: "We never cross… we don't take"): a POST-ONLY bid that LEADS the

@@ -397,3 +397,17 @@ first → GB −5.5 held at 44 until the Poly leg fills. Kickoff Sun 10am AZ.
   exactly cost through the game. Unfilled bids die at kickoff on both venues.
 - ⚠ The Ferrari half is INERT until the money daemon restarts on ≥ this commit (its lanes are
   untouched otherwise). First pair that can hit T-60 is GB–NYJ, Sun Sep 20 9:00am AZ.
+
+### ⚠ INCIDENT 2 (Tue Sep 15, 5:25am AZ): the Poly leg filled and the hedge parked at 9¢
+
+Poly filled NYJ +5.5 at 55.5¢. The Lambo priced the urgent cap off the venue position's
+`avgPx`, which read **0.917** — the lifetime per-market BLEND (this slug had been round-tripped:
+bought 20 / sold 40) that CLAUDE.md already warns about (the Braves 74¢ lesson). Cap = 1.005 −
+0.917 = 9¢ → the "hedge" rested at 9¢, i.e. no hedge, for ~90 minutes until Rob saw it in the
+app. Fixed by hand (bid moved to 44¢) and in code: **a filled leg's cost is the price we were
+RESTING at when it filled** (a maker fills at its own price; tracked per pair in
+`~/.kahla/gemini_hedge_state.json`), else config `poly_cost`; the venue's avgPx is accepted
+ONLY within 3¢ of that and otherwise logged as disagreeing; no trustworthy cost → the urgent
+leg REFUSES to place rather than guess a cap. Also seen overnight: Gemini REST intermittently
+returned Cloudflare HTML (`<!doctype html>`) ~10 times between 1:50 and 6:50am AZ; each one
+skips a loop (30s) and is logged — tolerable, watch the rate.
