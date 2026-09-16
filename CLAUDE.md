@@ -1166,8 +1166,9 @@ earned a Cloudflare 1015 on Sep 6); kill switch `machine_flags
 recenter_enabled=false`. **A MOVE MUST BENEFIT THE SEAT (Rob, Sep 15
 2026): `_gridiron_move_favorable` — favorite down, dog up, over down,
 under up, else `unfavorable` and stay; a value-side flip is `side_flip`
-(not a rung jump — stays); a slug with a Gemini leg in `hedge_pairs` is
-`hedged` (never moved — the twin is keyed by slug and cannot follow; see
+(not a rung jump — stays). PAIRED seats move the same way and the Gemini
+twin STAYS on its rung ("maintain the pair… a hedge PLUS a middle"); the
+Lambo re-keys the pair to the new Poly slug (`gemini_hedge.successor_slug`;
 docs/gemini-predictions-recon.md RUNG JUMPS).** Dry-run: call it with a client whose
 `orders.cancel` raises — `errors[]` then lists every would-move with
 rv/center/bound/target.

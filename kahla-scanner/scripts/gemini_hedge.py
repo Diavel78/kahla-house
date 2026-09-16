@@ -447,6 +447,65 @@ def orphan_plan(gs: dict, hedge_outcome: str, t30: bool):
     return 0.0, None
 
 
+# ------------------------------------------------------------------ rung jumps: FOLLOW the Poly leg
+# Rob, Sep 15 2026: "if Poly is − on a spread it goes down on a paired match. If it's + it should
+# only go up a rung, and maintain the pair. Then it's a hedge PLUS a middle." The Ferrari's recenter
+# moves the Poly seat to a better rung (favorite down / dog up — app._gridiron_move_favorable) and
+# the seat gets a NEW slug. The Gemini leg STAYS on its rung. The pair's identity is the Poly
+# seat (game + market type + side), not the slug: when the configured slug goes empty we look for
+# the same seat's successor pick and re-key the pair to it.
+def slug_seat(poly_slug: str, poly_side: str):
+    """(game_prefix, market_type, pick_side) for a Poly football slug + our yes/no side.
+    asc-nfl-gb-nyj-2026-09-20-neg-5pt5 → ('asc-nfl-gb-nyj-2026-09-20-', 'spread', side)
+    YES on any spread slug = AWAY (pos-L away +L, neg-L away −L); NO = HOME. Totals: YES = OVER."""
+    for tok, mt in (("-pos-", "spread"), ("-neg-", "spread"), ("-total-", "total")):
+        i = poly_slug.rfind(tok)
+        if i > 0:
+            if mt == "spread":
+                return poly_slug[:i + 1], mt, ("away" if poly_side == "yes" else "home")
+            return poly_slug[:i + 1], mt, ("over" if poly_side == "yes" else "under")
+    return None, None, None
+
+
+def successor_slug(poly_slug: str, poly_side: str, taken: set[str]) -> str | None:
+    """The pending machine pick that replaced this seat: same game, same market type, same side,
+    a different slug, not already claimed by another pair. Newest first (the re-seat is the
+    newest row). Box-local psql. None = no successor (a true orphan)."""
+    import subprocess
+    prefix, mt, side = slug_seat(poly_slug, poly_side)
+    if not prefix:
+        return None
+    sql = ("select signal_blob->>'pmm_slug' from bot_picks where status='pending' and market_type='" + mt + "' "
+           "and side='" + side + "' and signal_blob->>'gridiron_autobet' is not null "
+           "and signal_blob->>'pmm_slug' like '" + prefix + "%' and signal_blob->>'pmm_slug' <> '" + poly_slug + "' "
+           "order by picked_at desc limit 5;")
+    out = subprocess.run([PSQL, "kahla", "-At", "-c", sql], capture_output=True, text=True, timeout=20)
+    if out.returncode:
+        raise RuntimeError(out.stderr[:200])
+    for line in out.stdout.splitlines():
+        cand = line.strip()
+        if cand and cand not in taken:
+            return cand
+    return None
+
+
+def rekey_pair(pairs: list, pair: dict, new_slug: str) -> None:
+    """Persist the pair under its new Poly slug (config + state), keep the Gemini twin as is."""
+    old = pair["poly_slug"]
+    pair["poly_slug"] = new_slug
+    pair.setdefault("rung_jumps", []).append({"from": old, "to": new_slug, "at": dt.datetime.now(dt.timezone.utc).isoformat()})
+    CFG.write_text(json.dumps([{k: v for k, v in p_.items() if not k.startswith("_")} for p_ in pairs], indent=1))
+    st = _state_load()
+    if old in st:
+        st.pop(old, None)          # the new seat is RESTING; its price gets tracked fresh next loop
+        _state_save(st)
+    try:
+        _write_hedge_pair(old, pair["gemini_symbol"], 0.0, 0.0, 0.0, None)   # deletes the old slug's row
+    except Exception as ex:
+        log.warning("hedge_pairs delete of %s failed: %s", old[-28:], str(ex)[:120])
+    _led(kind="rung_jump", pair=new_slug, from_slug=old, gemini_symbol=pair["gemini_symbol"])
+
+
 # ------------------------------------------------------------------ loop
 def run(live: bool, once: bool):
     global SOCK
@@ -473,11 +532,26 @@ def run(live: bool, once: bool):
                 if ps.get("error"):
                     log.error("%s: %s — pair skipped", pair["poly_slug"], ps["error"]); continue
                 poly_side = ps["side"]
+                if poly_side is None and pair.get("poly_side"):
+                    # RUNG JUMP? The Ferrari's recenter moved this seat to a better rung under a new
+                    # slug. Follow the SEAT, keep the Gemini leg where it is: hedge + middle.
+                    try:
+                        succ = successor_slug(pair["poly_slug"], pair["poly_side"],
+                                              {p_["poly_slug"] for p_ in pairs if p_ is not pair})
+                    except Exception as ex:
+                        succ = None
+                        log.warning("%s: successor lookup failed: %s", pair["poly_slug"][-28:], str(ex)[:120])
+                    if succ:
+                        log.info("%s: RUNG JUMP → %s (Gemini %s %s stays — hedge + middle)",
+                                 pair["poly_slug"][-28:], succ[-28:], pair["gemini_symbol"], pair["hedge_outcome"].upper())
+                        rekey_pair(pairs, pair, succ)
+                        _poly_cache["by_slug"][succ] = ps = poly_state(pc, succ)
+                        poly_side = ps["side"]
                 if poly_side is None:
-                    # ORPHAN (Sep 15 2026 — the rung-jump class: the Ferrari's recenter moved the Poly
-                    # seat to another rung and this slug went empty). Before this the loop `continue`d
-                    # here, leaving Gemini's rent bid RESTING with nothing to mirror. Now: bids off,
-                    # held inventory keeps its cost ask, hedge_pairs still reports the held leg.
+                    # ORPHAN (no successor seat either: the Poly leg was sold, settled, or the seat is
+                    # gone for good). Before this the loop `continue`d here, leaving Gemini's rent bid
+                    # RESTING with nothing to mirror. Now: bids off, held inventory keeps its cost ask,
+                    # hedge_pairs still reports the held leg.
                     _t30 = kick is not None and now >= kick - dt.timedelta(minutes=int(pair.get("flatten_min", 30)))
                     fq, fpx = orphan_plan(gs, pair["hedge_outcome"], _t30)
                     log.info("%s: no Poly leg (no bid, no position) — ORPHAN: bids off, ask %g@%s on %g held [%s]",
@@ -597,7 +671,12 @@ def _selftest():
     # ask never through the ask, one tick over a bid at/above cost
     assert abs(ask_px(0.43, 0.45, 0.60) - 0.46) < 1e-9
     assert abs(ask_px(0.59, 0.40, 0.60) - 0.59) < 1e-9        # cost+1 would only JOIN the ask → rest at cost
-    print("gemini_hedge parse_poly + orphan selftest ok")
+    # RUNG JUMP: the seat's identity from its slug
+    assert slug_seat("asc-nfl-gb-nyj-2026-09-20-neg-5pt5", "no") == ("asc-nfl-gb-nyj-2026-09-20-", "spread", "home")
+    assert slug_seat("asc-nfl-gb-nyj-2026-09-20-pos-3pt5", "yes") == ("asc-nfl-gb-nyj-2026-09-20-", "spread", "away")
+    assert slug_seat("tsc-nfl-min-chi-2026-09-20-total-45pt5", "no") == ("tsc-nfl-min-chi-2026-09-20-", "total", "under")
+    assert slug_seat("aec-nfl-gb-nyj-2026-09-20", "yes") == (None, None, None)     # ML never rung-jumps
+    print("gemini_hedge parse_poly + orphan + rung-jump selftest ok")
 
 
 if __name__ == "__main__":

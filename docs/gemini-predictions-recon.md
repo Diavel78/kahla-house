@@ -412,31 +412,37 @@ leg REFUSES to place rather than guess a cap. Also seen overnight: Gemini REST i
 returned Cloudflare HTML (`<!doctype html>`) ~10 times between 1:50 and 6:50am AZ; each one
 skips a loop (30s) and is logged — tolerable, watch the rate.
 
-### RUNG JUMPS (Tue Sep 15 2026 — Rob: "program the rung jump to only benefit me")
+### RUNG JUMPS (Tue Sep 15 2026 — Rob: "if Poly is − on a spread it goes down on a paired match. If it's + it should only go up a rung, and maintain the pair. Then it's a hedge PLUS a middle")
 
 The Ferrari's `_gridiron_recenter_tick` re-judges every unfilled football seat hourly and
-moves an illegal one to the nearest legal rung on its side. Two ways that hurt a pair:
-(1) the pair is keyed by `poly_slug`, so when the Poly seat jumps rungs the Lambo's slug goes
-empty — it used to log "no Poly leg — nothing to mirror" and `continue`, leaving the Gemini
-rent bid RESTING with nothing behind it (a fill = a naked bet) and any held twin unmanaged;
-(2) not every legal target is a BETTER rung for the seat — the 10-pt tail rule can pull a dog
-+24.5 down to +10.5, and a value-side flip makes the executor re-seat the OTHER team.
+moves an illegal one to a legal rung. Two things were wrong for a pair: (1) not every legal
+target was a BETTER rung for the seat (the 10-pt tail rule could pull a dog +24.5 down to
++10.5; a value-side flip re-seated the OTHER team); (2) the pair was keyed by `poly_slug`, so
+a Poly rung jump left the Lambo logging "no Poly leg — nothing to mirror" and `continue`ing,
+its Gemini rent bid RESTING with nothing behind it.
 
 Rules now, and where each lives:
 - **Ferrari, direction:** `app._gridiron_move_favorable(mt, side, from, to)` — a move happens
   ONLY if it benefits the seat: favorite lays fewer (home line larger for the home side), dog
-  gets more, over drops, under rises. A legal-but-worse target is counted `unfavorable` and
-  the seat stays. Selftest `test_gridiron_move_favorable`.
-- **Ferrari, side:** if the rule's `value_side` no longer equals the seat's side the re-seat
-  would be a different bet, not a rung jump → `side_flip`, stays (rent first).
-- **Ferrari, hedge:** any slug with a `hedge_pairs` row (held OR paired — `_hedge_leg_slugs`,
-  60s cache) is never recentered → `hedged`. The twin cannot follow a Poly slug change yet.
-- **Lambo, orphan:** a configured pair whose Poly leg is gone (no bid, no position) now cancels
-  every `kh-hedge-*` BID on the twin and keeps the standing ask (cost+1 / cost, exactly cost
-  from T-30) on whatever Gemini holds (`orphan_plan`, selftested); `hedge_pairs` is written
-  whenever Gemini holds ≥1 (was: only when both legs were held) so the Ferrari sees the leg.
-  Following the jump (re-keying the pair to the new slug through `venue_contract_map`) is the
-  next build; until then a jumped pair rinses out on Gemini and re-arms by hand.
+  gets more, over drops, under rises. A legal-but-worse target counts `unfavorable` and the
+  seat stays. Selftest `test_gridiron_move_favorable`.
+- **Ferrari, side:** value side no longer the seat's side → `side_flip`, stays (the re-seat
+  would be a different bet, not a rung jump; rent first).
+- **Paired seats move like any other.** The Gemini leg STAYS on its rung — that is the
+  middle: Poly favorite −6.5 vs Gemini dog +7.5 wins both on a 7-point win; Poly dog +8.5 vs
+  Gemini favorite −7.5 wins both on an 8-point win. The locked-P&L numbers in `hedge_calc`
+  assume one contract on both sides, so after a jump they are the WORST case (the middle is
+  extra).
+- **Lambo, follow:** the pair's identity is the SEAT (game + market type + side), not the slug.
+  When the configured slug goes empty and the pair has `poly_side`, `successor_slug` finds the
+  same seat's pending replacement pick (box psql: same game prefix, market type, pick side,
+  newest first, not claimed by another pair) and `rekey_pair` rewrites the config + state +
+  `hedge_pairs` under the new slug, Gemini twin untouched, ledger `rung_jump`. `slug_seat`
+  (selftested) maps YES→away/over, NO→home/under.
+- **Lambo, true orphan** (no successor: sold, settled, seat gone): every `kh-hedge-*` BID comes
+  off and whatever Gemini holds gets the standing ask (cost+1 / cost; exactly cost from T-30)
+  so it rinses out (`orphan_plan`, selftested). `hedge_pairs` is written whenever Gemini holds
+  ≥1 (was: only when both legs were held).
 All counters ride the repeg tick's `recenter` detail. Kill switch unchanged (`recenter_enabled`).
 
 ### THE SECOND ZERO (Tue Sep 15 2026 — "zero rent earned on Gemini??? what did we miss")

@@ -25457,9 +25457,11 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
       side_flip — the rule's value side is no longer the seat's side, so
         the executor's re-seat would land on the OTHER team. That is a
         new bet, not a rung jump. Stays.
-      hedged — the slug carries a Gemini leg (hedge_pairs, any row: held
-        OR paired). The twin cannot follow a Poly rung jump yet; moving
-        the Poly leg strands it naked. Stays."""
+    A PAIRED seat (Gemini twin, hedge_pairs) moves like any other, under
+    the same direction rule — Rob: "if Poly is − on a spread it goes
+    down; if it's + it only goes up a rung, and maintain the pair. Then
+    it's a hedge PLUS a middle." The Gemini leg stays on its rung; the
+    Lambo re-keys the pair to the new Poly slug (gemini_hedge.follow)."""
     global _RECENTER_LAST_TS
     if _machine_flag_val("recenter_enabled") is False:
         return {"gate": "off"}
@@ -25513,9 +25515,7 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
 
     res = {"cands": len(cands), "judged": 0, "illegal": 0, "moved": 0,
            "filled": 0, "no_order": 0, "no_target": 0, "unconfirmed": 0,
-           "failed": 0, "games": 0, "unfavorable": 0, "side_flip": 0,
-           "hedged": 0}
-    hedged_slugs = _hedge_leg_slugs(sb)
+           "failed": 0, "games": 0, "unfavorable": 0, "side_flip": 0}
     by_game: dict = {}
     for r in cands:
         by_game.setdefault(str(r["market_id"]), []).append(r)
@@ -25598,9 +25598,6 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
             if _gridiron_seat_legal(rule, mt, sn, rv):
                 continue
             res["illegal"] += 1
-            if sl in hedged_slugs:
-                res["hedged"] += 1       # a Gemini twin rests/holds against this rung
-                continue
             _vs = rule.get("value_side")
             if _vs is not None and _vs != sn:
                 res["side_flip"] += 1    # re-seat would be the other team — not a rung jump
@@ -25985,28 +25982,7 @@ def _rent_cull_tick(sb, now, client=None, orders=None) -> dict:
 
 
 _HEDGE_PAIRS_CACHE: dict = {"at": 0.0, "map": {}}
-_HEDGE_LEGS_CACHE: dict = {"at": 0.0, "set": set()}
 _HEDGE_ASK_OFF_MIN = 60          # Rob, Sep 14 2026: both sells off at T-60, hedge rides
-
-
-def _hedge_leg_slugs(sb) -> set:
-    """Every Poly slug with ANY Gemini leg on it — held, paired, or a resting
-    twin (hedge_pairs rows; the Lambo writes one whenever Gemini holds ≥1 or
-    the pair is on). The recenter must not move these (Sep 15 2026): the
-    twin is keyed by slug and cannot follow a Poly rung jump — moving the
-    Poly leg leaves the Gemini leg naked. Fail-CLOSED to the last set (or
-    empty): an unreadable table must never freeze the whole recenter. 60s."""
-    c = _HEDGE_LEGS_CACHE
-    if _time.time() - c["at"] > 60:
-        try:
-            rows = (sb.table("hedge_pairs").select("poly_slug,paired_qty,gemini_held")
-                    .limit(500).execute().data) or []
-            c["set"] = {r["poly_slug"] for r in rows
-                        if float(r.get("paired_qty") or 0) >= 1 or float(r.get("gemini_held") or 0) >= 1}
-        except Exception:
-            pass
-        c["at"] = _time.time()
-    return c["set"]
 
 
 def _hedged_ask_off(sb, slug: str, event_start, now) -> bool:
