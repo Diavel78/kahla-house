@@ -146,6 +146,61 @@ def poly_state(pc, slug: str) -> dict:
     return parse_poly(orders or [], p, slug)
 
 
+def poly_game(pc, prefix: str) -> dict:
+    """Every spread rung of one game (slug prefix `asc-nfl-gb-nyj-2026-09-20`) that carries a Poly
+    bid or position — {slug: parse_poly(...)}. Two reads for the whole game, so the Lambo can
+    FOLLOW the Ferrari when it re-rungs (Rob, Sep 15 2026: the dog may only go UP, the favorite
+    only DOWN, and that is still a pair)."""
+    r = pc.orders.list(); orders = r.get("orders") if isinstance(r, dict) else r
+    r = pc.portfolio.positions(); pos = r.get("positions") if isinstance(r, dict) and "positions" in r else r
+    plist = list(pos.values()) if isinstance(pos, dict) else list(pos or [])
+    slugs = {o.get("marketSlug") for o in (orders or []) if str(o.get("marketSlug") or "").startswith(prefix + "-")}
+    slugs |= {(x.get("marketMetadata") or {}).get("slug") for x in plist
+              if str((x.get("marketMetadata") or {}).get("slug") or "").startswith(prefix + "-")}
+    out = {}
+    for sl in slugs:
+        if not sl or not any(sep in sl for sep in ("-neg-", "-pos-")):
+            continue
+        p = next((x for x in plist if (x.get("marketMetadata") or {}).get("slug") == sl), None)
+        out[sl] = parse_poly(orders or [], p, sl)
+    return out
+
+
+def _slug_prefix(slug: str) -> str:
+    for sep in ("-neg-", "-pos-", "-total-"):
+        if sep in slug:
+            return slug.split(sep)[0]
+    return slug
+
+
+def _home_rv(slug: str):
+    """The HOME line of a spread slug (the Ferrari's rung frame): neg-5pt5 (away −5.5) → +5.5,
+    pos-3pt5 (away +3.5) → −3.5. None for anything else."""
+    import re
+    m = re.search(r"-(neg|pos)-(\d+)pt(\d)$", slug)
+    if not m:
+        return None
+    x = float(f"{m.group(2)}.{m.group(3)}")
+    return x if m.group(1) == "neg" else -x
+
+
+def _hedge_geom(pinned_slug: str, poly_side: str) -> dict:
+    """Where the GEMINI leg sits, in the Ferrari's frame. Poly 'yes' = the away team (the slug's
+    first-named side), 'no' = home; the Gemini leg is the opposite side at the pinned slug's rung."""
+    poly_name = "away" if poly_side == "yes" else "home"
+    return {"prefix": _slug_prefix(pinned_slug), "poly_name": poly_name,
+            "gem_side": "home" if poly_name == "away" else "away", "gem_rv": _home_rv(pinned_slug)}
+
+
+def _rerung_ok(geo: dict, slug: str) -> bool:
+    """Rob's re-rung rule: with the Gemini leg held, a Poly seat on this game is still a PAIR only at
+    the mirror rung or a MIDDLE — dog only up (+4.5→+5.5→+6.5), favorite only down (−5.5→−4.5)."""
+    rv = _home_rv(slug)
+    if rv is None or geo.get("gem_rv") is None:
+        return False
+    return (rv >= geo["gem_rv"] - 0.01) if geo["poly_name"] == "home" else (rv <= geo["gem_rv"] + 0.01)
+
+
 # ------------------------------------------------------------------ Gemini socket (Rob, Sep 15: "thought we used websocket")
 # One authenticated connection: {sym}@bookTicker for every configured pair + orders@account +
 # positions@account. The loop WAKES on frames (1s debounce) and REST is only the 5-minute reconcile
@@ -404,21 +459,13 @@ def gem_sync(pair: dict, want_rest_qty: float, rest_px, urgent_qty: float, cap_p
 PSQL = "/Applications/Postgres.app/Contents/Versions/latest/bin/psql"
 
 
-def _write_hedge_pair(poly_slug: str, gemini_symbol: str, paired_qty: float, poly_filled: float,
-                      gemini_held: float, kickoff) -> None:
-    """Upsert when the pair is on (paired ≥ 1) OR Gemini holds a leg (gemini_held ≥ 1); delete
-    otherwise. Two Ferrari readers: `_hedged_ask_off` (paired ≥ 1 only — T-60 ask rule) and
-    `_hedge_leg_slugs` (ANY leg — the recenter must not rung-jump a Poly seat whose twin is
-    resting/held here, Sep 15 2026: the twin is keyed by slug and cannot follow)."""
+HEDGE_DDL = """alter table hedge_pairs add column if not exists game_prefix text, add column if not exists gem_side text,
+add column if not exists gem_rv numeric, add column if not exists gem_cost numeric, add column if not exists poly_rv numeric,
+add column if not exists middle boolean not null default false; notify pgrst, 'reload schema';"""
+
+
+def _psql(sql: str) -> None:
     import subprocess
-    if paired_qty >= 1 or gemini_held >= 1:
-        sql = ("insert into hedge_pairs (poly_slug,gemini_symbol,paired_qty,poly_filled,gemini_held,kickoff,updated_at) "
-               f"values ('{poly_slug}','{gemini_symbol}',{paired_qty},{poly_filled},{gemini_held},"
-               + (f"'{kickoff}'" if kickoff else "null") + ",now()) "
-               "on conflict (poly_slug) do update set paired_qty=excluded.paired_qty, poly_filled=excluded.poly_filled, "
-               "gemini_held=excluded.gemini_held, gemini_symbol=excluded.gemini_symbol, kickoff=excluded.kickoff, updated_at=now();")
-    else:
-        sql = f"delete from hedge_pairs where poly_slug='{poly_slug}';"
     out = subprocess.run([PSQL, "kahla", "-v", "ON_ERROR_STOP=1", "-At", "-c", sql], capture_output=True, text=True, timeout=20)
     if out.returncode:
         raise RuntimeError(out.stderr[:200])
@@ -435,75 +482,35 @@ def ask_px(cost: float, h_bid, h_ask, at_cost: bool = False):
     return px
 
 
-def orphan_plan(gs: dict, hedge_outcome: str, t30: bool):
-    """THE POLY LEG IS GONE (no bid, no position — a rung jump, a cancel, a sale) but Gemini
-    still has orders/inventory on the twin. Rule (Sep 15 2026): every resting Gemini BID comes
-    off (nothing left to mirror — a fill here would be a naked bet), and whatever Gemini HOLDS
-    gets the standing ask (cost+1/cost; exactly cost from T-30) so it rinses out. Returns
-    (flat_qty, flat_px)."""
-    if gs["held"] >= 1 and gs["held_avg"]:
-        h_bid, h_ask = hc.mirror_book(gs["yes_bid"], gs["yes_ask"], hedge_outcome)
-        return round(gs["held"], 4), ask_px(round(gs["held_avg"] + 1e-9, 2), h_bid, h_ask, at_cost=t30)
-    return 0.0, None
+def _num(x):
+    return "null" if x is None else repr(round(float(x), 4))
 
 
-# ------------------------------------------------------------------ rung jumps: FOLLOW the Poly leg
-# Rob, Sep 15 2026: "if Poly is − on a spread it goes down on a paired match. If it's + it should
-# only go up a rung, and maintain the pair. Then it's a hedge PLUS a middle." The Ferrari's recenter
-# moves the Poly seat to a better rung (favorite down / dog up — app._gridiron_move_favorable) and
-# the seat gets a NEW slug. The Gemini leg STAYS on its rung. The pair's identity is the Poly
-# seat (game + market type + side), not the slug: when the configured slug goes empty we look for
-# the same seat's successor pick and re-key the pair to it.
-def slug_seat(poly_slug: str, poly_side: str):
-    """(game_prefix, market_type, pick_side) for a Poly football slug + our yes/no side.
-    asc-nfl-gb-nyj-2026-09-20-neg-5pt5 → ('asc-nfl-gb-nyj-2026-09-20-', 'spread', side)
-    YES on any spread slug = AWAY (pos-L away +L, neg-L away −L); NO = HOME. Totals: YES = OVER."""
-    for tok, mt in (("-pos-", "spread"), ("-neg-", "spread"), ("-total-", "total")):
-        i = poly_slug.rfind(tok)
-        if i > 0:
-            if mt == "spread":
-                return poly_slug[:i + 1], mt, ("away" if poly_side == "yes" else "home")
-            return poly_slug[:i + 1], mt, ("over" if poly_side == "yes" else "under")
-    return None, None, None
-
-
-def successor_slug(poly_slug: str, poly_side: str, taken: set[str]) -> str | None:
-    """The pending machine pick that replaced this seat: same game, same market type, same side,
-    a different slug, not already claimed by another pair. Newest first (the re-seat is the
-    newest row). Box-local psql. None = no successor (a true orphan)."""
-    import subprocess
-    prefix, mt, side = slug_seat(poly_slug, poly_side)
-    if not prefix:
-        return None
-    sql = ("select signal_blob->>'pmm_slug' from bot_picks where status='pending' and market_type='" + mt + "' "
-           "and side='" + side + "' and signal_blob->>'gridiron_autobet' is not null "
-           "and signal_blob->>'pmm_slug' like '" + prefix + "%' and signal_blob->>'pmm_slug' <> '" + poly_slug + "' "
-           "order by picked_at desc limit 5;")
-    out = subprocess.run([PSQL, "kahla", "-At", "-c", sql], capture_output=True, text=True, timeout=20)
-    if out.returncode:
-        raise RuntimeError(out.stderr[:200])
-    for line in out.stdout.splitlines():
-        cand = line.strip()
-        if cand and cand not in taken:
-            return cand
-    return None
-
-
-def rekey_pair(pairs: list, pair: dict, new_slug: str) -> None:
-    """Persist the pair under its new Poly slug (config + state), keep the Gemini twin as is."""
-    old = pair["poly_slug"]
-    pair["poly_slug"] = new_slug
-    pair.setdefault("rung_jumps", []).append({"from": old, "to": new_slug, "at": dt.datetime.now(dt.timezone.utc).isoformat()})
-    CFG.write_text(json.dumps([{k: v for k, v in p_.items() if not k.startswith("_")} for p_ in pairs], indent=1))
-    st = _state_load()
-    if old in st:
-        st.pop(old, None)          # the new seat is RESTING; its price gets tracked fresh next loop
-        _state_save(st)
-    try:
-        _write_hedge_pair(old, pair["gemini_symbol"], 0.0, 0.0, 0.0, None)   # deletes the old slug's row
-    except Exception as ex:
-        log.warning("hedge_pairs delete of %s failed: %s", old[-28:], str(ex)[:120])
-    _led(kind="rung_jump", pair=new_slug, from_slug=old, gemini_symbol=pair["gemini_symbol"])
+def _write_hedge_pair(poly_slug: str, gemini_symbol: str, paired_qty: float, poly_filled: float,
+                      gemini_held: float, kickoff, geo: dict | None = None, gem_cost=None,
+                      poly_rv=None, middle: bool = False) -> None:
+    """The Ferrari's view of this pair (app._hedged_ask_off / _hedge_rung_ok / _hedge_cap_c).
+    The row LIVES while the Lambo holds its leg (gemini_held ≥ 1) or the pair is on — a held
+    Gemini leg with no Poly leg is exactly the state that must constrain the Ferrari's re-seat.
+    One row per game: other slugs of the same game are cleared (the Ferrari re-rung)."""
+    geo = geo or {}
+    if gemini_held >= 1 or paired_qty >= 1:
+        sql = ("insert into hedge_pairs (poly_slug,gemini_symbol,paired_qty,poly_filled,gemini_held,kickoff,updated_at,"
+               "game_prefix,gem_side,gem_rv,gem_cost,poly_rv,middle) "
+               f"values ('{poly_slug}','{gemini_symbol}',{paired_qty},{poly_filled},{gemini_held},"
+               + (f"'{kickoff}'" if kickoff else "null") + ",now(),"
+               + (f"'{geo['prefix']}'" if geo.get("prefix") else "null") + ","
+               + (f"'{geo['gem_side']}'" if geo.get("gem_side") else "null") + ","
+               f"{_num(geo.get('gem_rv'))},{_num(gem_cost)},{_num(poly_rv)},{'true' if middle else 'false'}) "
+               "on conflict (poly_slug) do update set paired_qty=excluded.paired_qty, poly_filled=excluded.poly_filled, "
+               "gemini_held=excluded.gemini_held, gemini_symbol=excluded.gemini_symbol, kickoff=excluded.kickoff, "
+               "game_prefix=excluded.game_prefix, gem_side=excluded.gem_side, gem_rv=excluded.gem_rv, gem_cost=excluded.gem_cost, "
+               "poly_rv=excluded.poly_rv, middle=excluded.middle, updated_at=now();")
+        if geo.get("prefix"):
+            sql += f" delete from hedge_pairs where game_prefix='{geo['prefix']}' and poly_slug<>'{poly_slug}';"
+    else:
+        sql = f"delete from hedge_pairs where poly_slug='{poly_slug}';"
+    _psql(sql)
 
 
 # ------------------------------------------------------------------ loop
@@ -513,6 +520,10 @@ def run(live: bool, once: bool):
     SOCK = GemSocket()
     time.sleep(3)
     _poly_cache: dict = {"at": 0.0, "by_slug": {}}
+    try:
+        _psql(HEDGE_DDL)
+    except Exception as ex:
+        log.warning("hedge_pairs DDL: %s", str(ex)[:160])
     while True:
         try:
             pairs = json.loads(CFG.read_text()) if CFG.exists() else []
@@ -524,44 +535,47 @@ def run(live: bool, once: bool):
         for pair in pairs:
             try:
                 kick = _iso(pair.get("kickoff"))
-                if poly_due or pair["poly_slug"] not in _poly_cache["by_slug"]:
-                    _poly_cache["by_slug"][pair["poly_slug"]] = poly_state(pc, pair["poly_slug"])
-                ps = _poly_cache["by_slug"][pair["poly_slug"]]
+                pinned = pair["poly_slug"]
+                geo = _hedge_geom(pinned, pair.get("poly_side") or "no")
+                if poly_due or geo["prefix"] not in _poly_cache["by_slug"]:
+                    _poly_cache["by_slug"][geo["prefix"]] = poly_game(pc, geo["prefix"])
+                game = _poly_cache["by_slug"][geo["prefix"]]
                 gs = gem_state(pair["gemini_symbol"], pair["hedge_outcome"])
+                ps = game.get(pinned) or parse_poly([], None, pinned)
+                # THE RE-RUNG (Rob, Sep 15 2026): the Ferrari sold and re-seated one rung over. If we HOLD the
+                # Gemini leg, follow its seat on the same side at the mirror rung or a MIDDLE — never a 'side'.
+                if ps.get("side") is None and gs["held"] >= 1:
+                    for s2, p2 in sorted(game.items()):
+                        if s2 == pinned or p2.get("error") or p2.get("side") is None:
+                            continue
+                        if p2["side"] != (pair.get("poly_side") or "no"):
+                            log.error("%s: Poly has a %s leg on %s — SAME side as our Gemini leg's twin? refusing", pinned[-28:], p2["side"], s2[-12:]); continue
+                        if not _rerung_ok(geo, s2):
+                            log.error("%s: Poly leg on %s is a SIDE against our held Gemini leg (backwards re-rung) — not a pair", pinned[-28:], s2[-12:]); continue
+                        log.info("%s: following the Ferrari's re-rung → %s", pinned[-28:], s2[-12:])
+                        pair = dict(pair, poly_slug=s2); pair.pop("poly_cost", None); ps = p2
+                        break
                 pair["_gem"] = gs
+                poly_rv = _home_rv(pair["poly_slug"])
                 if ps.get("error"):
                     log.error("%s: %s — pair skipped", pair["poly_slug"], ps["error"]); continue
                 poly_side = ps["side"]
-                if poly_side is None and pair.get("poly_side"):
-                    # RUNG JUMP? The Ferrari's recenter moved this seat to a better rung under a new
-                    # slug. Follow the SEAT, keep the Gemini leg where it is: hedge + middle.
-                    try:
-                        succ = successor_slug(pair["poly_slug"], pair["poly_side"],
-                                              {p_["poly_slug"] for p_ in pairs if p_ is not pair})
-                    except Exception as ex:
-                        succ = None
-                        log.warning("%s: successor lookup failed: %s", pair["poly_slug"][-28:], str(ex)[:120])
-                    if succ:
-                        log.info("%s: RUNG JUMP → %s (Gemini %s %s stays — hedge + middle)",
-                                 pair["poly_slug"][-28:], succ[-28:], pair["gemini_symbol"], pair["hedge_outcome"].upper())
-                        rekey_pair(pairs, pair, succ)
-                        _poly_cache["by_slug"][succ] = ps = poly_state(pc, succ)
-                        poly_side = ps["side"]
                 if poly_side is None:
-                    # ORPHAN (no successor seat either: the Poly leg was sold, settled, or the seat is
-                    # gone for good). Before this the loop `continue`d here, leaving Gemini's rent bid
-                    # RESTING with nothing to mirror. Now: bids off, held inventory keeps its cost ask,
-                    # hedge_pairs still reports the held leg.
-                    _t30 = kick is not None and now >= kick - dt.timedelta(minutes=int(pair.get("flatten_min", 30)))
-                    fq, fpx = orphan_plan(gs, pair["hedge_outcome"], _t30)
-                    log.info("%s: no Poly leg (no bid, no position) — ORPHAN: bids off, ask %g@%s on %g held [%s]",
-                             pair["poly_slug"][-28:], fq, fpx, gs["held"], gs.get("src"))
-                    try:
-                        _write_hedge_pair(pair["poly_slug"], pair["gemini_symbol"], 0.0, 0.0, gs["held"], pair.get("kickoff"))
-                    except Exception as ex:
-                        log.warning("hedge_pairs write failed: %s", str(ex)[:120])
-                    gem_sync(pair, 0.0, None, 0.0, None, live, fq, fpx)
-                    continue
+                    if gs["held"] >= 1:
+                        # no Poly leg, Gemini HELD: the Ferrari must know (its re-seat is now constrained),
+                        # and our own ask at cost keeps working below (rinse at cost).
+                        try:
+                            _write_hedge_pair(pinned, pair["gemini_symbol"], 0, 0, gs["held"], pair.get("kickoff"), geo, gs.get("held_avg"), None, False)
+                        except Exception as ex:
+                            log.warning("hedge_pairs write failed: %s", str(ex)[:120])
+                        poly_side = pair.get("poly_side")
+                        log.info("%s: no Poly leg — Gemini holds %g un-paired; ask at cost, Ferrari constrained to mirror-or-better", pinned[-28:], gs["held"])
+                    else:
+                        try:
+                            _write_hedge_pair(pinned, pair["gemini_symbol"], 0, 0, 0, pair.get("kickoff"), geo)
+                        except Exception:
+                            pass
+                        log.info("%s: no Poly leg (no bid, no position) — nothing to mirror", pair["poly_slug"]); continue
                 if pair.get("poly_side") and pair["poly_side"] != poly_side:
                     log.error("%s: config says poly_side=%s but the venue says %s — pair skipped", pair["poly_slug"], pair["poly_side"], poly_side); continue
                 state = _state_load()
@@ -602,7 +616,12 @@ def run(live: bool, once: bool):
                     cost = round(gs["held_avg"] + 1e-9, 2)
                     surplus = gs["held"] - ps["filled_qty"]
                     paired_qty = min(gs["held"], ps["filled_qty"])
-                    if t60 and surplus <= 0.5:
+                    middle = paired_qty >= 1 and poly_rv is not None and geo.get("gem_rv") is not None and abs(poly_rv - geo["gem_rv"]) > 0.01
+                    if middle:
+                        # HELD SPLIT-RUNG PAIR (Rob, Sep 15 2026): "we stop all sell orders, and we ride them to
+                        # conclusion… the middle pays 3x bet, rent isn't even close." No ask at any hour.
+                        cost = None
+                    elif t60 and surplus <= 0.5:
                         # Rob, Sep 14 (T-60 rule): both legs held → the ask comes OFF at T-60 and the hedge rides.
                         # Never sell one side late and wreck the pair. (Only the un-paired surplus keeps an ask.)
                         cost = None
@@ -626,7 +645,9 @@ def run(live: bool, once: bool):
                 # drops its ask on those inside T-60 (Rob: both sells off, hedge rides). Box-local psql.
                 try:
                     _pq = min(gs["held"], ps["filled_qty"])
-                    _write_hedge_pair(pair["poly_slug"], pair["gemini_symbol"], _pq, ps["filled_qty"], gs["held"], pair.get("kickoff"))
+                    _mid = _pq >= 1 and poly_rv is not None and geo.get("gem_rv") is not None and abs(poly_rv - geo["gem_rv"]) > 0.01
+                    _write_hedge_pair(pair["poly_slug"], pair["gemini_symbol"], _pq, ps["filled_qty"], gs["held"], pair.get("kickoff"),
+                                      geo, gs.get("held_avg"), poly_rv, _mid)
                 except Exception as ex:
                     log.warning("hedge_pairs write failed: %s", str(ex)[:120])
                 gem_sync(pair, want_rest, pl.rest_price, urgent, urgent_px, live, flat_qty, flat_px)
@@ -658,25 +679,21 @@ def _selftest():
     # a bid on the OPPOSITE side of a held position is refused
     orders3 = [dict(orders[0], intent="ORDER_INTENT_BUY_LONG")]
     assert parse_poly(orders3, pos, orders[0]["marketSlug"])["error"], "must refuse"
-    # ORPHAN: Poly leg gone, Gemini holds 19 NO at 43¢ on a 50/60 YES book (NO 40/50) → bids off, ask cost+1
-    gs = {"yes_bid": 0.50, "yes_ask": 0.60, "held": 19.0, "held_avg": 0.43, "orders": []}
-    fq, fpx = orphan_plan(gs, "no", False)
-    assert fq == 19 and abs(fpx - 0.44) < 1e-9, (fq, fpx)          # 0.44 leads the NO ask (0.50) → cost+1
-    fq, fpx = orphan_plan(gs, "no", True)
-    assert abs(fpx - 0.43) < 1e-9, fpx                              # T-30: exactly cost
-    # NO bid sitting ABOVE our cost (YES 40/46 → NO 54/60): one tick over the bid, never at/under it
-    fq, fpx = orphan_plan({"yes_bid": 0.40, "yes_ask": 0.46, "held": 19.0, "held_avg": 0.43, "orders": []}, "no", False)
-    assert abs(fpx - 0.55) < 1e-9, fpx
-    assert orphan_plan({"yes_bid": 0.4, "yes_ask": 0.46, "held": 0.0, "held_avg": None, "orders": []}, "no", False) == (0.0, None)
     # ask never through the ask, one tick over a bid at/above cost
     assert abs(ask_px(0.43, 0.45, 0.60) - 0.46) < 1e-9
     assert abs(ask_px(0.59, 0.40, 0.60) - 0.59) < 1e-9        # cost+1 would only JOIN the ask → rest at cost
-    # RUNG JUMP: the seat's identity from its slug
-    assert slug_seat("asc-nfl-gb-nyj-2026-09-20-neg-5pt5", "no") == ("asc-nfl-gb-nyj-2026-09-20-", "spread", "home")
-    assert slug_seat("asc-nfl-gb-nyj-2026-09-20-pos-3pt5", "yes") == ("asc-nfl-gb-nyj-2026-09-20-", "spread", "away")
-    assert slug_seat("tsc-nfl-min-chi-2026-09-20-total-45pt5", "no") == ("tsc-nfl-min-chi-2026-09-20-", "total", "under")
-    assert slug_seat("aec-nfl-gb-nyj-2026-09-20", "yes") == (None, None, None)     # ML never rung-jumps
-    print("gemini_hedge parse_poly + orphan + rung-jump selftest ok")
+    # the re-rung rule (Rob, Sep 15 2026): Gemini holds GB −5.5 (Poly leg = NYJ = 'no' = home)
+    geo = _hedge_geom("asc-nfl-gb-nyj-2026-09-20-neg-5pt5", "no")
+    assert geo == {"prefix": "asc-nfl-gb-nyj-2026-09-20", "poly_name": "home", "gem_side": "away", "gem_rv": 5.5}, geo
+    assert _rerung_ok(geo, "asc-nfl-gb-nyj-2026-09-20-neg-5pt5")          # mirror
+    assert _rerung_ok(geo, "asc-nfl-gb-nyj-2026-09-20-neg-6pt5")          # dog UP = middle at GB by 6
+    assert not _rerung_ok(geo, "asc-nfl-gb-nyj-2026-09-20-neg-4pt5")      # dog DOWN = GB by 5 loses both
+    # Gemini holds the DOG (NYJ +5.5); Poly leg = GB = 'yes' = away: favorite may only lay LESS
+    geo2 = _hedge_geom("asc-nfl-gb-nyj-2026-09-20-neg-5pt5", "yes")
+    assert geo2["gem_side"] == "home" and geo2["poly_name"] == "away"
+    assert _rerung_ok(geo2, "asc-nfl-gb-nyj-2026-09-20-neg-4pt5") and not _rerung_ok(geo2, "asc-nfl-gb-nyj-2026-09-20-neg-6pt5")
+    assert _home_rv("asc-nfl-atl-ind-2026-08-22-pos-21pt5") == -21.5
+    print("gemini_hedge parse_poly + rerung selftest ok")
 
 
 if __name__ == "__main__":

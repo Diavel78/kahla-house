@@ -12174,9 +12174,9 @@ def api_poly_topup():
             _skip("no_price")
             continue
         side_c = (100.0 - canon * 100.0) if synthetic else canon * 100.0
-        _cap_c = _GRIDIRON_MAX_ENTRY_C if _grid else _REPEG_NRFI_PRICE_CAP_C
+        _cap_c = _gridiron_cap_for(sb, slug) if _grid else _REPEG_NRFI_PRICE_CAP_C
         if side_c > _cap_c:
-            _skip("over_price_cap")         # 64¢ (60¢ gridiron) — never
+            _skip("over_price_cap")         # 64¢ (60¢ gridiron / pair cap) — never
             continue                        # re-place above it
         if target * side_c / 100.0 > _REPEG_MAX_COST_USD:
             _skip("master_rule")            # ⚠ $6/order
@@ -19685,7 +19685,9 @@ def _gridiron_line_rule(sb, g, d, pm, mt, mline, proj, ladder_quotes, now_utc):
     ka, kb = (("over", "under") if mt == "total" else ("away", "home"))
     out = {"center": None, "center_src": None, "pin_line": None,
            "ml_line": None, "bounds": None, "model_capped": None,
-           "value_side": None}
+           "value_side": None, "hedge": None}
+    if mt == "spread":                   # a HELD Gemini leg on this game constrains the rung (_hedge_rung_ok)
+        out["hedge"] = _hedge_held_for_game(sb, _gridiron_game_prefix(d, mt))
     try:
         pin_line, _bk = _book_line_center(sb, g["id"], mt, now_utc)
     except Exception:
@@ -19716,8 +19718,50 @@ def _gridiron_seat_legal(rule, mt, sn, rv):
     if not rule or rule.get("center") is None or rv is None:
         return False
     ka, kb = (("over", "under") if mt == "total" else ("away", "home"))
-    return (abs(rv - rule["center"]) <= _GRIDIRON_TAIL_PTS
-            and _gridiron_past_bound(mt, sn, rv, (rule.get("bounds") or {}).get(sn), ka, kb))
+    if not (abs(rv - rule["center"]) <= _GRIDIRON_TAIL_PTS
+            and _gridiron_past_bound(mt, sn, rv, (rule.get("bounds") or {}).get(sn), ka, kb)):
+        return False
+    return _hedge_rung_ok(rule.get("hedge"), mt, sn, rv)
+
+
+def _hedge_rung_ok(h, mt, sn, rv):
+    """THE HELD-LEG RUNG RULE (Rob, Sep 15 2026 — the GB–NYJ re-rung). The
+    Lambo held GB −5.5 on Gemini; the Ferrari sold its NYJ +5.5 seat and
+    re-seated NYJ +4.5 by the line rule: GB by exactly 5 loses BOTH legs.
+    Rob: "if they are BOTH pending, re-rung is fine… ya can't re-rung when
+    you hold one… −4.5 and +5.5 is still an arb with a middle; −5.5 + 4.5
+    would be a disaster." So with a Gemini leg HELD on the game (hedge_pairs
+    gemini_held ≥ 1, written by the Lambo) the Poly seat may sit ONLY on the
+    opposite side at the MIRROR rung or a MIDDLE — never a 'side'. `rv` is
+    the HOME line; gem_rv likewise. Held away at home-line g → Poly home
+    needs rv ≥ g; held home at g → Poly away needs rv ≤ g. No held leg →
+    no constraint (fail-open: the other 100 games never see this)."""
+    if not h or mt != "spread":
+        return True
+    try:
+        grv = float(h["gem_rv"])
+    except (KeyError, TypeError, ValueError):
+        return True
+    gside = h.get("gem_side")
+    if gside not in ("away", "home"):
+        return True
+    if sn == gside:
+        return False                     # same side as the held leg = doubling, never
+    eps = 0.01
+    return (rv >= grv - eps) if sn == "home" else (rv <= grv + eps)
+
+
+def _gridiron_game_prefix(d, mt="spread"):
+    """The football game's slug stem (`asc-nfl-gb-nyj-2026-09-20`) off any rung
+    in the pricing dossier's ladder — the key hedge_pairs.game_prefix uses."""
+    lad = (((((d or {}).get("odds") or {}).get(mt) or {}).get("polymarket") or {})
+           .get("ladder") or [])
+    for e in lad:
+        s = (e or {}).get("slug") or ""
+        for sep in ("-neg-", "-pos-", "-total-"):
+            if sep in s:
+                return s.split(sep)[0]
+    return None
 
 
 def _gridiron_try_bet(sb, g, es0, d, mt, gp, contracts=None):
@@ -19908,6 +19952,10 @@ def _gridiron_try_bet_impl(sb, g, es0, d, mt, gp, contracts=None):
               and (value_side is None or c[0] == value_side)]
     virgin_w = [v for v in pay_virgin if _seat_ok(v[0], _rungv(v[0], v[2]))
                 and (value_side is None or v[0] == value_side)]
+    _hg = _rule.get("hedge") or {}
+    if _hg.get("gem_cost") is not None:      # the 100.5 rule on a re-rung (Rob, Sep 15 2026)
+        _hcap = 100.5 - float(_hg["gem_cost"]) * 100.0
+        paying = [c for c in paying if c[1] <= _hcap + 1e-9]
     if not paying:
         # No BOOKED paying rung inside the window — try seeding a
         # windowed virgin one (our own line at model fair−6).
@@ -24906,7 +24954,7 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             tick = 1.0
         football = slug.startswith(("asc-nfl-", "tsc-nfl-", "asc-cfb-", "tsc-cfb-"))
         need, peg = _seat_topup_plan(stake, held, our_bid, our_ask, tick, football,
-                                     _GRIDIRON_MAX_ENTRY_C, _REPEG_MAX_COST_USD)
+                                     _gridiron_cap_for(sb, slug), _REPEG_MAX_COST_USD)
         if need is None:
             st["skip_" + str(peg)] = st.get("skip_" + str(peg), 0) + 1
             continue
@@ -25983,6 +26031,64 @@ def _rent_cull_tick(sb, now, client=None, orders=None) -> dict:
 
 _HEDGE_PAIRS_CACHE: dict = {"at": 0.0, "map": {}}
 _HEDGE_ASK_OFF_MIN = 60          # Rob, Sep 14 2026: both sells off at T-60, hedge rides
+_HEDGE_HELD_CACHE: dict = {"at": 0.0, "map": {}}
+
+
+def _hedge_held_for_game(sb, prefix):
+    """{poly_slug, gem_side, gem_rv, gemini_held} when the Lambo HOLDS a Gemini
+    leg on this football game (hedge_pairs.gemini_held ≥ 1 — written by
+    kahla-scanner/scripts/gemini_hedge.py whether or not Poly has a leg), else
+    None. Consumed by _hedge_rung_ok through the seat rule. Fail-OPEN (None):
+    an unreadable table must not freeze football seating; the Lambo's own
+    log is the backstop. 60s cache."""
+    if not prefix:
+        return None
+    try:
+        if _time.time() - _HEDGE_HELD_CACHE["at"] > 60:
+            rows = (sb.table("hedge_pairs")
+                    .select("poly_slug,game_prefix,gem_side,gem_rv,gemini_held,gem_cost,poly_rv,middle")
+                    .gte("gemini_held", 1).limit(500).execute().data) or []
+            m = {}
+            for r in rows:
+                if r.get("game_prefix") and r.get("gem_side") and r.get("gem_rv") is not None:
+                    m[r["game_prefix"]] = {"poly_slug": r["poly_slug"], "gem_side": r["gem_side"],
+                                           "gem_rv": float(r["gem_rv"]),
+                                           "gem_cost": (float(r["gem_cost"]) if r.get("gem_cost") is not None else None),
+                                           "gemini_held": float(r.get("gemini_held") or 0),
+                                           "middle": bool(r.get("middle"))}
+            _HEDGE_HELD_CACHE["map"] = m
+            _HEDGE_HELD_CACHE["at"] = _time.time()
+        return _HEDGE_HELD_CACHE["map"].get(prefix)
+    except Exception:
+        return None
+
+
+def _hedge_cap_c(sb, slug: str):
+    """THE 100.5 RULE ON A RE-RUNG (Rob, Sep 15 2026: "maintain the 100.5 rule
+    if you rerung"): with a Gemini leg HELD on this football game, a Poly bid
+    may not price above 100.5¢ − the Gemini leg's cost. None = no held leg,
+    no cap (fail-open)."""
+    try:
+        if not slug or not slug.startswith(("asc-nfl-", "asc-cfb-")):
+            return None
+        prefix = None
+        for sep in ("-neg-", "-pos-"):
+            if sep in slug:
+                prefix = slug.split(sep)[0]
+                break
+        h = _hedge_held_for_game(sb, prefix) if prefix else None
+        if not h or h.get("gem_cost") is None:
+            return None
+        return round(100.5 - float(h["gem_cost"]) * 100.0, 1)
+    except Exception:
+        return None
+
+
+def _gridiron_cap_for(sb, slug: str) -> float:
+    """The football entry cap for one slug: the machine-wide 60¢, tightened to
+    the pair cap when the Lambo holds the other leg of this game."""
+    hc = _hedge_cap_c(sb, slug)
+    return _GRIDIRON_MAX_ENTRY_C if hc is None else min(_GRIDIRON_MAX_ENTRY_C, hc)
 
 
 def _hedged_ask_off(sb, slug: str, event_start, now) -> bool:
@@ -25994,12 +26100,18 @@ def _hedged_ask_off(sb, slug: str, event_start, now) -> bool:
     `hedge_ask_off_min` (minutes; 0 disables)."""
     try:
         if _time.time() - _HEDGE_PAIRS_CACHE["at"] > 60:
-            rows = (sb.table("hedge_pairs").select("poly_slug,paired_qty")
+            rows = (sb.table("hedge_pairs").select("poly_slug,paired_qty,middle")
                     .gte("paired_qty", 1).limit(500).execute().data) or []
-            _HEDGE_PAIRS_CACHE["map"] = {r["poly_slug"]: float(r.get("paired_qty") or 0) for r in rows}
+            _HEDGE_PAIRS_CACHE["map"] = {r["poly_slug"]: (float(r.get("paired_qty") or 0), bool(r.get("middle")))
+                                         for r in rows}
             _HEDGE_PAIRS_CACHE["at"] = _time.time()
         if slug not in _HEDGE_PAIRS_CACHE["map"]:
             return False
+        if _HEDGE_PAIRS_CACHE["map"][slug][1]:
+            # HELD SPLIT-RUNG PAIR (Rob, Sep 15 2026: "IF we HOLD a split rung pair, we stop all
+            # sell orders, and we ride them to conclusion. The middle pays 3x bet, rent isn't
+            # even close.") — no ask, no T-60 wait, ride it.
+            return True
         mins = _machine_flag_val("hedge_ask_off_min", _HEDGE_ASK_OFF_MIN)
         try:
             mins = float(mins)
@@ -27500,7 +27612,7 @@ def _buy_snap_publish(sb, fs: dict, now, client, full_lap: bool) -> int:
         fresh[slug] = {"oid": f["order_id"], "our_bid": float(f["my_price_c"]),
                        "qty": qty, "synth": bool(f.get("synthetic")),
                        "join": _gridiron_join_touch(slug, 50.0),   # football: AT the touch
-                       "cap_c": (_GRIDIRON_MAX_ENTRY_C if grid
+                       "cap_c": (_gridiron_cap_for(sb, slug) if grid
                                  else _REPEG_NRFI_PRICE_CAP_C),
                        "master_c": master_c, "tick": tick, "gtt": gtt,
                        "pick_id": r["id"], "at": _time.monotonic()}
@@ -27991,7 +28103,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 # -- stop conditions (once-per-level Telegram, order stays) --
                 # football holds the machine-wide 60¢ entry cap; everything
                 # else keeps the Y/NRFI 64¢ guardrail
-                _cap_c = (_GRIDIRON_MAX_ENTRY_C if _is_gridiron
+                _cap_c = (_gridiron_cap_for(sb, f.get("slug") or "") if _is_gridiron
                           else _REPEG_NRFI_PRICE_CAP_C)
                 _flipped, _flip_to = False, None
                 if new_c is not None and new_c > _cap_c:
