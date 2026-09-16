@@ -782,6 +782,8 @@ def test_gridiron_join_touch() -> None:
     snap = {"our_bid": 46.0, "qty": 20, "synth": False, "cap_c": 60.0, "master_c": 65.0, "tick": 1.0, "join": True}
     check("buy sniper on football: competitor bid 44 → 44, not 45", _app._snipe_buy_target(snap, 44.0, 50.0) == 44.0)
     check("buy sniper without join: competitor bid 44 → 45", _app._snipe_buy_target({**snap, "join": False}, 44.0, 50.0) == 45.0)
+    check("buy sniper model wall: competitor 44, wall 41 → 41", _app._snipe_buy_target({**snap, "join": False, "wall_c": 41.0}, 44.0, 50.0) == 41.0)
+    check("buy sniper model wall: already at wall → no move", _app._snipe_buy_target({**snap, "join": False, "wall_c": 41.0, "our_bid": 41.0}, 44.0, 50.0) is None)
 
 
 def test_seat_topup_plan() -> None:

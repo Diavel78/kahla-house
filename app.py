@@ -24295,6 +24295,30 @@ def _fresh_fair_for_repeg(sb, r, mt, market_id):
         return None
 
 
+def _ml_model_wall_c(sb, r, fair_fallback=None):
+    """THE MODEL WALL ON THE NO-VETO CHASE (Rob, Sep 15 2026, on the Royals
+    bid the sniper walked from 40c to 64c against a 39% model: "we need a
+    model wall even if it's 6 hours out... obviously"). The no-veto rule
+    said the model stops VETOING a rent seat far out -- it never said the
+    bid may chase past the model. An MLB moneyline bid never rests above
+    the model's fair (+ `machine_flags noveto_wall_pp`, default 0): the
+    fresh Diamond IQ read when it answers, else the fair stamped on the
+    pick. None = no model on the pick -> caller keeps the cap only
+    (Diamond IQ refuses unmatched teams at placement, so an autobet ML
+    always carries one). Cents, our side."""
+    try:
+        fair = _fresh_fair_for_repeg(sb, r, "moneyline", r.get("market_id"))
+        if fair is None:
+            fair = _safe_float(fair_fallback if fair_fallback is not None
+                               else r.get("fair_prob"))
+        if fair is None:
+            return None
+        slack = _safe_float(_machine_flag_val("noveto_wall_pp", 0.0)) or 0.0
+        return float(fair) * 100.0 + slack
+    except Exception:
+        return None
+
+
 def _repeg_edge_ok(fair_prob, new_c: float):
     """(ok, edge_pp) — does the pick still clear the NRFI edge gate at the
     new price? fair_prob is the pick's logged model fair (bot_picks.fair_prob,
@@ -27663,6 +27687,8 @@ def _snipe_buy_target(snap: dict, bid_c, ask_c, comp_bid_c=None):
         if best_ask is not None and tgt >= best_ask:
             tgt = _grid_dn(comp, tick)           # one-tick book → join
     tgt = min(tgt, float(snap["cap_c"]), float(snap["master_c"]))
+    if snap.get("wall_c") is not None:
+        tgt = min(tgt, float(snap["wall_c"]))    # the model wall (Sep 15 2026)
     tgt = _grid_dn(tgt, tick)
     if tgt < tick:
         return None
@@ -27747,7 +27773,9 @@ def _buy_snap_publish(sb, fs: dict, now, client, full_lap: bool) -> int:
         return 0
     try:
         rows = _sb_paged(lambda: (sb.table("bot_picks")
-                                  .select("id,event_start,signal_blob")
+                                  .select("id,event_start,signal_blob,"
+                                          "fair_prob,event_name,side,"
+                                          "market_id,sport")
                                   .in_("id", [f["id"] for f in fills])), 3)
     except Exception:
         return 0
@@ -27778,7 +27806,13 @@ def _buy_snap_publish(sb, fs: dict, now, client, full_lap: bool) -> int:
         if qty < 1:
             continue
         master_c = _grid_dn(_REPEG_MAX_COST_USD / qty * 100.0, tick)
+        # THE MODEL WALL (Sep 15 2026): an MLB moneyline bid never snipes
+        # above the model's fair -- see _ml_model_wall_c.
+        wall_c = None
+        if b.get("autobet") and (f.get("market_type") or "") == "moneyline" and not grid:
+            wall_c = _ml_model_wall_c(sb, r)
         fresh[slug] = {"oid": f["order_id"], "our_bid": float(f["my_price_c"]),
+                       "wall_c": wall_c,
                        "qty": qty, "synth": bool(f.get("synthetic")),
                        "join": _gridiron_join_touch(slug, 50.0),   # football: AT the touch
                        "cap_c": (_gridiron_cap_for(sb, slug) if grid
@@ -28269,6 +28303,32 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                             > _OU_NOVETO_MIN_MIN)
                     except Exception:
                         _noveto_chase = False
+                # THE MODEL WALL (Sep 15 2026): a no-veto MLB moneyline
+                # chase follows the touch UP TO THE MODEL and no further --
+                # clamp to the wall, and when the wall is at or under where
+                # the bid already rests, stop (once). Totals have no model
+                # by the July-4 ruling; football rungs sit past the model
+                # line by the line rule -- both keep the cap alone here.
+                if (_noveto_chase and new_c is not None and old_c is not None
+                        and f.get("market_type") == "moneyline"
+                        and not _is_gridiron):
+                    _wall_c = _ml_model_wall_c(sb, r)
+                    if _wall_c is not None and new_c > _wall_c + 1e-9:
+                        _wc = _grid_dn(_wall_c, _tkr)
+                        if _wc > old_c + 0.26:
+                            new_c = _wc
+                            res["walled_model"] = res.get("walled_model", 0) + 1
+                        else:
+                            res["walled"] = res.get("walled", 0) + 1
+                            if _mark("repeg_stop",
+                                     {"reason": "model wall",
+                                      "wall_c": round(_wall_c, 1)},
+                                     tg=(f"🤖 REPEG STOP — {ev} {mlbl} {side}: "
+                                         f"book {round(new_c)}¢ is past the "
+                                         f"model's {round(_wall_c)}¢; resting "
+                                         f"at {round(old_c)}¢")):
+                                res["stopped"] += 1
+                            continue
                 # -- stop conditions (once-per-level Telegram, order stays) --
                 # football holds the machine-wide 60¢ entry cap; everything
                 # else keeps the Y/NRFI 64¢ guardrail
