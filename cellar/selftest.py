@@ -522,6 +522,22 @@ def test_gridiron_qb_adjust() -> None:
         _app._power_snapshot, _app._football_qb_adj = _o_snap, _o_adj
 
 
+def test_gridiron_move_favorable() -> None:
+    """Rob, Sep 15 2026: a rung jump may only BENEFIT the seat — favorite
+    down, dog up, over down, under up. Rung units = home line / the total."""
+    import app as _app
+    f = _app._gridiron_move_favorable
+    check("favorite (home −7.5) → −6.5 lays fewer: favorable", f("spread", "home", -7.5, -6.5))
+    check("favorite (home −7.5) → −9.5 lays more: REFUSED", not f("spread", "home", -7.5, -9.5))
+    check("dog (away +7.5 = home −7.5) → +9.5 (home −9.5): favorable", f("spread", "away", -7.5, -9.5))
+    check("dog +24.5 pulled to +10.5 (the tail pull): REFUSED", not f("spread", "away", -24.5, -10.5))
+    check("home dog +3.5 → +4.5 (home line larger): favorable", f("spread", "home", 3.5, 4.5))
+    check("over 45.5 → 44.5: favorable; → 46.5 refused", f("total", "over", 45.5, 44.5) and not f("total", "over", 45.5, 46.5))
+    check("under 45.5 → 46.5: favorable; → 44.5 refused", f("total", "under", 45.5, 46.5) and not f("total", "under", 45.5, 44.5))
+    check("same rung is not a move", not f("spread", "home", -7.5, -7.5) and not f("total", "over", 45.5, 45.5))
+    check("unknown rung never moves", not f("spread", "home", None, -6.5))
+
+
 def test_gridiron_value_window() -> None:
     """Rob's rule (Sep 5 2026): Pinnacle is the line; bet toward the model,
     away from Pinnacle; favorable rungs only. Rung units = home line."""
@@ -1033,7 +1049,7 @@ def main() -> int:
               test_batch_blocked_deps, test_owner_dependent_lanes,
               test_dry_run_blackout, test_overrun_detector,
               test_ws_quote_presence, test_ws_mkts_request_budget,
-              test_gridiron_value_window, test_gridiron_qb_adjust,
+              test_gridiron_value_window, test_gridiron_move_favorable, test_gridiron_qb_adjust,
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,

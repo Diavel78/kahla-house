@@ -406,9 +406,12 @@ PSQL = "/Applications/Postgres.app/Contents/Versions/latest/bin/psql"
 
 def _write_hedge_pair(poly_slug: str, gemini_symbol: str, paired_qty: float, poly_filled: float,
                       gemini_held: float, kickoff) -> None:
-    """Upsert (paired ≥ 1) or delete (paired < 1) the slug's hedge_pairs row. The Ferrari reads it."""
+    """Upsert when the pair is on (paired ≥ 1) OR Gemini holds a leg (gemini_held ≥ 1); delete
+    otherwise. Two Ferrari readers: `_hedged_ask_off` (paired ≥ 1 only — T-60 ask rule) and
+    `_hedge_leg_slugs` (ANY leg — the recenter must not rung-jump a Poly seat whose twin is
+    resting/held here, Sep 15 2026: the twin is keyed by slug and cannot follow)."""
     import subprocess
-    if paired_qty >= 1:
+    if paired_qty >= 1 or gemini_held >= 1:
         sql = ("insert into hedge_pairs (poly_slug,gemini_symbol,paired_qty,poly_filled,gemini_held,kickoff,updated_at) "
                f"values ('{poly_slug}','{gemini_symbol}',{paired_qty},{poly_filled},{gemini_held},"
                + (f"'{kickoff}'" if kickoff else "null") + ",now()) "
@@ -419,6 +422,29 @@ def _write_hedge_pair(poly_slug: str, gemini_symbol: str, paired_qty: float, pol
     out = subprocess.run([PSQL, "kahla", "-v", "ON_ERROR_STOP=1", "-At", "-c", sql], capture_output=True, text=True, timeout=20)
     if out.returncode:
         raise RuntimeError(out.stderr[:200])
+
+
+def ask_px(cost: float, h_bid, h_ask, at_cost: bool = False):
+    """The Lambo's ask: cost + 1 tick when that alone leads the ask side, else cost (exactly
+    cost when `at_cost`); one tick over a bid sitting at/above cost; never through the ask."""
+    px = round(cost, 2) if at_cost else (round(cost + 0.01, 2) if (h_ask is None or cost + 0.01 < h_ask - 1e-9) else round(cost, 2))
+    if h_bid is not None and px <= h_bid + 1e-9:
+        px = round(h_bid + 0.01, 2)
+    if h_ask is not None and px > h_ask + 1e-9:
+        px = round(h_ask, 2)
+    return px
+
+
+def orphan_plan(gs: dict, hedge_outcome: str, t30: bool):
+    """THE POLY LEG IS GONE (no bid, no position — a rung jump, a cancel, a sale) but Gemini
+    still has orders/inventory on the twin. Rule (Sep 15 2026): every resting Gemini BID comes
+    off (nothing left to mirror — a fill here would be a naked bet), and whatever Gemini HOLDS
+    gets the standing ask (cost+1/cost; exactly cost from T-30) so it rinses out. Returns
+    (flat_qty, flat_px)."""
+    if gs["held"] >= 1 and gs["held_avg"]:
+        h_bid, h_ask = hc.mirror_book(gs["yes_bid"], gs["yes_ask"], hedge_outcome)
+        return round(gs["held"], 4), ask_px(round(gs["held_avg"] + 1e-9, 2), h_bid, h_ask, at_cost=t30)
+    return 0.0, None
 
 
 # ------------------------------------------------------------------ loop
@@ -448,7 +474,20 @@ def run(live: bool, once: bool):
                     log.error("%s: %s — pair skipped", pair["poly_slug"], ps["error"]); continue
                 poly_side = ps["side"]
                 if poly_side is None:
-                    log.info("%s: no Poly leg (no bid, no position) — nothing to mirror", pair["poly_slug"]); continue
+                    # ORPHAN (Sep 15 2026 — the rung-jump class: the Ferrari's recenter moved the Poly
+                    # seat to another rung and this slug went empty). Before this the loop `continue`d
+                    # here, leaving Gemini's rent bid RESTING with nothing to mirror. Now: bids off,
+                    # held inventory keeps its cost ask, hedge_pairs still reports the held leg.
+                    _t30 = kick is not None and now >= kick - dt.timedelta(minutes=int(pair.get("flatten_min", 30)))
+                    fq, fpx = orphan_plan(gs, pair["hedge_outcome"], _t30)
+                    log.info("%s: no Poly leg (no bid, no position) — ORPHAN: bids off, ask %g@%s on %g held [%s]",
+                             pair["poly_slug"][-28:], fq, fpx, gs["held"], gs.get("src"))
+                    try:
+                        _write_hedge_pair(pair["poly_slug"], pair["gemini_symbol"], 0.0, 0.0, gs["held"], pair.get("kickoff"))
+                    except Exception as ex:
+                        log.warning("hedge_pairs write failed: %s", str(ex)[:120])
+                    gem_sync(pair, 0.0, None, 0.0, None, live, fq, fpx)
+                    continue
                 if pair.get("poly_side") and pair["poly_side"] != poly_side:
                     log.error("%s: config says poly_side=%s but the venue says %s — pair skipped", pair["poly_slug"], pair["poly_side"], poly_side); continue
                 state = _state_load()
@@ -493,15 +532,9 @@ def run(live: bool, once: bool):
                         # Rob, Sep 14 (T-60 rule): both legs held → the ask comes OFF at T-60 and the hedge rides.
                         # Never sell one side late and wreck the pair. (Only the un-paired surplus keeps an ask.)
                         cost = None
-                    elif t30 and surplus > 0.5:
-                        px = cost
                     else:
-                        px = round(cost + 0.01, 2) if (h_ask is None or cost + 0.01 < h_ask - 1e-9) else cost
+                        px = ask_px(cost, h_bid, h_ask, at_cost=(t30 and surplus > 0.5))
                     if cost is not None:
-                        if h_bid is not None and px <= h_bid + 1e-9:
-                            px = round(h_bid + 0.01, 2)             # bid at/above cost → one tick over it (maker)
-                        if h_ask is not None and px > h_ask + 1e-9:
-                            px = round(h_ask, 2)                      # never lead through the ask; join it
                         # after T-60 only the un-paired surplus may carry an ask; before it, everything held does
                         ask_qty = round(gs["held"] - paired_qty, 4) if t60 else round(gs["held"], 4)
                         if ask_qty >= 1:
@@ -551,7 +584,20 @@ def _selftest():
     # a bid on the OPPOSITE side of a held position is refused
     orders3 = [dict(orders[0], intent="ORDER_INTENT_BUY_LONG")]
     assert parse_poly(orders3, pos, orders[0]["marketSlug"])["error"], "must refuse"
-    print("gemini_hedge parse_poly selftest ok")
+    # ORPHAN: Poly leg gone, Gemini holds 19 NO at 43¢ on a 50/60 YES book (NO 40/50) → bids off, ask cost+1
+    gs = {"yes_bid": 0.50, "yes_ask": 0.60, "held": 19.0, "held_avg": 0.43, "orders": []}
+    fq, fpx = orphan_plan(gs, "no", False)
+    assert fq == 19 and abs(fpx - 0.44) < 1e-9, (fq, fpx)          # 0.44 leads the NO ask (0.50) → cost+1
+    fq, fpx = orphan_plan(gs, "no", True)
+    assert abs(fpx - 0.43) < 1e-9, fpx                              # T-30: exactly cost
+    # NO bid sitting ABOVE our cost (YES 40/46 → NO 54/60): one tick over the bid, never at/under it
+    fq, fpx = orphan_plan({"yes_bid": 0.40, "yes_ask": 0.46, "held": 19.0, "held_avg": 0.43, "orders": []}, "no", False)
+    assert abs(fpx - 0.55) < 1e-9, fpx
+    assert orphan_plan({"yes_bid": 0.4, "yes_ask": 0.46, "held": 0.0, "held_avg": None, "orders": []}, "no", False) == (0.0, None)
+    # ask never through the ask, one tick over a bid at/above cost
+    assert abs(ask_px(0.43, 0.45, 0.60) - 0.46) < 1e-9
+    assert abs(ask_px(0.59, 0.40, 0.60) - 0.59) < 1e-9        # cost+1 would only JOIN the ask → rest at cost
+    print("gemini_hedge parse_poly + orphan selftest ok")
 
 
 if __name__ == "__main__":

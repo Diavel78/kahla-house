@@ -1163,7 +1163,12 @@ row flipped pending — the executor re-seats it under the placement rule
 seat's side). Filled seats ride; no paying legal rung → the seat stays.
 ≤6 moves / ≤40 games per pass (a cold process REST-pricing every game
 earned a Cloudflare 1015 on Sep 6); kill switch `machine_flags
-recenter_enabled=false`. Dry-run: call it with a client whose
+recenter_enabled=false`. **A MOVE MUST BENEFIT THE SEAT (Rob, Sep 15
+2026): `_gridiron_move_favorable` — favorite down, dog up, over down,
+under up, else `unfavorable` and stay; a value-side flip is `side_flip`
+(not a rung jump — stays); a slug with a Gemini leg in `hedge_pairs` is
+`hedged` (never moved — the twin is keyed by slug and cannot follow; see
+docs/gemini-predictions-recon.md RUNG JUMPS).** Dry-run: call it with a client whose
 `orders.cancel` raises — `errors[]` then lists every would-move with
 rv/center/bound/target.
 (h) **FOOTBALL GHOST ADOPTION (Sep 5 2026, docket #6 root fix):** the

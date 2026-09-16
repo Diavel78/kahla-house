@@ -411,3 +411,49 @@ ONLY within 3¢ of that and otherwise logged as disagreeing; no trustworthy cost
 leg REFUSES to place rather than guess a cap. Also seen overnight: Gemini REST intermittently
 returned Cloudflare HTML (`<!doctype html>`) ~10 times between 1:50 and 6:50am AZ; each one
 skips a loop (30s) and is logged — tolerable, watch the rate.
+
+### RUNG JUMPS (Tue Sep 15 2026 — Rob: "program the rung jump to only benefit me")
+
+The Ferrari's `_gridiron_recenter_tick` re-judges every unfilled football seat hourly and
+moves an illegal one to the nearest legal rung on its side. Two ways that hurt a pair:
+(1) the pair is keyed by `poly_slug`, so when the Poly seat jumps rungs the Lambo's slug goes
+empty — it used to log "no Poly leg — nothing to mirror" and `continue`, leaving the Gemini
+rent bid RESTING with nothing behind it (a fill = a naked bet) and any held twin unmanaged;
+(2) not every legal target is a BETTER rung for the seat — the 10-pt tail rule can pull a dog
++24.5 down to +10.5, and a value-side flip makes the executor re-seat the OTHER team.
+
+Rules now, and where each lives:
+- **Ferrari, direction:** `app._gridiron_move_favorable(mt, side, from, to)` — a move happens
+  ONLY if it benefits the seat: favorite lays fewer (home line larger for the home side), dog
+  gets more, over drops, under rises. A legal-but-worse target is counted `unfavorable` and
+  the seat stays. Selftest `test_gridiron_move_favorable`.
+- **Ferrari, side:** if the rule's `value_side` no longer equals the seat's side the re-seat
+  would be a different bet, not a rung jump → `side_flip`, stays (rent first).
+- **Ferrari, hedge:** any slug with a `hedge_pairs` row (held OR paired — `_hedge_leg_slugs`,
+  60s cache) is never recentered → `hedged`. The twin cannot follow a Poly slug change yet.
+- **Lambo, orphan:** a configured pair whose Poly leg is gone (no bid, no position) now cancels
+  every `kh-hedge-*` BID on the twin and keeps the standing ask (cost+1 / cost, exactly cost
+  from T-30) on whatever Gemini holds (`orphan_plan`, selftested); `hedge_pairs` is written
+  whenever Gemini holds ≥1 (was: only when both legs were held) so the Ferrari sees the leg.
+  Following the jump (re-keying the pair to the new slug through `venue_contract_map`) is the
+  next build; until then a jumped pair rinses out on Gemini and re-arms by hand.
+All counters ride the repeg tick's `recenter` detail. Kill switch unchanged (`recenter_enabled`).
+
+### THE SECOND ZERO (Tue Sep 15 2026 — "zero rent earned on Gemini??? what did we miss")
+
+Nothing new was missed; the Sep 14 number already says why, and the pairs live on the SAME
+kind of rung. Read the score rule again: `spread_weight × size × two_sided`, normalized
+against every qualifying maker in the EVENT pool. On a main-line spread/total event the
+incumbents rest 250-lot two-sided quotes 1-4¢ wide on ~20 rungs (5,548 contracts inside the
+window on DEN–KC). One 20-lot one-sided seat at the touch is ~20/(250×1.5×2×20) ≈ 0.13% of
+the pool — **~$0.27/day per event at $200/day**, less with the quadratic spread weight when
+we sit 4-5¢ off mid. Two pairs ≈ $0.50/day, and the payout floor is **$1.00/day per ACCOUNT**
+(`BELOW_THRESHOLD` — the venue reports the score and pays nothing; whether sub-$1 days
+accrue is unproven, the summary shows them as unpaid). So a 2-pair hedge machine on main
+lines scores real but sub-dollar rent every day and NEVER sees a cent. To cross the floor
+you need ≥4-5 events' worth of seats live at once at 20 lots, or bigger lots — the recon's
+scale math ("250 two-sided on ~20 rungs ≈ $5,000 of capital per event for ~$60/day") is the
+honest version. The pairs idea still works as CAPITAL-locked rent (hedged inventory), but
+the unit of account is events × size, not seats. ⚠ Could not re-read the venue from this
+sandbox (api.gemini.com is egress-blocked); re-run `gemini_probe.py status` on the box for
+the Sep 15 5:30pm ET breakdown before changing sizing.

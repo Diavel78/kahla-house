@@ -19649,6 +19649,22 @@ def _gridiron_past_bound(mt, sn, rv, bound, ka, kb):
     return (rv < bound - eps) if sn == ka else (rv > bound + eps)
 
 
+def _gridiron_move_favorable(mt, sn, rv_from, rv_to) -> bool:
+    """RUNG JUMPS ONLY IN OUR FAVOR (Rob, Sep 15 2026: "program the rung
+    jump to only benefit me — favorite going down, or dog going up a
+    rung"). Rung units = home line (spread) / the line (total). A move
+    for the HOME side benefits us when the home line gets LARGER (fewer
+    points to lay, or more received); AWAY when it gets SMALLER; OVER when
+    the total drops; UNDER when it rises. Anything else — a tail-window
+    pull toward the line, a same-rung re-seat — is not a move we make."""
+    if rv_from is None or rv_to is None:
+        return False
+    eps = 0.01
+    if mt == "spread":
+        return (rv_to > rv_from + eps) if sn == "home" else (rv_to < rv_from - eps)
+    return (rv_to < rv_from - eps) if sn == "over" else (rv_to > rv_from + eps)
+
+
 def _gridiron_line_rule(sb, g, d, pm, mt, mline, proj, ladder_quotes, now_utc):
     """ONE rule for where a football seat may sit — the executor places by
     it and _gridiron_recenter_tick moves by it, so they can never disagree.
@@ -25432,7 +25448,18 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
     re-seats it at the proper rung on its next pass. Filled seats ride.
     No paying legal rung on that side → the seat stays (rent first: a
     paying wrong rung beats nothing). machine_flags recenter_enabled
-    (fail-open) is the kill switch."""
+    (fail-open) is the kill switch.
+
+    THREE STAYS added Sep 15 2026 (Rob: "program the rung jump to only
+    benefit me — favorite going down, or dog going up"):
+      unfavorable — the only legal target is a WORSE rung for our side
+        (the 10-pt tail pull: dog +24.5 dragged to +10.5). Stays.
+      side_flip — the rule's value side is no longer the seat's side, so
+        the executor's re-seat would land on the OTHER team. That is a
+        new bet, not a rung jump. Stays.
+      hedged — the slug carries a Gemini leg (hedge_pairs, any row: held
+        OR paired). The twin cannot follow a Poly rung jump yet; moving
+        the Poly leg strands it naked. Stays."""
     global _RECENTER_LAST_TS
     if _machine_flag_val("recenter_enabled") is False:
         return {"gate": "off"}
@@ -25486,7 +25513,9 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
 
     res = {"cands": len(cands), "judged": 0, "illegal": 0, "moved": 0,
            "filled": 0, "no_order": 0, "no_target": 0, "unconfirmed": 0,
-           "failed": 0, "games": 0}
+           "failed": 0, "games": 0, "unfavorable": 0, "side_flip": 0,
+           "hedged": 0}
+    hedged_slugs = _hedge_leg_slugs(sb)
     by_game: dict = {}
     for r in cands:
         by_game.setdefault(str(r["market_id"]), []).append(r)
@@ -25569,6 +25598,13 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
             if _gridiron_seat_legal(rule, mt, sn, rv):
                 continue
             res["illegal"] += 1
+            if sl in hedged_slugs:
+                res["hedged"] += 1       # a Gemini twin rests/holds against this rung
+                continue
+            _vs = rule.get("value_side")
+            if _vs is not None and _vs != sn:
+                res["side_flip"] += 1    # re-seat would be the other team — not a rung jump
+                continue
             if not ob:                   # dust seat, no bid → VACATE, no cancel needed
                 _pos = _pmm_positions_raw(client, fresh=True)
                 _chk = _pmm_open_orders_raw(client, fresh=True)
@@ -25607,6 +25643,8 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
                        if mt == "spread" else round(float(e["line"]), 1))
                 if not _gridiron_seat_legal(rule, mt, sn, erv):
                     continue
+                if not _gridiron_move_favorable(mt, sn, rv, erv):
+                    continue             # favorite down / dog up / over down / under up ONLY
                 if _rent_dead(e["slug"], sb):
                     continue
                 try:
@@ -25617,7 +25655,14 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
                 if target is None or abs(erv - rule["center"]) < abs(target[1] - rule["center"]):
                     target = (e["slug"], erv)
             if target is None:
-                res["no_target"] += 1
+                # a legal rung exists but every one is WORSE for our side → stay
+                if any(_gridiron_seat_legal(rule, mt, sn,
+                                            (round(float(e["line"]) if sn == "home" else -float(e["line"]), 1)
+                                             if mt == "spread" else round(float(e["line"]), 1)))
+                       for e in lad if e.get("side") == sn and e.get("line") is not None):
+                    res["unfavorable"] += 1
+                else:
+                    res["no_target"] += 1
                 continue
             ok = True
             for o in ob:
@@ -25940,7 +25985,28 @@ def _rent_cull_tick(sb, now, client=None, orders=None) -> dict:
 
 
 _HEDGE_PAIRS_CACHE: dict = {"at": 0.0, "map": {}}
+_HEDGE_LEGS_CACHE: dict = {"at": 0.0, "set": set()}
 _HEDGE_ASK_OFF_MIN = 60          # Rob, Sep 14 2026: both sells off at T-60, hedge rides
+
+
+def _hedge_leg_slugs(sb) -> set:
+    """Every Poly slug with ANY Gemini leg on it — held, paired, or a resting
+    twin (hedge_pairs rows; the Lambo writes one whenever Gemini holds ≥1 or
+    the pair is on). The recenter must not move these (Sep 15 2026): the
+    twin is keyed by slug and cannot follow a Poly rung jump — moving the
+    Poly leg leaves the Gemini leg naked. Fail-CLOSED to the last set (or
+    empty): an unreadable table must never freeze the whole recenter. 60s."""
+    c = _HEDGE_LEGS_CACHE
+    if _time.time() - c["at"] > 60:
+        try:
+            rows = (sb.table("hedge_pairs").select("poly_slug,paired_qty,gemini_held")
+                    .limit(500).execute().data) or []
+            c["set"] = {r["poly_slug"] for r in rows
+                        if float(r.get("paired_qty") or 0) >= 1 or float(r.get("gemini_held") or 0) >= 1}
+        except Exception:
+            pass
+        c["at"] = _time.time()
+    return c["set"]
 
 
 def _hedged_ask_off(sb, slug: str, event_start, now) -> bool:
