@@ -192,6 +192,34 @@ def _hedge_geom(pinned_slug: str, poly_side: str) -> dict:
             "gem_side": "home" if poly_name == "away" else "away", "gem_rv": _home_rv(pinned_slug)}
 
 
+def map_lookup(poly_slug: str, poly_side: str):
+    """venue_contract_map (build_venue_map.py): the Gemini contract + outcome that MATCHES this Poly
+    slug + side → (gemini_symbol, gemini_match_outcome), or None when the venue has no twin."""
+    import subprocess
+    sql = ("select gemini_symbol, gemini_outcome from venue_contract_map "
+           f"where poly_slug='{poly_slug}' and poly_side='{poly_side}' and coalesce(gemini_symbol,'')<>'' limit 1;")
+    out = subprocess.run([PSQL, "kahla", "-At", "-F", "\t", "-c", sql], capture_output=True, text=True, timeout=20)
+    if out.returncode or not out.stdout.strip():
+        return None
+    sym, outc = out.stdout.strip().split("\t")
+    return sym, outc.lower()
+
+
+def _cancel_ours(symbol: str, live: bool, why: str) -> None:
+    """Pull every kh-hedge order we still have on a Gemini contract we are LEAVING (the Ferrari
+    re-rung and we follow) — a bid left resting on the old contract would fill into a naked leg."""
+    for o in g.active_orders(symbol=symbol):
+        if not str(o.get("clientOrderId") or "").startswith(CID):
+            continue
+        if not live:
+            log.info("DRY %s: would cancel %s — %s", symbol, o.get("orderId"), why); continue
+        try:
+            g.cancel_order(o["orderId"])
+            _led(kind="cancel", symbol=symbol, order_id=o.get("orderId"), why=why, verified=None)
+        except Exception as ex:
+            log.warning("%s: cancel %s failed: %s", symbol, o.get("orderId"), str(ex)[:120])
+
+
 def _rerung_ok(geo: dict, slug: str) -> bool:
     """Rob's re-rung rule: with the Gemini leg held, a Poly seat on this game is still a PAIR only at
     the mirror rung or a MIDDLE — dog only up (+4.5→+5.5→+6.5), favorite only down (−5.5→−4.5)."""
@@ -530,20 +558,50 @@ def run(live: bool, once: bool):
         except Exception as ex:
             log.error("config unreadable: %s", ex); pairs = []
         now = dt.datetime.now(dt.timezone.utc)
-        SOCK.want({p["gemini_symbol"] for p in pairs})
+        SOCK.want({p["gemini_symbol"] for p in pairs} | {v.get("gem_symbol") for v in _state_load().values() if isinstance(v, dict) and v.get("gem_symbol")})
         poly_due = (time.monotonic() - _poly_cache["at"]) > int(os.getenv("GEMINI_HEDGE_POLY_S", "60"))
         for pair in pairs:
             try:
                 kick = _iso(pair.get("kickoff"))
-                pinned = pair["poly_slug"]
-                geo = _hedge_geom(pinned, pair.get("poly_side") or "no")
+                cfg_slug, cfg_side = pair["poly_slug"], (pair.get("poly_side") or "no")
+                # THE PAIR IS KEYED TO THE GAME, NOT A SLUG (Rob, Sep 15 2026). The WORKING slug/contract
+                # lives in state under the config slug: whichever rung the Ferrari is seated on when Gemini
+                # is flat, or the rung Gemini already holds. Mirror on THAT contract.
+                st_all = _state_load(); stp = st_all.setdefault(cfg_slug, {})
+                pinned = stp.get("gem_slug") or cfg_slug
+                if pinned != cfg_slug:
+                    pair = dict(pair, poly_slug=pinned, gemini_symbol=stp["gem_symbol"], gemini_match_outcome=stp["gem_match"],
+                                hedge_outcome=hc.opposite(stp["gem_match"])); pair.pop("poly_cost", None)
+                geo = _hedge_geom(pinned, cfg_side)
                 if poly_due or geo["prefix"] not in _poly_cache["by_slug"]:
                     _poly_cache["by_slug"][geo["prefix"]] = poly_game(pc, geo["prefix"])
                 game = _poly_cache["by_slug"][geo["prefix"]]
                 gs = gem_state(pair["gemini_symbol"], pair["hedge_outcome"])
                 ps = game.get(pinned) or parse_poly([], None, pinned)
-                # THE RE-RUNG (Rob, Sep 15 2026): the Ferrari sold and re-seated one rung over. If we HOLD the
-                # Gemini leg, follow its seat on the same side at the mirror rung or a MIDDLE — never a 'side'.
+                if ps.get("side") is None and gs["held"] < 1:
+                    # GEMINI FLAT, no Poly leg on our rung: "it can rerung to whatever it pleases… and then if it
+                    # rerungs at −4.5, gemini should now try to pair at +4.5" — find the Ferrari's seat on this game
+                    # (our side, ANY rung — both pending, any rung is fine) and move to ITS Gemini twin.
+                    for s2, p2 in sorted(game.items()):
+                        if s2 == pinned or p2.get("error") or p2.get("side") != cfg_side:
+                            continue
+                        m = map_lookup(s2, cfg_side)
+                        if not m:
+                            log.warning("%s: Ferrari seated on %s but the venue map has no Gemini twin — cannot pair", cfg_slug[-28:], s2[-12:]); continue
+                        old_sym = pair["gemini_symbol"]
+                        if m[0] != old_sym:
+                            _cancel_ours(old_sym, live, f"following the Ferrari to {s2[-12:]}")
+                        stp.update(gem_slug=s2, gem_symbol=m[0], gem_match=m[1]); _state_save(st_all)
+                        pair = dict(pair, poly_slug=s2, gemini_symbol=m[0], gemini_match_outcome=m[1], hedge_outcome=hc.opposite(m[1]))
+                        pair.pop("poly_cost", None)
+                        pinned, geo, ps = s2, _hedge_geom(s2, cfg_side), p2
+                        SOCK.want({m[0]})
+                        gs = gem_state(m[0], pair["hedge_outcome"], force_rest=True)
+                        log.info("%s: Gemini flat → following the Ferrari's seat to %s ↔ %s %s", cfg_slug[-28:], s2[-12:], m[0], pair["hedge_outcome"].upper())
+                        _led(kind="follow", pair=s2, from_slug=cfg_slug, gemini_symbol=m[0])
+                        break
+                # THE RE-RUNG WHILE HELD (Rob, Sep 15 2026): the Ferrari sold and re-seated one rung over. If we HOLD
+                # the Gemini leg, follow its seat on the same side at the mirror rung or a MIDDLE — never a 'side'.
                 if ps.get("side") is None and gs["held"] >= 1:
                     for s2, p2 in sorted(game.items()):
                         if s2 == pinned or p2.get("error") or p2.get("side") is None:
