@@ -1166,10 +1166,20 @@ earned a Cloudflare 1015 on Sep 6); kill switch `machine_flags
 recenter_enabled=false`. **A MOVE MUST BENEFIT THE SEAT (Rob, Sep 15
 2026): `_gridiron_move_favorable` — favorite down, dog up, over down,
 under up, else `unfavorable` and stay; a value-side flip is `side_flip`
-(not a rung jump — stays). PAIRED seats move the same way and the Gemini
-twin STAYS on its rung ("maintain the pair… a hedge PLUS a middle"); the
-Lambo re-keys the pair to the new Poly slug (`gemini_hedge.successor_slug`;
-docs/gemini-predictions-recon.md RUNG JUMPS).** Dry-run: call it with a client whose
+(not a rung jump — stays). **THE PAIR RE-RUNG LAW (Rob, Sep 15 2026, after
+the Ferrari sold NYJ +5.5 and re-seated NYJ +4.5 against a HELD Gemini
+GB −5.5 — GB by exactly 5 loses both): "if they are BOTH pending, re-rung
+is fine… ya can't re-rung when you hold one"; with a leg HELD, the other
+venue's seat may sit only at the MIRROR rung or a MIDDLE (dog up, favorite
+down) — `_hedge_rung_ok` inside `_gridiron_seat_legal`, fed by
+`hedge_pairs` (the Lambo writes `game_prefix/gem_side/gem_rv/gem_cost`
+whenever it holds a Gemini leg, Poly leg or not; fail-open when no row);
+the 100.5 pair cap applies at every football price site
+(`_hedge_cap_c`/`_gridiron_cap_for`: executor, chase, sniper, top-up); and
+a HELD split-rung pair (`middle`) rides with NO ask on either venue —
+`_hedged_ask_off` returns True at any hour ("the middle pays 3x bet, rent
+isn't even close"). The Lambo FOLLOWS a legal Poly re-rung on the same
+game (`poly_game` + `_rerung_ok`) and refuses a backwards one aloud.** Dry-run: call it with a client whose
 `orders.cancel` raises — `errors[]` then lists every would-move with
 rv/center/bound/target.
 (h) **FOOTBALL GHOST ADOPTION (Sep 5 2026, docket #6 root fix):** the
