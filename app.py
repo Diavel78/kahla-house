@@ -28303,19 +28303,70 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                             > _OU_NOVETO_MIN_MIN)
                     except Exception:
                         _noveto_chase = False
+                # football holds the machine-wide 60¢ entry cap; everything
+                # else keeps the Y/NRFI 64¢ guardrail
+                _cap_c = (_gridiron_cap_for(sb, f.get("slug") or "") if _is_gridiron
+                          else _REPEG_NRFI_PRICE_CAP_C)
+                _flipped, _flip_to = False, None
+
+                def _try_side_flip():
+                    """SIDE FLIP (Aug 31 2026 at the cap; Sep 15 2026 at the
+                    model wall too -- Rob: "BOTH sides can't be off... if
+                    you hit the model number, switch sides"). One market,
+                    two sides, fairs sum to 100 and the bids can't cross,
+                    so when OUR side is past the model the OTHER side sits
+                    at or under its own model, cheap, and pays the same
+                    rent. ML + O/U; one flip per bet per hour; the new-side
+                    peg must clear the 25¢ floor and the cap, else the
+                    caller clamps. Sets new_c / _flipped / _flip_to and
+                    flips f["synthetic"]; returns True on a flip."""
+                    nonlocal new_c, _flipped, _flip_to
+                    if not (_noveto_chase and old_c is not None
+                            and f.get("market_type") in ("moneyline", "total")
+                            and f.get("best_ask_c") is not None):
+                        return False
+                    _fl_prev = blob.get("side_flip") or {}
+                    try:
+                        if _fl_prev.get("at") and (
+                                now - datetime.fromisoformat(str(_fl_prev["at"]))
+                                ) < timedelta(hours=1):
+                            return False
+                    except Exception:
+                        pass
+                    _to = {("moneyline", "home"): "away",
+                           ("moneyline", "away"): "home",
+                           ("total", "over"): "under",
+                           ("total", "under"): "over"}.get(
+                        (f.get("market_type"), (r.get("side") or "").lower()))
+                    _nb_bid = 100.0 - float(f["best_ask_c"])
+                    _nb_ask = (100.0 - float(f["best_bid_c"])
+                               if f.get("best_bid_c") is not None else None)
+                    _pt = _grid_dn(_nb_bid, _tkr) + _tkr
+                    if _nb_ask is not None and _pt >= _nb_ask:
+                        _pt = _grid_dn(_nb_bid, _tkr)
+                    if not (_to and _OU_TRADER_MIN_ENTRY_C <= _pt <= _cap_c):
+                        return False
+                    new_c = _pt
+                    f["synthetic"] = not f.get("synthetic")
+                    _flipped, _flip_to = True, _to
+                    return True
+
                 # THE MODEL WALL (Sep 15 2026): a no-veto MLB moneyline
-                # chase follows the touch UP TO THE MODEL and no further --
-                # clamp to the wall, and when the wall is at or under where
-                # the bid already rests, stop (once). Totals have no model
-                # by the July-4 ruling; football rungs sit past the model
-                # line by the line rule -- both keep the cap alone here.
+                # chase follows the touch UP TO THE MODEL (+ noveto_wall_pp)
+                # and no further. Past it: FLIP to the other side first
+                # (by construction under its own model); else clamp to the
+                # wall; else stop (once). Totals have no model by the
+                # July-4 ruling; football rungs sit past the model line by
+                # the line rule -- both keep the cap alone here.
                 if (_noveto_chase and new_c is not None and old_c is not None
                         and f.get("market_type") == "moneyline"
                         and not _is_gridiron):
                     _wall_c = _ml_model_wall_c(sb, r)
                     if _wall_c is not None and new_c > _wall_c + 1e-9:
                         _wc = _grid_dn(_wall_c, _tkr)
-                        if _wc > old_c + 0.26:
+                        if _try_side_flip():
+                            res["wall_flips"] = res.get("wall_flips", 0) + 1
+                        elif _wc > old_c + 0.26:
                             new_c = _wc
                             res["walled_model"] = res.get("walled_model", 0) + 1
                         else:
@@ -28330,11 +28381,6 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                                 res["stopped"] += 1
                             continue
                 # -- stop conditions (once-per-level Telegram, order stays) --
-                # football holds the machine-wide 60¢ entry cap; everything
-                # else keeps the Y/NRFI 64¢ guardrail
-                _cap_c = (_gridiron_cap_for(sb, f.get("slug") or "") if _is_gridiron
-                          else _REPEG_NRFI_PRICE_CAP_C)
-                _flipped, _flip_to = False, None
                 if new_c is not None and new_c > _cap_c:
                     # SIDE FLIP AT THE CAP (Aug 31 2026, user: "we hit the
                     # cap — if it's that high, wouldn't the other side be
@@ -28349,37 +28395,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                     # hovering at the boundary can't seesaw; new-side peg
                     # must clear the 25¢ fill-viability floor or we fall
                     # back to the clamp.
-                    if (_noveto_chase and old_c is not None
-                            and f.get("market_type") in ("moneyline", "total")
-                            and f.get("best_ask_c") is not None):
-                        _fl_prev = blob.get("side_flip") or {}
-                        _fl_ok = True
-                        try:
-                            if _fl_prev.get("at") and (
-                                    now - datetime.fromisoformat(
-                                        str(_fl_prev["at"]))
-                                    ) < timedelta(hours=1):
-                                _fl_ok = False
-                        except Exception:
-                            pass
-                        _flip_to = {("moneyline", "home"): "away",
-                                    ("moneyline", "away"): "home",
-                                    ("total", "over"): "under",
-                                    ("total", "under"): "over"}.get(
-                            (f.get("market_type"),
-                             (r.get("side") or "").lower()))
-                        _nb_bid = 100.0 - float(f["best_ask_c"])
-                        _nb_ask = (100.0 - float(f["best_bid_c"])
-                                   if f.get("best_bid_c") is not None
-                                   else None)
-                        _pt = _grid_dn(_nb_bid, _tkr) + _tkr
-                        if _nb_ask is not None and _pt >= _nb_ask:
-                            _pt = _grid_dn(_nb_bid, _tkr)
-                        if (_fl_ok and _flip_to
-                                and _OU_TRADER_MIN_ENTRY_C <= _pt <= _cap_c):
-                            new_c = _pt
-                            f["synthetic"] = not f.get("synthetic")
-                            _flipped = True
+                    _try_side_flip()
                     # A touch above the cap used to FREEZE the order
                     # wherever it sat (the LAD ML: bid 66, cap 64, order
                     # parked at 53 — 13 ticks of dead rest). On a no-veto
@@ -28665,9 +28681,13 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                     nb["side_flip"] = {"at": now.isoformat(),
                                        "from": (r.get("side") or ""),
                                        "to": _flip_to}
+                    _why_flip = ("the model wall" if res.get("wall_flips")
+                                 else f"the {round(_cap_c)}¢ cap")
+                    nb["side_flip"]["why"] = ("wall" if res.get("wall_flips")
+                                              else "cap")
                     _send_fill_telegram(
-                        f"🔁 SIDE FLIP — {ev} {mlbl}: {side} hit the "
-                        f"{round(_cap_c)}¢ cap → now {_flip_to.upper()} at "
+                        f"🔁 SIDE FLIP — {ev} {mlbl}: {side} hit "
+                        f"{_why_flip} → now {_flip_to.upper()} at "
                         f"{round(new_c)}¢. Same market, same rent, "
                         f"cheaper seat.")
                 try:
