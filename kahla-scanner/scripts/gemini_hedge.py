@@ -507,6 +507,10 @@ def ask_px(cost: float, h_bid, h_ask, at_cost: bool = False):
         px = round(h_bid + 0.01, 2)
     if h_ask is not None and px > h_ask + 1e-9:
         px = round(h_ask, 2)
+    # NEVER UNDER COST (Sep 16 2026): a best ask below our cost used to drag the sell down to it
+    # (held @0.45, market ask 0.44 -> we rested 0.44). Cost is the floor; behind the touch is fine.
+    if px < round(cost, 2) - 1e-9:
+        px = round(cost, 2)
     return px
 
 
@@ -740,6 +744,8 @@ def _selftest():
     # ask never through the ask, one tick over a bid at/above cost
     assert abs(ask_px(0.43, 0.45, 0.60) - 0.46) < 1e-9
     assert abs(ask_px(0.59, 0.40, 0.60) - 0.59) < 1e-9        # cost+1 would only JOIN the ask → rest at cost
+    assert abs(ask_px(0.45, 0.40, 0.44) - 0.45) < 1e-9        # market ask UNDER cost → rest at cost, never below (Sep 16)
+    assert abs(ask_px(0.45, 0.40, 0.44, at_cost=True) - 0.45) < 1e-9
     # the re-rung rule (Rob, Sep 15 2026): Gemini holds GB −5.5 (Poly leg = NYJ = 'no' = home)
     geo = _hedge_geom("asc-nfl-gb-nyj-2026-09-20-neg-5pt5", "no")
     assert geo == {"prefix": "asc-nfl-gb-nyj-2026-09-20", "poly_name": "home", "gem_side": "away", "gem_rv": 5.5}, geo
