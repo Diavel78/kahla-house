@@ -26284,6 +26284,33 @@ def _gridiron_cap_for(sb, slug: str) -> float:
     return _GRIDIRON_MAX_ENTRY_C if hc is None else min(_GRIDIRON_MAX_ENTRY_C, hc)
 
 
+_HEDGE_FLOOR_CACHE: dict = {"at": 0.0, "map": {}}
+
+
+def _hedge_pair_floor_c(sb, slug: str, tick: float):
+    """PAIRED = THE CAP COMPLEMENT IS THE FLOOR (Rob, Sep 16 2026: "if it's a pair, the correct
+    math is 101, not necessarily the cost... unless it's not paired anymore, then it's cost").
+    When this Poly slug is PAIRED (hedge_pairs.paired_qty ≥ 1) the leg is worth
+    pair_cap − the Gemini leg's cost to us, so its ask never rests under that; the caller
+    takes max(cost floor, this). None = not paired / unreadable (fail-open to the cost floor).
+    60s cache. The Lambo applies the mirror rule on its side."""
+    try:
+        if _time.time() - _HEDGE_FLOOR_CACHE["at"] > 60:
+            rows = (sb.table("hedge_pairs").select("poly_slug,paired_qty,gem_cost,pair_cap")
+                    .gte("paired_qty", 1).limit(500).execute().data) or []
+            _HEDGE_FLOOR_CACHE["map"] = {
+                r["poly_slug"]: (float(r["gem_cost"]), float(r.get("pair_cap") or _HEDGE_PAIR_CAP))
+                for r in rows if r.get("gem_cost") is not None}
+            _HEDGE_FLOOR_CACHE["at"] = _time.time()
+        hit = _HEDGE_FLOOR_CACHE["map"].get(slug)
+        if not hit:
+            return None
+        gem_cost, cap = hit
+        return min(99.0, _grid_up(cap * 100.0 - gem_cost * 100.0, tick))
+    except Exception:
+        return None
+
+
 def _hedged_ask_off(sb, slug: str, event_start, now) -> bool:
     """True when this Poly slug carries a HELD Gemini hedge leg (hedge_pairs, written by the
     Lambo — kahla-scanner/scripts/gemini_hedge.py) and we are inside T-60 of kickoff. The scalp
@@ -26833,6 +26860,9 @@ def _fast_ask_one(sb, client, slug: str, buy_intent: str) -> None:
             return
         tick = _pmm_tick_c(client, slug)
         floor_c = min(99.0, _grid_up(entry_c, tick))
+        _pfc = _hedge_pair_floor_c(sb, slug, tick)      # paired leg: cap complement (Sep 16 2026)
+        if _pfc is not None and _pfc > floor_c:
+            floor_c = _pfc
         bk = _ws_depth(slug) or _pmm_book(client, slug)
         if synth and bk:
             bk = _invert_book(bk)
@@ -27273,6 +27303,9 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # extra tick of exit price and rested a tick behind the true grid.
         tick = _pmm_tick_c(client, slug)
         floor_c = min(99.0, _grid_up(entry_c, tick))
+        _pfc = _hedge_pair_floor_c(sb, slug, tick)      # paired leg: cap complement (Sep 16 2026)
+        if _pfc is not None and _pfc > floor_c:
+            floor_c = _pfc
         # IN-PLAY = DUMP AT MONEY-BACK (user policy, Aug 27 night: "The
         # only thing that survives a game going live is the scalp...
         # Dump it as soon as we get our money back"). Pre-game the ask

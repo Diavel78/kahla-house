@@ -688,7 +688,16 @@ def run(live: bool, once: bool):
                         # Never sell one side late and wreck the pair. (Only the un-paired surplus keeps an ask.)
                         cost = None
                     else:
-                        px = ask_px(cost, h_bid, h_ask, at_cost=(t30 and surplus > 0.5))
+                        # PAIRED = THE CAP COMPLEMENT IS THE FLOOR (Rob, Sep 16 2026: "if it's a pair, the
+                        # correct math is 101, not necessarily the cost... unless it's not paired anymore,
+                        # then it's cost"). Holding Poly at p, this leg is worth pair_cap − p to us (the most
+                        # we'd pay to re-pair), so selling under that is a losing rinse. Unpaired: cost.
+                        ask_base = cost
+                        if paired_qty >= 1 and cost_own is not None:
+                            import math as _m
+                            pair_floor = _m.ceil((float(pair.get("max_pair_cost", 1.01)) - float(cost_own)) * 100.0 - 1e-6) / 100.0
+                            ask_base = max(cost, round(pair_floor, 2))
+                        px = ask_px(ask_base, h_bid, h_ask, at_cost=(t30 and surplus > 0.5))
                     if cost is not None:
                         # after T-60 only the un-paired surplus may carry an ask; before it, everything held does
                         ask_qty = round(gs["held"] - paired_qty, 4) if t60 else round(gs["held"], 4)
