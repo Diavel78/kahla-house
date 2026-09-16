@@ -19958,7 +19958,7 @@ def _gridiron_try_bet_impl(sb, g, es0, d, mt, gp, contracts=None):
         # but it's paired, it has to follow the rules, so it rests at 55.5. What's the problem."
         # A legal rung whose touch prices over the pair cap rests AT the cap (one tick behind the
         # touch, less rent, still paired) — the same shape as the chase clamping at the 60¢ cap.
-        _hcap = 100.5 - float(_hg["gem_cost"]) * 100.0
+        _hcap = float(_hg.get("pair_cap") or _HEDGE_PAIR_CAP) * 100.0 - float(_hg["gem_cost"]) * 100.0
         _clamped = []
         for c in paying:
             if c[1] > _hcap + 1e-9:
@@ -26042,6 +26042,9 @@ def _rent_cull_tick(sb, now, client=None, orders=None) -> dict:
 _HEDGE_PAIRS_CACHE: dict = {"at": 0.0, "map": {}}
 _HEDGE_ASK_OFF_MIN = 60          # Rob, Sep 14 2026: both sells off at T-60, hedge rides
 _HEDGE_HELD_CACHE: dict = {"at": 0.0, "map": {}}
+_HEDGE_PAIR_CAP = 1.01   # Rob, Sep 15 2026: "101 across the board" — worst case 20¢ on a 20-lot pair; the line
+                         # moves are a fair coin over many pairs, and an uncompleted pair is a naked leg. The
+                         # Lambo writes each pair's own cap (hedge_pairs.pair_cap, from its config); this is the default.
 
 
 def _hedge_held_for_game(sb, prefix):
@@ -26056,7 +26059,7 @@ def _hedge_held_for_game(sb, prefix):
     try:
         if _time.time() - _HEDGE_HELD_CACHE["at"] > 60:
             rows = (sb.table("hedge_pairs")
-                    .select("poly_slug,game_prefix,gem_side,gem_rv,gemini_held,gem_cost,poly_rv,middle")
+                    .select("poly_slug,game_prefix,gem_side,gem_rv,gemini_held,gem_cost,poly_rv,middle,pair_cap")
                     .gte("gemini_held", 1).limit(500).execute().data) or []
             m = {}
             for r in rows:
@@ -26065,7 +26068,8 @@ def _hedge_held_for_game(sb, prefix):
                                            "gem_rv": float(r["gem_rv"]),
                                            "gem_cost": (float(r["gem_cost"]) if r.get("gem_cost") is not None else None),
                                            "gemini_held": float(r.get("gemini_held") or 0),
-                                           "middle": bool(r.get("middle"))}
+                                           "middle": bool(r.get("middle")),
+                                           "pair_cap": (float(r["pair_cap"]) if r.get("pair_cap") is not None else _HEDGE_PAIR_CAP)}
             _HEDGE_HELD_CACHE["map"] = m
             _HEDGE_HELD_CACHE["at"] = _time.time()
         return _HEDGE_HELD_CACHE["map"].get(prefix)
@@ -26074,9 +26078,10 @@ def _hedge_held_for_game(sb, prefix):
 
 
 def _hedge_cap_c(sb, slug: str):
-    """THE 100.5 RULE ON A RE-RUNG (Rob, Sep 15 2026: "maintain the 100.5 rule
-    if you rerung"): with a Gemini leg HELD on this football game, a Poly bid
-    may not price above 100.5¢ − the Gemini leg's cost. None = no held leg,
+    """THE PAIR CAP ON A RE-RUNG (Rob, Sep 15 2026: "maintain the 100.5 rule if
+    you rerung", then "101 across the board"): with a Gemini leg HELD on this
+    football game, a Poly bid may not price above the pair cap − the Gemini
+    leg's cost (the executor CLAMPS to it, never refuses). None = no held leg,
     no cap (fail-open)."""
     try:
         if not slug or not slug.startswith(("asc-nfl-", "asc-cfb-")):
@@ -26089,7 +26094,7 @@ def _hedge_cap_c(sb, slug: str):
         h = _hedge_held_for_game(sb, prefix) if prefix else None
         if not h or h.get("gem_cost") is None:
             return None
-        return round(100.5 - float(h["gem_cost"]) * 100.0, 1)
+        return round(float(h.get("pair_cap") or _HEDGE_PAIR_CAP) * 100.0 - float(h["gem_cost"]) * 100.0, 1)
     except Exception:
         return None
 

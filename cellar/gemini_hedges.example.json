@@ -8,7 +8,7 @@
   "rent_leg": true,
   "max_rest_gap": 0.03,
   "kickoff": "2026-09-20T17:00:00Z",
-  "max_pair_cost": 1.005,
+  "max_pair_cost": 1.01,
   "budget_usd": 12.0,
   "note": "TEST PAIR 2 (Sep 14 eve): Poly NYJ +5.5 bid 54.5c x20 (BUY_SHORT, the Ferrari's seat) <-> Gemini GB -5.5 (YES on GB5) bid at Gemini's touch 44c",
   "poly_cost": 0.555

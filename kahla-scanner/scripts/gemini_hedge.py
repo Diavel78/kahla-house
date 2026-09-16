@@ -489,7 +489,7 @@ PSQL = "/Applications/Postgres.app/Contents/Versions/latest/bin/psql"
 
 HEDGE_DDL = """alter table hedge_pairs add column if not exists game_prefix text, add column if not exists gem_side text,
 add column if not exists gem_rv numeric, add column if not exists gem_cost numeric, add column if not exists poly_rv numeric,
-add column if not exists middle boolean not null default false; notify pgrst, 'reload schema';"""
+add column if not exists middle boolean not null default false, add column if not exists pair_cap numeric; notify pgrst, 'reload schema';"""
 
 
 def _psql(sql: str) -> None:
@@ -516,7 +516,7 @@ def _num(x):
 
 def _write_hedge_pair(poly_slug: str, gemini_symbol: str, paired_qty: float, poly_filled: float,
                       gemini_held: float, kickoff, geo: dict | None = None, gem_cost=None,
-                      poly_rv=None, middle: bool = False) -> None:
+                      poly_rv=None, middle: bool = False, pair_cap=None) -> None:
     """The Ferrari's view of this pair (app._hedged_ask_off / _hedge_rung_ok / _hedge_cap_c).
     The row LIVES while the Lambo holds its leg (gemini_held ≥ 1) or the pair is on — a held
     Gemini leg with no Poly leg is exactly the state that must constrain the Ferrari's re-seat.
@@ -524,16 +524,16 @@ def _write_hedge_pair(poly_slug: str, gemini_symbol: str, paired_qty: float, pol
     geo = geo or {}
     if gemini_held >= 1 or paired_qty >= 1:
         sql = ("insert into hedge_pairs (poly_slug,gemini_symbol,paired_qty,poly_filled,gemini_held,kickoff,updated_at,"
-               "game_prefix,gem_side,gem_rv,gem_cost,poly_rv,middle) "
+               "game_prefix,gem_side,gem_rv,gem_cost,poly_rv,middle,pair_cap) "
                f"values ('{poly_slug}','{gemini_symbol}',{paired_qty},{poly_filled},{gemini_held},"
                + (f"'{kickoff}'" if kickoff else "null") + ",now(),"
                + (f"'{geo['prefix']}'" if geo.get("prefix") else "null") + ","
                + (f"'{geo['gem_side']}'" if geo.get("gem_side") else "null") + ","
-               f"{_num(geo.get('gem_rv'))},{_num(gem_cost)},{_num(poly_rv)},{'true' if middle else 'false'}) "
+               f"{_num(geo.get('gem_rv'))},{_num(gem_cost)},{_num(poly_rv)},{'true' if middle else 'false'},{_num(pair_cap)}) "
                "on conflict (poly_slug) do update set paired_qty=excluded.paired_qty, poly_filled=excluded.poly_filled, "
                "gemini_held=excluded.gemini_held, gemini_symbol=excluded.gemini_symbol, kickoff=excluded.kickoff, "
                "game_prefix=excluded.game_prefix, gem_side=excluded.gem_side, gem_rv=excluded.gem_rv, gem_cost=excluded.gem_cost, "
-               "poly_rv=excluded.poly_rv, middle=excluded.middle, updated_at=now();")
+               "poly_rv=excluded.poly_rv, middle=excluded.middle, pair_cap=excluded.pair_cap, updated_at=now();")
         if geo.get("prefix"):
             sql += f" delete from hedge_pairs where game_prefix='{geo['prefix']}' and poly_slug<>'{poly_slug}';"
     else:
@@ -623,7 +623,7 @@ def run(live: bool, once: bool):
                         # no Poly leg, Gemini HELD: the Ferrari must know (its re-seat is now constrained),
                         # and our own ask at cost keeps working below (rinse at cost).
                         try:
-                            _write_hedge_pair(pinned, pair["gemini_symbol"], 0, 0, gs["held"], pair.get("kickoff"), geo, gs.get("held_avg"), None, False)
+                            _write_hedge_pair(pinned, pair["gemini_symbol"], 0, 0, gs["held"], pair.get("kickoff"), geo, gs.get("held_avg"), None, False, pair.get("max_pair_cost", 1.01))
                         except Exception as ex:
                             log.warning("hedge_pairs write failed: %s", str(ex)[:120])
                         poly_side = pair.get("poly_side")
@@ -652,7 +652,7 @@ def run(live: bool, once: bool):
                     log.error("%s: Poly leg filled but its cost is unknown (no tracked resting price, no poly_cost) — urgent leg REFUSED", pair["poly_slug"][-28:])
                     pl.hedge_qty_now = 0.0
                 held_px = cost_own if cost_own is not None else poly_px
-                cap = round(min(float(pair.get("max_pair_cost", 1.00)) - held_px, 0.99), 2)   # urgent leg prices off OUR fill price, never the venue blend
+                cap = round(min(float(pair.get("max_pair_cost", 1.01)) - held_px, 0.99), 2)   # urgent leg prices off OUR fill price, never the venue blend
                 started = kick is not None and now >= kick
                 t30 = kick is not None and now >= kick - dt.timedelta(minutes=int(pair.get("flatten_min", 30)))
                 t60 = kick is not None and now >= kick - dt.timedelta(minutes=int(pair.get("ask_off_min", 60)))
@@ -705,7 +705,7 @@ def run(live: bool, once: bool):
                     _pq = min(gs["held"], ps["filled_qty"])
                     _mid = _pq >= 1 and poly_rv is not None and geo.get("gem_rv") is not None and abs(poly_rv - geo["gem_rv"]) > 0.01
                     _write_hedge_pair(pair["poly_slug"], pair["gemini_symbol"], _pq, ps["filled_qty"], gs["held"], pair.get("kickoff"),
-                                      geo, gs.get("held_avg"), poly_rv, _mid)
+                                      geo, gs.get("held_avg"), poly_rv, _mid, pair.get("max_pair_cost", 1.01))
                 except Exception as ex:
                     log.warning("hedge_pairs write failed: %s", str(ex)[:120])
                 gem_sync(pair, want_rest, pl.rest_price, urgent, urgent_px, live, flat_qty, flat_px)
