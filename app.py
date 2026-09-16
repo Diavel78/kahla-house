@@ -19953,9 +19953,19 @@ def _gridiron_try_bet_impl(sb, g, es0, d, mt, gp, contracts=None):
     virgin_w = [v for v in pay_virgin if _seat_ok(v[0], _rungv(v[0], v[2]))
                 and (value_side is None or v[0] == value_side)]
     _hg = _rule.get("hedge") or {}
-    if _hg.get("gem_cost") is not None:      # the 100.5 rule on a re-rung (Rob, Sep 15 2026)
+    if _hg.get("gem_cost") is not None:
+        # THE 100.5 RULE ON A RE-RUNG (Rob, Sep 15 2026) — CLAMP, never refuse: "Maker touch is 56,
+        # but it's paired, it has to follow the rules, so it rests at 55.5. What's the problem."
+        # A legal rung whose touch prices over the pair cap rests AT the cap (one tick behind the
+        # touch, less rent, still paired) — the same shape as the chase clamping at the 60¢ cap.
         _hcap = 100.5 - float(_hg["gem_cost"]) * 100.0
-        paying = [c for c in paying if c[1] <= _hcap + 1e-9]
+        _clamped = []
+        for c in paying:
+            if c[1] > _hcap + 1e-9:
+                _tk_c = _TICK_CACHE.get(((c[2] or {}).get("slug") or "")) or 1.0
+                c = (c[0], _grid_dn(_hcap, _tk_c), c[2], c[3], c[4])
+            _clamped.append(c)
+        paying = [c for c in _clamped if c[1] > 0]
     if not paying:
         # No BOOKED paying rung inside the window — try seeding a
         # windowed virgin one (our own line at model fair−6).
