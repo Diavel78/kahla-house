@@ -8438,6 +8438,10 @@ _SLUG_SPORT_TOKENS = (("-mlb-", "MLB"), ("-nfl-", "NFL"), ("-cfb-", "NCAAF"),
 _AUTOLOG_UNKNOWN_BUDGET_S = 45.0
 
 
+_AUTOLOG_MAX_REMOVALS = 8        # Sep 15 2026: deletes per walk; 193 in 14 min was a partial positions read
+_AUTOLOG_MAP_MIN_FRAC = 0.6      # a positions map < 60% of the book's filled picks is not truth
+
+
 def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dict:
     """Reconcile the admin's POLYMARKET book into bot_picks — the Poly analog
     of `_kalshi_autolog` (dual-venue, July 2026 revert). USER RULE: "I bet on
@@ -8541,6 +8545,43 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
         if _suspect_empty:
             out["removal_skipped"] = "positions_empty_suspect"
     if orders is not None and positions is not None and not _suspect_empty:
+        # ⚠ THE PARTIAL-MAP STORM (Sep 15 2026, 13:48-14:02 AZ): the EMPTY-map
+        # guard above passed a positions map that was merely SHORT, and one
+        # walk deleted 193 filled picks as "sold pre-game" — 147 of them
+        # still held on the venue. The opener/OMS then re-bet the "unbet"
+        # games (20-lots became 40s) and the re-adopted bare rows carried the
+        # venue's blended avgPx as their cost. Three rules now, all fail-
+        # CLOSED on delete: (a) removals price off a FRESH venue positions
+        # read taken HERE, never the lap's snapshot/mirror; (b) a map holding
+        # fewer than _AUTOLOG_MAP_MIN_FRAC of the book's filled picks is
+        # not truth — skip; (c) at most _AUTOLOG_MAX_REMOVALS deletes per
+        # walk — a real sold-out day is a handful, a hundred is a bad read.
+        try:
+            _fresh_pos = _pmm_positions_raw(client, fresh=True) if client is not None else None
+        except Exception:
+            _fresh_pos = None
+        if _fresh_pos is None:
+            out["removal_skipped"] = "positions_fresh_read_failed"
+            _suspect_empty = True
+        else:
+            positions = _fresh_pos
+            try:
+                _nf = (sb.table("bot_picks").select("id", count="exact")
+                       .eq("asked_by", owner_uid).eq("status", "pending")
+                       .filter("signal_blob->>filled", "eq", "true")
+                       .limit(1).execute().count) or 0
+            except Exception:
+                _nf = None
+            if _nf is None:
+                out["removal_skipped"] = "filled_count_unreadable"
+                _suspect_empty = True
+            elif _nf >= 10 and len(positions) < _AUTOLOG_MAP_MIN_FRAC * _nf:
+                out["removal_skipped"] = f"positions_partial_suspect:{len(positions)}/{_nf}"
+                app.logger.warning("PMM-AUTOLOG removals SKIPPED: positions map %d vs %d filled picks — partial read",
+                                   len(positions), _nf)
+                _suspect_empty = True
+    _removals_this_walk = 0
+    if orders is not None and positions is not None and not _suspect_empty:
         backed = {o["slug"] for o in orders if o.get("slug")}
         backed |= set(positions.keys())
         try:
@@ -8556,6 +8597,12 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                                      # every position look unbooked → 68 dup
                                      # adoption rows in one afternoon
         for a in (autos if autos_ok else []):
+            if _removals_this_walk >= _AUTOLOG_MAX_REMOVALS:
+                if out.get("removal_skipped") != "removal_cap":
+                    out["removal_skipped"] = "removal_cap"
+                    app.logger.warning("PMM-AUTOLOG removal cap %d hit this walk — the rest stay; a storm is a bad read, not a sell-off",
+                                       _AUTOLOG_MAX_REMOVALS)
+                break
             blob = a.get("signal_blob") or {}
             # MACHINE rows only (Aug 5 2026 — the Wesneski/Jones gap: the
             # sweep matched query_text='auto-logged from Polymarket'
@@ -8602,6 +8649,7 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                 reason = "never-filled"
             try:
                 sb.table("bot_picks").delete().eq("id", a["id"]).execute()
+                _removals_this_walk += 1
                 out["removed"] = out.get("removed", 0) + 1
                 app.logger.info("PMM-AUTOLOG removed %s %s (%s)", reason, a["id"], slug)
                 # UN-LATCH the opener eval (Aug 5 2026 — self-healing lost
@@ -16793,7 +16841,12 @@ def _diamond_ml(sb, event_name, away_sp_name, home_sp_name):
     return (xh ** k) / (xh ** k + xa ** k)
 
 
-def _peg_target(bid_c, ask_c, fair_c, join=False, tick=1.0):
+_ML_ENTRY_CAP_C = 60.0    # Sep 15 2026 (Rob: "what model has THE ROYALS at 64%?"): an MLB moneyline SEAT
+                          # never opens above 60¢ — dogs and near-pickems only, favorites shadow. The Y/NRFI
+                          # 64¢ guardrail stays NRFI's; the CHASE may still follow a seat up to its own cap.
+
+
+def _peg_target(bid_c, ask_c, fair_c, join=False, tick=1.0, cap_c=None):
     """(side_c, entry_edge) — the cheap-first GRID-NATIVE peg with every
     gate applied (bid + one tick; one-tick book → join; virgin book →
     fair−6 anchor; entry cap; ≥2.5pp edge floor). (None, None) = pass.
@@ -16817,7 +16870,7 @@ def _peg_target(bid_c, ask_c, fair_c, join=False, tick=1.0):
         if ask_c is not None and t >= ask_c:
             t = _grid_up(ask_c, tick) - tick
     e = fair_c - t
-    if t <= 0 or t > _REPEG_NRFI_PRICE_CAP_C or e < 2.5:
+    if t <= 0 or t > (cap_c if cap_c is not None else _REPEG_NRFI_PRICE_CAP_C) or e < 2.5:
         return None, None
     return t, e
 
@@ -17386,6 +17439,22 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
             return _fail("mine_q")
         if mine:
             return _fail("dedup")
+    # HOLDS-POSITION GUARD (Sep 15 2026 — the 40-lot class): the pick-row dedup
+    # is only as good as the pick rows, and a bad positions read deleted 193
+    # of them today; the opener then bought Angels/Red Sox/UFC games it already
+    # held 20 of. The venue's own position is the last word — a slug we hold
+    # (either side, ≥1 contract) is never seated again by this path (the seat
+    # top-up owns "held less than stake"; a scalped-out slug reads 0 and
+    # re-enters normally). Mirror read is fine here — a stale "held" only
+    # delays a re-entry, never doubles a position.
+    try:
+        _hp = _pmm_positions_raw(get_client(), fresh=False)
+        _hn = float(((_hp or {}).get(slug) or {}).get("net") or 0) if _hp else 0.0
+    except Exception:
+        _hn = 0.0
+    if abs(_hn) >= 1.0:
+        app.logger.info("HOLDS-POSITION refused %s %s: venue holds %+.1f", mt, slug, _hn)
+        return _fail("holds_position")
     try:
         dt = datetime.fromisoformat(str(es).replace("Z", "+00:00"))
         gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -18296,7 +18365,8 @@ def _opener_pass(sb, now, deadline):
                                 except Exception:
                                     _tk1 = 1.0
                                 side_c0, entry_e0 = _peg_target(
-                                    _b1, _a1, fairs[_s1] * 100.0, tick=_tk1)
+                                    _b1, _a1, fairs[_s1] * 100.0, tick=_tk1,
+                                    cap_c=_ML_ENTRY_CAP_C)
                                 _ft0: list = []
                                 if side_c0 is not None:
                                     res0 = _autobet_execute(
