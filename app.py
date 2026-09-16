@@ -8439,6 +8439,8 @@ _AUTOLOG_UNKNOWN_BUDGET_S = 45.0
 
 
 _AUTOLOG_MAX_REMOVALS = 8        # Sep 15 2026: deletes per walk; 193 in 14 min was a partial positions read
+_AUTOLOG_MISS_CONFIRM_S = 600.0  # a REST miss the socket never confirmed must persist this long before a delete
+_AUTOLOG_MISS: dict = {}         # slug → monotonic of the FIRST unconfirmed REST miss
 _AUTOLOG_MAP_MIN_FRAC = 0.6      # a positions map < 60% of the book's filled picks is not truth
 
 
@@ -8638,7 +8640,23 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                 pass
             slug = blob.get("pmm_slug")
             if not slug or slug in backed:
+                _AUTOLOG_MISS.pop(slug, None)
                 continue                        # still resting or held → keep
+            # ROB'S RULE (Sep 15 2026): "REST says position disappeared + socket never
+            # observed it going to zero = do NOT delete yet. Re-query/reconcile." A delete
+            # needs POSITIVE evidence — the socket saw the position/order go to zero — or a
+            # REST miss that REPEATS across walks for _AUTOLOG_MISS_CONFIRM_S. Absence of
+            # evidence is not evidence of a sale.
+            try:
+                with _VENUE_MIRROR["lock"]:
+                    _saw_zero = slug in (_VENUE_MIRROR.get("zeroed") or {})
+            except Exception:
+                _saw_zero = False
+            if not _saw_zero:
+                _first = _AUTOLOG_MISS.setdefault(slug, _time.monotonic())
+                if _time.monotonic() - _first < _AUTOLOG_MISS_CONFIRM_S:
+                    out["removal_deferred"] = out.get("removal_deferred", 0) + 1
+                    continue                    # unconfirmed miss → keep, re-check next walk
             if blob.get("filled") is not False:
                 # Filled at some point. PRE-GAME, no order AND no position
                 # = the user SOLD/exited — remove it (July 29 Braves −1.5
@@ -8661,6 +8679,7 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
             try:
                 sb.table("bot_picks").delete().eq("id", a["id"]).execute()
                 _removals_this_walk += 1
+                _AUTOLOG_MISS.pop(slug, None)
                 out["removed"] = out.get("removed", 0) + 1
                 app.logger.info("PMM-AUTOLOG removed %s %s (%s)", reason, a["id"], slug)
                 # UN-LATCH the opener eval (Aug 5 2026 — self-healing lost
@@ -12618,6 +12637,7 @@ def _fs_last_read(uid: str, max_age_s: float):
 # cancel pass fresh=True and still go to the venue.
 import threading as _threading
 _VENUE_MIRROR = {"orders": {}, "positions": {}, "orders_at": 0.0,
+                 "zeroed": {},            # slug → monotonic when the SOCKET saw the position go to 0 (Sep 15 2026)
                  "positions_at": 0.0, "lock": _threading.Lock(),
                  "hits": 0, "misses": 0, "ws_orders": 0, "ws_positions": 0,
                  "invalidations": 0}
@@ -12703,8 +12723,10 @@ def _mirror_position_event(pv: dict) -> None:
             n = _norm_position(after)
             if n is None:
                 m["positions"].pop(slug, None)
+                m.setdefault("zeroed", {})[slug] = _time.monotonic()   # POSITIVE evidence of an exit
             else:
                 m["positions"][slug] = n
+                m.setdefault("zeroed", {}).pop(slug, None)
             m["ws_positions"] += 1
     except Exception:
         pass
