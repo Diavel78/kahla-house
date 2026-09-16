@@ -8584,6 +8584,17 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
     if orders is not None and positions is not None and not _suspect_empty:
         backed = {o["slug"] for o in orders if o.get("slug")}
         backed |= set(positions.keys())
+        # THE SOCKET KNEW (Rob, Sep 15 2026: "you trying to tell me the private
+        # websocket doesn't SHOW MY POSITIONS?"). The private feed upserts every
+        # position frame into the venue mirror; a slug the MIRROR shows held is
+        # never deleted, whatever a short REST map says. A stale "held" only
+        # keeps a pick alive one lap longer — fail-safe by construction.
+        try:
+            with _VENUE_MIRROR["lock"]:
+                backed |= {k for k, v in _VENUE_MIRROR.get("positions", {}).items()
+                           if abs(float((v or {}).get("net") or 0)) >= 1.0}
+        except Exception:
+            pass
         try:
             autos = (sb.table("bot_picks")
                      .select("id,event_start,signal_blob,query_text,"
@@ -17364,6 +17375,40 @@ def _rent_ok(slug, event_start, now, sb=None):
     return True, need
 
 
+_BOOK_MAX_OPEN_COST_USD = 2500.0   # Sep 15 2026 — the whole book's committed dollars (held at cost + resting bids); machine_flags max_open_cost_usd overrides
+
+
+def _book_exposure_usd():
+    """Dollars committed on the venue: held positions at cost + every resting BUY at its
+    own-side price. Mirror reads (socket-fed). None when either read is unavailable —
+    the caller treats None as 'stop', never as zero."""
+    try:
+        pos = _pmm_positions_raw(get_client(), fresh=False)
+        ords = _pmm_open_orders_raw(get_client(), fresh=False)
+    except Exception:
+        return None
+    if pos is None or ords is None:
+        return None
+    held = 0.0
+    for v in pos.values():
+        q = abs(float((v or {}).get("net") or 0))
+        ap = (v or {}).get("avg_price")
+        if q >= 0.01 and ap is not None:
+            held += q * float(ap)
+    bids = 0.0
+    for o in ords:
+        if not str(o.get("intent") or "").endswith(("BUY_LONG", "BUY_SHORT")):
+            continue
+        if o.get("state") not in _OPEN_ORDER_STATES:
+            continue
+        py = o.get("price_yes")
+        if py is None:
+            continue
+        px = float(py) if str(o.get("intent")).endswith("BUY_LONG") else 1.0 - float(py)
+        bids += px * float(o.get("leaves") or 0)
+    return round(held + bids, 2)
+
+
 def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
                      side_c, fair_pb, entry_edge, opener_edge,
                      bid_c, ask_c, extra_blob=None,
@@ -17455,6 +17500,23 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
     if abs(_hn) >= 1.0:
         app.logger.info("HOLDS-POSITION refused %s %s: venue holds %+.1f", mt, slug, _hn)
         return _fail("holds_position")
+    # THE BOOK CEILING (Rob, Sep 15 2026: "what if you woulda bet 9000 contracts??? And
+    # I'm just broke!"). Per-order fences (20 contracts, $13, one per slug) never bounded
+    # the BOOK: every delete storm let the opener add another 20-lot per game across
+    # ~150 games. Now: held positions at cost + every resting bid at its price must stay
+    # under machine_flags `max_open_cost_usd` (default _BOOK_MAX_OPEN_COST_USD) or no new
+    # seat opens. FAIL-CLOSED — an unreadable book is a reason to stop, not to bet.
+    _exp = _book_exposure_usd()
+    _bcap = _machine_flag_val("max_open_cost_usd", _BOOK_MAX_OPEN_COST_USD)
+    try:
+        _bcap = float(_bcap)
+    except (TypeError, ValueError):
+        _bcap = _BOOK_MAX_OPEN_COST_USD
+    _this = float(contracts or _AUTOBET_CONTRACTS) * float(side_c) / 100.0
+    if _exp is None or _exp + _this > _bcap:
+        app.logger.warning("BOOK-CAP refused %s %s: open $%s + this $%.2f > cap $%.0f",
+                           mt, slug, ("?" if _exp is None else f"{_exp:.0f}"), _this, _bcap)
+        return _fail("book_cap")
     try:
         dt = datetime.fromisoformat(str(es).replace("Z", "+00:00"))
         gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
