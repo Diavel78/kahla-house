@@ -1179,7 +1179,7 @@ the 100.5 pair cap applies at every football price site
 a HELD split-rung pair (`middle`) rides with NO ask on either venue —
 `_hedged_ask_off` returns True at any hour ("the middle pays 3x bet, rent
 isn't even close"). The Lambo FOLLOWS a legal Poly re-rung on the same
-game (`poly_game` + `_rerung_ok`) and refuses a backwards one aloud.** Dry-run: call it with a client whose
+game (`poly_game` + `_rerung_ok`) and refuses a backwards one aloud. **THE PAIR ASK FLOOR (Rob, Sep 16 2026): UNPAIRED = cost, never under it (the Lambo's 'never through the ask' clamp once dragged a 45¢ leg to a 44¢ market ask); PAIRED = the cap complement — holding the other leg at p, this leg is worth pair_cap − p, so neither venue's ask rests under it (`ask_base` in gemini_hedge, `_hedge_pair_floor_c` at both scalp floor sites).** **THE MODEL WALL (Rob, Sep 15 2026, the Royals bid leapfrogged 6.5→64 by a bot leading our lead against a 39% model): no-veto never meant the bid may pass the model — an MLB moneyline chase/snipe stops at model + `machine_flags noveto_wall_pp` (10) and SIDE-FLIPS there (`_try_side_flip`, the cap flip's mechanics — fairs sum to 100, so the other side is under its own model by construction); `_ml_model_wall_c`.** Dry-run: call it with a client whose
 `orders.cancel` raises — `errors[]` then lists every would-move with
 rv/center/bound/target.
 (h) **FOOTBALL GHOST ADOPTION (Sep 5 2026, docket #6 root fix):** the
