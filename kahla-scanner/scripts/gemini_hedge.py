@@ -154,6 +154,11 @@ def poly_game(pc, prefix: str) -> dict:
     r = pc.orders.list(); orders = r.get("orders") if isinstance(r, dict) else r
     r = pc.portfolio.positions(); pos = r.get("positions") if isinstance(r, dict) and "positions" in r else r
     plist = list(pos.values()) if isinstance(pos, dict) else list(pos or [])
+    if not prefix.startswith(("asc-nfl-", "asc-cfb-")):
+        # NON-SPREAD PAIR (props / totals / ML, Sep 16 2026 — the first prop pair): there is no ladder to
+        # follow, the config slug IS the leg. _slug_prefix hands the whole slug back as the "prefix".
+        p = next((x for x in plist if (x.get("marketMetadata") or {}).get("slug") == prefix), None)
+        return {prefix: parse_poly(orders or [], p, prefix)}
     slugs = {o.get("marketSlug") for o in (orders or []) if str(o.get("marketSlug") or "").startswith(prefix + "-")}
     slugs |= {(x.get("marketMetadata") or {}).get("slug") for x in plist
               if str((x.get("marketMetadata") or {}).get("slug") or "").startswith(prefix + "-")}
