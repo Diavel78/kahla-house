@@ -12157,6 +12157,13 @@ def api_poly_topup():
     # already-topped bets skip themselves via `contracts`.
     lim = max(1, min(40, int(request.args.get("max")
                              or (40 if dry else 2))))
+    # ONE SEAT, ONE STAKE (Sep 16 2026 — the first prop pair, Rob: "go at
+    # 10"): `&slug=` restricts the pass to one market and `&target=` (only
+    # honoured WITH a slug) overrides that seat's stake — Gemini's pool
+    # needs 10 to qualify and the Lambo hedges the Poly quantity, so the
+    # Poly seat is what gets sized. Lane-wide stakes stay the constants.
+    slug_only = (request.args.get("slug") or "").strip() or None
+    tgt_override = int(request.args.get("target") or 0) if slug_only else 0
     deadline = _time.time() + (0.0 if dry else _TOPUP_BUDGET_S)
     try:
         sb, client = get_supabase(), get_client()
@@ -12187,7 +12194,8 @@ def api_poly_topup():
             break
         b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         if not (b.get("autobet") or b.get("whiff_autobet")
-                or b.get("ou_trader") or b.get("gridiron_autobet")):
+                or b.get("ou_trader") or b.get("gridiron_autobet")
+                or b.get("fbprop_autobet")):
             continue                       # model bets only — never manual
         mt = r.get("market_type") or ""
         # ⚠ K PROPS ARE EXEMPT FROM THE BOOK-WIDE STAKE (Aug 16 2026). A K
@@ -12216,12 +12224,16 @@ def api_poly_topup():
                         else _GRIDIRON_CONTRACTS) if _grid
                   else _AUTOBET_CONTRACTS)
         have = int(b.get("contracts") or 0)
-        if have >= target:
-            _skip("at_target")
-            continue
         slug = b.get("pmm_slug") or (
             (b.get("execution") or {}).get("pmm_slug")
             if isinstance(b.get("execution"), dict) else None)
+        if slug_only and slug != slug_only:
+            continue
+        if tgt_override:
+            target = tgt_override
+        if have >= target:
+            _skip("at_target")
+            continue
         if not slug:
             _skip("no_slug")
             continue
@@ -24295,7 +24307,7 @@ def _fresh_fair_for_repeg(sb, r, mt, market_id):
         return None
 
 
-def _ml_model_wall_c(sb, r, fair_fallback=None):
+def _ml_model_wall_c(sb, r, fair_fallback=None, mt="moneyline"):
     """THE MODEL WALL ON THE NO-VETO CHASE (Rob, Sep 15 2026, on the Royals
     bid the sniper walked from 40c to 64c against a 39% model: "we need a
     model wall even if it's 6 hours out... obviously"). The no-veto rule
@@ -24307,7 +24319,7 @@ def _ml_model_wall_c(sb, r, fair_fallback=None):
     (Diamond IQ refuses unmatched teams at placement, so an autobet ML
     always carries one). Cents, our side."""
     try:
-        fair = _fresh_fair_for_repeg(sb, r, "moneyline", r.get("market_id"))
+        fair = _fresh_fair_for_repeg(sb, r, mt or "moneyline", r.get("market_id"))
         if fair is None:
             fair = _safe_float(fair_fallback if fair_fallback is not None
                                else r.get("fair_prob"))
@@ -27797,7 +27809,7 @@ def _buy_snap_publish(sb, fs: dict, now, client, full_lap: bool) -> int:
     fills = [f for f in (fs.get("fills") or [])
              if f.get("venue") == "POLYMARKET" and f.get("order_id")
              and f.get("slug") and (f.get("order_leaves") or 0) >= 1
-             and (f.get("market_type") or "") in ("moneyline", "spread", "total")
+             and (f.get("market_type") or "") in ("moneyline", "spread", "total", "prop")
              and (f.get("mins_to_start") or 0) > _OU_NOVETO_MIN_MIN
              and f.get("my_price_c") is not None]
     if not fills:
@@ -27820,7 +27832,10 @@ def _buy_snap_publish(sb, fs: dict, now, client, full_lap: bool) -> int:
             continue
         b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         grid = bool(b.get("gridiron_autobet"))
-        if not (b.get("autobet") or b.get("ou_trader") or grid):
+        fbp = bool(b.get("fbprop_autobet")) and (f.get("market_type") or "") == "prop"
+        if (f.get("market_type") or "") == "prop" and not fbp:
+            continue                          # K/whiff props keep their model wall in the lap
+        if not (b.get("autobet") or b.get("ou_trader") or grid or fbp):
             continue                          # model rent lanes only
         slug = f["slug"]
         if SCALP_POPPED.get(slug, 0.0) > t_read - 300.0 and slug not in BUY_SNAP:
@@ -27844,10 +27859,12 @@ def _buy_snap_publish(sb, fs: dict, now, client, full_lap: bool) -> int:
         wall_c = None
         if b.get("autobet") and (f.get("market_type") or "") == "moneyline" and not grid:
             wall_c = _ml_model_wall_c(sb, r)
+        elif fbp:
+            wall_c = _ml_model_wall_c(sb, r, mt="prop")   # stamped model fair + slack
         fresh[slug] = {"oid": f["order_id"], "our_bid": float(f["my_price_c"]),
                        "wall_c": wall_c,
                        "qty": qty, "synth": bool(f.get("synthetic")),
-                       "join": _gridiron_join_touch(slug, 50.0),   # football: AT the touch
+                       "join": (fbp or _gridiron_join_touch(slug, 50.0)),   # football: AT the touch
                        "cap_c": (_gridiron_cap_for(sb, slug) if grid
                                  else _REPEG_NRFI_PRICE_CAP_C),
                        "master_c": master_c, "tick": tick, "gtt": gtt,
@@ -28228,10 +28245,16 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 # filter below was silently exempting every O/U bet from
                 # the chase ("same design as ML… rinse-repeat with repeg"
                 # was the lane's spec; the repeg leg was never flagged in).
+                _is_fbprop = bool(blob.get("fbprop_autobet"))
+                # fbprop added Sep 16 2026 (Rob: "we aren't even at the
+                # touch"): the NFL props lane was never on this list, so
+                # every prop seat fell through the manual-bet filter below
+                # and was NEVER chased — 15 days of prop rent parked where
+                # the seat was placed while the outbid pings fired.
                 is_model_bet = (bool(blob.get("autobet"))
                                 or bool(blob.get("whiff_autobet"))
                                 or bool(blob.get("ou_trader"))
-                                or _is_gridiron)
+                                or _is_gridiron or _is_fbprop)
                 # ⚠ NEVER CHASE A LIVE GAME (Aug 12 2026 — the CIN@CWS
                 # YRFI filled 13 minutes after first pitch). Every model
                 # buy is a PRE-GAME bet: the model prices a game that
@@ -28273,6 +28296,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                                 if isinstance(blob.get("whiff"), dict) else None)
                     _join_lane = (f.get("market_type") == "nrfi"
                                   or (_blobfam or "") in _JOIN_TOUCH_FAMS
+                                  or _is_fbprop          # football joins (Sep 9 rule)
                                   or _gridiron_join_touch(f.get("slug"), new_c))
                     try:              # grid-native chase (Aug 30)
                         _tkr = _pmm_tick_c(client, f.get("slug") or "")
@@ -28326,8 +28350,9 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 # cap CLAMPS a no-veto chase instead of freezing it.
                 _noveto_chase = False
                 if (is_model_bet
-                        and f.get("market_type") in ("moneyline", "total",
-                                                     "spread")
+                        and (f.get("market_type") in ("moneyline", "total",
+                                                      "spread")
+                             or (f.get("market_type") == "prop" and _is_fbprop))
                         and not blob.get("whiff_autobet")):
                     try:
                         _noveto_chase = ((datetime.fromisoformat(
@@ -28392,9 +28417,9 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 # July-4 ruling; football rungs sit past the model line by
                 # the line rule -- both keep the cap alone here.
                 if (_noveto_chase and new_c is not None and old_c is not None
-                        and f.get("market_type") == "moneyline"
-                        and not _is_gridiron):
-                    _wall_c = _ml_model_wall_c(sb, r)
+                        and ((f.get("market_type") == "moneyline" and not _is_gridiron)
+                             or _is_fbprop)):
+                    _wall_c = _ml_model_wall_c(sb, r, mt=f.get("market_type"))
                     if _wall_c is not None and new_c > _wall_c + 1e-9:
                         _wc = _grid_dn(_wall_c, _tkr)
                         if _try_side_flip():
