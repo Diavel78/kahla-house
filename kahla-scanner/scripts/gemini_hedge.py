@@ -210,6 +210,22 @@ def map_lookup(poly_slug: str, poly_side: str):
     return sym, outc.lower()
 
 
+def _cancel_our_bids(symbol: str, live: bool, why: str) -> None:
+    """A pair the loop is SKIPPING (unreadable Poly leg, side mismatch) must not leave a rent/urgent
+    BID resting on Gemini — that is how the Cook orphan filled in-play (Sep 17 2026). Asks stay: a
+    held leg's cost ask is the position's exit and is never a skip casualty."""
+    for o in g.active_orders(symbol=symbol):
+        if not str(o.get("clientOrderId") or "").startswith(CID) or str(o.get("side") or "").lower() != "buy":
+            continue
+        if not live:
+            log.info("DRY %s: would cancel bid %s — %s", symbol, o.get("orderId"), why); continue
+        try:
+            g.cancel_order(o["orderId"])
+            _led(kind="cancel", symbol=symbol, order_id=o.get("orderId"), why=why, verified=None)
+        except Exception as ex:
+            log.warning("%s: cancel %s failed: %s", symbol, o.get("orderId"), str(ex)[:120])
+
+
 def _cancel_ours(symbol: str, live: bool, why: str) -> None:
     """Pull every kh-hedge order we still have on a Gemini contract we are LEAVING (the Ferrari
     re-rung and we follow) — a bid left resting on the old contract would fill into a naked leg."""
@@ -625,6 +641,7 @@ def run(live: bool, once: bool):
                 pair["_gem"] = gs
                 poly_rv = _home_rv(pair["poly_slug"])
                 if ps.get("error"):
+                    _cancel_our_bids(pair["gemini_symbol"], live, f"pair skipped: {ps['error']}")
                     log.error("%s: %s — pair skipped", pair["poly_slug"], ps["error"]); continue
                 poly_side = ps["side"]
                 if poly_side is None:
@@ -650,6 +667,7 @@ def run(live: bool, once: bool):
                         _cancel_ours(pair["gemini_symbol"], live, "no Poly leg — nothing to mirror")
                         log.info("%s: no Poly leg (no bid, no position) — nothing to mirror", pair["poly_slug"]); continue
                 if pair.get("poly_side") and pair["poly_side"] != poly_side:
+                    _cancel_our_bids(pair["gemini_symbol"], live, "pair skipped: side mismatch")
                     log.error("%s: config says poly_side=%s but the venue says %s — pair skipped", pair["poly_slug"], pair["poly_side"], poly_side); continue
                 state = _state_load()
                 if ps["resting_px_own"] is not None and ps["resting_qty"] >= 1:
