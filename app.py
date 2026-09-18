@@ -25999,12 +25999,75 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
             rv = (round(ln if sn == "home" else -ln, 1) if mt == "spread"
                   else round(ln, 1))
             res["judged"] += 1
+            _vs = rule.get("value_side")
+            # COLLEGE SIDE JUMP (Rob, Sep 17 2026: "unfilled college seats built on
+            # a shit model… can jump sides"): the CFBD blend replaced a two-game
+            # solve that dogged every big favorite, so an UNFILLED NCAAF seat on
+            # the wrong side of the rule's value side is cancelled (verified),
+            # archived and handed back to the executor, which re-seats it on the
+            # value side under the placement rule — only when that side has a
+            # PAYING legal rung, else the seat stays (rent first). Held legs never.
+            if ((g.get("sport") or "").upper() == "NCAAF" and _vs is not None
+                    and _vs != sn and ob and res["moved"] < _RECENTER_MAX_MOVES):
+                _has_vs = False
+                for e in lad:
+                    if e.get("side") != _vs or e.get("line") is None or not e.get("slug"):
+                        continue
+                    _erv = (round(float(e["line"]) if _vs == "home" else -float(e["line"]), 1)
+                            if mt == "spread" else round(float(e["line"]), 1))
+                    if not _gridiron_seat_legal(rule, mt, _vs, _erv) or _rent_dead(e["slug"], sb):
+                        continue
+                    try:
+                        if _rent_ok(e["slug"], g["event_start"], now, sb)[0]:
+                            _has_vs = True
+                            break
+                    except Exception:
+                        continue
+                if _has_vs:
+                    ok = True
+                    for o in ob:
+                        try:
+                            client.orders.cancel(o["id"], {"marketSlug": sl})
+                        except Exception as e:
+                            ok = False
+                            res.setdefault("errors", []).append({"slug": sl, "err": str(e)[:100], "why": "side_jump"})
+                            break
+                    if ok:
+                        _time.sleep(0.5)
+                        _chk = _pmm_open_orders_raw(client, fresh=True)
+                        _pos = _pmm_positions_raw(client, fresh=True)
+                        if (_chk is None or _pos is None or _open_buys(_chk, sl)
+                                or (_pos.get(sl) or {}).get("qty", 0)):
+                            res["unconfirmed"] += 1
+                            continue
+                        try:
+                            (sb.table("reconcile_bak")
+                             .insert({"pick_id": p["id"], "reason": "recenter_side_jump",
+                                      "row": dict(p, recenter={"center": rule["center"],
+                                                               "center_src": rule["center_src"],
+                                                               "value_side": _vs, "was_side": sn,
+                                                               "was_rv": rv})})
+                             .execute())
+                            sb.table("bot_picks").delete().eq("id", p["id"]).execute()
+                            (sb.table("desired_orders")
+                             .update({"state": "pending",
+                                      "detail": f"side_jump:{sn}->{_vs}:{rule['center_src']}:{rv}",
+                                      "next_try_at": nowiso, "updated_at": nowiso})
+                             .eq("market_id", mid).eq("market_type", mt)
+                             .eq("lane", "rentlist").execute())
+                        except Exception:
+                            res["failed"] += 1
+                            continue
+                        res["moved"] += 1
+                        res["side_jump"] = res.get("side_jump", 0) + 1
+                        moves.append(f"{(p.get('event_name') or '')[:26]} {mt} {sn} {rv:+g} → "
+                                     f"SIDE JUMP to {_vs} ({rule['center_src']} {rule['center']:+g})")
+                    continue
             if _gridiron_seat_legal(rule, mt, sn, rv):
                 continue
             res["illegal"] += 1
-            _vs = rule.get("value_side")
             if _vs is not None and _vs != sn:
-                res["side_flip"] += 1    # re-seat would be the other team — not a rung jump
+                res["side_flip"] += 1    # NFL: re-seat would be the other team — not a rung jump
                 continue
             if not ob:                   # dust seat, no bid → VACATE, no cancel needed
                 _pos = _pmm_positions_raw(client, fresh=True)
