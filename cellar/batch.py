@@ -146,6 +146,11 @@ JOBS: tuple[Job, ...] = (
     Job("cfbd_ratings", ["scripts.ingest_cfbd_ratings", "--commit"],
         hour=4, minute=20, timeout_s=600,
         note="CollegeFootballData SP+/FPI/Elo/SRS mirror (college pre-market line)"),
+    # NFL pre-market inputs (Sep 17 2026): nfelo pts_vs_avg → cfbd_ratings
+    # (source nfelo), nflverse Vegas spread/total → book_lines (book nflverse).
+    Job("nfl_market", ["scripts.ingest_nfl_market", "--commit"],
+        hour=4, minute=25, timeout_s=600,
+        note="nfelo rating + nflverse Vegas lines (NFL pre-market)"),
 
     # -- weekly ------------------------------------------------------------
     # NOT --delta: this script has no such flag. Its delta mode is

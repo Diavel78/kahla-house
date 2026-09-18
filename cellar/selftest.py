@@ -538,6 +538,9 @@ def test_cfbd_consensus() -> None:
     got = _app._cfbd_consensus(None, "Notre Dame Fighting Irish @ Purdue Boilermakers")
     # home = Purdue: sp 3-25+2.5=-19.5, fpi 4-22+2.5=-15.5, elo -500/25+2.5=-17.5 → mean -17.5; SRS excluded
     check("consensus home margin −17.5 (SRS held out)", got is not None and abs(got[0] + 17.5) < 0.01 and got[1]["n_src"] == 3, f"got {got}")
+    _app._CFBD_CACHE.update(at=_app._time.time(), rows={"nfelo": {"Kansas City Chiefs": 6.0, "Miami Dolphins": -2.0}})
+    got = _app._cfbd_consensus(None, "Kansas City Chiefs @ Miami Dolphins", "NFL")
+    check("NFL prior: nfelo pts diff + 1.8 home edge → −6.2 (KC by 6.2)", got is not None and abs(got[0] + 6.2) < 0.01, f"got {got}")
     _app._CFBD_CACHE.update(at=0.0, rows=None)
 
 

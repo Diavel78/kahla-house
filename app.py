@@ -19046,7 +19046,9 @@ def _fb_adj_for(adjmap, nm):
 
 _CFBD_CACHE: dict = {"at": 0.0, "rows": None}
 _CFBD_ELO_PTS = 25.0          # Elo points per point of spread (the usual 25:1)
-_CFBD_HFA = 2.5               # neutral-field ratings need a home edge added
+_CFBD_HFA = 2.5               # neutral-field ratings need a home edge added (NCAAF)
+_PRIOR_SOURCES = {"NCAAF": ("sp", "fpi", "elo"), "NFL": ("nfelo",)}   # per-sport pre-market rating sources
+_PRIOR_HFA = {"NCAAF": 2.5, "NFL": 1.8}
 _CFBD_PRIOR_GAMES = 10.0      # blend: results weight = gp/(gp+10) — two cupcake games get ~17%, half the vote at 10 games
 _GRIDIRON_CFBD_NOTE: dict = {}
 
@@ -19088,7 +19090,7 @@ def _cfbd_team(table: dict, ours: str):
     return best
 
 
-def _cfbd_consensus(sb, event_name):
+def _cfbd_consensus(sb, event_name, sport="NCAAF"):
     """THE COLLEGE PRE-MARKET LINE (Rob, Sep 17 2026): home margin from SP+, FPI
     and Elo (SRS held out until ~week 6 — it is a season-only solve with our
     own two-game disease). Returns (margin_home, detail) or None. Every source
@@ -19100,13 +19102,14 @@ def _cfbd_consensus(sb, event_name):
     if not rows:
         return None
     lines: dict = {}
-    for src in ("sp", "fpi", "elo"):
+    _hfa = _PRIOR_HFA.get((sport or "NCAAF").upper(), _CFBD_HFA)
+    for src in _PRIOR_SOURCES.get((sport or "NCAAF").upper(), ()):
         t = rows.get(src) or {}
         h, aw = _cfbd_team(t, home_n), _cfbd_team(t, away_n)
         if h is None or aw is None:
             continue
         diff = (h - aw) / (_CFBD_ELO_PTS if src == "elo" else 1.0)
-        lines[src] = round(diff + _CFBD_HFA, 2)
+        lines[src] = round(diff + _hfa, 2)
     if not lines:
         return None
     m = sum(lines.values()) / len(lines)
@@ -19223,9 +19226,9 @@ def _gridiron_proj(sb, sport, event_name):
     # margin is the results solve weighted by THIS season's games played
     # (gp/(gp+6)) against the SP+/FPI/Elo consensus, which carries a
     # preseason prior with the roster in it. No CFBD rows → unchanged.
-    if (sport or "").upper() == "NCAAF":
+    if (sport or "").upper() in ("NCAAF", "NFL"):
         try:
-            cons = _cfbd_consensus(sb, event_name)
+            cons = _cfbd_consensus(sb, event_name, sport)
             if cons is not None:
                 gp = min(_season_games(sb, sport, home_n), _season_games(sb, sport, away_n))
                 w = gp / (gp + _CFBD_PRIOR_GAMES)
@@ -19674,7 +19677,7 @@ def _pin_line_center(sb, sport, away, home, mt, now):
     return _pin_line_from_events(events, away, home, mt)
 
 
-_BOOK_PRIORITY = ("pinnacle", "draftkings", "fanduel")
+_BOOK_PRIORITY = ("pinnacle", "draftkings", "fanduel", "nflverse")   # nflverse = the week's Vegas line (Sep 17 2026)
 _BOOK_LINE_MAX_AGE_S = 7 * 86400     # a line seen this week is still the line
 _BOOK_LINES_WRITE_TS: dict = {}
 
