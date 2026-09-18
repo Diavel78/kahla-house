@@ -642,6 +642,12 @@ def run(live: bool, once: bool):
                             _write_hedge_pair(pinned, pair["gemini_symbol"], 0, 0, 0, pair.get("kickoff"), geo)
                         except Exception:
                             pass
+                        # NOTHING TO MIRROR = NOTHING MAY REST (Sep 17 2026, the Cook prop: the Ferrari
+                        # rinsed its seat at 13:43, this branch `continue`d past the order reconcile for
+                        # 3.5 hours, and the orphaned 63c urgent bid filled 5 minutes into the game —
+                        # a naked NO nobody wanted). No Poly leg + Gemini flat → every kh-hedge order
+                        # on the contract comes off, kickoff or not.
+                        _cancel_ours(pair["gemini_symbol"], live, "no Poly leg — nothing to mirror")
                         log.info("%s: no Poly leg (no bid, no position) — nothing to mirror", pair["poly_slug"]); continue
                 if pair.get("poly_side") and pair["poly_side"] != poly_side:
                     log.error("%s: config says poly_side=%s but the venue says %s — pair skipped", pair["poly_slug"], pair["poly_side"], poly_side); continue
