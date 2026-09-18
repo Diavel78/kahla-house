@@ -10,8 +10,13 @@ name: Football Sheets — Data Assembly
 # Schedule (UTC — AZ is UTC-7 year-round):
 #   Tue 00:00 UTC = Monday 5:00 pm AZ  → monday mode (full build). The
 #     Monday generation Routine fires 6:30 pm AZ and reads these blobs.
-#   Fri 21:00 UTC = Friday 2:00 pm AZ  → friday mode (diff vs Monday). The
-#     Friday Routine fires 3:30 pm AZ.
+#   Fri 12:00 UTC = Friday 5:00 am AZ  → friday mode (diff vs Monday). MOVED
+#     HERE Sep 18 2026 (was 2pm AZ) so the whole pipeline lands before Rob
+#     wakes up — the Friday narrative Routine now fires 6:00 am AZ and
+#     publishes both the full pack and the picks-only sheet by ~6:15 am.
+#     (Separate "slate" text-card Routines that used to run Thu/Fri/Sat on
+#     overlapping schedules were retired the same day — this is the one
+#     football-sheets pipeline now.)
 # In-season only in effect: outside the season the script finds no games
 # and exits quietly (monday mode exits 1 on a truly empty slate so a dark
 # spine shows red — the six-day-green lesson).
@@ -39,7 +44,7 @@ on:
         default: "8"
   schedule:
     - cron: "0 0 * * 2"    # Mon 5pm AZ — monday build
-    - cron: "0 21 * * 5"   # Fri 2pm AZ — friday diff
+    - cron: "0 12 * * 5"   # Fri 5am AZ — friday diff (moved from 2pm)
 
 concurrency:
   group: football-sheets-data

@@ -63,6 +63,26 @@ def _az(iso: str | None) -> str:
         return _e(iso)
 
 
+def _time_short(iso: str | None) -> str:
+    if not iso:
+        return "TBD"
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        return dt.astimezone(AZ).strftime("%-I:%M%p").lower()
+    except ValueError:
+        return "TBD"
+
+
+def _day_short(iso: str | None) -> str:
+    if not iso:
+        return "TBD"
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        return dt.astimezone(AZ).strftime("%A %b %-d")
+    except ValueError:
+        return "TBD"
+
+
 def _pct(p) -> str:
     try:
         return f"{float(p) * 100:.0f}%"
@@ -485,6 +505,95 @@ def _since_monday(r: dict, blob: dict) -> str:
     return out + "</div>"
 
 
+_PICKS_CSS = """
+.page.picks { padding: 26px 32px; }
+.picks h3 { margin: 16px 0 4px; }
+.picks h3:first-of-type { margin-top: 6px; }
+.pline { display: flex; align-items: baseline; gap: 12px; padding: 4px 0;
+         border-bottom: 1px solid #eef2f6; font-size: 10pt; flex-wrap: wrap; }
+.ptime { width: 56px; flex: 0 0 56px; color: #5a6b7f; font-size: 8.5pt;
+         font-variant-numeric: tabular-nums; }
+.pmatch { flex: 1 1 230px; font-weight: 600; }
+.plegs { flex: 2 1 320px; }
+.pnote { color: #98a6b6; font-style: italic; font-size: 8.5pt; }
+"""
+
+
+def _picks_line(r: dict, blob: dict) -> str:
+    """One row: time, matchup, side call, total call. Straight off
+    data_blob->model — no prose, so it can never drift from the full
+    sheet's numbers. Deliberately carries NO roster override — that lives
+    only in the full PDF's narrative; this sheet is a fast reference, not
+    a substitute for reading the game page before betting a QB-question
+    game."""
+    g = blob.get("game") or {}
+    away, home = g.get("away") or "?", g.get("home") or "?"
+    when = _time_short(r.get("event_start"))
+    matchup = f"{_e(_short(away, blob))} @ {_e(_short(home, blob))}"
+    m = blob.get("model")
+    if not m:
+        return (f"<div class='pline'><span class='ptime'>{when}</span>"
+                f"<span class='pmatch'>{matchup}</span>"
+                f"<span class='plegs pnote'>unrated — no number</span></div>")
+    legs = []
+    bs, bt = m.get("bet_spread"), m.get("bet_total")
+    if bs:
+        vtxt, vcls = _VERDICT[bs["verdict"]]
+        team = _short(bs["team"], blob)
+        txt = (f"{_e(team)} {bs['line']:+g}" if bs["verdict"] != "pass"
+               else "pass")
+        legs.append(f"<span class='verdict {vcls}'>{vtxt}</span> {txt}")
+    else:
+        legs.append("<span class='pnote'>no spread</span>")
+    if bt:
+        vtxt, vcls = _VERDICT[bt["verdict"]]
+        side = "Over" if bt["side"] == "over" else "Under"
+        txt = (f"{side} {bt['line']:g}" if bt["verdict"] != "pass"
+               else "pass")
+        legs.append(f"<span class='verdict {vcls}'>{vtxt}</span> {txt}")
+    else:
+        legs.append("<span class='pnote'>no total</span>")
+    return (f"<div class='pline'><span class='ptime'>{when}</span>"
+            f"<span class='pmatch'>{matchup}</span>"
+            f"<span class='plegs'>" + " &nbsp;&nbsp;·&nbsp;&nbsp; ".join(legs)
+            + "</span></div>")
+
+
+def render_picks_html(week_key: str, sport: str, rows: list[dict],
+                      mode: str) -> str:
+    """The companion 'just the picks' sheet — one line per game, no
+    write-ups. Same data as the full pack (pulls data_blob->model
+    directly, Friday-refreshed when mode=friday) so the two can never
+    disagree; this is a fast-reference index, not a replacement for
+    reading the full game page before betting anything with a live
+    QB/injury question."""
+    rows = sorted(rows, key=lambda r: (r.get("event_start") or "",
+                                       r.get("event_name") or ""))
+    friday = mode == "friday"
+    view = [{**r, "data_blob": _friday_blob(r.get("data_blob") or {})}
+            for r in rows] if friday else rows
+    built = datetime.now(AZ).strftime("%b %-d, %Y %-I:%M %p AZ")
+    title = f"{sport} Picks — week of {week_key}"
+    out = (f"<div class='page picks'><h1>🏈 {_e(title)}</h1>"
+           f"<div class='sub'>The Kahla House · generated {built}"
+           + (" · Friday refresh" if friday else "")
+           + " · model calls only — check the full sheet pack before "
+             "betting any game with a starter or injury question."
+             "</div>")
+    day = None
+    for r in view:
+        blob = r.get("data_blob") or {}
+        if not blob:
+            continue
+        d = _day_short(r.get("event_start"))
+        if d != day:
+            out += f"<h3>{_e(d)}</h3>"
+            day = d
+        out += _picks_line(r, blob)
+    out += "</div>"
+    return f"<style>{_CSS}{_PICKS_CSS}</style><title>{_e(title)}</title>" + out
+
+
 def render_week_html(week_key: str, sport: str, rows: list[dict],
                      mode: str) -> str:
     """One printable pack. BOTH modes render the FULL per-game pages —
@@ -586,6 +695,9 @@ def main() -> int:
     ap.add_argument("--out", default="/tmp/football-sheets")
     ap.add_argument("--upload", action="store_true")
     ap.add_argument("--telegram", action="store_true")
+    ap.add_argument("--picks-only", action="store_true",
+                    help="render the compact one-line-per-game picks "
+                         "sheet instead of the full deep-dive pack")
     args = ap.parse_args()
 
     rows = sb_select("football_sheets", {
@@ -598,12 +710,16 @@ def main() -> int:
                   args.sport)
         return 1
     os.makedirs(args.out, exist_ok=True)
-    tag = "friday-update" if args.mode == "friday" else "sheets"
+    if args.picks_only:
+        tag = "picks"
+    else:
+        tag = "friday-update" if args.mode == "friday" else "sheets"
     stem = f"{args.week_key}-{args.sport.lower()}-{tag}"
     html_path = os.path.join(args.out, stem + ".html")
     pdf_path = os.path.join(args.out, stem + ".pdf")
+    render_fn = render_picks_html if args.picks_only else render_week_html
     with open(html_path, "w") as f:
-        f.write(render_week_html(args.week_key, args.sport, rows, args.mode))
+        f.write(render_fn(args.week_key, args.sport, rows, args.mode))
     html_to_pdf(html_path, pdf_path)
     size_kb = os.path.getsize(pdf_path) // 1024
     log.info("rendered %s (%d rows, %d KB)", pdf_path, len(rows), size_kb)
@@ -612,21 +728,29 @@ def main() -> int:
     if args.upload:
         url = upload_pdf(pdf_path, f"{args.week_key}/{stem}.pdf")
         now_iso = datetime.now(timezone.utc).isoformat()
-        patch = ({"friday_pdf_path": f"{args.week_key}/{stem}.pdf",
-                  "friday_published_at": now_iso} if args.mode == "friday"
-                 else {"pdf_path": f"{args.week_key}/{stem}.pdf",
-                       "published_at": now_iso})
+        if args.picks_only:
+            patch = {"picks_pdf_path": f"{args.week_key}/{stem}.pdf",
+                     "picks_published_at": now_iso}
+        else:
+            patch = ({"friday_pdf_path": f"{args.week_key}/{stem}.pdf",
+                      "friday_published_at": now_iso} if args.mode == "friday"
+                     else {"pdf_path": f"{args.week_key}/{stem}.pdf",
+                           "published_at": now_iso})
         sb_upsert("football_sheet_weeks",
                   [{"week_key": args.week_key, "sport": args.sport, **patch}],
                   "week_key,sport")
         result["url"] = url
         if args.telegram:
             deep = sum(1 for r in rows if r.get("tier") == "deep")
-            label = ("Friday update" if args.mode == "friday"
-                     else "weekly sheets")
+            if args.picks_only:
+                label = "picks sheet"
+            else:
+                label = ("Friday update" if args.mode == "friday"
+                         else "weekly sheets")
             queue_telegram(f"🏈 {args.sport} {label} — week of "
                            f"{args.week_key}: {len(rows)} games"
-                           + (f" ({deep} deep dives)" if args.mode == "monday"
+                           + (f" ({deep} deep dives)"
+                              if args.mode == "monday" and not args.picks_only
                               else "")
                            + f"\n{url}")
     print(json.dumps(result, indent=2))

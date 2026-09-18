@@ -18,6 +18,40 @@
 > `kahla-scanner/scripts/football_sheet_data.py` (`sb_select`, `sb_patch`)
 > already handle this, including stripping the angle-bracket wrapper the
 > env's `SUPABASE_URL` carries and paging past PostgREST's 1,000-row cap.
+>
+> **THIS IS THE ONE FOOTBALL-CARD SYSTEM (Sep 18 2026 — Rob: "I want 1
+> damn thing that runs sheets... I don't need 3").** A separate `/slate`
+> skill + three Routines (Thursday CFB+NFL, Friday NCAAF full-board,
+> Saturday NFL full-board) had grown up alongside this pipeline, producing
+> phone-first text cards on overlapping schedules — redundant with the
+> PDFs, and unreliable (Thursday's run showed `ROUTINE_RUN_STATUS_ABANDONED`,
+> the Friday one had no recorded successful run at all). All three deleted.
+> **The Friday schedule moved to the MORNING the same day**: the data
+> assembly is now Fri 5am AZ (was 2pm) and the Friday narrative Routine
+> fires 6am AZ (was 3:30pm) — so both the full pack and the picks-only
+> sheet (§3) are published and pinged before Rob is up, for that day's and
+> the next day's games. If you're asked to add a third schedule variant or
+> a separate lightweight card, push back — that's the thing that just got
+> deleted for being one system too many.
+>
+> ⚠ **KNOWN GAP, not yet fixed: the sheet's model does NOT carry the QB
+> adjustment or the CFBD-ratings blend that `app.py`'s live betting engine
+> (`_gridiron_proj`) now has.** `football_sheet_data.py` builds its own
+> standalone ratings from `_lib/power_ratings.py` + `_lib/gridiron_spread.py`
+> off `game_results` only — it has no player table and doesn't touch
+> `_lib/football_qb.py` or `app._cfbd_consensus`. That means a team that
+> lost its starting QB, or a team whose results-only rating is still noisy
+> this early in the season (CFBD's SP+/FPI blend exists specifically to
+> fix that), is mis-rated on these sheets the same way the live engine was
+> before those fixes shipped. The "Who's new/who's out" narrative section
+> is the only thing currently catching this — it is NOT optional, and a
+> `bet_spread`/`bet_total` verdict must never be quoted as a pick without
+> it (see `.claude/skills/slate.md` Rule 0 for the disaster case: Week 1
+> picks on Kyler Murray's released Arizona, injured Tua's Miami, and
+> Cooper-Rush-started Atlanta — all model output presented as analysis
+> with no lineup check). Porting the QB/CFBD layers into this pipeline is
+> the real fix; until then, treat the model number as a rent-parking
+> direction, not a finished handicap, exactly as slate.md said.
 
 ## 0. Setup (both days)
 
@@ -157,6 +191,25 @@ python -m scripts.football_sheet_render --week-key <WEEK> --sport NCAAF \
     --mode monday --upload --telegram
 # Friday: --mode friday
 ```
+
+**Also render the picks-only sheet, every run, both sports (added Sep 18
+2026 — Rob: "I want 1 damn thing that runs sheets... the big PDFs, and a
+simple sheet that is just the picks"):**
+
+```bash
+python -m scripts.football_sheet_render --week-key <WEEK> --sport NFL \
+    --mode <monday|friday> --picks-only --upload --telegram
+python -m scripts.football_sheet_render --week-key <WEEK> --sport NCAAF \
+    --mode <monday|friday> --picks-only --upload --telegram
+```
+
+One line per game (kickoff time, matchup, spread call, total call),
+pulled straight from `data_blob->'model'` so it can never disagree with
+the full pack — no roster narrative on it, which is the point: it's a
+fast reference, and the header says so. Publishes to `picks_pdf_path` /
+`picks_published_at` on `football_sheet_weeks` (separate slot from the
+full pack — one current picks sheet per week+sport, overwritten on both
+the Monday and Friday runs, not two artifacts to track).
 
 That renders the sheet-pack HTML → PDF (Chromium), uploads to the public
 `football-sheets` storage bucket, stamps `football_sheet_weeks`, and

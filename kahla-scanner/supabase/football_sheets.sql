@@ -42,6 +42,8 @@ create table if not exists football_sheet_weeks (
     deep_games    integer,
     pdf_path      text,                 -- storage path of the Monday sheet pack
     friday_pdf_path text,               -- storage path of the Friday changes pack
+    picks_pdf_path text,                -- storage path of the picks-only sheet (Sep 18 2026)
+    picks_published_at timestamptz,
     published_at  timestamptz,
     friday_published_at timestamptz,
     stats         jsonb,
