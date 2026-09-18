@@ -19815,6 +19815,31 @@ def _gridiron_past_bound(mt, sn, rv, bound, ka, kb):
     return (rv < bound - eps) if sn == ka else (rv > bound + eps)
 
 
+_GRIDIRON_KEY_NUMBERS = (3, 7, 10, 14, 17, 21, 24)
+
+
+def _gridiron_bad_hook(mt, sn, rv) -> bool:
+    """THE WRONG SIDE OF A KEY NUMBER (Rob, Sep 17 2026, on a Purdue +20.5 seat
+    filled at 49¢: "ain't NOBODY laying −150 on the dog GIVING UP THE HALF…
+    −2.5, 6.5, 20.5, 13.5"). Football margins pile on 3/7/10/14/17/21/24; a
+    seat that LOSES on the key number is the half nobody pays for — the dog
+    at +K−0.5 (loses when the favorite wins by exactly K), the favorite at
+    −K−0.5 (needs K+1). The other half — dog +K+0.5, favorite −K+0.5 — wins
+    on the number. Spreads only; `rv` is the HOME line; `sn` the seat's side.
+    The picker and the recenter both PREFER a good hook; a bad hook is still
+    bet when it is the only paying legal rung (rent first)."""
+    if mt != "spread" or rv is None:
+        return False
+    own = float(rv) if sn == "home" else -float(rv)     # the seat's own line (+ = dog)
+    mag = abs(own)
+    for k in _GRIDIRON_KEY_NUMBERS:
+        if abs(mag - (k - 0.5)) < 0.01:
+            return own > 0                               # dog at +K−0.5 loses on K
+        if abs(mag - (k + 0.5)) < 0.01:
+            return own < 0                               # favorite at −K−0.5 needs K+1
+    return False
+
+
 def _gridiron_move_favorable(mt, sn, rv_from, rv_to) -> bool:
     """RUNG JUMPS ONLY IN OUR FAVOR (Rob, Sep 15 2026: "program the rung
     jump to only benefit me — favorite going down, or dog going up a
@@ -20173,7 +20198,12 @@ def _gridiron_try_bet_impl(sb, g, es0, d, mt, gp, contracts=None):
     # here — the seeder path above owns the nothing-booked case.)
     # TWO SEATS: the allowed rung at/nearest the line, then the next one
     # toward the model (further along the favorable direction).
-    _rv_order = sorted({s["rv"] for s in scored}, key=lambda v: abs(v - center))
+    _sn_of = {s["rv"]: s["sn"] for s in scored}
+    # KEY NUMBERS (Sep 17 2026): a rung on the wrong side of 3/7/10/14/17/21
+    # sorts BEHIND every good-hook rung — Purdue +21.5 before +20.5 — and is
+    # still taken when it is all the ladder pays (rent first).
+    _rv_order = sorted({s["rv"] for s in scored},
+                       key=lambda v: (_gridiron_bad_hook(mt, _sn_of.get(v), v), abs(v - center)))
     targets = _rv_order[:2]
     # ONE ORDER PER SLUG stays the invariant: a rung already carrying a
     # pending pick is occupied, not a candidate. The executor's
@@ -25897,7 +25927,8 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
                         continue
                 except Exception:
                     continue
-                if target is None or abs(erv - rule["center"]) < abs(target[1] - rule["center"]):
+                _key = (_gridiron_bad_hook(mt, sn, erv), abs(erv - rule["center"]))
+                if target is None or _key < (_gridiron_bad_hook(mt, sn, target[1]), abs(target[1] - rule["center"])):
                     target = (e["slug"], erv)
             if target is None:
                 # a legal rung exists but every one is WORSE for our side → stay

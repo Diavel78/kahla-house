@@ -522,6 +522,21 @@ def test_gridiron_qb_adjust() -> None:
         _app._power_snapshot, _app._football_qb_adj = _o_snap, _o_adj
 
 
+def test_gridiron_key_hook() -> None:
+    """Rob, Sep 17 2026: the dog never sits at +K−0.5, the favorite never at
+    −K−0.5, when a good-hook rung pays. Rung units = home line."""
+    import app as _app
+    bh = _app._gridiron_bad_hook
+    check("home dog +20.5 is the bad hook", bh("spread", "home", 20.5) is True)
+    check("home dog +21.5 is the good hook", bh("spread", "home", 21.5) is False)
+    check("away dog +20.5 (home line −20.5) is the bad hook", bh("spread", "away", -20.5) is True)
+    check("home favorite −3.5 is the bad hook", bh("spread", "home", -3.5) is True)
+    check("home favorite −2.5 is the good hook", bh("spread", "home", -2.5) is False)
+    check("away favorite −6.5 (home line +6.5) is the good hook", bh("spread", "away", 6.5) is False)
+    check("+4.5 is nobody's key number", bh("spread", "home", 4.5) is False)
+    check("totals are out of scope", bh("total", "over", 44.5) is False)
+
+
 def test_gridiron_move_favorable() -> None:
     """Rob, Sep 15 2026: a rung jump may only BENEFIT the seat — favorite
     down, dog up, over down, under up. Rung units = home line / the total."""
@@ -1051,7 +1066,7 @@ def main() -> int:
               test_batch_blocked_deps, test_owner_dependent_lanes,
               test_dry_run_blackout, test_overrun_detector,
               test_ws_quote_presence, test_ws_mkts_request_budget,
-              test_gridiron_value_window, test_gridiron_move_favorable, test_gridiron_qb_adjust,
+              test_gridiron_value_window, test_gridiron_move_favorable, test_gridiron_key_hook, test_gridiron_qb_adjust,
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
