@@ -139,6 +139,13 @@ JOBS: tuple[Job, ...] = (
     Job("football_qb", ["scripts.compute_football_qb", "--commit"],
         hour=4, minute=10, timeout_s=900,
         note="football QB adjustment (who throws the next game vs who threw the rated games)"),
+    # CFBD RATINGS (Sep 17 2026): SP+/FPI/Elo/SRS → cfbd_ratings, the college
+    # PRE-MARKET line app._cfbd_consensus centers on before a book line exists.
+    # Needs CFBD_API_KEY in the box .env; without it the script exits 2 and the
+    # pricer falls back to the results solve exactly as before.
+    Job("cfbd_ratings", ["scripts.ingest_cfbd_ratings", "--commit"],
+        hour=4, minute=20, timeout_s=600,
+        note="CollegeFootballData SP+/FPI/Elo/SRS mirror (college pre-market line)"),
 
     # -- weekly ------------------------------------------------------------
     # NOT --delta: this script has no such flag. Its delta mode is

@@ -19044,6 +19044,99 @@ def _fb_adj_for(adjmap, nm):
     return None
 
 
+_CFBD_CACHE: dict = {"at": 0.0, "rows": None}
+_CFBD_ELO_PTS = 25.0          # Elo points per point of spread (the usual 25:1)
+_CFBD_HFA = 2.5               # neutral-field ratings need a home edge added
+_CFBD_PRIOR_GAMES = 6.0       # blend: results weight = gp/(gp+6) — market prior dominates until ~week 6
+_GRIDIRON_CFBD_NOTE: dict = {}
+
+
+def _cfbd_rows(sb):
+    """cfbd_ratings for the current year, by source → {team: rating}. 10-min cache; {} when empty."""
+    c = _CFBD_CACHE
+    if c["rows"] is not None and _time.time() - c["at"] < 600:
+        return c["rows"]
+    out: dict = {}
+    try:
+        yr = datetime.now(timezone.utc).year
+        rows = (sb.table("cfbd_ratings").select("source,team,rating,fetched_at")
+                .eq("year", yr).limit(2000).execute().data) or []
+        for r in rows:
+            if r.get("rating") is None:
+                continue
+            out.setdefault(r["source"], {})[r["team"]] = float(r["rating"])
+    except Exception:
+        out = {}
+    c["rows"], c["at"] = out, _time.time()
+    return out
+
+
+def _cfbd_team(table: dict, ours: str):
+    """CFBD keys by school ('Notre Dame', 'Miami (OH)'); ours are ESPN full names
+    ('Notre Dame Fighting Irish'). Longest CFBD name that prefixes ours wins, so
+    'Miami (OH) RedHawks' → 'Miami (OH)' and not 'Miami'."""
+    if not table or not ours:
+        return None
+    if ours in table:
+        return table[ours]
+    ol = ours.lower()
+    best, best_len = None, 0
+    for k, v in table.items():
+        kl = (k or "").lower()
+        if kl and ol.startswith(kl) and len(kl) > best_len:
+            best, best_len = v, len(kl)
+    return best
+
+
+def _cfbd_consensus(sb, event_name):
+    """THE COLLEGE PRE-MARKET LINE (Rob, Sep 17 2026): home margin from SP+, FPI
+    and Elo (SRS held out until ~week 6 — it is a season-only solve with our
+    own two-game disease). Returns (margin_home, detail) or None. Every source
+    is a neutral-field rating; the home edge is added once."""
+    if " @ " not in (event_name or ""):
+        return None
+    away_n, home_n = [s.strip() for s in event_name.split(" @ ", 1)]
+    rows = _cfbd_rows(sb)
+    if not rows:
+        return None
+    lines: dict = {}
+    for src in ("sp", "fpi", "elo"):
+        t = rows.get(src) or {}
+        h, aw = _cfbd_team(t, home_n), _cfbd_team(t, away_n)
+        if h is None or aw is None:
+            continue
+        diff = (h - aw) / (_CFBD_ELO_PTS if src == "elo" else 1.0)
+        lines[src] = round(diff + _CFBD_HFA, 2)
+    if not lines:
+        return None
+    m = sum(lines.values()) / len(lines)
+    return round(m, 2), {"lines": lines, "n_src": len(lines)}
+
+
+def _gridiron_cfbd_note(sport, event_name):
+    return _GRIDIRON_CFBD_NOTE.get(f"{sport}|{event_name}")
+
+
+def _season_games(sb, sport, team):
+    """Games this team has played THIS season (game_results since Aug 20) — the
+    results model's real sample, not the decayed-window gp. 10-min cache."""
+    c = _CFBD_CACHE.setdefault("gp", {"at": 0.0, "map": {}})
+    if _time.time() - c["at"] > 600 or sport not in c["map"]:
+        m: dict = {}
+        try:
+            since = f"{datetime.now(timezone.utc).year}-08-20"
+            for r in _sb_paged(lambda: (sb.table("game_results").select("home,away")
+                                        .eq("sport", sport).gte("game_date", since)), 3) or []:
+                for k in ("home", "away"):
+                    if r.get(k):
+                        m[r[k]] = m.get(r[k], 0) + 1
+        except Exception:
+            m = {}
+        c["map"][sport] = m
+        c["at"] = _time.time()
+    return int((c["map"].get(sport) or {}).get(team) or 0)
+
+
 def _gridiron_qb_note(sport, event_name):
     """The stamp every football bet/shadow carries: what the pricer added
     for each side's quarterback (None when nothing was applied)."""
@@ -19124,7 +19217,28 @@ def _gridiron_proj(sb, sport, event_name):
             _GRIDIRON_QB_NOTE.pop(f"{sport}|{event_name}", None)
     except Exception:
         pass
-    return exp_home - exp_away, exp_home + exp_away, params
+    margin = exp_home - exp_away
+    # THE CFBD BLEND (Rob, Sep 17 2026 — week-3 ratings are a 2-game solve:
+    # Indiana 64.8 off two cupcakes, ND–Purdue at 12.9): for NCAAF the
+    # margin is the results solve weighted by THIS season's games played
+    # (gp/(gp+6)) against the SP+/FPI/Elo consensus, which carries a
+    # preseason prior with the roster in it. No CFBD rows → unchanged.
+    if (sport or "").upper() == "NCAAF":
+        try:
+            cons = _cfbd_consensus(sb, event_name)
+            if cons is not None:
+                gp = min(_season_games(sb, sport, home_n), _season_games(sb, sport, away_n))
+                w = gp / (gp + _CFBD_PRIOR_GAMES)
+                blended = w * margin + (1.0 - w) * cons[0]
+                _GRIDIRON_CFBD_NOTE[f"{sport}|{event_name}"] = {
+                    "consensus": cons[0], "results": round(margin, 2), "w_results": round(w, 2),
+                    "gp": gp, **cons[1]}
+                margin = blended
+            else:
+                _GRIDIRON_CFBD_NOTE.pop(f"{sport}|{event_name}", None)
+        except Exception:
+            pass
+    return margin, exp_home + exp_away, params
 
 
 def _gridiron_margin(sb, sport, event_name):
@@ -20271,6 +20385,7 @@ def _gridiron_try_bet_impl(sb, g, es0, d, mt, gp, contracts=None):
               "bound": (bounds or {}).get(s["sn"]),
               "value_side": value_side,
               "qb_adj": _gridiron_qb_note(g.get("sport"), g.get("event_name")),
+              "cfbd": _gridiron_cfbd_note(g.get("sport"), g.get("event_name")),
               "rung_dist": round(s["dist"], 1),
               "early_noveto": bool(_noveto
                                    and s["e"] < _GRIDIRON_MIN_EDGE_PP)}
@@ -20409,6 +20524,7 @@ def _gridiron_try_ml(sb, g, es0, d):
     xb = {"gridiron_autobet": True, "rent_first": True,
           "ml_rent_lane": True,
           "qb_adj": _gridiron_qb_note(g.get("sport"), g.get("event_name")),
+              "cfbd": _gridiron_cfbd_note(g.get("sport"), g.get("event_name")),
           "ml_model_p": (round(ps, 4) if ps is not None else None),
           "early_noveto": bool(_noveto and (e is None
                                             or e < _GRIDIRON_MIN_EDGE_PP))}

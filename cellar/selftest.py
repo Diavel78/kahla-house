@@ -522,6 +522,25 @@ def test_gridiron_qb_adjust() -> None:
         _app._power_snapshot, _app._football_qb_adj = _o_snap, _o_adj
 
 
+def test_cfbd_consensus() -> None:
+    """Rob, Sep 17 2026: the college pre-market line — SP+/FPI in points, Elo/25,
+    one home edge; team match = longest CFBD school name prefixing ours."""
+    import app as _app
+    t = {"Notre Dame": 25.0, "Purdue": 3.0, "Miami": 20.0, "Miami (OH)": 4.0}
+    check("prefix match picks the school", _app._cfbd_team(t, "Purdue Boilermakers") == 3.0)
+    check("longest prefix wins: Miami (OH) RedHawks → Miami (OH)", _app._cfbd_team(t, "Miami (OH) RedHawks") == 4.0)
+    check("Miami Hurricanes → Miami", _app._cfbd_team(t, "Miami Hurricanes") == 20.0)
+    _app._CFBD_CACHE.update(at=_app._time.time(), rows={
+        "sp": {"Notre Dame": 25.0, "Purdue": 3.0},
+        "fpi": {"Notre Dame": 22.0, "Purdue": 4.0},
+        "elo": {"Notre Dame": 2000.0, "Purdue": 1500.0},
+        "srs": {"Notre Dame": 40.0, "Purdue": 1.0}})
+    got = _app._cfbd_consensus(None, "Notre Dame Fighting Irish @ Purdue Boilermakers")
+    # home = Purdue: sp 3-25+2.5=-19.5, fpi 4-22+2.5=-15.5, elo -500/25+2.5=-17.5 → mean -17.5; SRS excluded
+    check("consensus home margin −17.5 (SRS held out)", got is not None and abs(got[0] + 17.5) < 0.01 and got[1]["n_src"] == 3, f"got {got}")
+    _app._CFBD_CACHE.update(at=0.0, rows=None)
+
+
 def test_gridiron_key_hook() -> None:
     """Rob, Sep 17 2026: the dog never sits at +K−0.5, the favorite never at
     −K−0.5, when a good-hook rung pays. Rung units = home line."""
@@ -1066,7 +1085,7 @@ def main() -> int:
               test_batch_blocked_deps, test_owner_dependent_lanes,
               test_dry_run_blackout, test_overrun_detector,
               test_ws_quote_presence, test_ws_mkts_request_budget,
-              test_gridiron_value_window, test_gridiron_move_favorable, test_gridiron_key_hook, test_gridiron_qb_adjust,
+              test_gridiron_value_window, test_gridiron_move_favorable, test_gridiron_key_hook, test_cfbd_consensus, test_gridiron_qb_adjust,
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
