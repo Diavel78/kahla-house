@@ -618,13 +618,13 @@ def test_gridiron_value_window() -> None:
     _app._book_line_center = lambda sb, mid, mt, now: (None, None)
     try:
         d = {"odds": {"moneyline": {"polymarket": {"ladder": [
-            {"side": "away", "quote": {"bid": 0.015, "ask": 0.02}}]}}}}
+            {"side": "away", "quote": {"bid": 0.115, "ask": 0.12}}]}}}}
         rule = _app._gridiron_line_rule(None, {"id": "x"}, d, {"spread_fit": {"sd": 16.132}},
-                                        "spread", -20.5, 20.5, [], None)
-        check("no book line → venue ML centers (~−34), model capped to −27",
-              rule["center_src"] == "venue_ml" and -35.5 < rule["center"] < -32.5
-              and rule["model_capped"] == round(rule["center"] + 7.0, 1), f"got {rule}")
-        check("dog is value; +34.5 legal only if past the ML number",
+                                        "spread", -15.5, 15.5, [], None)
+        check("no book line → venue ML (88% favorite) centers (~−19), model −15.5 inside ±7 stays",
+              rule["center_src"] == "venue_ml" and -21.0 < rule["center"] < -17.0
+              and rule["model_capped"] == -15.5, f"got {rule}")
+        check("dog is value; a dog rung is legal only past the ML number",
               rule["value_side"] == "away" and leg(rule, "spread", "away", round(rule["center"] - 0.5, 1))
               and not leg(rule, "spread", "away", round(rule["center"] + 0.5, 1)))
         rule2 = _app._gridiron_line_rule(None, {"id": "x"}, {"odds": {}}, {"spread_fit": {"sd": 16.132}},
@@ -665,7 +665,10 @@ def test_gridiron_bounds() -> None:
     d2 = {"odds": {"moneyline": {"polymarket": {"ladder": [
         {"side": "away", "quote": {"bid": 0.015, "ask": 0.02}}]}}}}
     ml2 = _app._gridiron_ml_line(d2, {"spread_fit": {"sd": 16.132}}, "away", "home")
-    check("WKU 1.5/2.0 → Georgia about −34", ml2 is not None and -35.5 < ml2 < -32.5, f"got {ml2}")
+    check("WKU 1.5/2.0 (98% favorite) → NO line: past the 90% saturation guard (Sep 17 2026)", ml2 is None, f"got {ml2}")
+    d2b = {"odds": {"moneyline": {"polymarket": {"ladder": [{"side": "away", "quote": {"bid": 0.115, "ask": 0.12}}]}}}}
+    ml2b = _app._gridiron_ml_line(d2b, {"spread_fit": {"sd": 16.132}}, "away", "home")
+    check("an 88% favorite still converts (about −19)", ml2b is not None and -21.0 < ml2b < -17.0, f"got {ml2b}")
     d3 = {"odds": {"moneyline": {"polymarket": {"ladder": [
         {"side": "away", "quote": {"bid": 0.03, "ask": 0.415}}]}}}}
     check("a 3/41.5 ML book is not a line", _app._gridiron_ml_line(d3, pm, "away", "home") is None)
