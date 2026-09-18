@@ -19047,7 +19047,7 @@ def _fb_adj_for(adjmap, nm):
 _CFBD_CACHE: dict = {"at": 0.0, "rows": None}
 _CFBD_ELO_PTS = 25.0          # Elo points per point of spread (the usual 25:1)
 _CFBD_HFA = 2.5               # neutral-field ratings need a home edge added
-_CFBD_PRIOR_GAMES = 6.0       # blend: results weight = gp/(gp+6) — market prior dominates until ~week 6
+_CFBD_PRIOR_GAMES = 10.0      # blend: results weight = gp/(gp+10) — two cupcake games get ~17%, half the vote at 10 games
 _GRIDIRON_CFBD_NOTE: dict = {}
 
 
@@ -19229,10 +19229,20 @@ def _gridiron_proj(sb, sport, event_name):
             if cons is not None:
                 gp = min(_season_games(sb, sport, home_n), _season_games(sb, sport, away_n))
                 w = gp / (gp + _CFBD_PRIOR_GAMES)
-                blended = w * margin + (1.0 - w) * cons[0]
+                # ONE SHRINK, NOT TWO: every consumer runs this margin through the
+                # cover fit (alpha + beta·margin, beta≈0.68) — right for the raw
+                # results solve, wrong for SP+/FPI, which are already calibrated
+                # spreads. So the consensus is lifted into RAW space first
+                # ((cons − alpha)/beta) and the blend comes out of the fit at
+                # exactly w·shrunk_results + (1−w)·consensus.
+                _fit = (params or {}).get("spread_fit") or {}
+                _al, _be = float(_fit.get("alpha") or 0.0), float(_fit.get("beta") or 1.0)
+                cons_raw = (cons[0] - _al) / _be if _be > 0.05 else cons[0]
+                blended = w * margin + (1.0 - w) * cons_raw
                 _GRIDIRON_CFBD_NOTE[f"{sport}|{event_name}"] = {
-                    "consensus": cons[0], "results": round(margin, 2), "w_results": round(w, 2),
-                    "gp": gp, **cons[1]}
+                    "consensus": cons[0], "results_raw": round(margin, 2),
+                    "results_shrunk": round(_al + _be * margin, 2), "w_results": round(w, 2),
+                    "gp": gp, "model_line": round(_al + _be * blended, 2), **cons[1]}
                 margin = blended
             else:
                 _GRIDIRON_CFBD_NOTE.pop(f"{sport}|{event_name}", None)
