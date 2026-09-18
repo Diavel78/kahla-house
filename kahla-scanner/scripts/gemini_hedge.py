@@ -708,7 +708,19 @@ def run(live: bool, once: bool):
                             import math as _m
                             pair_floor = _m.ceil((float(pair.get("max_pair_cost", 1.01)) - float(cost_own)) * 100.0 - 1e-6) / 100.0
                             ask_base = max(cost, round(pair_floor, 2))
-                        px = ask_px(ask_base, h_bid, h_ask, at_cost=(t30 and surplus > 0.5))
+                        # DON'T ARGUE WITH YOURSELF (Sep 17 2026 — the GB5 ask flipped 45→46→45 five
+                        # times in a day, two cancels + two orders each time, on a 2h clock): when the
+                        # socket's book blinks empty, our own resting ask is the only ask on that side, so
+                        # the rule said "cost+1 leads" (46), then read our new 46 back as the market's ask
+                        # and said "cost" (45). An ask AT our own resting price is US, not competition; an
+                        # EMPTY book read never re-prices an ask we already have working.
+                        _my_flat = [o for o in (gs.get("orders") or []) if str(o.get("clientOrderId") or "").startswith(CID + "flat")]
+                        _my_ask = float(_my_flat[0]["price"]) if _my_flat else None
+                        if _my_ask is not None and h_bid is None and h_ask is None:
+                            px = _my_ask                                   # no information → hold
+                        else:
+                            _h_ask_eff = None if (_my_ask is not None and h_ask is not None and abs(h_ask - _my_ask) < 1e-9) else h_ask
+                            px = ask_px(ask_base, h_bid, _h_ask_eff, at_cost=(t30 and surplus > 0.5))
                     if cost is not None:
                         # after T-60 only the un-paired surplus may carry an ask; before it, everything held does
                         ask_qty = round(gs["held"] - paired_qty, 4) if t60 else round(gs["held"], 4)
@@ -766,6 +778,8 @@ def _selftest():
     assert abs(ask_px(0.59, 0.40, 0.60) - 0.59) < 1e-9        # cost+1 would only JOIN the ask → rest at cost
     assert abs(ask_px(0.45, 0.40, 0.44) - 0.45) < 1e-9        # market ask UNDER cost → rest at cost, never below (Sep 16)
     assert abs(ask_px(0.45, 0.40, 0.44, at_cost=True) - 0.45) < 1e-9
+    assert abs(ask_px(0.45, None, None) - 0.46) < 1e-9        # alone on an empty book: cost+1 leads
+    assert abs(ask_px(0.45, None, 0.46) - 0.45) < 1e-9        # a 46 ask that is NOT us → cost (the loop masks our own 46 to None first)
     # the re-rung rule (Rob, Sep 15 2026): Gemini holds GB −5.5 (Poly leg = NYJ = 'no' = home)
     geo = _hedge_geom("asc-nfl-gb-nyj-2026-09-20-neg-5pt5", "no")
     assert geo == {"prefix": "asc-nfl-gb-nyj-2026-09-20", "poly_name": "home", "gem_side": "away", "gem_rv": 5.5}, geo
