@@ -542,6 +542,12 @@ def test_cfbd_consensus() -> None:
     got = _app._cfbd_consensus(None, "Kansas City Chiefs @ Miami Dolphins", "NFL")
     check("NFL prior: nfelo pts diff + 1.8 home edge → −6.2 (KC by 6.2)", got is not None and abs(got[0] + 6.2) < 0.01, f"got {got}")
     _app._CFBD_CACHE.update(at=0.0, rows=None)
+    # moneyline → spread saturates: a 95% favorite is a guess, a 72% favorite is a line
+    pm = {"spread_fit": {"sd": 16.0}}
+    def _d(bid, ask):
+        return {"odds": {"moneyline": {"polymarket": {"ladder": [{"side": "home", "synthetic": False, "quote": {"bid": bid, "ask": ask}}]}}}}
+    check("ML→spread refuses a 95% favorite", _app._gridiron_ml_line(_d(0.95, 0.96), pm, "away", "home") is None)
+    check("ML→spread prices a 72% favorite", _app._gridiron_ml_line(_d(0.71, 0.73), pm, "away", "home") is not None)
 
 
 def test_gridiron_key_hook() -> None:

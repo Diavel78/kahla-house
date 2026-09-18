@@ -19192,6 +19192,18 @@ def _gridiron_proj(sb, sport, event_name):
         return None
 
     h, a = _team(home_n), _team(away_n)
+    # FCS GUARD (Sep 17 2026): a college side the market doesn't rate (no SP+
+    # row) is an FCS team with one or two FBS games behind it — North Dakota
+    # read 8.8 off ONE game and priced Nebraska at 15.5 against a 24.5 book.
+    # No model line for that game; it seats only once a book line exists.
+    if (sport or "").upper() == "NCAAF":
+        try:
+            _sp = (_cfbd_rows(sb) or {}).get("sp") or {}
+            if _sp and (_cfbd_team(_sp, home_n) is None or _cfbd_team(_sp, away_n) is None):
+                _GRIDIRON_CFBD_NOTE[f"{sport}|{event_name}"] = {"fcs": True, "consensus": None}
+                return None
+        except Exception:
+            pass
     try:
         lg = float(snap.get("league_avg") or 0.0)
         params = snap.get("params") or {}
@@ -19867,6 +19879,9 @@ def _norm_ppf(p: float) -> float:
     return (lo + hi) / 2.0
 
 
+_GRIDIRON_ML_LINE_PMAX = 0.90
+
+
 def _gridiron_ml_line(d, pm, ka, kb):
     """The venue's MONEYLINE turned into a spread, in rung units (home
     line). Rob, Sep 6 2026: 'can we use that and the model?' — measured
@@ -19899,6 +19914,12 @@ def _gridiron_ml_line(d, pm, ka, kb):
             continue
         p_side = (bid + ask) / 2.0
         p_home = p_side if e["side"] == kb else 1.0 - p_side
+        # SATURATION GUARD (Sep 17 2026 — North Dakota +16.5 against a
+        # DraftKings 24.5): past ~90% the curve is nearly flat, so a one-cent
+        # move in the moneyline is three to five points of spread; the
+        # conversion is a guess there, and the rule is never a guess.
+        if p_home > _GRIDIRON_ML_LINE_PMAX or p_home < 1.0 - _GRIDIRON_ML_LINE_PMAX:
+            return None
         return round(-sd * _norm_ppf(p_home), 1)
     return None
 
