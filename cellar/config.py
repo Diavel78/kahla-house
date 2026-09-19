@@ -197,6 +197,10 @@ ALL_LANES: dict[str, Lane] = {
         # _repeg_tick), so the one-scalp-at-a-time invariant holds.
         Lane("scalp",          120,   300, writes_money=True,
              needs_owner=True, stuck_s=600, note="exit asks (sell arm)"),
+        # Sep 18 2026 — the middle pair (Rob: "rent is king"). Owns its own
+        # slugs end to end; 20s so both legs track the touch closely.
+        Lane("pair",            20,   120, writes_money=True,
+             note="middle-pair hedge (two legs, one game)"),
     ]
 }
 

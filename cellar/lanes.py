@@ -427,6 +427,21 @@ def lane_scalp(ctx: Ctx) -> int:
             + int(stats.get("shadow") or 0))
 
 
+def lane_pair(ctx: Ctx) -> int:
+    """THE MIDDLE PAIR (Rob, Sep 18 2026): two Polymarket legs on opposite
+    sides of neighbouring rungs, combined bids capped (110), pair-floor sells,
+    T-30 hold-for-middle. Owns every order on its slugs; engine app._pair_tick."""
+    import app as _app
+    if ctx.dry_run:
+        log.info("pair: DRY-RUN, not executing")
+        return 0
+    stats = _app._pair_tick(ctx.sb, ctx.now) or {}
+    log.info("pair: %s", stats)
+    if ctx.detail is not None and isinstance(stats, dict):
+        ctx.detail.update(stats)
+    return int(stats.get("writes") or 0)
+
+
 REGISTRY: dict[str, Callable[[Ctx], int]] = {
     "pm_snapshot":    lane_pm_snapshot,
     "paperlog":       lane_paperlog,
@@ -440,6 +455,7 @@ REGISTRY: dict[str, Callable[[Ctx], int]] = {
     "batch":          lane_batch,
     "grader":         lane_grader,
     "scalp":          lane_scalp,
+    "pair":           lane_pair,
 }
 
 

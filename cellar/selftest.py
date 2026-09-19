@@ -156,8 +156,8 @@ def test_lane_registry_matches_config() -> None:
     extra = [n for n in lanes.REGISTRY if n not in config.ALL_LANES]
     check("no orphan lane implementations", not extra, f"orphans {extra}")
     money = {n for n, l in config.ALL_LANES.items() if l.writes_money}
-    check("money lanes are exactly opener/repeg/harvest/scalp",
-          money == {"opener", "repeg", "harvest", "scalp"},
+    check("money lanes are exactly opener/repeg/harvest/scalp/pair",
+          money == {"opener", "repeg", "harvest", "scalp", "pair"},
           f"got {sorted(money)}")
     bad = [n for n, l in config.ALL_LANES.items() if l.ttl_s <= l.every_s]
     check("every TTL exceeds its cadence", not bad, f"too tight: {bad}")
@@ -1088,6 +1088,56 @@ def test_ttls_agree_with_engines() -> None:
           f"mismatched (lane, app.py, config): {bad}")
 
 
+def test_pair_plan() -> None:
+    """THE MIDDLE PAIR (Rob, Sep 18 2026): combined bids ≤ cap, the empty
+    leg chases up to cap − the held leg's cost, lone leg after a sale floors
+    at cap − sold price, a ≤100 pair rides with no asks, both held at T−30
+    cancel the asks, kickoff stops bids."""
+    import app as _app
+    def leg(**kw):
+        d = {"h": 0.0, "cost": None, "sold": None, "bid": None, "ask": None,
+             "tick": 0.5, "rent": True}
+        d.update(kw)
+        return d
+    # both empty, touches 43.5 + 57.5 = 101 → both join
+    p = _app._pair_plan({"a": leg(bid=43.5, ask=44.0), "b": leg(bid=57.5, ask=58.0)}, 15, 110, 2000)
+    check("both empty under cap → join both touches",
+          p["a"]["bid"] == (43.5, 15) and p["b"]["bid"] == (57.5, 15) and not p["a"]["ask"])
+    # both empty, touches sum 114 > 110 → each gives up half the excess
+    p = _app._pair_plan({"a": leg(bid=55.0, ask=56.0), "b": leg(bid=59.0, ask=60.0)}, 15, 110, 2000)
+    check("both empty over cap → split the excess",
+          p["a"]["bid"][0] + p["b"]["bid"][0] <= 110.0 and p["a"]["bid"][0] == 53.0)
+    # a held at 44, b empty touching 70 → b capped at 66; a asks at cost+tick
+    p = _app._pair_plan({"a": leg(h=15, cost=44.0, bid=43.0, ask=46.0),
+                         "b": leg(bid=70.0, ask=71.0)}, 15, 110, 2000)
+    check("one held → other bid capped at cap − cost (66)", p["b"]["bid"] == (66.0, 15))
+    check("one held, never sold → ask at cost + tick when it leads", p["a"]["ask"] == (44.5, 15))
+    # a sold at 60, b held at 57 → b floor = 110 − 60 = 50, sells at 50.5 if it leads
+    p = _app._pair_plan({"a": leg(sold=60.0, bid=58.0, ask=61.0),
+                         "b": leg(h=15, cost=57.0, bid=40.0, ask=55.0)}, 15, 110, 2000)
+    check("lone leg after a sale → floor cap − sold (50 → 50.5)", p["b"]["ask"] == (50.5, 15))
+    check("sold leg re-bids capped at cap − held cost (53)", p["a"]["bid"] == (53.0, 15))
+    # both held at 44 + 55 = 99 → the lock rides, no asks
+    p = _app._pair_plan({"a": leg(h=15, cost=44.0, bid=44.0, ask=45.0),
+                         "b": leg(h=15, cost=55.0, bid=56.0, ask=57.0)}, 15, 110, 2000)
+    check("both held ≤100 → no asks (lock rides)", p["a"]["ask"] is None and p["b"]["ask"] is None
+          and "lock_rides" in p["a"]["why"])
+    # both held at 102, 45 min out → asks at cost; 20 min out → none
+    two = {"a": leg(h=15, cost=45.0, bid=44.0, ask=47.0), "b": leg(h=15, cost=57.0, bid=56.0, ask=59.0)}
+    p = _app._pair_plan(two, 15, 110, 45)
+    check("both held >100 before T−30 → asks at cost", p["a"]["ask"] == (45.5, 15) and p["b"]["ask"] == (57.5, 15))
+    p = _app._pair_plan(two, 15, 110, 20)
+    check("both held inside T−30 → no asks, hold for the middle",
+          p["a"]["ask"] is None and "t30_middle" in p["b"]["why"])
+    # kickoff: no bids, a lone leg keeps its ask
+    p = _app._pair_plan({"a": leg(bid=43.0, ask=44.0), "b": leg(h=15, cost=57.0, bid=40.0, ask=55.0)}, 15, 110, -5)
+    check("kickoff → no bids, lone ask stays live", p["a"]["bid"] is None and p["b"]["ask"] is not None)
+    # a bid never crosses the ask; an unpaid leg never bids
+    p = _app._pair_plan({"a": leg(bid=44.0, ask=44.0), "b": leg(bid=50.0, ask=51.0, rent=False)}, 15, 110, 2000)
+    check("post-only: bid steps under a locked touch", p["a"]["bid"][0] < 44.0)
+    check("rent rule: an unpaid leg never bids", p["b"]["bid"] is None and "not_paying" in p["b"]["why"])
+
+
 def main() -> int:
     print("THE CELLAR — offline selftest\n")
     for t in (test_imports_without_creds, test_config_validation,
@@ -1101,7 +1151,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines,
+              test_lane_covers_its_documented_engines, test_pair_plan,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
