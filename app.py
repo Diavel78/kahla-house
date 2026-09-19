@@ -2883,6 +2883,11 @@ _LANE_WORK_WARN_S = {
     # in _cellar_health, which reads outcomes (asks placed vs candidates
     # seen) — not this quiet-clock. 6h covers the overnight lull.
     "scalp":          21_600,
+    # pair (Sep 18 2026): work = order WRITES, and a pair resting at an
+    # unmoved touch writes nothing — the first night read "idle" after 8h
+    # with both bids still sitting on the touch. Books move daily; a day of
+    # silence is worth a look.
+    "pair":           86_400,
 }
 
 
