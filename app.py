@@ -1025,6 +1025,80 @@ def dashboard_full():
     return render_template("dashboard_full.html")
 
 
+@app.route("/football-picks")
+def football_picks_page():
+    """Football sheets, on the website (Sep 19 2026 — Rob: "I don't care
+    about telegram... just put them on my fucking website... next to
+    dashboard"). Reads straight off the football_sheets/football_sheet_weeks
+    tables the weekly Routine writes — no Telegram, no chat attachment, no
+    stale link pasted somewhere. Admin only, same gate as Dashboard."""
+    return render_template("football_picks.html")
+
+
+@app.route("/api/football-picks")
+@admin_required
+def api_football_picks():
+    sport = (request.args.get("sport") or "NCAAF").upper()
+    if sport not in ("NFL", "NCAAF"):
+        return jsonify({"ok": False, "error": "sport must be NFL or NCAAF"}), 400
+    sb = get_supabase()
+    if not sb:
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    try:
+        wk_rows = (sb.table("football_sheet_weeks").select("*")
+                   .eq("sport", sport).order("week_key", desc=True)
+                   .limit(1).execute().data or [])
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"week lookup failed: {e}"}), 500
+    if not wk_rows:
+        return jsonify({"ok": True, "sport": sport, "week_key": None,
+                        "games": [], "note": "no sheets built yet this season"})
+    wk = wk_rows[0]
+    week_key = wk["week_key"]
+    base = os.getenv("SUPABASE_URL", "").strip().strip("<>").rstrip("/")
+
+    def _pub_url(path):
+        return (f"{base}/storage/v1/object/public/football-sheets/{path}"
+                if path else None)
+
+    try:
+        rows = (sb.table("football_sheets")
+                .select("event_name,event_start,tier,data_blob,friday_md")
+                .eq("week_key", week_key).eq("sport", sport)
+                .order("event_start").execute().data or [])
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"games lookup failed: {e}"}), 500
+
+    games = []
+    for r in rows:
+        blob = r.get("data_blob") or {}
+        # Friday overlay: same numbers the picks PDF renders, so the
+        # website and the PDF can never disagree.
+        fr = blob.get("friday") or {}
+        model = fr.get("model") or blob.get("model")
+        g = blob.get("game") or {}
+        bs = (model or {}).get("bet_spread")
+        bt = (model or {}).get("bet_total")
+        games.append({
+            "event_name": r.get("event_name"),
+            "event_start": r.get("event_start"),
+            "tier": r.get("tier"),
+            "away": g.get("away"), "home": g.get("home"),
+            "spread": bs, "total": bt,
+            "unrated": model is None,
+            "friday_note": r.get("friday_md"),
+        })
+
+    return jsonify({
+        "ok": True, "sport": sport, "week_key": week_key,
+        "games": games,
+        "pdf_url": _pub_url(wk.get("friday_pdf_path") or wk.get("pdf_path")),
+        "picks_pdf_url": _pub_url(wk.get("picks_pdf_path")),
+        "published_at": wk.get("friday_published_at") or wk.get("published_at"),
+        "picks_published_at": wk.get("picks_published_at"),
+    })
+
+
 @app.route("/handicapper")
 def handicapper_page():
     """Handicapper Bot — admin + bot_access gated (client-side via /api/me)."""

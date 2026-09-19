@@ -143,6 +143,10 @@ body::after {
 .app-card.bookclub-app::before { background: linear-gradient(90deg, var(--cyan), var(--green)); }
 .app-card.bookclub-app:hover { border-color: rgba(6,182,212,0.3); box-shadow: 0 8px 40px rgba(6,182,212,0.08), 0 0 0 1px rgba(6,182,212,0.15); }
 .app-card.bookclub-app .app-tag { background: var(--cyan-dim); color: var(--cyan); }
+
+.app-card.football-app::before { background: linear-gradient(90deg, #34d399, var(--blue)); }
+.app-card.football-app:hover { border-color: rgba(52,211,153,0.3); box-shadow: 0 8px 40px rgba(52,211,153,0.08), 0 0 0 1px rgba(52,211,153,0.15); }
+.app-card.football-app .app-tag { background: rgba(52,211,153,0.15); color: #34d399; }
 .bookclub-app:hover .arrow { color: var(--cyan); }
 .dashboard-app:hover .arrow { color: var(--blue); }
 .admin-badge { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 9px; padding: 3px 8px; border-radius: 5px; background: var(--red-dim); color: #f87171; margin-left: 8px; letter-spacing: 0.05em; vertical-align: middle; }
@@ -395,6 +399,13 @@ function renderAppCards() {
             <h2>Dashboard<span class="admin-badge">ADMIN</span></h2>
             <p>Polymarket position tracking with P&amp;L, open and closed trades, maker rewards, and shareable bet slips.</p>
             <span class="app-tag">P&amp;L Tracking</span>
+            <span class="arrow">&rarr;</span>
+        </a>`;
+        h += `<a href="/football-picks" class="app-card football-app">
+            <span class="app-icon">&#127944;</span>
+            <h2>Football Picks<span class="admin-badge">ADMIN</span></h2>
+            <p>This week's NFL + college sheets, straight off the DB &mdash; every game, our number, and the spread/total call. Full deep-dive PDF and a one-page picks-only sheet, both downloadable here.</p>
+            <span class="app-tag">Sheets</span>
             <span class="arrow">&rarr;</span>
         </a>`;
     }

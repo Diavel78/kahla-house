@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kahla House — Football Picks</title>
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <link rel="icon" type="image/png" href="/apple-touch-icon.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Football Picks">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>
+        const FC = {
+            apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
+            authDomain: "kahla-house.firebaseapp.com",
+            projectId: "kahla-house",
+            storageBucket: "kahla-house.firebasestorage.app",
+            messagingSenderId: "1029771942929",
+            appId: "1:1029771942929:web:76358096dbb868e375a5b0"
+        };
+        firebase.initializeApp(FC);
+    </script>
+
+    <style>
+        :root {
+            --bg: #0b0e13; --surface: #13171e; --line: #232a37;
+            --text: #e8edf5; --muted: #7d8799;
+            --green: #34d399; --red: #f87171; --cyan: #22d3ee; --amber: #fbbf24;
+        }
+        * { box-sizing: border-box; }
+        html, body { overflow-x: hidden; }
+        body {
+            margin: 0; background: var(--bg); color: var(--text);
+            font-family: 'DM Sans', system-ui, sans-serif;
+            -webkit-font-smoothing: antialiased;
+        }
+        .topbar {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--line);
+            flex-wrap: wrap;
+        }
+        .nav { display: flex; gap: 16px; flex-wrap: wrap; }
+        .nav a { color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+        .nav a:hover, .nav a.on { color: var(--text); }
+        .logout {
+            background: none; border: 1px solid var(--line); color: var(--muted);
+            border-radius: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer;
+        }
+        .wrap { max-width: 920px; margin: 0 auto; padding: 18px 16px 60px; }
+        h1 { font-size: 20px; margin: 6px 0 14px; }
+        .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+        .tab {
+            background: var(--surface); border: 1px solid var(--line); color: var(--muted);
+            border-radius: 999px; padding: 7px 16px; font-size: 13px; font-weight: 600;
+            cursor: pointer;
+        }
+        .tab.on { color: var(--bg); background: var(--cyan); border-color: var(--cyan); }
+        .dl-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+        .dl {
+            display: inline-flex; align-items: center; gap: 8px; text-decoration: none;
+            background: var(--surface); border: 1px solid var(--line); color: var(--text);
+            border-radius: 10px; padding: 10px 14px; font-size: 13px; font-weight: 600;
+        }
+        .dl:hover { border-color: var(--cyan); }
+        .dl .sub { color: var(--muted); font-weight: 400; font-size: 11px; }
+        .meta { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
+        .day-hdr {
+            font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+            color: var(--muted); margin: 18px 0 6px; padding-bottom: 4px;
+            border-bottom: 1px solid var(--line);
+        }
+        .day-hdr:first-of-type { margin-top: 0; }
+        .row {
+            display: flex; align-items: baseline; gap: 10px; padding: 8px 0;
+            border-bottom: 1px solid var(--line); flex-wrap: wrap;
+        }
+        .t { width: 56px; flex: 0 0 56px; color: var(--muted); font-size: 12px;
+             font-variant-numeric: tabular-nums; }
+        .m { flex: 1 1 220px; font-weight: 600; font-size: 14px; }
+        .legs { flex: 2 1 260px; display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; }
+        .v {
+            display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .06em;
+            padding: 2px 7px; border-radius: 8px; margin-right: 5px; vertical-align: 1px;
+        }
+        .v-play { background: #103c2c; color: var(--green); }
+        .v-lean { background: #4a3a10; color: var(--amber); }
+        .v-pass { background: var(--surface); color: var(--muted); border: 1px solid var(--line); }
+        .unrated { color: var(--muted); font-style: italic; font-size: 13px; }
+        .friday-note {
+            flex-basis: 100%; color: var(--amber); font-size: 12px; margin-top: 2px;
+        }
+        .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+        .refresh-hint { color: var(--muted); font-size: 12px; margin-top: 24px; text-align: center; }
+    </style>
+</head>
+<body>
+    <div id="auth-gate" style="padding:40px;text-align:center;color:var(--muted)">Checking access…</div>
+    <div id="app" style="display:none">
+        <div class="topbar">
+            <div class="nav">
+                <a href="/">Home</a>
+                <a href="/dashboard">Dashboard</a>
+                <a href="/football-picks" class="on">Football Picks</a>
+                <a href="/handicapper">Pick Bot</a>
+            </div>
+            <button class="logout" onclick="doLogout()">Log out</button>
+        </div>
+
+        <div class="wrap">
+            <h1>🏈 Football Picks</h1>
+            <div class="tabs">
+                <button class="tab on" data-sport="NCAAF" onclick="switchSport('NCAAF')">College</button>
+                <button class="tab" data-sport="NFL" onclick="switchSport('NFL')">NFL</button>
+            </div>
+            <div class="dl-row" id="dlRow"></div>
+            <div class="meta" id="metaLine">loading…</div>
+            <div id="games"><div class="empty">loading…</div></div>
+            <div class="refresh-hint">Straight off the weekly sheet pipeline — Monday full build, Friday morning refresh. No Telegram, no chat link, this page just reads the DB.</div>
+        </div>
+    </div>
+
+<script>
+    async function authFetch(url, options = {}) {
+        const user = firebase.auth().currentUser;
+        if (!user) { window.location.href = '/'; return null; }
+        const token = await user.getIdToken();
+        const headers = { ...(options.headers || {}), 'Authorization': 'Bearer ' + token };
+        return fetch(url, { ...options, headers });
+    }
+
+    function doLogout() {
+        firebase.auth().signOut().then(() => { window.location.href = '/'; });
+    }
+
+    function _gateServerError(detail) {
+        try { document.querySelectorAll('#auth-gate,#app').forEach(function (el) { el.style.display = 'none'; }); } catch (e) {}
+        var o = document.createElement('div');
+        o.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;'
+            + 'justify-content:center;padding:24px;background:#0b0f14;color:#e6edf3;'
+            + 'font:15px/1.55 system-ui,-apple-system,sans-serif;text-align:center';
+        o.innerHTML = '<div style="max-width:460px">'
+            + '<div style="font-size:34px;margin-bottom:12px">⚠️</div>'
+            + '<div style="font-size:18px;font-weight:600;margin-bottom:8px">Server error &mdash; not a permissions problem</div>'
+            + '<div style="color:#9aa7b4;margin-bottom:18px">You are still signed in. This is a backend fault, not your account.</div>'
+            + '<div style="font:12px ui-monospace,monospace;color:#6e7d8d;margin-bottom:18px">' + String(detail || '') + '</div>'
+            + '<button id="_gateRetry" style="background:#1f6feb;color:#fff;border:0;border-radius:8px;'
+            + 'padding:10px 18px;font-size:14px;cursor:pointer;margin-right:8px">Retry</button>'
+            + '<a href="/" style="color:#9aa7b4;font-size:14px">Home</a></div>';
+        document.body.appendChild(o);
+        var b = document.getElementById('_gateRetry');
+        if (b) b.onclick = function () { location.reload(); };
+    }
+
+    let _sport = 'NCAAF';
+    function switchSport(s) {
+        _sport = s;
+        document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.sport === s));
+        load();
+    }
+
+    function fmtTime(iso) {
+        if (!iso) return 'TBD';
+        const d = new Date(iso);
+        return d.toLocaleString('en-US', { timeZone: 'America/Phoenix', weekday: 'short', month: 'short', day: 'numeric' });
+    }
+    function fmtClock(iso) {
+        if (!iso) return '';
+        const d = new Date(iso);
+        return d.toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit' });
+    }
+    function shortTeam(name) {
+        if (!name) return '?';
+        const parts = name.split(' ');
+        return parts.length > 1 ? parts.slice(0, -1).join(' ') : name;
+    }
+    function ago(iso) {
+        if (!iso) return 'never';
+        const sec = (Date.now() - new Date(iso).getTime()) / 1000;
+        if (sec < 90) return 'just now';
+        if (sec < 5400) return Math.round(sec / 60) + 'm ago';
+        if (sec < 172800) return Math.round(sec / 3600) + 'h ago';
+        return Math.round(sec / 86400) + 'd ago';
+    }
+
+    function verdictBadge(v) {
+        if (v === 'play') return '<span class="v v-play">PLAY</span>';
+        if (v === 'lean') return '<span class="v v-lean">LEAN</span>';
+        return '<span class="v v-pass">PASS</span>';
+    }
+    function spreadTxt(bs) {
+        if (!bs) return '<span class="unrated">no spread</span>';
+        const team = shortTeam(bs.team);
+        const txt = bs.verdict !== 'pass' ? (team + ' ' + (bs.line > 0 ? '+' : '') + bs.line) : 'pass';
+        return verdictBadge(bs.verdict) + ' ' + txt;
+    }
+    function totalTxt(bt) {
+        if (!bt) return '<span class="unrated">no total</span>';
+        const side = bt.side === 'over' ? 'Over' : 'Under';
+        const txt = bt.verdict !== 'pass' ? (side + ' ' + bt.line) : 'pass';
+        return verdictBadge(bt.verdict) + ' ' + txt;
+    }
+
+    async function load() {
+        document.getElementById('metaLine').textContent = 'loading…';
+        document.getElementById('games').innerHTML = '<div class="empty">loading…</div>';
+        let r;
+        try {
+            r = await authFetch('/api/football-picks?sport=' + _sport);
+        } catch (e) { document.getElementById('metaLine').textContent = 'fetch failed: ' + e; return; }
+        if (!r) return;
+        if (r.status >= 500) { document.getElementById('metaLine').textContent = 'server error ' + r.status; return; }
+        const d = await r.json().catch(() => null);
+        if (!d || !d.ok) { document.getElementById('metaLine').textContent = 'error: ' + (d && d.error || 'unknown'); return; }
+
+        const dl = document.getElementById('dlRow');
+        dl.innerHTML = '';
+        if (d.pdf_url) {
+            dl.innerHTML += '<a class="dl" href="' + d.pdf_url + '" target="_blank">📄 Full sheet pack<span class="sub"> · deep dives + roster notes</span></a>';
+        }
+        if (d.picks_pdf_url) {
+            dl.innerHTML += '<a class="dl" href="' + d.picks_pdf_url + '" target="_blank">📋 Picks only<span class="sub"> · one page</span></a>';
+        }
+
+        if (!d.week_key || !d.games || !d.games.length) {
+            document.getElementById('metaLine').textContent = d.note || 'no sheets for this sport yet';
+            document.getElementById('games').innerHTML = '<div class="empty">Nothing built yet — check back after the Monday or Friday run.</div>';
+            return;
+        }
+
+        document.getElementById('metaLine').textContent =
+            'Week of ' + d.week_key + ' · ' + d.games.length + ' games · sheet built ' + ago(d.published_at);
+
+        const games = d.games.slice().sort((a, b) => (a.event_start || '').localeCompare(b.event_start || ''));
+        let html = '';
+        let day = null;
+        for (const g of games) {
+            const dstr = fmtTime(g.event_start);
+            if (dstr !== day) { html += '<div class="day-hdr">' + dstr + '</div>'; day = dstr; }
+            const matchup = shortTeam(g.away) + ' @ ' + shortTeam(g.home);
+            let legs;
+            if (g.unrated) {
+                legs = '<span class="unrated">unrated — no number</span>';
+            } else {
+                legs = spreadTxt(g.spread) + '&nbsp;&nbsp;·&nbsp;&nbsp;' + totalTxt(g.total);
+            }
+            let note = g.friday_note ? '<div class="friday-note">Since Monday: ' + g.friday_note.replace(/[<>]/g, '') + '</div>' : '';
+            html += '<div class="row"><span class="t">' + fmtClock(g.event_start) + '</span>'
+                  + '<span class="m">' + matchup + '</span>'
+                  + '<span class="legs">' + legs + '</span>' + note + '</div>';
+        }
+        document.getElementById('games').innerHTML = html;
+    }
+
+    firebase.auth().onAuthStateChanged(async user => {
+        if (!user) { window.location.href = '/'; return; }
+        let me = null;
+        try {
+            const r = await authFetch('/api/me');
+            if (!r) { _gateServerError('sign-in check could not reach the server'); return; }
+            if (r.status >= 500) { _gateServerError('/api/me returned ' + r.status); return; }
+            me = await r.json().catch(() => null);
+        } catch (e) { _gateServerError('sign-in check failed: ' + e); return; }
+        if (!me || !me.ok || me.role !== 'admin') { window.location.href = '/'; return; }
+        document.getElementById('auth-gate').style.display = 'none';
+        document.getElementById('app').style.display = '';
+        load();
+        setInterval(load, 60000);
+    });
+</script>
+</body>
+</html>
