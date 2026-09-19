@@ -1099,6 +1099,41 @@ def api_football_picks():
     })
 
 
+@app.route("/api/football-picks-debug")
+def api_football_picks_debug():
+    """Shared-secret diagnostic (Sep 19 2026 — the "games 2 weeks ago"
+    report on /football-picks). Not admin-gated because the sandbox
+    can't reach thekahlahouse.com at all (network allowlist) — this rides
+    the documented site-curl bridge instead. Reports which DATABASE
+    get_supabase() is actually resolving to (host only, never the key) —
+    the live suspicion is that Vercel's SUPABASE_URL now points at the
+    box's local Postgres (db.thekahlahouse.com, per the Cellar cutover)
+    while football-sheets-data.yml (GitHub Actions) still writes the
+    ORIGINAL cloud Supabase project, so the two silently diverged."""
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or request.args.get("key", "") != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    raw_url = os.getenv("SUPABASE_URL", "")
+    out = {"ok": True, "supabase_url_host": raw_url.strip().strip("<>")}
+    sb = get_supabase()
+    if not sb:
+        out["error"] = "get_supabase() returned None"
+        return jsonify(out)
+    try:
+        wk = (sb.table("football_sheet_weeks").select("week_key,sport,published_at")
+              .order("week_key", desc=True).limit(5).execute().data)
+        out["latest_football_sheet_weeks"] = wk
+    except Exception as e:
+        out["football_sheet_weeks_error"] = str(e)[:300]
+    try:
+        cnt = (sb.table("football_sheets").select("week_key", count="exact")
+               .execute())
+        out["football_sheets_total_rows"] = cnt.count
+    except Exception as e:
+        out["football_sheets_count_error"] = str(e)[:300]
+    return jsonify(out)
+
+
 @app.route("/handicapper")
 def handicapper_page():
     """Handicapper Bot — admin + bot_access gated (client-side via /api/me)."""
