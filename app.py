@@ -8646,10 +8646,11 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
     # the truer entry. synthetic = our side is the market's NO (BUY_SHORT, or a
     # net<0 position).
     intended: dict = {}
+    _pairs = _pair_slugs(sb)          # the middle pair's legs are not picks
     for o in (orders or []):
         slug = o.get("slug")
         intent = o.get("intent") or ""
-        if not slug or not intent.startswith("ORDER_INTENT_BUY"):
+        if not slug or not intent.startswith("ORDER_INTENT_BUY") or slug in _pairs:
             continue
         syn = intent.endswith("_SHORT")
         py = o.get("price_yes")
@@ -8659,7 +8660,7 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
     filled_slugs: set = set()                   # slugs with a HELD position = filled
     for slug, pos in (positions or {}).items():
         net = pos.get("net") or 0.0
-        if abs(net) < 0.01:
+        if abs(net) < 0.01 or slug in _pairs:
             continue
         avg = pos.get("avg_price")
         if avg is not None:
@@ -20260,6 +20261,375 @@ def _hedge_rung_ok(h, mt, sn, rv):
     return (rv >= grv - eps) if sn == "home" else (rv <= grv + eps)
 
 
+# ── THE MIDDLE PAIR (Rob, Sep 18 2026) ─────────────────────────────────────
+# The Lambo's replacement, one venue: two Polymarket legs on OPPOSITE sides of
+# NEIGHBOURING rungs with a middle between them (favorite lays fewer, dog takes
+# more — GB −4.5 + NYJ +5.5 wins both on GB by 5). Rob: "I PLAN on losing money
+# every day, and making MORE rent" — the pair is rent on two pools with the bet
+# result capped at cost − 100. Rules, verbatim intent:
+#   both empty   → both bids chase the touch, combined ≤ cap (110)
+#   one filled   → the empty leg chases up to cap − the held leg's cost; the
+#                  filled leg lists at its own cost (sell-at-cost rule)
+#   one SOLD, other held → the held leg's floor = cap − the sold price ("sold
+#                  at 60, sell at 45" on a 105 cap), live through the game;
+#                  rides if it never sells
+#   both filled at ≤ 100 combined → the lock rides, no asks at all
+#   both filled > 100 → asks at cost until T−30, then every ask cancels and
+#                  the pair holds for the middle
+#   kickoff      → no bids; a lone held leg's ask stays live in-game
+# The engine owns every order on its slugs; every other engine skips them via
+# _pair_slugs (autolog adoption, scalp orphan sweep) and the executor refuses
+# the game via _pair_owns_game. Legs are NOT bot_picks rows, so the pick-
+# driven engines (repeg, scalp lap, snipers, fast ask, reconcile) never see
+# them at all. Kill switch: machine_flags pair_enabled=false (or the row's
+# enabled). DDL: kahla-scanner/supabase/pair_hedges.sql.
+_PAIR_CACHE: dict = {"at": 0.0, "rows": []}
+_PAIR_T30_MIN = 30
+_PAIR_ASK_GTD_H = 7
+
+
+def _pair_rows(sb, max_age_s: float = 30.0) -> list:
+    """Enabled pair rows whose game is not long over (30s cache). Fail-safe:
+    an unreadable table returns the last good list (never 'no pairs' — that
+    would hand the pair's slugs back to the autolog and the Ferrari)."""
+    if sb is None:
+        return _PAIR_CACHE["rows"]
+    if _time.time() - _PAIR_CACHE["at"] <= max_age_s:
+        return _PAIR_CACHE["rows"]
+    try:
+        cut = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()
+        rows = (sb.table("pair_hedges").select("*").eq("enabled", True)
+                .gte("kickoff", cut).limit(200).execute().data) or []
+        _PAIR_CACHE.update(at=_time.time(), rows=rows)
+    except Exception:
+        pass
+    return _PAIR_CACHE["rows"]
+
+
+def _pair_slugs(sb) -> set:
+    return {lg.get("slug") for r in _pair_rows(sb)
+            for lg in (r.get("legs") or []) if lg.get("slug")}
+
+
+def _pair_owns_game(sb, prefix, mt) -> bool:
+    return bool(prefix) and any(r.get("game_prefix") == prefix
+                                and r.get("market_type") == mt
+                                for r in _pair_rows(sb))
+
+
+def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
+    """PURE: what each leg should be resting right now. `legs` is exactly two
+    keys → {h (held, our side), cost (¢ avg of the held lot or None), sold
+    (¢, last sell this cycle or None), bid / ask (COMPETITOR touch, our side,
+    ¢ or None), tick (¢), rent (bool)}. Returns key → {bid: (px, n)|None,
+    ask: (px, n)|None, why: [...]}. Every price is on the market's grid, a
+    bid never crosses the competitor ask and an ask never crosses the bid."""
+    ka, kb = list(legs)
+    held = {k: float(legs[k].get("h") or 0) >= 1.0 for k in (ka, kb)}
+    both = held[ka] and held[kb]
+    pair_cost = None
+    if both and legs[ka].get("cost") is not None and legs[kb].get("cost") is not None:
+        pair_cost = float(legs[ka]["cost"]) + float(legs[kb]["cost"])
+    out = {}
+    for k, o in ((ka, kb), (kb, ka)):
+        L, O = legs[k], legs[o]
+        tick = float(L.get("tick") or 1.0)
+        why = []
+        # ── BID ──────────────────────────────────────────────────────────
+        bid = None
+        want = int(qty - float(L.get("h") or 0) + 1e-9)
+        if mins <= 0:
+            why.append("kickoff_no_bid")
+        elif want < 1:
+            pass
+        elif not L.get("rent"):
+            why.append("not_paying")
+        elif L.get("bid") is None:
+            why.append("no_touch")
+        else:
+            join = float(L["bid"])
+            if held[o]:
+                if O.get("cost") is None:
+                    capk = None
+                    why.append("other_cost_unknown")
+                else:
+                    capk = cap_c - float(O["cost"])
+            elif O.get("bid") is not None and float(O.get("h") or 0) < qty and mins > 0:
+                ojoin = float(O["bid"])
+                excess = join + ojoin - cap_c
+                capk = (join - excess / 2.0) if excess > 0 else join
+            else:
+                capk = cap_c - 1.0 * (float(O["bid"]) if O.get("bid") is not None else 0.0)
+            if capk is not None:
+                px = _grid_dn(min(join, capk), tick)
+                if L.get("ask") is not None and px >= float(L["ask"]):
+                    px = _grid_dn(float(L["ask"]) - tick, tick)
+                if px >= 1.0:
+                    bid = (round(px, 3), want)
+                    if px < join - 1e-9:
+                        why.append("capped")
+                else:
+                    why.append("cap_below_1")
+        # ── ASK ──────────────────────────────────────────────────────────
+        ask = None
+        n = int(float(L.get("h") or 0) + 1e-9)
+        if n >= 1:
+            floor = None
+            if both:
+                if pair_cost is not None and pair_cost <= 100.0 + 1e-9:
+                    why.append("lock_rides")
+                elif mins <= _PAIR_T30_MIN:
+                    why.append("t30_middle")
+                else:
+                    floor = L.get("cost")
+            elif O.get("sold") is not None:
+                floor = cap_c - float(O["sold"])
+                why.append("pair_floor")
+            else:
+                floor = L.get("cost")
+            if floor is None and not ({"lock_rides", "t30_middle"} & set(why)):
+                why.append("cost_unknown")
+            if floor is not None:
+                floor = _grid_up(float(floor), tick)
+                bb, ba = L.get("bid"), L.get("ask")
+                if bb is not None and float(bb) >= floor:
+                    tgt = float(bb) + tick
+                elif ba is None or floor + tick < float(ba):
+                    tgt = floor + tick
+                else:
+                    tgt = floor
+                tgt = _grid_up(tgt, tick)
+                if bb is not None and tgt <= float(bb):
+                    tgt = _grid_up(float(bb) + tick, tick)
+                if tgt < 100.0:
+                    ask = (round(tgt, 3), n)
+        out[k] = {"bid": bid, "ask": ask, "why": why}
+    return out
+
+
+def _pair_touch_ex_self(book: dict | None, side: str, own_px, own_qty) -> float | None:
+    """Competitor touch on one side of an our-side book: the best level, or
+    the next one when the best level is only us."""
+    lv = (book or {}).get("bids" if side == "bid" else "asks") or []
+    for c, q in lv:
+        if own_px is not None and abs(float(c) - float(own_px)) < 0.01 \
+                and float(q) <= float(own_qty or 0) + 0.01:
+            continue
+        return float(c)
+    return None
+
+
+def _pair_order_write(client, slug, intent, px_c, n, gtt, cur) -> tuple[str, str | None]:
+    """Converge ONE order: keep, amend in place, or create. `cur` = our current
+    resting order of this intent on the slug (normalized) or None."""
+    short = intent.endswith("_SHORT")
+    canon = ((100.0 - px_c) / 100.0) if short else (px_c / 100.0)
+    if cur is not None:
+        cur_px = cur.get("price_yes")
+        cur_c = None if cur_px is None else ((100.0 - cur_px * 100.0) if short else cur_px * 100.0)
+        if cur_c is not None and abs(cur_c - px_c) < 0.01 and int(cur.get("leaves") or 0) == int(n):
+            return "keep", cur.get("id")
+        r = _repeg_amend(client, cur.get("id"), slug, canon, int(n), gtt)
+        if r == "amended":
+            return "amended", cur.get("id")
+        if r == "unverified":
+            return "unverified", cur.get("id")
+        # 'gone' → fall through to a fresh create
+    params = {"marketSlug": slug, "intent": intent, "type": "ORDER_TYPE_LIMIT",
+              "price": {"value": f"{canon:.3f}", "currency": "USD"},
+              "quantity": int(n), "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
+              "goodTillTime": gtt, "participateDontInitiate": True,
+              "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
+    try:
+        cr = client.orders.create(params)
+        oid = cr.get("id") if isinstance(cr, dict) else getattr(cr, "id", None)
+        return "created", oid
+    except Exception as e:
+        app.logger.warning("pair create %s %s %.1f×%d failed: %s", slug, intent, px_c, n, e)
+        return "error", None
+
+
+def _pair_cancel(client, o) -> bool:
+    try:
+        client.orders.cancel(o.get("id"), {"marketSlug": o.get("slug")})
+        return True
+    except Exception as e:
+        app.logger.warning("pair cancel %s failed: %s", o.get("id"), e)
+        return False
+
+
+def _pair_tick(sb, now=None) -> dict:
+    """Run every enabled middle pair one step (see the block comment above)."""
+    now = now or datetime.now(timezone.utc)
+    res = {"pairs": 0, "writes": 0, "fills": 0, "sells": 0, "errors": 0}
+    if not _machine_flag("pair_enabled", True):
+        res["gate"] = "flag_off"
+        return res
+    if _machine_flag("bets_paused", False):
+        res["gate"] = "bets_paused"
+        return res
+    rows = _pair_rows(sb, max_age_s=0.0)
+    if not rows:
+        res["gate"] = "no_pairs"
+        return res
+    client = get_client()
+    positions = _pmm_positions_raw(client, fresh=True)
+    if positions is None:
+        res["gate"] = "positions_unreadable"
+        return res
+    for row in rows:
+        try:
+            _pair_step(sb, client, row, positions, now, res)
+            res["pairs"] += 1
+        except Exception as e:
+            res["errors"] += 1
+            app.logger.warning("pair %s step failed: %s", row.get("id"), e)
+    return res
+
+
+def _pair_step(sb, client, row, positions, now, res) -> None:
+    legs_def = row.get("legs") or []
+    if len(legs_def) != 2:
+        return
+    ko = _parse_iso(str(row.get("kickoff")))
+    if ko is None:
+        return
+    mins = (ko - now).total_seconds() / 60.0
+    qty = int(row.get("qty") or 15)
+    cap = float(row.get("cap_c") or 110)
+    st = row.get("state") if isinstance(row.get("state"), dict) else {}
+    st = {k: dict(v) for k, v in st.items() if isinstance(v, dict)}
+    slugs = [lg["slug"] for lg in legs_def]
+    try:
+        resp = client.orders.list({"slugs": slugs})
+        raw = (resp.get("orders") if isinstance(resp, dict)
+               else getattr(resp, "orders", [])) or []
+    except Exception as e:
+        res["errors"] += 1
+        app.logger.warning("pair %s order read failed: %s", row.get("id"), e)
+        return
+    orders = [n for n in (_norm_order(o) for o in raw)
+              if n and n["state"] in _OPEN_ORDER_STATES and n.get("auto")]
+    ev = row.get("event_name") or row.get("game_prefix")
+    lg_in = {}
+    cur = {}
+    for lg in legs_def:
+        k, slug, intent = lg["key"], lg["slug"], lg["intent"]
+        short = intent.endswith("_SHORT")
+        buy_i = "ORDER_INTENT_" + intent
+        sell_i = buy_i.replace("_BUY_", "_SELL_")
+        s = st.setdefault(k, {})
+        net = float((positions.get(slug) or {}).get("net") or 0.0)
+        if abs(net) >= 0.01 and ((net < 0) != short):
+            # THE SIGN RULE (the Lambo's first night): the venue holds the
+            # OTHER side of this market — not our leg. Touch nothing.
+            _send_fill_telegram(f"🚨 PAIR {ev}: venue holds the wrong side on {slug} "
+                                f"(net {net}) — pair frozen, check it.", urgent=True)
+            res["errors"] += 1
+            return
+        h = abs(net) if abs(net) >= 0.01 else 0.0
+        mine_b = [o for o in orders if o["slug"] == slug and o["intent"] == buy_i]
+        mine_s = [o for o in orders if o["slug"] == slug and o["intent"] == sell_i]
+        # one order per (slug, intent) — cancel extras, keep the oldest
+        for extra in sorted(mine_b, key=lambda o: o.get("created") or "")[1:] + \
+                sorted(mine_s, key=lambda o: o.get("created") or "")[1:]:
+            _pair_cancel(client, extra)
+            res["writes"] += 1
+        cb = sorted(mine_b, key=lambda o: o.get("created") or "")[:1]
+        cs = sorted(mine_s, key=lambda o: o.get("created") or "")[:1]
+        cur[k] = {"bid": cb[0] if cb else None, "ask": cs[0] if cs else None,
+                  "buy_i": buy_i, "sell_i": sell_i, "slug": slug, "short": short,
+                  "label": lg.get("label") or slug}
+        # ── lot memory: fills and sells since the last step ──
+        last_h = float(s.get("h") or 0.0)
+        if h > last_h + 0.01:
+            px = s.get("bid_c")
+            if px is None:
+                avg = (positions.get(slug) or {}).get("avg_price")
+                px = (avg * 100.0) if avg else None
+            if px is not None:
+                old = float(s.get("cost") or px) if last_h > 0 else float(px)
+                s["cost"] = round((old * last_h + float(px) * (h - last_h)) / h, 3)
+            res["fills"] += 1
+            _send_fill_telegram(f"🔗 PAIR {ev}: {cur[k]['label']} bought "
+                                f"{h - last_h:g} @ {px}¢ (now {h:g}/{qty})")
+        elif h < last_h - 0.01:
+            s["sold"] = s.get("ask_c")
+            res["sells"] += 1
+            _send_fill_telegram(f"🔗 PAIR {ev}: {cur[k]['label']} sold "
+                                f"{last_h - h:g} @ {s.get('ask_c')}¢ (left {h:g})")
+            if h < 0.01:
+                s["cost"] = None
+        s["h"] = round(h, 4)
+        tick = _pmm_tick_c(client, slug)
+        bk = _book_for_snipe(client, slug)
+        if short:
+            bk = _invert_book(bk)
+        own_b = s.get("bid_c") if cur[k]["bid"] else None
+        own_a = s.get("ask_c") if cur[k]["ask"] else None
+        lg_in[k] = {"h": h, "cost": s.get("cost"), "sold": None,
+                    "bid": _pair_touch_ex_self(bk, "bid", own_b,
+                                               (cur[k]["bid"] or {}).get("leaves")),
+                    "ask": _pair_touch_ex_self(bk, "ask", own_a,
+                                               (cur[k]["ask"] or {}).get("leaves")),
+                    "tick": tick,
+                    "rent": bool(_rent_ok(slug, ko, now, sb)[0]) if mins > 0 else False}
+    ka, kb = list(lg_in)
+    # a new cycle when both legs are flat: forget the last sell prices
+    if lg_in[ka]["h"] < 0.01 and lg_in[kb]["h"] < 0.01:
+        for k in (ka, kb):
+            st[k].pop("sold", None)
+    for k in (ka, kb):
+        lg_in[k]["sold"] = st[k].get("sold")
+    plan = _pair_plan(lg_in, qty, cap, mins)
+    gtt_bid = ko.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    gtt_ask = (ko + timedelta(hours=_PAIR_ASK_GTD_H)).astimezone(timezone.utc) \
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+    for k in (ka, kb):
+        c, p, s = cur[k], plan[k], st[k]
+        for side, gtt, intent in (("bid", gtt_bid, c["buy_i"]), ("ask", gtt_ask, c["sell_i"])):
+            want = p[side]
+            have = c[side]
+            if want is None:
+                if have is not None and _pair_cancel(client, have):
+                    res["writes"] += 1
+                    s.pop(side + "_c", None)
+                continue
+            if side == "bid" and have is None:
+                # new money: the book-wide exposure fence (fail-closed)
+                exp = _book_exposure_usd()
+                bcap = _machine_flag_val("max_open_cost_usd", _BOOK_MAX_OPEN_COST_USD)
+                try:
+                    bcap = float(bcap)
+                except (TypeError, ValueError):
+                    bcap = _BOOK_MAX_OPEN_COST_USD
+                if exp is None or exp + want[1] * want[0] / 100.0 > bcap:
+                    p["why"].append("book_cap")
+                    continue
+            if want[1] * want[0] / 100.0 > _REPEG_MAX_COST_USD:
+                p["why"].append("master_rule")
+                continue
+            verdict, oid = _pair_order_write(client, c["slug"], intent, want[0], want[1], gtt, have)
+            if verdict in ("created", "amended"):
+                res["writes"] += 1
+                s[side + "_c"] = want[0]
+                s[side + "_id"] = oid
+                s[side + "_at"] = now.isoformat()
+            elif verdict == "error":
+                res["errors"] += 1
+        s["why"] = p["why"]
+    try:
+        sb.table("pair_hedges").update(
+            {"state": st, "updated_at": now.isoformat()}).eq("id", row["id"]).execute()
+    except Exception as e:
+        app.logger.warning("pair %s state write failed: %s", row.get("id"), e)
+    res.setdefault("detail", {})[str(row["id"])] = {
+        "mins": round(mins), **{k: {"h": st[k].get("h"), "cost": st[k].get("cost"),
+                                    "bid": st[k].get("bid_c") if cur[k]["bid"] or plan[k]["bid"] else None,
+                                    "ask": st[k].get("ask_c") if cur[k]["ask"] or plan[k]["ask"] else None,
+                                    "why": plan[k]["why"]} for k in (ka, kb)}}
+
+
 def _gridiron_game_prefix(d, mt="spread"):
     """The football game's slug stem (`asc-nfl-gb-nyj-2026-09-20`) off any rung
     in the pricing dossier's ladder — the key hedge_pairs.game_prefix uses."""
@@ -20309,6 +20679,8 @@ def _gridiron_try_bet_impl(sb, g, es0, d, mt, gp, contracts=None):
     per-(market, type) dedup keeps it one bet per game per market."""
     if not gp:
         return None
+    if _pair_owns_game(sb, _gridiron_game_prefix(d, mt), mt):
+        return "pair_owned"     # the middle pair owns this (game, market)
     mg, tt, pm = gp
     fit = (pm or {}).get("spread_fit" if mt == "spread" else "total_fit") or {}
     try:
@@ -21438,6 +21810,7 @@ _OMS_RETRY_MIN = {"rent": 30, "no_pmm": 30, "no_book": 30, "none": 30,
                   "paused": 5,         # reopen posture: bets_paused refused it
                   "no_line": 60,       # real books, no readable line yet (book pull 6am)
                   "edge": 60, "tail": 60, "no_model": 360, "cap": 10,
+                  "pair_owned": 60,    # a middle pair owns the (game, mt)
                   "rung_window": 60,   # payers exist but all outside mid±1
                                        # — books grow toward the middle as
                                        # kickoff nears, so re-visit hourly
@@ -24850,6 +25223,7 @@ _CELLAR_LEASE_ENFORCED = (os.environ.get("CELLAR_LEASE_ENFORCED") or "").strip()
 #   "alerts"  -> _outbid_alerts
 #   "scalp"   -> _scalp_tick (Sep 4 2026 — own lane, own budget; the
 #                in-repeg call stands down via the CELLAR_LANES env gate)
+#   "pair"    -> _pair_tick (Sep 18 2026 — the middle pair; box-only, no Vercel twin)
 # NOT YET GATED (all on the "alerts" lane, all in the paperlog route body):
 #   _tg_flush, _bet_alerts, _opener_watchdog. Each is individually near-
 #   idempotent (per-bet markers, send-and-mark, cooldowns) so double-running
@@ -28030,9 +28404,11 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     try:
         _held_slugs = {sl for sl, p in positions.items()
                        if float((p or {}).get("qty") or 0) >= 1.0}
+        _pair_sl = _pair_slugs(sb)
         _orph = [o for o in orders if o.get("auto")
                  and "SELL" in (o.get("intent") or "")
-                 and o.get("slug") not in _held_slugs][:5]
+                 and o.get("slug") not in _held_slugs
+                 and o.get("slug") not in _pair_sl][:5]
         for _o in _orph:
             if _time.time() - _t0 > _SCALP_BUDGET_S:
                 break
