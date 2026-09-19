@@ -1115,6 +1115,20 @@ def api_football_picks_debug():
         return jsonify({"ok": False, "error": "forbidden"}), 403
     raw_url = os.getenv("SUPABASE_URL", "")
     out = {"ok": True, "supabase_url_host": raw_url.strip().strip("<>")}
+    mirror = get_supabase_mirror()
+    out["mirror_env_present"] = bool(
+        os.getenv("SUPABASE_MIRROR_URL", "").strip()
+        and os.getenv("SUPABASE_MIRROR_KEY", "").strip())
+    out["mirror_client_available"] = mirror is not None
+    if mirror:
+        out["mirror_url_host"] = os.getenv("SUPABASE_MIRROR_URL", "").strip()
+        try:
+            mwk = (mirror.table("football_sheet_weeks")
+                   .select("week_key,sport,published_at")
+                   .order("week_key", desc=True).limit(3).execute().data)
+            out["mirror_latest_football_sheet_weeks"] = mwk
+        except Exception as e:
+            out["mirror_query_error"] = str(e)[:300]
     sb = get_supabase()
     if not sb:
         out["error"] = "get_supabase() returned None"
