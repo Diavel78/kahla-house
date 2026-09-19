@@ -1133,24 +1133,53 @@ def api_football_sheets_mirror():
     if week:
         week = {k: v for k, v in week.items() if k != "id"}
     sheets = [{k: v for k, v in s.items() if k != "id"} for s in sheets]
-    out = {"ok": True, "week_upserted": 0, "sheets_upserted": 0}
+
+    def _upsert_forgiving(table, rows, on_conflict, dropped_out):
+        """Upsert, and when the destination schema is missing a column
+        the source has (PGRST204 'Could not find the X column'), drop
+        that key from every row and retry. The two DBs this bridges are
+        supposed to share a schema but have already drifted once (the
+        picks_pdf_path columns added to the cloud project without a
+        matching migration on the box) — this survives the NEXT
+        drift too instead of hard-failing the whole sync over one
+        column neither side strictly needs to transfer."""
+        rows = [dict(r) for r in rows]
+        for _ in range(8):
+            try:
+                sb.table(table).upsert(rows, on_conflict=on_conflict).execute()
+                return
+            except Exception as e:
+                msg = str(e)
+                m = re.search(r"Could not find the '([^']+)' column", msg)
+                if not m:
+                    raise
+                col = m.group(1)
+                dropped_out.add(col)
+                for r in rows:
+                    r.pop(col, None)
+        raise RuntimeError(f"gave up after dropping columns: {dropped_out}")
+
+    out = {"ok": True, "week_upserted": 0, "sheets_upserted": 0,
+           "dropped_columns": []}
+    dropped: set = set()
     try:
         if week:
-            sb.table("football_sheet_weeks").upsert(
-                week, on_conflict="week_key,sport").execute()
+            _upsert_forgiving("football_sheet_weeks", [week],
+                              "week_key,sport", dropped)
             out["week_upserted"] = 1
         if sheets:
             # Batched: PostgREST/Vercel function budget can't take 90+
             # individual round trips, and upsert() takes a list natively.
             CHUNK = 25
             for i in range(0, len(sheets), CHUNK):
-                sb.table("football_sheets").upsert(
-                    sheets[i:i + CHUNK],
-                    on_conflict="week_key,sport,event_name").execute()
+                _upsert_forgiving("football_sheets", sheets[i:i + CHUNK],
+                                  "week_key,sport,event_name", dropped)
             out["sheets_upserted"] = len(sheets)
+        out["dropped_columns"] = sorted(dropped)
     except Exception as e:
         out["ok"] = False
         out["error"] = str(e)[:500]
+        out["dropped_columns"] = sorted(dropped)
         return jsonify(out), 500
     return jsonify(out)
 
