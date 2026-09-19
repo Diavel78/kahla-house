@@ -1124,6 +1124,15 @@ def api_football_sheets_mirror():
     body = request.get_json(silent=True) or {}
     week = body.get("week")
     sheets = body.get("sheets") or []
+    # `id` is a bigserial PRIMARY KEY assigned independently by each
+    # database — the cloud project's id for a row has no relationship to
+    # whatever already occupies that same id in the destination table, so
+    # upserting it verbatim collides with an unrelated row and 500s the
+    # whole batch. Match on the real unique key (week_key+sport[+event_name])
+    # and let the destination assign its own id.
+    if week:
+        week = {k: v for k, v in week.items() if k != "id"}
+    sheets = [{k: v for k, v in s.items() if k != "id"} for s in sheets]
     out = {"ok": True, "week_upserted": 0, "sheets_upserted": 0}
     try:
         if week:

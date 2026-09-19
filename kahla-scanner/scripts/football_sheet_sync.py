@@ -72,6 +72,8 @@ def sync_one(sport: str, week_key: str | None) -> dict:
                    params={"key": key},
                    json={"week": week, "sheets": sheets},
                    timeout=120)
+    if r.status_code >= 400:
+        log.error("mirror POST failed %s: %s", r.status_code, r.text[:2000])
     r.raise_for_status()
     resp = r.json()
     return {"sport": sport, "week_key": week_key, "games": len(sheets),
