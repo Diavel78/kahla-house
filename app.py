@@ -1707,7 +1707,10 @@ def _venue_day_map(sb, days: int = 4) -> dict:
     legs = (sb.rpc("poly_gameday_legs", {"p_days": days}).execute().data) or []
     t_since = (datetime.now(timezone.utc) - timedelta(
         days=days + _VENUE_TRADE_LOOKBACK_D)).isoformat()
-    trows = _trade_rows(sb, since_iso=t_since, max_pages=15)
+    # 100 pages: at 15 the read (oldest→newest) silently stopped at 15,000
+    # rows — by Sep 19 2026 the 47-day window held 16,516 trades, so every
+    # sell after Sep 16 08:47 vanished and the Today card read +$0.00.
+    trows = _trade_rows(sb, since_iso=t_since, max_pages=100)
     events = []
     for r in trows:
         t = ((r.get("payload") or {}).get("trade") or {})
@@ -27327,7 +27330,14 @@ def _trade_rows(sb, since_iso=None, after_iso=None, max_pages: int = 30) -> list
         if after_iso:
             q = q.gt("at", after_iso)
         return q.order("at")
-    return _slim_to_trade_rows(_sb_paged(_build, max_pages=max_pages))
+    rows = _sb_paged(_build, max_pages=max_pages)
+    if len(rows) >= max_pages * 1000:
+        # oldest→newest, so a truncated read drops the NEWEST trades — the
+        # exact rows every "today" number is built from. Never silent again.
+        app.logger.warning("TRADE READ TRUNCATED at %d rows (since=%s after=%s) — "
+                           "newest trades missing; raise max_pages", len(rows),
+                           since_iso, after_iso)
+    return _slim_to_trade_rows(rows)
 
 
 def _lot_walk(trows, lots: dict | None = None) -> dict:
@@ -27389,7 +27399,7 @@ def _lot_ledger(sb, force: bool = False) -> dict:
         else:
             since = (datetime.now(timezone.utc)
                      - timedelta(days=_LOT_LEDGER_DAYS)).isoformat()
-            rows = _trade_rows(sb, since_iso=since, max_pages=30)
+            rows = _trade_rows(sb, since_iso=since, max_pages=100)
             lots = _lot_walk(rows)
         newest = max((str(r.get("at") or "") for r in rows), default="") or None
     except Exception as e:
