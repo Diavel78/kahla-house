@@ -1099,6 +1099,53 @@ def api_football_picks():
     })
 
 
+@app.route("/api/football-sheets-mirror", methods=["POST"])
+def api_football_sheets_mirror():
+    """One-way sync: the ORIGINAL cloud Supabase project (what
+    football-sheets-data.yml / football_sheet_render.py actually write —
+    GitHub Actions has those credentials as repo secrets) -> whatever DB
+    get_supabase() resolves to in production (db.thekahlahouse.com, the
+    box, since the Cellar cutover). Built Sep 19 2026 after the two
+    databases silently diverged and /football-picks sat showing games
+    from three weeks earlier with no error anywhere.
+
+    Shared-secret (FILLS_CRON_SECRET, already a GitHub Actions repo
+    secret — no new credential needed). Body: {"week": {...one
+    football_sheet_weeks row...}, "sheets": [...football_sheets rows...]}.
+    Caller (kahla-scanner/scripts/football_sheet_sync.py, run on GH
+    Actions) reads both tables from the cloud project and POSTs them
+    here verbatim; this just upserts into the production DB."""
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or request.args.get("key", "") != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    sb = get_supabase()
+    if not sb:
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    body = request.get_json(silent=True) or {}
+    week = body.get("week")
+    sheets = body.get("sheets") or []
+    out = {"ok": True, "week_upserted": 0, "sheets_upserted": 0}
+    try:
+        if week:
+            sb.table("football_sheet_weeks").upsert(
+                week, on_conflict="week_key,sport").execute()
+            out["week_upserted"] = 1
+        if sheets:
+            # Batched: PostgREST/Vercel function budget can't take 90+
+            # individual round trips, and upsert() takes a list natively.
+            CHUNK = 25
+            for i in range(0, len(sheets), CHUNK):
+                sb.table("football_sheets").upsert(
+                    sheets[i:i + CHUNK],
+                    on_conflict="week_key,sport,event_name").execute()
+            out["sheets_upserted"] = len(sheets)
+    except Exception as e:
+        out["ok"] = False
+        out["error"] = str(e)[:500]
+        return jsonify(out), 500
+    return jsonify(out)
+
+
 @app.route("/api/football-picks-debug")
 def api_football_picks_debug():
     """Shared-secret diagnostic (Sep 19 2026 — the "games 2 weeks ago"

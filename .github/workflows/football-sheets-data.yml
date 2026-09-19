@@ -94,3 +94,25 @@ jobs:
           --commit
           ${{ github.event.inputs.week_key && format('--week-key {0}', github.event.inputs.week_key) || '' }}
           ${{ github.event.inputs.sport && format('--sport {0}', github.event.inputs.sport) || '' }}
+
+      - name: Sync to production DB (the site reads a DIFFERENT database now)
+        # Vercel's SUPABASE_URL moved to db.thekahlahouse.com (the box) at
+        # the Cellar cutover; this workflow still writes the ORIGINAL cloud
+        # project. Without this step the assembly succeeds but the site
+        # never sees it — exactly what happened Sep 4-19 2026 with nobody
+        # noticing until /football-picks shipped and showed 3-week-old
+        # games. continue-on-error: the assembly itself already committed;
+        # a sync failure here should not fail the whole run, just get
+        # caught by whoever reads the job log.
+        continue-on-error: true
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          FILLS_CRON_SECRET:    ${{ secrets.FILLS_CRON_SECRET }}
+        run: |
+          SPORT="${{ github.event.inputs.sport }}"
+          if [ -n "$SPORT" ]; then
+            python -m scripts.football_sheet_sync --sport "$SPORT" --latest
+          else
+            python -m scripts.football_sheet_sync --sport NFL --sport NCAAF --latest
+          fi

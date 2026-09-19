@@ -221,6 +221,33 @@ min; links are public — Rob forwards the PDF to friends). Then:
   (Friday: `friday_published_at`.)
 - Sanity-fetch each public URL (curl the printed `url`, expect 200).
 
+**⚠ THEN SYNC TO PRODUCTION — do not skip this, it is not optional (Sep 19
+2026 landmine).** Everything above writes to the ORIGINAL cloud Supabase
+project. **The live site does NOT read that database anymore** — the
+Cellar cutover repointed Vercel's `SUPABASE_URL` at the box's local
+Postgres (`db.thekahlahouse.com`), and nothing keeps `football_sheets` /
+`football_sheet_weeks` in sync between the two on its own. Skipping this
+step means the assembly and render both report success, the PDFs upload
+fine, Telegram queues a link — and `/football-picks` on the website
+still shows whatever the box's copy last had, which sat 3+ weeks stale
+for two full weeks before anyone noticed. `football-sheets-data.yml`'s
+assembly step now runs this automatically (`continue-on-error`, so check
+its log if the site still looks stale), but the RENDER step runs in
+*this* CCR session, which can't reach thekahlahouse.com at all — trigger
+the sync from here via the GitHub MCP:
+
+```
+mcp__github__actions_run_trigger: football-sheets-sync.yml, ref main,
+  inputs {sport: NFL}   # then again with {sport: NCAAF}
+```
+
+If GitHub MCP tools aren't available in this session (Routine-fired
+sessions sometimes lack them), say so plainly in your final report —
+don't silently skip it. Verify with the shared-secret diagnostic via the
+site-curl bridge: `path=api/football-picks-debug` should show
+`latest_football_sheet_weeks` with THIS week's `week_key` and a
+`published_at` from today, not weeks ago.
+
 ## 4. Failure posture
 
 **⚠ CONTAINER RESTARTS ARE REAL AND SILENT (learned Aug 24-25 2026: the
