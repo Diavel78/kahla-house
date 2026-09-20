@@ -20766,15 +20766,52 @@ def _pair_board(sb, max_age_s: float = 600.0):
     return _PAIR_BOARD_CACHE["val"]
 
 
-def _pair_rungs_from_quotes(slugs: dict, mt: str):
+def _pair_tape_quotes(sb, market_ids: list, minutes: float = 30.0) -> dict:
+    """{(market_id, market_type, side, line): (bid, ask)} from pm_snapshots —
+    the tape the pm_snapshot lane writes every ~2 minutes.
+
+    THE SEEDER WAS BLIND WITHOUT THIS (Sep 20 2026): it priced from the quote
+    table alone, which only carries the slugs the markets socket is currently
+    subscribed to, so it found ZERO pairs on a board where the same logic
+    reading the tape found eleven — including two at 98¢. Quote table first
+    (fresher), tape second, venue never."""
+    out: dict = {}
+    if not market_ids:
+        return out
+    fresh = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    for i in range(0, len(market_ids), 25):
+        chunk = market_ids[i:i + 25]
+
+        def _q(chunk=chunk):
+            return (sb.table("pm_snapshots")
+                    .select("market_id,market_type,side,line,bid_c,ask_c")
+                    .in_("market_id", chunk).eq("source", "pmm")
+                    .gte("captured_at", fresh).order("captured_at"))
+        try:
+            for r in _sb_paged(_q, max_pages=8):
+                if (r.get("line") is None or r.get("bid_c") is None
+                        or r.get("ask_c") is None):
+                    continue
+                out[(r["market_id"], r["market_type"], r["side"],
+                     float(r["line"]))] = (float(r["bid_c"]), float(r["ask_c"]))
+        except Exception:
+            pass
+    return out
+
+
+def _pair_rungs_from_quotes(slugs: dict, mt: str, tape=None, mid=None):
     """{slug: line} → ([(side, line, bid, ask)], {(side, line): (slug, intent)}).
 
-    QUOTE TABLE ONLY — no venue reads. Each market gives BOTH sides: the YES
-    side at its own line, and the NO side mirrored (a NO buyer is a YES seller,
-    so NO bid = 100 − YES ask, at the mirrored line)."""
+    NO VENUE READS: the live quote table first, the snapshot tape second. Each
+    market gives BOTH sides: the YES side at its own line, and the NO side
+    mirrored (a NO buyer is a YES seller, so NO bid = 100 − YES ask, at the
+    mirrored line)."""
     rungs, legmap = [], {}
+    yes_side = "away" if mt == "spread" else "over"
     for slug, line in slugs.items():
         q = _ws_quote(slug)
+        if (not q or q[0] is None or q[1] is None) and tape is not None:
+            q = tape.get((mid, mt, yes_side, line))
         if not q or q[0] is None or q[1] is None:
             continue
         bid, ask = float(q[0]), float(q[1])
@@ -20862,6 +20899,8 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
     order = {"NFL": 0, "NCAAF": 1, "NHL": 2, "NBA": 3, "NCAAB": 4, "MLB": 5}
     todo = sorted(games.values(), key=lambda r: (order.get(r.get("sport"), 9),
                                                  r["event_start"]))
+    tape = _pair_tape_quotes(sb, [g["id"] for g in todo])
+    res["tape"] = len(tape)
     for g in todo:
         if res["seated"] >= max_new:
             break
@@ -20874,8 +20913,9 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
                 _pair_decline(sb, g["id"], mt, "owned")
                 continue                       # the Ferrari owns this ladder
             res["looked"] += 1
-            rungs, legmap = _pair_rungs_from_quotes(slugs, mt)
+            rungs, legmap = _pair_rungs_from_quotes(slugs, mt, tape, g["id"])
             if len(rungs) < 4:
+                res["skip_unpriced"] = res.get("skip_unpriced", 0) + 1
                 continue                       # not priced yet — look again, do
                                                # NOT decline (no verdict formed)
             cands = _pair_candidates(rungs, mt, g.get("sport") or "NFL",
