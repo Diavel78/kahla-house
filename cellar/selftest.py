@@ -1138,6 +1138,52 @@ def test_pair_plan() -> None:
     check("rent rule: an unpaid leg never bids", p["b"]["bid"] is None and "not_paying" in p["b"]["why"])
 
 
+def test_pair_candidates() -> None:
+    """The seeder's brain (Rob, Sep 19 2026): rank by EDGE (what the middle is
+    worth minus what we pay), never by price; a tie-only window is not a
+    middle; college keeps the big multiples of 7 the NFL would skip."""
+    import app as _app
+
+    def rungs(*rows):
+        return [(side, line, bid, ask) for side, line, bid, ask in rows]
+
+    # NFL: a middle on 3 (worth 17.2) vs one on 9 (worth 1.3) at the same price.
+    # The first finder draft took the cheap one; the edge rule must not.
+    r = rungs(("away", -2.5, 44.0, 45.0), ("home", 3.5, 55.0, 56.0),
+              ("away", -8.5, 20.0, 21.0), ("home", 9.5, 79.0, 80.0))
+    c = _app._pair_candidates(r, "spread", "NFL", 15)
+    check("NFL: the middle on 3 ranks first", c and c[0]["hits"] == [3])
+    check("NFL: the cheap middle on 9 is not seated at all (worth 1.3%)",
+          not [x for x in c if x["hits"] == [9]])
+
+    # The tie trap: away +0.5 with home +0.5 covers only a 0-point game.
+    r2 = rungs(("away", 0.5, 44.0, 45.0), ("home", 0.5, 56.0, 57.0))
+    check("a tie-only window is not a middle",
+          _app._pair_candidates(r2, "spread", "NFL", 15) == [])
+
+    # College: 21 is worth 3.5% and must qualify; NFL's table stops caring
+    # about numbers that big, and its 6 is a steal college does not have.
+    r3 = rungs(("away", -20.5, 45.0, 46.0), ("home", 21.5, 54.0, 55.0))
+    check("college seats a middle on 21",
+          [x for x in _app._pair_candidates(r3, "spread", "NCAAF", 15)
+           if x["hits"] == [21]])
+    check("NFL worth table rates 6 over 7 per cent paid",
+          _app._PAIR_WORTH_SPREAD["NFL"][6] > _app._PAIR_WORTH_SPREAD["NCAAF"][6])
+
+    # A pair priced over its cap never qualifies, however good the number.
+    r4 = rungs(("away", -2.5, 62.0, 63.0), ("home", 3.5, 58.0, 59.0))
+    check("over the cap = no seat",
+          all(x["cost_c"] <= x["cap_c"] for x in _app._pair_candidates(r4, "spread", "NFL", 15)))
+
+    # Totals: flat worth, still a real middle.
+    # mids must sum to at least 100 — a covering pair worth less than that is
+    # a stale quote (the seeder's stale-quote guard), so the test data has to
+    # be a coherent book: 48.5 + 52.5 = 101.
+    r5 = rungs(("over", 44.5, 48.0, 49.0), ("under", 45.5, 52.0, 53.0))
+    c5 = _app._pair_candidates(r5, "total", "NFL", 15)
+    check("totals middle on 45 qualifies", c5 and c5[0]["hits"] == [45])
+
+
 def main() -> int:
     print("THE CELLAR — offline selftest\n")
     for t in (test_imports_without_creds, test_config_validation,
@@ -1151,7 +1197,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines, test_pair_plan,
+              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")

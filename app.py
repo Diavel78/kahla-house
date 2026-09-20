@@ -20514,6 +20514,269 @@ def _pair_cancel(client, o) -> bool:
         return False
 
 
+# ── THE SEEDER: which pairs are worth seating (Rob, Sep 19 2026) ───────────
+# Measured, not guessed (kahla-scanner/scripts/middle_stats.py, 3,045 NFL
+# finals since 2015 with real closing lines + 3,071 college finals):
+#
+#   WHERE the middle sits is worth more than what the rung costs. A 1-point
+#   NFL middle averages 4.2%, but it is 17.2% when it covers 3, ~8% on 6 and
+#   7, and under 2% on 5 or 9. The venue charges by reputation: 3 costs 5.6¢
+#   (worth 17), 7 costs 5.3¢ (worth 8), and SIX costs 1.9¢ — the same as 8 —
+#   while hitting 7.3%. That is the steal, and Rob called it before the query
+#   ran: "everybody thinks 6.5-7.5 is the real money… 6 is worth just as much".
+#
+#   COLLEGE IS THE SAME GAME WITH A WIDER SPREAD. Same key numbers (3 9.4%,
+#   7 7.6%) and the multiples of 7 keep paying out to 28, so a 20.5/21.5
+#   middle (21 = 3.5%) beats an NFL middle on 9 (1.3%). The one real
+#   difference: college SIX is 2.7%, not the NFL's 6.9% — overtime rules and
+#   how games end, not the scoring grid. So the table is per league.
+#
+# EDGE = worth − (cost − 100). We seat the best edge per (game, market), never
+# the cheapest rung — the first draft of the finder ranked by price and chose a
+# middle on 9 over one at the line.
+_PAIR_WORTH_SPREAD = {
+    # NFL: P(margin lands exactly there | the line is near it), 2015→
+    "NFL": {1: 4.5, 2: 5.3, 3: 17.2, 4: 5.0, 5: 4.7, 6: 7.3, 7: 8.1, 8: 3.5,
+            9: 1.3, 10: 3.7, 11: 1.1, 12: 2.1, 13: 2.0, 14: 4.1, 17: 3.0},
+    # College: unconditional frequency (no free line history to condition on)
+    "NCAAF": {1: 2.9, 2: 2.8, 3: 9.4, 4: 3.3, 5: 2.1, 6: 2.7, 7: 7.6, 8: 2.7,
+              9: 1.1, 10: 4.3, 11: 2.0, 12: 1.5, 13: 2.0, 14: 3.9, 15: 1.4,
+              16: 1.2, 17: 3.8, 18: 2.3, 19: 1.7, 20: 1.6, 21: 3.5, 22: 1.5,
+              23: 1.1, 24: 2.8, 25: 1.9, 26: 1.1, 27: 1.5, 28: 3.0, 31: 1.8,
+              32: 1.9, 34: 1.6, 35: 2.1},
+}
+# Totals have no key numbers to speak of — the distribution is flat, so one
+# number per league (NFL measured 2.3% for a 1-point middle; college's totals
+# spread wider still).
+_PAIR_WORTH_TOTAL = {"NFL": 2.3, "NCAAF": 2.5}
+_PAIR_MIN_WORTH = 2.0      # a middle worth less than this is not worth seating
+_PAIR_MIN_EDGE_C = 1.0     # worth minus what we pay, in cents
+_PAIR_CEILING = {"NFL": 110.0, "NCAAF": 110.0, "NBA": 110.0, "NCAAB": 110.0,
+                 "MLB": 116.0, "NHL": 119.0}
+_PAIR_SLACK_C = 1.5
+_PAIR_LEG_BAND = (20.0, 80.0)   # keeps the window near the line, where the worth table was measured
+_PAIR_MAX_WIDTH = 3.0
+_PAIR_DEFAULT_QTY = 15
+
+
+def _pair_worth(sport: str, mt: str, hits: list) -> float:
+    """What a middle covering `hits` is worth, in cents (= percent)."""
+    if mt == "total":
+        return _PAIR_WORTH_TOTAL.get(sport, 2.0) * max(1, len(hits))
+    tbl = _PAIR_WORTH_SPREAD.get(sport) or {}
+    return sum(tbl.get(abs(int(h)), 0.5) for h in hits if int(h) != 0)
+
+
+def _pair_candidates(rungs: list, mt: str, sport: str, qty: int) -> list:
+    """rungs: [(side, line, bid, ask)] for ONE (game, market) → every legal
+    middle, best edge first. Pure; the seeder's whole brain lives here.
+
+    `side` is away/home for a spread, over/under for a total. A spread pair
+    wins both legs when the away margin M satisfies −la < M < lb; a total pair
+    when la < T < lb. A window whose only covered number is 0 is a TIE, not a
+    middle (away +0.5 with home +0.5 is simply both sides of one line) — those
+    are excluded, and they were 7 of the finder's first 28 picks."""
+    a_side, b_side = ("away", "home") if mt == "spread" else ("over", "under")
+    ceiling = _PAIR_CEILING.get(sport, 110.0)
+    out = []
+    for s1, la, ba, aa in [r for r in rungs if r[0] == a_side]:
+        for s2, lb, bb, ab in [r for r in rungs if r[0] == b_side]:
+            width = (la + lb) if mt == "spread" else (lb - la)
+            if not (0.9 <= width <= _PAIR_MAX_WIDTH):
+                continue
+            if None in (ba, aa, bb, ab):
+                continue
+            lo, hi = ((-la, lb) if mt == "spread" else (la, lb))
+            hits = [k for k in range(int(lo) - 1, int(hi) + 2) if lo < k < hi]
+            if not [k for k in hits if k != 0]:
+                continue
+            if not (_PAIR_LEG_BAND[0] <= ba <= _PAIR_LEG_BAND[1]
+                    and _PAIR_LEG_BAND[0] <= bb <= _PAIR_LEG_BAND[1]):
+                continue
+            cost = ba + bb
+            mid_sum = (ba + aa) / 2.0 + (bb + ab) / 2.0
+            # A COVERING PAIR CANNOT BE WORTH LESS THAN 100 (the stale-quote
+            # guard, caught on the seeder's first dry run, Sep 19 2026): every
+            # outcome wins at least one leg, so the two MIDS must sum to
+            # 100 + P(middle). A pair of mids summing to 84 (Clemson @ Cal)
+            # is a quote nobody has refreshed, not a gift — and the cap rule,
+            # which reads the mids, would happily "qualify" it.
+            if mid_sum < 99.5 or cost < 95.0:
+                continue
+            worth = _pair_worth(sport, mt, hits)
+            cap = min(ceiling, mid_sum + _PAIR_SLACK_C, 100.0 + worth + _PAIR_SLACK_C)
+            edge = worth - (cost - 100.0)
+            if cost > cap + 1e-9 or worth < _PAIR_MIN_WORTH or edge < _PAIR_MIN_EDGE_C:
+                continue
+            out.append({"a_line": la, "b_line": lb, "a_c": ba, "b_c": bb,
+                        "hits": hits, "width": round(width, 1),
+                        "cost_c": round(cost, 1), "cap_c": round(cap, 1),
+                        "worth_c": round(worth, 1), "edge_c": round(edge, 1),
+                        "worst_usd": round((cost - 100.0) * qty / 100.0, 2)})
+    out.sort(key=lambda o: (-o["edge_c"], abs(o["a_c"] - 50) + abs(o["b_c"] - 50)))
+    return out
+
+
+_PAIR_BOARD_CACHE: dict = {"at": 0.0, "val": ({}, {})}
+_PAIR_RUNG_RE = re.compile(r"-(neg|pos)-(\d+)pt5$")
+_PAIR_TOTAL_RE = re.compile(r"-total-(\d+)pt5$")
+
+
+def _pair_board(sb, max_age_s: float = 600.0):
+    """({(market_id, mt): {slug: away_line|total}}, {(market_id, mt): prefix})
+    over the venue's ENROLLED rungs — the rent list is the universe, exactly as
+    the football executor uses it. Period/quarter/team-total variants never
+    qualify. 10-min cache; a failed read keeps the last good board."""
+    if _time.time() - _PAIR_BOARD_CACHE["at"] <= max_age_s:
+        return _PAIR_BOARD_CACHE["val"]
+    board: dict = {}
+    prefixes: dict = {}
+    try:
+        _rent_enrolled_football(sb)
+        keys = dict(_RENTLIST_CACHE.get("keys") or {})
+        cut = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        for fam in ("asc-", "tsc-"):
+            def _b(fam=fam):
+                return (sb.table("rent_list_slugs").select("slug")
+                        .gte("last_seen", cut).like("slug", fam + "%"))
+            for r in _sb_paged(_b, max_pages=30):
+                sl = r["slug"]
+                m = _RENT_SLUG_RE.match(sl)
+                if not m:
+                    continue
+                mt = "spread" if m.group(1) == "asc" else "total"
+                stem = f"{m.group(1)}-{m.group(2)}-{m.group(3)}-{m.group(4)}-{m.group(5)}"
+                tail = sl[len(stem):]
+                mm = (_PAIR_RUNG_RE if mt == "spread" else _PAIR_TOTAL_RE).fullmatch(tail)
+                if not mm:
+                    continue                    # 1h / 2q / tt variants are out
+                line = (float(mm.group(2)) + 0.5) * (-1 if mm.group(1) == "neg" else 1) \
+                    if mt == "spread" else float(mm.group(1)) + 0.5
+                mid = keys.get(f"{m.group(2)}-{m.group(3)}-{m.group(4)}-{m.group(5)}")
+                if mid:
+                    board.setdefault((mid, mt), {})[sl] = line
+                    prefixes[(mid, mt)] = stem
+        _PAIR_BOARD_CACHE.update(at=_time.time(), val=(board, prefixes))
+    except Exception as e:
+        app.logger.warning("pair board read failed: %s", e)
+    return _PAIR_BOARD_CACHE["val"]
+
+
+def _pair_rungs_from_quotes(slugs: dict, mt: str):
+    """{slug: line} → ([(side, line, bid, ask)], {(side, line): (slug, intent)}).
+
+    QUOTE TABLE ONLY — no venue reads. Each market gives BOTH sides: the YES
+    side at its own line, and the NO side mirrored (a NO buyer is a YES seller,
+    so NO bid = 100 − YES ask, at the mirrored line)."""
+    rungs, legmap = [], {}
+    for slug, line in slugs.items():
+        q = _ws_quote(slug)
+        if not q or q[0] is None or q[1] is None:
+            continue
+        bid, ask = float(q[0]), float(q[1])
+        if mt == "spread":
+            rungs.append(("away", line, bid, ask))
+            legmap[("away", line)] = (slug, "BUY_LONG")
+            rungs.append(("home", -line, 100.0 - ask, 100.0 - bid))
+            legmap[("home", -line)] = (slug, "BUY_SHORT")
+        else:
+            rungs.append(("over", line, bid, ask))
+            legmap[("over", line)] = (slug, "BUY_LONG")
+            rungs.append(("under", line, 100.0 - ask, 100.0 - bid))
+            legmap[("under", line)] = (slug, "BUY_SHORT")
+    return rungs, legmap
+
+
+def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
+    """Find pairs worth seating and (when armed) write them to pair_hedges.
+
+    DEFAULT-DRY and, on top of that, gated by machine_flags `pair_seed_enabled`
+    — Rob's rule while the first pair is on trial: build it, do not bet it.
+    Prices come from the quote table, never REST (a standalone run of the same
+    logic tripped the venue's rate limiter on its first pass). Seats at most
+    `max_new` per tick, never past `pair_max_active` live pairs, and never on a
+    (game, market) the Ferrari already holds a pick on — one owner per market."""
+    now = now or datetime.now(timezone.utc)
+    res = {"looked": 0, "found": 0, "seated": 0, "dry": bool(dry), "cands": []}
+    armed = (not dry) and _machine_flag("pair_seed_enabled", False)
+    if not dry and not armed:
+        res["gate"] = "seed_flag_off"
+        return res
+    try:
+        live = (sb.table("pair_hedges").select("game_prefix,market_type")
+                .eq("enabled", True).execute().data) or []
+    except Exception as e:
+        res["gate"] = f"pairs_unreadable: {e}"
+        return res
+    cap_n = int(_machine_flag_val("pair_max_active", 25) or 25)
+    if len(live) >= cap_n and armed:
+        res["gate"] = "max_active"
+        return res
+    have = {(r["game_prefix"], r["market_type"]) for r in live}
+    board, prefixes = _pair_board(sb)
+    mids = sorted({k[0] for k in board})
+    games = {}
+    for i in range(0, len(mids), 300):
+        for r in ((sb.table("markets")
+                   .select("id,event_name,event_start,sport")
+                   .in_("id", mids[i:i + 300]).execute().data) or []):
+            es = _parse_iso(r.get("event_start") or "")
+            if es and now + timedelta(minutes=45) < es < now + timedelta(days=9):
+                games[r["id"]] = r
+    order = {"NFL": 0, "NCAAF": 1, "NHL": 2, "NBA": 3, "NCAAB": 4, "MLB": 5}
+    todo = sorted(games.values(), key=lambda r: (order.get(r.get("sport"), 9),
+                                                 r["event_start"]))
+    for g in todo:
+        if res["seated"] >= max_new:
+            break
+        for mt in ("spread", "total"):
+            slugs = board.get((g["id"], mt))
+            prefix = prefixes.get((g["id"], mt))
+            if not slugs or not prefix or (prefix, mt) in have:
+                continue
+            res["looked"] += 1
+            rungs, legmap = _pair_rungs_from_quotes(slugs, mt)
+            if len(rungs) < 4:
+                continue                       # nothing live in the table yet
+            cands = _pair_candidates(rungs, mt, g.get("sport") or "NFL",
+                                     _PAIR_DEFAULT_QTY)
+            if not cands:
+                continue
+            best = cands[0]
+            a_key = (("away" if mt == "spread" else "over"), best["a_line"])
+            b_key = (("home" if mt == "spread" else "under"), best["b_line"])
+            if a_key not in legmap or b_key not in legmap:
+                continue
+            a_slug, a_int = legmap[a_key]
+            b_slug, b_int = legmap[b_key]
+            es = _parse_iso(g["event_start"])
+            if not (_rent_ok(a_slug, es, now, sb)[0] and _rent_ok(b_slug, es, now, sb)[0]):
+                continue                       # RULE #1: both legs or nothing
+            row = {"game_prefix": prefix, "market_type": mt,
+                   "event_name": g.get("event_name"), "kickoff": g["event_start"],
+                   "qty": _PAIR_DEFAULT_QTY, "cap_c": best["cap_c"],
+                   "legs": [{"key": "a", "slug": a_slug, "intent": a_int,
+                             "label": f"{a_key[0]} {best['a_line']:+g}"},
+                            {"key": "b", "slug": b_slug, "intent": b_int,
+                             "label": f"{b_key[0]} {best['b_line']:+g}"}]}
+            res["found"] += 1
+            res["cands"].append({**best, "game": g.get("event_name"), "mt": mt,
+                                 "a_slug": a_slug, "b_slug": b_slug})
+            if not armed:
+                continue
+            try:
+                sb.table("pair_hedges").insert(row).execute()
+                res["seated"] += 1
+                _send_fill_telegram(
+                    f"🔗 PAIR SEATED — {g.get('event_name')} {mt}: "
+                    f"{row['legs'][0]['label']} + {row['legs'][1]['label']} "
+                    f"@ {best['cost_c']}¢ (wins both on {best['hits']}, "
+                    f"worth {best['worth_c']}¢)")
+            except Exception as e:
+                app.logger.warning("pair seed insert failed %s: %s", prefix, e)
+    return res
+
+
 def _pair_tick(sb, now=None) -> dict:
     """Run every enabled middle pair one step (see the block comment above)."""
     now = now or datetime.now(timezone.utc)
