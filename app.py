@@ -20766,7 +20766,7 @@ def _pair_board(sb, max_age_s: float = 600.0):
     return _PAIR_BOARD_CACHE["val"]
 
 
-def _pair_tape_quotes(sb, market_ids: list, minutes: float = 30.0) -> dict:
+def _pair_tape_quotes(sb, market_ids: list, minutes: float = 36.0) -> dict:
     """{(market_id, market_type, side, line): (bid, ask)} from pm_snapshots —
     the tape the pm_snapshot lane writes every ~2 minutes.
 
@@ -20778,24 +20778,22 @@ def _pair_tape_quotes(sb, market_ids: list, minutes: float = 30.0) -> dict:
     out: dict = {}
     if not market_ids:
         return out
-    fresh = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    # LATEST PER RUNG, NOT "CHANGED RECENTLY" (Sep 20 2026). pm_snapshots is
+    # deduped on CHANGE, so a time window returns only the rungs that MOVED —
+    # asked that way, 92 of 93 ladders read as unpriced. The RPC takes the most
+    # recent row per (market, type, side, line), which IS the current price
+    # however long it has rested. 2,064 rungs for 25 games, against 111.
     for i in range(0, len(market_ids), 25):
         chunk = market_ids[i:i + 25]
-
-        def _q(chunk=chunk):
-            return (sb.table("pm_snapshots")
-                    .select("market_id,market_type,side,line,bid_c,ask_c")
-                    .in_("market_id", chunk).eq("source", "pmm")
-                    .gte("captured_at", fresh).order("captured_at"))
         try:
-            for r in _sb_paged(_q, max_pages=8):
-                if (r.get("line") is None or r.get("bid_c") is None
-                        or r.get("ask_c") is None):
-                    continue
-                out[(r["market_id"], r["market_type"], r["side"],
-                     float(r["line"]))] = (float(r["bid_c"]), float(r["ask_c"]))
+            rows = (sb.rpc("pm_latest_quotes",
+                           {"p_market_ids": chunk,
+                            "p_hours": int(max(1, minutes))}).execute().data) or []
         except Exception:
-            pass
+            rows = []
+        for r in rows:
+            out[(r["market_id"], r["market_type"], r["side"],
+                 float(r["line"]))] = (float(r["bid_c"]), float(r["ask_c"]))
     return out
 
 
