@@ -35,3 +35,7 @@ Thumbs.db
 *.db
 output/
 .vercel
+
+# env backups — secrets, never committed (Sep 20 2026: a git add -A swept these
+# into a commit and GitHub secret scanning blocked the push, correctly)
+.env.bak*

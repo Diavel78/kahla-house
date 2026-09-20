@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time as _t
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
@@ -427,6 +428,10 @@ def lane_scalp(ctx: Ctx) -> int:
             + int(stats.get("shadow") or 0))
 
 
+_PAIR_SEED_TS = {"at": 0.0}
+_PAIR_SEED_EVERY_S = 300.0
+
+
 def lane_pair(ctx: Ctx) -> int:
     """THE MIDDLE PAIR (Rob, Sep 18 2026): two Polymarket legs on opposite
     sides of neighbouring rungs, combined bids capped (110), pair-floor sells,
@@ -437,6 +442,24 @@ def lane_pair(ctx: Ctx) -> int:
         return 0
     stats = _app._pair_tick(ctx.sb, ctx.now) or {}
     log.info("pair: %s", stats)
+    # THE SEEDER rides the same lane on its own cadence (the pair engine runs
+    # every 20s; hunting for new pairs that often is pointless and costs a
+    # rent-list read). DRY until machine_flags `pair_seed_enabled` says
+    # otherwise — the flag is the whole arming ceremony, no deploy, no restart.
+    if _t.time() - _PAIR_SEED_TS["at"] >= _PAIR_SEED_EVERY_S:
+        _PAIR_SEED_TS["at"] = _t.time()
+        try:
+            seed = _app._pair_seed_tick(ctx.sb, ctx.now, dry=ctx.dry_run) or {}
+            log.info("pair seed: %s", {k: v for k, v in seed.items() if k != "cands"})
+            for c in (seed.get("cands") or [])[:8]:
+                log.info("  would pair %s %s on %s: %s + %s = %s¢ "
+                         "(cap %s, worth %s, edge %s)", c.get("game"), c.get("mt"),
+                         c.get("hits"), c.get("a_c"), c.get("b_c"), c.get("cost_c"),
+                         c.get("cap_c"), c.get("worth_c"), c.get("edge_c"))
+            if ctx.detail is not None:
+                ctx.detail["seed"] = {k: v for k, v in seed.items() if k != "cands"}
+        except Exception as e:
+            log.warning("pair seed failed: %s", e)
     if ctx.detail is not None and isinstance(stats, dict):
         ctx.detail.update(stats)
     return int(stats.get("writes") or 0)

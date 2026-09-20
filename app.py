@@ -25581,7 +25581,9 @@ _CELLAR_LEASE_ENFORCED = (os.environ.get("CELLAR_LEASE_ENFORCED") or "").strip()
 #   "alerts"  -> _outbid_alerts
 #   "scalp"   -> _scalp_tick (Sep 4 2026 — own lane, own budget; the
 #                in-repeg call stands down via the CELLAR_LANES env gate)
-#   "pair"    -> _pair_tick (Sep 18 2026 — the middle pair; box-only, no Vercel twin)
+#   "pair"    -> _pair_tick + _pair_seed_tick (Sep 18 2026 — the middle pair;
+#                box-only, no Vercel twin; the seeder is DRY until the
+#                machine_flags `pair_seed_enabled` arming flag says otherwise)
 # NOT YET GATED (all on the "alerts" lane, all in the paperlog route body):
 #   _tg_flush, _bet_alerts, _opener_watchdog. Each is individually near-
 #   idempotent (per-bet markers, send-and-mark, cooldowns) so double-running
