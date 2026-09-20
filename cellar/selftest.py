@@ -1229,6 +1229,26 @@ def test_pair_candidates() -> None:
     check("totals middle on 45 qualifies", c5 and c5[0]["hits"] == [45])
 
 
+def test_pair_owner_guard() -> None:
+    """ONE OWNER PER MARKET (Sep 20 2026, the first armed seeder run): the spec
+    always claimed the seeder skipped a ladder the Ferrari holds, and the code
+    never checked. 5 of 6 pairs landed on slugs with existing picks/positions/
+    orders. The engine now also refuses to manage a leg a pending pick owns."""
+    import app as _app
+    import inspect
+    src = inspect.getsource(_app._pair_seed_tick)
+    check("seeder builds a TAKEN set from picks, positions and orders",
+          "taken_slugs" in src and "_pmm_positions_raw" in src
+          and "_pmm_open_orders_raw" in src)
+    check("seeder skips a (game, market) a pending pick owns", "taken_gm" in src)
+    check("seeder fails CLOSED when the venue is unreadable",
+          "venue_unreadable" in src)
+    step = inspect.getsource(_app._pair_step)
+    check("engine refuses a leg a pick owns", "_pair_foreign_slugs" in step)
+    check("the wrong-side page is rate limited, not every 20s",
+          "_PAIR_FREEZE_PING" in step)
+
+
 def main() -> int:
     print("THE CELLAR — offline selftest\n")
     for t in (test_imports_without_creds, test_config_validation,
@@ -1242,7 +1262,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates,
+              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
