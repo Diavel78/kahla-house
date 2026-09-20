@@ -1063,13 +1063,19 @@ def api_football_picks():
 
     try:
         rows = (sb.table("football_sheets")
-                .select("event_name,event_start,tier,data_blob,friday_md")
+                .select("event_name,event_start,tier,data_blob,friday_md,data_built_at")
                 .eq("week_key", week_key).eq("sport", sport)
                 .order("event_start").execute().data or [])
     except Exception as e:
         return jsonify({"ok": False, "error": f"games lookup failed: {e}"}), 500
 
     games = []
+    lines_updated_at = None  # freshest of data_built_at / friday.built_at
+    # across every game — the actual "when did the numbers last move"
+    # clock, separate from published_at (the PDF render time). The data
+    # assembly workflow now re-prices lines/model ~every 6h (Thu-Mon)
+    # WITHOUT re-rendering a PDF, so published_at alone reads stale even
+    # right after a refresh (Sep 20 2026 — "the NFL lines are stagnant").
     for r in rows:
         blob = r.get("data_blob") or {}
         # Friday overlay: same numbers the picks PDF renders, so the
@@ -1088,6 +1094,9 @@ def api_football_picks():
             "unrated": model is None,
             "friday_note": r.get("friday_md"),
         })
+        stamp = fr.get("built_at") or r.get("data_built_at")
+        if stamp and (lines_updated_at is None or stamp > lines_updated_at):
+            lines_updated_at = stamp
 
     return jsonify({
         "ok": True, "sport": sport, "week_key": week_key,
@@ -1096,6 +1105,7 @@ def api_football_picks():
         "picks_pdf_url": _pub_url(wk.get("picks_pdf_path")),
         "published_at": wk.get("friday_published_at") or wk.get("published_at"),
         "picks_published_at": wk.get("picks_published_at"),
+        "lines_updated_at": lines_updated_at,
     })
 
 

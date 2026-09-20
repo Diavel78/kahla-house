@@ -234,7 +234,8 @@
         }
 
         document.getElementById('metaLine').textContent =
-            'Week of ' + d.week_key + ' · ' + d.games.length + ' games · sheet built ' + ago(d.published_at);
+            'Week of ' + d.week_key + ' · ' + d.games.length + ' games · sheet built ' + ago(d.published_at) +
+            ' · lines/model updated ' + ago(d.lines_updated_at);
 
         const games = d.games.slice().sort((a, b) => (a.event_start || '').localeCompare(b.event_start || ''));
         let html = '';
