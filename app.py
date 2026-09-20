@@ -20388,6 +20388,39 @@ def _pair_slugs(sb) -> set:
             for lg in (r.get("legs") or []) if lg.get("slug")}
 
 
+_PAIR_DECLINED_CACHE: dict = {"at": 0.0, "set": set()}
+
+
+def _pair_declined(sb, market_id, mt, max_age_s: float = 60.0) -> bool:
+    """Has the pair machine already looked at this ladder and passed? 60s
+    cache. An unreadable table answers TRUE — the Ferrari keeps betting, which
+    is the safe side of this particular fence (a missed pair costs a pair; a
+    football lane frozen on a dead read costs the whole board)."""
+    if _time.time() - _PAIR_DECLINED_CACHE["at"] > max_age_s:
+        try:
+            rows = (sb.table("pair_declined").select("market_id,market_type")
+                    .gte("at", (datetime.now(timezone.utc)
+                                - timedelta(hours=12)).isoformat())
+                    .limit(4000).execute().data) or []
+            _PAIR_DECLINED_CACHE.update(
+                at=_time.time(),
+                set={(r["market_id"], r["market_type"]) for r in rows})
+        except Exception:
+            return True
+    return (market_id, mt) in _PAIR_DECLINED_CACHE["set"]
+
+
+def _pair_decline(sb, market_id, mt, reason: str) -> None:
+    """Record a pass so the Ferrari stops waiting on this ladder."""
+    try:
+        sb.table("pair_declined").upsert(
+            {"market_id": market_id, "market_type": mt, "reason": reason[:60],
+             "at": datetime.now(timezone.utc).isoformat()},
+            on_conflict="market_id,market_type").execute()
+    except Exception:
+        pass
+
+
 def _pair_owns_game(sb, prefix, mt) -> bool:
     return bool(prefix) and any(r.get("game_prefix") == prefix
                                 and r.get("market_type") == mt
@@ -20820,14 +20853,17 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
             if not slugs or not prefix or (prefix, mt) in have:
                 continue
             if (g["id"], mt) in taken_gm:
+                _pair_decline(sb, g["id"], mt, "owned")
                 continue                       # the Ferrari owns this ladder
             res["looked"] += 1
             rungs, legmap = _pair_rungs_from_quotes(slugs, mt)
             if len(rungs) < 4:
-                continue                       # nothing live in the table yet
+                continue                       # not priced yet — look again, do
+                                               # NOT decline (no verdict formed)
             cands = _pair_candidates(rungs, mt, g.get("sport") or "NFL",
                                      _PAIR_DEFAULT_QTY)
             if not cands:
+                _pair_decline(sb, g["id"], mt, "no_middle")
                 continue
             best = cands[0]
             a_key = (("away" if mt == "spread" else "over"), best["a_line"])
@@ -20838,9 +20874,11 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
             b_slug, b_int = legmap[b_key]
             if a_slug in taken_slugs or b_slug in taken_slugs:
                 res["skip_taken"] = res.get("skip_taken", 0) + 1
+                _pair_decline(sb, g["id"], mt, "leg_taken")
                 continue
             es = _parse_iso(g["event_start"])
             if not (_rent_ok(a_slug, es, now, sb)[0] and _rent_ok(b_slug, es, now, sb)[0]):
+                _pair_decline(sb, g["id"], mt, "rent")
                 continue                       # RULE #1: both legs or nothing
             row = {"game_prefix": prefix, "market_type": mt,
                    "event_name": g.get("event_name"), "kickoff": g["event_start"],
@@ -20850,6 +20888,9 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
                             {"key": "b", "slug": b_slug, "intent": b_int,
                              "label": f"{b_key[0]} {best['b_line']:+g}"}]}
             res["found"] += 1
+            # NOTE: a wanted pair is never declined — a dry look is still a
+            # look, but it is not a refusal, so the Ferrari does not inherit a
+            # ladder the pair machine is waiting to take.
             res["cands"].append({**best, "game": g.get("event_name"), "mt": mt,
                                  "a_slug": a_slug, "b_slug": b_slug})
             if not armed:
@@ -21106,6 +21147,16 @@ def _gridiron_try_bet_impl(sb, g, es0, d, mt, gp, contracts=None):
         return None
     if _pair_owns_game(sb, _gridiron_game_prefix(d, mt), mt):
         return "pair_owned"     # the middle pair owns this (game, market)
+    if (mt in ("spread", "total") and _machine_flag("pair_priority", False)
+            and not _pair_declined(sb, g["id"], mt)):
+        # PAIRS LOOK FIRST (Rob, Sep 20 2026: "the Ferrari doesn't stop seating
+        # football, it just doesn't get first pick… whatever it refuses goes to
+        # the Ferrari"). The seeder writes a `pair_declined` row for every
+        # ladder it passes on, so this defers ONLY until the pair machine has
+        # actually looked — never indefinitely, and never on a ladder it
+        # already refused. Managing existing seats (chase, recenter, top-up,
+        # sell arm) is untouched.
+        return "pair_first_look"
     mg, tt, pm = gp
     fit = (pm or {}).get("spread_fit" if mt == "spread" else "total_fit") or {}
     try:
@@ -22236,6 +22287,7 @@ _OMS_RETRY_MIN = {"rent": 30, "no_pmm": 30, "no_book": 30, "none": 30,
                   "no_line": 60,       # real books, no readable line yet (book pull 6am)
                   "edge": 60, "tail": 60, "no_model": 360, "cap": 10,
                   "pair_owned": 60,    # a middle pair owns the (game, mt)
+                  "pair_first_look": 10,   # waiting on the pair machine's verdict
                   "rung_window": 60,   # payers exist but all outside mid±1
                                        # — books grow toward the middle as
                                        # kickoff nears, so re-visit hourly
