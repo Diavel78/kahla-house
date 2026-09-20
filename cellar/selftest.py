@@ -1129,6 +1129,17 @@ def test_pair_plan() -> None:
     p = _app._pair_plan(two, 15, 110, 20)
     check("both held inside T−30 → no asks, hold for the middle",
           p["a"]["ask"] is None and "t30_middle" in p["b"]["why"])
+    # T−30 with NOTHING held: both bids come down (Rob, Sep 20 2026). With one
+    # leg held they stay up to kickoff — a fill then completes the pair.
+    p = _app._pair_plan({"a": leg(bid=43.5, ask=44.0), "b": leg(bid=57.5, ask=58.0)}, 15, 110, 20)
+    check("T-30, nothing held → both bids cancel",
+          p["a"]["bid"] is None and p["b"]["bid"] is None
+          and "t30_unpaired" in p["a"]["why"])
+    p = _app._pair_plan({"a": leg(h=15, cost=43.5, bid=43.0, ask=45.0),
+                         "b": leg(bid=57.5, ask=58.0)}, 15, 110, 20)
+    check("T-30, one leg held → the other keeps bidding to complete the pair",
+          p["b"]["bid"] == (57.5, 15))
+
     # kickoff: no bids, a lone leg keeps its ask
     p = _app._pair_plan({"a": leg(bid=43.0, ask=44.0), "b": leg(h=15, cost=57.0, bid=40.0, ask=55.0)}, 15, 110, -5)
     check("kickoff → no bids, lone ask stays live", p["a"]["bid"] is None and p["b"]["ask"] is not None)

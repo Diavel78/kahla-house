@@ -57,7 +57,15 @@ market) a pair owns and reports `pair_owned`.
 | one sold, one held | the sold leg re-bids, capped by the held leg's cost | the held leg floors at **`cap − sold price`**, live through the game, rides if unsold |
 | both filled ≤ 100 | — | **none. The lock rides.** |
 | both filled > 100 | — | at cost until T−30, then all asks cancel and it holds for the middle |
-| kickoff | stop | a lone held leg's ask stays working in-game |
+| T−30, nothing held | **both bids cancel** | — |
+| T−30, one leg held | the other keeps bidding to kickoff | held leg's ask stays |
+| kickoff | stop | a lone held leg's ask stays working the whole game, until sold or settled |
+
+**The T−30 split (Rob, Sep 20 2026).** With NOTHING held, both bids come down:
+a leg filling at T−20 with no partner is a fresh naked bet 20 minutes before
+kickoff, which is the thing this machine exists to avoid. With ONE leg held the
+bids stay up to kickoff, because then a fill COMPLETES the pair — it cannot
+create a naked leg, and a completed pair under the cap is the outcome we want.
 
 Other invariants: one order per (leg, side); prices snap to the market's own
 tick grid; a bid never crosses the ask (post-only); each leg's rent is checked

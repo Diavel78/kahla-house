@@ -20396,6 +20396,15 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
         want = int(qty - float(L.get("h") or 0) + 1e-9)
         if mins <= 0:
             why.append("kickoff_no_bid")
+        elif mins <= _PAIR_T30_MIN and not (held[ka] or held[kb]):
+            # T−30 WITH NOTHING HELD (Rob, Sep 20 2026): "if no legs are held,
+            # we need to cancel both at T−30". A leg that fills at T−20 with no
+            # partner is a fresh naked bet 20 minutes before kickoff — the very
+            # thing the pair exists to avoid. With one leg HELD the bids stay
+            # up to kickoff, because then a fill COMPLETES the pair (it cannot
+            # create a naked leg), and a completed pair under the cap is the
+            # outcome we want.
+            why.append("t30_unpaired")
         elif want < 1:
             pass
         elif not L.get("rent"):
