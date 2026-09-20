@@ -1,0 +1,56 @@
+name: Football Sheets — Grade
+
+# On-demand: "how did the sheet do" for a slate of dates. Reads the sheet's
+# own bet_spread/bet_total calls from football_sheets (the cloud project —
+# same one football-sheets-data.yml writes) and grades them against ESPN
+# finals via the stamped espn_id. Reference-only product, no venue money —
+# this script IS the resolver, run when asked. See
+# docs/football-sheet-runbook.md and scripts/grade_football_sheets.py.
+#
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY (the cloud
+# project football-sheets-data.yml already uses).
+
+on:
+  workflow_dispatch:
+    inputs:
+      sport:
+        description: "NFL, NCAAF, or blank for both"
+        required: false
+        default: ""
+      dates:
+        description: "Comma-separated AZ dates YYYY-MM-DD (required)"
+        required: true
+      week_key:
+        description: "Week key YYYY-MM-DD, or blank for each sport's latest"
+        required: false
+        default: ""
+
+jobs:
+  grade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Grade
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          SPORTS="${{ github.event.inputs.sport }}"
+          WK="${{ github.event.inputs.week_key }}"
+          ARGS=()
+          if [ -n "$SPORTS" ]; then ARGS+=(--sport "$SPORTS"); else ARGS+=(--sport NFL --sport NCAAF); fi
+          if [ -n "$WK" ]; then ARGS+=(--week-key "$WK"); fi
+          IFS=',' read -ra DATES <<< "${{ github.event.inputs.dates }}"
+          for d in "${DATES[@]}"; do ARGS+=(--date "$d"); done
+          python -m scripts.grade_football_sheets "${ARGS[@]}"
