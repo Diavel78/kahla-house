@@ -1129,6 +1129,15 @@ def test_pair_plan() -> None:
     p = _app._pair_plan(two, 15, 110, 20)
     check("both held inside T−30 → no asks, hold for the middle",
           p["a"]["ask"] is None and "t30_middle" in p["b"]["why"])
+    # An unreadable book leaves BOTH orders alone (Sep 19 2026: one failed read
+    # cancelled a resting bid and re-placed it at the back of the queue).
+    p = _app._pair_plan({"a": leg(h=15, cost=43.5, book_ok=False),
+                         "b": leg(bid=57.5, ask=58.0)}, 15, 110, 2000)
+    check("unreadable book → keep the orders, change nothing",
+          p["a"]["bid"] == "keep" and p["a"]["ask"] == "keep"
+          and "book_unreadable" in p["a"]["why"])
+    check("the other leg is unaffected", p["b"]["bid"] == (57.5, 15))
+
     # T−30 with NOTHING held: both bids come down (Rob, Sep 20 2026). With one
     # leg held they stay up to kickoff — a fill then completes the pair.
     p = _app._pair_plan({"a": leg(bid=43.5, ask=44.0), "b": leg(bid=57.5, ask=58.0)}, 15, 110, 20)

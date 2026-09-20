@@ -20391,6 +20391,14 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
         L, O = legs[k], legs[o]
         tick = float(L.get("tick") or 1.0)
         why = []
+        if L.get("book_ok") is False:
+            # AN UNREADABLE BOOK IS NOT AN EMPTY BOOK (Sep 19 2026): one failed
+            # read made the planner see no touch, and the step CANCELLED a
+            # resting bid at 07:41 and re-placed it a minute later at the back
+            # of the queue. A read failure is a reason to do NOTHING — "keep"
+            # leaves both orders exactly where they are.
+            out[k] = {"bid": "keep", "ask": "keep", "why": ["book_unreadable"]}
+            continue
         # ── BID ──────────────────────────────────────────────────────────
         bid = None
         want = int(qty - float(L.get("h") or 0) + 1e-9)
@@ -20896,11 +20904,12 @@ def _pair_step(sb, client, row, positions, now, res) -> None:
         s["h"] = round(h, 4)
         tick = _pmm_tick_c(client, slug)
         bk = _book_for_snipe(client, slug)
+        book_ok = bk is not None
         if short:
             bk = _invert_book(bk)
         own_b = s.get("bid_c") if cur[k]["bid"] else None
         own_a = s.get("ask_c") if cur[k]["ask"] else None
-        lg_in[k] = {"h": h, "cost": s.get("cost"), "sold": None,
+        lg_in[k] = {"h": h, "cost": s.get("cost"), "sold": None, "book_ok": book_ok,
                     "bid": _pair_touch_ex_self(bk, "bid", own_b,
                                                (cur[k]["bid"] or {}).get("leaves")),
                     "ask": _pair_touch_ex_self(bk, "ask", own_a,
@@ -20923,10 +20932,16 @@ def _pair_step(sb, client, row, positions, now, res) -> None:
         for side, gtt, intent in (("bid", gtt_bid, c["buy_i"]), ("ask", gtt_ask, c["sell_i"])):
             want = p[side]
             have = c[side]
+            if want == "keep":
+                continue                       # unreadable book — touch nothing
             if want is None:
                 if have is not None and _pair_cancel(client, have):
                     res["writes"] += 1
-                    s.pop(side + "_c", None)
+                if have is None:
+                    # the venue expired it at its good-till (kickoff) — our own
+                    # cancel never ran, so clear the memory here too
+                    s.pop(side + "_id", None)
+                s.pop(side + "_c", None)
                 continue
             if side == "bid" and have is None:
                 # new money: the book-wide exposure fence (fail-closed)
