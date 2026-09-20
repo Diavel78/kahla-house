@@ -1243,6 +1243,11 @@ def test_pair_priority_gate() -> None:
     seed = inspect.getsource(_app._pair_seed_tick)
     for why in ("owned", "no_middle", "leg_taken", "rent"):
         check(f"the seeder records its {why!r} pass", f'"{why}"' in seed)
+    check("'owned' expires in minutes — ownership changes",
+          _app._PAIR_DECLINE_TTL_S["owned"] <= 300
+          and _app._PAIR_DECLINE_TTL_S["leg_taken"] <= 300)
+    check("a market fact ('no middle', 'no rent') holds longer",
+          _app._PAIR_DECLINE_TTL_S["no_middle"] >= 1800)
     check("an unreadable decline table lets the Ferrari keep betting",
           "return True" in inspect.getsource(_app._pair_declined))
 

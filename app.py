@@ -20391,20 +20391,38 @@ def _pair_slugs(sb) -> set:
 _PAIR_DECLINED_CACHE: dict = {"at": 0.0, "set": set()}
 
 
+# A REFUSAL LASTS AS LONG AS ITS REASON IS STILL TRUE (Sep 20 2026, caught on
+# the handover): "owned" and "leg_taken" describe who holds the ladder RIGHT
+# NOW, and the moment a Ferrari seat is cancelled they are false — but the
+# sticky row handed the freed ladder straight back to the Ferrari a minute
+# later. Those expire in minutes. "no_middle" and "rent" are facts about the
+# market and hold for half an hour.
+_PAIR_DECLINE_TTL_S = {"owned": 300.0, "leg_taken": 300.0,
+                       "no_middle": 1800.0, "rent": 1800.0}
+_PAIR_DECLINE_TTL_DEFAULT = 600.0
+
+
 def _pair_declined(sb, market_id, mt, max_age_s: float = 60.0) -> bool:
-    """Has the pair machine already looked at this ladder and passed? 60s
-    cache. An unreadable table answers TRUE — the Ferrari keeps betting, which
-    is the safe side of this particular fence (a missed pair costs a pair; a
-    football lane frozen on a dead read costs the whole board)."""
+    """Has the pair machine looked at this ladder and passed, recently enough
+    for that verdict to still mean anything? 60s cache. An unreadable table
+    answers TRUE — the Ferrari keeps betting, which is the safe side of this
+    fence (a missed pair costs a pair; a frozen football lane costs the board)."""
     if _time.time() - _PAIR_DECLINED_CACHE["at"] > max_age_s:
         try:
-            rows = (sb.table("pair_declined").select("market_id,market_type")
+            rows = (sb.table("pair_declined")
+                    .select("market_id,market_type,reason,at")
                     .gte("at", (datetime.now(timezone.utc)
-                                - timedelta(hours=12)).isoformat())
+                                - timedelta(hours=2)).isoformat())
                     .limit(4000).execute().data) or []
-            _PAIR_DECLINED_CACHE.update(
-                at=_time.time(),
-                set={(r["market_id"], r["market_type"]) for r in rows})
+            now_dt = datetime.now(timezone.utc)
+            live = set()
+            for r in rows:
+                ttl = _PAIR_DECLINE_TTL_S.get(r.get("reason") or "",
+                                              _PAIR_DECLINE_TTL_DEFAULT)
+                at = _parse_iso(r.get("at") or "")
+                if at and (now_dt - at).total_seconds() <= ttl:
+                    live.add((r["market_id"], r["market_type"]))
+            _PAIR_DECLINED_CACHE.update(at=_time.time(), set=live)
         except Exception:
             return True
     return (market_id, mt) in _PAIR_DECLINED_CACHE["set"]
