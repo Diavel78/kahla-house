@@ -20656,6 +20656,7 @@ _PAIR_SLACK_C = 1.5
 _PAIR_LEG_BAND = (20.0, 80.0)   # keeps the window near the line, where the worth table was measured
 _PAIR_MAX_WIDTH = 3.0
 _PAIR_DEFAULT_QTY = 15
+_PAIR_MIN_LEAD_H = float(os.environ.get('PAIR_MIN_LEAD_H') or 6.0)
 
 
 def _pair_worth(sport: str, mt: str, hits: list) -> float:
@@ -20892,7 +20893,14 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
                    .select("id,event_name,event_start,sport")
                    .in_("id", mids[i:i + 300]).execute().data) or []):
             es = _parse_iso(r.get("event_start") or "")
-            if es and now + timedelta(minutes=45) < es < now + timedelta(days=9):
+            # SEAT EARLY OR NOT AT ALL (Rob, Sep 20 2026: "YIKES… today's slate
+            # huh"). The first armed pass took two games kicking off in 45
+            # minutes, because the Ferrari owns next week's board and today's
+            # leftovers were all that was free. Rent pays multiples for being
+            # early and alone, and a pair with nothing held cancels at T−30
+            # anyway — so a seat inside a few hours of kickoff is paying the
+            # spread for almost no rent.
+            if es and now + timedelta(hours=_PAIR_MIN_LEAD_H) < es < now + timedelta(days=9):
                 games[r["id"]] = r
     order = {"NFL": 0, "NCAAF": 1, "NHL": 2, "NBA": 3, "NCAAB": 4, "MLB": 5}
     todo = sorted(games.values(), key=lambda r: (order.get(r.get("sport"), 9),

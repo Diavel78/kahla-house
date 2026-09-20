@@ -1264,6 +1264,8 @@ def test_pair_owner_guard() -> None:
           "taken_slugs" in src and "_pmm_positions_raw" in src
           and "_pmm_open_orders_raw" in src)
     check("seeder skips a (game, market) a pending pick owns", "taken_gm" in src)
+    check("seeder seats EARLY only — hours of lead, not minutes",
+          _app._PAIR_MIN_LEAD_H >= 3 and "_PAIR_MIN_LEAD_H" in src)
     check("seeder prices from the quote table AND the tape (it was blind on the "
           "board the same logic found 11 pairs on)",
           "_pair_tape_quotes" in src)
