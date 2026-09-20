@@ -34,6 +34,21 @@
 > a separate lightweight card, push back — that's the thing that just got
 > deleted for being one system too many.
 >
+> **LINES REFRESH ~EVERY 6H, THU 5AM AZ → MON 5AM AZ (added Sep 20 2026 —
+> Rob: "the NFL lines are stagnant... I thought we said every 6 hours?").**
+> The `/football-picks` page's 6-hour client poll only re-fetches whatever
+> is already in the DB — it does NOT recompute anything. Before this fix,
+> the underlying DATA (market lines + model) only recomputed twice a week
+> (Monday's full build, Friday's single diff), so by Sunday the lines a
+> visitor saw were up to 2 days stale. `football-sheets-data.yml` now
+> fires `--mode friday` (re-price only: fresh lines + model into
+> `data_blob.friday`, no new narrative, no PDF re-render) roughly every 6h
+> from Thursday morning through Monday morning, on top of the one Monday
+> full build and the one Friday-morning run the 6am narrative Routine
+> depends on. This is invisible to you as the narrative session — you
+> still only run on Monday and Friday — it just means the live page's
+> numbers between your runs are hours old, not days old.
+>
 > ⚠ **KNOWN GAP, not yet fixed: the sheet's model does NOT carry the QB
 > adjustment or the CFBD-ratings blend that `app.py`'s live betting engine
 > (`_gridiron_proj`) now has.** `football_sheet_data.py` builds its own
