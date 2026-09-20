@@ -20340,6 +20340,27 @@ def _hedge_rung_ok(h, mt, sn, rv):
 # them at all. Kill switch: machine_flags pair_enabled=false (or the row's
 # enabled). DDL: kahla-scanner/supabase/pair_hedges.sql.
 _PAIR_CACHE: dict = {"at": 0.0, "rows": []}
+_PAIR_FREEZE_PING: dict = {}
+_PAIR_FOREIGN_CACHE: dict = {"at": 0.0, "slugs": set()}
+
+
+def _pair_foreign_slugs(sb, max_age_s: float = 120.0) -> set:
+    """Slugs a pending pick owns — the pair engine must never touch one."""
+    if _time.time() - _PAIR_FOREIGN_CACHE["at"] <= max_age_s:
+        return _PAIR_FOREIGN_CACHE["slugs"]
+    try:
+        def _q():
+            return (sb.table("bot_picks").select("signal_blob")
+                    .eq("status", "pending"))
+        out = set()
+        for r in _sb_paged(_q, max_pages=10):
+            b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+            if (b or {}).get("pmm_slug"):
+                out.add(b["pmm_slug"])
+        _PAIR_FOREIGN_CACHE.update(at=_time.time(), slugs=out)
+    except Exception:
+        pass                                   # keep the last good set
+    return _PAIR_FOREIGN_CACHE["slugs"]
 _PAIR_T30_MIN = 30
 _PAIR_ASK_GTD_H = 7
 
@@ -20745,6 +20766,38 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
         res["gate"] = "max_active"
         return res
     have = {(r["game_prefix"], r["market_type"]) for r in live}
+    # ONE OWNER PER MARKET — the check the spec always claimed and the code
+    # never had (Sep 20 2026, the first armed run: 5 of 6 pairs landed on slugs
+    # the Ferrari already held picks, positions or orders on, and the wrong-side
+    # guard froze them). A slug is TAKEN when any pending pick names it, when
+    # the venue shows a position on it, or when an AUTOMATIC order rests on it.
+    # Taken on EITHER leg disqualifies the pair; a pending pick on the same
+    # (game, market) disqualifies it too, even at a different rung — two
+    # engines quoting one ladder is the duplicate-order class by another name.
+    taken_slugs: set = set()
+    taken_gm: set = set()
+    try:
+        def _pk():
+            return (sb.table("bot_picks").select("market_id,market_type,signal_blob")
+                    .eq("status", "pending"))
+        for r in _sb_paged(_pk, max_pages=10):
+            b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+            if (b or {}).get("pmm_slug"):
+                taken_slugs.add(b["pmm_slug"])
+            if r.get("market_id") and r.get("market_type"):
+                taken_gm.add((r["market_id"], r["market_type"]))
+        _cl = get_client()
+        pos = _pmm_positions_raw(_cl, fresh=True)
+        ords = _pmm_open_orders_raw(_cl, fresh=True)
+        if pos is None or ords is None:
+            res["gate"] = "venue_unreadable"    # fail CLOSED: never seat blind
+            return res
+        taken_slugs |= set(pos)
+        taken_slugs |= {o["slug"] for o in ords if o.get("auto") and o.get("slug")}
+    except Exception as e:
+        res["gate"] = f"ownership_unreadable: {e}"
+        return res
+    res["taken"] = len(taken_slugs)
     board, prefixes = _pair_board(sb)
     mids = sorted({k[0] for k in board})
     games = {}
@@ -20766,6 +20819,8 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
             prefix = prefixes.get((g["id"], mt))
             if not slugs or not prefix or (prefix, mt) in have:
                 continue
+            if (g["id"], mt) in taken_gm:
+                continue                       # the Ferrari owns this ladder
             res["looked"] += 1
             rungs, legmap = _pair_rungs_from_quotes(slugs, mt)
             if len(rungs) < 4:
@@ -20781,6 +20836,9 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
                 continue
             a_slug, a_int = legmap[a_key]
             b_slug, b_int = legmap[b_key]
+            if a_slug in taken_slugs or b_slug in taken_slugs:
+                res["skip_taken"] = res.get("skip_taken", 0) + 1
+                continue
             es = _parse_iso(g["event_start"])
             if not (_rent_ok(a_slug, es, now, sb)[0] and _rent_ok(b_slug, es, now, sb)[0]):
                 continue                       # RULE #1: both legs or nothing
@@ -20870,12 +20928,21 @@ def _pair_step(sb, client, row, positions, now, res) -> None:
         buy_i = "ORDER_INTENT_" + intent
         sell_i = buy_i.replace("_BUY_", "_SELL_")
         s = st.setdefault(k, {})
+        if slug in (_pair_foreign_slugs(sb) or set()):
+            # DEFENSE IN DEPTH: even a hand-inserted pair may not manage a slug
+            # a pending pick owns. Freeze rather than fight another engine.
+            app.logger.warning("pair %s: %s belongs to a pick — pair frozen",
+                               row.get("id"), slug)
+            res["errors"] += 1
+            return
         net = float((positions.get(slug) or {}).get("net") or 0.0)
         if abs(net) >= 0.01 and ((net < 0) != short):
             # THE SIGN RULE (the Lambo's first night): the venue holds the
             # OTHER side of this market — not our leg. Touch nothing.
-            _send_fill_telegram(f"🚨 PAIR {ev}: venue holds the wrong side on {slug} "
-                                f"(net {net}) — pair frozen, check it.", urgent=True)
+            if _time.time() - _PAIR_FREEZE_PING.get(slug, 0.0) > 3600.0:
+                _PAIR_FREEZE_PING[slug] = _time.time()   # once an hour, not every 20s
+                _send_fill_telegram(f"🚨 PAIR {ev}: venue holds the wrong side on {slug} "
+                                    f"(net {net}) — pair frozen, check it.", urgent=True)
             res["errors"] += 1
             return
         h = abs(net) if abs(net) >= 0.01 else 0.0

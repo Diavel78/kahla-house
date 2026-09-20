@@ -48,6 +48,17 @@ market) a pair owns and reports `pair_owned`.
 ⚠ **Any new engine that acts on orders or positions without a pick must skip
 `_pair_slugs` too.**
 
+⚠ **ONE OWNER PER MARKET, AND IT IS CHECKED (Sep 20 2026 — the first armed
+seeder run).** The seeder used to only *say* it skipped ladders the Ferrari
+owns. It didn't check, and 5 of its first 6 pairs landed on slugs already
+carrying picks, positions or resting orders; the wrong-side guard froze them
+(it worked) and two pair bids rested 6 minutes on a Ferrari ladder before being
+cancelled. No money moved. Now a slug is TAKEN when a pending pick names it,
+the venue holds a position on it, or an AUTOMATIC order rests on it — taken on
+either leg disqualifies the pair, a pending pick on the same (game, market)
+disqualifies it at any rung, and an unreadable venue fails CLOSED. The engine
+independently refuses to manage a leg a pending pick owns.
+
 ### State machine
 
 | State | Bids | Asks |
