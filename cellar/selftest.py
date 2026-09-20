@@ -1175,6 +1175,18 @@ def test_pair_candidates() -> None:
     check("over the cap = no seat",
           all(x["cost_c"] <= x["cap_c"] for x in _app._pair_candidates(r4, "spread", "NFL", 15)))
 
+    # EARLY AND ALONE (Rob, Sep 20 2026): a wide, barely-quoted book whose
+    # two legs sum UNDER 100 is a lock we want, not a stale quote to refuse —
+    # and its nonsense mids must not set the cap (that would strand the second
+    # leg with nowhere to chase).
+    r6 = rungs(("away", -2.5, 41.0, 50.0), ("home", 3.5, 41.0, 52.0))
+    c6 = _app._pair_candidates(r6, "spread", "NFL", 15)
+    check("an early 82\u00a2 pair still qualifies", c6 and c6[0]["cost_c"] == 82.0)
+    check("its cap comes from the middle's worth, not the broken mids",
+          c6[0]["cap_c"] > 100.0)
+    check("a pair under 100 has a NEGATIVE worst case (a lock)",
+          c6[0]["worst_usd"] < 0)
+
     # Totals: flat worth, still a real middle.
     # mids must sum to at least 100 — a covering pair worth less than that is
     # a stale quote (the seeder's stale-quote guard), so the test data has to

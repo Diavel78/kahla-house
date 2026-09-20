@@ -20595,16 +20595,21 @@ def _pair_candidates(rungs: list, mt: str, sport: str, qty: int) -> list:
                 continue
             cost = ba + bb
             mid_sum = (ba + aa) / 2.0 + (bb + ab) / 2.0
-            # A COVERING PAIR CANNOT BE WORTH LESS THAN 100 (the stale-quote
-            # guard, caught on the seeder's first dry run, Sep 19 2026): every
-            # outcome wins at least one leg, so the two MIDS must sum to
-            # 100 + P(middle). A pair of mids summing to 84 (Clemson @ Cal)
-            # is a quote nobody has refreshed, not a gift — and the cap rule,
-            # which reads the mids, would happily "qualify" it.
-            if mid_sum < 99.5 or cost < 95.0:
-                continue
             worth = _pair_worth(sport, mt, hits)
-            cap = min(ceiling, mid_sum + _PAIR_SLACK_C, 100.0 + worth + _PAIR_SLACK_C)
+            # THE CAP, and why the MIDS ONLY GET A VOTE WHEN THEY MAKE SENSE
+            # (Rob, Sep 20 2026: "2 is WRONG. We are EARLY, absolutely might
+            # have pairs under 100"). Two legs that cover every outcome are
+            # worth 100 + P(middle) together, so mids summing under 100 are a
+            # book nobody has quoted yet — which is the seat we WANT (early,
+            # alone, wide) and must not be thrown away. My first cut refused
+            # them and also let the nonsense mid set the cap, which would have
+            # stranded the second leg with nowhere to chase. So: the mids cap
+            # us only when they are coherent; otherwise the measured worth of
+            # the middle does. A CHEAP PAIR IS A GIFT, NOT A DEFECT — cost
+            # under 100 is a lock, and nothing here rejects it.
+            cap = min(ceiling, 100.0 + worth + _PAIR_SLACK_C)
+            if mid_sum >= 100.0:
+                cap = min(cap, mid_sum + _PAIR_SLACK_C)
             edge = worth - (cost - 100.0)
             if cost > cap + 1e-9 or worth < _PAIR_MIN_WORTH or edge < _PAIR_MIN_EDGE_C:
                 continue
