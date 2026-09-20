@@ -21157,6 +21157,7 @@ def _pair_step(sb, client, row, positions, now, res) -> None:
     ko = _parse_iso(str(row.get("kickoff")))
     if ko is None:
         return
+    mt = row.get("market_type") or "spread"
     mins = (ko - now).total_seconds() / 60.0
     qty = int(row.get("qty") or 15)
     cap = float(row.get("cap_c") or 110)
