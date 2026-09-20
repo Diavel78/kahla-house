@@ -449,7 +449,13 @@ def lane_pair(ctx: Ctx) -> int:
     if _t.time() - _PAIR_SEED_TS["at"] >= _PAIR_SEED_EVERY_S:
         _PAIR_SEED_TS["at"] = _t.time()
         try:
-            seed = _app._pair_seed_tick(ctx.sb, ctx.now, dry=ctx.dry_run) or {}
+            # DRY = "shop but do not seat". On a live box ctx.dry_run is False,
+            # so passing it straight through meant the seeder reported
+            # `seed_flag_off` and never produced the shopping list the whole
+            # point of the dry phase is to read. The arming flag decides.
+            _armed = _app._machine_flag("pair_seed_enabled", False)
+            seed = _app._pair_seed_tick(ctx.sb, ctx.now,
+                                        dry=(ctx.dry_run or not _armed)) or {}
             log.info("pair seed: %s", {k: v for k, v in seed.items() if k != "cands"})
             for c in (seed.get("cands") or [])[:8]:
                 log.info("  would pair %s %s on %s: %s + %s = %s¢ "
