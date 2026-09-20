@@ -57,9 +57,19 @@ market) a pair owns and reports `pair_owned`.
 | one sold, one held | the sold leg re-bids, capped by the held leg's cost | the held leg floors at **`cap − sold price`**, live through the game, rides if unsold |
 | both filled ≤ 100 | — | **none. The lock rides.** |
 | both filled > 100 | — | at cost until T−30, then all asks cancel and it holds for the middle |
+| either leg loses rent, nothing held | **both bids cancel** | — |
+| either leg loses rent, one leg held | the empty leg keeps bidding anyway | the held leg keeps its exit |
 | T−30, nothing held | **both bids cancel** | — |
 | T−30, one leg held | the other keeps bidding to kickoff | held leg's ask stays |
 | kickoff | stop | a lone held leg's ask stays working the whole game, until sold or settled |
+
+**RULE 4 — rent is a reason to START, never a reason to go naked (Rob, Sep 20
+2026).** Rent is re-asked every tick and a program can be pulled mid-life. If
+EITHER leg stops paying while NOTHING is held, the whole pair comes down — two
+orders resting for a middle we were only renting have no reason to be there.
+Once a leg is HELD, we keep working to complete the pair (and to sell the held
+leg) even with no rent on either side: **a hedge half-built is a naked bet, and
+we don't accept a naked bet as the price of losing a rent program.**
 
 **The T−30 split (Rob, Sep 20 2026).** With NOTHING held, both bids come down:
 a leg filling at T−20 with no partner is a fresh naked bet 20 minutes before
@@ -131,7 +141,7 @@ nowhere to chase.
 
 ### Fences
 
-Both legs must pay rent (RULE #1, per market, at every tick), each leg 20-80¢,
+Both legs must pay rent to SEAT a pair (RULE #1, per market; rule 4 governs what happens when rent is pulled later), each leg 20-80¢,
 window 1-3 numbers, worth ≥ 2%, edge ≥ 1¢, at most 3 new pairs a tick, and
 never past `pair_max_active` (25) live pairs.
 

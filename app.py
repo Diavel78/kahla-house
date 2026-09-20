@@ -20383,6 +20383,16 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
     ka, kb = list(legs)
     held = {k: float(legs[k].get("h") or 0) >= 1.0 for k in (ka, kb)}
     both = held[ka] and held[kb]
+    any_held = held[ka] or held[kb]
+    # RULE 4 — RENT IS A REASON TO START, NEVER A REASON TO GO NAKED (Rob,
+    # Sep 20 2026). Rent is re-asked every tick, and a program can be pulled
+    # mid-life. If EITHER leg stops paying while NOTHING is held, the whole
+    # pair comes down — there is no point resting two orders for a middle we
+    # were only ever renting. But once a leg is HELD, we keep working to
+    # complete the pair (and to sell the held leg) even with no rent on either
+    # side: a hedge half-built is a naked bet, and we do not accept a naked bet
+    # as the price of losing a rent program.
+    rent_all = bool(legs[ka].get("rent")) and bool(legs[kb].get("rent"))
     pair_cost = None
     if both and legs[ka].get("cost") is not None and legs[kb].get("cost") is not None:
         pair_cost = float(legs[ka]["cost"]) + float(legs[kb]["cost"])
@@ -20415,8 +20425,8 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
             why.append("t30_unpaired")
         elif want < 1:
             pass
-        elif not L.get("rent"):
-            why.append("not_paying")
+        elif not (rent_all or any_held):
+            why.append("rent_pulled")          # rule 4: nothing held → stand down
         elif L.get("bid") is None:
             why.append("no_touch")
         else:

@@ -1152,10 +1152,23 @@ def test_pair_plan() -> None:
     # kickoff: no bids, a lone leg keeps its ask
     p = _app._pair_plan({"a": leg(bid=43.0, ask=44.0), "b": leg(h=15, cost=57.0, bid=40.0, ask=55.0)}, 15, 110, -5)
     check("kickoff → no bids, lone ask stays live", p["a"]["bid"] is None and p["b"]["ask"] is not None)
-    # a bid never crosses the ask; an unpaid leg never bids
-    p = _app._pair_plan({"a": leg(bid=44.0, ask=44.0), "b": leg(bid=50.0, ask=51.0, rent=False)}, 15, 110, 2000)
+    # a bid never crosses the ask
+    p = _app._pair_plan({"a": leg(bid=44.0, ask=44.0), "b": leg(bid=50.0, ask=51.0)}, 15, 110, 2000)
     check("post-only: bid steps under a locked touch", p["a"]["bid"][0] < 44.0)
-    check("rent rule: an unpaid leg never bids", p["b"]["bid"] is None and "not_paying" in p["b"]["why"])
+    # rule 4, first half: nothing held and ONE leg loses rent → the pair comes
+    # down, not just that leg (renting was the whole reason to rest two orders)
+    p = _app._pair_plan({"a": leg(bid=44.0, ask=45.0), "b": leg(bid=50.0, ask=51.0, rent=False)}, 15, 110, 2000)
+    check("rent rule: nothing held + a leg loses rent → BOTH bids down",
+          p["a"]["bid"] is None and p["b"]["bid"] is None
+          and "rent_pulled" in p["b"]["why"])
+
+    # RULE 4 (Rob, Sep 20 2026): with a leg HELD we keep working the pair even
+    # if the rent is gone on either side — a half-built hedge is a naked bet.
+    p = _app._pair_plan({"a": leg(h=15, cost=43.5, bid=43.0, ask=45.0, rent=False),
+                         "b": leg(bid=57.5, ask=58.0, rent=False)}, 15, 110, 2000)
+    check("rule 4: one leg held + no rent anywhere → still completing the pair",
+          p["b"]["bid"] == (57.5, 15))
+    check("rule 4: the held leg still lists its exit", p["a"]["ask"] is not None)
 
 
 def test_pair_candidates() -> None:
