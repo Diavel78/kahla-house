@@ -98,6 +98,21 @@ side** of a leg, the pair freezes and pages Rob (the Lambo's first-night bug).
 cancelled a bid at 07:41 Sep 19 and re-placed it a minute later at the back of
 the queue. Fix queued.
 
+## Who gets the ladder (Rob, Sep 20 2026)
+
+**The pair machine looks first; the Ferrari bets what it refuses.** Not a
+stand-down — "the Ferrari doesn't stop seating football, it just doesn't get
+first pick." With `machine_flags pair_priority` on, `_gridiron_try_bet` defers a
+football spread/total ladder (verdict `pair_first_look`, 10-min retry) until the
+seeder has written a `pair_declined` row for it — owned, no_middle, leg_taken or
+rent. A ladder the seeder WANTS is never declined, so the Ferrari can't inherit
+it out from under a pending seat. An unreadable `pair_declined` table answers
+"declined" on purpose: a missed pair costs one pair, a frozen football lane
+costs the board.
+
+**The end state:** once pairs prove out, the pair machine *becomes* the Ferrari
+for football — hedges only, and a game that can't be paired isn't bet.
+
 ## The seeder (`app._pair_seed_tick`, built, default-dry, flag `pair_seed_enabled`)
 
 Walks the venue's rent list — the enrolled rungs ARE the universe — prices them

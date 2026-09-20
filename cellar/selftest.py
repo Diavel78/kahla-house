@@ -1229,6 +1229,24 @@ def test_pair_candidates() -> None:
     check("totals middle on 45 qualifies", c5 and c5[0]["hits"] == [45])
 
 
+def test_pair_priority_gate() -> None:
+    """PAIRS LOOK FIRST (Rob, Sep 20 2026): with machine_flags `pair_priority`
+    on, the football executor defers a ladder ONLY until the pair machine has
+    recorded a verdict on it — then bets whatever pairs refused."""
+    import app as _app
+    import inspect
+    src = inspect.getsource(_app._gridiron_try_bet_impl)
+    check("the executor waits for the pair machine's verdict, not forever",
+          'pair_first_look' in src and '_pair_declined' in src)
+    check("the OMS retries a deferred ladder in minutes",
+          _app._OMS_RETRY_MIN.get("pair_first_look") == 10)
+    seed = inspect.getsource(_app._pair_seed_tick)
+    for why in ("owned", "no_middle", "leg_taken", "rent"):
+        check(f"the seeder records its {why!r} pass", f'"{why}"' in seed)
+    check("an unreadable decline table lets the Ferrari keep betting",
+          "return True" in inspect.getsource(_app._pair_declined))
+
+
 def test_pair_owner_guard() -> None:
     """ONE OWNER PER MARKET (Sep 20 2026, the first armed seeder run): the spec
     always claimed the seeder skipped a ladder the Ferrari holds, and the code
@@ -1262,7 +1280,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard,
+              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
