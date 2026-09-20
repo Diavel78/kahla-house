@@ -74,6 +74,22 @@ independently refuses to manage a leg a pending pick owns.
 | T−30, one leg held | the other keeps bidding to kickoff | held leg's ask stays |
 | kickoff | stop | a lone held leg's ask stays working the whole game, until sold or settled |
 
+**RULE 5 — THE RE-RUNG LADDER (Rob, Sep 20 2026).** One leg filled, the other
+stranded under the touch because the cap binds = no rent on either side and no
+hedge. The partner walks IN, rung by rung, to the best rung it can hold the
+TOUCH on inside the cap — **all the way to the mirror if that is what it takes:
+"the goal is to get out, not have the bet."** Every rung in is still a hedge
+(it only shrinks the window); the mirror has no middle at all and is a legal
+stop; below the mirror is a GAP where both legs lose and is never offered. The
+old bid is cancelled before the new leg is written — an order left behind is a
+second seat on the same game. Live example: holding WAS −1.5 at 37 with SEA
++4.5 run away to 78 (pair 115 vs cap 103), +3.5 pairs at 111 and +2.5 at 107,
+both past their own caps, so the ladder walks to the mirror at 99.
+
+**AND THE REBUY REMEMBERS.** When a completed pair sells out of both legs, the
+rebuy starts from the LAST rung traded, never the seed rung — that rung was a
+read on a line that has since moved.
+
 **RULE 4 — rent is a reason to START, never a reason to go naked (Rob, Sep 20
 2026).** Rent is re-asked every tick and a program can be pulled mid-life. If
 EITHER leg stops paying while NOTHING is held, the whole pair comes down — two

@@ -20972,6 +20972,155 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
     return res
 
 
+def _pair_partner_options(held_side, held_line, rungs, mt, sport, held_cost):
+    """THE RE-RUNG (Rob, Sep 20 2026: "why not rung down?? -1.5 to +4.5 is out,
+    but is +3.5? 2.5? They are ALL a middle… if you hit a cap, why not move
+    down the middle gap to get back to renting").
+
+    One leg is HELD; the partner rung we seated is now too expensive to reach
+    inside the cap, so the bid sits below the touch earning nothing. Every
+    rung further in is still a hedge — it only shrinks the window — and it is
+    cheaper, which puts us back AT the touch. Holding WAS −1.5, a partner of
+    SEA +4.5 wins both on a 2, 3 or 4-point win; +3.5 on a 2 or 3; +2.5 on a 2.
+    Whatever the margin, one leg always wins.
+
+    Returns options best-first: each is (line, bid, cap, worth, hits), where
+    `bid` is the partner's TOUCH (what it costs to sit at the front) and `cap`
+    is derived live from what that window is worth."""
+    out = []
+    want = "home" if held_side == "away" else "away"
+    if mt == "total":
+        want = "under" if held_side == "over" else "over"
+    for side, line, bid, ask in rungs:
+        if side != want or bid is None:
+            continue
+        lo, hi = ((-line, held_line) if (mt == "spread" and want == "away")
+                  else (-held_line, line) if mt == "spread"
+                  else (min(line, held_line), max(line, held_line)))
+        hits = [k for k in range(int(lo) - 1, int(hi) + 2) if lo < k < hi]
+        if not [k for k in hits if k != 0]:
+            continue                       # no window (or a tie only) = no hedge
+        worth = _pair_worth(sport, mt, hits)
+        cap = min(_PAIR_CEILING.get(sport, 110.0), 100.0 + worth + _PAIR_SLACK_C)
+        if held_cost is not None and held_cost + bid > cap + 1e-9:
+            continue                       # still unreachable at the touch
+        out.append({"line": line, "bid": bid, "cap": round(cap, 1),
+                    "worth": round(worth, 1), "hits": hits,
+                    "pair_c": round((held_cost or 0) + bid, 1)})
+    # best = the most window we can afford AT the touch, then the cheapest
+    out.sort(key=lambda o: (-o["worth"], o["pair_c"]))
+    return out
+
+
+def _pair_partner_options(held_side, held_line, rungs, mt, sport, held_cost):
+    """THE RE-RUNG LADDER (Rob, Sep 20 2026: "if it can't hold touch, then it
+    drops to the next rung paying rent to get on touch… all the way to the
+    mirror, the goal is to get out, not have the bet").
+
+    One leg is HELD and the partner rung we seated has run away, so our bid
+    sits under the touch earning nothing. Every rung further IN is still a
+    hedge — it only shrinks the window — and it is cheaper, which puts us back
+    at the touch. Holding WAS −1.5: SEA +4.5 wins both on 2, 3 or 4; +3.5 on
+    2 or 3; +2.5 on a 2; and +1.5 is the MIRROR — no middle at all, one leg
+    always wins, pure rent and out. The mirror is a legal stop. A rung BELOW
+    the mirror is not: that is a gap where both legs can lose.
+
+    Returns options best-first: the most window we can still afford while
+    sitting AT the touch, then the cheapest."""
+    out = []
+    want = ("home" if held_side == "away" else "away") if mt == "spread" else \
+           ("under" if held_side == "over" else "over")
+    for side, line, bid, ask in rungs:
+        if side != want or bid is None:
+            continue
+        if mt == "spread":
+            width = line + held_line          # >0 middle, =0 mirror, <0 GAP
+            lo, hi = ((-line, held_line) if want == "away" else (-held_line, line))
+        else:
+            lo, hi = ((held_line, line) if want == "under" else (line, held_line))
+            width = hi - lo
+        if width < -1e-9:
+            continue                          # both legs can lose — never
+        hits = [k for k in range(int(lo) - 1, int(hi) + 2) if lo < k < hi]
+        hits = [k for k in hits if k != 0]
+        worth = _pair_worth(sport, mt, hits) if hits else 0.0
+        cap = min(_PAIR_CEILING.get(sport, 110.0), 100.0 + worth + _PAIR_SLACK_C)
+        if held_cost is not None and held_cost + bid > cap + 1e-9:
+            continue                          # unreachable even at the touch
+        out.append({"line": line, "bid": bid, "cap": round(cap, 1),
+                    "worth": round(worth, 1), "hits": hits,
+                    "pair_c": round((held_cost or 0) + bid, 1)})
+    out.sort(key=lambda o: (-o["worth"], o["pair_c"]))
+    return out
+
+
+def _pair_leg_line(lg: dict, mt: str):
+    """The leg's own line, from its label ('home -1.5' / 'under +46.5')."""
+    try:
+        return float(str(lg.get("label") or "").split()[-1])
+    except (ValueError, IndexError):
+        return None
+
+
+_PAIR_RERUNG_TS: dict = {}
+
+
+def _pair_rerung(sb, client, row, hk, ek, lg_in, st, cur, now, res) -> bool:
+    """Swap the stranded leg onto the best rung it can hold the touch on.
+    Cancels the old bid first (an order left behind is a second seat on the
+    same game), rewrites the row's leg, clears that leg's memory, and lets the
+    next tick place the bid. Returns True when the leg moved."""
+    legs = {lg["key"]: lg for lg in (row.get("legs") or [])}
+    mt = row["market_type"]
+    slug_e = legs[ek]["slug"]
+    board, prefixes = _pair_board(sb)
+    mid = next((k[0] for k, v in prefixes.items()
+                if v == row["game_prefix"] and k[1] == mt), None)
+    if not mid:
+        return False
+    rungs, legmap = _pair_rungs_from_quotes(
+        board.get((mid, mt)) or {}, mt, _pair_tape_quotes(sb, [mid]), mid)
+    if len(rungs) < 2:
+        return False
+    sport = "NCAAF" if "-cfb-" in slug_e else "NFL"
+    held_side = ("away" if mt == "spread" else "over") if hk == "a" else                 ("home" if mt == "spread" else "under")
+    opts = _pair_partner_options(held_side, float(lg_in[hk].get("line") or 0.0),
+                                 rungs, mt, sport, st[hk].get("cost"))
+    if not opts:
+        return False
+    best = opts[0]
+    want_side = ("home" if mt == "spread" else "under") if hk == "a" else                 ("away" if mt == "spread" else "over")
+    key = (want_side, best["line"])
+    if key not in legmap:
+        return False
+    new_slug, new_intent = legmap[key]
+    if new_slug == slug_e:
+        return False                            # already there
+    if not _rent_ok(new_slug, _parse_iso(str(row.get("kickoff"))), now, sb)[0]:
+        return False                            # RULE #1 — rent or no seat
+    if cur[ek]["bid"] is not None and not _pair_cancel(client, cur[ek]["bid"]):
+        return False                            # never leave two seats out
+    legs[ek] = {"key": ek, "slug": new_slug, "intent": new_intent,
+                "label": f"{want_side} {best['line']:+g}"}
+    st[ek] = {"h": 0.0}
+    try:
+        sb.table("pair_hedges").update(
+            {"legs": [legs["a"], legs["b"]], "cap_c": best["cap"],
+             "state": st, "updated_at": now.isoformat()}
+        ).eq("id", row["id"]).execute()
+    except Exception as e:
+        app.logger.warning("pair %s re-rung write failed: %s", row.get("id"), e)
+        return False
+    app.logger.info("PAIR RE-RUNG %s %s: %s -> %s @ touch %s (pair %s, cap %s, wins %s)",
+                    row.get("event_name"), mt, slug_e[-10:], new_slug[-10:],
+                    best["bid"], best["pair_c"], best["cap"], best["hits"] or "mirror")
+    _send_fill_telegram(
+        f"🔗 PAIR RE-RUNG — {row.get('event_name')} {mt}: partner moved to "
+        f"{best['line']:+g} @ {best['bid']}¢ (pair {best['pair_c']}¢, "
+        f"{'wins both on ' + str(best['hits']) if best['hits'] else 'mirror — hedged, out'})")
+    return True
+
+
 def _pair_tick(sb, now=None) -> dict:
     """Run every enabled middle pair one step (see the block comment above)."""
     now = now or datetime.now(timezone.utc)
@@ -21092,6 +21241,7 @@ def _pair_step(sb, client, row, positions, now, res) -> None:
         own_b = s.get("bid_c") if cur[k]["bid"] else None
         own_a = s.get("ask_c") if cur[k]["ask"] else None
         lg_in[k] = {"h": h, "cost": s.get("cost"), "sold": None, "book_ok": book_ok,
+                    "line": _pair_leg_line(lg, mt),
                     "bid": _pair_touch_ex_self(bk, "bid", own_b,
                                                (cur[k]["bid"] or {}).get("leaves")),
                     "ask": _pair_touch_ex_self(bk, "ask", own_a,
@@ -21148,6 +21298,28 @@ def _pair_step(sb, client, row, positions, now, res) -> None:
             elif verdict == "error":
                 res["errors"] += 1
         s["why"] = p["why"]
+    # ── THE RE-RUNG (Rob, Sep 20 2026) ────────────────────────────────────
+    # One leg held, the other bidding under the touch because the cap binds =
+    # no rent on either side and no hedge. Walk the partner in, rung by rung,
+    # to the best rung we can hold the TOUCH on, down to the mirror. Every
+    # rung in is still a hedge; below the mirror is a gap and never offered.
+    _h = [k for k in (ka, kb) if lg_in[k]["h"] >= 1.0]
+    _e = [k for k in (ka, kb) if lg_in[k]["h"] < 1.0]
+    if (len(_h) == 1 and len(_e) == 1 and mins > 0
+            and _time.time() - _PAIR_RERUNG_TS.get(row["id"], 0.0) > 120.0):
+        hk, ek = _h[0], _e[0]
+        want_c = (plan[ek]["bid"] or (None, 0))[0] if isinstance(plan[ek]["bid"], tuple) else None
+        touch = lg_in[ek].get("bid")
+        if want_c is not None and touch is not None and want_c < touch - 1e-9:
+            _PAIR_RERUNG_TS[row["id"]] = _time.time()
+            res["rerung_looks"] = res.get("rerung_looks", 0) + 1
+            try:
+                _moved = _pair_rerung(sb, client, row, hk, ek, lg_in, st, cur, now, res)
+                if _moved:
+                    res["rerung"] = res.get("rerung", 0) + 1
+                    return                      # re-bid on the next tick
+            except Exception as e:
+                app.logger.warning("pair %s re-rung failed: %s", row.get("id"), e)
     try:
         sb.table("pair_hedges").update(
             {"state": st, "updated_at": now.isoformat()}).eq("id", row["id"]).execute()

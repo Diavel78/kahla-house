@@ -1277,6 +1277,39 @@ def test_pair_owner_guard() -> None:
           "_PAIR_FREEZE_PING" in step)
 
 
+def test_pair_rerung() -> None:
+    """THE RE-RUNG LADDER (Rob, Sep 20 2026). Holding WAS −1.5 with SEA +4.5
+    run away to 78: drop a rung at a time until we can sit AT the touch inside
+    the cap, all the way to the mirror — "the goal is to get out, not have the
+    bet". Never past the mirror: that is a gap where both legs lose."""
+    import app as _app
+    # away-side ladder as (side, line, bid, ask); we hold home −1.5 at 37
+    rungs = [("away", 4.5, 78.0, 78.5), ("away", 3.5, 74.0, 74.5),
+             ("away", 2.5, 70.0, 70.5), ("away", 1.5, 62.0, 62.5),
+             ("away", 0.5, 55.0, 55.5)]
+    opts = _app._pair_partner_options("home", -1.5, rungs, "spread", "NFL", 37.0)
+    lines = [o["line"] for o in opts]
+    check("the run-away rung (+4.5, pair 115) is dropped", 4.5 not in lines)
+    check("a rung we can reach at the touch is offered", lines)
+    check("the mirror (+1.5, no middle, pure hedge) is legal", 1.5 in lines)
+    check("past the mirror (+0.5 = both can lose) is never offered", 0.5 not in lines)
+    best = opts[0]
+    # on THIS book nothing but the mirror is reachable: +3.5 pairs at 111 and
+    # +2.5 at 107, both past their own caps — so the ladder walks all the way
+    # down, which is the rule ("the goal is to get out, not have the bet")
+    check("it walks down to the only reachable rung", best["line"] == 1.5)
+    check("and it sits at the touch inside its own cap",
+          best["pair_c"] <= best["cap"] + 1e-9)
+    # with the held leg cheaper, the wider window becomes affordable again and
+    # the ladder prefers it — more middle for the same seat
+    wide = _app._pair_partner_options("home", -1.5, rungs, "spread", "NFL", 30.0)
+    check("a cheaper held leg buys back the bigger window", wide[0]["line"] >= 2.5)
+    # mirror carries no middle and no worth
+    mir = [o for o in opts if o["line"] == 1.5][0]
+    check("the mirror is priced as a hedge, not a middle",
+          mir["hits"] == [] and mir["worth"] == 0.0)
+
+
 def main() -> int:
     print("THE CELLAR — offline selftest\n")
     for t in (test_imports_without_creds, test_config_validation,
@@ -1290,7 +1323,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate,
+              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
