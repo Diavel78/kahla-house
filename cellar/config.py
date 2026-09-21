@@ -204,7 +204,10 @@ ALL_LANES: dict[str, Lane] = {
         # against a 120s lease. The two clocks are different questions
         # (failover speed vs "is it hung"), and a healthy re-rung lap was
         # branding itself an overrun.
-        Lane("pair",            20,   120, writes_money=True, stuck_s=300,
+        # 45s, not 20 (Sep 21 2026): the socket wakes this lane on a fill or a
+        # book move, so the poll is a backstop, not the mechanism — and every
+        # poll costs venue reads we need for volume.
+        Lane("pair",            45,   180, writes_money=True, stuck_s=300,
              note="middle-pair hedge (two legs, one game)"),
     ]
 }
