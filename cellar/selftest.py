@@ -1374,6 +1374,8 @@ def test_pair_reline() -> None:
     rr = inspect.getsource(_app._pair_rerung_both)
     check("and the re-pick itself uses the Ferrari rule on football",
           "_pair_from_gridiron_rule" in rr)
+    check("the re-pick routes around slugs a pick owns (else it freezes)",
+          "_pair_foreign_slugs" in rr)
     check("it still cancels both old bids before swapping",
           "_pair_cancel" in rr and "never leave a stray seat out" in rr)
 

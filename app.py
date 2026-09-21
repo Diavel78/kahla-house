@@ -21472,7 +21472,15 @@ def _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res) -> bool:
         # pair re-seats it, so a re-pick can never land somewhere the
         # executor would refuse.
         g = _pair_market_row(sb, row["game_prefix"], mt)
-        pr = _pair_from_gridiron_rule(sb, g, mt, now, set()) if g else None
+        # ROUTE AROUND THE FERRARI (Sep 21 2026). The re-pick first shipped
+        # with an EMPTY taken set, and because it seats by the same rule the
+        # executor does, it kept choosing rungs the executor already owned —
+        # then the one-owner guard froze the pair on the next tick. Six pairs
+        # froze in the first ten minutes. `_pair_foreign_slugs` is the very
+        # set that guard consults.
+        pr = (_pair_from_gridiron_rule(sb, g, mt, now,
+                                       _pair_foreign_slugs(sb) or set())
+              if g else None)
         if not pr:
             return False
         _a, _b, _i = pr
