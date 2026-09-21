@@ -20693,7 +20693,15 @@ def _pair_ceiling(sport: str) -> float:
         loss = _PAIR_MAX_LOSS_C
     return max(100.0 + loss, _PAIR_CEILING_FLOOR.get(sport, 110.0))
 _PAIR_SLACK_C = 1.5
-_PAIR_LEG_BAND = (20.0, 80.0)   # keeps the window near the line, where the worth table was measured
+_PAIR_LEG_BAND = (20.0, 80.0)
+# A LIVE ladder has REAL BIDS ON BOTH SIDES. Note what this must NOT do: a
+# wide book is not a dead one. Early, barely-quoted ladders are the seats we
+# want most (Rob: "we are EARLY, absolutely might have pairs under 100") and a
+# spread filter would have thrown every one of them away. The FSU ladder was
+# different in kind, not width — every away rung bid ONE CENT against home
+# rungs at 92-98. That is a side nobody will trade with us.
+_PAIR_LIVE_BID_C = 8.0
+_PAIR_MIN_LIVE_RUNGS = 1   # keeps the window near the line, where the worth table was measured
 _PAIR_MAX_WIDTH = 3.0
 _PAIR_DEFAULT_QTY = 15
 _PAIR_MIN_LEAD_H = float(os.environ.get('PAIR_MIN_LEAD_H') or 6.0)
@@ -20720,6 +20728,19 @@ def _pair_candidates(rungs: list, mt: str, sport: str, qty: int) -> list:
     are excluded, and they were 7 of the finder's first 28 picks."""
     a_side, b_side = ("away", "home") if mt == "spread" else ("over", "under")
     ceiling = _pair_ceiling(sport)
+    # ONLY SEAT WHERE RENT CAN BE EARNED (Rob, Sep 21 2026: "I want to collect
+    # rent and limit loss… not limit loss with no rent"). A pair on a dead,
+    # one-sided ladder is the worst of both worlds: the legs cannot hold a
+    # touch worth anything, and when one fills there is no second rung to
+    # re-rung to, so it becomes a naked bet we also cannot hedge. Central
+    # Arkansas @ FSU was exactly that — every away rung bid 1c, every home rung
+    # 92-98c, and the only hedge on the board priced past the loss cap.
+    live = [r for r in rungs if r[2] is not None and r[3] is not None
+            and r[2] >= _PAIR_LIVE_BID_C]
+    if (len([r for r in live if r[0] == a_side]) < _PAIR_MIN_LIVE_RUNGS
+            or len([r for r in live if r[0] == b_side]) < _PAIR_MIN_LIVE_RUNGS):
+        return []                               # dead ladder — no rent to earn
+    rungs = live
     out = []
     for s1, la, ba, aa in [r for r in rungs if r[0] == a_side]:
         for s2, lb, bb, ab in [r for r in rungs if r[0] == b_side]:
