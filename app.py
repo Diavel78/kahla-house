@@ -21380,6 +21380,7 @@ def _pair_leg_line(lg: dict, mt: str):
 _PAIR_RERUNG_TS: dict = {}
 _PAIR_RELINE_TS: dict = {}         # row id -> last line-rule re-judge
 _PAIR_RELINE_S = 1_800.0           # slow: each look prices the game
+_PAIR_RELINE_PER_TICK = 4          # …and only a few per lap (REST burst)
 
 
 def _pair_rerung(sb, client, row, hk, ek, lg_in, st, cur, now, res) -> bool:
@@ -21785,7 +21786,13 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
               and ("-nfl-" in (row.get("game_prefix") or "")
                    or "-cfb-" in (row.get("game_prefix") or ""))
               and _time.time() - _PAIR_RELINE_TS.get(row["id"], 0.0)
-              > _PAIR_RELINE_S)
+              > _PAIR_RELINE_S
+              # …AND A FEW PER LAP. Every look prices a game, and after a
+              # restart the ladder cache is empty so all of them go REST at
+              # once — the first live pass tripped the venue rate limiter on
+              # its first tick. The clock is 30 min per row; this is the
+              # thundering-herd fence on top of it.
+              and res.get("reline_looks", 0) < _PAIR_RELINE_PER_TICK)
     if _stale:
         _PAIR_RELINE_TS[row["id"]] = _time.time()
         res["reline_looks"] = res.get("reline_looks", 0) + 1

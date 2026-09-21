@@ -1369,6 +1369,8 @@ def test_pair_reline() -> None:
           "not _h and mins > 0" in src)
     check("on a slow clock — each look prices the game",
           _app._PAIR_RELINE_S >= 900.0)
+    check("and only a few per lap — 59 due at once tripped the rate limiter",
+          "_PAIR_RELINE_PER_TICK" in src and 1 <= _app._PAIR_RELINE_PER_TICK <= 8)
     rr = inspect.getsource(_app._pair_rerung_both)
     check("and the re-pick itself uses the Ferrari rule on football",
           "_pair_from_gridiron_rule" in rr)
