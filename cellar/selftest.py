@@ -1277,6 +1277,25 @@ def test_pair_owner_guard() -> None:
           "_PAIR_FREEZE_PING" in step)
 
 
+def test_pair_read_budget() -> None:
+    """THE RATE-LIMIT WALL (Sep 21 2026): per-pair venue reads were 1 order
+    list + 2 book reads EACH tick — ~100 calls a minute at 11 pairs and ten
+    times that at full throttle, which the venue answered with Cloudflare. The
+    lane now takes ONE order read for every leg and pushes the legs onto the
+    markets socket so their books come from the depth table."""
+    import app as _app
+    import inspect
+    tick = inspect.getsource(_app._pair_tick)
+    check("one order read for the whole lane", "all_slugs[:400]" in tick)
+    check("legs go on the markets-socket watch list",
+          "_WS_WATCHLIST_CB" in tick)
+    check("an unreadable order list fails CLOSED",
+          "orders_unreadable" in tick)
+    step = inspect.getsource(_app._pair_step)
+    check("the step filters the shared list instead of re-reading",
+          "lane_orders" in step and 'o["slug"] in set(slugs)' in step)
+
+
 def test_pair_completion_exempt() -> None:
     """At full throttle the book-wide dollar fence must not block the SECOND
     leg of a half-filled pair (Sep 21 2026) — that bid converts a naked bet
@@ -1337,7 +1356,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_completion_exempt,
+              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_completion_exempt, test_pair_read_budget,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
