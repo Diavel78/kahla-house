@@ -780,6 +780,18 @@ _VARIANT_MARKERS: tuple[str, ...] = (
     "first_five", "first_inning", "inning",
     "first_half", "second_half", "_half",
     "quarter", "period", "player",
+    # TEAM TOTALS ARE NOT THE GAME TOTAL (Sep 21 2026). Polymarket lists
+    # 'football_team_points_full_game_total' — a TEAM's points, line 8.5-35.5
+    # — with the same V2 bucket and the same question text as the game total
+    # ("Will the total in Atlanta vs. Green Bay be more than 10.5?"), and no
+    # existing marker matched it. So ~20 team-total rungs sat in the game
+    # total's ladder, the at-the-money election landed on one of them, and
+    # _ladder_window then trimmed the ladder to ±12 of a TEAM number —
+    # deleting every real game total around the line. ATL@GB read 24.5-30.5
+    # against a Pinnacle 44. Rob: "bad rungs is the entire issue."
+    # MLB's main total is 'baseball_team_full_game_total', so match the
+    # narrower 'team_points', never 'team'.
+    "team_points",
 )
 
 

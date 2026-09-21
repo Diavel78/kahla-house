@@ -1,7 +1,9 @@
 # THE MIDDLE PAIR — spec
 
-**Status (Sep 20 2026): ONE test pair live, the seeder BUILT AND OFF.**
-Rob's rule while the first pair is on trial: build it, don't bet it.
+**Status (Sep 21 2026): LIVE at full throttle — the pair machine looks at
+every football ladder first and the Ferrari bets what it declines.** Football
+pairs are built from the executor's own line rule; MLB totals keep the
+worth-table path.
 
 ## Why it exists
 
@@ -104,6 +106,14 @@ second seat on the same game. Live example: holding WAS −1.5 at 37 with SEA
 +4.5 run away to 78 (pair 115 vs cap 103), +3.5 pairs at 111 and +2.5 at 107,
 both past their own caps, so the ladder walks to the mirror at 99.
 
+**RULE 5b — A BAD RUNG SITS AT ITS OWN TOUCH FOREVER (Sep 21 2026).** The
+off-touch test only fires when the market walks away from a leg, so a pair
+seated on the wrong rung in the first place is never re-picked — 59 of them
+were resting, none filled, windows beside the number. An UNFILLED football pair
+is now re-judged against the line rule every 30 min (`_PAIR_RELINE_S`) and
+re-picked when the rule wants different rungs. Nothing is held, so this is just
+rule 5's "both pending → re-rung is fine" with no hedge to protect.
+
 **AND THE REBUY REMEMBERS.** When a completed pair sells out of both legs, the
 rebuy starts from the LAST rung traded, never the seed rung — that rung was a
 read on a line that has since moved.
@@ -149,14 +159,47 @@ for football — hedges only, and a game that can't be paired isn't bet.
 
 ## The seeder (`app._pair_seed_tick`, built, default-dry, flag `pair_seed_enabled`)
 
-Walks the venue's rent list — the enrolled rungs ARE the universe — prices them
-**off the quote table, never REST** (a standalone run of the same logic tripped
-the venue's rate limiter on its first pass), and seats the best pair per (game,
-market).
+Walks the venue's rent list — the enrolled rungs ARE the universe — and seats
+the best pair per (game, market).
 
-**It picks by EDGE: what the middle is worth minus what we pay.** Never by
-price. The first draft ranked by price and chose a middle on 9 (worth 1.3%)
-over one at the line.
+### FOOTBALL: FERRARI RULES, WITH A PAIR (Rob, Sep 21 2026)
+
+**"Ferrari rules… with a pair… is the ENTIRE GOAL"** and **"bad rungs is the
+entire issue… and why we can't find a middle."**
+
+`_pair_from_gridiron_rule` builds a football pair out of the executor's own
+`_gridiron_line_rule` — the same center (Pinnacle > DK > FanDuel, else the
+venue moneyline converted to a spread, else the model capped ±7) and the same
+`_gridiron_seat_legal` the Ferrari has placed by since Sep 5. Each leg must
+also pay rent, not be culled, have a live bid, and peg where the executor
+pegs (`_gridiron_join_touch`).
+
+**Both sides of one rule ARE the middle.** The bound pushes each side away from
+the center in opposite directions — dogs up, favorites down — so a legal away
+seat and a legal home seat straddle the line by construction. Among the legal
+combinations under the cap, take the **widest window** (Rob: "highest odds to
+middle on the loss"), then the cheapest.
+
+It replaced a worth-table-and-price-band seeder that ranked rungs with no idea
+where the real number was. On the same board, same minute:
+
+| | old seeder | the rule |
+|---|---|---|
+| ATL@GB spread (Pinnacle −6) | away +4.5 / home −3.5, wins on **4** | away +8.5 / home −3.5, wins on **4-8** |
+| ATL@GB total (Pinnacle 44) | over 46.5 / under 48.5, wins on **47-48** | over 41.5 / under 46.5, wins on **42-46** |
+| CARK@FSU spread (≈ −30) | away +17.5 / home −8.5 | no legal seat — refused |
+
+The old windows sit *beside* the number; the rule's sit *on* it.
+
+**MLB totals keep the standalone path** (`_pair_candidates` + the worth tables)
+— the football line rule does not exist for them.
+
+### The old brain (still live for MLB)
+
+Prices rungs **off the quote table, never REST** (a standalone run of the same
+logic tripped the venue's rate limiter on its first pass) and **picks by EDGE:
+what the middle is worth minus what we pay.** Never by price. The first draft
+ranked by price and chose a middle on 9 (worth 1.3%) over one at the line.
 
 ### What a middle is worth (measured, `scripts/middle_stats.py`)
 
@@ -183,12 +226,24 @@ overtime rules and how games end, not the scoring grid.
 
 ### The cap
 
+**THE CAP IS A LOSS BUDGET, NOT A VALUE ESTIMATE (Rob, Sep 21 2026: "raise the
+cap to 120, take the most expensive rung under cap at touch… highest odds to
+middle on the loss", and "never ever take — I'd rather raise the fucking loss
+cap and get back to touch. I want fucking rent").** `_pair_ceiling` is
+`100 + machine_flags pair_max_loss_c` (20) against a per-sport floor, so a pair
+may lock up to 20¢ of loss per contract — $3 on a 15-lot — to sit at the touch
+on both legs and to reach the mirror on a completion. Crossing the spread is
+never the alternative: the taker fee peaks at exactly the prices pairs live at,
+and every order is post-only.
+
+MLB keeps the measured-worth cap:
+
 ```
 cap = min(sport ceiling, 100 + the middle's measured worth + 1.5¢)
       and, only when the two mids are coherent (≥100), mid_sum + 1.5¢
 ```
 
-Ceilings: football and basketball 110, MLB 116, NHL 119. Baseball and hockey
+Ceiling floors: football and basketball 110, MLB 116, NHL 119. Baseball and hockey
 need more room because the gap is a whole run or goal (an NFL-style 1-point
 middle doesn't exist there): a fair MLB moneyline + runline pair prices at
 113-114, and NHL worse.

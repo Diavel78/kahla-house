@@ -20943,6 +20943,148 @@ def _pair_rungs_from_quotes(slugs: dict, mt: str, tape=None, mid=None):
     return rungs, legmap
 
 
+def _pair_window(mt, a_line, b_line):
+    """THE MIDDLE, AS ARITHMETIC. Returns (width, hits) — the numbers that pay
+    BOTH legs.
+
+    Spread, with M = home − away: leg A is the away side at `a_line`, which
+    wins iff M < a_line; leg B is the home side at `b_line` (negative = home
+    laying), which wins iff M > −b_line. So both pay on (−b_line, a_line) and
+    the width is a_line + b_line. Getting this backwards reads a 5-point
+    window off a 1-point pair, which is how a seeder talks itself into a rung
+    that cannot middle.
+
+    Total: over at `a_line`, under at `b_line`, both pay on (a_line, b_line).
+
+    width 0 is the MIRROR — an exact lock, a legal place for a stranded leg to
+    walk to, never a pair worth seeding. And a window whose only number is 0
+    is the TIE TRAP (away +0.5 with home +0.5 pays twice only on an NFL tie),
+    so 0 is never counted as a hit on a spread."""
+    lo, hi = ((-float(b_line), float(a_line)) if mt == "spread"
+              else (float(a_line), float(b_line)))
+    hits = [k for k in range(int(lo) - 1, int(hi) + 2)
+            if lo < k < hi and not (mt == "spread" and k == 0)]
+    return round(hi - lo, 2), hits
+
+
+def _pair_from_gridiron_rule(sb, g, mt, now, taken_slugs=None):
+    """A PAIR IS TWO FERRARI-LEGAL SEATS, ONE PER SIDE (Rob, Sep 21 2026:
+    "Ferrari rules… with a pair… is the ENTIRE GOAL").
+
+    The executor has centered football seats on a real line since Sep 5 —
+    book line (Pinnacle > DK > FanDuel), else the venue moneyline converted to
+    a spread, else the model capped ±7 — and a seat is legal only when it sits
+    within the tail gate of that center AND at least one rung past its side's
+    bound in the favorable direction (dogs up, favorites down). The pair
+    seeder had none of that: it ranked every rung on the ladder by a worth
+    table and a price band, which is how it seated Central Arkansas +17.5 on a
+    game lined near −30 and then could not hedge it.
+
+    Take the SAME rule and use both sides of it. Because the bound pushes each
+    side away from the center in opposite directions, two legal seats — one
+    per side — straddle the line by construction. That IS the middle, and it
+    is the middle the rest of the machine already believes in.
+
+    Returns (leg_a, leg_b, info) or None; each leg is
+    {slug, side, line, intent, peg_c} pegged the way the executor pegs."""
+    gp = _gridiron_proj(sb, g.get("sport"), g.get("event_name"))
+    if not gp:
+        return None
+    mg, tt, pm = gp
+    fit = (pm or {}).get("spread_fit" if mt == "spread" else "total_fit") or {}
+    try:
+        proj = float(fit["alpha"]) + float(fit["beta"]) * (mg if mt == "spread" else tt)
+    except (TypeError, ValueError, KeyError):
+        return None
+    d = _gridiron_price_game(sb, g)
+    blkx = ((((d or {}).get("odds") or {}).get(mt) or {}).get("polymarket") or {})
+    raw = blkx.get("ladder") or []
+    if not raw:
+        return None
+    ka, kb = (("over", "under") if mt == "total" else ("away", "home"))
+    mline = (round(-float(proj), 1) if mt == "spread" else round(float(proj), 1))
+    lq = []                          # same filter the executor feeds the rule
+    for r in raw:
+        q = r.get("quote") or {}
+        if r.get("line") is None or q.get("bid") is None:
+            continue
+        if _gridiron_is_placeholder(q.get("bid"), q.get("ask")):
+            continue
+        lq.append((r.get("side"), r["line"], q.get("bid"), q.get("ask")))
+    rule = _gridiron_line_rule(sb, g, d, pm, mt, mline, proj, lq, now)
+    if not rule or rule.get("center") is None:
+        return None
+    es0 = g.get("event_start")
+    client = get_client()
+    legs = {ka: [], kb: []}
+    for r in raw:
+        sn, ln, slug = r.get("side"), r.get("line"), r.get("slug")
+        q = r.get("quote") or {}
+        if sn not in (ka, kb) or ln is None or not slug:
+            continue
+        if taken_slugs and slug in taken_slugs:
+            continue
+        bid = q.get("bid")
+        if bid is None or float(bid) * 100.0 < _PAIR_LIVE_BID_C:
+            continue                            # nobody is quoting this side
+        if _gridiron_is_placeholder(q.get("bid"), q.get("ask")):
+            continue
+        # rv is the HOME line on spreads, the total itself on totals — the
+        # executor's convention, and the only one _gridiron_past_bound reads.
+        rv = (round(float(ln) if sn == "home" else -float(ln), 1)
+              if mt == "spread" else round(float(ln), 1))
+        if not _gridiron_seat_legal(rule, mt, sn, rv):
+            continue                            # the executor's own legality
+        if not _rent_ok(slug, es0, now, sb)[0] or _rent_dead(slug, sb):
+            continue
+        try:
+            tk = _pmm_tick_c(client, slug)
+        except Exception:
+            tk = 1.0
+        bc = float(bid) * 100.0
+        peg = (_grid_dn(bc, tk) if _gridiron_join_touch(slug, bc)
+               else _grid_dn(bc, tk) + tk)
+        askc = (float(q["ask"]) * 100.0 if q.get("ask") is not None else None)
+        if askc is not None and peg >= askc:
+            peg = _grid_dn(bc, tk)              # one-tick book → JOIN (post-only)
+        if not (tk <= peg <= _GRIDIRON_MAX_ENTRY_C):
+            continue
+        # A rung is ONE binary market; the venue's NO side is our synthetic
+        # leg, so the intent follows the ladder's own flag — exactly as the
+        # executor reads it. Getting this wrong buys the same side twice.
+        legs[sn].append({"slug": slug, "side": sn, "line": float(ln),
+                         "intent": ("BUY_SHORT" if r.get("synthetic")
+                                    else "BUY_LONG"),
+                         "peg_c": round(peg, 2)})
+    if not legs[ka] or not legs[kb]:
+        return None
+    ceiling = _pair_ceiling(g.get("sport") or "NFL")
+    best = None
+    for a in legs[ka]:
+        for b in legs[kb]:
+            if a["slug"] == b["slug"]:
+                continue        # one market, both sides — that is flat, not a pair
+            width, hits = _pair_window(mt, a["line"], b["line"])
+            if width < -1e-9:
+                continue                        # a gap: both legs can lose
+            cost = a["peg_c"] + b["peg_c"]
+            if cost > ceiling + 1e-9:
+                continue
+            if not hits:
+                continue        # the mirror is a re-rung stop, never a seed
+            cand = (len(hits), -cost)
+            if best is None or cand > best[0]:
+                best = (cand, a, b, {"hits": hits, "cost_c": round(cost, 1),
+                                     "cap_c": round(ceiling, 1),
+                                     "center": rule.get("center"),
+                                     "center_src": rule.get("center_src"),
+                                     "width": width})
+    if best is None:
+        return None
+    _, a, b, info = best
+    return a, b, info
+
+
 def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 0) -> dict:
     """Find pairs worth seating and (when armed) write them to pair_hedges.
 
@@ -21054,23 +21196,50 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 0) -> dict:
             if not slugs or not prefix or (prefix, mt) in have:
                 continue
             res["looked"] += 1
-            rungs, legmap = _pair_rungs_from_quotes(slugs, mt, tape, g["id"])
-            if len(rungs) < 4:
-                res["skip_unpriced"] = res.get("skip_unpriced", 0) + 1
-                continue                       # not priced yet — look again, do
-                                               # NOT decline (no verdict formed)
-            cands = _pair_candidates(rungs, mt, g.get("sport") or "NFL",
-                                     _PAIR_DEFAULT_QTY)
-            if not cands:
-                _pair_decline(sb, g["id"], mt, "no_middle")
-                continue
-            best = cands[0]
-            a_key = (("away" if mt == "spread" else "over"), best["a_line"])
-            b_key = (("home" if mt == "spread" else "under"), best["b_line"])
-            if a_key not in legmap or b_key not in legmap:
-                continue
-            a_slug, a_int = legmap[a_key]
-            b_slug, b_int = legmap[b_key]
+            # FOOTBALL RUNS THE EXECUTOR'S RULE (Rob, Sep 21 2026: "Ferrari
+            # rules… with a pair… is the ENTIRE GOAL", and "bad rungs is the
+            # entire issue… why we can't find a middle"). Two Ferrari-legal
+            # seats, one per side, straddle the real line by construction.
+            # MLB totals keep the standalone path — the football line rule
+            # does not exist for them.
+            if (g.get("sport") or "") in ("NFL", "NCAAF"):
+                try:
+                    pr = _pair_from_gridiron_rule(sb, g, mt, now, taken_slugs)
+                except Exception as e:
+                    app.logger.warning("pair rule %s %s: %s",
+                                       g.get("event_name"), mt, e)
+                    pr = None
+                if not pr:
+                    _pair_decline(sb, g["id"], mt, "no_middle")
+                    continue
+                _a, _b, _info = pr
+                a_slug, a_int, b_slug, b_int = _a["slug"], _a["intent"], _b["slug"], _b["intent"]
+                a_label = f"{_a['side']} {_a['line']:+g}"
+                b_label = f"{_b['side']} {_b['line']:+g}"
+                best = {"hits": _info["hits"], "cost_c": _info["cost_c"],
+                        "cap_c": _info["cap_c"], "a_line": _a["line"],
+                        "b_line": _b["line"], "a_c": _a["peg_c"],
+                        "b_c": _b["peg_c"], "worth_c": 0.0, "edge_c": 0.0,
+                        "center": _info["center"], "center_src": _info["center_src"]}
+            else:
+                rungs, legmap = _pair_rungs_from_quotes(slugs, mt, tape, g["id"])
+                if len(rungs) < 4:
+                    res["skip_unpriced"] = res.get("skip_unpriced", 0) + 1
+                    continue                   # not priced yet — no verdict
+                cands = _pair_candidates(rungs, mt, g.get("sport") or "MLB",
+                                         _PAIR_DEFAULT_QTY)
+                if not cands:
+                    _pair_decline(sb, g["id"], mt, "no_middle")
+                    continue
+                best = cands[0]
+                a_key = (("away" if mt == "spread" else "over"), best["a_line"])
+                b_key = (("home" if mt == "spread" else "under"), best["b_line"])
+                if a_key not in legmap or b_key not in legmap:
+                    continue
+                a_slug, a_int = legmap[a_key]
+                b_slug, b_int = legmap[b_key]
+                a_label = f"{a_key[0]} {best['a_line']:+g}"
+                b_label = f"{b_key[0]} {best['b_line']:+g}"
             if a_slug in taken_slugs or b_slug in taken_slugs:
                 res["skip_taken"] = res.get("skip_taken", 0) + 1
                 _pair_decline(sb, g["id"], mt, "leg_taken")
@@ -21083,9 +21252,9 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 0) -> dict:
                    "event_name": g.get("event_name"), "kickoff": g["event_start"],
                    "qty": _PAIR_DEFAULT_QTY, "cap_c": best["cap_c"],
                    "legs": [{"key": "a", "slug": a_slug, "intent": a_int,
-                             "label": f"{a_key[0]} {best['a_line']:+g}"},
+                             "label": a_label},
                             {"key": "b", "slug": b_slug, "intent": b_int,
-                             "label": f"{b_key[0]} {best['b_line']:+g}"}]}
+                             "label": b_label}]}
             res["found"] += 1
             # NOTE: a wanted pair is never declined — a dry look is still a
             # look, but it is not a refusal, so the Ferrari does not inherit a
@@ -21209,6 +21378,8 @@ def _pair_leg_line(lg: dict, mt: str):
 
 
 _PAIR_RERUNG_TS: dict = {}
+_PAIR_RELINE_TS: dict = {}         # row id -> last line-rule re-judge
+_PAIR_RELINE_S = 1_800.0           # slow: each look prices the game
 
 
 def _pair_rerung(sb, client, row, hk, ek, lg_in, st, cur, now, res) -> bool:
@@ -21267,6 +21438,22 @@ def _pair_rerung(sb, client, row, hk, ek, lg_in, st, cur, now, res) -> bool:
     return True
 
 
+def _pair_market_row(sb, game_prefix: str, mt: str):
+    """The `markets` row behind a pair's slug prefix — what the football rule
+    needs (sport, event_name, event_start) to price the game."""
+    try:
+        board, prefixes = _pair_board(sb)
+        mid = next((k[0] for k, v in prefixes.items()
+                    if v == game_prefix and k[1] == mt), None)
+        if not mid:
+            return None
+        return (sb.table("markets")
+                .select("id,sport,event_name,event_start")
+                .eq("id", mid).limit(1).execute().data or [None])[0]
+    except Exception:
+        return None
+
+
 def _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res) -> bool:
     """BOTH legs empty and the window has run away: re-pick the rungs.
 
@@ -21276,28 +21463,45 @@ def _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res) -> bool:
     other rungs." Both old bids are cancelled before the swap; a pair that
     cannot be reseated anywhere keeps its old legs and the caller cancels."""
     mt = row["market_type"]
-    board, prefixes = _pair_board(sb)
-    mid = next((k[0] for k, v in prefixes.items()
-                if v == row["game_prefix"] and k[1] == mt), None)
-    if not mid:
-        return False
-    rungs, legmap = _pair_rungs_from_quotes(
-        board.get((mid, mt)) or {}, mt, _pair_tape_quotes(sb, [mid]), mid)
-    if len(rungs) < 4:
-        return False
     sport = ("NCAAF" if "-cfb-" in (row.get("game_prefix") or "") else
              "MLB" if "-mlb-" in (row.get("game_prefix") or "") else "NFL")
-    cands = _pair_candidates(rungs, mt, sport, int(row.get("qty") or 15))
-    if not cands:
-        return False
-    best = cands[0]
-    a_key = (("away" if mt == "spread" else "over"), best["a_line"])
-    b_key = (("home" if mt == "spread" else "under"), best["b_line"])
-    if a_key not in legmap or b_key not in legmap:
-        return False
     legs = {lg["key"]: lg for lg in (row.get("legs") or [])}
-    a_slug, a_int = legmap[a_key]
-    b_slug, b_int = legmap[b_key]
+    if sport in ("NFL", "NCAAF"):
+        # FERRARI RULES, WITH A PAIR — the same brain that seats a football
+        # pair re-seats it, so a re-pick can never land somewhere the
+        # executor would refuse.
+        g = _pair_market_row(sb, row["game_prefix"], mt)
+        pr = _pair_from_gridiron_rule(sb, g, mt, now, set()) if g else None
+        if not pr:
+            return False
+        _a, _b, _i = pr
+        a_slug, a_int, b_slug, b_int = _a["slug"], _a["intent"], _b["slug"], _b["intent"]
+        a_lbl = f"{_a['side']} {_a['line']:+g}"
+        b_lbl = f"{_b['side']} {_b['line']:+g}"
+        best = {"a_c": _a["peg_c"], "b_c": _b["peg_c"], "cost_c": _i["cost_c"],
+                "cap_c": _i["cap_c"], "hits": _i["hits"]}
+    else:
+        board, prefixes = _pair_board(sb)
+        mid = next((k[0] for k, v in prefixes.items()
+                    if v == row["game_prefix"] and k[1] == mt), None)
+        if not mid:
+            return False
+        rungs, legmap = _pair_rungs_from_quotes(
+            board.get((mid, mt)) or {}, mt, _pair_tape_quotes(sb, [mid]), mid)
+        if len(rungs) < 4:
+            return False
+        cands = _pair_candidates(rungs, mt, sport, int(row.get("qty") or 15))
+        if not cands:
+            return False
+        best = cands[0]
+        a_key = (("away" if mt == "spread" else "over"), best["a_line"])
+        b_key = (("home" if mt == "spread" else "under"), best["b_line"])
+        if a_key not in legmap or b_key not in legmap:
+            return False
+        a_slug, a_int = legmap[a_key]
+        b_slug, b_int = legmap[b_key]
+        a_lbl = f"{a_key[0]} {best['a_line']:+g}"
+        b_lbl = f"{b_key[0]} {best['b_line']:+g}"
     if {a_slug, b_slug} == {legs["a"]["slug"], legs["b"]["slug"]}:
         return False                            # already on the best window
     ko = _parse_iso(str(row.get("kickoff")))
@@ -21306,10 +21510,8 @@ def _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res) -> bool:
     for k in ("a", "b"):
         if cur[k]["bid"] is not None and not _pair_cancel(client, cur[k]["bid"]):
             return False                        # never leave a stray seat out
-    legs["a"] = {"key": "a", "slug": a_slug, "intent": a_int,
-                 "label": f"{a_key[0]} {best['a_line']:+g}"}
-    legs["b"] = {"key": "b", "slug": b_slug, "intent": b_int,
-                 "label": f"{b_key[0]} {best['b_line']:+g}"}
+    legs["a"] = {"key": "a", "slug": a_slug, "intent": a_int, "label": a_lbl}
+    legs["b"] = {"key": "b", "slug": b_slug, "intent": b_int, "label": b_lbl}
     st["a"], st["b"] = {"h": 0.0}, {"h": 0.0}
     try:
         sb.table("pair_hedges").update(
@@ -21571,6 +21773,28 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
               and lg_in[k].get("bid") is not None
               and plan[k]["bid"][0] < float(lg_in[k]["bid"])
               - float(lg_in[k].get("tick") or 1.0) - 1e-9]
+    # A BAD RUNG CAN SIT AT THE TOUCH FOREVER (Rob, Sep 21 2026: "bad rungs
+    # is the entire issue… and why we can't find a middle"). The off-touch
+    # test above only fires when the market walks away from a leg — a pair
+    # seated on the wrong rung in the first place is perfectly at its own
+    # touch and would never be re-picked. So an UNFILLED football pair is
+    # re-judged against the executor's line rule on a slow clock: if the
+    # rule now wants different rungs, take them. Nothing is held, so this is
+    # rule 5's "both pending → re-rung is fine" with no hedge to protect.
+    _stale = (not _h and mins > 0 and row["market_type"] in ("spread", "total")
+              and ("-nfl-" in (row.get("game_prefix") or "")
+                   or "-cfb-" in (row.get("game_prefix") or ""))
+              and _time.time() - _PAIR_RELINE_TS.get(row["id"], 0.0)
+              > _PAIR_RELINE_S)
+    if _stale:
+        _PAIR_RELINE_TS[row["id"]] = _time.time()
+        res["reline_looks"] = res.get("reline_looks", 0) + 1
+        try:
+            if _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res):
+                res["reline"] = res.get("reline", 0) + 1
+                return                          # re-bid on the next tick
+        except Exception as e:
+            app.logger.warning("pair %s reline failed: %s", row.get("id"), e)
     if (_under and mins > 0
             and _time.time() - _PAIR_RERUNG_TS.get(row["id"], 0.0) > 120.0):
         _PAIR_RERUNG_TS[row["id"]] = _time.time()
@@ -22847,19 +23071,28 @@ _LOOKUP_REUSE_FAR_S = 900.0 # >72h to kickoff (see _gridiron_price_game_impl)
 _LADDER_SUB_HALF_PTS = 12.0
 
 
-def _ladder_window(rungs: list) -> list:
+def _ladder_window(rungs: list, mt: str = "spread") -> list:
     """Trim a spread/total ladder to the rungs within _LADDER_SUB_HALF_PTS
     of the at-the-money rung (the real quote whose mid is nearest 50¢).
     Away-perspective rung value: a synthetic (home) side's line is
     mirrored so both sides of one market share a value. Placeholder
     books (≤2¢ bid / ≥98¢ ask) never elect the ATM; no real quote at all
-    → untrimmed (a virgin ladder is priced whole)."""
+    → untrimmed (a virgin ladder is priced whole).
+
+    ⚠ THE MIRROR IS A SPREAD RULE ONLY (Sep 21 2026). A total's two sides
+    share ONE number — over 44.5 and under 44.5 are the same market — so
+    negating the synthetic put the under 89 points away from the over and
+    the trim deleted EVERY under from the ladder (or every over, depending
+    on which side happened to elect the ATM). The executor then seated
+    whichever side survived the coin flip instead of the side the model
+    liked, and a total pair could never be built at all because the ladder
+    only ever held one side of the market."""
     def _rv(e):
         try:
             ln = float(e.get("line"))
         except (TypeError, ValueError):
             return None
-        return -ln if e.get("synthetic") else ln
+        return -ln if (e.get("synthetic") and mt != "total") else ln
     best = None
     for e in rungs:
         q = e.get("quote") or {}
@@ -23205,7 +23438,7 @@ def _gridiron_price_game_impl(sb, g):
                 except (TypeError, ValueError):
                     pass
             if rungs:
-                rungs = _ladder_window(rungs)
+                rungs = _ladder_window(rungs, mt)
                 d["odds"][mt] = {"polymarket": {"ladder": rungs}}
         # Moneyline sides (Sep 2 2026 — the CFB/UFC ML rent lane). Same
         # ladder shape, line-less; _gridiron_try_ml reads it.

@@ -1353,6 +1353,127 @@ def test_pair_seed_throughput() -> None:
           "COLD MIRROR" in src and "fresh=True" in src)
 
 
+def test_pair_reline() -> None:
+    """A PAIR SEATED ON A BAD RUNG SITS AT ITS OWN TOUCH FOREVER (Rob, Sep 21
+    2026). The off-touch rule only fires when the market walks away from a
+    leg, so 59 pairs seated by the old worth table — ATL@GB away +4.5/home
+    -3.5 against a Pinnacle -6, a window on 4 with the real number at 6 —
+    would never have been re-picked. An unfilled football pair is re-judged
+    against the executor's line rule on a slow clock instead."""
+    import app as _app
+    import inspect
+    src = inspect.getsource(_app._pair_step)
+    check("unfilled football pairs are re-judged against the line rule",
+          "_PAIR_RELINE_TS" in src and "_pair_rerung_both" in src)
+    check("only with NOTHING held (rule 5: both pending → re-rung is fine)",
+          "not _h and mins > 0" in src)
+    check("on a slow clock — each look prices the game",
+          _app._PAIR_RELINE_S >= 900.0)
+    rr = inspect.getsource(_app._pair_rerung_both)
+    check("and the re-pick itself uses the Ferrari rule on football",
+          "_pair_from_gridiron_rule" in rr)
+    check("it still cancels both old bids before swapping",
+          "_pair_cancel" in rr and "never leave a stray seat out" in rr)
+
+
+def test_ladder_window_total_sides() -> None:
+    """TOTALS SHARE ONE NUMBER; SPREADS MIRROR IT (Sep 21 2026). _ladder_window
+    negated the line of EVERY synthetic side to give both sides of a spread
+    market one rung value. On a total, over 44.5 and under 44.5 are the same
+    market, so negating put the under 89 points from the over and the ±12 trim
+    deleted every under (or every over) from the ladder — the executor seated
+    whichever side survived the election, and a total pair was impossible."""
+    import app as _app
+    lad = [{"side": "over", "line": 44.5, "slug": "t44", "synthetic": False,
+            "quote": {"bid": 0.49, "ask": 0.52}},
+           {"side": "under", "line": 44.5, "slug": "t44", "synthetic": True,
+            "quote": {"bid": 0.48, "ask": 0.51}},
+           {"side": "over", "line": 47.5, "slug": "t47", "synthetic": False,
+            "quote": {"bid": 0.34, "ask": 0.37}},
+           {"side": "under", "line": 47.5, "slug": "t47", "synthetic": True,
+            "quote": {"bid": 0.63, "ask": 0.66}}]
+    keep = _app._ladder_window(lad, "total")
+    check("a total ladder keeps BOTH sides",
+          {e["side"] for e in keep} == {"over", "under"} and len(keep) == 4)
+    spr = [{"side": "away", "line": 6.5, "slug": "s6", "synthetic": False,
+            "quote": {"bid": 0.49, "ask": 0.52}},
+           {"side": "home", "line": -6.5, "slug": "s6", "synthetic": True,
+            "quote": {"bid": 0.48, "ask": 0.51}},
+           {"side": "away", "line": 40.5, "slug": "s40", "synthetic": False,
+            "quote": {"bid": 0.02, "ask": 0.99}}]
+    keep = _app._ladder_window(spr, "spread")
+    check("a spread ladder still mirrors the synthetic side",
+          {e["slug"] for e in keep} == {"s6"})
+
+
+def test_team_totals_are_not_the_game_total() -> None:
+    """Polymarket's 'football_team_points_full_game_total' (a TEAM's points,
+    8.5-35.5) carries the same V2 bucket and the same question text as the
+    game total. It sat in the game-total ladder, won the at-the-money
+    election, and the window trim then deleted every real game total around
+    the line — ATL@GB read 24.5-30.5 against a Pinnacle 44."""
+    import pmm_markets as _pm
+    check("team totals are blocked as a variant",
+          any("team_points" == mk for mk in _pm._VARIANT_MARKERS))
+    check("but MLB's 'baseball_team_full_game_total' still classifies",
+          not any(mk in "baseball_team_full_game_total"
+                  for mk in _pm._VARIANT_MARKERS))
+    check("and so does the football game total",
+          not any(mk in "football_game_full_game_total"
+                  for mk in _pm._VARIANT_MARKERS))
+
+
+def test_pair_window() -> None:
+    """THE MIDDLE IS ARITHMETIC, AND THE SEEDER GOT IT BACKWARDS ONCE. Away
+    +5.5 with home −4.5 pays both legs on exactly one number (GB by 5); read
+    the window off the two away-lines instead and it reports a ten-point
+    middle on a one-point pair."""
+    import app as _app
+    w, h = _app._pair_window("spread", 5.5, -4.5)
+    check("away +5.5 / home -4.5 is a one-point middle on 5", w == 1.0 and h == [5])
+    w, h = _app._pair_window("spread", 6.5, -3.5)
+    check("away +6.5 / home -3.5 pays on 4,5,6", w == 3.0 and h == [4, 5, 6])
+    w, h = _app._pair_window("spread", 4.5, -4.5)
+    check("the mirror is a lock, not a middle (no hits)", w == 0.0 and not h)
+    w, h = _app._pair_window("spread", 3.5, -4.5)
+    check("below the mirror is a GAP and reads negative", w < 0)
+    w, h = _app._pair_window("spread", 0.5, 0.5)
+    check("the tie trap is not a middle (only 0 covered)", not h)
+    w, h = _app._pair_window("total", 44.5, 47.5)
+    check("over 44.5 / under 47.5 pays on 45,46,47",
+          w == 3.0 and h == [45, 46, 47])
+    w, h = _app._pair_window("total", 47.5, 44.5)
+    check("under BELOW over on a total is a gap", w < 0)
+
+
+def test_pair_uses_executor_rule() -> None:
+    """FERRARI RULES, WITH A PAIR (Rob, Sep 21 2026: "Ferrari rules… with a
+    pair… is the ENTIRE GOAL"; "bad rungs is the entire issue… why we can't
+    find a middle"). Football pairs are built from `_gridiron_line_rule` and
+    `_gridiron_seat_legal` — the same line and legality the executor has used
+    since Sep 5 — so both legs sit on the real line instead of wherever a
+    worth table pointed. Central Arkansas +17.5 on a game lined near −30 was
+    the old path."""
+    import app as _app
+    import inspect
+    src = inspect.getsource(_app._pair_from_gridiron_rule)
+    check("the pair centers on the executor's line rule",
+          "_gridiron_line_rule" in src)
+    check("each leg must pass the executor's seat legality",
+          "_gridiron_seat_legal" in src)
+    check("each leg must pay rent and not be culled",
+          "_rent_ok" in src and "_rent_dead" in src)
+    check("legs peg the way the executor pegs (join the touch)",
+          "_gridiron_join_touch" in src)
+    check("the venue's NO side is a BUY_SHORT, per the ladder's own flag",
+          'r.get("synthetic")' in src)
+    check("never both sides of ONE market (that is flat, not a pair)",
+          'a["slug"] == b["slug"]' in src)
+    seed = inspect.getsource(_app._pair_seed_tick)
+    check("football routes through it; MLB keeps the standalone path",
+          '("NFL", "NCAAF")' in seed)
+
+
 def test_pair_dead_ladder() -> None:
     """NO RENT, NO SEAT (Rob, Sep 21 2026: "I want to collect rent and limit
     loss… not limit loss with no rent"). A one-sided ladder — every rung on one
@@ -1500,7 +1621,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
+              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
