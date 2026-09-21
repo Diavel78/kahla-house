@@ -21541,10 +21541,15 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
     # underwater and even the mirror priced past the cap.
     _h = [k for k in (ka, kb) if lg_in[k]["h"] >= 1.0]
     _e = [k for k in (ka, kb) if lg_in[k]["h"] < 1.0]
+    # ONE TICK IS AT THE TOUCH, NOT UNDER IT (Sep 21 2026): the first cut
+    # fired on ANY gap and cancelled both legs of NYJ@DET over half a cent —
+    # one tick on a half-cent grid, i.e. exactly where a post-only bid sits
+    # when it is joining. Only a gap BIGGER than a tick is off the touch.
     _under = [k for k in _e
               if isinstance(plan[k]["bid"], tuple)
               and lg_in[k].get("bid") is not None
-              and plan[k]["bid"][0] < float(lg_in[k]["bid"]) - 1e-9]
+              and plan[k]["bid"][0] < float(lg_in[k]["bid"])
+              - float(lg_in[k].get("tick") or 1.0) - 1e-9]
     if (_under and mins > 0
             and _time.time() - _PAIR_RERUNG_TS.get(row["id"], 0.0) > 120.0):
         _PAIR_RERUNG_TS[row["id"]] = _time.time()

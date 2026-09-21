@@ -1366,6 +1366,8 @@ def test_pair_off_touch_rule() -> None:
     check("both-empty pairs re-pick their rungs", "_pair_rerung_both" in step)
     check("a bid with nowhere to go is cancelled",
           "off_touch_canceled" in step)
+    check("but one tick under IS the touch — never cancelled for a tick",
+          'lg_in[k].get("tick")' in step and "ONE TICK IS AT THE TOUCH" in step)
     both = inspect.getsource(_app._pair_rerung_both)
     check("the re-pick uses the seeder's own brain", "_pair_candidates" in both)
     check("and both old bids are cancelled before the swap",
