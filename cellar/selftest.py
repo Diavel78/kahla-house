@@ -1353,6 +1353,26 @@ def test_pair_seed_throughput() -> None:
           "COLD MIRROR" in src and "fresh=True" in src)
 
 
+def test_pair_off_touch_rule() -> None:
+    """OFF THE TOUCH IS POINTLESS (Rob, Sep 21 2026: "ZERO point in buying on
+    rungs you aren't at touch"). A bid under the touch earns no rent and will
+    not fill, so it either moves to a window we can hold the touch on — for a
+    half-filled pair walk the partner in, for a both-empty pair re-pick BOTH
+    rungs — or it comes down. Pair 10 sat 6c under with a held leg 24c
+    underwater and no reachable rung, and simply rested there."""
+    import app as _app
+    import inspect
+    step = inspect.getsource(_app._pair_step)
+    check("both-empty pairs re-pick their rungs", "_pair_rerung_both" in step)
+    check("a bid with nowhere to go is cancelled",
+          "off_touch_canceled" in step)
+    both = inspect.getsource(_app._pair_rerung_both)
+    check("the re-pick uses the seeder's own brain", "_pair_candidates" in both)
+    check("and both old bids are cancelled before the swap",
+          "_pair_cancel" in both and "never leave a stray seat out" in both)
+    check("a re-picked pair still has to pay rent", "_rent_ok" in both)
+
+
 def test_pair_mlb_totals() -> None:
     """MLB TOTALS PAIR (Rob, Sep 21 2026: "MLB totals can switch"). Over 8.5
     with Under 9.5 wins both on exactly 9 runs — 8.65% over 3,574 finals,
@@ -1429,7 +1449,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
+              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
