@@ -20872,11 +20872,14 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
     # the Ferrari already held picks, positions or orders on, and the wrong-side
     # guard froze them). A slug is TAKEN when any pending pick names it, when
     # the venue shows a position on it, or when an AUTOMATIC order rests on it.
-    # Taken on EITHER leg disqualifies the pair; a pending pick on the same
-    # (game, market) disqualifies it too, even at a different rung — two
-    # engines quoting one ladder is the duplicate-order class by another name.
+    # Taken on EITHER LEG disqualifies the pair. THE LADDER, HOWEVER, IS
+    # SHARED (Sep 21 2026): my first cut also refused any ladder the Ferrari
+    # held a pick on, at any rung — and that alone blocked 1,954 qualifying
+    # candidates while the board sat idle. The duplicate-order invariant is
+    # per SLUG (one order per market per intent); two engines on DIFFERENT
+    # rungs of one ladder never touch the same order. The Ferrari, for its
+    # part, refuses to seat or move onto a slug a pair leg owns.
     taken_slugs: set = set()
-    taken_gm: set = set()
     try:
         def _pk():
             return (sb.table("bot_picks").select("market_id,market_type,signal_blob")
@@ -20885,8 +20888,7 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
             b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
             if (b or {}).get("pmm_slug"):
                 taken_slugs.add(b["pmm_slug"])
-            if r.get("market_id") and r.get("market_type"):
-                taken_gm.add((r["market_id"], r["market_type"]))
+
         _cl = get_client()
         # THE MIRROR IS ENOUGH HERE (Sep 21 2026): this is an OWNERSHIP check,
         # not a money decision — a slug the Ferrari took in the last minute is
@@ -20936,9 +20938,6 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
             prefix = prefixes.get((g["id"], mt))
             if not slugs or not prefix or (prefix, mt) in have:
                 continue
-            if (g["id"], mt) in taken_gm:
-                _pair_decline(sb, g["id"], mt, "owned")
-                continue                       # the Ferrari owns this ladder
             res["looked"] += 1
             rungs, legmap = _pair_rungs_from_quotes(slugs, mt, tape, g["id"])
             if len(rungs) < 4:
@@ -21554,6 +21553,18 @@ def _gridiron_try_bet_impl(sb, g, es0, d, mt, gp, contracts=None):
     # middle of a ladder whose center just has no book yet — in that
     # shape the windowed booked set goes empty and the SEEDER quotes
     # the middle instead (our line at model fair−6).
+    # A PAIR LEG'S SLUG IS OFF LIMITS (Sep 21 2026). Ladders are shared now —
+    # pairs and the Ferrari can sit on different rungs of the same game — so
+    # the exclusivity that matters is per SLUG, and it has to hold from BOTH
+    # sides: the pair refuses a slug the Ferrari owns, and here the Ferrari
+    # refuses a rung a pair leg owns. Without this, a recenter could walk a
+    # Ferrari seat straight onto a resting pair leg.
+    _pair_owned_slugs = _pair_slugs(sb)
+    if _pair_owned_slugs:
+        paying = [c for c in paying
+                  if ((c[2] or {}).get("slug") not in _pair_owned_slugs)]
+        virgin = [v for v in virgin
+                  if ((v[1] or {}).get("slug") not in _pair_owned_slugs)]
     pay_virgin = []
     for vsn, vpblk, vln in virgin:
         sl = vpblk.get("slug")
