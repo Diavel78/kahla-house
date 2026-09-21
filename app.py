@@ -20903,7 +20903,7 @@ def _pair_rungs_from_quotes(slugs: dict, mt: str, tape=None, mid=None):
     return rungs, legmap
 
 
-def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
+def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 0) -> dict:
     """Find pairs worth seating and (when armed) write them to pair_hedges.
 
     DEFAULT-DRY and, on top of that, gated by machine_flags `pair_seed_enabled`
@@ -20913,6 +20913,11 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
     `max_new` per tick, never past `pair_max_active` live pairs, and never on a
     (game, market) the Ferrari already holds a pick on — one owner per market."""
     now = now or datetime.now(timezone.utc)
+    # SEAT THE BOARD (Rob, Sep 21 2026: "everything that we pair is pair now").
+    # Three per pass was a first-night throttle; with the ladder shared and the
+    # read budget fixed, the limiter should be capital and the venue's write
+    # rate, not an arbitrary count. machine_flags `pair_seed_max` tunes it.
+    max_new = int(max_new or _machine_flag_val("pair_seed_max", 12) or 12)
     res = {"looked": 0, "found": 0, "seated": 0, "dry": bool(dry), "cands": []}
     armed = (not dry) and _machine_flag("pair_seed_enabled", False)
     if not dry and not armed:
@@ -20961,6 +20966,14 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
         # nothing at all.
         pos = _pmm_positions_raw(_cl)
         ords = _pmm_open_orders_raw(_cl)
+        if pos is None or ords is None:
+            # COLD MIRROR ≠ DEAD VENUE: straight after a restart the mirror is
+            # empty, the read falls through to REST, and one rate-limited call
+            # was failing the whole pass closed — every restart cost a seeding
+            # window. Ask once more before giving up.
+            _time.sleep(2.0)
+            pos = pos if pos is not None else _pmm_positions_raw(_cl, fresh=True)
+            ords = ords if ords is not None else _pmm_open_orders_raw(_cl, fresh=True)
         if pos is None or ords is None:
             res["gate"] = "venue_unreadable"    # fail CLOSED: never seat blind
             return res
