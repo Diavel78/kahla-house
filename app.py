@@ -3030,6 +3030,20 @@ def _cellar_health(sb) -> dict:
                 ZoneInfo("America/Phoenix")).hour
             if _azh >= 20 or _azh < 8:
                 warn_s = None
+        if lane == "scalp":
+            # A FULLY-PRICED SELL ARM DOES NO WORK, and that is the GOAL
+            # (Rob, Sep 21 2026: "scalp quiet, 8 hours"). Its last tick read
+            # 100 candidates, 100 already AT the touch, nothing to move —
+            # every ask exactly where the rule wants it. Counting only order
+            # WRITES as work turned a perfectly-priced book into an amber
+            # row overnight. The starvation case is caught by the dead-scalp
+            # tripwire (uncovered inventory with no asks), which is a
+            # different question and still armed.
+            _d = r.get("detail") if isinstance(r.get("detail"), dict) else {}
+            _c, _atp = _d.get("cands"), _d.get("at_touch")
+            if (_c and _atp and int(_atp) >= int(_c)
+                    and not int(_d.get("uncovered") or 0)):
+                warn_s = None
         # RED MEANS FAILING NOW, not "hiccuped once since an hour ago". A
         # lane ticking 60×/h over a network takes the occasional dropped
         # connection; its work is idempotent and the next tick catches up.
