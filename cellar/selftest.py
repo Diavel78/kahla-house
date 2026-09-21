@@ -1420,10 +1420,28 @@ def test_pair_rerung() -> None:
     check("the mirror (+1.5, no middle, pure hedge) is legal", 1.5 in lines)
     check("past the mirror (+0.5 = both can lose) is never offered", 0.5 not in lines)
     best = opts[0]
+    # WIDEST AFFORDABLE FIRST (Rob, Sep 21 2026): completion pays up to the
+    # LOSS BUDGET, not the window's worth, so the mirror is reachable — but it
+    # sorts last because it can never middle.
+    check("the widest affordable window sorts ahead of the mirror",
+          opts[0]["worth"] >= opts[-1]["worth"]
+          and (opts[-1]["hits"] == [] or opts[0]["line"] >= opts[-1]["line"]))
     # on THIS book nothing but the mirror is reachable: +3.5 pairs at 111 and
     # +2.5 at 107, both past their own caps — so the ladder walks all the way
     # down, which is the rule ("the goal is to get out, not have the bet")
-    check("it walks down to the only reachable rung", best["line"] == 1.5)
+    check("it takes the WIDEST rung under the loss cap (+4.5, pair 115)",
+          best["line"] == 4.5 and best["pair_c"] == 115.0)
+    check("the mirror is last, not first", opts[-1]["line"] == 1.5)
+    # tighten the budget and it must walk in
+    import app as _app2
+    _old = _app2._PAIR_MAX_LOSS_C
+    try:
+        _app2._PAIR_MAX_LOSS_C = 8.0     # pair <= 108
+        tight = _app2._pair_partner_options("home", -1.5, rungs, "spread", "NFL", 37.0)
+        check("a tighter loss budget walks the ladder in",
+              tight and tight[0]["line"] <= 2.5)
+    finally:
+        _app2._PAIR_MAX_LOSS_C = _old
     check("and it sits at the touch inside its own cap",
           best["pair_c"] <= best["cap"] + 1e-9)
     # with the held leg cheaper, the wider window becomes affordable again and

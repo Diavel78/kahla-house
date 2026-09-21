@@ -20671,8 +20671,27 @@ _PAIR_WORTH_TOTAL_MLB = {3: 3.5, 4: 6.0, 5: 9.3, 6: 7.0, 7: 11.5, 8: 8.0,
                          14: 3.0, 15: 2.5, 16: 2.0}
 _PAIR_MIN_WORTH = 2.0      # a middle worth less than this is not worth seating
 _PAIR_MIN_EDGE_C = 1.0     # worth minus what we pay, in cents
-_PAIR_CEILING = {"NFL": 110.0, "NCAAF": 110.0, "NBA": 110.0, "NCAAB": 110.0,
-                 "MLB": 116.0, "NHL": 119.0}
+# THE CEILING IS A LOSS BUDGET, NOT A SPORT (Rob, Sep 21 2026: "Never ever
+# take… I'd rather raise the fucking loss cap and get back to touch. I want
+# fucking rent"). Crossing the spread costs the taker fee — 5c·p(1−p), worst
+# at a coin flip, which is exactly where pairs live — so we never take: every
+# order is post-only and the venue rejects it rather than cross. What we WILL
+# do is pay a worse locked loss to sit AT the touch on both legs, because a
+# leg off the touch earns nothing and rent is the product. `pair_max_loss_c`
+# is that budget in cents per contract: 20c = $3.00 on a 15-lot pair.
+_PAIR_MAX_LOSS_C = 20.0
+_PAIR_CEILING_FLOOR = {"NFL": 110.0, "NCAAF": 110.0, "NBA": 110.0,
+                       "NCAAB": 110.0, "MLB": 116.0, "NHL": 119.0}
+
+
+def _pair_ceiling(sport: str) -> float:
+    """100 + the loss budget, never below the sport's old fixed ceiling."""
+    try:
+        loss = float(_machine_flag_val("pair_max_loss_c", _PAIR_MAX_LOSS_C)
+                     or _PAIR_MAX_LOSS_C)
+    except (TypeError, ValueError):
+        loss = _PAIR_MAX_LOSS_C
+    return max(100.0 + loss, _PAIR_CEILING_FLOOR.get(sport, 110.0))
 _PAIR_SLACK_C = 1.5
 _PAIR_LEG_BAND = (20.0, 80.0)   # keeps the window near the line, where the worth table was measured
 _PAIR_MAX_WIDTH = 3.0
@@ -20700,7 +20719,7 @@ def _pair_candidates(rungs: list, mt: str, sport: str, qty: int) -> list:
     middle (away +0.5 with home +0.5 is simply both sides of one line) — those
     are excluded, and they were 7 of the finder's first 28 picks."""
     a_side, b_side = ("away", "home") if mt == "spread" else ("over", "under")
-    ceiling = _PAIR_CEILING.get(sport, 110.0)
+    ceiling = _pair_ceiling(sport)
     out = []
     for s1, la, ba, aa in [r for r in rungs if r[0] == a_side]:
         for s2, lb, bb, ab in [r for r in rungs if r[0] == b_side]:
@@ -21096,13 +21115,17 @@ def _pair_partner_options(held_side, held_line, rungs, mt, sport, held_cost):
         if not [k for k in hits if k != 0]:
             continue                       # no window (or a tie only) = no hedge
         worth = _pair_worth(sport, mt, hits)
-        cap = min(_PAIR_CEILING.get(sport, 110.0), 100.0 + worth + _PAIR_SLACK_C)
+        cap = min(_pair_ceiling(sport), 100.0 + worth + _PAIR_SLACK_C)
         if held_cost is not None and held_cost + bid > cap + 1e-9:
             continue                       # still unreachable at the touch
         out.append({"line": line, "bid": bid, "cap": round(cap, 1),
                     "worth": round(worth, 1), "hits": hits,
                     "pair_c": round((held_cost or 0) + bid, 1)})
-    # best = the most window we can afford AT the touch, then the cheapest
+    # HIGHEST ODDS OF A MIDDLE FIRST (Rob, Sep 21 2026: "take the most
+    # expensive rung under cap at touch… +4.5, then +3.5, then 2.5, then
+    # mirror. Highest odds to middle on the loss"). `worth` IS that
+    # probability, so widest-affordable sorts first and the mirror — which
+    # can never middle — sorts last, taken only when nothing else fits.
     out.sort(key=lambda o: (-o["worth"], o["pair_c"]))
     return out
 
@@ -21139,9 +21162,16 @@ def _pair_partner_options(held_side, held_line, rungs, mt, sport, held_cost):
         hits = [k for k in range(int(lo) - 1, int(hi) + 2) if lo < k < hi]
         hits = [k for k in hits if k != 0]
         worth = _pair_worth(sport, mt, hits) if hits else 0.0
-        cap = min(_PAIR_CEILING.get(sport, 110.0), 100.0 + worth + _PAIR_SLACK_C)
+        # COMPLETION IS NOT SEEDING (Rob, Sep 21 2026): a fresh pair may not
+        # pay more than its window is worth, but a HALF-FILLED pair is a loss
+        # we have already taken — the only question left is whether we sit
+        # dead or get both legs back on the touch earning rent. So the fence
+        # here is the LOSS BUDGET alone. Under a worth-based cap the mirror
+        # (worth 0, cap 101.5) would be refused at 109 even though it is the
+        # cheapest hedge on the board — the exact seat we most want.
+        cap = _pair_ceiling(sport)
         if held_cost is not None and held_cost + bid > cap + 1e-9:
-            continue                          # unreachable even at the touch
+            continue                          # past the loss budget
         out.append({"line": line, "bid": bid, "cap": round(cap, 1),
                     "worth": round(worth, 1), "hits": hits,
                     "pair_c": round((held_cost or 0) + bid, 1)})
