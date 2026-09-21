@@ -21290,8 +21290,13 @@ def _pair_step(sb, client, row, positions, now, res) -> None:
                     s.pop(side + "_id", None)
                 s.pop(side + "_c", None)
                 continue
-            if side == "bid" and have is None:
-                # new money: the book-wide exposure fence (fail-closed)
+            if (side == "bid" and have is None
+                    and not any(lg_in[x]["h"] >= 1.0 for x in (ka, kb))):
+                # NEW money only. COMPLETING a pair is exempt (Sep 21 2026, at
+                # full throttle): the second leg of a half-filled pair turns a
+                # naked bet into a hedge, so blocking it on a book-wide dollar
+                # fence is backwards — and at scale that fence binds first. A
+                # fresh pair still has to clear it.
                 exp = _book_exposure_usd()
                 bcap = _machine_flag_val("max_open_cost_usd", _BOOK_MAX_OPEN_COST_USD)
                 try:
