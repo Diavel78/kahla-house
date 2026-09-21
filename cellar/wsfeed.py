@@ -803,6 +803,7 @@ class WsFeed:
                     self._wake("repeg", why)
                     if any("position" in k for k in kset):
                         self._wake("scalp", why)   # a fill needs an ask NOW
+                        self._wake("pair", why)    # and a pair leg needs its partner
                     if (rid == "cellar-position"
                             or any("position" in k for k in kset)):
                         # A position changed — a fill or an exit. The
@@ -1619,6 +1620,7 @@ class MarketsFeed:
                     # came round in a minute: "should have already been
                     # done"). Same hint, same cooldown; the lap decides.
                     self._wake("scalp", "mkts", WAKE_MKTS_MIN_S)
+                    self._wake("pair", "mkts", WAKE_MKTS_MIN_S)
             except Exception as e:
                 _mkts_presence(up=False, conn=self.conn)  # readers fall back to the age rule
                 if self.stop.is_set():

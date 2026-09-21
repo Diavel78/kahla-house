@@ -21157,7 +21157,14 @@ def _pair_tick(sb, now=None) -> dict:
         res["gate"] = "no_pairs"
         return res
     client = get_client()
-    positions = _pmm_positions_raw(client, fresh=True)
+    # THE MIRROR IS THE DEFAULT READ (Rob, Sep 21 2026: "we need to figure out
+    # to read the damn venue… we are only going up in volume"). A fresh
+    # full-account positions call EVERY 20s is one of the heaviest repeating
+    # reads on the box, and it is also the least necessary: the private socket
+    # upserts the mirror on every fill and position change, so the mirror is
+    # what the fill detection would have seen anyway. Fresh reads stay where
+    # they decide money — after a cancel, before a delete.
+    positions = _pmm_positions_raw(client)
     if positions is None:
         res["gate"] = "positions_unreadable"
         return res
@@ -21282,7 +21289,10 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
                 s["cost"] = None
         s["h"] = round(h, 4)
         tick = _pmm_tick_c(client, slug)
-        bk = _book_for_snipe(client, slug)
+        _dbk = _ws_depth(slug)
+        bk = _dbk if _dbk is not None else _pmm_book(client, slug)
+        res["bk_ws" if _dbk is not None else "bk_rest"] = \
+            res.get("bk_ws" if _dbk is not None else "bk_rest", 0) + 1
         book_ok = bk is not None
         if short:
             bk = _invert_book(bk)

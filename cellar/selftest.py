@@ -1296,6 +1296,29 @@ def test_pair_read_budget() -> None:
           "lane_orders" in step and 'o["slug"] in set(slugs)' in step)
 
 
+def test_pair_venue_reads() -> None:
+    """READ THE VENUE LESS, NOT HARDER (Rob, Sep 21 2026: "we are only going
+    up in volume"). The pair lane's repeating reads: positions from the MIRROR
+    (the private socket upserts it on every fill), leg books from the DEPTH
+    table first, one order read for the lane, a 45s poll backstopped by socket
+    wakes. Fresh reads stay where they decide money."""
+    import app as _app
+    import inspect
+    from cellar import config, runner
+    tick = inspect.getsource(_app._pair_tick)
+    check("positions come from the mirror, not a fresh account read",
+          "_pmm_positions_raw(client)" in tick)
+    step = inspect.getsource(_app._pair_step)
+    check("leg books try the depth table before REST",
+          "_ws_depth(slug)" in step and "bk_rest" in step)
+    check("the poll is a backstop (45s), not the mechanism",
+          config.ALL_LANES["pair"].every_s >= 45)
+    check("the socket can wake the pair lane",
+          '"pair"' in inspect.getsource(runner.Runner._start_wsfeed)
+          if hasattr(runner.Runner, "_start_wsfeed")
+          else '"pair"' in open(runner.__file__).read())
+
+
 def test_pair_completion_exempt() -> None:
     """At full throttle the book-wide dollar fence must not block the SECOND
     leg of a half-filled pair (Sep 21 2026) — that bid converts a naked bet
@@ -1356,7 +1379,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_completion_exempt, test_pair_read_budget,
+              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
