@@ -1339,6 +1339,20 @@ def test_pair_completion_exempt() -> None:
     check("fresh pairs still check it", "_book_exposure_usd" in window)
 
 
+def test_pair_seed_throughput() -> None:
+    """SEAT THE BOARD (Rob, Sep 21 2026). Three per pass was a first-night
+    throttle; the limiter is capital and the venue's write rate. And a COLD
+    mirror right after a restart is not a dead venue — one rate-limited read
+    was failing the whole pass closed, costing a seeding window per restart."""
+    import app as _app
+    import inspect
+    src = inspect.getsource(_app._pair_seed_tick)
+    check("the per-pass count is a flag, not a hard 3",
+          'pair_seed_max' in src)
+    check("a cold mirror retries the venue before gating",
+          "COLD MIRROR" in src and "fresh=True" in src)
+
+
 def test_pair_mlb_totals() -> None:
     """MLB TOTALS PAIR (Rob, Sep 21 2026: "MLB totals can switch"). Over 8.5
     with Under 9.5 wins both on exactly 9 runs — 8.65% over 3,574 finals,
@@ -1415,7 +1429,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
+              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
