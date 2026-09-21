@@ -21216,6 +21216,65 @@ def _pair_rerung(sb, client, row, hk, ek, lg_in, st, cur, now, res) -> bool:
     return True
 
 
+def _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res) -> bool:
+    """BOTH legs empty and the window has run away: re-pick the rungs.
+
+    Same brain as the seeder — `_pair_candidates` over the game's live ladder —
+    so the pair lands where it can sit AT the touch inside the cap. Rob's rule:
+    "on 2 unfilled that we can stay under cap, lower the rung gap, or pick
+    other rungs." Both old bids are cancelled before the swap; a pair that
+    cannot be reseated anywhere keeps its old legs and the caller cancels."""
+    mt = row["market_type"]
+    board, prefixes = _pair_board(sb)
+    mid = next((k[0] for k, v in prefixes.items()
+                if v == row["game_prefix"] and k[1] == mt), None)
+    if not mid:
+        return False
+    rungs, legmap = _pair_rungs_from_quotes(
+        board.get((mid, mt)) or {}, mt, _pair_tape_quotes(sb, [mid]), mid)
+    if len(rungs) < 4:
+        return False
+    sport = ("NCAAF" if "-cfb-" in (row.get("game_prefix") or "") else
+             "MLB" if "-mlb-" in (row.get("game_prefix") or "") else "NFL")
+    cands = _pair_candidates(rungs, mt, sport, int(row.get("qty") or 15))
+    if not cands:
+        return False
+    best = cands[0]
+    a_key = (("away" if mt == "spread" else "over"), best["a_line"])
+    b_key = (("home" if mt == "spread" else "under"), best["b_line"])
+    if a_key not in legmap or b_key not in legmap:
+        return False
+    legs = {lg["key"]: lg for lg in (row.get("legs") or [])}
+    a_slug, a_int = legmap[a_key]
+    b_slug, b_int = legmap[b_key]
+    if {a_slug, b_slug} == {legs["a"]["slug"], legs["b"]["slug"]}:
+        return False                            # already on the best window
+    ko = _parse_iso(str(row.get("kickoff")))
+    if not (_rent_ok(a_slug, ko, now, sb)[0] and _rent_ok(b_slug, ko, now, sb)[0]):
+        return False
+    for k in ("a", "b"):
+        if cur[k]["bid"] is not None and not _pair_cancel(client, cur[k]["bid"]):
+            return False                        # never leave a stray seat out
+    legs["a"] = {"key": "a", "slug": a_slug, "intent": a_int,
+                 "label": f"{a_key[0]} {best['a_line']:+g}"}
+    legs["b"] = {"key": "b", "slug": b_slug, "intent": b_int,
+                 "label": f"{b_key[0]} {best['b_line']:+g}"}
+    st["a"], st["b"] = {"h": 0.0}, {"h": 0.0}
+    try:
+        sb.table("pair_hedges").update(
+            {"legs": [legs["a"], legs["b"]], "cap_c": best["cap_c"],
+             "state": st, "updated_at": now.isoformat()}
+        ).eq("id", row["id"]).execute()
+    except Exception as e:
+        app.logger.warning("pair %s re-pick write failed: %s", row.get("id"), e)
+        return False
+    app.logger.info("PAIR RE-PICK %s %s: -> %s + %s @ %s (pair %s, cap %s, wins %s)",
+                    row.get("event_name"), mt, legs["a"]["label"], legs["b"]["label"],
+                    f"{best['a_c']}/{best['b_c']}", best["cost_c"], best["cap_c"],
+                    best["hits"])
+    return True
+
+
 def _pair_tick(sb, now=None) -> dict:
     """Run every enabled middle pair one step (see the block comment above)."""
     now = now or datetime.now(timezone.utc)
@@ -21440,23 +21499,48 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
     # no rent on either side and no hedge. Walk the partner in, rung by rung,
     # to the best rung we can hold the TOUCH on, down to the mirror. Every
     # rung in is still a hedge; below the mirror is a gap and never offered.
+    # ── OFF THE TOUCH IS POINTLESS (Rob, Sep 21 2026: "ZERO point in buying
+    # on rungs you aren't at touch") ──────────────────────────────────────
+    # A bid under the touch earns no rent and is unlikely to fill, so it has
+    # exactly two legitimate answers: move to a window we CAN hold the touch
+    # on, or come down. This applies to a half-filled pair (walk the partner
+    # in) AND to a both-empty pair whose window has run away from us (re-pick
+    # both rungs). When nothing is reachable inside the cap, the bid is
+    # cancelled rather than left parked — pair 10 sat 6¢ under the touch on a
+    # rung that could never complete, because its held leg had gone 24¢
+    # underwater and even the mirror priced past the cap.
     _h = [k for k in (ka, kb) if lg_in[k]["h"] >= 1.0]
     _e = [k for k in (ka, kb) if lg_in[k]["h"] < 1.0]
-    if (len(_h) == 1 and len(_e) == 1 and mins > 0
+    _under = [k for k in _e
+              if isinstance(plan[k]["bid"], tuple)
+              and lg_in[k].get("bid") is not None
+              and plan[k]["bid"][0] < float(lg_in[k]["bid"]) - 1e-9]
+    if (_under and mins > 0
             and _time.time() - _PAIR_RERUNG_TS.get(row["id"], 0.0) > 120.0):
-        hk, ek = _h[0], _e[0]
-        want_c = (plan[ek]["bid"] or (None, 0))[0] if isinstance(plan[ek]["bid"], tuple) else None
-        touch = lg_in[ek].get("bid")
-        if want_c is not None and touch is not None and want_c < touch - 1e-9:
-            _PAIR_RERUNG_TS[row["id"]] = _time.time()
-            res["rerung_looks"] = res.get("rerung_looks", 0) + 1
-            try:
-                _moved = _pair_rerung(sb, client, row, hk, ek, lg_in, st, cur, now, res)
-                if _moved:
-                    res["rerung"] = res.get("rerung", 0) + 1
-                    return                      # re-bid on the next tick
-            except Exception as e:
-                app.logger.warning("pair %s re-rung failed: %s", row.get("id"), e)
+        _PAIR_RERUNG_TS[row["id"]] = _time.time()
+        res["rerung_looks"] = res.get("rerung_looks", 0) + 1
+        _moved = False
+        try:
+            if len(_h) == 1 and len(_e) == 1:
+                _moved = _pair_rerung(sb, client, row, _h[0], _e[0],
+                                      lg_in, st, cur, now, res)
+            elif not _h:
+                _moved = _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res)
+        except Exception as e:
+            app.logger.warning("pair %s re-rung failed: %s", row.get("id"), e)
+        if _moved:
+            res["rerung"] = res.get("rerung", 0) + 1
+            return                              # re-bid on the next tick
+        # nothing reachable: stop paying rent-less rent
+        for k in _under:
+            if cur[k]["bid"] is not None and _pair_cancel(client, cur[k]["bid"]):
+                res["off_touch_canceled"] = res.get("off_touch_canceled", 0) + 1
+                st[k].pop("bid_c", None)
+                st[k].pop("bid_id", None)
+                app.logger.info("PAIR %s: %s bid cancelled — %sc under the touch "
+                                "with no reachable rung", row.get("id"),
+                                cur[k]["label"],
+                                round(float(lg_in[k]["bid"]) - plan[k]["bid"][0], 1))
     try:
         sb.table("pair_hedges").update(
             {"state": st, "updated_at": now.isoformat()}).eq("id", row["id"]).execute()
