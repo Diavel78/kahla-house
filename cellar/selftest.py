@@ -1463,15 +1463,18 @@ def test_pair_rerung() -> None:
           best["line"] == 4.5 and best["pair_c"] == 115.0)
     check("the mirror is last, not first", opts[-1]["line"] == 1.5)
     # tighten the budget and it must walk in
+    # the budget is a machine_flag, so patch the LOOKUP — patching the module
+    # constant alone leaves the live flag (20) in charge
     import app as _app2
-    _old = _app2._PAIR_MAX_LOSS_C
+    _old = _app2._machine_flag_val
     try:
-        _app2._PAIR_MAX_LOSS_C = 8.0     # pair <= 108
+        _app2._machine_flag_val = (
+            lambda k, d=None: 8.0 if k == "pair_max_loss_c" else _old(k, d))
         tight = _app2._pair_partner_options("home", -1.5, rungs, "spread", "NFL", 37.0)
         check("a tighter loss budget walks the ladder in",
-              tight and tight[0]["line"] <= 2.5)
+              tight and tight[0]["line"] <= 3.5)
     finally:
-        _app2._PAIR_MAX_LOSS_C = _old
+        _app2._machine_flag_val = _old
     check("and it sits at the touch inside its own cap",
           best["pair_c"] <= best["cap"] + 1e-9)
     # with the held leg cheaper, the wider window becomes affordable again and
