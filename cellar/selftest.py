@@ -1442,7 +1442,10 @@ def test_pair_rerung() -> None:
              ("away", 0.5, 55.0, 55.5)]
     opts = _app._pair_partner_options("home", -1.5, rungs, "spread", "NFL", 37.0)
     lines = [o["line"] for o in opts]
-    check("the run-away rung (+4.5, pair 115) is dropped", 4.5 not in lines)
+    # +4.5 at pair 115 is INSIDE the 120 loss budget now, and is the widest
+    # window — so it is the pick, not a reject (Rob, Sep 21: raise the cap,
+    # take the most expensive rung under it at the touch).
+    check("the widest rung inside the loss budget is offered", 4.5 in lines)
     check("a rung we can reach at the touch is offered", lines)
     check("the mirror (+1.5, no middle, pure hedge) is legal", 1.5 in lines)
     check("past the mirror (+0.5 = both can lose) is never offered", 0.5 not in lines)
