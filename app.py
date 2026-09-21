@@ -20888,8 +20888,15 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 3) -> dict:
             if r.get("market_id") and r.get("market_type"):
                 taken_gm.add((r["market_id"], r["market_type"]))
         _cl = get_client()
-        pos = _pmm_positions_raw(_cl, fresh=True)
-        ords = _pmm_open_orders_raw(_cl, fresh=True)
+        # THE MIRROR IS ENOUGH HERE (Sep 21 2026): this is an OWNERSHIP check,
+        # not a money decision — a slug the Ferrari took in the last minute is
+        # still taken five minutes from now, and the mirror is upserted by the
+        # private socket anyway. Two fresh full-account reads every 5 minutes
+        # were enough to catch the venue's rate limiter and fail the whole
+        # pass CLOSED (`venue_unreadable`), which is how full throttle seated
+        # nothing at all.
+        pos = _pmm_positions_raw(_cl)
+        ords = _pmm_open_orders_raw(_cl)
         if pos is None or ords is None:
             res["gate"] = "venue_unreadable"    # fail CLOSED: never seat blind
             return res
