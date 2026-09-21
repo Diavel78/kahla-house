@@ -21624,6 +21624,31 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
                        if n and n["state"] in _OPEN_ORDER_STATES and n.get("auto")]
     orders = [o for o in lane_orders if o["slug"] in set(slugs)]
     ev = row.get("event_name") or row.get("game_prefix")
+    # A FREEZE MUST NOT BE A DEADLOCK (Sep 21 2026). The per-leg guard below
+    # refuses to manage a slug a pending pick owns and returns — which means a
+    # frozen pair can never reach the re-pick that would move it OFF that
+    # slug. Six sat frozen through every tick. With NOTHING held there is no
+    # hedge to protect and no reason to stay: re-pick around the pick (rule
+    # 5's "both pending → re-rung is fine"). Holding a leg still freezes —
+    # then the position is real and two engines fighting over it is worse.
+    _foreign = _pair_foreign_slugs(sb) or set()
+    if (any(sl in _foreign for sl in slugs) and mins > 0
+            and not any(abs(float((positions.get(sl) or {}).get("net") or 0.0))
+                        >= 1.0 for sl in slugs)):
+        _c = {lg["key"]: {"bid": next((o for o in orders
+                                       if o["slug"] == lg["slug"]
+                                       and "_BUY_" in (o.get("intent") or "")),
+                                      None),
+                          "label": lg.get("label")} for lg in legs_def}
+        _z = {lg["key"]: {"h": 0.0} for lg in legs_def}
+        try:
+            if _pair_rerung_both(sb, client, row, _z, st, _c, now, res):
+                res["unfroze"] = res.get("unfroze", 0) + 1
+                app.logger.info("PAIR %s: re-picked off a pick-owned slug",
+                                row.get("id"))
+                return
+        except Exception as e:
+            app.logger.warning("pair %s unfreeze failed: %s", row.get("id"), e)
     lg_in = {}
     cur = {}
     for lg in legs_def:
@@ -21632,7 +21657,7 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
         buy_i = "ORDER_INTENT_" + intent
         sell_i = buy_i.replace("_BUY_", "_SELL_")
         s = st.setdefault(k, {})
-        if slug in (_pair_foreign_slugs(sb) or set()):
+        if slug in _foreign:
             # DEFENSE IN DEPTH: even a hand-inserted pair may not manage a slug
             # a pending pick owns. Freeze rather than fight another engine.
             app.logger.warning("pair %s: %s belongs to a pick — pair frozen",

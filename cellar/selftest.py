@@ -1363,6 +1363,10 @@ def test_pair_reline() -> None:
     import app as _app
     import inspect
     src = inspect.getsource(_app._pair_step)
+    check("a freeze on a pick-owned slug is not a deadlock — re-pick off it",
+          "unfroze" in src and "_foreign" in src)
+    check("…but only with nothing held on either leg",
+          "not any(abs(float((positions.get(sl)" in src)
     check("unfilled football pairs are re-judged against the line rule",
           "_PAIR_RELINE_TS" in src and "_pair_rerung_both" in src)
     check("only with NOTHING held (rule 5: both pending → re-rung is fine)",
