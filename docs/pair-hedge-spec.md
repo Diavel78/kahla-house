@@ -21,6 +21,24 @@ The predecessor was the Lambo (Polymarket ↔ Gemini). It died Sep 18: Gemini
 paid no rent, and keeping two venues in sync in two processes never worked.
 This lives on one venue, in one engine, in one process.
 
+## THE DOCTRINE (Rob, Sep 21 2026)
+
+**"This is a fucking RENT MACHINE. At touch or it's POINTLESS. Hedge losses
+with no rent is just losing slowly."** Every rule below serves that and is
+read in its light:
+
+- **Be AT the touch or come down.** A leg more than a tick under the touch
+  earns nothing in the venue's per-second scoring, so it moves to a window it
+  can hold the touch on, or its bid is cancelled. There is no third option.
+- **NEVER take.** Crossing costs 5c·p(1−p), worst at a coin flip, which is
+  exactly where pairs live. Every order is post-only.
+- **Raise the loss cap instead.** A pair may cost up to 120 (machine_flags
+  `pair_max_loss_c`, cents over 100) if that is what it takes to sit at the
+  touch on both legs. The locked loss is the price of the rent, and it is
+  cheaper than the same loss taken slowly with no rent at all.
+- **On a completion, take the WIDEST window under the cap** — most numbers to
+  middle on. The mirror is the last resort, not the target.
+
 ## The shape
 
 `line` is always the AWAY line (spread) or the total.
