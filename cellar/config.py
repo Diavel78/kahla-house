@@ -199,7 +199,12 @@ ALL_LANES: dict[str, Lane] = {
              needs_owner=True, stuck_s=600, note="exit asks (sell arm)"),
         # Sep 18 2026 — the middle pair (Rob: "rent is king"). Owns its own
         # slugs end to end; 20s so both legs track the touch closely.
-        Lane("pair",            20,   120, writes_money=True,
+        # stuck_s 300 (Sep 21 2026): a lap that re-rungs reads the game's
+        # whole ladder off the tape and cancels/creates — 125s measured,
+        # against a 120s lease. The two clocks are different questions
+        # (failover speed vs "is it hung"), and a healthy re-rung lap was
+        # branding itself an overrun.
+        Lane("pair",            20,   120, writes_money=True, stuck_s=300,
              note="middle-pair hedge (two legs, one game)"),
     ]
 }
