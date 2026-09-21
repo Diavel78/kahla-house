@@ -1241,7 +1241,8 @@ def test_pair_priority_gate() -> None:
     check("the OMS retries a deferred ladder in minutes",
           _app._OMS_RETRY_MIN.get("pair_first_look") == 10)
     seed = inspect.getsource(_app._pair_seed_tick)
-    for why in ("owned", "no_middle", "leg_taken", "rent"):
+    # 'owned' retired with the ladder rule — the slug-level pass is 'leg_taken'
+    for why in ("no_middle", "leg_taken", "rent"):
         check(f"the seeder records its {why!r} pass", f'"{why}"' in seed)
     check("'owned' expires in minutes — ownership changes",
           _app._PAIR_DECLINE_TTL_S["owned"] <= 300
@@ -1263,7 +1264,12 @@ def test_pair_owner_guard() -> None:
     check("seeder builds a TAKEN set from picks, positions and orders",
           "taken_slugs" in src and "_pmm_positions_raw" in src
           and "_pmm_open_orders_raw" in src)
-    check("seeder skips a (game, market) a pending pick owns", "taken_gm" in src)
+    check("the LADDER is shared — only the SLUG is exclusive (1,954 qualifying "
+          "candidates were blocked by the ladder rule)",
+          "taken_gm" not in src)
+    grid = inspect.getsource(_app._gridiron_try_bet_impl)
+    check("and the Ferrari refuses a rung a pair leg owns",
+          "_pair_owned_slugs" in grid)
     check("seeder seats EARLY only — hours of lead, not minutes",
           _app._PAIR_MIN_LEAD_H >= 3 and "_PAIR_MIN_LEAD_H" in src)
     check("seeder prices from the quote table AND the tape (it was blind on the "
