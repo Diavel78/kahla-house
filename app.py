@@ -21154,9 +21154,33 @@ def _pair_tick(sb, now=None) -> dict:
     if positions is None:
         res["gate"] = "positions_unreadable"
         return res
+    # ONE order read for the WHOLE lane (Sep 21 2026 — the rate-limit wall at
+    # full throttle). Per-pair reads were 1 orders.list + 2 book reads each
+    # tick: ~100 venue calls a minute at 11 pairs, ten times that at 100, and
+    # the venue was answering with Cloudflare. The legs also go on the markets
+    # socket's watch list, so their books come from the depth table instead of
+    # REST.
+    all_slugs = [lg.get("slug") for r in rows for lg in (r.get("legs") or [])
+                 if lg.get("slug")]
+    try:
+        if _WS_WATCHLIST_CB is not None and all_slugs:
+            _WS_WATCHLIST_CB(set(all_slugs))
+    except Exception:
+        pass
+    lane_orders = None
+    try:
+        _resp = client.orders.list({"slugs": all_slugs[:400]})
+        _raw = (_resp.get("orders") if isinstance(_resp, dict)
+                else getattr(_resp, "orders", [])) or []
+        lane_orders = [n for n in (_norm_order(o) for o in _raw)
+                       if n and n["state"] in _OPEN_ORDER_STATES and n.get("auto")]
+    except Exception as e:
+        res["gate"] = f"orders_unreadable: {e}"
+        return res                              # fail closed, never seat blind
+    res["orders"] = len(lane_orders)
     for row in rows:
         try:
-            _pair_step(sb, client, row, positions, now, res)
+            _pair_step(sb, client, row, positions, now, res, lane_orders)
             res["pairs"] += 1
         except Exception as e:
             res["errors"] += 1
@@ -21164,7 +21188,7 @@ def _pair_tick(sb, now=None) -> dict:
     return res
 
 
-def _pair_step(sb, client, row, positions, now, res) -> None:
+def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
     legs_def = row.get("legs") or []
     if len(legs_def) != 2:
         return
@@ -21178,16 +21202,18 @@ def _pair_step(sb, client, row, positions, now, res) -> None:
     st = row.get("state") if isinstance(row.get("state"), dict) else {}
     st = {k: dict(v) for k, v in st.items() if isinstance(v, dict)}
     slugs = [lg["slug"] for lg in legs_def]
-    try:
-        resp = client.orders.list({"slugs": slugs})
-        raw = (resp.get("orders") if isinstance(resp, dict)
-               else getattr(resp, "orders", [])) or []
-    except Exception as e:
-        res["errors"] += 1
-        app.logger.warning("pair %s order read failed: %s", row.get("id"), e)
-        return
-    orders = [n for n in (_norm_order(o) for o in raw)
-              if n and n["state"] in _OPEN_ORDER_STATES and n.get("auto")]
+    if lane_orders is None:                     # standalone call (probe/tests)
+        try:
+            resp = client.orders.list({"slugs": slugs})
+            raw = (resp.get("orders") if isinstance(resp, dict)
+                   else getattr(resp, "orders", [])) or []
+        except Exception as e:
+            res["errors"] += 1
+            app.logger.warning("pair %s order read failed: %s", row.get("id"), e)
+            return
+        lane_orders = [n for n in (_norm_order(o) for o in raw)
+                       if n and n["state"] in _OPEN_ORDER_STATES and n.get("auto")]
+    orders = [o for o in lane_orders if o["slug"] in set(slugs)]
     ev = row.get("event_name") or row.get("game_prefix")
     lg_in = {}
     cur = {}
