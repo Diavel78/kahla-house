@@ -1277,6 +1277,20 @@ def test_pair_owner_guard() -> None:
           "_PAIR_FREEZE_PING" in step)
 
 
+def test_pair_completion_exempt() -> None:
+    """At full throttle the book-wide dollar fence must not block the SECOND
+    leg of a half-filled pair (Sep 21 2026) — that bid converts a naked bet
+    into a hedge. A fresh pair still has to clear the fence."""
+    import app as _app
+    import inspect
+    src = inspect.getsource(_app._pair_step)
+    i = src.index('side == "bid" and have is None')
+    window = src[i:i + 700]
+    check("completion bids skip the exposure fence",
+          'lg_in[x]["h"] >= 1.0' in window)
+    check("fresh pairs still check it", "_book_exposure_usd" in window)
+
+
 def test_pair_rerung() -> None:
     """THE RE-RUNG LADDER (Rob, Sep 20 2026). Holding WAS −1.5 with SEA +4.5
     run away to 78: drop a rung at a time until we can sit AT the touch inside
@@ -1323,7 +1337,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung,
+              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_completion_exempt,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
