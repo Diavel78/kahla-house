@@ -1353,6 +1353,29 @@ def test_pair_seed_throughput() -> None:
           "COLD MIRROR" in src and "fresh=True" in src)
 
 
+def test_pair_dead_ladder() -> None:
+    """NO RENT, NO SEAT (Rob, Sep 21 2026: "I want to collect rent and limit
+    loss… not limit loss with no rent"). A one-sided ladder — every rung on one
+    side bid a penny — can neither hold a touch worth earning nor offer a rung
+    to re-rung to when the line moves. Central Arkansas @ FSU was seated on
+    exactly that and ended as a naked leg with no buyable hedge."""
+    import app as _app
+    dead = [("away", 17.5, 1.0, 40.0), ("away", 13.5, 1.0, 38.0),
+            ("away", 10.5, 1.0, 35.0), ("home", -17.5, 92.0, 99.0),
+            ("home", -13.5, 94.0, 99.0), ("home", -10.5, 96.0, 99.0)]
+    check("a one-sided ladder seats nothing",
+          _app._pair_candidates(dead, "spread", "NCAAF", 15) == [])
+    live = [("away", 4.5, 44.0, 45.0), ("away", 3.5, 41.0, 42.0),
+            ("away", 2.5, 38.0, 39.0), ("home", -1.5, 58.0, 59.0),
+            ("home", -2.5, 55.0, 56.0), ("home", -3.5, 52.0, 53.0)]
+    check("a live two-sided ladder still seats",
+          _app._pair_candidates(live, "spread", "NFL", 15))
+    # and a WIDE early book is not a dead one — those are the seats we want
+    early = [("away", -2.5, 41.0, 50.0), ("home", 3.5, 41.0, 52.0)]
+    check("an early, barely-quoted ladder still seats",
+          _app._pair_candidates(early, "spread", "NFL", 15))
+
+
 def test_pair_off_touch_rule() -> None:
     """OFF THE TOUCH IS POINTLESS (Rob, Sep 21 2026: "ZERO point in buying on
     rungs you aren't at touch"). A bid under the touch earns no rent and will
@@ -1387,7 +1410,9 @@ def test_pair_mlb_totals() -> None:
           and _app._pair_worth("MLB", "total", [7]) > 11)
     check("a 2-run window adds both numbers",
           _app._pair_worth("MLB", "total", [8, 9]) > 16)
-    check("MLB keeps its own ceiling", _app._PAIR_CEILING["MLB"] == 116.0)
+    check("MLB's floor ceiling survives the loss-budget rewrite",
+          _app._PAIR_CEILING_FLOOR["MLB"] == 116.0
+          and _app._pair_ceiling("MLB") >= 116.0)
     src = inspect.getsource(_app._pair_board_mlb)
     check("MLB slugs resolve by tricode + ET date", "America/New_York" in src)
     check("first-five and inning variants never qualify",
@@ -1469,7 +1494,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
+              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
