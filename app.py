@@ -20662,6 +20662,13 @@ _PAIR_WORTH_SPREAD = {
 # number per league (NFL measured 2.3% for a 1-point middle; college's totals
 # spread wider still).
 _PAIR_WORTH_TOTAL = {"NFL": 2.3, "NCAAF": 2.5}
+# MLB totals middle on a RUN NUMBER, measured over 3,574 finals — and they are
+# worth far more than a football point (Rob, Sep 21 2026: "MLB totals can
+# switch"). Over 8.5 with Under 9.5 wins both on exactly 9 runs: 8.65%. Odd
+# totals repeat more than even ones (4-3, 3-2, 5-4 are the common scorelines).
+_PAIR_WORTH_TOTAL_MLB = {3: 3.5, 4: 6.0, 5: 9.3, 6: 7.0, 7: 11.5, 8: 8.0,
+                         9: 8.7, 10: 6.5, 11: 7.6, 12: 4.5, 13: 5.5,
+                         14: 3.0, 15: 2.5, 16: 2.0}
 _PAIR_MIN_WORTH = 2.0      # a middle worth less than this is not worth seating
 _PAIR_MIN_EDGE_C = 1.0     # worth minus what we pay, in cents
 _PAIR_CEILING = {"NFL": 110.0, "NCAAF": 110.0, "NBA": 110.0, "NCAAB": 110.0,
@@ -20676,6 +20683,8 @@ _PAIR_MIN_LEAD_H = float(os.environ.get('PAIR_MIN_LEAD_H') or 6.0)
 def _pair_worth(sport: str, mt: str, hits: list) -> float:
     """What a middle covering `hits` is worth, in cents (= percent)."""
     if mt == "total":
+        if sport == "MLB":
+            return sum(_PAIR_WORTH_TOTAL_MLB.get(int(h), 2.0) for h in hits)
         return _PAIR_WORTH_TOTAL.get(sport, 2.0) * max(1, len(hits))
     tbl = _PAIR_WORTH_SPREAD.get(sport) or {}
     return sum(tbl.get(abs(int(h)), 0.5) for h in hits if int(h) != 0)
@@ -20741,6 +20750,58 @@ _PAIR_RUNG_RE = re.compile(r"-(neg|pos)-(\d+)pt5$")
 _PAIR_TOTAL_RE = re.compile(r"-total-(\d+)pt5$")
 
 
+_PAIR_MLB_TOTAL_RE = re.compile(r"^tsc-mlb-([a-z0-9]+)-([a-z0-9]+)-(\d{4}-\d{2}-\d{2})-(\d+)pt5$")
+
+
+def _pair_board_mlb(sb, board: dict, prefixes: dict) -> None:
+    """MLB TOTALS JOIN THE BOARD (Rob, Sep 21 2026). The rent-list key map is
+    football-only (`_RENT_SLUG_RE` matches nfl/cfb/ufc), so MLB never reached
+    the seeder even though `tsc-mlb` ladders are enrolled and pay. Resolve each
+    slug's game from its own tricodes + ET date against the markets table —
+    the same dialect `_pmm_ensure_markets` writes the schedule in."""
+    inv = {v.lower(): k for k, v in (_MLB_CODE_TEAM or {}).items()}
+    if not inv:
+        return
+    now = datetime.now(timezone.utc)
+    key2mid: dict = {}
+    try:
+        rows = (sb.table("markets").select("id,event_name,event_start")
+                .eq("sport", "MLB").eq("status", "active")
+                .gte("event_start", now.isoformat())
+                .lte("event_start", (now + timedelta(days=5)).isoformat())
+                .limit(400).execute().data) or []
+    except Exception:
+        return
+    for r in rows:
+        ev = r.get("event_name") or ""
+        if " @ " not in ev:
+            continue
+        away, home = ev.split(" @ ", 1)
+        ac, hc = inv.get(away.strip().lower()), inv.get(home.strip().lower())
+        es = _parse_iso(r.get("event_start") or "")
+        if not (ac and hc and es):
+            continue
+        d = es.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+        key2mid[(ac, hc, d)] = r["id"]
+    if not key2mid:
+        return
+    cut = (now - timedelta(hours=24)).isoformat()
+
+    def _b():
+        return (sb.table("rent_list_slugs").select("slug")
+                .gte("last_seen", cut).like("slug", "tsc-mlb-%"))
+    for row in _sb_paged(_b, max_pages=10):
+        m = _PAIR_MLB_TOTAL_RE.match(row["slug"] or "")
+        if not m:
+            continue                            # f5 / inning variants are out
+        mid = key2mid.get((m.group(1), m.group(2), m.group(3)))
+        if not mid:
+            continue
+        board.setdefault((mid, "total"), {})[row["slug"]] = float(m.group(4)) + 0.5
+        prefixes[(mid, "total")] = row["slug"][:row["slug"].rindex("-total-")] \
+            if "-total-" in row["slug"] else row["slug"]
+
+
 def _pair_board(sb, max_age_s: float = 600.0):
     """({(market_id, mt): {slug: away_line|total}}, {(market_id, mt): prefix})
     over the venue's ENROLLED rungs — the rent list is the universe, exactly as
@@ -20751,6 +20812,7 @@ def _pair_board(sb, max_age_s: float = 600.0):
     board: dict = {}
     prefixes: dict = {}
     try:
+        _pair_board_mlb(sb, board, prefixes)
         _rent_enrolled_football(sb)
         keys = dict(_RENTLIST_CACHE.get("keys") or {})
         cut = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()

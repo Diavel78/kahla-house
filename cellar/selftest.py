@@ -1339,6 +1339,36 @@ def test_pair_completion_exempt() -> None:
     check("fresh pairs still check it", "_book_exposure_usd" in window)
 
 
+def test_pair_mlb_totals() -> None:
+    """MLB TOTALS PAIR (Rob, Sep 21 2026: "MLB totals can switch"). Over 8.5
+    with Under 9.5 wins both on exactly 9 runs — 8.65% over 3,574 finals,
+    three times what a football point is worth, and inside the 116 ceiling.
+    The rent-list key map is football-only, so MLB gets its own board build."""
+    import app as _app
+    import inspect
+    check("a 1-run MLB window is priced per number, not flat",
+          _app._pair_worth("MLB", "total", [9]) > 8
+          and _app._pair_worth("MLB", "total", [7]) > 11)
+    check("a 2-run window adds both numbers",
+          _app._pair_worth("MLB", "total", [8, 9]) > 16)
+    check("MLB keeps its own ceiling", _app._PAIR_CEILING["MLB"] == 116.0)
+    src = inspect.getsource(_app._pair_board_mlb)
+    check("MLB slugs resolve by tricode + ET date", "America/New_York" in src)
+    check("first-five and inning variants never qualify",
+          "_PAIR_MLB_TOTAL_RE" in src)
+    # a real MLB ladder: Over 8.5 at 52 / Under 9.5 at 54 = 106 for a window
+    # worth 8.7 — a 2.7c edge. (At 108 the same window is a 0.7c edge and the
+    # 1c floor refuses it, which is the floor doing its job.)
+    rungs = [("over", 8.5, 52.0, 53.0), ("under", 9.5, 54.0, 55.0)]
+    c = _app._pair_candidates(rungs, "total", "MLB", 15)
+    check("an MLB total pair at 106 qualifies under the 116 ceiling",
+          c and c[0]["hits"] == [9] and c[0]["cost_c"] == 106.0)
+    check("the same window at 108 is refused on edge, not ceiling",
+          not _app._pair_candidates(
+              [("over", 8.5, 52.0, 53.0), ("under", 9.5, 56.0, 57.0)],
+              "total", "MLB", 15))
+
+
 def test_pair_rerung() -> None:
     """THE RE-RUNG LADDER (Rob, Sep 20 2026). Holding WAS −1.5 with SEA +4.5
     run away to 78: drop a rung at a time until we can sit AT the touch inside
@@ -1385,7 +1415,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
+              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
