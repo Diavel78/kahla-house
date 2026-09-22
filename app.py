@@ -20578,10 +20578,23 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
             # expensive leg is the one that fills.
             # The fence is OFF once the other leg is HELD — then the hedge is
             # worth more than the balance, and `cap_c − filled cost` rules.
-            if join > _PAIR_MAX_LEG_C + 1e-9:
-                # AT THE TOUCH OR NOT THERE AT ALL, HELD LEG OR NOT (Rob,
-                # Sep 21 2026: "FSU minus eight and a half. Get the fuck out
-                # of here"). Capping to 65 under an 81.5¢ touch is worse than
+            if join > _PAIR_MAX_LEG_C + 1e-9 and not held[o]:
+                # AT THE TOUCH OR NOT THERE AT ALL — WHILE NOTHING IS HELD.
+                # ⚠ SEEDING ONLY (Rob, Sep 22 2026: "At a 120 cap, I will fight
+                # you every single time… THERE IS A LEGAL PAIR, unless it's no
+                # rent"). He was right and this fence was the thing blocking
+                # them. Pair 37 held away +3.5 at 34.5¢ with home +2.5 at 84¢
+                # available: a 118.5¢ pair, five numbers, paying rent — refused
+                # only because one leg was over 65.
+                # The 65¢ cap earns its place on a FRESH pair, where balance is
+                # what protects you when only one leg fills. On a COMPLETION we
+                # already hold the other side, and buying the dear side is the
+                # hedge — the 120 pair cap bounds the loss on its own.
+                # I made this unconditional on Sep 21 after the FSU −8.5 at
+                # 81.5¢ case, and drew the wrong lesson: the fault there was
+                # not the price, it was legs miles off the line (CARK +17.5 on
+                # a game lined −30). The line rule and the ±10 tail gate fix
+                # that directly, and they are in now. Capping to 65 under an 81.5¢ touch is worse than
                 # useless — 16.5¢ under the touch earns ~nothing (df^ticks)
                 # and still ties up the seat.
                 # I first exempted the HEDGE from this fence, reasoning that

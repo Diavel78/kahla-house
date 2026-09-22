@@ -1112,8 +1112,8 @@ def test_pair_plan() -> None:
     # leg still asks at cost, which is the flat exit the machine aims for.
     p = _app._pair_plan({"a": leg(h=15, cost=44.0, bid=43.0, ask=46.0),
                          "b": leg(bid=70.0, ask=71.0)}, 15, 110, 2000)
-    check("one held, partner touch 70 → REFUSED by the 65c leg fence",
-          p["b"]["bid"] is None and "leg_cap" in p["b"]["why"])
+    check("one held, partner touch 70 → taken; cap - cost (66) is the fence",
+          p["b"]["bid"] == (66.0, 15))
     # …and inside the fence the hedge still chases cap − cost
     p2 = _app._pair_plan({"a": leg(h=15, cost=44.0, bid=43.0, ask=46.0),
                           "b": leg(bid=60.0, ask=61.0)}, 15, 110, 2000)
@@ -1384,9 +1384,9 @@ def test_pair_leg_cap_in_the_engine() -> None:
              "home": dict(base, h=15.0, bid=None, cost=40.0)}
     plan2 = _app._pair_plan(legs2, 15, 120.0, 4000.0)
     px2 = plan2["away"]["bid"][0] if isinstance(plan2["away"]["bid"], tuple) else None
-    check("the fence holds even with the other leg HELD — a hedge we cannot "
-          "buy at 65 is a hedge we skip",
-          plan2["away"]["bid"] is None and "leg_cap" in plan2["away"]["why"])
+    check("with the other leg HELD the hedge completes — 120 pair cap is the "
+          "fence, not 65 (Rob, Sep 22: at a 120 cap there IS a legal pair)",
+          plan2["away"]["bid"] is not None and plan2["away"]["bid"][0] == 80.0)
 
 
 def test_pair_slugs_span_every_row_and_retired_leg() -> None:
