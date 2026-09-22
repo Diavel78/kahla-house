@@ -20540,8 +20540,14 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
             # expensive leg is the one that fills.
             # The fence is OFF once the other leg is HELD — then the hedge is
             # worth more than the balance, and `cap_c − filled cost` rules.
-            if not held[o] and capk is not None:
-                capk = min(capk, _PAIR_MAX_LEG_C)
+            if not held[o] and join > _PAIR_MAX_LEG_C + 1e-9:
+                # AT THE TOUCH OR NOT THERE AT ALL. Capping to 65 under an
+                # 81.5¢ touch is worse than useless — 16.5¢ under the touch
+                # earns ~nothing (df^ticks) and still ties up the seat. With
+                # nothing held there is no hedge to protect, so refuse the
+                # leg; the re-judge then re-picks the pair or tears it down.
+                capk = None
+                why.append("leg_cap")
             if capk is not None:
                 px = _grid_dn(min(join, capk), tick)
                 if L.get("ask") is not None and px >= float(L["ask"]):

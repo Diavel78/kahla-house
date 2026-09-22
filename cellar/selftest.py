@@ -1366,8 +1366,9 @@ def test_pair_leg_cap_in_the_engine() -> None:
     legs = {"away": dict(base, h=0.0, bid=81.5),
             "home": dict(base, h=0.0, bid=31.0)}
     plan = _app._pair_plan(legs, 15, 120.0, 4000.0)
-    px = plan["away"]["bid"][0] if isinstance(plan["away"]["bid"], tuple) else None
-    check("an 81.5c touch is capped to 65 while nothing is held", px == 65.0)
+    check("an 81.5c touch is REFUSED while nothing is held — at the touch or "
+          "not there at all",
+          plan["away"]["bid"] is None and "leg_cap" in plan["away"]["why"])
     check("the cheap partner still joins its own touch",
           isinstance(plan["home"]["bid"], tuple)
           and plan["home"]["bid"][0] == 31.0)
