@@ -21089,20 +21089,40 @@ def _pair_from_gridiron_rule(sb, g, mt, now, taken_slugs=None):
             # widest legal window puts the two rungs as far apart as the tail
             # gate allows, which is a deep favorite on one side and a longshot
             # on the other (CARK +17.5 at 81.5 against FSU -8.5, on a game
-            # lined near -30). A middle sits ON the line and rungs on the line
-            # price near 50, so a balanced pair is the SAME bet with a far
-            # better half-filled state — and half-filled is the normal state,
-            # because the expensive leg is the one the market is leaving.
+            # lined near -30).
+            #
+            # THE REASON IS LINE MOVEMENT, NOT LEG BALANCE (Rob's correction
+            # when I gave the weaker one): "reality is we're going to end up
+            # fucking owning these things, and we're so fucking early the
+            # line's going to be moving all over the place — so you want the
+            # distance to cover the fact that we really have no idea what the
+            # lines are going to end up being." Seeds go down days out. Today's
+            # line is the best estimate of the closing line, so sitting on it
+            # is what protects the seat we will still be holding when the
+            # number has moved. Balanced legs are a consequence, not the goal.
             # Rank by distance from the center, then by cost.
             _off = (abs((-a["line"]) - float(rule["center"]))
                     + abs(b["line"] - float(rule["center"]))
                     if mt == "spread" else
                     abs(a["line"] - float(rule["center"]))
                     + abs(b["line"] - float(rule["center"])))
-            cand = (-_off, -cost)
+            # A LOCK OUTRANKS EVERYTHING (Rob, Sep 21 2026: "flat, money back
+            # plus rent collected, is the fucking goal… hedged is almost a
+            # guaranteed loss unless we middle… the exception, from day one,
+            # was if you hold a pair for under a dollar — then fuck it, take
+            # the profit"). A completed pair over 100 pays 100 and only wins
+            # on the middle, so it is a bounded LOSS we accept as the price of
+            # renting two sides. A pair under 100 pays 100 for less than 100:
+            # free money, and it does not care where the line is. So rank any
+            # sub-100 combination first, cheapest wins; everything else ranks
+            # nearest the line, where the legs balance and the middle sits on
+            # the real number.
+            cand = ((1, 0.0, -cost) if cost < 100.0 - 1e-9
+                    else (0, -_off, -cost))
             if best is None or cand > best[0]:
                 best = (cand, a, b, {"hits": hits, "cost_c": round(cost, 1),
                                      "off_line": round(_off, 1),
+                                     "lock": cost < 100.0 - 1e-9,
                                      "cap_c": round(ceiling, 1),
                                      "center": rule.get("center"),
                                      "center_src": rule.get("center_src"),

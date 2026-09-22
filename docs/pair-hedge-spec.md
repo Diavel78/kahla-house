@@ -5,6 +5,20 @@ every football ladder first and the Ferrari bets what it declines.** Football
 pairs are built from the executor's own line rule; MLB totals keep the
 worth-table path.
 
+## THE GOAL IS FLAT, NOT HEDGED (Rob, Sep 21 2026)
+
+**"Flat, money back plus rent collected, is the fucking goal. Hedged is almost
+a guaranteed loss unless we middle. So ideally, we would collect rent and never,
+ever have anything bet."** Read every rule below in that light:
+
+- A fill is not a win. The seat exists to rest at the touch and earn.
+- Half-filled does **both at once** — chase the partner AND list the held leg at
+  cost. "Try to sell the one you own and keep trying to buy the one you don't."
+- A completed pair over 100 pays 100 and only profits on the middle: a bounded
+  LOSS, accepted as the price of renting two sides.
+- **A pair under 100 is the day-one exception — "fuck it, just take the
+  profit."** It rides to settlement with no asks.
+
 ## Why it exists
 
 Every day looks the same: the bets lose, the rent wins. Sep 1-18: **bets
@@ -176,9 +190,27 @@ pegs (`_gridiron_join_touch`).
 
 **Both sides of one rule ARE the middle.** The bound pushes each side away from
 the center in opposite directions — dogs up, favorites down — so a legal away
-seat and a legal home seat straddle the line by construction. Among the legal
-combinations under the cap, take the **widest window** (Rob: "highest odds to
-middle on the loss"), then the cheapest.
+seat and a legal home seat straddle the line by construction.
+
+**Seeds rank by DISTANCE FROM THE LINE, then cost** (Rob, Sep 21 2026).
+Widest-window is the COMPLETION rule — one leg held, its cost already spent, so
+more numbers on the loss is strictly better. It is wrong for a fresh seed:
+widest-under-cap puts the rungs as far apart as the tail gate allows, a deep
+favorite against a longshot (CARK +17.5 at 81.5¢ against FSU −8.5 on a game
+lined near −30). **The reason is line movement, not leg balance:** "reality is
+we're going to end up fucking owning these things, and we're so fucking early
+the line's going to be moving all over the place — so you want the distance to
+cover the fact that we really have no idea what the lines are going to end up
+being." Today's line is the best estimate of the closing line; sitting on it
+protects the seat we are still holding after the number moves.
+
+**Two price fences: 65¢ a leg, 120¢ the pair.** Not the Ferrari's single-seat
+`_GRIDIRON_MAX_ENTRY_C` (60) — that threw out real middles a leg at a time.
+And not "the combined cap is enough" either: the combined cap bounds the loss
+ONLY IF BOTH LEGS FILL, and half-filled is the normal state because the
+expensive leg is the one the market is leaving. The 65 is a SEEDING fence only
+— once a leg is held, the partner chases to `120 − filled cost` and the hedge
+is never blocked by it.
 
 It replaced a worth-table-and-price-band seeder that ranked rungs with no idea
 where the real number was. On the same board, same minute:
