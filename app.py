@@ -22062,6 +22062,18 @@ def _gridiron_try_bet_impl(sb, g, es0, d, mt, gp, contracts=None):
     """ONE football bet attempt (spread or total) — the shared leg behind
     the opener tape AND the week-of sweep.
 
+    ⚠ PAIRS OWN FOOTBALL SPREADS AND TOTALS OUTRIGHT (Rob, Sep 21 2026:
+    "as soon as the pairs turned on you should have obviously cancelled the
+    ability for the Ferrari to bet spreads or over and unders. Because, duh.
+    It can only be bet in a pair"). `pair_priority` is a DEFERRAL — the
+    Ferrari waits for the pair machine to decline a ladder and then takes it
+    anyway — and that is a soft gate where the rule is a wall: a football
+    spread or total is bet as half of a middle or it is not bet. A single
+    unhedged seat on those ladders is the thing the pair machine exists to
+    replace. Moneylines are untouched: a moneyline has no line, so it cannot
+    middle, so the Ferrari is still the only engine that can bet one.
+    Kill switch: machine_flags `pairs_own_football` = false.
+
     RENT-FIRST (rewritten Aug 30 2026, user: "The fucking problem is you
     aren't reading the damn rent table… RENT table is all that matters,
     if it ain't there, skip it. If it is, BET IT"): the old flow walked
@@ -22080,6 +22092,9 @@ def _gridiron_try_bet_impl(sb, g, es0, d, mt, gp, contracts=None):
     Rule + the executor's own rent re-check (cached, harmless) stand.
     Returns the gate string ("placed" = an order is resting); executor
     per-(market, type) dedup keeps it one bet per game per market."""
+    if mt in ("spread", "total") and _machine_flag("pairs_own_football", True):
+        return "pairs_own"
+
     if not gp:
         return None
     if _pair_owns_game(sb, _gridiron_game_prefix(d, mt), mt):

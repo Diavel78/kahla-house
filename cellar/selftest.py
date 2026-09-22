@@ -1425,6 +1425,30 @@ def test_pair_slugs_span_every_row_and_retired_leg() -> None:
     _app._PAIR_ALL_CACHE.update(at=0.0, rows=[])
 
 
+def test_pairs_own_football_spreads_and_totals() -> None:
+    """A FOOTBALL SPREAD OR TOTAL IS HALF OF A MIDDLE OR IT IS NOT BET (Rob,
+    Sep 21 2026: "as soon as the pairs turned on you should have obviously
+    cancelled the ability for the Ferrari to bet spreads or over and unders.
+    Because, duh. It can only be bet in a pair"). `pair_priority` is only a
+    DEFERRAL — the Ferrari waits for the pair machine to decline a ladder and
+    then takes it anyway. The rule is a wall, not a queue.
+
+    Moneylines are deliberately untouched: no line means no middle, so the
+    Ferrari stays the only engine that can bet one."""
+    import app as _app
+    import inspect
+    src = inspect.getsource(_app._gridiron_try_bet_impl)
+    check("the football spread/total executor refuses outright",
+          'mt in ("spread", "total")' in src and '"pairs_own"' in src)
+    check("…on a flag that can be flipped without a deploy",
+          'machine_flag("pairs_own_football"' in src)
+    check("…and it is the FIRST thing the body does, before any pricing",
+          src.split('"""')[2].strip().startswith('if mt in ("spread", "total")'))
+    ml = inspect.getsource(_app._gridiron_try_ml)
+    check("moneylines are untouched — a moneyline cannot middle",
+          "pairs_own_football" not in ml)
+
+
 def test_pair_reline() -> None:
     """A PAIR SEATED ON A BAD RUNG SITS AT ITS OWN TOUCH FOREVER (Rob, Sep 21
     2026). The off-touch rule only fires when the market walks away from a
@@ -1714,7 +1738,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
+              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
