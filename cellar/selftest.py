@@ -1489,6 +1489,27 @@ def test_pair_price_refusal_triggers_a_rerung() -> None:
           "no market row" in rr)
 
 
+def test_pair_sign_rule_does_not_freeze_the_whole_pair() -> None:
+    """THE SIGN RULE FROZE 26 PAIRS SILENTLY (Rob, Sep 22 2026: "no orders, no
+    god damn rent"). The venue's net is per MARKET and a rung's two sides share
+    one slug, so when anything else on the account holds the other side the leg
+    reads an opposite-signed net. The old rule returned immediately, logging
+    nothing but a Telegram ping that is dead on the box — the pair quoted
+    neither leg and never said why.
+
+    That position is not ours, so the leg holds ZERO: no ask (we cannot sell
+    what we do not have), but the bid still goes out."""
+    import app as _app
+    import inspect
+    src = inspect.getsource(_app._pair_step)
+    i = src.index("THE SIGN RULE")
+    seg = src[i:i + 1600]
+    check("it no longer returns out of the whole pair",
+          "net = 0.0" in seg and "res[\"errors\"] += 1\n            return" not in seg)
+    check("…and it LOGS, instead of only pinging a dead Telegram",
+          "app.logger.warning" in seg)
+
+
 def test_pair_reline() -> None:
     """A PAIR SEATED ON A BAD RUNG SITS AT ITS OWN TOUCH FOREVER (Rob, Sep 21
     2026). The off-touch rule only fires when the market walks away from a
@@ -1778,7 +1799,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
+              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")

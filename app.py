@@ -21818,14 +21818,24 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
             return
         net = float((positions.get(slug) or {}).get("net") or 0.0)
         if abs(net) >= 0.01 and ((net < 0) != short):
-            # THE SIGN RULE (the Lambo's first night): the venue holds the
-            # OTHER side of this market — not our leg. Touch nothing.
+            # THE SIGN RULE — WE HOLD NOTHING HERE, BUT WE MAY STILL BID
+            # (Rob, Sep 22 2026: "no orders, no god damn rent"). The venue's
+            # net is per MARKET, and a pair's two sides of one rung live on the
+            # same slug — so when anything else on the account holds the other
+            # side (another pair, a leftover Ferrari lot), this leg reads a net
+            # of the opposite sign. The original rule FROZE the whole pair and
+            # returned, silently: it only pinged Telegram, which is dead on the
+            # box, so 26 pairs sat quoting nothing all night with no log line.
+            # The honest reading is narrower — that position is not ours, so
+            # this leg holds ZERO. We cannot sell what we do not have (h = 0
+            # means the ask branch never fires), but there is no reason on
+            # earth not to bid our own side.
             if _time.time() - _PAIR_FREEZE_PING.get(slug, 0.0) > 3600.0:
                 _PAIR_FREEZE_PING[slug] = _time.time()   # once an hour, not every 20s
-                _send_fill_telegram(f"🚨 PAIR {ev}: venue holds the wrong side on {slug} "
-                                    f"(net {net}) — pair frozen, check it.", urgent=True)
-            res["errors"] += 1
-            return
+                app.logger.warning("pair %s: venue net %s on %s is the other side "
+                                   "of this leg — treating as flat, bidding only",
+                                   row.get("id"), net, slug)
+            net = 0.0
         h = abs(net) if abs(net) >= 0.01 else 0.0
         mine_b = [o for o in orders if o["slug"] == slug and o["intent"] == buy_i]
         mine_s = [o for o in orders if o["slug"] == slug and o["intent"] == sell_i]
