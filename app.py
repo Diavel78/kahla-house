@@ -21667,7 +21667,11 @@ def _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res) -> bool:
         a_lbl = f"{a_key[0]} {best['a_line']:+g}"
         b_lbl = f"{b_key[0]} {best['b_line']:+g}"
     if {a_slug, b_slug} == {legs["a"]["slug"], legs["b"]["slug"]}:
-        return False                            # already where the rule wants it
+        # NOT AN ERROR — the rule wants the rungs this pair already has. It
+        # shared a log line with "no legal pair under cap", which is a real
+        # refusal, so the two were indistinguishable in the counts.
+        _pair_rr_why(row, "already on the rule's rungs")
+        return False
     ko = _parse_iso(str(row.get("kickoff")))
     if not (_rent_ok(a_slug, ko, now, sb)[0] and _rent_ok(b_slug, ko, now, sb)[0]):
         _pair_rr_why(row, "a leg stopped paying rent")
@@ -21905,6 +21909,28 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
                                 f"{last_h - h:g} @ {s.get('ask_c')}¢ (left {h:g})")
             if h < 0.01:
                 s["cost"] = None
+        # A HELD LEG WITH NO COST IS DEAD IN BOTH DIRECTIONS (Rob, Sep 22 2026:
+        # "2, um… WHY…"). Four pairs were holding a position and quoting
+        # nothing — no ask, because the sell floor is the cost; and no partner
+        # bid, because the partner's ceiling is `cap − that cost`. The cost is
+        # stamped once, when the fill is first seen, and a re-rung resets the
+        # leg state and wipes it — so anything filled before that reset, or
+        # during one, stayed unknown forever with nothing to recompute it.
+        # Recover it from OUR OWN lot ledger (never the venue's blended avg —
+        # the Braves 74¢ lesson) whenever the ledger covers what we hold.
+        if h >= 1.0 and s.get("cost") is None:
+            _lot = (_lot_ledger(sb) or {}).get(slug) or {}
+            try:
+                _lq, _lc = float(_lot.get("qty") or 0), float(_lot.get("cost") or 0)
+            except (TypeError, ValueError):
+                _lq = _lc = 0.0
+            if _lq >= h - 0.01 and _lq > 0:
+                _c = round(_lc / _lq * 100.0, 3)
+                if 0.5 <= _c <= 99.5:
+                    s["cost"] = _c
+                    app.logger.info("pair %s %s: lot cost recovered from the "
+                                    "ledger at %s¢", row.get("id"),
+                                    cur[k]["label"], _c)
         s["h"] = round(h, 4)
         tick = _pmm_tick_c(client, slug)
         _dbk = _ws_depth(slug)
