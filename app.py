@@ -20529,6 +20529,19 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
                 capk = (join - excess / 2.0) if excess > 0 else join
             else:
                 capk = cap_c - 1.0 * (float(O["bid"]) if O.get("bid") is not None else 0.0)
+            # ⚠ THE 65¢ LEG FENCE BELONGS HERE TOO, NOT JUST IN THE SEEDER
+            # (Rob, Sep 21 2026, watching a torn-down Central Arkansas leg
+            # come straight back at 81.5¢ — "−350 in American odds… nobody's
+            # betting a −350"). The seed picks balanced rungs, but THIS
+            # function re-prices every tick to join the touch and was fenced
+            # only by the pair SUM: with the partner at 31¢ a leg could walk
+            # to 89¢ and still be "legal". A seat nobody would bet on its own
+            # is not made acceptable by its partner being cheap, because the
+            # expensive leg is the one that fills.
+            # The fence is OFF once the other leg is HELD — then the hedge is
+            # worth more than the balance, and `cap_c − filled cost` rules.
+            if not held[o] and capk is not None:
+                capk = min(capk, _PAIR_MAX_LEG_C)
             if capk is not None:
                 px = _grid_dn(min(join, capk), tick)
                 if L.get("ask") is not None and px >= float(L["ask"]):
