@@ -1547,8 +1547,8 @@ def test_pair_reline() -> None:
           '_PAIR_FREEZE_PING.get("pick:" + slug' in src)
     check("a freeze on a pick-owned slug is not a deadlock — re-pick off it",
           "unfroze" in src and "_foreign" in src)
-    check("…but only with nothing held on either leg",
-          "not any(abs(float((positions.get(sl)" in src)
+    check("…only with nothing held on OUR legs — a pick's position is not ours",
+          "for sl in slugs if sl not in _foreign" in src)
     check("a decline does not leave an over-cap bid resting — tear it down",
           "TORN DOWN" in src and "_PAIR_MAX_LEG_C" in src)
     check("unfilled football pairs are re-judged against the line rule",
