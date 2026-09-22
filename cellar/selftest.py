@@ -1541,6 +1541,10 @@ def test_pair_reline() -> None:
     import app as _app
     import inspect
     src = inspect.getsource(_app._pair_step)
+    check("…and when no re-seat exists and nothing is held, it tears down",
+          "a pick owns a leg and" in src and "TORN DOWN" in src)
+    check("the freeze warning is rate-limited, not once per tick",
+          '_PAIR_FREEZE_PING.get("pick:" + slug' in src)
     check("a freeze on a pick-owned slug is not a deadlock — re-pick off it",
           "unfroze" in src and "_foreign" in src)
     check("…but only with nothing held on either leg",

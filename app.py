@@ -21816,6 +21816,28 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
                 app.logger.info("PAIR %s: re-picked off a pick-owned slug",
                                 row.get("id"))
                 return
+            # NOWHERE TO GO AND NOTHING HELD — HAND THE GAME BACK (Rob,
+            # Sep 22 2026: "#2 should be an easy fix right? Why are we
+            # tolerating it?"). A pair whose leg a pick owns, which the rule
+            # cannot re-seat anywhere legal, is stuck forever: it freezes on
+            # every tick and logs the same line every 20 seconds. Pair 62 did
+            # that 45 times in an hour. It holds nothing, so there is nothing
+            # to protect — cancel any stray bid, disable the row, and let the
+            # Ferrari have the ladder.
+            _ok = True
+            for k2 in (lg2["key"] for lg2 in legs_def):
+                o2 = _c.get(k2, {}).get("bid")
+                if o2 is not None and not _pair_cancel(client, o2):
+                    _ok = False
+            if _ok:
+                sb.table("pair_hedges").update(
+                    {"enabled": False, "updated_at": now.isoformat()}
+                ).eq("id", row["id"]).execute()
+                res["torn_down"] = res.get("torn_down", 0) + 1
+                app.logger.info("PAIR %s %s: TORN DOWN — a pick owns a leg and "
+                                "no legal re-seat exists", row.get("id"),
+                                (row.get("event_name") or "")[:28])
+                return
         except Exception as e:
             app.logger.warning("pair %s unfreeze failed: %s", row.get("id"), e)
     lg_in = {}
@@ -21829,8 +21851,10 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
         if slug in _foreign:
             # DEFENSE IN DEPTH: even a hand-inserted pair may not manage a slug
             # a pending pick owns. Freeze rather than fight another engine.
-            app.logger.warning("pair %s: %s belongs to a pick — pair frozen",
-                               row.get("id"), slug)
+            if _time.time() - _PAIR_FREEZE_PING.get("pick:" + slug, 0.0) > 3600.0:
+                _PAIR_FREEZE_PING["pick:" + slug] = _time.time()
+                app.logger.warning("pair %s: %s belongs to a pick — pair frozen",
+                                   row.get("id"), slug)
             res["errors"] += 1
             return
         net = float((positions.get(slug) or {}).get("net") or 0.0)
