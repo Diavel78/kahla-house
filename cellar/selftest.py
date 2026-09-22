@@ -1367,6 +1367,8 @@ def test_pair_reline() -> None:
           "unfroze" in src and "_foreign" in src)
     check("…but only with nothing held on either leg",
           "not any(abs(float((positions.get(sl)" in src)
+    check("a decline does not leave an over-cap bid resting — tear it down",
+          "TORN DOWN" in src and "_PAIR_MAX_LEG_C" in src)
     check("unfilled football pairs are re-judged against the line rule",
           "_PAIR_RELINE_TS" in src and "_pair_rerung_both" in src)
     check("only with NOTHING held (rule 5: both pending → re-rung is fine)",

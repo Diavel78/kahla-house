@@ -21880,6 +21880,31 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
             if _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res):
                 res["reline"] = res.get("reline", 0) + 1
                 return                          # re-bid on the next tick
+            # A DECLINE MUST NOT LEAVE THE GARBAGE RESTING (Rob, Sep 21 2026,
+            # reading an 81.5¢ bid off his own order list). When the rule can
+            # find no legal pair AND a leg we are already quoting sits past
+            # the per-leg cap, that seat is not coming back — it was seated by
+            # an objective we have retired. Be at the touch on a real middle
+            # or come down: cancel both bids and hand the game to the Ferrari.
+            _over = [k for k in (ka, kb)
+                     if lg_in[k]["h"] < 1.0
+                     and float(st.get(k, {}).get("bid_c") or 0) > _PAIR_MAX_LEG_C]
+            if _over:
+                _ok = True
+                for k in (ka, kb):
+                    if cur[k]["bid"] is not None and not _pair_cancel(client, cur[k]["bid"]):
+                        _ok = False
+                if _ok:
+                    sb.table("pair_hedges").update(
+                        {"enabled": False, "updated_at": now.isoformat()}
+                    ).eq("id", row["id"]).execute()
+                    res["torn_down"] = res.get("torn_down", 0) + 1
+                    app.logger.info("PAIR %s %s: TORN DOWN — %s¢ leg past the "
+                                    "%s¢ cap and no legal pair to move to",
+                                    row.get("id"), (row.get("event_name") or "")[:28],
+                                    max(float(st.get(k, {}).get("bid_c") or 0)
+                                        for k in _over), _PAIR_MAX_LEG_C)
+                    return
         except Exception as e:
             app.logger.warning("pair %s reline failed: %s", row.get("id"), e)
     if (_under and mins > 0
