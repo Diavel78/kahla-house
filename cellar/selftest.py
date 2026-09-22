@@ -1412,9 +1412,12 @@ def test_pair_slugs_span_every_row_and_retired_leg() -> None:
           '.eq("enabled"' not in allsrc)
     check("…and fails safe to the last good list, never empty",
           "_PAIR_ALL_CACHE" in allsrc and "except Exception" in allsrc)
-    rr = inspect.getsource(_app._pair_rerung_both)
-    check("a re-pick retires the slugs it walks away from",
-          "retired_slugs" in rr and "retired[-40:]" in rr)
+    for fn in (_app._pair_rerung_both, _app._pair_rerung):
+        rr = inspect.getsource(fn)
+        check(f"{fn.__name__} retires the slug it walks away from",
+              "retired_slugs" in rr and "retired[-40:]" in rr)
+        check(f"{fn.__name__} never fails silently",
+              "_pair_rr_why" in rr)
     # the set really is a union
     _app._PAIR_ALL_CACHE.update(at=_time.time() if False else 9e9, rows=[
         {"legs": [{"slug": "now-a"}, {"slug": "now-b"}],

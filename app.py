@@ -21504,36 +21504,50 @@ def _pair_rerung(sb, client, row, hk, ek, lg_in, st, cur, now, res) -> bool:
     mid = next((k[0] for k, v in prefixes.items()
                 if v == row["game_prefix"] and k[1] == mt), None)
     if not mid:
+        _pair_rr_why(row, "game not on the pair board (rent list)")
         return False
     rungs, legmap = _pair_rungs_from_quotes(
         board.get((mid, mt)) or {}, mt, _pair_tape_quotes(sb, [mid]), mid)
     if len(rungs) < 2:
+        _pair_rr_why(row, "ladder not priced on the tape")
         return False
     sport = "NCAAF" if "-cfb-" in slug_e else "NFL"
     held_side = ("away" if mt == "spread" else "over") if hk == "a" else                 ("home" if mt == "spread" else "under")
     opts = _pair_partner_options(held_side, float(lg_in[hk].get("line") or 0.0),
                                  rungs, mt, sport, st[hk].get("cost"))
     if not opts:
+        _pair_rr_why(row, "no rung reachable inside the cap")
         return False
     best = opts[0]
     want_side = ("home" if mt == "spread" else "under") if hk == "a" else                 ("away" if mt == "spread" else "over")
     key = (want_side, best["line"])
     if key not in legmap:
+        _pair_rr_why(row, f"no slug for {key}")
         return False
     new_slug, new_intent = legmap[key]
     if new_slug == slug_e:
         return False                            # already there
     if not _rent_ok(new_slug, _parse_iso(str(row.get("kickoff"))), now, sb)[0]:
+        _pair_rr_why(row, f"{new_slug[-18:]} pays no rent")
         return False                            # RULE #1 — rent or no seat
     if cur[ek]["bid"] is not None and not _pair_cancel(client, cur[ek]["bid"]):
+        _pair_rr_why(row, "could not cancel the stranded bid")
         return False                            # never leave two seats out
+    # RETIRE THE SLUG WE WALK OFF (Sep 22 2026). `retired_slugs` was added to
+    # _pair_rerung_both last night and NOT here, so the half-filled path still
+    # dropped its old rung out of `_pair_slugs` — and `_pmm_autolog` adopts any
+    # AUTOMATIC order with no pick. Same hole, other branch.
+    retired = list(row.get("retired_slugs") or [])
+    if slug_e and slug_e != new_slug and slug_e not in retired:
+        retired.append(slug_e)
     legs[ek] = {"key": ek, "slug": new_slug, "intent": new_intent,
                 "label": f"{want_side} {best['line']:+g}"}
     st[ek] = {"h": 0.0}
     try:
         sb.table("pair_hedges").update(
             {"legs": [legs["a"], legs["b"]], "cap_c": best["cap"],
-             "state": st, "updated_at": now.isoformat()}
+             "state": st, "retired_slugs": retired[-40:],
+             "updated_at": now.isoformat()}
         ).eq("id", row["id"]).execute()
     except Exception as e:
         app.logger.warning("pair %s re-rung write failed: %s", row.get("id"), e)
