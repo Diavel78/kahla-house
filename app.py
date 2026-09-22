@@ -21827,8 +21827,31 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
         if h > last_h + 0.01:
             px = s.get("bid_c")
             if px is None:
-                avg = (positions.get(slug) or {}).get("avg_price")
-                px = (avg * 100.0) if avg else None
+                # ⚠ NEVER THE VENUE'S avg_price (Rob, Sep 22 2026 — pair 70).
+                # A re-pick resets the leg state, wiping `bid_c`; the next tick
+                # sees the fill, has no price of its own, and used to fall back
+                # to the venue's position average. That number is a LIFETIME
+                # BLEND per market (the Braves 74¢ receipt), and on a 1.2-share
+                # dust fill it came back 1.0 — a cost of 100¢ on a leg we
+                # bought at 59.5. That poisoned two things at once: the partner
+                # was capped at `cap − 100` = 20¢ and sat 37¢ under a 57¢ touch
+                # earning nothing, and the held leg could never list a sell
+                # because its floor was 100. Our own lot ledger first, then the
+                # price our resting order is actually quoting.
+                lot = (_lot_ledger(sb) or {}).get(slug) or {}
+                lc = lot.get("cost_c") if isinstance(lot, dict) else None
+                if lc is not None:
+                    px = float(lc)
+                elif cur[k]["bid"] is not None:
+                    _cp = (cur[k]["bid"] or {}).get("price_yes")
+                    if _cp is not None:
+                        px = round((100.0 - float(_cp) * 100.0) if short
+                                   else float(_cp) * 100.0, 2)
+            # A BUY can never cost 100¢ — that is the blend leaking in.
+            if px is not None and not (0.5 <= float(px) <= 99.5):
+                app.logger.warning("pair %s %s: refusing a %s¢ lot cost",
+                                   row.get("id"), cur[k]["label"], px)
+                px = None
             if px is not None:
                 old = float(s.get("cost") or px) if last_h > 0 else float(px)
                 s["cost"] = round((old * last_h + float(px) * (h - last_h)) / h, 3)
