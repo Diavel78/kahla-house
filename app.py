@@ -20578,12 +20578,20 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
             # expensive leg is the one that fills.
             # The fence is OFF once the other leg is HELD — then the hedge is
             # worth more than the balance, and `cap_c − filled cost` rules.
-            if not held[o] and join > _PAIR_MAX_LEG_C + 1e-9:
-                # AT THE TOUCH OR NOT THERE AT ALL. Capping to 65 under an
-                # 81.5¢ touch is worse than useless — 16.5¢ under the touch
-                # earns ~nothing (df^ticks) and still ties up the seat. With
-                # nothing held there is no hedge to protect, so refuse the
-                # leg; the re-judge then re-picks the pair or tears it down.
+            if join > _PAIR_MAX_LEG_C + 1e-9:
+                # AT THE TOUCH OR NOT THERE AT ALL, HELD LEG OR NOT (Rob,
+                # Sep 21 2026: "FSU minus eight and a half. Get the fuck out
+                # of here"). Capping to 65 under an 81.5¢ touch is worse than
+                # useless — 16.5¢ under the touch earns ~nothing (df^ticks)
+                # and still ties up the seat.
+                # I first exempted the HEDGE from this fence, reasoning that
+                # with a leg held, $12.23 to guarantee $15 back beats holding
+                # something worth $1.05. The arithmetic is right and the rule
+                # is still wrong: "if they do fill, I want to be hedged" means
+                # hedged at a price a person would pay, not at any price. 81.5¢
+                # is −441. Nobody lays −441, and the standing goal is FLAT —
+                # money back plus rent — which the sell-at-cost already works
+                # toward. A hedge we cannot buy at 65 is a hedge we skip.
                 capk = None
                 why.append("leg_cap")
             if capk is not None:

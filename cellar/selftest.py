@@ -1107,10 +1107,17 @@ def test_pair_plan() -> None:
     p = _app._pair_plan({"a": leg(bid=55.0, ask=56.0), "b": leg(bid=59.0, ask=60.0)}, 15, 110, 2000)
     check("both empty over cap → split the excess",
           p["a"]["bid"][0] + p["b"]["bid"][0] <= 110.0 and p["a"]["bid"][0] == 53.0)
-    # a held at 44, b empty touching 70 → b capped at 66; a asks at cost+tick
+    # a held at 44, b empty touching 70 → the 65c leg fence REFUSES b (Rob,
+    # Sep 21 2026: a hedge we cannot buy at 65 is a hedge we skip). The held
+    # leg still asks at cost, which is the flat exit the machine aims for.
     p = _app._pair_plan({"a": leg(h=15, cost=44.0, bid=43.0, ask=46.0),
                          "b": leg(bid=70.0, ask=71.0)}, 15, 110, 2000)
-    check("one held → other bid capped at cap − cost (66)", p["b"]["bid"] == (66.0, 15))
+    check("one held, partner touch 70 → REFUSED by the 65c leg fence",
+          p["b"]["bid"] is None and "leg_cap" in p["b"]["why"])
+    # …and inside the fence the hedge still chases cap − cost
+    p2 = _app._pair_plan({"a": leg(h=15, cost=44.0, bid=43.0, ask=46.0),
+                          "b": leg(bid=60.0, ask=61.0)}, 15, 110, 2000)
+    check("one held, partner touch 60 → hedge joins it", p2["b"]["bid"] == (60.0, 15))
     check("one held, never sold → ask at cost + tick when it leads", p["a"]["ask"] == (44.5, 15))
     # a sold at 60, b held at 57 → b floor = 110 − 60 = 50, sells at 50.5 if it leads
     p = _app._pair_plan({"a": leg(sold=60.0, bid=58.0, ask=61.0),
@@ -1377,7 +1384,9 @@ def test_pair_leg_cap_in_the_engine() -> None:
              "home": dict(base, h=15.0, bid=None, cost=40.0)}
     plan2 = _app._pair_plan(legs2, 15, 120.0, 4000.0)
     px2 = plan2["away"]["bid"][0] if isinstance(plan2["away"]["bid"], tuple) else None
-    check("…but with the other leg HELD the hedge chases past 65", px2 == 80.0)
+    check("the fence holds even with the other leg HELD — a hedge we cannot "
+          "buy at 65 is a hedge we skip",
+          plan2["away"]["bid"] is None and "leg_cap" in plan2["away"]["why"])
 
 
 def test_pair_slugs_span_every_row_and_retired_leg() -> None:
