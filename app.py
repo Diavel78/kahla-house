@@ -22044,8 +22044,20 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
                 s[side + "_c"] = want[0]
                 s[side + "_id"] = oid
                 s[side + "_at"] = now.isoformat()
+            elif verdict == "keep":
+                # "keep" means our order is ALREADY resting at this price, and
+                # the row must say so (Sep 22 2026). It did not, so a leg
+                # quoting perfectly well read as unquoted: pair 81 had live
+                # bids on both legs and recorded one. That is not cosmetic —
+                # `bid_c` is the price the lot-cost fallback reads on a fill,
+                # and `ask_c` is what gets recorded as the sell price, so a
+                # blank one loses the number after the trade.
+                s[side + "_c"] = want[0]
+                if oid:
+                    s[side + "_id"] = oid
             elif verdict == "error":
                 res["errors"] += 1
+                p["why"].append("write_failed")
         s["why"] = p["why"]
     # ── THE RE-RUNG (Rob, Sep 20 2026) ────────────────────────────────────
     # One leg held, the other bidding under the touch because the cap binds =
