@@ -21801,9 +21801,14 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
     # 5's "both pending → re-rung is fine"). Holding a leg still freezes —
     # then the position is real and two engines fighting over it is worse.
     _foreign = _pair_foreign_slugs(sb) or set()
+    # ⚠ A POSITION ON A PICK-OWNED SLUG IS THE PICK'S, NOT OURS (Sep 22 2026).
+    # The gate asked "is anything held on these slugs" and counted a position
+    # sitting on the very slug the pair is forbidden to manage — so pair 62
+    # could neither touch its leg nor escape it, and froze every 20 seconds
+    # forever. Only OUR side counts: skip the foreign slugs when asking.
     if (any(sl in _foreign for sl in slugs) and mins > 0
             and not any(abs(float((positions.get(sl) or {}).get("net") or 0.0))
-                        >= 1.0 for sl in slugs)):
+                        >= 1.0 for sl in slugs if sl not in _foreign)):
         _c = {lg["key"]: {"bid": next((o for o in orders
                                        if o["slug"] == lg["slug"]
                                        and "_BUY_" in (o.get("intent") or "")),
