@@ -1475,6 +1475,8 @@ def test_pair_uses_executor_rule() -> None:
           "_gridiron_join_touch" in src)
     check("the venue's NO side is a BUY_SHORT, per the ladder's own flag",
           'r.get("synthetic")' in src)
+    check("NO 60c per-leg cap — the pair's fence is the COMBINED touch",
+          "_GRIDIRON_MAX_ENTRY_C" not in src and "ceiling - tk" in src)
     check("never both sides of ONE market (that is flat, not a pair)",
           'a["slug"] == b["slug"]' in src)
     seed = inspect.getsource(_app._pair_seed_tick)

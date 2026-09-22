@@ -21015,6 +21015,7 @@ def _pair_from_gridiron_rule(sb, g, mt, now, taken_slugs=None):
     if not rule or rule.get("center") is None:
         return None
     es0 = g.get("event_start")
+    ceiling = _pair_ceiling(g.get("sport") or "NFL")
     client = get_client()
     legs = {ka: [], kb: []}
     for r in raw:
@@ -21047,7 +21048,19 @@ def _pair_from_gridiron_rule(sb, g, mt, now, taken_slugs=None):
         askc = (float(q["ask"]) * 100.0 if q.get("ask") is not None else None)
         if askc is not None and peg >= askc:
             peg = _grid_dn(bc, tk)              # one-tick book → JOIN (post-only)
-        if not (tk <= peg <= _GRIDIRON_MAX_ENTRY_C):
+        # ⚠ NO 60¢ PER-LEG CAP ON A PAIR (Rob, Sep 21 2026: "you're saying
+        # there is no legal middle? not even a single point, at any spread,
+        # under a touch COMBINED of 120??? I say bullshit"). He was right and
+        # it was neither rent nor FCS: _GRIDIRON_MAX_ENTRY_C is a SINGLE-SEAT
+        # rule — the Ferrari never pays 68¢ for one bet. A pair is two legs
+        # that must sum under the loss cap, and the two sides of a middle are
+        # complements by construction, so the expensive side is ALWAYS paired
+        # with a cheap one. On LAR@DEN the legal away rungs all bid 67-80¢ and
+        # the legal home rungs 50-57¢: away +3.5 at 67.5 with home +2.5 at
+        # 50.5 is 118 combined and wins on -2 through +3, and the per-leg cap
+        # threw it out one leg at a time. The COMBINATION check below (cost >
+        # ceiling) is the only price fence a pair needs.
+        if not (tk <= peg <= ceiling - tk):
             continue
         # A rung is ONE binary market; the venue's NO side is our synthetic
         # leg, so the intent follows the ladder's own flag — exactly as the
@@ -21058,7 +21071,6 @@ def _pair_from_gridiron_rule(sb, g, mt, now, taken_slugs=None):
                          "peg_c": round(peg, 2)})
     if not legs[ka] or not legs[kb]:
         return None
-    ceiling = _pair_ceiling(g.get("sport") or "NFL")
     best = None
     for a in legs[ka]:
         for b in legs[kb]:
