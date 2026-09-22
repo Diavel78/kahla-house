@@ -1641,10 +1641,12 @@ def test_pair_uses_executor_rule() -> None:
           and "peg <= _GRIDIRON_MAX_ENTRY_C" not in src)
     check("…and the pair cap is the loss budget",
           _app._pair_ceiling("NFL") == 120.0)
-    check("seed NEAREST the line, not the widest window",
-          "_off" in src and "NEAREST THE LINE" in src)
+    check("WIDEST window under the cap, centre as the tie-break",
+          "cand = (len(hits), -_off, -cost)" in src)
+    check("…and the 65c leg cap is what keeps widest from buying a -441 side",
+          "_PAIR_MAX_LEG_C" in src)
     check("…and nothing outranks it — no sub-100 seeding preference",
-          'cand = (-_off, -cost)' in src)
+          "cost < 100.0" not in src)
     check("never both sides of ONE market (that is flat, not a pair)",
           'a["slug"] == b["slug"]' in src)
     seed = inspect.getsource(_app._pair_seed_tick)

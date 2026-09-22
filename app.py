@@ -21179,7 +21179,20 @@ def _pair_from_gridiron_rule(sb, g, mt, now, taken_slugs=None):
             # that sits far from the number instead of a seat on it, and the
             # whole reason seeds rank by distance is that the line moves and we
             # end up owning these.
-            cand = (-_off, -cost)
+            # WIDEST FROM THE MIDDLE, UNDER THE CAP (Rob, Sep 22 2026: "was
+            # that the widest rung FROM MIDDLE under the 120 cap? Because that
+            # part is what gives us movement options").
+            # Width is not greed, it is room: the line moves, and a wide pair
+            # can walk a rung IN toward the new number while a tight one has
+            # nowhere to go but down. Ranking by closeness-to-centre picked the
+            # TIGHTEST window every time — Missouri State @ SMU took 2 numbers
+            # at 104¢ when an 8-number window sat there at 119¢, leaving 15¢ of
+            # the budget and six numbers of coverage unused.
+            # This was the original rule; I swung away from it after it seated
+            # an 81.5¢ leg. The 65¢ per-leg cap is what actually fixed that, so
+            # widest can no longer buy a −441 side. Centre is the tie-break:
+            # among equal widths, take the one sitting on the line.
+            cand = (len(hits), -_off, -cost)
             if best is None or cand > best[0]:
                 best = (cand, a, b, {"hits": hits, "cost_c": round(cost, 1),
                                      "off_line": round(_off, 1),
