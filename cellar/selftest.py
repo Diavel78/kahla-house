@@ -1371,8 +1371,8 @@ def test_pair_reline() -> None:
           "_PAIR_RELINE_TS" in src and "_pair_rerung_both" in src)
     check("only with NOTHING held (rule 5: both pending → re-rung is fine)",
           "not _h and mins > 0" in src)
-    check("on a slow clock — each look prices the game",
-          _app._PAIR_RELINE_S >= 900.0)
+    check("on a clock, not every lap — each look prices the game",
+          _app._PAIR_RELINE_S >= 300.0)
     check("and only a few per lap — 59 due at once tripped the rate limiter",
           "_PAIR_RELINE_PER_TICK" in src and 1 <= _app._PAIR_RELINE_PER_TICK <= 8)
     rr = inspect.getsource(_app._pair_rerung_both)
@@ -1477,9 +1477,13 @@ def test_pair_uses_executor_rule() -> None:
           'r.get("synthetic")' in src)
     # (the constant's NAME appears in the explaining comment — check the
     # actual price fence, which is the pair ceiling, not the single-seat cap)
-    check("NO 60c per-leg cap — the pair's fence is the COMBINED touch",
-          "tk <= peg <= ceiling - tk" in src
+    check("two fences: 65c a leg and 120c the pair (Rob, Sep 21)",
+          "_PAIR_MAX_LEG_C" in src and _app._PAIR_MAX_LEG_C == 65.0
           and "peg <= _GRIDIRON_MAX_ENTRY_C" not in src)
+    check("…and the pair cap is the loss budget",
+          _app._pair_ceiling("NFL") == 120.0)
+    check("seed NEAREST the line, not the widest window",
+          "_off" in src and "NEAREST THE LINE" in src)
     check("never both sides of ONE market (that is flat, not a pair)",
           'a["slug"] == b["slug"]' in src)
     seed = inspect.getsource(_app._pair_seed_tick)

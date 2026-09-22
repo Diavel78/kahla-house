@@ -21048,19 +21048,16 @@ def _pair_from_gridiron_rule(sb, g, mt, now, taken_slugs=None):
         askc = (float(q["ask"]) * 100.0 if q.get("ask") is not None else None)
         if askc is not None and peg >= askc:
             peg = _grid_dn(bc, tk)              # one-tick book → JOIN (post-only)
-        # ⚠ NO 60¢ PER-LEG CAP ON A PAIR (Rob, Sep 21 2026: "you're saying
-        # there is no legal middle? not even a single point, at any spread,
-        # under a touch COMBINED of 120??? I say bullshit"). He was right and
-        # it was neither rent nor FCS: _GRIDIRON_MAX_ENTRY_C is a SINGLE-SEAT
-        # rule — the Ferrari never pays 68¢ for one bet. A pair is two legs
-        # that must sum under the loss cap, and the two sides of a middle are
-        # complements by construction, so the expensive side is ALWAYS paired
-        # with a cheap one. On LAR@DEN the legal away rungs all bid 67-80¢ and
-        # the legal home rungs 50-57¢: away +3.5 at 67.5 with home +2.5 at
-        # 50.5 is 118 combined and wins on -2 through +3, and the per-leg cap
-        # threw it out one leg at a time. The COMBINATION check below (cost >
-        # ceiling) is the only price fence a pair needs.
-        if not (tk <= peg <= ceiling - tk):
+        # TWO FENCES: 65¢ A LEG, 120¢ THE PAIR (Rob, Sep 21 2026).
+        # Not the Ferrari's single-seat cap (_GRIDIRON_MAX_ENTRY_C, 60) — that
+        # one threw out real middles a leg at a time, and its removal then let
+        # a Central Arkansas +17.5 leg rest at 81.5¢. Both were wrong for the
+        # same reason: the combined cap bounds the loss ONLY IF BOTH LEGS
+        # FILL, and half-filled is the normal state — the expensive leg is the
+        # one the market is leaving, so it fills first. 65/120 keeps the pair
+        # balanced, so a half-filled pair leaves a coin flip instead of $12 at
+        # risk to win $2.78.
+        if not (tk <= peg <= min(_PAIR_MAX_LEG_C, ceiling - tk)):
             continue
         # A rung is ONE binary market; the venue's NO side is our synthetic
         # leg, so the intent follows the ladder's own flag — exactly as the
@@ -21084,9 +21081,28 @@ def _pair_from_gridiron_rule(sb, g, mt, now, taken_slugs=None):
                 continue
             if not hits:
                 continue        # the mirror is a re-rung stop, never a seed
-            cand = (len(hits), -cost)
+            # NEAREST THE LINE, NOT WIDEST (Rob, Sep 21 2026: "how would a
+            # fucking MIDDLE rung be 81.5 cents"). Widest-under-cap is the
+            # rule for a COMPLETION, where one leg is held and its cost is
+            # already spent — there, more numbers on the loss is strictly
+            # better. Seeding both legs fresh it is the wrong objective: the
+            # widest legal window puts the two rungs as far apart as the tail
+            # gate allows, which is a deep favorite on one side and a longshot
+            # on the other (CARK +17.5 at 81.5 against FSU -8.5, on a game
+            # lined near -30). A middle sits ON the line and rungs on the line
+            # price near 50, so a balanced pair is the SAME bet with a far
+            # better half-filled state — and half-filled is the normal state,
+            # because the expensive leg is the one the market is leaving.
+            # Rank by distance from the center, then by cost.
+            _off = (abs((-a["line"]) - float(rule["center"]))
+                    + abs(b["line"] - float(rule["center"]))
+                    if mt == "spread" else
+                    abs(a["line"] - float(rule["center"]))
+                    + abs(b["line"] - float(rule["center"])))
+            cand = (-_off, -cost)
             if best is None or cand > best[0]:
                 best = (cand, a, b, {"hits": hits, "cost_c": round(cost, 1),
+                                     "off_line": round(_off, 1),
                                      "cap_c": round(ceiling, 1),
                                      "center": rule.get("center"),
                                      "center_src": rule.get("center_src"),
@@ -21390,9 +21406,10 @@ def _pair_leg_line(lg: dict, mt: str):
 
 
 _PAIR_RERUNG_TS: dict = {}
+_PAIR_MAX_LEG_C = 65.0             # Rob, Sep 21 2026: 65 a leg, 120 the pair
 _PAIR_RELINE_TS: dict = {}         # row id -> last line-rule re-judge
-_PAIR_RELINE_S = 1_800.0           # slow: each look prices the game
-_PAIR_RELINE_PER_TICK = 4          # …and only a few per lap (REST burst)
+_PAIR_RELINE_S = 600.0             # each look prices the game (cheap off the quote table)
+_PAIR_RELINE_PER_TICK = 8          # …and a few per lap (REST burst)
 
 
 def _pair_rerung(sb, client, row, hk, ek, lg_in, st, cur, now, res) -> bool:
@@ -21451,6 +21468,21 @@ def _pair_rerung(sb, client, row, hk, ek, lg_in, st, cur, now, res) -> bool:
     return True
 
 
+_PAIR_RR_WHY: dict = {}            # row id -> last reason (log once per reason)
+
+
+def _pair_rr_why(row, why: str) -> None:
+    """A RE-PICK THAT FAILS SILENTLY COSTS A DIAGNOSIS (Sep 21 2026 — it had
+    five bare `return False` exits, and twice I had to guess which one fired
+    while three pairs logged 865 identical freeze warnings each)."""
+    rid = row.get("id")
+    if _PAIR_RR_WHY.get(rid) == why:
+        return
+    _PAIR_RR_WHY[rid] = why
+    app.logger.info("PAIR %s %s: re-pick declined — %s", rid,
+                    (row.get("event_name") or "")[:28], why)
+
+
 def _pair_market_row(sb, game_prefix: str, mt: str):
     """The `markets` row behind a pair's slug prefix — what the football rule
     needs (sport, event_name, event_start) to price the game."""
@@ -21494,6 +21526,7 @@ def _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res) -> bool:
                                        _pair_foreign_slugs(sb) or set())
               if g else None)
         if not pr:
+            _pair_rr_why(row, "no legal pair under cap")
             return False
         _a, _b, _i = pr
         a_slug, a_int, b_slug, b_int = _a["slug"], _a["intent"], _b["slug"], _b["intent"]
@@ -21524,12 +21557,14 @@ def _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res) -> bool:
         a_lbl = f"{a_key[0]} {best['a_line']:+g}"
         b_lbl = f"{b_key[0]} {best['b_line']:+g}"
     if {a_slug, b_slug} == {legs["a"]["slug"], legs["b"]["slug"]}:
-        return False                            # already on the best window
+        return False                            # already where the rule wants it
     ko = _parse_iso(str(row.get("kickoff")))
     if not (_rent_ok(a_slug, ko, now, sb)[0] and _rent_ok(b_slug, ko, now, sb)[0]):
+        _pair_rr_why(row, "a leg stopped paying rent")
         return False
     for k in ("a", "b"):
         if cur[k]["bid"] is not None and not _pair_cancel(client, cur[k]["bid"]):
+            _pair_rr_why(row, f"could not cancel the {k} bid")
             return False                        # never leave a stray seat out
     legs["a"] = {"key": "a", "slug": a_slug, "intent": a_int, "label": a_lbl}
     legs["b"] = {"key": "b", "slug": b_slug, "intent": b_int, "label": b_lbl}
