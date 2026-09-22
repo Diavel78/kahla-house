@@ -21610,6 +21610,9 @@ def _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res) -> bool:
         # pair re-seats it, so a re-pick can never land somewhere the
         # executor would refuse.
         g = _pair_market_row(sb, row["game_prefix"], mt)
+        if not g:
+            _pair_rr_why(row, "no market row (pair board)")
+            return False
         # ROUTE AROUND THE FERRARI (Sep 21 2026). The re-pick first shipped
         # with an EMPTY taken set, and because it seats by the same rule the
         # executor does, it kept choosing rungs the executor already owned —
@@ -21979,6 +21982,19 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
               and lg_in[k].get("bid") is not None
               and plan[k]["bid"][0] < float(lg_in[k]["bid"])
               - float(lg_in[k].get("tick") or 1.0) - 1e-9]
+    # A LEG WE REFUSE TO BID IS OFF THE TOUCH TOO (Rob, Sep 22 2026: "the line
+    # moves, and your top number has to re-rung down, or it'll go up and your
+    # bottom has to come up… no orders, no god damn rent").
+    # The test above only catches a leg we WOULD bid but below the touch. When
+    # the touch drifts past the 65¢ leg cap the planner returns bid=None, the
+    # step cancels the resting order, and the leg was never a re-rung
+    # candidate — so it just went silent. Overnight that was ~15 legs an hour
+    # coming down with exactly one re-rung, and 19 pairs quoting neither side.
+    # Refusing the PRICE is precisely the signal to walk the rung toward the
+    # line, where it gets cheaper.
+    _under += [k for k in _e
+               if k not in _under and plan[k]["bid"] is None
+               and "leg_cap" in (plan[k].get("why") or [])]
     # A BAD RUNG CAN SIT AT THE TOUCH FOREVER (Rob, Sep 21 2026: "bad rungs
     # is the entire issue… and why we can't find a middle"). The off-touch
     # test above only fires when the market walks away from a leg — a pair

@@ -1469,6 +1469,26 @@ def test_pair_lot_cost_never_from_the_venue_blend() -> None:
           "0.5 <= float(px) <= 99.5" in src)
 
 
+def test_pair_price_refusal_triggers_a_rerung() -> None:
+    """NO ORDERS, NO RENT (Rob, Sep 22 2026). When the touch drifts past the
+    65¢ leg cap the planner returns bid=None, the step cancels the resting
+    order, and the leg used to drop out of the re-rung candidate set entirely
+    — it only held legs we WOULD bid but below the touch. So the expensive leg
+    went silent instead of walking toward the line where it gets cheaper.
+    Overnight: ~15 legs an hour cancelled, exactly ONE re-rung, 19 pairs
+    quoting neither side."""
+    import app as _app
+    import inspect
+    src = inspect.getsource(_app._pair_step)
+    check("a price-refused leg joins the re-rung candidates",
+          'plan[k]["bid"] is None' in src and '"leg_cap" in (plan[k].get("why")' in src)
+    check("…only when that leg is not already held",
+          "_under += [k for k in _e" in src)
+    rr = inspect.getsource(_app._pair_rerung_both)
+    check("a missing market row says so instead of 'no legal pair'",
+          "no market row" in rr)
+
+
 def test_pair_reline() -> None:
     """A PAIR SEATED ON A BAD RUNG SITS AT ITS OWN TOUCH FOREVER (Rob, Sep 21
     2026). The off-touch rule only fires when the market walks away from a
@@ -1758,7 +1778,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
+              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
