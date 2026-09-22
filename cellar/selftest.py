@@ -1380,6 +1380,42 @@ def test_pair_leg_cap_in_the_engine() -> None:
     check("…but with the other leg HELD the hedge chases past 65", px2 == 80.0)
 
 
+def test_pair_slugs_span_every_row_and_retired_leg() -> None:
+    """THE AUTOLOG ADOPTED PAIR LEGS INTO THE FERRARI (Rob, Sep 21 2026: four
+    orders on one CAR/CLE total ladder, and cancels that came straight back).
+    `_pair_rows` filters enabled=True and `legs` holds only the CURRENT two
+    slugs, so a re-pick or a teardown dropped the slug out of `_pair_slugs`;
+    `_pmm_autolog` then saw an AUTOMATIC order with no pick and booked it as a
+    gridiron pick, handing the rung to the chase, the buy sniper and the seat
+    top-up while the pair re-seeded the game elsewhere.
+
+    The exclusion set must span EVERY pair row (enabled or not) and every slug
+    a pair has ever quoted."""
+    import app as _app
+    import inspect
+    src = inspect.getsource(_app._pair_slugs)
+    check("the exclusion set reads ALL pair rows, not just enabled ones",
+          "_pair_all_rows" in src)
+    check("…and includes slugs the pair has retired",
+          "retired_slugs" in src)
+    allsrc = inspect.getsource(_app._pair_all_rows)
+    check("_pair_all_rows does NOT filter on enabled",
+          '.eq("enabled"' not in allsrc)
+    check("…and fails safe to the last good list, never empty",
+          "_PAIR_ALL_CACHE" in allsrc and "except Exception" in allsrc)
+    rr = inspect.getsource(_app._pair_rerung_both)
+    check("a re-pick retires the slugs it walks away from",
+          "retired_slugs" in rr and "retired[-40:]" in rr)
+    # the set really is a union
+    _app._PAIR_ALL_CACHE.update(at=_time.time() if False else 9e9, rows=[
+        {"legs": [{"slug": "now-a"}, {"slug": "now-b"}],
+         "retired_slugs": ["old-a", "old-b"]}])
+    got = _app._pair_slugs(None)
+    check("union of current legs and retired legs",
+          got == {"now-a", "now-b", "old-a", "old-b"})
+    _app._PAIR_ALL_CACHE.update(at=0.0, rows=[])
+
+
 def test_pair_reline() -> None:
     """A PAIR SEATED ON A BAD RUNG SITS AT ITS OWN TOUCH FOREVER (Rob, Sep 21
     2026). The off-touch rule only fires when the market walks away from a
@@ -1669,7 +1705,7 @@ def main() -> int:
               test_pin_line_center,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
-              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
+              test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")

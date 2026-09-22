@@ -20397,9 +20397,47 @@ def _pair_rows(sb, max_age_s: float = 30.0) -> list:
     return _PAIR_CACHE["rows"]
 
 
+_PAIR_ALL_CACHE: dict = {"at": 0.0, "rows": []}
+
+
+def _pair_all_rows(sb, max_age_s: float = 60.0) -> list:
+    """EVERY pair row on a live game, enabled or not, WITH the slugs it has
+    retired. `_pair_rows` filters `enabled=True` and `legs` only ever holds
+    the CURRENT two slugs, so the instant a pair re-picked its rungs or was
+    torn down, its slugs left `_pair_slugs` — and `_pmm_autolog` adopted the
+    resting AUTOMATIC order as a gridiron pick. The Ferrari's chase, buy
+    sniper and seat top-up then owned a rung the pair machine had chosen,
+    while the pair re-seeded the same game on new rungs. Four orders on one
+    CAR/CLE total ladder, and cancels that came straight back because a
+    different engine was re-placing them (Rob, Sep 21 2026: "you keep
+    ordering them, I'm gonna keep fucking canceling them").
+
+    Same fail-safe as `_pair_rows`: an unreadable table returns the last good
+    list, never an empty one."""
+    if sb is None:
+        return _PAIR_ALL_CACHE["rows"]
+    if _time.time() - _PAIR_ALL_CACHE["at"] <= max_age_s:
+        return _PAIR_ALL_CACHE["rows"]
+    try:
+        cut = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()
+        rows = (sb.table("pair_hedges").select("legs,retired_slugs")
+                .gte("kickoff", cut).limit(500).execute().data) or []
+        _PAIR_ALL_CACHE.update(at=_time.time(), rows=rows)
+    except Exception:
+        pass
+    return _PAIR_ALL_CACHE["rows"]
+
+
 def _pair_slugs(sb) -> set:
-    return {lg.get("slug") for r in _pair_rows(sb)
-            for lg in (r.get("legs") or []) if lg.get("slug")}
+    out = set()
+    for r in _pair_all_rows(sb):
+        for lg in (r.get("legs") or []):
+            if lg.get("slug"):
+                out.add(lg["slug"])
+        for sl in (r.get("retired_slugs") or []):
+            if sl:
+                out.add(sl)
+    return out
 
 
 _PAIR_DECLINED_CACHE: dict = {"at": 0.0, "set": set()}
@@ -21600,13 +21638,21 @@ def _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res) -> bool:
         if cur[k]["bid"] is not None and not _pair_cancel(client, cur[k]["bid"]):
             _pair_rr_why(row, f"could not cancel the {k} bid")
             return False                        # never leave a stray seat out
+    # RETIRE THE OLD SLUGS, NEVER JUST DROP THEM. A slug this pair has quoted
+    # must stay out of the autolog's adoption set forever, or the Ferrari
+    # inherits the rung the moment we move off it.
+    retired = list(row.get("retired_slugs") or [])
+    for _old in (legs["a"].get("slug"), legs["b"].get("slug")):
+        if _old and _old not in (a_slug, b_slug) and _old not in retired:
+            retired.append(_old)
     legs["a"] = {"key": "a", "slug": a_slug, "intent": a_int, "label": a_lbl}
     legs["b"] = {"key": "b", "slug": b_slug, "intent": b_int, "label": b_lbl}
     st["a"], st["b"] = {"h": 0.0}, {"h": 0.0}
     try:
         sb.table("pair_hedges").update(
             {"legs": [legs["a"], legs["b"]], "cap_c": best["cap_c"],
-             "state": st, "updated_at": now.isoformat()}
+             "state": st, "retired_slugs": retired[-40:],
+             "updated_at": now.isoformat()}
         ).eq("id", row["id"]).execute()
     except Exception as e:
         app.logger.warning("pair %s re-pick write failed: %s", row.get("id"), e)
