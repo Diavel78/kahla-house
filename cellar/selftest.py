@@ -1486,8 +1486,8 @@ def test_pair_uses_executor_rule() -> None:
           _app._pair_ceiling("NFL") == 120.0)
     check("seed NEAREST the line, not the widest window",
           "_off" in src and "NEAREST THE LINE" in src)
-    check("…but a sub-100 LOCK outranks every priced pair",
-          "A LOCK OUTRANKS EVERYTHING" in src and "cost < 100.0" in src)
+    check("…and nothing outranks it — no sub-100 seeding preference",
+          'cand = (-_off, -cost)' in src)
     check("never both sides of ONE market (that is flat, not a pair)",
           'a["slug"] == b["slug"]' in src)
     seed = inspect.getsource(_app._pair_seed_tick)

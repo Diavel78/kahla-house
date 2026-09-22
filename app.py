@@ -21106,23 +21106,18 @@ def _pair_from_gridiron_rule(sb, g, mt, now, taken_slugs=None):
                     if mt == "spread" else
                     abs(a["line"] - float(rule["center"]))
                     + abs(b["line"] - float(rule["center"])))
-            # A LOCK OUTRANKS EVERYTHING (Rob, Sep 21 2026: "flat, money back
-            # plus rent collected, is the fucking goal… hedged is almost a
-            # guaranteed loss unless we middle… the exception, from day one,
-            # was if you hold a pair for under a dollar — then fuck it, take
-            # the profit"). A completed pair over 100 pays 100 and only wins
-            # on the middle, so it is a bounded LOSS we accept as the price of
-            # renting two sides. A pair under 100 pays 100 for less than 100:
-            # free money, and it does not care where the line is. So rank any
-            # sub-100 combination first, cheapest wins; everything else ranks
-            # nearest the line, where the legs balance and the middle sits on
-            # the real number.
-            cand = ((1, 0.0, -cost) if cost < 100.0 - 1e-9
-                    else (0, -_off, -cost))
+            # ⚠ DO NOT "PROMOTE" SUB-100 PAIRS ABOVE THE LINE RANKING.
+            # I added exactly that on Sep 21 2026 and Rob threw it out: the
+            # sub-100 lock has been rule #1 since day one and is already
+            # handled downstream (it rides to settlement with no asks). Making
+            # it a SEEDING preference is worse than useless — it buys a lock
+            # that sits far from the number instead of a seat on it, and the
+            # whole reason seeds rank by distance is that the line moves and we
+            # end up owning these.
+            cand = (-_off, -cost)
             if best is None or cand > best[0]:
                 best = (cand, a, b, {"hits": hits, "cost_c": round(cost, 1),
                                      "off_line": round(_off, 1),
-                                     "lock": cost < 100.0 - 1e-9,
                                      "cap_c": round(ceiling, 1),
                                      "center": rule.get("center"),
                                      "center_src": rule.get("center_src"),
