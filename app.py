@@ -2680,6 +2680,97 @@ def api_poly_orders():
     return jsonify(out)
 
 
+@app.route("/api/pair/status")
+def api_pair_status():
+    """READ-ONLY: pair_hedges rows for a game + a DRY re-rung verdict.
+
+    Built Sep 23 2026 from Vegas: LAR@DEN held DEN +3.5 @60 and parked the
+    LAR +2.5 partner 1.5c under the touch while LAR +1.5 sat reachable at
+    118.5 — and the only record of WHY lives in the box's log
+    (`_pair_rr_why`), which nothing off the box can read. This walks the
+    exact decision `_pair_rerung` makes (board → tape rungs → options →
+    rent per option) without a single write, so the failing exit is named.
+
+    ?game=<substring of game_prefix, e.g. lar-den>  (required)
+    Shared-secret like its siblings; fire via the site-curl bridge."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    game = (request.args.get("game") or "").strip().lower()
+    if not game:
+        return jsonify({"ok": False, "error": "game= required"}), 400
+    out: dict = {"ok": True, "rows": []}
+    try:
+        sb = get_supabase()
+        rows = (sb.table("pair_hedges").select("*")
+                .ilike("game_prefix", f"%{game}%").execute().data) or []
+        now = datetime.now(timezone.utc)
+        board, prefixes = _pair_board(sb)
+        for row in rows:
+            st = row.get("state") if isinstance(row.get("state"), dict) else {}
+            info = {k: row.get(k) for k in (
+                "id", "enabled", "event_name", "market_type", "game_prefix",
+                "kickoff", "cap_c", "qty", "legs", "state", "retired_slugs",
+                "updated_at")}
+            dry: dict = {}
+            info["dry_rerung"] = dry
+            out["rows"].append(info)
+            mt = row.get("market_type") or "spread"
+            legs = {lg["key"]: lg for lg in (row.get("legs") or [])}
+            held = [k for k in legs if float((st.get(k) or {}).get("h") or 0) >= 1.0]
+            empty = [k for k in legs if k not in held]
+            dry["held"], dry["empty"] = held, empty
+            if len(held) != 1 or len(empty) != 1:
+                dry["skip"] = "re-rung path needs exactly one held leg"
+                continue
+            hk, ek = held[0], empty[0]
+            dry["held_cost"] = (st.get(hk) or {}).get("cost")
+            mid = next((k[0] for k, v in prefixes.items()
+                        if v == row["game_prefix"] and k[1] == mt), None)
+            dry["board_mid"] = mid
+            if not mid:
+                dry["exit"] = "game not on the pair board (rent list)"
+                continue
+            rungs, legmap = _pair_rungs_from_quotes(
+                board.get((mid, mt)) or {}, mt, _pair_tape_quotes(sb, [mid]), mid)
+            dry["rungs"] = [list(r) for r in rungs]
+            if len(rungs) < 2:
+                dry["exit"] = "ladder not priced on the tape"
+                continue
+            sport = "NCAAF" if "-cfb-" in legs[ek]["slug"] else "NFL"
+            held_side = (("away" if mt == "spread" else "over") if hk == "a"
+                         else ("home" if mt == "spread" else "under"))
+            held_line = _pair_leg_line(legs[hk], mt)
+            dry["held_side"], dry["held_line"] = held_side, held_line
+            opts = _pair_partner_options(held_side, float(held_line or 0.0),
+                                         rungs, mt, sport,
+                                         (st.get(hk) or {}).get("cost"))
+            want_side = (("home" if mt == "spread" else "under") if hk == "a"
+                         else ("away" if mt == "spread" else "over"))
+            ko = _parse_iso(str(row.get("kickoff")))
+            for o in opts:
+                sl = (legmap.get((want_side, o["line"])) or (None,))[0]
+                o["slug"] = sl
+                try:
+                    o["rent_ok"] = bool(sl and _rent_ok(sl, ko, now, sb)[0])
+                except Exception as e:
+                    o["rent_ok"] = f"error: {e}"[:120]
+            dry["options"] = opts
+            if not opts:
+                dry["exit"] = "no rung reachable inside the cap"
+            elif opts[0]["slug"] == legs[ek]["slug"]:
+                dry["exit"] = "best option is the current rung (already there)"
+            elif opts[0].get("rent_ok") is not True:
+                dry["exit"] = ("best option pays no rent — _pair_rerung returns "
+                               "False here WITHOUT trying the next option")
+            else:
+                dry["exit"] = "would move"
+    except Exception as e:
+        out.update(ok=False, error=f"{type(e).__name__}: {e}"[:300])
+    return jsonify(out)
+
+
 @app.route("/api/polymarket/dedup-orders")
 def api_poly_dedup_orders():
     """Cancel DUPLICATE resting BUY orders — one order per (slug, intent).
