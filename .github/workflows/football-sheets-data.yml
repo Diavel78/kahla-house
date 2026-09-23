@@ -11,24 +11,31 @@ name: Football Sheets — Data Assembly
 #   Tue 00:00 UTC = Monday 5:00 pm AZ  → monday mode (full build, new
 #     narrative). The Monday generation Routine fires 6:30 pm AZ and reads
 #     these blobs.
-#   Every ~6h Thu 5am AZ → Mon 5am AZ → friday mode (RE-PRICE ONLY: fresh
-#     market lines + model, no new narrative). Added Sep 20 2026 (Rob:
-#     "the NFL lines are stagnant... I thought we said every 6 hours?") —
-#     the 6-hour cadence the /football-picks PAGE polls at only re-fetches
-#     whatever's already in the DB; NOTHING was recomputing the DATA
-#     between Monday's build and Friday's single diff, so a Sunday slate's
-#     lines were up to 2 days stale. `--mode friday` is really "refresh":
-#     it rebuilds data_blob.friday.{lines,model,...} for every game not yet
-#     kicked off and always diffs against MONDAY's baseline (never the
-#     previous refresh — friday_diff reads the blob's top-level fields,
-#     which only the monday build writes), so running it many times a
-#     week is safe and idempotent-ish. The Friday 5am AZ run is special
-#     only in that the 6am AZ narrative Routine reads its `changes` output
-#     to write friday_md blurbs — every OTHER friday-mode fire this
-#     schedule adds is silent re-pricing, no narrative, no PDF re-render.
-#     (Separate "slate" text-card Routines that used to run Thu/Fri/Sat on
-#     overlapping schedules were retired Sep 18 2026 — this is the one
-#     football-sheets pipeline now.)
+#   EVERY 6 HOURS, EVERY DAY (AZ 5am/11am/5pm/11pm) → friday mode
+#     (RE-PRICE ONLY: fresh market lines + model, no new narrative).
+#     Rev'd Sep 23 2026 — the Sep 20 fix only scheduled refreshes Thu→Mon
+#     (assumed Tue/Wed were "no games, nothing to refresh" days), which
+#     left a ~60h dead zone: this week's Monday build sat with
+#     `latest_refresh: null` until Thursday while Rob watched the site
+#     read "44 hours old" on a Wednesday. Lines move all week (injury
+#     reports, market repricing) regardless of which day games kick off,
+#     so this now fires literally every 6h, every day, with ONE
+#     exception: Tuesday skips the :00 UTC slot because that instant IS
+#     the Monday-full-build cron below — two schedule entries firing the
+#     same wall-clock minute would queue two runs, and
+#     `cancel-in-progress: true` could cancel the WEEKLY BUILD if the
+#     redundant refresh started second. `--mode friday` is really
+#     "refresh": it rebuilds data_blob.friday.{lines,model,...} for every
+#     game not yet kicked off and always diffs against MONDAY's baseline
+#     (never the previous refresh — friday_diff reads the blob's
+#     top-level fields, which only the monday build writes), so running
+#     it many times a week is safe and idempotent-ish. The Friday 5am AZ
+#     run is special only in that the 6am AZ narrative Routine reads its
+#     `changes` output to write friday_md blurbs — every OTHER
+#     friday-mode fire is silent re-pricing, no narrative, no PDF
+#     re-render. (Separate "slate" text-card Routines that used to run
+#     Thu/Fri/Sat on overlapping schedules were retired Sep 18 2026 —
+#     this is the one football-sheets pipeline now.)
 # In-season only in effect: outside the season the script finds no games
 # and exits quietly (monday mode exits 1 on a truly empty slate so a dark
 # spine shows red — the six-day-green lesson).
@@ -55,17 +62,9 @@ on:
         required: false
         default: "8"
   schedule:
-    - cron: "0 0 * * 2"    # Tue 00:00 UTC = Mon 5pm AZ  — monday full build
-    - cron: "0 12 * * 4"   # Thu 12:00 UTC = Thu 5am AZ  — refresh
-    - cron: "0 18 * * 4"   # Thu 18:00 UTC = Thu 11am AZ — refresh
-    - cron: "0 12 * * 5"   # Fri 12:00 UTC = Fri 5am AZ  — refresh (feeds the 6am narrative Routine)
-    - cron: "0 18 * * 5"   # Fri 18:00 UTC = Fri 11am AZ — refresh
-    - cron: "0 12 * * 6"   # Sat 12:00 UTC = Sat 5am AZ  — refresh (before CFB slate)
-    - cron: "0 18 * * 6"   # Sat 18:00 UTC = Sat 11am AZ — refresh
-    - cron: "0 12 * * 0"   # Sun 12:00 UTC = Sun 5am AZ  — refresh (before NFL slate)
-    - cron: "0 17 * * 0"   # Sun 17:00 UTC = Sun 10am AZ — refresh (before early NFL kickoffs)
-    - cron: "0 22 * * 0"   # Sun 22:00 UTC = Sun 3pm AZ  — refresh (before SNF)
-    - cron: "0 12 * * 1"   # Mon 12:00 UTC = Mon 5am AZ  — refresh (before MNF)
+    - cron: "0 0 * * 2"              # Tue 00:00 UTC = Mon 5pm AZ — monday full build
+    - cron: "0 0,6,12,18 * * 0,1,3,4,5,6"  # every 6h, every day EXCEPT Tuesday — refresh
+    - cron: "0 6,12,18 * * 2"        # Tuesday — refresh (0:00 UTC skipped, that's the build above)
 
 concurrency:
   group: football-sheets-data
