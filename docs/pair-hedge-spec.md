@@ -5,6 +5,12 @@ every football ladder first and the Ferrari bets what it declines.** Football
 pairs are built from the executor's own line rule; MLB totals keep the
 worth-table path.
 
+**Sep 25 2026 — read `docs/review-2026-09-25.md` first.** The venue pulled
+every EARLY program ~Sep 17; the seeder's lead floor now follows the program
+(`_pair_min_lead_h`), sides are read off labels, one enabled row owns a slug,
+the exit floor after a partner sale is FLAT, amends send the total, rent is
+tri-state, off-touch cancels park the leg.
+
 ## THE GOAL IS FLAT, NOT HEDGED (Rob, Sep 21 2026)
 
 **"Flat, money back plus rent collected, is the fucking goal. Hedged is almost
@@ -99,7 +105,7 @@ independently refuses to manage a leg a pending pick owns.
 |---|---|---|
 | both empty | both chase the touch, together ≤ cap | — |
 | one filled | the empty leg chases up to `cap − filled cost` | the filled leg lists at its own cost |
-| one sold, one held | the sold leg re-bids, capped by the held leg's cost | the held leg floors at **`cap − sold price`**, live through the game, rides if unsold |
+| one sold, one held | the sold leg re-bids, capped by the held leg's cost | the held leg floors **FLAT** (pair cost − sold price; Sep 25 2026 — `cap − sold` was written when the cap was a value estimate and became a 5-11¢ profit demand under the 120 loss budget), live through the game, rides if unsold |
 | both filled ≤ 100 | — | **none. The lock rides.** |
 | both filled > 100 | — | at cost until T−30, then all asks cancel and it holds for the middle |
 | either leg loses rent, nothing held | **both bids cancel** | — |

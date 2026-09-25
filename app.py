@@ -2739,15 +2739,13 @@ def api_pair_status():
                 dry["exit"] = "ladder not priced on the tape"
                 continue
             sport = "NCAAF" if "-cfb-" in legs[ek]["slug"] else "NFL"
-            held_side = (("away" if mt == "spread" else "over") if hk == "a"
-                         else ("home" if mt == "spread" else "under"))
+            held_side = _pair_leg_side(legs[hk], mt)
             held_line = _pair_leg_line(legs[hk], mt)
             dry["held_side"], dry["held_line"] = held_side, held_line
             opts = _pair_partner_options(held_side, float(held_line or 0.0),
                                          rungs, mt, sport,
                                          (st.get(hk) or {}).get("cost"))
-            want_side = (("home" if mt == "spread" else "under") if hk == "a"
-                         else ("away" if mt == "spread" else "over"))
+            want_side = _pair_leg_side(legs[ek], mt)
             ko = _parse_iso(str(row.get("kickoff")))
             for o in opts:
                 sl = (legmap.get((want_side, o["line"])) or (None,))[0]
@@ -2766,6 +2764,46 @@ def api_pair_status():
                                "False here WITHOUT trying the next option")
             else:
                 dry["exit"] = "would move"
+    except Exception as e:
+        out.update(ok=False, error=f"{type(e).__name__}: {e}"[:300])
+    return jsonify(out)
+
+
+@app.route("/api/cellar/health")
+def api_cellar_health():
+    """READ-ONLY: the box's lane vitals, the SHA it booted on, the machine
+    flags and a pair-row count — for a session that cannot reach the box DB
+    (Sep 25 2026: the sandbox allowlist blocks db.thekahlahouse.com and the
+    cloud mirror's leases froze Sep 10). Same numbers as the dashboard's
+    lane card. Shared-secret; fire via the site-curl bridge."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    out: dict = {"ok": True}
+    try:
+        sb = get_supabase()
+        out["cellar"] = _cellar_health(sb) or {}
+        r = (sb.table("exec_probe_runs").select("at,result")
+             .filter("params->>kind", "eq", "cellar_boot")
+             .order("at", desc=True).limit(3).execute().data) or []
+        out["boots"] = [{"at": x.get("at"),
+                         **{k: v for k, v in (x.get("result") or {}).items()
+                            if k in ("sha", "mode", "lanes", "side", "owner")}}
+                        for x in r]
+        out["site_sha"] = (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "")[:12]
+        flags = (sb.table("machine_flags").select("key,value,updated_at")
+                 .limit(60).execute().data) or []
+        out["flags"] = {f["key"]: f.get("value") for f in flags}
+        try:
+            pr = (sb.table("pair_hedges").select("id,enabled")
+                  .gte("kickoff", (datetime.now(timezone.utc)
+                                   - timedelta(hours=10)).isoformat())
+                  .limit(500).execute().data) or []
+            out["pairs"] = {"rows": len(pr),
+                            "enabled": sum(1 for p in pr if p.get("enabled"))}
+        except Exception:
+            pass
     except Exception as e:
         out.update(ok=False, error=f"{type(e).__name__}: {e}"[:300])
     return jsonify(out)
@@ -20468,6 +20506,40 @@ def _pair_foreign_slugs(sb, max_age_s: float = 120.0) -> set:
     return _PAIR_FOREIGN_CACHE["slugs"]
 _PAIR_T30_MIN = 30
 _PAIR_ASK_GTD_H = 7
+_PAIR_PARK_S = 600.0            # an off-touch-cancelled bid stays down this long
+_PAIR_CREATE_GRACE_S = 20.0     # our own async create may not be listed yet
+_PAIR_TICK_BUDGET_S = 150.0     # a lap that cannot finish defers, never overruns
+_PAIR_ROT: dict = {"i": 0}      # fair rotation across laps (the scalp's lesson)
+
+
+def _pair_leg_side(lg: dict, mt: str) -> str:
+    """The leg's SIDE (away/home, over/under) from its LABEL — never from its
+    key. Rows 86/93/97 (Sep 24 2026) were written by hand with leg `a` as the
+    HOME/UNDER side; every engine path assumed a=away/over and would have
+    walked the empty partner onto the SAME side of the line as the held leg
+    (two homes is flat, not a middle)."""
+    lab = str((lg or {}).get("label") or "").split()
+    s = lab[0].lower() if lab else ""
+    if s in ("away", "home", "over", "under"):
+        return s
+    return (("away" if mt == "spread" else "over")
+            if (lg or {}).get("key") == "a"
+            else ("home" if mt == "spread" else "under"))
+
+
+def _pair_rent(slug, ko, now, sb):
+    """True / False / None (UNREADABLE). A venue read that failed is not "no
+    rent": one 429 on /v1/incentives read as rent_pulled and cancelled both
+    bids of every unheld pair for the 10-minute cache (Sep 25 2026), then
+    re-placed them at the back of the queue. The planner keeps orders where
+    they are on None, exactly as it does for an unreadable book."""
+    try:
+        ok, why = _rent_ok(slug, ko, now, sb)
+    except Exception:
+        return None
+    if ok:
+        return True
+    return None if "venue read failed" in str(why) else False
 
 
 def _pair_rows(sb, max_age_s: float = 30.0) -> list:
@@ -20608,6 +20680,7 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
     # side: a hedge half-built is a naked bet, and we do not accept a naked bet
     # as the price of losing a rent program.
     rent_all = bool(legs[ka].get("rent")) and bool(legs[kb].get("rent"))
+    rent_unknown = (legs[ka].get("rent") is None) or (legs[kb].get("rent") is None)
     pair_cost = None
     if both and legs[ka].get("cost") is not None and legs[kb].get("cost") is not None:
         pair_cost = float(legs[ka]["cost"]) + float(legs[kb]["cost"])
@@ -20640,6 +20713,11 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
             why.append("t30_unpaired")
         elif want < 1:
             pass
+        elif rent_unknown and not any_held:
+            # UNREADABLE IS NOT UNPAID (Sep 25 2026): leave the bid exactly
+            # where it is, the way an unreadable book does.
+            bid = "keep"
+            why.append("rent_unreadable")
         elif not (rent_all or any_held):
             why.append("rent_pulled")          # rule 4: nothing held → stand down
         elif L.get("bid") is None:
@@ -20698,7 +20776,7 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
                 # toward. A hedge we cannot buy at 65 is a hedge we skip.
                 capk = None
                 why.append("leg_cap")
-            if capk is not None:
+            if capk is not None and bid != "keep":
                 px = _grid_dn(min(join, capk), tick)
                 if L.get("ask") is not None and px >= float(L["ask"]):
                     px = _grid_dn(float(L["ask"]) - tick, tick)
@@ -20721,7 +20799,23 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
                 else:
                     floor = L.get("cost")
             elif O.get("sold") is not None:
-                floor = cap_c - float(O["sold"])
+                # FLAT, NOT "CAP MINUS SOLD" (Sep 25 2026). That rule dates
+                # from the cap being a VALUE estimate (~100 + worth), where
+                # cap − sold ≈ this leg's cost. With the cap a 120 LOSS BUDGET
+                # it became a profit demand: CIN@PIT held away −2.5 at 58 and
+                # asked 65.5, LAC@BUF asked 64.5 on a 53 lot, WF@LOU 64.5 on
+                # 53.5 — ten held legs parked 5-11¢ over the touch: no fill,
+                # no ask-side rent. The goal is FLAT (Rob, Sep 21): pair cost
+                # minus what the sold leg fetched. The sold leg's cost travels
+                # as `sold_cost`; without it, this leg's own cost; only then
+                # the old cap − sold.
+                if L.get("cost") is not None and O.get("sold_cost") is not None:
+                    floor = max(1.0, float(L["cost"]) + float(O["sold_cost"])
+                                - float(O["sold"]))
+                elif L.get("cost") is not None:
+                    floor = float(L["cost"])
+                else:
+                    floor = cap_c - float(O["sold"])
                 why.append("pair_floor")
             else:
                 floor = L.get("cost")
@@ -20767,7 +20861,15 @@ def _pair_order_write(client, slug, intent, px_c, n, gtt, cur) -> tuple[str, str
         cur_c = None if cur_px is None else ((100.0 - cur_px * 100.0) if short else cur_px * 100.0)
         if cur_c is not None and abs(cur_c - px_c) < 0.01 and int(cur.get("leaves") or 0) == int(n):
             return "keep", cur.get("id")
-        r = _repeg_amend(client, cur.get("id"), slug, canon, int(n), gtt)
+        # THE VENUE'S `quantity` IS THE ORDER TOTAL, FILLS CARRIED (the sell
+        # arm's Sep 9 measurement: "18.99 held vs 17.6 leaves → resize to 18
+        # → leaves 17.6"). Amending a partially filled bid with the LEAVES we
+        # want shrank it by the filled part on every amend: a 15-lot leg
+        # holding 10.8, amended to 4, became a 4-lot with nothing left to
+        # fill. Send leaves-wanted + already-filled so LEAVES lands at n.
+        _cum = float(cur.get("cum") or 0.0)
+        r = _repeg_amend(client, cur.get("id"), slug, canon,
+                         int(n + _cum + 1e-9), gtt)
         if r == "amended":
             return "amended", cur.get("id")
         if r == "unverified":
@@ -20874,6 +20976,45 @@ _PAIR_MIN_LIVE_RUNGS = 1   # keeps the window near the line, where the worth tab
 _PAIR_MAX_WIDTH = 3.0
 _PAIR_DEFAULT_QTY = 15
 _PAIR_MIN_LEAD_H = float(os.environ.get('PAIR_MIN_LEAD_H') or 6.0)
+_PAIR_MIN_LEAD_DAYOF_H = 3.0
+
+
+def _pair_min_lead_h(sport, sb) -> float:
+    """How close to kickoff a pair may still be SEATED. 6h (Rob, Sep 20 2026:
+    "seat early or not at all") while the venue pays EARLY rent on the
+    family — a late seat then pays the spread for almost no rent. But when
+    the venue lists only DAY-OF programs (Sep 25 2026: NFL spreads, CFB totals
+    and MLB moneylines all read [day_of, live] — no early period anywhere,
+    and the ledger shows football spread/total rent falling from ~$100-200 a
+    day to $1-5 a day from Sep 17) the paying window is T-6h → kickoff, and a
+    6h floor makes seating IMPOSSIBLE by construction: _rent_ok refuses every
+    rung before T-6h and the lead floor refuses every game after it. Zero
+    football pairs seated, silently. Rent-first means the floor follows the
+    program: day-of-only → seat down to machine_flags `pair_min_lead_dayof_h`
+    (default 3h — a 2.5h rest before the T-30 cancel). `pair_min_lead_h`
+    overrides both outright."""
+    try:
+        ov = _machine_flag_val("pair_min_lead_h")
+        if ov is not None:
+            return float(ov)
+    except (TypeError, ValueError):
+        pass
+    sp = {"NFL": "nfl", "NCAAF": "cfb", "MLB": "mlb", "NHL": "nhl",
+          "NBA": "nba", "NCAAB": "cbb"}.get(str(sport or "").upper())
+    try:
+        live = _rent_periods_live(sb) if sb is not None else {}
+    except Exception:
+        live = {}
+    early = bool(sp and live and any(
+        "early" in (live.get((sp, fam)) or set()) for fam in ("spread", "total")))
+    if early:
+        return _PAIR_MIN_LEAD_H
+    try:
+        return float(_machine_flag_val("pair_min_lead_dayof_h",
+                                       _PAIR_MIN_LEAD_DAYOF_H)
+                     or _PAIR_MIN_LEAD_DAYOF_H)
+    except (TypeError, ValueError):
+        return _PAIR_MIN_LEAD_DAYOF_H
 
 
 def _pair_worth(sport: str, mt: str, hits: list) -> float:
@@ -21405,7 +21546,8 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 0) -> dict:
             # early and alone, and a pair with nothing held cancels at T−30
             # anyway — so a seat inside a few hours of kickoff is paying the
             # spread for almost no rent.
-            if es and now + timedelta(hours=_PAIR_MIN_LEAD_H) < es < now + timedelta(days=9):
+            _lead = _pair_min_lead_h(r.get("sport"), sb)
+            if es and now + timedelta(hours=_lead) < es < now + timedelta(days=9):
                 games[r["id"]] = r
     order = {"NFL": 0, "NCAAF": 1, "NHL": 2, "NBA": 3, "NCAAB": 4, "MLB": 5}
     todo = sorted(games.values(), key=lambda r: (order.get(r.get("sport"), 9),
@@ -21502,50 +21644,6 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 0) -> dict:
 
 
 def _pair_partner_options(held_side, held_line, rungs, mt, sport, held_cost):
-    """THE RE-RUNG (Rob, Sep 20 2026: "why not rung down?? -1.5 to +4.5 is out,
-    but is +3.5? 2.5? They are ALL a middle… if you hit a cap, why not move
-    down the middle gap to get back to renting").
-
-    One leg is HELD; the partner rung we seated is now too expensive to reach
-    inside the cap, so the bid sits below the touch earning nothing. Every
-    rung further in is still a hedge — it only shrinks the window — and it is
-    cheaper, which puts us back AT the touch. Holding WAS −1.5, a partner of
-    SEA +4.5 wins both on a 2, 3 or 4-point win; +3.5 on a 2 or 3; +2.5 on a 2.
-    Whatever the margin, one leg always wins.
-
-    Returns options best-first: each is (line, bid, cap, worth, hits), where
-    `bid` is the partner's TOUCH (what it costs to sit at the front) and `cap`
-    is derived live from what that window is worth."""
-    out = []
-    want = "home" if held_side == "away" else "away"
-    if mt == "total":
-        want = "under" if held_side == "over" else "over"
-    for side, line, bid, ask in rungs:
-        if side != want or bid is None:
-            continue
-        lo, hi = ((-line, held_line) if (mt == "spread" and want == "away")
-                  else (-held_line, line) if mt == "spread"
-                  else (min(line, held_line), max(line, held_line)))
-        hits = [k for k in range(int(lo) - 1, int(hi) + 2) if lo < k < hi]
-        if not [k for k in hits if k != 0]:
-            continue                       # no window (or a tie only) = no hedge
-        worth = _pair_worth(sport, mt, hits)
-        cap = min(_pair_ceiling(sport), 100.0 + worth + _PAIR_SLACK_C)
-        if held_cost is not None and held_cost + bid > cap + 1e-9:
-            continue                       # still unreachable at the touch
-        out.append({"line": line, "bid": bid, "cap": round(cap, 1),
-                    "worth": round(worth, 1), "hits": hits,
-                    "pair_c": round((held_cost or 0) + bid, 1)})
-    # HIGHEST ODDS OF A MIDDLE FIRST (Rob, Sep 21 2026: "take the most
-    # expensive rung under cap at touch… +4.5, then +3.5, then 2.5, then
-    # mirror. Highest odds to middle on the loss"). `worth` IS that
-    # probability, so widest-affordable sorts first and the mirror — which
-    # can never middle — sorts last, taken only when nothing else fits.
-    out.sort(key=lambda o: (-o["worth"], o["pair_c"]))
-    return out
-
-
-def _pair_partner_options(held_side, held_line, rungs, mt, sport, held_cost):
     """THE RE-RUNG LADDER (Rob, Sep 20 2026: "if it can't hold touch, then it
     drops to the next rung paying rent to get on touch… all the way to the
     mirror, the goal is to get out, not have the bet").
@@ -21629,24 +21727,42 @@ def _pair_rerung(sb, client, row, hk, ek, lg_in, st, cur, now, res) -> bool:
         _pair_rr_why(row, "ladder not priced on the tape")
         return False
     sport = "NCAAF" if "-cfb-" in slug_e else "NFL"
-    held_side = ("away" if mt == "spread" else "over") if hk == "a" else                 ("home" if mt == "spread" else "under")
+    held_side = _pair_leg_side(legs[hk], mt)
+    want_side = _pair_leg_side(legs[ek], mt)
+    if want_side == held_side:              # a hand-written row: both legs one side
+        _pair_rr_why(row, f"both legs read {held_side} — not a pair")
+        return False
     opts = _pair_partner_options(held_side, float(lg_in[hk].get("line") or 0.0),
                                  rungs, mt, sport, st[hk].get("cost"))
     if not opts:
         _pair_rr_why(row, "no rung reachable inside the cap")
         return False
-    best = opts[0]
-    want_side = ("home" if mt == "spread" else "under") if hk == "a" else                 ("away" if mt == "spread" else "over")
-    key = (want_side, best["line"])
-    if key not in legmap:
-        _pair_rr_why(row, f"no slug for {key}")
+    # WALK THE LADDER, DON'T STOP AT THE FIRST RUNG (Sep 25 2026). The best
+    # option used to be the ONLY option tried: no slug, or no rent on it, and
+    # the whole re-rung was declined — while the next rung in paid and was
+    # reachable. /api/pair/status named that exit on 15 of 15 half-filled
+    # pairs the morning after the venue pulled the early football programs.
+    ko = _parse_iso(str(row.get("kickoff")))
+    best = new_slug = new_intent = None
+    why_last = "no rung reachable inside the cap"
+    for o in opts:
+        key = (want_side, o["line"])
+        if key not in legmap:
+            why_last = f"no slug for {key}"
+            continue
+        sl, it = legmap[key]
+        if sl == slug_e:
+            if o is opts[0]:
+                return False                    # already on the best rung
+            continue
+        if not _rent_ok(sl, ko, now, sb)[0]:
+            why_last = f"{sl[-18:]} pays no rent"
+            continue                            # RULE #1 — rent or no seat
+        best, new_slug, new_intent = o, sl, it
+        break
+    if best is None:
+        _pair_rr_why(row, why_last)
         return False
-    new_slug, new_intent = legmap[key]
-    if new_slug == slug_e:
-        return False                            # already there
-    if not _rent_ok(new_slug, _parse_iso(str(row.get("kickoff"))), now, sb)[0]:
-        _pair_rr_why(row, f"{new_slug[-18:]} pays no rent")
-        return False                            # RULE #1 — rent or no seat
     if cur[ek]["bid"] is not None and not _pair_cancel(client, cur[ek]["bid"]):
         _pair_rr_why(row, "could not cancel the stranded bid")
         return False                            # never leave two seats out
@@ -21824,6 +21940,28 @@ def _pair_tick(sb, now=None) -> dict:
     if not rows:
         res["gate"] = "no_pairs"
         return res
+    # ONE ROW PER SLUG (Sep 25 2026): rows 82/90, 51/98 and 70/96 were live
+    # twins on the same rungs (hand-inserted while Rob was away), each reading
+    # the venue's lot as its own and each writing state. The OLDEST row owns a
+    # slug; a younger row that shares one is skipped and named in `dup_rows`.
+    _owner: dict = {}
+    _kept = []
+    for row in sorted(rows, key=lambda r: int(r.get("id") or 0)):
+        _sl = [lg.get("slug") for lg in (row.get("legs") or []) if lg.get("slug")]
+        _dup = [s for s in _sl if s in _owner]
+        if _dup:
+            res.setdefault("dup_rows", []).append(f"{row.get('id')}~{_owner[_dup[0]]}")
+            continue
+        for s in _sl:
+            _owner[s] = row.get("id")
+        _kept.append(row)
+    rows = _kept
+    # FAIR ROTATION under a budget: a lap that cannot finish defers the tail,
+    # and the next lap starts where this one stopped (the scalp's lesson).
+    _rot = _PAIR_ROT["i"] % max(1, len(rows))
+    rows = rows[_rot:] + rows[:_rot]
+    _PAIR_ROT["i"] = _rot + 1
+    _t0m = _time.monotonic()
     client = get_client()
     # THE MIRROR IS THE DEFAULT READ (Rob, Sep 21 2026: "we need to figure out
     # to read the damn venue… we are only going up in volume"). A fresh
@@ -21845,10 +21983,25 @@ def _pair_tick(sb, now=None) -> dict:
     all_slugs = [lg.get("slug") for r in rows for lg in (r.get("legs") or [])
                  if lg.get("slug")]
     try:
-        if _WS_WATCHLIST_CB is not None and all_slugs:
-            _WS_WATCHLIST_CB(set(all_slugs))
+        # MERGE, NEVER REPLACE (Sep 25 2026): the pair's set is a subset of the
+        # repeg lap's open-orders push, so a replace=True push here evicted
+        # every non-pair order slug from the depth/core groups every lap
+        # (unsubscribe, 6s dead air, baseline replay) — snipers and the
+        # fill-status walk paid REST for every Ferrari slug until the next
+        # repeg push. The merge path is the one the order-event push uses.
+        if _WS_WATCHLIST_MERGE_CB is not None and all_slugs:
+            _WS_WATCHLIST_MERGE_CB(set(all_slugs))
     except Exception:
         pass
+    if len(all_slugs) > 400:
+        # `orders.list` takes ≤400 slugs; a pair past that read `orders=[]`
+        # every tick and created a fresh bid every tick. Serve the first 200
+        # pairs and NAME the rest instead of quoting them blind.
+        _cov = set(all_slugs[:400])
+        _drop = [r for r in rows
+                 if any(lg.get("slug") not in _cov for lg in (r.get("legs") or []))]
+        res["uncovered_rows"] = [r.get("id") for r in _drop]
+        rows = [r for r in rows if r not in _drop]
     lane_orders = None
     try:
         _resp = client.orders.list({"slugs": all_slugs[:400]})
@@ -21861,6 +22014,9 @@ def _pair_tick(sb, now=None) -> dict:
         return res                              # fail closed, never seat blind
     res["orders"] = len(lane_orders)
     for row in rows:
+        if _time.monotonic() - _t0m > _PAIR_TICK_BUDGET_S:
+            res["deferred"] = res.get("deferred", 0) + 1
+            continue                            # next lap starts here (rotation)
         try:
             _pair_step(sb, client, row, positions, now, res, lane_orders)
             res["pairs"] += 1
@@ -22037,6 +22193,8 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
                                 f"{h - last_h:g} @ {px}¢ (now {h:g}/{qty})")
         elif h < last_h - 0.01:
             s["sold"] = s.get("ask_c")
+            if s.get("cost") is not None:
+                s["sold_cost"] = s.get("cost")   # the flat floor needs what we paid
             res["sells"] += 1
             _send_fill_telegram(f"🔗 PAIR {ev}: {cur[k]['label']} sold "
                                 f"{last_h - h:g} @ {s.get('ask_c')}¢ (left {h:g})")
@@ -22076,18 +22234,20 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
         own_b = s.get("bid_c") if cur[k]["bid"] else None
         own_a = s.get("ask_c") if cur[k]["ask"] else None
         lg_in[k] = {"h": h, "cost": s.get("cost"), "sold": None, "book_ok": book_ok,
+                    "sold_cost": s.get("sold_cost"),
                     "line": _pair_leg_line(lg, mt),
                     "bid": _pair_touch_ex_self(bk, "bid", own_b,
                                                (cur[k]["bid"] or {}).get("leaves")),
                     "ask": _pair_touch_ex_self(bk, "ask", own_a,
                                                (cur[k]["ask"] or {}).get("leaves")),
                     "tick": tick,
-                    "rent": bool(_rent_ok(slug, ko, now, sb)[0]) if mins > 0 else False}
+                    "rent": _pair_rent(slug, ko, now, sb) if mins > 0 else False}
     ka, kb = list(lg_in)
     # a new cycle when both legs are flat: forget the last sell prices
     if lg_in[ka]["h"] < 0.01 and lg_in[kb]["h"] < 0.01:
         for k in (ka, kb):
             st[k].pop("sold", None)
+            st[k].pop("sold_cost", None)
     for k in (ka, kb):
         lg_in[k]["sold"] = st[k].get("sold")
     plan = _pair_plan(lg_in, qty, cap, mins)
@@ -22110,6 +22270,43 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
                     s.pop(side + "_id", None)
                 s.pop(side + "_c", None)
                 continue
+            if side == "bid" and have is None:
+                # A BID WE JUST CANCELLED OFF THE TOUCH DOES NOT COME STRAIGHT
+                # BACK (Sep 25 2026). "nothing reachable → cancel" ran every
+                # 120s and this branch re-created the same capped bid 20s
+                # later: cancel, create, cancel, create — back of the queue
+                # each time, two venue writes a minute, rent-less. A capped
+                # bid stays down for _PAIR_PARK_S after an off-touch cancel;
+                # a bid that can sit AT the touch clears the park.
+                _pk = _parse_iso(str(s.get("parked_at") or ""))
+                if ("capped" in p["why"] and _pk is not None
+                        and (now - _pk).total_seconds() < _PAIR_PARK_S):
+                    p["why"].append("parked")
+                    continue
+                if "capped" not in p["why"]:
+                    s.pop("parked_at", None)
+                # THE FILL WE HAVE NOT SEEN YET (Sep 25 2026): the position
+                # mirror can lag a fill by minutes when the private socket
+                # blinks, and a create is async. A bid that vanished from the
+                # list seconds after our own create is probably still landing;
+                # one that vanished with our held size unchanged may have
+                # FILLED. Never seat a second full lot on a leg: wait out the
+                # grace, then read the venue before creating.
+                _ba = _parse_iso(str(s.get("bid_at") or ""))
+                if (s.get("bid_id") and _ba is not None
+                        and (now - _ba).total_seconds() < _PAIR_CREATE_GRACE_S):
+                    p["why"].append("create_pending")
+                    continue
+                if s.get("bid_id"):
+                    _fp = _pmm_positions_raw(client, fresh=True)
+                    if _fp is None:
+                        p["why"].append("positions_unreadable")
+                        continue
+                    _fn = abs(float(((_fp.get(c["slug"]) or {}).get("net")) or 0.0))
+                    if _fn > lg_in[k]["h"] + 0.5:
+                        p["why"].append("fill_unseen")   # next tick reads it
+                        continue
+                    s.pop("bid_id", None)
             if (side == "bid" and have is None
                     and not any(lg_in[x]["h"] >= 1.0 for x in (ka, kb))):
                 # NEW money only. COMPLETING a pair is exempt (Sep 21 2026, at
@@ -22126,7 +22323,10 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
                 if exp is None or exp + want[1] * want[0] / 100.0 > bcap:
                     p["why"].append("book_cap")
                     continue
-            if want[1] * want[0] / 100.0 > _REPEG_MAX_COST_USD:
+            if side == "bid" and want[1] * want[0] / 100.0 > _REPEG_MAX_COST_USD:
+                # BIDS ONLY: an ask on a held lot adds no exposure, and the
+                # $13 rule was refusing EXITS on any 19-20 lot over ~65¢
+                # (CAR@CLE over 41.5, 19 held, its ask blocked — Sep 25 2026).
                 p["why"].append("master_rule")
                 continue
             verdict, oid = _pair_order_write(client, c["slug"], intent, want[0], want[1], gtt, have)
@@ -22264,6 +22464,7 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
                 res["off_touch_canceled"] = res.get("off_touch_canceled", 0) + 1
                 st[k].pop("bid_c", None)
                 st[k].pop("bid_id", None)
+                st[k]["parked_at"] = now.isoformat()   # stays down (_PAIR_PARK_S)
                 app.logger.info("PAIR %s: %s bid cancelled — %sc under the touch "
                                 "with no reachable rung", row.get("id"),
                                 cur[k]["label"],
@@ -23498,6 +23699,7 @@ _OMS_RETRY_MIN = {"rent": 30, "no_pmm": 30, "no_book": 30, "none": 30,
                   "no_line": 60,       # real books, no readable line yet (book pull 6am)
                   "edge": 60, "tail": 60, "no_model": 360, "cap": 10,
                   "pair_owned": 60,    # a middle pair owns the (game, mt)
+                  "pairs_own": 240,    # the football wall (pairs_own_football)
                   "pair_first_look": 10,   # waiting on the pair machine's verdict
                   "rung_window": 60,   # payers exist but all outside mid±1
                                        # — books grow toward the middle as
@@ -24128,10 +24330,18 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
             # ML rows don't need the football fit — the ML leg computes
             # its own model prob (and has the no-view cheap-side path
             # beyond the no-veto horizon, so no_model can't park UFC).
-            gp = (True if mtype == "moneyline"
-                  else _gridiron_proj(sb, g.get("sport"),
-                                      g.get("event_name")))
-            if gp:
+            _walled = (mtype in ("spread", "total")
+                       and _machine_flag("pairs_own_football", True))
+            gp = (None if _walled else True if mtype == "moneyline"
+                  else _gridiron_proj(sb, g.get("sport"), g.get("event_name")))
+            if _walled:
+                # THE WALL, BEFORE THE PRICE (Sep 25 2026): the executor's
+                # first line is "pairs_own", but this loop paid _gridiron_proj
+                # + _gridiron_price_game (up to 8 book fills, or a 15-20s REST
+                # event search) for every enrolled spread/total row every 30
+                # minutes just to hear it. Refuse here; retry in hours.
+                verdict, retry_min = "pairs_own", _OMS_RETRY_MIN["pairs_own"]
+            elif gp:
                 # Failed-lookup backoff (module-level, survives laps): a
                 # game whose venue event-search just missed is not retried
                 # at venue cost for 20 min — the requeue is free.
@@ -24295,6 +24505,12 @@ def _gridiron_bet_sweep(sb, now, deadline, stats):
     guard. Rent stays per-market at placement, as always."""
     try:
         if _time.time() >= deadline - 1.5:
+            return
+        if _machine_flag("pairs_own_football", True):
+            # THE WALL (Sep 25 2026): this sweep exists to BET spreads and
+            # totals; behind pairs_own_football every build (8s each, up to
+            # four a lap) ended in "pairs_own". Skip the builds outright.
+            stats["sweep_gate"] = "pairs_own"
             return
         import handicapper_web
         lo = (now + timedelta(hours=_OPENER_LO_H)).isoformat()
@@ -26545,6 +26761,7 @@ _REPEG_BUDGET_S = 20.0    # hard wall clock for the chase loop. Stops mid-pass
 # the private ORDER snapshot came up empty/uncharted on night one — the
 # lap's list is authoritative and refreshes every ~2 min regardless.
 _WS_WATCHLIST_CB = None
+_WS_WATCHLIST_MERGE_CB = None     # push_watch(replace=False) — the pair lane's push
 # TARGETED LAPS (Aug 31 2026, user: "if the websocket is telling you what
 # just moved, why the hell are you reading 130 slugs"): drain_dirty hands
 # the lap the set of markets the socket saw move since last lap; the
@@ -28136,6 +28353,13 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
     global _RECENTER_LAST_TS
     if _machine_flag_val("recenter_enabled") is False:
         return {"gate": "off"}
+    if _machine_flag("pairs_own_football", True):
+        # THE WALL (Sep 25 2026): with the executor refusing every football
+        # spread/total ("pairs_own"), a seat this pass cancels and flips to
+        # pending is never re-seated — a paying bid gone for good, up to
+        # _RECENTER_MAX_MOVES an hour. There is nothing to recenter TO.
+        _RECENTER_LAST_TS = _time.time()
+        return {"gate": "pairs_own"}
     if _time.time() - _RECENTER_LAST_TS < _RECENTER_EVERY_S:
         return {"gate": "cadence"}
     owner = _kalshi_owner_uid()
@@ -29482,12 +29706,17 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     if not owner:
         return {"gate": "no_owner"}
     try:
-        rows = (sb.table("bot_picks")
-                .select("id,event_name,event_start,entry_price,market_type,"
-                        "side,signal_blob,poly_pnl")
-                .eq("status", "pending").eq("asked_by", owner)
-                .gte("event_start", (now - timedelta(hours=12)).isoformat())
-                .limit(300).execute().data) or []
+        # PAGED, NOT .limit(300) (Sep 25 2026): PostgREST returns rows in no
+        # order without .order(), so every pick past the 300th never got an
+        # ask — naked inventory on exactly the busy days (390 pending on a
+        # CFB Saturday, per the fill-status notes).
+        _lo_es = (now - timedelta(hours=12)).isoformat()
+        rows = _sb_paged(lambda: (sb.table("bot_picks")
+                                  .select("id,event_name,event_start,entry_price,"
+                                          "market_type,side,signal_blob,poly_pnl")
+                                  .eq("status", "pending").eq("asked_by", owner)
+                                  .gte("event_start", _lo_es)
+                                  .order("event_start")), 3) or []
     except Exception as e:
         return {"gate": ("picks_err: " + str(e))[:100]}
     _lots = _lot_ledger(sb)                 # our own trade walk: the exit floor's arbiter
@@ -30276,7 +30505,9 @@ def _snipe_buy_one(sb, client, slug: str) -> None:
     canon = ((100.0 - tgt) / 100.0) if snap.get("synth") else (tgt / 100.0)
     mod = {"marketSlug": slug, "price": {"value": f"{canon:.3f}", "currency": "USD"},
            "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": snap["gtt"],
-           "participateDontInitiate": True, "quantity": int(snap["qty"])}
+           "participateDontInitiate": True,
+           # TOTAL, fills carried (Sep 25 2026) — see the repeg chase
+           "quantity": int(snap["qty"]) + int(snap.get("cum") or 0)}
     frm = snap["our_bid"]
     ok, note = True, "buy"
     try:
@@ -30334,8 +30565,13 @@ def _buy_snap_publish(sb, fs: dict, now, client, full_lap: bool) -> int:
         if not (b.get("autobet") or b.get("ou_trader") or grid or fbp):
             continue                          # model rent lanes only
         slug = f["slug"]
-        if SCALP_POPPED.get(slug, 0.0) > t_read - 300.0 and slug not in BUY_SNAP:
-            pass                              # a recent pop: this lap's read vouches anew
+        # A SIZE EVENT AFTER THIS LAP'S VENUE READ MEANS THE SIZE WE HOLD IS
+        # STALE (Sep 25 2026 — this guard was a literal `pass`). The walk read
+        # the venue at fs["read_mono"]; a pop newer than that is a fill it
+        # never saw, and re-publishing pre-fill leaves would let the sniper
+        # amend the order to a stale total. Skip it until the next lap.
+        if SCALP_POPPED.get(slug, 0.0) > float(fs.get("read_mono") or t_read):
+            continue
         try:
             gtt = (datetime.fromisoformat(
                 str(r.get("event_start")).replace("Z", "+00:00"))
@@ -30359,7 +30595,8 @@ def _buy_snap_publish(sb, fs: dict, now, client, full_lap: bool) -> int:
             wall_c = _ml_model_wall_c(sb, r, mt="prop")   # stamped model fair + slack
         fresh[slug] = {"oid": f["order_id"], "our_bid": float(f["my_price_c"]),
                        "wall_c": wall_c,
-                       "qty": qty, "synth": bool(f.get("synthetic")),
+                       "qty": qty, "cum": int(float(f.get("order_cum") or 0.0)),
+                       "synth": bool(f.get("synthetic")),
                        "join": (fbp or _gridiron_join_touch(slug, 50.0)),   # football: AT the touch
                        "cap_c": (_gridiron_cap_for(sb, slug) if grid
                                  else _REPEG_NRFI_PRICE_CAP_C),
@@ -30654,9 +30891,12 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 res["t_setup"] = round(_time.time() - _tp, 1)
                 _tp = _time.time()
                 app.logger.info("repeg phase: fill-status uid=%s mode=%s", uid, res.get("mode"))
+                _fs_read = _time.monotonic()      # the buy sniper's pop guard
                 fs = _compute_fill_status(
                     sb, uid, poly_snap=lap_snap,
                     only_slugs=(_dirty if _targeted else None))
+                if isinstance(fs, dict):
+                    fs["read_mono"] = _fs_read
             except Exception:
                 continue
             # ALWAYS stamped (Sep 6 2026): the old t_fs landed only when a
@@ -31085,6 +31325,14 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 if not qty:
                     res["skipped"] += 1
                     continue
+                # AMEND SIZE = TOTAL (Sep 25 2026): modify's `quantity` is the
+                # order total with fills carried (the sell arm's Sep 9 fix).
+                # Sending LEAVES shrank every partially filled bid by its
+                # fill on each chase — a 20-lot nibbled 0.3 went 19, 18, …;
+                # a real partial (cum 5) went 15 → 10 → 5 → 0 in three
+                # chases. The create leg keeps `qty` (a fresh order has no
+                # cum).
+                qty_amend = int(qty + float(f.get("order_cum") or 0.0) + 1e-9)
                 if (res["acted"] >= _REPEG_MAX_ACTIONS
                         or (_time.time() - _t0) > _REPEG_BUDGET_S):
                     res["deferred"] += 1
@@ -31108,7 +31356,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                     _gtt_a = None
                 _did_amend, state, new_oid = False, None, None
                 if (not _flipped and _gtt_a and _amend_on(slug)):
-                    _av = _repeg_amend(client, oid, slug, canon, qty, _gtt_a)
+                    _av = _repeg_amend(client, oid, slug, canon, qty_amend, _gtt_a)
                     if _av == "amended":
                         _did_amend, state, new_oid = True, "amended", oid
                         res["amended"] = res.get("amended", 0) + 1

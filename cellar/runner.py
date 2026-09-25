@@ -303,6 +303,13 @@ class Runner:
         GIL on a float store — worst case a wake lands a second late.
         """
         self._next_due[lane] = 0.0
+        # STICKY (Sep 25 2026): a wake that lands while the lane is RUNNING
+        # used to be discarded by _tick's still-running branch, which set
+        # next_due a full cadence out — a fill frame with no follow-up
+        # market frame made scalp/pair react at +120s/+45s, not "seconds".
+        # Remember it; the running lane goes again right after it finishes.
+        self._wake_pending = getattr(self, "_wake_pending", set())
+        self._wake_pending.add(lane)
 
     def _tick(self, now: float, enabled: list[str]) -> None:
         for name in enabled:
@@ -315,8 +322,11 @@ class Runner:
                 # that is the overlapping-batch bug in miniature.
                 log.warning("lane %s still running, skipping this tick", name)
                 self._overrun_check(name, spec, now)
-                self._next_due[name] = now + spec.every_s
+                self._next_due[name] = (
+                    now + 1.0 if name in getattr(self, "_wake_pending", set())
+                    else now + spec.every_s)
                 continue
+            getattr(self, "_wake_pending", set()).discard(name)
             self._next_due[name] = now + spec.every_s
             t = threading.Thread(target=self.run_lane, args=(name,),
                                  name=f"cellar-{name}", daemon=True)
@@ -425,6 +435,11 @@ class Runner:
                         _app._WS_WATCHLIST_CB = (
                             lambda slugs: _wsf0.push_watch(set(slugs),
                                                            replace=True))
+                        # the pair lane MERGES its legs into the watch list
+                        # (a replace from a subset evicted every other slug)
+                        _app._WS_WATCHLIST_MERGE_CB = (
+                            lambda slugs: _wsf0.push_watch(set(slugs),
+                                                           replace=False))
                         # Targeted laps: the repeg reads books only for
                         # markets the socket named (None = socket can't
                         # vouch → full sweep, today's behavior).

@@ -1126,6 +1126,12 @@ class MarketsFeed:
         if requeue:
             with self._lock:
                 self._ops = requeue + self._ops
+        # LATE RE-QUEUES (Sep 25 2026): the cap-hold and post-eviction
+        # "come back in 3s" appends below used to go to `requeue` AFTER it
+        # had been pushed — a fresh local list nobody read. Core evicted a
+        # pack to seat itself and then never re-sent; the evicted rungs
+        # priced over REST until the next repeg push.
+        late: list = []
         changed = False
         for op in ripe:
             verb, gid, slugs = op[0], op[1], op[2]
@@ -1205,8 +1211,8 @@ class MarketsFeed:
             if not new:
                 continue
             if nowt - getattr(self, "_cap_hit_at", 0.0) < CAP_HOLD_S:
-                requeue.append(("add", gid, set(slugs), exp,
-                                self._cap_hit_at + CAP_HOLD_S))
+                late.append(("add", gid, set(slugs), exp,
+                             self._cap_hit_at + CAP_HOLD_S))
                 continue                      # venue said full — hold
             # REQUEST budget: core evicts ladders to seat itself; a ladder
             # that finds no room is skipped (its rungs price via REST).
@@ -1222,7 +1228,7 @@ class MarketsFeed:
                 # pack's request until its unsubscribe lands; sending core
                 # in the same instant got 'max subscriptions' and started
                 # the re-queue storm. Come back in 3s.
-                requeue.append(("add", gid, set(slugs), exp, nowt + 3.0))
+                late.append(("add", gid, set(slugs), exp, nowt + 3.0))
                 continue
             if (sum(len(r) for r, _s in self._groups.values())
                     >= getattr(self, "_rid_cap", MKTS_MAX_RIDS)):
@@ -1277,6 +1283,9 @@ class MarketsFeed:
                     self._ops.append(("add", gid, cur,
                                       self._expiry.get(gid),
                                       time.time() + 2.0))
+        if late:
+            with self._lock:
+                self._ops = late + self._ops
         if self._pack_flush(ws, nowt):
             changed = True
         if changed:

@@ -1119,10 +1119,25 @@ def test_pair_plan() -> None:
                           "b": leg(bid=60.0, ask=61.0)}, 15, 110, 2000)
     check("one held, partner touch 60 → hedge joins it", p2["b"]["bid"] == (60.0, 15))
     check("one held, never sold → ask at cost + tick when it leads", p["a"]["ask"] == (44.5, 15))
-    # a sold at 60, b held at 57 → b floor = 110 − 60 = 50, sells at 50.5 if it leads
-    p = _app._pair_plan({"a": leg(sold=60.0, bid=58.0, ask=61.0),
+    # a (cost 53) sold at 60, b held at 57 → FLAT floor = 57 + 53 − 60 = 50,
+    # sells at 50.5 if it leads (Sep 25 2026: flat, not cap − sold — under a
+    # 120 loss budget "cap − sold" had become a profit demand parked 5-11¢
+    # over the touch on ten held legs)
+    p = _app._pair_plan({"a": leg(sold=60.0, sold_cost=53.0, bid=58.0, ask=61.0),
                          "b": leg(h=15, cost=57.0, bid=40.0, ask=55.0)}, 15, 110, 2000)
-    check("lone leg after a sale → floor cap − sold (50 → 50.5)", p["b"]["ask"] == (50.5, 15))
+    check("lone leg after a sale → FLAT floor (57 + 53 − 60 = 50 → 50.5)", p["b"]["ask"] == (50.5, 15))
+    # the sold leg's cost unknown → this leg's own cost is the floor, never
+    # cap − sold (120 − 60 = 60 would sit 3¢ over cost with no fill)
+    p3 = _app._pair_plan({"a": leg(sold=60.0, bid=58.0, ask=61.0),
+                          "b": leg(h=15, cost=57.0, bid=40.0, ask=55.0)}, 15, 120, 2000)
+    check("sold cost unknown → floor at this leg's own cost (57), never cap − sold (60)",
+          p3["b"]["ask"] == (57.0, 15))
+    # UNREADABLE RENT IS NOT UNPAID (Sep 25 2026): rent=None with nothing
+    # held keeps the bid exactly where it is, like an unreadable book
+    p = _app._pair_plan({"a": leg(bid=44.0, ask=45.0, rent=None), "b": leg(bid=50.0, ask=51.0)}, 15, 110, 2000)
+    check("rent unreadable + nothing held → keep both bids",
+          p["a"]["bid"] == "keep" and p["b"]["bid"] == "keep"
+          and "rent_unreadable" in p["a"]["why"])
     check("sold leg re-bids capped at cap − held cost (53)", p["a"]["bid"] == (53.0, 15))
     # both held at 44 + 55 = 99 → the lock rides, no asks
     p = _app._pair_plan({"a": leg(h=15, cost=44.0, bid=44.0, ask=45.0),
@@ -1277,8 +1292,10 @@ def test_pair_owner_guard() -> None:
     grid = inspect.getsource(_app._gridiron_try_bet_impl)
     check("and the Ferrari refuses a rung a pair leg owns",
           "_pair_owned_slugs" in grid)
-    check("seeder seats EARLY only — hours of lead, not minutes",
-          _app._PAIR_MIN_LEAD_H >= 3 and "_PAIR_MIN_LEAD_H" in src)
+    check("seeder seats EARLY only — hours of lead, not minutes (6h while the "
+          "family pays early, 3h when it pays day-of only — Sep 25 2026)",
+          _app._PAIR_MIN_LEAD_H >= 3 and _app._PAIR_MIN_LEAD_DAYOF_H >= 2
+          and "_pair_min_lead_h(" in src)
     check("seeder prices from the quote table AND the tape (it was blind on the "
           "board the same logic found 11 pairs on)",
           "_pair_tape_quotes" in src)
@@ -1300,8 +1317,8 @@ def test_pair_read_budget() -> None:
     import inspect
     tick = inspect.getsource(_app._pair_tick)
     check("one order read for the whole lane", "all_slugs[:400]" in tick)
-    check("legs go on the markets-socket watch list",
-          "_WS_WATCHLIST_CB" in tick)
+    check("legs go on the markets-socket watch list (MERGED, never a replace)",
+          "_WS_WATCHLIST_MERGE_CB" in tick)
     check("an unreadable order list fails CLOSED",
           "orders_unreadable" in tick)
     step = inspect.getsource(_app._pair_step)
@@ -1339,7 +1356,7 @@ def test_pair_completion_exempt() -> None:
     import app as _app
     import inspect
     src = inspect.getsource(_app._pair_step)
-    i = src.index('side == "bid" and have is None')
+    i = src.index('if (side == "bid" and have is None')
     window = src[i:i + 700]
     check("completion bids skip the exposure fence",
           'lg_in[x]["h"] >= 1.0' in window)
@@ -1830,6 +1847,93 @@ def test_pair_rerung() -> None:
           mir["hits"] == [] and mir["worth"] == 0.0)
 
 
+def test_pair_leg_side() -> None:
+    """A LEG'S SIDE COMES FROM ITS LABEL (Sep 25 2026): rows 86/93/97 were
+    hand-written with leg `a` on the HOME/UNDER side, and every path that
+    read a=away/over would have walked the partner onto the held leg's own
+    side of the line."""
+    import app as _app
+    check("home label on key a reads home",
+          _app._pair_leg_side({"key": "a", "label": "home +0.5"}, "spread") == "home")
+    check("under label on key a reads under",
+          _app._pair_leg_side({"key": "a", "label": "under +47.5"}, "total") == "under")
+    check("no label → the key's convention (a = away)",
+          _app._pair_leg_side({"key": "a"}, "spread") == "away")
+    check("no label → the key's convention (b = under)",
+          _app._pair_leg_side({"key": "b"}, "total") == "under")
+    import inspect
+    src = inspect.getsource(_app._pair_rerung)
+    check("the re-rung walks every option, not just the first",
+          "for o in opts:" in src and "why_last" in src)
+    check("…and reads both sides off the labels",
+          "_pair_leg_side(legs[hk], mt)" in src and "_pair_leg_side(legs[ek], mt)" in src)
+    st = inspect.getsource(_app.api_pair_status)
+    check("/api/pair/status reads sides the same way", "_pair_leg_side(legs[hk], mt)" in st)
+
+
+def test_buy_amend_sends_the_total() -> None:
+    """MODIFY'S `quantity` IS THE ORDER TOTAL, FILLS CARRIED (the sell arm's
+    Sep 9 measurement). Sending LEAVES shrank every partially filled bid by
+    its fill on each amend (Sep 25 2026): pair legs, the repeg chase and
+    the buy sniper all did it."""
+    import app as _app
+    import inspect
+    pw = inspect.getsource(_app._pair_order_write)
+    check("pair amend adds the filled part", "int(n + _cum + 1e-9)" in pw)
+    rp = inspect.getsource(_app._repeg_tick)
+    check("repeg chase amends with cum + leaves",
+          "qty_amend = int(qty + float(f.get(\"order_cum\") or 0.0) + 1e-9)" in rp
+          and "_repeg_amend(client, oid, slug, canon, qty_amend, _gtt_a)" in rp)
+    sb = inspect.getsource(_app._snipe_buy_one)
+    check("buy sniper amends with cum + leaves", 'int(snap.get("cum") or 0)' in sb)
+    bp = inspect.getsource(_app._buy_snap_publish)
+    check("the snapshot carries cum", '"cum": int(float(f.get("order_cum") or 0.0))' in bp)
+    check("the pop guard is real, not `pass`",
+          'SCALP_POPPED.get(slug, 0.0) > float(fs.get("read_mono") or t_read)' in bp
+          and "            pass" not in bp.split("read_mono")[0][-400:])
+
+
+def test_football_wall_is_checked_before_the_price() -> None:
+    """pairs_own_football (Sep 21 2026) walled the executor; the callers kept
+    paying for pricing (OMS every 30 min, the sweep's dossier builds) and the
+    recenter kept CANCELLING seats the executor could no longer re-seat."""
+    import app as _app
+    import inspect
+    oms = inspect.getsource(_app._oms_pass)
+    check("OMS refuses walled rows before pricing",
+          '_walled = (mtype in ("spread", "total")' in oms
+          and '"pairs_own", _OMS_RETRY_MIN["pairs_own"]' in oms)
+    check("pairs_own retries in hours", _app._OMS_RETRY_MIN.get("pairs_own", 0) >= 120)
+    rc = inspect.getsource(_app._gridiron_recenter_tick)
+    check("recenter stands down behind the wall", '{"gate": "pairs_own"}' in rc)
+    sw = inspect.getsource(_app._gridiron_bet_sweep)
+    check("the bet sweep skips its builds behind the wall", 'stats["sweep_gate"] = "pairs_own"' in sw)
+
+
+def test_pair_tick_guards() -> None:
+    """One row per slug, a slug cap that names what it cannot serve, a lap
+    budget with rotation, a merge (not replace) watch push, park-after-cancel
+    and the unseen-fill guard (Sep 25 2026)."""
+    import app as _app
+    import inspect
+    tk = inspect.getsource(_app._pair_tick)
+    check("younger twin rows are skipped and named", '"dup_rows"' in tk and "_owner" in tk)
+    check("slugs past the list cap are named, not quoted blind", '"uncovered_rows"' in tk)
+    check("the lap has a budget and rotates", "_PAIR_TICK_BUDGET_S" in tk and "_PAIR_ROT" in tk)
+    check("the watch push merges", "_WS_WATCHLIST_MERGE_CB(set(all_slugs))" in tk
+          and "_WS_WATCHLIST_CB(set(all_slugs))" not in tk)
+    st = inspect.getsource(_app._pair_step)
+    check("an off-touch cancel parks the leg", 'st[k]["parked_at"] = now.isoformat()' in st
+          and '"parked"' in st)
+    check("a vanished bid re-reads the venue before a new lot",
+          '"fill_unseen"' in st and "_pmm_positions_raw(client, fresh=True)" in st)
+    check("the $13 rule governs bids only",
+          'if side == "bid" and want[1] * want[0] / 100.0 > _REPEG_MAX_COST_USD' in st)
+    check("rent is read tri-state", "_pair_rent(slug, ko, now, sb)" in st)
+    sd = inspect.getsource(_app._pair_seed_tick)
+    check("the seeder's lead floor follows the program", "_pair_min_lead_h(r.get(\"sport\"), sb)" in sd)
+
+
 def main() -> int:
     print("THE CELLAR — offline selftest\n")
     for t in (test_imports_without_creds, test_config_validation,
@@ -1844,6 +1948,8 @@ def main() -> int:
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
+              test_pair_leg_side, test_buy_amend_sends_the_total,
+              test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
