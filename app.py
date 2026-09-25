@@ -20515,6 +20515,7 @@ _PAIR_PARK_S = 600.0            # an off-touch-cancelled bid stays down this lon
 _PAIR_CREATE_GRACE_S = 20.0     # our own async create may not be listed yet
 _PAIR_TICK_BUDGET_S = 150.0     # a lap that cannot finish defers, never overruns
 _PAIR_ROT: dict = {"i": 0}      # fair rotation across laps (the scalp's lesson)
+PAIR_LIVE_SLUGS: set = set()    # the legs we quote — the markets socket wakes the pair lane ONLY for these
 
 
 def _pair_leg_side(lg: dict, mt: str) -> str:
@@ -21971,6 +21972,8 @@ def _pair_tick(sb, now=None) -> dict:
     # REST.
     all_slugs = [lg.get("slug") for r in rows for lg in (r.get("legs") or [])
                  if lg.get("slug")]
+    global PAIR_LIVE_SLUGS
+    PAIR_LIVE_SLUGS = set(all_slugs)    # scopes the socket's pair wake (wsfeed)
     try:
         # MERGE, NEVER REPLACE (Sep 25 2026): the pair's set is a subset of the
         # repeg lap's open-orders push, so a replace=True push here evicted
@@ -22065,12 +22068,21 @@ def _pair_tick(sb, now=None) -> dict:
         if _time.monotonic() - _t0m > _PAIR_TICK_BUDGET_S:
             res["deferred"] = res.get("deferred", 0) + 1
             continue                            # next lap starts here (rotation)
+        _ts = _time.monotonic()
         try:
             _pair_step(sb, client, row, positions, now, res, lane_orders)
             res["pairs"] += 1
         except Exception as e:
             res["errors"] += 1
             app.logger.warning("pair %s step failed: %s", row.get("id"), e)
+        # WHERE THE LAP GOES (Sep 25 2026): laps ran 300-814s with two
+        # writes and no error, and the stuck-lane dumps never showed a
+        # pair frame. Name the slowest rows so the next read is a fact.
+        _dt = round(_time.monotonic() - _ts, 1)
+        if _dt >= 2.0:
+            res.setdefault("slow_rows", []).append((row.get("id"), _dt))
+            res["slow_rows"] = sorted(res["slow_rows"], key=lambda x: -x[1])[:5]
+    res["t_lap"] = round(_time.monotonic() - _t0m, 1)
     return res
 
 

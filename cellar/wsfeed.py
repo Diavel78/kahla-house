@@ -1629,7 +1629,19 @@ class MarketsFeed:
                     # came round in a minute: "should have already been
                     # done"). Same hint, same cooldown; the lap decides.
                     self._wake("scalp", "mkts", WAKE_MKTS_MIN_S)
-                    self._wake("pair", "mkts", WAKE_MKTS_MIN_S)
+                    # THE PAIR WAKES FOR ITS OWN MARKETS ONLY (Sep 25 2026):
+                    # 624 wakes in 100 min = a lap attempt every 10s on any
+                    # frame from any of ~4,000 markets, 2,695 "still
+                    # running, skipping" ticks, laps to 814s. app.PAIR_LIVE_
+                    # SLUGS is the lap's own leg set (empty before the first
+                    # lap → wake as before).
+                    try:
+                        import app as _app_pair
+                        _pls = getattr(_app_pair, "PAIR_LIVE_SLUGS", None)
+                    except Exception:
+                        _pls = None
+                    if not _pls or (isinstance(_sl, str) and _sl in _pls):
+                        self._wake("pair", "mkts", WAKE_MKTS_MIN_S)
             except Exception as e:
                 _mkts_presence(up=False, conn=self.conn)  # readers fall back to the age rule
                 if self.stop.is_set():
