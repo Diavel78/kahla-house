@@ -21945,22 +21945,6 @@ def _pair_tick(sb, now=None) -> dict:
     if not rows:
         res["gate"] = "no_pairs"
         return res
-    # ONE ROW PER SLUG (Sep 25 2026): rows 82/90, 51/98 and 70/96 were live
-    # twins on the same rungs (hand-inserted while Rob was away), each reading
-    # the venue's lot as its own and each writing state. The OLDEST row owns a
-    # slug; a younger row that shares one is skipped and named in `dup_rows`.
-    _owner: dict = {}
-    _kept = []
-    for row in sorted(rows, key=lambda r: int(r.get("id") or 0)):
-        _sl = [lg.get("slug") for lg in (row.get("legs") or []) if lg.get("slug")]
-        _dup = [s for s in _sl if s in _owner]
-        if _dup:
-            res.setdefault("dup_rows", []).append(f"{row.get('id')}~{_owner[_dup[0]]}")
-            continue
-        for s in _sl:
-            _owner[s] = row.get("id")
-        _kept.append(row)
-    rows = _kept
     # FAIR ROTATION under a budget: a lap that cannot finish defers the tail,
     # and the next lap starts where this one stopped (the scalp's lesson).
     _rot = _PAIR_ROT["i"] % max(1, len(rows))
@@ -22018,6 +22002,65 @@ def _pair_tick(sb, now=None) -> dict:
         res["gate"] = f"orders_unreadable: {e}"
         return res                              # fail closed, never seat blind
     res["orders"] = len(lane_orders)
+    # ONE OWNER PER SHARED SLUG, BY VENUE TRUTH (Sep 25 2026). Rows 70/96,
+    # 58/93, 28/94 are twins on a shared rung (the Sep 21 'garage' conversion
+    # of the Gemini-hedged seats dodged the one-per-game index on purpose).
+    # AGE IS THE WRONG TIEBREAK: older row 70 held one leg and was BIDDING a
+    # third leg (under 42.5 x15) while younger 96 held the real hedge (under
+    # 46.5 x19). The row holding MORE legs owns the shared slug (tie → oldest).
+    # A loser whose own leg holds nothing is skipped and its resting BID on
+    # that leg is cancelled (that bid IS the third leg); a loser whose own leg
+    # IS held keeps running so its ask stays managed (one order per (slug,
+    # intent) dedups the shared ask). A row whose two legs read the SAME side
+    # is not a pair (row 97: home +0.5 held, home +4.5 bidding) — skipped,
+    # its bids cancelled, its asks left alone. Hand-placed orders are never
+    # touched: lane_orders is AUTOMATIC-only.
+    def _held(sl):
+        try:
+            return abs(float(((positions or {}).get(sl) or {}).get("net") or 0.0)) >= 1.0
+        except Exception:
+            return False
+    def _cancel_bid(sl, tag):
+        for o in (lane_orders or []):
+            if (o.get("slug") == sl
+                    and str(o.get("intent") or "").startswith("ORDER_INTENT_BUY")
+                    and _pair_cancel(client, o)):
+                res[tag] = res.get(tag, 0) + 1
+    _bys: dict = {}
+    for row in rows:
+        for lg in (row.get("legs") or []):
+            if lg.get("slug"):
+                _bys.setdefault(lg["slug"], []).append(row)
+    _owner: dict = {}
+    for sl, rs in _bys.items():
+        if len(rs) > 1:
+            _owner[sl] = max(rs, key=lambda r: (
+                sum(1 for lg in (r.get("legs") or []) if _held(lg.get("slug"))),
+                -int(r.get("id") or 0))).get("id")
+    _kept = []
+    for row in rows:
+        legs_ = row.get("legs") or []
+        mt_ = row.get("market_type") or "spread"
+        rid = row.get("id")
+        mine_ = [lg["slug"] for lg in legs_
+                 if lg.get("slug") and _owner.get(lg["slug"], rid) == rid]
+        if (len(legs_) == 2
+                and _pair_leg_side(legs_[0], mt_) == _pair_leg_side(legs_[1], mt_)):
+            res.setdefault("not_pair_rows", []).append(rid)
+            for sl in mine_:
+                _cancel_bid(sl, "not_pair_bids_cancelled")
+            continue
+        lost = [lg["slug"] for lg in legs_ if lg.get("slug") and lg["slug"] not in mine_]
+        if lost:
+            if any(_held(sl) for sl in mine_):
+                res.setdefault("dup_rows_kept", []).append(rid)
+            else:
+                res.setdefault("dup_rows", []).append(f"{rid}~{_owner[lost[0]]}")
+                for sl in mine_:
+                    _cancel_bid(sl, "dup_bids_cancelled")
+                continue
+        _kept.append(row)
+    rows = _kept
     for row in rows:
         if _time.monotonic() - _t0m > _PAIR_TICK_BUDGET_S:
             res["deferred"] = res.get("deferred", 0) + 1

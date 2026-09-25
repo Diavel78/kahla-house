@@ -1126,6 +1126,7 @@ def test_pair_plan() -> None:
     p = _app._pair_plan({"a": leg(sold=60.0, sold_cost=53.0, bid=58.0, ask=61.0),
                          "b": leg(h=15, cost=57.0, bid=40.0, ask=55.0)}, 15, 110, 2000)
     check("lone leg after a sale → FLAT floor (57 + 53 − 60 = 50 → 50.5)", p["b"]["ask"] == (50.5, 15))
+    check("sold leg re-bids capped at cap − held cost (53)", p["a"]["bid"] == (53.0, 15))
     # the sold leg's cost unknown → this leg's own cost is the floor, never
     # cap − sold (120 − 60 = 60 would sit 3¢ over cost with no fill)
     p3 = _app._pair_plan({"a": leg(sold=60.0, bid=58.0, ask=61.0),
@@ -1138,7 +1139,6 @@ def test_pair_plan() -> None:
     check("rent unreadable + nothing held → keep both bids",
           p["a"]["bid"] == "keep" and p["b"]["bid"] == "keep"
           and "rent_unreadable" in p["a"]["why"])
-    check("sold leg re-bids capped at cap − held cost (53)", p["a"]["bid"] == (53.0, 15))
     # both held at 44 + 55 = 99 → the lock rides, no asks
     p = _app._pair_plan({"a": leg(h=15, cost=44.0, bid=44.0, ask=45.0),
                          "b": leg(h=15, cost=55.0, bid=56.0, ask=57.0)}, 15, 110, 2000)
@@ -1918,6 +1918,13 @@ def test_pair_tick_guards() -> None:
     import inspect
     tk = inspect.getsource(_app._pair_tick)
     check("younger twin rows are skipped and named", '"dup_rows"' in tk and "_owner" in tk)
+    check("a shared slug is owned by the row holding MORE legs, not the older one",
+          "sum(1 for lg in (r.get(\"legs\") or []) if _held(lg.get(\"slug\")))" in tk)
+    check("a losing twin whose own leg is held keeps running (its ask stays managed)",
+          '"dup_rows_kept"' in tk)
+    check("a losing twin's third-leg bid is cancelled", '"dup_bids_cancelled"' in tk)
+    check("two legs on one side is not a pair: skipped, bids cancelled",
+          '"not_pair_rows"' in tk and '"not_pair_bids_cancelled"' in tk)
     check("slugs past the list cap are named, not quoted blind", '"uncovered_rows"' in tk)
     check("the lap has a budget and rotates", "_PAIR_TICK_BUDGET_S" in tk and "_PAIR_ROT" in tk)
     check("the watch push merges", "_WS_WATCHLIST_MERGE_CB(set(all_slugs))" in tk
