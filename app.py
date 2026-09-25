@@ -12336,11 +12336,11 @@ def _rent_unpaid_pass(sb, client, now, dry: bool, orders=None) -> dict:
     owner = _kalshi_owner_uid()
     mine: dict = {}
     try:
-        rows = (sb.table("bot_picks")
-                .select("id,event_name,market_type,event_start,signal_blob")
-                .eq("asked_by", owner).eq("status", "pending")
-                .gte("event_start", now.isoformat())
-                .limit(1000).execute().data) or []
+        rows = _sb_paged(lambda: (sb.table("bot_picks")
+                                  .select("id,event_name,market_type,event_start,signal_blob")
+                                  .eq("asked_by", owner).eq("status", "pending")
+                                  .gte("event_start", now.isoformat())
+                                  .order("event_start")), 3) or []
         for r in rows:
             b = r.get("signal_blob") or {}
             if not (b.get("autobet") or b.get("whiff_autobet")
@@ -17718,7 +17718,12 @@ def _rent_market_periods(slug: str):
                         periods.add(p)
     except Exception:
         periods = None
-    _RENT_MKT_CACHE[slug] = {"at": _time.time(), "periods": periods}
+    # A FAILED READ IS CACHED FOR 60s, NOT 10 MIN (Sep 25 2026): one 429 on
+    # the trading client used to park a whole ladder on "venue read failed"
+    # for the full TTL — every rung refused, the OMS row backed off 30 min.
+    _RENT_MKT_CACHE[slug] = {"at": (_time.time() if periods is not None
+                                    else _time.time() - (_RENT_MKT_TTL - 60.0)),
+                             "periods": periods}
     return periods
 
 
@@ -24303,7 +24308,11 @@ def _oms_pass(sb, now, deadline, skip_producer=False):
         # sat untouched. tries=0 first, soonest within each tier.
         rows = (sb.table("desired_orders").select("*")
                 .eq("state", "pending").eq("lane", "rentlist")
-                .lte("next_try_at", nowiso).gt("event_start", nowiso)
+                # KICKOFF FLOOR (Sep 25 2026): a fresh 20-lot minutes before
+                # kickoff has no rent time and contradicts the 60-min
+                # no-rebuy rule the top-up and recenter already honor
+                .lte("next_try_at", nowiso)
+                .gt("event_start", (now + timedelta(minutes=_SCALP_NO_REBUY_MIN)).isoformat())
                 .order("tries").order("event_start")
                 .limit(200).execute().data) or []
     except Exception:
@@ -27986,11 +27995,14 @@ def _reconcile_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         return {"gate": "no_owner"}
     lo = (now + timedelta(minutes=_RECON_START_GUARD_MIN)).isoformat()
     try:
-        rows = (sb.table("bot_picks")
-                .select("id,event_name,event_start,market_type,side,"
-                        "market_id,sport,signal_blob,poly_pnl")
-                .eq("asked_by", owner).eq("status", "pending")
-                .gt("event_start", lo).limit(400).execute().data) or []
+        # paged + ordered (Sep 25 2026): .limit(400) with no ORDER BY returns
+        # physical order, so on a 400+ pick day an arbitrary tail of picks
+        # was never reconciled (the scalp had the same shape at 300)
+        rows = _sb_paged(lambda: (sb.table("bot_picks")
+                                  .select("id,event_name,event_start,market_type,side,"
+                                          "market_id,sport,signal_blob,poly_pnl")
+                                  .eq("asked_by", owner).eq("status", "pending")
+                                  .gt("event_start", lo).order("event_start")), 3) or []
     except Exception as e:
         return {"gate": ("picks_err: " + str(e))[:100]}
     cands = []
@@ -28367,13 +28379,13 @@ def _gridiron_recenter_tick(sb, now, client=None, orders=None,
         return {"gate": "no_owner"}
     lo = (now + timedelta(minutes=30)).isoformat()
     try:
-        rows = (sb.table("bot_picks")
-                .select("id,event_name,event_start,market_type,side,"
-                        "entry_line,market_id,sport,signal_blob")
-                .eq("asked_by", owner).eq("status", "pending")
-                .in_("market_type", ["spread", "total"])
-                .in_("sport", ["NFL", "NCAAF"])
-                .gt("event_start", lo).limit(400).execute().data) or []
+        rows = _sb_paged(lambda: (sb.table("bot_picks")
+                                  .select("id,event_name,event_start,market_type,side,"
+                                          "entry_line,market_id,sport,signal_blob")
+                                  .eq("asked_by", owner).eq("status", "pending")
+                                  .in_("market_type", ["spread", "total"])
+                                  .in_("sport", ["NFL", "NCAAF"])
+                                  .gt("event_start", lo).order("event_start")), 2) or []
     except Exception as e:
         return {"gate": ("picks_err: " + str(e))[:100]}
     cands = [r for r in rows
@@ -30071,10 +30083,17 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                     if (_g("intent") == sell_intent
                             and str(_g("state") or "") in (_OPEN_ORDER_STATES | {"ORDER_STATE_REPLACED"})):
                         _px = _g("price"); _pv = float(_px.get("value") if isinstance(_px, dict) else _px)
+                        # the venue's own flag, never a hardcoded True (Sep 25
+                        # 2026): a HAND-placed ask that landed after the
+                        # mirror read was being adopted as ours and amended
+                        _moi = _g("manualOrderIndicator")
                         mine.append({"id": _g("id"), "slug": slug, "intent": sell_intent,
                                      "price_yes": _pv, "qty": float(_g("quantity") or 0),
                                      "leaves": float(_g("leavesQuantity") or _g("quantity") or 0),
-                                     "auto": True, "state": str(_g("state") or "")})
+                                     "cum": float(_g("cumQuantity") or 0),
+                                     "auto": (_moi == "MANUAL_ORDER_INDICATOR_AUTOMATIC"
+                                              if _moi is not None else True),
+                                     "state": str(_g("state") or "")})
             except Exception:
                 pass
         our_ask = None
@@ -30299,8 +30318,19 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                 SCALP_SNAP[slug]["our_ask"] = tgt     # the sniper prices from here now
                 SCALP_SNAP[slug]["qty"] = _ask_qty
             if _v == "gone":
+                # THE ORDER IS GONE FOR A REASON (Sep 25 2026): the venue
+                # replaced or FILLED it between the lap's snapshot and the
+                # modify. Sizing the fresh ask to lap-start `held` could
+                # oversell a lot that just shrank — the cancel path below
+                # re-reads positions before it creates, and so does this.
+                _fp2 = _pmm_positions_raw(client, fresh=True)
+                _h2 = (abs(float(((_fp2 or {}).get(slug) or {}).get("net") or 0.0))
+                       if _fp2 is not None else None)
+                if _h2 is None or _h2 < 1.0:
+                    res["gone_recheck"] = res.get("gone_recheck", 0) + 1
+                    continue             # unreadable, or sold — next lap decides
                 if _scalp_create(client, sb, r, b, slug, synth, sell_intent,
-                                 tgt, int(held), now, walked_from=our_ask):
+                                 tgt, int(_h2), now, walked_from=our_ask):
                     res["walked"] += 1   # modify killed it → fresh create
                 continue
             if _v != "qty_stuck":
@@ -31433,9 +31463,13 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                     except Exception:
                         pass        # verify decides — recreate is its fallback
                     _time.sleep(1.5)
+                    # the recreate leg gets the SAME expiry the create leg just
+                    # derived (Sep 25 2026) — echoing the old order's TIF put a
+                    # GTC order back on a market whose GTD had already lapsed
                     state = _repeg_verify_or_recreate(
                         client, slug, intent, canon, qty,
-                        f.get("order_tif"), f.get("order_good_till"))
+                        ("TIME_IN_FORCE_GOOD_TILL_DATE" if _gtt else f.get("order_tif")),
+                        (_gtt or f.get("order_good_till")))
                     if state == "filled":
                         continue                           # fill wins — done
                     if state == "lost":
