@@ -20157,6 +20157,9 @@ def _gridiron_is_placeholder(bid, ask) -> bool:
 _PIN_CENTER_MAX_AGE_S = 26 * 3600      # a daily pull is the design; stale = ignore
 _PIN_REFRESH_AFTER_H = 20 * 3600       # re-pull once the slate is a day old
 _PIN_REFRESH_HOUR_AZ = 6               # Rob: "every morning at six o'clock"
+_PIN_REFRESH_EARLY_AZ_MIN = 150        # Rob, Sep 26 2026: "Add that extra Pinn pull at 2:30, 100%" —
+                                       # the first day-of window (T-6h for 9am kicks) opens at 3am; the 6am
+                                       # pull left those seeds on a 21-hour-old line. Two pulls per AZ day.
 
 
 def _pin_line_from_events(events, away, home, mt):
@@ -20306,22 +20309,29 @@ def _pin_daily_refresh(sb, now):
     inside the 900 budget), after 6am AZ, only once the cached slate is
     a day old. The executor centers its rung window on that line."""
     try:
-        if now.astimezone(ZoneInfo("America/Phoenix")).hour < _PIN_REFRESH_HOUR_AZ:
-            return {}
+        _az = now.astimezone(ZoneInfo("America/Phoenix"))
+        _mins = _az.hour * 60 + _az.minute
     except Exception:
+        return {}
+    # TWO SLOTS PER AZ DAY (Sep 26 2026): 02:30 (before the earliest day-of
+    # seeding window) and 06:00 (Rob's morning pull). ~3 credits each.
+    if _mins >= _PIN_REFRESH_HOUR_AZ * 60:
+        _slot = "0600"
+    elif _mins >= _PIN_REFRESH_EARLY_AZ_MIN:
+        _slot = "0230"
+    else:
         return {}
     out = {}
     for sport in ("NFL", "NCAAF"):
-        if _time.monotonic() - _PIN_REFRESH_TS.get(sport, 0.0) < 3600.0:
-            continue                             # checked this hour already
+        if _time.monotonic() - _PIN_REFRESH_TS.get(sport, 0.0) < 600.0:
+            continue                             # checked in the last 10 min
         try:
             _ev, age = _pin_slate_cached(sb, sport, now)
         except Exception:
             _ev, age = None, None
-        # ONCE PER AZ DAY after 6am (Sep 6 2026): the "older than 20h" gate
-        # skipped this morning's pull because last evening's stale
-        # Pinnacle-only slate was 12h old — DK/FD never got fetched.
-        _azd = now.astimezone(ZoneInfo("America/Phoenix")).date().isoformat()
+        # ONCE PER SLOT PER AZ DAY (Sep 6 2026 lesson: an age gate skipped the
+        # morning pull because last evening's slate was "only" 12h old).
+        _azd = _az.date().isoformat() + ":" + _slot
         if _PIN_REFRESH_DAY.get(sport) == _azd:
             _PIN_REFRESH_TS[sport] = _time.monotonic()
             continue

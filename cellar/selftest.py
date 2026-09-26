@@ -2119,6 +2119,9 @@ def test_pair_tick_guards() -> None:
     check("rent is read tri-state", "_pair_rent(slug, ko, now, sb)" in st)
     sd = inspect.getsource(_app._pair_seed_tick)
     check("the seeder's lead floor follows the program", "_pair_min_lead_h(r.get(\"sport\"), sb)" in sd)
+    pr = inspect.getsource(_app._pin_daily_refresh)
+    check("Pinnacle is pulled twice a day: 02:30 (before the first day-of window) and 06:00",
+          '_slot = "0230"' in pr and '_slot = "0600"' in pr and _app._PIN_REFRESH_EARLY_AZ_MIN == 150)
 
 
 def main() -> int:
