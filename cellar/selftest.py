@@ -1974,6 +1974,84 @@ def test_review_sep26_sizing_and_state() -> None:
     check("buy sniper sizes the amend from decimal leaves", "_amend_total(snap.get(\"leaves_f\"" in sn)
 
 
+def test_executor_one_order_per_slug() -> None:
+    """Review Sep 26, findings 1 and 4 — behavioral, fake venue + fake DB:
+    a second call on a slug with our bid resting is refused; a create whose
+    response was lost is booked from the venue's list, not repeated; an
+    unreadable list fails closed; a duplicate-key insert on someone else's
+    order id cancels our twin."""
+    import app as _app
+    from types import SimpleNamespace as NS
+    class DB:
+        def __init__(self): self.rows = []; self.pending = None
+        def table(self, *a): self.pending = None; return self
+        def select(self, *a): return self
+        def filter(self, *a): return self
+        def eq(self, *a): return self
+        def gte(self, *a): return self
+        def limit(self, *a): return self
+        def contains(self, *a): return self
+        def insert(self, row): self.pending = row; return self
+        def execute(self):
+            if self.pending is not None:
+                if self.rows: raise RuntimeError("23505 duplicate key")
+                self.rows.append(self.pending)
+            return NS(data=[dict(r) for r in self.rows])
+    class Venue:
+        def __init__(self, fail_create=False, list_raises=False):
+            self.created = []; self.cancelled = []; self.fail_create = fail_create; self.list_raises = list_raises
+            self.orders = NS(create=self._create, list=self._list, cancel=lambda oid, p: self.cancelled.append(oid))
+        def _create(self, p):
+            self.created.append(dict(p, id=f"o{len(self.created)+1}"))
+            if self.fail_create: raise TimeoutError("response lost")
+            return {"id": self.created[-1]["id"]}
+        def _list(self, p):
+            if self.list_raises: raise RuntimeError("429")
+            return {"orders": [{"id": c["id"], "intent": c["intent"], "state": "ORDER_STATE_NEW",
+                                "manualOrderIndicator": c["manualOrderIndicator"]} for c in self.created]}
+    saved = {k: getattr(_app, k) for k in ("get_client", "_pmm_positions_raw", "_rent_ok", "_kalshi_owner_uid",
+             "_book_exposure_usd", "_machine_flag", "_machine_flag_val", "_repeg_verify_or_recreate",
+             "_send_fill_telegram")}
+    _sleep = _app._time.sleep
+    args = ({"id": "game", "event_name": "Test game"}, "2099-01-01T00:00:00Z", "spread", "away", "Away",
+            "test-slug", False, 50, .55, 5, 5, 49, 51)
+    def run(v, db, **kw):
+        _app.get_client = lambda: v
+        return _app._autobet_execute(db, *args, skip_game_dedup=True, **kw)
+    try:
+        _app._time.sleep = lambda *a: None
+        _app._pmm_positions_raw = lambda *a, **k: {}
+        _app._rent_ok = lambda *a, **k: (True, "day_of")
+        _app._kalshi_owner_uid = lambda: "owner"
+        _app._book_exposure_usd = lambda: 0.0
+        _app._machine_flag = lambda *a, **k: False
+        _app._machine_flag_val = lambda n, d=None: d
+        _app._repeg_verify_or_recreate = lambda *a, **k: "ok"
+        _app._send_fill_telegram = lambda *a, **k: None
+        v = Venue(); db = DB()
+        a = run(v, db); tags = []; b = run(v, db, fail_tag=tags)
+        check("executor: first call places, second call is refused (bid already resting)",
+              a == "placed" and b is False and "resting_order_exists" in tags and len(v.created) == 1)
+        v2 = Venue(fail_create=True); db2 = DB()
+        a2 = run(v2, db2)
+        check("executor: a create whose response was lost is booked from the venue, not repeated",
+              a2 == "placed" and len(v2.created) == 1 and len(db2.rows) == 1
+              and db2.rows[0]["signal_blob"]["order_id"] == "o1")
+        v3 = Venue(list_raises=True); db3 = DB(); tags3 = []
+        a3 = run(v3, db3, fail_tag=tags3)
+        check("executor: an unreadable order list fails CLOSED (no create)",
+              a3 is False and "orders_unreadable" in tags3 and not v3.created)
+        v4 = Venue(); db4 = DB()
+        db4.rows.append({"id": 1, "signal_blob": {"pmm_slug": "test-slug", "order_id": "someone-else"}})
+        tags4 = []
+        a4 = run(v4, db4, fail_tag=tags4)
+        check("executor: duplicate-key on another order id cancels OUR twin",
+              a4 is False and "twin_cancelled" in tags4 and v4.cancelled == ["o1"])
+    finally:
+        for k, f in saved.items(): setattr(_app, k, f)
+        _app._time.sleep = _sleep
+
+
 def test_pair_tick_guards() -> None:
     """One row per slug, a slug cap that names what it cannot serve, a lap
     budget with rotation, a merge (not replace) watch push, park-after-cancel
@@ -2043,7 +2121,7 @@ def main() -> int:
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
-              test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state,
+              test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()

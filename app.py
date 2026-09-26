@@ -17842,6 +17842,35 @@ def _book_exposure_usd():
     return round(held + bids, 2)
 
 
+def _venue_resting_buy(client, slug: str, intent: str):
+    """(order | None, readable). Our AUTOMATIC resting BUY of `intent` on
+    `slug`, from a FRESH orders.list. readable=False means the read failed —
+    the caller fails CLOSED (never seat blind). Sep 26 2026, review findings
+    1 and 4: the executor guarded POSITIONS but never RESTING ORDERS, so a
+    second call (or a create whose response was lost) put a second order on
+    a slug the book already had one on."""
+    try:
+        resp = client.orders.list({"slugs": [slug]})
+        raw = (resp.get("orders") if isinstance(resp, dict)
+               else getattr(resp, "orders", None))
+        if raw is None:
+            return None, False
+    except Exception:
+        return None, False
+    live = _OPEN_ORDER_STATES | {"ORDER_STATE_REPLACED"}
+    for o in raw:
+        gg = (lambda k: o.get(k) if isinstance(o, dict) else getattr(o, k, None))
+        if str(gg("intent") or "") != intent:
+            continue
+        if str(gg("state") or "") not in live:
+            continue
+        moi = gg("manualOrderIndicator")
+        if moi is not None and moi != "MANUAL_ORDER_INDICATOR_AUTOMATIC":
+            continue                      # a hand order is the user's, not a twin
+        return o, True
+    return None, True
+
+
 def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
                      side_c, fair_pb, entry_edge, opener_edge,
                      bid_c, ask_c, extra_blob=None,
@@ -17970,14 +17999,39 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
               "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
     try:
         pclient = get_client()
+    except Exception as e:
+        return _fail(("client:" + f"{type(e).__name__}")[:60])
+    # ONE ORDER PER SLUG, CHECKED AT THE VENUE (Sep 26 2026, review finding
+    # 1): a resting AUTOMATIC bid of this intent already on the slug means
+    # the book has it — whether or not a pick row says so. Unreadable list
+    # → fail CLOSED and retry next pass; never seat blind.
+    _ro, _ok = _venue_resting_buy(pclient, slug, intent)
+    if not _ok:
+        return _fail("orders_unreadable")
+    if _ro is not None:
+        return _fail("resting_order_exists")
+    new_oid = None
+    try:
         cr = pclient.orders.create(params)
         new_oid = (cr.get("id") if isinstance(cr, dict)
                    else getattr(cr, "id", None))
     except Exception as e:
-        _send_fill_telegram(
-            f"🤖 AUTO-BET FAILED — {g.get('event_name')} {side_lbl}: "
-            f"create errored ({e})"[:280])
-        return _fail(("create:" + f"{type(e).__name__}: {e}")[:90])
+        # AN AMBIGUOUS CREATE IS NOT "NOT PLACED" (review finding 4): the
+        # venue may have accepted the order and lost the response. Ask the
+        # venue; if our order is resting, BOOK it instead of failing — a
+        # failure here used to let the next pass create a second one.
+        _time.sleep(1.5)
+        _ro2, _ok2 = _venue_resting_buy(pclient, slug, intent)
+        if _ok2 and _ro2 is not None:
+            new_oid = (_ro2.get("id") if isinstance(_ro2, dict)
+                       else getattr(_ro2, "id", None))
+            app.logger.warning("AUTO-BET create errored on %s (%s) but the venue "
+                               "shows our order %s — booking it", slug, e, new_oid)
+        else:
+            _send_fill_telegram(
+                f"🤖 AUTO-BET FAILED — {g.get('event_name')} {side_lbl}: "
+                f"create errored ({e})"[:280])
+            return _fail(("create:" + f"{type(e).__name__}: {e}")[:90])
     entry_amer = _prob_to_amer_py(side_c / 100.0)
     blob = {cap_flag: True, "contracts": n_contracts,
             "order_id": new_oid, "pmm_slug": slug,
@@ -18025,7 +18079,29 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
             sb.table("bot_picks").insert(_pick_row).execute()
         except Exception as e2:
             if "duplicate key" in str(e2) or "23505" in str(e2):
-                pass                       # first insert committed — booked
+                # WHOSE ROW IS IT? (review finding 1) A duplicate key used to
+                # be read as "our first insert committed". If the booked row
+                # carries a DIFFERENT order id, WE are the twin: cancel ours.
+                _ex_oid = None
+                try:
+                    _exr = (sb.table("bot_picks").select("id,signal_blob")
+                            .eq("asked_by", owner).eq("status", "pending")
+                            .filter("signal_blob->>pmm_slug", "eq", slug)
+                            .limit(1).execute().data) or []
+                    _ex_oid = ((_exr[0].get("signal_blob") or {}).get("order_id")
+                               if _exr else None)
+                except Exception:
+                    _exr = []
+                if _ex_oid and new_oid and str(_ex_oid) != str(new_oid):
+                    try:
+                        pclient.orders.cancel(new_oid, {"marketSlug": slug})
+                    except Exception:
+                        pass
+                    _send_fill_telegram(
+                        f"🤖 TWIN ORDER on {slug}: pick {_exr[0].get('id')} owns "
+                        f"{_ex_oid}; our {new_oid} cancelled"[:240])
+                    return _fail("twin_cancelled")
+                # same order id (or none recorded): the first insert committed — booked
             else:
                 # NOT "log it by hand" (user: "you bet, you model — log
                 # your shit"): the autolog's prop-orphan ADOPTION books it
