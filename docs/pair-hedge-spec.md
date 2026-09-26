@@ -323,3 +323,20 @@ this week's board** — and the rent on two resting legs runs the whole time.
 3. Wire `_pair_seed_tick` into the `pair` lane, still dry, and read a day of
    its shopping list.
 4. Flip `pair_seed_enabled`, 25 pairs, and watch the first fills.
+
+
+## Sep 25 2026 addenda (box review — see `docs/review-2026-09-25.md` and commits 5516d5f…68b2c1e)
+
+Rules added or corrected on the box, all live and selftested (430 passed):
+
+1. **One leg per side per game.** `_pair_side_held(positions, game_prefix, mt, side, exclude_slug)` reads what we hold on a side through ANY rung (venue sign: pos-/neg- spread slugs are the away line, net>0 away / net<0 home; totals net>0 over / net<0 under). A pair BID that would add a second lot to a held side is refused (`why: side_held:N`) and our resting bid there cancelled. Two legs on one side is not a pair (`not_pair_rows`).
+2. **Shared slug → the row holding more legs owns it** (tie → oldest). A losing twin whose own leg is empty is skipped and its bid cancelled; one whose own leg is held keeps running for its ask.
+3. **Adopt or decline, never stack.** The seeder declines a (game, market) with any held seat ≥5 (`held_seat`). The handover — held seat as leg one plus one opposite bid under the cap — is NOT built; clean case only when it is.
+4. **Flat exit floor** after a partner sale: pair cost − sold price (`sold_cost` travels), then own cost, never `cap − sold`.
+5. **Amends send the order TOTAL** (`leaves + cum`); the venue's `quantity` carries fills.
+6. **Tri-state rent** (`_pair_rent`): unreadable keeps orders. **Off-touch cancels park 10 min.** A vanished bid re-reads positions before a new lot.
+7. **Socket wakes the pair lane only for its own legs** (`app.PAIR_LIVE_SLUGS`). Laps stamp `t_lap` and `slow_rows`.
+8. **Cap stays a flat 120 for now** (Rob): probability-based caps come only after re-rungs and completions are proven on a day-of window. Fair middle value = 100 + P(middle)¢ — the MLB seeder already prices that way; the football seeder and the completion path use the flat ceiling.
+9. **Retired-but-held legs are released** to the autolog (`_pair_slugs`), and the autolog's own blocks on adopting them are gone (`_sell_slugs` MANUAL-only; index 018 per rung).
+
+Open: the handover build; picks whose `entry_line` disagrees with their slug (OKL@GA, HOU@IND); the earnings sync riding a stuck paperlog lane.
