@@ -22282,7 +22282,15 @@ def _pair_tick(sb, now=None) -> dict:
     # is one call regardless of book size; the mirror is refreshed by it.
     lane_orders = None
     try:
-        _all = _pmm_open_orders_raw(client, fresh=True)
+        # THE MIRROR IS THE READ (Rob, Sep 21: "we are only going up in
+        # volume"): socket-fed, generation-safe, ~2s old. REST only when the
+        # mirror is older than 120s; a failed REST read falls back to a mirror
+        # under 120s instead of gating the lap (five laps gated 'orders.list
+        # failed' in two minutes on Sep 26 while the mirror was 2s old).
+        _oage = _time.monotonic() - float(_VENUE_MIRROR.get("orders_at") or 0.0)
+        _all = _pmm_open_orders_raw(client, fresh=(_oage > 120.0))
+        if _all is None and _oage <= 120.0:
+            _all = _pmm_open_orders_raw(client, fresh=False)
         if _all is None:
             raise RuntimeError("orders.list failed")
         _want = set(all_slugs)

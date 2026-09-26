@@ -1316,7 +1316,7 @@ def test_pair_read_budget() -> None:
     import app as _app
     import inspect
     tick = inspect.getsource(_app._pair_tick)
-    check("one order read for the whole lane", "_pmm_open_orders_raw(client, fresh=True)" in tick)
+    check("one order read for the whole lane", "_pmm_open_orders_raw(client, fresh=(_oage > 120.0))" in tick)
     check("legs go on the markets-socket watch list (MERGED, never a replace)",
           "_WS_WATCHLIST_MERGE_CB" in tick)
     check("an unreadable order list fails CLOSED",
@@ -2133,8 +2133,8 @@ def test_pair_tick_guards() -> None:
     check("side helper: short total reads as UNDER, spreads don't leak into totals",
           _app._pair_side_held(P, "tsc-x-a-b-2026-01-01", "total", "under") == 19
           and _app._pair_side_held(P, "tsc-x-a-b-2026-01-01", "total", "over") == 0)
-    check("the lane reads the WHOLE account's orders once and filters locally (no slugs in the URL — 414 at ~200)",
-          "_pmm_open_orders_raw(client, fresh=True)" in tk and 'orders.list({"slugs": all_slugs' not in tk)
+    check("the lane reads the WHOLE account's orders (mirror first, REST only when >120s stale; no slugs in the URL — 414 at ~200)",
+          "_pmm_open_orders_raw(client, fresh=(_oage > 120.0))" in tk and 'orders.list({"slugs": all_slugs' not in tk)
     check("the lap has a budget and rotates", "_PAIR_TICK_BUDGET_S" in tk and "_PAIR_ROT" in tk)
     check("the watch push merges", "_WS_WATCHLIST_MERGE_CB(set(all_slugs))" in tk
           and "_WS_WATCHLIST_CB(set(all_slugs))" not in tk)
