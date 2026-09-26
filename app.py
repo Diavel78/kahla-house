@@ -22227,24 +22227,24 @@ def _pair_tick(sb, now=None) -> dict:
             _WS_WATCHLIST_MERGE_CB(set(all_slugs))
     except Exception:
         pass
-    if len(all_slugs) > 400:
-        # `orders.list` takes ≤400 slugs; a pair past that read `orders=[]`
-        # every tick and created a fresh bid every tick. Serve the first 200
-        # pairs and NAME the rest instead of quoting them blind.
-        _cov = set(all_slugs[:400])
-        _drop = [r for r in rows
-                 if any(lg.get("slug") not in _cov for lg in (r.get("legs") or []))]
-        res["uncovered_rows"] = [r.get("id") for r in _drop]
-        rows = [r for r in rows if r not in _drop]
+    # ONE WHOLE-ACCOUNT READ, FILTERED HERE (Sep 26 2026): `orders.list(
+    # {"slugs": [...]})` puts every slug in the URL, and at ~200 slugs (103
+    # pairs) the venue answered `414 Request-URI Too Large` — every lap
+    # gated `orders_unreadable`, processed ZERO pairs, and three legs filled
+    # with no state, no cost and no ask for 100 minutes (09:07-10:47). The
+    # old "≤400 slugs" assumption was never the venue's limit. A full list
+    # is one call regardless of book size; the mirror is refreshed by it.
     lane_orders = None
     try:
-        _resp = client.orders.list({"slugs": all_slugs[:400]})
-        _raw = (_resp.get("orders") if isinstance(_resp, dict)
-                else getattr(_resp, "orders", [])) or []
-        lane_orders = [n for n in (_norm_order(o) for o in _raw)
-                       if n and n["state"] in _OPEN_ORDER_STATES and n.get("auto")]
+        _all = _pmm_open_orders_raw(client, fresh=True)
+        if _all is None:
+            raise RuntimeError("orders.list failed")
+        _want = set(all_slugs)
+        lane_orders = [dict(n) for n in _all
+                       if n.get("slug") in _want and n.get("state") in _OPEN_ORDER_STATES
+                       and n.get("auto")]
     except Exception as e:
-        res["gate"] = f"orders_unreadable: {e}"
+        res["gate"] = f"orders_unreadable: {str(e)[:120]}"
         return res                              # fail closed, never seat blind
     res["orders"] = len(lane_orders)
     # ONE OWNER PER SHARED SLUG, BY VENUE TRUTH (Sep 25 2026). Rows 70/96,
