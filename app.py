@@ -9224,44 +9224,48 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
         return out                              # unknown is meaningless without the list
     app.logger.info("autolog: removals/syncs done, unknown=%d", len(unknown))
     _al_deadline = _time.monotonic() + _AUTOLOG_UNKNOWN_BUDGET_S
+    _gskip: dict = {}                            # WHY each unknown was not booked (Sep 25 2026)
+    def _gs(why):
+        _gskip[why] = _gskip.get(why, 0) + 1
     for (slug, syn), prob in list(unknown.items()):
         if _time.monotonic() > _al_deadline:
             out["budget"] = "ghost"
             break                                # the rest next call
         if not _RENT_SLUG_RE.match(slug or ""):
-            continue
+            _gs("not_rent_slug"); continue
         if _rent_dead(slug, sb):
-            continue                            # marked for cancel, not for booking
+            _gs("rent_dead"); continue                            # marked for cancel, not for booking
         try:                                    # belt and braces: re-ask the DB
             _ex = (sb.table("bot_picks").select("id").eq("asked_by", owner_uid)
                    .eq("status", "pending")
                    .contains("signal_blob", {"pmm_slug": slug})
                    .limit(1).execute().data) or []
         except Exception:
-            continue                            # can't verify → don't insert
+            _gs("pick_check_err"); continue                            # can't verify → don't insert
         if _ex:
-            continue                            # already booked
+            _gs("already_booked"); continue                            # already booked
         is_pos = slug in filled_slugs
         o = _auto_ord.get(slug)
         if not is_pos and o is None:
-            continue                            # manual bid → not ours
+            _gs("manual_bid"); continue                            # manual bid → not ours
         if is_pos and slug in _sell_slugs and o is None:
-            continue                            # user's ask rests → takeover
+            _gs("manual_ask_takeover"); continue                            # user's ask rests → takeover
         qty = (abs(float((positions or {}).get(slug, {}).get("net") or 0))
                if is_pos else float(o.get("qty") or 0))
         if qty < 1.0:
             # DUST IS NOT A POSITION (Sep 6 2026): 0.06- and 0.02-share
             # fragments were re-booked every lap and hit the autolog unique
             # index every time — 1,029 duplicate-key warnings in a day.
-            continue
+            _gs("dust"); continue
         try:
             row = _football_ghost_row(sb, client, owner_uid, slug, syn, prob,
                                       qty, order_id=(o or {}).get("id"),
                                       is_pos=is_pos)
-        except Exception:
+        except Exception as _ge:
             row = None
+            _gs("row_exc:" + type(_ge).__name__)
         if not row:
-            continue                            # unresolved → backoff path
+            _gs("unresolved"); continue                            # unresolved → backoff path
         try:
             sb.table("bot_picks").insert(row).execute()
             out["ghost_adopted"] = out.get("ghost_adopted", 0) + 1
@@ -9277,6 +9281,10 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                 app.logger.debug("PMM-AUTOLOG ghost adopt dup %s", slug)
             else:
                 app.logger.warning("PMM-AUTOLOG ghost adopt failed %s: %s", slug, e)
+    if _gskip:
+        out["ghost_skip"] = _gskip
+        app.logger.info("autolog ghost: unknown=%d adopted=%d skips=%s", len(unknown),
+                        int(out.get("ghost_adopted") or 0), _gskip)
     _nowm = _time.monotonic()
     # OUT-OF-WINDOW SHORT-CIRCUIT: the index only holds games from −12h to
     # +48h, and every slug carries its ET game date — a stray on a game 5-15
