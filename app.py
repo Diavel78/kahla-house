@@ -28317,6 +28317,35 @@ def _reconcile_tick(sb, now, client=None, orders=None, positions=None) -> dict:
                                   .gt("event_start", lo).order("event_start")), 3) or []
     except Exception as e:
         return {"gate": ("picks_err: " + str(e))[:100]}
+    # START TIMES FOLLOW THE MARKET (Sep 26 2026): the ESPN spine retimes
+    # `markets` rows (placeholder → real kick), picks copied event_start at
+    # creation and never again. Nine pending picks sat a day early; every
+    # ask/GTD derived from them expired before the game. Re-sync >30 min drift.
+    try:
+        _mids = sorted({r.get("market_id") for r in rows if r.get("market_id")})
+        _ms: dict = {}
+        for _k in range(0, len(_mids), 150):
+            for _m in (sb.table("markets").select("id,event_start")
+                       .in_("id", _mids[_k:_k + 150]).execute().data) or []:
+                _ms[_m["id"]] = _m.get("event_start")
+        _resync = 0
+        for r in rows:
+            _me = _ms.get(r.get("market_id"))
+            if not _me or not r.get("event_start"):
+                continue
+            try:
+                _d1 = datetime.fromisoformat(str(r["event_start"]).replace("Z", "+00:00"))
+                _d2 = datetime.fromisoformat(str(_me).replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if abs((_d1 - _d2).total_seconds()) > 1800:
+                sb.table("bot_picks").update({"event_start": _me}).eq("id", r["id"]).execute()
+                r["event_start"] = _me
+                _resync += 1
+        if _resync:
+            app.logger.info("reconcile: re-synced event_start on %d picks from markets", _resync)
+    except Exception as _e:
+        app.logger.warning("reconcile: event_start re-sync failed: %s", _e)
     cands = []
     for r in rows:
         b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
@@ -31030,8 +31059,15 @@ def _scalp_create(client, sb, r, b, slug, synth, sell_intent, tgt_c, qty,
     try:
         dt = datetime.fromisoformat(
             str(r.get("event_start")).replace("Z", "+00:00"))
-        gtt = ((dt + timedelta(hours=7)).astimezone(timezone.utc)
-               .strftime("%Y-%m-%dT%H:%M:%SZ"))
+        _exp = dt + timedelta(hours=7)
+        # NEVER AN EXPIRY IN THE PAST (Sep 26 2026): six picks seated on
+        # placeholder start times carried event_start a day early; their
+        # asks went out with goodTillTime already elapsed and the venue
+        # rejected ~615 per slug from 04:00. Floor the expiry at now + 8h.
+        _flo = now + timedelta(hours=8) if now is not None else datetime.now(timezone.utc) + timedelta(hours=8)
+        if _exp < _flo:
+            _exp = _flo
+        gtt = _exp.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception:
         return False
     canon = ((100.0 - tgt_c) / 100.0) if synth else (tgt_c / 100.0)

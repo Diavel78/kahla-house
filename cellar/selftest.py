@@ -2088,6 +2088,10 @@ def test_neutral_and_rejections_sep26() -> None:
     check("pair: a bid the venue just rejected is not re-created for 30 min", '"rejected_recently"' in ps)
     ws = pathlib.Path(__file__).resolve().parent.joinpath("wsfeed.py").read_text()
     check("wsfeed stamps ORDER_REJECTED and dumps the first raw frame", "ORDER_REJECTED[(" in ws and "ws priv ORDER REJECTED" in ws)
+    sc2 = inspect.getsource(_app._scalp_create)
+    check("scalp ask expiry is floored in the future (stale event_start can't expire it)", "_flo = now + timedelta(hours=8)" in sc2)
+    rc = inspect.getsource(_app._reconcile_tick)
+    check("reconcile re-syncs a pick's event_start from its market", "re-synced event_start" in rc)
 
 
 def test_pair_tick_guards() -> None:
