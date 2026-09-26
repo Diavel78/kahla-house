@@ -92,9 +92,6 @@
         .v-lean { background: #4a3a10; color: var(--amber); }
         .v-pass { background: var(--surface); color: var(--muted); border: 1px solid var(--line); }
         .unrated { color: var(--muted); font-style: italic; font-size: 13px; }
-        .friday-note {
-            flex-basis: 100%; color: var(--amber); font-size: 12px; margin-top: 2px;
-        }
         .empty { color: var(--muted); padding: 40px 0; text-align: center; }
         .refresh-hint { color: var(--muted); font-size: 12px; margin-top: 24px; text-align: center; }
     </style>
@@ -250,10 +247,9 @@
             } else {
                 legs = spreadTxt(g.spread) + '&nbsp;&nbsp;·&nbsp;&nbsp;' + totalTxt(g.total);
             }
-            let note = g.friday_note ? '<div class="friday-note">Since Monday: ' + g.friday_note.replace(/[<>]/g, '') + '</div>' : '';
             html += '<div class="row"><span class="t">' + fmtClock(g.event_start) + '</span>'
                   + '<span class="m">' + matchup + '</span>'
-                  + '<span class="legs">' + legs + '</span>' + note + '</div>';
+                  + '<span class="legs">' + legs + '</span></div>';
         }
         document.getElementById('games').innerHTML = html;
     }
