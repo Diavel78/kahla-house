@@ -9202,13 +9202,21 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
     # question — no venue event search, no window. A position that already
     # carries a resting ask is the user's takeover: left alone.
     _auto_ord: dict = {}
-    _sell_slugs: set = set()
+    _sell_slugs: set = set()      # slugs with a HAND-PLACED ask (the user's takeover)
     for o in (orders or []):
         _sl = o.get("slug")
         if not _sl:
             continue
         if (o.get("intent") or "").startswith("ORDER_INTENT_SELL"):
-            _sell_slugs.add(_sl)
+            # THE STRAY FACTORY (Sep 25 2026): this set used to hold EVERY
+            # resting ask, including the scalp's own. A pick deleted for any
+            # reason (the Sep 15 storm, a reconcile two-strike) left its lot
+            # AND its AUTOMATIC ask on the venue, and this gate then read
+            # that ask as the user's and refused to re-adopt — forever. Three
+            # 17-20 lots from Sep 14-15 sat that way with no owner. Only a
+            # MANUAL ask is a takeover; an AUTOMATIC ask is ours.
+            if not o.get("auto"):
+                _sell_slugs.add(_sl)
         elif o.get("auto"):
             _auto_ord[_sl] = o
     if not autos_ok:

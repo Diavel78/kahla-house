@@ -1931,6 +1931,9 @@ def test_pair_tick_guards() -> None:
     sd2 = inspect.getsource(_app._pair_seed_tick)
     check("the seeder declines a game where a seat is already held (adopt or decline, never stack)",
           '"held_seat"' in sd2)
+    al = inspect.getsource(_app._pmm_autolog)
+    check("ghost adoption treats only a MANUAL ask as the user's takeover (an AUTOMATIC ask is ours)",
+          "if not o.get(\"auto\"):\n                _sell_slugs.add(_sl)" in al)
     ps = inspect.getsource(_app._pair_slugs)
     check("a retired-but-held leg is released to the autolog", "net" in ps and "retired_slugs" in ps)
     # the side helper reads the venue's sign convention
