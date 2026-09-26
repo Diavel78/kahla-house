@@ -3282,12 +3282,15 @@ def _cellar_health(sb) -> dict:
                .in_("lane", ["repeg", "scalp"])
                .gte("started_at", (datetime.now(timezone.utc)
                                    - timedelta(hours=3)).isoformat())
+               .order("started_at", desc=True)      # newest first (was physical order, capped at 300)
                .limit(300).execute().data) or []
         laps = 0
         budg = 0
         sc_unc = 0
         sc_rej = 0
         sc_act = 0
+        unc_now = None      # the LATEST lap's naked inventory — "dead" is about NOW (Sep 26 2026)
+        rej_now = None
         for t in st3:
             d = t.get("detail") if isinstance(t.get("detail"), dict) else {}
             s = (d.get("scalp") if t.get("lane") == "repeg" else d) or {}
@@ -3297,6 +3300,9 @@ def _cellar_health(sb) -> dict:
             if s.get("gate") == "own_lane":
                 continue        # repeg stood down — the scalp lane owns it
             laps += 1
+            if unc_now is None and "cands" in s:
+                unc_now = int(s.get("uncovered") or 0)
+                rej_now = int(s.get("skip_rejected") or 0)
             if s.get("gate") == "budget":
                 budg += 1
             # uncovered = inventory with NO resting ask, stamped by the
@@ -3313,13 +3319,15 @@ def _cellar_health(sb) -> dict:
             if budg >= laps / 2:
                 _accuse = (f"SCALP STARVED: budget-gated {budg}/{laps} "
                            f"laps, 0 asks in 3h")
-            elif sc_rej > 0 and sc_unc <= sc_rej:
-                _accuse = (f"SCALP REJECTED: the venue refused asks on "
-                           f"{sc_rej} slug-laps in 3h (price collar? see "
+            elif rej_now:
+                _accuse = (f"SCALP REJECTED: the venue is refusing asks on "
+                           f"{rej_now} lot(s) now ({sc_rej} slug-laps in 3h; see "
                            f"'ws priv ORDER REJECTED' in the log)")
-            elif sc_unc >= 10:
-                _accuse = (f"SCALP DEAD: {sc_unc} uncovered positions "
-                           f"seen, 0 asks in 3h")
+            elif unc_now and sc_unc >= 10:
+                # a storm that is OVER must not keep the light red for 3h:
+                # the accusation needs naked inventory in the LATEST lap
+                _accuse = (f"SCALP DEAD: {unc_now} naked lot(s) now, "
+                           f"{sc_unc} lap-sightings, 0 asks in 3h")
         if _accuse:
             _tgt = ("scalp" if any(_l["lane"] == "scalp" for _l in lanes)
                     else "repeg")
