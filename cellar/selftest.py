@@ -1965,6 +1965,20 @@ def test_review_sep26_sizing_and_state() -> None:
         check("orders: a response without 'orders' is unreadable (None)", out2 is None)
     finally:
         m["positions"] = _keep; _app._pmm_read_client = _rc
+    # REST install keeps a socket fill that landed during the fetch (finding 3)
+    _keep = dict(m["positions"]); _kat = m.get("positions_at"); _rc = _app._pmm_read_client
+    try:
+        m["positions"] = {}; m["positions_at"] = 0.0; m.setdefault("pos_ts", {}).clear()
+        _app._pmm_read_client = lambda c: c
+        def _positions_with_fill_midflight():
+            _app._mirror_position_event({"marketSlug": "t", "afterPosition": {"netPositionDecimal": "20", "cost": {"value": "10"}}})
+            return {"positions": {}}        # snapshot taken BEFORE the fill
+        out3 = _app._pmm_positions_raw(NS(portfolio=NS(positions=_positions_with_fill_midflight)), fresh=True)
+        check("positions: a socket fill during the REST fetch survives the install",
+              out3 is not None and "t" in out3 and abs(float(out3["t"]["net"]) - 20) < 0.01
+              and "t" in m["positions"])
+    finally:
+        m["positions"] = _keep; m["positions_at"] = _kat or 0.0; _app._pmm_read_client = _rc
     src = inspect.getsource(_app._repeg_tick)
     check("sniper read stamp is taken when the lap snapshot is read, not later",
           src.index("_fs_read = _time.monotonic()") < src.index("lap_orders = _pmm_open_orders_raw(lap_client)"))

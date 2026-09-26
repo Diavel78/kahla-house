@@ -13095,6 +13095,7 @@ def _mirror_order_event(od: dict) -> None:
                 m["orders"][oid] = n
             else:
                 m["orders"].pop(oid, None)
+            m.setdefault("ord_ts", {})[oid] = _time.monotonic()   # socket write time (REST install respects it)
             m["ws_orders"] += 1
     except Exception:
         pass
@@ -13128,6 +13129,7 @@ def _mirror_position_event(pv: dict) -> None:
             else:
                 m["positions"][slug] = n
                 m.setdefault("zeroed", {}).pop(slug, None)
+            m.setdefault("pos_ts", {})[slug] = _time.monotonic()   # socket write time (REST install respects it)
             m["ws_positions"] += 1
     except Exception:
         pass
@@ -13253,11 +13255,12 @@ def _pmm_open_orders_raw(client, fresh: bool = False) -> list | None:
     out: list = []
     rc = _pmm_read_client(client)     # 8s read twin — writes keep their 30s
     raw = None
+    _t0 = _time.monotonic()           # socket writes after this are NEWER than this read
     for _attempt in (1, 2):           # one retry: transient reset ≠ dark venue
         if _venue_rl_active() or not _venue_read_gate(6.0):
             break
         try:
-            resp = rc.orders.list()
+            resp = rc.orders.list()          # (_t0 below stamps this read's start)
             raw = (resp.get("orders") if isinstance(resp, dict)
                    else getattr(resp, "orders", None))
             if raw is None:
@@ -13275,8 +13278,18 @@ def _pmm_open_orders_raw(client, fresh: bool = False) -> list | None:
         out.append(n)
     with m["lock"]:
         m["misses"] += 1
-        m["orders"] = {n["id"]: n for n in out if n.get("id")}
+        if float(m.get("orders_at") or 0.0) > _t0:
+            return [dict(v) for v in m["orders"].values()]   # a newer read already landed
+        _new = {n["id"]: n for n in out if n.get("id")}
+        for _oid, _ts in list((m.get("ord_ts") or {}).items()):   # socket writes during the fetch win
+            if _ts > _t0:
+                if _oid in m["orders"]:
+                    _new[_oid] = dict(m["orders"][_oid])
+                else:
+                    _new.pop(_oid, None)
+        m["orders"] = _new
         m["orders_at"] = _time.monotonic()
+        out = [dict(v) for v in _new.values()]
     return out
 
 
@@ -13316,6 +13329,7 @@ def _pmm_positions_raw(client, fresh: bool = False) -> dict | None:
     out: dict = {}
     rc = _pmm_read_client(client)     # 8s read twin — writes keep their 30s
     items = None
+    _t0 = _time.monotonic()           # anything the socket writes after this is NEWER than this read
     for _attempt in (1, 2):           # one retry: transient reset ≠ dark venue
         try:
             resp = rc.portfolio.positions()
@@ -13337,6 +13351,19 @@ def _pmm_positions_raw(client, fresh: bool = False) -> dict | None:
         return None                              # read failed → not "no positions"
     with m["lock"]:
         m["misses"] += 1
+        if float(m.get("positions_at") or 0.0) > _t0:
+            # a NEWER REST read already installed while this one was in
+            # flight — an older snapshot never overwrites a newer one
+            return {k: dict(v) for k, v in m["positions"].items()}
+        # SOCKET WRITES DURING THE FETCH WIN (Sep 26 2026, review finding 3):
+        # a fill frame that landed while REST was in flight is newer than
+        # the snapshot; replacing the whole map erased it for up to the TTL.
+        for _sl, _ts in list((m.get("pos_ts") or {}).items()):
+            if _ts > _t0:
+                if _sl in m["positions"]:
+                    out[_sl] = dict(m["positions"][_sl])
+                else:
+                    out.pop(_sl, None)
         m["positions"] = {k: dict(v) for k, v in out.items()}
         m["positions_at"] = _time.monotonic()
     return out
