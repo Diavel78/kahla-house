@@ -20533,6 +20533,38 @@ def _pair_leg_side(lg: dict, mt: str) -> str:
             else ("home" if mt == "spread" else "under"))
 
 
+def _pair_side_held(positions, game_prefix: str, mt: str, side: str,
+                    exclude_slug: str | None = None, min_q: float = 5.0) -> float:
+    """Contracts we HOLD on `side` of this (game, market) through any OTHER
+    rung (Sep 25 2026: 10 games carried two legs on one side — a Ferrari seat
+    with a pair stacked beside it, a garage twin, a both-home row). Side from
+    the venue's sign: pos-/neg- spread slugs are the AWAY line (net>0 away,
+    net<0 home); totals net>0 over, net<0 under. Returns the largest such lot
+    (>= min_q) or 0."""
+    best = 0.0
+    pre = str(game_prefix or "") + "-"
+    for sl, v in (positions or {}).items():
+        if not isinstance(sl, str) or not sl.startswith(pre) or sl == exclude_slug:
+            continue
+        try:
+            net = float((v or {}).get("net") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if abs(net) < min_q:
+            continue
+        if mt == "spread":
+            if not ("-pos-" in sl or "-neg-" in sl):
+                continue
+            ps = "away" if net > 0 else "home"
+        else:
+            if "-total-" not in sl:
+                continue
+            ps = "over" if net > 0 else "under"
+        if ps == side:
+            best = max(best, abs(net))
+    return best
+
+
 def _pair_rent(slug, ko, now, sb):
     """True / False / None (UNREADABLE). A venue read that failed is not "no
     rent": one 429 on /v1/incentives read as rent_pulled and cancelled both
@@ -20599,13 +20631,29 @@ def _pair_all_rows(sb, max_age_s: float = 60.0) -> list:
 
 def _pair_slugs(sb) -> set:
     out = set()
+    try:
+        _pos = _pmm_positions_raw(get_client(), fresh=False) or {}
+    except Exception:
+        _pos = {}
     for r in _pair_all_rows(sb):
         for lg in (r.get("legs") or []):
             if lg.get("slug"):
                 out.add(lg["slug"])
         for sl in (r.get("retired_slugs") or []):
-            if sl:
-                out.add(sl)
+            if not sl:
+                continue
+            # A RETIRED LEG WE STILL HOLD IS NOBODY'S (Sep 25 2026): Ok State
+            # away +1.5 x15 was re-rung away from, stayed held, stayed
+            # pair-owned, and sat with no ask — the autolog skipped it as a
+            # pair leg, the scalp never saw it. Held → released to the
+            # autolog (a pick, an ask at cost). Flat → still ours to keep the
+            # re-rung's old rung out of the Ferrari's hands.
+            try:
+                if abs(float(((_pos.get(sl) or {}).get("net")) or 0.0)) >= 1.0:
+                    continue
+            except (TypeError, ValueError):
+                pass
+            out.add(sl)
     return out
 
 
@@ -21569,6 +21617,20 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 0) -> dict:
             if not slugs or not prefix or (prefix, mt) in have:
                 continue
             res["looked"] += 1
+            # ADOPT OR DECLINE, NEVER STACK (Rob, Sep 25 2026). The slug-level
+            # `taken` check stepped around the rung the Ferrari held and seeded
+            # a fresh pair on the other rungs: Miss@FL under 51.5 x16 got over
+            # 59.5 / under 61.5 beside it, Ok State under 51.5 x18 got under
+            # 59.5 x15 on top. A held seat on this (game, market) means the
+            # pair is THAT seat plus one opposite leg — the handover — or no
+            # pair at all. Until the handover exists, decline.
+            _held_here = [sl for sl in (pos or {}) if isinstance(sl, str)
+                          and sl.startswith(prefix + "-")
+                          and abs(float(((pos or {}).get(sl) or {}).get("net") or 0.0)) >= 5.0]
+            if _held_here:
+                res["skip_held_seat"] = res.get("skip_held_seat", 0) + 1
+                _pair_decline(sb, g["id"], mt, "held_seat")
+                continue
             # FOOTBALL RUNS THE EXECUTOR'S RULE (Rob, Sep 21 2026: "Ferrari
             # rules… with a pair… is the ENTIRE GOAL", and "bad rungs is the
             # entire issue… why we can't find a middle"). Two Ferrari-legal
@@ -22389,6 +22451,19 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
                 # (CAR@CLE over 41.5, 19 held, its ask blocked — Sep 25 2026).
                 p["why"].append("master_rule")
                 continue
+            if side == "bid":
+                # ONE LEG PER SIDE PER GAME (Rob, Sep 25 2026: "I can't get
+                # you to stop betting two different bets on the same side").
+                # A bid that would put a second lot on a side we already hold
+                # on this (game, market) — through ANY rung, pair or Ferrari
+                # or stray — is not a hedge. Refused here, whatever row asked.
+                _sh = _pair_side_held(positions, row.get("game_prefix"), mt,
+                                      _pair_leg_side(c, mt), c["slug"])
+                if _sh:
+                    p["why"].append(f"side_held:{_sh:g}")
+                    if have is not None and _pair_cancel(client, have):
+                        res["side_held_cancelled"] = res.get("side_held_cancelled", 0) + 1
+                    continue
             verdict, oid = _pair_order_write(client, c["slug"], intent, want[0], want[1], gtt, have)
             if verdict in ("created", "amended"):
                 res["writes"] += 1

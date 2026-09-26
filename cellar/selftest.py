@@ -1925,6 +1925,27 @@ def test_pair_tick_guards() -> None:
     check("a losing twin's third-leg bid is cancelled", '"dup_bids_cancelled"' in tk)
     check("two legs on one side is not a pair: skipped, bids cancelled",
           '"not_pair_rows"' in tk and '"not_pair_bids_cancelled"' in tk)
+    st2 = inspect.getsource(_app._pair_step)
+    check("a bid never makes a second leg on a side we already hold on the game",
+          "_pair_side_held(positions, row.get(\"game_prefix\"), mt," in st2 and "side_held" in st2)
+    sd2 = inspect.getsource(_app._pair_seed_tick)
+    check("the seeder declines a game where a seat is already held (adopt or decline, never stack)",
+          '"held_seat"' in sd2)
+    ps = inspect.getsource(_app._pair_slugs)
+    check("a retired-but-held leg is released to the autolog", "net" in ps and "retired_slugs" in ps)
+    # the side helper reads the venue's sign convention
+    P = {"asc-x-a-b-2026-01-01-pos-3pt5": {"net": 15}, "asc-x-a-b-2026-01-01-neg-2pt5": {"net": -9},
+         "tsc-x-a-b-2026-01-01-total-41pt5": {"net": -19}, "asc-x-a-b-2026-01-01-pos-1pt5": {"net": 0.3}}
+    check("side helper: away +3.5 x15 reads as AWAY held",
+          _app._pair_side_held(P, "asc-x-a-b-2026-01-01", "spread", "away") == 15)
+    check("side helper: short on away -2.5 reads as HOME held",
+          _app._pair_side_held(P, "asc-x-a-b-2026-01-01", "spread", "home") == 9)
+    check("side helper: dust is ignored and the excluded slug is skipped",
+          _app._pair_side_held(P, "asc-x-a-b-2026-01-01", "spread", "away",
+                               exclude_slug="asc-x-a-b-2026-01-01-pos-3pt5") == 0)
+    check("side helper: short total reads as UNDER, spreads don't leak into totals",
+          _app._pair_side_held(P, "tsc-x-a-b-2026-01-01", "total", "under") == 19
+          and _app._pair_side_held(P, "tsc-x-a-b-2026-01-01", "total", "over") == 0)
     check("slugs past the list cap are named, not quoted blind", '"uncovered_rows"' in tk)
     check("the lap has a budget and rotates", "_PAIR_TICK_BUDGET_S" in tk and "_PAIR_ROT" in tk)
     check("the watch push merges", "_WS_WATCHLIST_MERGE_CB(set(all_slugs))" in tk
