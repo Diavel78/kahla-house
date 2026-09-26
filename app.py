@@ -13259,7 +13259,9 @@ def _pmm_open_orders_raw(client, fresh: bool = False) -> list | None:
         try:
             resp = rc.orders.list()
             raw = (resp.get("orders") if isinstance(resp, dict)
-                   else getattr(resp, "orders", [])) or []
+                   else getattr(resp, "orders", None))
+            if raw is None:
+                continue          # MALFORMED ≠ EMPTY (Sep 26 2026)
             break
         except Exception as _e:
             _venue_rl_trip(_e)
@@ -13317,7 +13319,10 @@ def _pmm_positions_raw(client, fresh: bool = False) -> dict | None:
     for _attempt in (1, 2):           # one retry: transient reset ≠ dark venue
         try:
             resp = rc.portfolio.positions()
-            items = list((resp.get("positions", {}) or {}).items())
+            _pl = resp.get("positions") if isinstance(resp, dict) else None
+            if _pl is None:
+                continue          # MALFORMED ≠ EMPTY (Sep 26 2026): keep the last good mirror
+            items = list((_pl or {}).items())
             break
         except Exception:
             continue
@@ -20584,6 +20589,18 @@ def _pair_side_held(positions, game_prefix: str, mt: str, side: str,
     return best
 
 
+def _amend_total(leaves, cum) -> int:
+    """The venue's modify `quantity` is the ORDER TOTAL, fills carried. Decimal
+    in, whole contracts out — ROUNDED, never truncated (Sep 26 2026, the
+    independent review's finding 5: `int(19.7) + 0.3 → 19` shrank every
+    partially filled bid by a contract per amend: 20 → 19 → 18 → 17)."""
+    try:
+        t = float(leaves or 0.0) + float(cum or 0.0)
+    except (TypeError, ValueError):
+        return 0
+    return max(1, int(round(t))) if t >= 0.5 else 0
+
+
 def _pair_rent(slug, ko, now, sb):
     """True / False / None (UNREADABLE). A venue read that failed is not "no
     rent": one 429 on /v1/incentives read as rent_pulled and cancelled both
@@ -20772,7 +20789,7 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
             continue
         # ── BID ──────────────────────────────────────────────────────────
         bid = None
-        want = int(qty - float(L.get("h") or 0) + 1e-9)
+        want = qty - float(L.get("h") or 0)          # DECIMAL (Sep 26 2026): int() here fed the shrink
         if mins <= 0:
             why.append("kickoff_no_bid")
         elif mins <= _PAIR_T30_MIN and not (held[ka] or held[kb]):
@@ -20932,7 +20949,7 @@ def _pair_order_write(client, slug, intent, px_c, n, gtt, cur) -> tuple[str, str
     if cur is not None:
         cur_px = cur.get("price_yes")
         cur_c = None if cur_px is None else ((100.0 - cur_px * 100.0) if short else cur_px * 100.0)
-        if cur_c is not None and abs(cur_c - px_c) < 0.01 and int(cur.get("leaves") or 0) == int(n):
+        if cur_c is not None and abs(cur_c - px_c) < 0.01 and abs(float(cur.get("leaves") or 0) - float(n)) < 0.5:
             return "keep", cur.get("id")
         # THE VENUE'S `quantity` IS THE ORDER TOTAL, FILLS CARRIED (the sell
         # arm's Sep 9 measurement: "18.99 held vs 17.6 leaves → resize to 18
@@ -20942,15 +20959,20 @@ def _pair_order_write(client, slug, intent, px_c, n, gtt, cur) -> tuple[str, str
         # fill. Send leaves-wanted + already-filled so LEAVES lands at n.
         _cum = float(cur.get("cum") or 0.0)
         r = _repeg_amend(client, cur.get("id"), slug, canon,
-                         int(n + _cum + 1e-9), gtt)
+                         _amend_total(n, _cum), gtt)
         if r == "amended":
             return "amended", cur.get("id")
         if r == "unverified":
             return "unverified", cur.get("id")
-        # 'gone' → fall through to a fresh create
+        # 'GONE' IS NOT A CREATE (Sep 26 2026, review finding 2): an order
+        # absent from the verification list may have FILLED during the
+        # modify. Creating here put a second lot on a leg that had just
+        # become held. Hand it back; the next lap's missing-bid guard reads
+        # positions fresh before any new lot.
+        return "gone", cur.get("id")
     params = {"marketSlug": slug, "intent": intent, "type": "ORDER_TYPE_LIMIT",
               "price": {"value": f"{canon:.3f}", "currency": "USD"},
-              "quantity": int(n), "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
+              "quantity": max(1, int(round(float(n)))), "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
               "goodTillTime": gtt, "participateDontInitiate": True,
               "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
     try:
@@ -20958,7 +20980,7 @@ def _pair_order_write(client, slug, intent, px_c, n, gtt, cur) -> tuple[str, str
         oid = cr.get("id") if isinstance(cr, dict) else getattr(cr, "id", None)
         return "created", oid
     except Exception as e:
-        app.logger.warning("pair create %s %s %.1f×%d failed: %s", slug, intent, px_c, n, e)
+        app.logger.warning("pair create %s %s %.1f×%s failed: %s", slug, intent, px_c, n, e)
         return "error", None
 
 
@@ -22500,6 +22522,9 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
                 s[side + "_c"] = want[0]
                 if oid:
                     s[side + "_id"] = oid
+            elif verdict == "gone":
+                res["gone"] = res.get("gone", 0) + 1   # state untouched: next lap re-reads positions
+                p["why"].append("order_gone")
             elif verdict == "error":
                 res["errors"] += 1
                 p["why"].append("write_failed")
@@ -30686,7 +30711,7 @@ def _snipe_buy_one(sb, client, slug: str) -> None:
            "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": snap["gtt"],
            "participateDontInitiate": True,
            # TOTAL, fills carried (Sep 25 2026) — see the repeg chase
-           "quantity": int(snap["qty"]) + int(snap.get("cum") or 0)}
+           "quantity": _amend_total(snap.get("leaves_f", snap["qty"]), snap.get("cum"))}
     frm = snap["our_bid"]
     ok, note = True, "buy"
     try:
@@ -30774,7 +30799,8 @@ def _buy_snap_publish(sb, fs: dict, now, client, full_lap: bool) -> int:
             wall_c = _ml_model_wall_c(sb, r, mt="prop")   # stamped model fair + slack
         fresh[slug] = {"oid": f["order_id"], "our_bid": float(f["my_price_c"]),
                        "wall_c": wall_c,
-                       "qty": qty, "cum": int(float(f.get("order_cum") or 0.0)),
+                       "qty": qty, "leaves_f": float(f.get("order_leaves") or 0.0),
+                       "cum": float(f.get("order_cum") or 0.0),
                        "synth": bool(f.get("synthetic")),
                        "join": (fbp or _gridiron_join_touch(slug, 50.0)),   # football: AT the touch
                        "cap_c": (_gridiron_cap_for(sb, slug) if grid
@@ -31017,6 +31043,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
         # reconcile/scalp gate venue_read — never act blind, just fail FAST.
         _tp = _time.time()                 # phase clock (journal: t_setup/t_fs)
         lap_client = lap_orders = lap_positions = None
+        _fs_read = _time.monotonic()      # the buy sniper's pop guard: stamped WHEN THE DATA IS READ (Sep 26 2026)
         try:
             lap_client = get_client()
             lap_orders = _pmm_open_orders_raw(lap_client)
@@ -31070,7 +31097,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 res["t_setup"] = round(_time.time() - _tp, 1)
                 _tp = _time.time()
                 app.logger.info("repeg phase: fill-status uid=%s mode=%s", uid, res.get("mode"))
-                _fs_read = _time.monotonic()      # the buy sniper's pop guard
+                # (_fs_read is stamped at snapshot acquisition above — review finding 6)
                 fs = _compute_fill_status(
                     sb, uid, poly_snap=lap_snap,
                     only_slugs=(_dirty if _targeted else None))
@@ -31511,7 +31538,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                 # a real partial (cum 5) went 15 → 10 → 5 → 0 in three
                 # chases. The create leg keeps `qty` (a fresh order has no
                 # cum).
-                qty_amend = int(qty + float(f.get("order_cum") or 0.0) + 1e-9)
+                qty_amend = _amend_total(leaves, f.get("order_cum"))   # decimal leaves + cum, rounded
                 if (res["acted"] >= _REPEG_MAX_ACTIONS
                         or (_time.time() - _t0) > _REPEG_BUDGET_S):
                     res["deferred"] += 1

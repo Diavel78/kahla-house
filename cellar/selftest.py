@@ -1878,16 +1878,19 @@ def test_buy_amend_sends_the_total() -> None:
     the buy sniper all did it."""
     import app as _app
     import inspect
+    # Sep 26 2026: the Sep 25 strings truncated decimals (int(19.7)+0.3 = 19);
+    # every site now goes through _amend_total (behavioral test in
+    # test_review_sep26_sizing_and_state). These check the wiring only.
     pw = inspect.getsource(_app._pair_order_write)
-    check("pair amend adds the filled part", "int(n + _cum + 1e-9)" in pw)
+    check("pair amend adds the filled part", "_amend_total(n, _cum)" in pw)
     rp = inspect.getsource(_app._repeg_tick)
     check("repeg chase amends with cum + leaves",
-          "qty_amend = int(qty + float(f.get(\"order_cum\") or 0.0) + 1e-9)" in rp
+          "_amend_total(leaves, f.get(\"order_cum\"))" in rp
           and "_repeg_amend(client, oid, slug, canon, qty_amend, _gtt_a)" in rp)
     sb = inspect.getsource(_app._snipe_buy_one)
-    check("buy sniper amends with cum + leaves", 'int(snap.get("cum") or 0)' in sb)
+    check("buy sniper amends with cum + leaves", '_amend_total(snap.get("leaves_f"' in sb)
     bp = inspect.getsource(_app._buy_snap_publish)
-    check("the snapshot carries cum", '"cum": int(float(f.get("order_cum") or 0.0))' in bp)
+    check("the snapshot carries cum", '"cum": float(f.get("order_cum") or 0.0)' in bp)
     check("the pop guard is real, not `pass`",
           'SCALP_POPPED.get(slug, 0.0) > float(fs.get("read_mono") or t_read)' in bp
           and "            pass" not in bp.split("read_mono")[0][-400:])
@@ -1908,6 +1911,67 @@ def test_football_wall_is_checked_before_the_price() -> None:
     check("recenter stands down behind the wall", '{"gate": "pairs_own"}' in rc)
     sw = inspect.getsource(_app._gridiron_bet_sweep)
     check("the bet sweep skips its builds behind the wall", 'stats["sweep_gate"] = "pairs_own"' in sw)
+
+
+def test_review_sep26_sizing_and_state() -> None:
+    """Behavioral checks for the Sep 26 independent review: fractional-fill
+    amend totals (5), the pair's gone-is-not-a-create (2), malformed venue
+    envelopes (7), and the sniper read stamp (6)."""
+    import app as _app, inspect, time as _t
+    from types import SimpleNamespace as NS
+    at = _app._amend_total
+    check("amend total: 19.7 leaves + 0.3 filled = 20 (not 19)", at(19.7, 0.3) == 20)
+    check("amend total: 14.7 + 0.3 = 15", at(14.7, 0.3) == 15)
+    check("amend total: whole numbers pass through", at(15, 0) == 15 and at(19.7, 0) == 20)
+    check("amend total: dust is 0, never a 1-lot", at(0.3, 0) == 0 and at(0.6, 0) == 1)
+    # pair write: an order that vanished during the amend is handed back, not replaced
+    created = []
+    client = NS(orders=NS(create=lambda p: (created.append(p) or {"id": "second"}),
+                          modify=lambda *a: None, list=lambda *a: {"orders": []}))
+    _sleep = _app._time.sleep
+    try:
+        _app._time.sleep = lambda *a: None
+        v = _app._pair_order_write(client, "test", "ORDER_INTENT_BUY_LONG", 51, 15,
+                                   "2099-01-01T00:00:00Z",
+                                   {"id": "first", "price_yes": .50, "leaves": 15, "cum": 0})
+    finally:
+        _app._time.sleep = _sleep
+    check("pair write: 'gone' returns gone and creates NOTHING", v[0] == "gone" and not created)
+    # pair write: a partially filled bid is amended to the rounded total
+    mods = []
+    client2 = NS(orders=NS(create=lambda p: created.append(p),
+                           modify=lambda oid, m: mods.append(m),
+                           list=lambda *a: {"orders": [{"id": "first", "state": "ORDER_STATE_REPLACED",
+                                                         "price": {"value": "0.510"}, "quantity": 15}]}))
+    try:
+        _app._time.sleep = lambda *a: None
+        v2 = _app._pair_order_write(client2, "test", "ORDER_INTENT_BUY_LONG", 51, 14.7,
+                                    "2099-01-01T00:00:00Z",
+                                    {"id": "first", "price_yes": .50, "leaves": 14.7, "cum": 0.3})
+    finally:
+        _app._time.sleep = _sleep
+    check("pair write: 14.7 wanted + 0.3 filled amends to quantity 15",
+          bool(mods) and mods[-1].get("quantity") == 15 and v2[0] == "amended")
+    # malformed positions envelope keeps the mirror
+    m = _app._VENUE_MIRROR
+    _keep = dict(m["positions"]); _rc = _app._pmm_read_client
+    try:
+        m["positions"] = {"t": {"net": 20.0, "qty": 20.0, "avg_price": 0.5}}
+        _app._pmm_read_client = lambda c: c
+        out = _app._pmm_positions_raw(NS(portfolio=NS(positions=lambda: {"unexpected": 1})), fresh=True)
+        check("positions: a response without 'positions' is unreadable (None), mirror kept",
+              out is None and "t" in m["positions"])
+        out2 = _app._pmm_open_orders_raw(NS(orders=NS(list=lambda: {"unexpected": 1})), fresh=True)
+        check("orders: a response without 'orders' is unreadable (None)", out2 is None)
+    finally:
+        m["positions"] = _keep; _app._pmm_read_client = _rc
+    src = inspect.getsource(_app._repeg_tick)
+    check("sniper read stamp is taken when the lap snapshot is read, not later",
+          src.index("_fs_read = _time.monotonic()") < src.index("lap_orders = _pmm_open_orders_raw(lap_client)"))
+    rp = inspect.getsource(_app._repeg_tick)
+    check("repeg chase sizes the amend from decimal leaves", "_amend_total(leaves, f.get(\"order_cum\"))" in rp)
+    sn = inspect.getsource(_app._snipe_buy_one)
+    check("buy sniper sizes the amend from decimal leaves", "_amend_total(snap.get(\"leaves_f\"" in sn)
 
 
 def test_pair_tick_guards() -> None:
@@ -1979,7 +2043,7 @@ def main() -> int:
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
-              test_pair_leg_side, test_buy_amend_sends_the_total,
+              test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()
