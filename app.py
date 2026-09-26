@@ -21671,52 +21671,22 @@ def _pair_from_gridiron_rule(sb, g, mt, now, taken_slugs=None):
                 continue
             if not hits:
                 continue        # the mirror is a re-rung stop, never a seed
-            # NEAREST THE LINE, NOT WIDEST (Rob, Sep 21 2026: "how would a
-            # fucking MIDDLE rung be 81.5 cents"). Widest-under-cap is the
-            # rule for a COMPLETION, where one leg is held and its cost is
-            # already spent — there, more numbers on the loss is strictly
-            # better. Seeding both legs fresh it is the wrong objective: the
-            # widest legal window puts the two rungs as far apart as the tail
-            # gate allows, which is a deep favorite on one side and a longshot
-            # on the other (CARK +17.5 at 81.5 against FSU -8.5, on a game
-            # lined near -30).
-            #
-            # THE REASON IS LINE MOVEMENT, NOT LEG BALANCE (Rob's correction
-            # when I gave the weaker one): "reality is we're going to end up
-            # fucking owning these things, and we're so fucking early the
-            # line's going to be moving all over the place — so you want the
-            # distance to cover the fact that we really have no idea what the
-            # lines are going to end up being." Seeds go down days out. Today's
-            # line is the best estimate of the closing line, so sitting on it
-            # is what protects the seat we will still be holding when the
-            # number has moved. Balanced legs are a consequence, not the goal.
-            # Rank by distance from the center, then by cost.
+            # THE RULE (Rob, Sep 26 2026, verbatim): "Widest rung to START. If
+            # it can't hold under 120, then rerung tighter, and tighter as
+            # needed. STAY ON TOUCH." Spread 4.5 → −3.5 with +6.5 if it fits
+            # under the cap, step in only when it doesn't. Rank = widest
+            # window, then nearest the centre, then cheapest. The 65¢ per-leg
+            # fence (_PAIR_MAX_LEG_C) is what keeps "widest" from buying a
+            # −441 side (the CARK +17.5 @ 81.5 lesson). Stepping in when the
+            # touch moves is the re-rung's job (_pair_rerung / _pair_rerung_both),
+            # which walks the same ladder widest→tightest every 120s.
+            # ⚠ DO NOT rank by closeness first (Sep 21) or promote sub-100
+            # pairs above width (also Sep 21) — both were tried and thrown out.
             _off = (abs((-a["line"]) - float(rule["center"]))
                     + abs(b["line"] - float(rule["center"]))
                     if mt == "spread" else
                     abs(a["line"] - float(rule["center"]))
                     + abs(b["line"] - float(rule["center"])))
-            # ⚠ DO NOT "PROMOTE" SUB-100 PAIRS ABOVE THE LINE RANKING.
-            # I added exactly that on Sep 21 2026 and Rob threw it out: the
-            # sub-100 lock has been rule #1 since day one and is already
-            # handled downstream (it rides to settlement with no asks). Making
-            # it a SEEDING preference is worse than useless — it buys a lock
-            # that sits far from the number instead of a seat on it, and the
-            # whole reason seeds rank by distance is that the line moves and we
-            # end up owning these.
-            # WIDEST FROM THE MIDDLE, UNDER THE CAP (Rob, Sep 22 2026: "was
-            # that the widest rung FROM MIDDLE under the 120 cap? Because that
-            # part is what gives us movement options").
-            # Width is not greed, it is room: the line moves, and a wide pair
-            # can walk a rung IN toward the new number while a tight one has
-            # nowhere to go but down. Ranking by closeness-to-centre picked the
-            # TIGHTEST window every time — Missouri State @ SMU took 2 numbers
-            # at 104¢ when an 8-number window sat there at 119¢, leaving 15¢ of
-            # the budget and six numbers of coverage unused.
-            # This was the original rule; I swung away from it after it seated
-            # an 81.5¢ leg. The 65¢ per-leg cap is what actually fixed that, so
-            # widest can no longer buy a −441 side. Centre is the tie-break:
-            # among equal widths, take the one sitting on the line.
             cand = (len(hits), -_off, -cost)
             if best is None or cand > best[0]:
                 best = (cand, a, b, {"hits": hits, "cost_c": round(cost, 1),

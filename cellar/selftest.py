@@ -2148,6 +2148,11 @@ def test_pair_tick_guards() -> None:
     check("rent is read tri-state", "_pair_rent(slug, ko, now, sb)" in st)
     sd = inspect.getsource(_app._pair_seed_tick)
     check("the seeder's lead floor follows the program", "_pair_min_lead_h(r.get(\"sport\"), sb)" in sd)
+    gr = inspect.getsource(_app._pair_from_gridiron_rule)
+    check("football seeder ranks WIDEST window first (Rob, Sep 26: widest to start, rerung tighter as needed)",
+          "cand = (len(hits), -_off, -cost)" in gr and "STAY ON TOUCH" in gr)
+    po = inspect.getsource(_app._pair_partner_options)
+    check("the re-rung walks widest → tighter", 'out.sort(key=lambda o: (-o["worth"], o["pair_c"]))' in po)
     pr = inspect.getsource(_app._pin_daily_refresh)
     check("Pinnacle is pulled twice a day: 02:30 (before the first day-of window) and 06:00",
           '_slot = "0230"' in pr and '_slot = "0600"' in pr and _app._PIN_REFRESH_EARLY_AZ_MIN == 150)
