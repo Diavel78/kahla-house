@@ -442,33 +442,36 @@ def lane_pair(ctx: Ctx) -> int:
         return 0
     stats = _app._pair_tick(ctx.sb, ctx.now) or {}
     log.info("pair: %s", stats)
-    # THE SEEDER rides the same lane on its own cadence (the pair engine runs
-    # every 20s; hunting for new pairs that often is pointless and costs a
-    # rent-list read). DRY until machine_flags `pair_seed_enabled` says
-    # otherwise — the flag is the whole arming ceremony, no deploy, no restart.
-    if _t.time() - _PAIR_SEED_TS["at"] >= _PAIR_SEED_EVERY_S:
-        _PAIR_SEED_TS["at"] = _t.time()
-        try:
-            # DRY = "shop but do not seat". On a live box ctx.dry_run is False,
-            # so passing it straight through meant the seeder reported
-            # `seed_flag_off` and never produced the shopping list the whole
-            # point of the dry phase is to read. The arming flag decides.
-            _armed = _app._machine_flag("pair_seed_enabled", False)
-            seed = _app._pair_seed_tick(ctx.sb, ctx.now,
-                                        dry=(ctx.dry_run or not _armed)) or {}
-            log.info("pair seed: %s", {k: v for k, v in seed.items() if k != "cands"})
-            for c in (seed.get("cands") or [])[:8]:
-                log.info("  would pair %s %s on %s: %s + %s = %s¢ "
-                         "(cap %s, worth %s, edge %s)", c.get("game"), c.get("mt"),
-                         c.get("hits"), c.get("a_c"), c.get("b_c"), c.get("cost_c"),
-                         c.get("cap_c"), c.get("worth_c"), c.get("edge_c"))
-            if ctx.detail is not None:
-                ctx.detail["seed"] = {k: v for k, v in seed.items() if k != "cands"}
-        except Exception as e:
-            log.warning("pair seed failed: %s", e)
     if ctx.detail is not None and isinstance(stats, dict):
         ctx.detail.update(stats)
     return int(stats.get("writes") or 0)
+
+
+
+def lane_pair_seed(ctx: Ctx) -> int:
+    """THE PAIR SEEDER, on its own lane (Sep 26 2026). Prices the rent-list
+    board and seats new pairs; DRY until machine_flags `pair_seed_enabled`.
+    Moved out of `pair` so a pair lap is a pair lap (re-peg fills in seconds)
+    and the board walk can take its time on a 5-min clock."""
+    import app as _app
+    if ctx.dry_run:
+        log.info("pair seed: DRY-RUN, not executing")
+        return 0
+    try:
+        _armed = _app._machine_flag("pair_seed_enabled", False)
+        seed = _app._pair_seed_tick(ctx.sb, ctx.now, dry=(not _armed)) or {}
+        log.info("pair seed: %s", {k: v for k, v in seed.items() if k != "cands"})
+        for c in (seed.get("cands") or [])[:8]:
+            log.info("  would pair %s %s on %s: %s + %s = %s¢ "
+                     "(cap %s, worth %s, edge %s)", c.get("game"), c.get("mt"),
+                     c.get("hits"), c.get("a_c"), c.get("b_c"), c.get("cost_c"),
+                     c.get("cap_c"), c.get("worth_c"), c.get("edge_c"))
+        if ctx.detail is not None:
+            ctx.detail.update({k: v for k, v in seed.items() if k != "cands"})
+        return int(seed.get("seated") or 0)
+    except Exception as e:
+        log.warning("pair seed failed: %s", e)
+        return 0
 
 
 REGISTRY: dict[str, Callable[[Ctx], int]] = {
@@ -485,6 +488,7 @@ REGISTRY: dict[str, Callable[[Ctx], int]] = {
     "grader":         lane_grader,
     "scalp":          lane_scalp,
     "pair":           lane_pair,
+    "pair_seed":      lane_pair_seed,
 }
 
 

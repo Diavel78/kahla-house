@@ -3339,6 +3339,52 @@ def _cellar_health(sb) -> dict:
                     bad += 1
     except Exception:
         pass
+    # ── PAIR BLIND TRIPWIRE (Sep 26 2026). The pair lane gated
+    # `orders_unreadable: 414 Request-URI Too Large` for 100 minutes, ticked
+    # every 20s, processed ZERO pairs, and read GREEN the whole time while
+    # three legs filled with no ask. A lane's liveness is ROWS PROCESSED,
+    # not ticks: ≥6 pair ticks in the last 5 min, every one with pairs=0
+    # and a gate, while pairs are enabled → red with the gate text.
+    try:
+        pt = (sb.table("cellar_ticks").select("detail,started_at")
+              .eq("lane", "pair")
+              .gte("started_at", (datetime.now(timezone.utc)
+                                  - timedelta(minutes=5)).isoformat())
+              .order("started_at", desc=True).limit(40).execute().data) or []
+        _pd = [t.get("detail") for t in pt if isinstance(t.get("detail"), dict)]
+        _pd = [d for d in _pd if "pairs" in d or "gate" in d]
+        if len(_pd) >= 6 and all(int(d.get("pairs") or 0) == 0 for d in _pd):
+            _gates = [str(d.get("gate") or "no_gate")[:60] for d in _pd]
+            _g0 = max(set(_gates), key=_gates.count)
+            if _g0 != "no_pairs":          # an empty pair table is not blindness
+                for _l in lanes:
+                    if _l["lane"] == "pair" and _l["state"] in ("ok", "idle"):
+                        _l["state"] = "error"
+                        _l["error"] = (f"PAIR BLIND: {len(_pd)} laps in 5 min processed "
+                                       f"0 pairs — gate '{_g0}'")
+                        bad += 1
+    except Exception:
+        pass
+    # ── PAIR STALE TRIPWIRE (Sep 26 2026). Liveness per PAIR, not per lane:
+    # every converge writes the row's updated_at; an enabled pre-kick pair
+    # nobody has converged in 3 minutes is a pair nobody is managing —
+    # whatever the lane's tick counter says.
+    try:
+        _stale = (sb.table("pair_hedges").select("id")
+                  .eq("enabled", True)
+                  .gt("kickoff", datetime.now(timezone.utc).isoformat())
+                  .lt("updated_at", (datetime.now(timezone.utc)
+                                     - timedelta(minutes=3)).isoformat())
+                  .limit(50).execute().data) or []
+        if len(_stale) >= 3:
+            for _l in lanes:
+                if _l["lane"] == "pair" and _l["state"] in ("ok", "idle"):
+                    _l["state"] = "error"
+                    _l["error"] = (f"PAIR STALE: {len(_stale)} pre-kick pairs not converged "
+                                   f"in 3 min (e.g. rows {[r['id'] for r in _stale[:5]]})")
+                    bad += 1
+    except Exception:
+        pass
     # ── OMS-DEAD TRIPWIRE (Sep 9 2026 — the mangled-kwarg miss). The opener
     # lane read green for 2.5 days while its OMS executor threw on its
     # first bet every tick: `oms_err` sat in every tick's detail and no
@@ -27464,9 +27510,10 @@ _CELLAR_LEASE_ENFORCED = (os.environ.get("CELLAR_LEASE_ENFORCED") or "").strip()
 #   "alerts"  -> _outbid_alerts
 #   "scalp"   -> _scalp_tick (Sep 4 2026 — own lane, own budget; the
 #                in-repeg call stands down via the CELLAR_LANES env gate)
-#   "pair"    -> _pair_tick + _pair_seed_tick (Sep 18 2026 — the middle pair;
-#                box-only, no Vercel twin; the seeder is DRY until the
-#                machine_flags `pair_seed_enabled` arming flag says otherwise)
+#   "pair"    -> _pair_tick (Sep 18 2026 — the middle pair; box-only, no
+#                Vercel twin; every pair converges every lap, one account read)
+#   "pair_seed" -> _pair_seed_tick (Sep 26 2026 — the seeder on its OWN lane
+#                and clock; DRY until machine_flags `pair_seed_enabled`)
 # NOT YET GATED (all on the "alerts" lane, all in the paperlog route body):
 #   _tg_flush, _bet_alerts, _opener_watchdog. Each is individually near-
 #   idempotent (per-bet markers, send-and-mark, cooldowns) so double-running

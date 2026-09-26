@@ -156,8 +156,8 @@ def test_lane_registry_matches_config() -> None:
     extra = [n for n in lanes.REGISTRY if n not in config.ALL_LANES]
     check("no orphan lane implementations", not extra, f"orphans {extra}")
     money = {n for n, l in config.ALL_LANES.items() if l.writes_money}
-    check("money lanes are exactly opener/repeg/harvest/scalp/pair",
-          money == {"opener", "repeg", "harvest", "scalp", "pair"},
+    check("money lanes are exactly opener/repeg/harvest/scalp/pair/pair_seed",
+          money == {"opener", "repeg", "harvest", "scalp", "pair", "pair_seed"},
           f"got {sorted(money)}")
     bad = [n for n, l in config.ALL_LANES.items() if l.ttl_s <= l.every_s]
     check("every TTL exceeds its cadence", not bad, f"too tight: {bad}")

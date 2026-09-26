@@ -209,6 +209,12 @@ ALL_LANES: dict[str, Lane] = {
         # poll costs venue reads we need for volume.
         Lane("pair",            45,   180, writes_money=True, stuck_s=300,
              note="middle-pair hedge (two legs, one game)"),
+        # THE SEEDER OFF THE MONEY LAP (Rob, Sep 26 2026 — "one of these times
+        # you'll make this machine work"): pricing the whole board (2,364
+        # looks in 24 laps) inside the lane that must re-peg fills within
+        # seconds is why pair laps overran 300s all week. Own lane, own clock.
+        Lane("pair_seed",      300,   900, writes_money=True, stuck_s=600,
+             note="middle-pair seeder — prices the board, seats new pairs"),
     ]
 }
 
