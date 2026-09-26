@@ -22259,7 +22259,10 @@ def _pair_tick(sb, now=None) -> dict:
         # failed' in two minutes on Sep 26 while the mirror was 2s old).
         _oage = _time.monotonic() - float(_VENUE_MIRROR.get("orders_at") or 0.0)
         _all = _pmm_open_orders_raw(client, fresh=(_oage > 120.0))
-        if _all is None and _oage <= 120.0:
+        if _all is None and _oage <= 600.0:
+            # a failed REST read falls back to the mirror inside its TTL —
+            # the socket keeps it current; orders_at only moves on REST
+            # (34 laps gated 'orders.list failed' in 4h with a 120s window)
             _all = _pmm_open_orders_raw(client, fresh=False)
         if _all is None:
             raise RuntimeError("orders.list failed")
@@ -22433,21 +22436,26 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
             app.logger.warning("pair %s unfreeze failed: %s", row.get("id"), e)
     lg_in = {}
     cur = {}
+    # FREEZE IS DECIDED BEFORE THE LEG WALK (Sep 26 2026): returning from
+    # inside the loop on leg b left leg a's fill/sell already detected but
+    # never written, so the same sell was re-counted (and re-pinged) on every
+    # lap — 1,103 'sells' and 1,215 'errors' in an afternoon from one frozen
+    # row. A frozen pair is not an error; it is a pair a pick owns a leg of.
+    _frozen = [lg["slug"] for lg in legs_def if lg.get("slug") in _foreign]
+    if _frozen:
+        for _fs in _frozen:
+            if _time.time() - _PAIR_FREEZE_PING.get("pick:" + _fs, 0.0) > 3600.0:
+                _PAIR_FREEZE_PING["pick:" + _fs] = _time.time()
+                app.logger.warning("pair %s: %s belongs to a pick — pair frozen",
+                                   row.get("id"), _fs)
+        res["frozen"] = res.get("frozen", 0) + 1
+        return
     for lg in legs_def:
         k, slug, intent = lg["key"], lg["slug"], lg["intent"]
         short = intent.endswith("_SHORT")
         buy_i = "ORDER_INTENT_" + intent
         sell_i = buy_i.replace("_BUY_", "_SELL_")
         s = st.setdefault(k, {})
-        if slug in _foreign:
-            # DEFENSE IN DEPTH: even a hand-inserted pair may not manage a slug
-            # a pending pick owns. Freeze rather than fight another engine.
-            if _time.time() - _PAIR_FREEZE_PING.get("pick:" + slug, 0.0) > 3600.0:
-                _PAIR_FREEZE_PING["pick:" + slug] = _time.time()
-                app.logger.warning("pair %s: %s belongs to a pick — pair frozen",
-                                   row.get("id"), slug)
-            res["errors"] += 1
-            return
         net = float((positions.get(slug) or {}).get("net") or 0.0)
         if abs(net) >= 0.01 and ((net < 0) != short):
             # THE SIGN RULE — WE HOLD NOTHING HERE, BUT WE MAY STILL BID

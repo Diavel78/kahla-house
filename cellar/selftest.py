@@ -1578,7 +1578,7 @@ def test_pair_reline() -> None:
     check("…and when no re-seat exists and nothing is held, it tears down",
           "a pick owns a leg and" in src and "TORN DOWN" in src)
     check("the freeze warning is rate-limited, not once per tick",
-          '_PAIR_FREEZE_PING.get("pick:" + slug' in src)
+          '_PAIR_FREEZE_PING.get("pick:" + _fs' in src)
     check("a freeze on a pick-owned slug is not a deadlock — re-pick off it",
           "unfroze" in src and "_foreign" in src)
     check("…only with nothing held on OUR legs — a pick's position is not ours",
@@ -2148,6 +2148,10 @@ def test_pair_tick_guards() -> None:
     check("rent is read tri-state", "_pair_rent(slug, ko, now, sb)" in st)
     sd = inspect.getsource(_app._pair_seed_tick)
     check("the seeder's lead floor follows the program", "_pair_min_lead_h(r.get(\"sport\"), sb)" in sd)
+    st3 = inspect.getsource(_app._pair_step)
+    check("a frozen pair is decided before the leg walk and counted as frozen, not error",
+          '_frozen = [lg["slug"] for lg in legs_def if lg.get("slug") in _foreign]' in st3
+          and 'res["frozen"] = res.get("frozen", 0) + 1' in st3)
     gr = inspect.getsource(_app._pair_from_gridiron_rule)
     check("football seeder ranks WIDEST window first (Rob, Sep 26: widest to start, rerung tighter as needed)",
           "cand = (len(hits), -_off, -cost)" in gr and "STAY ON TOUCH" in gr)
