@@ -957,7 +957,11 @@ tick, per-market rent checks effectively free.
 
 **Split today (post-cutover, Sep 4 2026): the box runs EVERYTHING** —
 `batch, pm_snapshot, vsin, kalshi_autolog, ledger, opener, paperlog,
-repeg, alerts, grader, scalp`; **C2 DONE Sep 5 2026: Vercel is the website
+repeg, alerts, grader, scalp, pair, pair_seed` (money `.env` roster:
+`opener,repeg,scalp,alerts,ledger,pair,pair_seed`; **`pair_seed` split off the
+pair lap Sep 26 2026** — the board walk on its own 5-min clock, a pair lap is a
+pair lap; health has PAIR BLIND (laps processing 0 rows behind a gate) and
+PAIR STALE (a pre-kick pair row not converged in 3 min) tripwires); **C2 DONE Sep 5 2026: Vercel is the website
 ONLY and reads/writes the BOX's Postgres** through a Cloudflare tunnel —
 `db.thekahlahouse.com` → `cloudflared` (LaunchAgent `com.kahla.cloudflared`,
 config `~/.cloudflared/config.yml`, log `~/.kahla/logs/cloudflared.log`) →
