@@ -2066,6 +2066,30 @@ def test_executor_one_order_per_slug() -> None:
         _app._time.sleep = _sleep
 
 
+def test_neutral_and_rejections_sep26() -> None:
+    """A NEUTRAL (void) resolution is a refund, never a loss; a venue REJECTED
+    create is remembered and not retried every lap (Sep 26 2026)."""
+    import app as _app, inspect
+    dm = inspect.getsource(_app._venue_day_map)
+    check("day map: NEUTRAL resolution scores 0", 'neutral = side.endswith("_NEUTRAL")' in dm and "0.0 if neutral" in dm)
+    pa = inspect.getsource(_app.parse_activities)
+    check("parse_activities: NEUTRAL → pnl 0", 'if side == "NEUTRAL":\n                    pnl = 0.0' in pa)
+    import pathlib
+    sql = pathlib.Path(__file__).resolve().parents[1].joinpath("kahla-scanner/supabase/poly_gameday_pnl.sql").read_text()
+    check("RPC: NEUTRAL → 0", "POSITION_RESOLUTION_SIDE_NEUTRAL' then 0" in sql)
+    sc = inspect.getsource(_app._scalp_create)
+    check("scalp create: a REJECTED frame after our create backs the slug off",
+          "ORDER_REJECTED.get((slug, sell_intent), 0.0) >= _t_create - 1.0" in sc and "_SCALP_REJECT_UNTIL[slug]" in sc)
+    st = inspect.getsource(_app._scalp_tick)
+    check("scalp tick: slugs under rejection backoff are skipped and counted", '"skip_rejected"' in st)
+    ch = inspect.getsource(_app._cellar_health)
+    check("tripwire names a rejection storm", "SCALP REJECTED" in ch)
+    ps = inspect.getsource(_app._pair_step)
+    check("pair: a bid the venue just rejected is not re-created for 30 min", '"rejected_recently"' in ps)
+    ws = pathlib.Path(__file__).resolve().parent.joinpath("wsfeed.py").read_text()
+    check("wsfeed stamps ORDER_REJECTED and dumps the first raw frame", "ORDER_REJECTED[(" in ws and "ws priv ORDER REJECTED" in ws)
+
+
 def test_pair_tick_guards() -> None:
     """One row per slug, a slug cap that names what it cannot serve, a lap
     budget with rotation, a merge (not replace) watch push, park-after-cancel
@@ -2138,7 +2162,7 @@ def main() -> int:
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
-              test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug,
+              test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
               test_side_and_phase, test_ttls_agree_with_engines):
         t()

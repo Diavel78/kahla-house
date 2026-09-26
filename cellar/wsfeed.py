@@ -775,6 +775,18 @@ class WsFeed:
                                              _od.get("cumQuantity"), _od.get("leavesQuantity"),
                                              str(_od.get("state"))[-10:], _ex.get("quantity") if _ex is not _od else None,
                                              bool(_buy_fill(msg)))
+                                    if str(_od.get("state") or "").endswith("REJECTED"):
+                                        # remembered so the scalp/pair stop retrying a refused
+                                        # create every lap (Sep 26 2026); first frame dumped raw
+                                        try:
+                                            import app as _app_rj
+                                            _rs = str(_od.get("marketSlug") or "")
+                                            _app_rj.ORDER_REJECTED[(_rs, str(_od.get("intent") or ""))] = time.time()
+                                            if _rs not in _app_rj._REJECT_DUMPED:
+                                                _app_rj._REJECT_DUMPED.add(_rs)
+                                                log.warning("ws priv ORDER REJECTED %s raw=%s", _rs, str(_od)[:700])
+                                        except Exception:
+                                            pass
                                 elif _kl.startswith("position"):
                                     _af = _v.get("afterPosition") if isinstance(_v.get("afterPosition"), dict) else {}
                                     log.info("ws priv POSITION %s net=%s",

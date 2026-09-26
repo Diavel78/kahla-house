@@ -78,7 +78,8 @@ language sql stable as $$
   )
   select (gst::timestamptz at time zone 'America/Phoenix')::date,
          round(sum(
-           case when (net > 0 and a.side in ('POSITION_RESOLUTION_SIDE_LONG',
+           case when a.side = 'POSITION_RESOLUTION_SIDE_NEUTRAL' then 0   -- void → refund (Sep 26 2026)
+                when (net > 0 and a.side in ('POSITION_RESOLUTION_SIDE_LONG',
                                              'POSITION_RESOLUTION_SIDE_YES'))
                   or (net < 0 and a.side in ('POSITION_RESOLUTION_SIDE_SHORT',
                                              'POSITION_RESOLUTION_SIDE_NO'))

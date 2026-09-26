@@ -1744,6 +1744,11 @@ def _venue_day_map(sb, days: int = 4) -> dict:
             side = str(r.get("side") or "")
             won = ((net > 0 and side.endswith(("_LONG", "_YES")))
                    or (net < 0 and side.endswith(("_SHORT", "_NO"))))
+            # NEUTRAL = VOID = REFUND (Sep 26 2026): a cancelled UFC bout (Gall vs
+            # Dumas) resolved NEUTRAL with the venue's realized 0.0000 and the
+            # day card booked it as a −$10.80 loss; a voided Dart prop did the
+            # same on Sunday's card. Money back is zero, not a loss.
+            neutral = side.endswith("_NEUTRAL")
             p = pos.get(slug)
             if p and p["qty"] > 0 and abs(p["qty"] - qty) <= 0.5:
                 cost = p["cost"]                     # OUR ledger covers the lot
@@ -1751,7 +1756,7 @@ def _venue_day_map(sb, days: int = 4) -> dict:
                 cost = _v(r.get("cost")) or 0.0      # venue blend, last resort
             d = _day(r.get("az_day"))
             if d is not None:
-                acc[d] = acc.get(d, 0.0) + ((qty - cost) if won else -cost)
+                acc[d] = acc.get(d, 0.0) + (0.0 if neutral else ((qty - cost) if won else -cost))
             pos[slug] = {"qty": 0.0, "cost": 0.0}    # settled: the lot is gone
             continue
         t = ((r.get("payload") or {}).get("trade") or {})
@@ -3281,6 +3286,7 @@ def _cellar_health(sb) -> dict:
         laps = 0
         budg = 0
         sc_unc = 0
+        sc_rej = 0
         sc_act = 0
         for t in st3:
             d = t.get("detail") if isinstance(t.get("detail"), dict) else {}
@@ -3298,6 +3304,7 @@ def _cellar_health(sb) -> dict:
             # book (every ask at its floor) has high cands and zero
             # actions, which is fine. Naked inventory is not.
             sc_unc += int(s.get("uncovered") or 0)
+            sc_rej += int(s.get("skip_rejected") or 0)
             sc_act += (int(s.get("placed") or 0) + int(s.get("walked") or 0)
                        + int(s.get("dup_canceled") or 0)
                        + int(s.get("shadow") or 0))
@@ -3306,6 +3313,10 @@ def _cellar_health(sb) -> dict:
             if budg >= laps / 2:
                 _accuse = (f"SCALP STARVED: budget-gated {budg}/{laps} "
                            f"laps, 0 asks in 3h")
+            elif sc_rej > 0 and sc_unc <= sc_rej:
+                _accuse = (f"SCALP REJECTED: the venue refused asks on "
+                           f"{sc_rej} slug-laps in 3h (price collar? see "
+                           f"'ws priv ORDER REJECTED' in the log)")
             elif sc_unc >= 10:
                 _accuse = (f"SCALP DEAD: {sc_unc} uncovered positions "
                            f"seen, 0 asks in 3h")
@@ -4332,7 +4343,9 @@ def parse_activities(client, activities):
                 yes_won = side in ("YES", "LONG")
                 no_won = side in ("NO", "SHORT")
                 won = (held_yes and yes_won) or (not held_yes and no_won)
-                if won:
+                if side == "NEUTRAL":
+                    pnl = 0.0                  # void → refund (Sep 26 2026)
+                elif won:
                     pnl = quantity - cost
                 else:
                     pnl = -cost
@@ -10011,7 +10024,8 @@ def api_poly_roi_baseline():
             net = _safe_float(bef.get("netPosition")) or 0
             won = ((net > 0 and side in ("YES", "LONG"))
                    or (net < 0 and side in ("NO", "SHORT")))
-            M["payout"] += qty if won else 0.0
+            M["payout"] += (qty if won else
+                            (abs(_safe_float(bef.get("cost")) or 0.0) if side == "NEUTRAL" else 0.0))
             M["resolutions"] += 1
             # WIN RATE + entry mix (user, Aug 3: "what was the actual WIN
             # rate.. instead of the ROI" — the harvest math hinges on it)
@@ -20653,6 +20667,10 @@ _PAIR_CREATE_GRACE_S = 20.0     # our own async create may not be listed yet
 _PAIR_TICK_BUDGET_S = 150.0     # a lap that cannot finish defers, never overruns
 _PAIR_ROT: dict = {"i": 0}      # fair rotation across laps (the scalp's lesson)
 PAIR_LIVE_SLUGS: set = set()    # the legs we quote — the markets socket wakes the pair lane ONLY for these
+ORDER_REJECTED: dict = {}       # (slug, intent) -> time.time() of the venue's last REJECTED frame (wsfeed writes)
+_REJECT_DUMPED: set = set()     # slugs whose first REJECTED frame was dumped raw to the log
+_REJECT_BACKOFF_S = 1800.0      # a rejected create is not retried on that (slug, intent) for 30 min
+_SCALP_REJECT_UNTIL: dict = {}  # slug -> time.time() until which the scalp leaves it alone
 
 
 def _pair_leg_side(lg: dict, mt: str) -> str:
@@ -22604,6 +22622,11 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
                 # $13 rule was refusing EXITS on any 19-20 lot over ~65¢
                 # (CAR@CLE over 41.5, 19 held, its ask blocked — Sep 25 2026).
                 p["why"].append("master_rule")
+                continue
+            if (side == "bid" and have is None
+                    and ORDER_REJECTED.get((c["slug"], intent), 0.0)
+                    > _time.time() - _REJECT_BACKOFF_S):
+                p["why"].append("rejected_recently")     # the venue refused this create; 30 min
                 continue
             if side == "bid":
                 # ONE LEG PER SIDE PER GAME (Rob, Sep 25 2026: "I can't get
@@ -27774,7 +27797,9 @@ def _poly_ledger_tick(sb, now, *, force: bool = False) -> dict:
                 held_yes = net_b > 0
                 won = ((held_yes and side in ("YES", "LONG"))
                        or (not held_yes and side in ("NO", "SHORT")))
-                L["payout"] += qty if won else 0.0
+                L["payout"] += (qty if won else
+                                (abs(_safe_float((d.get("beforePosition") or {}).get("cost")) or 0.0)
+                                 if side == "NEUTRAL" else 0.0))   # void → refund
                 L["qty"] = 0.0
                 L["resolved"] = True
                 L["events"] += 1
@@ -30031,6 +30056,9 @@ def _scalp_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         # lives is the no run first inning. Everything else gets sold."
         ex = b.get("execution") if isinstance(b.get("execution"), dict) else {}
         slug = b.get("pmm_slug") or ex.get("pmm_slug")
+        if slug and _SCALP_REJECT_UNTIL.get(slug, 0.0) > _time.time():
+            res["skip_rejected"] = res.get("skip_rejected", 0) + 1
+            continue                     # the venue refused this ask recently
         if not slug:
             continue
         synth = bool(b.get("pmm_synthetic") or ex.get("pmm_synthetic"))
@@ -31018,6 +31046,7 @@ def _scalp_create(client, sb, r, b, slug, synth, sell_intent, tgt_c, qty,
     if int(qty) < 1:
         return False                          # dust lot — never an ask
     try:
+        _t_create = _time.time()
         client.orders.create(params)
     except Exception as e:
         _send_fill_telegram(
@@ -31039,6 +31068,19 @@ def _scalp_create(client, sb, r, b, slug, synth, sell_intent, tgt_c, qty,
                                          # failed — assume alive, next pass
                                          # heals (never double-create blind)
     if not ok:
+        # THE VENUE SAID NO (Sep 26 2026): six Ferrari lots whose markets had
+        # moved far against them drew ~615 REJECTED asks EACH between 04:00
+        # and 07:00 — the create returned, the private socket said REJECTED,
+        # this path returned False, and the next lap tried again. A rejection
+        # is remembered per slug and the slug is left alone for
+        # _REJECT_BACKOFF_S; the first raw frame per slug is in the log
+        # ('ws priv ORDER REJECTED') so the reason can be read.
+        if ORDER_REJECTED.get((slug, sell_intent), 0.0) >= _t_create - 1.0:
+            _SCALP_REJECT_UNTIL[slug] = _time.time() + _REJECT_BACKOFF_S
+            app.logger.warning("scalp ask REJECTED by the venue on %s at %s¢ x%s — "
+                               "backing off %ds", slug, round(tgt_c, 1), int(qty),
+                               int(_REJECT_BACKOFF_S))
+            return False
         _send_fill_telegram(
             f"🚨 SCALP ASK LOST — {r.get('event_name')}: create returned ok "
             f"but no working ask on {slug}. Check it.", urgent=True)
