@@ -9278,13 +9278,16 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
                 # the machine-slug unique index doing its job — a pick for
                 # this slug already exists (twin-pick class blocked at the
                 # source). Not a fault; keep the log readable.
-                app.logger.debug("PMM-AUTOLOG ghost adopt dup %s", slug)
+                _gs("insert_dup")
+                app.logger.info("PMM-AUTOLOG ghost adopt dup %s: %s", slug, str(e)[:160])
             else:
+                _gs("insert_err")
                 app.logger.warning("PMM-AUTOLOG ghost adopt failed %s: %s", slug, e)
-    if _gskip:
+    if unknown:
         out["ghost_skip"] = _gskip
-        app.logger.info("autolog ghost: unknown=%d adopted=%d skips=%s", len(unknown),
-                        int(out.get("ghost_adopted") or 0), _gskip)
+        app.logger.info("autolog ghost: unknown=%d adopted=%d skips=%s slugs=%s", len(unknown),
+                        int(out.get("ghost_adopted") or 0), _gskip,
+                        sorted({k[0] for k in unknown})[:24])
     _nowm = _time.monotonic()
     # OUT-OF-WINDOW SHORT-CIRCUIT: the index only holds games from −12h to
     # +48h, and every slug carries its ET game date — a stray on a game 5-15
