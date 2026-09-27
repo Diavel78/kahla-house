@@ -20714,7 +20714,10 @@ def _pair_foreign_slugs(sb, max_age_s: float = 120.0) -> set:
     except Exception:
         pass                                   # keep the last good set
     return _PAIR_FOREIGN_CACHE["slugs"]
-_PAIR_T30_MIN = 30
+# T-10, not T-30 (Rob, Sep 26 2026: "it's really that last 30 seconds when
+# anything actually moves") — the partner bid gets the whole pre-kick window;
+# the name stays because every verdict string (`t30_*`) is grep'd and stamped.
+_PAIR_T30_MIN = 10
 _PAIR_ASK_GTD_H = 7
 _PAIR_PARK_S = 600.0            # an off-touch-cancelled bid stays down this long
 _PAIR_CREATE_GRACE_S = 20.0     # our own async create may not be listed yet
@@ -20935,7 +20938,7 @@ def _pair_owns_game(sb, prefix, mt) -> bool:
                                 for r in _pair_rows(sb))
 
 
-def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
+def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float, t30_exit: bool = True) -> dict:
     """PURE: what each leg should be resting right now. `legs` is exactly two
     keys → {h (held, our side), cost (¢ avg of the held lot or None), sold
     (¢, last sell this cycle or None), bid / ask (COMPETITOR touch, our side,
@@ -20977,14 +20980,16 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
         want = qty - float(L.get("h") or 0)          # DECIMAL (Sep 26 2026): int() here fed the shrink
         if mins <= 0:
             why.append("kickoff_no_bid")
-        elif mins <= _PAIR_T30_MIN and not (held[ka] or held[kb]):
-            # T−30 WITH NOTHING HELD (Rob, Sep 20 2026): "if no legs are held,
-            # we need to cancel both at T−30". A leg that fills at T−20 with no
-            # partner is a fresh naked bet 20 minutes before kickoff — the very
-            # thing the pair exists to avoid. With one leg HELD the bids stay
-            # up to kickoff, because then a fill COMPLETES the pair (it cannot
-            # create a naked leg), and a completed pair under the cap is the
-            # outcome we want.
+        elif mins <= _PAIR_T30_MIN and (not (held[ka] or held[kb])
+                                        or (t30_exit and not both)):
+            # T−10 WITH NOTHING HELD (Rob, Sep 20 2026): "if no legs are held,
+            # we need to cancel both". A leg that fills now with no partner is
+            # a fresh naked bet minutes before kickoff — the very thing the
+            # pair exists to avoid. ONE LEG HELD (Sep 26 2026): the held leg is
+            # exiting at the touch (`t30_exit`, ask section), so the partner's
+            # completion bid comes off with it — a partner filling AFTER the
+            # exit would be naked the other way. Kill switch off → the old
+            # rule: bids stay up to kickoff with one leg held.
             why.append("t30_unpaired")
         elif want < 1:
             pass
@@ -21094,6 +21099,18 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float) -> dict:
                 why.append("pair_floor")
             else:
                 floor = L.get("cost")
+            # NO NAKED PAIRS (Rob, Sep 26 2026: "go as long as you can keep
+            # from having any naked pairs"). One leg held, partner NOT held,
+            # inside T-10 (and in-play): the held leg exits at the TOUCH —
+            # one tick above the best bid, cost be damned. A single leg into
+            # the game is a coin flip we paid the spread for (Saturday's
+            # unpaired lots went 0-for-13); the loss is the spread, $0.15-0.30
+            # a lot. The partner's bid is pulled by the bid section in the
+            # same plan. Kill switch: machine_flags pair_t30_exit.
+            if (t30_exit and not both and O.get("sold") is None
+                    and mins <= _PAIR_T30_MIN and L.get("bid") is not None):
+                floor = float(L["bid"])            # → tgt = bid + tick below
+                why.append("t30_exit")
             if floor is None and not ({"lock_rides", "t30_middle"} & set(why)):
                 why.append("cost_unknown")
             if floor is not None:
@@ -21230,9 +21247,13 @@ _PAIR_MIN_EDGE_C = 1.0     # worth minus what we pay, in cents
 # do is pay a worse locked loss to sit AT the touch on both legs, because a
 # leg off the touch earns nothing and rent is the product. `pair_max_loss_c`
 # is that budget in cents per contract: 20c = $3.00 on a 15-lot pair.
-_PAIR_MAX_LOSS_C = 20.0
-_PAIR_CEILING_FLOOR = {"NFL": 110.0, "NCAAF": 110.0, "NBA": 110.0,
-                       "NCAAB": 110.0, "MLB": 116.0, "NHL": 119.0}
+_PAIR_MAX_LOSS_C = 5.0          # Rob, Sep 26 2026: cap 105 (was 20 → 120)
+# Rob, Sep 26 2026: "your cap's probably 105" — the per-sport floors that used
+# to hold the ceiling at 110/116/119 whatever the flag said are gone; machine_flags
+# `pair_max_loss_c` (=5) IS the ceiling. At 105 a no-middle costs $0.75 a pair,
+# a middle pays $14.25 — break-even one in twenty.
+_PAIR_CEILING_FLOOR = {"NFL": 100.0, "NCAAF": 100.0, "NBA": 100.0,
+                       "NCAAB": 100.0, "MLB": 100.0, "NHL": 100.0}
 
 
 def _pair_ceiling(sport: str) -> float:
@@ -22584,7 +22605,8 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
             st[k].pop("sold_cost", None)
     for k in (ka, kb):
         lg_in[k]["sold"] = st[k].get("sold")
-    plan = _pair_plan(lg_in, qty, cap, mins)
+    plan = _pair_plan(lg_in, qty, cap, mins,
+                      t30_exit=_machine_flag("pair_t30_exit", True))
     gtt_bid = ko.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     gtt_ask = (ko + timedelta(hours=_PAIR_ASK_GTD_H)).astimezone(timezone.utc) \
         .strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -1139,6 +1139,26 @@ def test_pair_plan() -> None:
     check("rent unreadable + nothing held → keep both bids",
           p["a"]["bid"] == "keep" and p["b"]["bid"] == "keep"
           and "rent_unreadable" in p["a"]["why"])
+    # NO NAKED PAIRS (Sep 26 2026): one held, partner empty, inside T-10 →
+    # the held leg asks one tick above the BID whatever its cost, and the
+    # partner's completion bid comes off with it
+    p = _app._pair_plan({"a": leg(h=15, cost=58.0, bid=52.0, ask=54.0),
+                         "b": leg(bid=40.0, ask=41.0)}, 15, 105, 8)
+    check("unpaired held leg inside T-10 exits at bid + tick (52.5), not cost (58)",
+          p["a"]["ask"] == (52.5, 15) and "t30_exit" in p["a"]["why"])
+    check("…and the partner's completion bid is pulled",
+          p["b"]["bid"] is None and "t30_unpaired" in p["b"]["why"])
+    p = _app._pair_plan({"a": leg(h=15, cost=58.0, bid=52.0, ask=54.0),
+                         "b": leg(bid=40.0, ask=41.0)}, 15, 105, -10)
+    check("…and in-play too", p["a"]["ask"] == (52.5, 15) and "t30_exit" in p["a"]["why"])
+    p = _app._pair_plan({"a": leg(h=15, cost=58.0, bid=52.0, ask=54.0),
+                         "b": leg(bid=40.0, ask=41.0)}, 15, 105, 8, t30_exit=False)
+    check("kill switch restores the cost floor + the completion bid",
+          p["a"]["ask"] == (58.0, 15) and p["b"]["bid"] is not None)
+    p = _app._pair_plan({"a": leg(h=15, cost=58.0, bid=52.0, ask=54.0),
+                         "b": leg(bid=40.0, ask=41.0)}, 15, 105, 25)
+    check("at T-25 (outside T-10) the held leg still floors at cost and the partner bids",
+          p["a"]["ask"] == (58.0, 15) and p["b"]["bid"] is not None)
     # both held at 44 + 55 = 99 → the lock rides, no asks
     p = _app._pair_plan({"a": leg(h=15, cost=44.0, bid=44.0, ask=45.0),
                          "b": leg(h=15, cost=55.0, bid=56.0, ask=57.0)}, 15, 110, 2000)
@@ -1148,8 +1168,8 @@ def test_pair_plan() -> None:
     two = {"a": leg(h=15, cost=45.0, bid=44.0, ask=47.0), "b": leg(h=15, cost=57.0, bid=56.0, ask=59.0)}
     p = _app._pair_plan(two, 15, 110, 45)
     check("both held >100 before T−30 → asks at cost", p["a"]["ask"] == (45.5, 15) and p["b"]["ask"] == (57.5, 15))
-    p = _app._pair_plan(two, 15, 110, 20)
-    check("both held inside T−30 → no asks, hold for the middle",
+    p = _app._pair_plan(two, 15, 110, 8)
+    check("both held inside T−10 → no asks, hold for the middle",
           p["a"]["ask"] is None and "t30_middle" in p["b"]["why"])
     # An unreadable book leaves BOTH orders alone (Sep 19 2026: one failed read
     # cancelled a resting bid and re-placed it at the back of the queue).
@@ -1160,15 +1180,19 @@ def test_pair_plan() -> None:
           and "book_unreadable" in p["a"]["why"])
     check("the other leg is unaffected", p["b"]["bid"] == (57.5, 15))
 
-    # T−30 with NOTHING held: both bids come down (Rob, Sep 20 2026). With one
-    # leg held they stay up to kickoff — a fill then completes the pair.
-    p = _app._pair_plan({"a": leg(bid=43.5, ask=44.0), "b": leg(bid=57.5, ask=58.0)}, 15, 110, 20)
-    check("T-30, nothing held → both bids cancel",
+    # T−10 with NOTHING held: both bids come down (Rob, Sep 20 2026). With one
+    # leg held the partner keeps bidding until T-10 (Sep 26: the cut moved
+    # from 30 to 10 — "it's really that last 30 seconds when anything moves").
+    p = _app._pair_plan({"a": leg(bid=43.5, ask=44.0), "b": leg(bid=57.5, ask=58.0)}, 15, 110, 8)
+    check("T-10, nothing held → both bids cancel",
           p["a"]["bid"] is None and p["b"]["bid"] is None
           and "t30_unpaired" in p["a"]["why"])
+    p = _app._pair_plan({"a": leg(bid=43.5, ask=44.0), "b": leg(bid=57.5, ask=58.0)}, 15, 110, 20)
+    check("T-20, nothing held → the bids still work (the cut is T-10 now)",
+          p["a"]["bid"] is not None and p["b"]["bid"] is not None)
     p = _app._pair_plan({"a": leg(h=15, cost=43.5, bid=43.0, ask=45.0),
                          "b": leg(bid=57.5, ask=58.0)}, 15, 110, 20)
-    check("T-30, one leg held → the other keeps bidding to complete the pair",
+    check("T-20, one leg held → the other keeps bidding to complete the pair",
           p["b"]["bid"] == (57.5, 15))
 
     # kickoff: no bids, a lone leg keeps its ask
@@ -1698,8 +1722,8 @@ def test_pair_uses_executor_rule() -> None:
     check("two fences: 65c a leg and 120c the pair (Rob, Sep 21)",
           "_PAIR_MAX_LEG_C" in src and _app._PAIR_MAX_LEG_C == 65.0
           and "peg <= _GRIDIRON_MAX_ENTRY_C" not in src)
-    check("…and the pair cap is the loss budget",
-          _app._pair_ceiling("NFL") == 120.0)
+    check("…and the pair cap is the loss budget (105 since Sep 26)",
+          _app._pair_ceiling("NFL") == 105.0)
     check("WIDEST window under the cap, centre as the tie-break",
           "cand = (len(hits), -_off, -cost)" in src)
     check("…and the 65c leg cap is what keeps widest from buying a -441 side",
@@ -1770,20 +1794,24 @@ def test_pair_mlb_totals() -> None:
           and _app._pair_worth("MLB", "total", [7]) > 11)
     check("a 2-run window adds both numbers",
           _app._pair_worth("MLB", "total", [8, 9]) > 16)
-    check("MLB's floor ceiling survives the loss-budget rewrite",
-          _app._PAIR_CEILING_FLOOR["MLB"] == 116.0
-          and _app._pair_ceiling("MLB") >= 116.0)
+    check("the per-sport floors are gone — the loss budget IS the ceiling (Sep 26)",
+          all(v == 100.0 for v in _app._PAIR_CEILING_FLOOR.values())
+          and _app._PAIR_MAX_LOSS_C == 5.0)
     src = inspect.getsource(_app._pair_board_mlb)
     check("MLB slugs resolve by tricode + ET date", "America/New_York" in src)
     check("first-five and inning variants never qualify",
           "_PAIR_MLB_TOTAL_RE" in src)
-    # a real MLB ladder: Over 8.5 at 52 / Under 9.5 at 54 = 106 for a window
-    # worth 8.7 — a 2.7c edge. (At 108 the same window is a 0.7c edge and the
-    # 1c floor refuses it, which is the floor doing its job.)
-    rungs = [("over", 8.5, 52.0, 53.0), ("under", 9.5, 54.0, 55.0)]
+    # a real MLB ladder: Over 8.5 at 50 / Under 9.5 at 54 = 104 for a window
+    # worth 8.7 — a 4.7c edge, under the 105 cap. (At 108 the same window is
+    # over the cap AND a 0.7c edge — refused either way.)
+    rungs = [("over", 8.5, 50.0, 51.0), ("under", 9.5, 54.0, 55.0)]
     c = _app._pair_candidates(rungs, "total", "MLB", 15)
-    check("an MLB total pair at 106 qualifies under the 116 ceiling",
-          c and c[0]["hits"] == [9] and c[0]["cost_c"] == 106.0)
+    check("an MLB total pair at 104 qualifies under the 105 ceiling",
+          c and c[0]["hits"] == [9] and c[0]["cost_c"] == 104.0)
+    check("the same window at 106 is over the 105 cap",
+          not _app._pair_candidates(
+              [("over", 8.5, 52.0, 53.0), ("under", 9.5, 54.0, 55.0)],
+              "total", "MLB", 15))
     check("the same window at 108 is refused on edge, not ceiling",
           not _app._pair_candidates(
               [("over", 8.5, 52.0, 53.0), ("under", 9.5, 56.0, 57.0)],
@@ -1800,9 +1828,19 @@ def test_pair_rerung() -> None:
     rungs = [("away", 4.5, 78.0, 78.5), ("away", 3.5, 74.0, 74.5),
              ("away", 2.5, 70.0, 70.5), ("away", 1.5, 62.0, 62.5),
              ("away", 0.5, 55.0, 55.5)]
+    # the LIVE budget is 5 (cap 105, Sep 26 2026): on this book only the
+    # mirror (+1.5 at 62 → 99) is reachable — the widest rung under the cap
+    live = _app._pair_partner_options("home", -1.5, rungs, "spread", "NFL", 37.0)
+    check("at cap 105 only the mirror is affordable on this book",
+          live and live[0]["line"] == 1.5 and all(o["line"] == 1.5 for o in live))
+    # the ladder-walk MECHANICS below are exercised at a 20 budget (cap 120)
+    import app as _app0
+    _old0 = _app0._machine_flag_val
+    _app0._machine_flag_val = (
+        lambda k, d=None: 20.0 if k == "pair_max_loss_c" else _old0(k, d))
     opts = _app._pair_partner_options("home", -1.5, rungs, "spread", "NFL", 37.0)
     lines = [o["line"] for o in opts]
-    # +4.5 at pair 115 is INSIDE the 120 loss budget now, and is the widest
+    # +4.5 at pair 115 is INSIDE a 120 loss budget, and is the widest
     # window — so it is the pick, not a reject (Rob, Sep 21: raise the cap,
     # take the most expensive rung under it at the touch).
     check("the widest rung inside the loss budget is offered", 4.5 in lines)
@@ -1834,7 +1872,8 @@ def test_pair_rerung() -> None:
         check("a tighter loss budget walks the ladder in",
               tight and tight[0]["line"] <= 3.5)
     finally:
-        _app2._machine_flag_val = _old
+        _app2._machine_flag_val = (
+            lambda k, d=None: 20.0 if k == "pair_max_loss_c" else _old0(k, d))
     check("and it sits at the touch inside its own cap",
           best["pair_c"] <= best["cap"] + 1e-9)
     # with the held leg cheaper, the wider window becomes affordable again and
@@ -1845,6 +1884,7 @@ def test_pair_rerung() -> None:
     mir = [o for o in opts if o["line"] == 1.5][0]
     check("the mirror is priced as a hedge, not a middle",
           mir["hits"] == [] and mir["worth"] == 0.0)
+    _app0._machine_flag_val = _old0
 
 
 def test_pair_leg_side() -> None:
