@@ -1162,6 +1162,26 @@ def test_pair_plan() -> None:
     check("the props cap is 110 while spreads/totals stay 105",
           _app._PAIR_PROP_CAP_C == 110.0 and _app._pair_ceiling("NFL") == 105.0)
     check("the seeder calls the prop pass", "_pair_seed_props(sb, now, res, armed, taken_slugs, have, max_new)" in _insp0.getsource(_app._pair_seed_tick))
+    # THE RE-RUNG CANCELS FROM A FRESH READ (Sep 27 2026, LAR@DEN 11:20:17)
+    from types import SimpleNamespace as _NS
+    _cxl = []
+    _fake = _NS(orders=_NS(cancel=lambda oid, m: _cxl.append(oid), list=lambda *a: {"orders": []}))
+    _oo = app_orders = [{"id": "o1", "slug": "s-old", "intent": "ORDER_INTENT_BUY_LONG", "state": "ORDER_STATE_NEW", "auto": True},
+                        {"id": "o2", "slug": "s-old", "intent": "ORDER_INTENT_SELL_LONG", "state": "ORDER_STATE_NEW", "auto": True},
+                        {"id": "o3", "slug": "s-keep", "intent": "ORDER_INTENT_BUY_LONG", "state": "ORDER_STATE_NEW", "auto": True}]
+    _oraw = _app._pmm_open_orders_raw
+    try:
+        _app._pmm_open_orders_raw = lambda c, fresh=False: list(_oo)
+        _r = _app._pair_cancel_rungs_fresh(_fake, ["s-old"])
+        check("re-rung fresh cancel: takes down the AUTOMATIC BUY on the walked-off rung only", _r is True and _cxl == ["o1"])
+        _app._pmm_open_orders_raw = lambda c, fresh=False: None
+        check("re-rung fresh cancel: an unreadable venue refuses (caller must not rewrite legs)", _app._pair_cancel_rungs_fresh(_fake, ["s-old"]) is False)
+    finally:
+        _app._pmm_open_orders_raw = _oraw
+    _src_rr = _insp0.getsource(_app._pair_rerung) + _insp0.getsource(_app._pair_rerung_both) + _insp0.getsource(_app._pair_rerung_prop)
+    check("all three re-rungs cancel from a fresh read, none from the lap snapshot",
+          _src_rr.count("_pair_cancel_rungs_fresh(") == 4 and "_pair_cancel(client, cur[" not in _src_rr)
+    check("no re-rung within a minute of a create on the row", "_recent_create" in _insp0.getsource(_app._pair_step) and _app._PAIR_RERUNG_GRACE_S == 60.0)
     # THE ORPHAN SWEEP (Sep 27 2026, Bateman): a bid on a walked-off rung no leg claims is cancelled
     _ob = _app._pair_orphan_bids(
         [{"slug": "s-old", "intent": "ORDER_INTENT_BUY_SHORT", "state": "ORDER_STATE_NEW", "auto": True},

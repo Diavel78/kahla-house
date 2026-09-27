@@ -22025,10 +22025,9 @@ def _pair_rerung_prop(sb, client, row, lg_in, st, cur, now, res) -> bool:
         if not (_rent_ok(a_slug, ko, now, sb)[0] and _rent_ok(b_slug, ko, now, sb)[0]):
             _pair_rr_why(row, "a leg stopped paying rent")
             return False
-        for k in (ka, kb):
-            if cur[k]["bid"] is not None and not _pair_cancel(client, cur[k]["bid"]):
-                _pair_rr_why(row, f"could not cancel the {k} bid")
-                return False
+        if not _pair_cancel_rungs_fresh(client, [legs[ka].get("slug"), legs[kb].get("slug")]):
+            _pair_rr_why(row, "could not cancel the old bids")
+            return False
         for _old in (legs[ka].get("slug"), legs[kb].get("slug")):
             if _old and _old not in (a_slug, b_slug) and _old not in retired:
                 retired.append(_old)
@@ -22078,7 +22077,7 @@ def _pair_rerung_prop(sb, client, row, lg_in, st, cur, now, res) -> bool:
     if not _rent_ok(new_slug, ko, now, sb)[0]:
         _pair_rr_why(row, "partner rung pays no rent")
         return False
-    if cur[ek]["bid"] is not None and not _pair_cancel(client, cur[ek]["bid"]):
+    if not _pair_cancel_rungs_fresh(client, [legs[ek].get("slug")]):
         _pair_rr_why(row, "could not cancel the stranded bid")
         return False
     old = legs[ek].get("slug")
@@ -22647,6 +22646,7 @@ _PAIR_RERUNG_TS: dict = {}
 _PAIR_MAX_LEG_C = 65.0             # Rob, Sep 21 2026: 65 a leg, 120 the pair
 _PAIR_RELINE_TS: dict = {}         # row id -> last line-rule re-judge
 _PAIR_RELINE_S = 600.0             # each look prices the game (cheap off the quote table)
+_PAIR_RERUNG_GRACE_S = 60.0        # no re-rung/re-line within this of a create on the row
 _PAIR_RELINE_PER_TICK = 8          # …and a few per lap (REST burst)
 
 
@@ -22706,7 +22706,7 @@ def _pair_rerung(sb, client, row, hk, ek, lg_in, st, cur, now, res) -> bool:
     if best is None:
         _pair_rr_why(row, why_last)
         return False
-    if cur[ek]["bid"] is not None and not _pair_cancel(client, cur[ek]["bid"]):
+    if not _pair_cancel_rungs_fresh(client, [slug_e]):
         _pair_rr_why(row, "could not cancel the stranded bid")
         return False                            # never leave two seats out
     # RETIRE THE SLUG WE WALK OFF (Sep 22 2026). `retired_slugs` was added to
@@ -22739,6 +22739,31 @@ def _pair_rerung(sb, client, row, hk, ek, lg_in, st, cur, now, res) -> bool:
 
 
 _PAIR_RR_WHY: dict = {}            # row id -> last reason (log once per reason)
+
+
+def _pair_cancel_rungs_fresh(client, slugs: list) -> bool:
+    """THE RE-RUNG CANCELS FROM A FRESH READ (Sep 27 2026). At 11:20:14 the
+    lane seated LAR@DEN +2.5/−3.5; at 11:20:17 the re-line re-picked the pair
+    off the lap's order SNAPSHOT (taken before those creates landed), saw no
+    bids, cancelled nothing, rewrote the legs — and two fresh 15-lots sat on
+    retired rungs owned by nobody until the orphan sweep. Every re-rung now
+    re-lists the venue and takes down every AUTOMATIC BUY on the rungs it is
+    walking off. False on any failure — the caller must not rewrite legs."""
+    try:
+        allo = _pmm_open_orders_raw(client, fresh=True)
+    except Exception:
+        allo = None
+    if allo is None:
+        return False
+    want = {sl for sl in slugs if sl}
+    ok = True
+    for o in allo:
+        if (o.get("slug") in want and o.get("auto")
+                and str(o.get("intent") or "").startswith("ORDER_INTENT_BUY")
+                and o.get("state") in _OPEN_ORDER_STATES):
+            if not _pair_cancel(client, o):
+                ok = False
+    return ok
 
 
 def _pair_rr_why(row, why: str) -> None:
@@ -22839,10 +22864,9 @@ def _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res) -> bool:
     if not (_rent_ok(a_slug, ko, now, sb)[0] and _rent_ok(b_slug, ko, now, sb)[0]):
         _pair_rr_why(row, "a leg stopped paying rent")
         return False
-    for k in ("a", "b"):
-        if cur[k]["bid"] is not None and not _pair_cancel(client, cur[k]["bid"]):
-            _pair_rr_why(row, f"could not cancel the {k} bid")
-            return False                        # never leave a stray seat out
+    if not _pair_cancel_rungs_fresh(client, [legs["a"].get("slug"), legs["b"].get("slug")]):
+        _pair_rr_why(row, "could not cancel the old bids")
+        return False                            # never leave a stray seat out
     # RETIRE THE OLD SLUGS, NEVER JUST DROP THEM. A slug this pair has quoted
     # must stay out of the autolog's adoption set forever, or the Ferrari
     # inherits the rung the moment we move off it.
@@ -23464,7 +23488,14 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
     # re-judged against the executor's line rule on a slow clock: if the
     # rule now wants different rungs, take them. Nothing is held, so this is
     # rule 5's "both pending → re-rung is fine" with no hedge to protect.
+    # NO RE-RUNG WITHIN A MINUTE OF A CREATE ON THIS ROW (Sep 27 2026): the
+    # 11:20:17 re-pick ran three seconds after the 11:20:14 seats.
+    _recent_create = any(
+        (lambda _t: _t is not None and (now - _t).total_seconds() < _PAIR_RERUNG_GRACE_S)(
+            _parse_iso(str((st.get(k) or {}).get("bid_at") or "")))
+        for k in (ka, kb))
     _stale = (not _h and mins > 0 and row["market_type"] in ("spread", "total")
+              and not _recent_create
               and not str(row.get("game_prefix") or "").startswith("astatc-")
               and ("-nfl-" in (row.get("game_prefix") or "")
                    or "-cfb-" in (row.get("game_prefix") or ""))
@@ -23510,7 +23541,7 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
                     return
         except Exception as e:
             app.logger.warning("pair %s reline failed: %s", row.get("id"), e)
-    if (_under and mins > 0
+    if (_under and mins > 0 and not _recent_create
             and _time.time() - _PAIR_RERUNG_TS.get(row["id"], 0.0) > 120.0):
         _PAIR_RERUNG_TS[row["id"]] = _time.time()
         res["rerung_looks"] = res.get("rerung_looks", 0) + 1
