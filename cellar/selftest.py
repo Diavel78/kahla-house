@@ -1139,6 +1139,27 @@ def test_pair_plan() -> None:
     check("rent unreadable + nothing held → keep both bids",
           p["a"]["bid"] == "keep" and p["b"]["bid"] == "keep"
           and "rent_unreadable" in p["a"]["why"])
+    import inspect as _insp0
+    # HOCKEY JOINS THE BOARD (Sep 27 2026): the venue's NHL dialect parses,
+    # the map covers all 32 teams, the worth tables keep the cap at 105
+    m = _app._PAIR_NHL_TOTAL_RE.match("tsc-nhl-pit-phi-2026-09-30-6pt5")
+    check("NHL total slug parses (MLB-style tail)", m and m.group(1) == "pit" and m.group(4) == "6")
+    m2 = _app._PAIR_NHL_SPREAD_RE.match("asc-nhl-pit-phi-2026-09-30-neg-1pt5")
+    check("NHL puck-line slug parses", m2 and m2.group(4) == "neg" and m2.group(5) == "1")
+    check("NHL period/team-total variants never parse",
+          not _app._PAIR_NHL_TOTAL_RE.match("tsc-nhl-pit-phi-2026-09-30-1p-2pt5")
+          and not _app._PAIR_NHL_TOTAL_RE.match("tsc-nhl-pit-phi-2026-09-30-tt-pit-2pt5"))
+    check("NHL tricode map covers 32 teams", len(_app._NHL_CODE_TEAM) == 32 and len(set(_app._NHL_CODE_TEAM.values())) == 32)
+    check("accent/punctuation folding: Montréal + St. Louis resolve",
+          _app._pair_team_key("Montréal Canadiens") == "montreal canadiens"
+          and _app._pair_team_key("St. Louis Blues") == "st louis blues")
+    check("NHL total worth: 5.5/6.5 middles on 6 at 11.0, not the 2.0 default",
+          abs(_app._pair_worth("NHL", "total", [6]) - 11.0) < 1e-9)
+    check("NHL puck-line worth: home −1.5 + away +2.5 middles on exactly 2 (18.4)",
+          _app._pair_window("spread", 2.5, -1.5) == (1.0, [2])
+          and abs(_app._pair_worth("NHL", "spread", [2]) - 18.4) < 1e-9)
+    check("away +1.5 with home −2.5 is a GAP, never a pair", _app._pair_window("spread", 1.5, -2.5)[0] < 0)
+    check("the board builder is wired beside MLB", "_pair_board_nhl(sb, board, prefixes)" in _insp0.getsource(_app._pair_board))
     # PAIR OR NOTHING (Rob, Sep 27 2026): the single-leg creators are gated
     import inspect as _insp0
     check("pair or nothing: the autobet executor, the NRFI create and the top-up all check the flag",
