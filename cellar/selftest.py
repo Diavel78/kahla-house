@@ -1162,6 +1162,8 @@ def test_pair_plan() -> None:
     check("the props cap is 110 while spreads/totals stay 105",
           _app._PAIR_PROP_CAP_C == 110.0 and _app._pair_ceiling("NFL") == 105.0)
     check("the seeder calls the prop pass", "_pair_seed_props(sb, now, res, armed, taken_slugs, have, max_new)" in _insp0.getsource(_app._pair_seed_tick))
+    check("props have their own 1h lead floor, not the 3h game-line floor",
+          'pair_props_min_lead_h", 1.0' in _insp0.getsource(_app._pair_seed_props))
     # HOCKEY JOINS THE BOARD (Sep 27 2026): the venue's NHL dialect parses,
     # the map covers all 32 teams, the worth tables keep the cap at 105
     m = _app._PAIR_NHL_TOTAL_RE.match("tsc-nhl-pit-phi-2026-09-30-6pt5")

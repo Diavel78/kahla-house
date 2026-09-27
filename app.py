@@ -21840,7 +21840,14 @@ def _pair_seed_props(sb, now, res: dict, armed: bool, taken_slugs: set, have: se
     Off unless `machine_flags pair_props_enabled`."""
     if not _machine_flag("pair_props_enabled", False):
         return
-    lead = _pair_min_lead_h("NFL", sb)
+    # PROPS SEAT INSIDE THE GAME-LINE LEAD FLOOR (Rob, Sep 27 2026: "You could
+    # easily do today's 1 pm games"). Props pay day-of only, so the seat is
+    # T-6 → T-10 by construction; a 3h floor threw away two of the three
+    # rent hours. One hour, the T-10 exit covers the tail.
+    try:
+        lead = float(_machine_flag_val("pair_props_min_lead_h", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        lead = 1.0
     board = _pair_prop_board(sb, now, lead, 24 * 9)
     res["props_ladders"] = len(board)
     if not board:
