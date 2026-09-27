@@ -22869,6 +22869,23 @@ def _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res) -> bool:
     return True
 
 
+def _pair_orphan_bids(all_orders: list, retired: set, want: set) -> list:
+    """AUTOMATIC BUY orders resting on a rung the pairs have WALKED OFF
+    (`retired_slugs`) that no enabled leg claims any more. An order no leg
+    claims is invisible to the step — Bateman 40+/50+ (Sep 27 2026): a
+    hand-edited row was overwritten by a dying process's last lap, the
+    completion bid it had placed on the old rung belonged to nobody, and it
+    sat through the T-10 exit until a human pulled it. Pure; the lap cancels
+    what this returns."""
+    out = []
+    for n in all_orders or []:
+        sl = n.get("slug")
+        if (n.get("auto") and str(n.get("intent") or "").startswith("ORDER_INTENT_BUY")
+                and n.get("state") in _OPEN_ORDER_STATES and sl in retired and sl not in want):
+            out.append(n)
+    return out
+
+
 def _pair_tick(sb, now=None) -> dict:
     """Run every enabled middle pair one step (see the block comment above)."""
     now = now or datetime.now(timezone.utc)
@@ -22953,6 +22970,19 @@ def _pair_tick(sb, now=None) -> dict:
         res["gate"] = f"orders_unreadable: {str(e)[:120]}"
         return res                              # fail closed, never seat blind
     res["orders"] = len(lane_orders)
+    # THE ORPHAN SWEEP (Sep 27 2026): a bid on a walked-off rung with no leg
+    # behind it comes down this lap, not never.
+    try:
+        _retired: set = set()
+        for row in rows:
+            _retired |= {str(x) for x in (row.get("retired_slugs") or []) if x}
+        for _o in _pair_orphan_bids(_all, _retired, _want)[:6]:
+            if _pair_cancel(client, _o):
+                res["orphan_cancelled"] = res.get("orphan_cancelled", 0) + 1
+                app.logger.info("PAIR orphan bid cancelled: %s %s @ %s (walked-off rung, no leg)",
+                                _o.get("slug"), _o.get("intent"), _o.get("price_yes"))
+    except Exception as _e:
+        res["orphan_err"] = str(_e)[:60]
     # ONE OWNER PER SHARED SLUG, BY VENUE TRUTH (Sep 25 2026). Rows 70/96,
     # 58/93, 28/94 are twins on a shared rung (the Sep 21 'garage' conversion
     # of the Gemini-hedged seats dodged the one-per-game index on purpose).

@@ -1162,6 +1162,17 @@ def test_pair_plan() -> None:
     check("the props cap is 110 while spreads/totals stay 105",
           _app._PAIR_PROP_CAP_C == 110.0 and _app._pair_ceiling("NFL") == 105.0)
     check("the seeder calls the prop pass", "_pair_seed_props(sb, now, res, armed, taken_slugs, have, max_new)" in _insp0.getsource(_app._pair_seed_tick))
+    # THE ORPHAN SWEEP (Sep 27 2026, Bateman): a bid on a walked-off rung no leg claims is cancelled
+    _ob = _app._pair_orphan_bids(
+        [{"slug": "s-old", "intent": "ORDER_INTENT_BUY_SHORT", "state": "ORDER_STATE_NEW", "auto": True},
+         {"slug": "s-old", "intent": "ORDER_INTENT_SELL_SHORT", "state": "ORDER_STATE_NEW", "auto": True},
+         {"slug": "s-old", "intent": "ORDER_INTENT_BUY_LONG", "state": "ORDER_STATE_NEW", "auto": False},
+         {"slug": "s-cur", "intent": "ORDER_INTENT_BUY_LONG", "state": "ORDER_STATE_NEW", "auto": True},
+         {"slug": "s-other", "intent": "ORDER_INTENT_BUY_LONG", "state": "ORDER_STATE_NEW", "auto": True}],
+        retired={"s-old"}, want={"s-cur"})
+    check("orphan sweep: only the AUTOMATIC BUY on the retired rung (not the sell, not MANUAL, not a live leg, not a stranger)",
+          [o["slug"] + "/" + o["intent"][-9:] for o in _ob] == ["s-old/BUY_SHORT"])
+    check("the pair lap runs the orphan sweep", "_pair_orphan_bids(_all, _retired, _want)" in _insp0.getsource(_app._pair_tick))
     # THE PROP RE-RUNG (Sep 27 2026, Rob: "figure out the re-rung on these props")
     check("prop leg label → rung: 'over 14.5' = YES 15+, 'under 19.5' = NO 20+",
           _app._pair_prop_rung({"label": "over 14.5"}) == ("over", 15) and _app._pair_prop_rung({"label": "under 19.5"}) == ("under", 20))
