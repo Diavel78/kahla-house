@@ -1162,6 +1162,22 @@ def test_pair_plan() -> None:
     check("the props cap is 110 while spreads/totals stay 105",
           _app._PAIR_PROP_CAP_C == 110.0 and _app._pair_ceiling("NFL") == 105.0)
     check("the seeder calls the prop pass", "_pair_seed_props(sb, now, res, armed, taken_slugs, have, max_new)" in _insp0.getsource(_app._pair_seed_tick))
+    # THE PROP RE-RUNG (Sep 27 2026, Rob: "figure out the re-rung on these props")
+    check("prop leg label → rung: 'over 14.5' = YES 15+, 'under 19.5' = NO 20+",
+          _app._pair_prop_rung({"label": "over 14.5"}) == ("over", 15) and _app._pair_prop_rung({"label": "under 19.5"}) == ("under", 20))
+    pr = {15: (54, 55), 20: (43, 44), 25: (30, 31)}
+    check("held YES 15 @54, cap 110: widest partner under budget 56 is NO 20 (peg 56), not NO 25 (69)",
+          _app._pair_prop_partner(pr, "over", 15, 54.0, 110) == (20, 56.0, list(range(15, 20))))
+    check("held YES 15 @60, cap 110: budget 50 → NO 20 (56) fails, walks to the MIRROR NO 15 (45), hedged out",
+          _app._pair_prop_partner(pr, "over", 15, 60.0, 110) == (15, 45.0, []))
+    check("held NO 20 @56: partner is YES on a rung ≤ 20, widest first → YES 15 @54 (budget 54)",
+          _app._pair_prop_partner(pr, "under", 20, 56.0, 110) == (15, 54.0, list(range(15, 20))))
+    check("nothing under budget → None", _app._pair_prop_partner(pr, "over", 15, 70.0, 110) is None)
+    check("prop prefix parses fam + code", _app._pair_prop_parts("astatc-nfl-ari-sf-2026-09-27-ryd-bropur") == ("ryd", "bropur"))
+    _src_step = _insp0.getsource(_app._pair_step)
+    check("the step dispatches astatc- rows to the prop re-rung and keeps the football reline off them",
+          "_pair_rerung_prop(sb, client, row, lg_in, st, cur, now, res)" in _src_step
+          and 'not str(row.get("game_prefix") or "").startswith("astatc-")' in _src_step)
     check("props have their own 1h lead floor, not the 3h game-line floor",
           'pair_props_min_lead_h", 1.0' in _insp0.getsource(_app._pair_seed_props))
     # HOCKEY JOINS THE BOARD (Sep 27 2026): the venue's NHL dialect parses,

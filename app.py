@@ -21902,6 +21902,204 @@ def _pair_seed_props(sb, now, res: dict, armed: bool, taken_slugs: set, have: se
             app.logger.warning("prop sister insert failed %s: %s", prefix, e)
 
 
+def _pair_prop_parts(prefix: str):
+    """('recyd', 'ceelam') from a prop ladder prefix, else None."""
+    m = re.search(r"-(pyd|ryd|recyd)-([a-z]+)$", str(prefix or ""))
+    return (m.group(1), m.group(2)) if m else None
+
+
+def _pair_prop_rung(lg: dict):
+    """(side, N) from a prop leg's label: 'over 14.5' → ('over', 15) — the YES
+    rung 15+; 'under 19.5' → ('under', 20) — NO on the 20+ rung."""
+    try:
+        side, val = str(lg.get("label") or "").split()[:2]
+        return side, int(round(float(val) + 0.5))
+    except (ValueError, IndexError):
+        return None, None
+
+
+def _pair_prop_ladder(sb, prefix: str, now) -> dict:
+    """{N: (yes_bid, yes_ask, slug)} — one player ladder's rungs off the tape
+    (latest quote per rung, ≤ _PAIR_PROP_TAPE_MAX_AGE_H old)."""
+    out: dict = {}
+    try:
+        cut = (now - timedelta(hours=_PAIR_PROP_TAPE_MAX_AGE_H)).isoformat()
+        def _q():
+            return (sb.table("prop_snapshots").select("prop_key,bid_c,ask_c,captured_at")
+                    .eq("venue", "polymarket").like("prop_key", prefix + "-gte%")
+                    .gte("captured_at", cut).order("captured_at", desc=True))
+        seen: set = set()
+        for r in _sb_paged(_q, max_pages=4):
+            k = r["prop_key"]
+            if k in seen:
+                continue
+            seen.add(k)
+            m = _PAIR_PROP_RE.match(k)
+            if not m or r.get("bid_c") is None or r.get("ask_c") is None:
+                continue
+            out[int(m.group(7))] = (int(r["bid_c"]), int(r["ask_c"]), k)
+    except Exception as e:
+        app.logger.warning("prop ladder read failed %s: %s", prefix, e)
+    return out
+
+
+def _pair_prop_partner(rungs: dict, held_side: str, n_h: int, cost_h: float,
+                       cap_c: float):
+    """THE PROP RE-RUNG LADDER, one leg held (Rob: "if it can't hold under the
+    cap, rerung tighter, and tighter as needed, STAY ON TOUCH"). `rungs` =
+    {N: (yes_bid, yes_ask)}. Holding YES on N (cost c): the partner is NO on a
+    rung ≥ N, widest first, walking IN until its NO bid (100 − ask) fits the
+    budget cap − c; N itself is the mirror (flat, the exit stop). Holding NO
+    on N: the partner is YES on a rung ≤ N, widest (lowest) first, walking UP.
+    Returns (rung, peg_c, hits) or None."""
+    if not rungs or n_h is None or cost_h is None:
+        return None
+    budget = float(cap_c) - float(cost_h)
+    lo_b, hi_b = _PAIR_LEG_BAND
+    if held_side == "over":
+        order = sorted([n for n in rungs if n >= n_h], reverse=True)
+        for n in order:
+            ask = rungs[n][1]
+            if ask is None:
+                continue
+            peg = 100.0 - float(ask)
+            if lo_b <= peg <= hi_b and peg <= budget + 1e-9:
+                return n, round(peg, 1), list(range(n_h, n))
+    else:
+        order = sorted([n for n in rungs if n <= n_h])
+        for n in order:
+            bid = rungs[n][0]
+            if bid is None:
+                continue
+            peg = float(bid)
+            if lo_b <= peg <= hi_b and peg <= budget + 1e-9:
+                return n, round(peg, 1), list(range(n, n_h))
+    return None
+
+
+def _pair_rerung_prop(sb, client, row, lg_in, st, cur, now, res) -> bool:
+    """Re-rung for a PROP sister (game_prefix `astatc-…-<fam>-<code>`).
+    Both legs empty → re-pick around the DK center with `_pair_prop_pick`;
+    one leg held → walk the partner in with `_pair_prop_partner`. Same
+    write discipline as the game-line re-rungs: cancel the stranded bid
+    first, retire the slug walked off, one update."""
+    prefix = str(row.get("game_prefix") or "")
+    parts = _pair_prop_parts(prefix)
+    if not parts:
+        _pair_rr_why(row, "not a prop ladder")
+        return False
+    fam, code = parts
+    ladder = _pair_prop_ladder(sb, prefix, now)
+    if len(ladder) < 2:
+        _pair_rr_why(row, "prop ladder unpriced on the tape")
+        return False
+    rungs = {n: (b, a) for n, (b, a, _s) in ladder.items()}
+    cap = float(row.get("cap_c") or _PAIR_PROP_CAP_C)
+    legs = {lg["key"]: dict(lg) for lg in (row.get("legs") or [])}
+    ka, kb = "a", "b"
+    held = [k for k in (ka, kb) if float(lg_in[k].get("h") or 0) >= 1.0]
+    ko = _parse_iso(str(row.get("kickoff")))
+    foreign = _pair_foreign_slugs(sb) or set()
+    retired = list(row.get("retired_slugs") or [])
+    if not held:
+        center = (_prop_center_lines(sb, "NFL", now) or {}).get((code, fam))
+        if center is None:
+            _pair_rr_why(row, "no DK center for this ladder")
+            return False
+        pick = _pair_prop_pick(rungs, center, cap)
+        if not pick:
+            _pair_rr_why(row, "no legal prop pair under cap")
+            return False
+        a_slug, b_slug = ladder[pick["lo"]][2], ladder[pick["hi"]][2]
+        if {a_slug, b_slug} == {legs[ka]["slug"], legs[kb]["slug"]}:
+            _pair_rr_why(row, "already on the rule's rungs")
+            return False
+        if a_slug in foreign or b_slug in foreign:
+            _pair_rr_why(row, "the rule's rung is pick-owned")
+            return False
+        if not (_rent_ok(a_slug, ko, now, sb)[0] and _rent_ok(b_slug, ko, now, sb)[0]):
+            _pair_rr_why(row, "a leg stopped paying rent")
+            return False
+        for k in (ka, kb):
+            if cur[k]["bid"] is not None and not _pair_cancel(client, cur[k]["bid"]):
+                _pair_rr_why(row, f"could not cancel the {k} bid")
+                return False
+        for _old in (legs[ka].get("slug"), legs[kb].get("slug")):
+            if _old and _old not in (a_slug, b_slug) and _old not in retired:
+                retired.append(_old)
+        legs[ka] = {"key": ka, "slug": a_slug, "intent": "BUY_LONG",
+                    "label": f"over {pick['lo'] - 0.5:g}"}
+        legs[kb] = {"key": kb, "slug": b_slug, "intent": "BUY_SHORT",
+                    "label": f"under {pick['hi'] - 0.5:g}"}
+        st[ka], st[kb] = {"h": 0.0}, {"h": 0.0}
+        try:
+            sb.table("pair_hedges").update(
+                {"legs": [legs[ka], legs[kb]], "state": st, "retired_slugs": retired[-40:],
+                 "updated_at": now.isoformat()}).eq("id", row["id"]).execute()
+        except Exception as e:
+            app.logger.warning("prop sister %s re-pick write failed: %s", row.get("id"), e)
+            return False
+        app.logger.info("PROP RE-PICK %s: -> %s + %s @ %s/%s (pair %s, DK %s, wins %s)",
+                        row.get("event_name"), legs[ka]["label"], legs[kb]["label"],
+                        pick["a_c"], pick["b_c"], pick["cost_c"], center, pick["hits"])
+        _send_fill_telegram(f"🔗 PROP RE-PICK — {row.get('event_name')}: {legs[ka]['label']} + "
+                            f"{legs[kb]['label']} @ {pick['cost_c']}¢ (DK {center:g})")
+        return True
+    if len(held) != 1:
+        return False
+    hk = held[0]; ek = kb if hk == ka else ka
+    side_h, n_h = _pair_prop_rung(legs[hk])
+    if n_h is None:
+        _pair_rr_why(row, "held leg label unreadable")
+        return False
+    cost_h = lg_in[hk].get("cost")
+    if cost_h is None:
+        cost_h = (st.get(hk) or {}).get("cost")
+    if cost_h is None:
+        _pair_rr_why(row, "held cost unknown")
+        return False
+    opt = _pair_prop_partner(rungs, side_h, n_h, float(cost_h), cap)
+    if not opt:
+        _pair_rr_why(row, f"no partner rung under cap (budget {cap - float(cost_h):.1f})")
+        return False
+    n_new, peg, hits = opt
+    new_slug = ladder[n_new][2]
+    if new_slug == legs[ek].get("slug"):
+        _pair_rr_why(row, "already on the best partner rung")
+        return False
+    if new_slug in foreign and new_slug != legs[hk].get("slug"):
+        _pair_rr_why(row, "partner rung is pick-owned")
+        return False
+    if not _rent_ok(new_slug, ko, now, sb)[0]:
+        _pair_rr_why(row, "partner rung pays no rent")
+        return False
+    if cur[ek]["bid"] is not None and not _pair_cancel(client, cur[ek]["bid"]):
+        _pair_rr_why(row, "could not cancel the stranded bid")
+        return False
+    old = legs[ek].get("slug")
+    if old and old != new_slug and old not in retired:
+        retired.append(old)
+    new_side = "under" if side_h == "over" else "over"
+    legs[ek] = {"key": ek, "slug": new_slug,
+                "intent": "BUY_SHORT" if new_side == "under" else "BUY_LONG",
+                "label": f"{new_side} {n_new - 0.5:g}"}
+    st[ek] = {"h": 0.0}
+    try:
+        sb.table("pair_hedges").update(
+            {"legs": [legs[ka], legs[kb]], "state": st, "retired_slugs": retired[-40:],
+             "updated_at": now.isoformat()}).eq("id", row["id"]).execute()
+    except Exception as e:
+        app.logger.warning("prop sister %s re-rung write failed: %s", row.get("id"), e)
+        return False
+    app.logger.info("PROP RE-RUNG %s: partner -> %s @ %s (held %s @ %s, pair %s, cap %s, wins %s)",
+                    row.get("event_name"), legs[ek]["label"], peg, legs[hk]["label"], cost_h,
+                    round(float(cost_h) + peg, 1), cap, hits or "mirror")
+    _send_fill_telegram(f"🔗 PROP RE-RUNG — {row.get('event_name')}: partner moved to "
+                        f"{legs[ek]['label']} @ {peg}¢ (pair {round(float(cost_h) + peg, 1)}¢, "
+                        f"{'wins both on ' + str(hits) if hits else 'mirror — hedged, out'})")
+    return True
+
+
 def _pair_board(sb, max_age_s: float = 600.0):
     """({(market_id, mt): {slug: away_line|total}}, {(market_id, mt): prefix})
     over the venue's ENROLLED rungs — the rent list is the universe, exactly as
@@ -23232,6 +23430,7 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
     # rule now wants different rungs, take them. Nothing is held, so this is
     # rule 5's "both pending → re-rung is fine" with no hedge to protect.
     _stale = (not _h and mins > 0 and row["market_type"] in ("spread", "total")
+              and not str(row.get("game_prefix") or "").startswith("astatc-")
               and ("-nfl-" in (row.get("game_prefix") or "")
                    or "-cfb-" in (row.get("game_prefix") or ""))
               and _time.time() - _PAIR_RELINE_TS.get(row["id"], 0.0)
@@ -23282,7 +23481,9 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
         res["rerung_looks"] = res.get("rerung_looks", 0) + 1
         _moved = False
         try:
-            if len(_h) == 1 and len(_e) == 1:
+            if str(row.get("game_prefix") or "").startswith("astatc-"):
+                _moved = _pair_rerung_prop(sb, client, row, lg_in, st, cur, now, res)
+            elif len(_h) == 1 and len(_e) == 1:
                 _moved = _pair_rerung(sb, client, row, _h[0], _e[0],
                                       lg_in, st, cur, now, res)
             elif not _h:
