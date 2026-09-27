@@ -21151,7 +21151,12 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float, t30_exit: bool =
             # unpaired lots went 0-for-13); the loss is the spread, $0.15-0.30
             # a lot. The partner's bid is pulled by the bid section in the
             # same plan. Kill switch: machine_flags pair_t30_exit.
-            if (t30_exit and not both and O.get("sold") is None
+            # (Sep 27 2026, first live window: three legs whose partner had
+            # SOLD earlier sat at their flat floor through kickoff — 58.5 /
+            # 53 / 53 against touches in the 30s-40s — while the four with an
+            # empty partner exited. A sold partner leaves this leg exactly as
+            # naked; the exit applies to it too.)
+            if (t30_exit and not both
                     and mins <= _PAIR_T30_MIN and L.get("bid") is not None):
                 # AT THE TOUCH — the best ASK, joined, post-only (Rob: "At
                 # touch… just not touch +1, it'll fill at kickoff"). Not a

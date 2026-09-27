@@ -1206,6 +1206,14 @@ def test_pair_plan() -> None:
                          "b": leg(bid=40.0, ask=41.0)}, 15, 105, -10)
     check("…and in-play too", p["a"]["ask"] == (54.0, 15) and "t30_exit" in p["a"]["why"])
     p = _app._pair_plan({"a": leg(h=15, cost=58.0, bid=52.0, ask=54.0),
+                         "b": leg(bid=40.0, ask=41.0, sold=61.5, sold_cost=60.0)}, 15, 105, 8)
+    check("…and when the partner SOLD earlier (a naked leg is a naked leg): exit, not the flat floor",
+          p["a"]["ask"] == (54.0, 15) and "t30_exit" in p["a"]["why"])
+    p = _app._pair_plan({"a": leg(h=15, cost=58.0, bid=52.0, ask=54.0),
+                         "b": leg(bid=40.0, ask=41.0, sold=61.5, sold_cost=60.0)}, 15, 105, 200)
+    check("…outside T-10 the sold-partner leg keeps its flat floor (58+60−61.5=56.5)",
+          p["a"]["ask"] == (56.5, 15) and "pair_floor" in p["a"]["why"])
+    p = _app._pair_plan({"a": leg(h=15, cost=58.0, bid=52.0, ask=54.0),
                          "b": leg(bid=40.0, ask=41.0)}, 15, 105, 8, t30_exit=False)
     check("kill switch restores the cost floor + the completion bid",
           p["a"]["ask"] == (58.0, 15) and p["b"]["bid"] is not None)
