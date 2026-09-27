@@ -1149,6 +1149,9 @@ def test_pair_plan() -> None:
     check("player code: CeeDee Lamb → ceelam, Ja'Marr Chase → jamcha, Amon-Ra St. Brown → amobro, Kenneth Walker III → kenwal",
           _app._pair_player_code("CeeDee Lamb") == "ceelam" and _app._pair_player_code("Ja'Marr Chase") == "jamcha"
           and _app._pair_player_code("Amon-Ra St. Brown") == "amobro" and _app._pair_player_code("Kenneth Walker III") == "kenwal")
+    check("player code alternates: D'Andre Swift offers dswi, J.K. Dobbins offers jdob, Colby Parkinson offers colbpar",
+          "dswi" in _app._pair_player_codes("D'Andre Swift") and "jdob" in _app._pair_player_codes("J.K. Dobbins")
+          and "colbpar" in _app._pair_player_codes("Colby Parkinson") and _app._pair_player_codes("Colby Parkinson")[0] == "colpar")
     lamb = {70: (60, 62), 80: (52, 53), 90: (28, 29), 100: (15, 16)}
     check("a fairly-quoted 10-yd band (80/90 = 52 + 71 = 123) does NOT fit under 110", _app._pair_prop_pick(lamb, 82.5, 110) is None)
     wide = {40: (52, 53), 50: (40, 42), 60: (30, 33), 30: (62, 64)}

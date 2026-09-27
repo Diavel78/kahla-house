@@ -21629,16 +21629,44 @@ _PAIR_PROP_CREDITS = 3
 _PAIR_PROP_OUT = {"out", "doubtful", "injured reserve", "ir", "suspended", "inactive", "pup"}
 
 
-def _pair_player_code(name) -> str | None:
-    """Polymarket's player code: first three letters of the first and last
-    name, lower-case, accents folded ('CeeDee Lamb' → 'ceelam',
-    "Ja'Marr Chase" → 'jamcha', 'Amon-Ra St. Brown' → 'amobro' — the slug
-    keeps the hyphenated first name whole and takes the LAST token)."""
+def _pair_player_codes(name) -> list:
+    """Polymarket's player code CANDIDATES, most likely first. The usual form
+    is first-three + last-three ('CeeDee Lamb' → ceelam, 'Amon-Ra St. Brown'
+    → amobro). Read off the Sep 27 board: an APOSTROPHE first name keeps only
+    the letter before it ("D'Andre Swift" → dswi, while "Ja'Marr Chase" is
+    jamcha — both forms are offered), INITIALS collapse to one letter ('J.K.
+    Dobbins' → jdob), and a collision gets a fourth letter ('Colby Parkinson'
+    → colbpar). The board's slug decides; the center map is keyed by every
+    candidate."""
     import unicodedata
-    t = unicodedata.normalize("NFKD", str(name or "")).encode("ascii", "ignore").decode().lower()
-    parts = [p for p in re.sub(r"[^a-z ]", "", t.replace("'", "").replace("-", "")).split()
-             if p not in ("jr", "sr", "ii", "iii", "iv", "v")]
-    return (parts[0][:3] + parts[-1][:3]) if len(parts) >= 2 else None
+    raw = str(name or "")
+    t = unicodedata.normalize("NFKD", raw).encode("ascii", "ignore").decode().lower()
+    toks = [p for p in re.sub(r"[^a-z' .]", "", t.replace("-", "")).split()
+            if p.strip(".") not in ("jr", "sr", "ii", "iii", "iv", "v")]
+    if len(toks) < 2:
+        return []
+    first, last = toks[0], toks[-1]
+    last3 = re.sub(r"[^a-z]", "", last)[:3]
+    out = []
+    f_plain = re.sub(r"[^a-z]", "", first)
+    if f_plain:
+        out.append(f_plain[:3] + last3)
+    if "'" in first:                                   # D'Andre → d
+        out.append(re.sub(r"[^a-z]", "", first.split("'")[0])[:3] + last3)
+    if "." in first or len(f_plain) <= 2:              # J.K. / JK → j
+        out.append(f_plain[:1] + last3)
+    if len(f_plain) >= 4:
+        out.append(f_plain[:4] + last3)                # collision form
+    seen = set(); res = []
+    for c in out:
+        if c and c not in seen:
+            seen.add(c); res.append(c)
+    return res
+
+
+def _pair_player_code(name) -> str | None:
+    c = _pair_player_codes(name)
+    return c[0] if c else None
 
 
 def _prop_center_lines(sb, sport: str, now) -> dict | None:
@@ -21710,17 +21738,19 @@ def _prop_center_lines(sb, sport: str, now) -> dict | None:
     best: dict = {}
     for x in rows:
         fam = inv.get(x.get("mk"))
-        code = _pair_player_code(x.get("player"))
-        if not fam or not code or x.get("line") is None:
+        codes = _pair_player_codes(x.get("player"))
+        if not fam or not codes or x.get("line") is None:
             continue
         if str(x.get("inj") or "").strip().lower() in _PAIR_PROP_OUT:
             continue
         ov = x.get("over") if x.get("over") is not None else -110
         un = x.get("under") if x.get("under") is not None else -110
         score = abs(float(ov) + 110.0) + abs(float(un) + 110.0)   # the main line sits nearest even money
-        cur = best.get((code, fam))
-        if cur is None or score < cur[1]:
-            best[(code, fam)] = (float(x["line"]), score)
+        for i, code in enumerate(codes):
+            cur = best.get((code, fam))
+            # the primary form wins a tie; an alternate never overrides a primary
+            if cur is None or (score, i) < (cur[1], cur[2]):
+                best[(code, fam)] = (float(x["line"]), score, i)
     return {k2: v[0] for k2, v in best.items()}
 
 
