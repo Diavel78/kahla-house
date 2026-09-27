@@ -1144,13 +1144,13 @@ def test_pair_plan() -> None:
     # partner's completion bid comes off with it
     p = _app._pair_plan({"a": leg(h=15, cost=58.0, bid=52.0, ask=54.0),
                          "b": leg(bid=40.0, ask=41.0)}, 15, 105, 8)
-    check("unpaired held leg inside T-10 exits at bid + tick (52.5), not cost (58)",
-          p["a"]["ask"] == (52.5, 15) and "t30_exit" in p["a"]["why"])
+    check("unpaired held leg inside T-10 exits AT the bid (52 — it sells), not cost (58)",
+          p["a"]["ask"] == (52.0, 15) and "t30_exit" in p["a"]["why"])
     check("…and the partner's completion bid is pulled",
           p["b"]["bid"] is None and "t30_unpaired" in p["b"]["why"])
     p = _app._pair_plan({"a": leg(h=15, cost=58.0, bid=52.0, ask=54.0),
                          "b": leg(bid=40.0, ask=41.0)}, 15, 105, -10)
-    check("…and in-play too", p["a"]["ask"] == (52.5, 15) and "t30_exit" in p["a"]["why"])
+    check("…and in-play too", p["a"]["ask"] == (52.0, 15) and "t30_exit" in p["a"]["why"])
     p = _app._pair_plan({"a": leg(h=15, cost=58.0, bid=52.0, ask=54.0),
                          "b": leg(bid=40.0, ask=41.0)}, 15, 105, 8, t30_exit=False)
     check("kill switch restores the cost floor + the completion bid",
@@ -1992,6 +1992,23 @@ def test_review_sep26_sizing_and_state() -> None:
         _app._time.sleep = _sleep
     check("pair write: 14.7 wanted + 0.3 filled amends to quantity 15",
           bool(mods) and mods[-1].get("quantity") == 15 and v2[0] == "amended")
+    # the exit write CROSSES: not post-only, and a resting ask is cancelled first
+    created.clear(); cancels = []
+    client3 = NS(orders=NS(create=lambda p: (created.append(p) or {"id": "x"}),
+                           modify=lambda *a: None, list=lambda *a: {"orders": []},
+                           cancel=lambda oid, m: cancels.append(oid)))
+    v3 = _app._pair_order_write(client3, "test", "ORDER_INTENT_SELL_LONG", 52, 15,
+                                "2099-01-01T00:00:00Z",
+                                {"id": "ask1", "price_yes": .58, "leaves": 15, "cum": 0},
+                                post_only=False)
+    check("pair exit write: cancels the resting ask, then creates a CROSSING order at the bid",
+          v3[0] == "created" and cancels == ["ask1"] and created
+          and created[-1]["participateDontInitiate"] is False
+          and created[-1]["price"]["value"] == "0.520")
+    created.clear()
+    _app._pair_order_write(client3, "test", "ORDER_INTENT_SELL_LONG", 52, 15,
+                           "2099-01-01T00:00:00Z", None)
+    check("pair write default stays post-only", created and created[-1]["participateDontInitiate"] is True)
     # malformed positions envelope keeps the mirror
     m = _app._VENUE_MIRROR
     _keep = dict(m["positions"]); _rc = _app._pmm_read_client

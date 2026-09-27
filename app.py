@@ -21109,9 +21109,14 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float, t30_exit: bool =
             # same plan. Kill switch: machine_flags pair_t30_exit.
             if (t30_exit and not both and O.get("sold") is None
                     and mins <= _PAIR_T30_MIN and L.get("bid") is not None):
-                floor = float(L["bid"])            # → tgt = bid + tick below
+                # AT THE BID, NOT A TICK ABOVE IT (Rob: "should be touch,
+                # it'll sell"). The writer sends this one order WITHOUT
+                # post-only so it crosses and fills; whatever the bid's depth
+                # does not take rests at the touch.
+                floor = None
+                ask = (round(float(L["bid"]), 3), n)
                 why.append("t30_exit")
-            if floor is None and not ({"lock_rides", "t30_middle"} & set(why)):
+            if floor is None and not ({"lock_rides", "t30_middle", "t30_exit"} & set(why)):
                 why.append("cost_unknown")
             if floor is not None:
                 floor = _grid_up(float(floor), tick)
@@ -21143,11 +21148,19 @@ def _pair_touch_ex_self(book: dict | None, side: str, own_px, own_qty) -> float 
     return None
 
 
-def _pair_order_write(client, slug, intent, px_c, n, gtt, cur) -> tuple[str, str | None]:
+def _pair_order_write(client, slug, intent, px_c, n, gtt, cur, post_only: bool = True) -> tuple[str, str | None]:
     """Converge ONE order: keep, amend in place, or create. `cur` = our current
     resting order of this intent on the slug (normalized) or None."""
     short = intent.endswith("_SHORT")
     canon = ((100.0 - px_c) / 100.0) if short else (px_c / 100.0)
+    if not post_only and cur is not None:
+        # THE EXIT CROSSES (Sep 26 2026, `t30_exit`): an amend is post-only and
+        # a crossing amend is rejected, so the resting ask is cancelled and a
+        # fresh taker order goes in at the touch. A cancel that fails leaves
+        # the resting ask alone — never two asks on one lot.
+        if not _pair_cancel(client, {"id": cur.get("id"), "slug": slug}):
+            return "error", cur.get("id")
+        cur = None
     if cur is not None:
         cur_px = cur.get("price_yes")
         cur_c = None if cur_px is None else ((100.0 - cur_px * 100.0) if short else cur_px * 100.0)
@@ -21175,7 +21188,7 @@ def _pair_order_write(client, slug, intent, px_c, n, gtt, cur) -> tuple[str, str
     params = {"marketSlug": slug, "intent": intent, "type": "ORDER_TYPE_LIMIT",
               "price": {"value": f"{canon:.3f}", "currency": "USD"},
               "quantity": max(1, int(round(float(n)))), "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
-              "goodTillTime": gtt, "participateDontInitiate": True,
+              "goodTillTime": gtt, "participateDontInitiate": bool(post_only),
               "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
     try:
         cr = client.orders.create(params)
@@ -22703,7 +22716,11 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
                     if have is not None and _pair_cancel(client, have):
                         res["side_held_cancelled"] = res.get("side_held_cancelled", 0) + 1
                     continue
-            verdict, oid = _pair_order_write(client, c["slug"], intent, want[0], want[1], gtt, have)
+            _cross = side == "ask" and "t30_exit" in p["why"]
+            if _cross:
+                res["t30_exit"] = res.get("t30_exit", 0) + 1
+            verdict, oid = _pair_order_write(client, c["slug"], intent, want[0], want[1], gtt, have,
+                                             post_only=not _cross)
             if verdict in ("created", "amended"):
                 res["writes"] += 1
                 s[side + "_c"] = want[0]
