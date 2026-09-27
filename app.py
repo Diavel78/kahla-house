@@ -21609,6 +21609,262 @@ def _pair_board_nhl(sb, board: dict, prefixes: dict) -> None:
             prefixes[(mid, mt)] = stem
 
 
+# ── THE PROP SISTERS (Rob, Sep 27 2026: "props are all paired now… yardage
+# only, cap 110, use DK for props, count props are out") ────────────────────
+# A prop ladder is Polymarket's `gte` rungs for one player + stat
+# (astatc-nfl-bal-dal-2026-09-27-recyd-ceelam-gte80 = CeeDee Lamb 80+ rec
+# yds). The sister is YES on the rung at/under the book's line + NO on the
+# rung above it, paying both on every integer from the low rung to one under
+# the high rung. Measured on the Sep 27 NFL board: a 10-yd rec/rush band
+# prices 112-113 at the touch, a 25-yd pass band 114, a 1-catch band 118 —
+# so yardage only, and the props cap is 110 (spreads/totals stay 105).
+_PAIR_PROP_FAMS = {"pyd": "player_passing_yards", "ryd": "player_rushing_yards",
+                   "recyd": "player_receiving_yards"}
+_PAIR_PROP_CAP_C = 110.0
+_PAIR_PROP_RE = re.compile(
+    r"^astatc-(nfl)-([a-z0-9]+)-([a-z0-9]+)-(\d{4}-\d{2}-\d{2})-(pyd|ryd|recyd)-([a-z]+)-gte(\d+)$")
+_PAIR_PROP_TAPE_MAX_AGE_H = 12.0     # a rung last quoted longer ago than this is not a ladder we seat from
+_PAIR_PROP_CENTER_MIN = 60           # parlay-api props slate cache (3 credits a pull)
+_PAIR_PROP_CREDITS = 3
+_PAIR_PROP_OUT = {"out", "doubtful", "injured reserve", "ir", "suspended", "inactive", "pup"}
+
+
+def _pair_player_code(name) -> str | None:
+    """Polymarket's player code: first three letters of the first and last
+    name, lower-case, accents folded ('CeeDee Lamb' → 'ceelam',
+    "Ja'Marr Chase" → 'jamcha', 'Amon-Ra St. Brown' → 'amobro' — the slug
+    keeps the hyphenated first name whole and takes the LAST token)."""
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(name or "")).encode("ascii", "ignore").decode().lower()
+    parts = [p for p in re.sub(r"[^a-z ]", "", t.replace("'", "").replace("-", "")).split()
+             if p not in ("jr", "sr", "ii", "iii", "iv", "v")]
+    return (parts[0][:3] + parts[-1][:3]) if len(parts) >= 2 else None
+
+
+def _prop_center_lines(sb, sport: str, now) -> dict | None:
+    """{(player_code, fam): book line} for the whole slate — DraftKings main
+    line, FanDuel fallback (Rob: "Use DK for props, Pinnacle won't have much"
+    — Pinnacle carried 335 NFL prop lines and zero NHL ones on Sep 27). One
+    grouped `/props` call per sport is 3 credits, DB-cached
+    `_PAIR_PROP_CENTER_MIN`; the monthly budget guard is the slate's. A row
+    whose injury status reads out/doubtful/IR is dropped — a book still
+    posting a line on a scratch is not a center."""
+    sk = _PARLAY_SPORT_KEY.get(sport)
+    if not sk:
+        return None
+    k = f"props:{sport}"
+    cache = _parlay_state_get(sb, k)
+    rows = None
+    if cache:
+        try:
+            age = (now - datetime.fromisoformat(
+                str(cache["updated_at"]).replace("Z", "+00:00"))).total_seconds()
+            if age < _PAIR_PROP_CENTER_MIN * 60:
+                rows = (cache.get("v") or {}).get("rows")
+        except Exception:
+            rows = None
+    if rows is None:
+        key = _parlay_key(sb)
+        if not key:
+            return None
+        month_k = "usage:" + now.strftime("%Y-%m")
+        used = (((_parlay_state_get(sb, month_k) or {}).get("v") or {}).get("credits") or 0)
+        if used + _PAIR_PROP_CREDITS > _PARLAY_BUDGET:
+            rows = ((cache or {}).get("v") or {}).get("rows")
+        else:
+            try:
+                r = _http.get(f"{_PARLAY_BASE}/sports/{sk}/props",
+                              params={"apiKey": key, "grouped": "true",
+                                      "markets": ",".join(_PAIR_PROP_FAMS.values()),
+                                      "bookmakers": "draftkings,fanduel",
+                                      "oddsFormat": "american", "limit": 10000},
+                              timeout=60)
+                if r.status_code == 200 and isinstance(r.json(), list):
+                    slim = []
+                    for x in r.json():
+                        bks = {b.get("bookmaker"): b for b in (x.get("books") or [])}
+                        b = bks.get("draftkings") or bks.get("fanduel")
+                        if not b or x.get("line") is None:
+                            continue
+                        slim.append({"player": x.get("player"), "mk": x.get("market_key"),
+                                     "line": x.get("line"), "book": b.get("bookmaker"),
+                                     "over": b.get("over_price"), "under": b.get("under_price"),
+                                     "inj": ((x.get("injury") or {}).get("status") or ""),
+                                     "away": x.get("away_team"), "home": x.get("home_team"),
+                                     "start": x.get("commence_time")})
+                    rows = slim
+                    _parlay_state_put(sb, k, {"rows": rows}, now)
+                    try:
+                        vend = r.headers.get("x-requests-used")
+                        used_now = int(float(vend)) if vend else used + _PAIR_PROP_CREDITS
+                    except (TypeError, ValueError):
+                        used_now = used + _PAIR_PROP_CREDITS
+                    _parlay_state_put(sb, month_k, {"credits": max(used_now, used)}, now)
+                else:
+                    rows = ((cache or {}).get("v") or {}).get("rows")
+            except Exception:
+                rows = ((cache or {}).get("v") or {}).get("rows")
+    if not rows:
+        return None
+    inv = {v: k2 for k2, v in _PAIR_PROP_FAMS.items()}
+    best: dict = {}
+    for x in rows:
+        fam = inv.get(x.get("mk"))
+        code = _pair_player_code(x.get("player"))
+        if not fam or not code or x.get("line") is None:
+            continue
+        if str(x.get("inj") or "").strip().lower() in _PAIR_PROP_OUT:
+            continue
+        ov = x.get("over") if x.get("over") is not None else -110
+        un = x.get("under") if x.get("under") is not None else -110
+        score = abs(float(ov) + 110.0) + abs(float(un) + 110.0)   # the main line sits nearest even money
+        cur = best.get((code, fam))
+        if cur is None or score < cur[1]:
+            best[(code, fam)] = (float(x["line"]), score)
+    return {k2: v[0] for k2, v in best.items()}
+
+
+def _pair_prop_pick(rungs: dict, line: float, cap_c: float = _PAIR_PROP_CAP_C) -> dict | None:
+    """Widest sister under the cap around the book line (Rob: "widest rung to
+    START, rerung tighter as needed"). `rungs` = {N: (yes_bid_c, yes_ask_c)}.
+    YES on a low rung pegs at its bid (join); NO on a high rung pegs at
+    100 − its ask (the NO side's bid). Both legs inside the leg band, pair
+    ≤ cap, band = every integer from lo to hi−1."""
+    if not rungs or line is None:
+        return None
+    los = sorted([n for n in rungs if float(n) <= float(line)], reverse=True)[:2]
+    his = sorted([n for n in rungs if float(n) > float(line)])[:2]
+    if not los or not his:
+        return None
+    order = []
+    if len(los) > 1 and len(his) > 1:
+        order.append((los[1], his[1]))
+    if len(los) > 1:
+        order.append((los[1], his[0]))
+    if len(his) > 1:
+        order.append((los[0], his[1]))
+    order.append((los[0], his[0]))
+    lo_b, hi_b = _PAIR_LEG_BAND
+    for lo, hi in order:
+        qa, qb = rungs.get(lo), rungs.get(hi)
+        if not qa or not qb or qa[0] is None or qb[1] is None:
+            continue
+        a_c = float(qa[0])
+        b_c = 100.0 - float(qb[1])
+        if not (lo_b <= a_c <= hi_b and lo_b <= b_c <= hi_b):
+            continue
+        cost = a_c + b_c
+        if cost > cap_c + 1e-9:
+            continue
+        return {"lo": int(lo), "hi": int(hi), "a_c": round(a_c, 1), "b_c": round(b_c, 1),
+                "cost_c": round(cost, 1), "hits": list(range(int(lo), int(hi))),
+                "cap_c": cap_c}
+    return None
+
+
+def _pair_prop_board(sb, now, lo_h: float, hi_h: float) -> dict:
+    """{(market_id, fam, code): {"prefix", "rungs": {N: (bid, ask)}, "slugs": {N: slug},
+    "game": markets row}} from the prop tape — Polymarket's yardage ladders
+    on NFL games kicking off in [now+lo_h, now+hi_h]. Only rungs quoted within
+    `_PAIR_PROP_TAPE_MAX_AGE_H` count (the tick prices live once seated)."""
+    out: dict = {}
+    try:
+        g_lo = (now + timedelta(hours=lo_h)).isoformat()
+        g_hi = (now + timedelta(hours=hi_h)).isoformat()
+        games = {r["id"]: r for r in (sb.table("markets").select("id,event_name,event_start,sport")
+                                       .eq("sport", "NFL").eq("status", "active")
+                                       .gte("event_start", g_lo).lte("event_start", g_hi)
+                                       .limit(200).execute().data or [])}
+        if not games:
+            return out
+        cut = (now - timedelta(hours=_PAIR_PROP_TAPE_MAX_AGE_H)).isoformat()
+        seen: set = set()
+        for mid in list(games)[:40]:
+            def _q(mid=mid):
+                return (sb.table("prop_snapshots").select("prop_key,bid_c,ask_c,captured_at")
+                        .eq("venue", "polymarket").eq("market_id", mid)
+                        .gte("captured_at", cut).like("prop_key", "astatc-nfl-%")
+                        .order("captured_at", desc=True))
+            for r in _sb_paged(_q, max_pages=6):
+                k = r["prop_key"]
+                if k in seen:
+                    continue
+                seen.add(k)
+                m = _PAIR_PROP_RE.match(k)
+                if not m or r.get("bid_c") is None or r.get("ask_c") is None:
+                    continue
+                fam, code, n = m.group(5), m.group(6), int(m.group(7))
+                ent = out.setdefault((mid, fam, code), {
+                    "prefix": k[:k.rindex("-gte")], "rungs": {}, "slugs": {}, "game": games[mid]})
+                ent["rungs"][n] = (int(r["bid_c"]), int(r["ask_c"]))
+                ent["slugs"][n] = k
+    except Exception as e:
+        app.logger.warning("pair prop board failed: %s", e)
+    return out
+
+
+def _pair_seed_props(sb, now, res: dict, armed: bool, taken_slugs: set, have: set,
+                     max_new: int) -> None:
+    """Seat prop sisters on the NFL board: DK center → Polymarket ladder →
+    widest pair under 110 → rent on BOTH rungs → one row per player ladder.
+    Off unless `machine_flags pair_props_enabled`."""
+    if not _machine_flag("pair_props_enabled", False):
+        return
+    lead = _pair_min_lead_h("NFL", sb)
+    board = _pair_prop_board(sb, now, lead, 24 * 9)
+    res["props_ladders"] = len(board)
+    if not board:
+        return
+    centers = _prop_center_lines(sb, "NFL", now) or {}
+    res["props_centers"] = len(centers)
+    foreign = _pair_foreign_slugs(sb) or set()
+    for (mid, fam, code), ent in sorted(board.items(), key=lambda kv: kv[1]["game"]["event_start"]):
+        if res.get("seated", 0) >= max_new:
+            break
+        prefix = ent["prefix"]
+        if (prefix, "total") in have:
+            continue
+        res["props_looked"] = res.get("props_looked", 0) + 1
+        line = centers.get((code, fam))
+        if line is None:
+            res["props_no_center"] = res.get("props_no_center", 0) + 1
+            continue
+        pick = _pair_prop_pick(ent["rungs"], line, _PAIR_PROP_CAP_C)
+        if not pick:
+            res["props_no_middle"] = res.get("props_no_middle", 0) + 1
+            continue
+        a_slug, b_slug = ent["slugs"][pick["lo"]], ent["slugs"][pick["hi"]]
+        if any(sl in taken_slugs or sl in foreign for sl in (a_slug, b_slug)):
+            res["props_taken"] = res.get("props_taken", 0) + 1
+            continue
+        g = ent["game"]
+        es = _parse_iso(g["event_start"])
+        if not (_rent_ok(a_slug, es, now, sb)[0] and _rent_ok(b_slug, es, now, sb)[0]):
+            res["props_rent"] = res.get("props_rent", 0) + 1
+            continue
+        row = {"game_prefix": prefix, "market_type": "total",
+               "event_name": f"{g.get('event_name')} · {code} {fam}", "kickoff": g["event_start"],
+               "qty": _PAIR_DEFAULT_QTY, "cap_c": _PAIR_PROP_CAP_C,
+               "legs": [{"key": "a", "slug": a_slug, "intent": "BUY_LONG",
+                         "label": f"over {pick['lo'] - 0.5:g}"},
+                        {"key": "b", "slug": b_slug, "intent": "BUY_SHORT",
+                         "label": f"under {pick['hi'] - 0.5:g}"}]}
+        res["found"] += 1
+        res["cands"].append({**pick, "game": row["event_name"], "mt": "prop:" + fam,
+                             "a_slug": a_slug, "b_slug": b_slug, "line": line})
+        if not armed:
+            continue
+        try:
+            sb.table("pair_hedges").insert(row).execute()
+            res["seated"] += 1
+            have.add((prefix, "total"))
+            _send_fill_telegram(
+                f"🔗 PROP SISTER — {row['event_name']}: {row['legs'][0]['label']} + "
+                f"{row['legs'][1]['label']} @ {pick['cost_c']}¢ (DK {line:g}; wins both on {pick['hits']})")
+        except Exception as e:
+            app.logger.warning("prop sister insert failed %s: %s", prefix, e)
+
+
 def _pair_board(sb, max_age_s: float = 600.0):
     """({(market_id, mt): {slug: away_line|total}}, {(market_id, mt): prefix})
     over the venue's ENROLLED rungs — the rent list is the universe, exactly as
@@ -22082,6 +22338,11 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 0) -> dict:
                     f"worth {best['worth_c']}¢)")
             except Exception as e:
                 app.logger.warning("pair seed insert failed %s: %s", prefix, e)
+    try:
+        _pair_seed_props(sb, now, res, armed, taken_slugs, have, max_new)
+    except Exception as e:
+        app.logger.warning("prop sisters pass failed: %s", e)
+        res["props_err"] = str(e)[:80]
     return res
 
 

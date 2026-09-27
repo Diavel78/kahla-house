@@ -1140,6 +1140,25 @@ def test_pair_plan() -> None:
           p["a"]["bid"] == "keep" and p["b"]["bid"] == "keep"
           and "rent_unreadable" in p["a"]["why"])
     import inspect as _insp0
+    # THE PROP SISTERS (Sep 27 2026): slug parse, player code, the widest-under-cap pick
+    m = _app._PAIR_PROP_RE.match("astatc-nfl-bal-dal-2026-09-27-recyd-ceelam-gte80")
+    check("prop slug parses (fam, code, rung)", m and m.group(5) == "recyd" and m.group(6) == "ceelam" and m.group(7) == "80")
+    check("count-stat and period props never parse as a sister ladder",
+          not _app._PAIR_PROP_RE.match("astatc-nfl-bal-dal-2026-09-27-rec-ceelam-gte5")
+          and not _app._PAIR_PROP_RE.match("astatc-nfl-bal-dal-2026-09-27-td-ceelam-gte1"))
+    check("player code: CeeDee Lamb → ceelam, Ja'Marr Chase → jamcha, Amon-Ra St. Brown → amobro, Kenneth Walker III → kenwal",
+          _app._pair_player_code("CeeDee Lamb") == "ceelam" and _app._pair_player_code("Ja'Marr Chase") == "jamcha"
+          and _app._pair_player_code("Amon-Ra St. Brown") == "amobro" and _app._pair_player_code("Kenneth Walker III") == "kenwal")
+    lamb = {70: (60, 62), 80: (52, 53), 90: (28, 29), 100: (15, 16)}
+    check("a fairly-quoted 10-yd band (80/90 = 52 + 71 = 123) does NOT fit under 110", _app._pair_prop_pick(lamb, 82.5, 110) is None)
+    wide = {40: (52, 53), 50: (40, 42), 60: (30, 33), 30: (62, 64)}
+    pk = _app._pair_prop_pick(wide, 42.5, 110)
+    check("widest first: 30/60 (62+67=129) and 30/50 (62+58=120) fail, 40/60 (52+67=119) fails, 40/50 (52+58=110) seats",
+          pk and (pk["lo"], pk["hi"], pk["cost_c"], pk["hits"]) == (40, 50, 110.0, list(range(40, 50))))
+    check("no rung on one side of the line → no sister", _app._pair_prop_pick({40: (52, 53)}, 42.5, 110) is None)
+    check("the props cap is 110 while spreads/totals stay 105",
+          _app._PAIR_PROP_CAP_C == 110.0 and _app._pair_ceiling("NFL") == 105.0)
+    check("the seeder calls the prop pass", "_pair_seed_props(sb, now, res, armed, taken_slugs, have, max_new)" in _insp0.getsource(_app._pair_seed_tick))
     # HOCKEY JOINS THE BOARD (Sep 27 2026): the venue's NHL dialect parses,
     # the map covers all 32 teams, the worth tables keep the cap at 105
     m = _app._PAIR_NHL_TOTAL_RE.match("tsc-nhl-pit-phi-2026-09-30-6pt5")
