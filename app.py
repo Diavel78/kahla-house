@@ -18002,6 +18002,8 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
     # Default False (fail-open to betting); `bets_paused` true = hold.
     if _machine_flag("bets_paused", False):
         return "paused"
+    if _pair_or_nothing():
+        return "paused"                  # PAIR OR NOTHING (Rob, Sep 27 2026)
     # ⚠ THE RENT RULE, FIRST AND UNCONDITIONAL (user, Aug 18 2026): no
     # computer bet at all unless this market pays rent AND we are inside
     # its paying window. Checked before the cap, before the dedup, before
@@ -19372,6 +19374,8 @@ def _opener_pass(sb, now, deadline):
                 continue
             if _machine_flag("bets_paused", False):   # reopen posture (Sep 5)
                 continue
+            if _pair_or_nothing():
+                continue                 # PAIR OR NOTHING (Rob, Sep 27 2026) — NRFI is a single leg
             gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             canon = ((100.0 - side_c) / 100.0 if synthetic
                      else side_c / 100.0)
@@ -28028,6 +28032,17 @@ _SEAT_TOPUP_SOURCES = {"gridiron_autobet", "autobet", "ou_trader",
                        "pmm_autolog", "fbprop_autobet"}
 
 
+def _pair_or_nothing() -> bool:
+    """PAIR OR NOTHING (Rob, Sep 27 2026: "From here on out, it's pair or
+    nothing"). No engine places a single-leg BUY on any sport — MLB ML/O-U,
+    NRFI, pitcher props, football seats, NFL props, UFC. The pair machine
+    (`_pair_tick`, cap 105) is the only buyer; the scalp arm still sells
+    what is held. Gates `_autobet_execute`, the NRFI create site and the
+    seat top-up. Code default TRUE; `machine_flags pair_or_nothing=false`
+    re-opens the single-leg lanes."""
+    return bool(_machine_flag("pair_or_nothing", True))
+
+
 def _ferrari_parked() -> bool:
     """THE FERRARI IS PARKED (Rob, Sep 27 2026: "The Ferrari needs to be
     parked"). The single-leg football/prop/UFC seat machine places nothing:
@@ -28120,6 +28135,8 @@ def _gridiron_seat_legal_now(sb, g, mt, sn, entry_line, now, _cache: dict):
 def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
     global _SEAT_TOPUP_LAST_TS
     st: dict = {"cands": 0, "placed": 0}
+    if _pair_or_nothing():
+        return {"gate": "pair_or_nothing"}   # top-up only serves single-leg seats (Rob, Sep 27 2026)
     if not _machine_flag("seat_topup", True):
         return {"gate": "off"}
     if _machine_flag("bets_paused", False):

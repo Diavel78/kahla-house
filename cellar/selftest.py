@@ -1139,6 +1139,16 @@ def test_pair_plan() -> None:
     check("rent unreadable + nothing held → keep both bids",
           p["a"]["bid"] == "keep" and p["b"]["bid"] == "keep"
           and "rent_unreadable" in p["a"]["why"])
+    # PAIR OR NOTHING (Rob, Sep 27 2026): the single-leg creators are gated
+    import inspect as _insp0
+    check("pair or nothing: the autobet executor, the NRFI create and the top-up all check the flag",
+          "if _pair_or_nothing():" in _insp0.getsource(_app._autobet_execute)
+          and "if _pair_or_nothing():" in _insp0.getsource(_app._opener_pass)
+          and '{"gate": "pair_or_nothing"}' in _insp0.getsource(_app._seat_topup_tick))
+    check("pair or nothing: the PAIR tick does not check it (pairs are the only buyer)",
+          "_pair_or_nothing" not in _insp0.getsource(_app._pair_tick)
+          and "_pair_or_nothing" not in _insp0.getsource(_app._pair_step))
+    check("pair or nothing defaults ON in code", "_machine_flag(\"pair_or_nothing\", True)" in _insp0.getsource(_app._pair_or_nothing))
     # THE FERRARI IS PARKED (Sep 27 2026): the top-up must skip single-leg
     # football/prop/UFC seats while the flag holds; MLB seats are untouched
     check("ferrari pick: gridiron / fbprop / ghost-adopt seats are Ferrari, MLB autobet is not",
