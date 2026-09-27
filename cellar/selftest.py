@@ -1168,8 +1168,10 @@ def test_pair_plan() -> None:
     pr = {15: (54, 55), 20: (43, 44), 25: (30, 31)}
     check("held YES 15 @54, cap 110: widest partner under budget 56 is NO 20 (peg 56), not NO 25 (69)",
           _app._pair_prop_partner(pr, "over", 15, 54.0, 110) == (20, 56.0, list(range(15, 20))))
-    check("held YES 15 @60, cap 110: budget 50 → NO 20 (56) fails, walks to the MIRROR NO 15 (45), hedged out",
-          _app._pair_prop_partner(pr, "over", 15, 60.0, 110) == (15, 45.0, []))
+    check("held YES 15 @60, cap 110: budget 50 → NO 20 (56) fails and there is NO mirror on a prop (same market) → None",
+          _app._pair_prop_partner(pr, "over", 15, 60.0, 110) is None)
+    check("held NO 20: the mirror YES 20 on the same market is never offered",
+          _app._pair_prop_partner({20: (43, 44)}, "under", 20, 30.0, 110) is None)
     check("held NO 20 @56: partner is YES on a rung ≤ 20, widest first → YES 15 @54 (budget 54)",
           _app._pair_prop_partner(pr, "under", 20, 56.0, 110) == (15, 54.0, list(range(15, 20))))
     check("nothing under budget → None", _app._pair_prop_partner(pr, "over", 15, 70.0, 110) is None)

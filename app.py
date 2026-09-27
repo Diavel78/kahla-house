@@ -21956,8 +21956,13 @@ def _pair_prop_partner(rungs: dict, held_side: str, n_h: int, cost_h: float,
         return None
     budget = float(cap_c) - float(cost_h)
     lo_b, hi_b = _PAIR_LEG_BAND
+    # NO MIRROR ON A PROP (Sep 27 2026, Bateman 40+): on a spread the mirror
+    # is a DIFFERENT market (home −1.5 vs away +1.5); on a prop the mirror is
+    # the SAME market we hold — a NO bid beside the cost ASK is two exits on
+    # one lot, and both filling leaves us SHORT fifteen. The held prop leg's
+    # exit is its ask (cost, then the T-10 touch), never a bid on itself.
     if held_side == "over":
-        order = sorted([n for n in rungs if n >= n_h], reverse=True)
+        order = sorted([n for n in rungs if n > n_h], reverse=True)
         for n in order:
             ask = rungs[n][1]
             if ask is None:
@@ -21966,7 +21971,7 @@ def _pair_prop_partner(rungs: dict, held_side: str, n_h: int, cost_h: float,
             if lo_b <= peg <= hi_b and peg <= budget + 1e-9:
                 return n, round(peg, 1), list(range(n_h, n))
     else:
-        order = sorted([n for n in rungs if n <= n_h])
+        order = sorted([n for n in rungs if n < n_h])
         for n in order:
             bid = rungs[n][0]
             if bid is None:
