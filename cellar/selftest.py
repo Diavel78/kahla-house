@@ -1178,6 +1178,9 @@ def test_pair_plan() -> None:
         check("re-rung fresh cancel: an unreadable venue refuses (caller must not rewrite legs)", _app._pair_cancel_rungs_fresh(_fake, ["s-old"]) is False)
     finally:
         _app._pmm_open_orders_raw = _oraw
+    _src_tick = _insp0.getsource(_app._pair_tick)
+    check("the lap hands each row the mirror as it is NOW, not the lap-start copy",
+          "_o_now = _pmm_open_orders_raw(client, fresh=False)" in _src_tick and "_pair_step(sb, client, row, _p_now" in _src_tick)
     _src_rr = _insp0.getsource(_app._pair_rerung) + _insp0.getsource(_app._pair_rerung_both) + _insp0.getsource(_app._pair_rerung_prop)
     check("all three re-rungs cancel from a fresh read, none from the lap snapshot",
           _src_rr.count("_pair_cancel_rungs_fresh(") == 4 and "_pair_cancel(client, cur[" not in _src_rr)

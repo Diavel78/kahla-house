@@ -23072,7 +23072,18 @@ def _pair_tick(sb, now=None) -> dict:
             continue                            # next lap starts here (rotation)
         _ts = _time.monotonic()
         try:
-            _pair_step(sb, client, row, positions, now, res, lane_orders)
+            # EACH ROW DECIDES OFF THE MIRROR AS IT IS NOW (Sep 27 2026), never
+            # off the copy this lap took at its start: the 11:20:17 re-pick
+            # read a 3-second-old copy and orphaned two fresh seats. The
+            # mirror is the private socket's state; a read failure falls back
+            # to the lap's copy so a row is never skipped blind.
+            _o_now = _pmm_open_orders_raw(client, fresh=False)
+            _p_now = _pmm_positions_raw(client, fresh=False)
+            _row_orders = ([dict(n) for n in _o_now
+                            if n.get("slug") in _want and n.get("state") in _OPEN_ORDER_STATES
+                            and n.get("auto")] if _o_now is not None else lane_orders)
+            _pair_step(sb, client, row, _p_now if _p_now is not None else positions,
+                       now, res, _row_orders)
             res["pairs"] += 1
         except Exception as e:
             res["errors"] += 1
