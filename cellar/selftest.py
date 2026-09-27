@@ -1139,6 +1139,15 @@ def test_pair_plan() -> None:
     check("rent unreadable + nothing held → keep both bids",
           p["a"]["bid"] == "keep" and p["b"]["bid"] == "keep"
           and "rent_unreadable" in p["a"]["why"])
+    # THE FERRARI IS PARKED (Sep 27 2026): the top-up must skip single-leg
+    # football/prop/UFC seats while the flag holds; MLB seats are untouched
+    check("ferrari pick: gridiron / fbprop / ghost-adopt seats are Ferrari, MLB autobet is not",
+          _app._is_ferrari_pick({"gridiron_autobet": True}) and _app._is_ferrari_pick({"fbprop_autobet": True})
+          and _app._is_ferrari_pick({"ghost_adopt": True}) and not _app._is_ferrari_pick({"autobet": True, "source": "autobet"}))
+    import inspect as _insp
+    _src = _insp.getsource(_app._seat_topup_tick)
+    check("seat top-up honours the parked flag before planning a bid",
+          "_ferrari_parked() and _is_ferrari_pick(b)" in _src)
     # DUST IS NOT A SEAT (Sep 27 2026): a pick-owned rung holding <5 with no
     # resting bid does not fence the pair off; ≥5, or a resting bid, does
     ff = _app._pair_foreign_filter_dust(

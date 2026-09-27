@@ -28028,6 +28028,23 @@ _SEAT_TOPUP_SOURCES = {"gridiron_autobet", "autobet", "ou_trader",
                        "pmm_autolog", "fbprop_autobet"}
 
 
+def _ferrari_parked() -> bool:
+    """THE FERRARI IS PARKED (Rob, Sep 27 2026: "The Ferrari needs to be
+    parked"). The single-leg football/prop/UFC seat machine places nothing:
+    `fbprop_config.enabled=false`, `oms_enabled=false`, `seed_quotes=false`
+    stop the SEEDS; this flag stops the TOP-UP from putting new money on a
+    partially held single-leg seat (the only other path that creates a
+    Ferrari BUY). Held positions ride and the scalp arm exits them at cost.
+    Un-park = flip the switches; nothing else."""
+    return bool(_machine_flag("ferrari_parked", True))
+
+
+def _is_ferrari_pick(blob: dict) -> bool:
+    b = blob or {}
+    return bool(b.get("gridiron_autobet") or b.get("fbprop_autobet")
+                or b.get("ghost_adopt"))
+
+
 def _seat_topup_plan(stake, held, our_bid_c, our_ask_c, tick, football,
                      cap_c, master_usd):
     """(need, peg_c) or (None, reason). Pure — selftested."""
@@ -28142,6 +28159,9 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
         if (not slug or not b.get("order_id") or b.get("source") not in _SEAT_TOPUP_SOURCES
                 or (p.get("market_type") or "") == "nrfi" or slug in buy_slugs):
             continue
+        if _ferrari_parked() and _is_ferrari_pick(b):
+            st["ferrari_parked"] = st.get("ferrari_parked", 0) + 1
+            continue                     # parked: no new money on a single-leg seat
         synth = bool(b.get("pmm_synthetic"))
         net = float((positions.get(slug) or {}).get("net") or 0.0)
         held = (-net) if synth else net
