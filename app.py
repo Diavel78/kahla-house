@@ -20710,10 +20710,50 @@ def _pair_foreign_slugs(sb, max_age_s: float = 120.0) -> set:
             b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
             if (b or {}).get("pmm_slug"):
                 out.add(b["pmm_slug"])
+        # DUST IS NOT A SEAT (Sep 27 2026). A pick holding <5 contracts with
+        # no resting bid — a Ferrari/prop leftover — fenced the rung off from
+        # the pair: ARI@SF total, the rule's 103 pair (over 47.5 / under 48.5)
+        # was refused because a 2.4-lot sat on under 48.5, and nothing else
+        # fit under 105 — five of Sunday's pairs parked on this. The seeder's
+        # `held_seat` and `_pair_side_held` already say a seat is ≥5; the
+        # foreign set says so too now. Mirror unreadable → everything stays
+        # foreign (fail closed).
+        out = _pair_foreign_filter_dust(out)
         _PAIR_FOREIGN_CACHE.update(at=_time.time(), slugs=out)
     except Exception:
         pass                                   # keep the last good set
     return _PAIR_FOREIGN_CACHE["slugs"]
+_PAIR_SEAT_MIN_Q = 5.0          # below this a held lot is dust, not a seat (seeder + side guard agree)
+
+
+_LIVE_MIRROR = object()
+
+
+def _pair_foreign_filter_dust(slugs: set, positions=_LIVE_MIRROR, orders=_LIVE_MIRROR) -> set:
+    """Drop pick-owned slugs that hold only dust (<_PAIR_SEAT_MIN_Q) and carry
+    no resting BUY. `positions`/`orders` injectable for the selftest (None =
+    unreadable); live they come off the venue mirror. Unreadable → nothing is
+    dropped."""
+    try:
+        if positions is _LIVE_MIRROR or orders is _LIVE_MIRROR:
+            client = get_client()
+            if positions is _LIVE_MIRROR:
+                positions = _pmm_positions_raw(client, fresh=False)
+            if orders is _LIVE_MIRROR:
+                orders = _pmm_open_orders_raw(client, fresh=False)
+    except Exception:
+        return set(slugs)
+    if positions is None or orders is None:
+        return set(slugs)
+    bids = {o.get("slug") for o in orders if "_BUY_" in (o.get("intent") or "")}
+    keep = set()
+    for sl in slugs:
+        held = abs(float(((positions.get(sl) or {}).get("net")) or 0.0))
+        if held >= _PAIR_SEAT_MIN_Q or sl in bids:
+            keep.add(sl)
+    return keep
+
+
 # T-10, not T-30 (Rob, Sep 26 2026: "it's really that last 30 seconds when
 # anything actually moves") — the partner bid gets the whole pre-kick window;
 # the name stays because every verdict string (`t30_*`) is grep'd and stamped.

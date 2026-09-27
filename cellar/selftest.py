@@ -1139,6 +1139,17 @@ def test_pair_plan() -> None:
     check("rent unreadable + nothing held → keep both bids",
           p["a"]["bid"] == "keep" and p["b"]["bid"] == "keep"
           and "rent_unreadable" in p["a"]["why"])
+    # DUST IS NOT A SEAT (Sep 27 2026): a pick-owned rung holding <5 with no
+    # resting bid does not fence the pair off; ≥5, or a resting bid, does
+    ff = _app._pair_foreign_filter_dust(
+        {"s-dust", "s-seat", "s-bid", "s-none"},
+        positions={"s-dust": {"net": -2.4}, "s-seat": {"net": 15.0}, "s-bid": {"net": 0.3}},
+        orders=[{"slug": "s-bid", "intent": "ORDER_INTENT_BUY_LONG"},
+                {"slug": "s-dust", "intent": "ORDER_INTENT_SELL_SHORT"}])
+    check("foreign filter: dust lot with only a sell resting is released; a seat and a bid stay",
+          ff == {"s-seat", "s-bid"})
+    check("foreign filter: unreadable mirror keeps everything foreign",
+          _app._pair_foreign_filter_dust({"x", "y"}, positions=None, orders=[]) == {"x", "y"})
     # NO NAKED PAIRS (Sep 26 2026): one held, partner empty, inside T-10 →
     # the held leg asks one tick above the BID whatever its cost, and the
     # partner's completion bid comes off with it
