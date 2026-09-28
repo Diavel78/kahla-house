@@ -493,12 +493,31 @@ class WsFeed:
             full = set(slugs)
         else:
             full |= set(slugs)
+        # THE PAIR LEGS SURVIVE EVERY REPLACE (Sep 27 2026, Rob: "pulling
+        # shit via REST instead of from the WebSocket"). The repeg lap's
+        # push is replace=True and carries OPEN ORDERS only, so a held pair
+        # leg (no resting order) was evicted from the depth connection every
+        # two minutes, the table forgot its rows, and the pair lane read
+        # 53 books over REST per lap against 0-15 from the socket — the
+        # depth set flapped 18 ↔ 48 all afternoon. The pair set is a
+        # standing member of the watch list, whoever pushes.
+        full |= set(self._pair_slugs())
         self._watch_full = full
         if getattr(self, "mkts", None) is not None:
             self.mkts.set_slugs(set(full), replace=True)
         d = getattr(self, "depth_feed", None)
         if d is not None:
             d.set_slugs(set(full), replace=True)
+
+    @staticmethod
+    def _pair_slugs() -> set:
+        """app.PAIR_LIVE_SLUGS (the legs the pair lane quotes), empty when
+        app is not importable — fail-open to today's behaviour."""
+        try:
+            import app as _app
+            return set(getattr(_app, "PAIR_LIVE_SLUGS", None) or ())
+        except Exception:
+            return set()
 
     def add_dirty(self, slugs: set) -> None:
         with self._dirty_lock:

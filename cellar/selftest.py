@@ -1266,6 +1266,27 @@ def test_pair_plan() -> None:
           ff == {"s-seat", "s-bid"})
     check("foreign filter: unreadable mirror keeps everything foreign",
           _app._pair_foreign_filter_dust({"x", "y"}, positions=None, orders=[]) == {"x", "y"})
+    # PAIR LEGS SURVIVE A REPLACE PUSH (Sep 27 2026): the repeg lap's open-orders push
+    # must not evict held pair legs from the depth/core watch list
+    try:
+        from cellar import wsfeed as _wsf
+        _old_pls = getattr(_app, "PAIR_LIVE_SLUGS", set())
+        _app.PAIR_LIVE_SLUGS = {"astatc-nfl-x-y-2026-09-28-ryd-abc-gte20", "astatc-nfl-x-y-2026-09-28-ryd-abc-gte30"}
+        class _FakeMk:
+            def __init__(self): self.got = None
+            def set_slugs(self, s, replace=True): self.got = set(s)
+        _wf = _wsf.WsFeed.__new__(_wsf.WsFeed)
+        _wf._watch_full = set(); _wf.mkts = _FakeMk(); _wf.depth_feed = _FakeMk()
+        _wf.push_watch({"asc-nfl-order-1"}, replace=True)
+        check("a replace push keeps every pair leg on the watch list (depth + core)",
+              _wf.mkts.got == {"asc-nfl-order-1"} | _app.PAIR_LIVE_SLUGS
+              and _wf.depth_feed.got == _wf.mkts.got)
+        _wf.push_watch({"asc-nfl-order-2"}, replace=False)
+        check("a merge push adds without dropping the pair legs or the prior list",
+              _wf.mkts.got == {"asc-nfl-order-1", "asc-nfl-order-2"} | _app.PAIR_LIVE_SLUGS)
+        _app.PAIR_LIVE_SLUGS = _old_pls
+    except Exception as _e:
+        check(f"push_watch pair-survival test ran ({_e})", False)
     # SETTLING (Sep 27 2026, Nix): a leg the venue resolved means the pair places NOTHING
     p = _app._pair_plan({"a": leg(h=15, cost=53.0, bid=98.0, ask=99.0),
                          "b": {**leg(bid=1.0, ask=2.0), "resolved": True}}, 15, 110, -190)
