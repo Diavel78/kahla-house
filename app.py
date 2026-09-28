@@ -20990,6 +20990,9 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float, t30_exit: bool =
     ask: (px, n)|None, why: [...]}. Every price is on the market's grid, a
     bid never crosses the competitor ask and an ask never crosses the bid."""
     ka, kb = list(legs)
+    if any((legs[k] or {}).get("resolved") for k in (ka, kb)):
+        # the venue is settling this ladder: nothing rests, nothing is listed
+        return {k: {"bid": None, "ask": None, "why": ["settling"]} for k in (ka, kb)}
     held = {k: float(legs[k].get("h") or 0) >= 1.0 for k in (ka, kb)}
     both = held[ka] and held[kb]
     any_held = held[ka] or held[kb]
@@ -23270,14 +23273,31 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
             _send_fill_telegram(f"🔗 PAIR {ev}: {cur[k]['label']} bought "
                                 f"{h - last_h:g} @ {px}¢ (now {h:g}/{qty})")
         elif h < last_h - 0.01:
-            s["sold"] = s.get("ask_c")
-            if s.get("cost") is not None:
-                s["sold_cost"] = s.get("cost")   # the flat floor needs what we paid
-            res["sells"] += 1
-            _send_fill_telegram(f"🔗 PAIR {ev}: {cur[k]['label']} sold "
-                                f"{last_h - h:g} @ {s.get('ask_c')}¢ (left {h:g})")
-            if h < 0.01:
+            _ok_ = "b" if k == "a" else "a"
+            _partner_held = float((st.get(_ok_) or {}).get("h") or 0.0) >= 1.0
+            if (mins <= 0 and cur[k]["ask"] is None and h < 0.01
+                    and (_partner_held or (st.get(_ok_) or {}).get("resolved"))):
+                # SETTLED BY THE VENUE, NOT SOLD (Sep 27 2026, Nix 15/20): a
+                # both-held pair carries no asks in-play, so a leg going to
+                # zero with nothing resting is the venue resolving the ladder
+                # one market at a time. Stamping it "sold" made the partner
+                # look stranded and the plan listed it at the touch in the
+                # 30s before ITS resolution — on a hit middle that is a
+                # winning leg offered at 99 seconds before it pays 100.
+                s["resolved"] = now.isoformat()
                 s["cost"] = None
+                res["settled_legs"] = res.get("settled_legs", 0) + 1
+                app.logger.info("PAIR %s: %s settled by the venue (%g → 0, in-play, no ask) — pair is settling, no orders",
+                                row.get("id"), cur[k]["label"], last_h)
+            else:
+                s["sold"] = s.get("ask_c")
+                if s.get("cost") is not None:
+                    s["sold_cost"] = s.get("cost")   # the flat floor needs what we paid
+                res["sells"] += 1
+                _send_fill_telegram(f"🔗 PAIR {ev}: {cur[k]['label']} sold "
+                                    f"{last_h - h:g} @ {s.get('ask_c')}¢ (left {h:g})")
+                if h < 0.01:
+                    s["cost"] = None
         # A HELD LEG WITH NO COST IS DEAD IN BOTH DIRECTIONS (Rob, Sep 22 2026:
         # "2, um… WHY…"). Four pairs were holding a position and quoting
         # nothing — no ask, because the sell floor is the cost; and no partner
@@ -23312,7 +23332,7 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
         own_b = s.get("bid_c") if cur[k]["bid"] else None
         own_a = s.get("ask_c") if cur[k]["ask"] else None
         lg_in[k] = {"h": h, "cost": s.get("cost"), "sold": None, "book_ok": book_ok,
-                    "sold_cost": s.get("sold_cost"),
+                    "sold_cost": s.get("sold_cost"), "resolved": bool(s.get("resolved")),
                     "line": _pair_leg_line(lg, mt),
                     "bid": _pair_touch_ex_self(bk, "bid", own_b,
                                                (cur[k]["bid"] or {}).get("leaves")),

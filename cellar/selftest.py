@@ -1266,6 +1266,13 @@ def test_pair_plan() -> None:
           ff == {"s-seat", "s-bid"})
     check("foreign filter: unreadable mirror keeps everything foreign",
           _app._pair_foreign_filter_dust({"x", "y"}, positions=None, orders=[]) == {"x", "y"})
+    # SETTLING (Sep 27 2026, Nix): a leg the venue resolved means the pair places NOTHING
+    p = _app._pair_plan({"a": leg(h=15, cost=53.0, bid=98.0, ask=99.0),
+                         "b": {**leg(bid=1.0, ask=2.0), "resolved": True}}, 15, 110, -190)
+    check("partner resolved → the held leg gets no ask (not even at 99) and no bid",
+          p["a"]["ask"] is None and p["a"]["bid"] is None and "settling" in p["a"]["why"] and p["b"]["bid"] is None)
+    check("the step stamps a venue settlement, not a sale, when a both-held leg goes to zero in-play with no ask",
+          's["resolved"] = now.isoformat()' in _insp0.getsource(_app._pair_step))
     # NO NAKED PAIRS (Sep 26 2026): one held, partner empty, inside T-10 →
     # the held leg asks one tick above the BID whatever its cost, and the
     # partner's completion bid comes off with it
