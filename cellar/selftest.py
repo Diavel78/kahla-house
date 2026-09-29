@@ -1583,9 +1583,14 @@ def test_pair_leg_cap_in_the_engine() -> None:
     check("an 81.5c touch is REFUSED while nothing is held — at the touch or "
           "not there at all",
           plan["away"]["bid"] is None and "leg_cap" in plan["away"]["why"])
-    check("the cheap partner still joins its own touch",
-          isinstance(plan["home"]["bid"], tuple)
-          and plan["home"]["bid"][0] == 31.0)
+    # …and the cheap partner comes DOWN with it (Sep 29 2026, MTL@TOR over
+    # 7.5 resting alone): half a pair with nothing held is a naked bet.
+    check("the cheap partner does NOT rest alone — pair or nothing",
+          plan["home"]["bid"] is None
+          and "partner_refused" in plan["home"]["why"])
+    check("hockey rows re-rung as hockey, never as NFL",
+          _app._pair_sport_of("tsc-nhl-mon-tor-2026-09-29") == "NHL"
+          and _app._pair_sport_of("asc-cfb-x-y-2026-10-03") == "NCAAF")
     # partner HELD at 40: the hedge may chase to cap - cost = 80
     legs2 = {"away": dict(base, h=0.0, bid=81.5),
              "home": dict(base, h=15.0, bid=None, cost=40.0)}

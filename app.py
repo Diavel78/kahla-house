@@ -2743,7 +2743,7 @@ def api_pair_status():
             if len(rungs) < 2:
                 dry["exit"] = "ladder not priced on the tape"
                 continue
-            sport = "NCAAF" if "-cfb-" in legs[ek]["slug"] else "NFL"
+            sport = _pair_sport_of(legs[ek]["slug"])
             held_side = _pair_leg_side(legs[hk], mt)
             held_line = _pair_leg_line(legs[hk], mt)
             dry["held_side"], dry["held_line"] = held_side, held_line
@@ -21189,6 +21189,20 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float, t30_exit: bool =
                 if tgt < 100.0:
                     ask = (round(tgt, 3), n)
         out[k] = {"bid": bid, "ask": ask, "why": why}
+    # HALF A PAIR IS A NAKED BET (Rob, Sep 29 2026, MTL@TOR: "Half the
+    # sisters…" — over 7.5 resting 26¢ alone, the under 8.5 partner refused
+    # at the 65¢ leg fence). With NOTHING held, a leg we refuse to bid on
+    # PRICE takes its partner's bid down with it: the lone leg is exactly the
+    # single-seat Ferrari bet we parked, and if it fills there is no hedge we
+    # were willing to buy a minute ago. The refused leg still flags the
+    # re-rung (`leg_cap` stays in its why), which re-picks BOTH rungs.
+    if not any_held:
+        _refused = {"leg_cap", "cap_below_1"}
+        for k, o in ((ka, kb), (kb, ka)):
+            if (out[o]["bid"] is None and _refused & set(out[o]["why"])
+                    and isinstance(out[k]["bid"], tuple)):
+                out[k]["bid"] = None
+                out[k]["why"].append("partner_refused")
     return out
 
 
@@ -22693,7 +22707,7 @@ def _pair_rerung(sb, client, row, hk, ek, lg_in, st, cur, now, res) -> bool:
     if len(rungs) < 2:
         _pair_rr_why(row, "ladder not priced on the tape")
         return False
-    sport = "NCAAF" if "-cfb-" in slug_e else "NFL"
+    sport = _pair_sport_of(slug_e)
     held_side = _pair_leg_side(legs[hk], mt)
     want_side = _pair_leg_side(legs[ek], mt)
     if want_side == held_side:              # a hand-written row: both legs one side
@@ -22818,6 +22832,18 @@ def _pair_market_row(sb, game_prefix: str, mt: str):
         return None
 
 
+def _pair_sport_of(s) -> str:
+    """The pair row's sport from any of its slugs / its game_prefix. Hockey
+    used to fall through to 'NFL' (Sep 29 2026) and walked the football
+    re-rung, which has no hockey market row — so a hockey pair never re-rung."""
+    s = str(s or "")
+    for tag, sp in (("-cfb-", "NCAAF"), ("-nhl-", "NHL"), ("-mlb-", "MLB"),
+                    ("-nba-", "NBA"), ("-nfl-", "NFL")):
+        if tag in s:
+            return sp
+    return "NFL"
+
+
 def _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res) -> bool:
     """BOTH legs empty and the window has run away: re-pick the rungs.
 
@@ -22827,8 +22853,7 @@ def _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res) -> bool:
     other rungs." Both old bids are cancelled before the swap; a pair that
     cannot be reseated anywhere keeps its old legs and the caller cancels."""
     mt = row["market_type"]
-    sport = ("NCAAF" if "-cfb-" in (row.get("game_prefix") or "") else
-             "MLB" if "-mlb-" in (row.get("game_prefix") or "") else "NFL")
+    sport = _pair_sport_of(row.get("game_prefix"))
     legs = {lg["key"]: lg for lg in (row.get("legs") or [])}
     if sport in ("NFL", "NCAAF"):
         # FERRARI RULES, WITH A PAIR — the same brain that seats a football
