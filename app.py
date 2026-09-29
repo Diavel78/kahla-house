@@ -22377,6 +22377,20 @@ def _pair_from_gridiron_rule(sb, g, mt, now, taken_slugs=None):
     return a, b, info
 
 
+def _seed_why(res: dict, g: dict, mt: str, reason: str) -> None:
+    """EVERY SEEDER EXIT IS COUNTED, PER SPORT (Sep 29 2026): `looked 206,
+    found 0` with 67 uncounted exits took eight queries to read as "the
+    105 cap prices out every hockey pair" — the declines went to
+    `pair_declined` and never to the stamp. `why` = {sport: {reason: n}}."""
+    try:
+        w = res.setdefault("why", {})
+        sp = w.setdefault(str((g or {}).get("sport") or "?"), {})
+        k = f"{mt}:{reason}"
+        sp[k] = sp.get(k, 0) + 1
+    except Exception:
+        pass
+
+
 def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 0) -> dict:
     """Find pairs worth seating and (when armed) write them to pair_hedges.
 
@@ -22502,6 +22516,7 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 0) -> dict:
             if _held_here:
                 res["skip_held_seat"] = res.get("skip_held_seat", 0) + 1
                 _pair_decline(sb, g["id"], mt, "held_seat")
+                _seed_why(res, g, mt, "held_seat")
                 continue
             # FOOTBALL RUNS THE EXECUTOR'S RULE (Rob, Sep 21 2026: "Ferrari
             # rules… with a pair… is the ENTIRE GOAL", and "bad rungs is the
@@ -22518,6 +22533,7 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 0) -> dict:
                     pr = None
                 if not pr:
                     _pair_decline(sb, g["id"], mt, "no_middle")
+                    _seed_why(res, g, mt, "no_middle")
                     continue
                 _a, _b, _info = pr
                 a_slug, a_int, b_slug, b_int = _a["slug"], _a["intent"], _b["slug"], _b["intent"]
@@ -22532,16 +22548,19 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 0) -> dict:
                 rungs, legmap = _pair_rungs_from_quotes(slugs, mt, tape, g["id"])
                 if len(rungs) < 4:
                     res["skip_unpriced"] = res.get("skip_unpriced", 0) + 1
+                    _seed_why(res, g, mt, "unpriced")
                     continue                   # not priced yet — no verdict
                 cands = _pair_candidates(rungs, mt, g.get("sport") or "MLB",
                                          _PAIR_DEFAULT_QTY)
                 if not cands:
                     _pair_decline(sb, g["id"], mt, "no_middle")
+                    _seed_why(res, g, mt, "no_middle")
                     continue
                 best = cands[0]
                 a_key = (("away" if mt == "spread" else "over"), best["a_line"])
                 b_key = (("home" if mt == "spread" else "under"), best["b_line"])
                 if a_key not in legmap or b_key not in legmap:
+                    _seed_why(res, g, mt, "no_leg_slug")
                     continue
                 a_slug, a_int = legmap[a_key]
                 b_slug, b_int = legmap[b_key]
@@ -22550,10 +22569,12 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 0) -> dict:
             if a_slug in taken_slugs or b_slug in taken_slugs:
                 res["skip_taken"] = res.get("skip_taken", 0) + 1
                 _pair_decline(sb, g["id"], mt, "leg_taken")
+                _seed_why(res, g, mt, "leg_taken")
                 continue
             es = _parse_iso(g["event_start"])
             if not (_rent_ok(a_slug, es, now, sb)[0] and _rent_ok(b_slug, es, now, sb)[0]):
                 _pair_decline(sb, g["id"], mt, "rent")
+                _seed_why(res, g, mt, "rent")
                 continue                       # RULE #1: both legs or nothing
             row = {"game_prefix": prefix, "market_type": mt,
                    "event_name": g.get("event_name"), "kickoff": g["event_start"],
