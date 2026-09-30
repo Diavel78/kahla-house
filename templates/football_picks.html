@@ -212,6 +212,29 @@
         x = Math.round(Number(x));
         return x > 0 ? '+' + x : String(x);
     }
+    // Implied probability of an American price (with the vig still in).
+    function impl(x) {
+        if (x === null || x === undefined || x === '') return null;
+        x = Number(x);
+        if (!isFinite(x) || x === 0) return null;
+        return x > 0 ? 100 / (x + 100) : -x / (-x + 100);
+    }
+    function pct(p) { return (p === null || p === undefined) ? '' : Math.round(p * 1000) / 10 + '%'; }
+    // "+130 (43.5%)" — every price on the sheet in both languages.
+    function amp(x) {
+        const a = am(x);
+        if (!a) return '';
+        const p = impl(x);
+        return a + (p === null ? '' : ' <span class="dim">(' + pct(p) + ')</span>');
+    }
+    // A probability printed as its fair American price: "52.0% (-108)".
+    function pam(p) {
+        if (p === null || p === undefined) return '';
+        p = Number(p);
+        if (!(p > 0 && p < 1)) return pct(p);
+        const a = p >= 0.5 ? -100 * p / (1 - p) : 100 * (1 - p) / p;
+        return pct(p) + ' <span class="dim">(' + am(a) + ')</span>';
+    }
     function nameOf(g, side) {
         if (_sport === 'NHL') return g[side + '_short'] || shortTeam(g[side]);
         return g[side + '_short'] || shortTeam(g[side]);
@@ -238,10 +261,10 @@
         const pk = [];
         const bs = g.spread, bt = g.total;
         if (bs) pk.push('<div>' + verdictBadge(bs.verdict) + ' ' + (bs.verdict !== 'pass'
-            ? shortTeam(bs.team) + ' ' + sgn(bs.line) + ' <span class="dim">(' + sgn(bs.edge_pts) + ' pts' + (bs.fair ? ', to ' + am(bs.fair) : '') + ')</span>'
+            ? shortTeam(bs.team) + ' ' + sgn(bs.line) + ' <span class="dim">(' + sgn(bs.edge_pts) + ' pts' + (bs.fair ? ', to ' + am(bs.fair) + ' / ' + pct(impl(bs.fair)) : '') + ')</span>'
             : '<span class="dim">spread</span>') + '</div>');
         if (bt) pk.push('<div>' + verdictBadge(bt.verdict) + ' ' + (bt.verdict !== 'pass'
-            ? (bt.side === 'over' ? 'Over ' : 'Under ') + bt.line + ' <span class="dim">(' + sgn(bt.edge_pts) + ' pts' + (bt.fair ? ', to ' + am(bt.fair) : '') + ')</span>'
+            ? (bt.side === 'over' ? 'Over ' : 'Under ') + bt.line + ' <span class="dim">(' + sgn(bt.edge_pts) + ' pts' + (bt.fair ? ', to ' + am(bt.fair) + ' / ' + pct(impl(bt.fair)) : '') + ')</span>'
             : '<span class="dim">total</span>') + '</div>');
         return [line, model, pk.join('') || '<span class="unrated">no market line</span>'];
     }
@@ -250,24 +273,36 @@
     function hockeyCols(g) {
         const L = g.line || {}, M = g.model;
         const ml = (L.ml_away !== undefined && L.ml_home !== undefined)
-            ? nameOf(g, 'away') + ' ' + am(L.ml_away) + ' / ' + nameOf(g, 'home') + ' ' + am(L.ml_home) : 'ML —';
-        const line = '<div class="num">' + ml + '</div>'
-                   + '<div class="num">O/U ' + (L.total ?? '—')
-                   + (L.puck_home !== undefined ? ' · puck ' + favLine(g, L.puck_home, 1) : '') + '</div>';
+            ? nameOf(g, 'away') + ' ' + amp(L.ml_away) + '<br>' + nameOf(g, 'home') + ' ' + amp(L.ml_home) : 'ML —';
+        let tot = 'O/U ' + (L.total ?? '—');
+        if (L.over_odds !== undefined || L.under_odds !== undefined)
+            tot += '<br><span class="dim">o</span> ' + (amp(L.over_odds) || '—')
+                 + ' <span class="dim">u</span> ' + (amp(L.under_odds) || '—');
+        let puck = '';
+        if (L.puck_home !== undefined) {
+            const favHome = Number(L.puck_home) < 0;
+            const po = favHome ? L.puck_home_odds : L.puck_away_odds;
+            puck = '<div class="num">puck ' + favLine(g, L.puck_home, 1) + (po !== undefined ? ' ' + amp(po) : '') + '</div>';
+        }
+        const line = '<div class="num">' + ml + '</div><div class="num">' + tot + '</div>' + puck;
         let model = '<span class="unrated">unrated</span>';
         if (M) {
-            const fav = M.win_home >= 0.5 ? 'home' : 'away';
-            const pw = fav === 'home' ? M.win_home : 1 - M.win_home;
-            model = '<div class="num">' + favLine(g, M.spread_home, 2)
-                  + ' <span class="dim">' + nameOf(g, fav) + ' ' + Math.round(pw * 100) + '%</span></div>'
+            const wh = Number(M.win_home);
+            model = '<div class="num">' + favLine(g, M.spread_home, 2) + '</div>'
+                  + '<div class="num">' + nameOf(g, 'away') + ' ' + pam(1 - wh) + '<br>'
+                  + nameOf(g, 'home') + ' ' + pam(wh) + '</div>'
                   + '<div class="num">Total ' + (M.total !== undefined && M.total !== null ? Number(M.total).toFixed(1) : '—') + '</div>';
         }
         const pk = [];
         if (g.ml) pk.push('<div>' + verdictBadge(g.ml.verdict) + ' ' + (g.ml.verdict !== 'pass'
-            ? (g.ml.abbr || shortTeam(g.ml.team)) + ' ML ' + am(g.ml.price) + ' <span class="dim">(' + sgn(g.ml.edge_pp) + '%, to ' + am(g.ml.fair) + ')</span>'
+            ? (g.ml.abbr || shortTeam(g.ml.team)) + ' ML ' + amp(g.ml.price)
+              + ' <span class="dim">· model ' + (g.ml.model_p !== undefined && g.ml.model_p !== null ? pct(g.ml.model_p) : '—')
+              + ' (' + sgn(g.ml.edge_pp) + '%), fair ' + am(g.ml.fair) + '</span>'
             : '<span class="dim">ML</span>') + '</div>');
         if (g.total) pk.push('<div>' + verdictBadge(g.total.verdict) + ' ' + (g.total.verdict !== 'pass'
-            ? (g.total.side === 'over' ? 'Over ' : 'Under ') + g.total.line + ' <span class="dim">(' + sgn(g.total.edge_pp) + '%)</span>'
+            ? (g.total.side === 'over' ? 'Over ' : 'Under ') + g.total.line + (g.total.price !== undefined && g.total.price !== null ? ' ' + amp(g.total.price) : '')
+              + ' <span class="dim">· model ' + (g.total.model_p !== undefined && g.total.model_p !== null ? pct(g.total.model_p) : '—')
+              + ' (' + sgn(g.total.edge_pp) + '%)' + (g.total.fair ? ', fair ' + am(g.total.fair) : '') + '</span>'
             : '<span class="dim">total</span>') + '</div>');
         return [line, model, pk.join('') || '<span class="unrated">no market line yet</span>'];
     }
