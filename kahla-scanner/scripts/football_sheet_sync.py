@@ -84,7 +84,7 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sport", action="append", choices=["NFL", "NCAAF"],
+    ap.add_argument("--sport", action="append", choices=["NFL", "NCAAF", "NHL"],
                     required=True)
     ap.add_argument("--week-key", default=None,
                     help="omit (or pass --latest) to sync whatever "

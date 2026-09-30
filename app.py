@@ -1025,22 +1025,106 @@ def dashboard_full():
     return render_template("dashboard_full.html")
 
 
+@app.route("/pick-sheets")
 @app.route("/football-picks")
 def football_picks_page():
-    """Football sheets, on the website (Sep 19 2026 — Rob: "I don't care
-    about telegram... just put them on my fucking website... next to
-    dashboard"). Reads straight off the football_sheets/football_sheet_weeks
-    tables the weekly Routine writes — no Telegram, no chat attachment, no
-    stale link pasted somewhere. Admin only, same gate as Dashboard."""
+    """PICK SHEETS, every sport (Sep 19 2026 football; Sep 30 2026 hockey
+    — Rob: "Pick bot can be retired, I want pick sheets ... on ALL sheets
+    show the line, the model's spread and total, and the picks"). Reads
+    the football_sheets / football_sheet_weeks tables (the generic sheet
+    store — sport NFL/NCAAF/NHL/...). Admin + bot_access (the old Pick Bot
+    pill carries over)."""
     return render_template("football_picks.html")
 
 
+_SHEET_SPORTS = ("NHL", "NCAAF", "NFL")
+
+
+def _sheet_game_football(r: dict) -> dict:
+    """Football row → Line / Model / Picks. Line and model are both home-
+    oriented (negative = home favored); the model spread is the CALIBRATED
+    margin the verdicts price off, never the raw projection."""
+    blob = r.get("data_blob") or {}
+    fr = blob.get("friday") or {}
+    model = fr.get("model") or blob.get("model")
+    g = blob.get("game") or {}
+    bs = (model or {}).get("bet_spread")
+    bt = (model or {}).get("bet_total")
+    line = {}
+    if bs and bs.get("market_home_line") is not None:
+        line["spread_home"] = bs["market_home_line"]
+    if bt and bt.get("line") is not None:
+        line["total"] = bt["line"]
+    if not line:
+        bo = fr.get("book_odds") or blob.get("book_odds") or {}
+        if bo.get("spread_home") is not None:
+            line["spread_home"] = bo["spread_home"]
+        if bo.get("total") is not None:
+            line["total"] = bo["total"]
+    mdl = None
+    if model:
+        m = model.get("margin_cal", model.get("margin_raw"))
+        t = model.get("total_cal", model.get("total_raw"))
+        mdl = {"spread_home": round(-m, 1) if m is not None else None,
+               "total": round(t, 1) if t is not None else None,
+               "win_home": model.get("win_prob_home")}
+    return {"event_name": r.get("event_name"), "event_start": r.get("event_start"),
+            "tier": r.get("tier"), "away": g.get("away"), "home": g.get("home"),
+            "away_short": (g.get("locs") or {}).get("away"),
+            "home_short": (g.get("locs") or {}).get("home"),
+            "line": line, "model": mdl,
+            "spread": bs, "total": bt, "unrated": model is None,
+            "friday_note": r.get("friday_md")}
+
+
+def _sheet_game_nhl(r: dict) -> dict:
+    blob = r.get("data_blob") or {}
+    g = blob.get("game") or {}
+    ln = blob.get("lines") or {}
+    model = blob.get("model")
+    picks = blob.get("picks") or {}
+    line = {k: ln.get(k) for k in ("ml_home", "ml_away", "total", "puck_home",
+                                   "puck_home_odds", "puck_away_odds",
+                                   "over_odds", "under_odds", "provider")
+            if ln.get(k) is not None}
+    mdl = None
+    if model:
+        mdl = {"spread_home": round(-(model.get("exp_margin") or 0), 2),
+               "total": model.get("exp_total"),
+               "win_home": model.get("win_home"),
+               "p_ot": model.get("p_ot"),
+               "home_cover": model.get("home_cover"),
+               "away_cover": model.get("away_cover")}
+    gl = blob.get("goalies") or {}
+    return {"event_name": r.get("event_name"), "event_start": r.get("event_start"),
+            "away": g.get("away"), "home": g.get("home"),
+            "away_short": g.get("away_abbr"), "home_short": g.get("home_abbr"),
+            "line": line, "model": mdl, "ml": picks.get("ml"),
+            "total": picks.get("total"), "unrated": model is None,
+            "goalies": {k: {"name": (v or {}).get("name"), "source": (v or {}).get("source")}
+                        for k, v in gl.items()}}
+
+
+def _nhl_sheet_fallback(sb):
+    """Bridge until the box DB's sport CHECK is widened
+    (supabase/pick_sheets_sports.sql): the mirror endpoint parks a
+    rejected NHL push in exec_probe_runs; read the newest one."""
+    try:
+        r = (sb.table("exec_probe_runs").select("at,result")
+             .eq("params->>kind", "pick_sheet").eq("params->>sport", "NHL")
+             .order("at", desc=True).limit(1).execute().data or [])
+    except Exception:
+        return None
+    return r[0] if r else None
+
+
+@app.route("/api/pick-sheets")
 @app.route("/api/football-picks")
-@admin_required
+@bot_required
 def api_football_picks():
-    sport = (request.args.get("sport") or "NCAAF").upper()
-    if sport not in ("NFL", "NCAAF"):
-        return jsonify({"ok": False, "error": "sport must be NFL or NCAAF"}), 400
+    sport = (request.args.get("sport") or "NHL").upper()
+    if sport not in _SHEET_SPORTS:
+        return jsonify({"ok": False, "error": f"sport must be one of {_SHEET_SPORTS}"}), 400
     sb = get_supabase()
     if not sb:
         return jsonify({"ok": False, "error": "database unavailable"}), 503
@@ -1050,56 +1134,48 @@ def api_football_picks():
                    .limit(1).execute().data or [])
     except Exception as e:
         return jsonify({"ok": False, "error": f"week lookup failed: {e}"}), 500
-    if not wk_rows:
+    wk = wk_rows[0] if wk_rows else {}
+    rows = []
+    if wk:
+        try:
+            q = (sb.table("football_sheets")
+                 .select("event_name,event_start,tier,data_blob,friday_md,data_built_at")
+                 .eq("week_key", wk["week_key"]).eq("sport", sport))
+            if sport == "NHL":
+                # A daily slate: last night's games stay in the week's rows,
+                # the sheet shows what's still to play (3h grace for live).
+                q = q.gte("event_start", (datetime.now(timezone.utc)
+                                          - timedelta(hours=3)).isoformat())
+            rows = q.order("event_start").execute().data or []
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"games lookup failed: {e}"}), 500
+    if sport == "NHL" and not rows:
+        fb = _nhl_sheet_fallback(sb)
+        if fb:
+            res = fb.get("result") or {}
+            wk = res.get("week") or wk
+            cut = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+            rows = sorted([s for s in (res.get("sheets") or [])
+                           if (s.get("event_start") or "") >= cut],
+                          key=lambda s: s.get("event_start") or "")
+    if not rows and not wk:
         return jsonify({"ok": True, "sport": sport, "week_key": None,
                         "games": [], "note": "no sheets built yet this season"})
-    wk = wk_rows[0]
-    week_key = wk["week_key"]
     base = os.getenv("SUPABASE_URL", "").strip().strip("<>").rstrip("/")
 
     def _pub_url(path):
         return (f"{base}/storage/v1/object/public/football-sheets/{path}"
                 if path else None)
 
-    try:
-        rows = (sb.table("football_sheets")
-                .select("event_name,event_start,tier,data_blob,friday_md,data_built_at")
-                .eq("week_key", week_key).eq("sport", sport)
-                .order("event_start").execute().data or [])
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"games lookup failed: {e}"}), 500
-
-    games = []
-    lines_updated_at = None  # freshest of data_built_at / friday.built_at
-    # across every game — the actual "when did the numbers last move"
-    # clock, separate from published_at (the PDF render time). The data
-    # assembly workflow now re-prices lines/model ~every 6h (Thu-Mon)
-    # WITHOUT re-rendering a PDF, so published_at alone reads stale even
-    # right after a refresh (Sep 20 2026 — "the NFL lines are stagnant").
+    games, lines_updated_at = [], None
     for r in rows:
+        games.append(_sheet_game_nhl(r) if sport == "NHL" else _sheet_game_football(r))
         blob = r.get("data_blob") or {}
-        # Friday overlay: same numbers the picks PDF renders, so the
-        # website and the PDF can never disagree.
-        fr = blob.get("friday") or {}
-        model = fr.get("model") or blob.get("model")
-        g = blob.get("game") or {}
-        bs = (model or {}).get("bet_spread")
-        bt = (model or {}).get("bet_total")
-        games.append({
-            "event_name": r.get("event_name"),
-            "event_start": r.get("event_start"),
-            "tier": r.get("tier"),
-            "away": g.get("away"), "home": g.get("home"),
-            "spread": bs, "total": bt,
-            "unrated": model is None,
-            "friday_note": r.get("friday_md"),
-        })
-        stamp = fr.get("built_at") or r.get("data_built_at")
+        stamp = (blob.get("friday") or {}).get("built_at") or r.get("data_built_at")
         if stamp and (lines_updated_at is None or stamp > lines_updated_at):
             lines_updated_at = stamp
-
     return jsonify({
-        "ok": True, "sport": sport, "week_key": week_key,
+        "ok": True, "sport": sport, "week_key": wk.get("week_key"),
         "games": games,
         "pdf_url": _pub_url(wk.get("friday_pdf_path") or wk.get("pdf_path")),
         "picks_pdf_url": _pub_url(wk.get("picks_pdf_path")),
@@ -1187,8 +1263,27 @@ def api_football_sheets_mirror():
             out["sheets_upserted"] = len(sheets)
         out["dropped_columns"] = sorted(dropped)
     except Exception as e:
+        msg = str(e)
+        sport = (week or {}).get("sport") or (sheets[0].get("sport") if sheets else None)
+        if "sport_check" in msg or ("check constraint" in msg and "sport" in msg):
+            # This DB's sport CHECK predates the new sport (hockey, Sep 30
+            # 2026) and DDL can't ride PostgREST. Park the push where the
+            # pick-sheets API reads its fallback; the real fix is
+            # kahla-scanner/supabase/pick_sheets_sports.sql on this DB.
+            try:
+                sb.table("exec_probe_runs").insert({
+                    "params": {"kind": "pick_sheet", "sport": sport,
+                               "week_key": (week or {}).get("week_key")},
+                    "result": {"week": week, "sheets": sheets}}).execute()
+                out.update({"ok": True, "parked": "exec_probe_runs",
+                            "note": "sport CHECK rejected the rows — run "
+                                    "supabase/pick_sheets_sports.sql on this DB",
+                            "sheets_upserted": 0, "sheets_parked": len(sheets)})
+                return jsonify(out)
+            except Exception as e2:
+                msg += f" | park failed: {e2}"
         out["ok"] = False
-        out["error"] = str(e)[:500]
+        out["error"] = msg[:500]
         out["dropped_columns"] = sorted(dropped)
         return jsonify(out), 500
     return jsonify(out)
@@ -1245,7 +1340,13 @@ def api_football_picks_debug():
 
 @app.route("/handicapper")
 def handicapper_page():
-    """Handicapper Bot — admin + bot_access gated (client-side via /api/me)."""
+    """Pick Bot — RETIRED from the site Sep 30 2026 (Rob: "Pick bot can be
+    retired, I want pick sheets"). The page redirects to Pick Sheets; the
+    template and its APIs stay on disk (the paperlog/resolver lanes are
+    machine infrastructure, not the page). /handicapper?legacy=1 still
+    opens the old page."""
+    if request.args.get("legacy") != "1":
+        return redirect("/pick-sheets")
     return render_template("handicapper.html")
 
 

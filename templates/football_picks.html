@@ -92,6 +92,18 @@
         .v-lean { background: #4a3a10; color: var(--amber); }
         .v-pass { background: var(--surface); color: var(--muted); border: 1px solid var(--line); }
         .unrated { color: var(--muted); font-style: italic; font-size: 13px; }
+        .game { padding: 10px 0; border-bottom: 1px solid var(--line); }
+        .ghead { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; flex-wrap: wrap; }
+        .ghead .sub { color: var(--muted); font-size: 12px; }
+        .cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+        .col { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; min-width: 0; }
+        .col .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 3px; }
+        .col .val { font-size: 13px; font-variant-numeric: tabular-nums; line-height: 1.5; }
+        .col.picks .val div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .num { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; }
+        .dim { color: var(--muted); font-size: 11.5px; }
+        .gap-pos { color: var(--green); }
+        @media (max-width: 560px) { .cols { grid-template-columns: 1fr; } }
         .empty { color: var(--muted); padding: 40px 0; text-align: center; }
         .refresh-hint { color: var(--muted); font-size: 12px; margin-top: 24px; text-align: center; }
     </style>
@@ -103,22 +115,22 @@
             <div class="nav">
                 <a href="/">Home</a>
                 <a href="/dashboard">Dashboard</a>
-                <a href="/football-picks" class="on">Pick Sheets</a>
-                <a href="/handicapper">Pick Bot</a>
+                <a href="/pick-sheets" class="on">Pick Sheets</a>
             </div>
             <button class="logout" onclick="doLogout()">Log out</button>
         </div>
 
         <div class="wrap">
-            <h1>🏈 Pick Sheets</h1>
+            <h1>Pick Sheets</h1>
             <div class="tabs">
-                <button class="tab on" data-sport="NCAAF" onclick="switchSport('NCAAF')">College</button>
-                <button class="tab" data-sport="NFL" onclick="switchSport('NFL')">NFL</button>
+                <button class="tab on" data-sport="NHL" onclick="switchSport('NHL')">🏒 Hockey</button>
+                <button class="tab" data-sport="NCAAF" onclick="switchSport('NCAAF')">🏈 College</button>
+                <button class="tab" data-sport="NFL" onclick="switchSport('NFL')">🏈 NFL</button>
             </div>
             <div class="dl-row" id="dlRow"></div>
             <div class="meta" id="metaLine">loading…</div>
             <div id="games"><div class="empty">loading…</div></div>
-            <div class="refresh-hint">Straight off the weekly sheet pipeline — Monday full build, Friday morning refresh. No Telegram, no chat link, this page just reads the DB.</div>
+            <div class="refresh-hint" id="hint"></div>
         </div>
     </div>
 
@@ -154,7 +166,7 @@
         if (b) b.onclick = function () { location.reload(); };
     }
 
-    let _sport = 'NCAAF';
+    let _sport = 'NHL';
     function switchSport(s) {
         _sport = s;
         document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.sport === s));
@@ -190,17 +202,74 @@
         if (v === 'lean') return '<span class="v v-lean">LEAN</span>';
         return '<span class="v v-pass">PASS</span>';
     }
-    function spreadTxt(bs) {
-        if (!bs) return '<span class="unrated">no spread</span>';
-        const team = shortTeam(bs.team);
-        const txt = bs.verdict !== 'pass' ? (team + ' ' + (bs.line > 0 ? '+' : '') + bs.line) : 'pass';
-        return verdictBadge(bs.verdict) + ' ' + txt;
+    function sgn(x, d) {
+        if (x === null || x === undefined) return '—';
+        const v = Number(x).toFixed(d === undefined ? 1 : d);
+        return (Number(v) > 0 ? '+' : '') + v;
     }
-    function totalTxt(bt) {
-        if (!bt) return '<span class="unrated">no total</span>';
-        const side = bt.side === 'over' ? 'Over' : 'Under';
-        const txt = bt.verdict !== 'pass' ? (side + ' ' + bt.line) : 'pass';
-        return verdictBadge(bt.verdict) + ' ' + txt;
+    function am(x) {
+        if (x === null || x === undefined) return '';
+        x = Math.round(Number(x));
+        return x > 0 ? '+' + x : String(x);
+    }
+    function nameOf(g, side) {
+        if (_sport === 'NHL') return g[side + '_short'] || shortTeam(g[side]);
+        return g[side + '_short'] || shortTeam(g[side]);
+    }
+    // A home-oriented spread printed the way a book prints it: the favorite
+    // and its number ("NEB -14.5"); pick'em when it's zero.
+    function favLine(g, homeLine, d) {
+        if (homeLine === null || homeLine === undefined) return '—';
+        const x = Number(homeLine);
+        if (Math.abs(x) < 0.05) return "pick'em";
+        return x < 0 ? nameOf(g, 'home') + ' ' + sgn(x, d) : nameOf(g, 'away') + ' ' + sgn(-x, d);
+    }
+
+    // ---------- football
+    function footballCols(g) {
+        const L = g.line || {}, M = g.model;
+        const line = '<div class="num">' + favLine(g, L.spread_home, 1) + '</div>'
+                   + '<div class="num">O/U ' + (L.total ?? '—') + '</div>';
+        let model = '<span class="unrated">unrated — no number</span>';
+        if (M) {
+            model = '<div class="num">' + favLine(g, M.spread_home, 1) + '</div>'
+                  + '<div class="num">Total ' + (M.total ?? '—') + '</div>';
+        }
+        const pk = [];
+        const bs = g.spread, bt = g.total;
+        if (bs) pk.push('<div>' + verdictBadge(bs.verdict) + ' ' + (bs.verdict !== 'pass'
+            ? shortTeam(bs.team) + ' ' + sgn(bs.line) + ' <span class="dim">(' + sgn(bs.edge_pts) + ' pts' + (bs.fair ? ', to ' + am(bs.fair) : '') + ')</span>'
+            : '<span class="dim">spread</span>') + '</div>');
+        if (bt) pk.push('<div>' + verdictBadge(bt.verdict) + ' ' + (bt.verdict !== 'pass'
+            ? (bt.side === 'over' ? 'Over ' : 'Under ') + bt.line + ' <span class="dim">(' + sgn(bt.edge_pts) + ' pts' + (bt.fair ? ', to ' + am(bt.fair) : '') + ')</span>'
+            : '<span class="dim">total</span>') + '</div>');
+        return [line, model, pk.join('') || '<span class="unrated">no market line</span>'];
+    }
+
+    // ---------- hockey
+    function hockeyCols(g) {
+        const L = g.line || {}, M = g.model;
+        const ml = (L.ml_away !== undefined && L.ml_home !== undefined)
+            ? nameOf(g, 'away') + ' ' + am(L.ml_away) + ' / ' + nameOf(g, 'home') + ' ' + am(L.ml_home) : 'ML —';
+        const line = '<div class="num">' + ml + '</div>'
+                   + '<div class="num">O/U ' + (L.total ?? '—')
+                   + (L.puck_home !== undefined ? ' · puck ' + favLine(g, L.puck_home, 1) : '') + '</div>';
+        let model = '<span class="unrated">unrated</span>';
+        if (M) {
+            const fav = M.win_home >= 0.5 ? 'home' : 'away';
+            const pw = fav === 'home' ? M.win_home : 1 - M.win_home;
+            model = '<div class="num">' + favLine(g, M.spread_home, 2)
+                  + ' <span class="dim">' + nameOf(g, fav) + ' ' + Math.round(pw * 100) + '%</span></div>'
+                  + '<div class="num">Total ' + (M.total !== undefined && M.total !== null ? Number(M.total).toFixed(1) : '—') + '</div>';
+        }
+        const pk = [];
+        if (g.ml) pk.push('<div>' + verdictBadge(g.ml.verdict) + ' ' + (g.ml.verdict !== 'pass'
+            ? (g.ml.abbr || shortTeam(g.ml.team)) + ' ML ' + am(g.ml.price) + ' <span class="dim">(' + sgn(g.ml.edge_pp) + '%, to ' + am(g.ml.fair) + ')</span>'
+            : '<span class="dim">ML</span>') + '</div>');
+        if (g.total) pk.push('<div>' + verdictBadge(g.total.verdict) + ' ' + (g.total.verdict !== 'pass'
+            ? (g.total.side === 'over' ? 'Over ' : 'Under ') + g.total.line + ' <span class="dim">(' + sgn(g.total.edge_pp) + '%)</span>'
+            : '<span class="dim">total</span>') + '</div>');
+        return [line, model, pk.join('') || '<span class="unrated">no market line yet</span>'];
     }
 
     async function load() {
@@ -208,7 +277,7 @@
         document.getElementById('games').innerHTML = '<div class="empty">loading…</div>';
         let r;
         try {
-            r = await authFetch('/api/football-picks?sport=' + _sport);
+            r = await authFetch('/api/pick-sheets?sport=' + _sport);
         } catch (e) { document.getElementById('metaLine').textContent = 'fetch failed: ' + e; return; }
         if (!r) return;
         if (r.status >= 500) { document.getElementById('metaLine').textContent = 'server error ' + r.status; return; }
@@ -226,13 +295,17 @@
 
         if (!d.week_key || !d.games || !d.games.length) {
             document.getElementById('metaLine').textContent = d.note || 'no sheets for this sport yet';
-            document.getElementById('games').innerHTML = '<div class="empty">Nothing built yet — check back after the Monday or Friday run.</div>';
+            document.getElementById('games').innerHTML = '<div class="empty">' + (_sport === 'NHL' ? 'No upcoming games on the sheet yet.' : 'Nothing built yet — check back after the Monday or Friday run.') + '</div>';
             return;
         }
 
-        document.getElementById('metaLine').textContent =
-            'Week of ' + d.week_key + ' · ' + d.games.length + ' games · sheet built ' + ago(d.published_at) +
-            ' · lines/model updated ' + ago(d.lines_updated_at);
+        document.getElementById('metaLine').textContent = _sport === 'NHL'
+            ? d.games.length + ' games · lines/model updated ' + ago(d.lines_updated_at)
+            : 'Week of ' + d.week_key + ' · ' + d.games.length + ' games · sheet built ' + ago(d.published_at) +
+              ' · lines/model updated ' + ago(d.lines_updated_at);
+        document.getElementById('hint').innerHTML = _sport === 'NHL'
+            ? 'Model = Crease IQ v2 (score model: xG, goalies, rest). Spread = expected final goal margin; % = win probability. ML play ≥ 4% over the no-vig line, lean ≥ 2%. Totals are LEAN at most — the total model has not beaten the base rate in backtest. Starting goalies are projected until confirmed — check before betting.'
+            : 'Model spread/total = our number (calibrated). Picks show the edge in points and the price the bet is good to.';
 
         const games = d.games.slice().sort((a, b) => (a.event_start || '').localeCompare(b.event_start || ''));
         let html = '';
@@ -240,16 +313,19 @@
         for (const g of games) {
             const dstr = fmtTime(g.event_start);
             if (dstr !== day) { html += '<div class="day-hdr">' + dstr + '</div>'; day = dstr; }
-            const matchup = shortTeam(g.away) + ' @ ' + shortTeam(g.home);
-            let legs;
-            if (g.unrated) {
-                legs = '<span class="unrated">unrated — no number</span>';
-            } else {
-                legs = spreadTxt(g.spread) + '&nbsp;&nbsp;·&nbsp;&nbsp;' + totalTxt(g.total);
+            const cols = _sport === 'NHL' ? hockeyCols(g) : footballCols(g);
+            let sub = '';
+            if (_sport === 'NHL' && g.goalies) {
+                const ga = (g.goalies.away || {}).name, gh = (g.goalies.home || {}).name;
+                if (ga || gh) sub = '<span class="sub">🥅 ' + (ga || '?') + ' vs ' + (gh || '?') + '</span>';
             }
-            html += '<div class="row"><span class="t">' + fmtClock(g.event_start) + '</span>'
-                  + '<span class="m">' + matchup + '</span>'
-                  + '<span class="legs">' + legs + '</span></div>';
+            html += '<div class="game"><div class="ghead"><span class="t">' + fmtClock(g.event_start) + '</span>'
+                  + '<span class="m">' + shortTeam(g.away) + ' @ ' + shortTeam(g.home) + '</span>' + sub + '</div>'
+                  + '<div class="cols">'
+                  + '<div class="col"><div class="lbl">Line</div><div class="val">' + cols[0] + '</div></div>'
+                  + '<div class="col"><div class="lbl">Model</div><div class="val">' + cols[1] + '</div></div>'
+                  + '<div class="col picks"><div class="lbl">Picks</div><div class="val">' + cols[2] + '</div></div>'
+                  + '</div></div>';
         }
         document.getElementById('games').innerHTML = html;
     }
@@ -263,11 +339,11 @@
             if (r.status >= 500) { _gateServerError('/api/me returned ' + r.status); return; }
             me = await r.json().catch(() => null);
         } catch (e) { _gateServerError('sign-in check failed: ' + e); return; }
-        if (!me || !me.ok || me.role !== 'admin') { window.location.href = '/'; return; }
+        if (!me || !me.ok || !(me.role === 'admin' || me.bot_access)) { window.location.href = '/'; return; }
         document.getElementById('auth-gate').style.display = 'none';
         document.getElementById('app').style.display = '';
         load();
-        setInterval(load, 6 * 60 * 60 * 1000);
+        setInterval(load, 15 * 60 * 1000);
     });
 </script>
 </body>

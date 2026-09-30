@@ -1,0 +1,73 @@
+name: NHL Pick Sheet
+
+# HOCKEY PICK SHEET (Sep 30 2026) — scripts/nhl_sheet_data.py.
+# Delta-ingests last night's NHL goalie boxscores + shot events into the
+# cloud DB (the box ingests its own copy on the batch lane — two DBs, two
+# writers, no overlap), refits Crease IQ v2, prices today's + tomorrow's
+# slate off ESPN's book lines, writes football_sheets sport='NHL', then
+# pushes the rows to the site DB through /api/football-sheets-mirror.
+#
+# Schedule (UTC; AZ = UTC-7): 07:00, 11:00, 14:00, 15:30 AZ — the last
+# one lands ~30 min before the first East-coast puck drop, after most
+# starting goalies are confirmed.
+#
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY, FILLS_CRON_SECRET.
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Slate window: today + N days (AZ)"
+        required: false
+        default: "1"
+      ingest:
+        description: "Run the goalie/shot delta ingest first (true/false)"
+        required: false
+        default: "true"
+  schedule:
+    - cron: "0 14 * * *"
+    - cron: "0 18 * * *"
+    - cron: "0 21 * * *"
+    - cron: "30 22 * * *"
+
+concurrency:
+  group: nhl-sheets
+  cancel-in-progress: false
+
+jobs:
+  sheet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    env:
+      SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      FILLS_CRON_SECRET:    ${{ secrets.FILLS_CRON_SECRET }}
+      NHL_CACHE: ${{ github.workspace }}/.nhl-cache/nhl_games_cache.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Restore per-game xG cache
+        uses: actions/cache@v4
+        with:
+          path: .nhl-cache
+          key: nhl-games-${{ github.run_id }}
+          restore-keys: nhl-games-
+      - name: Delta ingest (goalies, then shots)
+        if: ${{ github.event.inputs.ingest != 'false' }}
+        continue-on-error: true
+        run: |
+          python -m scripts.ingest_nhl_goalies --delta --commit
+          python -m scripts.ingest_nhl_shots --delta --commit
+      - name: Build sheet
+        run: python -m scripts.nhl_sheet_data --days "${{ github.event.inputs.days || '1' }}" --commit
+      - name: Sync to site DB
+        run: python -m scripts.football_sheet_sync --sport NHL --latest

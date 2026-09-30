@@ -373,11 +373,12 @@ function renderAppCards() {
     const hasGrocery = isAdmin || !!CUD.grocery_access;
     let h = '';
     if (hasBot) {
-        h += `<a href="/handicapper" class="app-card pickbot-app">
-            <span class="app-icon">&#127919;</span>
-            <h2>Pick Bot${isAdmin ? '' : '<span class="admin-badge">BOT</span>'}</h2>
-            <p>In-chat handicapper. Ask about a game on Claude — get a full pre-game analysis (PIN sharp signals, line movement, public splits, injuries, lineups) and a 1/3/5u recommendation. ML, spread, or total only.</p>
-            <span class="app-tag">Handicapping</span>
+        // Pick Bot retired Sep 30 2026 — the pill now opens Pick Sheets.
+        h += `<a href="/pick-sheets" class="app-card football-app">
+            <span class="app-icon">&#128203;</span>
+            <h2>Pick Sheets${isAdmin ? '<span class="admin-badge">ADMIN</span>' : ''}</h2>
+            <p>Hockey daily, NFL + college weekly &mdash; every game with the line, our model's spread and total, and the picks.</p>
+            <span class="app-tag">Sheets</span>
             <span class="arrow">&rarr;</span>
         </a>`;
     }
@@ -399,13 +400,6 @@ function renderAppCards() {
             <h2>Dashboard<span class="admin-badge">ADMIN</span></h2>
             <p>Polymarket position tracking with P&amp;L, open and closed trades, maker rewards, and shareable bet slips.</p>
             <span class="app-tag">P&amp;L Tracking</span>
-            <span class="arrow">&rarr;</span>
-        </a>`;
-        h += `<a href="/football-picks" class="app-card football-app">
-            <span class="app-icon">&#127944;</span>
-            <h2>Pick Sheets<span class="admin-badge">ADMIN</span></h2>
-            <p>This week's NFL + college sheets, straight off the DB &mdash; every game, our number, and the spread/total call. Full deep-dive PDF and a one-page picks-only sheet, both downloadable here.</p>
-            <span class="app-tag">Sheets</span>
             <span class="arrow">&rarr;</span>
         </a>`;
     }
