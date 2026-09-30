@@ -1231,9 +1231,9 @@ def test_pair_plan() -> None:
           and _app._pair_team_key("St. Louis Blues") == "st louis blues")
     check("NHL total worth: 5.5/6.5 middles on 6 at 11.0, not the 2.0 default",
           abs(_app._pair_worth("NHL", "total", [6]) - 11.0) < 1e-9)
-    check("NHL puck-line worth: home −1.5 + away +2.5 middles on exactly 2 (18.4)",
+    check("NHL puck-line worth: home −1.5 + away +2.5 middles on exactly 2 (9.7, one direction)",
           _app._pair_window("spread", 2.5, -1.5) == (1.0, [2])
-          and abs(_app._pair_worth("NHL", "spread", [2]) - 18.4) < 1e-9)
+          and abs(_app._pair_worth("NHL", "spread", [2]) - 9.7) < 1e-9)
     check("away +1.5 with home −2.5 is a GAP, never a pair", _app._pair_window("spread", 1.5, -2.5)[0] < 0)
     check("the board builder is wired beside MLB", "_pair_board_nhl(sb, board, prefixes)" in _insp0.getsource(_app._pair_board))
     # PAIR OR NOTHING (Rob, Sep 27 2026): the single-leg creators are gated
@@ -1287,6 +1287,18 @@ def test_pair_plan() -> None:
         _app.PAIR_LIVE_SLUGS = _old_pls
     except Exception as _e:
         check(f"push_watch pair-survival test ran ({_e})", False)
+    # CAP BY WORTH (Sep 29 2026): hockey's ceiling is 100 + P(middle), not the flat 105
+    check("NHL is cap-by-worth by default; NFL is not", _app._pair_cap_by_worth("NHL") and not _app._pair_cap_by_worth("NFL"))
+    check("NHL puck-line worth is one-direction (fav by exactly 2 ≈ 9.7, not 18.4)",
+          abs(_app._pair_worth("NHL", "spread", [2]) - 9.7) < 1e-6)
+    _c = _app._pair_candidates([("over", 5.5, 55.0, 56.0), ("under", 6.5, 54.0, 55.0),
+                                ("over", 6.5, 43.0, 44.0), ("under", 7.5, 60.0, 61.0)],
+                               "total", "NHL", 15)
+    _by = {(c["a_line"], c["b_line"]): c for c in _c}
+    check("5.5/6.5 at 109 seats under a worth cap of 111 (was refused at 105)", (5.5, 6.5) in _by and _by[(5.5, 6.5)]["cap_c"] == 111.0)
+    check("6.5/7.5 at 103 seats under its 121.1 worth cap", (6.5, 7.5) in _by)
+    _c2 = _app._pair_candidates([("over", 5.5, 57.0, 58.0), ("under", 6.5, 56.0, 57.0)], "total", "NHL", 15)
+    check("5.5/6.5 at 113 (worth 111) is refused — the book must price the middle under its worth", not _c2)
     # THE SEEDER CANNOT ADMIT A LEG THE PLAN REFUSES (Sep 29 2026, MTL@TOR 7.5/8.5)
     check("seeder leg band upper bound == the plan's 65¢ fresh-leg fence",
           abs(_app._PAIR_LEG_BAND[1] - _app._PAIR_MAX_LEG_C) < 1e-9)

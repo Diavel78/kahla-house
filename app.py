@@ -21303,7 +21303,13 @@ _PAIR_WORTH_SPREAD = {
     # NHL puck line (Sep 27 2026, two seasons): margin 1 is 43% (OT/SO games
     # end by one) but no ±0.5 rung exists to middle it; the venue posts ±1.5
     # and ±2.5, so the only puck-line middle is exactly 2 — 18.4%.
-    "NHL": {1: 43.3, 2: 18.4, 3: 22.3, 4: 10.3, 5: 4.0, 6: 0.7},
+    # ⚠ ONE DIRECTION ONLY (Sep 29 2026): a pair fav −1.5 / dog +2.5 wins both
+    # legs only when the FAVORITE wins by exactly 2 — half of the |margin|
+    # rate, not all of it. The both-directions table (2: 18.4, 3: 22.3) priced
+    # every puck-line middle at twice its worth. Measured per side over the
+    # same 1,499 finals: home by 2 = 9.7 / away by 2 = 9.8; by 3 = 13.1 / 10.6;
+    # by 4 = 5.6 / 5.4. Chart: claude.ai/artifact/AaS9roJg1yzjGptJDAUdbU.
+    "NHL": {1: 23.0, 2: 9.7, 3: 11.8, 4: 5.5, 5: 2.0, 6: 0.4},
 }
 # Totals have no key numbers to speak of — the distribution is flat, so one
 # number per league (NFL measured 2.3% for a 1-point middle; college's totals
@@ -21339,6 +21345,27 @@ _PAIR_MAX_LOSS_C = 5.0          # Rob, Sep 26 2026: cap 105 (was 20 → 120)
 # a middle pays $14.25 — break-even one in twenty.
 _PAIR_CEILING_FLOOR = {"NFL": 100.0, "NCAAF": 100.0, "NBA": 100.0,
                        "NCAAB": 100.0, "MLB": 100.0, "NHL": 100.0}
+
+
+_PAIR_CAP_BY_WORTH = {"NHL"}   # Rob, Sep 29 2026: "start setting these caps by what they are worth"
+
+
+def _pair_cap_by_worth(sport: str) -> bool:
+    """CAP = WHAT THE MIDDLE IS WORTH (Rob, Sep 29 2026, after a hockey day
+    where the flat 105 admitted only a 7.5/8.5 tail): for these sports the
+    ceiling is 100 + P(middle) per pair (the measured worth tables), not the
+    flat loss budget. With the 1¢ edge floor the seat costs at most 99 + worth
+    — the book has to price the middle at least a cent under its worth. The
+    65¢ leg fence still applies, so the rich hockey windows (4.5/5.5, 6.5/7.5)
+    seat only when their dear leg comes under 65. `machine_flags
+    pair_cap_by_worth` (json list of sports) overrides the code set."""
+    try:
+        v = _machine_flag_val("pair_cap_by_worth", None)
+        if isinstance(v, (list, tuple, set)):
+            return str(sport).upper() in {str(x).upper() for x in v}
+    except Exception:
+        pass
+    return str(sport).upper() in _PAIR_CAP_BY_WORTH
 
 
 def _pair_ceiling(sport: str) -> float:
@@ -21474,7 +21501,10 @@ def _pair_candidates(rungs: list, mt: str, sport: str, qty: int) -> list:
             # us only when they are coherent; otherwise the measured worth of
             # the middle does. A CHEAP PAIR IS A GIFT, NOT A DEFECT — cost
             # under 100 is a lock, and nothing here rejects it.
-            cap = min(ceiling, 100.0 + worth + _PAIR_SLACK_C)
+            if _pair_cap_by_worth(sport):
+                cap = 100.0 + worth              # the middle's worth IS the cap
+            else:
+                cap = min(ceiling, 100.0 + worth + _PAIR_SLACK_C)
             if mid_sum >= 100.0:
                 cap = min(cap, mid_sum + _PAIR_SLACK_C)
             edge = worth - (cost - 100.0)
