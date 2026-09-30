@@ -21347,7 +21347,7 @@ _PAIR_CEILING_FLOOR = {"NFL": 100.0, "NCAAF": 100.0, "NBA": 100.0,
                        "NCAAB": 100.0, "MLB": 100.0, "NHL": 100.0}
 
 
-_PAIR_CAP_BY_WORTH = {"NHL"}   # Rob, Sep 29 2026: "start setting these caps by what they are worth"
+_PAIR_CAP_BY_WORTH = {"NHL", "NFL", "NCAAF", "NBA", "MLB", "NCAAB", "CBB", "WNBA"}   # Rob, Sep 29 2026: "set all caps based on value… these need to stand on their own"
 
 
 def _pair_cap_by_worth(sport: str) -> bool:
@@ -21673,7 +21673,29 @@ def _pair_board_nhl(sb, board: dict, prefixes: dict) -> None:
 # so yardage only, and the props cap is 110 (spreads/totals stay 105).
 _PAIR_PROP_FAMS = {"pyd": "player_passing_yards", "ryd": "player_rushing_yards",
                    "recyd": "player_receiving_yards"}
-_PAIR_PROP_CAP_C = 110.0
+_PAIR_PROP_CAP_C = 110.0           # the flat cap — used only when a ladder's family is unknown
+# PROP BAND WORTH, measured Sep 29 2026 on 12,071 NFL player-games 2023-26
+# (the yardage landing inside a band around the player's trailing-8 mean —
+# the DK line's stand-in): a 10-yd rec band 13.0%, 10-yd rush 13.2%, a
+# 25-yd pass band 12.1%; 5-yd bands 6.5-6.6, 20-yd 26-27. Linear in width
+# near the line, so worth = width × per-yard. Bands BELOW the line hit more
+# (rec 14.9 vs 12.5 above) — not modelled; the average is used.
+_PAIR_PROP_WORTH_PER_YD = {"recyd": 1.30, "ryd": 1.32, "pyd": 0.484}
+
+
+def _pair_prop_worth(fam: str, lo: int, hi: int) -> float:
+    """What a prop band [lo, hi) is worth, in cents (= percent)."""
+    per = _PAIR_PROP_WORTH_PER_YD.get(str(fam or ""))
+    if per is None:
+        return 0.0
+    return round(max(0, int(hi) - int(lo)) * per, 1)
+
+
+def _pair_prop_cap(fam: str, lo: int, hi: int, flat: float = _PAIR_PROP_CAP_C) -> float:
+    """The pair's cap: 100 + the band's worth when the family is measured
+    (Rob, Sep 29 2026: caps by value), else the flat cap."""
+    w = _pair_prop_worth(fam, lo, hi)
+    return round(100.0 + w, 1) if w > 0 else float(flat)
 _PAIR_PROP_RE = re.compile(
     r"^astatc-(nfl)-([a-z0-9]+)-([a-z0-9]+)-(\d{4}-\d{2}-\d{2})-(pyd|ryd|recyd)-([a-z]+)-gte(\d+)$")
 _PAIR_PROP_TAPE_MAX_AGE_H = 12.0     # a rung last quoted longer ago than this is not a ladder we seat from
@@ -21807,7 +21829,8 @@ def _prop_center_lines(sb, sport: str, now) -> dict | None:
     return {k2: v[0] for k2, v in best.items()}
 
 
-def _pair_prop_pick(rungs: dict, line: float, cap_c: float = _PAIR_PROP_CAP_C) -> dict | None:
+def _pair_prop_pick(rungs: dict, line: float, cap_c: float = _PAIR_PROP_CAP_C,
+                    fam: str | None = None) -> dict | None:
     """Widest sister under the cap around the book line (Rob: "widest rung to
     START, rerung tighter as needed"). `rungs` = {N: (yes_bid_c, yes_ask_c)}.
     YES on a low rung pegs at its bid (join); NO on a high rung pegs at
@@ -21837,11 +21860,14 @@ def _pair_prop_pick(rungs: dict, line: float, cap_c: float = _PAIR_PROP_CAP_C) -
         if not (lo_b <= a_c <= hi_b and lo_b <= b_c <= hi_b):
             continue
         cost = a_c + b_c
-        if cost > cap_c + 1e-9:
+        _w = _pair_prop_worth(fam, lo, hi) if fam else 0.0
+        _cap = _pair_prop_cap(fam, lo, hi, cap_c) if _w > 0 else float(cap_c)
+        _lim = (_cap - _PAIR_MIN_EDGE_C) if _w > 0 else _cap
+        if cost > _lim + 1e-9:
             continue
         return {"lo": int(lo), "hi": int(hi), "a_c": round(a_c, 1), "b_c": round(b_c, 1),
                 "cost_c": round(cost, 1), "hits": list(range(int(lo), int(hi))),
-                "cap_c": cap_c}
+                "cap_c": _cap, "worth_c": (_w if _w > 0 else None)}
     return None
 
 
@@ -21919,7 +21945,7 @@ def _pair_seed_props(sb, now, res: dict, armed: bool, taken_slugs: set, have: se
         if line is None:
             res["props_no_center"] = res.get("props_no_center", 0) + 1
             continue
-        pick = _pair_prop_pick(ent["rungs"], line, _PAIR_PROP_CAP_C)
+        pick = _pair_prop_pick(ent["rungs"], line, _PAIR_PROP_CAP_C, fam=fam)
         if not pick:
             res["props_no_middle"] = res.get("props_no_middle", 0) + 1
             continue
@@ -21934,7 +21960,7 @@ def _pair_seed_props(sb, now, res: dict, armed: bool, taken_slugs: set, have: se
             continue
         row = {"game_prefix": prefix, "market_type": "total",
                "event_name": f"{g.get('event_name')} · {code} {fam}", "kickoff": g["event_start"],
-               "qty": _PAIR_DEFAULT_QTY, "cap_c": _PAIR_PROP_CAP_C,
+               "qty": _PAIR_DEFAULT_QTY, "cap_c": pick["cap_c"],
                "legs": [{"key": "a", "slug": a_slug, "intent": "BUY_LONG",
                          "label": f"over {pick['lo'] - 0.5:g}"},
                         {"key": "b", "slug": b_slug, "intent": "BUY_SHORT",
@@ -21997,7 +22023,7 @@ def _pair_prop_ladder(sb, prefix: str, now) -> dict:
 
 
 def _pair_prop_partner(rungs: dict, held_side: str, n_h: int, cost_h: float,
-                       cap_c: float):
+                       cap_c: float, fam: str | None = None):
     """THE PROP RE-RUNG LADDER, one leg held (Rob: "if it can't hold under the
     cap, rerung tighter, and tighter as needed, STAY ON TOUCH"). `rungs` =
     {N: (yes_bid, yes_ask)}. Holding YES on N (cost c): the partner is NO on a
@@ -22007,8 +22033,14 @@ def _pair_prop_partner(rungs: dict, held_side: str, n_h: int, cost_h: float,
     Returns (rung, peg_c, hits) or None."""
     if not rungs or n_h is None or cost_h is None:
         return None
-    budget = float(cap_c) - float(cost_h)
     lo_b, hi_b = _PAIR_LEG_BAND
+    def _budget(lo, hi):
+        # the partner's budget = the BAND's cap (its worth, less the edge
+        # floor) minus what the held leg cost — a wider partner rung buys a
+        # bigger middle and may cost more (Rob, Sep 29 2026: caps by value)
+        if fam and _pair_prop_worth(fam, lo, hi) > 0:
+            return _pair_prop_cap(fam, lo, hi, cap_c) - _PAIR_MIN_EDGE_C - float(cost_h)
+        return float(cap_c) - float(cost_h)
     # NO MIRROR ON A PROP (Sep 27 2026, Bateman 40+): on a spread the mirror
     # is a DIFFERENT market (home −1.5 vs away +1.5); on a prop the mirror is
     # the SAME market we hold — a NO bid beside the cost ASK is two exits on
@@ -22021,7 +22053,7 @@ def _pair_prop_partner(rungs: dict, held_side: str, n_h: int, cost_h: float,
             if ask is None:
                 continue
             peg = 100.0 - float(ask)
-            if lo_b <= peg <= hi_b and peg <= budget + 1e-9:
+            if lo_b <= peg <= hi_b and peg <= _budget(n_h, n) + 1e-9:
                 return n, round(peg, 1), list(range(n_h, n))
     else:
         order = sorted([n for n in rungs if n < n_h])
@@ -22030,7 +22062,7 @@ def _pair_prop_partner(rungs: dict, held_side: str, n_h: int, cost_h: float,
             if bid is None:
                 continue
             peg = float(bid)
-            if lo_b <= peg <= hi_b and peg <= budget + 1e-9:
+            if lo_b <= peg <= hi_b and peg <= _budget(n, n_h) + 1e-9:
                 return n, round(peg, 1), list(range(n, n_h))
     return None
 
@@ -22064,7 +22096,7 @@ def _pair_rerung_prop(sb, client, row, lg_in, st, cur, now, res) -> bool:
         if center is None:
             _pair_rr_why(row, "no DK center for this ladder")
             return False
-        pick = _pair_prop_pick(rungs, center, cap)
+        pick = _pair_prop_pick(rungs, center, cap, fam=(_pair_prop_parts(prefix) or (None, None))[0])
         if not pick:
             _pair_rr_why(row, "no legal prop pair under cap")
             return False
@@ -22115,7 +22147,8 @@ def _pair_rerung_prop(sb, client, row, lg_in, st, cur, now, res) -> bool:
     if cost_h is None:
         _pair_rr_why(row, "held cost unknown")
         return False
-    opt = _pair_prop_partner(rungs, side_h, n_h, float(cost_h), cap)
+    _fam = (_pair_prop_parts(prefix) or (None, None))[0]
+    opt = _pair_prop_partner(rungs, side_h, n_h, float(cost_h), cap, fam=_fam)
     if not opt:
         _pair_rr_why(row, f"no partner rung under cap (budget {cap - float(cost_h):.1f})")
         return False
@@ -22393,10 +22426,22 @@ def _pair_from_gridiron_rule(sb, g, mt, now, taken_slugs=None):
             if width < -1e-9:
                 continue                        # a gap: both legs can lose
             cost = a["peg_c"] + b["peg_c"]
-            if cost > ceiling + 1e-9:
-                continue
             if not hits:
                 continue        # the mirror is a re-rung stop, never a seed
+            # CAP = WORTH (Rob, Sep 29 2026: "these need to stand on their
+            # own, without living on rent"): the pair may cost at most what
+            # its middle is worth, less the edge floor — a seat is +EV on the
+            # bet before a cent of rent. The flat ceiling stays for sports
+            # not in _PAIR_CAP_BY_WORTH.
+            _sport = g.get("sport") or "NFL"
+            if _pair_cap_by_worth(_sport):
+                _wcap = 100.0 + _pair_worth(_sport, mt, hits)
+                if cost > _wcap - _PAIR_MIN_EDGE_C + 1e-9:
+                    continue
+            else:
+                _wcap = ceiling
+                if cost > ceiling + 1e-9:
+                    continue
             # THE RULE (Rob, Sep 26 2026, verbatim): "Widest rung to START. If
             # it can't hold under 120, then rerung tighter, and tighter as
             # needed. STAY ON TOUCH." Spread 4.5 → −3.5 with +6.5 if it fits
@@ -22417,7 +22462,8 @@ def _pair_from_gridiron_rule(sb, g, mt, now, taken_slugs=None):
             if best is None or cand > best[0]:
                 best = (cand, a, b, {"hits": hits, "cost_c": round(cost, 1),
                                      "off_line": round(_off, 1),
-                                     "cap_c": round(ceiling, 1),
+                                     "cap_c": round(_wcap, 1),
+                                     "worth_c": round(_wcap - 100.0, 1),
                                      "center": rule.get("center"),
                                      "center_src": rule.get("center_src"),
                                      "width": width})

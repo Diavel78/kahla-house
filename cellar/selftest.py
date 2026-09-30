@@ -1287,8 +1287,22 @@ def test_pair_plan() -> None:
         _app.PAIR_LIVE_SLUGS = _old_pls
     except Exception as _e:
         check(f"push_watch pair-survival test ran ({_e})", False)
+    # CAPS BY VALUE, EVERY SPORT + PROPS (Rob, Sep 29 2026)
+    check("NFL and MLB are cap-by-worth too", _app._pair_cap_by_worth("NFL") and _app._pair_cap_by_worth("MLB"))
+    check("a 10-yd receiving band is worth 13.0 → cap 113.0", _app._pair_prop_cap("recyd", 20, 30) == 113.0)
+    check("a 25-yd passing band is worth 12.1 → cap 112.1", _app._pair_prop_cap("pyd", 200, 225) == 112.1)
+    _pk = _app._pair_prop_pick({20: (55.0, 56.0), 30: (43.0, 44.0)}, 24.5, 110.0, fam="recyd")
+    check("rec 20/30 at 55 + 56 = 111 seats under its 113 worth cap (was refused at 110)",
+          _pk is not None and _pk["cost_c"] == 111.0 and _pk["cap_c"] == 113.0)
+    _pk2 = _app._pair_prop_pick({20: (57.0, 58.0), 30: (43.0, 44.0)}, 24.5, 110.0, fam="recyd")
+    check("rec 20/30 at 57 + 56 = 113 is refused — at its worth, no edge", _pk2 is None)
+    _pt = _app._pair_prop_partner({20: (55.0, 56.0), 30: (40.0, 43.0), 40: (18.0, 20.0)}, "over", 20, 55.0, 110.0, fam="recyd")
+    check("partner budget follows the band's worth: the 80¢ NO on 40 is over the leg fence, 30 at 57¢ fits 113 − 1 − 55",
+          _pt is not None and _pt[0] == 30)
+    _pt2 = _app._pair_prop_partner({20: (55.0, 56.0), 30: (40.0, 42.0)}, "over", 20, 55.0, 110.0, fam="recyd")
+    check("…and 30 at 58¢ does not (57 is the budget)", _pt2 is None)
     # CAP BY WORTH (Sep 29 2026): hockey's ceiling is 100 + P(middle), not the flat 105
-    check("NHL is cap-by-worth by default; NFL is not", _app._pair_cap_by_worth("NHL") and not _app._pair_cap_by_worth("NFL"))
+    check("NHL is cap-by-worth by default (and a made-up sport is not)", _app._pair_cap_by_worth("NHL") and not _app._pair_cap_by_worth("CURLING"))
     check("NHL puck-line worth is one-direction (fav by exactly 2 ≈ 9.7, not 18.4)",
           abs(_app._pair_worth("NHL", "spread", [2]) - 9.7) < 1e-6)
     _c = _app._pair_candidates([("over", 5.5, 55.0, 56.0), ("under", 6.5, 54.0, 55.0),
@@ -1997,11 +2011,13 @@ def test_pair_mlb_totals() -> None:
     # over the cap AND a 0.7c edge — refused either way.)
     rungs = [("over", 8.5, 50.0, 51.0), ("under", 9.5, 54.0, 55.0)]
     c = _app._pair_candidates(rungs, "total", "MLB", 15)
-    check("an MLB total pair at 104 qualifies under the 105 ceiling",
+    check("an MLB total pair at 104 qualifies (worth 8.7 → cap 108.7)",
           c and c[0]["hits"] == [9] and c[0]["cost_c"] == 104.0)
-    check("the same window at 106 is over the 105 cap",
+    check("the same window at 106 still seats under its 108.7 worth cap (the flat 105 no longer binds)",
+          bool(_app._pair_candidates([("over", 8.5, 52.0, 53.0), ("under", 9.5, 54.0, 55.0)], "total", "MLB", 15)))
+    check("the same window at 108 is refused on edge (worth 8.7, 8 paid — under the 1¢ floor)",
           not _app._pair_candidates(
-              [("over", 8.5, 52.0, 53.0), ("under", 9.5, 54.0, 55.0)],
+              [("over", 8.5, 53.0, 54.0), ("under", 9.5, 55.0, 56.0)],
               "total", "MLB", 15))
     check("the same window at 108 is refused on edge, not ceiling",
           not _app._pair_candidates(
