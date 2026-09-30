@@ -21350,7 +21350,13 @@ def _pair_ceiling(sport: str) -> float:
         loss = _PAIR_MAX_LOSS_C
     return max(100.0 + loss, _PAIR_CEILING_FLOOR.get(sport, 110.0))
 _PAIR_SLACK_C = 1.5
-_PAIR_LEG_BAND = (20.0, 80.0)
+# ⚠ THE SEEDER'S BAND MUST NOT ADMIT A LEG THE PLAN WILL NEVER BID (Sep 29
+# 2026, MTL@TOR over 7.5 / under 8.5): the band ran to 80 while `_pair_plan`
+# refuses any FRESH leg over `_PAIR_MAX_LEG_C`=65 (`leg_cap`). The seeder
+# saw 27 + 78 = 105, seated it, the plan bid the 27¢ leg and refused the
+# 78¢ partner every lap, and a lone tail bid rested 3h46m until T-10. The
+# upper bound is the plan's fence; the selftest pins them together.
+_PAIR_LEG_BAND = (20.0, 65.0)
 # A LIVE ladder has REAL BIDS ON BOTH SIDES. Note what this must NOT do: a
 # wide book is not a dead one. Early, barely-quoted ladders are the seats we
 # want most (Rob: "we are EARLY, absolutely might have pairs under 100") and a

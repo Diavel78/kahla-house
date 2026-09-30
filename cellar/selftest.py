@@ -1287,6 +1287,14 @@ def test_pair_plan() -> None:
         _app.PAIR_LIVE_SLUGS = _old_pls
     except Exception as _e:
         check(f"push_watch pair-survival test ran ({_e})", False)
+    # THE SEEDER CANNOT ADMIT A LEG THE PLAN REFUSES (Sep 29 2026, MTL@TOR 7.5/8.5)
+    check("seeder leg band upper bound == the plan's 65¢ fresh-leg fence",
+          abs(_app._PAIR_LEG_BAND[1] - _app._PAIR_MAX_LEG_C) < 1e-9)
+    _c = _app._pair_candidates([("over", 7.5, 27.0, 28.0), ("under", 8.5, 78.0, 81.0),
+                                ("over", 6.5, 45.0, 46.0), ("under", 7.5, 72.0, 73.0)],
+                               "total", "NHL", 15)
+    check("a 27 + 78 hockey tail pair is NOT a candidate (78 > the leg fence)",
+          not any(c["b_c"] > _app._PAIR_MAX_LEG_C for c in _c))
     # SETTLING (Sep 27 2026, Nix): a leg the venue resolved means the pair places NOTHING
     p = _app._pair_plan({"a": leg(h=15, cost=53.0, bid=98.0, ask=99.0),
                          "b": {**leg(bid=1.0, ask=2.0), "resolved": True}}, 15, 110, -190)
