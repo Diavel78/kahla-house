@@ -1287,6 +1287,16 @@ def test_pair_plan() -> None:
         _app.PAIR_LIVE_SLUGS = _old_pls
     except Exception as _e:
         check(f"push_watch pair-survival test ran ({_e})", False)
+    # EARLY NOT EARLY-EARLY + HOLD BOTH (Rob, Sep 30 2026)
+    check("rent gate is ON by default for every sport (the flag opens it)", _app._pair_rent_gated("NFL") and _app._pair_rent_gated("NHL"))
+    check("seat ceiling: NFL 72h, NHL 24h, props 48h", _app._pair_max_lead_h("NFL") == 72.0 and _app._pair_max_lead_h("NHL") == 24.0 and _app._pair_props_max_lead_h() == 48.0)
+    p = _app._pair_plan({"a": leg(h=15, cost=55.7, bid=50.0, ask=51.0), "b": leg(h=15, cost=54.7, bid=48.0, ask=49.0)}, 15, 111, 300, hold_both=True)
+    check("both held over 100 → HOLD: no asks on either leg", p["a"]["ask"] is None and p["b"]["ask"] is None and "hold_both" in p["a"]["why"])
+    p2 = _app._pair_plan({"a": leg(h=15, cost=55.7, bid=50.0, ask=51.0), "b": leg(h=15, cost=54.7, bid=48.0, ask=49.0)}, 15, 111, 300, hold_both=False)
+    check("…and with hold_both off the old cost asks come back", p2["a"]["ask"] is not None)
+    p3 = _app._pair_plan({"a": leg(h=15, cost=45.0, bid=50.0, ask=51.0), "b": leg(h=15, cost=50.0, bid=48.0, ask=49.0)}, 15, 111, 300, hold_both=True)
+    check("both held UNDER 100 is still the lock, no asks", p3["a"]["ask"] is None and "lock_rides" in p3["a"]["why"])
+    check("the plan call site passes the hold-both flag", "hold_both=_pair_hold_both()" in _insp0.getsource(_app._pair_step))
     # CAPS BY VALUE, EVERY SPORT + PROPS (Rob, Sep 29 2026)
     check("NFL and MLB are cap-by-worth too", _app._pair_cap_by_worth("NFL") and _app._pair_cap_by_worth("MLB"))
     check("a 10-yd receiving band is worth 13.0 → cap 113.0", _app._pair_prop_cap("recyd", 20, 30) == 113.0)
@@ -1366,9 +1376,9 @@ def test_pair_plan() -> None:
           and "lock_rides" in p["a"]["why"])
     # both held at 102, 45 min out → asks at cost; 20 min out → none
     two = {"a": leg(h=15, cost=45.0, bid=44.0, ask=47.0), "b": leg(h=15, cost=57.0, bid=56.0, ask=59.0)}
-    p = _app._pair_plan(two, 15, 110, 45)
+    p = _app._pair_plan(two, 15, 110, 45, hold_both=False)
     check("both held >100 before T−30 → asks at cost", p["a"]["ask"] == (45.5, 15) and p["b"]["ask"] == (57.5, 15))
-    p = _app._pair_plan(two, 15, 110, 8)
+    p = _app._pair_plan(two, 15, 110, 8, hold_both=False)
     check("both held inside T−10 → no asks, hold for the middle",
           p["a"]["ask"] is None and "t30_middle" in p["b"]["why"])
     # An unreadable book leaves BOTH orders alone (Sep 19 2026: one failed read

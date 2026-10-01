@@ -230,6 +230,8 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 > answer and the verdict side by side. That is the read that settles "we
 > should be betting X".
 >
+> ⚠ **THE SISTERS ARE EXEMPT (Rob, Sep 30 2026: "this isn't rent if it's about the sisters… shouldn't we be going for the middles when it's ripe, and holding?").** A middle PAIR takes no side; capped at its measured worth it is a +EV bet before rent, and football/prop rent had fallen to pennies. For sports listed in `machine_flags pair_rent_gate_off` the pair seeder and the pair lap skip `_rent_ok` (`_pair_rent_gated`); the seat instead needs a BOOK line for the center (`_BOOK_PRIORITY`, Pinnacle first — never the venue ML or the model; `no_book_line` in the seeder stamp), both rungs quoted, the pair under worth, and kickoff inside the sport's seat ceiling (`_pair_max_lead_h`: football 72h, props 48h, the rest 24h — "early, not EARLY EARLY": lines move and a filled leg cannot). Completed pairs HOLD to the whistle (`pair_hold_both`); a lone held leg still exits at the touch at T-10. Every seat that takes a side stays under this rule in full.
+
 > ⚠ **A RENT REFUSAL MUST NOT LATCH.** The opener's done-set treats
 > `would_bet=true` as finished, which is only safe when persist and
 > placement happen together — and this gate separates them by design (a game

@@ -21083,7 +21083,8 @@ def _pair_owns_game(sb, prefix, mt) -> bool:
                                 for r in _pair_rows(sb))
 
 
-def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float, t30_exit: bool = True) -> dict:
+def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float, t30_exit: bool = True,
+               hold_both: bool = True) -> dict:
     """PURE: what each leg should be resting right now. `legs` is exactly two
     keys → {h (held, our side), cost (¢ avg of the held lot or None), sold
     (¢, last sell this cycle or None), bid / ask (COMPETITOR touch, our side,
@@ -21222,6 +21223,8 @@ def _pair_plan(legs: dict, qty: int, cap_c: float, mins: float, t30_exit: bool =
             if both:
                 if pair_cost is not None and pair_cost <= 100.0 + 1e-9:
                     why.append("lock_rides")
+                elif hold_both:
+                    why.append("hold_both")     # Rob, Sep 30 2026: a completed pair is the bet — no asks
                 elif mins <= _PAIR_T30_MIN:
                     why.append("t30_middle")
                 else:
@@ -21467,6 +21470,64 @@ def _pair_cap_by_worth(sport: str) -> bool:
     except Exception:
         pass
     return str(sport).upper() in _PAIR_CAP_BY_WORTH
+
+
+# EARLY, NOT EARLY-EARLY (Rob, Sep 30 2026): "this isn't rent if it's about
+# the sisters… shouldn't we be going for the middles when it's ripe, and
+# holding?" A sister is a bet on the middle priced under its worth; the
+# day-of RENT gate was a rent-machine rule applied to a gambling machine and
+# it threw away the ripest books (the second rung is unquoted at T-6). Ripe =
+# a BOOK line for the center (Pinnacle first — never the model, never the
+# venue ML), both rungs quoted, pair under worth — and not more than a lead
+# ceiling before kickoff (lines move; a filled leg cannot). The RENT RULE in
+# CLAUDE.md stands for every seat that takes a side; the sisters take none.
+_PAIR_RENT_GATE_OFF: set = set()          # code default: gated everywhere; `machine_flags pair_rent_gate_off` (list of sports) opens it
+_PAIR_MAX_LEAD_H = {"NFL": 72.0, "NCAAF": 72.0, "NHL": 24.0, "MLB": 24.0,
+                    "NBA": 24.0, "NCAAB": 24.0, "CBB": 24.0, "WNBA": 24.0}
+_PAIR_PROPS_MAX_LEAD_H = 48.0             # DK prop lines move on injury news; two days is early enough
+
+
+def _pair_rent_gated(sport) -> bool:
+    """Does this sport's sister seat still need the market to PAY RENT now?
+    Props follow their sport (an NFL prop is gated as NFL)."""
+    sp = str(sport or "").upper()
+    try:
+        v = _machine_flag_val("pair_rent_gate_off", None)
+        if isinstance(v, (list, tuple, set)):
+            return sp not in {str(x).upper() for x in v}
+    except Exception:
+        pass
+    return sp not in _PAIR_RENT_GATE_OFF
+
+
+def _pair_max_lead_h(sport) -> float:
+    """How far before kickoff a sister may be SEATED (the 'not EARLY EARLY'
+    ceiling). `machine_flags pair_max_lead_h` = {sport: hours} overrides."""
+    sp = str(sport or "").upper()
+    try:
+        v = _machine_flag_val("pair_max_lead_h", None)
+        if isinstance(v, dict) and v.get(sp) is not None:
+            return float(v[sp])
+    except Exception:
+        pass
+    return float(_PAIR_MAX_LEAD_H.get(sp, 24.0 * 9))
+
+
+def _pair_props_max_lead_h() -> float:
+    try:
+        return float(_machine_flag_val("pair_props_max_lead_h", _PAIR_PROPS_MAX_LEAD_H)
+                     or _PAIR_PROPS_MAX_LEAD_H)
+    except (TypeError, ValueError):
+        return _PAIR_PROPS_MAX_LEAD_H
+
+
+def _pair_hold_both() -> bool:
+    """HOLD BOTH (Rob, Sep 30 2026): a completed pair under worth is a +EV
+    ticket on the middle — asking it out at cost+1 sells the ticket for a
+    penny (tonight's Cubs 7.5/8.5: the 61¢ ask filled first and left the
+    46¢ leg alone into the game). Both held → no asks, hold to the whistle.
+    A lone held leg still exits at the touch at T-10. Flag `pair_hold_both`."""
+    return bool(_machine_flag("pair_hold_both", True))
 
 
 def _pair_ceiling(sport: str) -> float:
@@ -22028,7 +22089,7 @@ def _pair_seed_props(sb, now, res: dict, armed: bool, taken_slugs: set, have: se
         lead = float(_machine_flag_val("pair_props_min_lead_h", 1.0) or 1.0)
     except (TypeError, ValueError):
         lead = 1.0
-    board = _pair_prop_board(sb, now, lead, 24 * 9)
+    board = _pair_prop_board(sb, now, lead, _pair_props_max_lead_h())
     res["props_ladders"] = len(board)
     if not board:
         return
@@ -22056,7 +22117,8 @@ def _pair_seed_props(sb, now, res: dict, armed: bool, taken_slugs: set, have: se
             continue
         g = ent["game"]
         es = _parse_iso(g["event_start"])
-        if not (_rent_ok(a_slug, es, now, sb)[0] and _rent_ok(b_slug, es, now, sb)[0]):
+        if _pair_rent_gated(g.get("sport") or "NFL") and not (
+                _rent_ok(a_slug, es, now, sb)[0] and _rent_ok(b_slug, es, now, sb)[0]):
             res["props_rent"] = res.get("props_rent", 0) + 1
             continue
         row = {"game_prefix": prefix, "market_type": "total",
@@ -22684,7 +22746,8 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 0) -> dict:
             # anyway — so a seat inside a few hours of kickoff is paying the
             # spread for almost no rent.
             _lead = _pair_min_lead_h(r.get("sport"), sb)
-            if es and now + timedelta(hours=_lead) < es < now + timedelta(days=9):
+            if es and (now + timedelta(hours=_lead) < es
+                       < now + timedelta(hours=_pair_max_lead_h(r.get("sport")))):
                 games[r["id"]] = r
     order = {"NFL": 0, "NCAAF": 1, "NHL": 2, "NBA": 3, "NCAAB": 4, "MLB": 5}
     todo = sorted(games.values(), key=lambda r: (order.get(r.get("sport"), 9),
@@ -22769,10 +22832,18 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 0) -> dict:
                 _seed_why(res, g, mt, "leg_taken")
                 continue
             es = _parse_iso(g["event_start"])
-            if not (_rent_ok(a_slug, es, now, sb)[0] and _rent_ok(b_slug, es, now, sb)[0]):
-                _pair_decline(sb, g["id"], mt, "rent")
-                _seed_why(res, g, mt, "rent")
-                continue                       # RULE #1: both legs or nothing
+            if _pair_rent_gated(g.get("sport")):
+                if not (_rent_ok(a_slug, es, now, sb)[0] and _rent_ok(b_slug, es, now, sb)[0]):
+                    _pair_decline(sb, g["id"], mt, "rent")
+                    _seed_why(res, g, mt, "rent")
+                    continue                   # RULE #1: both legs or nothing
+            elif (g.get("sport") or "") in ("NFL", "NCAAF"):
+                # ungated football seats on a BOOK line only (Rob: "as soon
+                # as we have the line from Pinnacle") — the venue-ML or model
+                # center is a guess, and a filled leg cannot follow the line
+                if str(best.get("center_src") or "") not in _BOOK_PRIORITY:
+                    _seed_why(res, g, mt, "no_book_line")
+                    continue
             row = {"game_prefix": prefix, "market_type": mt,
                    "event_name": g.get("event_name"), "kickoff": g["event_start"],
                    "qty": _PAIR_DEFAULT_QTY, "cap_c": best["cap_c"],
@@ -23568,7 +23639,8 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
                     "ask": _pair_touch_ex_self(bk, "ask", own_a,
                                                (cur[k]["ask"] or {}).get("leaves")),
                     "tick": tick,
-                    "rent": _pair_rent(slug, ko, now, sb) if mins > 0 else False}
+                    "rent": ((True if not _pair_rent_gated(_pair_sport_of(row.get("game_prefix")))
+                              else _pair_rent(slug, ko, now, sb)) if mins > 0 else False)}
     ka, kb = list(lg_in)
     # a new cycle when both legs are flat: forget the last sell prices
     if lg_in[ka]["h"] < 0.01 and lg_in[kb]["h"] < 0.01:
@@ -23578,7 +23650,8 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
     for k in (ka, kb):
         lg_in[k]["sold"] = st[k].get("sold")
     plan = _pair_plan(lg_in, qty, cap, mins,
-                      t30_exit=_machine_flag("pair_t30_exit", True))
+                      t30_exit=_machine_flag("pair_t30_exit", True),
+                      hold_both=_pair_hold_both())
     gtt_bid = ko.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     gtt_ask = (ko + timedelta(hours=_PAIR_ASK_GTD_H)).astimezone(timezone.utc) \
         .strftime("%Y-%m-%dT%H:%M:%SZ")
