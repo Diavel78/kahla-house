@@ -1287,8 +1287,27 @@ def test_pair_plan() -> None:
         _app.PAIR_LIVE_SLUGS = _old_pls
     except Exception as _e:
         check(f"push_watch pair-survival test ran ({_e})", False)
+    # FOOTBALL SPREAD WORTH IS ONE DIRECTION (Oct 2 2026)
+    check("NFL fav by exactly 3 is worth 8.6 (half the |margin| table), not 17.2",
+          abs(_app._pair_worth("NFL", "spread", [3]) - 8.6) < 1e-6)
+    check("NHL stays as measured (already one-direction)", abs(_app._pair_worth("NHL", "spread", [2]) - 9.7) < 1e-6)
+    # ONE RENT QUESTION IN THE PAIR ENGINE (Oct 2 2026): no pair function calls _rent_ok directly
+    import re as _re_pr
+    for _fn in ("_pair_from_gridiron_rule", "_pair_rerung", "_pair_rerung_both", "_pair_rerung_prop"):
+        _f = getattr(_app, _fn, None)
+        if _f is not None:
+            check(f"{_fn} asks rent through _pair_rent_ok, never _rent_ok directly",
+                  not _re_pr.search(r"(?<!_pair)_rent_ok\(", _insp0.getsource(_f)))
+    _g0 = _app._pair_rent_gated
+    try:
+        _app._pair_rent_gated = lambda sp: str(sp).upper() != "NFL"
+        check("an ungated sport's leg passes the pair rent question without asking the venue",
+              _app._pair_rent_ok("asc-nfl-x-y-2026-10-04-neg-2pt5", None, None, None) is True
+              and _app._pair_rent("asc-nfl-x-y-2026-10-04-neg-2pt5", None, None, None) is True)
+    finally:
+        _app._pair_rent_gated = _g0
     # EARLY NOT EARLY-EARLY + HOLD BOTH (Rob, Sep 30 2026)
-    check("rent gate is ON by default for every sport (the flag opens it)", _app._pair_rent_gated("NFL") and _app._pair_rent_gated("NHL"))
+    check("rent gate is ON by default in code for every sport (the DB flag opens it)", _app._PAIR_RENT_GATE_OFF == set())
     check("seat ceiling: NFL 72h, NHL 24h, props 48h", _app._pair_max_lead_h("NFL") == 72.0 and _app._pair_max_lead_h("NHL") == 24.0 and _app._pair_props_max_lead_h() == 48.0)
     p = _app._pair_plan({"a": leg(h=15, cost=55.7, bid=50.0, ask=51.0), "b": leg(h=15, cost=54.7, bid=48.0, ask=49.0)}, 15, 111, 300, hold_both=True)
     check("both held over 100 → HOLD: no asks on either leg", p["a"]["ask"] is None and p["b"]["ask"] is None and "hold_both" in p["a"]["why"])
@@ -1450,12 +1469,12 @@ def test_pair_candidates() -> None:
     check("a tie-only window is not a middle",
           _app._pair_candidates(r2, "spread", "NFL", 15) == [])
 
-    # College: 21 is worth 3.5% and must qualify; NFL's table stops caring
-    # about numbers that big, and its 6 is a steal college does not have.
+    # College: |21| is 3.5% both ways, so ONE direction is 1.75 — under the
+    # 2.0 minimum worth. It used to seat on the both-teams number (Oct 2 2026).
     r3 = rungs(("away", -20.5, 45.0, 46.0), ("home", 21.5, 54.0, 55.0))
-    check("college seats a middle on 21",
-          [x for x in _app._pair_candidates(r3, "spread", "NCAAF", 15)
-           if x["hits"] == [21]])
+    check("college does NOT seat a middle on 21 (one-direction worth 1.75 < 2.0)",
+          not [x for x in _app._pair_candidates(r3, "spread", "NCAAF", 15)
+               if x["hits"] == [21]])
     check("NFL worth table rates 6 over 7 per cent paid",
           _app._PAIR_WORTH_SPREAD["NFL"][6] > _app._PAIR_WORTH_SPREAD["NCAAF"][6])
 

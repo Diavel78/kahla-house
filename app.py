@@ -20934,12 +20934,31 @@ def _amend_total(leaves, cum) -> int:
     return max(1, int(round(t))) if t >= 0.5 else 0
 
 
+def _pair_rent_ok(slug, ko, now, sb) -> bool:
+    """THE PAIR ENGINE'S ONE RENT QUESTION (Oct 2 2026). Wednesday's switch
+    (`pair_rent_gate_off`) opened the seeder and the lap but FIVE other pair
+    sites still called `_rent_ok` directly — the football pair BUILDER among
+    them, which threw away every leg more than six hours out (football pays
+    day-of only) and returned None for all 132 football game lines for two
+    days: `no_middle` on a board that was never priced. Every rent check in
+    the pair engine goes through here: True for an ungated sport, else the
+    venue's per-market answer."""
+    if not _pair_rent_gated(_pair_sport_of(slug)):
+        return True
+    try:
+        return bool(_rent_ok(slug, ko, now, sb)[0])
+    except Exception:
+        return False
+
+
 def _pair_rent(slug, ko, now, sb):
     """True / False / None (UNREADABLE). A venue read that failed is not "no
     rent": one 429 on /v1/incentives read as rent_pulled and cancelled both
     bids of every unheld pair for the 10-minute cache (Sep 25 2026), then
     re-placed them at the back of the queue. The planner keeps orders where
     they are on None, exactly as it does for an unreadable book."""
+    if not _pair_rent_gated(_pair_sport_of(slug)):
+        return True
     try:
         ok, why = _rent_ok(slug, ko, now, sb)
     except Exception:
@@ -21418,6 +21437,7 @@ _PAIR_WORTH_SPREAD = {
 # Totals have no key numbers to speak of — the distribution is flat, so one
 # number per league (NFL measured 2.3% for a 1-point middle; college's totals
 # spread wider still).
+_PAIR_SPREAD_BOTH_WAYS = {"NFL", "NCAAF"}   # tables above are |margin| rates → halved in _pair_worth
 _PAIR_WORTH_TOTAL = {"NFL": 2.3, "NCAAF": 2.5}
 # MLB totals middle on a RUN NUMBER, measured over 3,574 finals — and they are
 # worth far more than a football point (Rob, Sep 21 2026: "MLB totals can
@@ -21607,7 +21627,19 @@ def _pair_worth(sport: str, mt: str, hits: list) -> float:
             return sum(_PAIR_WORTH_TOTAL_NHL.get(int(h), 1.0) for h in hits)
         return _PAIR_WORTH_TOTAL.get(sport, 2.0) * max(1, len(hits))
     tbl = _PAIR_WORTH_SPREAD.get(sport) or {}
-    return sum(tbl.get(abs(int(h)), 0.5) for h in hits if int(h) != 0)
+    w = sum(tbl.get(abs(int(h)), 0.5) for h in hits if int(h) != 0)
+    # ⚠ ONE DIRECTION (Oct 2 2026): the football tables are |margin| rates —
+    # BOTH teams winning by k. A pair's window is signed (fav by 3, not
+    # "anyone by 3"), so each number is worth about half its table value
+    # (NFL |3| = 14.7% over 906 finals, a 3-point favorite lands exactly 3
+    # ~9.5%; half the table's 17.2 = 8.6, on the safe side). The NHL table
+    # was re-measured one-direction on Sep 29; football gets the divisor
+    # until its tables are re-measured against line history. Found the
+    # morning the pair builder first priced football under value caps: it
+    # wanted 20 college spread pairs at ~124 against a true worth near 114.
+    if str(sport).upper() in _PAIR_SPREAD_BOTH_WAYS:
+        w *= 0.5
+    return w
 
 
 def _pair_candidates(rungs: list, mt: str, sport: str, qty: int) -> list:
@@ -22270,7 +22302,7 @@ def _pair_rerung_prop(sb, client, row, lg_in, st, cur, now, res) -> bool:
         if a_slug in foreign or b_slug in foreign:
             _pair_rr_why(row, "the rule's rung is pick-owned")
             return False
-        if not (_rent_ok(a_slug, ko, now, sb)[0] and _rent_ok(b_slug, ko, now, sb)[0]):
+        if not (_pair_rent_ok(a_slug, ko, now, sb) and _pair_rent_ok(b_slug, ko, now, sb)):
             _pair_rr_why(row, "a leg stopped paying rent")
             return False
         if not _pair_cancel_rungs_fresh(client, [legs[ka].get("slug"), legs[kb].get("slug")]):
@@ -22323,7 +22355,7 @@ def _pair_rerung_prop(sb, client, row, lg_in, st, cur, now, res) -> bool:
     if new_slug in foreign and new_slug != legs[hk].get("slug"):
         _pair_rr_why(row, "partner rung is pick-owned")
         return False
-    if not _rent_ok(new_slug, ko, now, sb)[0]:
+    if not _pair_rent_ok(new_slug, ko, now, sb):
         _pair_rr_why(row, "partner rung pays no rent")
         return False
     if not _pair_cancel_rungs_fresh(client, [legs[ek].get("slug")]):
@@ -22548,7 +22580,7 @@ def _pair_from_gridiron_rule(sb, g, mt, now, taken_slugs=None):
               if mt == "spread" else round(float(ln), 1))
         if not _gridiron_seat_legal(rule, mt, sn, rv):
             continue                            # the executor's own legality
-        if not _rent_ok(slug, es0, now, sb)[0] or _rent_dead(slug, sb):
+        if not _pair_rent_ok(slug, es0, now, sb) or _rent_dead(slug, sb):
             continue
         try:
             tk = _pmm_tick_c(client, slug)
@@ -22990,7 +23022,7 @@ def _pair_rerung(sb, client, row, hk, ek, lg_in, st, cur, now, res) -> bool:
             if o is opts[0]:
                 return False                    # already on the best rung
             continue
-        if not _rent_ok(sl, ko, now, sb)[0]:
+        if not _pair_rent_ok(sl, ko, now, sb):
             why_last = f"{sl[-18:]} pays no rent"
             continue                            # RULE #1 — rent or no seat
         best, new_slug, new_intent = o, sl, it
@@ -23164,7 +23196,7 @@ def _pair_rerung_both(sb, client, row, lg_in, st, cur, now, res) -> bool:
         _pair_rr_why(row, "already on the rule's rungs")
         return False
     ko = _parse_iso(str(row.get("kickoff")))
-    if not (_rent_ok(a_slug, ko, now, sb)[0] and _rent_ok(b_slug, ko, now, sb)[0]):
+    if not (_pair_rent_ok(a_slug, ko, now, sb) and _pair_rent_ok(b_slug, ko, now, sb)):
         _pair_rr_why(row, "a leg stopped paying rent")
         return False
     if not _pair_cancel_rungs_fresh(client, [legs["a"].get("slug"), legs["b"].get("slug")]):
