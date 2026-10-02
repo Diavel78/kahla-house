@@ -22703,13 +22703,24 @@ def _pair_seed_tick(sb, now=None, dry: bool = True, max_new: int = 0) -> dict:
         res["gate"] = "seed_flag_off"
         return res
     try:
-        live = (sb.table("pair_hedges").select("game_prefix,market_type")
+        live = (sb.table("pair_hedges").select("game_prefix,market_type,kickoff")
                 .eq("enabled", True).execute().data) or []
     except Exception as e:
         res["gate"] = f"pairs_unreadable: {e}"
         return res
     cap_n = int(_machine_flag_val("pair_max_active", 25) or 25)
-    if len(live) >= cap_n and armed:
+    # ACTIVE = NOT FINISHED (Oct 2 2026): nothing ever retires a row whose
+    # game is over, so 147 finished games filled the 150 limit and the seeder
+    # returned `max_active` in 24ms on a football Friday. A game 8h past its
+    # kickoff is not an active pair.
+    def _pair_row_live(r):
+        try:
+            return _parse_iso(r.get("kickoff")) > now - timedelta(hours=8)
+        except Exception:
+            return True
+    n_live = sum(1 for r in live if _pair_row_live(r))
+    res["active"] = n_live
+    if n_live >= cap_n and armed:
         res["gate"] = "max_active"
         return res
     have = {(r["game_prefix"], r["market_type"]) for r in live}
