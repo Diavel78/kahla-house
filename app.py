@@ -9435,6 +9435,16 @@ def _pmm_autolog(sb, owner_uid, client=None, orders=None, positions=None) -> dic
             _gs("manual_bid"); continue                            # manual bid → not ours
         if is_pos and slug in _sell_slugs and o is None:
             _gs("manual_ask_takeover"); continue                            # user's ask rests → takeover
+        if is_pos and o is None:
+            # A HAND BET THAT FILLED IS STILL A HAND BET (the Nebraska bet,
+            # Oct 3 2026): the venue's trade tape says whose buy it was.
+            # Not visible yet → wait a lap; a missed re-adoption costs a lap,
+            # a wrong one sells the user's bet.
+            _hv = _hand_fill_verdict(sb, slug, syn)
+            if _hv is None:
+                _gs("fill_owner_unknown"); continue
+            if _hv:
+                _gs("manual_fill"); continue
         qty = (abs(float((positions or {}).get(slug, {}).get("net") or 0))
                if is_pos else float(o.get("qty") or 0))
         if qty < 1.0:
@@ -13420,6 +13430,38 @@ def _mirror_fresh(key: str) -> bool:
     except Exception:
         pass
     return _time.monotonic() - at <= _VENUE_MIRROR_TTL_S
+
+
+def _hand_fill_verdict(sb, slug, synth) -> bool | None:
+    """Whose buy built this position? True = a HAND-PLACED (MANUAL) buy,
+    False = the machine's (AUTOMATIC), None = no buy trade visible yet.
+    Read off the venue's own trade tape (poly_activities mirror): the
+    manualOrderIndicator rides on every fill, and the venue's order list
+    drops filled orders, so the tape is the only record.
+
+    THE NEBRASKA BET (Oct 3 2026): Rob bought 5 Nebraska ML by hand at
+    14:40; football ghost adoption booked the pickless position as a
+    machine bet, the scalp rested an ask at cost and sold it at 14:42 for
+    6¢ — and the game won. The MANUAL flag lives on orders and fills, never
+    on a position, so "never touches a hand bet" was only true until the
+    hand bet filled. Callers REFUSE to adopt on True AND on None."""
+    try:
+        acts = (sb.table("poly_activities").select("payload")
+                .eq("type", "ACTIVITY_TYPE_TRADE").eq("slug", slug)
+                .limit(60).execute().data) or []
+    except Exception:
+        return None
+    want = ("ORDER_INTENT_BUY_SHORT" if synth else "ORDER_INTENT_BUY_LONG")
+    seen = None
+    for a in acts:
+        t = (a.get("payload") or {}).get("trade") or {}
+        mo = (t.get("aggressor") if t.get("isAggressor") else t.get("passive")) or {}
+        if mo.get("intent") != want:
+            continue
+        if mo.get("manualOrderIndicator") == "MANUAL_ORDER_INDICATOR_MANUAL":
+            return True                      # any hand buy on the lot = hands off
+        seen = False
+    return seen
 
 
 def _pmm_open_orders_raw(client, fresh: bool = False) -> list | None:

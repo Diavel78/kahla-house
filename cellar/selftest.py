@@ -1297,6 +1297,26 @@ def test_pair_plan() -> None:
     check("no line falls back to the unconditional |margin| table, unhalved",
           abs(_app._pair_worth("NFL", "spread", [3]) - 17.2) < 1e-6)
     check("prop sisters seat 10 a leg (Rob, Oct 3 2026)", _app._pair_prop_qty() == 10 or _app._machine_flag_val("pair_props_qty") is not None)
+    # THE NEBRASKA BET (Oct 3 2026): a position built by a MANUAL buy is never adopted
+    class _NebSB:
+        def __init__(self, moi): self.moi = moi
+        def table(self, *_a): return self
+        def select(self, *_a): return self
+        def eq(self, *_a): return self
+        def limit(self, *_a): return self
+        def execute(self):
+            class _R: pass
+            r = _R(); r.data = [{"payload": {"trade": {"isAggressor": False, "passive": {
+                "intent": "ORDER_INTENT_BUY_SHORT", "manualOrderIndicator": self.moi}}}}] if self.moi else []
+            return r
+    check("a hand-placed fill reads as the user's (True)",
+          _app._hand_fill_verdict(_NebSB("MANUAL_ORDER_INDICATOR_MANUAL"), "aec-cfb-mary-nebr-2026-10-03", True) is True)
+    check("a machine fill reads as ours (False)",
+          _app._hand_fill_verdict(_NebSB("MANUAL_ORDER_INDICATOR_AUTOMATIC"), "aec-cfb-mary-nebr-2026-10-03", True) is False)
+    check("no buy trade visible yet is unknown (None) — adoption waits",
+          _app._hand_fill_verdict(_NebSB(None), "aec-cfb-mary-nebr-2026-10-03", True) is None)
+    check("the ghost loop refuses a position on True or None (source shows both gates)",
+          "manual_fill" in _insp0.getsource(_app._pmm_autolog) and "fill_owner_unknown" in _insp0.getsource(_app._pmm_autolog))
     check("a line far from any measured row returns no conditional row",
           _app._pair_spread_cond_row("NFL", 30.5) is None)
     check("NHL stays as measured (already one-direction)", abs(_app._pair_worth("NHL", "spread", [2]) - 9.7) < 1e-6)
