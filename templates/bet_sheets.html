@@ -117,6 +117,12 @@
         .record { color: var(--muted); font-size: 12px; margin: -10px 0 14px; }
         .gap-pos { color: var(--green); }
         @media (max-width: 560px) { .cols { grid-template-columns: 1fr; } }
+        .live-hdr { color: var(--red); border-bottom-color: #4a1f1f; }
+        .live-flag { display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .08em; padding: 2px 7px; border-radius: 8px;
+                     background: #3c1414; color: var(--red); vertical-align: 1px; animation: livepulse 1.6s ease-in-out infinite; }
+        @keyframes livepulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+        .game.done { opacity: .72; }
+        .game.done .t { width: auto; flex-basis: auto; }
         .empty { color: var(--muted); padding: 40px 0; text-align: center; }
         .refresh-hint { color: var(--muted); font-size: 12px; margin-top: 24px; text-align: center; }
 
@@ -486,6 +492,7 @@
     }
     // football: spread both sides at the market line (else the model's), total over/under
     function footballSides(gi, g) {
+        if (g._st && g._st !== 'up') return '';     // started/finished — pre-game bets only
         const L = g.line || {}, M = g.model || {};
         let sh = L.spread_home, fromM = false;
         if (sh == null && M.spread_home != null) { sh = Math.round(Number(M.spread_home) * 2) / 2; fromM = true; }
@@ -504,6 +511,7 @@
     }
     // hockey: ML both sides, total over/under, puck line both sides
     function hockeySides(gi, g) {
+        if (g._st && g._st !== 'up') return '';     // started/finished — pre-game bets only
         const L = g.line || {}, M = g.model || {};
         const out = [];
         out.push(sideBtn(gi, g, 'ml', 'away', 0, nameOf(g, 'away') + ' ML', false));
@@ -704,6 +712,16 @@
             .filter(Boolean).join(' ').toLowerCase();
         return words.every(w => hay.includes(w));
     }
+    // 'up' = not started; 'final' = graded final or started > FINAL_AFTER_H
+    // ago (a grade lands within ~5 min of the final); 'live' = in between.
+    const FINAL_AFTER_H = { NHL: 3.5, NFL: 4.5, NCAAF: 4.5 };
+    function gameStatus(g) {
+        const t = g.event_start ? new Date(g.event_start).getTime() : null;
+        if (t === null || t > Date.now()) return 'up';
+        if (g.grade && g.grade.final) return 'final';
+        const h = (Date.now() - t) / 3600000;
+        return h > (FINAL_AFTER_H[_sport] || 4) ? 'final' : 'live';
+    }
     function renderGames() {
         const q = (document.getElementById('search').value || '').trim().toLowerCase();
         const words = q.split(/\s+/).filter(Boolean);
@@ -724,18 +742,34 @@
             html += '<div class="record">Picks record (plays + leans, graded): <b>' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + '</b>'
                   + (rec.win + rec.loss ? ' <span class="dim">(' + Math.round(100 * rec.win / (rec.win + rec.loss)) + '%)</span>' : '') + '</div>';
         }
+        // ORDER (Rob, Oct 3 2026: "live at the top, then next to go live,
+        // finished at the bottom — too much scrolling"): in-play first with a
+        // LIVE flag, then upcoming soonest-first under day headers, then
+        // finals (most recent first). Only upcoming games get side buttons.
+        games.forEach(g => { g._st = gameStatus(g); });
+        const live = games.filter(g => g._st === 'live');
+        const up = games.filter(g => g._st === 'up');
+        const fin = games.filter(g => g._st === 'final').reverse();
         let day = null;
-        for (const g of games) {
-            const dstr = fmtTime(g.event_start);
-            if (dstr !== day) { html += '<div class="day-hdr">' + dstr + '</div>'; day = dstr; }
+        const ordered = live.concat(up, fin);
+        for (const g of ordered) {
+            if (g._st === 'live') {
+                if (day !== '__live') { html += '<div class="day-hdr live-hdr">🔴 Live now</div>'; day = '__live'; }
+            } else if (g._st === 'final') {
+                if (day !== '__final') { html += '<div class="day-hdr">Final</div>'; day = '__final'; }
+            } else {
+                const dstr = fmtTime(g.event_start);
+                if (dstr !== day) { html += '<div class="day-hdr">' + dstr + '</div>'; day = dstr; }
+            }
             const cols = _sport === 'NHL' ? hockeyCols(g) : footballCols(g);
             let sub = '';
             if (_sport === 'NHL' && g.goalies) {
                 const ga = (g.goalies.away || {}).name, gh = (g.goalies.home || {}).name;
                 if (ga || gh) sub = '<span class="sub">🥅 ' + (ga || '?') + ' vs ' + (gh || '?') + '</span>';
             }
-            html += '<div class="game"><div class="ghead"><span class="t">' + fmtClock(g.event_start) + '</span>'
-                  + '<span class="m">' + shortTeam(g.away) + ' @ ' + shortTeam(g.home) + '</span>' + finalChip(g) + sub + '</div>'
+            const flag = g._st === 'live' ? '<span class="live-flag">LIVE</span>' : '';
+            html += '<div class="game' + (g._st === 'final' ? ' done' : '') + '"><div class="ghead"><span class="t">' + (g._st === 'final' ? fmtTime(g.event_start).split(',')[0] + ' ' : '') + fmtClock(g.event_start) + '</span>'
+                  + '<span class="m">' + shortTeam(g.away) + ' @ ' + shortTeam(g.home) + '</span>' + flag + finalChip(g) + sub + '</div>'
                   + '<div class="cols">'
                   + '<div class="col"><div class="lbl">Line</div><div class="val">' + cols[0] + '</div></div>'
                   + '<div class="col"><div class="lbl">Model</div><div class="val">' + cols[1] + '</div></div>'
