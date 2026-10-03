@@ -3479,14 +3479,16 @@ def _cellar_health(sb) -> dict:
                   .eq("enabled", True)
                   .gt("kickoff", datetime.now(timezone.utc).isoformat())
                   .lt("updated_at", (datetime.now(timezone.utc)
-                                     - timedelta(minutes=3)).isoformat())
+                                     - timedelta(minutes=10)).isoformat())
                   .limit(50).execute().data) or []
+        # 10 min, not 3 (Oct 3 2026): at 200+ pairs a lap is a 150s budget
+        # covering ~140 rows, so a healthy row is touched every other lap.
         if len(_stale) >= 3:
             for _l in lanes:
                 if _l["lane"] == "pair" and _l["state"] in ("ok", "idle"):
                     _l["state"] = "error"
                     _l["error"] = (f"PAIR STALE: {len(_stale)} pre-kick pairs not converged "
-                                   f"in 3 min (e.g. rows {[r['id'] for r in _stale[:5]]})")
+                                   f"in 10 min (e.g. rows {[r['id'] for r in _stale[:5]]})")
                     bad += 1
     except Exception:
         pass
@@ -23355,6 +23357,12 @@ def _pair_tick(sb, now=None) -> dict:
     # and the next lap starts where this one stopped (the scalp's lesson).
     _rot = _PAIR_ROT["i"] % max(1, len(rows))
     rows = rows[_rot:] + rows[:_rot]
+    _n_rows = max(1, len(rows))
+    # THE POINTER ADVANCES BY WHAT THE LAP DID (Oct 3 2026): it used to move
+    # ONE row per lap, so at 219 pairs and ~140 converged per 150s budget
+    # the tail sat unvisited for hours (rows 339/211/310 last touched 03:35,
+    # found 10:12 — bids resting unmanaged, PAIR STALE red). Set below from
+    # the count actually processed; a lap that finishes wraps to 0.
     _PAIR_ROT["i"] = _rot + 1
     _t0m = _time.monotonic()
     client = get_client()
@@ -23493,10 +23501,13 @@ def _pair_tick(sb, now=None) -> dict:
                 continue
         _kept.append(row)
     rows = _kept
+    _done = 0
     for row in rows:
         if _time.monotonic() - _t0m > _PAIR_TICK_BUDGET_S:
             res["deferred"] = res.get("deferred", 0) + 1
             continue                            # next lap starts here (rotation)
+        _done += 1
+        _PAIR_ROT["i"] = (_rot + _done) % _n_rows if _done < len(rows) else 0
         _ts = _time.monotonic()
         try:
             # EACH ROW DECIDES OFF THE MIRROR AS IT IS NOW (Sep 27 2026), never
