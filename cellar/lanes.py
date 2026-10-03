@@ -368,6 +368,8 @@ def lane_batch(ctx: Ctx) -> int:
 # replaces); the subprocess inherits the daemon's env, so it runs
 # against the same local PostgREST as everything else.
 _GRADER_ESPN_TS = {"ts": 0.0}
+_GRADER_SHEETS_TS = {"ts": 0.0}
+_GRADER_SHEETS_EVERY_S = 300.0
 
 
 def lane_grader(ctx: Ctx) -> int:
@@ -391,6 +393,20 @@ def lane_grader(ctx: Ctx) -> int:
             n += 1
         else:
             log.warning("grader: espn ingest failed: %s", out2[-400:])
+    # Pick-sheet ✅/❌ every ~5 min (Rob, Oct 3 2026: "grade… faster… like
+    # every 5 minutes"). Same ESPN scoreboard the live tracker polls; the
+    # grader skips any game ESPN hasn't marked final, and the stamp is an
+    # idempotent merge, so a pass with nothing new writes nothing. The
+    # 9:00 batch job still owns the stamped daily record.
+    if _t.time() - _GRADER_SHEETS_TS["ts"] >= _GRADER_SHEETS_EVERY_S:
+        _GRADER_SHEETS_TS["ts"] = _t.time()
+        ok3, out3 = _run_one(["scripts.grade_football_sheets", "--sport", "NFL",
+                              "--sport", "NCAAF", "--sport", "NHL",
+                              "--days-back", "1", "--today", "--write"], 240)
+        if ok3:
+            n += 1
+        else:
+            log.warning("grader: sheet grade failed: %s", out3[-400:])
     return n
 
 

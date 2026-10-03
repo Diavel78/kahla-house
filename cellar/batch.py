@@ -152,15 +152,8 @@ JOBS: tuple[Job, ...] = (
                          "--sport", "NCAAF", "--sport", "NHL",
                          "--days-back", "2", "--stamp", "--write"],
         hour=9, minute=0, timeout_s=600, note="pick-sheet record (yesterday + day before)"),
-    # Intraday ✅/❌ (Rob, Oct 3 2026: "how often does it grade?") — same
-    # grader, today + yesterday, --write only (the 9:00 run owns the stamped
-    # record). ESPN is the score source either way; a game not yet final is
-    # skipped, so these are safe mid-slate. One ESPN call per sport per date.
-    *(Job(f"sheets_grade_{hh:02d}{mm:02d}",
-          ["scripts.grade_football_sheets", "--sport", "NFL", "--sport", "NCAAF",
-           "--sport", "NHL", "--days-back", "1", "--today", "--write"],
-          hour=hh, minute=mm, timeout_s=600, note="pick-sheet ✅/❌ (intraday)")
-      for hh, mm in ((12, 0), (15, 0), (18, 0), (20, 30), (23, 0))),
+    # Intraday ✅/❌ ride the `grader` lane every ~5 min (cellar/lanes.py
+    # lane_grader) — this job owns only the stamped daily record.
 
     # -- daily model computes (order matters: after their spines) ----------
     Job("diamond_iq", ["scripts.compute_diamond_iq"],
