@@ -32,7 +32,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, __import__("os").path.dirname(
     __import__("os").path.dirname(__import__("os").path.abspath(__file__))))
-from scripts.football_sheet_data import sb_select, _espn_get, _LEAGUES  # noqa: E402
+from scripts.football_sheet_data import sb_select, sb_patch, _espn_get, _LEAGUES  # noqa: E402
 
 log = logging.getLogger("grade_football_sheets")
 # Hockey sheets (sport='NHL', same table — Sep 30 2026) stamp ESPN hockey
@@ -153,6 +153,9 @@ def main() -> int:
                      help="also grade the N AZ days before today (box batch job)")
     ap.add_argument("--stamp", action="store_true",
                      help="write the tally to exec_probe_runs (kind=sheet_grade)")
+    ap.add_argument("--write", action="store_true",
+                     help="stamp each graded game's result into football_sheets."
+                          "data_blob.grade (what /pick-sheets renders as ✅/❌)")
     ap.add_argument("--week-key", default=None,
                      help="omit to check the latest football_sheet_weeks for each sport")
     args = ap.parse_args()
@@ -166,6 +169,7 @@ def main() -> int:
     if not dates:
         ap.error("give --date and/or --days-back")
     detail = []
+    writes: list[tuple[dict, dict]] = []   # (row, grade) — stamped after the walk
     # tally[sport][market][verdict_tier] = {win, loss, push}
     tally: dict[str, dict[str, dict[str, dict[str, int]]]] = defaultdict(
         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(int))))
@@ -182,7 +186,7 @@ def main() -> int:
             wk = wk_rows[0]["week_key"]
 
         rows = sb_select("football_sheets", {
-            "select": "espn_id,event_name,event_start,tier,data_blob",
+            "select": "id,espn_id,event_name,event_start,tier,data_blob",
             "week_key": f"eq.{wk}", "sport": f"eq.{sport}"})
         rows = [r for r in rows if r.get("espn_id")
                 and _az_date(r["event_start"]) in dates]
@@ -210,12 +214,17 @@ def main() -> int:
                 continue
             hs, aws = fin["home_score"], fin["away_score"]
             row_detail["final"] = f"{r['event_name']} ({aws:g}-{hs:g})"
+            # The per-row stamp the sheet renders (Rob, Oct 3 2026: "add a
+            # grader to the picksheet… so it shows ✅ or ❌"). One key per
+            # graded market, win/loss/push; PASS verdicts get no key.
+            grade: dict = {"final": {"home": hs, "away": aws}}
 
             if hockey:
                 ml = hockey.get("ml") or {}
                 if ml.get("verdict") in ("play", "lean"):
                     res = grade_ml(ml, hs, aws)
                     if res:
+                        grade["ml"] = res
                         tier = ml["verdict"]
                         tally[sport]["ml"][tier][res] += 1
                         row_detail["ml"] = (
@@ -225,6 +234,7 @@ def main() -> int:
                 if bt.get("verdict") in ("play", "lean"):
                     res = grade_total(bt, hs, aws)
                     if res:
+                        grade["total"] = res
                         tier = bt["verdict"]
                         tally[sport]["total"][tier][res] += 1
                         row_detail["total"] = (
@@ -235,6 +245,7 @@ def main() -> int:
                 if bs.get("verdict") in ("play", "lean"):
                     res = grade_spread(bs, hs, aws)
                     if res:
+                        grade["spread"] = res
                         tier = bs["verdict"]
                         tally[sport]["spread"][tier][res] += 1
                         row_detail["spread"] = (
@@ -244,12 +255,37 @@ def main() -> int:
                 if bt.get("verdict") in ("play", "lean"):
                     res = grade_total(bt, hs, aws)
                     if res:
+                        grade["total"] = res
                         tier = bt["verdict"]
                         tally[sport]["total"][tier][res] += 1
                         row_detail["total"] = (
                             f"{bt.get('side')} {bt.get('line'):g} "
                             f"[{tier}] -> {res}")
+            writes.append((r, grade))
             detail.append(row_detail)
+
+    # Stamp data_blob.grade. Idempotent: an unchanged grade is not rewritten,
+    # so the daily 2-day re-grade is free. Merges into the existing blob —
+    # the builders' refresh path (data_blob.friday) merges the same way, and
+    # the NHL builder only upserts the coming slate, so a stamped row keeps
+    # its grade until the game falls out of the week.
+    n_stamped = 0
+    if args.write:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for r, grade in writes:
+            blob = dict(r.get("data_blob") or {})
+            prev = dict(blob.get("grade") or {})
+            prev.pop("graded_at", None)
+            if prev == grade:
+                continue
+            blob["grade"] = dict(grade, graded_at=now_iso)
+            try:
+                sb_patch("football_sheets", {"id": f"eq.{r['id']}"},
+                         {"data_blob": blob})
+                n_stamped += 1
+            except Exception as e:  # noqa: BLE001 — one bad row never stops the tally
+                log.warning("grade stamp failed for %s: %s", r.get("event_name"), e)
+        log.info("stamped %d/%d graded rows", n_stamped, len(writes))
 
     def _fmt(counts: dict) -> str:
         w, losses, p = counts.get("win", 0), counts.get("loss", 0), counts.get("push", 0)
@@ -312,7 +348,8 @@ def main() -> int:
     out = {"tally": {s: {mk: {t: dict(c) for t, c in tiers.items()}
                          for mk, tiers in m.items()} for s, m in tally.items()},
            "dates": sorted(dates), "play_only": dict(play_only),
-           "play_and_lean": dict(play_and_lean)}
+           "play_and_lean": dict(play_and_lean),
+           "stamped": n_stamped, "graded_rows": len(writes)}
     print("\n" + json.dumps(out, default=dict))
     if args.stamp:
         # exec_probe_runs(at default now(), params jsonb, result jsonb) — the

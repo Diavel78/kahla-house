@@ -110,6 +110,11 @@
         .col.picks .val div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .num { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; }
         .dim { color: var(--muted); font-size: 11.5px; }
+        .gr { margin-left: 4px; font-size: 13px; }
+        .gr-win { color: var(--green); } .gr-loss { color: #e05a5a; } .gr-push { color: var(--muted); }
+        .final { color: var(--text); font-weight: 600; font-size: 12px; background: var(--surface);
+                 border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px; }
+        .record { color: var(--muted); font-size: 12px; margin: -10px 0 14px; }
         .gap-pos { color: var(--green); }
         @media (max-width: 560px) { .cols { grid-template-columns: 1fr; } }
         .empty { color: var(--muted); padding: 40px 0; text-align: center; }
@@ -213,6 +218,20 @@
         if (v === 'lean') return '<span class="v v-lean">LEAN</span>';
         return '<span class="v v-pass">PASS</span>';
     }
+    // ✅/❌/➖ after a pick once the box's 09:00 grader has stamped the row
+    // (data_blob.grade, written by grade_football_sheets --write).
+    function gradeMark(g, key) {
+        const r = g.grade && g.grade[key];
+        if (r === 'win') return ' <span class="gr gr-win" title="won">✅</span>';
+        if (r === 'loss') return ' <span class="gr gr-loss" title="lost">❌</span>';
+        if (r === 'push') return ' <span class="gr gr-push" title="push">➖</span>';
+        return '';
+    }
+    function finalChip(g) {
+        const f = g.grade && g.grade.final;
+        if (!f || f.away === undefined || f.home === undefined) return '';
+        return '<span class="final">FINAL ' + nameOf(g, 'away') + ' ' + f.away + ' · ' + nameOf(g, 'home') + ' ' + f.home + '</span>';
+    }
     function sgn(x, d) {
         if (x === null || x === undefined) return '—';
         const v = Number(x).toFixed(d === undefined ? 1 : d);
@@ -273,10 +292,10 @@
         const bs = g.spread, bt = g.total;
         if (bs) pk.push('<div>' + verdictBadge(bs.verdict) + ' ' + (bs.verdict !== 'pass'
             ? shortTeam(bs.team) + ' ' + sgn(bs.line) + ' <span class="dim">(' + sgn(bs.edge_pts) + ' pts' + (bs.fair ? ', to ' + am(bs.fair) + ' / ' + pct(impl(bs.fair)) : '') + ')</span>'
-            : '<span class="dim">spread</span>') + '</div>');
+            : '<span class="dim">spread</span>') + gradeMark(g, 'spread') + '</div>');
         if (bt) pk.push('<div>' + verdictBadge(bt.verdict) + ' ' + (bt.verdict !== 'pass'
             ? (bt.side === 'over' ? 'Over ' : 'Under ') + bt.line + ' <span class="dim">(' + sgn(bt.edge_pts) + ' pts' + (bt.fair ? ', to ' + am(bt.fair) + ' / ' + pct(impl(bt.fair)) : '') + ')</span>'
-            : '<span class="dim">total</span>') + '</div>');
+            : '<span class="dim">total</span>') + gradeMark(g, 'total') + '</div>');
         return [line, model, pk.join('') || '<span class="unrated">no market line</span>'];
     }
 
@@ -309,12 +328,12 @@
             ? (g.ml.abbr || shortTeam(g.ml.team)) + ' ML ' + amp(g.ml.price)
               + ' <span class="dim">· model ' + (g.ml.model_p !== undefined && g.ml.model_p !== null ? pct(g.ml.model_p) : '—')
               + ' (' + sgn(g.ml.edge_pp) + '%), fair ' + am(g.ml.fair) + '</span>'
-            : '<span class="dim">ML</span>') + '</div>');
+            : '<span class="dim">ML</span>') + gradeMark(g, 'ml') + '</div>');
         if (g.total) pk.push('<div>' + verdictBadge(g.total.verdict) + ' ' + (g.total.verdict !== 'pass'
             ? (g.total.side === 'over' ? 'Over ' : 'Under ') + g.total.line + (g.total.price !== undefined && g.total.price !== null ? ' ' + amp(g.total.price) : '')
               + ' <span class="dim">· model ' + (g.total.model_p !== undefined && g.total.model_p !== null ? pct(g.total.model_p) : '—')
               + ' (' + sgn(g.total.edge_pp) + '%)' + (g.total.fair ? ', fair ' + am(g.total.fair) : '') + '</span>'
-            : '<span class="dim">total</span>') + '</div>');
+            : '<span class="dim">total</span>') + gradeMark(g, 'total') + '</div>');
         return [line, model, pk.join('') || '<span class="unrated">no market line yet</span>'];
     }
 
@@ -376,6 +395,17 @@
             return;
         }
         let html = '';
+        const rec = { win: 0, loss: 0, push: 0 };
+        for (const g of _games) {
+            for (const k of ['ml', 'spread', 'total']) {
+                const r = g.grade && g.grade[k];
+                if (r in rec) rec[r]++;
+            }
+        }
+        if (rec.win + rec.loss + rec.push) {
+            html += '<div class="record">Graded on this sheet: <b>' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + '</b>'
+                  + (rec.win + rec.loss ? ' <span class="dim">(' + Math.round(100 * rec.win / (rec.win + rec.loss)) + '%)</span>' : '') + '</div>';
+        }
         let day = null;
         for (const g of games) {
             const dstr = fmtTime(g.event_start);
@@ -387,7 +417,7 @@
                 if (ga || gh) sub = '<span class="sub">🥅 ' + (ga || '?') + ' vs ' + (gh || '?') + '</span>';
             }
             html += '<div class="game"><div class="ghead"><span class="t">' + fmtClock(g.event_start) + '</span>'
-                  + '<span class="m">' + shortTeam(g.away) + ' @ ' + shortTeam(g.home) + '</span>' + sub + '</div>'
+                  + '<span class="m">' + shortTeam(g.away) + ' @ ' + shortTeam(g.home) + '</span>' + finalChip(g) + sub + '</div>'
                   + '<div class="cols">'
                   + '<div class="col"><div class="lbl">Line</div><div class="val">' + cols[0] + '</div></div>'
                   + '<div class="col"><div class="lbl">Model</div><div class="val">' + cols[1] + '</div></div>'

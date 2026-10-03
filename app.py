@@ -1042,6 +1042,7 @@ def football_picks_page():
 
 
 _SHEET_SPORTS = ("NHL", "NCAAF", "NFL")
+_SHEET_NHL_LOOKBACK_H = 36   # hockey sheet keeps last night's graded games on the page
 
 
 def _sheet_game_football(r: dict) -> dict:
@@ -1078,6 +1079,7 @@ def _sheet_game_football(r: dict) -> dict:
             "home_short": (g.get("locs") or {}).get("home"),
             "line": line, "model": mdl,
             "spread": bs, "total": bt, "unrated": model is None,
+            "grade": blob.get("grade"),
             "friday_note": r.get("friday_md")}
 
 
@@ -1105,6 +1107,7 @@ def _sheet_game_nhl(r: dict) -> dict:
             "away_short": g.get("away_abbr"), "home_short": g.get("home_abbr"),
             "line": line, "model": mdl, "ml": picks.get("ml"),
             "total": picks.get("total"), "unrated": model is None,
+            "grade": blob.get("grade"),
             "goalies": {k: {"name": (v or {}).get("name"), "source": (v or {}).get("source")}
                         for k, v in gl.items()}}
 
@@ -1146,10 +1149,11 @@ def api_football_picks():
                  .select("event_name,event_start,tier,data_blob,friday_md,data_built_at")
                  .eq("week_key", wk["week_key"]).eq("sport", sport))
             if sport == "NHL":
-                # A daily slate: last night's games stay in the week's rows,
-                # the sheet shows what's still to play (3h grace for live).
+                # A daily slate: the sheet shows what's still to play PLUS
+                # the last ~36h, so last night's games stay up with their
+                # ✅/❌ grade (Oct 3 2026) until the next slate rolls on.
                 q = q.gte("event_start", (datetime.now(timezone.utc)
-                                          - timedelta(hours=3)).isoformat())
+                                          - timedelta(hours=_SHEET_NHL_LOOKBACK_H)).isoformat())
             rows = q.order("event_start").execute().data or []
         except Exception as e:
             return jsonify({"ok": False, "error": f"games lookup failed: {e}"}), 500
@@ -1158,7 +1162,7 @@ def api_football_picks():
         if fb:
             res = fb.get("result") or {}
             wk = res.get("week") or wk
-            cut = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+            cut = (datetime.now(timezone.utc) - timedelta(hours=_SHEET_NHL_LOOKBACK_H)).isoformat()
             rows = sorted([s for s in (res.get("sheets") or [])
                            if (s.get("event_start") or "") >= cut],
                           key=lambda s: s.get("event_start") or "")

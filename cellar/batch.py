@@ -150,7 +150,7 @@ JOBS: tuple[Job, ...] = (
     # (kind=sheet_grade) so a sandbox can read it through the site.
     Job("sheets_grade", ["scripts.grade_football_sheets", "--sport", "NFL",
                          "--sport", "NCAAF", "--sport", "NHL",
-                         "--days-back", "2", "--stamp"],
+                         "--days-back", "2", "--stamp", "--write"],
         hour=9, minute=0, timeout_s=600, note="pick-sheet record (yesterday + day before)"),
 
     # -- daily model computes (order matters: after their spines) ----------
