@@ -1074,6 +1074,7 @@ def _sheet_game_football(r: dict) -> dict:
                "total": round(t, 1) if t is not None else None,
                "win_home": model.get("win_prob_home")}
     return {"event_name": r.get("event_name"), "event_start": r.get("event_start"),
+            "market_id": r.get("market_id"),
             "tier": r.get("tier"), "away": g.get("away"), "home": g.get("home"),
             "away_short": (g.get("locs") or {}).get("away"),
             "home_short": (g.get("locs") or {}).get("home"),
@@ -1103,6 +1104,7 @@ def _sheet_game_nhl(r: dict) -> dict:
                "away_cover": model.get("away_cover")}
     gl = blob.get("goalies") or {}
     return {"event_name": r.get("event_name"), "event_start": r.get("event_start"),
+            "market_id": r.get("market_id"),
             "away": g.get("away"), "home": g.get("home"),
             "away_short": g.get("away_abbr"), "home_short": g.get("home_abbr"),
             "line": line, "model": mdl, "ml": picks.get("ml"),
@@ -1146,7 +1148,7 @@ def api_football_picks():
     if wk:
         try:
             q = (sb.table("football_sheets")
-                 .select("event_name,event_start,tier,data_blob,friday_md,data_built_at")
+                 .select("market_id,event_name,event_start,tier,data_blob,friday_md,data_built_at")
                  .eq("week_key", wk["week_key"]).eq("sport", sport))
             if sport == "NHL":
                 # A daily slate: the sheet shows what's still to play PLUS
@@ -12022,13 +12024,8 @@ def api_poly_manual_order():
     if book is None:
         return jsonify({"ok": False,
                         "error": "book unreadable — try again"}), 503
-    # our-side view: a synthetic NO side reads the inverted ladder
-    if synthetic:
-        s_bid = (100 - book["best_ask"]) if book["best_ask"] is not None else None
-        s_ask = (100 - book["best_bid"]) if book["best_bid"] is not None else None
-    else:
-        s_bid, s_ask = book["best_bid"], book["best_ask"]
     if body.get("preview"):
+        s_bid, s_ask = _manual_side_book(book, synthetic)
         sugg = (float(int(s_bid)) + 1.0) if s_bid is not None else None
         if (sugg is not None and s_ask is not None and sugg >= s_ask
                 and s_bid is not None):
@@ -12036,35 +12033,64 @@ def api_poly_manual_order():
         return jsonify({"ok": True, "preview": True, "slug": slug,
                         "side_bid_c": s_bid, "side_ask_c": s_ask,
                         "suggest_c": sugg})
+    out, status = _manual_order_place(client, slug, synthetic,
+                                      body.get("price_c"), body.get("contracts"),
+                                      body.get("event_start"), book=book)
+    return jsonify(out), status
+
+
+def _manual_side_book(book: dict, synthetic: bool):
+    """(our-side best bid, our-side best ask) in cents off a YES book. A
+    synthetic NO side reads the inverted ladder."""
+    if synthetic:
+        s_bid = (100 - book["best_ask"]) if book["best_ask"] is not None else None
+        s_ask = (100 - book["best_bid"]) if book["best_bid"] is not None else None
+    else:
+        s_bid, s_ask = book["best_bid"], book["best_ask"]
+    return s_bid, s_ask
+
+
+def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
+                        event_start, book: dict | None = None):
+    """THE HAND BET — one post-only MANUAL order (Aug 22 2026 rails, lifted
+    out of the route Oct 3 2026 so the Bet Sheets slip can place a list of
+    them). Returns (payload, http_status); payload['ok'] False carries
+    'error'. Rails: half-cent grid, 1-99c, 1-250 contracts, cost <= $500,
+    must not cross the ask (post-only would reject — fail loud instead),
+    GTD = kickoff. MANUAL indicator = every machine sweep is blind to it."""
     try:
-        price_c = float(body.get("price_c"))
-        contracts = int(body.get("contracts"))
+        price_c = float(price_c)
+        contracts = int(contracts)
     except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "price_c and contracts "
-                        "must be numbers"}), 400
+        return {"ok": False, "error": "price_c and contracts must be numbers"}, 400
+    if book is None:
+        book = _pmm_book(client, slug)
+    if book is None:
+        return {"ok": False, "error": "book unreadable — try again"}, 503
+    s_bid, s_ask = _manual_side_book(book, synthetic)
     if abs(price_c * 2 - round(price_c * 2)) > 1e-6:
-        return jsonify({"ok": False,
-                        "error": "price must be on the half-cent grid"}), 400
+        return {"ok": False, "error": "price must be on the half-cent grid"}, 400
     if not (1.0 <= price_c <= 99.0):
-        return jsonify({"ok": False, "error": "price must be 1-99¢"}), 400
+        return {"ok": False, "error": "price must be 1-99¢"}, 400
     if not (1 <= contracts <= 250):
-        return jsonify({"ok": False, "error": "contracts must be 1-250"}), 400
+        return {"ok": False, "error": "contracts must be 1-250"}, 400
     cost = contracts * price_c / 100.0
     if cost > 500.0:
-        return jsonify({"ok": False, "error": f"cost ${cost:.2f} over the "
-                        "$500 fat-finger cap"}), 400
+        return {"ok": False, "error": f"cost ${cost:.2f} over the "
+                "$500 fat-finger cap"}, 400
     if s_ask is not None and price_c >= s_ask:
-        return jsonify({"ok": False, "error": f"{price_c:g}¢ crosses the "
-                        f"{s_ask:g}¢ ask — post-only would reject; bid "
-                        "below the ask"}), 400
+        return {"ok": False, "error": f"{price_c:g}¢ crosses the "
+                f"{s_ask:g}¢ ask — post-only would reject; bid "
+                "below the ask"}, 400
     try:
         dt = datetime.fromisoformat(
-            str(body.get("event_start")).replace("Z", "+00:00"))
+            str(event_start).replace("Z", "+00:00"))
         gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     except (TypeError, ValueError):
-        return jsonify({"ok": False,
-                        "error": "event_start (ISO) required — orders "
-                        "expire at kickoff"}), 400
+        return {"ok": False, "error": "event_start (ISO) required — orders "
+                "expire at kickoff"}, 400
+    if dt.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        return {"ok": False, "error": "game already started — pre-game bets only"}, 400
     canon = (100.0 - price_c) / 100.0 if synthetic else price_c / 100.0
     params = {"marketSlug": slug,
               "intent": ("ORDER_INTENT_BUY_SHORT" if synthetic
@@ -12080,14 +12106,13 @@ def api_poly_manual_order():
         oid = (cr.get("id") if isinstance(cr, dict)
                else getattr(cr, "id", None))
     except Exception as e:
-        return jsonify({"ok": False,
-                        "error": f"create failed: {e}"[:200]}), 502
+        return {"ok": False, "error": f"create failed: {e}"[:200]}, 502
     # orders.list is the only truthful read (retrieve 404s on live
     # orders — the probe-proven landmine). Post-only rejections show up
     # here as a missing/rejected order rather than a resting one.
     state = None
     try:
-        for o in (_pmm_open_orders_raw(client) or []):
+        for o in (_pmm_open_orders_raw(client, fresh=True) or []):
             if o.get("id") == oid:
                 state = o.get("state")
                 break
@@ -12096,9 +12121,484 @@ def api_poly_manual_order():
     _probe_log({"manual_order": True, "slug": slug, "price_c": price_c,
                 "contracts": contracts, "synthetic": synthetic,
                 "order_id": oid, "state": state})
-    return jsonify({"ok": True, "order_id": oid, "state": state,
-                    "resting": state in _OPEN_ORDER_STATES,
-                    "cost": round(cost, 2)})
+    return {"ok": True, "order_id": oid, "state": state,
+            "resting": state in _OPEN_ORDER_STATES,
+            "cost": round(cost, 2), "price_c": price_c,
+            "side_bid_c": s_bid, "side_ask_c": s_ask}, 200
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# BET SHEETS (Oct 3 2026 — Rob: "Pick sheets is solid… make one that
+# looks the same, but it's Bet Sheets, admin only… I set the contracts
+# per bet, and you place my resting bets (RESTING ONLY) at touch on
+# Polymarket via API"). The human betting page that replaces the Pick
+# Bot: every priced side on the sheet is a tap into a slip; one contracts
+# number for the whole slip; Submit places post-only MANUAL orders that
+# JOIN the touch (Rob: "at touch, match the top offer"), one venue write
+# at a time, through _manual_order_place — the Aug 22 hand-bet rails.
+# A side whose exact rung the venue doesn't list takes the NEAREST MORE
+# FAVORABLE rung ("auto pick the more favorable side"); nothing legal →
+# the item stays on the slip with the reason. Every placed bet is logged
+# as a bot_picks row (signal_blob.bet_sheet + manual_web_bet + pmm_slug)
+# so the resolver grades it (venue-first on a held lot, ESPN otherwise);
+# the MANUAL flag keeps every machine sweep off it and the pick's flags
+# keep the scalp/chase off it — the machine is being switched off anyway
+# (Rob: "no pairs, no machine… these bets stay").
+# ═══════════════════════════════════════════════════════════════════════
+_BET_SHEET_MTS = ("ml", "spread", "total")
+
+
+def _bet_sheet_rung(entries, mt: str, side: str, want):
+    """Pure. Pick the venue rung for a sheet side. `entries` = the pmm
+    lookup list for `mt` (each {side, line, slug, quote, synthetic?}); the
+    line is the SIDE'S OWN number (home −3.5 / away +3.5; totals the posted
+    total). Exact rung first; else the nearest MORE FAVORABLE rung — a
+    spread's own line higher (−3 beats −3.5, +4 beats +3.5), an over LOWER,
+    an under HIGHER. Never a worse rung. Returns (entry, why) with why in
+    {'exact','favorable'} or (None, reason)."""
+    same = [e for e in (entries or []) if e.get("side") == side and e.get("slug")]
+    if not same:
+        return None, f"venue lists no {mt} market for that side"
+    if mt == "ml":
+        return same[0], "exact"
+    try:
+        want = float(want)
+    except (TypeError, ValueError):
+        return None, "sheet has no line"
+    lined = [(float(e["line"]), e) for e in same if e.get("line") is not None]
+    if not lined:
+        return None, "venue rungs carry no line"
+    for ln, e in lined:
+        if abs(ln - want) < 0.01:
+            return e, "exact"
+    if mt == "spread" or side == "under":
+        fav = [(ln, e) for ln, e in lined if ln > want]
+    else:
+        fav = [(ln, e) for ln, e in lined if ln < want]
+    if not fav:
+        have = ", ".join(f"{ln:+g}" if mt == "spread" else f"{ln:g}"
+                         for ln, _ in sorted(lined))
+        return None, (f"no rung at {want:+g} or better; venue has {have}"
+                      if mt == "spread" else
+                      f"no rung at {want:g} or better; venue has {have}")
+    fav.sort(key=lambda t: abs(t[0] - want))
+    return fav[0][1], "favorable"
+
+
+def _bet_sheet_resolve(client, item: dict) -> dict:
+    """One slip item → the Polymarket slug + the touch on our side. Reads
+    the venue twice (event lookup, cached 120s across items; one book)."""
+    sport = str(item.get("sport") or "").upper()
+    away, home = item.get("away"), item.get("home")
+    es = item.get("event_start")
+    mt = str(item.get("market_type") or "")
+    side = str(item.get("side") or "")
+    if sport not in _SHEET_SPORTS or mt not in _BET_SHEET_MTS or not (away and home and es):
+        return {"ok": False, "reason": "bad item"}
+    if side not in (("home", "away") if mt != "total" else ("over", "under")):
+        return {"ok": False, "reason": "bad side"}
+    try:
+        import pmm_markets as _pm
+        pmm = _pm.lookup(client, sport, away, home, es, want_props=False, max_age_s=120)
+    except Exception as e:
+        return {"ok": False, "reason": f"venue lookup failed: {e}"[:120]}
+    if not pmm:
+        return {"ok": False, "reason": "Polymarket has not listed this game"}
+    entry, why = _bet_sheet_rung(pmm.get(mt), mt, side, item.get("line"))
+    if entry is None:
+        return {"ok": False, "reason": why}
+    slug = entry["slug"]
+    synthetic = bool(entry.get("synthetic"))
+    book = _pmm_book(client, slug)
+    if book is None:
+        return {"ok": False, "reason": "book unreadable — try again", "slug": slug}
+    s_bid, s_ask = _manual_side_book(book, synthetic)
+    if s_bid is None:
+        return {"ok": False, "reason": "no bids on this market yet", "slug": slug,
+                "rung_line": entry.get("line")}
+    return {"ok": True, "slug": slug, "synthetic": synthetic,
+            "rung_line": entry.get("line"), "rung_why": why,
+            "price_c": s_bid, "ask_c": s_ask,
+            "event_slug": pmm.get("event_slug"), "event_title": pmm.get("event_title"),
+            "_book": book}
+
+
+def _bet_sheet_market_id(sb, sport: str, away: str, home: str, event_start: str):
+    """The markets row the pick joins on (the resolver grades by it). Exact
+    event_name in a ±12h window, else a same-window row naming both teams'
+    last tokens, else MINT one (notes.src='bet_sheet') — a sheet game the
+    spine never carried must still be gradeable."""
+    name = f"{away} @ {home}"
+    try:
+        dt = datetime.fromisoformat(str(event_start).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    lo = (dt - timedelta(hours=12)).isoformat()
+    hi = (dt + timedelta(hours=12)).isoformat()
+    try:
+        rows = (sb.table("markets").select("id,event_name,event_start")
+                .eq("sport", sport).gte("event_start", lo).lte("event_start", hi)
+                .limit(400).execute().data or [])
+    except Exception:
+        rows = []
+    exact = [r for r in rows if r.get("event_name") == name]
+    if exact:
+        return exact[0]["id"]
+    a_tok = (away or "").split()[-1].lower()
+    h_tok = (home or "").split()[-1].lower()
+    fuzzy = [r for r in rows
+             if a_tok in (r.get("event_name") or "").lower().split(" @ ")[0]
+             and h_tok in (r.get("event_name") or "").lower().split(" @ ")[-1]]
+    if fuzzy:
+        return fuzzy[0]["id"]
+    try:
+        ins = sb.table("markets").insert({
+            "sport": sport, "event_name": name, "event_start": dt.isoformat(),
+            "status": "active", "notes": {"src": "bet_sheet"}}).execute()
+        return (ins.data or [{}])[0].get("id")
+    except Exception as e:
+        app.logger.warning("bet sheet: market mint failed %s: %s", name, e)
+        return None
+
+
+@app.route("/bet-sheets")
+def bet_sheets_page():
+    """BET SHEETS (Oct 3 2026) — the admin's betting page: the pick sheet
+    with a slip. Client gate = admin only (the API routes are
+    @admin_required, which is the real gate)."""
+    return render_template("bet_sheets.html")
+
+
+@app.route("/api/bet-sheets/place", methods=["POST"])
+@admin_required
+def api_bet_sheets_place():
+    """body {items:[{key, sport, away, home, event_start, market_type
+    ml|spread|total, side, line, label}], contracts, preview}. Resolves each
+    item to its venue rung + touch; preview=true stops there. Otherwise
+    places a post-only MANUAL order at the touch per item, SERIALLY, and
+    logs each placed bet as a bot_picks row. Per-item results — a failure
+    carries `reason` and the slip keeps the item (Rob: "if it fails, it
+    stays on the betslip with a reason")."""
+    body = request.get_json(silent=True) or {}
+    items = body.get("items") or []
+    preview = bool(body.get("preview"))
+    try:
+        contracts = int(body.get("contracts") or 10)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "contracts must be a number"}), 400
+    if not isinstance(items, list) or not items:
+        return jsonify({"ok": False, "error": "no items"}), 400
+    if len(items) > 40:
+        return jsonify({"ok": False, "error": "40 items per submit"}), 400
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    sb = get_supabase()
+    results, placed = [], 0
+    t_end = _time.monotonic() + 50.0          # under the Vercel function budget
+    for it in items:
+        key = (it or {}).get("key")
+        if _time.monotonic() > t_end:
+            results.append({"key": key, "ok": False, "reason": "out of time — submit again"})
+            continue
+        res = _bet_sheet_resolve(client, it or {})
+        book = res.pop("_book", None)
+        res["key"] = key
+        if not res.get("ok") or preview:
+            results.append(res)
+            continue
+        out, _st = _manual_order_place(client, res["slug"], res["synthetic"],
+                                       res["price_c"], contracts, it.get("event_start"),
+                                       book=book)
+        if not out.get("ok"):
+            res.update({"ok": False, "reason": out.get("error") or "order failed"})
+            results.append(res)
+            continue
+        res.update({"order_id": out.get("order_id"), "state": out.get("state"),
+                    "resting": out.get("resting"), "cost": out.get("cost"),
+                    "contracts": contracts})
+        if not out.get("resting"):
+            res["warning"] = f"order sent but not resting (state {out.get('state') or 'unknown'}) — check the app"
+        placed += 1
+        # log it — the book must know about the bet from second one
+        pick_id = None
+        if sb is not None:
+            try:
+                mt = it.get("market_type")
+                mid = _bet_sheet_market_id(sb, str(it.get("sport")).upper(),
+                                           it.get("away"), it.get("home"), it.get("event_start"))
+                amer = _cents_to_american_py(res["price_c"])
+                blob = {"bet_sheet": True, "manual_web_bet": True,
+                        "pmm_slug": res["slug"], "pmm_synthetic": res["synthetic"],
+                        "order_id": out.get("order_id"), "contracts": contracts,
+                        "price_c": res["price_c"], "sheet_line": it.get("line"),
+                        "rung_line": res.get("rung_line"), "rung_why": res.get("rung_why"),
+                        "label": it.get("label"), "sport": str(it.get("sport")).upper(),
+                        "placed_at": datetime.now(timezone.utc).isoformat()}
+                row = {"asked_by": g.uid, "query_text": "bet sheet",
+                       "market_id": mid, "sport": str(it.get("sport")).upper(),
+                       "event_name": f"{it.get('away')} @ {it.get('home')}",
+                       "event_start": it.get("event_start"),
+                       "market_type": "moneyline" if mt == "ml" else mt,
+                       "side": it.get("side"), "entry_book": "POLYMARKET",
+                       "entry_price": amer,
+                       "entry_line": (float(res["rung_line"]) if mt != "ml"
+                                      and res.get("rung_line") is not None else None),
+                       "units": 1, "confidence": "low",
+                       "reasons": [f"Bet sheet — {contracts} contracts resting at {res['price_c']:g}¢"],
+                       "signal_blob": blob}
+                if mid is None:
+                    raise RuntimeError("no markets row")
+                ins = sb.table("bot_picks").insert(row).execute()
+                pick_id = (ins.data or [{}])[0].get("id")
+            except Exception as e:
+                res["warning"] = (res.get("warning") or "") + f" · pick log failed: {e}"[:160]
+                app.logger.warning("bet sheet pick log failed: %s", e)
+        res["pick_id"] = pick_id
+        results.append(res)
+    return jsonify({"ok": True, "preview": preview, "placed": placed,
+                    "contracts": contracts, "results": results})
+
+
+def _bet_sheet_pick_side_held(pos: dict | None, synthetic: bool) -> float:
+    """Contracts held on OUR side of a slug off the positions map (net>0 =
+    YES, net<0 = NO)."""
+    if not pos:
+        return 0.0
+    try:
+        net = float(pos.get("net") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if synthetic:
+        return -net if net < 0 else 0.0
+    return net if net > 0 else 0.0
+
+
+@app.route("/api/bet-sheets/mine")
+@admin_required
+def api_bet_sheets_mine():
+    """The admin's sheet bets with venue truth: resting (leaves/price),
+    filled (held), the current touch on our side (the gauge's outer ring vs
+    the entry's inner ring — the Pick Bot live tracker's circles), and the
+    resolver's grade + a dollars line once settled."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    now = datetime.now(timezone.utc)
+    cols = ("id,sport,event_name,event_start,market_type,side,entry_price,"
+            "entry_line,status,pnl_units,settled_at,result_score,signal_blob")
+    rows: dict = {}
+    try:
+        for r in (sb.table("bot_picks").select(cols)
+                  .eq("signal_blob->>bet_sheet", "true")
+                  .gte("event_start", (now - timedelta(days=4)).isoformat())
+                  .order("event_start").limit(300).execute().data or []):
+            rows[r["id"]] = r
+        for r in (sb.table("bot_picks").select(cols)
+                  .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                  .limit(300).execute().data or []):
+            rows[r["id"]] = r
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"picks read failed: {e}"}), 500
+    orders_by_id, positions, venue_ok = {}, {}, True
+    client = None
+    try:
+        client = get_client()
+        ords = _pmm_open_orders_raw(client, fresh=True)
+        pos = _pmm_positions_raw(client, fresh=True)
+        if ords is None or pos is None:
+            venue_ok = False
+        for o in (ords or []):
+            if o.get("id"):
+                orders_by_id[o["id"]] = o
+        positions = pos or {}
+    except Exception:
+        venue_ok = False
+    out, reads = [], 0
+    for r in sorted(rows.values(), key=lambda x: x.get("event_start") or ""):
+        blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        slug = blob.get("pmm_slug")
+        syn = bool(blob.get("pmm_synthetic"))
+        oid = blob.get("order_id")
+        o = orders_by_id.get(oid) if oid else None
+        resting = bool(o and o.get("state") in _OPEN_ORDER_STATES)
+        held = _bet_sheet_pick_side_held(positions.get(slug), syn) if slug else 0.0
+        filled_qty = blob.get("filled_qty")
+        if held > 0 and (filled_qty is None or abs(float(filled_qty) - held) > 0.01):
+            filled_qty = round(held, 2)
+            try:
+                sb.table("bot_picks").update(
+                    {"signal_blob": {**blob, "filled_qty": filled_qty}}).eq("id", r["id"]).execute()
+            except Exception:
+                pass
+        try:
+            ev_dt = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+            started = ev_dt <= now
+        except Exception:
+            started = False
+        cur_c = None
+        if (r.get("status") == "pending" and slug and client is not None
+                and venue_ok and reads < 30):
+            book = _pmm_book(client, slug)
+            reads += 1
+            if book:
+                b, a = _manual_side_book(book, syn)
+                if b is not None and a is not None:
+                    cur_c = round((b + a) / 2.0, 1)
+                else:
+                    cur_c = b if b is not None else a
+        price_c = blob.get("price_c")
+        contracts = blob.get("contracts")
+        st = r.get("status") or "pending"
+        pnl_usd = None
+        qty = filled_qty if filled_qty is not None else (
+            (float(o.get("cum") or 0.0) if o else None))
+        if st in ("won", "lost", "push") and price_c is not None:
+            q = float(qty) if qty is not None else float(contracts or 0)
+            if st == "won":
+                pnl_usd = round(q * (100.0 - float(price_c)) / 100.0, 2)
+            elif st == "lost":
+                pnl_usd = round(-q * float(price_c) / 100.0, 2)
+            else:
+                pnl_usd = 0.0
+        out.append({
+            "id": r["id"], "sport": r.get("sport"), "event_name": r.get("event_name"),
+            "event_start": r.get("event_start"), "started": started,
+            "market_type": r.get("market_type"), "side": r.get("side"),
+            "line": r.get("entry_line"), "label": blob.get("label"),
+            "entry_price": r.get("entry_price"), "price_c": price_c,
+            "contracts": contracts, "slug": slug, "synthetic": syn,
+            "order_id": oid,
+            "order": ({"resting": True, "leaves": o.get("leaves"), "cum": o.get("cum"),
+                       "price_c": (round((1 - float(o["price_yes"])) * 100, 1) if syn
+                                   else round(float(o["price_yes"]) * 100, 1))
+                       if o.get("price_yes") is not None else None}
+                      if resting else {"resting": False}),
+            "held": round(held, 2), "filled_qty": filled_qty,
+            "cur_c": cur_c, "status": st, "pnl_units": r.get("pnl_units"),
+            "pnl_usd": pnl_usd, "result_score": r.get("result_score"),
+            "venue_ok": venue_ok,
+        })
+    return jsonify({"ok": True, "bets": out, "venue_ok": venue_ok,
+                    "at": now.isoformat()})
+
+
+def _bet_sheet_cancel(client, oid: str, slug: str):
+    """Cancel + VERIFY on the re-listed book (a cancel that returns is a
+    claim). Returns (gone: bool, orders_list_or_None)."""
+    try:
+        client.orders.cancel(oid, {"marketSlug": slug})
+    except Exception as e:
+        app.logger.warning("bet sheet cancel %s: %s", oid, e)
+    ords = _pmm_open_orders_raw(client, fresh=True)
+    if ords is None:
+        return False, None
+    gone = not any(o.get("id") == oid and o.get("state") in _OPEN_ORDER_STATES
+                   for o in ords)
+    return gone, ords
+
+
+def _bet_sheet_pick(sb, pick_id):
+    try:
+        r = (sb.table("bot_picks").select("id,asked_by,status,event_start,signal_blob")
+             .eq("id", int(pick_id)).single().execute().data)
+    except Exception:
+        r = None
+    if not r:
+        return None, None
+    blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+    if not blob.get("bet_sheet"):
+        return None, None
+    return r, blob
+
+
+@app.route("/api/bet-sheets/cancel", methods=["POST"])
+@admin_required
+def api_bet_sheets_cancel():
+    """Cancel a resting sheet order. Nothing filled → the pick row goes too;
+    a partial fill keeps the pick at the held size."""
+    body = request.get_json(silent=True) or {}
+    sb = get_supabase()
+    r, blob = _bet_sheet_pick(sb, body.get("pick_id")) if sb else (None, None)
+    if not r:
+        return jsonify({"ok": False, "error": "pick not found"}), 404
+    oid, slug, syn = blob.get("order_id"), blob.get("pmm_slug"), bool(blob.get("pmm_synthetic"))
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    gone = True
+    if oid:
+        gone, _ = _bet_sheet_cancel(client, oid, slug)
+        if not gone:
+            return jsonify({"ok": False, "error": "venue did not cancel it — check the app"}), 502
+    pos = _pmm_positions_raw(client, fresh=True)
+    held = _bet_sheet_pick_side_held((pos or {}).get(slug), syn) if pos is not None else None
+    if held is not None and held <= 0.0 and r.get("status") == "pending":
+        sb.table("bot_picks").delete().eq("id", r["id"]).execute()
+        _probe_log({"bet_sheet_cancel": True, "pick_id": r["id"], "slug": slug, "deleted": True})
+        return jsonify({"ok": True, "deleted": True})
+    nb = {**blob, "cancelled_at": datetime.now(timezone.utc).isoformat(), "order_id": None}
+    if held:
+        nb["filled_qty"] = round(held, 2)
+    sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+    _probe_log({"bet_sheet_cancel": True, "pick_id": r["id"], "slug": slug, "held": held})
+    return jsonify({"ok": True, "deleted": False, "held": held})
+
+
+@app.route("/api/bet-sheets/repeg", methods=["POST"])
+@admin_required
+def api_bet_sheets_repeg():
+    """Move a resting sheet order back to the touch: cancel → verify →
+    create fresh at the current best bid (never orders.modify — the Aug 2/16
+    landmine). A failed re-create is reported loud and stamped on the pick."""
+    body = request.get_json(silent=True) or {}
+    sb = get_supabase()
+    r, blob = _bet_sheet_pick(sb, body.get("pick_id")) if sb else (None, None)
+    if not r:
+        return jsonify({"ok": False, "error": "pick not found"}), 404
+    oid, slug, syn = blob.get("order_id"), blob.get("pmm_slug"), bool(blob.get("pmm_synthetic"))
+    if not oid or not slug:
+        return jsonify({"ok": False, "error": "no resting order on this bet"}), 400
+    try:
+        client = get_client()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"client: {e}"}), 500
+    book = _pmm_book(client, slug)
+    if book is None:
+        return jsonify({"ok": False, "error": "book unreadable — try again"}), 503
+    s_bid, s_ask = _manual_side_book(book, syn)
+    if s_bid is None:
+        return jsonify({"ok": False, "error": "no bids on this market — nothing to join"}), 409
+    # size = what is still unfilled on the resting order
+    leaves = None
+    for o in (_pmm_open_orders_raw(client, fresh=True) or []):
+        if o.get("id") == oid:
+            leaves = o.get("leaves")
+            break
+    qty = int(round(float(leaves))) if leaves else int(blob.get("contracts") or 0)
+    if qty < 1:
+        return jsonify({"ok": False, "error": "nothing left unfilled to move"}), 409
+    if abs(float(blob.get("price_c") or -1) - s_bid) < 0.01:
+        return jsonify({"ok": True, "moved": False, "price_c": s_bid, "note": "already at the touch"})
+    gone, _ = _bet_sheet_cancel(client, oid, slug)
+    if not gone:
+        return jsonify({"ok": False, "error": "venue did not cancel the old order — nothing moved"}), 502
+    out, _st = _manual_order_place(client, slug, syn, s_bid, qty, r.get("event_start"), book=book)
+    if not out.get("ok"):
+        nb = {**blob, "order_id": None, "order_lost": True,
+              "repeg_error": out.get("error"), "repeg_at": datetime.now(timezone.utc).isoformat()}
+        sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+        return jsonify({"ok": False, "error": "old order cancelled but the new one failed: "
+                        + str(out.get("error")) + " — the bet is OFF the book"}), 502
+    nb = {**blob, "order_id": out.get("order_id"), "price_c": s_bid, "contracts": qty,
+          "repegged_from_c": blob.get("price_c"),
+          "repeg_at": datetime.now(timezone.utc).isoformat()}
+    sb.table("bot_picks").update({"signal_blob": nb,
+                                  "entry_price": _cents_to_american_py(s_bid)}).eq("id", r["id"]).execute()
+    return jsonify({"ok": True, "moved": True, "price_c": s_bid, "from_c": blob.get("price_c"),
+                    "order_id": out.get("order_id"), "resting": out.get("resting")})
 
 
 @app.route("/api/polymarket/cancel-gridiron")

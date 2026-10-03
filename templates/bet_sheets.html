@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kahla House — Bet Sheets</title>
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <link rel="icon" type="image/png" href="/apple-touch-icon.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Bet Sheets">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>
+        const FC = {
+            apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
+            authDomain: "kahla-house.firebaseapp.com",
+            projectId: "kahla-house",
+            storageBucket: "kahla-house.firebasestorage.app",
+            messagingSenderId: "1029771942929",
+            appId: "1:1029771942929:web:76358096dbb868e375a5b0"
+        };
+        firebase.initializeApp(FC);
+    </script>
+
+    <style>
+        :root {
+            --bg: #0b0e13; --surface: #13171e; --line: #232a37;
+            --text: #e8edf5; --muted: #7d8799;
+            --green: #34d399; --red: #f87171; --cyan: #22d3ee; --amber: #fbbf24;
+        }
+        * { box-sizing: border-box; }
+        html, body { overflow-x: hidden; }
+        body {
+            margin: 0; background: var(--bg); color: var(--text);
+            font-family: 'DM Sans', system-ui, sans-serif;
+            -webkit-font-smoothing: antialiased;
+        }
+        .topbar {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--line);
+            flex-wrap: wrap;
+        }
+        .nav { display: flex; gap: 16px; flex-wrap: wrap; }
+        .nav a { color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+        .nav a:hover, .nav a.on { color: var(--text); }
+        .logout {
+            background: none; border: 1px solid var(--line); color: var(--muted);
+            border-radius: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer;
+        }
+        .wrap { max-width: 920px; margin: 0 auto; padding: 18px 16px 60px; }
+        h1 { font-size: 20px; margin: 6px 0 14px; }
+        .search {
+            width: 100%; box-sizing: border-box; margin: 0 0 12px;
+            background: var(--surface); border: 1px solid var(--line); color: var(--text);
+            border-radius: 10px; padding: 10px 14px; font-size: 15px; font-family: inherit;
+            -webkit-appearance: none;
+        }
+        .search:focus { outline: none; border-color: #4a7bd6; }
+        .search::placeholder { color: var(--muted); }
+        .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+        .tab {
+            background: var(--surface); border: 1px solid var(--line); color: var(--muted);
+            border-radius: 999px; padding: 7px 16px; font-size: 13px; font-weight: 600;
+            cursor: pointer;
+        }
+        .tab.on { color: var(--bg); background: var(--cyan); border-color: var(--cyan); }
+        .dl-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+        .dl {
+            display: inline-flex; align-items: center; gap: 8px; text-decoration: none;
+            background: var(--surface); border: 1px solid var(--line); color: var(--text);
+            border-radius: 10px; padding: 10px 14px; font-size: 13px; font-weight: 600;
+        }
+        .dl:hover { border-color: var(--cyan); }
+        .dl .sub { color: var(--muted); font-weight: 400; font-size: 11px; }
+        .meta { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
+        .day-hdr {
+            font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+            color: var(--muted); margin: 18px 0 6px; padding-bottom: 4px;
+            border-bottom: 1px solid var(--line);
+        }
+        .day-hdr:first-of-type { margin-top: 0; }
+        .row {
+            display: flex; align-items: baseline; gap: 10px; padding: 8px 0;
+            border-bottom: 1px solid var(--line); flex-wrap: wrap;
+        }
+        .t { width: 56px; flex: 0 0 56px; color: var(--muted); font-size: 12px;
+             font-variant-numeric: tabular-nums; }
+        .m { flex: 1 1 220px; font-weight: 600; font-size: 14px; }
+        .legs { flex: 2 1 260px; display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; }
+        .v {
+            display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .06em;
+            padding: 2px 7px; border-radius: 8px; margin-right: 5px; vertical-align: 1px;
+        }
+        .v-play { background: #103c2c; color: var(--green); }
+        .v-lean { background: #4a3a10; color: var(--amber); }
+        .v-pass { background: var(--surface); color: var(--muted); border: 1px solid var(--line); }
+        .unrated { color: var(--muted); font-style: italic; font-size: 13px; }
+        .game { padding: 10px 0; border-bottom: 1px solid var(--line); }
+        .ghead { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; flex-wrap: wrap; }
+        .ghead .sub { color: var(--muted); font-size: 12px; }
+        .cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+        .col { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; min-width: 0; }
+        .col .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 3px; }
+        .col .val { font-size: 13px; font-variant-numeric: tabular-nums; line-height: 1.5; }
+        .col.picks .val div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .num { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; }
+        .dim { color: var(--muted); font-size: 11.5px; }
+        .gr { margin-left: 4px; font-size: 13px; }
+        .gr-win { color: var(--green); } .gr-loss { color: #e05a5a; } .gr-push { color: var(--muted); }
+        .final { color: var(--text); font-weight: 600; font-size: 12px; background: var(--surface);
+                 border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px; }
+        .record { color: var(--muted); font-size: 12px; margin: -10px 0 14px; }
+        .gap-pos { color: var(--green); }
+        @media (max-width: 560px) { .cols { grid-template-columns: 1fr; } }
+        .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+        .refresh-hint { color: var(--muted); font-size: 12px; margin-top: 24px; text-align: center; }
+
+        /* ── Bet Sheets additions ── */
+        .sides { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+        .sb {
+            background: #0f1420; border: 1px solid #2b3447; color: var(--text);
+            border-radius: 8px; padding: 5px 9px; font-size: 12.5px; font-weight: 600;
+            font-family: 'JetBrains Mono', monospace; cursor: pointer; white-space: nowrap;
+        }
+        .sb:hover { border-color: var(--cyan); }
+        .sb.in { background: #0e3b2e; border-color: var(--green); color: var(--green); }
+        .sb.dis { opacity: .35; cursor: default; }
+        .sb .ml { color: var(--muted); font-weight: 400; font-size: 10.5px; }
+        .mline { color: var(--amber); font-size: 10px; margin-left: 4px; }
+        .slip {
+            position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+            background: #10141c; border-top: 1px solid #2b3447; box-shadow: 0 -8px 30px rgba(0,0,0,.45);
+            max-height: 70vh; display: flex; flex-direction: column;
+        }
+        .slip-h { display: flex; align-items: center; gap: 10px; padding: 10px 16px; cursor: pointer; }
+        .slip-h b { font-size: 14px; }
+        .slip-h .cnt { background: var(--cyan); color: var(--bg); border-radius: 999px; padding: 1px 9px; font-size: 12px; font-weight: 800; }
+        .slip-h .sp { flex: 1; }
+        .slip-h .chev { color: var(--muted); font-size: 12px; }
+        .slip-b { overflow: auto; padding: 0 16px 14px; display: none; }
+        .slip.open .slip-b { display: block; }
+        .si { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+        .si .lab { flex: 1; min-width: 0; }
+        .si .lab b { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+        .si .lab .g { color: var(--muted); font-size: 11.5px; }
+        .si .q { font-size: 11.5px; color: var(--muted); margin-top: 2px; font-family: 'JetBrains Mono', monospace; }
+        .si .q.bad { color: var(--red); }
+        .si .q.ok { color: var(--green); }
+        .si .x { background: none; border: 0; color: var(--muted); font-size: 16px; cursor: pointer; padding: 0 4px; }
+        .slip-f { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 0 0; border-top: 1px solid var(--line); margin-top: 4px; }
+        .slip-f label { color: var(--muted); font-size: 12px; }
+        .slip-f input {
+            width: 84px; background: var(--surface); border: 1px solid var(--line); color: var(--text);
+            border-radius: 8px; padding: 7px 10px; font-size: 15px; font-family: 'JetBrains Mono', monospace;
+        }
+        .btn { border: 1px solid var(--line); background: var(--surface); color: var(--text); border-radius: 9px;
+               padding: 8px 14px; font-size: 13px; font-weight: 700; cursor: pointer; font-family: inherit; }
+        .btn:disabled { opacity: .5; cursor: default; }
+        .btn.go { background: var(--green); border-color: var(--green); color: #052e1c; }
+        .btn.sm { padding: 4px 9px; font-size: 11.5px; font-weight: 600; }
+        .btn.warn { color: var(--red); }
+        .slip-cost { color: var(--muted); font-size: 12px; margin-left: auto; font-family: 'JetBrains Mono', monospace; }
+        .wrap { padding-bottom: 120px; }
+        .sec-h { display: flex; align-items: baseline; gap: 10px; margin: 6px 0 8px; }
+        .sec-h h2 { font-size: 15px; margin: 0; }
+        .sec-h .sub { color: var(--muted); font-size: 12px; }
+        .bets { margin-bottom: 18px; }
+        .bet { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+        .bet .info { flex: 1; min-width: 0; }
+        .bet .info .l1 { font-size: 13.5px; font-weight: 600; }
+        .bet .info .l1 b { font-family: 'JetBrains Mono', monospace; }
+        .bet .info .l2 { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+        .bet .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+        .chip { display: inline-block; font-size: 10.5px; font-weight: 800; letter-spacing: .04em; padding: 2px 7px; border-radius: 8px; margin-right: 5px; }
+        .c-rest { background: #3a3410; color: var(--amber); }
+        .c-fill { background: #103c2c; color: var(--green); }
+        .c-won { background: #103c2c; color: var(--green); }
+        .c-lost { background: #3c1414; color: var(--red); }
+        .c-push, .c-off { background: var(--surface); color: var(--muted); border: 1px solid var(--line); }
+        .win-gauge { flex: 0 0 auto; position: relative; width: 44px; height: 44px; }
+        .win-gauge svg { transform: rotate(-90deg); }
+        .win-gauge .wg-num { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+        .toast { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 99; background: #1a2130; border: 1px solid #2b3447;
+                 color: var(--text); padding: 10px 16px; border-radius: 10px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+        .toast.show { opacity: 1; }
+        .toast.bad { border-color: var(--red); }
+    </style>
+</head>
+<body>
+    <div id="auth-gate" style="padding:40px;text-align:center;color:var(--muted)">Checking access…</div>
+    <div id="toast" class="toast"></div>
+    <div id="app" style="display:none">
+        <div class="topbar">
+            <div class="nav">
+                <a href="/">Home</a>
+                <a href="/dashboard">Dashboard</a>
+                <a href="/pick-sheets">Pick Sheets</a>
+                <a href="/bet-sheets" class="on">Bet Sheets</a>
+            </div>
+            <button class="logout" onclick="doLogout()">Log out</button>
+        </div>
+
+        <div class="wrap">
+            <h1>Bet Sheets</h1>
+
+            <div class="bets" id="betsSec">
+                <div class="sec-h"><h2>My bets</h2><span class="sub" id="betsMeta">loading…</span></div>
+                <div id="bets"></div>
+            </div>
+
+            <input class="search" id="search" type="search" placeholder="Search a game or team…"
+                   autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                   oninput="renderGames()">
+            <div class="tabs">
+                <button class="tab on" data-sport="NHL" onclick="switchSport('NHL')">🏒 Hockey</button>
+                <button class="tab" data-sport="NCAAF" onclick="switchSport('NCAAF')">🏈 College</button>
+                <button class="tab" data-sport="NFL" onclick="switchSport('NFL')">🏈 NFL</button>
+            </div>
+            <div class="meta" id="metaLine">loading…</div>
+            <div id="games"><div class="empty">loading…</div></div>
+            <div class="refresh-hint" id="hint">Tap a side to add it to the slip. Submit rests post-only orders at the touch (joins the best bid). A missing rung takes the nearest more-favorable one; nothing legal stays on the slip with the reason.</div>
+        </div>
+
+        <div class="slip" id="slip">
+            <div class="slip-h" onclick="toggleSlip()">
+                <b>Betslip</b><span class="cnt" id="slipCnt">0</span>
+                <span class="sp"></span>
+                <span class="slip-cost" id="slipCost"></span>
+                <span class="chev" id="slipChev">▲</span>
+            </div>
+            <div class="slip-b">
+                <div id="slipItems"></div>
+                <div class="slip-f">
+                    <label>Contracts <input id="contracts" type="number" min="1" max="250" step="1" value="10" oninput="saveSlip();renderSlip()"></label>
+                    <button class="btn" id="btnQuote" onclick="quoteSlip()">Quote</button>
+                    <button class="btn go" id="btnPlace" onclick="placeSlip()">Place bets</button>
+                    <button class="btn sm" onclick="clearSlip()">Clear</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script>
+    async function authFetch(url, options = {}) {
+        const user = firebase.auth().currentUser;
+        if (!user) { window.location.href = '/'; return null; }
+        const token = await user.getIdToken();
+        const headers = { ...(options.headers || {}), 'Authorization': 'Bearer ' + token };
+        return fetch(url, { ...options, headers });
+    }
+
+    function doLogout() {
+        firebase.auth().signOut().then(() => { window.location.href = '/'; });
+    }
+
+    function _gateServerError(detail) {
+        try { document.querySelectorAll('#auth-gate,#app').forEach(function (el) { el.style.display = 'none'; }); } catch (e) {}
+        var o = document.createElement('div');
+        o.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;'
+            + 'justify-content:center;padding:24px;background:#0b0f14;color:#e6edf3;'
+            + 'font:15px/1.55 system-ui,-apple-system,sans-serif;text-align:center';
+        o.innerHTML = '<div style="max-width:460px">'
+            + '<div style="font-size:34px;margin-bottom:12px">⚠️</div>'
+            + '<div style="font-size:18px;font-weight:600;margin-bottom:8px">Server error &mdash; not a permissions problem</div>'
+            + '<div style="color:#9aa7b4;margin-bottom:18px">You are still signed in. This is a backend fault, not your account.</div>'
+            + '<div style="font:12px ui-monospace,monospace;color:#6e7d8d;margin-bottom:18px">' + String(detail || '') + '</div>'
+            + '<button id="_gateRetry" style="background:#1f6feb;color:#fff;border:0;border-radius:8px;'
+            + 'padding:10px 18px;font-size:14px;cursor:pointer;margin-right:8px">Retry</button>'
+            + '<a href="/" style="color:#9aa7b4;font-size:14px">Home</a></div>';
+        document.body.appendChild(o);
+        var b = document.getElementById('_gateRetry');
+        if (b) b.onclick = function () { location.reload(); };
+    }
+
+    let _sport = 'NHL';
+    function switchSport(s) {
+        _sport = s;
+        document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.sport === s));
+        load();
+    }
+
+    function fmtTime(iso) {
+        if (!iso) return 'TBD';
+        const d = new Date(iso);
+        return d.toLocaleString('en-US', { timeZone: 'America/Phoenix', weekday: 'short', month: 'short', day: 'numeric' });
+    }
+    function fmtClock(iso) {
+        if (!iso) return '';
+        const d = new Date(iso);
+        return d.toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit' });
+    }
+    function shortTeam(name) {
+        if (!name) return '?';
+        const parts = name.split(' ');
+        return parts.length > 1 ? parts.slice(0, -1).join(' ') : name;
+    }
+    function ago(iso) {
+        if (!iso) return 'never';
+        const sec = (Date.now() - new Date(iso).getTime()) / 1000;
+        if (sec < 90) return 'just now';
+        if (sec < 5400) return Math.round(sec / 60) + 'm ago';
+        if (sec < 172800) return Math.round(sec / 3600) + 'h ago';
+        return Math.round(sec / 86400) + 'd ago';
+    }
+
+    function verdictBadge(v) {
+        if (v === 'play') return '<span class="v v-play">PLAY</span>';
+        if (v === 'lean') return '<span class="v v-lean">LEAN</span>';
+        return '<span class="v v-pass">PASS</span>';
+    }
+    // ✅/❌/➖ after a pick once the box's 09:00 grader has stamped the row
+    // (data_blob.grade, written by grade_football_sheets --write).
+    function gradeMark(g, key, sub) {
+        let r = g.grade && g.grade[key];
+        if (sub) r = r && r[sub];
+        if (r === 'win') return ' <span class="gr gr-win" title="won">✅</span>';
+        if (r === 'loss') return ' <span class="gr gr-loss" title="lost">❌</span>';
+        if (r === 'push') return ' <span class="gr gr-push" title="push">➖</span>';
+        return '';
+    }
+    function finalChip(g) {
+        const f = g.grade && g.grade.final;
+        if (!f || f.away === undefined || f.home === undefined) return '';
+        return '<span class="final">FINAL ' + nameOf(g, 'away') + ' ' + f.away + ' · ' + nameOf(g, 'home') + ' ' + f.home + '</span>';
+    }
+    function sgn(x, d) {
+        if (x === null || x === undefined) return '—';
+        const v = Number(x).toFixed(d === undefined ? 1 : d);
+        return (Number(v) > 0 ? '+' : '') + v;
+    }
+    function am(x) {
+        if (x === null || x === undefined) return '';
+        x = Math.round(Number(x));
+        return x > 0 ? '+' + x : String(x);
+    }
+    // Implied probability of an American price (with the vig still in).
+    function impl(x) {
+        if (x === null || x === undefined || x === '') return null;
+        x = Number(x);
+        if (!isFinite(x) || x === 0) return null;
+        return x > 0 ? 100 / (x + 100) : -x / (-x + 100);
+    }
+    function pct(p) { return (p === null || p === undefined) ? '' : Math.round(p * 1000) / 10 + '%'; }
+    // "+130 (43.5%)" — every price on the sheet in both languages.
+    function amp(x) {
+        const a = am(x);
+        if (!a) return '';
+        const p = impl(x);
+        return a + (p === null ? '' : ' <span class="dim">(' + pct(p) + ')</span>');
+    }
+    // A probability printed as its fair American price: "52.0% (-108)".
+    function pam(p) {
+        if (p === null || p === undefined) return '';
+        p = Number(p);
+        if (!(p > 0 && p < 1)) return pct(p);
+        const a = p >= 0.5 ? -100 * p / (1 - p) : 100 * (1 - p) / p;
+        return pct(p) + ' <span class="dim">(' + am(a) + ')</span>';
+    }
+    function nameOf(g, side) {
+        if (_sport === 'NHL') return g[side + '_short'] || shortTeam(g[side]);
+        return g[side + '_short'] || shortTeam(g[side]);
+    }
+    // A home-oriented spread printed the way a book prints it: the favorite
+    // and its number ("NEB -14.5"); pick'em when it's zero.
+    function favLine(g, homeLine, d) {
+        if (homeLine === null || homeLine === undefined) return '—';
+        const x = Number(homeLine);
+        if (Math.abs(x) < 0.05) return "pick'em";
+        return x < 0 ? nameOf(g, 'home') + ' ' + sgn(x, d) : nameOf(g, 'away') + ' ' + sgn(-x, d);
+    }
+
+
+    // ───────────────────────── the slip ─────────────────────────
+    const SLIP_KEY = 'kh_betslip_v1';
+    let _slip = [];          // [{key, sport, away, home, event_start, market_type, side, line, label, game, q}]
+    let _slipOpen = false;
+    try { const s = JSON.parse(localStorage.getItem(SLIP_KEY) || '{}'); _slip = s.items || []; if (s.contracts) document.getElementById('contracts').value = s.contracts; } catch (e) {}
+    function saveSlip() {
+        try { localStorage.setItem(SLIP_KEY, JSON.stringify({ items: _slip.map(i => ({ ...i, q: undefined })), contracts: document.getElementById('contracts').value })); } catch (e) {}
+    }
+    function toggleSlip(force) {
+        _slipOpen = (force === undefined) ? !_slipOpen : !!force;
+        document.getElementById('slip').classList.toggle('open', _slipOpen);
+        document.getElementById('slipChev').textContent = _slipOpen ? '▼' : '▲';
+    }
+    function slipKey(g, mt, side) { return [_sport, g.event_name, mt, side].join('|'); }
+    function inSlip(key) { return _slip.some(i => i.key === key); }
+    function toggleSide(key, mt, side, line, label, gi) {
+        const g = _games[gi];
+        if (!g) return;
+        const idx = _slip.findIndex(i => i.key === key);
+        if (idx >= 0) { _slip.splice(idx, 1); }
+        else {
+            if (g.event_start && new Date(g.event_start).getTime() <= Date.now()) { toast('Game already started — pre-game only', true); return; }
+            _slip.push({ key, sport: _sport, away: g.away, home: g.home, event_start: g.event_start,
+                         market_type: mt, side, line, label, game: shortTeam(g.away) + ' @ ' + shortTeam(g.home) });
+            toggleSlip(true);
+        }
+        saveSlip(); renderSlip(); renderGames();
+    }
+    function removeSlip(key) { _slip = _slip.filter(i => i.key !== key); saveSlip(); renderSlip(); renderGames(); }
+    function clearSlip() { _slip = []; saveSlip(); renderSlip(); renderGames(); }
+    function contractsN() { const n = parseInt(document.getElementById('contracts').value, 10); return (n >= 1 && n <= 250) ? n : 10; }
+    function renderSlip() {
+        document.getElementById('slipCnt').textContent = _slip.length;
+        const n = contractsN();
+        let cost = 0, known = 0;
+        const el = document.getElementById('slipItems');
+        if (!_slip.length) { el.innerHTML = '<div class="empty" style="padding:18px 0">Nothing on the slip. Tap a side on a game below.</div>'; }
+        else el.innerHTML = _slip.map(i => {
+            let q = '';
+            if (i.q) {
+                if (i.q.ok) {
+                    q = '<div class="q ok">' + (i.q.rung_why === 'favorable' ? 'rung ' + rungTxt(i, i.q.rung_line) + ' (better than sheet) · ' : '')
+                      + 'touch ' + i.q.price_c + '¢' + (i.q.ask_c != null ? ' / ask ' + i.q.ask_c + '¢' : '') + ' · ' + n + ' for $' + (n * i.q.price_c / 100).toFixed(2) + '</div>';
+                    cost += n * i.q.price_c / 100; known++;
+                } else q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + '</div>';
+            }
+            return '<div class="si"><div class="lab"><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport) + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
+                 + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
+        }).join('');
+        document.getElementById('slipCost').textContent = _slip.length ? (known ? '$' + cost.toFixed(2) + (known < _slip.length ? ' (' + known + '/' + _slip.length + ' quoted)' : '') : n + ' contracts each') : '';
+        document.getElementById('btnPlace').disabled = !_slip.length;
+        document.getElementById('btnQuote').disabled = !_slip.length;
+    }
+    function rungTxt(i, ln) {
+        if (ln == null) return '';
+        if (i.market_type === 'total') return (i.side === 'over' ? 'O ' : 'U ') + ln;
+        return (Number(ln) > 0 ? '+' : '') + ln;
+    }
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]); }
+    let _busy = false;
+    async function postSlip(preview) {
+        if (_busy || !_slip.length) return;
+        _busy = true;
+        const bq = document.getElementById('btnQuote'), bp = document.getElementById('btnPlace');
+        bq.disabled = bp.disabled = true;
+        bp.textContent = preview ? 'Place bets' : 'Placing…';
+        try {
+            const r = await authFetch('/api/bet-sheets/place', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ preview, contracts: contractsN(), items: _slip.map(i => ({ key: i.key, sport: i.sport, away: i.away, home: i.home,
+                    event_start: i.event_start, market_type: i.market_type, side: i.side, line: i.line, label: i.label })) }) });
+            const d = r ? await r.json().catch(() => null) : null;
+            if (!d || !d.ok) { toast('Failed: ' + ((d && d.error) || (r && r.status) || 'network'), true); return; }
+            const byKey = {}; (d.results || []).forEach(x => { byKey[x.key] = x; });
+            let placed = 0;
+            _slip = _slip.filter(i => {
+                const x = byKey[i.key];
+                if (!x) { i.q = { ok: false, reason: 'no result' }; return true; }
+                if (!preview && x.ok) { placed++; return false; }     // placed → off the slip
+                i.q = x; return true;
+            });
+            saveSlip(); renderSlip(); renderGames();
+            if (!preview) {
+                toast(placed ? ('Placed ' + placed + ' bet' + (placed === 1 ? '' : 's') + (_slip.length ? ' · ' + _slip.length + ' stayed on the slip' : '')) : 'Nothing placed — see the slip', !placed);
+                loadBets();
+            }
+        } catch (e) { toast('Failed: ' + e, true); }
+        finally { _busy = false; bp.textContent = 'Place bets'; renderSlip(); }
+    }
+    function quoteSlip() { postSlip(true); }
+    function placeSlip() {
+        const n = contractsN();
+        if (!confirm('Place ' + _slip.length + ' resting bet' + (_slip.length === 1 ? '' : 's') + ' at the touch, ' + n + ' contracts each?')) return;
+        postSlip(false);
+    }
+    let _toastT = null;
+    function toast(msg, bad) {
+        const t = document.getElementById('toast');
+        t.textContent = msg; t.classList.toggle('bad', !!bad); t.classList.add('show');
+        clearTimeout(_toastT); _toastT = setTimeout(() => t.classList.remove('show'), bad ? 6000 : 3500);
+    }
+
+    // ───────────────────────── side buttons ─────────────────────────
+    function sideBtn(gi, g, mt, side, line, label, fromModel) {
+        if (line === null || line === undefined) return '<span class="sb dis">' + esc(label) + '</span>';
+        const key = slipKey(g, mt, side);
+        const on = inSlip(key);
+        const args = [JSON.stringify(key), JSON.stringify(mt), JSON.stringify(side), line == null ? 'null' : Number(line), JSON.stringify(label), gi].join(',');
+        return '<button class="sb' + (on ? ' in' : '') + '" onclick=\'toggleSide(' + args.replace(/'/g, '&#39;') + ')\'>' + esc(label) + (fromModel ? '<span class="mline">model</span>' : '') + '</button>';
+    }
+    // football: spread both sides at the market line (else the model's), total over/under
+    function footballSides(gi, g) {
+        const L = g.line || {}, M = g.model || {};
+        let sh = L.spread_home, fromM = false;
+        if (sh == null && M.spread_home != null) { sh = Math.round(Number(M.spread_home) * 2) / 2; fromM = true; }
+        let tot = L.total, fromMt = false;
+        if (tot == null && M.total != null) { tot = Math.round(Number(M.total) * 2) / 2; fromMt = true; }
+        const out = [];
+        if (sh != null) {
+            out.push(sideBtn(gi, g, 'spread', 'away', -sh, nameOf(g, 'away') + ' ' + sgn(-sh, 1), fromM));
+            out.push(sideBtn(gi, g, 'spread', 'home', sh, nameOf(g, 'home') + ' ' + sgn(sh, 1), fromM));
+        } else out.push('<span class="sb dis">no spread</span>');
+        if (tot != null) {
+            out.push(sideBtn(gi, g, 'total', 'over', tot, 'O ' + tot, fromMt));
+            out.push(sideBtn(gi, g, 'total', 'under', tot, 'U ' + tot, fromMt));
+        } else out.push('<span class="sb dis">no total</span>');
+        return '<div class="sides">' + out.join('') + '</div>';
+    }
+    // hockey: ML both sides, total over/under, puck line both sides
+    function hockeySides(gi, g) {
+        const L = g.line || {}, M = g.model || {};
+        const out = [];
+        out.push(sideBtn(gi, g, 'ml', 'away', 0, nameOf(g, 'away') + ' ML', false));
+        out.push(sideBtn(gi, g, 'ml', 'home', 0, nameOf(g, 'home') + ' ML', false));
+        let tot = L.total, fromMt = false;
+        if (tot == null && M.total != null) { tot = Math.round(Number(M.total) * 2) / 2; if (Math.abs(tot - Math.round(tot)) < 0.01) tot += 0.5; fromMt = true; }
+        if (tot != null) {
+            out.push(sideBtn(gi, g, 'total', 'over', tot, 'O ' + tot, fromMt));
+            out.push(sideBtn(gi, g, 'total', 'under', tot, 'U ' + tot, fromMt));
+        }
+        const ph = L.puck_home != null ? Number(L.puck_home) : (M.win_home != null ? (Number(M.win_home) >= 0.5 ? -1.5 : 1.5) : null);
+        if (ph != null) {
+            out.push(sideBtn(gi, g, 'spread', 'away', -ph, nameOf(g, 'away') + ' ' + sgn(-ph, 1), L.puck_home == null));
+            out.push(sideBtn(gi, g, 'spread', 'home', ph, nameOf(g, 'home') + ' ' + sgn(ph, 1), L.puck_home == null));
+        }
+        return '<div class="sides">' + out.join('') + '</div>';
+    }
+
+    // ───────────────────────── my bets ─────────────────────────
+    function _probToAmer(p) { return p >= 0.5 ? -100 * p / (1 - p) : 100 * (1 - p) / p; }
+    function winGauge(prob, entryP, tip) {
+        const size = 44, c = size / 2, rO = 17, rI = 10.5;
+        const CO = 2 * Math.PI * rO, CI = 2 * Math.PI * rI;
+        const arc = (r, C, frac, col, w) =>
+            `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="${col}" stroke-width="${w}" stroke-linecap="round" stroke-dasharray="${(Math.max(0, Math.min(1, frac)) * C).toFixed(1)} ${C.toFixed(1)}"/>`;
+        const trackO = `<circle cx="${c}" cy="${c}" r="${rO}" fill="none" stroke="#2a2f3a" stroke-width="4"/>`;
+        const trackI = entryP != null ? `<circle cx="${c}" cy="${c}" r="${rI}" fill="none" stroke="#22262e" stroke-width="3"/>` : '';
+        const innerArc = entryP != null ? arc(rI, CI, entryP, 'rgba(255,255,255,0.55)', 3) : '';
+        if (prob == null) return `<div class="win-gauge" title="${esc(tip || '')}"><svg width="${size}" height="${size}">${trackO}${trackI}${innerArc}</svg><span class="wg-num" style="color:var(--muted)">—</span></div>`;
+        const p = Math.max(0, Math.min(1, prob));
+        const col = `hsl(${Math.round(p * 120)},75%,48%)`;
+        return `<div class="win-gauge" title="${esc(tip || '')}"><svg width="${size}" height="${size}">${trackO}${trackI}${arc(rO, CO, p, col, 4)}${innerArc}</svg><span class="wg-num" style="color:${col}">${Math.round(p * 100)}</span></div>`;
+    }
+    function betLabel(b) {
+        if (b.label) return b.label;
+        const parts = (b.event_name || '').split(' @ ');
+        const team = b.side === 'home' ? shortTeam(parts[1]) : b.side === 'away' ? shortTeam(parts[0]) : '';
+        if (b.market_type === 'total') return (b.side === 'over' ? 'O ' : 'U ') + b.line;
+        if (b.market_type === 'spread') return team + ' ' + sgn(b.line, 1);
+        return team + ' ML';
+    }
+    function money(x) { if (x == null) return ''; return (x >= 0 ? '+$' : '−$') + Math.abs(x).toFixed(2); }
+    async function loadBets() {
+        let r;
+        try { r = await authFetch('/api/bet-sheets/mine'); } catch (e) { document.getElementById('betsMeta').textContent = 'fetch failed'; return; }
+        if (!r) return;
+        const d = await r.json().catch(() => null);
+        if (!d || !d.ok) { document.getElementById('betsMeta').textContent = 'error: ' + (d && d.error || r.status); return; }
+        const bets = d.bets || [];
+        const open = bets.filter(b => b.status === 'pending');
+        const done = bets.filter(b => b.status !== 'pending');
+        let usd = 0, w = 0, l = 0, p = 0;
+        done.forEach(b => { if (b.pnl_usd != null) usd += b.pnl_usd; if (b.status === 'won') w++; else if (b.status === 'lost') l++; else p++; });
+        document.getElementById('betsMeta').textContent = (open.length + ' open') + (done.length ? ' · settled ' + w + '-' + l + (p ? '-' + p : '') + ' ' + money(usd) : '') + (d.venue_ok ? '' : ' · ⚠ venue unreadable');
+        if (!bets.length) { document.getElementById('bets').innerHTML = '<div class="empty" style="padding:14px 0">No bets yet. Build a slip below.</div>'; return; }
+        const rows = open.concat(done.slice().reverse());
+        document.getElementById('bets').innerHTML = rows.map(b => {
+            const entryP = b.price_c != null ? b.price_c / 100 : impl(b.entry_price);
+            let prob = null, tip = '';
+            if (b.status === 'won') prob = 1; else if (b.status === 'lost') prob = 0; else if (b.status === 'push') prob = 0.5;
+            else if (b.cur_c != null) prob = b.cur_c / 100;
+            tip = (prob != null ? 'now ' + Math.round(prob * 100) + '%' : 'no quote') + (entryP != null ? ' · you bet at ' + Math.round(entryP * 100) + '%' : '');
+            let chip = '', l2 = '';
+            const o = b.order || {};
+            if (b.status !== 'pending') {
+                chip = '<span class="chip c-' + b.status + '">' + b.status.toUpperCase() + '</span>';
+                l2 = (b.pnl_usd != null ? money(b.pnl_usd) + ' · ' : '') + (b.filled_qty != null ? b.filled_qty : (b.contracts || '?')) + ' @ ' + (b.price_c != null ? b.price_c + '¢' : am(b.entry_price));
+            } else {
+                const held = b.held || 0;
+                if (o.resting) chip += '<span class="chip c-rest">RESTING ' + Math.round(o.leaves || 0) + (o.price_c != null ? ' @ ' + o.price_c + '¢' : '') + '</span>';
+                if (held > 0) chip += '<span class="chip c-fill">FILLED ' + held + ' @ ' + (b.price_c != null ? b.price_c + '¢' : am(b.entry_price)) + '</span>';
+                if (!o.resting && !(held > 0)) chip += '<span class="chip c-off">' + (b.started ? 'IN PLAY' : 'OFF THE BOOK') + '</span>';
+                l2 = (b.cur_c != null ? 'now ' + b.cur_c + '¢ (' + am(_probToAmer(b.cur_c / 100)) + ')' : 'no live quote') + (b.started ? ' · in play' : '');
+            }
+            const acts = (b.status === 'pending' && o.resting && !b.started)
+                ? '<div class="acts"><button class="btn sm" onclick="repegBet(' + b.id + ')">Re-peg</button><button class="btn sm warn" onclick="cancelBet(' + b.id + ')">Cancel</button></div>' : '';
+            return '<div class="bet">' + winGauge(prob, entryP, tip)
+                 + '<div class="info"><div class="l1">' + chip + '<b>' + esc(betLabel(b)) + '</b> <span class="dim">· ' + esc((b.event_name || '').split(' @ ').map(shortTeam).join(' @ ')) + ' · ' + esc(b.sport) + ' · ' + fmtTime(b.event_start) + ' ' + fmtClock(b.event_start) + '</span></div>'
+                 + '<div class="l2">' + l2 + '</div></div>' + acts + '</div>';
+        }).join('');
+    }
+    async function cancelBet(id) {
+        if (!confirm('Cancel this resting order?')) return;
+        const r = await authFetch('/api/bet-sheets/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pick_id: id }) });
+        const d = r ? await r.json().catch(() => null) : null;
+        toast(d && d.ok ? (d.deleted ? 'Cancelled — nothing had filled' : 'Cancelled · ' + d.held + ' filled stays') : 'Cancel failed: ' + ((d && d.error) || (r && r.status)), !(d && d.ok));
+        loadBets();
+    }
+    async function repegBet(id) {
+        const r = await authFetch('/api/bet-sheets/repeg', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pick_id: id }) });
+        const d = r ? await r.json().catch(() => null) : null;
+        toast(d && d.ok ? (d.moved ? 'Moved ' + d.from_c + '¢ → ' + d.price_c + '¢' : (d.note || 'no move')) : 'Re-peg failed: ' + ((d && d.error) || (r && r.status)), !(d && d.ok));
+        loadBets();
+    }
+    // ---------- football
+    function footballCols(g) {
+        const L = g.line || {}, M = g.model;
+        const line = '<div class="num">' + favLine(g, L.spread_home, 1) + '</div>'
+                   + '<div class="num">O/U ' + (L.total ?? '—') + '</div>';
+        let model = '<span class="unrated">unrated — no number</span>';
+        if (M) {
+            model = '<div class="num">' + favLine(g, M.spread_home, 1) + gradeMark(g, 'model', 'spread') + '</div>'
+                  + '<div class="num">Total ' + (M.total ?? '—') + gradeMark(g, 'model', 'total') + '</div>';
+        }
+        const pk = [];
+        const bs = g.spread, bt = g.total;
+        if (bs) pk.push('<div>' + verdictBadge(bs.verdict) + ' ' + (bs.verdict !== 'pass'
+            ? shortTeam(bs.team) + ' ' + sgn(bs.line) + ' <span class="dim">(' + sgn(bs.edge_pts) + ' pts' + (bs.fair ? ', to ' + am(bs.fair) + ' / ' + pct(impl(bs.fair)) : '') + ')</span>'
+            : '<span class="dim">spread</span>') + '</div>');
+        if (bt) pk.push('<div>' + verdictBadge(bt.verdict) + ' ' + (bt.verdict !== 'pass'
+            ? (bt.side === 'over' ? 'Over ' : 'Under ') + bt.line + ' <span class="dim">(' + sgn(bt.edge_pts) + ' pts' + (bt.fair ? ', to ' + am(bt.fair) + ' / ' + pct(impl(bt.fair)) : '') + ')</span>'
+            : '<span class="dim">total</span>') + '</div>');
+        return [line + footballSides(g._gi, g), model, pk.join('') || '<span class="unrated">no market line</span>'];
+    }
+
+    // ---------- hockey
+    function hockeyCols(g) {
+        const L = g.line || {}, M = g.model;
+        const ml = (L.ml_away !== undefined && L.ml_home !== undefined)
+            ? nameOf(g, 'away') + ' ' + amp(L.ml_away) + '<br>' + nameOf(g, 'home') + ' ' + amp(L.ml_home) : 'ML —';
+        let tot = 'O/U ' + (L.total ?? '—');
+        if (L.over_odds !== undefined || L.under_odds !== undefined)
+            tot += '<br><span class="dim">o</span> ' + (amp(L.over_odds) || '—')
+                 + ' <span class="dim">u</span> ' + (amp(L.under_odds) || '—');
+        let puck = '';
+        if (L.puck_home !== undefined) {
+            const favHome = Number(L.puck_home) < 0;
+            const po = favHome ? L.puck_home_odds : L.puck_away_odds;
+            puck = '<div class="num">puck ' + favLine(g, L.puck_home, 1) + (po !== undefined ? ' ' + amp(po) : '') + '</div>';
+        }
+        const line = '<div class="num">' + ml + '</div><div class="num">' + tot + '</div>' + puck;
+        let model = '<span class="unrated">unrated</span>';
+        if (M) {
+            const wh = Number(M.win_home);
+            model = '<div class="num">' + favLine(g, M.spread_home, 2) + '</div>'
+                  + '<div class="num">' + nameOf(g, 'away') + ' ' + pam(1 - wh) + (wh < 0.5 ? gradeMark(g, 'model', 'ml') : '') + '<br>'
+                  + nameOf(g, 'home') + ' ' + pam(wh) + (wh > 0.5 ? gradeMark(g, 'model', 'ml') : '') + '</div>'
+                  + '<div class="num">Total ' + (M.total !== undefined && M.total !== null ? Number(M.total).toFixed(1) : '—') + gradeMark(g, 'model', 'total') + '</div>';
+        }
+        const pk = [];
+        if (g.ml) pk.push('<div>' + verdictBadge(g.ml.verdict) + ' ' + (g.ml.verdict !== 'pass'
+            ? (g.ml.abbr || shortTeam(g.ml.team)) + ' ML ' + amp(g.ml.price)
+              + ' <span class="dim">· model ' + (g.ml.model_p !== undefined && g.ml.model_p !== null ? pct(g.ml.model_p) : '—')
+              + ' (' + sgn(g.ml.edge_pp) + '%), fair ' + am(g.ml.fair) + '</span>'
+            : '<span class="dim">ML</span>') + '</div>');
+        if (g.total) pk.push('<div>' + verdictBadge(g.total.verdict) + ' ' + (g.total.verdict !== 'pass'
+            ? (g.total.side === 'over' ? 'Over ' : 'Under ') + g.total.line + (g.total.price !== undefined && g.total.price !== null ? ' ' + amp(g.total.price) : '')
+              + ' <span class="dim">· model ' + (g.total.model_p !== undefined && g.total.model_p !== null ? pct(g.total.model_p) : '—')
+              + ' (' + sgn(g.total.edge_pp) + '%)' + (g.total.fair ? ', fair ' + am(g.total.fair) : '') + '</span>'
+            : '<span class="dim">total</span>') + '</div>');
+        return [line + hockeySides(g._gi, g), model, pk.join('') || '<span class="unrated">no market line yet</span>'];
+    }
+
+    async function load() {
+        document.getElementById('metaLine').textContent = 'loading…';
+        document.getElementById('games').innerHTML = '<div class="empty">loading…</div>';
+        let r;
+        try {
+            r = await authFetch('/api/pick-sheets?sport=' + _sport);
+        } catch (e) { document.getElementById('metaLine').textContent = 'fetch failed: ' + e; return; }
+        if (!r) return;
+        if (r.status >= 500) { document.getElementById('metaLine').textContent = 'server error ' + r.status; return; }
+        const d = await r.json().catch(() => null);
+        if (!d || !d.ok) { document.getElementById('metaLine').textContent = 'error: ' + (d && d.error || 'unknown'); return; }
+
+        const dl = document.getElementById('dlRow');
+        dl.innerHTML = '';
+        if (d.pdf_url) {
+            dl.innerHTML += '<a class="dl" href="' + d.pdf_url + '" target="_blank">📄 Full sheet pack<span class="sub"> · deep dives + roster notes</span></a>';
+        }
+        if (d.picks_pdf_url) {
+            dl.innerHTML += '<a class="dl" href="' + d.picks_pdf_url + '" target="_blank">📋 Picks only<span class="sub"> · one page</span></a>';
+        }
+
+        if (!d.week_key || !d.games || !d.games.length) {
+            document.getElementById('metaLine').textContent = d.note || 'no sheets for this sport yet';
+            _games = [];
+            document.getElementById('games').innerHTML = '<div class="empty">' + (_sport === 'NHL' ? 'No upcoming games on the sheet yet.' : 'Nothing built yet — check back after the Monday or Friday run.') + '</div>';
+            return;
+        }
+
+        document.getElementById('metaLine').textContent = _sport === 'NHL'
+            ? d.games.length + ' games · lines/model updated ' + ago(d.lines_updated_at)
+            : 'Week of ' + d.week_key + ' · ' + d.games.length + ' games · sheet built ' + ago(d.built_at || d.published_at) +
+              ' · lines/model updated ' + ago(d.lines_updated_at);
+
+        _games = d.games.slice().sort((a, b) => (a.event_start || '').localeCompare(b.event_start || ''));
+        _games.forEach((g, i) => { g._gi = i; });
+        renderGames();
+    }
+
+    // The search bar (Rob, Oct 3 2026) filters the loaded sheet client-side:
+    // every typed word must appear in either team's full or short name.
+    let _games = [];
+    function gameMatches(g, words) {
+        if (!words.length) return true;
+        const hay = [g.away, g.home, g.away_short, g.home_short, shortTeam(g.away), shortTeam(g.home)]
+            .filter(Boolean).join(' ').toLowerCase();
+        return words.every(w => hay.includes(w));
+    }
+    function renderGames() {
+        const q = (document.getElementById('search').value || '').trim().toLowerCase();
+        const words = q.split(/\s+/).filter(Boolean);
+        const games = _games.filter(g => gameMatches(g, words));
+        if (!games.length) {
+            document.getElementById('games').innerHTML = '<div class="empty">' + (_games.length ? 'No games match "' + q + '".' : 'No games.') + '</div>';
+            return;
+        }
+        let html = '';
+        const rec = { win: 0, loss: 0, push: 0 };
+        for (const g of _games) {
+            for (const k of ['ml', 'spread', 'total']) {
+                const r = g.grade && g.grade[k];
+                if (r in rec) rec[r]++;
+            }
+        }
+        if (rec.win + rec.loss + rec.push) {
+            html += '<div class="record">Picks record (plays + leans, graded): <b>' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + '</b>'
+                  + (rec.win + rec.loss ? ' <span class="dim">(' + Math.round(100 * rec.win / (rec.win + rec.loss)) + '%)</span>' : '') + '</div>';
+        }
+        let day = null;
+        for (const g of games) {
+            const dstr = fmtTime(g.event_start);
+            if (dstr !== day) { html += '<div class="day-hdr">' + dstr + '</div>'; day = dstr; }
+            const cols = _sport === 'NHL' ? hockeyCols(g) : footballCols(g);
+            let sub = '';
+            if (_sport === 'NHL' && g.goalies) {
+                const ga = (g.goalies.away || {}).name, gh = (g.goalies.home || {}).name;
+                if (ga || gh) sub = '<span class="sub">🥅 ' + (ga || '?') + ' vs ' + (gh || '?') + '</span>';
+            }
+            html += '<div class="game"><div class="ghead"><span class="t">' + fmtClock(g.event_start) + '</span>'
+                  + '<span class="m">' + shortTeam(g.away) + ' @ ' + shortTeam(g.home) + '</span>' + finalChip(g) + sub + '</div>'
+                  + '<div class="cols">'
+                  + '<div class="col"><div class="lbl">Line</div><div class="val">' + cols[0] + '</div></div>'
+                  + '<div class="col"><div class="lbl">Model</div><div class="val">' + cols[1] + '</div></div>'
+                  + '<div class="col picks"><div class="lbl">Picks</div><div class="val">' + cols[2] + '</div></div>'
+                  + '</div></div>';
+        }
+        document.getElementById('games').innerHTML = html;
+    }
+
+    firebase.auth().onAuthStateChanged(async user => {
+        if (!user) { window.location.href = '/'; return; }
+        let me = null;
+        try {
+            const r = await authFetch('/api/me');
+            if (!r) { _gateServerError('sign-in check could not reach the server'); return; }
+            if (r.status >= 500) { _gateServerError('/api/me returned ' + r.status); return; }
+            me = await r.json().catch(() => null);
+        } catch (e) { _gateServerError('sign-in check failed: ' + e); return; }
+        if (!me || !me.ok || me.role !== 'admin') { window.location.href = '/'; return; }   // admin only — real money
+        document.getElementById('auth-gate').style.display = 'none';
+        document.getElementById('app').style.display = '';
+        renderSlip();
+        load();
+        loadBets();
+        setInterval(load, 15 * 60 * 1000);
+        setInterval(loadBets, 60 * 1000);
+    });
+</script>
+</body>
+</html>

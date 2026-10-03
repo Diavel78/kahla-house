@@ -382,6 +382,17 @@ function renderAppCards() {
             <span class="arrow">&rarr;</span>
         </a>`;
     }
+    if (isAdmin) {
+        // Bet Sheets (Oct 3 2026) — the admin's betting page: the pick sheet
+        // with a slip that rests MANUAL post-only orders on Polymarket.
+        h += `<a href="/bet-sheets" class="app-card football-app">
+            <span class="app-icon">&#127915;</span>
+            <h2>Bet Sheets</h2>
+            <p>The pick sheet with a betslip &mdash; tap sides, set contracts, and rest post-only bets at the touch on Polymarket.</p>
+            <span class="app-tag">Admin</span>
+            <span class="arrow">&rarr;</span>
+        </a>`;
+    }
     if (hasBookClub) {
         // Book Club is a separate, non-betting surface gated by its own
         // book_club_access pill (admins implicit). Shared reading list,
