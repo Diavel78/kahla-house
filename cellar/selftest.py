@@ -1296,6 +1296,7 @@ def test_pair_plan() -> None:
           _app._pair_spread_cond_row("NFL", 7) is _app._pair_spread_cond_row("NFL", 7.5))
     check("no line falls back to the unconditional |margin| table, unhalved",
           abs(_app._pair_worth("NFL", "spread", [3]) - 17.2) < 1e-6)
+    check("prop sisters seat 10 a leg (Rob, Oct 3 2026)", _app._pair_prop_qty() == 10 or _app._machine_flag_val("pair_props_qty") is not None)
     check("a line far from any measured row returns no conditional row",
           _app._pair_spread_cond_row("NFL", 30.5) is None)
     check("NHL stays as measured (already one-direction)", abs(_app._pair_worth("NHL", "spread", [2]) - 9.7) < 1e-6)

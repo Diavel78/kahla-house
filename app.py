@@ -21640,6 +21640,18 @@ _PAIR_LIVE_BID_C = 8.0
 _PAIR_MIN_LIVE_RUNGS = 1   # keeps the window near the line, where the worth table was measured
 _PAIR_MAX_WIDTH = 3.0
 _PAIR_DEFAULT_QTY = 15
+# PROP SISTERS RUN 10 A LEG (Rob, Oct 3 2026: "10 a leg on props is better")
+# — 168 prop pairs were three-quarters of the board's dollars at 15.
+# `machine_flags pair_props_qty` overrides without a deploy.
+_PAIR_PROP_QTY = 10
+
+
+def _pair_prop_qty() -> int:
+    try:
+        v = int(_machine_flag_val("pair_props_qty", _PAIR_PROP_QTY) or _PAIR_PROP_QTY)
+        return v if v > 0 else _PAIR_PROP_QTY
+    except Exception:
+        return _PAIR_PROP_QTY
 _PAIR_MIN_LEAD_H = float(os.environ.get('PAIR_MIN_LEAD_H') or 6.0)
 _PAIR_MIN_LEAD_DAYOF_H = 3.0
 
@@ -22220,7 +22232,7 @@ def _pair_seed_props(sb, now, res: dict, armed: bool, taken_slugs: set, have: se
             continue
         row = {"game_prefix": prefix, "market_type": "total",
                "event_name": f"{g.get('event_name')} · {code} {fam}", "kickoff": g["event_start"],
-               "qty": _PAIR_DEFAULT_QTY, "cap_c": pick["cap_c"],
+               "qty": _pair_prop_qty(), "cap_c": pick["cap_c"],
                "legs": [{"key": "a", "slug": a_slug, "intent": "BUY_LONG",
                          "label": f"over {pick['lo'] - 0.5:g}"},
                         {"key": "b", "slug": b_slug, "intent": "BUY_SHORT",
