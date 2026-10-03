@@ -35,6 +35,10 @@ sys.path.insert(0, __import__("os").path.dirname(
 from scripts.football_sheet_data import sb_select, _espn_get, _LEAGUES  # noqa: E402
 
 log = logging.getLogger("grade_football_sheets")
+# Hockey sheets (sport='NHL', same table — Sep 30 2026) stamp ESPN hockey
+# event ids, so they grade off the same scoreboard shape; football_sheet_data
+# only knows the two football leagues.
+_GRADE_LEAGUES = dict(_LEAGUES, NHL=("hockey", "nhl"))
 AZ = ZoneInfo("America/Phoenix")
 
 
@@ -52,7 +56,7 @@ def espn_finals(sport: str, date: str) -> dict[str, dict]:
     into ESPN's next UTC day. Fetch the requested date AND the next one,
     keep whichever event actually lands on our AZ date.
     """
-    grp, lg = _LEAGUES[sport]
+    grp, lg = _GRADE_LEAGUES[sport]
     url = f"https://site.api.espn.com/apis/site/v2/sports/{grp}/{lg}/scoreboard"
     y, m, d = (int(x) for x in date.split("-"))
     from datetime import date as _date, timedelta
@@ -111,6 +115,18 @@ def grade_spread(bs: dict, home_score: float, away_score: float) -> str | None:
     return None
 
 
+def grade_ml(pk: dict, home_score: float, away_score: float) -> str | None:
+    if home_score == away_score:
+        return "push"
+    home_won = home_score > away_score
+    side = pk.get("side")
+    if side == "home":
+        return "win" if home_won else "loss"
+    if side == "away":
+        return "win" if not home_won else "loss"
+    return None
+
+
 def grade_total(bt: dict, home_score: float, away_score: float) -> str | None:
     line = bt.get("line")
     if line is None:
@@ -130,7 +146,7 @@ def grade_total(bt: dict, home_score: float, away_score: float) -> str | None:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sport", action="append", choices=["NFL", "NCAAF"], required=True)
+    ap.add_argument("--sport", action="append", choices=["NFL", "NCAAF", "NHL"], required=True)
     ap.add_argument("--date", action="append", required=True,
                      help="AZ-anchored date YYYY-MM-DD; repeatable")
     ap.add_argument("--week-key", default=None,
@@ -171,6 +187,7 @@ def main() -> int:
             eid = r["espn_id"]
             fin = finals.get(eid)
             blob = _model_block(r.get("data_blob"))
+            hockey = (r.get("data_blob") or {}).get("picks") if sport == "NHL" else None
             row_detail = {
                 "sport": sport, "event_name": r["event_name"],
                 "espn_id": eid, "espn_state": (fin or {}).get("state"),
@@ -183,7 +200,26 @@ def main() -> int:
             hs, aws = fin["home_score"], fin["away_score"]
             row_detail["final"] = f"{r['event_name']} ({aws:g}-{hs:g})"
 
-            if blob:
+            if hockey:
+                ml = hockey.get("ml") or {}
+                if ml.get("verdict") in ("play", "lean"):
+                    res = grade_ml(ml, hs, aws)
+                    if res:
+                        tier = ml["verdict"]
+                        tally[sport]["ml"][tier][res] += 1
+                        row_detail["ml"] = (
+                            f"{ml.get('team')} {ml.get('price'):+g} "
+                            f"[{tier}] -> {res}")
+                bt = hockey.get("total") or {}
+                if bt.get("verdict") in ("play", "lean"):
+                    res = grade_total(bt, hs, aws)
+                    if res:
+                        tier = bt["verdict"]
+                        tally[sport]["total"][tier][res] += 1
+                        row_detail["total"] = (
+                            f"{bt.get('side')} {bt.get('line'):g} "
+                            f"[{tier}] -> {res}")
+            elif blob:
                 bs = blob.get("bet_spread") or {}
                 if bs.get("verdict") in ("play", "lean"):
                     res = grade_spread(bs, hs, aws)
@@ -215,7 +251,7 @@ def main() -> int:
     grand = defaultdict(lambda: defaultdict(int))
     for sport, markets in tally.items():
         print(f"--- {sport} ---")
-        for market in ("spread", "total"):
+        for market in ("ml", "spread", "total"):
             tiers = markets.get(market, {})
             if not tiers:
                 continue
@@ -252,8 +288,10 @@ def main() -> int:
 
     print("\n--- per-game detail (only games with a graded pick) ---")
     for d in detail:
-        if "spread" in d or "total" in d:
+        if "ml" in d or "spread" in d or "total" in d:
             line = f"  {d['final']}"
+            if "ml" in d:
+                line += f"  | ML {d['ml']}"
             if "spread" in d:
                 line += f"  | SPR {d['spread']}"
             if "total" in d:

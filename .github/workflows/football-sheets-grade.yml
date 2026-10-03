@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       sport:
-        description: "NFL, NCAAF, or blank for both"
+        description: "NFL, NCAAF, NHL, or blank for all three"
         required: false
         default: ""
       dates:
@@ -49,7 +49,7 @@ jobs:
           SPORTS="${{ github.event.inputs.sport }}"
           WK="${{ github.event.inputs.week_key }}"
           ARGS=()
-          if [ -n "$SPORTS" ]; then ARGS+=(--sport "$SPORTS"); else ARGS+=(--sport NFL --sport NCAAF); fi
+          if [ -n "$SPORTS" ]; then ARGS+=(--sport "$SPORTS"); else ARGS+=(--sport NFL --sport NCAAF --sport NHL); fi
           if [ -n "$WK" ]; then ARGS+=(--week-key "$WK"); fi
           IFS=',' read -ra DATES <<< "${{ github.event.inputs.dates }}"
           for d in "${DATES[@]}"; do ARGS+=(--date "$d"); done
