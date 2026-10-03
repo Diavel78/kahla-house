@@ -54,6 +54,14 @@
         }
         .wrap { max-width: 920px; margin: 0 auto; padding: 18px 16px 60px; }
         h1 { font-size: 20px; margin: 6px 0 14px; }
+        .search {
+            width: 100%; box-sizing: border-box; margin: 0 0 12px;
+            background: var(--surface); border: 1px solid var(--line); color: var(--text);
+            border-radius: 10px; padding: 10px 14px; font-size: 15px; font-family: inherit;
+            -webkit-appearance: none;
+        }
+        .search:focus { outline: none; border-color: #4a7bd6; }
+        .search::placeholder { color: var(--muted); }
         .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
         .tab {
             background: var(--surface); border: 1px solid var(--line); color: var(--muted);
@@ -122,6 +130,9 @@
 
         <div class="wrap">
             <h1>Pick Sheets</h1>
+            <input class="search" id="search" type="search" placeholder="Search a game or team…"
+                   autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                   oninput="renderGames()">
             <div class="tabs">
                 <button class="tab on" data-sport="NHL" onclick="switchSport('NHL')">🏒 Hockey</button>
                 <button class="tab" data-sport="NCAAF" onclick="switchSport('NCAAF')">🏈 College</button>
@@ -330,6 +341,7 @@
 
         if (!d.week_key || !d.games || !d.games.length) {
             document.getElementById('metaLine').textContent = d.note || 'no sheets for this sport yet';
+            _games = [];
             document.getElementById('games').innerHTML = '<div class="empty">' + (_sport === 'NHL' ? 'No upcoming games on the sheet yet.' : 'Nothing built yet — check back after the Monday or Friday run.') + '</div>';
             return;
         }
@@ -342,7 +354,27 @@
             ? 'Model = Crease IQ v2 (score model: xG, goalies, rest). Spread = expected final goal margin; % = win probability. ML play ≥ 4% over the no-vig line, lean ≥ 2%. Totals are LEAN at most — the total model has not beaten the base rate in backtest. Starting goalies are projected until confirmed — check before betting.'
             : 'Model spread/total = our number (calibrated). Picks show the edge in points and the price the bet is good to.';
 
-        const games = d.games.slice().sort((a, b) => (a.event_start || '').localeCompare(b.event_start || ''));
+        _games = d.games.slice().sort((a, b) => (a.event_start || '').localeCompare(b.event_start || ''));
+        renderGames();
+    }
+
+    // The search bar (Rob, Oct 3 2026) filters the loaded sheet client-side:
+    // every typed word must appear in either team's full or short name.
+    let _games = [];
+    function gameMatches(g, words) {
+        if (!words.length) return true;
+        const hay = [g.away, g.home, g.away_short, g.home_short, shortTeam(g.away), shortTeam(g.home)]
+            .filter(Boolean).join(' ').toLowerCase();
+        return words.every(w => hay.includes(w));
+    }
+    function renderGames() {
+        const q = (document.getElementById('search').value || '').trim().toLowerCase();
+        const words = q.split(/\s+/).filter(Boolean);
+        const games = _games.filter(g => gameMatches(g, words));
+        if (!games.length) {
+            document.getElementById('games').innerHTML = '<div class="empty">' + (_games.length ? 'No games match "' + q + '".' : 'No games.') + '</div>';
+            return;
+        }
         let html = '';
         let day = null;
         for (const g of games) {
