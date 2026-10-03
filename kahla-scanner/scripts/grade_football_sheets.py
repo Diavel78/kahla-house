@@ -193,6 +193,10 @@ def main() -> int:
                      help="AZ-anchored date YYYY-MM-DD; repeatable")
     ap.add_argument("--days-back", type=int, default=0,
                      help="also grade the N AZ days before today (box batch job)")
+    ap.add_argument("--today", action="store_true",
+                     help="also grade today's AZ date — intraday passes; a game ESPN "
+                          "has not marked final is skipped, so this is safe to run "
+                          "while games are in progress")
     ap.add_argument("--stamp", action="store_true",
                      help="write the tally to exec_probe_runs (kind=sheet_grade)")
     ap.add_argument("--write", action="store_true",
@@ -203,9 +207,11 @@ def main() -> int:
     args = ap.parse_args()
 
     dates = set(args.date)
+    today_az = datetime.now(AZ).date()
+    if args.today:
+        dates.add(today_az.isoformat())
     if args.days_back:
         from datetime import timedelta
-        today_az = datetime.now(AZ).date()
         for n in range(1, args.days_back + 1):
             dates.add((today_az - timedelta(days=n)).isoformat())
     if not dates:
