@@ -116,6 +116,43 @@ JOBS: tuple[Job, ...] = (
         then=(("scripts.ingest_football_players", "--delta", "--sport", "NCAAF",
                "--commit"),)),
 
+    # -- PICK SHEETS — the humans' betting page, built HERE with the box's
+    # model (Rob, Oct 3 2026: "the sheets need to run the current damn
+    # model… UP TO DATE"). scripts/box_sheets.py prices every game through
+    # app._gridiron_proj and writes football_sheets in THIS database, which
+    # is the one the site reads — no Actions, no cloud project, no sync.
+    # Monday 17:00 AZ = the old Tue-00:00-UTC full build; the three daily
+    # refreshes re-price into data_blob.friday (what the site prefers).
+    Job("sheets_build", ["scripts.box_sheets", "--mode", "monday", "--commit"],
+        hour=17, minute=0, weekday=0, timeout_s=1500,
+        note="football pick sheets: Monday full build (box model)"),
+    Job("sheets_refresh_am", ["scripts.box_sheets", "--mode", "friday", "--commit"],
+        hour=5, minute=30, timeout_s=1500,
+        note="football pick sheets: morning re-price (box model)"),
+    Job("sheets_refresh_md", ["scripts.box_sheets", "--mode", "friday", "--commit"],
+        hour=11, minute=0, timeout_s=1500,
+        note="football pick sheets: midday re-price (box model)"),
+    Job("sheets_refresh_pm", ["scripts.box_sheets", "--mode", "friday", "--commit"],
+        hour=15, minute=30, timeout_s=1500,
+        note="football pick sheets: pre-slate re-price (box model)"),
+    # Hockey: Crease IQ v2 off the box's own goalie/shot spines (3:00/3:10
+    # above), DailyFaceoff goalies + ESPN lines fetched live. Same four
+    # clocks the Actions workflow kept (07:00/11:00/14:00/15:30 AZ).
+    Job("nhl_sheet_07", ["scripts.nhl_sheet_data", "--days", "1", "--commit"],
+        hour=7, minute=0, timeout_s=1500, note="NHL pick sheet (box)"),
+    Job("nhl_sheet_11", ["scripts.nhl_sheet_data", "--days", "1", "--commit"],
+        hour=11, minute=5, timeout_s=1500, note="NHL pick sheet (box)"),
+    Job("nhl_sheet_14", ["scripts.nhl_sheet_data", "--days", "1", "--commit"],
+        hour=14, minute=0, timeout_s=1500, note="NHL pick sheet (box)"),
+    Job("nhl_sheet_1530", ["scripts.nhl_sheet_data", "--days", "1", "--commit"],
+        hour=15, minute=35, timeout_s=1500, note="NHL pick sheet (box)"),
+    # Yesterday's sheet record, every sport, stamped to exec_probe_runs
+    # (kind=sheet_grade) so a sandbox can read it through the site.
+    Job("sheets_grade", ["scripts.grade_football_sheets", "--sport", "NFL",
+                         "--sport", "NCAAF", "--sport", "NHL",
+                         "--days-back", "2", "--stamp"],
+        hour=9, minute=0, timeout_s=600, note="pick-sheet record (yesterday + day before)"),
+
     # -- daily model computes (order matters: after their spines) ----------
     Job("diamond_iq", ["scripts.compute_diamond_iq"],
         hour=3, minute=50, note="MLB ML model snapshot"),

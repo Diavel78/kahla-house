@@ -61,10 +61,16 @@ on:
         description: "Lookahead window in days"
         required: false
         default: "8"
-  schedule:
-    - cron: "0 0 * * 2"              # Tue 00:00 UTC = Mon 5pm AZ — monday full build
-    - cron: "0 0,6,12,18 * * 0,1,3,4,5,6"  # every 6h, every day EXCEPT Tuesday — refresh
-    - cron: "0 6,12,18 * * 2"        # Tuesday — refresh (0:00 UTC skipped, that's the build above)
+      sync:
+        description: "true = push the cloud build over the box's sheets (DANGEROUS - the box builds them now)"
+        required: false
+        default: "false"
+  # SCHEDULES RETIRED Oct 3 2026 — the sheets are built ON THE BOX now
+  # (cellar/batch.py sheets_build / sheets_refresh_* -> scripts/box_sheets.py:
+  # the box's model, the box's database = the one the site reads). This
+  # workflow is a manual standby against the ORIGINAL cloud project only;
+  # its sync step would OVERWRITE the box's sheets with the naked model, so
+  # it stays off unless `sync=true` is passed deliberately.
 
 concurrency:
   group: football-sheets-data
@@ -147,6 +153,7 @@ jobs:
         # games. continue-on-error: the assembly itself already committed;
         # a sync failure here should not fail the whole run, just get
         # caught by whoever reads the job log.
+        if: ${{ github.event.inputs.sync == 'true' }}
         continue-on-error: true
         env:
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}

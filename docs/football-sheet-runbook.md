@@ -1,3 +1,5 @@
+> ⚠ **Oct 3 2026 — DATA ASSEMBLY RUNS ON THE BOX NOW.** `cellar/batch.py` jobs `sheets_build` (Mon 17:00 AZ) and `sheets_refresh_am/md/pm` run `scripts/box_sheets.py`, which prices every game through `app._gridiron_proj` (QB adjustment + CFBD/nfelo blend — the betting lanes' number) and writes `football_sheets` in the box's Postgres, the database the site reads. The Actions workflow below is a dispatch-only standby against the ORIGINAL cloud project and its sync is gated (`sync=true`). Any Routine that reads `football_sheets` through the cloud `SUPABASE_URL` is reading a table the box no longer writes — repoint it.
+
 # FOOTBALL WEEKLY GAME SHEETS — generation runbook
 
 > This is the procedure the **Monday** and **Friday** Routine sessions

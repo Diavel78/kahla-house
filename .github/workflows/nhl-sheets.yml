@@ -16,6 +16,10 @@ name: NHL Pick Sheet
 on:
   workflow_dispatch:
     inputs:
+      sync:
+        description: "true = push the cloud build over the box's sheet (DANGEROUS - the box builds it now)"
+        required: false
+        default: "false"
       days:
         description: "Slate window: today + N days (AZ)"
         required: false
@@ -24,11 +28,11 @@ on:
         description: "Run the goalie/shot delta ingest first (true/false)"
         required: false
         default: "true"
-  schedule:
-    - cron: "0 14 * * *"
-    - cron: "0 18 * * *"
-    - cron: "0 21 * * *"
-    - cron: "30 22 * * *"
+  # SCHEDULES RETIRED Oct 3 2026 — the NHL sheet is built ON THE BOX now
+  # (cellar/batch.py nhl_sheet_* jobs -> scripts/nhl_sheet_data.py against the
+  # box's own goalie/shot spines and database). Manual standby only; the
+  # sync step is gated behind `sync=true` because it would overwrite the
+  # box-built sheet.
 
 concurrency:
   group: nhl-sheets
@@ -70,4 +74,5 @@ jobs:
       - name: Build sheet
         run: python -m scripts.nhl_sheet_data --days "${{ github.event.inputs.days || '1' }}" --commit
       - name: Sync to site DB
+        if: ${{ github.event.inputs.sync == 'true' }}
         run: python -m scripts.football_sheet_sync --sport NHL --latest

@@ -450,6 +450,18 @@ def _resolve_team(name: str, teams: dict) -> str:
     return folded.get(_fold(name), name)
 
 
+# ---------------------------------------------------------------- box hooks
+# THE SHEETS RUN THE BOX'S MODEL (Rob, Oct 3 2026: "the sheets need to run
+# the current damn model… UP TO DATE… can't you run the model on the box?").
+# scripts/box_sheets.py installs these when the builder runs on the house
+# box: MODEL_HOOK returns the live power_ratings snapshot; PRICE_HOOK prices
+# each matchup through app._gridiron_proj (QB adjust + CFBD/nfelo blend), the
+# same number the betting lanes seat off. Left None, the builder behaves
+# exactly as before (its own ratings solve from game_results — Actions path).
+MODEL_HOOK = None   # fn(sport) -> model dict (R/params/n_games/computed_at)
+PRICE_HOOK = None   # fn(model, home, away, neutral) -> priced dict | None
+
+
 def load_model(sport: str) -> dict | None:
     """The sheet's model. Prefers ratings built HERE (see build_sheet_model)
     over the live power_ratings snapshot — the snapshot's 40-day half-life
@@ -457,6 +469,10 @@ def load_model(sport: str) -> dict | None:
     single-game noise at a season boundary, which is precisely when these
     sheets are written. Falls back to the snapshot if the local build can't
     run, so a sheet is never blocked on it."""
+    if MODEL_HOOK:
+        m = MODEL_HOOK(sport)
+        if m:
+            return m
     local = build_sheet_model(sport)
     if local:
         return local
@@ -579,6 +595,8 @@ def price_game(model: dict, home: str, away: str, neutral: bool) -> dict | None:
     shrinkage fits (gridiron_spread — cover_prob shrinks internally, so it
     gets the RAW numbers). Displayed margin/total are the CALIBRATED ones —
     the raw projection is measurably too extreme (never price off raw)."""
+    if PRICE_HOOK:
+        return PRICE_HOOK(model, home, away, neutral)
     params = model["params"]
     hfa = 0.0 if neutral else float(params.get("hfa") or 0.0)
     teams = model["R"].get("teams") or {}

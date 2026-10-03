@@ -147,13 +147,24 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     ap = argparse.ArgumentParser()
     ap.add_argument("--sport", action="append", choices=["NFL", "NCAAF", "NHL"], required=True)
-    ap.add_argument("--date", action="append", required=True,
+    ap.add_argument("--date", action="append", default=[],
                      help="AZ-anchored date YYYY-MM-DD; repeatable")
+    ap.add_argument("--days-back", type=int, default=0,
+                     help="also grade the N AZ days before today (box batch job)")
+    ap.add_argument("--stamp", action="store_true",
+                     help="write the tally to exec_probe_runs (kind=sheet_grade)")
     ap.add_argument("--week-key", default=None,
                      help="omit to check the latest football_sheet_weeks for each sport")
     args = ap.parse_args()
 
     dates = set(args.date)
+    if args.days_back:
+        from datetime import timedelta
+        today_az = datetime.now(AZ).date()
+        for n in range(1, args.days_back + 1):
+            dates.add((today_az - timedelta(days=n)).isoformat())
+    if not dates:
+        ap.error("give --date and/or --days-back")
     detail = []
     # tally[sport][market][verdict_tier] = {win, loss, push}
     tally: dict[str, dict[str, dict[str, dict[str, int]]]] = defaultdict(
@@ -298,7 +309,23 @@ def main() -> int:
                 line += f"  | TOT {d['total']}"
             print(line)
 
-    print("\n" + json.dumps({"tally": {s: dict(m) for s, m in tally.items()}}, default=dict))
+    out = {"tally": {s: {mk: {t: dict(c) for t, c in tiers.items()}
+                         for mk, tiers in m.items()} for s, m in tally.items()},
+           "dates": sorted(dates), "play_only": dict(play_only),
+           "play_and_lean": dict(play_and_lean)}
+    print("\n" + json.dumps(out, default=dict))
+    if args.stamp:
+        # exec_probe_runs(at default now(), params jsonb, result jsonb) — the
+        # box's probe ledger, readable from a sandbox through the site.
+        from scripts.football_sheet_data import _sb_base
+        import httpx
+        base, headers = _sb_base()
+        h = dict(headers, **{"Content-Type": "application/json",
+                             "Prefer": "return=minimal"})
+        r = httpx.post(f"{base}/rest/v1/exec_probe_runs", headers=h, timeout=30,
+                       json=[{"params": {"kind": "sheet_grade", "ctx": "cellar"},
+                              "result": {"kind": "sheet_grade", **out}}])
+        r.raise_for_status()
     return 0
 
 
