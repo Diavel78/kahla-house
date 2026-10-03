@@ -1287,9 +1287,17 @@ def test_pair_plan() -> None:
         _app.PAIR_LIVE_SLUGS = _old_pls
     except Exception as _e:
         check(f"push_watch pair-survival test ran ({_e})", False)
-    # FOOTBALL SPREAD WORTH IS ONE DIRECTION (Oct 2 2026)
-    check("NFL fav by exactly 3 is worth 8.6 (half the |margin| table), not 17.2",
-          abs(_app._pair_worth("NFL", "spread", [3]) - 8.6) < 1e-6)
+    # FOOTBALL SPREAD WORTH IS LINE-CONDITIONAL, FAVORITE-SIGNED (Oct 2 2026, measured)
+    check("NFL fav by exactly 3 at a 2.5 line is the measured 8.25",
+          abs(_app._pair_worth("NFL", "spread", [3], line=-2.5) - 8.25) < 1e-6)
+    check("NCAAF -6.5/+8.5 at a 7.5 line is worth 7+8 = 9.67",
+          abs(_app._pair_worth("NCAAF", "spread", [7, 8], line=7.5) - 9.67) < 1e-6)
+    check("a whole-number line reads the half above it",
+          _app._pair_spread_cond_row("NFL", 7) is _app._pair_spread_cond_row("NFL", 7.5))
+    check("no line falls back to the unconditional |margin| table, unhalved",
+          abs(_app._pair_worth("NFL", "spread", [3]) - 17.2) < 1e-6)
+    check("a line far from any measured row returns no conditional row",
+          _app._pair_spread_cond_row("NFL", 30.5) is None)
     check("NHL stays as measured (already one-direction)", abs(_app._pair_worth("NHL", "spread", [2]) - 9.7) < 1e-6)
     # ONE RENT QUESTION IN THE PAIR ENGINE (Oct 2 2026): no pair function calls _rent_ok directly
     import re as _re_pr
@@ -1469,12 +1477,11 @@ def test_pair_candidates() -> None:
     check("a tie-only window is not a middle",
           _app._pair_candidates(r2, "spread", "NFL", 15) == [])
 
-    # College: |21| is 3.5% both ways, so ONE direction is 1.75 — under the
-    # 2.0 minimum worth. It used to seat on the both-teams number (Oct 2 2026).
-    r3 = rungs(("away", -20.5, 45.0, 46.0), ("home", 21.5, 54.0, 55.0))
-    check("college does NOT seat a middle on 21 (one-direction worth 1.75 < 2.0)",
-          not [x for x in _app._pair_candidates(r3, "spread", "NCAAF", 15)
-               if x["hits"] == [21]])
+    # College: at a 21.5 line the favorite wins by EXACTLY 21 six per cent of
+    # the time (CFBD closing lines 2017→) — a real middle. The Oct 2 halving
+    # priced it at 1.75 and refused it; the measured row is the judge now.
+    check("college middle on 21 at a 21.5 line is worth the measured 6.0",
+          abs(_app._pair_worth("NCAAF", "spread", [21], line=-21.5) - 6.0) < 1e-6)
     check("NFL worth table rates 6 over 7 per cent paid",
           _app._PAIR_WORTH_SPREAD["NFL"][6] > _app._PAIR_WORTH_SPREAD["NCAAF"][6])
 

@@ -21437,7 +21437,71 @@ _PAIR_WORTH_SPREAD = {
 # Totals have no key numbers to speak of — the distribution is flat, so one
 # number per league (NFL measured 2.3% for a 1-point middle; college's totals
 # spread wider still).
-_PAIR_SPREAD_BOTH_WAYS = {"NFL", "NCAAF"}   # tables above are |margin| rates → halved in _pair_worth
+# LINE-CONDITIONAL, FAVORITE-SIGNED (Oct 2 2026 — measured, after Rob called
+# the halving "bullshit" and the data agreed): P(favorite wins by EXACTLY m |
+# the closing spread was L), in percent. NFL = nflverse closing lines 2010→
+# (2,103 half-point lines); NCAAF = CFBD consensus/Bovada/DK closing lines
+# 2017→ (~9,700 games). Rows need n≥80. This is the number a pair straddling
+# the line actually collects — at L=7.5 the NCAAF −6.5/+8.5 pair wins 7 or 8
+# 9.7% of the time; the |margin| table said 10.3 and the halving said 5.2.
+# Rebuild: the one-off in the Oct 2 session transcript (nflverse games.csv +
+# CFBD /lines); write it into kahla-scanner/scripts/middle_stats.py when touched.
+_PAIR_SPREAD_COND = {
+    "NFL": {
+        1.5: {-2: 4.32, -1: 2.88, 1: 3.6, 2: 5.04, 3: 12.23, 4: 2.88, 5: 3.6},
+        2.5: {-1: 3.0, 1: 2.25, 2: 3.25, 3: 8.25, 4: 2.75, 5: 3.25, 6: 3.0},
+        3.5: {1: 2.03, 2: 1.35, 3: 8.8, 4: 3.16, 5: 4.06, 6: 4.97, 7: 5.87},
+        4.5: {1: 1.27, 2: 1.27, 3: 12.03, 4: 3.16, 5: 2.53, 6: 1.9, 7: 2.53, 8: 5.06},
+        5.5: {2: 0.56, 3: 8.89, 4: 5.56, 5: 2.78, 6: 2.22, 7: 5.0, 8: 2.78, 9: 1.67},
+        6.5: {3: 8.0, 4: 3.5, 5: 3.0, 6: 7.0, 7: 5.5, 8: 3.0, 9: 1.5, 10: 3.5},
+        7.5: {4: 3.24, 5: 2.31, 6: 4.63, 7: 8.33, 8: 2.31, 9: 0.93, 10: 2.31, 11: 2.78},
+        9.5: {6: 5.95, 7: 2.38, 8: 5.95, 9: 1.19, 10: 2.38, 11: 1.19, 13: 4.76},
+        10.5: {7: 6.82, 8: 1.14, 10: 1.14, 11: 1.14, 12: 2.27, 13: 2.27, 14: 11.36},
+    },
+    "NCAAF": {
+        1.5: {-2: 1.6, -1: 3.6, 1: 2.4, 2: 2.0, 3: 10.8, 4: 3.2},
+        2.5: {-1: 2.04, 1: 1.81, 2: 1.36, 3: 4.98, 4: 1.36, 5: 0.9, 6: 2.94},
+        3.5: {1: 1.39, 2: 3.7, 3: 8.31, 4: 2.77, 5: 2.08, 6: 3.0, 7: 5.54},
+        4.5: {1: 3.32, 2: 1.66, 3: 9.96, 4: 2.07, 5: 1.66, 6: 3.32, 7: 4.98, 8: 2.07},
+        5.5: {2: 0.56, 3: 7.78, 4: 4.44, 5: 1.11, 6: 1.67, 7: 6.67, 8: 1.67, 9: 0.56},
+        6.5: {3: 6.4, 4: 3.2, 5: 2.93, 6: 1.87, 7: 6.13, 8: 3.47, 9: 1.87, 10: 2.67},
+        7.5: {4: 1.51, 5: 0.6, 6: 1.81, 7: 6.95, 8: 2.72, 9: 0.6, 10: 3.93, 11: 1.81},
+        8.5: {5: 2.31, 6: 2.31, 7: 4.62, 8: 2.31, 9: 1.54, 10: 7.69, 11: 1.54, 12: 0.77},
+        9.5: {6: 1.85, 7: 5.09, 8: 1.85, 9: 0.46, 10: 6.94, 11: 1.85, 12: 2.78, 13: 1.39},
+        10.5: {7: 6.67, 8: 1.78, 9: 0.44, 10: 2.22, 11: 3.11, 12: 3.56, 13: 1.33, 14: 1.78},
+        11.5: {8: 0.75, 9: 0.75, 10: 1.49, 11: 1.49, 12: 2.24, 13: 2.99, 14: 2.99, 15: 1.49},
+        12.5: {10: 2.76, 11: 2.76, 12: 1.38, 13: 0.69, 14: 2.76, 15: 1.38, 16: 2.76},
+        13.5: {10: 0.95, 11: 0.95, 12: 1.9, 13: 1.43, 14: 4.29, 15: 0.95, 16: 3.33, 17: 5.24},
+        14.5: {11: 1.47, 12: 1.47, 13: 1.47, 14: 2.45, 15: 0.98, 16: 0.98, 17: 2.45, 18: 2.45},
+        15.5: {13: 2.97, 14: 5.94, 15: 0.99, 16: 2.97, 17: 2.97, 18: 0.99, 19: 0.99},
+        16.5: {13: 2.68, 14: 1.34, 15: 0.67, 16: 2.68, 17: 2.68, 18: 4.03, 19: 2.68, 20: 2.01},
+        17.5: {14: 4.07, 15: 2.91, 16: 1.74, 17: 2.33, 18: 2.91, 19: 2.91, 20: 4.65, 21: 5.81},
+        18.5: {16: 3.49, 17: 6.98, 18: 1.16, 19: 3.49, 20: 3.49, 21: 6.98, 22: 2.33},
+        19.5: {16: 1.15, 17: 4.6, 18: 2.3, 19: 2.3, 21: 6.9, 23: 2.3},
+        20.5: {17: 5.88, 18: 3.53, 19: 2.35, 20: 2.35, 21: 7.06, 22: 2.35, 23: 3.53, 24: 4.71},
+        21.5: {18: 3.0, 19: 1.0, 20: 1.0, 21: 6.0, 22: 2.0, 23: 1.0, 24: 3.0, 25: 2.0},
+        23.5: {20: 0.95, 21: 6.67, 22: 1.9, 23: 1.9, 24: 3.81, 25: 2.86, 26: 0.95, 27: 1.9},
+        24.5: {21: 4.17, 22: 1.04, 23: 4.17, 24: 1.04, 25: 1.04, 26: 2.08, 27: 4.17, 28: 2.08},
+    },
+}
+
+
+def _pair_spread_cond_row(sport: str, line) -> dict | None:
+    """The conditional row for a book line (abs, nearest half point), or the
+    nearest measured row within 1 point, else None."""
+    try:
+        L = abs(float(line))
+    except (TypeError, ValueError):
+        return None
+    tbl = _PAIR_SPREAD_COND.get(str(sport).upper()) or {}
+    if not tbl:
+        return None
+    Lh = round(L * 2) / 2.0
+    if Lh == int(Lh):                       # whole-number line: use the half above
+        Lh += 0.5
+    best = min(tbl, key=lambda k: abs(k - Lh))
+    return tbl[best] if abs(best - Lh) <= 1.0 else None
+
 _PAIR_WORTH_TOTAL = {"NFL": 2.3, "NCAAF": 2.5}
 # MLB totals middle on a RUN NUMBER, measured over 3,574 finals — and they are
 # worth far more than a football point (Rob, Sep 21 2026: "MLB totals can
@@ -21618,8 +21682,10 @@ def _pair_min_lead_h(sport, sb) -> float:
         return _PAIR_MIN_LEAD_DAYOF_H
 
 
-def _pair_worth(sport: str, mt: str, hits: list) -> float:
-    """What a middle covering `hits` is worth, in cents (= percent)."""
+def _pair_worth(sport: str, mt: str, hits: list, line=None) -> float:
+    """What a middle covering `hits` is worth, in cents (= percent). `line` =
+    the book line the pair straddles; football spreads price off the
+    line-conditional, favorite-signed table when it is known."""
     if mt == "total":
         if sport == "MLB":
             return sum(_PAIR_WORTH_TOTAL_MLB.get(int(h), 2.0) for h in hits)
@@ -21627,19 +21693,18 @@ def _pair_worth(sport: str, mt: str, hits: list) -> float:
             return sum(_PAIR_WORTH_TOTAL_NHL.get(int(h), 1.0) for h in hits)
         return _PAIR_WORTH_TOTAL.get(sport, 2.0) * max(1, len(hits))
     tbl = _PAIR_WORTH_SPREAD.get(sport) or {}
-    w = sum(tbl.get(abs(int(h)), 0.5) for h in hits if int(h) != 0)
-    # ⚠ ONE DIRECTION (Oct 2 2026): the football tables are |margin| rates —
-    # BOTH teams winning by k. A pair's window is signed (fav by 3, not
-    # "anyone by 3"), so each number is worth about half its table value
-    # (NFL |3| = 14.7% over 906 finals, a 3-point favorite lands exactly 3
-    # ~9.5%; half the table's 17.2 = 8.6, on the safe side). The NHL table
-    # was re-measured one-direction on Sep 29; football gets the divisor
-    # until its tables are re-measured against line history. Found the
-    # morning the pair builder first priced football under value caps: it
-    # wanted 20 college spread pairs at ~124 against a true worth near 114.
-    if str(sport).upper() in _PAIR_SPREAD_BOTH_WAYS:
-        w *= 0.5
-    return w
+    row = (_pair_spread_cond_row(sport, line) if mt == "spread" and line is not None
+           else None)
+    if row:
+        # measured: P(fav by exactly m | line) — the pair's window sits on the
+        # favorable side of the line by construction, so |h| is the fav margin
+        return sum(row.get(abs(int(h)), 0.5) for h in hits if int(h) != 0)
+    # no line / no row: the unconditional |margin| table. Near its own key
+    # number the favorite's share of a |margin| is most of it (measured Oct 2:
+    # NFL fav-by-3 at a 2.5 line 8.25 vs |3| 17.2 → 48%; NCAAF fav-by-7 at
+    # 7.5 is 6.95 vs |7| 7.6 → 91%), so neither halving nor the full table is
+    # right everywhere — the conditional row is; this is the fallback only.
+    return sum(tbl.get(abs(int(h)), 0.5) for h in hits if int(h) != 0)
 
 
 def _pair_candidates(rungs: list, mt: str, sport: str, qty: int) -> list:
@@ -22630,7 +22695,7 @@ def _pair_from_gridiron_rule(sb, g, mt, now, taken_slugs=None):
             # not in _PAIR_CAP_BY_WORTH.
             _sport = g.get("sport") or "NFL"
             if _pair_cap_by_worth(_sport):
-                _wcap = 100.0 + _pair_worth(_sport, mt, hits)
+                _wcap = 100.0 + _pair_worth(_sport, mt, hits, line=rule.get("center"))
                 if cost > _wcap - _PAIR_MIN_EDGE_C + 1e-9:
                     continue
             else:
