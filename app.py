@@ -23736,6 +23736,18 @@ def _pair_step(sb, client, row, positions, now, res, lane_orders=None) -> None:
                                    row.get("id"), net, slug)
             net = 0.0
         h = abs(net) if abs(net) >= 0.01 else 0.0
+        # THE PAIR OWNS AT MOST ITS OWN LOT (Oct 3 2026, after the Nebraska
+        # hand bet): `h` is the venue's whole position on the slug, so a lot
+        # Rob buys by hand on a leg's market would be folded into the pair's
+        # ask size and sold at the pair's floor. Anything above the row's
+        # qty is not ours to list — cap, count, leave it alone.
+        try:
+            _qcap = float(row.get("qty") or _PAIR_DEFAULT_QTY)
+        except (TypeError, ValueError):
+            _qcap = float(_PAIR_DEFAULT_QTY)
+        if h > _qcap + 0.5:
+            res["foreign_lot"] = res.get("foreign_lot", 0) + 1
+            h = _qcap
         mine_b = [o for o in orders if o["slug"] == slug and o["intent"] == buy_i]
         mine_s = [o for o in orders if o["slug"] == slug and o["intent"] == sell_i]
         # one order per (slug, intent) — cancel extras, keep the oldest
