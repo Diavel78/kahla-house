@@ -20984,8 +20984,13 @@ def _pair_rows(sb, max_age_s: float = 30.0) -> list:
         return _PAIR_CACHE["rows"]
     try:
         cut = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()
-        rows = (sb.table("pair_hedges").select("*").eq("enabled", True)
-                .gte("kickoff", cut).limit(200).execute().data) or []
+        # PAGED, NOT .limit(200) (Oct 3 2026): the board passed 200 live pairs
+        # and rows 201+ were never LOADED — no lap ever saw them, their bids
+        # rested unmanaged, PAIR STALE went red. Gotcha #40 class.
+        def _q():
+            return (sb.table("pair_hedges").select("*").eq("enabled", True)
+                    .gte("kickoff", cut).order("id"))
+        rows = list(_sb_paged(_q, max_pages=5))
         _PAIR_CACHE.update(at=_time.time(), rows=rows)
     except Exception:
         pass
