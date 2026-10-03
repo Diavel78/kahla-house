@@ -143,6 +143,48 @@ def grade_total(bt: dict, home_score: float, away_score: float) -> str | None:
     return None
 
 
+def grade_model(sport: str, data_blob: dict, hs: float, aws: float) -> dict:
+    """The MODEL's side on every market it priced, pass or not (Rob, Oct 3
+    2026: "grade the model, not the picks"). Football: the calibrated margin
+    vs the market home line, the calibrated total vs the market total.
+    Hockey: win_home vs 50% on the ML, exp_total vs the market total.
+    A model number that lands exactly on the line has no side → no key."""
+    out: dict = {}
+    db = data_blob or {}
+    if sport == "NHL":
+        m = db.get("model") or {}
+        ln = db.get("lines") or {}
+        wh = m.get("win_home")
+        if wh is not None and wh != 0.5:
+            res = grade_ml({"side": "home" if wh > 0.5 else "away"}, hs, aws)
+            if res:
+                out["ml"] = res
+        et, lt = m.get("exp_total"), ln.get("total")
+        if et is not None and lt is not None and et != lt:
+            res = grade_total({"line": lt, "side": "over" if et > lt else "under"}, hs, aws)
+            if res:
+                out["total"] = res
+        return out
+    blob = _model_block(db) or {}
+    if not blob:
+        return out
+    mm = blob.get("margin_cal", blob.get("margin_raw"))
+    L = (blob.get("bet_spread") or {}).get("market_home_line")
+    if mm is not None and L is not None and (mm + L) != 0:
+        # home covers when (home margin + home line) > 0 → the model's side
+        res = grade_spread({"market_home_line": L,
+                            "side": "home" if (mm + L) > 0 else "away"}, hs, aws)
+        if res:
+            out["spread"] = res
+    mt = blob.get("total_cal", blob.get("total_raw"))
+    lt = (blob.get("bet_total") or {}).get("line")
+    if mt is not None and lt is not None and mt != lt:
+        res = grade_total({"line": lt, "side": "over" if mt > lt else "under"}, hs, aws)
+        if res:
+            out["total"] = res
+    return out
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     ap = argparse.ArgumentParser()
@@ -261,6 +303,9 @@ def main() -> int:
                         row_detail["total"] = (
                             f"{bt.get('side')} {bt.get('line'):g} "
                             f"[{tier}] -> {res}")
+            mg = grade_model(sport, r.get("data_blob"), hs, aws)
+            if mg:
+                grade["model"] = mg
             writes.append((r, grade))
             detail.append(row_detail)
 

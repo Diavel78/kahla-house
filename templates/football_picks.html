@@ -220,8 +220,9 @@
     }
     // ✅/❌/➖ after a pick once the box's 09:00 grader has stamped the row
     // (data_blob.grade, written by grade_football_sheets --write).
-    function gradeMark(g, key) {
-        const r = g.grade && g.grade[key];
+    function gradeMark(g, key, sub) {
+        let r = g.grade && g.grade[key];
+        if (sub) r = r && r[sub];
         if (r === 'win') return ' <span class="gr gr-win" title="won">✅</span>';
         if (r === 'loss') return ' <span class="gr gr-loss" title="lost">❌</span>';
         if (r === 'push') return ' <span class="gr gr-push" title="push">➖</span>';
@@ -285,17 +286,17 @@
                    + '<div class="num">O/U ' + (L.total ?? '—') + '</div>';
         let model = '<span class="unrated">unrated — no number</span>';
         if (M) {
-            model = '<div class="num">' + favLine(g, M.spread_home, 1) + '</div>'
-                  + '<div class="num">Total ' + (M.total ?? '—') + '</div>';
+            model = '<div class="num">' + favLine(g, M.spread_home, 1) + gradeMark(g, 'model', 'spread') + '</div>'
+                  + '<div class="num">Total ' + (M.total ?? '—') + gradeMark(g, 'model', 'total') + '</div>';
         }
         const pk = [];
         const bs = g.spread, bt = g.total;
         if (bs) pk.push('<div>' + verdictBadge(bs.verdict) + ' ' + (bs.verdict !== 'pass'
             ? shortTeam(bs.team) + ' ' + sgn(bs.line) + ' <span class="dim">(' + sgn(bs.edge_pts) + ' pts' + (bs.fair ? ', to ' + am(bs.fair) + ' / ' + pct(impl(bs.fair)) : '') + ')</span>'
-            : '<span class="dim">spread</span>') + gradeMark(g, 'spread') + '</div>');
+            : '<span class="dim">spread</span>') + '</div>');
         if (bt) pk.push('<div>' + verdictBadge(bt.verdict) + ' ' + (bt.verdict !== 'pass'
             ? (bt.side === 'over' ? 'Over ' : 'Under ') + bt.line + ' <span class="dim">(' + sgn(bt.edge_pts) + ' pts' + (bt.fair ? ', to ' + am(bt.fair) + ' / ' + pct(impl(bt.fair)) : '') + ')</span>'
-            : '<span class="dim">total</span>') + gradeMark(g, 'total') + '</div>');
+            : '<span class="dim">total</span>') + '</div>');
         return [line, model, pk.join('') || '<span class="unrated">no market line</span>'];
     }
 
@@ -319,21 +320,21 @@
         if (M) {
             const wh = Number(M.win_home);
             model = '<div class="num">' + favLine(g, M.spread_home, 2) + '</div>'
-                  + '<div class="num">' + nameOf(g, 'away') + ' ' + pam(1 - wh) + '<br>'
-                  + nameOf(g, 'home') + ' ' + pam(wh) + '</div>'
-                  + '<div class="num">Total ' + (M.total !== undefined && M.total !== null ? Number(M.total).toFixed(1) : '—') + '</div>';
+                  + '<div class="num">' + nameOf(g, 'away') + ' ' + pam(1 - wh) + (wh < 0.5 ? gradeMark(g, 'model', 'ml') : '') + '<br>'
+                  + nameOf(g, 'home') + ' ' + pam(wh) + (wh > 0.5 ? gradeMark(g, 'model', 'ml') : '') + '</div>'
+                  + '<div class="num">Total ' + (M.total !== undefined && M.total !== null ? Number(M.total).toFixed(1) : '—') + gradeMark(g, 'model', 'total') + '</div>';
         }
         const pk = [];
         if (g.ml) pk.push('<div>' + verdictBadge(g.ml.verdict) + ' ' + (g.ml.verdict !== 'pass'
             ? (g.ml.abbr || shortTeam(g.ml.team)) + ' ML ' + amp(g.ml.price)
               + ' <span class="dim">· model ' + (g.ml.model_p !== undefined && g.ml.model_p !== null ? pct(g.ml.model_p) : '—')
               + ' (' + sgn(g.ml.edge_pp) + '%), fair ' + am(g.ml.fair) + '</span>'
-            : '<span class="dim">ML</span>') + gradeMark(g, 'ml') + '</div>');
+            : '<span class="dim">ML</span>') + '</div>');
         if (g.total) pk.push('<div>' + verdictBadge(g.total.verdict) + ' ' + (g.total.verdict !== 'pass'
             ? (g.total.side === 'over' ? 'Over ' : 'Under ') + g.total.line + (g.total.price !== undefined && g.total.price !== null ? ' ' + amp(g.total.price) : '')
               + ' <span class="dim">· model ' + (g.total.model_p !== undefined && g.total.model_p !== null ? pct(g.total.model_p) : '—')
               + ' (' + sgn(g.total.edge_pp) + '%)' + (g.total.fair ? ', fair ' + am(g.total.fair) : '') + '</span>'
-            : '<span class="dim">total</span>') + gradeMark(g, 'total') + '</div>');
+            : '<span class="dim">total</span>') + '</div>');
         return [line, model, pk.join('') || '<span class="unrated">no market line yet</span>'];
     }
 
@@ -403,7 +404,7 @@
             }
         }
         if (rec.win + rec.loss + rec.push) {
-            html += '<div class="record">Graded on this sheet: <b>' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + '</b>'
+            html += '<div class="record">Picks record (plays + leans, graded): <b>' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + '</b>'
                   + (rec.win + rec.loss ? ' <span class="dim">(' + Math.round(100 * rec.win / (rec.win + rec.loss)) + '%)</span>' : '') + '</div>';
         }
         let day = null;
