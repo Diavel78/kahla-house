@@ -669,7 +669,7 @@
         const d = await r.json().catch(() => null);
         if (!d || !d.ok) { document.getElementById('metaLine').textContent = 'error: ' + (d && d.error || 'unknown'); return; }
 
-        const dl = document.getElementById('dlRow');
+        const dl = document.getElementById('dlRow') || { innerHTML: '' };   // no PDF row on the bet sheet
         dl.innerHTML = '';
         if (d.pdf_url) {
             dl.innerHTML += '<a class="dl" href="' + d.pdf_url + '" target="_blank">📄 Full sheet pack<span class="sub"> · deep dives + roster notes</span></a>';
