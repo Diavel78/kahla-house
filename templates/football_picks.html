@@ -368,7 +368,7 @@
 
         document.getElementById('metaLine').textContent = _sport === 'NHL'
             ? d.games.length + ' games · lines/model updated ' + ago(d.lines_updated_at)
-            : 'Week of ' + d.week_key + ' · ' + d.games.length + ' games · sheet built ' + ago(d.published_at) +
+            : 'Week of ' + d.week_key + ' · ' + d.games.length + ' games · sheet built ' + ago(d.built_at || d.published_at) +
               ' · lines/model updated ' + ago(d.lines_updated_at);
         document.getElementById('hint').innerHTML = _sport === 'NHL'
             ? 'Model = Crease IQ v2 (score model: xG, goalies, rest). Spread = expected final goal margin; % = win probability. ML play ≥ 4% over the no-vig line, lean ≥ 2%. Totals are LEAN at most — the total model has not beaten the base rate in backtest. Starting goalies are projected until confirmed — check before betting.'

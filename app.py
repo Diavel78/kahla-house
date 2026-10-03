@@ -1175,19 +1175,26 @@ def api_football_picks():
         return (f"{base}/storage/v1/object/public/football-sheets/{path}"
                 if path else None)
 
-    games, lines_updated_at = [], None
+    games, lines_updated_at, built_at = [], None, None
     for r in rows:
         games.append(_sheet_game_nhl(r) if sport == "NHL" else _sheet_game_football(r))
         blob = r.get("data_blob") or {}
         stamp = (blob.get("friday") or {}).get("built_at") or r.get("data_built_at")
         if stamp and (lines_updated_at is None or stamp > lines_updated_at):
             lines_updated_at = stamp
+        # "sheet built" = the week's first box build (earliest row stamp).
+        # The week row's published_at is the PDF narrative's stamp, which
+        # the box never writes — it read "never" from Oct 3 2026 on.
+        b = r.get("data_built_at")
+        if b and (built_at is None or b < built_at):
+            built_at = b
     return jsonify({
         "ok": True, "sport": sport, "week_key": wk.get("week_key"),
         "games": games,
         "pdf_url": _pub_url(wk.get("friday_pdf_path") or wk.get("pdf_path")),
         "picks_pdf_url": _pub_url(wk.get("picks_pdf_path")),
         "published_at": wk.get("friday_published_at") or wk.get("published_at"),
+        "built_at": built_at or wk.get("friday_published_at") or wk.get("published_at"),
         "picks_published_at": wk.get("picks_published_at"),
         "lines_updated_at": lines_updated_at,
     })
