@@ -90,6 +90,25 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
+      - name: Ingest finals (ESPN -> game_results, THIS project)
+        # The sheet model solves its own ratings from game_results in the
+        # cloud project this workflow writes — and since the Cellar cutover
+        # nothing else writes that table (the daily ingest_results job runs
+        # on the box, into the box's Postgres). Sep 13 -> Oct 3 2026 every
+        # sheet was priced on ratings frozen at Sep 13 (NFL: 2 games of the
+        # 2026 season in the table) and nobody noticed until the record was
+        # graded. 10 days back so a missed run self-heals; football only
+        # (the other sports' finals are not read by anything here).
+        # continue-on-error: a dead ESPN must not block the sheet; the
+        # model just prices on last run's finals, like before.
+        continue-on-error: true
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          python -m scripts.ingest_results --days 10 --sport NFL
+          python -m scripts.ingest_results --days 10 --sport NCAAF
+
       - name: Resolve mode
         id: mode
         run: |
