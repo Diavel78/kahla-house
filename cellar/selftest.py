@@ -1317,6 +1317,11 @@ def test_pair_plan() -> None:
           _app._hand_fill_verdict(_NebSB(None), "aec-cfb-mary-nebr-2026-10-03", True) is None)
     check("the ghost loop refuses a position on True or None (source shows both gates)",
           "manual_fill" in _insp0.getsource(_app._pmm_autolog) and "fill_owner_unknown" in _insp0.getsource(_app._pmm_autolog))
+    # WIND-DOWN (Rob, Oct 3 2026): flat rows are cancelled + retired, held rows keep running
+    _src_pt = _insp0.getsource(_app._pair_tick)
+    check("pair_wind_down retires only rows holding nothing (both legs flat)",
+          "pair_wind_down" in _src_pt and "wind_down_retired" in _src_pt
+          and "not any(_held(lg.get(\"slug\")) for lg in legs_)" in _src_pt)
     check("a line far from any measured row returns no conditional row",
           _app._pair_spread_cond_row("NFL", 30.5) is None)
     check("NHL stays as measured (already one-direction)", abs(_app._pair_worth("NHL", "spread", [2]) - 9.7) < 1e-6)

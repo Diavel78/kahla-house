@@ -1239,6 +1239,10 @@ on a dead slug, pick or no pick), and ghost adoption skips dead slugs.
 Rule for every write surface: reads coming back does NOT mean the venue
 executes — check that the book CHANGES before trusting a cancel or create.
 
+## ⛔ COMPUTER BETTING IS SHUT DOWN (Rob, Oct 3 2026: "Shut it down. I'm going back to gambling. It doesn't collect rent anymore… it was fun when we had rent")
+
+Nothing new gets seated: `machine_flags pair_seed_enabled=false`, `pair_props_enabled=false`, `pair_or_nothing=true`, `oms_enabled=false`, `seed_quotes=false`, `ferrari_parked=true`. The code stays exactly where it is — un-shutting is flipping flags, not rebuilding. **Wind-down rule (`machine_flags pair_wind_down=true`, enforced in `_pair_tick`):** a pair holding NOTHING has its bids cancelled and is retired; ONE leg held keeps running (partner bid + the cost ask — "keep trying to pair or sell the held leg"); BOTH held rides with no new orders (`pair_hold_both`). **The early-rent watch** (`_early_rent_watch`, alerts lane): an `early` program on a game-line family (ML/spread/total) in a sport we trade appears on the newest reward-schedule scrape → 🚨 urgent Telegram once per program (`machine_flags early_rent_seen`), stamped `exec_probe_runs kind=early_rent`. ⚠ The box's `.env` still has blank `FILLED_BOT_TOKEN`/`FILLED_BOT_CHAT_ID` (nothing sent since Aug 27) — until Rob pastes them, the stamp + the daily Claude routine are the notification.
+
 ## THE ORDER OF WORK (user, Aug 21 2026 — do not reorder)
 
 **1. The Cellar goes live. 2. FOOTBALL. 3. The Market Maker.**

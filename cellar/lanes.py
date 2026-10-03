@@ -418,6 +418,13 @@ def lane_alerts(ctx: Ctx) -> int:
     except Exception as e:
         log.warning("outbid alerts failed: %s", e)
     try:
+        w = _app._early_rent_watch(ctx.sb, ctx.now) or {}
+        if w.get("new"):
+            log.warning("EARLY RENT WATCH: new game-line early programs %s", w["new"])
+            n += len(w["new"])
+    except Exception as e:
+        log.warning("early rent watch failed: %s", e)
+    try:
         n += int(_app._tg_flush(ctx.sb, ctx.now) or 0)
     except Exception as e:
         log.warning("telegram flush failed: %s", e)

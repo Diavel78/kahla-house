@@ -23536,10 +23536,29 @@ def _pair_tick(sb, now=None) -> dict:
                 sum(1 for lg in (r.get("legs") or []) if _held(lg.get("slug"))),
                 -int(r.get("id") or 0))).get("id")
     _kept = []
+    # WIND-DOWN (Rob, Oct 3 2026: "Shut it down. I'm going back to gambling…
+    # If you hold 1 leg, keep trying to pair or sell the held leg. If we
+    # hold no legs, cancel them. If we hold both legs, let them ride, no new
+    # orders"). machine_flags pair_wind_down: a row holding NOTHING has its
+    # bids cancelled and is retired; one leg held runs the normal step (the
+    # partner bid + the cost ask); both held is already hold_both (no asks).
+    _wind = bool(_machine_flag("pair_wind_down", False))
     for row in rows:
         legs_ = row.get("legs") or []
         mt_ = row.get("market_type") or "spread"
         rid = row.get("id")
+        if _wind and legs_ and not any(_held(lg.get("slug")) for lg in legs_):
+            for lg in legs_:
+                if lg.get("slug"):
+                    _cancel_bid(lg["slug"], "wind_down_cancelled")
+            try:
+                sb.table("pair_hedges").update(
+                    {"enabled": False, "updated_at": now.isoformat()}
+                ).eq("id", rid).execute()
+                res["wind_down_retired"] = res.get("wind_down_retired", 0) + 1
+            except Exception:
+                pass
+            continue
         mine_ = [lg["slug"] for lg in legs_
                  if lg.get("slug") and _owner.get(lg["slug"], rid) == rid]
         if (len(legs_) == 2
@@ -33345,6 +33364,67 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
     res["ms"] = int((_time.time() - _t0) * 1000)
     app.logger.info("repeg phase: done ms=%s", res["ms"])
     return res
+
+
+_EARLY_RENT_SPORTS = {"mlb", "nfl", "cfb", "ncaaf", "nhl", "nba", "cbb", "ncaab", "wnba"}
+_EARLY_RENT_FAMILIES = {"moneyline", "spread", "total"}
+
+
+def _early_rent_watch(sb, now=None) -> dict:
+    """THE EARLY-RENT WATCH (Rob, Oct 3 2026, shutting the machine down:
+    "It doesn't collect rent anymore. You can check if early rent comes
+    back and you send me a notification"). Every alerts lap reads the
+    venue's reward-schedule mirror (newest scrape only) for an `early`
+    program on a GAME-LINE family in a sport we trade — UFC/soccer/racing
+    early programs exist today and are not the signal. A program not seen
+    before is stamped (exec_probe_runs kind=early_rent, machine_flags
+    early_rent_seen) and pinged 🚨 urgent, once. Never places anything."""
+    now = now or datetime.now(timezone.utc)
+    out = {"kind": "early_rent", "new": [], "live": 0}
+    try:
+        rows = (sb.table("poly_reward_schedule")
+                .select("program_id,sport,family,period,pool,n_markets,synced_at")
+                .eq("period", "early").limit(500).execute().data) or []
+    except Exception as e:
+        out["err"] = str(e)[:120]
+        return out
+    try:
+        newest = max((_parse_iso(r["synced_at"]) for r in rows if r.get("synced_at")), default=None)
+    except Exception:
+        newest = None
+    if newest is None:
+        return out
+    cut = newest - timedelta(minutes=_RENT_SCHED_TOL_MIN)
+    live = [r for r in rows
+            if (r.get("synced_at") and _parse_iso(r["synced_at"]) >= cut
+                and str(r.get("sport") or "").lower() in _EARLY_RENT_SPORTS
+                and str(r.get("family") or "").lower() in _EARLY_RENT_FAMILIES
+                and int(r.get("n_markets") or 0) > 0)]
+    out["live"] = len(live)
+    if not live:
+        return out
+    seen = set(_machine_flag_val("early_rent_seen", []) or [])
+    new = [r for r in live if r["program_id"] not in seen]
+    out["new"] = [r["program_id"] for r in new]
+    if not new:
+        return out
+    lines = [f"  {r['sport'].upper()} {r['family']} early — pool ${float(r.get('pool') or 0):g}, "
+             f"{r.get('n_markets')} markets ({r['program_id']})" for r in new]
+    msg = "🚨 EARLY RENT IS BACK on a game-line family:\n" + "\n".join(lines) + \
+          "\nThe machine is in wind-down (pair_seed_enabled=false); nothing was placed."
+    app.logger.warning(msg)
+    try:
+        _send_fill_telegram(msg, urgent=True)
+    except Exception:
+        pass
+    try:
+        sb.table("machine_flags").upsert(
+            {"key": "early_rent_seen", "value": sorted(seen | {r["program_id"] for r in new})},
+            on_conflict="key").execute()
+    except Exception as e:
+        out["flag_err"] = str(e)[:120]
+    _probe_log({**out, "programs": [{k: r.get(k) for k in ("program_id", "sport", "family", "pool", "n_markets")} for r in new]})
+    return out
 
 
 def _tg_send_now(text):
