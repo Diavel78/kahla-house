@@ -1069,7 +1069,9 @@
             if (!me.approved) { window.location.href = '/'; return; }
             // Pick Bot now requires explicit access — admin or bot_access.
             // A plain viewer (e.g. a book-club-only member) is bounced out.
-            _canBet = (me.role === 'admin') || !!me.bot_access;   // VIEW + LOG
+            // Pick Bot RETIRED Sep 30 2026; bot_access is Pick Sheets access now
+            // (Oct 3 2026) — this legacy page (?legacy=1) opens for admins only.
+            _canBet = (me.role === 'admin');                       // VIEW + LOG (admin-only legacy)
             _canLog = _canBet;                                     // per-user: view ⇒ log
             _isAdmin = (me.role === 'admin');                      // settle + analytics gate
             if (!_canBet) { window.location.href = '/'; return; }

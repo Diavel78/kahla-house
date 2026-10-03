@@ -249,8 +249,9 @@ Three roles in Firestore `users/{uid}.role`:
 - **`viewer`** — Odds only by default. Friends use this tier.
 - **`pending`** — default for new signups. No access until an admin approves.
 
-Plus a **per-user capability** in Firestore `users/{uid}.bot_access` (boolean):
-- Toggleable independently of `role` via the Pick Bot pill in User Management. Lets a viewer get Pick Bot access without making them admin.
+Plus a **per-user capability** in Firestore `users/{uid}.bot_access` (boolean) — **the PICK SHEETS pill (Oct 3 2026, Rob: "I need Pickbot access to be picksheet access, so they can see the sheets only. Not the dashboard")**:
+- Toggleable independently of `role` via the Pick Sheets pill in User Management (the Firestore field keeps its old `bot_access` name — friends who had Pick Bot access carried over without a data migration). Lets a viewer see `/pick-sheets` without making them admin.
+- Grants `/pick-sheets` + `/api/pick-sheets` (`@bot_required`) and NOTHING else: the Pick Sheets page hides its Dashboard nav link for non-admins, and the retired legacy `/handicapper?legacy=1` page is admin-only client-side (`_canBet = isAdmin`). The legacy `/api/handicapper*` routes still carry `@bot_required` but no non-admin page reaches them.
 - Admins always have it implicitly (the gates treat `role=admin` as `bot_access=true`).
 - Admin pill toggle in User Management: ON / OFF (greyed out for pending/unapproved users).
 

@@ -250,7 +250,7 @@ select.role-select option { background: var(--surface); }
         <div class="apps-grid" id="appsGrid"></div>
         <div class="admin-panel" id="adminPanel" style="display:none">
             <div class="admin-hdr"><h2>User Management</h2><span class="badge" id="pendingBadge" style="display:none">0 pending</span></div>
-            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>Pick Bot</th><th>Odds</th><th>Book Club</th><th>Club Mgr</th><th>Games</th><th>Grocery</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
+            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>Pick Sheets</th><th>Odds</th><th>Book Club</th><th>Club Mgr</th><th>Games</th><th>Grocery</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
         </div>
         <div class="footer">The Kahla House &middot; thekahlahouse.com</div>
     </div>
@@ -365,7 +365,7 @@ function renderAppCards() {
     const isAdmin = role === 'admin';
     // Every app is gated by its OWN capability now — the `viewer` role by
     // itself grants nothing (so a book-club-only member can't see Odds /
-    // Pick Bot). Admins have every capability implicitly.
+    // Pick Sheets). Admins have every capability implicitly.
     const hasBot = isAdmin || !!CUD.bot_access;
     const hasOdds = isAdmin || !!CUD.odds_access;
     const hasBookClub = isAdmin || !!CUD.book_club_access || !!CUD.book_club_manager;
@@ -373,7 +373,7 @@ function renderAppCards() {
     const hasGrocery = isAdmin || !!CUD.grocery_access;
     let h = '';
     if (hasBot) {
-        // Pick Bot retired Sep 30 2026 — the pill now opens Pick Sheets.
+        // Pick Bot retired Sep 30 2026 — bot_access IS the Pick Sheets pill now.
         h += `<a href="/pick-sheets" class="app-card football-app">
             <span class="app-icon">&#128203;</span>
             <h2>Pick Sheets${isAdmin ? '<span class="admin-badge">ADMIN</span>' : ''}</h2>
@@ -471,7 +471,7 @@ function loadAdminPanel() {
 function botPill(u) {
     // Admins always have implicit access — show as "ON" but uneditable.
     if (u.role === 'admin') {
-        return `<span class="bot-pill on implicit" title="Admins always have Pick Bot access">ON</span>`;
+        return `<span class="bot-pill on implicit" title="Admins always have Pick Sheets access">ON</span>`;
     }
     // Pending users can't have access — pill stays grey.
     if (u.role === 'pending' || !u.approved) {
@@ -488,7 +488,7 @@ async function setRole(uid, role) {
 
 async function toggleBotAccess(uid, on) {
     await db.collection('users').doc(uid).update({ bot_access: on });
-    toast('Pick Bot access ' + (on ? 'granted' : 'revoked'), 'success');
+    toast('Pick Sheets access ' + (on ? 'granted' : 'revoked'), 'success');
 }
 
 function oddsPill(u) {

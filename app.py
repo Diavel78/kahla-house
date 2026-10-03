@@ -264,7 +264,10 @@ def admin_required(f):
 
 def bot_required(f):
     """Require Firebase auth + bot_access (admin always implicit).
-    Used for the Handicapper Bot page + API."""
+    bot_access is the PICK SHEETS pill since Pick Bot retired (Sep 30 /
+    Oct 3 2026): it opens /pick-sheets + /api/pick-sheets and nothing
+    else — never the Dashboard. The legacy /api/handicapper* routes keep
+    the decorator; their page is admin-only now."""
     @functools.wraps(f)
     @firebase_auth_required
     def wrapper(*args, **kwargs):
@@ -1032,8 +1035,9 @@ def football_picks_page():
     — Rob: "Pick bot can be retired, I want pick sheets ... on ALL sheets
     show the line, the model's spread and total, and the picks"). Reads
     the football_sheets / football_sheet_weeks tables (the generic sheet
-    store — sport NFL/NCAAF/NHL/...). Admin + bot_access (the old Pick Bot
-    pill carries over)."""
+    store — sport NFL/NCAAF/NHL/...). Admin + bot_access — the old Pick Bot
+    pill IS the Pick Sheets pill now (friends see the sheets, not the
+    Dashboard; the page hides the Dashboard link for non-admins)."""
     return render_template("football_picks.html")
 
 
