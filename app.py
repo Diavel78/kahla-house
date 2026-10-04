@@ -2842,6 +2842,36 @@ def api_poly_touch():
     pace_s = float(request.args.get("pace") or 0.9)
     try:
         client = get_client()
+        if request.args.get("tape"):
+            # THE WEBSOCKET VIEW: what the box's depth socket saw, published
+            # every handbets tick (~10s). No venue read here at all.
+            sb = get_supabase()
+            r = (sb.table("lookup_cache").select("fetched_at,payload")
+                 .eq("key", _TOUCH_TAPE_KEY).limit(1).execute())
+            row = (r.data or [None])[0]
+            if not row:
+                out["tape"] = None
+                return jsonify(out)
+            pl = row.get("payload") or {}
+            out["tape_at"] = pl.get("at")
+            try:
+                out["tape_age_s"] = round((datetime.now(timezone.utc) -
+                                           datetime.fromisoformat(str(pl.get("at")).replace("Z", "+00:00"))).total_seconds(), 1)
+            except Exception:
+                pass
+            last_n = int(request.args.get("n") or 40)
+            az = ZoneInfo("America/Phoenix")
+            for sl, rows in (pl.get("slugs") or {}).items():
+                rows = rows or []
+                hi = max((r_[2] + r_[4] for r_ in rows[-90:]), default=0)
+                for r_ in rows[-last_n:]:
+                    ts = datetime.fromtimestamp(r_[0], az).strftime("%H:%M:%S")
+                    tq = round(r_[2] + r_[4], 1)
+                    out["lines"].append(
+                        f"{ts} {sl[-34:]:>34} bid {r_[1]}x{r_[2]} ask {r_[3]}x{r_[4]} touch {tq}"
+                        f" top3 {r_[5]}/{r_[6]} vs90hi {round(100.0 * tq / hi, 1) if hi else None}%")
+                out["rows"].append({"slug": sl, "n": len(rows), "last": rows[-1] if rows else None})
+            return jsonify(out)
         if request.args.get("slate"):
             # The venue IS the schedule: list its events for this league
             # in the next N hours so the watch can name real game codes.
@@ -2918,6 +2948,17 @@ def api_poly_touch():
             if _res:
                 _TOUCH_GAME_CACHE[ev_slug] = (_time.monotonic(), _res)
             out.setdefault("games", {})[ev_slug] = _res
+        if request.args.get("watch") is not None:
+            # Set the box's watch set (depth-socket subscription + tape).
+            w = [x.strip() for x in (request.args.get("watch") or "").split(",") if x.strip()]
+            want = sorted(set(w) | set(slugs))[:24]
+            sb = get_supabase()
+            sb.table("machine_flags").upsert(
+                {"key": "touch_watch", "value": {"slugs": want, "at": datetime.now(timezone.utc).isoformat()}},
+                on_conflict="key").execute()
+            out["watch_set"] = want
+            if not request.args.get("read"):
+                return jsonify(out)
         seen = set()
         for sl in slugs[:16]:
             if sl in seen:
@@ -12819,6 +12860,71 @@ def _hand_status_read(sb):
     return pl
 
 
+# ── THE TOUCH TAPE (Oct 4 2026, Rob: "You're gonna have to watch this on the
+# fucking WebSocket") — the depth socket already carries sizes; this keeps
+# the last ~10 min of (bid, ask, size) per WATCHED slug in memory on the box
+# and publishes it to lookup_cache every handbets tick, so a sandbox can
+# read what the socket saw without one REST book read. Watch set = the
+# machine_flags row `touch_watch` {"slugs": [...]}, set from
+# /api/polymarket/touch?watch=… — the depth connection subscribes it as a
+# standing member of the watch list (wsfeed.push_watch). Read-only; feeds
+# nothing but eyes until the volume rule is designed off what it shows.
+from collections import deque as _deque
+TOUCH_TAPE: dict = {}
+TOUCH_WATCH_SLUGS: set = set()
+_TOUCH_TAPE_KEY = "touch_tape"
+_TOUCH_TAPE_MAX = 900
+
+
+def _touch_tape_record(slug: str, bids: list, asks: list) -> None:
+    """One depth frame for a watched slug → one tape sample. Never raises."""
+    try:
+        if slug not in TOUCH_WATCH_SLUGS:
+            return
+        bb = bids[0] if bids else (None, 0.0)
+        ba = asks[0] if asks else (None, 0.0)
+        row = (round(_time.time(), 2), bb[0], round(bb[1], 1), ba[0], round(ba[1], 1),
+               round(sum(q for _, q in bids[:3]), 1), round(sum(q for _, q in asks[:3]), 1))
+        dq = TOUCH_TAPE.get(slug)
+        if dq is None:
+            dq = TOUCH_TAPE[slug] = _deque(maxlen=_TOUCH_TAPE_MAX)
+        dq.append(row)
+    except Exception:
+        pass
+
+
+def _touch_tape_publish(sb) -> dict:
+    """Refresh the watch set from machine_flags, push it to the depth socket,
+    publish the tape (last 240 samples per slug) to lookup_cache."""
+    global TOUCH_WATCH_SLUGS
+    out: dict = {}
+    try:
+        cfg = _machine_flag_val("touch_watch", {}) or {}
+        want = set(str(x) for x in (cfg.get("slugs") or []) if x)
+        if want != TOUCH_WATCH_SLUGS:
+            TOUCH_WATCH_SLUGS = want
+            for s in list(TOUCH_TAPE):
+                if s not in want:
+                    TOUCH_TAPE.pop(s, None)
+        if want and _WS_WATCHLIST_CB is not None:
+            try:
+                _WS_WATCHLIST_CB(set(want), False)
+            except Exception as e:
+                out["push_err"] = str(e)[:80]
+        out["watch"] = len(want)
+        if not want:
+            return out
+        payload = {"at": datetime.now(timezone.utc).isoformat(),
+                   "slugs": {s: list(TOUCH_TAPE.get(s) or [])[-240:] for s in sorted(want)}}
+        sb.table("lookup_cache").upsert({
+            "key": _TOUCH_TAPE_KEY, "sport": "ANY",
+            "fetched_at": payload["at"], "payload": payload}).execute()
+        out["samples"] = sum(len(v) for v in payload["slugs"].values())
+    except Exception as e:
+        out["err"] = str(e)[:120]
+    return out
+
+
 def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 8) -> dict:
     """THE BOX LANE: claim pending rows oldest-first and run them. Rows
     older than _HAND_EXPIRE_S are failed, never placed late."""
@@ -12836,6 +12942,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 8) -> dict:
     try:
         client = get_client()
         stats["status"] = _hand_status_publish(sb, client)   # the My-bets strip, from memory
+        try:
+            stats["tape"] = _touch_tape_publish(sb)
+        except Exception as e:
+            stats["tape"] = {"err": str(e)[:80]}
     except Exception as e:
         stats["status"] = {"err": f"{type(e).__name__}: {e}"[:120]}
     try:

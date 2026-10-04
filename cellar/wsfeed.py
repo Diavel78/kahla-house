@@ -228,6 +228,10 @@ def _write_depth(slug: str, pv: dict, conn: int = 0) -> None:
         asks = sorted(lv(pv.get("offers")), key=lambda x: x[0])
         ts = time.monotonic()
         _app.WS_DEPTH[slug] = (bids, asks, ts)
+        try:
+            _app._touch_tape_record(slug, bids, asks)
+        except Exception:
+            pass
         ep = _app._mkts_state(conn)["epoch"]
         _app.WS_DEPTH_EPOCH[slug] = ep
         _app.WS_DEPTH_CONN[slug] = conn
@@ -502,6 +506,11 @@ class WsFeed:
         # depth set flapped 18 ↔ 48 all afternoon. The pair set is a
         # standing member of the watch list, whoever pushes.
         full |= set(self._pair_slugs())
+        try:
+            import app as _app_t
+            full |= set(getattr(_app_t, "TOUCH_WATCH_SLUGS", None) or ())
+        except Exception:
+            pass
         self._watch_full = full
         if getattr(self, "mkts", None) is not None:
             self.mkts.set_slugs(set(full), replace=True)
