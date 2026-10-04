@@ -923,16 +923,22 @@
             return;
         }
         let html = '';
-        const rec = { win: 0, loss: 0, push: 0 };
+        // Two records (Rob, Oct 4 2026: "Plays + Leans" and "Just Plays"):
+        // every graded pick, and the PLAY verdicts alone.
+        const rec = { win: 0, loss: 0, push: 0 }, recP = { win: 0, loss: 0, push: 0 };
         for (const g of _games) {
             for (const k of ['ml', 'spread', 'total']) {
                 const r = g.grade && g.grade[k];
-                if (r in rec) rec[r]++;
+                if (!(r in rec)) continue;
+                rec[r]++;
+                if (g[k] && g[k].verdict === 'play') recP[r]++;
             }
         }
+        const recStr = (x) => '<b>' + x.win + '-' + x.loss + (x.push ? '-' + x.push : '') + '</b>'
+            + (x.win + x.loss ? ' <span class="dim">(' + Math.round(100 * x.win / (x.win + x.loss)) + '%)</span>' : '');
         if (rec.win + rec.loss + rec.push) {
-            html += '<div class="record">Picks record (plays + leans, graded): <b>' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + '</b>'
-                  + (rec.win + rec.loss ? ' <span class="dim">(' + Math.round(100 * rec.win / (rec.win + rec.loss)) + '%)</span>' : '') + '</div>';
+            html += '<div class="record">Plays + Leans: ' + recStr(rec)
+                  + ' <span class="dim">·</span> Just Plays: ' + recStr(recP) + '</div>';
         }
         // ORDER (Rob, Oct 3 2026: "live at the top, then next to go live,
         // finished at the bottom — too much scrolling"): in-play first with a
