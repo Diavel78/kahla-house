@@ -117,6 +117,15 @@
         .record { color: var(--muted); font-size: 12px; margin: -10px 0 14px; }
         .gap-pos { color: var(--green); }
         @media (max-width: 560px) { .cols { grid-template-columns: 1fr; } }
+        .mbox { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 4px 9px; }
+        .mrow { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 3px 0; font-size: 13px; line-height: 1.35; }
+        .mrow + .mrow { border-top: 1px solid var(--line); }
+        .mk { flex: 0 0 44px; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+        .mp { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; }
+        .mp .v { margin-right: 6px; }
+        .mm { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; }
+        .mm .dim { font-family: 'DM Sans', system-ui, sans-serif; }
+        .md { font-size: 11.5px; }
         .live-hdr { color: var(--red); border-bottom-color: #4a1f1f; }
         .live-flag { display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .08em; padding: 2px 7px; border-radius: 8px;
                      background: #3c1414; color: var(--red); vertical-align: 1px; animation: livepulse 1.6s ease-in-out infinite; }
@@ -285,63 +294,69 @@
         return x < 0 ? nameOf(g, 'home') + ' ' + sgn(x, d) : nameOf(g, 'away') + ' ' + sgn(-x, d);
     }
 
-    // ---------- football
-    function footballCols(g) {
-        const L = g.line || {}, M = g.model;
-        const line = '<div class="num">' + favLine(g, L.spread_home, 1) + '</div>'
-                   + '<div class="num">O/U ' + (L.total ?? '—') + '</div>';
-        let model = '<span class="unrated">unrated — no number</span>';
-        if (M) {
-            model = '<div class="num">' + favLine(g, M.spread_home, 1) + gradeMark(g, 'model', 'spread') + '</div>'
-                  + '<div class="num">Total ' + (M.total ?? '—') + gradeMark(g, 'model', 'total') + '</div>';
-        }
-        const pk = [];
-        const bs = g.spread, bt = g.total;
-        if (bs) pk.push('<div>' + verdictBadge(bs.verdict) + ' ' + (bs.verdict !== 'pass'
-            ? shortTeam(bs.team) + ' ' + sgn(bs.line) + ' <span class="dim">(' + sgn(bs.edge_pts) + ' pts' + (bs.fair ? ', to ' + am(bs.fair) + ' / ' + pct(impl(bs.fair)) : '') + ')</span>'
-            : '<span class="dim">spread</span>') + '</div>');
-        if (bt) pk.push('<div>' + verdictBadge(bt.verdict) + ' ' + (bt.verdict !== 'pass'
-            ? (bt.side === 'over' ? 'Over ' : 'Under ') + bt.line + ' <span class="dim">(' + sgn(bt.edge_pts) + ' pts' + (bt.fair ? ', to ' + am(bt.fair) + ' / ' + pct(impl(bt.fair)) : '') + ')</span>'
-            : '<span class="dim">total</span>') + '</div>');
-        return [line, model, pk.join('') || '<span class="unrated">no market line</span>'];
+    // ---------- one compact row per market: PICK · model · edge (Rob, Oct 3
+    // 2026: "picks and model on same line… less wasted space"), with the
+    // tap buttons UNDER the rows — read the pick, then tap the box.
+    function mrow(label, pickHtml, modelHtml, detailHtml) {
+        return '<div class="mrow"><span class="mk">' + label + '</span>'
+             + '<span class="mp">' + (pickHtml || '<span class="dim">—</span>') + '</span>'
+             + (modelHtml ? '<span class="mm"><span class="dim">model</span> ' + modelHtml + '</span>' : '')
+             + (detailHtml ? '<span class="md dim">' + detailHtml + '</span>' : '')
+             + '</div>';
     }
-
-    // ---------- hockey
-    function hockeyCols(g) {
+    function footballRows(g) {
         const L = g.line || {}, M = g.model;
-        const ml = (L.ml_away !== undefined && L.ml_home !== undefined)
-            ? nameOf(g, 'away') + ' ' + amp(L.ml_away) + '<br>' + nameOf(g, 'home') + ' ' + amp(L.ml_home) : 'ML —';
-        let tot = 'O/U ' + (L.total ?? '—');
-        if (L.over_odds !== undefined || L.under_odds !== undefined)
-            tot += '<br><span class="dim">o</span> ' + (amp(L.over_odds) || '—')
-                 + ' <span class="dim">u</span> ' + (amp(L.under_odds) || '—');
-        let puck = '';
-        if (L.puck_home !== undefined) {
-            const favHome = Number(L.puck_home) < 0;
-            const po = favHome ? L.puck_home_odds : L.puck_away_odds;
-            puck = '<div class="num">puck ' + favLine(g, L.puck_home, 1) + (po !== undefined ? ' ' + amp(po) : '') + '</div>';
+        const bs = g.spread, bt = g.total;
+        const rows = [];
+        // spread
+        let pk = '', det = '';
+        if (bs && bs.verdict !== 'pass') {
+            pk = verdictBadge(bs.verdict) + '<b>' + shortTeam(bs.team) + ' ' + sgn(bs.line) + '</b>';
+            det = sgn(bs.edge_pts) + ' pts' + (bs.fair ? ', to ' + am(bs.fair) + ' / ' + pct(impl(bs.fair)) : '');
+        } else if (bs) pk = verdictBadge('pass') + '<span class="dim">' + favLine(g, L.spread_home, 1) + '</span>';
+        else if (L.spread_home != null) pk = '<span class="dim">' + favLine(g, L.spread_home, 1) + '</span>';
+        rows.push(mrow('Spread', pk, M ? favLine(g, M.spread_home, 1) + gradeMark(g, 'model', 'spread') : (g.unrated ? '<span class="unrated">unrated</span>' : ''), det));
+        // total
+        pk = ''; det = '';
+        if (bt && bt.verdict !== 'pass') {
+            pk = verdictBadge(bt.verdict) + '<b>' + (bt.side === 'over' ? 'Over ' : 'Under ') + bt.line + '</b>';
+            det = sgn(bt.edge_pts) + ' pts' + (bt.fair ? ', to ' + am(bt.fair) + ' / ' + pct(impl(bt.fair)) : '');
+        } else if (bt) pk = verdictBadge('pass') + '<span class="dim">O/U ' + bt.line + '</span>';
+        else if (L.total != null) pk = '<span class="dim">O/U ' + L.total + '</span>';
+        rows.push(mrow('Total', pk, M && M.total != null ? Number(M.total).toFixed(1) + gradeMark(g, 'model', 'total') : '', det));
+        return rows.join('');
+    }
+    function hockeyRows(g) {
+        const L = g.line || {}, M = g.model;
+        const rows = [];
+        // moneyline
+        let pk = '', det = '', mdl = '';
+        if (g.ml && g.ml.verdict !== 'pass') {
+            pk = verdictBadge(g.ml.verdict) + '<b>' + (g.ml.abbr || shortTeam(g.ml.team)) + ' ML ' + am(g.ml.price) + '</b>';
+            det = 'edge ' + sgn(g.ml.edge_pp) + '%' + (g.ml.fair ? ', fair ' + am(g.ml.fair) : '');
+        } else if (L.ml_away !== undefined && L.ml_home !== undefined) {
+            pk = (g.ml ? verdictBadge('pass') : '') + '<span class="dim">' + nameOf(g, 'away') + ' ' + am(L.ml_away) + ' · ' + nameOf(g, 'home') + ' ' + am(L.ml_home) + '</span>';
         }
-        const line = '<div class="num">' + ml + '</div><div class="num">' + tot + '</div>' + puck;
-        let model = '<span class="unrated">unrated</span>';
-        if (M) {
+        if (M && M.win_home != null) {
             const wh = Number(M.win_home);
-            model = '<div class="num">' + favLine(g, M.spread_home, 2) + '</div>'
-                  + '<div class="num">' + nameOf(g, 'away') + ' ' + pam(1 - wh) + (wh < 0.5 ? gradeMark(g, 'model', 'ml') : '') + '<br>'
-                  + nameOf(g, 'home') + ' ' + pam(wh) + (wh > 0.5 ? gradeMark(g, 'model', 'ml') : '') + '</div>'
-                  + '<div class="num">Total ' + (M.total !== undefined && M.total !== null ? Number(M.total).toFixed(1) : '—') + gradeMark(g, 'model', 'total') + '</div>';
+            mdl = (wh >= 0.5 ? nameOf(g, 'home') + ' ' + pct(wh) : nameOf(g, 'away') + ' ' + pct(1 - wh)) + gradeMark(g, 'model', 'ml');
+        } else if (g.unrated) mdl = '<span class="unrated">unrated</span>';
+        rows.push(mrow('ML', pk, mdl, det));
+        // total
+        pk = ''; det = '';
+        if (g.total && g.total.verdict !== 'pass') {
+            pk = verdictBadge(g.total.verdict) + '<b>' + (g.total.side === 'over' ? 'Over ' : 'Under ') + g.total.line + (g.total.price != null ? ' ' + am(g.total.price) : '') + '</b>';
+            det = 'edge ' + sgn(g.total.edge_pp) + '%' + (g.total.fair ? ', fair ' + am(g.total.fair) : '');
+        } else if (L.total != null) pk = (g.total ? verdictBadge('pass') : '') + '<span class="dim">O/U ' + L.total + '</span>';
+        rows.push(mrow('Total', pk, M && M.total != null ? Number(M.total).toFixed(1) + gradeMark(g, 'model', 'total') : '', det));
+        // puck line (no sheet verdict — line + model margin)
+        if (L.puck_home !== undefined || (M && M.spread_home != null)) {
+            const favHome = L.puck_home !== undefined && Number(L.puck_home) < 0;
+            const po = L.puck_home !== undefined ? (favHome ? L.puck_home_odds : L.puck_away_odds) : undefined;
+            pk = L.puck_home !== undefined ? '<span class="dim">' + favLine(g, L.puck_home, 1) + (po !== undefined ? ' ' + am(po) : '') + '</span>' : '';
+            rows.push(mrow('Puck', pk, M && M.spread_home != null ? favLine(g, M.spread_home, 2) : '', ''));
         }
-        const pk = [];
-        if (g.ml) pk.push('<div>' + verdictBadge(g.ml.verdict) + ' ' + (g.ml.verdict !== 'pass'
-            ? (g.ml.abbr || shortTeam(g.ml.team)) + ' ML ' + amp(g.ml.price)
-              + ' <span class="dim">· model ' + (g.ml.model_p !== undefined && g.ml.model_p !== null ? pct(g.ml.model_p) : '—')
-              + ' (' + sgn(g.ml.edge_pp) + '%), fair ' + am(g.ml.fair) + '</span>'
-            : '<span class="dim">ML</span>') + '</div>');
-        if (g.total) pk.push('<div>' + verdictBadge(g.total.verdict) + ' ' + (g.total.verdict !== 'pass'
-            ? (g.total.side === 'over' ? 'Over ' : 'Under ') + g.total.line + (g.total.price !== undefined && g.total.price !== null ? ' ' + amp(g.total.price) : '')
-              + ' <span class="dim">· model ' + (g.total.model_p !== undefined && g.total.model_p !== null ? pct(g.total.model_p) : '—')
-              + ' (' + sgn(g.total.edge_pp) + '%)' + (g.total.fair ? ', fair ' + am(g.total.fair) : '') + '</span>'
-            : '<span class="dim">total</span>') + '</div>');
-        return [line, model, pk.join('') || '<span class="unrated">no market line yet</span>'];
+        return rows.join('');
     }
 
     async function load() {
@@ -440,7 +455,7 @@
                 const dstr = fmtTime(g.event_start);
                 if (dstr !== day) { html += '<div class="day-hdr">' + dstr + '</div>'; day = dstr; }
             }
-            const cols = _sport === 'NHL' ? hockeyCols(g) : footballCols(g);
+            const rows = _sport === 'NHL' ? hockeyRows(g) : footballRows(g);
             let sub = '';
             if (_sport === 'NHL' && g.goalies) {
                 const ga = (g.goalies.away || {}).name, gh = (g.goalies.home || {}).name;
@@ -449,11 +464,7 @@
             const flag = g._st === 'live' ? '<span class="live-flag">LIVE</span>' : '';
             html += '<div class="game' + (g._st === 'final' ? ' done' : '') + '"><div class="ghead"><span class="t">' + (g._st === 'final' ? fmtTime(g.event_start).split(',')[0] + ' ' : '') + fmtClock(g.event_start) + '</span>'
                   + '<span class="m">' + shortTeam(g.away) + ' @ ' + shortTeam(g.home) + '</span>' + flag + finalChip(g) + sub + '</div>'
-                  + '<div class="cols">'
-                  + '<div class="col"><div class="lbl">Line</div><div class="val">' + cols[0] + '</div></div>'
-                  + '<div class="col"><div class="lbl">Model</div><div class="val">' + cols[1] + '</div></div>'
-                  + '<div class="col picks"><div class="lbl">Picks</div><div class="val">' + cols[2] + '</div></div>'
-                  + '</div></div>';
+                  + '<div class="mbox">' + rows + '</div></div>';
         }
         document.getElementById('games').innerHTML = html;
     }
