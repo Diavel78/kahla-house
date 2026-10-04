@@ -2803,6 +2803,9 @@ def api_poly_orders():
     return jsonify(out)
 
 
+_TOUCH_GAME_CACHE: dict = {}
+
+
 @app.route("/api/polymarket/touch")
 def api_poly_touch():
     """READ-ONLY: the TOUCH with SIZES on several slugs in one call.
@@ -2834,6 +2837,9 @@ def api_poly_touch():
            datetime.now(ZoneInfo("America/Phoenix")).strftime("%Y-%m-%d"))
     out: dict = {"ok": True, "at": datetime.now(ZoneInfo("America/Phoenix")).strftime("%H:%M:%S"),
                  "rows": [], "lines": []}
+    # The venue 429s a burst of reads from Vercel's egress (12 reads in
+    # ~2s tripped it on the first watch pass) — pace every venue call.
+    pace_s = float(request.args.get("pace") or 0.9)
     try:
         client = get_client()
         if request.args.get("slate"):
@@ -2855,7 +2861,13 @@ def api_poly_touch():
                 key=lambda r: str(r.get("start")))
         for g in games[:4]:
             ev_slug = f"{lg}-{g}-{day}"
+            _cached = _TOUCH_GAME_CACHE.get(ev_slug)
+            if _cached and _time.monotonic() - _cached[0] < 900:
+                slugs.extend(_cached[1].values())
+                out.setdefault("games", {})[ev_slug] = dict(_cached[1])
+                continue
             try:
+                _time.sleep(pace_s)
                 full = client.events.retrieve_by_slug(ev_slug)
                 evf = (full.get("event") if isinstance(full, dict)
                        else getattr(full, "event", None)) or full
@@ -2876,7 +2888,9 @@ def api_poly_touch():
                     continue
                 v2 = str(md.get("sportsMarketTypeV2") or "")
                 v1 = str(md.get("sportsMarketType") or "").lower()
-                if any(k in v1 for k in ("half", "quarter", "player", "first", "period")):
+                if any(k in v1 for k in ("half", "quarter", "player", "first", "period", "team")):
+                    continue
+                if "-tt-" in sl:          # team total, not the game total
                     continue
                 bq = md.get("bestBidQuote")
                 try:
@@ -2898,12 +2912,16 @@ def api_poly_touch():
             for kind in ("ml", "spread", "total"):
                 if kind in picks:
                     slugs.append(picks[kind][1])
-            out.setdefault("games", {})[ev_slug] = {k: v[1] for k, v in picks.items()}
+            _res = {k: v[1] for k, v in picks.items()}
+            if _res:
+                _TOUCH_GAME_CACHE[ev_slug] = (_time.monotonic(), _res)
+            out.setdefault("games", {})[ev_slug] = _res
         seen = set()
         for sl in slugs[:16]:
             if sl in seen:
                 continue
             seen.add(sl)
+            _time.sleep(pace_s)
             bk = _pmm_book(client, sl)
             if bk is None:
                 # Our own breaker/gate or a venue 429 — NOT an empty book.
