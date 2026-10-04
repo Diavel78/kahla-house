@@ -809,7 +809,7 @@
         load();
         loadBets();
         setInterval(load, 15 * 60 * 1000);
-        setInterval(loadBets, 60 * 1000);
+        setInterval(() => { if (!_busy) loadBets(); }, 90 * 1000);   // never race a submit for the venue's read budget
     });
 </script>
 </body>

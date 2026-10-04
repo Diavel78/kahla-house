@@ -12185,6 +12185,32 @@ def _bet_sheet_rung(entries, mt: str, side: str, want):
     return fav[0][1], "favorable"
 
 
+def _bet_sheet_wait_rl(max_s: float = 25.0) -> bool:
+    """Wait out the venue 429 breaker (20s hold) instead of failing the slip.
+    Oct 3 2026, first NHL submit: one 429 on a book read tripped the hold,
+    the next two lookups returned None under it, and the slip read
+    "Polymarket has not listed this game" for games the Quote had priced
+    twelve seconds earlier. True = clear to read."""
+    end = _time.monotonic() + max_s
+    while _venue_rl_active():
+        if _time.monotonic() > end:
+            return False
+        _time.sleep(1.0)
+    return True
+
+
+def _bet_sheet_book(client, slug: str, tries: int = 3):
+    """One book read, retried across the breaker; None only when the venue
+    stayed unreadable for all tries."""
+    for i in range(tries):
+        _bet_sheet_wait_rl(25.0)
+        b = _pmm_book(client, slug)
+        if b is not None:
+            return b
+        _time.sleep(2.0 + 2.0 * i)
+    return None
+
+
 def _bet_sheet_resolve(client, item: dict) -> dict:
     """One slip item → the Polymarket slug + the touch on our side. Reads
     the venue twice (event lookup, cached 120s across items; one book)."""
@@ -12197,21 +12223,31 @@ def _bet_sheet_resolve(client, item: dict) -> dict:
         return {"ok": False, "reason": "bad item"}
     if side not in (("home", "away") if mt != "total" else ("over", "under")):
         return {"ok": False, "reason": "bad side"}
+    pmm = None
     try:
         import pmm_markets as _pm
-        pmm = _pm.lookup(client, sport, away, home, es, want_props=False, max_age_s=120)
+        for _i in range(2):
+            if not _bet_sheet_wait_rl(25.0):
+                return {"ok": False, "reason": "Polymarket is rate-limiting us — wait 20s and submit again"}
+            pmm = _pm.lookup(client, sport, away, home, es, want_props=False, max_age_s=120)
+            if pmm or not _venue_rl_active():
+                break
     except Exception as e:
         return {"ok": False, "reason": f"venue lookup failed: {e}"[:120]}
     if not pmm:
+        if _venue_rl_active():
+            return {"ok": False, "reason": "Polymarket is rate-limiting us — wait 20s and submit again"}
         return {"ok": False, "reason": "Polymarket has not listed this game"}
     entry, why = _bet_sheet_rung(pmm.get(mt), mt, side, item.get("line"))
     if entry is None:
         return {"ok": False, "reason": why}
     slug = entry["slug"]
     synthetic = bool(entry.get("synthetic"))
-    book = _pmm_book(client, slug)
+    book = _bet_sheet_book(client, slug)
     if book is None:
-        return {"ok": False, "reason": "book unreadable — try again", "slug": slug}
+        return {"ok": False, "reason": ("Polymarket is rate-limiting us — wait 20s and submit again"
+                                        if _venue_rl_active() else "book unreadable — try again"),
+                "slug": slug}
     s_bid, s_ask = _manual_side_book(book, synthetic)
     if s_bid is None:
         return {"ok": False, "reason": "no bids on this market yet", "slug": slug,
@@ -12296,12 +12332,14 @@ def api_bet_sheets_place():
         return jsonify({"ok": False, "error": f"client: {e}"}), 500
     sb = get_supabase()
     results, placed = [], 0
-    t_end = _time.monotonic() + 50.0          # under the Vercel function budget
-    for it in items:
+    t_end = _time.monotonic() + 55.0          # under the Vercel function budget
+    for n, it in enumerate(items):
         key = (it or {}).get("key")
         if _time.monotonic() > t_end:
             results.append({"key": key, "ok": False, "reason": "out of time — submit again"})
             continue
+        if n:
+            _time.sleep(0.6)                  # pace the venue reads — a burst earns a 429
         res = _bet_sheet_resolve(client, it or {})
         book = res.pop("_book", None)
         res["key"] = key
@@ -12359,6 +12397,10 @@ def api_bet_sheets_place():
         results.append(res)
     return jsonify({"ok": True, "preview": preview, "placed": placed,
                     "contracts": contracts, "results": results})
+
+
+_BS_CUR_C: dict = {}          # slug -> (mono_ts, our-side mid c) — the My bets poll's price cache
+_BS_CUR_C_TTL_S = 75.0
 
 
 def _bet_sheet_pick_side_held(pos: dict | None, synthetic: bool) -> float:
@@ -12438,8 +12480,13 @@ def api_bet_sheets_mine():
         except Exception:
             started = False
         cur_c = None
-        if (r.get("status") == "pending" and slug and client is not None
-                and venue_ok and reads < 30):
+        _cc = _BS_CUR_C.get(slug) if slug else None
+        if _cc and _time.monotonic() - _cc[0] < _BS_CUR_C_TTL_S:
+            cur_c = _cc[1]                    # a fresh read this minute — don't re-ask the venue
+        elif (r.get("status") == "pending" and slug and client is not None
+                and venue_ok and reads < 30 and not _venue_rl_active()):
+            if reads:
+                _time.sleep(0.4)              # pace — three bursts a minute earned a 429 (Oct 3 2026)
             book = _pmm_book(client, slug)
             reads += 1
             if book:
@@ -12448,6 +12495,9 @@ def api_bet_sheets_mine():
                     cur_c = round((b + a) / 2.0, 1)
                 else:
                     cur_c = b if b is not None else a
+                _BS_CUR_C[slug] = (_time.monotonic(), cur_c)
+            elif _cc:
+                cur_c = _cc[1]                # stale beats blank while the venue is cranky
         price_c = blob.get("price_c")
         contracts = blob.get("contracts")
         st = r.get("status") or "pending"
