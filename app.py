@@ -3081,6 +3081,56 @@ def api_pair_status():
     return jsonify(out)
 
 
+@app.route("/api/bet-sheets/picks")
+def api_bet_sheets_picks():
+    """READ-ONLY (shared-secret, site-curl): every bot_picks row on a slug
+    (any status) with the hand-bet blob fields that say WHICH path minted it
+    (sheet placement / app order adoption / held-lot adoption), the exact
+    pending-pick count, and the adopt/retire stamps for the slug. Built Oct 4
+    2026 when a 1-contract Bills ML showed up as eight settled rows."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    slug = (request.args.get("slug") or "").strip()
+    out: dict = {"ok": True, "slug": slug}
+    sb = get_supabase()
+    try:
+        out["pending_total"] = (sb.table("bot_picks").select("id", count="exact")
+                                .eq("status", "pending").limit(1).execute().count) or 0
+    except Exception as e:
+        out["pending_total"] = f"err: {e}"[:120]
+    keep = ("contracts", "price_c", "anchor_c", "order_id", "app_adopted", "manual_web_bet",
+            "filled", "filled_qty", "placed_via", "adopted_at", "placed_at", "entry_src",
+            "in_play", "pmm_synthetic", "label", "line_rejoins", "amended")
+    if slug:
+        try:
+            rows = (sb.table("bot_picks")
+                    .select("id,picked_at,status,pnl_units,market_type,side,entry_price,entry_line,asked_by,signal_blob")
+                    .like("signal_blob->>pmm_slug", f"%{slug}%")
+                    .order("id", desc=True).limit(60).execute().data) or []
+        except Exception as e:
+            rows = []
+            out["rows_err"] = str(e)[:160]
+        out["rows"] = [{"id": r["id"], "picked_at": r.get("picked_at"), "status": r.get("status"),
+                        "pnl_units": r.get("pnl_units"), "mt": r.get("market_type"), "side": r.get("side"),
+                        "entry": r.get("entry_price"), "line": r.get("entry_line"),
+                        "slug": (r.get("signal_blob") or {}).get("pmm_slug"),
+                        "blob": {k: (r.get("signal_blob") or {}).get(k) for k in keep
+                                 if (r.get("signal_blob") or {}).get(k) is not None}}
+                       for r in rows]
+        try:
+            st = (sb.table("exec_probe_runs").select("at,result")
+                  .order("at", desc=True).limit(400).execute().data) or []
+        except Exception:
+            st = []
+        out["stamps"] = [{"at": x.get("at"), "r": x.get("result")} for x in st
+                         if isinstance(x.get("result"), dict)
+                         and (x["result"].get("hand_app_adopt") or x["result"].get("hand_app_retire"))
+                         and slug in str(x["result"].get("slug") or "")][:40]
+    return jsonify(out)
+
+
 @app.route("/api/cellar/health")
 def api_cellar_health():
     """READ-ONLY: the box's lane vitals, the SHA it booted on, the machine
