@@ -12935,7 +12935,7 @@ def _hand_status_publish(sb, client) -> dict:
             "outbid": bool(resting and touch_c is not None and price_c is not None
                            and price_c < float(touch_c) - 0.01),
             "chase": {"hold": blob.get("chase_hold"), "anchor_c": blob.get("anchor_c", blob.get("price_c")),
-                      "moves": blob.get("chase_moves") or 0},
+                      "moves": blob.get("chase_moves") or 0, "rejoin_hold": blob.get("rejoin_hold")},
             "line_hold": blob.get("line_hold")}
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
@@ -13181,6 +13181,7 @@ _HAND_MOVE_CALM_S = 300.0          # sit out this long before rejoining
 _HAND_MOVE_CALM_WIN_S = 60.0       # …and the mid must have held ±1 tick this long
 _HAND_MOVE_MAX_WAIT_S = 900.0      # never sit out longer than this
 _HAND_MOVE_MIN_LEAD_MIN = 30.0     # inside this the rule is OFF — that's noise, not news
+_HAND_MOVE_REJOIN_HOLD_S = 600.0   # after a rejoin the chase may not climb off the rejoin rung for this long (the Oct 4 flap loop)
 _HAND_MOVE_MAX_ACTS = 3
 _HAND_MOVE_LAST: dict = {}
 
@@ -13259,6 +13260,12 @@ def _hand_move_plan(rows, our_price_c, our_qty, now_ts: float, collapse_pct: flo
     hi = ours_excl(hi_row)
     P = hi_row[1]
     bc = last[1]
+    # THE BITE NEEDS US AT THE DEPARTURE RUNG (Rob, Oct 4 2026, the second
+    # Texas A&M cancel: "51.5 went from 1800 to 200… who cares… we were at
+    # 51"). A rung ABOVE our bid collapsing into ours is the market coming
+    # to us, not leaving us alone on top. Only our own rung can strand us.
+    if our_price_c is not None and P is not None and float(our_price_c) < float(P) - 0.01:
+        return "stay", {"why": "below_rung", "p_c": P, "our_c": our_price_c, "hi_q": round(hi, 1)}
     rejoin_c, rung_inc = None, {}
     if lad(hi_row) is not None and lad(last) is not None and P is not None:
         # PER-RUNG (Rob, Oct 4 2026: "watch four rungs below the departure
@@ -13443,10 +13450,14 @@ def _hand_move_tick(sb, client, now) -> dict:
                 # THE REJOIN IS THE NEW ANCHOR (Rob, Oct 4 2026): the market
                 # re-priced and we sat back down at its touch — the leash
                 # measures from here now, not from the pre-move hand price.
+                hold_s = _fl("hand_move_rejoin_hold_s", _HAND_MOVE_REJOIN_HOLD_S)
                 nb.update({"order_id": out["order_id"], "price_c": touch, "anchor_c": touch,
                            "amended": False,
                            "line_rejoins": int(blob.get("line_rejoins") or 0) + 1,
-                           "rejoined_at": now.isoformat()})
+                           "rejoined_at": now.isoformat(),
+                           # the chase may not climb off this rung until the hold expires
+                           "rejoin_hold": {"cap_c": touch, "at": now.isoformat(),
+                                           "until": (now + timedelta(seconds=float(hold_s))).isoformat()}})
                 sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
                 st["rejoined"] += 1
                 HAND_LIVE_SLUGS.add(slug)
@@ -14228,7 +14239,7 @@ def api_bet_sheets_mine():
             "venue_ok": venue_ok,
             "chase": (bx.get("chase") if (bx is not None and bx.get("chase") is not None) else
                       {"hold": blob.get("chase_hold"), "anchor_c": blob.get("anchor_c", blob.get("price_c")),
-                       "moves": blob.get("chase_moves") or 0}),
+                       "moves": blob.get("chase_moves") or 0, "rejoin_hold": blob.get("rejoin_hold")}),
             "line_hold": (bx.get("line_hold") if bx is not None else blob.get("line_hold")),
         })
     return jsonify({"ok": True, "bets": out, "venue_ok": venue_ok,
@@ -14402,9 +14413,13 @@ _HAND_CHASE_LAST: dict = {}          # pick_id → monotonic of the last write a
 HAND_LIVE_SLUGS: set = set()         # slugs with a resting hand bet — the socket wakes handbets for these
 
 
-def _hand_chase_plan(price_c, touch_c, anchor_c, leash_c):
+def _hand_chase_plan(price_c, touch_c, anchor_c, leash_c, cap_c=None):
     """Pure. ('stay'|'move'|'hold', target_c, note). Our-side cents in,
-    our-side cents out. `anchor_c` None → the current price is the anchor."""
+    our-side cents out. `anchor_c` None → the current price is the anchor.
+    `cap_c` = the post-move REJOIN HOLD: after the line-move rule sat us
+    back down at the rung the size relocated to, the chase may not climb
+    back onto the straggler rung above it until the hold expires (Oct 4
+    2026: rejoined 51.0, chased to 51.5 within a tick, cancelled again)."""
     if price_c is None or touch_c is None:
         return "stay", None, "no_quote"
     try:
@@ -14415,6 +14430,8 @@ def _hand_chase_plan(price_c, touch_c, anchor_c, leash_c):
         return "stay", None, "touch_99"
     if price_c >= touch_c - 0.01:
         return "stay", None, "at_touch"
+    if cap_c is not None and touch_c > float(cap_c) + 1e-9:
+        return "stay", touch_c, "rejoin_hold"
     a = float(anchor_c) if anchor_c is not None else price_c
     if touch_c - a > float(leash_c) + 1e-9:
         return "hold", touch_c, "leash"
@@ -14424,7 +14441,8 @@ def _hand_chase_plan(price_c, touch_c, anchor_c, leash_c):
 def _hand_chase_tick(sb, client, now) -> dict:
     """One pass over the pending sheet bets with a resting order."""
     global HAND_LIVE_SLUGS
-    st = {"cands": 0, "moved": 0, "held": 0, "at_touch": 0, "no_quote": 0, "errors": 0, "rest": 0}
+    st = {"cands": 0, "moved": 0, "held": 0, "at_touch": 0, "no_quote": 0, "errors": 0, "rest": 0,
+          "rejoin_hold": 0}
     if not (HAND_CHASE_ENABLED and _machine_flag("hand_chase_enabled", True)):
         st["gate"] = "off"
         return st
@@ -14476,10 +14494,18 @@ def _hand_chase_tick(sb, client, now) -> dict:
             if bk:
                 touch_c, _a = _manual_side_book(bk, syn)
         anchor_c = blob.get("anchor_c", blob.get("price_c"))
-        verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash)
+        cap_c = None
+        rh = blob.get("rejoin_hold") if isinstance(blob.get("rejoin_hold"), dict) else None
+        if rh:
+            try:
+                if datetime.fromisoformat(str(rh.get("until")).replace("Z", "+00:00")) > now:
+                    cap_c = rh.get("cap_c")
+            except (TypeError, ValueError):
+                pass
+        verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash, cap_c=cap_c)
         hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
         if verdict == "stay":
-            st["at_touch" if note == "at_touch" else "no_quote"] += 1
+            st["at_touch" if note == "at_touch" else ("rejoin_hold" if note == "rejoin_hold" else "no_quote")] += 1
             if hold and note == "at_touch":
                 nb = {k: v for k, v in blob.items() if k != "chase_hold"}
                 sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()

@@ -2543,6 +2543,11 @@ def test_hand_move_plan() -> None:
     # the touch IMPROVED (bids above us) → nothing collapsed at P
     v, d = f(base + [row(N - 2, 55.5, 90000, 56.0, 90000, 200000)], 55.0, 1.0, N, 70)
     assert v == "stay" and d["why"] == "quiet", (v, d)
+    # WE SIT BELOW THE DEPARTURE RUNG (Rob, Oct 4 2026: "51.5 went from 1800
+    # to 200… who cares… we were at 51"): the exact move that cancels a bid
+    # at 55 is nobody's business when our bid rests at 54.5
+    v, d = f(base + [row(N - 2, 54.0, 140000, 54.5, 90000, 170000)], 54.5, 1.0, N, 70)
+    assert v == "stay" and d["why"] == "below_rung", (v, d)
     # our own contracts never count toward the baseline or the collapse
     lone = [row(N - 80, 55.0, 5.0, 55.5, 120000), row(N - 50, 55.0, 5.0, 55.5, 120000)]
     v, d = f(lone + [row(N - 2, 55.0, 5.0, 54.5, 90000)], 55.0, 5.0, N, 70)
@@ -2686,6 +2691,13 @@ def test_hand_chase_plan() -> None:
     check("no anchor → the current price is the anchor", plan(47.0, 48.0, None, 2.0)[0] == "move")
     check("no quote → stay", plan(47.0, None, 47.0, 2.0)[0] == "stay")
     check("touch at 99 → stay", plan(47.0, 99.0, 47.0, 60.0)[0] == "stay")
+    # THE REJOIN HOLD (Oct 4 2026): sat back down at 51.0 after a move, the
+    # straggler rung at 51.5 is inside the leash but above the cap → stay.
+    v, _t, note = plan(51.0, 51.5, 51.0, 2.0, cap_c=51.0)
+    check("rejoin hold: touch above the cap → stay", v == "stay" and note == "rejoin_hold")
+    check("rejoin hold: touch AT the cap → at_touch", plan(51.0, 51.0, 51.0, 2.0, cap_c=51.0)[0] == "stay")
+    check("rejoin hold: below the cap still moves", plan(50.0, 50.5, 50.0, 2.0, cap_c=51.0)[0] == "move")
+    check("no cap → the old rule", plan(51.0, 51.5, 51.0, 2.0)[0] == "move")
 
 
 def test_hand_orders_queue() -> None:
