@@ -13086,6 +13086,60 @@ def api_bet_sheets_cancel():
     return _bet_sheet_queue_op("cancel")
 
 
+@app.route("/api/bet-sheets/ops", methods=["POST"])
+@admin_required
+def api_bet_sheets_ops():
+    """BATCH cancel / re-peg from the slip (Oct 4 2026, Rob: "Repeg needs to
+    add to betslip, not just fire… you need to be able to select multiple
+    ones"). Body {items:[{key, op: cancel|repeg, pick_id}]}. Every item is
+    ENQUEUED first (one hand_orders row each), then ONE wait covers them all
+    — the place route's shape, so the box runs them serially and the Vercel
+    fallback claims whatever no box took. Per-item results; an item the box
+    has not finished by the deadline comes back `queued` + `queue_id` for
+    the page's poller."""
+    body = request.get_json(silent=True) or {}
+    items = body.get("items") or []
+    if not isinstance(items, list) or not items:
+        return jsonify({"ok": False, "error": "no items"}), 400
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    results, queued = [], []
+    for it in items[:40]:
+        key = (it or {}).get("key") or f"op|{(it or {}).get('op')}|{(it or {}).get('pick_id')}"
+        op = str((it or {}).get("op") or "").lower()
+        res = {"key": key, "op": op, "pick_id": (it or {}).get("pick_id")}
+        if op not in ("cancel", "repeg"):
+            res.update({"ok": False, "reason": "unknown action"}); results.append(res); continue
+        r, blob = _bet_sheet_pick(sb, (it or {}).get("pick_id"))
+        if not r:
+            res.update({"ok": False, "reason": "bet not found (already settled or removed?)"}); results.append(res); continue
+        row = {"op": op, "pick_id": r["id"], "slug": blob.get("pmm_slug"),
+               "synthetic": bool(blob.get("pmm_synthetic")), "order_id": blob.get("order_id"),
+               "payload": {"asked_by": g.uid}}
+        try:
+            rid = _hand_order_enqueue(sb, row)
+        except Exception as e:
+            res.update({"ok": False, "reason": f"queue write failed: {e}"[:160]}); results.append(res); continue
+        res["queue_id"] = rid
+        queued.append((rid, res))
+    done = _hand_orders_wait(sb, [rid for rid, _ in queued], _time.monotonic() + 45.0) if queued else {}
+    n_ok = 0
+    for rid, res in queued:
+        out = done.get(rid)
+        if out is None:
+            res.update({"ok": False, "queued": True, "reason": "queued on the box — running…"})
+        elif not out.get("ok"):
+            res.update({"ok": False, "reason": out.get("error") or f"{res['op']} failed"})
+        else:
+            res.update({k: out.get(k) for k in ("moved", "from_c", "price_c", "note", "deleted", "held", "via", "order_lost")
+                        if out.get(k) is not None})
+            res["ok"] = True
+            n_ok += 1
+    results.extend(queued_res for _, queued_res in queued)
+    return jsonify({"ok": True, "done": n_ok, "results": results})
+
+
 @app.route("/api/bet-sheets/repeg", methods=["POST"])
 @admin_required
 def api_bet_sheets_repeg():

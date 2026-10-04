@@ -181,6 +181,11 @@
         .btn.go { background: var(--green); border-color: var(--green); color: #052e1c; }
         .btn.sm { padding: 4px 9px; font-size: 11.5px; font-weight: 600; }
         .btn.warn { color: var(--red); }
+        .btn.sm.on { background: var(--cyan); border-color: var(--cyan); color: var(--bg); }
+        .btn.sm.warn.on { background: var(--red); border-color: var(--red); color: #fff; }
+        .si .tag { display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .05em; padding: 1px 6px; border-radius: 6px;
+                   margin-right: 6px; background: var(--cyan); color: var(--bg); vertical-align: 1px; }
+        .si .tag.cancel { background: var(--red); color: #fff; }
         .slip-cost { color: var(--muted); font-size: 12px; margin-left: auto; font-family: 'JetBrains Mono', monospace; }
         .wrap { padding-bottom: 120px; }
         .sec-h { display: flex; align-items: baseline; gap: 10px; margin: 6px 0 8px; }
@@ -420,8 +425,14 @@
         }
         saveSlip(); renderSlip(); renderGames();
     }
-    function removeSlip(key) { _slip = _slip.filter(i => i.key !== key); saveSlip(); renderSlip(); renderGames(); }
-    function clearSlip() { _slip = []; saveSlip(); renderSlip(); renderGames(); }
+    function removeSlip(key) { _slip = _slip.filter(i => i.key !== key); saveSlip(); renderSlip(); renderGames(); loadBetsRender(); }
+    function clearSlip() { _slip = []; saveSlip(); renderSlip(); renderGames(); loadBetsRender(); }
+    function submitLabel() {
+        const nb = _slip.filter(i => !i.op).length, no = _slip.length - nb;
+        if (nb && no) return 'Place ' + nb + ' · run ' + no;
+        if (no) return 'Run ' + no + ' action' + (no === 1 ? '' : 's');
+        return 'Place bets';
+    }
     function contractsN() { const n = parseInt(document.getElementById('contracts').value, 10); return (n >= 1 && n <= 250) ? n : 10; }
     function renderSlip() {
         document.getElementById('slipCnt').textContent = _slip.length;
@@ -431,6 +442,18 @@
         if (!_slip.length) { el.innerHTML = '<div class="empty" style="padding:18px 0">Nothing on the slip. Tap a side on a game below.</div>'; }
         else el.innerHTML = _slip.map(i => {
             let q = '';
+            if (i.op) {
+                const b = _betsById[i.pick_id], o = (b && b.order) || {};
+                const rest = (o.price_c != null ? o.price_c : i.resting_c), tch = (b && b.touch_c != null) ? b.touch_c : i.touch_c;
+                let line = i.op === 'repeg'
+                    ? ('resting' + (rest != null ? ' @ ' + rest + '¢' : '') + (tch != null ? ' → touch ' + tch + '¢' : '') + (rest != null && tch != null && Math.abs(rest - tch) < 0.01 ? ' (already there)' : ''))
+                    : ('pull the resting order' + (o.leaves != null ? ' · ' + Math.round(o.leaves) + ' unfilled' : ''));
+                if (i.q && i.q.queued) q = '<div class="q wait">⏳ ' + esc(i.q.reason || 'queued on the box…') + '</div>';
+                else if (i.q && i.q.ok === false) q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + '</div>';
+                else q = '<div class="q">' + esc(line) + '</div>';
+                return '<div class="si"><div class="lab"><span class="tag ' + i.op + '">' + (i.op === 'repeg' ? 'RE-PEG' : 'CANCEL') + '</span><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport || '') + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
+                     + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
+            }
             if (i.q) {
                 if (i.q.ok) {
                     q = '<div class="q ok">' + (i.q.rung_why === 'favorable' ? 'rung ' + rungTxt(i, i.q.rung_line) + ' (better than sheet) · ' : '')
@@ -442,9 +465,11 @@
             return '<div class="si"><div class="lab"><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport) + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
                  + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
         }).join('');
-        document.getElementById('slipCost').textContent = _slip.length ? (known ? '$' + cost.toFixed(2) + (known < _slip.length ? ' (' + known + '/' + _slip.length + ' quoted)' : '') : n + ' contracts each') : '';
+        const nb = _slip.filter(i => !i.op).length, no = _slip.length - nb;
+        document.getElementById('slipCost').textContent = nb ? (known ? '$' + cost.toFixed(2) + (known < nb ? ' (' + known + '/' + nb + ' quoted)' : '') : n + ' contracts each') : (no ? no + ' action' + (no === 1 ? '' : 's') : '');
         document.getElementById('btnPlace').disabled = !_slip.length;
-        document.getElementById('btnQuote').disabled = !_slip.length;
+        document.getElementById('btnQuote').disabled = !nb;
+        if (!_busy) document.getElementById('btnPlace').textContent = submitLabel();
     }
     function rungTxt(i, ln) {
         if (ln == null) return '';
@@ -455,34 +480,62 @@
     let _busy = false;
     async function postSlip(preview) {
         if (_busy || !_slip.length) return;
+        const betItems = _slip.filter(i => !i.op), opItems = _slip.filter(i => i.op);
+        if (preview && !betItems.length) return;
         _busy = true;
         const bq = document.getElementById('btnQuote'), bp = document.getElementById('btnPlace');
         bq.disabled = bp.disabled = true;
-        bp.textContent = preview ? 'Place bets' : 'Placing…';
+        bp.textContent = preview ? submitLabel() : (betItems.length ? 'Placing…' : 'Running…');
         try {
-            const r = await authFetch('/api/bet-sheets/place', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ preview, contracts: contractsN(), items: _slip.map(i => ({ key: i.key, sport: i.sport, away: i.away, home: i.home,
-                    event_start: i.event_start, market_type: i.market_type, side: i.side, line: i.line, label: i.label })) }) });
-            const d = r ? await r.json().catch(() => null) : null;
-            if (!d || !d.ok) { toast('Failed: ' + ((d && d.error) || (r && r.status) || 'network'), true); return; }
-            const byKey = {}; (d.results || []).forEach(x => { byKey[x.key] = x; });
-            let placed = 0;
+            const byKey = {};
+            if (betItems.length) {
+                const r = await authFetch('/api/bet-sheets/place', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ preview, contracts: contractsN(), items: betItems.map(i => ({ key: i.key, sport: i.sport, away: i.away, home: i.home,
+                        event_start: i.event_start, market_type: i.market_type, side: i.side, line: i.line, label: i.label })) }) });
+                const d = r ? await r.json().catch(() => null) : null;
+                if (!d || !d.ok) { toast('Failed: ' + ((d && d.error) || (r && r.status) || 'network'), true); return; }
+                (d.results || []).forEach(x => { byKey[x.key] = x; });
+            }
+            if (!preview && opItems.length) {
+                bp.textContent = 'Running ' + opItems.length + ' action' + (opItems.length === 1 ? '' : 's') + '…';
+                const r = await authFetch('/api/bet-sheets/ops', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ items: opItems.map(i => ({ key: i.key, op: i.op, pick_id: i.pick_id })) }) });
+                const d = r ? await r.json().catch(() => null) : null;
+                if (!d || !d.ok) opItems.forEach(i => { byKey[i.key] = { ok: false, reason: 'Failed: ' + ((d && d.error) || (r && r.status) || 'network') }; });
+                else (d.results || []).forEach(x => { byKey[x.key] = x; });
+            }
+            let placed = 0, ran = 0;
+            const notes = [];
             _slip = _slip.filter(i => {
+                if (preview && i.op) return true;                       // quotes don't touch actions
                 const x = byKey[i.key];
                 if (!x) { i.q = { ok: false, reason: 'no result' }; return true; }
-                if (!preview && x.ok) { placed++; return false; }     // placed → off the slip
+                if (!preview && x.ok) {
+                    if (i.op) { ran++; notes.push(opNote(i, x)); } else placed++;
+                    return false;                                       // done → off the slip
+                }
                 i.q = x; return true;
             });
             saveSlip(); renderSlip(); renderGames();
             if (!preview) {
                 const qn = _slip.filter(i => i.q && i.q.queued).length;
-                toast(placed ? ('Placed ' + placed + ' bet' + (placed === 1 ? '' : 's') + (qn ? ' · ' + qn + ' still placing on the box' : '') + (_slip.length - qn ? ' · ' + (_slip.length - qn) + ' stayed on the slip' : ''))
-                             : (qn ? qn + ' queued on the box — placing…' : 'Nothing placed — see the slip'), !(placed || qn));
+                const stayed = _slip.filter(i => i.q && !i.q.queued && i.q.ok === false).length;
+                const bits = [];
+                if (placed) bits.push('Placed ' + placed + ' bet' + (placed === 1 ? '' : 's'));
+                if (ran) bits.push(notes.join(' · '));
+                if (qn) bits.push(qn + ' still running on the box');
+                if (stayed) bits.push(stayed + ' stayed on the slip');
+                toast(bits.length ? bits.join(' · ') : 'Nothing done — see the slip', !(placed || ran || qn));
                 loadBets();
                 if (qn) pollQueue();
             }
         } catch (e) { toast('Failed: ' + e, true); }
-        finally { _busy = false; bp.textContent = 'Place bets'; renderSlip(); }
+        finally { _busy = false; bp.textContent = submitLabel(); renderSlip(); }
+    }
+    function opNote(i, x) {
+        if (i.op === 'cancel') return 'Cancelled ' + i.label + (x.deleted ? '' : ' (' + x.held + ' filled stays)');
+        if (x.moved) return 'Moved ' + i.label + ' ' + (x.from_c != null ? x.from_c + '¢ → ' : 'to ') + x.price_c + '¢';
+        return i.label + ': ' + (x.note || 'no move');
     }
     // Queued items (the box is placing them): poll until done/failed.
     let _pollT = null;
@@ -494,16 +547,16 @@
             const r = await authFetch('/api/bet-sheets/queue?ids=' + qi.map(i => i.q.queue_id).join(','));
             const d = r ? await r.json().catch(() => null) : null;
             if (d && d.ok) {
-                let placed = 0;
+                let placed = 0; const ran = [];
                 _slip = _slip.filter(i => {
                     if (!(i.q && i.q.queued)) return true;
                     const row = d.rows[String(i.q.queue_id)];
                     if (!row) return true;
-                    if (row.state === 'done' && (row.result || {}).ok !== false) { placed++; return false; }
+                    if (row.state === 'done' && (row.result || {}).ok !== false) { if (i.op) ran.push(opNote(i, row.result || {})); else placed++; return false; }
                     if (row.state === 'failed') { i.q = { ok: false, reason: row.error || 'failed' }; }
                     return true;
                 });
-                if (placed) { toast('Placed ' + placed + ' bet' + (placed === 1 ? '' : 's') + ' from the box'); loadBets(); }
+                if (placed || ran.length) { toast([placed ? 'Placed ' + placed + ' bet' + (placed === 1 ? '' : 's') + ' from the box' : ''].concat(ran).filter(Boolean).join(' · ')); loadBets(); }
                 saveSlip(); renderSlip(); renderGames();
             }
         } catch (e) {}
@@ -512,7 +565,12 @@
     function quoteSlip() { postSlip(true); }
     function placeSlip() {
         const n = contractsN();
-        if (!confirm('Place ' + _slip.length + ' resting bet' + (_slip.length === 1 ? '' : 's') + ' at the touch, ' + n + ' contracts each?')) return;
+        const nb = _slip.filter(i => !i.op).length, nr = _slip.filter(i => i.op === 'repeg').length, nc = _slip.filter(i => i.op === 'cancel').length;
+        const parts = [];
+        if (nb) parts.push('place ' + nb + ' resting bet' + (nb === 1 ? '' : 's') + ' at the touch, ' + n + ' contracts each');
+        if (nr) parts.push('re-peg ' + nr + ' order' + (nr === 1 ? '' : 's') + ' to the touch');
+        if (nc) parts.push('cancel ' + nc + ' resting order' + (nc === 1 ? '' : 's'));
+        if (!confirm(parts.join('; ').replace(/^./, c => c.toUpperCase()) + '?')) return;
         postSlip(false);
     }
     let _toastT = null;
@@ -600,7 +658,12 @@
         if (!r) return;
         const d = await r.json().catch(() => null);
         if (!d || !d.ok) { document.getElementById('betsMeta').textContent = 'error: ' + (d && d.error || r.status); return; }
+        _lastBetsPayload = d;
+        renderBets(d);
+    }
+    function renderBets(d) {
         const bets = d.bets || [];
+        _betsById = {}; bets.forEach(b => { _betsById[b.id] = b; });
         const open = bets.filter(b => b.status === 'pending');
         const done = bets.filter(b => b.status !== 'pending');
         let usd = 0, w = 0, l = 0, p = 0;
@@ -631,26 +694,40 @@
                 if (!o.resting && !(held > 0)) chip += '<span class="chip c-off">' + (b.started ? 'IN PLAY' : 'OFF THE BOOK') + '</span>';
                 l2 = (b.cur_c != null ? 'now ' + b.cur_c + '¢ (' + am(_probToAmer(b.cur_c / 100)) + ')' : 'no live quote') + (b.started ? ' · in play' : '');
             }
+            const rp = inSlip(opKey('repeg', b.id)), cn = inSlip(opKey('cancel', b.id));
             const acts = (b.status === 'pending' && o.resting && !b.started)
-                ? '<div class="acts"><button class="btn sm" onclick="repegBet(' + b.id + ')">Re-peg</button><button class="btn sm warn" onclick="cancelBet(' + b.id + ')">Cancel</button></div>' : '';
+                ? '<div class="acts"><button class="btn sm' + (rp ? ' on' : '') + '" onclick="toggleOp(\'repeg\',' + b.id + ')">' + (rp ? '✓ Re-peg' : 'Re-peg') + '</button>'
+                  + '<button class="btn sm warn' + (cn ? ' on' : '') + '" onclick="toggleOp(\'cancel\',' + b.id + ')">' + (cn ? '✓ Cancel' : 'Cancel') + '</button></div>' : '';
             return '<div class="bet">' + winGauge(prob, entryP, tip)
                  + '<div class="info"><div class="l1">' + chip + '<b>' + esc(betLabel(b)) + '</b> <span class="dim">· ' + esc((b.event_name || '').split(' @ ').map(shortTeam).join(' @ ')) + ' · ' + esc(b.sport) + ' · ' + fmtTime(b.event_start) + ' ' + fmtClock(b.event_start) + '</span></div>'
                  + '<div class="l2">' + l2 + '</div></div>' + acts + '</div>';
         }).join('');
     }
-    async function cancelBet(id) {
-        if (!confirm('Cancel this resting order?')) return;
-        const r = await authFetch('/api/bet-sheets/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pick_id: id }) });
-        const d = r ? await r.json().catch(() => null) : null;
-        toast(d && d.ok ? (d.queued ? 'Cancel queued on the box…' : d.deleted ? 'Cancelled — nothing had filled' : 'Cancelled · ' + d.held + ' filled stays') : 'Cancel failed: ' + ((d && d.error) || (r && r.status)), !(d && d.ok));
-        loadBets(); if (d && d.queued) setTimeout(loadBets, 12000);
+    // Re-peg / Cancel are SLIP ITEMS, not fire-now buttons (Rob, Oct 4 2026:
+    // "Repeg needs to add to betslip, not just fire, you can't even tell if
+    // you click it, and you need to be able to select multiple ones"). Tap
+    // toggles the action onto the slip (button lights up), Submit runs them
+    // all through /api/bet-sheets/ops → the box queue, one row each.
+    let _betsById = {};
+    function opKey(op, id) { return 'op|' + op + '|' + id; }
+    function toggleOp(op, id) {
+        const key = opKey(op, id);
+        const idx = _slip.findIndex(i => i.key === key);
+        if (idx >= 0) { _slip.splice(idx, 1); }
+        else {
+            // one action per bet: picking Cancel drops a pending Re-peg and vice versa
+            _slip = _slip.filter(i => !(i.op && i.pick_id === id));
+            const b = _betsById[id] || {};
+            const o = b.order || {};
+            _slip.push({ key, op, pick_id: id, sport: b.sport, event_start: b.event_start,
+                         label: betLabel(b), game: (b.event_name || '').split(' @ ').map(shortTeam).join(' @ '),
+                         resting_c: o.price_c, touch_c: b.touch_c, leaves: o.leaves });
+            toggleSlip(true);
+        }
+        saveSlip(); renderSlip(); loadBetsRender();
     }
-    async function repegBet(id) {
-        const r = await authFetch('/api/bet-sheets/repeg', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pick_id: id }) });
-        const d = r ? await r.json().catch(() => null) : null;
-        toast(d && d.ok ? (d.queued ? 'Re-peg queued on the box…' : d.moved ? 'Moved ' + d.from_c + '¢ → ' + d.price_c + '¢' : (d.note || 'no move')) : 'Re-peg failed: ' + ((d && d.error) || (r && r.status)), !(d && d.ok));
-        loadBets(); if (d && d.queued) setTimeout(loadBets, 12000);
-    }
+    let _lastBetsPayload = null;
+    function loadBetsRender() { if (_lastBetsPayload) renderBets(_lastBetsPayload); }
     // ---------- one compact row per market: PICK · model · edge (Rob, Oct 3
     // 2026: "picks and model on same line… less wasted space"), with the
     // tap buttons UNDER the rows — read the pick, then tap the box.
