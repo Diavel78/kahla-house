@@ -2592,6 +2592,19 @@ def test_hand_move_plan() -> None:
     print("  PASS  hand line-move planner (collapse + 4-rung relocation → cancel at the gaining rung; vanish stays) + calm")
 
 
+def test_price_grid() -> None:
+    """Quarter-cent ticks (Oct 4 2026, NE@BUF ML bid 64.00 / ask 64.25): the
+    hand rails check the MARKET's grid, never a hard-coded half cent."""
+    import app as _app
+    g = _app._on_grid
+    assert g(67.75, 0.25) and g(67.5, 0.25) and g(67.0, 0.25) and not g(67.8, 0.25)
+    assert g(67.5, 0.5) and not g(67.75, 0.5)
+    assert g(67.0, 1.0) and not g(67.5, 1.0)
+    assert not g(None, 0.5)
+    assert f"{0.6425:.4f}" == "0.6425" and f"{0.6425:.3f}" != "0.6425"
+    print("  PASS  price grid honours the market tick (0.25 / 0.5 / 1.0)")
+
+
 def test_slug_side_line() -> None:
     """App adoption (Oct 4 2026): side/line off the venue slug convention
     when the market question can't be read."""
@@ -2759,7 +2772,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_hand_orders_queue):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_hand_orders_queue):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

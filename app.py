@@ -7719,25 +7719,37 @@ def _pmm_book(client, slug: str) -> dict | None:
 # exact.) Tick cached per slug forever (it never changes); unknown or
 # unreadable → 1.0¢, the grid that is valid everywhere.
 _TICK_CACHE: dict[str, float] = {}
+_TICK_CACHE_AT: dict[str, float] = {}
+_TICK_CACHE_TTL_S = 3600.0            # QUARTER-CENT ticks seen Oct 4 2026 (NE@BUF ML, 0.25¢) — re-read hourly
+
+
+def _on_grid(price_c, tick: float) -> bool:
+    """Is a cents price on the market's tick grid? (0.25 / 0.5 / 1.0)"""
+    try:
+        return abs(float(price_c) / tick - round(float(price_c) / tick)) < 1e-6
+    except (TypeError, ValueError, ZeroDivisionError):
+        return False
 
 
 def _pmm_tick_c(client, slug: str) -> float:
-    """orderPriceMinTickSize in CENTS (0.5 or 1.0). Never raises; a
-    failed read returns 1.0 WITHOUT caching so the next call retries."""
+    """orderPriceMinTickSize in CENTS (0.25 / 0.5 / 1.0). Never raises; a
+    failed read returns the stale cached value, else 1.0, WITHOUT caching so
+    the next call retries."""
     t = _TICK_CACHE.get(slug)
-    if t:
+    if t and _time.monotonic() - _TICK_CACHE_AT.get(slug, 0.0) < _TICK_CACHE_TTL_S:
         return t
     try:
         m = client.markets.retrieve_by_slug(slug) or {}
         if isinstance(m, dict):
             m = m.get("market") or m
         v = float(m.get("orderPriceMinTickSize") or 0)
-        if 0.001 <= v <= 0.02:
+        if 0.001 <= v <= 0.02:                 # 0.0025 (quarter), 0.005 (half), 0.01 (whole)
             _TICK_CACHE[slug] = v * 100.0
+            _TICK_CACHE_AT[slug] = _time.monotonic()
             return _TICK_CACHE[slug]
     except Exception:
         pass
-    return 1.0
+    return t or 1.0
 
 
 def _grid_dn(c: float, tick: float) -> float:
@@ -10061,7 +10073,7 @@ def api_polymarket_probe_exec():
            + timedelta(minutes=gtd_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
     params = {"marketSlug": slug, "intent": intent,
               "type": "ORDER_TYPE_LIMIT",
-              "price": {"value": f"{price_c / 100.0:.3f}", "currency": "USD"},
+              "price": {"value": f"{price_c / 100.0:.4f}", "currency": "USD"},
               "quantity": qty,
               "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtd,
               "participateDontInitiate": True,
@@ -10209,7 +10221,7 @@ def api_polymarket_probe_exec():
         _step("retrieve_after_create",
               lambda: client.orders.retrieve(oid["v"]))
     mod = {"marketSlug": slug,
-           "price": {"value": f"{(price_c + 1) / 100.0:.3f}",
+           "price": {"value": f"{(price_c + 1) / 100.0:.4f}",
                      "currency": "USD"},
            "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtd,
            "participateDontInitiate": True}
@@ -12259,7 +12271,7 @@ def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
     """THE HAND BET — one post-only MANUAL order (Aug 22 2026 rails, lifted
     out of the route Oct 3 2026 so the Bet Sheets slip can place a list of
     them). Returns (payload, http_status); payload['ok'] False carries
-    'error'. Rails: half-cent grid, 1-99c, 1-250 contracts, cost <= $500,
+    'error'. Rails: the market's own tick grid, 1-99c, 1-250 contracts, cost <= $500,
     must not cross the ask (post-only would reject — fail loud instead),
     GTD = kickoff. MANUAL indicator = every machine sweep is blind to it."""
     try:
@@ -12272,8 +12284,9 @@ def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
     if book is None:
         return {"ok": False, "error": "book unreadable — try again"}, 503
     s_bid, s_ask = _manual_side_book(book, synthetic)
-    if abs(price_c * 2 - round(price_c * 2)) > 1e-6:
-        return {"ok": False, "error": "price must be on the half-cent grid"}, 400
+    tick = _pmm_tick_c(client, slug)         # 0.25 / 0.5 / 1.0 — the venue's grid for THIS market
+    if not _on_grid(price_c, tick):
+        return {"ok": False, "error": f"price must be on the market's {tick:g}¢ grid"}, 400
     if not (1.0 <= price_c <= 99.0):
         return {"ok": False, "error": "price must be 1-99¢"}, 400
     if not (1 <= contracts <= 250):
@@ -12300,7 +12313,7 @@ def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
               "intent": ("ORDER_INTENT_BUY_SHORT" if synthetic
                          else "ORDER_INTENT_BUY_LONG"),
               "type": "ORDER_TYPE_LIMIT",
-              "price": {"value": f"{canon:.3f}", "currency": "USD"},
+              "price": {"value": f"{canon:.4f}", "currency": "USD"},   # .4f — a quarter tick is 0.0025
               "quantity": contracts,
               "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
               "participateDontInitiate": True,
@@ -12826,7 +12839,7 @@ def _hand_status_publish(sb, client) -> dict:
         resting = bool(o and o.get("state") in _OPEN_ORDER_STATES)
         price_c = None
         if resting and o.get("price_yes") is not None:
-            price_c = round((1 - float(o["price_yes"])) * 100, 1) if syn else round(float(o["price_yes"]) * 100, 1)
+            price_c = round((1 - float(o["price_yes"])) * 100, 2) if syn else round(float(o["price_yes"]) * 100, 2)
         held = _bet_sheet_pick_side_held(positions.get(slug), syn) if slug else 0.0
         touch_c = cur_c = None
         q = _ws_quote(slug) if slug else None
@@ -12835,7 +12848,7 @@ def _hand_status_publish(sb, client) -> dict:
             b = ((100 - ya) if ya is not None else None) if syn else yb
             a = ((100 - yb) if yb is not None else None) if syn else ya
             touch_c = b
-            cur_c = round((b + a) / 2.0, 1) if (b is not None and a is not None) else (b if b is not None else a)
+            cur_c = round((b + a) / 2.0, 2) if (b is not None and a is not None) else (b if b is not None else a)
             quoted += 1
         out[str(r["id"])] = {
             "order": ({"resting": True, "leaves": o.get("leaves"), "cum": o.get("cum"), "price_c": price_c}
@@ -13379,7 +13392,7 @@ def _hand_move_tick(sb, client, now) -> dict:
             continue                                      # inside the lead floor: noise, not news
         st["cands"] += 1
         py = float(o["price_yes"]) * 100.0
-        price_c = round((100.0 - py) if syn else py, 1)
+        price_c = round((100.0 - py) if syn else py, 2)
         try:
             leaves = float(o.get("leaves") or 0.0)
         except (TypeError, ValueError):
@@ -13526,7 +13539,7 @@ def _hand_app_pick_row(sb, client, owner_uid, o: dict, now) -> dict | None:
     py = o.get("price_yes")
     if py is None:
         return None
-    price_c = round(((1.0 - float(py)) if syn else float(py)) * 100.0, 1)
+    price_c = round(((1.0 - float(py)) if syn else float(py)) * 100.0, 2)
     if not (0.5 <= price_c <= 99.5):
         return None
     mk, away, home = _hand_app_market(sb, client, o)
@@ -13956,7 +13969,7 @@ def api_bet_sheets_mine():
                 b, a = _manual_side_book(book, syn)
                 touch_c = b                   # our-side best bid = the touch a resting bid must match
                 if b is not None and a is not None:
-                    cur_c = round((b + a) / 2.0, 1)
+                    cur_c = round((b + a) / 2.0, 2)
                 else:
                     cur_c = b if b is not None else a
                 _BS_CUR_C[slug] = (_time.monotonic(), cur_c, touch_c)
@@ -13990,8 +14003,8 @@ def api_bet_sheets_mine():
             "app": bool(blob.get("app_adopted")), "in_play": bool(blob.get("in_play")),
             "order": (bx.get("order") if bx is not None else
                       ({"resting": True, "leaves": o.get("leaves"), "cum": o.get("cum"),
-                        "price_c": (round((1 - float(o["price_yes"])) * 100, 1) if syn
-                                    else round(float(o["price_yes"]) * 100, 1))
+                        "price_c": (round((1 - float(o["price_yes"])) * 100, 2) if syn
+                                    else round(float(o["price_yes"]) * 100, 2))
                         if o.get("price_yes") is not None else None}
                        if resting else {"resting": False})),
             "held": round(held, 2), "filled_qty": filled_qty,
@@ -14120,7 +14133,7 @@ def _bet_sheet_repeg_exec(sb, client, pick_id):
     cur_c = None
     if cur.get("price_yes") is not None:
         py = float(cur["price_yes"]) * 100.0
-        cur_c = round((100.0 - py) if syn else py, 1)
+        cur_c = round((100.0 - py) if syn else py, 2)
     from_c = cur_c if cur_c is not None else blob.get("price_c")
     if from_c is not None and abs(float(from_c) - s_bid) < 0.01:
         return {"ok": True, "moved": False, "price_c": s_bid, "note": "already at the touch"}, 200
@@ -14243,7 +14256,7 @@ def _hand_chase_tick(sb, client, now) -> dict:
             continue                                    # chase is pre-game only
         st["cands"] += 1
         py = float(o["price_yes"]) * 100.0
-        price_c = round((100.0 - py) if syn else py, 1)
+        price_c = round((100.0 - py) if syn else py, 2)
         touch_c = None
         q = _ws_quote(slug)
         if q:
@@ -15190,7 +15203,7 @@ def api_poly_topup():
             continue
         cparams = {"marketSlug": slug, "intent": intent,
                    "type": "ORDER_TYPE_LIMIT",
-                   "price": {"value": f"{float(canon):.3f}",
+                   "price": {"value": f"{float(canon):.4f}",
                              "currency": "USD"},
                    "quantity": target,
                    "participateDontInitiate": True,
@@ -20552,7 +20565,7 @@ def _autobet_execute(sb, g, es, mt, side, side_lbl, slug, synthetic,
               else "ORDER_INTENT_BUY_LONG")
     params = {"marketSlug": slug, "intent": intent,
               "type": "ORDER_TYPE_LIMIT",
-              "price": {"value": f"{canon:.3f}", "currency": "USD"},
+              "price": {"value": f"{canon:.4f}", "currency": "USD"},
               "quantity": n_contracts,
               "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
               "participateDontInitiate": True,
@@ -21846,7 +21859,7 @@ def _opener_pass(sb, now, deadline):
                       else "ORDER_INTENT_BUY_LONG")
             params = {"marketSlug": slug, "intent": intent,
                       "type": "ORDER_TYPE_LIMIT",
-                      "price": {"value": f"{canon:.3f}", "currency": "USD"},
+                      "price": {"value": f"{canon:.4f}", "currency": "USD"},
                       "quantity": _AUTOBET_CONTRACTS_NRFI,
                       "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
                       "goodTillTime": gtt,
@@ -23738,7 +23751,7 @@ def _pair_order_write(client, slug, intent, px_c, n, gtt, cur) -> tuple[str, str
         # positions fresh before any new lot.
         return "gone", cur.get("id")
     params = {"marketSlug": slug, "intent": intent, "type": "ORDER_TYPE_LIMIT",
-              "price": {"value": f"{canon:.3f}", "currency": "USD"},
+              "price": {"value": f"{canon:.4f}", "currency": "USD"},
               "quantity": max(1, int(round(float(n)))), "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
               "goodTillTime": gtt, "participateDontInitiate": True,
               "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
@@ -30791,7 +30804,7 @@ def _repeg_verify_or_recreate(client, slug, intent, canon, qty, orig_tif,
     try:
         params = {"marketSlug": slug, "intent": intent,
                   "type": "ORDER_TYPE_LIMIT",
-                  "price": {"value": f"{canon:.3f}", "currency": "USD"},
+                  "price": {"value": f"{canon:.4f}", "currency": "USD"},
                   "quantity": int(qty),
                   "participateDontInitiate": True,
                   "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
@@ -31303,7 +31316,7 @@ def _harvest_tick(sb, now, *, force: bool = False) -> dict:
                          else sell_c / 100.0)
                 params = {"marketSlug": slug, "intent": sell_intent,
                           "type": "ORDER_TYPE_LIMIT",
-                          "price": {"value": f"{canon:.3f}", "currency": "USD"},
+                          "price": {"value": f"{canon:.4f}", "currency": "USD"},
                           "quantity": 1,
                           "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
                           "goodTillTime": gtt,
@@ -31836,7 +31849,7 @@ def _seat_topup_tick(sb, now, client=None, orders=None, positions=None) -> dict:
             continue
         params = {"marketSlug": slug, "intent": intent,
                   "type": "ORDER_TYPE_LIMIT",
-                  "price": {"value": f"{canon:.3f}", "currency": "USD"},
+                  "price": {"value": f"{canon:.4f}", "currency": "USD"},
                   "quantity": int(need),
                   "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
                   "participateDontInitiate": True,
@@ -33507,7 +33520,7 @@ def _snipe_one(sb, client, slug: str) -> None:
     except Exception:
         return
     canon = ((100.0 - tgt) / 100.0) if snap.get("synth") else (tgt / 100.0)
-    mod = {"marketSlug": slug, "price": {"value": f"{canon:.3f}", "currency": "USD"},
+    mod = {"marketSlug": slug, "price": {"value": f"{canon:.4f}", "currency": "USD"},
            "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
            "participateDontInitiate": True, "quantity": int(snap["qty"])}
     frm = snap["our_ask"]
@@ -34449,7 +34462,7 @@ def _repeg_amend(client, oid, slug, canon: float, qty: int, gtt: str) -> str:
     if int(qty) < 1:
         return "gone"
     mod = {"marketSlug": slug,
-           "price": {"value": f"{canon:.3f}", "currency": "USD"},
+           "price": {"value": f"{canon:.4f}", "currency": "USD"},   # .4f — quarter ticks (Oct 4 2026)
            "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
            "participateDontInitiate": True, "quantity": int(qty)}
     try:
@@ -34472,7 +34485,7 @@ def _repeg_amend(client, oid, slug, canon: float, qty: int, gtt: str) -> str:
     except Exception:
         return "unverified"
     live = state in (_OPEN_ORDER_STATES | {"ORDER_STATE_REPLACED"})
-    at_new = seen_px is not None and abs(seen_px - canon) < 0.0026
+    at_new = seen_px is not None and abs(seen_px - canon) < 0.0006   # under a quarter tick
     return "amended" if (live and at_new) else ("gone" if state is None else "unverified")
 
 
@@ -34560,7 +34573,7 @@ def _snipe_buy_one(sb, client, slug: str) -> None:
         _BUY_SNIPE_STATS["skips"] += 1
         return
     canon = ((100.0 - tgt) / 100.0) if snap.get("synth") else (tgt / 100.0)
-    mod = {"marketSlug": slug, "price": {"value": f"{canon:.3f}", "currency": "USD"},
+    mod = {"marketSlug": slug, "price": {"value": f"{canon:.4f}", "currency": "USD"},
            "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": snap["gtt"],
            "participateDontInitiate": True,
            # TOTAL, fills carried (Sep 25 2026) — see the repeg chase
@@ -34681,7 +34694,7 @@ def _scalp_amend(client, sb, r, b, slug, synth, sell_intent, oid, tgt_c, qty,
         return "gone"
     canon = ((100.0 - tgt_c) / 100.0) if synth else (tgt_c / 100.0)
     mod = {"marketSlug": slug,
-           "price": {"value": f"{canon:.3f}", "currency": "USD"},
+           "price": {"value": f"{canon:.4f}", "currency": "USD"},
            "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
            "participateDontInitiate": True,
            "quantity": int(qty)}               # FULL replace, always
@@ -34756,7 +34769,7 @@ def _scalp_create(client, sb, r, b, slug, synth, sell_intent, tgt_c, qty,
     canon = ((100.0 - tgt_c) / 100.0) if synth else (tgt_c / 100.0)
     params = {"marketSlug": slug, "intent": sell_intent,
               "type": "ORDER_TYPE_LIMIT",
-              "price": {"value": f"{canon:.3f}", "currency": "USD"},
+              "price": {"value": f"{canon:.4f}", "currency": "USD"},
               "quantity": int(qty),
               "tif": "TIME_IN_FORCE_GOOD_TILL_DATE",
               "goodTillTime": gtt,
@@ -35475,7 +35488,7 @@ def _repeg_tick(sb, now, *, force: bool = False) -> dict:
                         continue                           # fill won — done
                     cparams = {"marketSlug": slug, "intent": intent,
                                "type": "ORDER_TYPE_LIMIT",
-                               "price": {"value": f"{canon:.3f}",
+                               "price": {"value": f"{canon:.4f}",
                                          "currency": "USD"},
                                "quantity": qty,
                                "participateDontInitiate": True,
