@@ -693,6 +693,10 @@
                     else if (b.outbid) chip += '<span class="chip c-lost">OUTBID · touch ' + b.touch_c + '¢ · chasing</span>';
                     else if (b.touch_c != null && o.price_c != null && Math.abs(o.price_c - b.touch_c) < 0.01) chip += '<span class="chip c-fill">AT TOUCH</span>';
                 }
+                if (!o.resting && b.line_hold) {
+                    const lh = b.line_hold;
+                    chip += '<span class="chip c-lost" title="the line moved against this side (touch size collapsed and the ask came down) — the box cancelled the bid rather than get picked off; it rejoins the touch once the book calms">SITTING OUT · line moved' + (lh.from_c != null ? ' off ' + lh.from_c + '¢' : '') + (lh.resume_at ? ' · rejoin ~' + fmtClock(lh.resume_at) : '') + (lh.err ? ' · ' + lh.err : '') + '</span>';
+                }
                 if (held > 0) chip += '<span class="chip c-fill">FILLED ' + held + ' @ ' + (b.price_c != null ? b.price_c + '¢' : am(b.entry_price)) + '</span>';
                 if (!o.resting && !(held > 0)) chip += '<span class="chip c-off">' + (b.started ? 'IN PLAY' : 'OFF THE BOOK') + '</span>';
                 l2 = (b.cur_c != null ? 'now ' + b.cur_c + '¢ (' + am(_probToAmer(b.cur_c / 100)) + ')' : 'no live quote') + (b.started ? ' · in play' : '');

@@ -12844,7 +12844,8 @@ def _hand_status_publish(sb, client) -> dict:
             "outbid": bool(resting and touch_c is not None and price_c is not None
                            and price_c < float(touch_c) - 0.01),
             "chase": {"hold": blob.get("chase_hold"), "anchor_c": blob.get("anchor_c", blob.get("price_c")),
-                      "moves": blob.get("chase_moves") or 0}}
+                      "moves": blob.get("chase_moves") or 0},
+            "line_hold": blob.get("line_hold")}
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
         sb.table("lookup_cache").upsert({
@@ -13062,6 +13063,262 @@ def _hand_start_tick(sb, client, now) -> dict:
     return st
 
 
+# ── LINE MOVEMENT: CANCEL, SIT OUT, REJOIN (Rob, Oct 4 2026: "we need to
+# cancel, not follow touch. Wait 5 minutes or so, and then rejoin at touch
+# after it calms down… not within 30 minutes of kickoff, I don't want to miss
+# the game"). The bite is a sequence: the line moves against our side, the
+# makers CANCEL and re-quote a tick lower (our bid is suddenly alone above
+# the market), then one seller hits it. The pull and the hit are separate
+# frames. A single maker pulling its orders looks the same on our side's bid
+# size (NYJ@CHI total 18k→190→120k in ten seconds, 09:55:49) — the ASK tells
+# them apart: a real move brings the best ask down with the bid; a pull
+# leaves it where it was. Both conditions, never one.
+HAND_MOVE_CANCEL_ENABLED = True
+_HAND_MOVE_COLLAPSE_PCT = 70.0     # our-side bid size at the touch, off its 60-90s high
+_HAND_MOVE_BASE_S = 90.0           # baseline window [now-90, now-10]
+_HAND_MOVE_RECENT_S = 10.0
+_HAND_MOVE_STALE_S = 30.0          # the newest frame must be this fresh
+_HAND_MOVE_CALM_S = 300.0          # sit out this long before rejoining
+_HAND_MOVE_CALM_WIN_S = 60.0       # …and the mid must have held ±1 tick this long
+_HAND_MOVE_MAX_WAIT_S = 900.0      # never sit out longer than this
+_HAND_MOVE_MIN_LEAD_MIN = 30.0     # inside this the rule is OFF — that's noise, not news
+_HAND_MOVE_MAX_ACTS = 3
+_HAND_MOVE_LAST: dict = {}
+
+
+def _hand_side_rows(samples, syn: bool):
+    """Tape rows (ts, yes_bid_c, yes_bid_q, yes_ask_c, yes_ask_q, …) → OUR
+    side's book as (ts, bid_c, bid_q, ask_c, ask_q). A synthetic NO bet's
+    bid is the YES ask inverted."""
+    out = []
+    for r in (samples or []):
+        try:
+            ts, bc, bq, ac, aq = r[0], r[1], r[2], r[3], r[4]
+        except (TypeError, IndexError):
+            continue
+        if syn:
+            out.append((ts, (100.0 - ac) if ac is not None else None, aq or 0.0,
+                        (100.0 - bc) if bc is not None else None, bq or 0.0))
+        else:
+            out.append((ts, bc, bq or 0.0, ac, aq or 0.0))
+    return out
+
+
+def _hand_move_plan(rows, our_price_c, our_qty, now_ts: float, collapse_pct: float):
+    """rows = OUR-side book samples (ts, bid_c, bid_q, ask_c, ask_q), oldest
+    first. -> (verdict, detail) with verdict 'stay' | 'cancel'.
+    cancel ⇔ (a) our-side bid size at the touch, minus our own contracts when
+    we are the touch, is ≥ collapse_pct off its high over the baseline window
+    [now-90s, now-10s], AND (b) the best ask on our side has made a NEW LOW
+    against that window by at least a tick (0.5¢) — the line moved, the
+    makers did not merely pull. Pure; selftest `test_hand_move_plan`."""
+    rows = [r for r in (rows or []) if r and r[0] is not None]
+    if not rows:
+        return "stay", {"why": "no_tape"}
+    last = rows[-1]
+    if now_ts - last[0] > _HAND_MOVE_STALE_S:
+        return "stay", {"why": "stale"}
+    base = [r for r in rows if now_ts - _HAND_MOVE_BASE_S <= r[0] < now_ts - _HAND_MOVE_RECENT_S]
+    if len(base) < 2:
+        return "stay", {"why": "no_base"}
+
+    def ours_excl(r):
+        q = r[2] or 0.0
+        if our_price_c is not None and r[1] is not None and abs(r[1] - our_price_c) < 0.01:
+            q = max(0.0, q - (our_qty or 0.0))
+        return q
+    hi = max(ours_excl(r) for r in base)
+    cur = ours_excl(last)
+    asks = [r[3] for r in base if r[3] is not None]
+    ask_lo = min(asks) if asks else None
+    ask_now = last[3]
+    collapse = hi > 0 and cur <= hi * (1.0 - collapse_pct / 100.0)
+    ask_down = ask_now is not None and ask_lo is not None and ask_now <= ask_lo - 0.49
+    det = {"hi_q": round(hi, 1), "cur_q": round(cur, 1),
+           "drop_pct": round(100.0 * (1.0 - cur / hi), 1) if hi > 0 else None,
+           "ask_lo": ask_lo, "ask_now": ask_now, "bid_now": last[1]}
+    if collapse and ask_down:
+        det["why"] = "move"
+        return "cancel", det
+    det["why"] = "pull" if collapse else "quiet"
+    return "stay", det
+
+
+def _hand_calm(rows, now_ts: float) -> bool:
+    """Our-side mid has held within one tick for the calm window, newest
+    frame fresh. No tape in the window → not calm."""
+    rows = [r for r in (rows or []) if r and r[0] is not None and r[1] is not None and r[3] is not None]
+    win = [r for r in rows if r[0] >= now_ts - _HAND_MOVE_CALM_WIN_S]
+    if not win or now_ts - rows[-1][0] > _HAND_MOVE_STALE_S:
+        return False
+    mids = [(r[1] + r[3]) / 2.0 for r in win]
+    return max(mids) - min(mids) <= 0.5
+
+
+def _hand_move_tick(sb, client, now) -> dict:
+    """Pending sheet bets, pre-game, more than the lead floor out: cancel a
+    resting bid the moment the tape says the line moved against it; a bet
+    sitting out rejoins the touch (fresh post-only order, same contracts,
+    the hand price still the anchor for the leash) once the wait is up and
+    the mid has calmed — or at once when the lead floor arrives."""
+    st = {"cands": 0, "cancelled": 0, "rejoined": 0, "sitting": 0, "errors": 0, "rest": 0}
+    if not (HAND_MOVE_CANCEL_ENABLED and _machine_flag("hand_move_cancel", True)):
+        st["gate"] = "off"
+        return st
+
+    def _fl(key, dflt):
+        try:
+            return float(_machine_flag_val(key, dflt))
+        except (TypeError, ValueError):
+            return dflt
+    pct = _fl("hand_move_collapse_pct", _HAND_MOVE_COLLAPSE_PCT)
+    calm_s = _fl("hand_move_calm_s", _HAND_MOVE_CALM_S)
+    max_wait = _fl("hand_move_max_wait_s", _HAND_MOVE_MAX_WAIT_S)
+    lead_min = _fl("hand_move_min_lead_min", _HAND_MOVE_MIN_LEAD_MIN)
+    leash = _fl("hand_chase_leash_c", _HAND_CHASE_LEASH_C)
+    t0 = _time.monotonic()
+    try:
+        rows = (sb.table("bot_picks").select("id,event_start,signal_blob")
+                .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                .gt("event_start", now.isoformat()).limit(300).execute().data or [])
+    except Exception as e:
+        st["gate"] = f"picks: {e}"[:120]
+        return st
+    if not rows:
+        return st
+    orders = _pmm_open_orders_raw(client, fresh=False) or []
+    by_id = {o["id"]: o for o in orders if o.get("id")}
+    now_ts = _time.time()
+    acts = 0
+    for r in rows:
+        if _time.monotonic() - t0 > 25.0 or acts >= _HAND_MOVE_MAX_ACTS:
+            st["gate"] = "budget"
+            break
+        blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        slug, syn, oid = blob.get("pmm_slug"), bool(blob.get("pmm_synthetic")), blob.get("order_id")
+        if not slug:
+            continue
+        try:
+            ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        lead_s = (ev.astimezone(timezone.utc) - now).total_seconds()
+        hold = blob.get("line_hold") if isinstance(blob.get("line_hold"), dict) else None
+        side_rows = _hand_side_rows(TOUCH_TAPE.get(slug), syn)
+        last_at = _HAND_MOVE_LAST.get(r["id"], 0.0)
+
+        if hold:
+            # ── sitting out: rejoin? ──
+            st["sitting"] += 1
+            HAND_LIVE_SLUGS.add(slug)                     # keep the tape on it
+            try:
+                since = now_ts - datetime.fromisoformat(str(hold.get("at"))).timestamp()
+            except (TypeError, ValueError):
+                since = max_wait
+            forced = lead_s <= lead_min * 60.0 or since >= max_wait
+            if since < calm_s and not forced:
+                continue
+            if not forced and not _hand_calm(side_rows, now_ts):
+                continue
+            if _time.monotonic() - last_at < 30.0:
+                continue
+            touch = None
+            q = _ws_quote(slug)
+            if q:
+                yb, ya = q
+                touch = ((100 - ya) if ya is not None else None) if syn else yb
+            if touch is None and st["rest"] < 2:
+                st["rest"] += 1
+                bk = _bet_sheet_book(client, slug, tries=1)
+                if bk:
+                    touch, _a = _manual_side_book(bk, syn)
+            if touch is None:
+                continue
+            anchor = blob.get("anchor_c", blob.get("price_c"))
+            if anchor is not None and touch > float(anchor) + leash + 1e-9:
+                # the market ran away while we sat out — Rob's leash owns it
+                if not blob.get("chase_hold"):
+                    sb.table("bot_picks").update({"signal_blob": {**blob, "chase_hold": {
+                        "touch_c": touch, "price_c": blob.get("price_c"), "leash_c": leash,
+                        "at": now.isoformat(), "sitting_out": True}}}).eq("id", r["id"]).execute()
+                continue
+            _HAND_MOVE_LAST[r["id"]] = _time.monotonic()
+            contracts = int(blob.get("contracts") or 1)
+            try:
+                out, code = _manual_order_place(client, slug, syn, touch, contracts, r.get("event_start"))
+            except Exception as e:
+                out, code = {"ok": False, "error": str(e)[:160]}, 500
+            acts += 1
+            stamp = {"hand_move_rejoin": True, "pick_id": r["id"], "slug": slug, "touch_c": touch,
+                     "contracts": contracts, "sat_out_s": round(since, 1), "forced": forced,
+                     "result": out, "http": code, "at": now.isoformat()}
+            if out.get("ok") and out.get("order_id") and out.get("resting", True):
+                nb = {k: v for k, v in blob.items() if k not in ("line_hold", "chase_hold")}
+                nb.update({"order_id": out["order_id"], "price_c": touch, "amended": False,
+                           "line_rejoins": int(blob.get("line_rejoins") or 0) + 1,
+                           "rejoined_at": now.isoformat()})
+                sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+                st["rejoined"] += 1
+                HAND_LIVE_SLUGS.add(slug)
+            else:
+                st["errors"] += 1
+                sb.table("bot_picks").update({"signal_blob": {**blob, "line_hold": {
+                    **hold, "err": str(out.get("error") or out.get("state") or "create failed")[:120],
+                    "err_at": now.isoformat()}}}).eq("id", r["id"]).execute()
+            try:
+                _probe_log(stamp)
+            except Exception:
+                pass
+            app.logger.warning("hand move-rejoin %s pick %s at %.1f¢ after %.0fs → %s",
+                               slug, r["id"], touch, since, out.get("ok"))
+            continue
+
+        # ── resting: did the line move against us? ──
+        o = by_id.get(oid) if oid else None
+        if not (o and o.get("state") in _OPEN_ORDER_STATES and o.get("price_yes") is not None):
+            continue
+        if lead_s <= lead_min * 60.0:
+            continue                                      # inside the lead floor: noise, not news
+        st["cands"] += 1
+        py = float(o["price_yes"]) * 100.0
+        price_c = round((100.0 - py) if syn else py, 1)
+        try:
+            leaves = float(o.get("leaves") or 0.0)
+        except (TypeError, ValueError):
+            leaves = 0.0
+        verdict, det = _hand_move_plan(side_rows, price_c, leaves, now_ts, pct)
+        if verdict != "cancel":
+            continue
+        if _time.monotonic() - last_at < 30.0:
+            continue
+        _HAND_MOVE_LAST[r["id"]] = _time.monotonic()
+        acts += 1
+        gone, _ords = _bet_sheet_cancel(client, oid, slug)
+        stamp = {"hand_move_cancel": True, "pick_id": r["id"], "slug": slug, "order_id": oid,
+                 "price_c": price_c, "leaves": leaves, "gone": gone, "lead_s": round(lead_s),
+                 "rule_pct": pct, "at": now.isoformat(), **det}
+        if gone:
+            resume = datetime.fromtimestamp(now_ts + calm_s, tz=timezone.utc)
+            nb = {**blob, "order_id": None,
+                  "line_hold": {"at": now.isoformat(), "resume_at": resume.isoformat(),
+                                "from_c": price_c, "detail": det},
+                  "line_cancels": int(blob.get("line_cancels") or 0) + 1}
+            nb.pop("chase_hold", None)
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            st["cancelled"] += 1
+            HAND_LIVE_SLUGS.add(slug)
+        else:
+            st["errors"] += 1
+        try:
+            _probe_log(stamp)
+        except Exception:
+            pass
+        app.logger.warning("hand move-cancel %s pick %s @%.1f¢: bid %s→%s (-%s%%) ask %s→%s → gone=%s",
+                           slug, r["id"], price_c, det.get("hi_q"), det.get("cur_q"), det.get("drop_pct"),
+                           det.get("ask_lo"), det.get("ask_now"), gone)
+    return st
+
+
 def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 8) -> dict:
     """THE BOX LANE: claim pending rows oldest-first and run them. Rows
     older than _HAND_EXPIRE_S are failed, never placed late."""
@@ -13087,6 +13344,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 8) -> dict:
             stats["start"] = _hand_start_tick(sb, client, now)
         except Exception as e:
             stats["start"] = {"err": str(e)[:80]}
+        try:
+            stats["move"] = _hand_move_tick(sb, client, now)
+        except Exception as e:
+            stats["move"] = {"err": str(e)[:80]}
     except Exception as e:
         stats["status"] = {"err": f"{type(e).__name__}: {e}"[:120]}
     try:
@@ -13358,6 +13619,7 @@ def api_bet_sheets_mine():
             "chase": (bx.get("chase") if (bx is not None and bx.get("chase") is not None) else
                       {"hold": blob.get("chase_hold"), "anchor_c": blob.get("anchor_c", blob.get("price_c")),
                        "moves": blob.get("chase_moves") or 0}),
+            "line_hold": (bx.get("line_hold") if bx is not None else blob.get("line_hold")),
         })
     return jsonify({"ok": True, "bets": out, "venue_ok": venue_ok,
                     "src": ("box" if box is not None else "vercel"),
@@ -13578,6 +13840,8 @@ def _hand_chase_tick(sb, client, now) -> dict:
             break
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         slug, syn, oid = blob.get("pmm_slug"), bool(blob.get("pmm_synthetic")), blob.get("order_id")
+        if slug and blob.get("line_hold"):
+            live.add(slug)                              # sitting out — the calm check reads these frames
         o = by_id.get(oid) if oid else None
         if not (slug and o and o.get("state") in _OPEN_ORDER_STATES and o.get("price_yes") is not None):
             continue
