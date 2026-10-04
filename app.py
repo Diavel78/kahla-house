@@ -2854,6 +2854,7 @@ def api_poly_touch():
                 return jsonify(out)
             pl = row.get("payload") or {}
             out["tape_at"] = pl.get("at")
+            out["adopt"] = pl.get("adopt")
             try:
                 out["tape_age_s"] = round((datetime.now(timezone.utc) -
                                            datetime.fromisoformat(str(pl.get("at")).replace("Z", "+00:00"))).total_seconds(), 1)
@@ -12949,6 +12950,7 @@ def _touch_tape_publish(sb) -> dict:
         if not want:
             return out
         payload = {"at": datetime.now(timezone.utc).isoformat(),
+                   "adopt": dict(_HAND_APP_LAST) if isinstance(_HAND_APP_LAST, dict) else None,
                    "slugs": {s: list(TOUCH_TAPE.get(s) or [])[-240:] for s in sorted(want)}}
         sb.table("lookup_cache").upsert({
             "key": _TOUCH_TAPE_KEY, "sport": "ANY",
@@ -13451,6 +13453,8 @@ def _hand_move_tick(sb, client, now) -> dict:
 # are the machine's or a sheet bet already carrying a pick).
 HAND_APP_ADOPT_ENABLED = True
 _HAND_APP_ADOPT_MAX = 3            # adoptions per tick (each is 1-2 venue reads)
+_HAND_APP_POS_LOOKBACK_H = 12.0    # a held hand lot is adopted only while its game is upcoming or <12h old
+_HAND_APP_LAST: dict = {}          # last tick's stats — published with the tape for the site-curl read
 _HAND_APP_MISS: dict = {}          # pick_id -> monotonic of the first order-gone sighting
 _HAND_APP_MISS_S = 20.0            # second strike must be this much later
 
@@ -13479,6 +13483,20 @@ def _slug_side_line(slug: str, syn: bool):
     return "spread", ("home" if syn else "away"), (-away_line if syn else away_line)
 
 
+def _event_slug_from_market(slug: str):
+    """The venue's EVENT slug from a market slug: strip the family prefix and
+    the rung suffix — `aec-cfb-nevada-ndkst-2026-10-17` →
+    `cfb-nevada-ndkst-2026-10-17`, `tsc-nhl-pit-phi-2026-09-30-6pt5` →
+    `nhl-pit-phi-2026-09-30`. None for a prop/unknown shape."""
+    m = re.match(r"^(asc|tsc|aec)-(.+)$", slug or "")
+    if not m:
+        return None
+    rest = m.group(2)
+    rest = re.sub(r"-(pos|neg|total)-\d+(?:pt\d+)?$", "", rest)
+    rest = re.sub(r"-\d+pt\d+$", "", rest)
+    return rest if re.search(r"-\d{4}-\d{2}-\d{2}$", rest) else None
+
+
 def _slug_sport(slug: str):
     for tok, sp in _SLUG_SPORT_TOKENS:
         if tok in (slug or ""):
@@ -13500,7 +13518,7 @@ def _hand_app_market(sb, client, o: dict):
     if mk and " @ " in (mk.get("event_name") or ""):
         a, h = [x.strip() for x in mk["event_name"].split(" @ ", 1)]
         return mk, a, h
-    ev_slug = o.get("event_slug")
+    ev_slug = o.get("event_slug") or _event_slug_from_market(slug)
     sport = _slug_sport(slug)
     if not (ev_slug and sport and client):
         return None, None, None
@@ -13580,21 +13598,27 @@ def _hand_app_pick_row(sb, client, owner_uid, o: dict, now) -> dict | None:
             "label": label, "sport": mk.get("sport"), "placed_via": "app",
             "in_play": in_play, "venue_flag": "MANUAL",
             "adopted_at": now.isoformat(), "order_created": o.get("created")}
+    if o.get("_filled"):                     # a held POSITION, not a resting order
+        blob.update({"filled": True, "filled_qty": qty, "entry_src": "venue_avg",
+                     "in_play": False})
     amer = _cents_to_american_py(price_c)
     return {"asked_by": owner_uid, "query_text": "app bet (adopted)",
             "market_id": mk["id"], "sport": mk.get("sport"),
             "event_name": mk.get("event_name"), "event_start": mk.get("event_start"),
             "market_type": mt, "side": side, "entry_book": "POLYMARKET",
             "entry_price": amer, "entry_line": line, "units": 1, "confidence": "low",
-            "reasons": [f"App bet — {qty:g} contracts resting at {price_c:g}¢"
-                        + (" (placed in-play)" if in_play else "")],
+            "reasons": [f"App bet — {qty:g} contracts "
+                        + ("held at" if o.get("_filled") else "resting at") + f" {price_c:g}¢"
+                        + (" (placed in-play)" if in_play and not o.get("_filled") else "")],
             "signal_blob": blob}
 
 
 def _hand_app_adopt_tick(sb, client, now) -> dict:
     """Every handbets tick: adopt resting MANUAL buys with no pick; retire
     adopted picks whose order is gone with nothing held."""
-    st = {"cands": 0, "adopted": 0, "retired": 0, "skipped": {}}
+    global _HAND_APP_LAST
+    st = {"cands": 0, "adopted": 0, "retired": 0, "skipped": {}, "at": now.isoformat()}
+    _HAND_APP_LAST = st
     if not (HAND_APP_ADOPT_ENABLED and _machine_flag("hand_app_adopt", True)):
         st["gate"] = "disabled"
         return st
@@ -13606,7 +13630,7 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
     orders = _pmm_open_orders_raw(client, fresh=False) or []
     by_id = {o["id"]: o for o in orders if o.get("id")}
     try:
-        picks = (sb.table("bot_picks").select("id,signal_blob")
+        picks = (sb.table("bot_picks").select("id,event_start,signal_blob")
                  .eq("status", "pending").limit(800).execute().data or [])
     except Exception as e:
         st["gate"] = f"picks: {e}"[:120]
@@ -13668,11 +13692,76 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
                            row["signal_blob"]["label"], row["signal_blob"]["price_c"],
                            row["signal_blob"]["contracts"], row["signal_blob"]["in_play"])
 
+    # ── adopt HELD hand lots (a filled app bet has no order left — the Bucs
+    # at 20%, Indiana −9.5): a pickless position whose BUY the venue's trade
+    # tape flags MANUAL (`_hand_fill_verdict` True — the Nebraska rule; None =
+    # tape not mirrored yet, wait; False = the machine's, never ours to book).
+    # Game upcoming or started < _HAND_APP_POS_LOOKBACK_H ago, ≥1 share.
+    positions = _pmm_positions_raw(client, fresh=False) or {}
+    pos_adopted = 0
+    for slug, pos in positions.items():
+        if pos_adopted >= 2 or _time.monotonic() - t0 > 20.0:
+            break
+        try:
+            net = float(pos.get("net") or 0.0)
+            qty = abs(net)
+        except (TypeError, ValueError):
+            continue
+        if qty < 1.0 or not slug or slug in pending_slugs or slug in pair:
+            continue
+        if not _event_slug_from_market(slug) and not _RENT_SLUG_RE.match(slug):
+            continue                                   # props / unknown shapes: not this lane
+        st["cands"] += 1
+        v = _hand_fill_verdict(sb, slug, net < 0)
+        if v is not True:
+            _skip("pos_machine_fill" if v is False else "pos_fill_unknown"); continue
+        avg = pos.get("avg_price")
+        if avg is None or not (0.005 <= float(avg) <= 0.995):
+            _skip("pos_no_avg"); continue
+        syn = net < 0
+        pseudo = {"slug": slug, "intent": "BUY_SHORT" if syn else "BUY_LONG",
+                  "price_yes": (1.0 - float(avg)) if syn else float(avg),
+                  "qty": qty, "leaves": 0.0, "id": None, "title": "", "event_slug": None,
+                  "created": "", "_filled": True}
+        row = _hand_app_pick_row(sb, client, owner, pseudo, now)
+        if not row:
+            _skip("pos_unresolved"); continue
+        try:
+            ev_dt = datetime.fromisoformat(str(row.get("event_start")).replace("Z", "+00:00"))
+            if ev_dt.astimezone(timezone.utc) < now - timedelta(hours=_HAND_APP_POS_LOOKBACK_H):
+                _skip("pos_old_game"); continue
+        except (TypeError, ValueError):
+            _skip("pos_no_start"); continue
+        try:
+            ins = sb.table("bot_picks").insert(row).execute()
+            pid = (ins.data or [{}])[0].get("id")
+        except Exception as e:
+            _skip("pos_insert_failed")
+            app.logger.warning("app adopt (position) insert %s failed: %s", slug, str(e)[:120])
+            continue
+        pos_adopted += 1
+        st["adopted"] += 1
+        pending_slugs.add(slug)
+        try:
+            _probe_log({"hand_app_adopt": True, "filled": True, "pick_id": pid, "slug": slug,
+                        "price_c": row["signal_blob"]["price_c"], "contracts": qty,
+                        "label": row["signal_blob"]["label"], "at": now.isoformat()})
+        except Exception:
+            pass
+        app.logger.warning("hand app-adopt HELD %s pick %s %s x%g @%.2f¢", slug, pid,
+                           row["signal_blob"]["label"], qty, row["signal_blob"]["price_c"])
+
     # ── retire (two strikes, fresh read on the second) ──
     positions = None
     for r, b in adopted_rows:
         if b.get("line_hold"):
             continue                                   # sitting out by design — no order is expected
+        try:                                           # a started game is the RESOLVER's — a position
+            _ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+            if _ev.astimezone(timezone.utc) <= now:   # that vanished at settlement is a grade, not a cancel
+                continue
+        except (TypeError, ValueError):
+            pass
         oid = b.get("order_id")
         if oid and oid in by_id and by_id[oid].get("state") in _OPEN_ORDER_STATES:
             _HAND_APP_MISS.pop(r["id"], None)

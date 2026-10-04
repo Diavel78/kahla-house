@@ -2618,6 +2618,12 @@ def test_slug_side_line() -> None:
     assert f("aec-nfl-tb-sea-2026-10-05", False) == ("moneyline", "away", None)
     assert f("aec-nfl-tb-sea-2026-10-05", True) == ("moneyline", "home", None)
     assert f("astatc-nfl-foo-2026-10-05-pyd-abc-gte250", False) is None
+    e = _app._event_slug_from_market
+    assert e("aec-cfb-nevada-ndkst-2026-10-17") == "cfb-nevada-ndkst-2026-10-17"
+    assert e("asc-cfb-neb-ind-2026-10-04-neg-9pt5") == "cfb-neb-ind-2026-10-04"
+    assert e("tsc-nfl-ne-buf-2026-10-04-total-49pt5") == "nfl-ne-buf-2026-10-04"
+    assert e("tsc-nhl-pit-phi-2026-09-30-6pt5") == "nhl-pit-phi-2026-09-30"
+    assert e("astatc-nfl-den-sf-2026-10-04-recyd-chrmcc-gte30") is None
     assert _app._slug_sport("asc-cfb-neb-ind-2026-10-04-neg-9pt5") == "NCAAF"
     assert _app._slug_sport("aec-nfl-tb-sea-2026-10-05") == "NFL"
     print("  PASS  app-adoption slug side/line")
