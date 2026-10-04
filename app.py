@@ -13104,14 +13104,16 @@ def _hand_side_rows(samples, syn: bool):
     return out
 
 
-def _hand_move_plan(rows, our_price_c, our_qty, now_ts: float, collapse_pct: float):
+def _hand_move_plan(rows, our_price_c, our_qty, now_ts: float, collapse_pct: float,
+                    need_ask: bool = False):
     """rows = OUR-side book samples (ts, bid_c, bid_q, ask_c, ask_q), oldest
     first. -> (verdict, detail) with verdict 'stay' | 'cancel'.
-    cancel ⇔ (a) our-side bid size at the touch, minus our own contracts when
-    we are the touch, is ≥ collapse_pct off its high over the baseline window
-    [now-90s, now-10s], AND (b) the best ask on our side has made a NEW LOW
-    against that window by at least a tick (0.5¢) — the line moved, the
-    makers did not merely pull. Pure; selftest `test_hand_move_plan`."""
+    cancel ⇔ our-side bid size at the touch, minus our own contracts when we
+    are the touch, is ≥ collapse_pct off its high over the baseline window
+    [now-90s, now-10s]. The ask side is RECORDED (ask_down = a new low by a
+    tick) but only required when need_ask is set — on this venue the ask
+    lags the pull, and a bid left alone above the market is the bite.
+    Pure; selftest `test_hand_move_plan`."""
     rows = [r for r in (rows or []) if r and r[0] is not None]
     if not rows:
         return "stay", {"why": "no_tape"}
@@ -13136,9 +13138,18 @@ def _hand_move_plan(rows, our_price_c, our_qty, now_ts: float, collapse_pct: flo
     ask_down = ask_now is not None and ask_lo is not None and ask_now <= ask_lo - 0.49
     det = {"hi_q": round(hi, 1), "cur_q": round(cur, 1),
            "drop_pct": round(100.0 * (1.0 - cur / hi), 1) if hi > 0 else None,
-           "ask_lo": ask_lo, "ask_now": ask_now, "bid_now": last[1]}
-    if collapse and ask_down:
-        det["why"] = "move"
+           "ask_lo": ask_lo, "ask_now": ask_now, "bid_now": last[1], "ask_down": ask_down}
+    # THE COLLAPSE ALONE DECIDES (Rob, Oct 4 2026, killing the ask
+    # confirmation an hour after it shipped): "no one is doing a take on
+    # these things because the take fees are so astronomical. The ask side
+    # won't move in conjunction with the bid side. The bid side will
+    # collapse first and then the ask side will have to come down. Us
+    # stragglers who are left out there will get taken." Waiting for the
+    # ask is waiting past the bite. A false positive costs five minutes
+    # off the book on a game days out. `ask_down` is recorded, not required
+    # (`hand_move_need_ask` flips it back on).
+    if collapse and (ask_down or not need_ask):
+        det["why"] = "move" if ask_down else "collapse"
         return "cancel", det
     det["why"] = "pull" if collapse else "quiet"
     return "stay", det
@@ -13286,7 +13297,8 @@ def _hand_move_tick(sb, client, now) -> dict:
             leaves = float(o.get("leaves") or 0.0)
         except (TypeError, ValueError):
             leaves = 0.0
-        verdict, det = _hand_move_plan(side_rows, price_c, leaves, now_ts, pct)
+        verdict, det = _hand_move_plan(side_rows, price_c, leaves, now_ts, pct,
+                                       need_ask=bool(_machine_flag("hand_move_need_ask", False)))
         if verdict != "cancel":
             continue
         if _time.monotonic() - last_at < 30.0:
