@@ -12822,9 +12822,15 @@ def api_bet_sheets_mine():
             "entry_line,status,pnl_units,settled_at,result_score,signal_blob")
     rows: dict = {}
     try:
+        # TODAY'S AZ SLATE ONLY (Oct 4 2026, Rob: "settled drop off at
+        # midnight, just keeps open and settled bets for the day") — the
+        # Pick Bot's settled-list rule; pending bets always (next read).
+        az_day0 = (now.astimezone(ZoneInfo("America/Phoenix"))
+                   .replace(hour=0, minute=0, second=0, microsecond=0))
         for r in (sb.table("bot_picks").select(cols)
                   .eq("signal_blob->>bet_sheet", "true")
-                  .gte("event_start", (now - timedelta(days=4)).isoformat())
+                  .gte("event_start", az_day0.astimezone(timezone.utc).isoformat())
+                  .lt("event_start", (az_day0 + timedelta(days=1)).astimezone(timezone.utc).isoformat())
                   .order("event_start").limit(300).execute().data or []):
             rows[r["id"]] = r
         for r in (sb.table("bot_picks").select(cols)
